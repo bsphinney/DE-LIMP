@@ -9,7 +9,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
 }
 
-required_pkgs <- c("limma", "limpa", "ComplexHeatmap", "shinyjs", "plotly", "DT", "tidyr", "tibble", "stringr", "curl", "clusterProfiler", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db", "enrichplot", "ggridges")
+required_pkgs <- c("limma", "limpa", "ComplexHeatmap", "shinyjs", "plotly", "DT", "tidyr", "tibble", "stringr", "curl", "clusterProfiler", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db", "enrichplot", "ggridges", "ggrepel")
 
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -39,6 +39,7 @@ library(stringr)
 library(clusterProfiler)
 library(AnnotationDbi)
 library(enrichplot)
+library(ggrepel)
 
 options(shiny.maxRequestSize = 500 * 1024^2)
 
@@ -247,8 +248,15 @@ ui <- page_sidebar(
     nav_panel("Data Overview", icon = icon("database"),
               card(card_header("Summary"), card_body(uiOutput("file_summary"))),
               card(
-                card_header("Top 50 Most Abundant Proteins"),
-                card_body(plotOutput("protein_signal_plot", height = "500px"))
+                card_header("Signal Distribution Across All Protein Groups"),
+                card_body(
+                  div(
+                    actionButton("color_de", "Color by DE Status", icon = icon("paint-brush"), class = "btn-info btn-sm"),
+                    actionButton("reset_color", "Reset Colors", icon = icon("undo"), class = "btn-secondary btn-sm")
+                  ),
+                  hr(),
+                  plotOutput("protein_signal_plot", height = "500px")
+                )
               ),
               card(
                 card_header("Group QC Summary"),
@@ -335,6 +343,7 @@ ui <- page_sidebar(
                   uiOutput("chat_window"),
                   tags$div(style="margin-top: 15px; display: flex; gap: 10px;",
                            textAreaInput("chat_input", label=NULL, placeholder="Ask e.g. 'Which group has higher precursor counts?'", width="100%", rows=2),
+                           actionButton("summarize_data", "🤖 Auto-Analyze", class="btn-info", style="height: 54px; margin-top: 2px;"),
                            actionButton("send_chat", "Send", icon=icon("paper-plane"), class="btn-primary", style="height: 54px; margin-top: 2px;")
                   ),
                   p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
@@ -399,36 +408,79 @@ server <- function(input, output, session) {
     return(tags$div(summary_elements))
   })
   
+  values$color_plot_by_de <- reactiveVal(FALSE)
+  observeEvent(input$color_de, { values$color_plot_by_de(TRUE) })
+  observeEvent(input$reset_color, { values$color_plot_by_de(FALSE) })
+
   output$protein_signal_plot <- renderPlot({
     req(values$y_protein)
     
-    # Calculate average signal (log2 intensity) for each protein
+    # Base data calculation
     avg_signal <- rowMeans(values$y_protein$E, na.rm = TRUE)
-    
-    # Create a data frame and get the top 50
-    signal_df <- data.frame(
+    plot_df <- data.frame(
       Protein.Group = names(avg_signal),
-      Average_Signal = avg_signal
+      Average_Signal_Log2 = avg_signal
     ) %>%
-      arrange(desc(Average_Signal))
+      mutate(Average_Signal_Log10 = Average_Signal_Log2 / log2(10))
+    
+    # --- Join DE data if coloring is requested ---
+    if (values$color_plot_by_de() && !is.null(values$fit) && !is.null(input$contrast_selector) && nchar(input$contrast_selector) > 0) {
+      de_data <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
+        as.data.frame() %>%
+        rownames_to_column("Protein.Group") %>%
+        mutate(
+          DE_Status = case_when(
+            adj.P.Val < 0.05 & logFC > input$logfc_cutoff ~ "Up-regulated",
+            adj.P.Val < 0.05 & logFC < -input$logfc_cutoff ~ "Down-regulated",
+            TRUE ~ "Not Significant"
+          )
+        ) %>%
+        dplyr::select(Protein.Group, DE_Status)
       
-    # Convert log2 intensity to log10 intensity
-    signal_df$Average_Signal <- signal_df$Average_Signal / log2(10)
+      plot_df <- left_join(plot_df, de_data, by = "Protein.Group")
+      plot_df$DE_Status[is.na(plot_df$DE_Status)] <- "Not Significant"
       
-    # Generate the plot
-    ggplot(signal_df, aes(x = reorder(Protein.Group, -Average_Signal), y = Average_Signal)) +
-      geom_point(color = "cornflowerblue", size = 1) + # Changed to points
+      # Set up plot with color aesthetic
+      p <- ggplot(plot_df, aes(x = reorder(Protein.Group, -Average_Signal_Log10), y = Average_Signal_Log10, color = DE_Status)) +
+        geom_point(size = 1.5) +
+        scale_color_manual(
+          name = "DE Status",
+          values = c("Up-regulated" = "#e41a1c", "Down-regulated" = "#377eb8", "Not Significant" = "grey70")
+        )
+      
+    } else {
+      # Default plot (no color aesthetic)
+      p <- ggplot(plot_df, aes(x = reorder(Protein.Group, -Average_Signal_Log10), y = Average_Signal_Log10)) +
+        geom_point(color = "cornflowerblue", size = 1.5)
+    }
+    
+    # --- Add common elements, including selection highlights ---
+    
+    # Add selection column
+    if (!is.null(values$plot_selected_proteins)) {
+      plot_df$Is_Selected <- plot_df$Protein.Group %in% values$plot_selected_proteins
+    } else {
+      plot_df$Is_Selected <- FALSE
+    }
+    
+    selected_df <- filter(plot_df, Is_Selected)
+    
+    p +
       labs(
         title = "Signal Distribution Across All Protein Groups",
-        x = NULL, # Remove x-axis title
-        y = "Average Signal (Log10 Intensity)" # Updated y-axis title
+        x = NULL,
+        y = "Average Signal (Log10 Intensity)"
       ) +
       theme_minimal() +
       theme(
-        axis.text.x = element_blank(), # Remove x-axis text
-        axis.ticks.x = element_blank() # Remove x-axis ticks
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
       ) +
-      scale_x_discrete(expand = expansion(add = 1)) # Extend x-axis to prevent cutoff
+      scale_x_discrete(expand = expansion(add = 1)) +
+      
+      # Add layers to highlight and label selected points
+      geom_point(data = selected_df, color = "black", shape = 1, size = 4, stroke = 1) +
+      geom_text_repel(data = selected_df, aes(label = Protein.Group), size = 4, max.overlaps = 20)
   })
   
   output$group_summary_table <- renderDT({
@@ -740,6 +792,45 @@ server <- function(input, output, session) {
   
   output$chat_selection_indicator <- renderText({
     if (!is.null(values$plot_selected_proteins)) { n_sel <- length(values$plot_selected_proteins); paste("✅ Current Selection:", n_sel, "Proteins from Plots.") } else { "ℹ️ No proteins selected in plots." }
+  })
+  
+  observeEvent(input$summarize_data, {
+    req(input$user_api_key)
+    
+    auto_prompt <- "Please provide a concise summary of this proteomics dataset. Focus on a few key points:\n1. **Technical Quality:** Based on the QC data, does any experimental group stand out as having higher or lower quality (e.g., in terms of Precursors or MS1 Signal)?\n2. **Biological Insights:** What are the top 3-5 most significantly up-regulated and down-regulated proteins in the current comparison?\n3. **Overall Pattern:** Is there a clear separation between the groups in the data?\nPlease keep the summary brief and to the point."
+    
+    values$chat_history <- append(values$chat_history, list(list(role = "user", content = "(Auto-Query: Summarize & Analyze)")))
+    
+    withProgress(message = "Auto-Analyzing Dataset...", {
+      if (!is.null(values$fit) && !is.null(values$y_protein)) {
+        
+        n_max <- 800
+        df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max)
+        df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ])
+        df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
+        
+        incProgress(0.3, detail = "Sending data file...")
+        current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
+        
+        qc_final <- NULL
+        if(!is.null(values$qc_stats) && !is.null(values$metadata)) {
+          qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal)
+        }
+        
+        incProgress(0.7, detail = "Thinking...")
+        ai_reply <- ask_gemini_file_chat(
+          auto_prompt, 
+          current_file_uri, 
+          qc_final,
+          input$user_api_key, 
+          input$model_name, 
+          values$plot_selected_proteins 
+        )
+        
+      } else { ai_reply <- "Please load data and run analysis first." }
+      
+      values$chat_history <- append(values$chat_history, list(list(role = "ai", content = ai_reply)))
+    })
   })
   
   observeEvent(input$send_chat, {
