@@ -360,7 +360,17 @@ server <- function(input, output, session) {
   output$run_status_msg <- renderText({ values$status })
   
   output$dpc_plot <- renderPlot({ req(values$dpc_fit); limpa::plotDPC(values$dpc_fit) })
-  output$mds_plot <- renderPlot({ req(values$y_protein, values$metadata); meta <- values$metadata[match(colnames(values$y_protein$E), values$metadata$File.Name), ]; grps <- factor(meta$Group); cols <- rainbow(length(levels(grps))); limpa::plotMDSUsingSEs(values$y_protein, pch=16, main="MDS Plot", col=cols[grps]); legend("topleft", legend=levels(grps), col=cols, pch=16, bty = "n") })
+  output$mds_plot <- renderPlot({
+    req(values$y_protein, values$metadata)
+    meta <- values$metadata[match(colnames(values$y_protein$E), values$metadata$File.Name), ]
+    grps <- factor(meta$Group)
+    cols <- rainbow(length(levels(grps)))
+    # Set xpd to TRUE to allow plotting outside the plot region
+    par(xpd = TRUE)
+    limpa::plotMDSUsingSEs(values$y_protein, pch=16, main="MDS Plot", col=cols[grps])
+    # Place legend to the right of the plot area
+    legend(x = "right", inset = c(-0.2, 0), legend=levels(grps), col=cols, pch=16, bty = "n")
+  })
   
   volcano_data <- reactive({
     req(values$fit, input$contrast_selector)
