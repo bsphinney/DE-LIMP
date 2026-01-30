@@ -9,7 +9,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
 }
 
-required_pkgs <- c("limma", "limpa", "ComplexHeatmap", "shinyjs", "plotly", "DT", "tidyr", "tibble", "stringr", "curl")
+required_pkgs <- c("limma", "limpa", "ComplexHeatmap", "shinyjs", "plotly", "DT", "tidyr", "tibble", "stringr", "curl", "clusterProfiler", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db", "enrichplot", "ggridges")
 
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -36,6 +36,9 @@ library(ComplexHeatmap)
 library(shinyjs)
 library(plotly)
 library(stringr)
+library(clusterProfiler)
+library(AnnotationDbi)
+library(enrichplot)
 
 options(shiny.maxRequestSize = 500 * 1024^2)
 
@@ -162,6 +165,34 @@ ask_gemini_file_chat <- function(user_query, file_uri, qc_df, api_key, model_nam
 
 cal_z_score <- function(x) { (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE) }
 
+# --- Auto-detect Organism ---
+detect_organism_db <- function(protein_ids) {
+  
+  ORGANISM_DB_MAP <- list(
+    "_HUMAN" = "org.Hs.eg.db",
+    "_MOUSE" = "org.Mm.eg.db",
+    "_RAT"   = "org.Rn.eg.db",
+    "_BOVIN" = "org.Bt.eg.db", # Cow
+    "_CANLF" = "org.Cf.eg.db", # Dog
+    "_CHICK" = "org.Gg.eg.db", # Chicken
+    "_DROME" = "org.Dm.eg.db", # Fly
+    "_CAEEL" = "org.Ce.eg.db", # C. elegans
+    "_DANRE" = "org.Dr.eg.db", # Zebrafish
+    "_YEAST" = "org.Sc.sgd.db",# Yeast
+    "_ARATH" = "org.At.tair.db",# Arabidopsis
+    "_PIG"   = "org.Ss.eg.db"  # Pig
+  )
+  
+  for (suffix in names(ORGANISM_DB_MAP)) {
+    if (any(grepl(suffix, protein_ids, ignore.case = TRUE))) {
+      return(ORGANISM_DB_MAP[[suffix]])
+    }
+  }
+  
+  # Default to Human if no clear identifier is found
+  return("org.Hs.eg.db")
+}
+
 # ==============================================================================
 #  USER INTERFACE (UI)
 # ==============================================================================
@@ -266,6 +297,27 @@ ui <- page_sidebar(
     nav_panel("Reproducibility", icon = icon("code"),
               card(card_header("R Code for Reproducibility"), card_body(p("Copy the code below."), verbatimTextOutput("reproducible_code")))),
     
+    nav_panel("Gene Set Enrichment", icon = icon("sitemap"),
+              card(
+                card_header("Gene Ontology (GO) Analysis"),
+                card_body(
+                  actionButton("run_gsea", "Run GSEA", class = "btn-success w-100", icon = icon("play")),
+                  verbatimTextOutput("gsea_status"),
+                  hr(),
+                  p("This panel performs Gene Set Enrichment Analysis on the ranked list of proteins from the DE results. It automatically detects the organism (Human or Mouse) to use the correct annotation database.", class = "text-muted small")
+                )
+              ),
+              card(
+                card_header("GSEA Results"),
+                navset_card_tab(
+                  nav_panel("Dot Plot", plotOutput("gsea_dot_plot", height = "500px")),
+                  nav_panel("Enrichment Map", plotOutput("gsea_emapplot", height = "500px")),
+                  nav_panel("Ridgeplot", plotOutput("gsea_ridgeplot", height = "600px")),
+                  nav_panel("Results Table", DTOutput("gsea_results_table"))
+                )
+              )
+    ),
+    
     nav_panel("Data Chat", icon = icon("comments"),
               card(
                 card_header(div(style="display: flex; justify-content: space-between; align-items: center;", span("Chat with Full Data (QC + Expression)"), downloadButton("download_chat_txt", "💾 Save Chat", class="btn-secondary btn-sm"))),
@@ -325,7 +377,7 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text") %>% config(displayModeBar = FALSE)
   })
   
-  output$r_qc_table <- renderDT({ req(values$qc_stats); df_display <- values$qc_stats %>% arrange(Run) %>% mutate(ID = 1:n()) %>% select(ID, Run, everything()); datatable(df_display, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE) })
+  output$r_qc_table <- renderDT({ req(values$qc_stats); df_display <- values$qc_stats %>% arrange(Run) %>% mutate(ID = 1:n()) %>% dplyr::select(ID, Run, everything()); datatable(df_display, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE) })
   
   output$qc_group_violin <- renderPlotly({
     req(values$qc_stats, values$metadata, input$qc_violin_metric)
@@ -393,7 +445,7 @@ server <- function(input, output, session) {
   observeEvent(input$clear_plot_selection, { values$plot_selected_proteins <- NULL })
   
   output$de_table <- renderDT({
-    df <- volcano_data() %>% mutate(across(where(is.numeric), \(x) round(x,4))) %>% select(Protein.Group, logFC, adj.P.Val, Significance)
+    df <- volcano_data() %>% mutate(across(where(is.numeric), \(x) round(x,4))) %>% dplyr::select(Protein.Group, logFC, adj.P.Val, Significance)
     if (!is.null(values$plot_selected_proteins)) df <- df %>% filter(Protein.Group %in% values$plot_selected_proteins)
     datatable(df, selection = "multiple", options = list(pageLength = 10, scrollX = TRUE))
   })
@@ -459,11 +511,11 @@ server <- function(input, output, session) {
     # Merge and Cleanup
     df_final <- left_join(df_res, cv_df, by="Row_ID_Temp") %>%
       arrange(Avg_CV) %>%
-      select(Row_ID_Temp, Avg_CV, starts_with("CV_"), logFC, adj.P.Val) %>%
+      dplyr::select(Row_ID_Temp, Avg_CV, starts_with("CV_"), logFC, adj.P.Val) %>%
       mutate(across(where(is.numeric), \(x) round(x, 2))) %>%
       mutate(Stability = ifelse(Avg_CV < 20, "High", "Low")) %>%
       rename(Protein.Group = Row_ID_Temp) %>% # Rename for display at the very end
-      select(Protein.Group, Stability, Avg_CV, everything())
+      dplyr::select(Protein.Group, Stability, Avg_CV, everything())
     
     datatable(df_final, options = list(pageLength = 15, scrollX = TRUE))
   })
@@ -492,13 +544,109 @@ server <- function(input, output, session) {
       if(!"Protein.Group" %in% names(full_data)) {
         full_data <- full_data %>% rename(Protein.Group = Row_ID_Temp)
       } else {
-        full_data <- full_data %>% select(-Row_ID_Temp)
+        full_data <- full_data %>% dplyr::select(-Row_ID_Temp)
       }
       
       write.csv(full_data, file, row.names=FALSE)
     }
   )  
   output$reproducible_code <- renderText({ req(values$metadata, input$contrast_selector); groups_vec <- paste(sprintf("'%s' = '%s'", values$metadata$File.Name, values$metadata$Group), collapse=",\n  "); script <- paste0("# Reproducibility Script\nlibrary(limpa); library(limma); library(dplyr)\n\ndat <- readDIANN('report.parquet', format='parquet', q.cutoffs=", input$q_cutoff, ")\ngroup_map <- c(\n  ", groups_vec, "\n)\nmetadata <- data.frame(File.Name = names(group_map), Group = group_map)\nmetadata <- metadata[match(colnames(dat$E), metadata$File.Name), ]\ndpcfit <- dpc(dat)\ny_protein <- dpcQuant(dat, 'Protein.Group', dpc=dpcfit)\ngroups <- factor(metadata$Group)\ndesign <- model.matrix(~ 0 + groups); colnames(design) <- levels(groups)\nfit <- dpcDE(y_protein, design, plot=FALSE)\ncont <- makeContrasts(", input$contrast_selector, ", levels=design)\nfit <- contrasts.fit(fit, cont); fit <- eBayes(fit)\nresults <- topTable(fit, number=Inf)\n"); return(script) })
+  
+  # --- GSEA Analysis ---
+  values$gsea_results <- reactiveVal(NULL)
+  
+  observeEvent(input$run_gsea, {
+    req(values$fit, input$contrast_selector)
+    
+    output$gsea_status <- renderText("Running GSEA... This may take a few minutes.")
+    
+    withProgress(message = "Running GSEA", {
+      tryCatch({
+        
+        incProgress(0.1, detail = "Preparing gene list...")
+        de_results <- topTable(values$fit, coef = input$contrast_selector, number = Inf)
+        
+        # Detect organism
+        org_db_name <- detect_organism_db(rownames(de_results))
+        if (!requireNamespace(org_db_name, quietly = TRUE)) {
+          BiocManager::install(org_db_name, ask = FALSE)
+        }
+        library(org_db_name, character.only = TRUE)
+        
+        output$gsea_status <- renderText(paste("Detected Organism DB:", org_db_name))
+        
+        incProgress(0.3, detail = "Converting Gene IDs...")
+        
+        # Extract plain protein IDs if they are in format like 'sp|P12345|GENE_ID'
+        protein_ids <- str_extract(rownames(de_results), "[A-Z0-9]+")
+        
+        id_map <- bitr(protein_ids, fromType = "UNIPROT", toType = "ENTREZID", OrgDb = get(org_db_name))
+        
+        de_results_mapped <- de_results[rownames(de_results) %in% id_map$UNIPROT, ]
+        de_results_mapped$ENTREZID <- id_map$ENTREZID[match(str_extract(rownames(de_results_mapped), "[A-Z0-9]+"), id_map$UNIPROT)]
+        
+        # Create ranked gene list
+        gene_list <- de_results_mapped$logFC
+        names(gene_list) <- de_results_mapped$ENTREZID
+        gene_list <- sort(gene_list, decreasing = TRUE)
+        gene_list <- gene_list[!duplicated(names(gene_list))]
+
+        incProgress(0.6, detail = "Running GO enrichment...")
+        gsea_res <- gseGO(
+          geneList     = gene_list,
+          OrgDb        = get(org_db_name),
+          keyType      = "ENTREZID",
+          ont          = "BP", # Biological Process
+          minGSSize    = 10,
+          maxGSSize    = 500,
+          pvalueCutoff = 0.05,
+          verbose      = FALSE
+        )
+        
+        values$gsea_results(gsea_res)
+        
+        incProgress(1, detail = "Complete.")
+        output$gsea_status <- renderText("GSEA Complete.")
+        
+      }, error = function(e) {
+        output$gsea_status <- renderText(paste("GSEA Error:", e$message))
+      })
+    })
+  })
+  
+  # --- Render GSEA Outputs ---
+  output$gsea_dot_plot <- renderPlot({
+    req(values$gsea_results())
+    res <- values$gsea_results()
+    if (nrow(res) > 0) {
+      dotplot(res, showCategory = 20) + ggtitle("GSEA GO Biological Process")
+    } else {
+      plot(NULL, xlim=c(0,1), ylim=c(0,1), main="No significant enrichment found.", xaxt='n', yaxt='n')
+    }
+  })
+  
+  output$gsea_emapplot <- renderPlot({
+    req(values$gsea_results())
+    res <- values$gsea_results()
+    if (nrow(res) > 0) {
+      sim <- pairwise_termsim(res)
+      emapplot(sim, showCategory = 20)
+    }
+  })
+  
+  output$gsea_ridgeplot <- renderPlot({
+    req(values$gsea_results())
+    res <- values$gsea_results()
+    if (nrow(res) > 0) {
+      ridgeplot(res)
+    }
+  })
+  
+  output$gsea_results_table <- renderDT({
+    req(values$gsea_results())
+    df <- as.data.frame(values$gsea_results())
+    datatable(df, options = list(pageLength = 10, scrollX = TRUE))
+  })
   
   observeEvent(input$check_models, { if (nchar(input$user_api_key) < 10) { showNotification("Please enter a valid API Key first.", type="error"); return() }; withProgress(message = "Checking Google Models...", { models <- list_google_models(input$user_api_key); if (length(models) > 0 && !grepl("Error", models[1])) { showModal(modalDialog(title = "Available Models for Your Key", p("Copy one of these into the Model Name box:"), tags$textarea(paste(models, collapse="\n"), rows=10, style="width:100%;"), easyClose = TRUE)) } else { showNotification(paste("Failed to list models:", models), type="error") } }) })
   
@@ -533,7 +681,7 @@ server <- function(input, output, session) {
         # 3. PREPARE MERGED QC (RUN + GROUP)
         qc_final <- NULL
         if(!is.null(values$qc_stats) && !is.null(values$metadata)) {
-          qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% select(Run, Group, Precursors, Proteins, MS1_Signal)
+          qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal)
         }
         
         # 4. Call AI
