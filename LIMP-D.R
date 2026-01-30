@@ -245,7 +245,16 @@ ui <- page_sidebar(
     id = "main_tabs", 
     
     nav_panel("Data Overview", icon = icon("database"),
-              card(card_header("Summary"), card_body(verbatimTextOutput("file_summary")))),
+              card(card_header("Summary"), card_body(uiOutput("file_summary"))),
+              card(
+                card_header("Top 50 Most Abundant Proteins"),
+                card_body(plotOutput("protein_signal_plot", height = "500px"))
+              ),
+              card(
+                card_header("Group QC Summary"),
+                card_body(DTOutput("group_summary_table"))
+              )
+    ),
     
     nav_panel("QC Trends", icon = icon("chart-bar"),
               layout_columns(col_widths=c(12,12),
@@ -361,7 +370,86 @@ server <- function(input, output, session) {
     })
   })
   
-  output$file_summary <- renderText({ if(is.null(values$metadata)) return("No data loaded."); paste("Total Files:", nrow(values$metadata), "\nAssigned Groups:", length(unique(values$metadata$Group[values$metadata$Group!=""]))) })
+  output$file_summary <- renderUI({ 
+    summary_elements <- list()
+    
+    if (is.null(values$metadata)) {
+      summary_elements[[length(summary_elements) + 1]] <- tags$p("No data loaded.")
+    } else {
+      summary_elements[[length(summary_elements) + 1]] <- tags$p(paste("Total Files:", nrow(values$metadata)))
+      
+      assigned_groups_count <- length(unique(values$metadata$Group[values$metadata$Group != ""]))
+      summary_elements[[length(summary_elements) + 1]] <- tags$p(paste("Assigned Groups:", assigned_groups_count))
+      
+      if (!is.null(values$y_protein)) {
+        avg_signal <- rowMeans(values$y_protein$E, na.rm = TRUE)
+        min_linear <- 2^min(avg_signal, na.rm = TRUE)
+        max_linear <- 2^max(avg_signal, na.rm = TRUE)
+        
+        # Ensure min_linear is not zero or extremely small to avoid issues with log10
+        if (min_linear > 1e-10) { # Use a small epsilon instead of exactly 0
+          orders_of_magnitude <- log10(max_linear / min_linear)
+          summary_elements[[length(summary_elements) + 1]] <- tags$p(paste("Dynamic Range:", round(orders_of_magnitude, 1), "orders of magnitude"))
+        } else {
+          summary_elements[[length(summary_elements) + 1]] <- tags$p("Dynamic Range: N/A (Min signal is zero)")
+        }
+      }
+    }
+    
+    return(tags$div(summary_elements))
+  })
+  
+  output$protein_signal_plot <- renderPlot({
+    req(values$y_protein)
+    
+    # Calculate average signal (log2 intensity) for each protein
+    avg_signal <- rowMeans(values$y_protein$E, na.rm = TRUE)
+    
+    # Create a data frame and get the top 50
+    signal_df <- data.frame(
+      Protein.Group = names(avg_signal),
+      Average_Signal = avg_signal
+    ) %>%
+      arrange(desc(Average_Signal))
+      
+    # Convert log2 intensity to log10 intensity
+    signal_df$Average_Signal <- signal_df$Average_Signal / log2(10)
+      
+    # Generate the plot
+    ggplot(signal_df, aes(x = reorder(Protein.Group, -Average_Signal), y = Average_Signal)) +
+      geom_point(color = "cornflowerblue", size = 1) + # Changed to points
+      labs(
+        title = "Signal Distribution Across All Protein Groups",
+        x = NULL, # Remove x-axis title
+        y = "Average Signal (Log10 Intensity)" # Updated y-axis title
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_blank(), # Remove x-axis text
+        axis.ticks.x = element_blank() # Remove x-axis ticks
+      ) +
+      scale_x_discrete(expand = expansion(add = 1)) # Extend x-axis to prevent cutoff
+  })
+  
+  output$group_summary_table <- renderDT({
+    req(values$qc_stats, values$metadata)
+    
+    summary_df <- values$qc_stats %>%
+      left_join(values$metadata, by = c("Run" = "File.Name")) %>%
+      filter(Group != "") %>%
+      group_by(Group) %>%
+      summarise(
+        `Avg. Precursors` = mean(Precursors, na.rm = TRUE),
+        `Avg. MS1 Signal` = mean(MS1_Signal, na.rm = TRUE),
+        `Avg. Proteins` = mean(Proteins, na.rm = TRUE)
+      ) %>%
+      mutate(across(where(is.numeric), ~round(.x, 0)))
+      
+    datatable(summary_df, options = list(
+      dom = 't', # Show only the table, no search or pagination
+      pageLength = 10
+    ), rownames = FALSE)
+  })
   
   output$qc_trend_plot <- renderPlotly({
     req(values$qc_stats, input$qc_metric_select, values$metadata)
@@ -445,7 +533,7 @@ server <- function(input, output, session) {
   observeEvent(input$clear_plot_selection, { values$plot_selected_proteins <- NULL })
   
   output$de_table <- renderDT({
-    df <- volcano_data() %>% mutate(across(where(is.numeric), \(x) round(x,4))) %>% dplyr::select(Protein.Group, logFC, adj.P.Val, Significance)
+    df <- volcano_data() %>% mutate(across(where(is.numeric), function(x) round(x,4))) %>% dplyr::select(Protein.Group, logFC, adj.P.Val, Significance)
     if (!is.null(values$plot_selected_proteins)) df <- df %>% filter(Protein.Group %in% values$plot_selected_proteins)
     datatable(df, selection = "multiple", options = list(pageLength = 10, scrollX = TRUE))
   })
@@ -512,7 +600,7 @@ server <- function(input, output, session) {
     df_final <- left_join(df_res, cv_df, by="Row_ID_Temp") %>%
       arrange(Avg_CV) %>%
       dplyr::select(Row_ID_Temp, Avg_CV, starts_with("CV_"), logFC, adj.P.Val) %>%
-      mutate(across(where(is.numeric), \(x) round(x, 2))) %>%
+      mutate(across(where(is.numeric), function(x) round(x, 2))) %>%
       mutate(Stability = ifelse(Avg_CV < 20, "High", "Low")) %>%
       rename(Protein.Group = Row_ID_Temp) %>% # Rename for display at the very end
       dplyr::select(Protein.Group, Stability, Avg_CV, everything())
