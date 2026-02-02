@@ -1,6 +1,7 @@
 # ==============================================================================
-#  Limpa Proteomics Analysis App (LIMP-D)
-#  Status: Production Ready (Final Grid View: Key, Export, Interactions)
+#  DE-LIMP: Differential Expression & Limpa Proteomics App
+#  (Formerly LIMP-D)
+#  Status: Production Ready (Rebranded)
 # ==============================================================================
 
 # --- 1. AUTO-INSTALLATION & SETUP ---
@@ -220,7 +221,7 @@ detect_organism_db <- function(protein_ids) {
 # ==============================================================================
 
 ui <- page_sidebar(
-  title = "Limpa Proteomics Pipeline",
+  title = "DE-LIMP Proteomics",
   theme = bs_theme(bootswatch = "flatly"),
   useShinyjs(), 
   
@@ -430,7 +431,7 @@ server <- function(input, output, session) {
     
     # --- Start Reproducibility Log ---
     base_script <- c(
-      "# === LIMP-D Reproducibility Log ===",
+      "# === DE-LIMP Reproducibility Log ===",
       sprintf("# Log generated on %s", Sys.time()),
       "\n# --- 1. Load Libraries ---",
       "library(limpa); library(limma); library(dplyr); library(stringr); library(ggrepel);",
@@ -739,6 +740,7 @@ server <- function(input, output, session) {
               original_name <- valid_cols_map[i - length(fixed_cols)]
               grp <- meta_sorted$Group[meta_sorted$File.Name == original_name]
               bg_color <- group_colors[grp]
+              # Standard HTML Title Tooltip (No custom style, just native browser behavior)
               tags$th(title = paste("File:", original_name, "\nGroup:", grp), col_name, style = paste0("background-color: ", bg_color, "; color: white; text-align: center;"))
             } else {
               tags$th(col_name)
@@ -758,6 +760,7 @@ server <- function(input, output, session) {
               selection = 'single', # Enable row selection
               escape = FALSE,       # Render HTML links
               options = list(
+                dom = 'frtip', # No buttons here, we moved export to footer
                 pageLength = 15, 
                 scrollX = TRUE,
                 columnDefs = list(list(className = 'dt-center', targets = (length(fixed_cols)):(ncol(df_display)-1)))
@@ -765,6 +768,20 @@ server <- function(input, output, session) {
               rownames = FALSE) %>%
       formatStyle(expr_cols, backgroundColor = styleInterval(brks, clrs))
   })
+  
+  # EXPORT HANDLER: Downloads Full Filenames, not IDs
+  output$download_grid_data <- downloadHandler(
+    filename = function() { paste0("DE_LIMP_Grid_Export_", Sys.Date(), ".csv") },
+    content = function(file) {
+      gdata <- grid_react_df()
+      df_export <- gdata$data %>% dplyr::select(-Original.ID)
+      # Restore full filenames for export
+      fixed_cols <- gdata$fixed_cols
+      real_names <- gdata$valid_cols_map
+      colnames(df_export) <- c(fixed_cols, real_names)
+      write.csv(df_export, file, row.names = FALSE)
+    }
+  )
   
   # Grid View Interactions - Click Row -> Open Plot
   observeEvent(input$grid_view_table_rows_selected, {
@@ -996,20 +1013,6 @@ server <- function(input, output, session) {
     valid_ids <- intersect(prot_ids, rownames(values$y_protein$E)); if (length(valid_ids) == 0) return(NULL)
     mat <- values$y_protein$E[valid_ids, , drop=FALSE]; mat_z <- t(apply(mat, 1, cal_z_score)); meta <- values$metadata[match(colnames(mat), values$metadata$File.Name), ]; groups <- factor(meta$Group)
     ha <- HeatmapAnnotation(Group = groups, col = list(Group = setNames(rainbow(length(levels(groups))), levels(groups)))); Heatmap(mat_z, name="Z-score", top_annotation = ha, cluster_rows=TRUE, cluster_columns=TRUE, show_column_names=FALSE)
-  })
-  
-  observeEvent(input$show_violin, {
-    req(values$y_protein); df_volc <- volcano_data(); prot_ids <- NULL
-    if (!is.null(input$de_table_rows_selected)) { current_table_data <- df_volc; if (!is.null(values$plot_selected_proteins)) current_table_data <- current_table_data %>% filter(Protein.Group %in% values$plot_selected_proteins); prot_ids <- current_table_data$Protein.Group[input$de_table_rows_selected]
-    } else if (!is.null(values$plot_selected_proteins)) { prot_ids <- values$plot_selected_proteins }
-    if (length(prot_ids) == 0) { showNotification("Please select proteins first.", type="warning"); return() }
-    if (length(prot_ids) > 12) { showNotification("Plotting top 12 proteins.", type = "message"); prot_ids <- head(prot_ids, 12) }
-    showModal(modalDialog(title = "Expression Levels", size = "xl", plotOutput("violin_plot_pop", height = "600px"), easyClose = TRUE))
-    output$violin_plot_pop <- renderPlot({
-      exprs_mat <- values$y_protein$E[prot_ids, , drop=FALSE]; long_df <- as.data.frame(exprs_mat) %>% rownames_to_column("Protein") %>% pivot_longer(-Protein, names_to = "File.Name", values_to = "LogIntensity")
-      meta <- values$metadata; long_df <- left_join(long_df, meta, by="File.Name")
-      ggplot(long_df, aes(x = Group, y = LogIntensity, fill = Group)) + geom_violin(alpha = 0.5, trim = FALSE) + geom_jitter(width = 0.2, size = 2, alpha = 0.8) + facet_wrap(~Protein, scales = "free_y") + theme_bw()
-    })
   })
   
   output$consistent_table <- renderDT({
