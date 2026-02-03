@@ -1,6 +1,6 @@
-# LIMP-D (Limpa Proteomics Dashboard) v1.0
+# DE-LIMP (Limpa Proteomics Dashboard) v1.0
 
-**LIMP-D** is a local, interactive R Shiny dashboard for statistical analysis of proteomics data (DIA-NN outputs). This tool leverages the `limpa` package for Data Processing & Cleaning (DPC) and integrates Google's Gemini AI for bidirectional, context-aware biological insights.
+**DE-LIMP** is a local, interactive R Shiny dashboard for statistical analysis of proteomics data (DIA-NN outputs). This tool leverages the `limpa` package for Data Processing & Cleaning (DPC) and integrates Google's Gemini AI for bidirectional, context-aware biological insights.
 
 ## 🚀 Key Features
 
