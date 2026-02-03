@@ -1,6 +1,6 @@
 # ==============================================================================
 #  DE-LIMP: Differential Expression & Limpa Proteomics App
-#  (Formerly LIMP-D)
+#  (Formerly LIMP-D, I Forked the name to a new verison because the old one was hard to keep up and running)
 #  Status: Production Ready (Rebranded)
 # ==============================================================================
 
