@@ -23,8 +23,10 @@ RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggpl
 RUN R -e "BiocManager::install(c('limma', 'limpa', 'ComplexHeatmap', 'clusterProfiler', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'enrichplot', 'ggridges'), ask=FALSE)"
 
 # 4. Copy the App Files into the image
-COPY LIMP-D.R /srv/shiny-server/app.R
-# (Optional: Copy your logo if you have one)
+# CRITICAL UPDATE: Looking for DE-LIMP.R now
+COPY DE-LIMP.R /srv/shiny-server/app.R
+
+# (Optional: If you have your logo file locally, uncomment the next line)
 # COPY funny_scientist.png /srv/shiny-server/funny_scientist.png
 
 # 5. Expose the port (Shiny runs on 3838 by default)
