@@ -1,0 +1,48 @@
+# R/Shiny specific
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+.httr-oauth
+.DS_Store
+*.rds
+*.RDS
+
+# Shiny
+rsconnect/
+shinyapps/
+
+# Data files (usually too large for Git)
+*.parquet
+*.csv
+*.xlsx
+*.tsv
+*.feather
+*.arrow
+
+# Logs
+*.log
+/tmp/
+
+# System
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Outputs (regenerate from code)
+plots/
+figures/
+*.pdf
+*.png
+*.jpg
+
+# Keep CLAUDE.md and documentation
+!CLAUDE.md
+!README.md
+!*.md
