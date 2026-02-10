@@ -95,6 +95,16 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
    - Use cases: Batch effects, Sex, Age, Diet, Instrument, Time_Point, etc.
    - Fully flexible: Name and use covariates for any categorical variable
 
+10. **Improved Volcano Plot to Show Raw P-Values** (lines 1047-1051, 1302, 1634-1643)
+   - Change: Volcano plot y-axis now uses non-adjusted P.Value instead of adj.P.Val
+   - Rationale: Best practice in proteomics - visualize raw p-values, determine significance by FDR
+   - **Significance coloring unchanged**: Red points still indicate FDR-corrected significance (adj.P.Val < 0.05)
+   - Y-axis label: Explicitly labeled as "-log10(P-Value)" for clarity
+   - **Results table**: Now shows both P.Value and adj.P.Val columns
+   - **Grid view**: Also includes both P.Value and adj.P.Val for consistency
+   - Horizontal line at -log10(0.05) represents unadjusted p-value threshold
+   - Users can see both raw and adjusted p-values to understand statistical stringency
+
 ### 2026-02-10: Fixed Package Installation for First-Time Users
 1. **Fixed Installation Conflicts** (lines 7-82)
    - Problem: Auto-installation tried to update already-loaded packages → ggplot2 unload errors

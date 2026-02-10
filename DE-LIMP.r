@@ -1044,11 +1044,11 @@ server <- function(input, output, session) {
     new_headers <- as.character(run_ids)
     
     df_final <- df_merged %>%
-      dplyr::select(Protein.Group, Gene, Protein.Name, Significance, logFC, adj.P.Val, all_of(valid_cols)) %>%
+      dplyr::select(Protein.Group, Gene, Protein.Name, Significance, logFC, P.Value, adj.P.Val, all_of(valid_cols)) %>%
       mutate(across(where(is.numeric), ~round(., 2)))
-    
+
     df_final$Original.ID <- df_final$Protein.Group
-    fixed_cols <- c("Protein.Group", "Gene", "Protein.Name", "Significance", "logFC", "adj.P.Val")
+    fixed_cols <- c("Protein.Group", "Gene", "Protein.Name", "Significance", "logFC", "P.Value", "adj.P.Val")
     colnames(df_final) <- c(fixed_cols, new_headers, "Original.ID")
     
     unique_groups <- sort(unique(meta_sorted$Group))
@@ -1299,7 +1299,7 @@ server <- function(input, output, session) {
                                               "/entry' target='_blank' onclick='window.open(this.href, \"_blank\"); return false;'>",
                                               Protein.Name, "</a>"),
                                        Protein.Name)) %>%
-      dplyr::select(Gene, `Protein Name` = Protein.Name_Link, logFC, adj.P.Val, Significance)
+      dplyr::select(Gene, `Protein Name` = Protein.Name_Link, logFC, P.Value, adj.P.Val, Significance)
 
     datatable(df_display, selection = "multiple", options = list(pageLength = 10, scrollX = TRUE), escape = FALSE, rownames = FALSE)
   })
@@ -1633,11 +1633,15 @@ server <- function(input, output, session) {
   
   output$volcano_plot_interactive <- renderPlotly({
     df <- volcano_data(); cols <- c("Not Sig" = "grey", "Significant" = "red")
-    p <- ggplot(df, aes(x = logFC, y = -log10(adj.P.Val), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
+    # Use non-adjusted P.Value for y-axis, but color by adjusted p-value significance
+    p <- ggplot(df, aes(x = logFC, y = -log10(P.Value), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
       geom_point(alpha = 0.6) + scale_color_manual(values = cols) +
-      geom_vline(xintercept = c(-input$logfc_cutoff, input$logfc_cutoff), linetype="dashed") + geom_hline(yintercept = -log10(0.05), linetype="dashed") + theme_minimal()
+      geom_vline(xintercept = c(-input$logfc_cutoff, input$logfc_cutoff), linetype="dashed") +
+      geom_hline(yintercept = -log10(0.05), linetype="dashed") +
+      theme_minimal() +
+      labs(y = "-log10(P-Value)")
     df_sel <- df %>% filter(Selected == "Yes")
-    if (nrow(df_sel) > 0) p <- p + geom_point(data = df_sel, aes(x=logFC, y=-log10(adj.P.Val)), shape=21, size=4, fill=NA, color="blue", stroke=2)
+    if (nrow(df_sel) > 0) p <- p + geom_point(data = df_sel, aes(x=logFC, y=-log10(P.Value)), shape=21, size=4, fill=NA, color="blue", stroke=2)
     ggplotly(p, tooltip = "text", source = "volcano_source") %>% layout(dragmode = "select")
   })
   
