@@ -59,6 +59,43 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 - **Always restart app after code changes**: `pkill -f "DE-LIMP.r" && Rscript -e "shiny::runApp('DE-LIMP.r', port=3838)" &`
 - **Check status**: `lsof -i :3838`
 - **View logs**: `tail -f /tmp/shiny-app.log`
+- **Note**: Shiny apps don't hot-reload - must restart after every code change
+
+## Key Patterns & Gotchas
+
+### R Shiny Reactivity
+- **DT table row indices** refer to CURRENTLY DISPLAYED data (filtered or not)
+- **Avoid circular reactivity**: Don't filter data based on a reactive value that the filter updates
+- **CRITICAL Reactive Loop Pattern**:
+  - If `renderDT` depends on a reactive that uses `values$selection`
+  - AND selecting rows updates `values$selection`
+  - → Creates infinite loop: selection → reactive update → table re-render → selection reset
+  - **Solution**: Make `renderDT` build data independently without reactive dependencies on selection state
+- Use `isolate()` to break reactive dependencies when needed
+- DT tables with `selection = "multiple"` support Ctrl+Click and Shift+Click
+
+### dplyr/tidyverse Best Practices
+- In `summarise()`, use explicit `{}` braces for multi-line if statements
+- Always set `.groups = 'drop'` to avoid grouping warnings
+- Can't use bracket subsetting `[condition]` directly on column names inside summarise - need proper context
+- Example from this project (line 70):
+```r
+summarise(
+  Proteins = if(has_pg_q) {
+    n_distinct(Protein.Group[PG.Q.Value <= 0.01])
+  } else {
+    n_distinct(Protein.Group)
+  },
+  .groups = 'drop'
+)
+```
+
+### Reproducibility Logging Pattern
+- Log actions with timestamps, not just final code
+- Use cumulative logging (append) rather than overwrite
+- Include context: which button was clicked, which parameters changed
+- Add human-readable action names before code blocks
+- Implementation: `add_to_log(action_name, code_lines)` helper function
 
 ## Common Issues & Solutions
 1. **App won't start**: Check line 70 syntax, ensure all packages installed

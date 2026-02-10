@@ -34,6 +34,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+.claude/
 
 # Outputs (regenerate from code)
 plots/
