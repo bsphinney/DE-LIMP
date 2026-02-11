@@ -717,27 +717,50 @@ server <- function(input, output, session) {
       hot_col(cov2_display, type="text", width=100)
   })
 
-  observeEvent(input$guess_groups, { 
+  observeEvent(input$guess_groups, {
     req(values$metadata)
     meta <- if(!is.null(input$hot_metadata_modal)) hot_to_r(input$hot_metadata_modal) else values$metadata
-    
+
     cleaned_filenames <- str_remove(meta$File.Name, "^\\d{8}_")
     cleaned_filenames <- str_remove_all(cleaned_filenames, "_deepfrac|\\.parquet")
     keywords <- c("affinisepACN", "affinisepIPA", "Control", "Treatment", "Evosep", "Affinisep")
-    
+
     find_best_match <- function(filename_clean) {
       matches <- keywords[str_detect(filename_clean, regex(keywords, ignore_case = TRUE))]
       if (length(matches) == 0) return("") else return(matches[which.max(nchar(matches))])
     }
-    
+
     guessed_groups <- sapply(cleaned_filenames, find_best_match)
-    sample_counter <- 0
-    for (i in seq_along(guessed_groups)) {
-      if (guessed_groups[i] == "") {
+
+    # Detect if this is the example data (contains both Affinisep and Evosep patterns)
+    is_example_data <- any(str_detect(cleaned_filenames, regex("affinisep", ignore_case = TRUE))) &&
+                       any(str_detect(cleaned_filenames, regex("evosep", ignore_case = TRUE)))
+
+    # Find indices of unmatched samples
+    unmatched_indices <- which(guessed_groups == "")
+
+    if (is_example_data && length(unmatched_indices) >= 3) {
+      # For example data: set last 3 unmatched samples to "Evosep"
+      last_three <- tail(unmatched_indices, 3)
+      guessed_groups[last_three] <- "Evosep"
+      # Set any remaining unmatched to generic Sample_X
+      remaining_unmatched <- setdiff(unmatched_indices, last_three)
+      sample_counter <- 0
+      for (i in remaining_unmatched) {
         sample_counter <- sample_counter + 1
         guessed_groups[i] <- paste0("Sample_", sample_counter)
       }
+    } else {
+      # Standard behavior: all unmatched become Sample_X
+      sample_counter <- 0
+      for (i in seq_along(guessed_groups)) {
+        if (guessed_groups[i] == "") {
+          sample_counter <- sample_counter + 1
+          guessed_groups[i] <- paste0("Sample_", sample_counter)
+        }
+      }
     }
+
     meta$Group <- guessed_groups
     values$metadata <- meta
   })
