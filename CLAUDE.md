@@ -12,6 +12,8 @@ Don't wait to be asked - suggest adding these to CLAUDE.md to help future sessio
 ## Project Overview
 DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package for differential expression analysis of DIA-NN data.
 
+**GitHub Repository**: https://github.com/bsphinney/DE-LIMP
+
 ## System Requirements
 **CRITICAL**: limpa package requires specific R/Bioconductor versions:
 - **R version**: 4.5 or newer (required)
