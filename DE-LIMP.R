@@ -515,6 +515,22 @@ ui <- page_sidebar(
                   p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
                 )
               )
+    ),
+
+    nav_panel("Education", icon = icon("graduation-cap"),
+              card(
+                card_header("Proteomics Resources & Training"),
+                card_body(
+                  tags$iframe(
+                    src = "https://bsphinney.github.io/DE-LIMP/",
+                    style = "width: 100%; height: 700px; border: 1px solid #e2e8f0; border-radius: 8px;",
+                    frameborder = "0",
+                    scrolling = "yes"
+                  ),
+                  p("Explore video tutorials, training courses, and methodology citations.",
+                    style = "margin-top: 10px; color: #718096; font-size: 0.9em; text-align: center;")
+                )
+              )
     )
   )
 )
