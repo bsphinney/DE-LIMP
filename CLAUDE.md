@@ -26,6 +26,18 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 
 ## Recent Changes & Important Fixes
 
+### 2026-02-11: Added Save/Load Session Feature
+1. **Save/Load Analysis Sessions as RDS** (sidebar UI + server handlers)
+   - Feature: Save and Load buttons in sidebar under new "3. Session" section
+   - **Save**: Downloads an .rds file containing all analysis state (data, results, settings)
+   - **Load**: Opens modal with file picker and confirmation warning
+   - Saved state includes: raw_data, metadata, fit, y_protein, dpc_fit, design, qc_stats, gsea_results, repro_log, covariate names, UI settings (contrast, logfc cutoff, q cutoff)
+   - Load validates the session file has required fields before restoring
+   - Restores UI state (contrast selector choices/selection, slider values)
+   - Appends load event to reproducibility log with timestamp of original save
+   - Uses `%||%` (null coalescing) for backwards compatibility with older session files
+   - File naming: `DE-LIMP_session_YYYYMMDD_HHMMSS.rds`
+
 ### 2026-02-10: Added Reproducibility Log Download Feature
 1. **Download Button for Reproducibility Log** (lines 460, 1085-1113)
    - Feature: Added download button in "Reproducibility > Code Log" tab
@@ -311,7 +323,7 @@ summarise(
 ## Next Steps / TODO
 - [x] Add download button for reproducibility log ✅ (2026-02-10)
 - [ ] Consider adding plot theme customization
-- [ ] Add option to save/load analysis sessions (RDS)
+- [x] Add option to save/load analysis sessions (RDS) ✅ (2026-02-11)
 - [ ] Volcano plot: Indicate how significance is being defined (e.g., "FDR < 0.05" annotation)
 - [ ] GSEA: Add KEGG and Reactome enrichment to the pathway analysis functionality
 - [ ] GSEA: Clarify which DE results (contrast) the GSEA analysis is being performed for

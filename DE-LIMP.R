@@ -359,6 +359,12 @@ ui <- page_sidebar(
     actionButton("open_setup", "Assign Groups & Run Pipeline", class = "btn-success w-100", icon = icon("table")),
     textOutput("run_status_msg"),
     hr(),
+    h5("3. Session"),
+    div(style="display: flex; gap: 5px; margin-bottom: 5px;",
+      downloadButton("save_session", "Save", class = "btn-primary w-50", icon = icon("download")),
+      actionButton("load_session_btn", "Load", class = "btn-outline-primary w-50", icon = icon("upload"))
+    ),
+    hr(),
     h5("4. Explore Results"),
     selectInput("contrast_selector", "Comparison:", choices=NULL, width="100%"),
     sliderInput("logfc_cutoff", "Min Log2 Fold Change:", min=0, max=5, value=1, step=0.1),
@@ -1415,6 +1421,113 @@ server <- function(input, output, session) {
       writeLines(paste(c(log_content, footer), collapse = "\n"), file)
     }
   )
+
+  # ============================================================================
+  #      Save / Load Session (RDS)
+  # ============================================================================
+
+  output$save_session <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_session_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
+    },
+    content = function(file) {
+      session_data <- list(
+        raw_data   = values$raw_data,
+        metadata   = values$metadata,
+        fit        = values$fit,
+        y_protein  = values$y_protein,
+        dpc_fit    = values$dpc_fit,
+        design     = values$design,
+        qc_stats   = values$qc_stats,
+        gsea_results = values$gsea_results,
+        repro_log  = values$repro_log,
+        color_plot_by_de = values$color_plot_by_de,
+        # Store UI state so it can be restored
+        contrast   = input$contrast_selector,
+        logfc_cutoff = input$logfc_cutoff,
+        q_cutoff   = input$q_cutoff,
+        # Covariate settings
+        cov1_name  = values$cov1_name,
+        cov2_name  = values$cov2_name,
+        # Save timestamp & version
+        saved_at   = Sys.time(),
+        app_version = "DE-LIMP v1.2"
+      )
+      saveRDS(session_data, file)
+      showNotification("Session saved successfully!", type = "message")
+    }
+  )
+
+  observeEvent(input$load_session_btn, {
+    showModal(modalDialog(
+      title = "Load Saved Session",
+      fileInput("session_file", "Choose .rds session file", accept = ".rds"),
+      div(style = "background-color: #fff3cd; padding: 10px; border-radius: 5px;",
+        icon("exclamation-triangle"),
+        " Loading a session will replace all current data and results."
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_load_session", "Load Session", class = "btn-primary", icon = icon("upload"))
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_load_session, {
+    req(input$session_file)
+    tryCatch({
+      session_data <- readRDS(input$session_file$datapath)
+
+      # Validate that this is a DE-LIMP session file
+      required_fields <- c("raw_data", "metadata", "fit")
+      if (!all(required_fields %in% names(session_data))) {
+        showNotification("Invalid session file: missing required data fields.", type = "error")
+        return()
+      }
+
+      # Restore reactive values
+      values$raw_data   <- session_data$raw_data
+      values$metadata   <- session_data$metadata
+      values$fit        <- session_data$fit
+      values$y_protein  <- session_data$y_protein
+      values$dpc_fit    <- session_data$dpc_fit
+      values$design     <- session_data$design
+      values$qc_stats   <- session_data$qc_stats
+      values$gsea_results <- session_data$gsea_results
+      values$color_plot_by_de <- session_data$color_plot_by_de %||% FALSE
+      values$cov1_name  <- session_data$cov1_name %||% "Covariate1"
+      values$cov2_name  <- session_data$cov2_name %||% "Covariate2"
+
+      # Restore repro log and append load event
+      values$repro_log  <- session_data$repro_log %||% values$repro_log
+      add_to_log("Session Loaded", c(
+        sprintf("# Loaded session saved at: %s", session_data$saved_at),
+        sprintf("# App version: %s", session_data$app_version %||% "unknown")
+      ))
+
+      # Restore UI state: update contrast choices from the fit object
+      if (!is.null(values$fit)) {
+        contrast_names <- colnames(values$fit$contrasts)
+        updateSelectInput(session, "contrast_selector", choices = contrast_names,
+                          selected = session_data$contrast %||% contrast_names[1])
+      }
+      if (!is.null(session_data$logfc_cutoff)) {
+        updateSliderInput(session, "logfc_cutoff", value = session_data$logfc_cutoff)
+      }
+      if (!is.null(session_data$q_cutoff)) {
+        updateNumericInput(session, "q_cutoff", value = session_data$q_cutoff)
+      }
+
+      values$status <- "Session loaded successfully"
+      removeModal()
+      showNotification(
+        paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
+        type = "message", duration = 5
+      )
+    }, error = function(e) {
+      showNotification(paste("Error loading session:", e$message), type = "error")
+    })
+  })
 
   output$methodology_text <- renderText({
     req(values$fit)
