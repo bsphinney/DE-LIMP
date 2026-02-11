@@ -609,7 +609,12 @@ server <- function(input, output, session) {
       ),
       layout_columns(col_widths = c(4, 8),
         div(
-          actionButton("guess_groups", "🪄 Auto-Guess Groups", class="btn-info btn-sm")
+          actionButton("guess_groups", "🪄 Auto-Guess Groups", class="btn-info btn-sm"),
+          br(), br(),
+          div(style="display: flex; gap: 10px;",
+            modalButton("Cancel"),
+            actionButton("run_from_modal", "▶ Run Pipeline", class="btn-success", icon = icon("play"))
+          )
         ),
         div(
           strong("Covariates:"),
@@ -633,10 +638,7 @@ server <- function(input, output, session) {
       ),
       br(),
       rHandsontableOutput("hot_metadata_modal"),
-      footer = tagList(
-        modalButton("Cancel"),
-        actionButton("run_from_modal", "▶ Run Pipeline", class="btn-success", icon = icon("play"))
-      )
+      footer = NULL
     ))
   })
 
