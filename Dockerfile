@@ -1,5 +1,5 @@
-# Base image with R and Shiny pre-installed
-FROM rocker/shiny:4.2.1
+# Base image with R and Shiny pre-installed (R 4.5+ required for limpa)
+FROM rocker/shiny:4.5.0
 
 # 1. Install System Dependencies (Linux libraries needed for R packages)
 RUN apt-get update && apt-get install -y \
@@ -23,8 +23,8 @@ RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggpl
 RUN R -e "BiocManager::install(c('limma', 'limpa', 'ComplexHeatmap', 'clusterProfiler', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'enrichplot', 'ggridges'), ask=FALSE)"
 
 # 4. Copy the App Files into the image
-# CRITICAL UPDATE: Looking for DE-LIMP.R now
-COPY DE-LIMP.R /srv/shiny-server/app.R
+# Copy app.R (Hugging Face standard naming)
+COPY app.R /srv/shiny-server/app.R
 
 # (Optional: If you have your logo file locally, uncomment the next line)
 # COPY funny_scientist.png /srv/shiny-server/funny_scientist.png
