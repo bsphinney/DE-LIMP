@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DE-LIMP: Differential Expression &amp; Limpa Proteomics</title>
+    <style>
+        :root {
+            --primary: #2c5282;
+            --primary-light: #ebf4ff;
+            --accent: #38a169;
+            --text: #2d3748;
+            --text-light: #718096;
+            --bg: #ffffff;
+            --bg-alt: #f7fafc;
+            --border: #e2e8f0;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, var(--primary), #1a365d);
+            color: #fff;
+            padding: 3rem 1rem;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .header .tagline {
+            font-size: 1.15rem;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto 1.5rem;
+        }
+
+        .header .btn-group {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 0.65rem 1.5rem;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover {
+            text-decoration: none;
+            opacity: 0.9;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+        }
+
+        /* Container */
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+
+        /* Sections */
+        section {
+            padding: 3rem 0;
+        }
+
+        section:nth-child(even) {
+            background: var(--bg-alt);
+        }
+
+        section h2 {
+            font-size: 1.75rem;
+            margin-bottom: 1.5rem;
+            color: var(--primary);
+        }
+
+        /* Feature grid */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .feature-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+        }
+
+        .feature-card h3 {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .feature-card p {
+            color: var(--text-light);
+            font-size: 0.95rem;
+        }
+
+        /* Install steps */
+        .steps {
+            counter-reset: step;
+            list-style: none;
+        }
+
+        .steps li {
+            counter-increment: step;
+            position: relative;
+            padding-left: 3rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .steps li::before {
+            content: counter(step);
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 2rem;
+            height: 2rem;
+            background: var(--primary);
+            color: #fff;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.9rem;
+        }
+
+        .steps li h3 {
+            margin-bottom: 0.25rem;
+        }
+
+        .steps li p, .steps li pre {
+            color: var(--text-light);
+            font-size: 0.95rem;
+        }
+
+        pre {
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 1rem 1.25rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        }
+
+        /* Requirements table */
+        .req-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        .req-table th, .req-table td {
+            text-align: left;
+            padding: 0.6rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .req-table th {
+            background: var(--primary-light);
+            font-weight: 600;
+        }
+
+        /* Footer */
+        .footer {
+            background: #1a202c;
+            color: #a0aec0;
+            text-align: center;
+            padding: 2rem 1rem;
+            font-size: 0.9rem;
+        }
+
+        .footer a {
+            color: #90cdf4;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .header h1 {
+                font-size: 1.75rem;
+            }
+
+            .header .tagline {
+                font-size: 1rem;
+            }
+
+            section {
+                padding: 2rem 0;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <div class="header">
+        <div class="container">
+            <h1>DE-LIMP</h1>
+            <p class="tagline">
+                An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data,
+                powered by Limpa and Limma.
+            </p>
+            <div class="btn-group">
+                <a href="https://github.com/bsphinney/DE-LIMP" class="btn btn-primary">View on GitHub</a>
+                <a href="https://github.com/bsphinney/DE-LIMP/releases" class="btn btn-secondary">Download Latest Release</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Features -->
+    <section>
+        <div class="container">
+            <h2>Key Features</h2>
+            <div class="features">
+                <div class="feature-card">
+                    <h3>Interactive Volcano Plots</h3>
+                    <p>Fully interactive Plotly volcano plots. Click or box-select proteins to highlight them across all views.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>AI-Powered Analysis</h3>
+                    <p>Chat with your data using Google Gemini. Ask biological questions and get context-aware answers with automatic protein highlighting.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>QC Trend Monitoring</h3>
+                    <p>Track precursor and protein counts across run order to identify batch effects and quality issues early.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Deep-Dive Grid View</h3>
+                    <p>Heatmap-style expression grid with color-coded values, UniProt links, and click-to-plot violin charts.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Reproducibility Log</h3>
+                    <p>Every analysis step is logged as executable R code with timestamps. Download a complete, runnable script of your session.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Save &amp; Load Sessions</h3>
+                    <p>Save your entire analysis state as an RDS file and reload it later to continue exactly where you left off.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Getting Started -->
+    <section>
+        <div class="container">
+            <h2>Getting Started</h2>
+            <ol class="steps">
+                <li>
+                    <h3>Install R 4.5+</h3>
+                    <p>DE-LIMP requires R version 4.5 or newer for Bioconductor 3.22+ compatibility.
+                        Download from <a href="https://cloud.r-project.org/">cloud.r-project.org</a>.</p>
+                </li>
+                <li>
+                    <h3>Clone the repository</h3>
+                    <pre><code>git clone https://github.com/bsphinney/DE-LIMP.git
+cd DE-LIMP</code></pre>
+                </li>
+                <li>
+                    <h3>Run the app</h3>
+                    <p>The app will automatically install any missing packages on first launch.</p>
+                    <pre><code>Rscript -e "shiny::runApp('DE-LIMP.R', port = 3838, launch.browser = TRUE)"</code></pre>
+                </li>
+                <li>
+                    <h3>Upload your DIA-NN data</h3>
+                    <p>Use the sidebar to upload a DIA-NN parquet or TSV report, assign experimental groups, and run the analysis pipeline.</p>
+                </li>
+            </ol>
+        </div>
+    </section>
+
+    <!-- Requirements -->
+    <section>
+        <div class="container">
+            <h2>System Requirements</h2>
+            <table class="req-table">
+                <thead>
+                    <tr>
+                        <th>Requirement</th>
+                        <th>Version</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>R</td>
+                        <td>4.5+</td>
+                        <td>Required for Bioconductor 3.22+</td>
+                    </tr>
+                    <tr>
+                        <td>Bioconductor</td>
+                        <td>3.22+</td>
+                        <td>Automatically configured with R 4.5</td>
+                    </tr>
+                    <tr>
+                        <td>limpa</td>
+                        <td>Latest</td>
+                        <td>Core analysis engine (auto-installed)</td>
+                    </tr>
+                    <tr>
+                        <td>limma</td>
+                        <td>Latest</td>
+                        <td>Statistical framework (auto-installed)</td>
+                    </tr>
+                    <tr>
+                        <td>Shiny</td>
+                        <td>Latest</td>
+                        <td>Web framework (auto-installed)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Analysis Pipeline -->
+    <section>
+        <div class="container">
+            <h2>Analysis Pipeline</h2>
+            <p>DE-LIMP uses the LIMPA package to run a well-established proteomics analysis workflow:</p>
+            <ol class="steps">
+                <li>
+                    <h3>Data Import</h3>
+                    <p>Load DIA-NN report files (parquet or TSV) with <code>readDIANN()</code>.</p>
+                </li>
+                <li>
+                    <h3>Normalization</h3>
+                    <p>Apply Data Point Correspondence (DPC-CN) normalization via <code>dpcCN()</code> to correct for systematic biases.</p>
+                </li>
+                <li>
+                    <h3>Protein Quantification</h3>
+                    <p>Roll up peptide-level data to protein-level using maxLFQ quantification with <code>dpcQuant()</code>.</p>
+                </li>
+                <li>
+                    <h3>Differential Expression</h3>
+                    <p>Fit linear models with <code>dpcDE()</code>, apply contrasts, and compute empirical Bayes moderated statistics with <code>eBayes()</code>. FDR correction via Benjamini-Hochberg.</p>
+                </li>
+            </ol>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <div class="footer">
+        <div class="container">
+            <p>
+                DE-LIMP is open source.
+                <a href="https://github.com/bsphinney/DE-LIMP">GitHub Repository</a> &middot;
+                <a href="https://github.com/bsphinney/DE-LIMP/issues">Report an Issue</a>
+            </p>
+            <p style="margin-top: 0.5rem;">
+                Built with <a href="https://shiny.posit.co/">Shiny</a>,
+                <a href="https://bioconductor.org/packages/limpa/">limpa</a>, and
+                <a href="https://bioconductor.org/packages/limma/">limma</a>.
+            </p>
+        </div>
+    </div>
+
+</body>
+</html>
