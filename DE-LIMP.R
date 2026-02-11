@@ -590,6 +590,9 @@ server <- function(input, output, session) {
         if(is.null(values$cov1_name)) values$cov1_name <- "Covariate1"
         if(is.null(values$cov2_name)) values$cov2_name <- "Covariate2"
 
+        # Flag this as example data for auto-guess logic
+        values$is_example_data <- TRUE
+
         incProgress(0.9, detail = "Opening setup...")
 
         # Log to reproducibility
@@ -629,6 +632,8 @@ server <- function(input, output, session) {
         # Initialize custom covariate names (user can change these)
         if(is.null(values$cov1_name)) values$cov1_name <- "Covariate1"
         if(is.null(values$cov2_name)) values$cov2_name <- "Covariate2"
+        # Clear example data flag for user uploads
+        values$is_example_data <- FALSE
         click("open_setup") 
       }, error=function(e) { showNotification(paste("Error:", e$message), type="error") })
     })
@@ -732,14 +737,11 @@ server <- function(input, output, session) {
 
     guessed_groups <- sapply(cleaned_filenames, find_best_match)
 
-    # Detect if this is the example data (contains both Affinisep and Evosep patterns)
-    is_example_data <- any(str_detect(cleaned_filenames, regex("affinisep", ignore_case = TRUE))) &&
-                       any(str_detect(cleaned_filenames, regex("evosep", ignore_case = TRUE)))
-
     # Find indices of unmatched samples
     unmatched_indices <- which(guessed_groups == "")
 
-    if (is_example_data && length(unmatched_indices) >= 3) {
+    # Use flag to detect if this is the example data
+    if (!is.null(values$is_example_data) && values$is_example_data && length(unmatched_indices) >= 3) {
       # For example data: set last 3 unmatched samples to "Evosep"
       last_three <- tail(unmatched_indices, 3)
       guessed_groups[last_three] <- "Evosep"
