@@ -315,3 +315,4 @@ summarise(
 - [ ] Volcano plot: Indicate how significance is being defined (e.g., "FDR < 0.05" annotation)
 - [ ] GSEA: Add KEGG and Reactome enrichment to the pathway analysis functionality
 - [ ] GSEA: Clarify which DE results (contrast) the GSEA analysis is being performed for
+- [ ] Documentation: Re-write README.md and USER_GUIDE.md to incorporate new features and workflows
