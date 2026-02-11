@@ -38,17 +38,26 @@ This project is deployed to **two platforms** with separate git remotes:
 
 **IMPORTANT**: Changes to GitHub do NOT automatically sync to Hugging Face. You must push to both remotes manually.
 
+**CRITICAL WARNING**: The two remotes have **different README.md files**:
+- GitHub: Full documentation (no YAML)
+- Hugging Face: YAML frontmatter required for Spaces configuration
+
+**⚠️ DO NOT push README.md to both remotes!** If you push to both, you'll overwrite one of them and break HF configuration.
+
 ### When to Update Each Platform
 
-#### For Code Changes (app.R):
+#### For Code Changes (app.R, CLAUDE.md, etc.):
 ```bash
-# Make your changes to app.R
-git add app.R
+# Make your changes to app.R, CLAUDE.md, or other shared files
+# ⚠️ DO NOT include README.md in this commit!
+git add app.R CLAUDE.md
 git commit -m "Description of changes"
 
 # Push to BOTH remotes
 git push origin main && git push hf main
 ```
+
+**⚠️ WARNING**: Never use `git add .` or `git add -A` before pushing to both remotes! This will include README.md and break HF configuration.
 
 #### For GitHub-Only Changes (DE-LIMP.R, full README.md):
 ```bash
@@ -132,13 +141,39 @@ When creating a new release (e.g., v2.0):
    - [ ] Hugging Face Space builds successfully (check Logs tab)
    - [ ] Test both local download and HF web version
 
+### If You Accidentally Break HF Configuration
+
+If you get "Missing configuration in README" error on Hugging Face, it means the GitHub README overwrote the HF README. Fix it:
+
+```bash
+# 1. Backup current README
+cp README.md README_GITHUB_BACKUP.md
+
+# 2. Replace with HF version (has YAML)
+cp README_HF.md README.md
+
+# 3. Commit and push to HF ONLY
+git add README.md
+git commit -m "Fix HF: Restore README with YAML frontmatter"
+git push hf main
+
+# 4. Restore GitHub version and push to GitHub ONLY
+cp README_GITHUB_BACKUP.md README.md
+git add README.md
+git commit -m "Restore GitHub README"
+git push origin main
+rm README_GITHUB_BACKUP.md
+```
+
 ### Quick Commands Reference
 
 ```bash
 # Check which remote you're on
 git remote -v
 
-# Push to both remotes at once (for code changes)
+# Push to both remotes (⚠️ ONLY for files other than README.md)
+git add app.R CLAUDE.md  # Be specific!
+git commit -m "Description"
 git push origin main && git push hf main
 
 # Check Hugging Face build status (in browser)
