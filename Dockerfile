@@ -17,10 +17,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install R Dependencies (CRAN)
-RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager'), repos='https://cloud.r-project.org/')"
+RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager', 'markdown'), repos='https://cloud.r-project.org/')"
 
 # 3. Install Bioconductor Packages (Specific versions for stability)
-RUN R -e "BiocManager::install(c('limma', 'limpa', 'ComplexHeatmap', 'clusterProfiler', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'enrichplot', 'ggridges'), ask=FALSE)"
+# Install in correct dependency order to avoid compilation issues
+RUN R -e "BiocManager::install(c('DOSE', 'GOSemSim', 'yulab.utils'), ask=FALSE, update=FALSE)"
+RUN R -e "BiocManager::install(c('limma', 'limpa', 'ComplexHeatmap', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'ggridges'), ask=FALSE, update=FALSE)"
+RUN R -e "BiocManager::install(c('clusterProfiler', 'enrichplot'), ask=FALSE, update=FALSE)"
 
 # 4. Copy the App Files into the image
 # Copy app.R (Hugging Face standard naming)
