@@ -1,0 +1,44 @@
+name: Sync to Hugging Face
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - '.github/**'
+
+jobs:
+  sync-to-hf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitHub repository
+        uses: actions/checkout@v4
+        with:
+          path: github-repo
+          fetch-depth: 0
+
+      - name: Checkout HF repository
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git clone https://brettphinney:$HF_TOKEN@huggingface.co/spaces/brettsp/de-limp-proteomics hf-repo
+
+      - name: Sync files to HF
+        run: |
+          cd hf-repo
+
+          # Copy all files except README.md and .github
+          rsync -av --exclude='.git' --exclude='README.md' --exclude='.github' ../github-repo/ ./
+
+          # Use HF README
+          cp README_HF.md README.md
+
+      - name: Commit and push to HF
+        run: |
+          cd hf-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add .
+          git commit -m "Auto-sync from GitHub (commit ${{ github.sha }})" || echo "No changes to commit"
+          git push origin main

@@ -126,7 +126,11 @@ This project has **two git remotes**:
 - **`origin`** → GitHub (https://github.com/bsphinney/DE-LIMP)
 - **`hf`** → Hugging Face Spaces (https://huggingface.co/spaces/brettsp/de-limp-proteomics)
 
-**IMPORTANT**: Changes to GitHub do NOT automatically sync to Hugging Face. You must push to both remotes manually.
+**✅ AUTOMATED SYNC (Since 2026-02-12)**: GitHub Actions automatically syncs code to Hugging Face!
+- Workflow: `.github/workflows/sync-to-hf.yml`
+- Trigger: Any push to `origin/main` (except README.md and .github changes)
+- **You only need to push to GitHub** - HF updates automatically within 1-2 minutes
+- README conflict issue: **SOLVED** (workflow uses README_HF.md for HF, never overwrites)
 
 **CRITICAL WARNING**: The two remotes have **different README.md files**:
 - GitHub: Full documentation (no YAML)
@@ -210,20 +214,66 @@ rm README_GITHUB_BACKUP.md
 3. ✅ **DO**: Keep README.md in separate commits for each remote
 4. ❌ **DON'T**: Include README.md in commits that go to both remotes
 
-### When to Update Each Platform
+### ✅ GitHub Actions Auto-Sync (Since 2026-02-12)
 
-#### For Code Changes (app.R, CLAUDE.md, etc.):
+**🎉 README Conflict Issue SOLVED!**
+
+As of 2026-02-12, we use GitHub Actions to automatically sync code to Hugging Face. This **eliminates the README conflict problem entirely**.
+
+**How It Works:**
+1. **Workflow file**: `.github/workflows/sync-to-hf.yml`
+2. **Trigger**: Any push to GitHub `main` branch (except README.md and .github changes)
+3. **Process**:
+   - Checks out GitHub repo
+   - Clones HF repo
+   - Syncs all files **except** README.md and .github
+   - Uses `README_HF.md` → `README.md` (with YAML frontmatter)
+   - Commits and pushes to HF automatically
+
+**📋 Setup Required (One-Time):**
+Add your Hugging Face token as a GitHub secret:
+1. Go to: https://github.com/bsphinney/DE-LIMP/settings/secrets/actions
+2. Create secret: `HF_TOKEN` = your HF write token
+3. Get token from: https://huggingface.co/settings/tokens
+
+**New Simplified Workflow:**
 ```bash
-# Make your changes to app.R, CLAUDE.md, or other shared files
-# ⚠️ DO NOT include README.md in this commit!
-git add app.R CLAUDE.md
-git commit -m "Description of changes"
+# 1. Make changes locally
+nano DE-LIMP.R app.R  # or any files
 
-# Push to BOTH remotes
-git push origin main && git push hf main
+# 2. Commit and push to GitHub ONLY
+git add DE-LIMP.R app.R Dockerfile  # add whatever you changed
+git commit -m "Description of changes"
+git push origin main
+
+# 3. Done! GitHub Actions automatically syncs to HF within 1-2 minutes
+# Monitor: https://github.com/bsphinney/DE-LIMP/actions
 ```
 
-**⚠️ WARNING**: Never use `git add .` or `git add -A` before pushing to both remotes! This will include README.md and break HF configuration.
+**Benefits:**
+- ✅ No more README conflicts (uses correct README for each platform)
+- ✅ No manual `git push hf main` needed
+- ✅ No risk of overwriting HF YAML
+- ✅ Automatic, reliable, server-side
+
+**Recovery Count Before Automation:** 9 README conflict incidents
+
+### When to Update Each Platform (Legacy - For Reference)
+
+**⚠️ NOTE**: The sections below describe the OLD manual workflow. With GitHub Actions, you only need to push to GitHub - HF syncs automatically.
+
+#### For Code Changes (app.R, CLAUDE.md, etc.) - LEGACY METHOD:
+```bash
+# OLD METHOD (no longer needed with GitHub Actions):
+git add app.R CLAUDE.md
+git commit -m "Description of changes"
+git push origin main && git push hf main  # No longer needed!
+
+# NEW METHOD (with GitHub Actions):
+git add app.R CLAUDE.md
+git commit -m "Description of changes"
+git push origin main  # That's it! HF syncs automatically
+```
 
 #### For GitHub-Only Changes (DE-LIMP.R, full README.md):
 ```bash
@@ -891,8 +941,8 @@ summarise(
 - [x] Add download button for reproducibility log ✅ (2026-02-10)
 - [x] Add option to save/load analysis sessions (RDS) ✅ (2026-02-11)
 - [x] Documentation: Re-write README.md and USER_GUIDE.md to incorporate new features and workflows ✅ (2026-02-11, v2.0 release)
+- [x] Auto-sync to HF with GitHub Actions ✅ (2026-02-12, solves README conflict issue)
 - [ ] Consider adding plot theme customization
 - [ ] Volcano plot: Add annotation/legend indicating FDR threshold used for coloring
 - [ ] GSEA: Add KEGG and Reactome enrichment to the pathway analysis functionality
 - [ ] GSEA: Clarify which DE results (contrast) the GSEA analysis is being performed for
-- [ ] Consider auto-pushing to both remotes with git hooks or GitHub Actions
