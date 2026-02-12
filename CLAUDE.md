@@ -94,6 +94,8 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 ## Key Files
 - **DE-LIMP.R** - Main Shiny app (1923 lines) - For GitHub releases and local users
 - **app.R** - Copy of DE-LIMP.R for Hugging Face Spaces (HF requires this naming)
+- **Dockerfile** - Docker container definition for HF Spaces and HPC deployment
+- **HPC_DEPLOYMENT.md** - 📘 Complete guide for UC Davis HPC/Apptainer deployment
 - **README_GITHUB.md** - ⭐ **SOURCE FILE** for GitHub README (edit this for GitHub docs!)
 - **README_HF.md** - ⭐ **SOURCE FILE** for HF README (edit this for HF config!)
 - **README.md** - Generated from source files (content differs between origin/hf remotes)
@@ -101,8 +103,25 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 
 ## Deployment & Release Management
 
-### Dual Remote Setup
-This project is deployed to **two platforms** with separate git remotes:
+### Deployment Platforms
+
+This project supports **three deployment modes**:
+
+1. **GitHub** (origin remote) - Source code and releases
+   - URL: https://github.com/bsphinney/DE-LIMP
+   - Use: Download DE-LIMP.R for local installation
+
+2. **Hugging Face Spaces** (hf remote) - Web-based access
+   - URL: https://huggingface.co/spaces/brettsp/de-limp-proteomics
+   - Uses: Docker container with app.R
+
+3. **HPC Clusters** (UC Davis FARM/HPC1/HPC2) - High-performance computing
+   - Platform: Apptainer/Singularity containers
+   - Guide: See [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md)
+   - Use: Large dataset analysis with full cluster resources
+
+### Dual Remote Setup (GitHub + Hugging Face)
+This project has **two git remotes**:
 - **`origin`** → GitHub (https://github.com/bsphinney/DE-LIMP)
 - **`hf`** → Hugging Face Spaces (https://huggingface.co/spaces/brettsp/de-limp-proteomics)
 
