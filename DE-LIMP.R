@@ -438,6 +438,12 @@ ui <- page_sidebar(
     ),
     
     nav_panel("DE Dashboard", icon = icon("table-columns"),
+              # Prominent comparison indicator
+              div(style="background-color: #007bff; color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; text-align: center; font-size: 1.2em; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.1);",
+                icon("microscope", style="margin-right: 10px;"),
+                span("Viewing Comparison:"),
+                uiOutput("current_comparison_display", inline = TRUE, style="margin-left: 10px; color: #ffe066; text-decoration: underline;")
+              ),
               layout_columns(col_widths = c(6, 6),
                              card(card_header(div(style="display: flex; justify-content: space-between; align-items: center;", span("Results Table"), div(actionButton("generate_ai_summary", "🤖 Generate AI Summary", class="btn-info btn-sm"), actionButton("clear_plot_selection", "Reset", class="btn-warning btn-xs"), actionButton("show_violin", "📊 Violin Plot", class="btn-primary btn-xs"), downloadButton("download_result_csv", "💾 Export Results", class="btn-success btn-xs")))), DTOutput("de_table")),
                              card(card_header("Volcano Plot (Click/Box Select to Filter Table)"), plotlyOutput("volcano_plot_interactive", height = "600px"))),
@@ -683,6 +689,11 @@ server <- function(input, output, session) {
         div(
           actionButton("guess_groups", "🪄 Auto-Guess Groups", class="btn-info btn-sm"),
           br(), br(),
+          strong("Template:"),
+          div(style="display: flex; gap: 5px; margin-top: 5px; margin-bottom: 10px;",
+            downloadButton("export_template", "📥 Export", class="btn-secondary btn-sm"),
+            actionButton("import_template", "📤 Import", class="btn-secondary btn-sm")
+          ),
           div(style="display: flex; gap: 10px;",
             modalButton("Cancel"),
             actionButton("run_from_modal", "▶ Run Pipeline", class="btn-success", icon = icon("play"))
@@ -1837,7 +1848,80 @@ server <- function(input, output, session) {
       ))
     }
   )
-  
+
+  # Export group assignment template
+  output$export_template <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_group_template_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      # Get current table data (including any edits)
+      template_data <- if (!is.null(input$hot_metadata_modal)) {
+        hot_to_r(input$hot_metadata_modal)
+      } else {
+        values$metadata
+      }
+
+      # Export with current custom covariate names
+      write.csv(template_data, file, row.names = FALSE)
+      showNotification("Template exported successfully!", type = "message", duration = 3)
+    }
+  )
+
+  # Import group assignment template
+  observeEvent(input$import_template, {
+    showModal(modalDialog(
+      title = "Import Group Assignment Template",
+      fileInput("template_file", "Choose CSV File",
+                accept = c("text/csv", "text/comma-separated-values", ".csv")),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_import", "Import", class = "btn-primary")
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_import, {
+    req(input$template_file)
+
+    tryCatch({
+      imported_data <- read.csv(input$template_file$datapath, stringsAsFactors = FALSE)
+
+      # Validate columns
+      required_cols <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")
+      if (!all(required_cols %in% colnames(imported_data))) {
+        showNotification("Error: Template must have columns: ID, File.Name, Group, Batch, Covariate1, Covariate2",
+                        type = "error", duration = 10)
+        return()
+      }
+
+      # Validate File.Name matches
+      if (!all(imported_data$File.Name %in% values$metadata$File.Name)) {
+        showNotification("Warning: Some file names in template don't match current data. Using matching rows only.",
+                        type = "warning", duration = 8)
+      }
+
+      # Update metadata with imported data (match by File.Name)
+      values$metadata <- imported_data
+
+      showNotification("Template imported successfully!", type = "message", duration = 3)
+      removeModal()  # Close import dialog
+
+      # Reopen assign groups modal to show imported data
+      Sys.sleep(0.5)  # Brief delay for UX
+      click("open_setup")
+
+    }, error = function(e) {
+      showNotification(paste("Error importing template:", e$message), type = "error", duration = 10)
+    })
+  })
+
+  # Display current comparison prominently
+  output$current_comparison_display <- renderUI({
+    req(input$contrast_selector)
+    span(input$contrast_selector, style="font-size: 1.1em;")
+  })
+
   output$volcano_plot_interactive <- renderPlotly({
     df <- volcano_data(); cols <- c("Not Sig" = "grey", "Significant" = "red")
     # Use non-adjusted P.Value for y-axis, but color by adjusted p-value significance
