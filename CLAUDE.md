@@ -703,7 +703,44 @@ As of 2026-02-11, we now use **source files** to manage the two different README
 
 ## Development Workflow
 
-### Running the App
+### 🎯 IMPORTANT: Minimize Hugging Face Builds
+
+**HF Docker builds take 30-45 minutes (or 5-10 minutes with caching). Always test locally first!**
+
+**Recommended workflow to avoid unnecessary HF builds:**
+
+```bash
+# 1. Edit DE-LIMP.R locally
+nano DE-LIMP.R  # or use VS Code
+
+# 2. Test locally (instant startup, hot-reload on save)
+shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
+
+# 3. Test thoroughly with multiple changes
+# Make several improvements, test each one locally
+
+# 4. When satisfied with all changes, sync to app.R
+cp DE-LIMP.R app.R
+
+# 5. Commit to GitHub first (for version control)
+git add DE-LIMP.R app.R
+git commit -m "Descriptive message about changes"
+git push origin main
+
+# 6. ⚠️ REMINDER: Push to Hugging Face ONLY when fully tested
+git push hf main
+# This triggers a 5-10 minute rebuild (or 30-45 if Dockerfile changed)
+# Check build status: https://huggingface.co/spaces/brettsp/de-limp-proteomics/logs
+```
+
+**Key Points:**
+- ✅ **DO**: Make multiple local changes and test thoroughly before pushing to HF
+- ✅ **DO**: Batch changes together to minimize HF builds
+- ❌ **DON'T**: Push every small change to HF immediately
+- ❌ **DON'T**: Use HF for testing - it's too slow
+
+### Running the App Locally
+
 **In VS Code R Terminal (recommended):**
 ```r
 shiny::runApp('/Users/brettphinney/Documents/claude/DE-LIMP.r', port=3838, launch.browser=TRUE)
