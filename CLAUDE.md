@@ -9,6 +9,27 @@
 
 Don't wait to be asked - suggest adding these to CLAUDE.md to help future sessions!
 
+**🚨 CRITICAL GIT RULE - README.md Management**:
+```
+NEVER commit README.md together with other files when pushing to both remotes!
+
+✅ CORRECT:
+  git add CLAUDE.md USER_GUIDE.md    # Other docs
+  git commit -m "Update docs"
+  git push origin main && git push hf main
+
+  git add README.md                  # README separately
+  git commit -m "Update GitHub README"
+  git push origin main               # GitHub ONLY!
+
+❌ WRONG (breaks HF deployment):
+  git add .                          # Includes README.md
+  git commit -m "Update docs"
+  git push origin main && git push hf main
+
+This has broken HF deployment 5+ times. Always use specific file names with git add.
+```
+
 ## Project Overview
 DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package for differential expression analysis of DIA-NN data.
 
@@ -47,6 +68,32 @@ This project is deployed to **two platforms** with separate git remotes:
 ### 🚨 CRITICAL: Avoiding README Conflicts
 
 **THE PROBLEM**: Every time you push to HF, if README.md is in your recent commits OR working directory, it will overwrite HF's YAML README and break deployment.
+
+**⚠️ MOST COMMON TRIGGER**: Updating documentation files (CLAUDE.md, USER_GUIDE.md, README.md) together and pushing to both remotes. This has broken HF deployment 5+ times!
+
+**THE SOLUTION FOR DOCUMENTATION UPDATES**:
+```bash
+# When updating multiple documentation files:
+
+# 1. Update CLAUDE.md and USER_GUIDE.md - safe to push to both
+git add CLAUDE.md USER_GUIDE.md
+git commit -m "Update docs for vX.X.X features"
+git push origin main && git push hf main
+
+# 2. Update README.md separately - GitHub ONLY
+git add README.md
+git commit -m "Update GitHub README"
+git push origin main
+# ⚠️ DO NOT PUSH TO HF! README.md must stay separate
+
+# 3. If you need to update HF README:
+cp README_HF.md README.md
+git add README.md
+git commit -m "Update HF README"
+git push hf main
+# Then restore GitHub version:
+git checkout HEAD~1 README.md
+```
 
 **THE SOLUTION**: When making HF-specific changes (Dockerfile, etc.), follow this EXACT workflow:
 
@@ -235,6 +282,41 @@ shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
 
 ## Recent Changes & Important Fixes
 
+### 2026-02-11: v2.0.1 Enhancement Release
+
+**⚠️ README Conflict Incident #5**: HF deployment broke again when documenting v2.0.1 features
+- Trigger: Updated CLAUDE.md, USER_GUIDE.md, and README.md together
+- Problem: All three files committed together, then pushed to both remotes
+- Result: GitHub README (no YAML) overwrote HF README → "Missing configuration" error
+- Fix: Ran recovery script (4th time during v2.0 release cycle)
+- **Lesson**: ALWAYS commit/push README.md separately from other documentation files!
+
+1. **Prominent Comparison Display on DE Dashboard** (app.R lines 440-446, 1852-1856)
+   - Feature: Blue header banner at top of DE Dashboard showing current comparison
+   - Dynamic display: Updates when user changes comparison in dropdown
+   - Visual design: Blue background with microscope icon and yellow highlighting
+   - Implementation: `renderUI` output (`current_comparison_display`) in styled div container
+   - User benefit: Immediately see which contrast is being viewed without scrolling
+   - Reduces confusion when switching between multiple comparisons
+
+2. **Export/Import Template for Group Assignments** (app.R lines 683-690, 1850+)
+   - Feature: CSV template export/import buttons in "Assign Groups & Run Pipeline" modal
+   - **Export Template**:
+     - Downloads current group assignment table as CSV
+     - Filename format: `DE-LIMP_group_template_YYYYMMDD_HHMMSS.csv`
+     - Includes all table data: File.Name, Group, Batch, custom covariates
+     - Captures current state from rhandsontable (including user edits)
+   - **Import Template**:
+     - Opens file picker modal for CSV upload
+     - Validates columns and matches files by File.Name
+     - Updates metadata table with imported values
+     - Error handling for missing columns or file mismatches
+   - Use cases:
+     - Save group assignments between sessions
+     - Share configurations with collaborators
+     - Quickly apply standard group patterns to new data
+     - Template-based workflows for repeated experiments
+
 ### 2026-02-11: v2.0 Release Preparation & HF Deployment Fixes
 
 **CRITICAL LESSON LEARNED**: README.md management with dual remotes
@@ -280,7 +362,10 @@ git push hf main  # OK if no README in recent commits
 
 **Lesson:** The two remotes MUST have different README.md files permanently. This is not a bug - it's a feature of having platform-specific configurations. The branches will diverge on README.md and that's OK.
 
-**Recovery Count:** Fixed README on HF 4+ times during v2.0 release session
+**Recovery Count:**
+- v2.0 release session: 4 times
+- v2.0.1 documentation update: 1 time
+- **Total: 5 times** (as of 2026-02-11)
 
 1. **Updated USER_GUIDE.md for v2.0**
    - Updated prerequisites to R 4.5+ requirement
