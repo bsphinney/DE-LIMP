@@ -9,6 +9,40 @@
 
 Don't wait to be asked - suggest adding these to CLAUDE.md to help future sessions!
 
+**📦 CRITICAL: Updating Dockerfile When Adding New Packages**:
+```
+When adding new features that require new R packages:
+
+1. ✅ Update app.R/DE-LIMP.R with new library() calls
+2. ✅ Update Dockerfile to install the new packages BEFORE copying app.R
+3. ✅ Test the Docker build locally (if possible) or check HF build logs
+4. ✅ Consider dependency order - install dependencies before packages that need them
+
+Example workflow:
+  # 1. Add feature to app.R with new package
+  library(newpackage)  # Add to app.R
+
+  # 2. Update Dockerfile
+  # Add to appropriate section based on package source:
+  # - CRAN packages → Section 2
+  # - Bioconductor → Section 3
+  # - Consider dependencies (system libs, R packages)
+
+  # 3. Commit both files together
+  git add app.R DE-LIMP.R Dockerfile
+  git commit -m "Add new feature with newpackage"
+
+  # 4. Push to HF and monitor build logs
+  git push hf main
+  # Check: https://huggingface.co/spaces/brettsp/de-limp-proteomics/logs
+
+Common dependency patterns:
+  - Graphics packages (ggplot2 extensions) → Need Cairo: libcairo2-dev
+  - XML/web packages → Need: libxml2-dev, libcurl4-openssl-dev
+  - Font packages → Need: libfontconfig1-dev, libfreetype6-dev
+  - Bioconductor → Install dependencies in correct order!
+```
+
 **🚨 CRITICAL GIT RULE - README.md Management**:
 ```
 We now use SOURCE FILES for README management (as of 2026-02-11):
@@ -41,7 +75,7 @@ We now use SOURCE FILES for README management (as of 2026-02-11):
   git commit -m "Update docs"
   git push origin main && git push hf main
 
-Recovery count: 6 incidents. Use source files and specific file names!
+Recovery count: 7 incidents. Use source files and specific file names!
 ```
 
 ## Project Overview
@@ -299,6 +333,17 @@ shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
 
 ### 2026-02-11: v2.0.1 Enhancement Release
 
+**🐛 Dockerfile Fix for HF Deployment** (Incident #7)
+- Problem: HF Docker build failed - `clusterProfiler` and `enrichplot` not installing
+- Root cause: Missing Cairo graphics system dependencies
+- Solution:
+  - Added `libcairo2-dev` and `libxt-dev` to system dependencies
+  - Added step 2b to install graphics R packages (`systemfonts`, `gdtools`, `Rcpp`) before Bioconductor
+  - Added `ggtree`, `ggtangle` installation before `clusterProfiler`/`enrichplot`
+  - Ensures all dependencies installed in correct order during Docker build
+- Files changed: Dockerfile (lines 16-17, 24-32)
+- Recovery: README incident #7 during fix deployment (expected, recovered automatically)
+
 **⚠️ README Conflict Incident #5**: HF deployment broke again when documenting v2.0.1 features
 - Trigger: Updated CLAUDE.md, USER_GUIDE.md, and README.md together
 - Problem: All three files committed together, then pushed to both remotes
@@ -380,7 +425,8 @@ git push hf main  # OK if no README in recent commits
 **Recovery Count:**
 - v2.0 release session: 4 times
 - v2.0.1 documentation update: 2 times (incidents #5 and #6)
-- **Total: 6 times** (as of 2026-02-11)
+- v2.0.1 Dockerfile fix: 1 time (incident #7)
+- **Total: 7 times** (as of 2026-02-11)
 
 **Incident #6 Root Cause:**
 Even though we only pushed CLAUDE.md changes, git pushed the entire commit history including the previous "Restore GitHub README" commit, which overwrote HF's YAML README.
