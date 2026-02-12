@@ -1,129 +1,140 @@
-# DE-LIMP HPC Deployment Guide (UC Davis)
+# DE-LIMP HPC Deployment Guide
 
-This guide covers deploying DE-LIMP on UC Davis HPC clusters (FARM, HPC1/HPC2) using Apptainer/Singularity containers.
+This guide covers deploying DE-LIMP on HPC clusters using Apptainer/Singularity containers. While written with UC Davis HPC (FARM/HPC1/HPC2) in mind, these instructions work on any HPC system with Apptainer/Singularity.
 
 ---
 
-## 🏗️ Part 1: Build Docker Image Locally
+## 🎯 Quick Start (3 Options)
 
-### Prerequisites
-- Docker Desktop installed on Mac
-- ~10GB free disk space
-- 30-45 minutes for build
+Choose the method that works best for you:
 
-### Step 1: Build the Image
+### **Option 1: Pull from Hugging Face** ⭐ **EASIEST - RECOMMENDED**
 ```bash
-# Navigate to project directory
-cd /Users/brettphinney/Documents/claude
+# SSH to your HPC cluster
+ssh username@your-hpc-cluster.edu
 
-# Build Docker image (takes 30-45 minutes)
+# Load Apptainer (or Singularity)
+module load apptainer  # or: module load singularity
+
+# Create directory for containers
+mkdir -p ~/containers
+
+# Pull directly from Hugging Face (takes ~5-10 minutes)
+apptainer pull ~/containers/de-limp.sif docker://huggingface.co/spaces/brettsp/de-limp-proteomics
+
+# Done! Skip to Part 3 to run it.
+```
+
+### **Option 2: Build from GitHub Files**
+```bash
+# SSH to your HPC cluster
+ssh username@your-hpc-cluster.edu
+
+# Download Dockerfile and app.R from GitHub
+mkdir -p ~/de-limp-build && cd ~/de-limp-build
+wget https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/Dockerfile
+wget https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/app.R
+
+# Load Apptainer and build (takes 30-45 minutes)
+module load apptainer
+apptainer build ~/containers/de-limp.sif Dockerfile
+
+# Clean up
+cd ~ && rm -rf ~/de-limp-build
+```
+
+### **Option 3: Build Locally, Transfer to Cluster**
+If you have Docker on your local machine and want to build there:
+
+```bash
+# On your local machine:
+# 1. Clone the repository
+git clone https://github.com/bsphinney/DE-LIMP.git
+cd DE-LIMP
+
+# 2. Build Docker image (30-45 minutes)
 docker build -t de-limp:latest .
 
-# Verify build
-docker images | grep de-limp
-# Should show: de-limp   latest   <image-id>   <size>
-```
-
-### Step 2: Test Locally (Optional)
-```bash
-# Run the container locally to verify it works
-docker run -p 7860:7860 de-limp:latest
-
-# Open browser to http://localhost:7860
-# Ctrl+C to stop
-```
-
-### Step 3: Convert to Apptainer Format
-
-**Option A: Direct conversion (if Apptainer installed on Mac)**
-```bash
-# Install Apptainer on Mac (if not already installed)
-brew install apptainer
-
-# Convert Docker image to .sif
-apptainer build de-limp.sif docker-daemon://de-limp:latest
-```
-
-**Option B: Save for conversion on cluster**
-```bash
-# Save Docker image as tar archive
+# 3. Save as tar archive
 docker save de-limp:latest -o de-limp-docker.tar
 
-# The .tar file will be ~3-4GB
-ls -lh de-limp-docker.tar
-```
+# 4. Transfer to cluster (adjust username and host)
+scp de-limp-docker.tar username@your-hpc-cluster.edu:~/
 
----
-
-## 📤 Part 2: Transfer to UC Davis HPC
-
-### Transfer the Image
-
-**If you built .sif file locally:**
-```bash
-# Transfer to FARM cluster
-scp de-limp.sif username@farm.hpc.ucdavis.edu:~/containers/
-
-# Or to HPC1/HPC2
-scp de-limp.sif username@hpc1.hpc.ucdavis.edu:~/containers/
-```
-
-**If you saved .tar file:**
-```bash
-# Transfer tar file
-scp de-limp-docker.tar username@farm.hpc.ucdavis.edu:~/
-
-# SSH to cluster and convert
-ssh username@farm.hpc.ucdavis.edu
-mkdir -p ~/containers
+# 5. SSH to cluster and convert
+ssh username@your-hpc-cluster.edu
 module load apptainer
+mkdir -p ~/containers
 apptainer build ~/containers/de-limp.sif docker-archive://de-limp-docker.tar
 rm de-limp-docker.tar  # Clean up
 ```
 
 ---
 
+## ⚙️ Part 2: First-Time Setup
+
+After you have the `de-limp.sif` file (from any option above), set up your directories:
+
+```bash
+# Create organized directory structure
+mkdir -p ~/containers     # For .sif files
+mkdir -p ~/jobs           # For SLURM scripts
+mkdir -p ~/logs           # For job output logs
+mkdir -p ~/data           # For your proteomics data
+mkdir -p ~/results        # For analysis results
+
+# Verify the container works
+apptainer exec ~/containers/de-limp.sif R --version
+# Should show: R version 4.5.0 (2025-04-11)
+```
+
+---
+
 ## 🖥️ Part 3: Interactive Usage with Port Forwarding
 
-### Method 1: Single-Command Interactive Session
+### Method 1: Simple One-Step Launch
 
-**On your Mac (Terminal 1):**
+**On your local computer (Terminal 1):**
 ```bash
-# SSH with port forwarding
-ssh -L 7860:localhost:7860 username@farm.hpc.ucdavis.edu
+# SSH with port forwarding (replace with your cluster address)
+ssh -L 7860:localhost:7860 username@your-hpc-cluster.edu
 
-# Once connected, request interactive node
-salloc --partition=high --time=4:00:00 --mem=32GB --cpus-per-task=8
+# Once connected, request an interactive compute node
+# Adjust partition name and resources for your cluster
+salloc --time=4:00:00 --mem=32GB --cpus-per-task=8
 
-# Note the node name (e.g., "compute-0-42")
-# Load Apptainer and run
+# Load Apptainer and run DE-LIMP
 module load apptainer
 apptainer exec ~/containers/de-limp.sif \
   R -e "shiny::runApp('/srv/shiny-server/app.R', host='0.0.0.0', port=7860)"
 ```
 
-**On your Mac (Browser):**
+**On your local computer (Browser):**
 ```
 Open: http://localhost:7860
 ```
 
-### Method 2: Two-Step Port Forwarding (More Stable)
+### Method 2: Two-Step Port Forwarding (More Stable for Long Sessions)
 
-**On your Mac (Terminal 1):**
+**On your local computer (Terminal 1):**
 ```bash
 # SSH to cluster
-ssh username@farm.hpc.ucdavis.edu
+ssh username@your-hpc-cluster.edu
 
 # Request interactive node
-salloc --partition=high --time=8:00:00 --mem=32GB --cpus-per-task=8
+salloc --time=8:00:00 --mem=32GB --cpus-per-task=8
 
-# Note the exact node name shown, e.g., "compute-0-42"
+# IMPORTANT: Note the exact compute node name shown
+# It will be something like: "compute-0-42" or "node123"
 ```
 
-**On your Mac (Terminal 2):**
+**On your local computer (Terminal 2):**
 ```bash
-# Set up port forwarding (replace NODE_NAME with actual node)
-ssh -L 7860:compute-0-42:7860 username@farm.hpc.ucdavis.edu
+# Set up port forwarding (replace NODE_NAME and cluster address)
+ssh -L 7860:NODE_NAME:7860 username@your-hpc-cluster.edu
+
+# Example:
+# ssh -L 7860:compute-0-42:7860 username@farm.hpc.ucdavis.edu
 ```
 
 **Back in Terminal 1 (on cluster):**
@@ -134,27 +145,31 @@ apptainer exec ~/containers/de-limp.sif \
   R -e "shiny::runApp('/srv/shiny-server/app.R', host='0.0.0.0', port=7860)"
 ```
 
-**On your Mac (Browser):**
+**On your local computer (Browser):**
 ```
 Open: http://localhost:7860
 ```
 
-### Interactive Session Script
+### Interactive Session Helper Script
 
 Save as `~/run-delimp-interactive.sh` on cluster:
 ```bash
 #!/bin/bash
-# Interactive DE-LIMP launcher
+# Interactive DE-LIMP launcher with port forwarding instructions
 
 # Get compute node
 echo "Requesting compute node..."
-salloc --partition=high --time=8:00:00 --mem=32GB --cpus-per-task=8 << 'SCRIPT'
+salloc --time=8:00:00 --mem=32GB --cpus-per-task=8 << 'SCRIPT'
 
-# Show node info
+# Show node info and port forwarding command
+CLUSTER_HOST=$(hostname -f | sed 's/.*\.//')  # Extract cluster domain
 echo "==================================="
 echo "Running on: $(hostname)"
-echo "Setup port forwarding from your Mac:"
-echo "ssh -L 7860:$(hostname):7860 $USER@farm.hpc.ucdavis.edu"
+echo ""
+echo "To access DE-LIMP, open a NEW terminal and run:"
+echo "ssh -L 7860:$(hostname):7860 $USER@$(hostname -f)"
+echo ""
+echo "Then open browser to: http://localhost:7860"
 echo "==================================="
 echo ""
 echo "Starting DE-LIMP..."
@@ -177,24 +192,27 @@ Create `~/jobs/delimp-batch.slurm`:
 ```bash
 #!/bin/bash
 #SBATCH --job-name=de-limp
-#SBATCH --partition=high
 #SBATCH --time=12:00:00
 #SBATCH --mem=64GB
 #SBATCH --cpus-per-task=16
 #SBATCH --output=logs/delimp-%j.log
 #SBATCH --error=logs/delimp-%j.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=your.email@ucdavis.edu
+#SBATCH --mail-user=your.email@yourinstitution.edu
 
-# Load modules
-module load apptainer
+# Optional: Specify partition (adjust for your cluster)
+# #SBATCH --partition=compute
+
+# Load Apptainer module (name may vary by cluster)
+module load apptainer  # or: module load singularity
 
 # Print job info
 echo "Job started: $(date)"
 echo "Running on: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
 echo "Working directory: $(pwd)"
 
-# Run DE-LIMP
+# Run DE-LIMP with data binding
 apptainer exec \
   --bind ${HOME}/data:/data \
   --bind ${HOME}/results:/results \
@@ -204,7 +222,7 @@ apptainer exec \
 echo "Job finished: $(date)"
 ```
 
-### Submit the job:
+### Submit and Monitor:
 ```bash
 # Create log directory
 mkdir -p ~/logs
@@ -215,8 +233,14 @@ sbatch ~/jobs/delimp-batch.slurm
 # Check job status
 squeue -u $USER
 
-# View output
+# View output in real-time
 tail -f ~/logs/delimp-<jobid>.log
+
+# After job starts, set up port forwarding to access the app
+# Find the node name from the log file:
+NODE=$(grep "Running on:" ~/logs/delimp-*.log | tail -1 | awk '{print $3}')
+# Then on your local computer:
+# ssh -L 7860:$NODE:7860 username@your-hpc-cluster.edu
 ```
 
 ---
@@ -289,20 +313,23 @@ netstat -an | grep 7860
 
 ## 📊 Part 6: Example Workflows
 
-### Workflow 1: Quick Interactive Analysis
+### Workflow 1: Quick Interactive Analysis (Recommended for First-Time Users)
 ```bash
-# 1. SSH with port forwarding
-ssh -L 7860:localhost:7860 username@farm.hpc.ucdavis.edu
+# 1. Get the container (if you haven't already)
+apptainer pull ~/containers/de-limp.sif docker://huggingface.co/spaces/brettsp/de-limp-proteomics
 
-# 2. Start interactive session
-salloc --partition=high --time=4:00:00 --mem=32GB --cpus-per-task=8
+# 2. SSH with port forwarding (replace with your cluster)
+ssh -L 7860:localhost:7860 username@your-hpc-cluster.edu
 
-# 3. Run DE-LIMP
+# 3. Start interactive session (adjust resources)
+salloc --time=4:00:00 --mem=32GB --cpus-per-task=8
+
+# 4. Run DE-LIMP
 module load apptainer
 apptainer exec ~/containers/de-limp.sif \
   R -e "shiny::runApp('/srv/shiny-server/app.R', host='0.0.0.0', port=7860)"
 
-# 4. Open browser on Mac: http://localhost:7860
+# 5. Open browser on your computer: http://localhost:7860
 ```
 
 ### Workflow 2: Long-Running Batch Analysis
@@ -311,14 +338,16 @@ apptainer exec ~/containers/de-limp.sif \
 # 2. Submit job
 sbatch ~/jobs/delimp-batch.slurm
 
-# 3. Monitor
+# 3. Monitor job status
 squeue -u $USER
 tail -f ~/logs/delimp-*.log
 
-# 4. When job starts, set up port forwarding
-# Find node in log file
-NODE=$(grep "Running on:" ~/logs/delimp-*.log | awk '{print $3}')
-ssh -L 7860:${NODE}:7860 username@farm.hpc.ucdavis.edu
+# 4. When job starts, set up port forwarding in a new terminal
+# Find the compute node from the log file:
+NODE=$(grep "Running on:" ~/logs/delimp-*.log | tail -1 | awk '{print $3}')
+
+# Then connect with port forwarding:
+ssh -L 7860:${NODE}:7860 username@your-hpc-cluster.edu
 
 # 5. Access in browser: http://localhost:7860
 ```
@@ -326,30 +355,56 @@ ssh -L 7860:${NODE}:7860 username@farm.hpc.ucdavis.edu
 ### Workflow 3: Automated Pipeline (No GUI)
 ```bash
 # For batch processing without interactive Shiny interface
-# Create R script: ~/scripts/run-analysis.R
+# Create R script with your analysis: ~/scripts/run-analysis.R
+# Then execute it:
 apptainer exec ~/containers/de-limp.sif \
   Rscript ~/scripts/run-analysis.R
 ```
 
 ---
 
-## 🎓 UC Davis Specific Notes
+## 🎓 Cluster-Specific Examples
 
-### FARM Cluster
-- **Login node:** farm.hpc.ucdavis.edu
-- **Common partitions:** high, low, med, long
-- **Max time:** 14 days (long partition)
-- **Apptainer module:** `module load apptainer`
+### UC Davis (FARM, HPC1, HPC2)
+```bash
+# Login
+ssh username@farm.hpc.ucdavis.edu
 
-### HPC1/HPC2
-- **Login node:** hpc1.hpc.ucdavis.edu, hpc2.hpc.ucdavis.edu
-- **Check available partitions:** `sinfo`
-- **Check node availability:** `squeue`
+# Common partitions: high, low, med, long
+salloc --partition=high --time=8:00:00 --mem=64GB --cpus-per-task=16
+
+# Module
+module load apptainer
+
+# Support: hpc-help@ucdavis.edu
+# Docs: https://hpc.ucdavis.edu
+```
+
+### General HPC Clusters
+```bash
+# Check available partitions
+sinfo
+
+# Check available modules
+module avail
+
+# Check node availability
+squeue
+
+# Request resources (adjust for your system)
+salloc --time=8:00:00 --mem=64GB --cpus-per-task=16
+```
+
+### Common Module Names
+- `module load apptainer`
+- `module load singularity`
+- `module load singularity/3.8`
+- Check your cluster documentation for the exact name
 
 ### Getting Help
-- HPC Support: hpc-help@ucdavis.edu
-- Proteomics Core: Brett Phinney (your account!)
-- Documentation: https://hpc.ucdavis.edu
+- Check your cluster's documentation website
+- Contact your HPC support team
+- DE-LIMP issues: https://github.com/bsphinney/DE-LIMP/issues
 
 ---
 
