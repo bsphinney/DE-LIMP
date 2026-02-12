@@ -24,6 +24,9 @@ RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggpl
 # 2b. Install graphics/font dependencies for clusterProfiler/enrichplot
 RUN R -e "install.packages(c('systemfonts', 'gdtools', 'Rcpp'), repos='https://cloud.r-project.org/')"
 
+# 2c. Install network visualization dependencies for enrichplot
+RUN R -e "install.packages(c('ggraph', 'graphlayouts', 'tidygraph', 'scatterpie', 'shadowtext', 'ggforce'), repos='https://cloud.r-project.org/')"
+
 # 3. Install Bioconductor Packages (Specific versions for stability)
 # Install in correct dependency order to avoid compilation issues
 RUN R -e "BiocManager::install(c('DOSE', 'GOSemSim', 'yulab.utils'), ask=FALSE, update=FALSE)"

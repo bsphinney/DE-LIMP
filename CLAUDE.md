@@ -360,6 +360,16 @@ shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
 - Fix: Ran recovery script (8th time total)
 - **Key Lesson**: The two branches MUST permanently diverge on README.md. Pushing ANY commit to both remotes risks bringing along README changes from commit history.
 
+**🐛 Dockerfile Fix #9 for HF Deployment** (2026-02-12)
+- Problem: HF Docker build completed but `clusterProfiler` and `enrichplot` missing at runtime
+- Root cause: Missing network visualization CRAN dependencies for `enrichplot`
+- Error: "there is no package called 'clusterProfiler'" when app starts
+- Solution:
+  - Added step 2c to install network visualization packages before Bioconductor
+  - Packages added: `ggraph`, `graphlayouts`, `tidygraph`, `scatterpie`, `shadowtext`, `ggforce`
+  - These are required by enrichplot for pathway network visualizations
+- Files changed: Dockerfile (new step 2c between lines 25-26)
+
 **🐛 Dockerfile Fix for HF Deployment** (Incident #7)
 - Problem: HF Docker build failed - `clusterProfiler` and `enrichplot` not installing
 - Root cause: Missing Cairo graphics system dependencies
