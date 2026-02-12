@@ -1,174 +1,80 @@
-<img src="https://github.com/user-attachments/assets/2aeb5863-2c10-4faa-99e8-25835a9e9330" align="left" width="150" style="margin-right: 20px;" alt="DE-LIMP Logo" />
-
-# DE-LIMP: Differential Expression & Limpa Proteomics
-
-**DE-LIMP** is a modern, interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** and **Limma** for robust statistics, with **Google Gemini AI** integration for intelligent data exploration.
-
-> **Why "DE-LIMP"?**
-> Because analyzing differential expression shouldn't make you walk with a limp. 🧬🚶‍♂️
-
-**🌐 Project Website:** [bsphinney.github.io/DE-LIMP](https://bsphinney.github.io/DE-LIMP/)
-**📚 Full Documentation:** [USER_GUIDE.md](USER_GUIDE.md) | [CLAUDE.md](CLAUDE.md)
-
-<br clear="left"/>
-
+---
+title: DE-LIMP Proteomics
+emoji: 🧬
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: 4.5.0
+app_file: app.R
+pinned: true
+license: mit
+tags:
+  - proteomics
+  - shiny
+  - bioinformatics
+  - differential-expression
+  - mass-spectrometry
+  - limma
+  - dia-nn
 ---
 
-## 🚀 Key Features
+# DE-LIMP: Differential Expression & Limpa Proteomics 🧬
 
-### 📊 Interactive Visualizations
-- **Volcano Plots** - Fully interactive (Plotly). Click or box-select to highlight across all views
+An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** and **Limma** for robust statistics, with **Google Gemini AI** integration.
+
+## 🚀 Features
+
+### 📊 Interactive Analysis
+- **Volcano Plots** - Fully interactive (Plotly). Click or box-select to highlight
 - **Heatmaps** - Auto-scaled Z-score heatmaps of significant proteins
-- **QC Trends** - Monitor precursors and proteins across run order with group averages
-- **Multi-Protein Violin Plots** - Compare expression distributions across groups
-- **MDS & DPC Plots** - Assess sample clustering and normalization quality
+- **QC Trends** - Monitor run quality with group averages
+- **Multi-Protein Violin Plots** - Compare expression distributions
 
-### 🤖 AI-Powered Analysis (Gemini Integration)
-- **Chat with Your Data** - Upload QC stats + top proteins to Google Gemini
-- **Bi-Directional Sync:**
-  - Select proteins in plots → AI knows your focus
-  - Ask AI questions → Auto-filter plots and tables
-- **Auto-Summary** - Generate publication-ready methodology summaries
+### 🤖 AI-Powered Exploration
+- **Chat with Your Data** - Google Gemini integration
+- **Bi-Directional Sync** - Select proteins ↔ AI suggestions
+- **Auto-Summary** - Generate publication-ready summaries
 
 ### 💾 Session Management
-- **Save/Load Sessions** - Preserve entire analysis state as .rds files
-- **Reproducibility Logging** - Export complete R code for analysis reproduction
-- **Example Data** - One-click download of demo dataset (Affinisep vs Evosep comparison)
+- **Save/Load Sessions** - Preserve analysis state (.rds files)
+- **Reproducibility Logging** - Export complete R code
+- **Example Data** - One-click demo dataset (Affinisep vs Evosep)
 
-### 🔬 Advanced Features
-- **Multiple Covariates** - Customize covariate names (Batch, Sex, Diet, etc.) and include in models
-- **Auto-Guess Groups** - Smart detection of experimental groups from filenames
-- **Grid View** - Heatmap-style table with UniProt linking and click-to-plot
-- **GSEA Integration** - Gene Ontology enrichment analysis
-- **Consistent DE** - Identify highly reproducible significant proteins
+### 🎓 Education & Resources
+- Embedded proteomics training materials
+- UC Davis Proteomics video tutorials
+- Methodology citations (limpa, limma, DIA-NN)
 
-### 🎓 Education Tab
-- Embedded proteomics resources and training materials
-- Latest UC Davis Proteomics YouTube videos
-- Links to short courses and methodology citations
-- Google NotebookLM for exploring key papers
+## 📖 Quick Start
 
----
-
-## 🛠 Installation
-
-### System Requirements
-- **R 4.5 or newer** (required for limpa package)
-- **Bioconductor 3.22+** (automatically configured with R 4.5+)
-- Internet connection for package installation
-
-### Quick Start
-
-1. **Download the app:**
-   ```bash
-   wget https://github.com/bsphinney/DE-LIMP/releases/latest/download/DE-LIMP.R
-   # Or download from: https://github.com/bsphinney/DE-LIMP/releases
-   ```
-
-2. **Run the app:**
-   ```r
-   shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
-   ```
-
-3. **First-time setup:**
-   - The app automatically installs missing packages
-   - R version check performed on startup
-   - Clear upgrade instructions if R 4.5+ is needed
-
-### Dependencies
-All dependencies install automatically on first run:
-```r
-# Core packages
-shiny, bslib, plotly, DT, rhandsontable, shinyjs
-
-# Data processing
-dplyr, tidyr, stringr, readr, arrow
-
-# Statistics & Bioinformatics
-limpa, limma, ComplexHeatmap, clusterProfiler
-org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi
-
-# Visualization
-ggplot2, ggrepel, ggridges, enrichplot
-
-# AI Integration
-httr2, curl
-```
-
----
-
-## 📖 Usage
-
-### 1. Load Data
-- **Upload DIA-NN .parquet file** OR
-- **Click "Load Example Data"** for instant demo dataset
-
-### 2. Assign Groups & Run Pipeline
-- Click "Assign Groups & Run Pipeline"
-- Use "Auto-Guess Groups" or manually assign
-- Configure covariates (optional): Batch, custom covariate names
-- Click "▶ Run Pipeline" to execute limpa analysis
-
-### 3. Explore Results
-- **Data Overview** - Signal distributions and QC summaries
-- **QC Trends** - Temporal trends with group averages
-- **DE Dashboard** - Volcano plots and interactive tables
-- **Consistent DE** - High-reproducibility proteins
-- **GSEA** - Gene Ontology enrichment
-- **Data Chat** - AI-powered exploration
-
-### 4. Export & Reproduce
-- Download reproducibility log (.R file)
-- Save session (.rds file) for later
-- Export tables and plots
-
----
+1. **Load Data**: Upload DIA-NN .parquet file or use "Load Example Data"
+2. **Assign Groups**: Use auto-guess or manual assignment
+3. **Run Pipeline**: Click "▶ Run Pipeline" for limpa analysis
+4. **Explore Results**: Interactive plots, tables, GSEA, AI chat
 
 ## 🔬 Methodology
 
-**Normalization:** Data Point Correspondence (DPC-CN)
-**Quantification:** maxLFQ algorithm
-**Statistics:** limma empirical Bayes moderation
-**FDR Correction:** Benjamini-Hochberg
+- **Normalization**: Data Point Correspondence (DPC-CN)
+- **Quantification**: maxLFQ algorithm
+- **Statistics**: limma empirical Bayes moderation
+- **FDR Correction**: Benjamini-Hochberg
 
-**Key Citations:**
-- **limpa:** Bioconductor package for DIA proteomics
-- **limma:** Ritchie ME et al. (2015) Nucleic Acids Res
-- **DIA-NN:** Demichev V et al. (2020) Nat Methods
+## 📚 Resources
 
-Full methodology available in the app's "Reproducibility > Methodology" tab.
+- **GitHub**: [github.com/bsphinney/DE-LIMP](https://github.com/bsphinney/DE-LIMP)
+- **Website**: [bsphinney.github.io/DE-LIMP](https://bsphinney.github.io/DE-LIMP/)
+- **YouTube**: [UC Davis Proteomics](https://www.youtube.com/channel/UCpulhf8gl-HVxACyJUEFPRw)
+- **Core Facility**: [proteomics.ucdavis.edu](https://proteomics.ucdavis.edu)
 
----
+## 🛠 System Requirements
 
-## 🎓 Resources
+- R 4.5+
+- Bioconductor 3.22+
+- All dependencies auto-install on first run
 
-- **🌐 Project Website:** [bsphinney.github.io/DE-LIMP](https://bsphinney.github.io/DE-LIMP/)
-- **📺 Video Tutorials:** [UC Davis Proteomics YouTube](https://www.youtube.com/channel/UCpulhf8gl-HVxACyJUEFPRw)
-- **🏫 Training:** [Hands-On Proteomics Short Course](https://proteomics.ucdavis.edu/events/hands-proteomics-short-course)
-- **🏢 Core Facility:** [proteomics.ucdavis.edu](https://proteomics.ucdavis.edu)
-- **📰 News:** [Proteomics News Blog](https://proteomicsnews.blogspot.com/)
+## 👨‍🔬 Developer
 
----
-
-## 📄 License
-
-This project is open source. See repository for license details.
-
----
-
-## 🤝 Contributing
-
-Issues and pull requests welcome! See [CLAUDE.md](CLAUDE.md) for development documentation.
-
-**Developer:** Brett Phinney, UC Davis Proteomics Core Facility
-**Contact:** [GitHub Issues](https://github.com/bsphinney/DE-LIMP/issues)
-
----
-
-## 📊 Example Data
-
-Demo dataset included in releases: **Affinisep vs Evosep** comparison using 50ng Thermo Hela digest.
-Available at: [github.com/bsphinney/DE-LIMP/releases](https://github.com/bsphinney/DE-LIMP/releases)
+**Brett Phinney** - UC Davis Proteomics Core Facility
 
 ---
 
