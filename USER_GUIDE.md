@@ -60,12 +60,21 @@ This is the most critical step for statistical analysis. The workflow is streaml
 3.  **Manual Edit (If Needed):**
     * Click on any cell in the **Group** column to type a custom group name
     * You can also edit **Batch**, **Covariate1**, and **Covariate2** columns
-4.  **Customize Covariate Names (Optional):**
+4.  **Template Export/Import (NEW in v2.0.1):**
+    * **Export Template**: Click **"📥 Export"** to download current group assignments as CSV
+      - Saves all table data: File.Name, Group, Batch, and custom covariates
+      - Filename format: `DE-LIMP_group_template_YYYYMMDD_HHMMSS.csv`
+      - Use for saving configurations or sharing with collaborators
+    * **Import Template**: Click **"📤 Import"** to load previously saved group assignments
+      - Opens file picker to select a CSV template
+      - Validates columns and matches files by name
+      - Perfect for reproducible workflows or applying standard patterns to new data
+5.  **Customize Covariate Names (Optional):**
     * Use the text inputs above the table to rename "Covariate1" and "Covariate2"
     * Examples: "Sex", "Diet", "Age", "Time_Point", "Instrument"
     * Check the boxes to include covariates in the statistical model
     * Only covariates with 2+ unique values will be used
-5.  **Run the Analysis:**
+6.  **Run the Analysis:**
     * Click the **"▶ Run Pipeline"** button at the top of the modal
     * **What happens?** The app uses the `limpa` package to perform DPC normalization and the `limma` package to fit linear models for differential expression
     * The modal will automatically close and navigate to the QC Plots tab
@@ -105,6 +114,7 @@ Click the green **"Open Grid View"** button to open the deep-dive table.
 ## 4. Visualizing Results
 
 ### 📉 DE Dashboard
+* **Current Comparison Display (NEW in v2.0.1):** A prominent blue header banner at the top shows which comparison you're viewing (e.g., "Evosep - Affinisep"). This updates automatically when you change the comparison dropdown, making it easy to keep track of your current analysis focus.
 * **Volcano Plot:** Interactive! Click points to select them. Box-select multiple points to analyze a cluster.
     * **Y-axis:** Shows -log10(raw P-Value) following proteomics best practices
     * **Coloring:** Red points indicate FDR-corrected significance (adj.P.Val < 0.05)
