@@ -364,8 +364,33 @@ git push hf main  # OK if no README in recent commits
 
 **Recovery Count:**
 - v2.0 release session: 4 times
-- v2.0.1 documentation update: 1 time
-- **Total: 5 times** (as of 2026-02-11)
+- v2.0.1 documentation update: 2 times (incidents #5 and #6)
+- **Total: 6 times** (as of 2026-02-11)
+
+**Incident #6 Root Cause:**
+Even though we only pushed CLAUDE.md changes, git pushed the entire commit history including the previous "Restore GitHub README" commit, which overwrote HF's YAML README.
+
+**🚨 NEW PROPOSED SOLUTION - Stop Fighting Git:**
+The current approach is unsustainable. Instead of constantly committing README changes back and forth:
+
+1. **Keep README.md UNCOMMITTED** in your working directory (GitHub version)
+2. **When updating HF README:**
+   ```bash
+   cp README_HF.md README.md
+   git add README.md
+   git commit -m "Update HF README"
+   git push hf main
+   # Restore locally but DON'T commit:
+   cp README_HF.md README.md  # Keep HF version locally too
+   ```
+3. **When updating GitHub README:**
+   - Edit README_GITHUB.md (keep as separate file)
+   - Copy to README.md locally for testing
+   - DON'T commit it - just use it locally
+   - Or commit to origin ONLY if needed, then immediately restore HF version
+
+**Alternative: Use .gitignore**
+Add README.md to .gitignore and maintain README_HF.md and README_GITHUB.md as the source files. Copy whichever one you need to README.md for local testing.
 
 1. **Updated USER_GUIDE.md for v2.0**
    - Updated prerequisites to R 4.5+ requirement
