@@ -75,7 +75,7 @@ We now use SOURCE FILES for README management (as of 2026-02-11):
   git commit -m "Update docs"
   git push origin main && git push hf main
 
-Recovery count: 7 incidents. Use source files and specific file names!
+Recovery count: 8 incidents (as of 2026-02-11). Use source files and specific file names!
 ```
 
 ## Project Overview
@@ -353,6 +353,13 @@ shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
 
 ### 2026-02-11: v2.0.1 Enhancement Release
 
+**⚠️ README Conflict Incident #8**: HF deployment broke after CLAUDE.md update
+- Trigger: Pushed CLAUDE.md changes to both remotes (commit e5d86ab)
+- Problem: Even though only CLAUDE.md was modified, git commit history contained previous README.md changes
+- Result: Previous commits with GitHub README overwrote HF YAML README
+- Fix: Ran recovery script (8th time total)
+- **Key Lesson**: The two branches MUST permanently diverge on README.md. Pushing ANY commit to both remotes risks bringing along README changes from commit history.
+
 **🐛 Dockerfile Fix for HF Deployment** (Incident #7)
 - Problem: HF Docker build failed - `clusterProfiler` and `enrichplot` not installing
 - Root cause: Missing Cairo graphics system dependencies
@@ -446,7 +453,8 @@ git push hf main  # OK if no README in recent commits
 - v2.0 release session: 4 times
 - v2.0.1 documentation update: 2 times (incidents #5 and #6)
 - v2.0.1 Dockerfile fix: 1 time (incident #7)
-- **Total: 7 times** (as of 2026-02-11)
+- v2.0.1 CLAUDE.md update: 1 time (incident #8)
+- **Total: 8 times** (as of 2026-02-11)
 
 **Incident #6 Root Cause:**
 Even though we only pushed CLAUDE.md changes, git pushed the entire commit history including the previous "Restore GitHub README" commit, which overwrote HF's YAML README.
