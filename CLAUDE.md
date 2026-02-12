@@ -238,11 +238,49 @@ shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
 ### 2026-02-11: v2.0 Release Preparation & HF Deployment Fixes
 
 **CRITICAL LESSON LEARNED**: README.md management with dual remotes
-- Problem: HF deployment kept breaking because GitHub README (without YAML) overwrote HF README (with YAML)
-- Root cause: Pushing commits to HF that included README.md changes
-- Solution: Always use `git add <specific-file>` before pushing to both remotes
-- Recovery: Use the recovery script in "Avoiding README Conflicts" section above
-- Added prominent warnings and workflow to prevent this
+
+**The Recurring Problem:**
+HF deployment broke **multiple times** during v2.0 release because GitHub README (without YAML) kept overwriting HF README (with YAML frontmatter). This happened even when we:
+1. Fixed Dockerfile and pushed to HF → README broke
+2. Updated CLAUDE.md and pushed to both remotes → README broke again
+3. Fixed README, then pushed any commit to HF → README broke again
+
+**Root Cause - Git Commit History:**
+Git doesn't just push the files you changed - it pushes your **entire branch history**. When we:
+- Made commit A: Changed README.md (GitHub version)
+- Made commit B: Changed CLAUDE.md
+- Pushed commit B to HF → Git also pushed commit A (with README changes)
+
+**Why This Is Tricky:**
+- We documented the workflow correctly in CLAUDE.md
+- We followed the "use `git add <specific-file>`" rule
+- But the problem persisted because **previous commits** in the branch history included README changes
+- Every push to HF brought those README commits along
+
+**The Real Solution:**
+1. ✅ **DO**: Keep README changes in SEPARATE commits for each remote
+2. ✅ **DO**: After fixing HF README, never push those commits back to origin
+3. ✅ **DO**: Accept that the two branches will diverge on README.md
+4. ✅ **DO**: Use the recovery script IMMEDIATELY when "Missing configuration" error appears
+5. ❌ **DON'T**: Push to both remotes if ANY recent commit includes README.md changes
+6. ❌ **DON'T**: Try to keep both remotes in perfect sync - they MUST diverge on README.md
+
+**Pattern That Works:**
+```bash
+# Making app changes (safe to push to both):
+git add app.R CLAUDE.md  # Specific files only
+git commit -m "Update app"
+git push origin main
+git push hf main  # OK if no README in recent commits
+
+# After this, if README broke on HF:
+# Run recovery script IMMEDIATELY
+# Don't continue working until README is fixed
+```
+
+**Lesson:** The two remotes MUST have different README.md files permanently. This is not a bug - it's a feature of having platform-specific configurations. The branches will diverge on README.md and that's OK.
+
+**Recovery Count:** Fixed README on HF 4+ times during v2.0 release session
 
 1. **Updated USER_GUIDE.md for v2.0**
    - Updated prerequisites to R 4.5+ requirement
