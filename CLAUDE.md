@@ -11,23 +11,37 @@ Don't wait to be asked - suggest adding these to CLAUDE.md to help future sessio
 
 **🚨 CRITICAL GIT RULE - README.md Management**:
 ```
-NEVER commit README.md together with other files when pushing to both remotes!
+We now use SOURCE FILES for README management (as of 2026-02-11):
+- README_GITHUB.md = Source for GitHub (edit this!)
+- README_HF.md = Source for Hugging Face (edit this!)
+- README.md = Generated (copy from source, differs between remotes)
 
-✅ CORRECT:
-  git add CLAUDE.md USER_GUIDE.md    # Other docs
-  git commit -m "Update docs"
-  git push origin main && git push hf main
-
-  git add README.md                  # README separately
+✅ CORRECT Workflow:
+  # For GitHub README updates:
+  nano README_GITHUB.md              # Edit source file
+  cp README_GITHUB.md README.md      # Copy to README.md
+  git add README.md README_GITHUB.md
   git commit -m "Update GitHub README"
   git push origin main               # GitHub ONLY!
 
+  # For HF README updates:
+  nano README_HF.md                  # Edit source file
+  cp README_HF.md README.md          # Copy to README.md
+  git add README.md README_HF.md
+  git commit -m "Update HF README"
+  git push hf main                   # HF ONLY!
+
+  # For other files (app.R, docs, etc.):
+  git add app.R CLAUDE.md USER_GUIDE.md
+  git commit -m "Update app"
+  git push origin main && git push hf main  # Both OK!
+
 ❌ WRONG (breaks HF deployment):
-  git add .                          # Includes README.md
+  git add .                          # Includes README.md!
   git commit -m "Update docs"
   git push origin main && git push hf main
 
-This has broken HF deployment 5+ times. Always use specific file names with git add.
+Recovery count: 6 incidents. Use source files and specific file names!
 ```
 
 ## Project Overview
@@ -46,8 +60,9 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 ## Key Files
 - **DE-LIMP.R** - Main Shiny app (1923 lines) - For GitHub releases and local users
 - **app.R** - Copy of DE-LIMP.R for Hugging Face Spaces (HF requires this naming)
-- **README.md** - Full documentation for GitHub
-- **README_HF.md** - Hugging Face version with YAML frontmatter (source for HF's README.md)
+- **README_GITHUB.md** - ⭐ **SOURCE FILE** for GitHub README (edit this for GitHub docs!)
+- **README_HF.md** - ⭐ **SOURCE FILE** for HF README (edit this for HF config!)
+- **README.md** - Generated from source files (content differs between origin/hf remotes)
 - **Main URL**: http://localhost:3838 when running locally
 
 ## Deployment & Release Management
@@ -370,27 +385,57 @@ git push hf main  # OK if no README in recent commits
 **Incident #6 Root Cause:**
 Even though we only pushed CLAUDE.md changes, git pushed the entire commit history including the previous "Restore GitHub README" commit, which overwrote HF's YAML README.
 
-**🚨 NEW PROPOSED SOLUTION - Stop Fighting Git:**
-The current approach is unsustainable. Instead of constantly committing README changes back and forth:
+**✅ IMPLEMENTED SOLUTION - Source File Approach:**
+As of 2026-02-11, we now use **source files** to manage the two different READMEs:
 
-1. **Keep README.md UNCOMMITTED** in your working directory (GitHub version)
-2. **When updating HF README:**
+**Source Files (both in git):**
+- `README_GITHUB.md` - Full documentation for GitHub (edit this for GitHub README updates)
+- `README_HF.md` - YAML frontmatter version for Hugging Face (edit this for HF README updates)
+- `README.md` - Generated file (copy from source files, content differs between remotes)
+
+**The two git remotes have permanently diverged on README.md:**
+- **origin/main**: README.md = GitHub version (full docs)
+- **hf/main**: README.md = HF version (YAML frontmatter)
+
+**New Workflow:**
+
+1. **To update GitHub README:**
    ```bash
-   cp README_HF.md README.md
-   git add README.md
-   git commit -m "Update HF README"
-   git push hf main
-   # Restore locally but DON'T commit:
-   cp README_HF.md README.md  # Keep HF version locally too
-   ```
-3. **When updating GitHub README:**
-   - Edit README_GITHUB.md (keep as separate file)
-   - Copy to README.md locally for testing
-   - DON'T commit it - just use it locally
-   - Or commit to origin ONLY if needed, then immediately restore HF version
+   # Edit README_GITHUB.md
+   nano README_GITHUB.md
 
-**Alternative: Use .gitignore**
-Add README.md to .gitignore and maintain README_HF.md and README_GITHUB.md as the source files. Copy whichever one you need to README.md for local testing.
+   # Copy to README.md and commit to origin ONLY
+   cp README_GITHUB.md README.md
+   git add README.md README_GITHUB.md
+   git commit -m "Update GitHub README"
+   git push origin main  # GitHub ONLY, NOT hf!
+   ```
+
+2. **To update HF README:**
+   ```bash
+   # Edit README_HF.md
+   nano README_HF.md
+
+   # Copy to README.md and commit to hf ONLY
+   cp README_HF.md README.md
+   git add README.md README_HF.md
+   git commit -m "Update HF README"
+   git push hf main  # HF ONLY, NOT origin!
+   ```
+
+3. **For all other files (app.R, CLAUDE.md, USER_GUIDE.md, etc.):**
+   ```bash
+   # Safe to push to both remotes
+   git add app.R CLAUDE.md USER_GUIDE.md
+   git commit -m "Update features"
+   git push origin main && git push hf main  # Both remotes OK
+   ```
+
+**Key Rules:**
+- ✅ Edit source files (README_GITHUB.md or README_HF.md)
+- ✅ Use specific file names with git add
+- ❌ NEVER push README.md changes to both remotes
+- ❌ NEVER use `git add .` when README.md is modified
 
 1. **Updated USER_GUIDE.md for v2.0**
    - Updated prerequisites to R 4.5+ requirement
