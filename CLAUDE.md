@@ -44,6 +44,56 @@ This project is deployed to **two platforms** with separate git remotes:
 
 **⚠️ DO NOT push README.md to both remotes!** If you push to both, you'll overwrite one of them and break HF configuration.
 
+### 🚨 CRITICAL: Avoiding README Conflicts
+
+**THE PROBLEM**: Every time you push to HF, if README.md is in your recent commits OR working directory, it will overwrite HF's YAML README and break deployment.
+
+**THE SOLUTION**: When making HF-specific changes (Dockerfile, etc.), follow this EXACT workflow:
+
+```bash
+# 1. Make your Dockerfile changes
+# Edit Dockerfile...
+
+# 2. Add ONLY the specific file (NOT README.md!)
+git add Dockerfile  # Be specific! Don't use git add .
+
+# 3. Commit
+git commit -m "Fix Dockerfile"
+
+# 4. Push to HF only
+git push hf main
+
+# 5. IF you get "Missing configuration in README" error:
+#    Run the recovery script below
+```
+
+**Recovery Script** (copy-paste this when README breaks):
+```bash
+# Quick fix for broken HF README
+cp README.md README_GITHUB_BACKUP.md
+cp README_HF.md README.md
+git add README.md
+git commit -m "Fix HF: Restore README with YAML frontmatter"
+git push hf main
+cp README_GITHUB_BACKUP.md README.md
+git add README.md
+git commit -m "Restore GitHub README"
+git push origin main
+rm README_GITHUB_BACKUP.md
+```
+
+**WHY THIS HAPPENS**:
+- Git pushes ALL commits in your branch history, not just the files you changed
+- If any recent commit includes README.md, it gets pushed to HF
+- HF needs YAML frontmatter in README.md, GitHub doesn't
+- When GitHub's README replaces HF's README → deployment breaks
+
+**PREVENTION RULES**:
+1. ✅ **DO**: Use `git add <specific-file>` before pushing to both remotes
+2. ❌ **DON'T**: Use `git add .` or `git add -A` before pushing to both remotes
+3. ✅ **DO**: Keep README.md in separate commits for each remote
+4. ❌ **DON'T**: Include README.md in commits that go to both remotes
+
 ### When to Update Each Platform
 
 #### For Code Changes (app.R, CLAUDE.md, etc.):
@@ -185,7 +235,15 @@ shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
 
 ## Recent Changes & Important Fixes
 
-### 2026-02-11: v2.0 Release Preparation
+### 2026-02-11: v2.0 Release Preparation & HF Deployment Fixes
+
+**CRITICAL LESSON LEARNED**: README.md management with dual remotes
+- Problem: HF deployment kept breaking because GitHub README (without YAML) overwrote HF README (with YAML)
+- Root cause: Pushing commits to HF that included README.md changes
+- Solution: Always use `git add <specific-file>` before pushing to both remotes
+- Recovery: Use the recovery script in "Avoiding README Conflicts" section above
+- Added prominent warnings and workflow to prevent this
+
 1. **Updated USER_GUIDE.md for v2.0**
    - Updated prerequisites to R 4.5+ requirement
    - Added Load Example Data section (Option A vs Option B)
