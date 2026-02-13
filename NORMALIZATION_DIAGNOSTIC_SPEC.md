@@ -1,19 +1,29 @@
-# Feature Spec: Normalization Before/After Diagnostic Plot
+# Feature Spec: Normalization Diagnostic Plot
 
 ## Overview
 
-Add a side-by-side visualization to the **QC Plots** tab that shows how normalization transforms
-the data distributions across samples. This helps users confirm normalization is working correctly
-and understand the magnitude of correction being applied.
+Add a diagnostic visualization to the **QC Plots** tab that shows per-sample intensity distributions
+at two stages of the pipeline: (1) precursor-level input from DIA-NN, and (2) protein-level output
+from DPC-Quant. This helps users confirm that:
 
-## Background: The Normalization Chain
+- DIA-NN normalization produced well-aligned precursor distributions across samples
+- Protein-level quantification preserved that alignment
+- No individual samples are behaving as outliers
 
-Data arriving in DE-LIMP passes through **up to three normalization layers**:
+**Important**: DIA-NN's RT-dependent normalization is the **only** cross-run normalization in this
+pipeline. Limpa's `dpcCN()` estimates the missingness model and `dpcQuant()` performs protein
+aggregation — neither applies normalization. This plot is therefore primarily a check on DIA-NN's
+normalization quality, with a secondary check that protein quantification didn't introduce artifacts.
 
-### Layer 1: DIA-NN Normalization (Pre-DE-LIMP)
+## Background: The Pipeline — Normalization, Missingness Modeling, and Quantification
+
+Understanding what each step does (and doesn't do) is critical for this feature.
+
+### Step 1: DIA-NN Normalization (Pre-DE-LIMP) — THE ONLY NORMALIZATION
 - **Default**: RT-dependent normalization (recommended, always-on unless user disabled it)
 - **How it works**: Selects top N precursors with lowest CVs, normalizes their summed intensities
-  to be equal across runs, then applies RT-bin-specific correction factors
+  to be equal across runs, then applies RT-bin-specific correction factors (running median of
+  fold changes across retention time bins)
 - **Applied at**: Precursor level, before DE-LIMP ever sees the data
 - **Key columns in parquet file**:
   - `Precursor.Quantity` = raw, unnormalized intensity
@@ -21,29 +31,56 @@ Data arriving in DE-LIMP passes through **up to three normalization layers**:
   - Normalization factor = `Precursor.Normalised / Precursor.Quantity`
 - **Critical**: `limpa::readDIANN()` reads `Precursor.Normalised` by default (its `qty.column`
   parameter defaults to `"Precursor.Normalised"`)
+- **This is the only cross-run normalization in the entire pipeline.** Limpa does NOT add its
+  own normalization layer. If DIA-NN normalization was off, the data flows through the rest of
+  the pipeline unnormalized.
 
-### Layer 2: limpa DPC-CN (`dpcCN()`)
-- Cyclic Normalization using the Detection Probability Curve
-- Corrects for systematic technical variation across runs
-- Accounts for intensity-dependent missing values
-- **Input**: `values$raw_data` (EList from `readDIANN()` — already DIA-NN normalized)
-- **Output**: DPC fit object (`values$dpc_fit`)
+### Step 2: limpa `dpcCN()` — MISSINGNESS MODEL (NOT normalization)
+- **What it is**: Estimates the Detection Probability Curve (DPC) under the Complete Normal model
+- **What "CN" stands for**: "Complete Normal" — the statistical model assumption that the
+  *complete* (observed + unobserved) log-intensities are normally distributed. **NOT** "Cyclic
+  Normalization" as previously mislabeled.
+- **What it does**: Learns the relationship between a peptide's intensity and its probability of
+  being detected. Low-intensity peptides are more likely to be missing — the DPC quantifies
+  this precisely with an intercept and slope parameter.
+- **What it does NOT do**: It does NOT adjust, shift, scale, or transform the intensity values.
+  The precursor intensities go in and come out unchanged. It only estimates the DPC parameters
+  (stored in `values$dpc_fit`).
+- **Input**: `values$raw_data` (EList from `readDIANN()`)
+- **Output**: DPC fit object (`values$dpc_fit`) containing `$dpc` (intercept + slope)
 
-### Layer 3: limpa DPC-Quant (`dpcQuant()`)
-- Aggregates precursors → proteins using modified maxLFQ with DPC-based missing value handling
-- Uses the DPC fit from Layer 2
-- **Output**: `values$y_protein` (protein-level EList with complete data, no NAs)
+### Step 3: limpa `dpcQuant()` — PROTEIN QUANTIFICATION (NOT normalization)
+- **What it does**: Aggregates precursor-level data → protein-level expression estimates
+- Uses the DPC from Step 2 to probabilistically recover information from missing values
+- Fits an additive model (protein expression + peptide baseline) for each protein
+- Missing values are represented by the DPC rather than imputed with point estimates
+- Empirical Bayes prior borrows information across all proteins
+- **Output**: `values$y_protein` — protein-level EList with COMPLETE data (no NAs), plus
+  standard errors for each protein-in-sample estimate
+- **What it does NOT do**: No cross-run normalization. The protein expression estimates
+  reflect whatever normalization state the input precursor data was in.
+
+### Step 4: limpa `dpcDE()` — DIFFERENTIAL EXPRESSION
+- Wraps limma's linear model framework with precision weights from DPC-Quant standard errors
+- Proteins with more missing precursors → larger standard errors → downweighted in DE analysis
+- This is where the uncertainty from missingness is properly propagated
 
 ### What this means for the diagnostic
 
-`values$raw_data$E` is **precursor-level, log2, already DIA-NN normalized** data (with NAs).
-`values$y_protein$E` is **protein-level, log2, DPC-CN normalized + DPC-Quant aggregated** data
-(complete, no NAs).
+`values$raw_data$E` is **precursor-level, log2, DIA-NN normalized** data (with NAs).
+`values$y_protein$E` is **protein-level, log2, DPC-Quant aggregated** data (complete, no NAs).
 
-Comparing these two shows the combined effect of limpa's normalization + protein aggregation.
-They are at different granularities (precursor vs protein), but per-sample distribution comparison
-(box plots, density plots) is still valid and informative — users can see whether medians align and
-distributions become more uniform.
+The difference between these two is driven by **protein aggregation and missing value recovery**,
+NOT by a second normalization step. Per-sample distribution changes (median shifts, shape changes)
+between the two panels reflect the effect of rolling up precursors to proteins and filling in missing
+values — not normalization correction.
+
+This means the diagnostic is really showing two things:
+1. Whether DIA-NN's normalization produced well-aligned precursor distributions (left panel)
+2. Whether the protein-level quantification preserved that alignment (right panel)
+
+If the left panel already looks bad (scattered medians), the right panel won't magically fix it —
+limpa trusts the input normalization.
 
 ## Implementation Spec
 
@@ -59,7 +96,7 @@ layout_columns(col_widths = c(12),
   card(
     card_header(
       div(style = "display: flex; justify-content: space-between; align-items: center;",
-        span("Normalization Diagnostic"),
+        span("Pipeline Diagnostic: Input → Output Distributions"),
         div(
           # Info badge about DIA-NN normalization status
           uiOutput("diann_norm_status_badge", inline = TRUE),
@@ -142,15 +179,15 @@ output$norm_diagnostic_plot <- renderPlotly({
   pre_medians <- data.frame(
     Sample = colnames(pre_mat),
     Median = apply(pre_mat, 2, median, na.rm = TRUE),
-    Stage = "Pre-Normalization\n(Precursor-level, DIA-NN normalized)"
+    Stage = "Precursor Input\n(DIA-NN normalized, with NAs)"
   )
 
-  # --- Post-normalization: per-sample medians from protein data ---
+  # --- Post-quantification: per-sample medians from protein data ---
   post_mat <- values$y_protein$E  # protein-level, log2, no NAs
   post_medians <- data.frame(
     Sample = colnames(post_mat),
     Median = apply(post_mat, 2, median, na.rm = TRUE),
-    Stage = "Post-Normalization\n(Protein-level, DPC-CN + DPC-Quant)"
+    Stage = "Protein Output\n(DPC-Quant aggregated, complete)"
   )
 
   # Add group info
@@ -163,19 +200,19 @@ output$norm_diagnostic_plot <- renderPlotly({
     # Build long-form data for side-by-side box plots
     pre_long <- as.data.frame(pre_mat) %>%
       pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-      mutate(Stage = "Before\n(Precursor)") %>%
+      mutate(Stage = "Precursor Input\n(DIA-NN normalized)") %>%
       filter(!is.na(Log2Intensity))
 
     post_long <- as.data.frame(post_mat) %>%
       pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-      mutate(Stage = "After\n(Protein)")
+      mutate(Stage = "Protein Output\n(DPC-Quant)")
 
     # Add group info to both
     pre_long$Group <- meta$Group[match(pre_long$Sample, meta$File.Name)]
     post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
 
     combined <- bind_rows(pre_long, post_long)
-    combined$Stage <- factor(combined$Stage, levels = c("Before\n(Precursor)", "After\n(Protein)"))
+    combined$Stage <- factor(combined$Stage, levels = c("Precursor Input\n(DIA-NN normalized)", "Protein Output\n(DPC-Quant)"))
 
     # Order samples by group then name
     sample_order <- meta %>% arrange(Group, File.Name) %>% pull(File.Name)
@@ -189,8 +226,8 @@ output$norm_diagnostic_plot <- renderPlotly({
       facet_wrap(~Stage, scales = "free_y", ncol = 2) +
       theme_minimal() +
       labs(
-        title = "Normalization Effect: Per-Sample Intensity Distributions",
-        subtitle = "Medians should align after normalization",
+        title = "Pipeline Diagnostic: Precursor Input → Protein Output",
+        subtitle = "Left: DIA-NN normalized precursors | Right: DPC-Quant protein estimates",
         x = "Sample ID",
         y = "Log2 Intensity"
       ) +
@@ -204,27 +241,27 @@ output$norm_diagnostic_plot <- renderPlotly({
 
     pre_long <- as.data.frame(pre_mat) %>%
       pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-      mutate(Stage = "Before (Precursor)") %>%
+      mutate(Stage = "Precursor Input (DIA-NN)") %>%
       filter(!is.na(Log2Intensity))
 
     post_long <- as.data.frame(post_mat) %>%
       pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-      mutate(Stage = "After (Protein)")
+      mutate(Stage = "Protein Output (DPC-Quant)")
 
     pre_long$Group <- meta$Group[match(pre_long$Sample, meta$File.Name)]
     post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
 
     combined <- bind_rows(pre_long, post_long)
     combined$Stage <- factor(combined$Stage,
-      levels = c("Before (Precursor)", "After (Protein)"))
+      levels = c("Precursor Input (DIA-NN)", "Protein Output (DPC-Quant)"))
 
     p <- ggplot(combined, aes(x = Log2Intensity, color = Group, group = Sample)) +
       geom_density(alpha = 0.3, linewidth = 0.4) +
       facet_wrap(~Stage, ncol = 2) +
       theme_minimal() +
       labs(
-        title = "Normalization Effect: Per-Sample Density Curves",
-        subtitle = "Curves should overlap more tightly after normalization",
+        title = "Pipeline Diagnostic: Per-Sample Density Curves",
+        subtitle = "Well-aligned input distributions should remain aligned after quantification",
         x = "Log2 Intensity",
         y = "Density"
       )
@@ -239,7 +276,7 @@ output$norm_diagnostic_plot <- renderPlotly({
 ```r
 observeEvent(input$fullscreen_norm_diag, {
   showModal(modalDialog(
-    title = "Normalization Diagnostic - Fullscreen View",
+    title = "Pipeline Diagnostic - Fullscreen View",
     plotlyOutput("norm_diagnostic_plot_fullscreen", height = "700px"),
     size = "xl",
     easyClose = TRUE,
@@ -268,42 +305,252 @@ output$norm_diagnostic_plot <- renderPlotly({ generate_norm_diagnostic_plot() })
 output$norm_diagnostic_plot_fullscreen <- renderPlotly({ generate_norm_diagnostic_plot() })
 ```
 
-## What Users Should See
+## User-Facing Guidance System
 
-### Healthy Data (Normalization Working Well)
-- **Before**: Box plot medians scattered at different heights across samples
-- **After**: Box plot medians well-aligned at similar heights
-- **Density**: Curves converge and overlap more tightly after normalization
-- DIA-NN badge shows "ON" (green)
+The diagnostic plot is only useful if users can interpret it and know what to do when something
+looks wrong. This section specifies the automated guidance that should appear contextually.
 
-### Already-Normalized Data (e.g., `noNorm.parquet` example file)
-- **Before**: Medians may already be somewhat scattered (raw DIA-NN output)
-- **After**: limpa's DPC-CN provides additional alignment
-- DIA-NN badge shows "OFF" (yellow)
-- This is actually the ideal scenario for showing DPC-CN's effect in isolation
+### 1. Automatic Health Assessment
 
-### Problematic Data
-- **After** distributions still highly scattered → possible batch effects not corrected by normalization
-- One sample's distribution dramatically different → possible outlier/failed sample
-- Very wide distributions post-normalization → high missing value rate, DPC imputation active
-
-## Important Caveats to Display
-
-Add an info box below the plot (or as a collapsible details section):
+After the pipeline runs, compute a simple diagnostic score and display a status indicator on the
+plot card header (next to the DIA-NN badge):
 
 ```r
-div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px;
-             font-size: 0.85em; color: #6c757d;",
-  icon("info-circle"),
-  strong(" Note: "),
-  "'Before' shows precursor-level data (with NAs) as read by limpa from DIA-NN's ",
-  tags$code("Precursor.Normalised"), " column. ",
-  "'After' shows protein-level data after DPC-CN normalization and DPC-Quant aggregation. ",
-  "The two panels differ in both normalization state AND granularity (precursor vs protein), ",
-  "so distributions will naturally differ in shape. Focus on whether ",
-  strong("per-sample medians align"), " after normalization."
+# Compute after pipeline completes
+assess_distribution_health <- reactive({
+  req(values$raw_data, values$y_protein)
+
+  pre_mat <- values$raw_data$E
+  post_mat <- values$y_protein$E
+
+  # Per-sample medians
+  pre_medians <- apply(pre_mat, 2, median, na.rm = TRUE)
+  post_medians <- apply(post_mat, 2, median, na.rm = TRUE)
+
+  # Metric: coefficient of variation of medians (lower = better aligned)
+  pre_cv <- sd(pre_medians) / abs(mean(pre_medians))
+  post_cv <- sd(post_medians) / abs(mean(post_medians))
+
+  # Metric: any single sample > 2 SD from mean of medians?
+  pre_outliers <- which(abs(pre_medians - mean(pre_medians)) > 2 * sd(pre_medians))
+  post_outliers <- which(abs(post_medians - mean(post_medians)) > 2 * sd(post_medians))
+
+  list(
+    pre_cv = pre_cv,
+    post_cv = post_cv,
+    pre_outlier_samples = names(pre_outliers),
+    post_outlier_samples = names(post_outliers),
+    status = if (pre_cv > 0.05) "warning" else if (length(pre_outliers) > 0) "caution" else "good"
+  )
+})
+```
+
+### 2. Contextual Warning Banners
+
+Display above the plot, color-coded by severity. These fire automatically based on the health
+assessment and DIA-NN normalization detection.
+
+```r
+output$norm_diag_guidance <- renderUI({
+  req(values$raw_data, values$y_protein)
+
+  health <- assess_distribution_health()
+  diann_status <- values$diann_norm_detected
+
+  warnings <- list()
+
+  # --- SCENARIO 1: DIA-NN normalization OFF + bad distributions ---
+  if (diann_status == "off" && health$status == "warning") {
+    warnings <- c(warnings, list(
+      div(class = "alert alert-warning", role = "alert",
+        icon("exclamation-triangle"),
+        strong(" Unnormalized data detected. "),
+        "Your DIA-NN output does not appear to be normalized (the ",
+        tags$code("Precursor.Normalised"), " and ", tags$code("Precursor.Quantity"),
+        " columns are identical). The sample distributions look uneven, which can lead ",
+        "to unreliable differential expression results.",
+        br(), br(),
+        strong("What to do: "),
+        "For most experiments, re-process your data in DIA-NN with ",
+        tags$b("RT-dependent normalization"), " enabled (this is the default setting). ",
+        "This corrects for differences in sample loading and LC-MS run variability.",
+        br(), br(),
+        em("Exception: "), "If you are analyzing AP-MS/Co-IP, fractionated samples, or ",
+        "isotope labeling time-courses, unnormalized data may be appropriate — ",
+        "but you should apply your own normalization before using DE-LIMP."
+      )
+    ))
+  }
+
+  # --- SCENARIO 2: DIA-NN normalization OFF but distributions look OK ---
+  if (diann_status == "off" && health$status == "good") {
+    warnings <- c(warnings, list(
+      div(class = "alert alert-info", role = "alert",
+        icon("info-circle"),
+        strong(" DIA-NN normalization was off, "),
+        "but your sample distributions look reasonably aligned. This can happen if your ",
+        "samples had very consistent loading and LC-MS performance. Results may still be ",
+        "valid, but consider whether normalization would improve your analysis."
+      )
+    ))
+  }
+
+  # --- SCENARIO 3: DIA-NN normalization ON but distributions still bad ---
+  if (diann_status == "on" && health$status == "warning") {
+    warnings <- c(warnings, list(
+      div(class = "alert alert-danger", role = "alert",
+        icon("times-circle"),
+        strong(" Sample distributions are uneven despite normalization. "),
+        "DIA-NN normalization was applied but the per-sample distributions still show ",
+        "substantial differences. This could indicate:",
+        tags$ul(
+          tags$li("A failed or low-quality injection (check the QC Trends tab)"),
+          tags$li("Very different sample types being compared (e.g., tissue vs plasma)"),
+          tags$li("Severe batch effects that normalization couldn't fully correct")
+        ),
+        strong("What to do: "),
+        "Check the QC Trends tab for outlier samples. Consider whether any samples ",
+        "should be excluded. If batch effects are suspected, make sure you've assigned ",
+        "batch information in the Assign Groups modal."
+      )
+    ))
+  }
+
+  # --- SCENARIO 4: Outlier sample(s) detected ---
+  if (length(health$pre_outlier_samples) > 0) {
+    outlier_names <- paste(health$pre_outlier_samples, collapse = ", ")
+    warnings <- c(warnings, list(
+      div(class = "alert alert-warning", role = "alert",
+        icon("user-times"),
+        strong(" Possible outlier sample(s): "),
+        tags$code(outlier_names),
+        br(),
+        "These samples have median intensities substantially different from the rest. ",
+        "This could indicate a failed injection, sample preparation issue, or ",
+        "biological outlier. Check the QC Trends tab and MDS plot for confirmation. ",
+        "If the sample is clearly problematic, consider re-running the analysis ",
+        "without it."
+      )
+    ))
+  }
+
+  # --- SCENARIO 5: Everything looks good ---
+  if (health$status == "good" && diann_status %in% c("on", "unknown") &&
+      length(health$pre_outlier_samples) == 0) {
+    warnings <- c(warnings, list(
+      div(class = "alert alert-success", role = "alert",
+        icon("check-circle"),
+        strong(" Distributions look good. "),
+        "Per-sample intensity distributions are well-aligned. ",
+        "No outlier samples detected."
+      )
+    ))
+  }
+
+  do.call(tagList, warnings)
+})
+```
+
+Place `uiOutput("norm_diag_guidance")` **above** the plot in the card body.
+
+### 3. "What does this mean?" Expandable Section
+
+Below the plot, add a collapsible explanation written for bench scientists:
+
+```r
+tags$details(
+  tags$summary(style = "cursor: pointer; color: #0d6efd; font-size: 0.9em;",
+    icon("question-circle"), " What am I looking at?"
+  ),
+  div(style = "background-color: #f8f9fa; padding: 12px; border-radius: 5px;
+               margin-top: 8px; font-size: 0.85em; line-height: 1.6;",
+
+    tags$h6("Reading this plot"),
+    p("Each box (or density curve) represents one sample's intensity distribution — ",
+      "essentially, how bright all the detected peptides/proteins are in that sample."),
+
+    p(strong("Left panel: "), "What DIA-NN gave us. These are the peptide-level intensities ",
+      "after DIA-NN's normalization (if it was enabled). ",
+      strong("Right panel: "), "What our pipeline produced. These are the final protein-level ",
+      "estimates after aggregating peptides and handling missing values."),
+
+    tags$h6("What 'good' looks like"),
+    p("The boxes (or curves) should sit at roughly the same height across all samples. ",
+      "Small differences are normal. If one sample is dramatically higher or lower than ",
+      "the rest, that sample may be problematic."),
+
+    tags$h6("What 'bad' looks like"),
+    p("If all the boxes are at very different heights, your samples aren't comparable ",
+      "and the statistical results may not be reliable. The most common cause is that ",
+      "DIA-NN normalization was turned off when the data was processed."),
+
+    tags$h6("Why doesn't the right panel 'fix' bad data?"),
+    p("Unlike some other tools, this pipeline does not apply its own normalization. ",
+      "The protein quantification step (DPC-Quant) aggregates peptides into proteins and ",
+      "handles missing values, but it ",
+      strong("trusts the input intensities as-is"), ". ",
+      "If the input is unnormalized, the output will be too. ",
+      "Normalization happens in DIA-NN, before the data reaches this tool."),
+
+    tags$h6("The DIA-NN normalization badge"),
+    p("The badge at the top of this plot tells you whether DIA-NN applied normalization ",
+      "to your data. ",
+      tags$span(class = "badge bg-info", "ON"), " = DIA-NN's RT-dependent normalization was active (recommended). ",
+      tags$span(class = "badge bg-warning", "OFF"), " = Data was exported without normalization. ",
+      tags$span(class = "badge bg-secondary", "Unknown"), " = Couldn't determine (older DIA-NN version or non-standard export).")
+  )
 )
 ```
+
+### 4. Updated Card Body Layout
+
+The full card body should be structured as:
+
+```r
+card_body(
+  # Contextual warnings (auto-generated)
+  uiOutput("norm_diag_guidance"),
+
+  # View toggle
+  radioButtons("norm_diag_type", "View:",
+    choices = c("Box Plots" = "boxplot", "Density Overlay" = "density"),
+    inline = TRUE
+  ),
+
+  # The plot
+  plotlyOutput("norm_diagnostic_plot", height = "450px"),
+
+  # Expandable explanation
+  tags$details(
+    tags$summary(style = "cursor: pointer; color: #0d6efd; font-size: 0.9em; margin-top: 10px;",
+      icon("question-circle"), " What am I looking at?"
+    ),
+    # ... (explanation content from section 3 above)
+  )
+)
+```
+
+## What Developers Should Know (Internal Reference)
+
+These are the expected outcomes for each data scenario. Use for testing and QA.
+
+### Healthy Data (DIA-NN Normalization ON — most common case)
+- **Left panel**: Box plot medians well-aligned across samples
+- **Right panel**: Medians remain aligned, distributions slightly narrower (fewer features, no NAs)
+- **DIA-NN badge**: Blue "ON"
+- **Automated guidance**: Green "Distributions look good" banner
+
+### Data with DIA-NN Normalization OFF
+- **Left panel**: Medians may be scattered depending on sample loading variation
+- **Right panel**: Medians will still be scattered — limpa does not normalize
+- **DIA-NN badge**: Yellow "OFF"
+- **Automated guidance**: If medians scattered → yellow warning with re-processing instructions.
+  If medians happen to be aligned → blue info note.
+
+### Problematic Data (even with normalization ON)
+- One sample diverges in both panels → red banner naming the outlier sample
+- All medians scattered despite norm ON → red banner about possible batch effects
+- Right panel diverges but left looks fine → unusual, may indicate extreme missingness in some samples
 
 ## Files to Modify
 
@@ -311,13 +558,15 @@ div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margi
    - Add `diann_norm_detected` to `reactiveValues()` initialization (~line 555)
    - Add DIA-NN norm detection code to both data loading observers (~lines 599 and 640)
    - Add UI elements to `nav_panel("QC Plots")` (~line 425)
-   - Add server-side reactive + render functions (after existing QC renderers ~line 1000)
+   - Add `assess_distribution_health` reactive (~after pipeline runs)
+   - Add `output$norm_diag_guidance` renderUI
+   - Add plot reactive + render functions (after existing QC renderers ~line 1000)
 
 2. **Dockerfile**: No changes needed (no new packages required — uses existing ggplot2, plotly, tidyr)
 
 3. **CLAUDE.md**: Add to Recent Changes section documenting the new feature
 
-4. **USER_GUIDE.md**: Add section about interpreting the normalization diagnostic
+4. **USER_GUIDE.md**: Add section about interpreting the diagnostic plot
 
 ## Testing Checklist
 
@@ -327,6 +576,11 @@ div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margi
 - [ ] Box plot view works and medians are visible
 - [ ] Density overlay view works and curves are distinguishable
 - [ ] Fullscreen modal works
+- [ ] **Green banner appears when distributions are healthy**
+- [ ] **Yellow warning appears when DIA-NN norm is OFF + distributions scattered**
+- [ ] **Red banner appears when distributions bad despite normalization ON**
+- [ ] **Outlier sample banner names the correct sample(s)**
+- [ ] "What am I looking at?" section expands/collapses correctly
 - [ ] Plot handles edge cases: single group, many samples (>20), very few samples (2-3)
 - [ ] No errors when pipeline hasn't been run yet (plot should just not render — `req()` guards)
 - [ ] Tooltip/hover info works in plotly
