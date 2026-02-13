@@ -949,8 +949,7 @@ summarise(
 
 ### UI/UX Enhancements (2026-02-12)
 - [ ] **DE Dashboard**: Make comparison bar selectable/clickable to change contrasts directly
-- [ ] **Grid View**: Add bar chart button to switch between violin and bar plot
-- [ ] **Grid View**: Default to violin plot when opening from grid view
+- [ ] **Grid View Protein Plot**: When clicking a protein from grid view, open violin plot (default) with button to switch to bar plot view (showing all samples), and bar plot should have toggle button to switch between regular and log2 scale
 - [ ] **Consistent DE**: Add CV histogram plot (broken out by condition with average CVs)
 - [ ] **All Plots**: Add fullscreen view button to all plot panels
 - [ ] **Data Overview**: Show which comparison is being used for "Signal Distribution Across All Protein Groups"
