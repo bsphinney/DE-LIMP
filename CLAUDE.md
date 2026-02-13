@@ -955,6 +955,7 @@ summarise(
 - [ ] **Data Overview**: Show which comparison is being used for "Signal Distribution Across All Protein Groups"
 - [ ] **Grid View Violin Plots**: Remove close button when opening from expression gridview
 - [ ] **QC Trend Fullscreen**: Add metric selector to switch between Precursors, Proteins, and MS1 Signal
+- [ ] **QC Plots**: Add Normalization Diagnostic plot showing before/after comparison (precursor-level vs protein-level, box plots + density overlay, DIA-NN normalization status detection) - Implement per spec in `NORMALIZATION_DIAGNOSTIC_SPEC.md`
 
 ### Feature Enhancements from DIA-Analyst Competitive Analysis (Priority Ranked)
 
