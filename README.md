@@ -14,6 +14,22 @@
 
 ---
 
+## ✨ What's New in v2.1
+
+**Major UI/UX Enhancements** (February 2026):
+- 🎯 **Four-Way Comparison Selector Sync** - Signal Distribution, Expression Grid, P-value Distribution, and DE Dashboard selectors now sync automatically
+- 📊 **Enhanced Dataset Summary** - DE protein counts per comparison with explicit directional arrows (↑ higher in X, ↓ higher in Y)
+- 🔬 **P-value Distribution Diagnostic** - Automated pattern detection with color-coded guidance (healthy, inflation, low power, model issues)
+- 📈 **CV Distribution Histogram** - Visual distribution of protein variability per experimental group
+- 🤖 **AI Summary Relocated** - Moved from modal popup to dedicated Data Overview sub-tab with inline display
+- 🌋 **Volcano Plot Annotations** - FDR and logFC thresholds clearly labeled with significance criteria legend box
+- 🎨 **Signal Distribution Enhancement** - Always shows DE coloring automatically with dedicated comparison selector
+- 🎨 **Responsive Plot Heights** - All plots use viewport-relative units for optimal viewing on any screen size
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history.
+
+---
+
 ## 🚀 Key Features
 
 ### 📊 Interactive Visualizations
