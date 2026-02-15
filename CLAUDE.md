@@ -44,9 +44,9 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 Lines 1-110:    Auto-installation & setup (R/Bioc version checks, package install)
 Lines 111-168:  Server configuration (max upload size, Gemini API)
 Lines 169-330:  Helper functions (QC stats, AI chat, organism detection)
-Lines 331-830:  UI definition (page_sidebar with 9 main tabs)
-Lines 831-2809: Server logic (~77 reactive elements)
-Line 2810:      shinyApp(ui, server)
+Lines 331-850:  UI definition (page_sidebar with 9 main tabs)
+Lines 851-4185: Server logic (~80+ reactive elements, incl. XIC viewer)
+Line 4186:      shinyApp(ui, server)
 ```
 
 ### Main Tab Structure
@@ -65,6 +65,12 @@ Line 2810:      shinyApp(ui, server)
 - `values$fit` - limma fit object from DE analysis
 - `values$y_protein` - Protein-level quantification matrix
 - `values$repro_log` - Cumulative R code for reproducibility
+- `values$xic_dir` - Path to XIC parquet directory
+- `values$xic_available` - Whether XIC files were detected
+- `values$xic_protein` - Currently selected protein for XIC viewing
+- `values$xic_data` - Loaded & reshaped XIC data for current protein
+- `values$xic_report_map` - Protein → Precursor mapping from report
+- `values$uploaded_report_path` - Path to uploaded report.parquet
 
 ### LIMPA Pipeline Flow
 1. `readDIANN()` - Load DIA-NN parquet file
@@ -200,6 +206,39 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 | HF "Missing configuration in README" | Run README recovery script above |
 
 ## Recent Changes (v2.1)
+
+### 2026-02-15: XIC Viewer for Differentially Expressed Proteins
+1. **Sidebar Section "5. XIC Viewer"** (lines 438-447 UI)
+   - `textInput` for XIC directory path (HPC/local users paste path)
+   - "Load XICs" button with wave-square icon
+   - Status badge shows file count when loaded
+   - Not visible on HF (XIC files too large for cloud deployment)
+
+2. **XIC Trigger Buttons**
+   - DE Dashboard results table: "📈 XICs" button (line 864) alongside Reset, Violin, Export
+   - Grid View modal footer: "📈 XICs" button (line 1989) alongside Back to Grid
+
+3. **Helper Functions** (lines 1088-1175)
+   - `load_xic_for_protein(xic_dir, protein_id, report_map)`: Arrow predicate pushdown reads only target precursor rows from potentially GB-sized `.xic.parquet` files
+   - `reshape_xic_for_plotting(xic_raw, metadata)`: Pairs RT/intensity rows, pivots to long format, adds fragment labels (y/b ions) and group metadata via fuzzy File.Name matching
+
+4. **XIC Modal** (lines 3780-3857)
+   - Full-width modal with controls: Display mode, Precursor selector, Group filter, MS1 checkbox
+   - Three display modes: Overlay (fragments per sample), Facet by fragment, Facet by sample
+   - Plotly interactive chromatograms with tooltips (Sample, Fragment, RT, Intensity)
+   - Info panel shows protein stats, RT range, DE stats (logFC, adj.P.Val)
+   - Prev/Next protein navigation through significant DE proteins
+   - Download handler exports PNG (14x10 inch, 150 DPI)
+
+5. **Data Loading Architecture**
+   - On-demand lazy loading: Arrow `open_dataset()` with predicate pushdown
+   - Fallback: individual file reads if schema mismatch across DIA-NN versions
+   - Protein → Precursor mapping loaded from report.parquet on XIC dir load
+   - Caps at top 6 precursors for very large proteins (e.g., Titin)
+
+6. **Report Path Storage** (lines 1189, 1131)
+   - `values$uploaded_report_path` stored on both user upload and example data load
+   - Enables XIC precursor mapping without re-reading the report
 
 ### 2026-02-13: Added Comparison Selectors to Data Overview Tab
 1. **Signal Distribution sub-tab** (lines 502-523)
@@ -417,3 +456,4 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 - [ ] Sample CV distribution plots
 - [ ] Protein numbers bar plot per sample
 - [ ] Absence/presence table for on/off proteins
+- [x] XIC Viewer: On-demand chromatogram viewer for DE proteins ✅

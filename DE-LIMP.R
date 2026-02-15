@@ -433,7 +433,16 @@ ui <- page_sidebar(
     passwordInput("user_api_key", "Gemini API Key", value = "", placeholder = "AIzaSy..."),
     actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
     br(), br(),
-    textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview")
+    textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview"),
+    hr(),
+    h5("5. XIC Viewer"),
+    p(class = "text-muted small",
+      "Load .xic.parquet files from DIA-NN to inspect chromatograms."),
+    textInput("xic_dir_input", "XIC Directory Path:",
+      placeholder = "/path/to/diann/output/"),
+    actionButton("xic_load_dir", "Load XICs", class = "btn-outline-info btn-sm w-100",
+      icon = icon("wave-square")),
+    uiOutput("xic_status_badge")
   ),
   
   navset_card_tab(
@@ -851,6 +860,7 @@ ui <- page_sidebar(
                       div(
                         actionButton("clear_plot_selection", "Reset", class="btn-warning btn-xs"),
                         actionButton("show_violin", "📊 Violin", class="btn-primary btn-xs"),
+                        actionButton("show_xic", "📈 XICs", class="btn-info btn-xs"),
                         downloadButton("download_result_csv", "💾 Export", class="btn-success btn-xs")
                       )
                     )
@@ -1054,7 +1064,15 @@ server <- function(input, output, session) {
     color_plot_by_de = FALSE,
     grid_selected_protein = NULL,
     temp_violin_target = NULL, # Added for violin popup
-    diann_norm_detected = "unknown" # "on", "off", or "unknown" — DIA-NN normalization status
+    diann_norm_detected = "unknown", # "on", "off", or "unknown" — DIA-NN normalization status
+
+    # === XIC Viewer ===
+    xic_dir = NULL,              # Path to directory containing .xic.parquet files
+    xic_available = FALSE,       # Whether XIC files were detected
+    xic_protein = NULL,          # Currently selected protein for XIC viewing
+    xic_data = NULL,             # Loaded XIC data (tibble, only for selected protein)
+    xic_report_map = NULL,       # Protein → Precursor mapping from report
+    uploaded_report_path = NULL   # Path to uploaded report.parquet for re-reading
   )
 
   # Helper function to append to reproducibility log
@@ -1066,7 +1084,102 @@ server <- function(input, output, session) {
     )
     values$repro_log <- c(values$repro_log, header, code_lines)
   }
-  
+
+  # Helper: Load XIC data for a single protein using Arrow predicate pushdown
+  load_xic_for_protein <- function(xic_dir, protein_id, report_map) {
+    target_precursors <- report_map %>%
+      filter(Protein.Group == protein_id) %>%
+      distinct(Precursor.Id) %>%
+      pull(Precursor.Id)
+
+    if (length(target_precursors) == 0) return(NULL)
+
+    tryCatch({
+      ds <- arrow::open_dataset(xic_dir, format = "parquet")
+      xic_data <- ds %>%
+        filter(Precursor.Id %in% target_precursors) %>%
+        collect()
+      if (nrow(xic_data) == 0) return(NULL)
+      xic_data
+    }, error = function(e) {
+      # Fallback: read files individually (handles non-uniform schemas)
+      xic_files <- list.files(xic_dir, pattern = "\\.xic\\.parquet$",
+                              full.names = TRUE, recursive = TRUE)
+      xic_list <- lapply(xic_files, function(f) {
+        tryCatch({
+          arrow::read_parquet(f) %>%
+            filter(Precursor.Id %in% target_precursors)
+        }, error = function(e2) NULL)
+      })
+      bind_rows(Filter(Negate(is.null), xic_list))
+    })
+  }
+
+  # Helper: Reshape raw XIC data into tidy long format for ggplot
+  reshape_xic_for_plotting <- function(xic_raw, metadata) {
+    num_cols <- names(xic_raw)[grepl("^\\d+$", names(xic_raw))]
+    if (length(num_cols) == 0) {
+      warning("No numbered columns found in XIC data")
+      return(NULL)
+    }
+
+    make_key <- function(df) {
+      paste(df$File.Name, df$Precursor.Id, df$MS.Level,
+            df$Theoretical.Mz, df$FragmentType, df$FragmentCharge,
+            df$FragmentSeriesNumber, df$FragmentLossType, sep = "|")
+    }
+
+    rt_rows <- xic_raw %>% filter(Retention.Times == 1)
+    int_rows <- xic_raw %>% filter(Intensities == 1)
+
+    rt_keys <- make_key(rt_rows)
+    int_keys <- make_key(int_rows)
+
+    rt_long <- rt_rows %>%
+      mutate(.key = rt_keys) %>%
+      select(.key, all_of(num_cols)) %>%
+      pivot_longer(cols = all_of(num_cols), names_to = "point_idx", values_to = "RT")
+
+    int_long <- int_rows %>%
+      mutate(.key = int_keys) %>%
+      select(.key, File.Name, Precursor.Id, Modified.Sequence, MS.Level,
+             Theoretical.Mz, Reference.Intensity, FragmentType, FragmentCharge,
+             FragmentSeriesNumber, FragmentLossType, all_of(num_cols)) %>%
+      pivot_longer(cols = all_of(num_cols), names_to = "point_idx", values_to = "Intensity")
+
+    xic_plot <- inner_join(
+      rt_long %>% select(.key, point_idx, RT),
+      int_long,
+      by = c(".key", "point_idx")
+    ) %>%
+      mutate(
+        RT = as.numeric(RT),
+        Intensity = as.numeric(Intensity),
+        Fragment.Label = case_when(
+          MS.Level == 1 ~ paste0("MS1 (", round(as.numeric(Theoretical.Mz), 2), ")"),
+          TRUE ~ paste0(FragmentType, FragmentSeriesNumber,
+                        ifelse(as.integer(FragmentCharge) > 1,
+                               paste0("+", FragmentCharge), ""),
+                        ifelse(FragmentLossType != "noloss",
+                               paste0("-", FragmentLossType), ""))
+        )
+      ) %>%
+      filter(!(Intensity == 0 & RT == 0)) %>%
+      mutate(File.Name.Base = basename(tools::file_path_sans_ext(
+        tools::file_path_sans_ext(File.Name)))) %>%
+      left_join(
+        metadata %>%
+          mutate(File.Name.Base = basename(tools::file_path_sans_ext(File.Name))) %>%
+          select(File.Name.Base, Group, ID),
+        by = "File.Name.Base"
+      ) %>%
+      select(.key, File.Name, ID, Group, Precursor.Id, Modified.Sequence,
+             MS.Level, Fragment.Label, Theoretical.Mz, Reference.Intensity,
+             RT, Intensity)
+
+    return(xic_plot)
+  }
+
   # ============================================================================
   #      2. Main Data Loading & Processing Pipeline
   # ============================================================================
@@ -1116,6 +1229,9 @@ server <- function(input, output, session) {
             if (ratios_vary) "on" else "off"
           } else { "unknown" }
         }, error = function(e) "unknown")
+
+        # Store report path for XIC viewer precursor mapping
+        values$uploaded_report_path <- temp_file
 
         incProgress(0.9, detail = "Opening setup...")
 
@@ -1173,6 +1289,9 @@ server <- function(input, output, session) {
             if (ratios_vary) "on" else "off"
           } else { "unknown" }
         }, error = function(e) "unknown")
+
+        # Store report path for XIC viewer precursor mapping
+        values$uploaded_report_path <- input$report_file$datapath
 
         # Navigate to Assign Groups sub-tab
         nav_select("main_tabs", "Data Overview")
@@ -1962,7 +2081,7 @@ server <- function(input, output, session) {
     req(grid_react_df()); selected_idx <- input$grid_view_table_rows_selected
     if (length(selected_idx) > 0) {
       gdata <- grid_react_df(); selected_id <- gdata$data$Original.ID[selected_idx]; values$grid_selected_protein <- selected_id
-      showModal(modalDialog(title = paste("Expression Plot:", selected_id), size = "xl", plotOutput("violin_plot_grid", height = "600px"), footer = tagList(actionButton("back_to_grid", "Back to Grid", class="btn-info"), modalButton("Close")), easyClose = TRUE))
+      showModal(modalDialog(title = paste("Expression Plot:", selected_id), size = "xl", plotOutput("violin_plot_grid", height = "600px"), footer = tagList(actionButton("show_xic_from_grid", "📈 XICs", class="btn-info"), actionButton("back_to_grid", "Back to Grid", class="btn-info"), modalButton("Close")), easyClose = TRUE))
     }
   })
   
@@ -3646,6 +3765,423 @@ server <- function(input, output, session) {
         strip.text = element_text(face = "bold")
       )
   })
+
+  # ============================================================================
+  #      XIC Viewer: Server Logic
+  # ============================================================================
+
+  # --- XIC Directory Loading ---
+  observeEvent(input$xic_load_dir, {
+    req(input$xic_dir_input)
+    xic_path <- trimws(input$xic_dir_input)
+
+    if (!dir.exists(xic_path)) {
+      showNotification("Directory not found. Check the path and try again.",
+        type = "error", duration = 5)
+      values$xic_available <- FALSE
+      return()
+    }
+
+    xic_files <- list.files(xic_path, pattern = "\\.xic\\.parquet$",
+                            full.names = TRUE, recursive = TRUE)
+
+    if (length(xic_files) > 0) {
+      values$xic_dir <- xic_path
+      values$xic_available <- TRUE
+
+      # Pre-load precursor mapping if report is available
+      if (!is.null(values$uploaded_report_path)) {
+        tryCatch({
+          values$xic_report_map <- arrow::read_parquet(
+            values$uploaded_report_path,
+            col_select = c("Protein.Group", "Precursor.Id",
+                           "Modified.Sequence", "Stripped.Sequence", "File.Name")
+          ) %>% distinct()
+
+          message(paste("XIC precursor map loaded:",
+                        n_distinct(values$xic_report_map$Protein.Group), "proteins,",
+                        n_distinct(values$xic_report_map$Precursor.Id), "precursors"))
+        }, error = function(e) {
+          warning(paste("Could not load precursor mapping:", e$message))
+          values$xic_report_map <- NULL
+        })
+      }
+
+      showNotification(
+        paste("Found", length(xic_files), "XIC files. Select a protein to view chromatograms."),
+        type = "message", duration = 5)
+    } else {
+      values$xic_available <- FALSE
+      showNotification(
+        "No .xic.parquet files found in selected directory.",
+        type = "warning", duration = 5)
+    }
+  })
+
+  # --- XIC Status Badge ---
+  output$xic_status_badge <- renderUI({
+    if (values$xic_available) {
+      xic_files <- list.files(values$xic_dir, pattern = "\\.xic\\.parquet$")
+      div(class = "alert alert-success py-1 px-2 mt-2 mb-0",
+        style = "font-size: 0.85em;",
+        icon("check-circle"),
+        paste(length(xic_files), "XIC files ready"))
+    } else {
+      NULL
+    }
+  })
+
+  # --- XIC Modal Function ---
+  show_xic_modal <- function(session, values) {
+    showModal(modalDialog(
+      title = div(style = "display: flex; align-items: center; gap: 10px;",
+        icon("wave-square"),
+        span("XIC Chromatograms:"),
+        span(values$xic_protein, style = "color: #667eea; font-weight: bold;"),
+        span(textOutput("xic_precursor_count", inline = TRUE),
+          style = "font-size: 0.8em; color: #6c757d; margin-left: 10px;")
+      ),
+
+      # Controls row
+      div(style = "display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px;",
+        selectInput("xic_display_mode", "Display:",
+          choices = c("Overlay (all fragments)" = "overlay",
+                      "Facet by fragment" = "facet",
+                      "Facet by sample" = "sample_facet"),
+          selected = "overlay", width = "220px"),
+
+        selectInput("xic_precursor_select", "Precursor:",
+          choices = NULL, width = "280px"),
+
+        selectInput("xic_group_filter", "Filter Group:",
+          choices = NULL, width = "180px"),
+
+        checkboxInput("xic_show_ms1", "Show MS1", value = FALSE)
+      ),
+
+      # Main plot
+      plotlyOutput("xic_plot", height = "calc(100vh - 380px)"),
+
+      # Info panel
+      div(class = "mt-2 p-2 bg-light rounded",
+        style = "font-size: 0.85em;",
+        uiOutput("xic_info_panel")
+      ),
+
+      size = "xl",
+      easyClose = TRUE,
+      footer = div(style = "display: flex; gap: 8px; align-items: center;",
+        actionButton("xic_prev_protein", label = "Prev",
+          icon = icon("arrow-left"), class = "btn-outline-secondary btn-sm"),
+        actionButton("xic_next_protein", label = "Next",
+          icon = icon("arrow-right"), class = "btn-outline-secondary btn-sm"),
+        downloadButton("xic_download_plot", "Download",
+          class = "btn-outline-success btn-sm"),
+        modalButton("Close")
+      )
+    ))
+  }
+
+  # --- XIC from DE Dashboard ---
+  observeEvent(input$show_xic, {
+    if (!values$xic_available) {
+      showNotification("Load XIC files first (sidebar > '5. XIC Viewer')", type = "warning")
+      return()
+    }
+    if (is.null(values$plot_selected_proteins) || length(values$plot_selected_proteins) == 0) {
+      showNotification("Select a protein in the Volcano Plot or Table first!", type = "warning")
+      return()
+    }
+    values$xic_protein <- values$plot_selected_proteins[1]
+    show_xic_modal(session, values)
+  })
+
+  # --- XIC from Grid View ---
+  observeEvent(input$show_xic_from_grid, {
+    if (!values$xic_available) {
+      showNotification("Load XIC files first (sidebar > '5. XIC Viewer')", type = "warning")
+      return()
+    }
+    req(values$grid_selected_protein)
+    values$xic_protein <- values$grid_selected_protein
+    removeModal()
+    show_xic_modal(session, values)
+  })
+
+  # --- Reactive XIC Data Loading ---
+  observe({
+    req(values$xic_protein, values$xic_available, values$xic_dir,
+        values$xic_report_map)
+
+    withProgress(message = "Loading chromatograms...", {
+      incProgress(0.3, detail = "Reading XIC files...")
+
+      tryCatch({
+        xic_raw <- load_xic_for_protein(
+          xic_dir = values$xic_dir,
+          protein_id = values$xic_protein,
+          report_map = values$xic_report_map
+        )
+
+        if (!is.null(xic_raw) && nrow(xic_raw) > 0) {
+          incProgress(0.6, detail = "Reshaping data...")
+
+          values$xic_data <- reshape_xic_for_plotting(xic_raw, values$metadata)
+
+          # Update precursor selector
+          precursors <- unique(values$xic_data$Precursor.Id)
+          updateSelectInput(session, "xic_precursor_select",
+            choices = c("All Precursors" = "all",
+                        setNames(precursors, precursors)),
+            selected = "all")
+
+          # Update group filter
+          groups <- unique(values$metadata$Group)
+          updateSelectInput(session, "xic_group_filter",
+            choices = c("All Groups" = "all", setNames(groups, groups)),
+            selected = "all")
+        } else {
+          values$xic_data <- NULL
+          showNotification(
+            paste("No XIC data found for", values$xic_protein,
+                  "-- this protein may have been identified via MBR."),
+            type = "warning", duration = 5)
+        }
+      }, error = function(e) {
+        values$xic_data <- NULL
+        showNotification(paste("Error loading XICs:", e$message),
+          type = "error", duration = 8)
+      })
+    })
+  })
+
+  # --- XIC Precursor Count ---
+  output$xic_precursor_count <- renderText({
+    req(values$xic_data)
+    n_prec <- n_distinct(values$xic_data$Precursor.Id)
+    n_frag <- values$xic_data %>%
+      filter(MS.Level == 2) %>%
+      distinct(Fragment.Label) %>%
+      nrow()
+    paste0(n_prec, " precursor(s), ", n_frag, " fragments")
+  })
+
+  # --- XIC Plot ---
+  output$xic_plot <- renderPlotly({
+    req(values$xic_data)
+
+    xic <- values$xic_data
+    display_mode <- input$xic_display_mode
+
+    # Filter by selected precursor
+    if (!is.null(input$xic_precursor_select) &&
+        input$xic_precursor_select != "all") {
+      xic <- xic %>% filter(Precursor.Id == input$xic_precursor_select)
+    }
+
+    # Filter by group
+    if (!is.null(input$xic_group_filter) &&
+        input$xic_group_filter != "all") {
+      xic <- xic %>% filter(Group == input$xic_group_filter)
+    }
+
+    # MS level filter
+    if (!isTRUE(input$xic_show_ms1)) {
+      xic_plot <- xic %>% filter(MS.Level == 2)
+      if (nrow(xic_plot) == 0) xic_plot <- xic  # fallback to MS1
+    } else {
+      xic_plot <- xic
+    }
+
+    # Cap at top 6 precursors for very large proteins
+    if (n_distinct(xic_plot$Precursor.Id) > 6 &&
+        (is.null(input$xic_precursor_select) || input$xic_precursor_select == "all")) {
+      top_prec <- xic_plot %>%
+        filter(MS.Level == 2) %>%
+        count(Precursor.Id) %>%
+        slice_max(n, n = 6) %>%
+        pull(Precursor.Id)
+      xic_plot <- xic_plot %>% filter(Precursor.Id %in% top_prec)
+      showNotification(
+        paste("Showing top 6 of", n_distinct(xic$Precursor.Id),
+              "precursors. Use the selector to view others."),
+        type = "message", duration = 4)
+    }
+
+    # Tooltip text
+    xic_plot <- xic_plot %>%
+      mutate(tooltip_text = paste0(
+        "<b>Sample:</b> ", ID, " (", Group, ")",
+        "<br><b>Fragment:</b> ", Fragment.Label,
+        "<br><b>RT:</b> ", round(RT, 3), " min",
+        "<br><b>Intensity:</b> ", format(round(Intensity), big.mark = ",")
+      ))
+
+    if (display_mode == "overlay") {
+      p <- ggplot(xic_plot,
+          aes(x = RT, y = Intensity, color = Fragment.Label,
+              group = interaction(File.Name, Fragment.Label),
+              text = tooltip_text)) +
+        geom_line(alpha = 0.7, linewidth = 0.5) +
+        facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
+        theme_minimal() +
+        labs(
+          title = paste("Fragment XICs --", values$xic_protein),
+          subtitle = "Each panel = one sample, colors = fragment ions",
+          x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+        ) +
+        theme(legend.position = "bottom", legend.text = element_text(size = 7),
+              strip.text = element_text(size = 8))
+
+    } else if (display_mode == "facet") {
+      p <- ggplot(xic_plot,
+          aes(x = RT, y = Intensity, color = Group,
+              group = File.Name, text = tooltip_text)) +
+        geom_line(alpha = 0.6, linewidth = 0.4) +
+        facet_wrap(~Fragment.Label, scales = "free_y") +
+        theme_minimal() +
+        labs(
+          title = paste("Fragment XICs --", values$xic_protein),
+          subtitle = "Each panel = one fragment ion, colors = groups",
+          x = "Retention Time (min)", y = "Intensity", color = "Group"
+        ) +
+        theme(strip.text = element_text(size = 8))
+
+    } else if (display_mode == "sample_facet") {
+      p <- ggplot(xic_plot,
+          aes(x = RT, y = Intensity, color = Fragment.Label,
+              group = Fragment.Label, text = tooltip_text)) +
+        geom_line(alpha = 0.7, linewidth = 0.5) +
+        facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
+        theme_minimal() +
+        labs(
+          title = paste("Fragment XICs --", values$xic_protein),
+          subtitle = "Each panel = one sample, all fragments overlaid",
+          x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+        ) +
+        theme(legend.position = "bottom", legend.text = element_text(size = 7),
+              strip.text = element_text(size = 8))
+    }
+
+    ggplotly(p, tooltip = "text") %>%
+      layout(legend = list(orientation = "h", y = -0.15),
+             margin = list(b = 80)) %>%
+      config(displayModeBar = TRUE)
+  })
+
+  # --- XIC Info Panel ---
+  output$xic_info_panel <- renderUI({
+    req(values$xic_data, values$xic_protein)
+
+    xic <- values$xic_data
+    n_precursors <- n_distinct(xic$Precursor.Id)
+    n_fragments <- xic %>% filter(MS.Level == 2) %>%
+      distinct(Fragment.Label) %>% nrow()
+    n_samples <- n_distinct(xic$File.Name)
+    rt_range <- range(xic$RT, na.rm = TRUE)
+
+    # Get DE stats for this protein from current contrast
+    de_info <- tryCatch({
+      tt <- topTable(values$fit, coef = input$contrast_selector, number = Inf)
+      tt[values$xic_protein, c("logFC", "adj.P.Val")]
+    }, error = function(e) NULL)
+
+    tagList(
+      div(class = "row",
+        div(class = "col-md-4",
+          strong("Protein: "), values$xic_protein, br(),
+          strong("Precursors: "), n_precursors, br(),
+          strong("Fragment ions: "), n_fragments
+        ),
+        div(class = "col-md-4",
+          strong("Samples: "), n_samples, br(),
+          strong("RT range: "),
+          paste0(round(rt_range[1], 2), " -- ", round(rt_range[2], 2), " min")
+        ),
+        div(class = "col-md-4",
+          if (!is.null(de_info)) {
+            tagList(
+              strong("log2 FC: "),
+              span(round(de_info$logFC, 3),
+                style = paste0("color: ",
+                  ifelse(de_info$logFC > 0, "#d32f2f", "#1976d2"), ";")),
+              br(),
+              strong("adj. p-value: "),
+              formatC(de_info$adj.P.Val, format = "e", digits = 2)
+            )
+          } else {
+            em("DE stats unavailable for current contrast")
+          }
+        )
+      ),
+      hr(style = "margin: 5px 0;"),
+      div(class = "text-muted", style = "font-size: 0.8em;",
+        icon("info-circle"),
+        " Co-eluting fragment ions with similar peak shapes indicate reliable identification.",
+        " Consistent peak areas across replicates within a group support accurate quantification.",
+        " Irregular peaks or missing fragments may indicate interference or low-confidence IDs."
+      )
+    )
+  })
+
+  # --- XIC Protein Navigation (Prev/Next) ---
+  observeEvent(input$xic_prev_protein, {
+    req(values$xic_protein, values$fit, input$contrast_selector)
+    tt <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
+      filter(adj.P.Val < 0.05) %>% arrange(adj.P.Val)
+    prot_list <- rownames(tt)
+    current_idx <- which(prot_list == values$xic_protein)
+    if (length(current_idx) > 0 && current_idx > 1) {
+      values$xic_protein <- prot_list[current_idx - 1]
+      values$plot_selected_proteins <- values$xic_protein
+    }
+  })
+
+  observeEvent(input$xic_next_protein, {
+    req(values$xic_protein, values$fit, input$contrast_selector)
+    tt <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
+      filter(adj.P.Val < 0.05) %>% arrange(adj.P.Val)
+    prot_list <- rownames(tt)
+    current_idx <- which(prot_list == values$xic_protein)
+    if (length(current_idx) > 0 && current_idx < length(prot_list)) {
+      values$xic_protein <- prot_list[current_idx + 1]
+      values$plot_selected_proteins <- values$xic_protein
+    }
+  })
+
+  # --- XIC Download ---
+  output$xic_download_plot <- downloadHandler(
+    filename = function() {
+      paste0("XIC_", gsub("[^A-Za-z0-9]", "_", values$xic_protein), "_",
+             format(Sys.time(), "%Y%m%d_%H%M%S"), ".png")
+    },
+    content = function(file) {
+      req(values$xic_data)
+      xic <- values$xic_data
+
+      if (!isTRUE(input$xic_show_ms1)) {
+        xic_plot <- xic %>% filter(MS.Level == 2)
+        if (nrow(xic_plot) == 0) xic_plot <- xic
+      } else {
+        xic_plot <- xic
+      }
+
+      p <- ggplot(xic_plot,
+          aes(x = RT, y = Intensity, color = Fragment.Label,
+              group = interaction(File.Name, Fragment.Label))) +
+        geom_line(alpha = 0.7, linewidth = 0.5) +
+        facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
+        theme_minimal() +
+        labs(
+          title = paste("Fragment XICs --", values$xic_protein),
+          x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+        ) +
+        theme(legend.position = "bottom", legend.text = element_text(size = 7),
+              strip.text = element_text(size = 8))
+
+      ggsave(file, plot = p, width = 14, height = 10, dpi = 150)
+    }
+  )
 }
 
 shinyApp(ui, server)
