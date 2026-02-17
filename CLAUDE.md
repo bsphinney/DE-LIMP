@@ -72,6 +72,7 @@ Line 4186:      shinyApp(ui, server)
 - `values$xic_data` - Loaded & reshaped XIC data for current protein
 - `values$xic_report_map` - Protein → Precursor mapping from report
 - `values$uploaded_report_path` - Path to uploaded report.parquet
+- `values$original_report_name` - Original filename of uploaded report (for XIC path derivation)
 - `values$mobilogram_available` - Whether mobilogram files with non-zero IM data exist
 
 ### LIMPA Pipeline Flow
@@ -208,6 +209,34 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 | HF "Missing configuration in README" | Run README recovery script above |
 
 ## Recent Changes (v2.1)
+
+### 2026-02-16: XIC Bug Fixes & Auto-Population
+1. **Fixed "object 'pr' not found" error** (load_xic_for_protein helper)
+   - `rlang::sym("pr")` filtering didn't work reliably with Arrow/dplyr
+   - Replaced with base R subsetting: `df[df$pr %in% target_prs, , drop = FALSE]`
+   - Applied to both v2 (`pr` column) and v1 (`Precursor.Id` column)
+
+2. **Fixed precursor map building** (XIC directory loader, lines 3910-3930)
+   - Eliminated all report file I/O — builds map directly from `values$raw_data$E` rownames + `values$raw_data$genes$Protein.Group`
+   - Previous approach failed due to: temp file deletion, `Run` vs `File.Name` column mismatch, `rlang` rename errors
+   - Now just 3 lines of base R — zero file reading needed
+
+3. **Fixed Assign Groups layout** (lines 465-508 CSS)
+   - MacBook: Run Pipeline button pushed off-screen, no vertical scroll
+   - Changed from rigid CSS Grid (`grid-template-columns: 200px 1fr 250px`) to Flexbox with `flex-wrap: wrap`
+   - Controls now wrap responsively on smaller screens
+
+4. **XIC Directory Auto-Population** (lines 1374-1393, 1306-1314, 3875-3900)
+   - On data upload: auto-detects `<report_name>_xic/` directory in working directory
+   - On example data load: checks for `Affinisep_vs_evosep_noNorm_xic/` in working directory
+   - Pre-fills `xic_dir_input` text field with `updateTextInput()`
+   - Shows notification when auto-detected
+   - Stores `values$original_report_name` for future path derivation
+
+5. **Smart XIC Path Resolution** (XIC directory loader, lines 3875-3900)
+   - If user enters a `.parquet` file path → derives `_xic` sibling directory automatically
+   - If user enters a path without `_xic` suffix → tries appending `_xic`
+   - Updates the text input to show the resolved path
 
 ### 2026-02-16: DIA-NN 2.x Format Support & Mobilogram Detection
 1. **Dual Format Support** (helper functions lines 1088-1250)

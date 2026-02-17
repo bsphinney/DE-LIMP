@@ -439,7 +439,7 @@ ui <- page_sidebar(
     p(class = "text-muted small",
       "Load .xic.parquet files from DIA-NN to inspect chromatograms."),
     textInput("xic_dir_input", "XIC Directory Path:",
-      placeholder = "/path/to/diann/output/"),
+      placeholder = "Auto-detected or paste path here"),
     actionButton("xic_load_dir", "Load XICs", class = "btn-outline-info btn-sm w-100",
       icon = icon("wave-square")),
     uiOutput("xic_status_badge")
@@ -462,33 +462,32 @@ ui <- page_sidebar(
                     "Assign experimental groups (required). Covariate columns are optional - customize names and include in model as needed."
                   ),
 
-                  # Top row: Auto-Guess button + Covariates + Action buttons
-                  div(style="display: grid; grid-template-columns: 200px 1fr 250px; gap: 15px; margin-bottom: 15px;",
-                    # Left column: Auto-Guess + Template buttons
-                    div(
-                      actionButton("guess_groups", "🪄 Auto-Guess Groups", class="btn-info btn-sm w-100"),
-                      br(), br(),
-                      strong("Template:"),
-                      div(style="display: flex; gap: 5px; margin-top: 5px;",
-                        downloadButton("export_template", "📥 Export", class="btn-secondary btn-sm"),
-                        actionButton("import_template", "📤 Import", class="btn-secondary btn-sm")
+                  # Top row: Auto-Guess + Covariates + Run Pipeline (responsive)
+                  div(style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; align-items: flex-start;",
+                    # Auto-Guess + Template buttons
+                    div(style="min-width: 160px;",
+                      actionButton("guess_groups", "Auto-Guess Groups", class="btn-info btn-sm w-100",
+                        icon = icon("wand-magic-sparkles")),
+                      div(style="display: flex; gap: 5px; margin-top: 8px;",
+                        downloadButton("export_template", "Export", class="btn-outline-secondary btn-sm"),
+                        actionButton("import_template", "Import", class="btn-outline-secondary btn-sm")
                       )
                     ),
 
-                    # Middle column: Covariates
-                    div(
-                      strong("Covariates:"),
-                      div(style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 5px;",
-                        div(
+                    # Covariates (compact inline)
+                    div(style="flex: 1; min-width: 250px;",
+                      strong("Covariates:", style="font-size: 0.9em;"),
+                      div(style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px;",
+                        div(style="min-width: 110px;",
                           checkboxInput("include_batch", "Batch", value = FALSE),
                           textInput("batch_label", NULL, value = "Batch", placeholder = "e.g., Batch")
                         ),
-                        div(
+                        div(style="min-width: 130px;",
                           checkboxInput("include_cov1", NULL, value = FALSE),
                           textInput("cov1_label", "Name:", value = "Covariate1",
                                    placeholder = "e.g., Sex, Diet")
                         ),
-                        div(
+                        div(style="min-width: 130px;",
                           checkboxInput("include_cov2", NULL, value = FALSE),
                           textInput("cov2_label", "Name:", value = "Covariate2",
                                    placeholder = "e.g., Age, Time")
@@ -496,16 +495,18 @@ ui <- page_sidebar(
                       )
                     ),
 
-                    # Right column: Run Pipeline button
-                    div(style="display: flex; flex-direction: column; justify-content: center;",
-                      actionButton("run_pipeline", "▶ Run Pipeline",
+                    # Run Pipeline button
+                    div(style="min-width: 150px; display: flex; align-items: center;",
+                      actionButton("run_pipeline", "Run Pipeline",
                         class="btn-success btn-lg w-100", icon = icon("play"),
-                        style="padding: 15px; font-size: 1.1em;")
+                        style="padding: 12px; font-size: 1.05em; white-space: nowrap;")
                     )
                   ),
 
-                  # Metadata table
-                  rHandsontableOutput("hot_metadata", height = "calc(100vh - 480px)")
+                  # Metadata table (with overflow scroll)
+                  div(style="overflow-y: auto; max-height: calc(100vh - 420px);",
+                    rHandsontableOutput("hot_metadata")
+                  )
                 ),
 
                 nav_panel("Signal Distribution",
@@ -1074,6 +1075,7 @@ server <- function(input, output, session) {
     xic_data = NULL,             # Loaded XIC data (tibble, only for selected protein)
     xic_report_map = NULL,       # Protein → Precursor mapping from report
     uploaded_report_path = NULL,  # Path to uploaded report.parquet for re-reading
+    original_report_name = NULL,  # Original filename of uploaded report (e.g., "report.parquet")
     mobilogram_available = FALSE, # Whether mobilogram files with non-zero data exist
     mobilogram_dir = NULL         # Path to mobilogram directory (same as xic_dir)
   )
@@ -1103,51 +1105,32 @@ server <- function(input, output, session) {
   # Helper: Load XIC data for a single protein using Arrow predicate pushdown
   # Supports both DIA-NN 1.x (wide format) and 2.x (long format: pr/feature/rt/value)
   load_xic_for_protein <- function(xic_dir, protein_id, report_map, xic_format = "v2") {
-    if (xic_format == "v2") {
-      # DIA-NN 2.x: pr = StrippedSequence + Charge (e.g., "PEPTIDEK2")
-      target_prs <- report_map %>%
-        filter(Protein.Group == protein_id) %>%
-        mutate(pr_key = paste0(Stripped.Sequence, Precursor.Charge)) %>%
-        distinct(pr_key) %>%
-        pull(pr_key)
-    } else {
-      # DIA-NN 1.x: Precursor.Id column directly
-      target_prs <- report_map %>%
-        filter(Protein.Group == protein_id) %>%
-        distinct(Precursor.Id) %>%
-        pull(Precursor.Id)
-    }
+    # In DIA-NN 2.x, Precursor.Id in the report already matches the XIC "pr" column
+    # (both use StrippedSequence+Charge format, e.g., "PEPTIDEK2")
+    # In DIA-NN 1.x, Precursor.Id matches the XIC "Precursor.Id" column directly
+    target_prs <- report_map %>%
+      filter(Protein.Group == protein_id) %>%
+      distinct(Precursor.Id) %>%
+      pull(Precursor.Id)
 
     if (length(target_prs) == 0) return(NULL)
-    filter_col <- if (xic_format == "v2") "pr" else "Precursor.Id"
 
     # Read only .xic.parquet files (exclude mobilograms)
     xic_files <- list.files(xic_dir, pattern = "\\.xic\\.parquet$",
                             full.names = TRUE, recursive = TRUE)
 
-    tryCatch({
-      # Try open_dataset for unified read across files
-      ds <- arrow::open_dataset(xic_files, format = "parquet")
-      xic_data <- ds %>%
-        filter(!!rlang::sym(filter_col) %in% target_prs) %>%
-        collect()
-      # Tag with source file for sample identification (v2 has no File.Name column)
-      if (xic_format == "v2" && !"File.Name" %in% names(xic_data)) {
-        # Fallback to per-file read to preserve file identity
-        xic_data <- NULL
-      }
-      if (!is.null(xic_data) && nrow(xic_data) > 0) return(xic_data)
-    }, error = function(e) NULL)
-
-    # Per-file read: needed for v2 (to tag File.Name) or schema mismatches
+    # Per-file read with source file tagging (needed for v2 which has no File.Name)
     xic_list <- lapply(xic_files, function(f) {
       tryCatch({
-        df <- arrow::read_parquet(f) %>%
-          filter(!!rlang::sym(filter_col) %in% target_prs)
+        df <- arrow::read_parquet(f, as_data_frame = TRUE)
+        # Filter by precursor — use base R to avoid rlang issues
+        if (xic_format == "v2") {
+          df <- df[df$pr %in% target_prs, , drop = FALSE]
+        } else {
+          df <- df[df$Precursor.Id %in% target_prs, , drop = FALSE]
+        }
         if (nrow(df) > 0) {
-          # Extract sample name from filename for v2 format
-          sample_name <- basename(f)
-          sample_name <- sub("\\.xic\\.parquet$", "", sample_name)
+          sample_name <- sub("\\.xic\\.parquet$", "", basename(f))
           df$Source.File <- sample_name
         }
         df
@@ -1309,8 +1292,21 @@ server <- function(input, output, session) {
           } else { "unknown" }
         }, error = function(e) "unknown")
 
-        # Store report path for XIC viewer precursor mapping
-        values$uploaded_report_path <- temp_file
+        # Store report path for XIC viewer precursor mapping (copy to session dir)
+        session_report <- file.path(tempdir(), "de_limp_report.parquet")
+        file.copy(temp_file, session_report, overwrite = TRUE)
+        values$uploaded_report_path <- session_report
+        values$original_report_name <- "Affinisep_vs_evosep_noNorm.parquet"
+
+        # Auto-detect XIC directory in working directory for example data
+        tryCatch({
+          cand <- file.path(getwd(), "Affinisep_vs_evosep_noNorm_xic")
+          if (dir.exists(cand) && length(list.files(cand, pattern = "\\.xic\\.parquet$")) > 0) {
+            updateTextInput(session, "xic_dir_input", value = cand)
+            showNotification("Auto-detected XIC directory for example data.",
+              type = "message", duration = 4)
+          }
+        }, error = function(e) NULL)
 
         incProgress(0.9, detail = "Opening setup...")
 
@@ -1369,8 +1365,30 @@ server <- function(input, output, session) {
           } else { "unknown" }
         }, error = function(e) "unknown")
 
-        # Store report path for XIC viewer precursor mapping
-        values$uploaded_report_path <- input$report_file$datapath
+        # Store report path for XIC viewer precursor mapping (copy to session dir)
+        session_report <- file.path(tempdir(), "de_limp_report.parquet")
+        file.copy(input$report_file$datapath, session_report, overwrite = TRUE)
+        values$uploaded_report_path <- session_report
+        values$original_report_name <- input$report_file$name
+
+        # Auto-detect XIC directory next to the uploaded report
+        # For local Shiny, check if _xic sibling directory exists
+        tryCatch({
+          report_name <- tools::file_path_sans_ext(input$report_file$name)
+          # Check common locations: working directory, or if user uploaded from a known path
+          candidate_dirs <- c(
+            file.path(getwd(), paste0(report_name, "_xic")),
+            file.path(dirname(input$report_file$datapath), paste0(report_name, "_xic"))
+          )
+          for (cand in candidate_dirs) {
+            if (dir.exists(cand) && length(list.files(cand, pattern = "\\.xic\\.parquet$")) > 0) {
+              updateTextInput(session, "xic_dir_input", value = cand)
+              showNotification(paste0("Auto-detected XIC directory: ", basename(cand)),
+                type = "message", duration = 4)
+              break
+            }
+          }
+        }, error = function(e) NULL)
 
         # Navigate to Assign Groups sub-tab
         nav_select("main_tabs", "Data Overview")
@@ -3854,6 +3872,27 @@ server <- function(input, output, session) {
     req(input$xic_dir_input)
     xic_path <- trimws(input$xic_dir_input)
 
+    # Smart path resolution: if user enters a .parquet file path, derive the _xic sibling
+    if (grepl("\\.parquet$", xic_path, ignore.case = TRUE) && file.exists(xic_path)) {
+      report_stem <- tools::file_path_sans_ext(basename(xic_path))
+      derived_dir <- file.path(dirname(xic_path), paste0(report_stem, "_xic"))
+      if (dir.exists(derived_dir)) {
+        xic_path <- derived_dir
+        updateTextInput(session, "xic_dir_input", value = xic_path)
+        showNotification(paste0("Derived XIC directory: ", basename(xic_path)),
+          type = "message", duration = 3)
+      }
+    }
+
+    # If path doesn't end with _xic, try appending _xic (user may have pasted the parent dir)
+    if (!dir.exists(xic_path) && !grepl("_xic/?$", xic_path)) {
+      candidate <- paste0(xic_path, "_xic")
+      if (dir.exists(candidate)) {
+        xic_path <- candidate
+        updateTextInput(session, "xic_dir_input", value = xic_path)
+      }
+    }
+
     if (!dir.exists(xic_path)) {
       showNotification("Directory not found. Check the path and try again.",
         type = "error", duration = 5)
@@ -3889,31 +3928,29 @@ server <- function(input, output, session) {
         values$mobilogram_available <- FALSE
       }
 
-      # Pre-load precursor mapping if report is available
-      if (!is.null(values$uploaded_report_path)) {
+      # Build precursor map directly from loaded data (no file re-reading needed)
+      if (!is.null(values$raw_data)) {
         tryCatch({
-          # Include Precursor.Charge for DIA-NN 2.x pr key mapping
-          report_cols <- c("Protein.Group", "Precursor.Id",
-                           "Modified.Sequence", "Stripped.Sequence", "File.Name")
-          # Try to also get Precursor.Charge (needed for v2 format)
-          all_cols <- tryCatch(
-            names(arrow::read_parquet(values$uploaded_report_path, as_data_frame = FALSE)),
-            error = function(e) character(0))
-          if ("Precursor.Charge" %in% all_cols) {
-            report_cols <- c(report_cols, "Precursor.Charge")
-          }
-          values$xic_report_map <- arrow::read_parquet(
-            values$uploaded_report_path,
-            col_select = report_cols
-          ) %>% distinct()
-
-          message(paste("XIC precursor map loaded:",
-                        n_distinct(values$xic_report_map$Protein.Group), "proteins,",
-                        n_distinct(values$xic_report_map$Precursor.Id), "precursors"))
+          precursor_ids <- rownames(values$raw_data$E)
+          protein_groups <- values$raw_data$genes$Protein.Group
+          values$xic_report_map <- data.frame(
+            Precursor.Id = precursor_ids,
+            Protein.Group = protein_groups,
+            stringsAsFactors = FALSE
+          )
+          message(paste("XIC precursor map built from loaded data:",
+                        length(unique(protein_groups)), "proteins,",
+                        length(unique(precursor_ids)), "precursors"))
         }, error = function(e) {
-          warning(paste("Could not load precursor mapping:", e$message))
           values$xic_report_map <- NULL
+          showNotification(paste("Error building precursor map:", e$message),
+            type = "error", duration = 8)
         })
+      } else {
+        values$xic_report_map <- NULL
+        showNotification(
+          "Please load your DIA-NN report data first (Step 1), then load XICs.",
+          type = "warning", duration = 8)
       }
 
       status_msg <- paste("Found", length(xic_files), "XIC files")
