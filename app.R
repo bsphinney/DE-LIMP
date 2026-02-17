@@ -4011,13 +4011,19 @@ server <- function(input, output, session) {
         selectInput("xic_group_filter", "Filter Group:",
           choices = NULL, width = "180px"),
 
-        checkboxInput("xic_show_ms1", "Show MS1", value = FALSE),
+        checkboxInput("xic_show_ms1", "Show MS1 (split axis)", value = FALSE),
 
         # Ion mobility toggle — only shown when mobilogram data is available
         if (values$mobilogram_available) {
-          checkboxInput("xic_show_mobilogram", "Show Ion Mobility", value = FALSE)
+          div(style = "display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; background: linear-gradient(135deg, #e0f2fe, #bae6fd); border: 1px solid #7dd3fc;",
+            checkboxInput("xic_show_mobilogram", "Ion Mobility", value = FALSE),
+            icon("bolt", style = "color: #0284c7; font-size: 1.1em;")
+          )
         }
       ),
+
+      # Mobilogram mode banner — visible when IM is active
+      uiOutput("xic_mobilogram_banner"),
 
       # Main plot
       plotlyOutput("xic_plot", height = "calc(100vh - 380px)"),
@@ -4129,6 +4135,20 @@ server <- function(input, output, session) {
     paste0(n_prec, " precursor(s), ", n_frag, " fragments")
   })
 
+  # --- Mobilogram Mode Banner ---
+  output$xic_mobilogram_banner <- renderUI({
+    if (isTRUE(input$xic_show_mobilogram)) {
+      div(style = "background: linear-gradient(135deg, #0284c7, #0369a1); color: white; padding: 8px 16px; border-radius: 8px; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; font-weight: 500;",
+        icon("bolt", style = "font-size: 1.3em;"),
+        span("Ion Mobility Mode", style = "font-size: 1.05em;"),
+        span("— Showing mobilogram data (1/K0 vs intensity). Requires timsTOF or PASEF instrument data.",
+          style = "font-weight: 400; font-size: 0.9em; opacity: 0.9;")
+      )
+    } else {
+      NULL
+    }
+  })
+
   # --- XIC Plot ---
   output$xic_plot <- renderPlotly({
     req(values$xic_data)
@@ -4148,12 +4168,16 @@ server <- function(input, output, session) {
       xic <- xic %>% filter(Group == input$xic_group_filter)
     }
 
-    # MS level filter
-    if (!isTRUE(input$xic_show_ms1)) {
+    # MS level filter — when MS1 shown, add panel label for split axis
+    show_ms1 <- isTRUE(input$xic_show_ms1)
+    if (!show_ms1) {
       xic_plot <- xic %>% filter(MS.Level == 2)
-      if (nrow(xic_plot) == 0) xic_plot <- xic  # fallback to MS1
+      if (nrow(xic_plot) == 0) xic_plot <- xic  # fallback if only MS1 exists
     } else {
-      xic_plot <- xic
+      xic_plot <- xic %>%
+        mutate(MS_Panel = factor(
+          ifelse(MS.Level == 1, "MS1 Precursor", "MS2 Fragments"),
+          levels = c("MS1 Precursor", "MS2 Fragments")))
     }
 
     # Cap at top 6 precursors for very large proteins
@@ -4164,6 +4188,7 @@ server <- function(input, output, session) {
         count(Precursor.Id) %>%
         slice_max(n, n = 6) %>%
         pull(Precursor.Id)
+      # Keep MS1 for selected precursors too
       xic_plot <- xic_plot %>% filter(Precursor.Id %in% top_prec)
       showNotification(
         paste("Showing top 6 of", n_distinct(xic$Precursor.Id),
@@ -4171,59 +4196,116 @@ server <- function(input, output, session) {
         type = "message", duration = 4)
     }
 
-    # Tooltip text
+    # Sample label for faceting
     xic_plot <- xic_plot %>%
-      mutate(tooltip_text = paste0(
-        "<b>Sample:</b> ", ID, " (", Group, ")",
-        "<br><b>Fragment:</b> ", Fragment.Label,
-        "<br><b>RT:</b> ", round(RT, 3), " min",
-        "<br><b>Intensity:</b> ", format(round(Intensity), big.mark = ",")
-      ))
+      mutate(
+        Sample.Label = paste0(ID, " (", Group, ")"),
+        tooltip_text = paste0(
+          "<b>Sample:</b> ", ID, " (", Group, ")",
+          "<br><b>Fragment:</b> ", Fragment.Label,
+          "<br><b>RT:</b> ", round(RT, 3), " min",
+          "<br><b>Intensity:</b> ", format(round(Intensity), big.mark = ",")
+        )
+      )
 
     if (display_mode == "overlay") {
-      p <- ggplot(xic_plot,
-          aes(x = RT, y = Intensity, color = Fragment.Label,
-              group = interaction(File.Name, Fragment.Label),
-              text = tooltip_text)) +
-        geom_line(alpha = 0.7, linewidth = 0.5) +
-        facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
-        theme_minimal() +
-        labs(
-          title = paste("Fragment XICs --", values$xic_protein),
-          subtitle = "Each panel = one sample, colors = fragment ions",
-          x = "Retention Time (min)", y = "Intensity", color = "Fragment"
-        ) +
-        theme(legend.position = "bottom", legend.text = element_text(size = 7),
-              strip.text = element_text(size = 8))
+      if (show_ms1) {
+        # Split axis: MS1 on top, MS2 fragments below, per sample
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Fragment.Label,
+                group = interaction(File.Name, Fragment.Label),
+                text = tooltip_text)) +
+          geom_line(alpha = 0.7, linewidth = 0.5) +
+          facet_grid(MS_Panel ~ Sample.Label, scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            subtitle = "MS1 precursor (top) vs MS2 fragments (bottom) per sample",
+            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+          ) +
+          theme(legend.position = "bottom", legend.text = element_text(size = 7),
+                strip.text = element_text(size = 8),
+                strip.text.y = element_text(angle = 0, face = "bold"))
+      } else {
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Fragment.Label,
+                group = interaction(File.Name, Fragment.Label),
+                text = tooltip_text)) +
+          geom_line(alpha = 0.7, linewidth = 0.5) +
+          facet_wrap(~ Sample.Label, scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            subtitle = "Each panel = one sample, colors = fragment ions",
+            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+          ) +
+          theme(legend.position = "bottom", legend.text = element_text(size = 7),
+                strip.text = element_text(size = 8))
+      }
 
     } else if (display_mode == "facet") {
-      p <- ggplot(xic_plot,
-          aes(x = RT, y = Intensity, color = Group,
-              group = File.Name, text = tooltip_text)) +
-        geom_line(alpha = 0.6, linewidth = 0.4) +
-        facet_wrap(~Fragment.Label, scales = "free_y") +
-        theme_minimal() +
-        labs(
-          title = paste("Fragment XICs --", values$xic_protein),
-          subtitle = "Each panel = one fragment ion, colors = groups",
-          x = "Retention Time (min)", y = "Intensity", color = "Group"
-        ) +
-        theme(strip.text = element_text(size = 8))
+      if (show_ms1) {
+        # Split axis: MS1 on top row, each fragment in its own panel below
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Group,
+                group = File.Name, text = tooltip_text)) +
+          geom_line(alpha = 0.6, linewidth = 0.4) +
+          facet_grid(MS_Panel ~ Fragment.Label, scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            subtitle = "MS1 precursor (top) vs MS2 fragments (bottom), colors = groups",
+            x = "Retention Time (min)", y = "Intensity", color = "Group"
+          ) +
+          theme(strip.text = element_text(size = 7),
+                strip.text.y = element_text(angle = 0, face = "bold"))
+      } else {
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Group,
+                group = File.Name, text = tooltip_text)) +
+          geom_line(alpha = 0.6, linewidth = 0.4) +
+          facet_wrap(~Fragment.Label, scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            subtitle = "Each panel = one fragment ion, colors = groups",
+            x = "Retention Time (min)", y = "Intensity", color = "Group"
+          ) +
+          theme(strip.text = element_text(size = 8))
+      }
 
     } else if (display_mode == "sample_facet") {
-      p <- ggplot(xic_plot,
-          aes(x = RT, y = Intensity, color = Fragment.Label,
-              group = Fragment.Label, text = tooltip_text)) +
-        geom_line(alpha = 0.7, linewidth = 0.5) +
-        facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
-        theme_minimal() +
-        labs(
-          title = paste("Fragment XICs --", values$xic_protein),
-          subtitle = "Each panel = one sample, all fragments overlaid",
-          x = "Retention Time (min)", y = "Intensity", color = "Fragment"
-        ) +
-        theme(legend.position = "bottom", legend.text = element_text(size = 7),
-              strip.text = element_text(size = 8))
+      if (show_ms1) {
+        # Split axis: MS1 on top, fragments below, per sample
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Fragment.Label,
+                group = Fragment.Label, text = tooltip_text)) +
+          geom_line(alpha = 0.7, linewidth = 0.5) +
+          facet_grid(MS_Panel ~ Sample.Label, scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            subtitle = "MS1 precursor (top) vs MS2 fragments (bottom) per sample",
+            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+          ) +
+          theme(legend.position = "bottom", legend.text = element_text(size = 7),
+                strip.text = element_text(size = 8),
+                strip.text.y = element_text(angle = 0, face = "bold"))
+      } else {
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Fragment.Label,
+                group = Fragment.Label, text = tooltip_text)) +
+          geom_line(alpha = 0.7, linewidth = 0.5) +
+          facet_wrap(~ Sample.Label, scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            subtitle = "Each panel = one sample, all fragments overlaid",
+            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+          ) +
+          theme(legend.position = "bottom", legend.text = element_text(size = 7),
+                strip.text = element_text(size = 8))
+      }
     }
 
     ggplotly(p, tooltip = "text") %>%
