@@ -4000,9 +4000,8 @@ server <- function(input, output, session) {
       # Controls row
       div(style = "display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px;",
         selectInput("xic_display_mode", "Display:",
-          choices = c("Overlay (all fragments)" = "overlay",
-                      "Facet by fragment" = "facet",
-                      "Facet by sample" = "sample_facet"),
+          choices = c("Facet by sample" = "overlay",
+                      "Facet by fragment" = "facet"),
           selected = "overlay", width = "220px"),
 
         selectInput("xic_precursor_select", "Precursor:",
@@ -4274,38 +4273,6 @@ server <- function(input, output, session) {
           theme(strip.text = element_text(size = 8))
       }
 
-    } else if (display_mode == "sample_facet") {
-      if (show_ms1) {
-        # Split axis: MS1 on top, fragments below, per sample
-        p <- ggplot(xic_plot,
-            aes(x = RT, y = Intensity, color = Fragment.Label,
-                group = Fragment.Label, text = tooltip_text)) +
-          geom_line(alpha = 0.7, linewidth = 0.5) +
-          facet_grid(MS_Panel ~ Sample.Label, scales = "free_y") +
-          theme_minimal() +
-          labs(
-            title = paste("Fragment XICs --", values$xic_protein),
-            subtitle = "MS1 precursor (top) vs MS2 fragments (bottom) per sample",
-            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
-          ) +
-          theme(legend.position = "bottom", legend.text = element_text(size = 7),
-                strip.text = element_text(size = 8),
-                strip.text.y = element_text(angle = 0, face = "bold"))
-      } else {
-        p <- ggplot(xic_plot,
-            aes(x = RT, y = Intensity, color = Fragment.Label,
-                group = Fragment.Label, text = tooltip_text)) +
-          geom_line(alpha = 0.7, linewidth = 0.5) +
-          facet_wrap(~ Sample.Label, scales = "free_y") +
-          theme_minimal() +
-          labs(
-            title = paste("Fragment XICs --", values$xic_protein),
-            subtitle = "Each panel = one sample, all fragments overlaid",
-            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
-          ) +
-          theme(legend.position = "bottom", legend.text = element_text(size = 7),
-                strip.text = element_text(size = 8))
-      }
     }
 
     ggplotly(p, tooltip = "text") %>%
