@@ -1146,13 +1146,13 @@ server <- function(input, output, session) {
 
     if (xic_format == "v2") {
       # ── DIA-NN 2.x: already long format (pr, feature, info, rt, value) ──
+      # Rename columns using base R to avoid tidy evaluation issues with "pr"
+      names(xic_raw)[names(xic_raw) == "pr"] <- "Precursor.Id"
+      names(xic_raw)[names(xic_raw) == "feature"] <- "Fragment.Label"
+      names(xic_raw)[names(xic_raw) == "rt"] <- "RT"
+      names(xic_raw)[names(xic_raw) == "value"] <- "Intensity"
+
       xic_plot <- xic_raw %>%
-        rename(
-          Precursor.Id = pr,
-          Fragment.Label = feature,
-          RT = rt,
-          Intensity = value
-        ) %>%
         mutate(
           MS.Level = ifelse(Fragment.Label == "ms1", 1L, 2L),
           RT = as.numeric(RT),
