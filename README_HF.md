@@ -24,11 +24,11 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 
 ## ✨ What's New in v2.1
 
-**XIC Chromatogram Viewer** (Local/HPC only):
-- 📈 **Fragment-level XIC inspection** for DE proteins with split-axis MS1/MS2 view
-- 📊 **MS2 Intensity Alignment** - Spectronaut-style fragment ion ratio consistency check with automatic inconsistency detection
-- ⚡ **Ion mobility support** for timsTOF/PASEF data
-- 🔄 **Auto-detects** DIA-NN 1.x and 2.x formats
+**XIC Chromatogram Viewer** (not available here — [download for local/HPC use](https://github.com/bsphinney/DE-LIMP)):
+- 📈 Fragment-level XIC inspection with split-axis MS1/MS2 view
+- 📊 MS2 Intensity Alignment with automatic inconsistency detection
+- ⚡ Ion mobility support for timsTOF/PASEF data
+- 🔄 DIA-NN 1.x and 2.x format support
 
 **Major UI/UX Enhancements** (February 2026):
 - 🎯 **Four-Way Selector Sync** - All comparison selectors automatically synchronized

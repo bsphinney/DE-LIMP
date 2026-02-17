@@ -42,7 +42,7 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 ### Structure (app.R)
 ```
 Lines 1-110:    Auto-installation & setup (R/Bioc version checks, package install)
-Lines 111-168:  Server configuration (max upload size, Gemini API)
+Lines 111-170:  Server configuration (max upload size, HF detection, Gemini API)
 Lines 169-330:  Helper functions (QC stats, AI chat, organism detection)
 Lines 331-850:  UI definition (page_sidebar with 9 main tabs)
 Lines 851-4185: Server logic (~80+ reactive elements, incl. XIC viewer)
@@ -74,6 +74,7 @@ Line 4186:      shinyApp(ui, server)
 - `values$uploaded_report_path` - Path to uploaded report.parquet
 - `values$original_report_name` - Original filename of uploaded report (for XIC path derivation)
 - `values$mobilogram_available` - Whether mobilogram files with non-zero IM data exist
+- `values$mobilogram_files_found` - Count of mobilogram files detected (may have zero data)
 
 ### LIMPA Pipeline Flow
 1. `readDIANN()` - Load DIA-NN parquet file
@@ -96,6 +97,12 @@ Line 4186:      shinyApp(ui, server)
 - Uses Google Gemini API, uploads top 800 proteins via File API
 - Bidirectional: user selects proteins for AI analysis, AI suggests proteins to highlight
 - Selection format: `[[SELECT: P12345; P67890]]`
+
+### Hugging Face Environment Detection
+- `is_hf_space <- nzchar(Sys.getenv("SPACE_ID", ""))` — set once at startup (line 147)
+- XIC sidebar section, XICs buttons (DE Dashboard + Grid View), and auto-load logic all guarded by `if (!is_hf_space)`
+- On HF: info note with GitHub download link replaces the XIC sidebar section
+- On Local/HPC: full XIC viewer with path input, auto-detect, auto-load
 
 ## Development Workflow
 
@@ -209,8 +216,33 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 | HF "Missing configuration in README" | Run README recovery script above |
 | `arrow::select` masks `dplyr::select` | Use `dplyr::select()` explicitly in XIC helper functions |
 | `rename(New = old)` fails with "object not found" | Use base R `names(df)[names(df) == "old"] <- "New"` |
+| XIC buttons visible on HF but don't work | Already fixed: hidden via `is_hf_space` flag |
+| Mobilogram files not detected | Pattern was `.mobilogram.parquet`; DIA-NN uses `_mobilogram.parquet` — already fixed |
+| Windows path separator in XIC regex | Already fixed: use `basename()` instead of literal `/` in regex |
 
 ## Recent Changes (v2.1)
+
+### 2026-02-16: HF Environment Detection & Platform-Specific UI
+1. **`is_hf_space` flag** (line 147)
+   - Detects Hugging Face Spaces via `SPACE_ID` environment variable
+   - Set once at startup, used throughout UI and server code
+
+2. **XIC UI hidden on HF** (sidebar, DE Dashboard, Grid View)
+   - Sidebar: XIC path input + Load button replaced with info note linking to GitHub
+   - DE Dashboard: "📈 XICs" button hidden via `if (!is_hf_space)`
+   - Grid View modal: XICs button conditionally included
+   - Auto-detect and auto-load logic skipped on HF (no local filesystem)
+
+3. **Windows path fix** (line 3891)
+   - Changed `grepl("_xic/?$", xic_path)` to `grepl("_xic$", basename(xic_path))`
+   - Original used forward slash which fails on Windows backslash paths
+   - `basename()` is cross-platform — handles both separators
+
+4. **Mobilogram detection fix** (line 3919)
+   - Changed pattern from `\\.mobilogram\\.parquet$` to `_mobilogram\\.parquet$`
+   - DIA-NN names files `.ms1_mobilogram.parquet` / `.ms2_mobilogram.parquet` (underscore, not dot)
+   - Added `values$mobilogram_files_found` counter for status feedback
+   - Notification now reports when mobilogram files are found but contain zero data
 
 ### 2026-02-16: MS2 Intensity Alignment Stacked Bar Chart
 1. **New "Intensity alignment" display mode** (XIC modal, third option in display selector)

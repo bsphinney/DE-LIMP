@@ -67,6 +67,8 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Smart auto-detection** - XIC directory auto-populates and auto-loads when data is uploaded
 - **Dual format** - Supports DIA-NN 1.x and 2.x XIC output formats
 
+> *Not available on Hugging Face Spaces (XIC files too large for cloud). Download DE-LIMP.R to use locally.*
+
 ### 🔬 Advanced Features
 - **Multiple Covariates** - Customize covariate names (Batch, Sex, Diet, etc.) and include in models
 - **Auto-Guess Groups** - Smart detection of experimental groups from filenames
