@@ -4357,15 +4357,15 @@ server <- function(input, output, session) {
 
       # Build plot
       p <- ggplot(auc,
-          aes(x = Sample_Label, y = Proportion, fill = Fragment.Label,
+          aes(x = Sample_Label, y = AUC, fill = Fragment.Label,
               text = tooltip_text)) +
-        geom_col(position = position_fill(), width = 0.85, color = "white", linewidth = 0.2) +
-        scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+        geom_col(position = position_stack(), width = 0.85, color = "white", linewidth = 0.2) +
+        scale_y_continuous(labels = scales::label_comma(), expand = c(0, 0)) +
         theme_minimal() +
         labs(
           title = paste("MS2 Intensity Alignment --", values$xic_protein),
-          subtitle = "Each bar = one sample. Consistent bars = reliable quantification. Flagged samples may have interference.",
-          x = NULL, y = "Relative Fragment Proportion",
+          subtitle = "Each bar = one sample. Bar height = total intensity. Consistent proportions = reliable quantification.",
+          x = NULL, y = "Summed Fragment Intensity",
           fill = "Fragment"
         ) +
         theme(
@@ -4393,10 +4393,15 @@ server <- function(input, output, session) {
         flagged_x <- flagged_x[!is.na(flagged_x)]
 
         if (length(flagged_x) > 0) {
+          # Position markers just above each bar's total intensity
+          sample_totals <- auc %>%
+            group_by(Sample_Label) %>%
+            summarise(Total = sum(AUC), .groups = "drop")
           annotations <- lapply(flagged_x, function(x) {
+            sample_total <- sample_totals$Total[x]
             list(
               x = x - 1,  # plotly uses 0-indexed for categorical
-              y = 1.03,
+              y = sample_total * 1.03,
               text = "\u26A0",
               showarrow = FALSE,
               font = list(size = 16, color = "#ef4444"),
@@ -4658,14 +4663,14 @@ server <- function(input, output, session) {
           filter(max_x < max(as.numeric(auc$Sample_Label)))
 
         p <- ggplot(auc,
-            aes(x = Sample_Label, y = Proportion, fill = Fragment.Label)) +
-          geom_col(position = position_fill(), width = 0.85, color = "white", linewidth = 0.2) +
-          scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+            aes(x = Sample_Label, y = AUC, fill = Fragment.Label)) +
+          geom_col(position = position_stack(), width = 0.85, color = "white", linewidth = 0.2) +
+          scale_y_continuous(labels = scales::label_comma(), expand = c(0, 0)) +
           theme_minimal() +
           labs(
             title = paste("MS2 Intensity Alignment --", values$xic_protein),
             subtitle = paste0("Flagged: ", sum(scores$Flagged), " of ", nrow(scores), " samples"),
-            x = NULL, y = "Relative Fragment Proportion", fill = "Fragment"
+            x = NULL, y = "Summed Fragment Intensity", fill = "Fragment"
           ) +
           theme(
             axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
@@ -4683,7 +4688,12 @@ server <- function(input, output, session) {
         flagged <- scores %>% filter(Flagged)
         if (nrow(flagged) > 0) {
           flagged_labels <- paste0(flagged$ID, " (", flagged$Group, ")")
-          p <- p + annotate("text", x = flagged_labels, y = 1.02,
+          sample_totals <- auc %>%
+            group_by(Sample_Label) %>%
+            summarise(Total = sum(AUC), .groups = "drop")
+          flagged_y <- sample_totals$Total[match(flagged_labels, sample_totals$Sample_Label)]
+          flagged_y[is.na(flagged_y)] <- max(sample_totals$Total)
+          p <- p + annotate("text", x = flagged_labels, y = flagged_y * 1.03,
                             label = "\u26A0", color = "#ef4444", size = 5)
         }
 
