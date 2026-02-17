@@ -248,7 +248,9 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 1. **New "Intensity alignment" display mode** (XIC modal, third option in display selector)
    - Spectronaut-style stacked bar chart where each bar = one sample, segments = fragment ion proportions
    - Bars ordered by experimental group with dashed vertical separators between groups
-   - `geom_col(position = position_fill())` for relative proportions (0-100%)
+   - `geom_col(position = position_stack())` for absolute summed fragment intensity (bar height = total peptide intensity per sample)
+   - Y-axis shows absolute intensity so cross-sample/group intensity differences are visible at a glance
+   - Flagged sample markers (⚠) positioned above each bar's actual total
    - Tooltips show: Sample, Fragment, AUC, Proportion, Median, Deviation score, Cosine similarity
 
 2. **Inconsistency detection algorithm** (shared reactive `xic_alignment_data()`, line ~4161)
