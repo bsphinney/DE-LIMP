@@ -4293,6 +4293,108 @@ server <- function(input, output, session) {
     xic <- values$xic_data
     display_mode <- input$xic_display_mode
 
+    # --- Alignment mode: short-circuit before chromatogram filtering ---
+    if (isTRUE(display_mode == "alignment")) {
+      align_data <- xic_alignment_data()
+      if (is.null(align_data)) {
+        p <- ggplot() +
+          annotate("text", x = 0.5, y = 0.5, label = "No MS2 fragment data available",
+                   size = 5, color = "gray60") +
+          theme_void()
+        return(ggplotly(p) %>% config(displayModeBar = FALSE))
+      }
+
+      auc <- align_data$auc_data
+      scores <- align_data$sample_scores
+
+      # Create tooltip text
+      auc <- auc %>%
+        mutate(
+          tooltip_text = paste0(
+            "<b>Sample:</b> ", ID, " (", Group, ")",
+            "<br><b>Fragment:</b> ", Fragment.Label,
+            "<br><b>AUC:</b> ", format(round(AUC), big.mark = ","),
+            "<br><b>Proportion:</b> ", round(Proportion * 100, 1), "%",
+            "<br><b>Median:</b> ", round(Median_Proportion * 100, 1), "%",
+            "<br><b>Deviation score:</b> ", round(Deviation_Score, 3),
+            "<br><b>Cosine sim:</b> ", round(Cosine_Sim, 3),
+            ifelse(Flagged, "<br><b style='color:#ef4444;'>FLAGGED</b>", "")
+          )
+        )
+
+      # Identify group boundaries for vertical lines
+      sample_groups <- auc %>%
+        distinct(Sample_Label, Group) %>%
+        arrange(Sample_Label) %>%
+        mutate(x_pos = as.numeric(Sample_Label))
+
+      group_boundaries <- sample_groups %>%
+        group_by(Group) %>%
+        summarise(max_x = max(x_pos), .groups = "drop") %>%
+        filter(max_x < max(sample_groups$x_pos))
+
+      # Build plot
+      p <- ggplot(auc,
+          aes(x = Sample_Label, y = Proportion, fill = Fragment.Label,
+              text = tooltip_text)) +
+        geom_col(position = position_fill(), width = 0.85, color = "white", linewidth = 0.2) +
+        scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+        theme_minimal() +
+        labs(
+          title = paste("MS2 Intensity Alignment --", values$xic_protein),
+          subtitle = "Each bar = one sample. Consistent bars = reliable quantification. Flagged samples may have interference.",
+          x = NULL, y = "Relative Fragment Proportion",
+          fill = "Fragment"
+        ) +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          legend.position = "bottom",
+          legend.text = element_text(size = 7),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank()
+        )
+
+      # Add group boundary lines
+      if (nrow(group_boundaries) > 0) {
+        p <- p + geom_vline(xintercept = group_boundaries$max_x + 0.5,
+                            linetype = "dashed", color = "gray40", linewidth = 0.5)
+      }
+
+      # Convert to plotly
+      pl <- ggplotly(p, tooltip = "text")
+
+      # Add warning markers for flagged samples
+      flagged_samples <- scores %>% filter(Flagged)
+      if (nrow(flagged_samples) > 0) {
+        flagged_labels <- paste0(flagged_samples$ID, " (", flagged_samples$Group, ")")
+        flagged_x <- match(flagged_labels, levels(auc$Sample_Label))
+        flagged_x <- flagged_x[!is.na(flagged_x)]
+
+        if (length(flagged_x) > 0) {
+          annotations <- lapply(flagged_x, function(x) {
+            list(
+              x = x - 1,  # plotly uses 0-indexed for categorical
+              y = 1.03,
+              text = "\u26A0",
+              showarrow = FALSE,
+              font = list(size = 16, color = "#ef4444"),
+              xref = "x", yref = "y"
+            )
+          })
+          pl <- pl %>% layout(annotations = annotations)
+        }
+      }
+
+      return(
+        pl %>%
+          layout(legend = list(orientation = "h", y = -0.25),
+                 margin = list(b = 120)) %>%
+          config(displayModeBar = TRUE)
+      )
+    }
+
+    # --- Chromatogram modes (overlay / facet) ---
+
     # Filter by selected precursor
     if (!is.null(input$xic_precursor_select) &&
         input$xic_precursor_select != "all") {
@@ -4411,104 +4513,6 @@ server <- function(input, output, session) {
           theme(strip.text = element_text(size = 8))
       }
 
-    } else if (display_mode == "alignment") {
-      # --- MS2 Intensity Alignment Stacked Bar Chart ---
-      align_data <- xic_alignment_data()
-      if (is.null(align_data)) {
-        p <- ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = "No MS2 fragment data available",
-                   size = 5, color = "gray60") +
-          theme_void()
-        return(ggplotly(p) %>% config(displayModeBar = FALSE))
-      }
-
-      auc <- align_data$auc_data
-      scores <- align_data$sample_scores
-
-      # Create tooltip text
-      auc <- auc %>%
-        mutate(
-          tooltip_text = paste0(
-            "<b>Sample:</b> ", ID, " (", Group, ")",
-            "<br><b>Fragment:</b> ", Fragment.Label,
-            "<br><b>AUC:</b> ", format(round(AUC), big.mark = ","),
-            "<br><b>Proportion:</b> ", round(Proportion * 100, 1), "%",
-            "<br><b>Median:</b> ", round(Median_Proportion * 100, 1), "%",
-            "<br><b>Deviation score:</b> ", round(Deviation_Score, 3),
-            "<br><b>Cosine sim:</b> ", round(Cosine_Sim, 3),
-            ifelse(Flagged, "<br><b style='color:#ef4444;'>FLAGGED</b>", "")
-          )
-        )
-
-      # Identify group boundaries for vertical lines
-      sample_groups <- auc %>%
-        distinct(Sample_Label, Group) %>%
-        arrange(Sample_Label) %>%
-        mutate(x_pos = as.numeric(Sample_Label))
-
-      group_boundaries <- sample_groups %>%
-        group_by(Group) %>%
-        summarise(max_x = max(x_pos), .groups = "drop") %>%
-        filter(max_x < max(sample_groups$x_pos))
-
-      # Build plot
-      p <- ggplot(auc,
-          aes(x = Sample_Label, y = Proportion, fill = Fragment.Label,
-              text = tooltip_text)) +
-        geom_col(position = position_fill(), width = 0.85, color = "white", linewidth = 0.2) +
-        scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
-        theme_minimal() +
-        labs(
-          title = paste("MS2 Intensity Alignment --", values$xic_protein),
-          subtitle = "Each bar = one sample. Consistent bars = reliable quantification. Flagged samples may have interference.",
-          x = NULL, y = "Relative Fragment Proportion",
-          fill = "Fragment"
-        ) +
-        theme(
-          axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
-          legend.position = "bottom",
-          legend.text = element_text(size = 7),
-          panel.grid.major.x = element_blank(),
-          panel.grid.minor = element_blank()
-        )
-
-      # Add group boundary lines
-      if (nrow(group_boundaries) > 0) {
-        p <- p + geom_vline(xintercept = group_boundaries$max_x + 0.5,
-                            linetype = "dashed", color = "gray40", linewidth = 0.5)
-      }
-
-      # Convert to plotly
-      pl <- ggplotly(p, tooltip = "text")
-
-      # Add warning markers for flagged samples
-      flagged_samples <- scores %>% filter(Flagged)
-      if (nrow(flagged_samples) > 0) {
-        flagged_labels <- paste0(flagged_samples$ID, " (", flagged_samples$Group, ")")
-        flagged_x <- match(flagged_labels, levels(auc$Sample_Label))
-        flagged_x <- flagged_x[!is.na(flagged_x)]
-
-        if (length(flagged_x) > 0) {
-          annotations <- lapply(flagged_x, function(x) {
-            list(
-              x = x - 1,  # plotly uses 0-indexed for categorical
-              y = 1.03,
-              text = "\u26A0",
-              showarrow = FALSE,
-              font = list(size = 16, color = "#ef4444"),
-              xref = "x", yref = "y"
-            )
-          })
-          pl <- pl %>% layout(annotations = annotations)
-        }
-      }
-
-      return(
-        pl %>%
-          layout(legend = list(orientation = "h", y = -0.25),
-                 margin = list(b = 120)) %>%
-          config(displayModeBar = TRUE)
-      )
     }
 
     ggplotly(p, tooltip = "text") %>%
