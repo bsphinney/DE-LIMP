@@ -11,8 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **XIC Chromatogram Viewer**: On-demand fragment-level chromatogram inspection for differentially expressed proteins
   - Sidebar section "5. XIC Viewer" with directory path input and load button
   - XIC buttons on DE Dashboard results table and Grid View modal
-  - Two display modes: Facet by sample, Facet by fragment
+  - Three display modes: Facet by sample, Facet by fragment, Intensity alignment
   - Split-axis MS1/MS2 view with independent y-axes (MS1 top, fragments bottom)
+- **MS2 Intensity Alignment**: Spectronaut-style stacked bar chart for fragment ion ratio consistency
+  - Each bar = one sample, colored segments = relative fragment proportions
+  - Automatic inconsistency detection: flags samples with deviation > mean + 2×SD
+  - Green/amber guidance banners with sample IDs and possible causes
+  - Bars ordered by experimental group with dashed separators
+  - Cosine similarity and deviation scores in tooltips
   - Precursor selector, group filter, and MS1 toggle controls
   - Prev/Next protein navigation through significant DE proteins
   - Download handler for PNG export (14×10 inch, 150 DPI)

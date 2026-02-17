@@ -4001,7 +4001,8 @@ server <- function(input, output, session) {
       div(style = "display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px;",
         selectInput("xic_display_mode", "Display:",
           choices = c("Facet by sample" = "overlay",
-                      "Facet by fragment" = "facet"),
+                      "Facet by fragment" = "facet",
+                      "Intensity alignment" = "alignment"),
           selected = "overlay", width = "220px"),
 
         selectInput("xic_precursor_select", "Precursor:",
@@ -4010,19 +4011,27 @@ server <- function(input, output, session) {
         selectInput("xic_group_filter", "Filter Group:",
           choices = NULL, width = "180px"),
 
-        checkboxInput("xic_show_ms1", "Show MS1 (split axis)", value = FALSE),
-
-        # Ion mobility toggle — only shown when mobilogram data is available
-        if (values$mobilogram_available) {
-          div(style = "display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; background: linear-gradient(135deg, #e0f2fe, #bae6fd); border: 1px solid #7dd3fc;",
-            checkboxInput("xic_show_mobilogram", "Ion Mobility", value = FALSE),
-            icon("bolt", style = "color: #0284c7; font-size: 1.1em;")
+        # MS1 and IM controls hidden in alignment mode (irrelevant for bar charts)
+        conditionalPanel(
+          condition = "input.xic_display_mode != 'alignment'",
+          div(style = "display: flex; flex-wrap: wrap; gap: 12px; align-items: center;",
+            checkboxInput("xic_show_ms1", "Show MS1 (split axis)", value = FALSE),
+            # Ion mobility toggle — only shown when mobilogram data is available
+            if (values$mobilogram_available) {
+              div(style = "display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; background: linear-gradient(135deg, #e0f2fe, #bae6fd); border: 1px solid #7dd3fc;",
+                checkboxInput("xic_show_mobilogram", "Ion Mobility", value = FALSE),
+                icon("bolt", style = "color: #0284c7; font-size: 1.1em;")
+              )
+            }
           )
-        }
+        )
       ),
 
       # Mobilogram mode banner — visible when IM is active
       uiOutput("xic_mobilogram_banner"),
+
+      # Alignment guidance banner — visible in alignment mode
+      uiOutput("xic_alignment_banner"),
 
       # Main plot
       plotlyOutput("xic_plot", height = "calc(100vh - 380px)"),
@@ -4145,6 +4154,135 @@ server <- function(input, output, session) {
       )
     } else {
       NULL
+    }
+  })
+
+  # --- XIC Alignment Data (shared reactive for stacked bar chart + banner) ---
+  xic_alignment_data <- reactive({
+    req(values$xic_data, input$xic_display_mode == "alignment")
+
+    xic <- values$xic_data
+
+    # Filter by selected precursor
+    if (!is.null(input$xic_precursor_select) &&
+        input$xic_precursor_select != "all") {
+      xic <- xic %>% filter(Precursor.Id == input$xic_precursor_select)
+    }
+
+    # Filter by group
+    if (!is.null(input$xic_group_filter) &&
+        input$xic_group_filter != "all") {
+      xic <- xic %>% filter(Group == input$xic_group_filter)
+    }
+
+    # Keep only MS2 fragments
+    xic_ms2 <- xic %>% filter(MS.Level == 2)
+    if (nrow(xic_ms2) == 0) return(NULL)
+
+    # Compute AUC per (Sample x Fragment) by summing intensity across RT points
+    auc_data <- xic_ms2 %>%
+      group_by(File.Name, ID, Group, Precursor.Id, Fragment.Label) %>%
+      summarise(AUC = sum(Intensity, na.rm = TRUE), .groups = "drop")
+
+    # Compute per-sample total AUC and proportions
+    auc_data <- auc_data %>%
+      group_by(File.Name, ID, Group) %>%
+      mutate(
+        Total_AUC = sum(AUC, na.rm = TRUE),
+        Proportion = ifelse(Total_AUC > 0, AUC / Total_AUC, 0)
+      ) %>%
+      ungroup()
+
+    # Compute median proportion per fragment across all samples (reference pattern)
+    ref_pattern <- auc_data %>%
+      group_by(Fragment.Label) %>%
+      summarise(Median_Proportion = median(Proportion, na.rm = TRUE),
+                .groups = "drop")
+
+    auc_data <- auc_data %>%
+      left_join(ref_pattern, by = "Fragment.Label")
+
+    # Score each sample: sum of absolute deviations from reference
+    sample_scores <- auc_data %>%
+      group_by(File.Name, ID, Group) %>%
+      summarise(
+        Deviation_Score = sum(abs(Proportion - Median_Proportion), na.rm = TRUE),
+        # Cosine similarity for tooltip
+        Cosine_Sim = {
+          p <- Proportion
+          m <- Median_Proportion
+          denom <- sqrt(sum(p^2)) * sqrt(sum(m^2))
+          if (denom > 0) sum(p * m) / denom else NA_real_
+        },
+        .groups = "drop"
+      )
+
+    # Flag outliers: deviation > mean + 2*SD
+    mean_dev <- mean(sample_scores$Deviation_Score, na.rm = TRUE)
+    sd_dev <- sd(sample_scores$Deviation_Score, na.rm = TRUE)
+    threshold <- mean_dev + 2 * sd_dev
+    # If only 1-2 samples, don't flag (SD is unreliable)
+    if (is.na(sd_dev) || nrow(sample_scores) < 3) threshold <- Inf
+
+    sample_scores <- sample_scores %>%
+      mutate(Flagged = Deviation_Score > threshold)
+
+    # Add flag info back to auc_data for plotting
+    auc_data <- auc_data %>%
+      left_join(sample_scores %>% dplyr::select(File.Name, Deviation_Score, Cosine_Sim, Flagged),
+                by = "File.Name")
+
+    # Create ordered sample label (by Group then ID)
+    sample_order <- auc_data %>%
+      distinct(File.Name, ID, Group) %>%
+      arrange(Group, ID)
+    auc_data$Sample_Label <- factor(
+      paste0(auc_data$ID, " (", auc_data$Group, ")"),
+      levels = paste0(sample_order$ID, " (", sample_order$Group, ")")
+    )
+
+    list(
+      auc_data = auc_data,
+      sample_scores = sample_scores,
+      threshold = threshold,
+      ref_pattern = ref_pattern
+    )
+  })
+
+  # --- XIC Alignment Banner ---
+  output$xic_alignment_banner <- renderUI({
+    if (!isTRUE(input$xic_display_mode == "alignment")) return(NULL)
+
+    align_data <- xic_alignment_data()
+    if (is.null(align_data)) return(NULL)
+
+    scores <- align_data$sample_scores
+    flagged <- scores %>% filter(Flagged)
+    n_flagged <- nrow(flagged)
+
+    if (n_flagged == 0) {
+      div(style = "background: linear-gradient(135deg, #059669, #047857); color: white; padding: 10px 16px; border-radius: 8px; margin-bottom: 8px; display: flex; align-items: center; gap: 10px;",
+        icon("circle-check", style = "font-size: 1.3em;"),
+        span("All samples consistent", style = "font-weight: 600; font-size: 1.05em;"),
+        span(paste0("— Fragment ion ratios are consistent across all ",
+                     nrow(scores), " samples. No interference detected."),
+          style = "font-weight: 400; font-size: 0.9em; opacity: 0.9;")
+      )
+    } else {
+      flagged_ids <- paste(flagged$ID, collapse = ", ")
+      div(style = "background: linear-gradient(135deg, #d97706, #b45309); color: white; padding: 10px 16px; border-radius: 8px; margin-bottom: 8px;",
+        div(style = "display: flex; align-items: center; gap: 10px;",
+          icon("triangle-exclamation", style = "font-size: 1.3em;"),
+          span(paste0(n_flagged, " sample(s) flagged"),
+            style = "font-weight: 600; font-size: 1.05em;"),
+          span(paste0("— Inconsistent fragment ratios in: ", flagged_ids),
+            style = "font-weight: 400; font-size: 0.9em; opacity: 0.9;")
+        ),
+        div(style = "margin-top: 6px; font-size: 0.85em; opacity: 0.9; padding-left: 30px;",
+          "Possible causes: co-elution interference, ion suppression, chimeric spectra, or injection issues.",
+          " Check chromatogram view for irregular peak shapes in flagged samples."
+        )
+      )
     }
   })
 
@@ -4273,6 +4411,104 @@ server <- function(input, output, session) {
           theme(strip.text = element_text(size = 8))
       }
 
+    } else if (display_mode == "alignment") {
+      # --- MS2 Intensity Alignment Stacked Bar Chart ---
+      align_data <- xic_alignment_data()
+      if (is.null(align_data)) {
+        p <- ggplot() +
+          annotate("text", x = 0.5, y = 0.5, label = "No MS2 fragment data available",
+                   size = 5, color = "gray60") +
+          theme_void()
+        return(ggplotly(p) %>% config(displayModeBar = FALSE))
+      }
+
+      auc <- align_data$auc_data
+      scores <- align_data$sample_scores
+
+      # Create tooltip text
+      auc <- auc %>%
+        mutate(
+          tooltip_text = paste0(
+            "<b>Sample:</b> ", ID, " (", Group, ")",
+            "<br><b>Fragment:</b> ", Fragment.Label,
+            "<br><b>AUC:</b> ", format(round(AUC), big.mark = ","),
+            "<br><b>Proportion:</b> ", round(Proportion * 100, 1), "%",
+            "<br><b>Median:</b> ", round(Median_Proportion * 100, 1), "%",
+            "<br><b>Deviation score:</b> ", round(Deviation_Score, 3),
+            "<br><b>Cosine sim:</b> ", round(Cosine_Sim, 3),
+            ifelse(Flagged, "<br><b style='color:#ef4444;'>FLAGGED</b>", "")
+          )
+        )
+
+      # Identify group boundaries for vertical lines
+      sample_groups <- auc %>%
+        distinct(Sample_Label, Group) %>%
+        arrange(Sample_Label) %>%
+        mutate(x_pos = as.numeric(Sample_Label))
+
+      group_boundaries <- sample_groups %>%
+        group_by(Group) %>%
+        summarise(max_x = max(x_pos), .groups = "drop") %>%
+        filter(max_x < max(sample_groups$x_pos))
+
+      # Build plot
+      p <- ggplot(auc,
+          aes(x = Sample_Label, y = Proportion, fill = Fragment.Label,
+              text = tooltip_text)) +
+        geom_col(position = position_fill(), width = 0.85, color = "white", linewidth = 0.2) +
+        scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+        theme_minimal() +
+        labs(
+          title = paste("MS2 Intensity Alignment --", values$xic_protein),
+          subtitle = "Each bar = one sample. Consistent bars = reliable quantification. Flagged samples may have interference.",
+          x = NULL, y = "Relative Fragment Proportion",
+          fill = "Fragment"
+        ) +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          legend.position = "bottom",
+          legend.text = element_text(size = 7),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank()
+        )
+
+      # Add group boundary lines
+      if (nrow(group_boundaries) > 0) {
+        p <- p + geom_vline(xintercept = group_boundaries$max_x + 0.5,
+                            linetype = "dashed", color = "gray40", linewidth = 0.5)
+      }
+
+      # Convert to plotly
+      pl <- ggplotly(p, tooltip = "text")
+
+      # Add warning markers for flagged samples
+      flagged_samples <- scores %>% filter(Flagged)
+      if (nrow(flagged_samples) > 0) {
+        flagged_labels <- paste0(flagged_samples$ID, " (", flagged_samples$Group, ")")
+        flagged_x <- match(flagged_labels, levels(auc$Sample_Label))
+        flagged_x <- flagged_x[!is.na(flagged_x)]
+
+        if (length(flagged_x) > 0) {
+          annotations <- lapply(flagged_x, function(x) {
+            list(
+              x = x - 1,  # plotly uses 0-indexed for categorical
+              y = 1.03,
+              text = "\u26A0",
+              showarrow = FALSE,
+              font = list(size = 16, color = "#ef4444"),
+              xref = "x", yref = "y"
+            )
+          })
+          pl <- pl %>% layout(annotations = annotations)
+        }
+      }
+
+      return(
+        pl %>%
+          layout(legend = list(orientation = "h", y = -0.25),
+                 margin = list(b = 120)) %>%
+          config(displayModeBar = TRUE)
+      )
     }
 
     ggplotly(p, tooltip = "text") %>%
@@ -4327,12 +4563,22 @@ server <- function(input, output, session) {
         )
       ),
       hr(style = "margin: 5px 0;"),
-      div(class = "text-muted", style = "font-size: 0.8em;",
-        icon("info-circle"),
-        " Co-eluting fragment ions with similar peak shapes indicate reliable identification.",
-        " Consistent peak areas across replicates within a group support accurate quantification.",
-        " Irregular peaks or missing fragments may indicate interference or low-confidence IDs."
-      )
+      if (isTRUE(input$xic_display_mode == "alignment")) {
+        div(class = "text-muted", style = "font-size: 0.8em;",
+          icon("chart-bar"),
+          " Each bar shows relative fragment ion proportions for one sample.",
+          " Consistent bars across samples indicate reliable quantification.",
+          " Bars with unusual proportions (\u26A0) may have co-elution interference, ion suppression, or chimeric spectra.",
+          " Group separators (dashed lines) help compare within and between conditions."
+        )
+      } else {
+        div(class = "text-muted", style = "font-size: 0.8em;",
+          icon("info-circle"),
+          " Co-eluting fragment ions with similar peak shapes indicate reliable identification.",
+          " Consistent peak areas across replicates within a group support accurate quantification.",
+          " Irregular peaks or missing fragments may indicate interference or low-confidence IDs."
+        )
+      }
     )
   })
 
@@ -4364,34 +4610,85 @@ server <- function(input, output, session) {
   # --- XIC Download ---
   output$xic_download_plot <- downloadHandler(
     filename = function() {
-      paste0("XIC_", gsub("[^A-Za-z0-9]", "_", values$xic_protein), "_",
+      mode_tag <- if (isTRUE(input$xic_display_mode == "alignment")) "Alignment" else "XIC"
+      paste0(mode_tag, "_", gsub("[^A-Za-z0-9]", "_", values$xic_protein), "_",
              format(Sys.time(), "%Y%m%d_%H%M%S"), ".png")
     },
     content = function(file) {
       req(values$xic_data)
-      xic <- values$xic_data
 
-      if (!isTRUE(input$xic_show_ms1)) {
-        xic_plot <- xic %>% filter(MS.Level == 2)
-        if (nrow(xic_plot) == 0) xic_plot <- xic
+      if (isTRUE(input$xic_display_mode == "alignment")) {
+        # --- Alignment mode: stacked bar chart ---
+        align_data <- xic_alignment_data()
+        req(align_data)
+        auc <- align_data$auc_data
+        scores <- align_data$sample_scores
+        group_boundaries_df <- auc %>%
+          distinct(Sample_Label, Group) %>%
+          arrange(Sample_Label) %>%
+          mutate(x_pos = as.numeric(Sample_Label)) %>%
+          group_by(Group) %>%
+          summarise(max_x = max(x_pos), .groups = "drop") %>%
+          filter(max_x < max(as.numeric(auc$Sample_Label)))
+
+        p <- ggplot(auc,
+            aes(x = Sample_Label, y = Proportion, fill = Fragment.Label)) +
+          geom_col(position = position_fill(), width = 0.85, color = "white", linewidth = 0.2) +
+          scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+          theme_minimal() +
+          labs(
+            title = paste("MS2 Intensity Alignment --", values$xic_protein),
+            subtitle = paste0("Flagged: ", sum(scores$Flagged), " of ", nrow(scores), " samples"),
+            x = NULL, y = "Relative Fragment Proportion", fill = "Fragment"
+          ) +
+          theme(
+            axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+            legend.position = "bottom",
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor = element_blank()
+          )
+
+        if (nrow(group_boundaries_df) > 0) {
+          p <- p + geom_vline(xintercept = group_boundaries_df$max_x + 0.5,
+                              linetype = "dashed", color = "gray40", linewidth = 0.5)
+        }
+
+        # Mark flagged samples with red triangles
+        flagged <- scores %>% filter(Flagged)
+        if (nrow(flagged) > 0) {
+          flagged_labels <- paste0(flagged$ID, " (", flagged$Group, ")")
+          p <- p + annotate("text", x = flagged_labels, y = 1.02,
+                            label = "\u26A0", color = "#ef4444", size = 5)
+        }
+
+        ggsave(file, plot = p, width = 14, height = 10, dpi = 150)
+
       } else {
-        xic_plot <- xic
+        # --- Chromatogram mode ---
+        xic <- values$xic_data
+
+        if (!isTRUE(input$xic_show_ms1)) {
+          xic_plot <- xic %>% filter(MS.Level == 2)
+          if (nrow(xic_plot) == 0) xic_plot <- xic
+        } else {
+          xic_plot <- xic
+        }
+
+        p <- ggplot(xic_plot,
+            aes(x = RT, y = Intensity, color = Fragment.Label,
+                group = interaction(File.Name, Fragment.Label))) +
+          geom_line(alpha = 0.7, linewidth = 0.5) +
+          facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
+          theme_minimal() +
+          labs(
+            title = paste("Fragment XICs --", values$xic_protein),
+            x = "Retention Time (min)", y = "Intensity", color = "Fragment"
+          ) +
+          theme(legend.position = "bottom", legend.text = element_text(size = 7),
+                strip.text = element_text(size = 8))
+
+        ggsave(file, plot = p, width = 14, height = 10, dpi = 150)
       }
-
-      p <- ggplot(xic_plot,
-          aes(x = RT, y = Intensity, color = Fragment.Label,
-              group = interaction(File.Name, Fragment.Label))) +
-        geom_line(alpha = 0.7, linewidth = 0.5) +
-        facet_wrap(~ paste0(ID, " (", Group, ")"), scales = "free_y") +
-        theme_minimal() +
-        labs(
-          title = paste("Fragment XICs --", values$xic_protein),
-          x = "Retention Time (min)", y = "Intensity", color = "Fragment"
-        ) +
-        theme(legend.position = "bottom", legend.text = element_text(size = 7),
-              strip.text = element_text(size = 8))
-
-      ggsave(file, plot = p, width = 14, height = 10, dpi = 150)
     }
   )
 }

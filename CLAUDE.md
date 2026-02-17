@@ -212,6 +212,36 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 
 ## Recent Changes (v2.1)
 
+### 2026-02-16: MS2 Intensity Alignment Stacked Bar Chart
+1. **New "Intensity alignment" display mode** (XIC modal, third option in display selector)
+   - Spectronaut-style stacked bar chart where each bar = one sample, segments = fragment ion proportions
+   - Bars ordered by experimental group with dashed vertical separators between groups
+   - `geom_col(position = position_fill())` for relative proportions (0-100%)
+   - Tooltips show: Sample, Fragment, AUC, Proportion, Median, Deviation score, Cosine similarity
+
+2. **Inconsistency detection algorithm** (shared reactive `xic_alignment_data()`, line ~4161)
+   - Computes AUC per (Sample x Fragment) by summing intensity across RT
+   - Reference pattern: median proportion per fragment across all samples
+   - Deviation score: `sum(|proportion_i - median_i|)` per sample
+   - Cosine similarity for tooltip (standard spectral matching metric)
+   - Flags samples where deviation > mean + 2*SD (minimum 3 samples to flag)
+   - Returns `list(auc_data, sample_scores, threshold, ref_pattern)`
+
+3. **Alignment guidance banner** (`output$xic_alignment_banner`, line ~4256)
+   - **Green banner**: "All samples consistent" — no interference detected
+   - **Amber banner**: "X sample(s) flagged" — lists sample IDs with possible causes
+   - Suggests checking chromatogram view for irregular peaks in flagged samples
+
+4. **Contextual UI updates for alignment mode**
+   - MS1 checkbox and IM toggle hidden via `conditionalPanel(condition = "input.xic_display_mode != 'alignment'")`
+   - Info panel shows bar chart interpretation guidance instead of chromatogram guidance
+   - Download handler generates alignment-specific PNG with flagged sample markers
+   - Warning markers (⚠) appear above flagged sample bars in plotly view
+
+5. **Key reactive values**:
+   - No new `values$` variables — alignment data computed on-the-fly via `xic_alignment_data()` reactive
+   - Reactive depends on `values$xic_data`, `input$xic_display_mode`, precursor selector, group filter
+
 ### 2026-02-16: XIC Split-Axis MS1 View & Mobilogram Indicator
 1. **Split-axis MS1/MS2 display** (XIC plot rendering)
    - When "Show MS1 (split axis)" is checked, plot splits into two rows via `facet_grid(MS_Panel ~ Sample)`
@@ -296,7 +326,7 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 
 4. **XIC Modal** (lines 3990+)
    - Full-width modal with controls: Display mode, Precursor selector, Group filter, MS1 split-axis checkbox, IM toggle
-   - Two display modes: Facet by sample (fragments overlaid per sample), Facet by fragment (groups overlaid per fragment)
+   - Three display modes: Facet by sample (fragments overlaid per sample), Facet by fragment (groups overlaid per fragment), Intensity alignment (Spectronaut-style stacked bar chart of fragment proportions with inconsistency detection)
    - **Split-axis MS1 view**: When "Show MS1 (split axis)" checked, uses `facet_grid(MS_Panel ~ Sample)` with MS1 on top row and MS2 fragments on bottom row — independent y-axes prevent MS1 intensity from squishing fragments
    - **Mobilogram mode indicator**: Blue gradient badge + bolt icon on IM toggle; prominent blue banner appears when active
    - Plotly interactive chromatograms with tooltips (Sample, Fragment, RT, Intensity)
@@ -530,3 +560,4 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 - [ ] Protein numbers bar plot per sample
 - [ ] Absence/presence table for on/off proteins
 - [x] XIC Viewer: On-demand chromatogram viewer for DE proteins ✅
+- [x] XIC Viewer: MS2 Intensity Alignment stacked bar chart with inconsistency detection ✅
