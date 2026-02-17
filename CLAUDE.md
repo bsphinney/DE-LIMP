@@ -207,14 +207,33 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 | Selections disappear after clicking | Reactive loop - table must not depend on selection-derived reactives |
 | bslib `card()` doesn't render in nav_panel | Use plain `div()` with inline CSS for top-level nav_panel content |
 | HF "Missing configuration in README" | Run README recovery script above |
+| `arrow::select` masks `dplyr::select` | Use `dplyr::select()` explicitly in XIC helper functions |
+| `rename(New = old)` fails with "object not found" | Use base R `names(df)[names(df) == "old"] <- "New"` |
 
 ## Recent Changes (v2.1)
 
+### 2026-02-16: XIC Split-Axis MS1 View & Mobilogram Indicator
+1. **Split-axis MS1/MS2 display** (XIC plot rendering)
+   - When "Show MS1 (split axis)" is checked, plot splits into two rows via `facet_grid(MS_Panel ~ Sample)`
+   - Top row: MS1 precursor signal; bottom row: MS2 fragment ions
+   - Each row gets independent y-axis (`scales = "free_y"`) so MS1 intensity doesn't squish fragments
+   - Works across both display modes (Facet by sample, Facet by fragment)
+
+2. **Mobilogram mode indicator** (XIC modal UI)
+   - IM checkbox restyled with blue gradient badge + bolt icon for visual prominence
+   - Blue banner appears above plot when IM mode is active: "Ion Mobility Mode — Showing mobilogram data"
+   - `output$xic_mobilogram_banner` renders conditionally based on `input$xic_show_mobilogram`
+
+3. **Consolidated display modes** (XIC modal)
+   - Removed redundant "Facet by sample" mode (was identical to "Overlay")
+   - Two clean options: "Facet by sample" (fragments overlaid, color = fragment) and "Facet by fragment" (samples overlaid, color = group)
+
 ### 2026-02-16: XIC Bug Fixes & Auto-Population
-1. **Fixed "object 'pr' not found" error** (load_xic_for_protein helper)
-   - `rlang::sym("pr")` filtering didn't work reliably with Arrow/dplyr
-   - Replaced with base R subsetting: `df[df$pr %in% target_prs, , drop = FALSE]`
-   - Applied to both v2 (`pr` column) and v1 (`Precursor.Id` column)
+1. **Fixed "object 'pr' not found" error** (load_xic_for_protein + reshape helpers)
+   - `rlang::sym("pr")` filtering didn't work reliably with Arrow/dplyr — replaced with base R `df[df$pr %in% target_prs, ]`
+   - `dplyr::rename(Precursor.Id = pr)` had tidy evaluation issues — replaced with base R `names()` assignment
+   - `dplyr::select()` masked by `arrow::select()` — replaced with `dplyr::select()` and base R `[, cols]`
+   - **Key gotcha**: Arrow package masks `dplyr::select()`, always use `dplyr::select()` explicitly in XIC code
 
 2. **Fixed precursor map building** (XIC directory loader, lines 3910-3930)
    - Eliminated all report file I/O — builds map directly from `values$raw_data$E` rownames + `values$raw_data$genes$Protein.Group`
@@ -275,18 +294,19 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
    - `load_xic_for_protein(xic_dir, protein_id, report_map, xic_format)`: Arrow predicate pushdown, dual format
    - `reshape_xic_for_plotting(xic_raw, metadata, xic_format)`: Format-aware reshaping
 
-4. **XIC Modal** (lines 3950+)
-   - Full-width modal with controls: Display mode, Precursor selector, Group filter, MS1 checkbox, IM toggle
-   - Three display modes: Overlay (fragments per sample), Facet by fragment, Facet by sample
+4. **XIC Modal** (lines 3990+)
+   - Full-width modal with controls: Display mode, Precursor selector, Group filter, MS1 split-axis checkbox, IM toggle
+   - Two display modes: Facet by sample (fragments overlaid per sample), Facet by fragment (groups overlaid per fragment)
+   - **Split-axis MS1 view**: When "Show MS1 (split axis)" checked, uses `facet_grid(MS_Panel ~ Sample)` with MS1 on top row and MS2 fragments on bottom row — independent y-axes prevent MS1 intensity from squishing fragments
+   - **Mobilogram mode indicator**: Blue gradient badge + bolt icon on IM toggle; prominent blue banner appears when active
    - Plotly interactive chromatograms with tooltips (Sample, Fragment, RT, Intensity)
    - Info panel shows protein stats, RT range, DE stats (logFC, adj.P.Val)
    - Prev/Next protein navigation through significant DE proteins
    - Download handler exports PNG (14x10 inch, 150 DPI)
 
 5. **Data Loading Architecture**
-   - On-demand lazy loading: Arrow `open_dataset()` with predicate pushdown
-   - Fallback: individual per-file reads if schema mismatch across DIA-NN versions
-   - Protein → Precursor mapping loaded from report.parquet on XIC dir load
+   - Per-file reading with base R filtering (avoids Arrow/dplyr/rlang issues)
+   - Protein → Precursor mapping built from in-memory `values$raw_data` (no file I/O)
    - Caps at top 6 precursors for very large proteins (e.g., Titin)
 
 6. **Report Path Storage** (lines 1289, 1234)

@@ -24,6 +24,11 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 
 ## ✨ What's New in v2.1
 
+**XIC Chromatogram Viewer** (Local/HPC only):
+- 📈 **Fragment-level XIC inspection** for DE proteins with split-axis MS1/MS2 view
+- ⚡ **Ion mobility support** for timsTOF/PASEF data
+- 🔄 **Auto-detects** DIA-NN 1.x and 2.x formats
+
 **Major UI/UX Enhancements** (February 2026):
 - 🎯 **Four-Way Selector Sync** - All comparison selectors automatically synchronized
 - 📊 **Enhanced Dataset Summary** - DE counts with directional arrows (↑↓)

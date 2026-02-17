@@ -269,6 +269,27 @@ In the running app, your bound directories appear at:
 - `/data` - Your bound data directory
 - `/results` - Your bound results directory
 
+### 📈 XIC Chromatogram Viewing on HPC
+
+DIA-NN generates `_xic` directories containing per-file `.xic.parquet` files alongside the main report. To use the XIC Viewer on HPC:
+
+1. **Bind the XIC directory** alongside your data:
+   ```bash
+   apptainer exec \
+     --bind /path/to/diann/output:/data:ro \
+     ~/containers/de-limp.sif \
+     R -e "shiny::runApp('/srv/shiny-server/app.R', host='0.0.0.0', port=7860)"
+   ```
+   Make sure the bind path includes both the report `.parquet` and the `_xic/` sibling directory.
+
+2. **In the app**, paste the path to the XIC directory in the sidebar under "5. XIC Viewer" (e.g., `/data/report_xic/`), then click "Load XICs".
+   - The app auto-detects DIA-NN 1.x vs 2.x format
+   - If mobilogram files with non-zero data are found (timsTOF/PASEF), an ion mobility toggle appears
+
+3. **Select a protein** in the DE Dashboard and click "📈 XICs" to view chromatograms.
+
+**Tip:** XIC files can be large (hundreds of MB per sample). Ensure your `--mem` allocation is sufficient — 32GB+ recommended when viewing XICs for datasets with many samples.
+
 ---
 
 ## 🔧 Troubleshooting
@@ -433,6 +454,6 @@ salloc --time=8:00:00 --mem=64GB --cpus-per-task=16
 
 ---
 
-**Last updated:** 2026-02-11
-**DE-LIMP version:** v2.0.1
+**Last updated:** 2026-02-16
+**DE-LIMP version:** v2.1.1
 **Apptainer/Singularity:** Compatible with versions 3.0+

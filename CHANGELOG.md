@@ -5,6 +5,30 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-02-16
+
+### Added
+- **XIC Chromatogram Viewer**: On-demand fragment-level chromatogram inspection for differentially expressed proteins
+  - Sidebar section "5. XIC Viewer" with directory path input and load button
+  - XIC buttons on DE Dashboard results table and Grid View modal
+  - Two display modes: Facet by sample, Facet by fragment
+  - Split-axis MS1/MS2 view with independent y-axes (MS1 top, fragments bottom)
+  - Precursor selector, group filter, and MS1 toggle controls
+  - Prev/Next protein navigation through significant DE proteins
+  - Download handler for PNG export (14×10 inch, 150 DPI)
+  - Info panel with protein stats, RT range, and DE statistics
+- **DIA-NN 2.x Format Support**: Auto-detects and handles both DIA-NN 1.x (wide) and 2.x (long) XIC formats
+- **Ion Mobility / Mobilogram Support**: Detects mobilogram files, checks for non-zero data (timsTOF/PASEF only)
+  - Blue gradient toggle with bolt icon; prominent banner when IM mode is active
+- **XIC Directory Auto-Population**: Auto-detects `_xic` sibling directory when data is loaded
+  - Smart path resolution: accepts `.parquet` file paths or directories without `_xic` suffix
+- **Precursor Map from In-Memory Data**: Builds protein→precursor mapping from `values$raw_data` (no file I/O)
+
+### Fixed
+- **Assign Groups Layout**: Fixed Run Pipeline button pushed off-screen on MacBook (CSS Grid → Flexbox)
+- **Arrow/dplyr Conflicts**: `arrow::select` masking `dplyr::select` — use explicit `dplyr::select()` in XIC code
+- **Tidy Evaluation Issues**: `rlang::sym("pr")` and `rename(Precursor.Id = pr)` replaced with base R equivalents
+
 ## [2.1.0] - 2026-02-13
 
 ### Added

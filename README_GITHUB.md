@@ -16,7 +16,14 @@
 
 ## ✨ What's New in v2.1
 
-**Major UI/UX Enhancements** (February 2026):
+**XIC Chromatogram Viewer** (February 2026):
+- 📈 **Fragment-level XIC inspection** - View chromatograms for any differentially expressed protein
+- 🔄 **Dual format support** - Auto-detects DIA-NN 1.x (wide) and 2.x (long) XIC formats
+- 📊 **Split-axis MS1/MS2** - MS1 precursor on top, MS2 fragments below with independent y-axes
+- ⚡ **Ion mobility support** - Mobilogram visualization for timsTOF/PASEF data with clear mode indicator
+- 🔍 **Auto-detection** - XIC directory path auto-populates based on report filename
+
+**Major UI/UX Enhancements**:
 - 🎯 **Four-Way Comparison Selector Sync** - Signal Distribution, Expression Grid, P-value Distribution, and DE Dashboard selectors now sync automatically
 - 📊 **Enhanced Dataset Summary** - DE protein counts per comparison with explicit directional arrows (↑ higher in X, ↓ higher in Y)
 - 🔬 **P-value Distribution Diagnostic** - Automated pattern detection with color-coded guidance (healthy, inflation, low power, model issues)
@@ -51,6 +58,13 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Reproducibility Logging** - Export complete R code for analysis reproduction
 - **Example Data** - One-click download of demo dataset (Affinisep vs Evosep comparison)
 - **Group Assignment Templates** - Export/import group configurations as CSV for reproducible workflows
+
+### 📈 XIC Chromatogram Viewer (Local/HPC)
+- **Fragment-level validation** - Inspect chromatograms for any DE protein
+- **Split-axis MS1/MS2** - Independent y-axes prevent MS1 from squishing fragment peaks
+- **Ion mobility support** - Mobilogram visualization for timsTOF/PASEF instruments
+- **Smart auto-detection** - XIC directory auto-populates from report filename
+- **Dual format** - Supports DIA-NN 1.x and 2.x XIC output formats
 
 ### 🔬 Advanced Features
 - **Multiple Covariates** - Customize covariate names (Batch, Sex, Diet, etc.) and include in models
