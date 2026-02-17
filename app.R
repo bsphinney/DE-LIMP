@@ -1168,14 +1168,16 @@ server <- function(input, output, session) {
           mutate(File.Name = Source.File,
                  File.Name.Base = Source.File) %>%
           left_join(
-            meta_lookup %>% select(File.Name.Base, Group, ID),
+            meta_lookup %>% dplyr::select(File.Name.Base, Group, ID),
             by = "File.Name.Base"
           )
       }
 
-      xic_plot <- xic_plot %>%
-        select(any_of(c("File.Name", "ID", "Group", "Precursor.Id",
-                         "MS.Level", "Fragment.Label", "RT", "Intensity")))
+      # Keep only the columns we need — use base R to avoid arrow::select conflict
+      keep_cols <- intersect(c("File.Name", "ID", "Group", "Precursor.Id",
+                               "MS.Level", "Fragment.Label", "RT", "Intensity"),
+                             names(xic_plot))
+      xic_plot <- xic_plot[, keep_cols, drop = FALSE]
 
       return(xic_plot)
 
@@ -1198,18 +1200,18 @@ server <- function(input, output, session) {
 
       rt_long <- rt_rows %>%
         mutate(.key = make_key(rt_rows)) %>%
-        select(.key, all_of(num_cols)) %>%
+        dplyr::select(.key, all_of(num_cols)) %>%
         pivot_longer(cols = all_of(num_cols), names_to = "point_idx", values_to = "RT")
 
       int_long <- int_rows %>%
         mutate(.key = make_key(int_rows)) %>%
-        select(.key, File.Name, Precursor.Id, Modified.Sequence, MS.Level,
+        dplyr::select(.key, File.Name, Precursor.Id, Modified.Sequence, MS.Level,
                Theoretical.Mz, Reference.Intensity, FragmentType, FragmentCharge,
                FragmentSeriesNumber, FragmentLossType, all_of(num_cols)) %>%
         pivot_longer(cols = all_of(num_cols), names_to = "point_idx", values_to = "Intensity")
 
       xic_plot <- inner_join(
-        rt_long %>% select(.key, point_idx, RT),
+        rt_long %>% dplyr::select(.key, point_idx, RT),
         int_long,
         by = c(".key", "point_idx")
       ) %>%
@@ -1231,10 +1233,10 @@ server <- function(input, output, session) {
         left_join(
           metadata %>%
             mutate(File.Name.Base = basename(tools::file_path_sans_ext(File.Name))) %>%
-            select(File.Name.Base, Group, ID),
+            dplyr::select(File.Name.Base, Group, ID),
           by = "File.Name.Base"
         ) %>%
-        select(File.Name, ID, Group, Precursor.Id, Modified.Sequence,
+        dplyr::select(File.Name, ID, Group, Precursor.Id, Modified.Sequence,
                MS.Level, Fragment.Label, Theoretical.Mz, Reference.Intensity,
                RT, Intensity)
 
