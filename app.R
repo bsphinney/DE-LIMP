@@ -1077,6 +1077,7 @@ server <- function(input, output, session) {
     uploaded_report_path = NULL,  # Path to uploaded report.parquet for re-reading
     original_report_name = NULL,  # Original filename of uploaded report (e.g., "report.parquet")
     mobilogram_available = FALSE, # Whether mobilogram files with non-zero data exist
+    mobilogram_files_found = 0, # Number of mobilogram files detected (may have zero data)
     mobilogram_dir = NULL         # Path to mobilogram directory (same as xic_dir)
   )
 
@@ -3914,8 +3915,10 @@ server <- function(input, output, session) {
       message(paste("Detected XIC format:", values$xic_format))
 
       # Detect mobilogram files and check if they contain non-zero data
-      mob_files <- list.files(xic_path, pattern = "\\.mobilogram\\.parquet$",
+      # DIA-NN names these: .ms1_mobilogram.parquet, .ms2_mobilogram.parquet
+      mob_files <- list.files(xic_path, pattern = "_mobilogram\\.parquet$",
                               full.names = TRUE, recursive = TRUE)
+      values$mobilogram_files_found <- length(mob_files)
       if (length(mob_files) > 0) {
         # Sample one file to check for non-zero data (IM instruments only)
         mob_has_data <- tryCatch({
@@ -3958,6 +3961,8 @@ server <- function(input, output, session) {
       status_msg <- paste("Found", length(xic_files), "XIC files")
       if (values$mobilogram_available) {
         status_msg <- paste0(status_msg, " + ion mobility data")
+      } else if (values$mobilogram_files_found > 0) {
+        status_msg <- paste0(status_msg, " (mobilogram files present but contain no IM data)")
       }
       showNotification(paste0(status_msg, ". Select a protein to view chromatograms."),
         type = "message", duration = 5)
