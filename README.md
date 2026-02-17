@@ -14,17 +14,29 @@
 
 ---
 
-## ✨ What's New in v2.1
+## ✨ What's New in v2.2
 
-**Major UI/UX Enhancements** (February 2026):
-- 🎯 **Four-Way Comparison Selector Sync** - Signal Distribution, Expression Grid, P-value Distribution, and DE Dashboard selectors now sync automatically
-- 📊 **Enhanced Dataset Summary** - DE protein counts per comparison with explicit directional arrows (↑ higher in X, ↓ higher in Y)
-- 🔬 **P-value Distribution Diagnostic** - Automated pattern detection with color-coded guidance (healthy, inflation, low power, model issues)
-- 📈 **CV Distribution Histogram** - Visual distribution of protein variability per experimental group
-- 🤖 **AI Summary Relocated** - Moved from modal popup to dedicated Data Overview sub-tab with inline display
-- 🌋 **Volcano Plot Annotations** - FDR and logFC thresholds clearly labeled with significance criteria legend box
-- 🎨 **Signal Distribution Enhancement** - Always shows DE coloring automatically with dedicated comparison selector
-- 🎨 **Responsive Plot Heights** - All plots use viewport-relative units for optimal viewing on any screen size
+**Contextual Help System** (February 2026):
+- ❓ **15 info modal buttons** across every major tab — click `?` for in-context guidance on any plot or table
+- Covers: QC Plots, DE Dashboard, Data Overview, Consistent DE, QC Trends, GSEA, Methodology, Data Chat
+- Each modal explains what you're seeing, what "good" and "bad" look like, and what to do next
+
+**Improved DE Dashboard**:
+- 🌋 **Volcano → Table filtering** - Selecting proteins in the volcano plot now filters the results table
+- 🗺️ **MDS Plot legend** - Color-coded group legend now visible inside the plot
+- 📊 **Heatmap expanded by default** - No more clicking to open the accordion
+
+**Cleaner Layouts**:
+- Normalization Diagnostic and P-value Distribution help content moved to modals (no more layout interference)
+- P-value guidance banner moved below the plot so the comparison dropdown isn't crowded
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history.
+
+### Previous: v2.1 Highlights
+- 📈 **XIC Chromatogram Viewer** with MS2 Intensity Alignment and ion mobility support (Local/HPC)
+- 🎯 **Four-Way Comparison Selector Sync** across all tabs
+- 🔬 **P-value Distribution Diagnostic** with automated pattern detection
+- 🌋 **Volcano Plot Annotations** with FDR/logFC threshold legend
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
@@ -51,6 +63,16 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Reproducibility Logging** - Export complete R code for analysis reproduction
 - **Example Data** - One-click download of demo dataset (Affinisep vs Evosep comparison)
 - **Group Assignment Templates** - Export/import group configurations as CSV for reproducible workflows
+
+### 📈 XIC Chromatogram Viewer (Local/HPC)
+- **Fragment-level validation** - Inspect chromatograms for any DE protein
+- **MS2 Intensity Alignment** - Spectronaut-style stacked bar chart for fragment ion ratio consistency with automatic inconsistency detection
+- **Split-axis MS1/MS2** - Independent y-axes prevent MS1 from squishing fragment peaks
+- **Ion mobility support** - Mobilogram visualization for timsTOF/PASEF instruments
+- **Smart auto-detection** - XIC directory auto-populates and auto-loads when data is uploaded
+- **Dual format** - Supports DIA-NN 1.x and 2.x XIC output formats
+
+> *Not available on Hugging Face Spaces (XIC files too large for cloud). Download DE-LIMP.R to use locally.*
 
 ### 🔬 Advanced Features
 - **Multiple Covariates** - Customize covariate names (Batch, Sex, Diet, etc.) and include in models
@@ -157,6 +179,7 @@ httr2, curl
 - **Data Overview** - Signal distributions and QC summaries
 - **QC Trends** - Temporal trends with group averages
 - **DE Dashboard** - Volcano plots and interactive tables (current comparison shown prominently)
+- **XIC Viewer** - Click "📈 XICs" on any DE protein to inspect fragment chromatograms (local/HPC only)
 - **Consistent DE** - High-reproducibility proteins
 - **GSEA** - Gene Ontology enrichment
 - **Data Chat** - AI-powered exploration
