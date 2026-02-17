@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import base64
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -65,7 +66,7 @@ LOGO_SVG = """
   <circle cx="68" cy="90" r="1.8" fill="white" opacity="0.25"/>
   <!-- Crack lines -->
   <path d="M52 45 L48 55 L53 62 L47 72" stroke="url(#crack_grad_{id})"
-        stroke-width="2" fill="none" stroke-linecap="round" filter="url(#glow_{id})"/>
+        stroke-width="2" fill="none" stroke-linecap="round"/>
   <path d="M68 50 L72 58 L66 65 L73 75" stroke="url(#crack_grad_{id})"
         stroke-width="1.8" fill="none" stroke-linecap="round"/>
   <path d="M55 52 L58 48" stroke="#fbbf24" stroke-width="1.2" opacity="0.7"/>
@@ -83,7 +84,9 @@ LOGO_SVG = """
 
 
 def logo_html(size: int = 80, uid: str = "hdr") -> str:
-    return LOGO_SVG.replace("{size}", str(size)).replace("{id}", uid)
+    svg = LOGO_SVG.replace("{size}", str(size)).replace("{id}", uid)
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" alt="CrackPipe logo"/>'
 
 
 # ---------------------------------------------------------------------------
