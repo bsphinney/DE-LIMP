@@ -117,7 +117,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       }
 
       summary_elements[[length(summary_elements) + 1]] <- div(
-        style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px;",
+        style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;",
         tags$h4(icon("flask"), " Differential Expression Summary"),
         tags$hr(),
         tags$p(style = "font-size: 0.85em; color: #6c757d; margin-bottom: 15px;",
@@ -125,10 +125,120 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         ),
         do.call(tagList, de_summary_list)
       )
+
+      # Complete dataset export button
+      summary_elements[[length(summary_elements) + 1]] <- div(
+        style = "background-color: #eef2ff; padding: 20px; border-radius: 8px; border: 1px solid #c7d2fe;",
+        div(style = "display: flex; justify-content: space-between; align-items: center;",
+          div(
+            tags$h4(icon("download"), " Export Complete Dataset", style = "margin: 0 0 5px 0;"),
+            tags$p(style = "font-size: 0.85em; color: #6c757d; margin: 0;",
+              "DE statistics for all comparisons, expression values, gene symbols, and sample metadata — ready for downstream tools."
+            )
+          ),
+          downloadButton("download_complete_dataset", "Download Complete Dataset",
+            class = "btn-primary", style = "white-space: nowrap;")
+        )
+      )
     }
 
     tagList(summary_elements)
   })
+
+  # --- COMPLETE DATASET EXPORT ---
+  output$download_complete_dataset <- downloadHandler(
+    filename = function() {
+      paste0("Limpa_Complete_Dataset_", format(Sys.Date(), "%Y%m%d"), ".csv")
+    },
+    content = function(file) {
+      req(values$fit, values$y_protein, values$metadata)
+
+      withProgress(message = "Building complete dataset...", value = 0, {
+
+        # --- 1. Gene symbol mapping ---
+        incProgress(0.1, detail = "Mapping gene symbols...")
+        protein_ids <- rownames(values$y_protein$E)
+        accessions <- str_split_fixed(protein_ids, "[; ]", 2)[,1]
+        org_db_name <- detect_organism_db(protein_ids)
+
+        id_map <- tryCatch({
+          if (!requireNamespace(org_db_name, quietly = TRUE)) BiocManager::install(org_db_name, ask = FALSE)
+          library(org_db_name, character.only = TRUE)
+          db_obj <- get(org_db_name)
+          AnnotationDbi::select(db_obj, keys = accessions, columns = c("SYMBOL"), keytype = "UNIPROT") %>%
+            dplyr::rename(Accession = UNIPROT, Gene = SYMBOL) %>% distinct(Accession, .keep_all = TRUE)
+        }, error = function(e) data.frame(Accession = accessions, Gene = accessions))
+
+        gene_df <- data.frame(Protein.Group = protein_ids, Accession = accessions, stringsAsFactors = FALSE)
+        gene_df <- left_join(gene_df, id_map, by = "Accession")
+        gene_df$Gene[is.na(gene_df$Gene)] <- gene_df$Accession[is.na(gene_df$Gene)]
+
+        # --- 2. DE stats for ALL contrasts ---
+        incProgress(0.3, detail = "Gathering DE statistics for all comparisons...")
+        all_contrasts <- colnames(values$fit$contrasts)
+        de_combined <- data.frame(Protein.Group = protein_ids, stringsAsFactors = FALSE)
+
+        for (cname in all_contrasts) {
+          tt <- topTable(values$fit, coef = cname, number = Inf) %>% as.data.frame()
+          if (!"Protein.Group" %in% colnames(tt)) tt <- tt %>% rownames_to_column("Protein.Group")
+          safe_name <- make.names(cname)
+          tt_subset <- tt %>% dplyr::select(Protein.Group, logFC, P.Value, adj.P.Val)
+          colnames(tt_subset) <- c("Protein.Group",
+            paste0("logFC_", safe_name),
+            paste0("P.Value_", safe_name),
+            paste0("adj.P.Val_", safe_name))
+          de_combined <- left_join(de_combined, tt_subset, by = "Protein.Group")
+        }
+
+        # --- 3. Expression matrix ---
+        incProgress(0.6, detail = "Adding expression values...")
+        exprs_df <- as.data.frame(values$y_protein$E) %>% rownames_to_column("Protein.Group")
+
+        # --- 4. Combine everything ---
+        incProgress(0.8, detail = "Assembling and writing file...")
+        full_export <- gene_df %>%
+          dplyr::select(Protein.Group, Accession, Gene) %>%
+          left_join(de_combined, by = "Protein.Group") %>%
+          left_join(exprs_df, by = "Protein.Group")
+
+        # --- 5. Add sample metadata as header rows ---
+        # Build metadata annotation lines that map to sample columns
+        sample_cols <- colnames(values$y_protein$E)
+        meta <- values$metadata
+        non_sample_cols <- setdiff(colnames(full_export), sample_cols)
+
+        # Get custom covariate names
+        cov1_name <- if (!is.null(values$cov1_name) && nzchar(values$cov1_name)) values$cov1_name else "Covariate1"
+        cov2_name <- if (!is.null(values$cov2_name) && nzchar(values$cov2_name)) values$cov2_name else "Covariate2"
+
+        # Build annotation rows
+        annot_rows <- list()
+        annot_fields <- list(
+          Group = "Group", Batch = "Batch",
+          Covariate1 = cov1_name, Covariate2 = cov2_name
+        )
+        for (col_name in names(annot_fields)) {
+          if (col_name %in% colnames(meta) && any(nzchar(meta[[col_name]]))) {
+            label <- annot_fields[[col_name]]
+            vals <- meta[[col_name]][match(sample_cols, meta$File.Name)]
+            vals[is.na(vals)] <- ""
+            row <- c(paste0("#", label), rep("", length(non_sample_cols) - 1), vals)
+            annot_rows[[length(annot_rows) + 1]] <- row
+          }
+        }
+
+        # Write: annotation header rows, then column names, then data
+        con <- file(file, "w")
+        for (arow in annot_rows) {
+          writeLines(paste(arow, collapse = ","), con)
+        }
+        close(con)
+        write.table(full_export, file, sep = ",", row.names = FALSE, quote = TRUE, append = TRUE)
+
+        incProgress(1.0, detail = "Done!")
+      })
+    }
+  )
 
   # --- GRID VIEW & PLOT LOGIC (lines 1064-1191) ---
   grid_react_df <- reactive({
