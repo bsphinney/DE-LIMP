@@ -143,7 +143,34 @@ server_ai <- function(input, output, session, values) {
     values$chat_history <- append(values$chat_history, list(list(role = "user", content = "(Auto-Query: Summarize & Analyze)")))
     withProgress(message = "Auto-Analyzing Dataset...", {
       if (!is.null(values$fit) && !is.null(values$y_protein)) {
-        n_max <- 800; df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max); df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
+        # Scale protein count to stay within Gemini's token limit (~1M tokens)
+        n_samples <- ncol(values$y_protein$E)
+        n_max <- if (n_samples > 200) 100 else if (n_samples > 100) 200 else if (n_samples > 50) 400 else 800
+        message(sprintf("[DE-LIMP] AI data: %d proteins x %d samples (scaled from 800)", n_max, n_samples))
+
+        df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max)
+
+        # For large datasets (>100 samples), send group-level summary stats
+        # instead of per-sample expression to stay within token limits
+        if (n_samples > 100 && !is.null(values$metadata)) {
+          exprs_mat <- values$y_protein$E[rownames(df_de), , drop = FALSE]
+          meta <- values$metadata[values$metadata$Group != "", ]
+          group_stats <- do.call(cbind, lapply(unique(meta$Group), function(g) {
+            cols <- intersect(meta$File.Name[meta$Group == g], colnames(exprs_mat))
+            if (length(cols) == 0) return(NULL)
+            data.frame(
+              setNames(list(
+                rowMeans(exprs_mat[, cols, drop = FALSE], na.rm = TRUE),
+                apply(exprs_mat[, cols, drop = FALSE], 1, sd, na.rm = TRUE)
+              ), c(paste0("Mean_", g), paste0("SD_", g)))
+            )
+          }))
+          df_full <- cbind(Protein = rownames(df_de), df_de, group_stats)
+        } else {
+          df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ])
+          df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
+        }
+
         incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
         qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }
         # Append phospho context if phospho analysis is active
@@ -166,9 +193,29 @@ server_ai <- function(input, output, session, values) {
     values$chat_history <- append(values$chat_history, list(list(role = "user", content = input$chat_input)))
     withProgress(message = "Processing...", {
       if (!is.null(values$fit) && !is.null(values$y_protein)) {
-        n_max <- 800; df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max)
+        # Scale protein count to stay within Gemini's token limit (~1M tokens)
+        n_samples <- ncol(values$y_protein$E)
+        n_max <- if (n_samples > 200) 100 else if (n_samples > 100) 200 else if (n_samples > 50) 400 else 800
+        df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max)
         if (!is.null(values$plot_selected_proteins)) { missing_ids <- setdiff(values$plot_selected_proteins, rownames(df_de)); if (length(missing_ids) > 0) { valid_missing <- intersect(missing_ids, rownames(values$fit$coefficients)); if(length(valid_missing) > 0) { df_extra <- topTable(values$fit, coef=input$contrast_selector, number=Inf)[valid_missing, ]; df_de <- rbind(df_de, df_extra) } } }
-        df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
+        # For large datasets (>100 samples), send group-level summary stats
+        if (n_samples > 100 && !is.null(values$metadata)) {
+          exprs_mat <- values$y_protein$E[rownames(df_de), , drop = FALSE]
+          meta <- values$metadata[values$metadata$Group != "", ]
+          group_stats <- do.call(cbind, lapply(unique(meta$Group), function(g) {
+            cols <- intersect(meta$File.Name[meta$Group == g], colnames(exprs_mat))
+            if (length(cols) == 0) return(NULL)
+            data.frame(
+              setNames(list(
+                rowMeans(exprs_mat[, cols, drop = FALSE], na.rm = TRUE),
+                apply(exprs_mat[, cols, drop = FALSE], 1, sd, na.rm = TRUE)
+              ), c(paste0("Mean_", g), paste0("SD_", g)))
+            )
+          }))
+          df_full <- cbind(Protein = rownames(df_de), df_de, group_stats)
+        } else {
+          df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
+        }
         incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
         qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }
         # Append phospho context if phospho analysis is active
