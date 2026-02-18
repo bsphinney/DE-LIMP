@@ -69,6 +69,12 @@ build_ui <- function(is_hf_space) {
       padding: 0.5rem 1rem;
       font-size: 0.9rem;
     }
+
+    /* Remove default bottom margin from selectInput inside gradient banners */
+    div[style*='linear-gradient'] .form-group,
+    div[style*='linear-gradient'] .shiny-input-container {
+      margin-bottom: 0 !important;
+    }
   "))),
 
   tags$head(tags$script(HTML("
@@ -251,12 +257,12 @@ build_ui <- function(is_hf_space) {
                 nav_panel("Signal Distribution",
                   icon = icon("chart-area"),
                   # Comparison selector banner
-                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;",
-                    div(style = "display: flex; align-items: center; gap: 10px;",
+                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;",
+                    div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
                       icon("microscope"),
                       span("Viewing Comparison:", style = "font-weight: 500;")
                     ),
-                    div(style = "flex-grow: 1; max-width: 400px;",
+                    div(style = "flex: 1 1 auto; min-width: 200px;",
                       selectInput("contrast_selector_signal", NULL,
                         choices = NULL,
                         width = "100%"
@@ -285,12 +291,12 @@ build_ui <- function(is_hf_space) {
                 nav_panel("Expression Grid",
                   icon = icon("th"),
                   # Comparison selector banner
-                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;",
-                    div(style = "display: flex; align-items: center; gap: 10px;",
+                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;",
+                    div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
                       icon("microscope"),
                       span("Viewing Comparison:", style = "font-weight: 500;")
                     ),
-                    div(style = "flex-grow: 1; max-width: 400px;",
+                    div(style = "flex: 1 1 auto; min-width: 200px;",
                       selectInput("contrast_selector_grid", NULL,
                         choices = NULL,
                         width = "100%"
@@ -501,27 +507,26 @@ build_ui <- function(is_hf_space) {
                 # TAB 5: P-value Distribution Diagnostic
                 nav_panel("P-value Distribution",
                   icon = icon("chart-column"),
-                  # Comparison selector banner
-                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;",
-                    div(style = "display: flex; align-items: center; gap: 10px;",
+                  # Comparison selector banner with buttons
+                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;",
+                    div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
                       icon("microscope"),
                       span("Viewing Comparison:", style = "font-weight: 500;")
                     ),
-                    div(style = "flex-grow: 1; max-width: 400px;",
+                    div(style = "flex: 1 1 auto; min-width: 200px;",
                       selectInput("contrast_selector_pvalue", NULL,
                         choices = NULL,
                         width = "100%"
                       )
+                    ),
+                    div(style = "display: flex; gap: 6px; flex-shrink: 0;",
+                      actionButton("pvalue_hist_info_btn", icon("question-circle"), title = "How do I interpret this?",
+                        class = "btn-outline-light btn-sm"),
+                      actionButton("fullscreen_pvalue_hist", "\U0001F50D Fullscreen",
+                        class = "btn-outline-light btn-sm")
                     )
                   ),
                   card_body(
-                    # Control row
-                    div(style = "display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 10px;",
-                      actionButton("pvalue_hist_info_btn", icon("question-circle"), title = "How do I interpret this?",
-                        class = "btn-outline-info btn-sm"),
-                      actionButton("fullscreen_pvalue_hist", "\U0001F50D Fullscreen",
-                        class = "btn-outline-secondary btn-sm")
-                    ),
 
                     # Plot
                     plotOutput("pvalue_histogram", height = "calc(100vh - 400px)"),
