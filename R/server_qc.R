@@ -751,21 +751,31 @@ server_qc <- function(input, output, session, values) {
     de_results <- topTable(values$fit, coef = input$contrast_selector_pvalue, number = Inf)
     pvalues <- de_results$P.Value
 
-    # Calculate expected uniform distribution
+    # Calculate expected uniform distribution and bin counts
     n_proteins <- length(pvalues)
     n_bins <- 30
     expected_per_bin <- n_proteins / n_bins
+    h <- hist(pvalues, breaks = seq(0, 1, length.out = n_bins + 1), plot = FALSE)
+    first_bin_count <- h$counts[1]
+    other_max <- max(h$counts[-1])
 
-    # Create histogram data
+    # Cap y-axis so the distribution shape is visible; annotate the clipped first bin
+    y_max <- max(other_max * 1.5, expected_per_bin * 3)
     hist_data <- data.frame(PValue = pvalues)
 
-    # Create the plot
     ggplot(hist_data, aes(x = PValue)) +
-      geom_histogram(bins = n_bins, fill = "#4A90E2", color = "white", alpha = 0.7) +
+      geom_histogram(breaks = seq(0, 1, length.out = n_bins + 1),
+                     fill = "#4A90E2", color = "white", alpha = 0.7) +
       geom_hline(yintercept = expected_per_bin, linetype = "dashed", color = "red", size = 1) +
-      annotate("text", x = 0.75, y = expected_per_bin * 1.1,
+      annotate("text", x = 0.75, y = expected_per_bin * 1.15,
                label = "Expected under null (uniform)",
                color = "red", size = 3.5, fontface = "italic") +
+      {if (first_bin_count > y_max)
+        annotate("text", x = h$mids[1], y = y_max * 0.92,
+                 label = paste0("n = ", format(first_bin_count, big.mark = ",")),
+                 size = 3.5, fontface = "bold", color = "#2c3e50")
+      } +
+      coord_cartesian(ylim = c(0, y_max)) +
       labs(
         title = paste0("P-value Distribution (", nrow(de_results), " proteins tested)"),
         subtitle = paste0("Comparison: ", input$contrast_selector_pvalue),
@@ -778,7 +788,7 @@ server_qc <- function(input, output, session, values) {
         plot.subtitle = element_text(color = "gray40", size = 11),
         panel.grid.minor = element_blank()
       ) +
-      scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+      scale_x_continuous(breaks = seq(0, 1, 0.1)) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
   })
 
@@ -826,21 +836,32 @@ server_qc <- function(input, output, session, values) {
     de_results <- topTable(values$fit, coef = input$contrast_selector_pvalue, number = Inf)
     pvalues <- de_results$P.Value
 
-    # Calculate expected uniform distribution
+    # Calculate expected uniform distribution and bin counts
     n_proteins <- length(pvalues)
     n_bins <- 40  # More bins for fullscreen
     expected_per_bin <- n_proteins / n_bins
+    h <- hist(pvalues, breaks = seq(0, 1, length.out = n_bins + 1), plot = FALSE)
+    first_bin_count <- h$counts[1]
+    other_max <- max(h$counts[-1])
 
-    # Create histogram data
+    # Cap y-axis so the distribution shape is visible
+    y_max <- max(other_max * 1.5, expected_per_bin * 3)
     hist_data <- data.frame(PValue = pvalues)
 
     # Create enhanced plot for fullscreen
     p <- ggplot(hist_data, aes(x = PValue)) +
-      geom_histogram(bins = n_bins, fill = "#4A90E2", color = "white", alpha = 0.7) +
+      geom_histogram(breaks = seq(0, 1, length.out = n_bins + 1),
+                     fill = "#4A90E2", color = "white", alpha = 0.7) +
       geom_hline(yintercept = expected_per_bin, linetype = "dashed", color = "red", size = 1.2) +
       annotate("text", x = 0.75, y = expected_per_bin * 1.15,
                label = "Expected uniform distribution",
                color = "red", size = 4, fontface = "italic") +
+      {if (first_bin_count > y_max)
+        annotate("text", x = h$mids[1], y = y_max * 0.92,
+                 label = paste0("n = ", format(first_bin_count, big.mark = ",")),
+                 size = 4, fontface = "bold", color = "#2c3e50")
+      } +
+      coord_cartesian(ylim = c(0, y_max)) +
       labs(
         title = paste0("P-value Distribution: ", input$contrast_selector_pvalue),
         subtitle = paste0(nrow(de_results), " proteins tested | ",
@@ -854,7 +875,7 @@ server_qc <- function(input, output, session, values) {
         plot.subtitle = element_text(color = "gray40", size = 13),
         panel.grid.minor = element_blank()
       ) +
-      scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+      scale_x_continuous(breaks = seq(0, 1, 0.1)) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
 
     showModal(modalDialog(
