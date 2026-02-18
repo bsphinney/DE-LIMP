@@ -73,6 +73,9 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
           }, error = function(e) NULL)
         }
 
+        # Auto-detect phospho data
+        values$phospho_detected <- detect_phospho(session_report)
+
         incProgress(0.9, detail = "Opening setup...")
 
         # Log to reproducibility
@@ -135,6 +138,9 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         file.copy(input$report_file$datapath, session_report, overwrite = TRUE)
         values$uploaded_report_path <- session_report
         values$original_report_name <- input$report_file$name
+
+        # Auto-detect phospho data
+        values$phospho_detected <- detect_phospho(session_report)
 
         # Auto-detect XIC directory next to the uploaded report (local/HPC only)
         if (!is_hf_space) {

@@ -272,9 +272,16 @@ server_session <- function(input, output, session, values, add_to_log) {
         # Covariate settings
         cov1_name  = values$cov1_name,
         cov2_name  = values$cov2_name,
+        # Phosphoproteomics state
+        phospho_detected = values$phospho_detected,
+        phospho_site_matrix = values$phospho_site_matrix,
+        phospho_site_info = values$phospho_site_info,
+        phospho_fit = values$phospho_fit,
+        phospho_site_matrix_filtered = values$phospho_site_matrix_filtered,
+        phospho_input_mode = values$phospho_input_mode,
         # Save timestamp & version
         saved_at   = Sys.time(),
-        app_version = "DE-LIMP v1.2"
+        app_version = "DE-LIMP v2.4"
       )
       saveRDS(session_data, file)
       showNotification("Session saved successfully!", type = "message")
@@ -321,6 +328,14 @@ server_session <- function(input, output, session, values, add_to_log) {
       values$cov1_name  <- session_data$cov1_name %||% "Covariate1"
       values$cov2_name  <- session_data$cov2_name %||% "Covariate2"
 
+      # Restore phospho state
+      values$phospho_detected <- session_data$phospho_detected
+      values$phospho_site_matrix <- session_data$phospho_site_matrix
+      values$phospho_site_info <- session_data$phospho_site_info
+      values$phospho_fit <- session_data$phospho_fit
+      values$phospho_site_matrix_filtered <- session_data$phospho_site_matrix_filtered
+      values$phospho_input_mode <- session_data$phospho_input_mode
+
       # Restore repro log and append load event
       values$repro_log  <- session_data$repro_log %||% values$repro_log
       add_to_log("Session Loaded", c(
@@ -339,6 +354,13 @@ server_session <- function(input, output, session, values, add_to_log) {
         updateSelectInput(session, "contrast_selector_grid", choices = contrast_names, selected = selected_contrast)
         updateSelectInput(session, "contrast_selector_pvalue", choices = contrast_names, selected = selected_contrast)
       }
+      # Restore phospho contrast selector
+      if (!is.null(values$phospho_fit)) {
+        phospho_contrasts <- colnames(values$phospho_fit$contrasts)
+        updateSelectInput(session, "phospho_contrast_selector",
+                         choices = phospho_contrasts, selected = phospho_contrasts[1])
+      }
+
       if (!is.null(session_data$logfc_cutoff)) {
         updateSliderInput(session, "logfc_cutoff", value = session_data$logfc_cutoff)
       }

@@ -217,7 +217,14 @@ server <- function(input, output, session) {
     xic_protein = NULL, xic_data = NULL, xic_report_map = NULL,
     uploaded_report_path = NULL, original_report_name = NULL,
     mobilogram_available = FALSE, mobilogram_files_found = 0,
-    mobilogram_dir = NULL
+    mobilogram_dir = NULL,
+    # Phosphoproteomics
+    phospho_detected = NULL,
+    phospho_site_matrix = NULL,
+    phospho_site_info = NULL,
+    phospho_fit = NULL,
+    phospho_site_matrix_filtered = NULL,
+    phospho_input_mode = NULL
   )
 
   # --- Shared helper: append to reproducibility log ---
@@ -235,6 +242,7 @@ server <- function(input, output, session) {
   server_gsea(input, output, session, values, add_to_log)
   server_ai(input, output, session, values)
   server_xic(input, output, session, values, is_hf_space)
+  server_phospho(input, output, session, values, add_to_log)
   server_session(input, output, session, values, add_to_log)
 }
 

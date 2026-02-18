@@ -107,8 +107,49 @@ build_ui <- function(is_hf_space) {
     br(), br(),
     textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview"),
     hr(),
+    # Phospho controls (conditional on detection)
+    conditionalPanel(
+      condition = "output.phospho_detected_flag",
+      hr(),
+      h5("5. Phosphoproteomics", style = "color: #6c757d;"),
+      radioButtons("phospho_input_mode", "Site Quantification Source",
+        choices = c(
+          "DIA-NN site matrix (recommended)" = "site_matrix",
+          "Parse from report.parquet" = "parsed_report"
+        ),
+        selected = "site_matrix"
+      ),
+      conditionalPanel(
+        condition = "input.phospho_input_mode == 'site_matrix'",
+        fileInput("phospho_site_matrix_file", "Upload site_matrix parquet",
+                  accept = ".parquet"),
+        tags$p(class = "text-muted small",
+          "Upload the ", tags$code("site_matrix_0.9.parquet"), " or ",
+          tags$code("site_matrix_0.99.parquet"), " from DIA-NN 1.9+."
+        )
+      ),
+      conditionalPanel(
+        condition = "input.phospho_input_mode == 'parsed_report'",
+        sliderInput("phospho_loc_threshold", "Site Localization Confidence",
+          min = 0.5, max = 1.0, value = 0.75, step = 0.05),
+        tags$p(class = "text-muted small",
+          "Recommended: 0.75 for exploratory, 0.9 for high-confidence sites."
+        )
+      ),
+      radioButtons("phospho_norm", "Site-Level Normalization",
+        choices = c(
+          "None (DIA-NN normalized)" = "none",
+          "Median centering" = "median",
+          "Quantile normalization" = "quantile"
+        ),
+        selected = "none"
+      ),
+      actionButton("run_phospho_pipeline", "Run Phosphosite Analysis",
+                   class = "btn-warning w-100", icon = icon("bolt"))
+    ),
+
     if (!is_hf_space) tagList(
-      h5("5. XIC Viewer"),
+      h5("6. XIC Viewer"),
       p(class = "text-muted small",
         "Load .xic.parquet files from DIA-NN to inspect chromatograms."),
       textInput("xic_dir_input", "XIC Directory Path:",
@@ -137,6 +178,8 @@ build_ui <- function(is_hf_space) {
 
                 nav_panel("Assign Groups & Run",
                   icon = icon("table"),
+                  # Phospho detection banner (shown when phospho data detected)
+                  uiOutput("phospho_detection_banner"),
                   # Tip banner
                   div(style="background-color: #e7f3ff; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
                     icon("info-circle"),
@@ -605,6 +648,10 @@ build_ui <- function(is_hf_space) {
                           )
                 )
               )
+    ),
+
+    nav_panel("Phosphoproteomics", icon = icon("flask"),
+      uiOutput("phospho_tab_content")
     ),
 
     nav_panel("Gene Set Enrichment", icon = icon("sitemap"),
