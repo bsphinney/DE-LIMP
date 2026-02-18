@@ -145,7 +145,21 @@ build_ui <- function(is_hf_space) {
         selected = "none"
       ),
       actionButton("run_phospho_pipeline", "Run Phosphosite Analysis",
-                   class = "btn-warning w-100", icon = icon("bolt"))
+                   class = "btn-warning w-100", icon = icon("bolt")),
+      hr(),
+      tags$p(class = "text-muted small", style = "margin-top: 8px;",
+        tags$strong("Advanced (Phase 2/3):")
+      ),
+      fileInput("phospho_fasta_file", "Upload FASTA (for motifs)",
+                accept = c(".fasta", ".fa", ".faa")),
+      tags$p(class = "text-muted small",
+        "Protein FASTA enables accurate motif extraction around phosphosites."
+      ),
+      checkboxInput("phospho_protein_correction",
+        "Normalize to protein abundance", value = FALSE),
+      tags$p(class = "text-muted small",
+        "Subtracts protein-level logFC from site logFC (requires total proteome pipeline to be run first)."
+      )
     ),
 
     if (!is_hf_space) tagList(

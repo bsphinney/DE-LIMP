@@ -146,7 +146,16 @@ server_ai <- function(input, output, session, values) {
         n_max <- 800; df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max); df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
         incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
         qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }
-        incProgress(0.7, detail = "Thinking..."); ai_reply <- ask_gemini_file_chat(auto_prompt, current_file_uri, qc_final, input$user_api_key, input$model_name, values$plot_selected_proteins)
+        # Append phospho context if phospho analysis is active
+        auto_msg <- auto_prompt
+        if (!is.null(values$phospho_fit) && !is.null(input$phospho_contrast_selector)) {
+          phospho_ctx <- tryCatch(
+            phospho_ai_context(values$phospho_fit, input$phospho_contrast_selector, values$ksea_results),
+            error = function(e) ""
+          )
+          if (nzchar(phospho_ctx)) auto_msg <- paste0(auto_msg, phospho_ctx)
+        }
+        incProgress(0.7, detail = "Thinking..."); ai_reply <- ask_gemini_file_chat(auto_msg, current_file_uri, qc_final, input$user_api_key, input$model_name, values$plot_selected_proteins)
       } else { ai_reply <- "Please load data and run analysis first." }
       values$chat_history <- append(values$chat_history, list(list(role = "ai", content = ai_reply)))
     })
@@ -162,7 +171,16 @@ server_ai <- function(input, output, session, values) {
         df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
         incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
         qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }
-        incProgress(0.7, detail = "Thinking..."); ai_reply <- ask_gemini_file_chat(input$chat_input, current_file_uri, qc_final, input$user_api_key, input$model_name, values$plot_selected_proteins)
+        # Append phospho context if phospho analysis is active
+        chat_msg <- input$chat_input
+        if (!is.null(values$phospho_fit) && !is.null(input$phospho_contrast_selector)) {
+          phospho_ctx <- tryCatch(
+            phospho_ai_context(values$phospho_fit, input$phospho_contrast_selector, values$ksea_results),
+            error = function(e) ""
+          )
+          if (nzchar(phospho_ctx)) chat_msg <- paste0(chat_msg, phospho_ctx)
+        }
+        incProgress(0.7, detail = "Thinking..."); ai_reply <- ask_gemini_file_chat(chat_msg, current_file_uri, qc_final, input$user_api_key, input$model_name, values$plot_selected_proteins)
       } else { ai_reply <- "Please load data and run analysis first." }
     })
 

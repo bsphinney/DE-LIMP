@@ -208,3 +208,171 @@ extract_phosphosites <- function(report_path, loc_threshold = 0.75, q_cutoff = 0
 
   list(matrix = site_matrix, info = site_info)
 }
+
+# ==============================================================================
+#  Phase 2: KSEA & Motif helpers
+# ==============================================================================
+
+#' Read FASTA file and return named list of protein sequences
+#'
+#' Parses standard FASTA format. Extracts UniProt accession from headers
+#' like ">sp|P12345|NAME_HUMAN ..." or uses the first word otherwise.
+#'
+#' @return Named list: accession -> amino acid sequence string
+read_fasta_sequences <- function(fasta_path) {
+  lines <- readLines(fasta_path, warn = FALSE)
+  sequences <- list()
+  current_id <- NULL
+  current_seq <- character(0)
+
+  for (line in lines) {
+    if (startsWith(line, ">")) {
+      if (!is.null(current_id)) {
+        sequences[[current_id]] <- paste(current_seq, collapse = "")
+      }
+      header <- sub("^>", "", line)
+      # Try UniProt format: >sp|P12345|NAME_HUMAN ... or >tr|Q9Y6K1|...
+      parts <- strsplit(header, "\\|")[[1]]
+      if (length(parts) >= 2) {
+        current_id <- parts[2]
+      } else {
+        current_id <- strsplit(trimws(header), "\\s+")[[1]][1]
+      }
+      current_seq <- character(0)
+    } else {
+      current_seq <- c(current_seq, trimws(line))
+    }
+  }
+  if (!is.null(current_id)) {
+    sequences[[current_id]] <- paste(current_seq, collapse = "")
+  }
+
+  sequences
+}
+
+#' Prepare phospho DE results for KSEAapp input format
+#'
+#' Transforms limma topTable + site_info into the data.frame required by
+#' KSEAapp::KSEA.Scores(): columns Protein, Peptide, Residue.Both, p, FC
+prepare_ksea_input <- function(phospho_fit, contrast, site_info) {
+  de <- limma::topTable(phospho_fit, coef = contrast, number = Inf)
+  de$SiteID <- rownames(de)
+  de <- merge(de, site_info, by = "SiteID")
+
+  ksea_input <- data.frame(
+    Protein      = de$Genes,
+    Peptide      = de$SiteID,
+    Residue.Both = paste0(de$Residue, de$Position),
+    p            = de$P.Value,
+    FC           = 2^de$logFC,
+    stringsAsFactors = FALSE
+  )
+
+  # Remove rows with missing gene names (KSEA needs gene symbols)
+  ksea_input <- ksea_input[!is.na(ksea_input$Protein) & ksea_input$Protein != "", ]
+  ksea_input
+}
+
+#' Extract flanking amino acid sequences around phosphosites
+#'
+#' For each significant phosphosite, extracts ±window residues from the
+#' FASTA protein sequence. Pads with "_" near termini. Splits by direction.
+#'
+#' @return list(up = character(), down = character()) of fixed-width sequences
+extract_flanking_sequences <- function(site_info, de_results, fasta_sequences, window = 7L) {
+  sig <- de_results[de_results$adj.P.Val < 0.05, ]
+  sig$SiteID <- rownames(sig)
+  sig <- merge(sig, site_info, by = "SiteID")
+
+  if (nrow(sig) == 0) return(list(up = character(0), down = character(0)))
+
+  flanking <- vapply(seq_len(nrow(sig)), function(i) {
+    pg <- sig$Protein.Group[i]
+    accession <- strsplit(pg, "[;]")[[1]][1]
+    pos <- sig$Position[i]
+    seq_str <- fasta_sequences[[accession]]
+
+    if (is.null(seq_str) || is.na(pos) || pos < 1 || pos > nchar(seq_str)) {
+      return(NA_character_)
+    }
+
+    start_pos <- max(1L, pos - window)
+    end_pos   <- min(nchar(seq_str), pos + window)
+    flank <- substr(seq_str, start_pos, end_pos)
+
+    left_pad  <- paste(rep("_", window - (pos - start_pos)), collapse = "")
+    right_pad <- paste(rep("_", window - (end_pos - pos)), collapse = "")
+    paste0(left_pad, flank, right_pad)
+  }, character(1))
+
+  valid <- !is.na(flanking)
+  list(
+    up   = flanking[valid & sig$logFC > 0],
+    down = flanking[valid & sig$logFC < 0]
+  )
+}
+
+# ==============================================================================
+#  Phase 3: Protein correction & AI context
+# ==============================================================================
+
+#' Correct phosphosite logFC by subtracting protein-level logFC
+#'
+#' Isolates phosphorylation stoichiometry changes by removing the contribution
+#' of total protein abundance changes. Requires both protein-level and
+#' site-level DE to have been run on the same contrast.
+#'
+#' @return data.frame with original + corrected logFC columns
+correct_phospho_for_protein <- function(phospho_fit, protein_fit, contrast, site_info) {
+  protein_de <- limma::topTable(protein_fit, coef = contrast, number = Inf)
+  protein_de$Protein.Group <- rownames(protein_de)
+
+  site_de <- limma::topTable(phospho_fit, coef = contrast, number = Inf)
+  site_de$SiteID <- rownames(site_de)
+  site_de <- merge(site_de, site_info[, c("SiteID", "Protein.Group"), drop = FALSE],
+                   by = "SiteID")
+
+  site_de$protein_logFC <- protein_de$logFC[
+    match(site_de$Protein.Group, protein_de$Protein.Group)
+  ]
+  site_de$corrected_logFC <- site_de$logFC - ifelse(
+    is.na(site_de$protein_logFC), 0, site_de$protein_logFC
+  )
+
+  site_de
+}
+
+#' Build phospho-specific context string for AI chat
+#'
+#' Appends phosphosite DE results and KSEA kinase activities to the
+#' system prompt when phospho analysis is active.
+phospho_ai_context <- function(phospho_fit, contrast, ksea_results = NULL) {
+  de <- limma::topTable(phospho_fit, coef = contrast, number = 20)
+  de$SiteID <- rownames(de)
+  all_de <- limma::topTable(phospho_fit, coef = contrast, number = Inf)
+
+  context <- paste(
+    "\n\n--- PHOSPHOPROTEOMICS RESULTS ---",
+    sprintf("Phosphosite DE contrast: %s", contrast),
+    sprintf("Total sites tested: %d", nrow(all_de)),
+    sprintf("Significant sites (FDR < 0.05): %d", sum(all_de$adj.P.Val < 0.05)),
+    "\nTop 20 regulated phosphosites:",
+    paste(capture.output(print(de[, c("SiteID", "logFC", "adj.P.Val")])), collapse = "\n"),
+    sep = "\n"
+  )
+
+  if (!is.null(ksea_results)) {
+    sig_kinases <- ksea_results[ksea_results$FDR < 0.05, , drop = FALSE]
+    if (nrow(sig_kinases) > 0) {
+      context <- paste(context,
+        "\n\nKSEA Kinase Activity (significant, FDR < 0.05):",
+        paste(capture.output(
+          print(sig_kinases[, c("Kinase.Gene", "z.score", "m", "FDR")])
+        ), collapse = "\n"),
+        sep = "\n"
+      )
+    }
+  }
+
+  context
+}

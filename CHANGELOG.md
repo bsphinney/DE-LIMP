@@ -5,6 +5,34 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-02-18
+
+### Added
+- **Phosphoproteomics Phase 2 — Kinase Activity & Motif Analysis**:
+  - **KSEA kinase-substrate enrichment analysis**: Infers upstream kinase activity from phosphosite fold-changes using `KSEAapp` CRAN package with PhosphoSitePlus + NetworKIN database
+  - **KSEA bar plot**: Horizontal bar chart of kinase z-scores (top 15 activated + top 15 inhibited), colored by direction, with substrate count annotations
+  - **KSEA results table**: Filterable, sortable DT datatable with kinase gene, z-score, FDR, substrate count. Downloadable as CSV.
+  - **Sequence logo motif analysis**: Displays amino acid enrichment around regulated phosphosites using `ggseqlogo`. Separate logos for up-regulated and down-regulated sites.
+  - **FASTA upload**: Sidebar file input for protein FASTA. Parses UniProt-format headers to extract accessions. Enables accurate flanking sequence extraction for motif analysis.
+  - New "Kinase Activity" and "Motif Analysis" tabs in phospho results navset
+  - New packages: `KSEAapp` (CRAN), `ggseqlogo` (CRAN)
+
+- **Phosphoproteomics Phase 3 — Advanced Features**:
+  - **Protein-level abundance correction**: Checkbox to subtract protein-level logFC from phosphosite logFC, isolating phosphorylation stoichiometry changes. Requires total proteome pipeline to have been run first. Volcano plot title and axis labels update to indicate corrected values.
+  - **AI context integration**: Phosphosite DE results (top 20 sites) and KSEA kinase activities (significant kinases) are automatically appended to Data Chat context when phospho analysis is active. Both manual chat and auto-analyze include phospho context.
+  - **Session persistence**: KSEA results, FASTA sequences, and all Phase 2/3 state saved/loaded with sessions.
+  - New helper functions: `read_fasta_sequences()`, `prepare_ksea_input()`, `extract_flanking_sequences()`, `correct_phospho_for_protein()`, `phospho_ai_context()`
+
+### Changed
+- `R/helpers_phospho.R`: Extended from 210 to ~380 lines (5 new helper functions)
+- `R/server_phospho.R`: Extended from 650 to ~950 lines (KSEA, motifs, protein correction)
+- `Dockerfile`: Added `KSEAapp` and `ggseqlogo` CRAN package installation
+- App version bumped to v2.5
+
+### Planned — Future
+- PhosR integration (RUVphospho normalization, kinase profiling, signalome)
+- FASTA-based protein-relative position mapping for Path B sites
+
 ## [2.4.0] - 2026-02-17
 
 ### Added
@@ -24,19 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Educational expandable**: Explains site-level vs protein-level analysis, localization confidence, imputation approach
   - **Session save/load**: All phospho state persisted and restored
   - **Reproducibility logging**: Pipeline steps logged with parameters
-  - **No new packages**: Uses existing limma, arrow, ggplot2, ggrepel, DT, dplyr, tidyr
 - New files: `R/helpers_phospho.R` (210 lines), `R/server_phospho.R` (650 lines)
-
-### Planned — Phase 2 (Kinase Activity & Motifs)
-- KSEA kinase-substrate enrichment analysis (`KSEAapp` package)
-- Sequence logo motif visualization (`ggseqlogo` package)
-- Kinase activity bar plots and results table
-
-### Planned — Phase 3 (Advanced)
-- Protein-level abundance correction (isolate phosphorylation stoichiometry)
-- PhosR integration (RUVphospho normalization, kinase profiling, signalome)
-- AI context integration for phospho results
-- FASTA-based protein-relative position mapping
 
 ## [2.3.0] - 2026-02-17
 

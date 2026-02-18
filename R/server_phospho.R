@@ -355,6 +355,45 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
         nav_panel("QC: Completeness",
           plotOutput("phospho_completeness", height = "450px")
+        ),
+
+        nav_panel("Kinase Activity",
+          tags$div(
+            style = "display: flex; align-items: center; gap: 15px; flex-wrap: wrap; margin-bottom: 15px;",
+            actionButton("run_ksea", "Run Kinase Enrichment (KSEA)",
+                         class = "btn-info", icon = icon("project-diagram")),
+            tags$span(id = "ksea_status_text", class = "text-muted small")
+          ),
+          tags$p(class = "text-muted small",
+            "Infers upstream kinase activity from phosphosite fold-changes using the ",
+            "PhosphoSitePlus + NetworKIN kinase-substrate database. ",
+            "Requires the ", tags$code("KSEAapp"), " R package. ",
+            "Reference: Casado et al. 2013, Sci Signal 6:rs6; Wiredja et al. 2017."
+          ),
+          hr(),
+          plotOutput("ksea_barplot", height = "500px"),
+          hr(),
+          tags$div(style = "text-align: right; margin-bottom: 10px;",
+            downloadButton("download_ksea_table", "Export CSV",
+                           class = "btn-success btn-sm")
+          ),
+          DT::DTOutput("ksea_results_table")
+        ),
+
+        nav_panel("Motif Analysis",
+          tags$p(class = "text-muted small",
+            "Sequence logos show the amino acid enrichment around regulated phosphosites. ",
+            "Distinct motifs suggest specific kinase families are active. For example, ",
+            "proline at +1 indicates proline-directed kinases (CDKs, MAPKs); ",
+            "acidic residues (D/E) at +1 to +3 suggest CK2. ",
+            "Requires FASTA upload (sidebar) and the ", tags$code("ggseqlogo"), " R package."
+          ),
+          tags$p(class = "text-muted small",
+            "Reference: Wagih O (2017) ggseqlogo, Bioinformatics 33:3645-3647."
+          ),
+          hr(),
+          plotOutput("phospho_motif_up", height = "220px"),
+          plotOutput("phospho_motif_down", height = "220px")
         )
       )
     )
@@ -419,6 +458,19 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       de <- merge(de, values$phospho_site_info, by = "SiteID", all.x = TRUE)
     }
 
+    # Apply protein correction if active
+    correction_active <- FALSE
+    if (isTRUE(input$phospho_protein_correction) && !is.null(values$fit)) {
+      corrected <- phospho_corrected_de()
+      if (!is.null(corrected)) {
+        # Replace logFC with corrected values
+        corr_map <- stats::setNames(corrected$corrected_logFC, corrected$SiteID)
+        matched <- corr_map[de$SiteID]
+        de$logFC[!is.na(matched)] <- matched[!is.na(matched)]
+        correction_active <- TRUE
+      }
+    }
+
     # Significance categories
     de$sig <- dplyr::case_when(
       de$adj.P.Val < 0.05 & abs(de$logFC) > 1 ~ "Significant",
@@ -461,10 +513,11 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
       ggplot2::geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray50") +
       ggplot2::labs(
-        title = paste("Phosphosite Volcano:", input$phospho_contrast_selector),
+        title = paste("Phosphosite Volcano:", input$phospho_contrast_selector,
+                      if (correction_active) "(protein-corrected)" else ""),
         subtitle = sprintf("%d sites | %d significant (\u2191%d \u2193%d) at |FC|>2 & FDR<0.05",
                            nrow(de), n_sig, n_up, n_down),
-        x = "log2 Fold Change (phosphosite)",
+        x = if (correction_active) "Corrected log2 FC (phospho - protein)" else "log2 Fold Change (phosphosite)",
         y = "-log10(adjusted p-value)"
       ) +
       ggplot2::theme_bw(base_size = 14) +
@@ -647,6 +700,274 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         x = "% of Samples with Quantification", y = "Number of Phosphosites"
       ) +
       ggplot2::theme_bw(base_size = 14)
+  })
+
+  # ============================================================================
+  #  Phase 2: FASTA Upload
+  # ============================================================================
+  observeEvent(input$phospho_fasta_file, {
+    req(input$phospho_fasta_file)
+    tryCatch({
+      seqs <- read_fasta_sequences(input$phospho_fasta_file$datapath)
+      values$phospho_fasta_sequences <- seqs
+      showNotification(
+        sprintf("FASTA loaded: %d protein sequences", length(seqs)),
+        type = "message", duration = 5
+      )
+    }, error = function(e) {
+      showNotification(paste("Error reading FASTA:", e$message),
+                       type = "error", duration = 10)
+    })
+  })
+
+  # ============================================================================
+  #  Phase 2: KSEA Kinase Activity Inference
+  # ============================================================================
+  observeEvent(input$run_ksea, {
+    req(values$phospho_fit, input$phospho_contrast_selector)
+
+    if (!requireNamespace("KSEAapp", quietly = TRUE)) {
+      showNotification(
+        "KSEAapp package not installed. Run: install.packages('KSEAapp')",
+        type = "error", duration = 10)
+      return()
+    }
+
+    withProgress(message = "Running kinase activity inference...", {
+      incProgress(0.2, detail = "Preparing input...")
+
+      ksea_input <- prepare_ksea_input(
+        values$phospho_fit,
+        input$phospho_contrast_selector,
+        values$phospho_site_info
+      )
+
+      if (nrow(ksea_input) < 5) {
+        showNotification(
+          sprintf("Only %d sites with gene annotations. Need more for KSEA.", nrow(ksea_input)),
+          type = "error", duration = 8)
+        return()
+      }
+
+      incProgress(0.5, detail = "Computing KSEA scores...")
+
+      tryCatch({
+        # Load PhosphoSitePlus + NetworKIN kinase-substrate database
+        ks_data <- NULL
+        data("KSData", package = "KSEAapp", envir = environment())
+        ks_data <- get("KSData", envir = environment())
+
+        # Suppress KSEAapp's built-in plot output
+        grDevices::png(tempfile())
+        ksea_scores <- KSEAapp::KSEA.Scores(
+          ks_data,
+          ksea_input,
+          NetworKIN    = TRUE,
+          NetworKIN.cutoff = 5,
+          m.cutoff     = 2,
+          p.cutoff     = 0.05
+        )
+        grDevices::dev.off()
+
+        values$ksea_results <- ksea_scores
+        values$ksea_last_contrast <- input$phospho_contrast_selector
+
+        incProgress(1.0, detail = "Complete!")
+
+        n_sig <- sum(ksea_scores$FDR < 0.05, na.rm = TRUE)
+        showNotification(
+          sprintf("\u2713 KSEA complete: %d kinases scored, %d significant (FDR < 0.05).",
+                  nrow(ksea_scores), n_sig),
+          type = "message", duration = 8
+        )
+
+        add_to_log("KSEA Kinase Activity", c(
+          sprintf("# Contrast: %s", input$phospho_contrast_selector),
+          sprintf("# Input: %d phosphosites with gene annotations", nrow(ksea_input)),
+          "data('KSData', package = 'KSEAapp')",
+          "ksea_scores <- KSEAapp::KSEA.Scores(KSData, ksea_input, NetworKIN=TRUE, NetworKIN.cutoff=5, m.cutoff=2)"
+        ))
+      }, error = function(e) {
+        try(grDevices::dev.off(), silent = TRUE)
+        showNotification(paste("KSEA error:", e$message),
+                         type = "error", duration = 10)
+      })
+    })
+  })
+
+  # KSEA Bar Plot
+  output$ksea_barplot <- renderPlot({
+    req(values$ksea_results)
+
+    ks <- values$ksea_results
+    ks <- ks[order(ks$z.score, decreasing = TRUE), ]
+
+    # Show significant kinases, or top 20 if none significant
+    sig_ks <- ks[ks$FDR < 0.05, ]
+    if (nrow(sig_ks) == 0) sig_ks <- utils::head(ks, 20)
+
+    # Take top 15 activated + top 15 inhibited
+    top_up   <- utils::head(sig_ks[sig_ks$z.score > 0, ], 15)
+    top_down <- utils::tail(sig_ks[sig_ks$z.score < 0, ], 15)
+    plot_ks  <- rbind(top_up, top_down)
+
+    if (nrow(plot_ks) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No kinases scored (insufficient substrate matches)")
+      return()
+    }
+
+    plot_ks <- plot_ks[order(plot_ks$z.score), ]
+    plot_ks$Kinase.Gene <- factor(plot_ks$Kinase.Gene, levels = plot_ks$Kinase.Gene)
+    plot_ks$Direction <- ifelse(plot_ks$z.score > 0, "Activated", "Inhibited")
+
+    ggplot2::ggplot(plot_ks, ggplot2::aes(x = z.score, y = Kinase.Gene, fill = Direction)) +
+      ggplot2::geom_col(alpha = 0.85) +
+      ggplot2::scale_fill_manual(values = c("Activated" = "#E63946", "Inhibited" = "#457B9D")) +
+      ggplot2::geom_text(
+        ggplot2::aes(label = sprintf("n=%d", m)),
+        hjust = ifelse(plot_ks$z.score > 0, -0.1, 1.1), size = 3
+      ) +
+      ggplot2::labs(
+        title = paste("Kinase Activity:", values$ksea_last_contrast),
+        subtitle = "KSEA z-scores (PhosphoSitePlus + NetworKIN substrates)",
+        x = "KSEA z-score", y = NULL
+      ) +
+      ggplot2::theme_bw(base_size = 13) +
+      ggplot2::theme(legend.position = "bottom")
+  })
+
+  # KSEA Results Table
+  output$ksea_results_table <- DT::renderDT({
+    req(values$ksea_results)
+    ks <- values$ksea_results
+    # Round numeric columns
+    num_cols <- intersect(c("z.score", "p.value", "FDR", "mS"), names(ks))
+    for (col in num_cols) {
+      ks[[col]] <- signif(ks[[col]], 3)
+    }
+    DT::datatable(ks, rownames = FALSE, filter = "top",
+      options = list(pageLength = 20, scrollX = TRUE,
+        order = list(list(which(names(ks) == "FDR") - 1, "asc")))
+    )
+  })
+
+  # Download KSEA table
+  output$download_ksea_table <- downloadHandler(
+    filename = function() {
+      paste0("ksea_results_", gsub(" ", "_", values$ksea_last_contrast %||% ""), ".csv")
+    },
+    content = function(file) {
+      req(values$ksea_results)
+      write.csv(values$ksea_results, file, row.names = FALSE)
+    }
+  )
+
+  # ============================================================================
+  #  Phase 2: Motif Analysis (ggseqlogo)
+  # ============================================================================
+
+  # Compute flanking sequences reactively when FASTA + DE are available
+  phospho_flanking_seqs <- reactive({
+    req(values$phospho_fit, values$phospho_fasta_sequences,
+        values$phospho_site_info, input$phospho_contrast_selector)
+
+    de <- limma::topTable(values$phospho_fit,
+                          coef = input$phospho_contrast_selector,
+                          number = Inf)
+    extract_flanking_sequences(
+      values$phospho_site_info, de,
+      values$phospho_fasta_sequences, window = 7L
+    )
+  })
+
+  output$phospho_motif_up <- renderPlot({
+    seqs <- phospho_flanking_seqs()
+
+    if (is.null(seqs) || length(seqs$up) < 10) {
+      plot.new()
+      if (is.null(values$phospho_fasta_sequences)) {
+        text(0.5, 0.5, "Upload a FASTA file (sidebar) to enable motif analysis",
+             cex = 1.1, col = "gray50")
+      } else {
+        text(0.5, 0.5,
+             sprintf("Insufficient up-regulated sites for motif (need >= 10, have %d)",
+                     length(seqs$up)),
+             cex = 1.1, col = "gray50")
+      }
+      return()
+    }
+
+    if (!requireNamespace("ggseqlogo", quietly = TRUE)) {
+      plot.new()
+      text(0.5, 0.5, "ggseqlogo package not installed.\nRun: install.packages('ggseqlogo')",
+           cex = 1.1, col = "gray50")
+      return()
+    }
+
+    ggseqlogo::ggseqlogo(seqs$up, method = "bits", seq_type = "aa") +
+      ggplot2::ggtitle(sprintf("Up-regulated phosphosites (n=%d)", length(seqs$up))) +
+      ggplot2::theme(plot.title = ggplot2::element_text(size = 12))
+  })
+
+  output$phospho_motif_down <- renderPlot({
+    seqs <- phospho_flanking_seqs()
+
+    if (is.null(seqs) || length(seqs$down) < 10) {
+      plot.new()
+      if (is.null(values$phospho_fasta_sequences)) {
+        text(0.5, 0.5, "Upload a FASTA file (sidebar) to enable motif analysis",
+             cex = 1.1, col = "gray50")
+      } else {
+        text(0.5, 0.5,
+             sprintf("Insufficient down-regulated sites for motif (need >= 10, have %d)",
+                     length(seqs$down)),
+             cex = 1.1, col = "gray50")
+      }
+      return()
+    }
+
+    if (!requireNamespace("ggseqlogo", quietly = TRUE)) {
+      plot.new()
+      text(0.5, 0.5, "ggseqlogo package not installed.\nRun: install.packages('ggseqlogo')",
+           cex = 1.1, col = "gray50")
+      return()
+    }
+
+    ggseqlogo::ggseqlogo(seqs$down, method = "bits", seq_type = "aa") +
+      ggplot2::ggtitle(sprintf("Down-regulated phosphosites (n=%d)", length(seqs$down))) +
+      ggplot2::theme(plot.title = ggplot2::element_text(size = 12))
+  })
+
+  # ============================================================================
+  #  Phase 3: Protein-Level Abundance Correction
+  # ============================================================================
+
+  # Reactive: corrected DE table (only when checkbox is checked + both fits exist)
+  phospho_corrected_de <- reactive({
+    req(input$phospho_protein_correction,
+        values$phospho_fit, values$fit, values$phospho_site_info,
+        input$phospho_contrast_selector)
+
+    # Check if the same contrast exists in the protein-level fit
+    protein_contrasts <- colnames(values$fit$contrasts)
+    phospho_contrast  <- input$phospho_contrast_selector
+
+    if (!phospho_contrast %in% protein_contrasts) return(NULL)
+
+    correct_phospho_for_protein(
+      values$phospho_fit, values$fit,
+      phospho_contrast, values$phospho_site_info
+    )
+  })
+
+  # Override volcano with corrected values when correction is active
+  observe({
+    if (isTRUE(input$phospho_protein_correction) && !is.null(phospho_corrected_de())) {
+      values$phospho_corrected_active <- TRUE
+    } else {
+      values$phospho_corrected_active <- FALSE
+    }
   })
 
 }

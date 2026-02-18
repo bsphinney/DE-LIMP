@@ -279,9 +279,13 @@ server_session <- function(input, output, session, values, add_to_log) {
         phospho_fit = values$phospho_fit,
         phospho_site_matrix_filtered = values$phospho_site_matrix_filtered,
         phospho_input_mode = values$phospho_input_mode,
+        # Phospho Phase 2/3
+        ksea_results = values$ksea_results,
+        ksea_last_contrast = values$ksea_last_contrast,
+        phospho_fasta_sequences = values$phospho_fasta_sequences,
         # Save timestamp & version
         saved_at   = Sys.time(),
-        app_version = "DE-LIMP v2.4"
+        app_version = "DE-LIMP v2.5"
       )
       saveRDS(session_data, file)
       showNotification("Session saved successfully!", type = "message")
@@ -335,6 +339,10 @@ server_session <- function(input, output, session, values, add_to_log) {
       values$phospho_fit <- session_data$phospho_fit
       values$phospho_site_matrix_filtered <- session_data$phospho_site_matrix_filtered
       values$phospho_input_mode <- session_data$phospho_input_mode
+      # Phospho Phase 2/3
+      values$ksea_results <- session_data$ksea_results
+      values$ksea_last_contrast <- session_data$ksea_last_contrast
+      values$phospho_fasta_sequences <- session_data$phospho_fasta_sequences
 
       # Restore repro log and append load event
       values$repro_log  <- session_data$repro_log %||% values$repro_log

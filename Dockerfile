@@ -21,10 +21,13 @@ RUN apt-get update && apt-get install -y \
 # 2. Install R Dependencies (CRAN)
 RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager', 'markdown'), repos='https://cloud.r-project.org/')"
 
-# 2b. Install graphics/font dependencies for clusterProfiler/enrichplot
+# 2b. Install phosphoproteomics packages (KSEA kinase activity, sequence logos)
+RUN R -e "install.packages(c('KSEAapp', 'ggseqlogo'), repos='https://cloud.r-project.org/')"
+
+# 2c. Install graphics/font dependencies for clusterProfiler/enrichplot
 RUN R -e "install.packages(c('systemfonts', 'gdtools', 'Rcpp'), repos='https://cloud.r-project.org/')"
 
-# 2c. Install network visualization dependencies for enrichplot
+# 2d. Install network visualization dependencies for enrichplot
 RUN R -e "install.packages(c('ggraph', 'graphlayouts', 'tidygraph', 'scatterpie', 'shadowtext', 'ggforce'), repos='https://cloud.r-project.org/')"
 
 # 3. Install Bioconductor Packages (Specific versions for stability)

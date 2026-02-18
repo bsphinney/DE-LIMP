@@ -93,7 +93,8 @@ required_pkgs <- c("shiny", "bslib", "readr", "tibble", "dplyr", "tidyr",
                    "ggplot2", "httr2", "rhandsontable", "DT", "arrow",
                    "ComplexHeatmap", "shinyjs", "plotly", "stringr", "limma",
                    "clusterProfiler", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db",
-                   "enrichplot", "ggridges", "ggrepel", "markdown", "curl")
+                   "enrichplot", "ggridges", "ggrepel", "markdown", "curl",
+                   "KSEAapp", "ggseqlogo")
 
 # Only install truly missing packages (don't update already-loaded packages)
 missing_pkgs <- character(0)
@@ -224,7 +225,12 @@ server <- function(input, output, session) {
     phospho_site_info = NULL,
     phospho_fit = NULL,
     phospho_site_matrix_filtered = NULL,
-    phospho_input_mode = NULL
+    phospho_input_mode = NULL,
+    # Phospho Phase 2/3
+    ksea_results = NULL,
+    ksea_last_contrast = NULL,
+    phospho_fasta_sequences = NULL,
+    phospho_corrected_active = FALSE
   )
 
   # --- Shared helper: append to reproducibility log ---
