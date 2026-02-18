@@ -360,7 +360,8 @@ server_de <- function(input, output, session, values, add_to_log) {
     filename = function() { paste0("Limpa_Results_", make.names(input$contrast_selector), ".csv") },
     content = function(file) {
       req(values$fit, values$y_protein)
-      de_stats <- topTable(values$fit, coef=input$contrast_selector, number=Inf) %>% rownames_to_column("Protein.Group")
+      de_stats <- topTable(values$fit, coef=input$contrast_selector, number=Inf) %>% as.data.frame()
+      if (!"Protein.Group" %in% colnames(de_stats)) de_stats <- de_stats %>% rownames_to_column("Protein.Group")
       exprs_data <- as.data.frame(values$y_protein$E) %>% rownames_to_column("Protein.Group")
       full_data <- left_join(de_stats, exprs_data, by="Protein.Group")
       write.csv(full_data, file, row.names=FALSE)
