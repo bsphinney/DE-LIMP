@@ -507,23 +507,23 @@ build_ui <- function(is_hf_space) {
                 # TAB 5: P-value Distribution Diagnostic
                 nav_panel("P-value Distribution",
                   icon = icon("chart-column"),
-                  # Comparison selector banner with buttons
-                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;",
-                    div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
-                      icon("microscope"),
-                      span("Viewing Comparison:", style = "font-weight: 500;")
-                    ),
-                    div(style = "flex: 1 1 auto; min-width: 200px;",
-                      selectInput("contrast_selector_pvalue", NULL,
-                        choices = NULL,
-                        width = "100%"
+                  # Comparison selector banner — two-row layout for full-width dropdown
+                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px;",
+                    div(style = "display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;",
+                      div(style = "display: flex; align-items: center; gap: 10px;",
+                        icon("microscope"),
+                        span("Viewing Comparison:", style = "font-weight: 500;")
+                      ),
+                      div(style = "display: flex; gap: 6px;",
+                        actionButton("pvalue_hist_info_btn", icon("question-circle"), title = "How do I interpret this?",
+                          class = "btn-outline-light btn-sm"),
+                        actionButton("fullscreen_pvalue_hist", "\U0001F50D Fullscreen",
+                          class = "btn-outline-light btn-sm")
                       )
                     ),
-                    div(style = "display: flex; gap: 6px; flex-shrink: 0;",
-                      actionButton("pvalue_hist_info_btn", icon("question-circle"), title = "How do I interpret this?",
-                        class = "btn-outline-light btn-sm"),
-                      actionButton("fullscreen_pvalue_hist", "\U0001F50D Fullscreen",
-                        class = "btn-outline-light btn-sm")
+                    selectInput("contrast_selector_pvalue", NULL,
+                      choices = NULL,
+                      width = "100%"
                     )
                   ),
                   card_body(
