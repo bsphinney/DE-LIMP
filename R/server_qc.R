@@ -778,7 +778,8 @@ server_qc <- function(input, output, session, values) {
         plot.subtitle = element_text(color = "gray40", size = 11),
         panel.grid.minor = element_blank()
       ) +
-      scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1))
+      scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
   })
 
   # P-value histogram info modal
@@ -853,7 +854,8 @@ server_qc <- function(input, output, session, values) {
         plot.subtitle = element_text(color = "gray40", size = 13),
         panel.grid.minor = element_blank()
       ) +
-      scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1))
+      scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
 
     showModal(modalDialog(
       title = "P-value Distribution - Fullscreen View",
