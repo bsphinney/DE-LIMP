@@ -5,6 +5,46 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-02-17
+
+### Added
+- **Phosphoproteomics Tab (Phase 1)**: Site-level differential phosphorylation analysis
+  - **Auto-detection**: Scans `Modified.Sequence` for `UniMod:21` on file upload; shows blue banner in Data Overview with "Open Phospho Tab" button
+  - **Two input paths**:
+    - Path A (recommended): Upload DIA-NN 1.9+ `site_matrix_0.9.parquet` or `site_matrix_0.99.parquet`
+    - Path B: Parse phosphosites directly from `report.parquet` with configurable localization confidence threshold (0.5–1.0)
+  - **Site extraction algorithm** (Path B): Character-by-character Modified.Sequence parser to locate `(UniMod:21)` positions, expand multiply-phosphorylated peptides, aggregate per SiteID × Run via max intensity ("Top 1" method)
+  - **Site-level limma DE**: Filter sites (≥2 non-NA per group), tail-based imputation (Perseus-style: mean − 1.8 SD, width 0.3 SD), optional normalization (none/median/quantile), standard limma pipeline
+  - **Phospho Volcano**: ggplot2 volcano with ggrepel labels formatted as "Gene Residue+Position" (e.g., "MAPK1 T185"). Colors: Significant=#E63946, FDR-only=#457B9D, NS=gray70. Downloadable as PDF.
+  - **Site Table**: DT datatable with SiteID, Gene, Residue, Position, logFC, adj.P.Val, localization confidence. Filterable, sortable, downloadable as CSV.
+  - **Residue Distribution**: Grouped bar chart (S/T/Y) comparing "All quantified" vs "Significant". Subtitle with expected ~85% Ser / ~14% Thr / ~1% Tyr.
+  - **QC: Completeness**: Histogram of per-site % samples quantified with red dashed line at 50% threshold.
+  - **Sidebar controls**: Conditional on phospho detection — input mode, localization slider, normalization radio, "Run Phosphosite Analysis" button
+  - **Normalization warning**: Yellow alert for phospho-enriched data explaining DIA-NN normalization assumptions
+  - **Educational expandable**: Explains site-level vs protein-level analysis, localization confidence, imputation approach
+  - **Session save/load**: All phospho state persisted and restored
+  - **Reproducibility logging**: Pipeline steps logged with parameters
+  - **No new packages**: Uses existing limma, arrow, ggplot2, ggrepel, DT, dplyr, tidyr
+- New files: `R/helpers_phospho.R` (210 lines), `R/server_phospho.R` (650 lines)
+
+### Planned — Phase 2 (Kinase Activity & Motifs)
+- KSEA kinase-substrate enrichment analysis (`KSEAapp` package)
+- Sequence logo motif visualization (`ggseqlogo` package)
+- Kinase activity bar plots and results table
+
+### Planned — Phase 3 (Advanced)
+- Protein-level abundance correction (isolate phosphorylation stoichiometry)
+- PhosR integration (RUVphospho normalization, kinase profiling, signalome)
+- AI context integration for phospho results
+- FASTA-based protein-relative position mapping
+
+## [2.3.0] - 2026-02-17
+
+### Changed
+- **Modularization**: Split 5,139-line monolith into `app.R` orchestrator + 12 `R/` module files
+- **Upload limit**: Increased from 500 MB to 5 GB
+- **Dockerfile**: Updated for directory-based `runApp()` and `COPY R/` directive
+
 ## [2.2.0] - 2026-02-17
 
 ### Added
