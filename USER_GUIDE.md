@@ -4,56 +4,47 @@ Welcome to **DE-LIMP** (Differential Expression & Limpa Proteomics), your intera
 
 ---
 
-## ✨ What's New in v2.2 (February 2026)
+## ✨ What's New in v2.5 (February 2026)
 
-### Contextual Help System (NEW)
-- **15 info modal buttons** across every major tab — click the `?` icon for in-context guidance
-- Each modal explains what the plot/table shows, what "good" and "bad" patterns look like, and actionable next steps
-- Covers: Normalization Diagnostic, DPC Fit, MDS Plot, Group Distribution, P-value Distribution, Signal Distribution, Expression Grid, DE Dashboard, Consistent DE, CV Distribution, QC Trends, GSEA (overview + column definitions), Methodology, and Data Chat
+### GSEA Expansion
+- **Four gene-set databases**: Biological Process (BP), Molecular Function (MF), Cellular Component (CC), and KEGG pathways
+- **Ontology selector dropdown**: Choose which database to run from the GSEA tab
+- **Per-ontology caching**: Results are cached separately for each database and contrast — switch instantly without re-running
+- **Automatic organism detection**: The app queries the UniProt API to identify organism from your protein IDs, supporting non-human datasets without manual configuration
 
-### Improved DE Dashboard
-- **Volcano → Table filtering**: Selecting proteins in the volcano plot now automatically filters the results table to show only selected proteins
-- **MDS Plot legend**: Color-coded group legend now visible inside the plot (bottom-right with white background)
-- **Heatmap expanded by default**: DE Dashboard heatmap accordion opens expanded instead of collapsed
+### AI Summary — All Comparisons
+- New **"Summarize All Comparisons"** mode analyzes every contrast simultaneously
+- Identifies **cross-comparison biomarkers** (proteins significant in multiple contrasts) and shared biological themes
+- **Info modal** explains exactly what data is sent to the AI and how results are generated
 
-### Cleaner Layouts
-- "What am I looking at?" (Normalization Diagnostic) and "How do I interpret this?" (P-value Distribution) moved from inline expandable sections to modal dialogs — no longer interfere with plots
-- P-value guidance banner moved below the plot so the comparison dropdown has space
+### MDS Plot Coloring
+- Color samples by **Group**, **Batch**, or any covariate column
+- **Colorblind-friendly palette** applied across all MDS color modes
+
+### Complete Dataset Export
+- **Download all results at once** from the Dataset Summary tab
+- Export includes: all contrast tables, full expression matrix, and sample metadata
+
+### Phosphoproteomics
+- **Phase 1 — Site-Level DE**: Auto-detection of phospho data on upload, site-level differential expression with volcano plot, results table, residue distribution, and QC completeness
+- **Phase 2 — Kinase Activity & Motifs**: KSEA kinase activity inference from phosphosite fold-changes, sequence logo motif analysis for enriched residue patterns
+- **Phase 3 — Advanced**: Protein-level abundance correction to isolate phosphorylation stoichiometry, AI context integration for phospho results
+
+### Code Modularization
+- App split from a single `DE-LIMP.R` monolith into a modular `R/` directory with `app.R` orchestrator
+- 12 focused module files for easier maintenance and development
 
 ---
 
-## What's New in v2.1 (February 2026)
+## Previous: v2.1-2.2 Highlights
 
-### XIC Chromatogram Viewer
-- **Inspect fragment-level chromatograms** for any differentially expressed protein
-- Supports **DIA-NN 1.x and 2.x** XIC formats with automatic detection
-- **Split-axis MS1/MS2 view**: MS1 precursor on top, MS2 fragments below with independent y-axes
-- **Ion Mobility support**: Mobilogram visualization for timsTOF/PASEF data with prominent mode indicator
-- Three display modes: Facet by sample, Facet by fragment, and Intensity alignment
-- **MS2 Intensity Alignment**: Spectronaut-style stacked bar chart for fragment ion ratio consistency with automatic inconsistency detection
-- **Auto-detection**: XIC directory path auto-populates when data is loaded; XICs auto-load when detected
-- Available for local and HPC deployments (XIC files too large for cloud)
-
-### Major UI/UX Enhancements
-
-**Comparison Selector Synchronization**
-- All comparison selectors now sync automatically across tabs
-- Purple gradient banners show active comparison on Signal Distribution, Expression Grid, and P-value Distribution tabs
-- Change any selector → all others update immediately
-
-**Enhanced Visualizations**
-- **Volcano Plot**: Now includes colored threshold lines (blue FDR, orange logFC) with significance criteria legend box
-- **Dataset Summary**: Shows DE protein counts per comparison with explicit directional arrows (e.g., "↑ 189 proteins higher in Evosep")
-- **P-value Distribution**: New diagnostic plot with automated pattern detection and color-coded guidance banners
-- **CV Distribution**: New histogram showing protein variability distribution per experimental group
-- **Signal Distribution**: Always shows DE coloring automatically (no manual toggle needed)
-
-**AI Summary**
-- Moved from modal popup to dedicated sub-tab in Data Overview
-- Results display inline for easier workflow
-
-**Responsive Design**
-- All plots now use viewport-relative heights for optimal viewing on any screen size
+- **XIC Chromatogram Viewer** (v2.1): Fragment-level chromatogram inspection with DIA-NN 1.x/2.x support, split-axis MS1/MS2 view, ion mobility, and MS2 intensity alignment
+- **Comparison Selector Sync** (v2.1): All comparison selectors sync automatically across tabs
+- **Enhanced Volcano Plot** (v2.1): Colored threshold lines, significance legend, and box-select filtering
+- **P-value Distribution Diagnostic** (v2.1): Automated pattern detection with color-coded guidance banners
+- **Contextual Help System** (v2.2): 15 info modal `?` buttons across every major tab with actionable guidance
+- **Volcano → Table Filtering** (v2.2): Selecting proteins in the volcano plot filters the results table automatically
+- **Responsive Design**: All plots use viewport-relative heights for optimal viewing on any screen size
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
@@ -79,8 +70,8 @@ To use the "Chat with Data" features, you need a key from Google. It is free for
 6.  **Paste this key** into the "Gemini API Key" box in the DE-LIMP sidebar.
 
 ### 1.2 Launching the App
-1.  Open `DE-LIMP.R` in RStudio.
-2.  Click the **"Run App"** button at the top right of the script editor.
+1.  Open the DE-LIMP project folder in RStudio (or navigate to it in your R console).
+2.  Run the app with: `shiny::runApp('/path/to/de-limp/', port=3838, launch.browser=TRUE)`
 3.  The dashboard will launch in your default web browser.
 
 ---
@@ -257,9 +248,38 @@ Below the plot, the info panel shows:
 ---
 
 ### 🧬 Gene Set Enrichment (GSEA)
-1.  Click **"Run GSEA"**.
-2.  The app automatically detects if your data is Human, Mouse, or Rat based on UniProt suffixes.
-3.  View results as Dot Plots, Enrichment Maps (networks), or Ridgeplots to understand biological pathways.
+1.  Select a **database** from the ontology selector dropdown: Biological Process (BP), Molecular Function (MF), Cellular Component (CC), or KEGG pathways.
+2.  Click **"Run GSEA"** for the current contrast.
+3.  **Automatic organism detection**: The app queries the UniProt API using your protein IDs to determine the correct organism database. For human data this is instant; for non-human data (mouse, rat, etc.) the API lookup runs automatically.
+4.  **Per-ontology caching**: Results are cached separately for each database and contrast combination. Switch between BP, MF, CC, and KEGG without re-running the analysis.
+5.  **Contrast indicator**: A banner shows which contrast is active. If you change the comparison, a stale-results warning appears prompting you to re-run.
+6.  View results as Dot Plots, Enrichment Maps (networks), Ridgeplots, or browse the full Results Table.
+
+### 🔬 Phosphoproteomics
+
+The phosphoproteomics module provides site-level analysis of phosphorylation data, available when phospho-enriched data is detected.
+
+#### Auto-Detection
+- On file upload, the app scans for phospho modifications (`UniMod:21`) and displays a detection banner if phospho data is present
+- The **Phosphoproteomics** tab appears automatically when phospho data is detected
+
+#### Input Paths
+- **Site matrix upload** (recommended): Upload a DIA-NN 1.9+ `site_matrix_*.parquet` file directly
+- **Parsed from report**: The app extracts phosphosites from `Modified.Sequence` columns in your main report file
+
+#### Phase 1 — Site-Level DE
+- **Phospho Volcano Plot**: Interactive volcano plot for phosphosite-level differential expression
+- **Site Table**: Full results table with site ID, protein, gene, residue, position, fold-change, and significance
+- **Residue Distribution**: Breakdown of Serine/Threonine/Tyrosine phosphorylation frequencies
+- **QC Completeness**: Missingness analysis across sites and samples with filtering thresholds
+
+#### Phase 2 — Kinase Activity & Motifs
+- **KSEA (Kinase-Substrate Enrichment Analysis)**: Infers upstream kinase activity from phosphosite fold-changes using PhosphoSitePlus and NetworKIN databases
+- **Sequence Logo Analysis**: Visualizes enriched amino acid motifs around significant phosphosites (up-regulated vs. down-regulated)
+
+#### Phase 3 — Advanced
+- **Protein-level abundance correction**: Subtracts protein-level logFC from phosphosite logFC to isolate changes in phosphorylation stoichiometry (requires matched total proteome and phospho-enriched samples)
+- **AI context**: Phosphosite DE results and kinase activities are included in the Gemini chat context when phospho analysis is active
 
 ### 🎓 Education & Resources
 Click the **"Education"** tab to access embedded proteomics training materials without leaving the app.
@@ -330,8 +350,9 @@ You have multiple options to access DE-LIMP:
 * Note: Limited computational resources compared to local installation
 
 ### 💻 Local Installation (Recommended for Regular Use)
-* Download `DE-LIMP.R` from [GitHub Releases](https://github.com/bsphinney/DE-LIMP/releases)
-* Run with: `shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)`
+* Clone or download the DE-LIMP directory from [GitHub](https://github.com/bsphinney/DE-LIMP)
+* Run with: `shiny::runApp('/path/to/de-limp/', port=3838, launch.browser=TRUE)` (directory-based)
+* The app uses a modular structure (`app.R` + `R/` directory) — launch the project folder, not a single file
 * Full computational power of your machine
 * Better for large datasets or multiple analyses
 
@@ -350,6 +371,7 @@ You have multiple options to access DE-LIMP:
 | **"limpa package not found"** | Upgrade to R 4.5+, then run: `BiocManager::install('limpa')`. The app will auto-install missing packages on first run. |
 | **"Please select a CRAN mirror"** | This should not happen in the current version. If it does, add `options(repos = c(CRAN = "https://cloud.r-project.org"))` at the top of the script. |
 | **GSEA fails** | Ensure you are connected to the internet (it needs to download gene ontologies). |
+| **GSEA fails with organism error** | The app now auto-detects organism via UniProt API. Ensure internet connection. If detection fails, check that your protein IDs are valid UniProt accessions (e.g., P12345). |
 | **Grid View "Object not found"** | Ensure you have run the pipeline first (click "Assign Groups & Run Pipeline"). The Grid View requires processed data. |
 | **AI says "No data"** | Click the "▶ Run Pipeline" button first. The AI needs the statistical results to answer questions. Also verify your Gemini API key is entered correctly. |
 | **Example data won't download** | Check your internet connection. The file is 46MB and downloads from GitHub Releases. |

@@ -14,29 +14,36 @@
 
 ---
 
-## ✨ What's New in v2.2
+## ✨ What's New in v2.5
 
-**Contextual Help System** (February 2026):
-- ❓ **15 info modal buttons** across every major tab — click `?` for in-context guidance on any plot or table
-- Covers: QC Plots, DE Dashboard, Data Overview, Consistent DE, QC Trends, GSEA, Methodology, Data Chat
-- Each modal explains what you're seeing, what "good" and "bad" look like, and what to do next
+**🧬 GSEA Expansion**:
+- 4 enrichment databases: GO Biological Process, Molecular Function, Cellular Component, and KEGG Pathways
+- Per-ontology caching — switch databases without re-computation
+- Automatic organism detection via UniProt REST API (works for any organism)
 
-**Improved DE Dashboard**:
-- 🌋 **Volcano → Table filtering** - Selecting proteins in the volcano plot now filters the results table
-- 🗺️ **MDS Plot legend** - Color-coded group legend now visible inside the plot
-- 📊 **Heatmap expanded by default** - No more clicking to open the accordion
+**🔬 Phosphoproteomics**:
+- Auto-detection of phospho-enriched data on upload
+- Site-level differential expression via limma
+- KSEA kinase activity inference with bar plots and results tables
+- Sequence logo motif analysis for regulated phosphosites
+- Protein-level abundance correction for stoichiometry changes
 
-**Cleaner Layouts**:
-- Normalization Diagnostic and P-value Distribution help content moved to modals (no more layout interference)
-- P-value guidance banner moved below the plot so the comparison dropdown isn't crowded
+**🤖 AI Summary — All Comparisons**:
+- Analyzes all contrasts simultaneously with cross-comparison biomarker detection
+- Biological insights on high-confidence candidates
+
+**🗺️ MDS Plot Coloring**: Color by Group, Batch, or covariates
+**📦 Complete Dataset Export**: Download all contrasts + expression + metadata
+**🏗️ Code Modularization**: Split from 5,139-line monolith into app.R + 12 R/ modules
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
-### Previous: v2.1 Highlights
+### Previous: v2.1–2.2 Highlights
+- ❓ **Contextual Help System** — 15 info modal buttons across every major tab
+- 🌋 **Volcano → Table filtering** and improved DE Dashboard layout
 - 📈 **XIC Chromatogram Viewer** with MS2 Intensity Alignment and ion mobility support (Local/HPC)
 - 🎯 **Four-Way Comparison Selector Sync** across all tabs
 - 🔬 **P-value Distribution Diagnostic** with automated pattern detection
-- 🌋 **Volcano Plot Annotations** with FDR/logFC threshold legend
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
@@ -78,8 +85,15 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Multiple Covariates** - Customize covariate names (Batch, Sex, Diet, etc.) and include in models
 - **Auto-Guess Groups** - Smart detection of experimental groups from filenames
 - **Grid View** - Heatmap-style table with UniProt linking and click-to-plot
-- **GSEA Integration** - Gene Ontology enrichment analysis
+- **GSEA Integration** - GO (BP/MF/CC) and KEGG pathways with automatic organism detection
 - **Consistent DE** - Identify highly reproducible significant proteins
+
+### 🧪 Phosphoproteomics
+- **Auto-Detection** - Phospho-enriched data identified automatically on upload
+- **Site-Level DE** - Differential expression at the phosphosite level via limma
+- **KSEA Kinase Activity** - Infer upstream kinase activity from phosphosite fold-changes with bar plots and results tables
+- **Motif Analysis** - Sequence logo visualization for regulated phosphosites
+- **Abundance Correction** - Protein-level correction to isolate stoichiometry changes
 
 ### 🎓 Education Tab
 - Embedded proteomics resources and training materials
@@ -153,6 +167,7 @@ dplyr, tidyr, stringr, readr, arrow
 # Statistics & Bioinformatics
 limpa, limma, ComplexHeatmap, clusterProfiler
 org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi
+KSEAapp, ggseqlogo
 
 # Visualization
 ggplot2, ggrepel, ggridges, enrichplot
@@ -181,6 +196,7 @@ httr2, curl
 - **DE Dashboard** - Volcano plots and interactive tables (current comparison shown prominently)
 - **XIC Viewer** - Click "📈 XICs" on any DE protein to inspect fragment chromatograms (local/HPC only)
 - **Consistent DE** - High-reproducibility proteins
+- **Phosphoproteomics** - Site-level DE with KSEA kinase activity analysis
 - **GSEA** - Gene Ontology enrichment
 - **Data Chat** - AI-powered exploration
 

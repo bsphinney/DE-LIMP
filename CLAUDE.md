@@ -28,8 +28,8 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 | `R/server_de.R` | Volcano, DE table, heatmap, consistent DE, selection sync (~498 lines) |
 | `R/server_qc.R` | QC trends, diagnostic plots, p-value distribution (~828 lines) |
 | `R/server_viz.R` | Expression grid, signal distribution, AI summary (~381 lines) |
-| `R/server_gsea.R` | GSEA analysis, dot/emap/ridge plots, results table (~144 lines) |
-| `R/server_ai.R` | Data Chat tab, Gemini integration (~181 lines) |
+| `R/server_gsea.R` | GSEA analysis, multi-DB (BP/MF/CC/KEGG), organism detection, caching (~400 lines) |
+| `R/server_ai.R` | AI Summary (all contrasts), Data Chat, Gemini integration (~280 lines) |
 | `R/server_xic.R` | XIC viewer, mobilogram, alignment (~861 lines) |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, methodology (~533 lines) |
 | `R/helpers.R` | `get_diann_stats_r()`, `cal_z_score()`, `detect_organism_db()` |
@@ -84,7 +84,7 @@ server <- function(input, output, session) {
 - **Consistent DE** - 2 sub-tabs: High-Consistency Table (ranked by %CV), CV Distribution (histogram by group)
 - **Reproducibility** - Code Log + Methodology sub-tabs
 - **Phosphoproteomics** - Site-level DE: Phospho Volcano, Site Table, Residue Distribution, QC Completeness (conditional on phospho detection)
-- **Gene Set Enrichment** - Dot Plot, Enrichment Map, Ridgeplot, Results Table
+- **Gene Set Enrichment** - Ontology selector (BP/MF/CC/KEGG), Dot Plot, Enrichment Map, Ridgeplot, Results Table, per-ontology caching
 - **Data Chat** - AI-powered analysis (Google Gemini API)
 - **Education** - Learning resources
 
@@ -109,6 +109,9 @@ server <- function(input, output, session) {
 - `values$phospho_fit` - limma MArrayLM object for site-level DE
 - `values$phospho_site_matrix_filtered` - after missingness filtering + imputation
 - `values$phospho_input_mode` - "site_matrix" or "parsed_report"
+- `values$gsea_results_cache` - Named list of cached GSEA results per ontology (BP=res, MF=res, etc.)
+- `values$gsea_last_contrast` - Contrast used for cached GSEA results
+- `values$gsea_last_org_db` - OrgDb used for cached GSEA results
 
 ### LIMPA Pipeline Flow
 1. `readDIANN()` - Load DIA-NN parquet file
@@ -252,6 +255,13 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 - **Site positions are peptide-relative** in Path B (no FASTA mapping). Labeled as such in the table.
 - **Spec documents**: `PHOSPHO_TAB_SPEC.md` (full 3-phase spec with citations), `PHOSPHO_TAB_PHASE1_COMPACT.md` (Phase 1 implementation guide)
 
+### GSEA & Organism Detection
+- **Organism detection priority**: 1) Suffix-based (`_HUMAN`, `_MOUSE` in Protein.Group), 2) UniProt REST API lookup (`rest.uniprot.org/uniprotkb/{accession}` → taxonomy ID), 3) Default to human
+- **ID mapping fallback**: Try UNIPROT → ENTREZID first, then SYMBOL → ENTREZID
+- **ID format handling**: Strips pipe format (`sp|ACC|NAME`), isoform suffixes (`-2`), organism suffixes (`_HUMAN`)
+- **Per-ontology caching**: `values$gsea_results_cache` is a named list keyed by ontology (BP/MF/CC/KEGG)
+- **Taxonomy mapping**: 12 species mapped from NCBI taxonomy ID to Bioconductor OrgDb name
+
 ### XIC Viewer Patterns
 - **Arrow masks dplyr**: `arrow::select()` masks `dplyr::select()` — always use `dplyr::select()` explicitly in XIC code
 - **Avoid rlang in Arrow context**: `rlang::sym()` and tidy `rename()` fail with Arrow — use base R `df[df$col %in% vals, ]` and `names(df)[...] <- "new"`
@@ -280,7 +290,7 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 
 ## Version History
 
-Current version: **v2.4.0** (2026-02-17). See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
+Current version: **v2.5.0** (2026-02-18). See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
 
 ### Key Architecture Decisions (for context)
 - **Modularization** (v2.3): Split 5,139-line monolith into `app.R` orchestrator + 12 `R/` module files. Each server module receives `(input, output, session, values, ...)`. `app.R` explicitly sources `R/` for compatibility with both `runApp('.')` and `runApp('app.R')`.
@@ -292,6 +302,8 @@ Current version: **v2.4.0** (2026-02-17). See [CHANGELOG.md](CHANGELOG.md) for d
 - **P-value Distribution Diagnostic** (v2.1): Automated health assessment with color-coded guidance banners (healthy/warning/danger/info patterns).
 - **Assign Groups** (v2.1): Moved from modal to permanent Data Overview sub-tab for better layout.
 - **Phosphoproteomics Phase 1** (v2.4): Site-level DE via limma with two input paths (site matrix upload or parsed from report). Auto-detection on file upload. Independent from protein-level pipeline. No new packages required.
+- **GSEA Expansion** (v2.5): Multi-database enrichment (BP/MF/CC/KEGG) with per-ontology caching. UniProt REST API organism detection when protein IDs lack species suffixes. Robust ID extraction handles pipe-separated, isoform, and organism suffix formats.
+- **AI Summary All-Contrasts** (v2.5): Loops over all `colnames(values$fit$contrasts)`, computes cross-comparison biomarkers (significant in >=2 contrasts), scales token budget by contrast count (30/20/10 top proteins).
 
 ## Current TODO
 
@@ -309,7 +321,6 @@ Current version: **v2.4.0** (2026-02-17). See [CHANGELOG.md](CHANGELOG.md) for d
 - [ ] **Phospho-specific FASTA upload**: Map peptide-relative positions to protein-relative positions for accurate site IDs and motif extraction
 
 ### General
-- [ ] GSEA: Add KEGG/Reactome enrichment; clarify which contrast is used
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
 - [ ] Publication-quality plot exports (SVG/PNG/TIFF with size controls)
 - [ ] Sample correlation heatmap (QC Plots tab)

@@ -22,22 +22,20 @@ tags:
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** and **Limma** for robust statistics, with **Google Gemini AI** integration.
 
-## ✨ What's New in v2.2
+## ✨ What's New in v2.5
 
-**Contextual Help System** (February 2026):
-- ❓ **15 info modal buttons** — click `?` on any tab for in-context guidance
-- Covers QC Plots, DE Dashboard, Data Overview, Consistent DE, QC Trends, GSEA, Methodology, Data Chat
+- 🧬 **GSEA**: 4 databases (BP/MF/CC/KEGG) with automatic organism detection
+- 🔬 **Phosphoproteomics**: Site-level DE, KSEA kinase activity, motif analysis
+- 🤖 **AI Summary**: Analyzes all contrasts with cross-comparison biomarkers
+- 🗺️ **MDS coloring** by Group, Batch, or covariates
+- 📦 **Complete dataset export** — all contrasts + expression + metadata
+- 🏗️ **Code modularization** — split into app.R + 12 R/ modules for maintainability
 
-**Improved DE Dashboard**:
-- 🌋 Volcano → Table filtering (select proteins in volcano to filter the table)
-- 🗺️ MDS Plot legend now visible; heatmap expanded by default
-- Cleaner layouts: help content in modals, not cluttering plots
-
-**Previous highlights** (v2.1):
-- 📈 XIC Chromatogram Viewer with MS2 Intensity Alignment ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
-- 🎯 Four-Way Selector Sync across all comparison dropdowns
-- 🔬 P-value Distribution Diagnostic with automated pattern detection
-- 🌋 Volcano Plot Annotations with FDR/logFC threshold legend
+**Previous highlights** (v2.1–2.2):
+- ❓ Contextual Help System — 15 info modal `?` buttons
+- 🌋 Volcano → Table filtering and improved DE Dashboard
+- 📈 XIC Chromatogram Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
+- 🎯 Four-Way Selector Sync, P-value Diagnostics, Volcano Annotations
 
 ## 🚀 Features
 

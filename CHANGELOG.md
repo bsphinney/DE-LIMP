@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.5.0] - 2026-02-18
 
 ### Added
+- **GSEA Expansion — Multi-Database Enrichment**:
+  - **Four enrichment databases**: GO Biological Process (BP), GO Molecular Function (MF), GO Cellular Component (CC), and KEGG Pathways
+  - **Ontology selector**: Dropdown to switch between BP/MF/CC/KEGG on the GSEA tab
+  - **Per-ontology caching**: Results cached per database; switching back loads instantly without re-computation
+  - **Contrast indicator**: Shows active contrast with stale-results warning when contrast changes
+  - **UniProt API organism detection**: Queries `rest.uniprot.org` to determine organism from accession when no suffix is present — works automatically for human, mouse, rat, and 9 other species
+  - **Robust ID mapping**: Handles multiple protein ID formats (pipe-separated, isoform suffixes, organism suffixes); fallback from UNIPROT to SYMBOL ID types
+  - **KEGG organism mapping**: Supports 11 species with automatic organism code detection
+  - **Dynamic plot titles**: All GSEA plots show which database was used
+  - Updated info modals with all 4 database descriptions
+  - Session save/load for GSEA cache, last contrast, and organism DB
+
+- **AI Summary — All Comparisons Analysis**:
+  - AI Summary now analyzes **all contrasts** simultaneously, not just the selected one
+  - Cross-comparison biomarker detection: identifies proteins significant in ≥2 comparisons
+  - Enhanced prompt with 5 structured sections: Overview, Key Findings Per Comparison, Cross-Comparison Biomarkers, High-Confidence Biomarker Insights, Biological Interpretation
+  - Adaptive token budget: top 30/20/10 proteins per contrast (scales with number of contrasts)
+  - `?` info modal explaining what data is/isn't sent to Gemini API
+
+- **MDS Plot Coloring**:
+  - Color MDS plot by Group, Batch, Covariate1, or Covariate2
+  - Colorblind-friendly Okabe-Ito palette
+  - Dynamic dropdown updates when metadata changes
+
+- **Complete Dataset Export**:
+  - Download button on Dataset Summary tab
+  - Exports: protein IDs, gene symbols, DE stats for ALL contrasts (suffixed columns), per-sample expression values, metadata as header comment rows
+
 - **Phosphoproteomics Phase 2 — Kinase Activity & Motif Analysis**:
   - **KSEA kinase-substrate enrichment analysis**: Infers upstream kinase activity from phosphosite fold-changes using `KSEAapp` CRAN package with PhosphoSitePlus + NetworKIN database
   - **KSEA bar plot**: Horizontal bar chart of kinase z-scores (top 15 activated + top 15 inhibited), colored by direction, with substrate count annotations
@@ -18,16 +46,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New packages: `KSEAapp` (CRAN), `ggseqlogo` (CRAN)
 
 - **Phosphoproteomics Phase 3 — Advanced Features**:
-  - **Protein-level abundance correction**: Checkbox to subtract protein-level logFC from phosphosite logFC, isolating phosphorylation stoichiometry changes. Requires total proteome pipeline to have been run first. Volcano plot title and axis labels update to indicate corrected values.
-  - **AI context integration**: Phosphosite DE results (top 20 sites) and KSEA kinase activities (significant kinases) are automatically appended to Data Chat context when phospho analysis is active. Both manual chat and auto-analyze include phospho context.
-  - **Session persistence**: KSEA results, FASTA sequences, and all Phase 2/3 state saved/loaded with sessions.
-  - New helper functions: `read_fasta_sequences()`, `prepare_ksea_input()`, `extract_flanking_sequences()`, `correct_phospho_for_protein()`, `phospho_ai_context()`
+  - **Protein-level abundance correction**: Checkbox to subtract protein-level logFC from phosphosite logFC, isolating phosphorylation stoichiometry changes
+  - **AI context integration**: Phosphosite DE results and KSEA kinase activities appended to Data Chat context when phospho analysis is active
+  - **Session persistence**: KSEA results, FASTA sequences, and all Phase 2/3 state saved/loaded with sessions
 
 ### Changed
+- `R/server_gsea.R`: Rewritten from 144 to ~400 lines (multi-DB, caching, organism detection)
+- `R/server_ai.R`: AI Summary rewritten for all-contrast analysis; send_chat scaled for large datasets
 - `R/helpers_phospho.R`: Extended from 210 to ~380 lines (5 new helper functions)
 - `R/server_phospho.R`: Extended from 650 to ~950 lines (KSEA, motifs, protein correction)
 - `Dockerfile`: Added `KSEAapp` and `ggseqlogo` CRAN package installation
 - App version bumped to v2.5
+
+### Fixed
+- **Export CSV crash**: "Column name `Protein.Group` must not be duplicated" when limpa's topTable includes Protein.Group column
+- **Gemini token limit**: Scale data sent to AI based on sample count; group-level Mean/SD for >100 samples
+- **P-value histogram y-axis**: Cap y-axis to show distribution shape when first bin dominates; annotate clipped bin count
+- **P-value dropdown clipping**: Removed card_body wrapper and added z-index stacking to prevent plot from overlapping dropdown
+- **Comparison dropdown width**: Full-width dropdowns on all comparison banners; buttons moved inline
 
 ### Planned — Future
 - PhosR integration (RUVphospho normalization, kinase profiling, signalome)
