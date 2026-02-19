@@ -326,9 +326,21 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         meta_base <- basename(meta_samples)
         common_base <- intersect(mat_base, meta_base)
         if (length(common_base) > 0) {
-          # Use base-matched samples
           mat_idx  <- match(common_base, mat_base)
           meta_idx <- match(common_base, meta_base)
+          mat <- mat[, mat_idx, drop = FALSE]
+          colnames(mat) <- meta_samples[meta_idx]
+          common <- meta_samples[meta_idx]
+        }
+      }
+      if (length(common) == 0) {
+        # Try matching by basename with extensions stripped (.d, .raw, .mzML)
+        mat_clean  <- sub("\\.(d|raw|mzML)$", "", basename(mat_samples), ignore.case = TRUE)
+        meta_clean <- sub("\\.(d|raw|mzML)$", "", basename(meta_samples), ignore.case = TRUE)
+        common_clean <- intersect(mat_clean, meta_clean)
+        if (length(common_clean) > 0) {
+          mat_idx  <- match(common_clean, mat_clean)
+          meta_idx <- match(common_clean, meta_clean)
           mat <- mat[, mat_idx, drop = FALSE]
           colnames(mat) <- meta_samples[meta_idx]
           common <- meta_samples[meta_idx]
