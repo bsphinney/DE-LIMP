@@ -72,6 +72,114 @@ server_phospho <- function(input, output, session, values, add_to_log) {
   })
 
   # ============================================================================
+  #  Load Example Phospho Data (downloads from GitHub release)
+  # ============================================================================
+  observeEvent(input$load_example_phospho, {
+    withProgress(message = "Loading example phospho data...", {
+      tryCatch({
+        # Download the phospho report (for detection + parsed_report path)
+        incProgress(0.1, detail = "Downloading phospho report...")
+        report_url <- "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0/phospho.parquet"
+        report_tmp <- tempfile(fileext = ".parquet")
+        download.file(report_url, report_tmp, mode = "wb", quiet = TRUE)
+
+        incProgress(0.4, detail = "Downloading site matrix...")
+        # Download the site localization TSV (90% confidence)
+        site_url <- "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0/report.phosphosites_90.tsv"
+        site_tmp <- tempfile(fileext = ".tsv")
+        download.file(site_url, site_tmp, mode = "wb", quiet = TRUE)
+
+        incProgress(0.6, detail = "Loading report...")
+        # Load main report into pipeline
+        values$raw_data <- limpa::readDIANN(report_tmp, format = "parquet",
+                                             q.cutoffs = input$q_cutoff)
+        fnames <- sort(colnames(values$raw_data$E))
+        values$metadata <- data.frame(
+          ID = seq_along(fnames),
+          File.Name = fnames,
+          Group = rep("", length(fnames)),
+          Batch = rep("", length(fnames)),
+          Covariate1 = rep("", length(fnames)),
+          Covariate2 = rep("", length(fnames)),
+          stringsAsFactors = FALSE
+        )
+
+        # Store report path
+        session_report <- file.path(tempdir(), "de_limp_phospho_report.parquet")
+        file.copy(report_tmp, session_report, overwrite = TRUE)
+        values$uploaded_report_path <- session_report
+        values$original_report_name <- "phospho.parquet"
+
+        # Detect phospho data
+        values$phospho_detected <- detect_phospho(session_report)
+
+        incProgress(0.8, detail = "Loading site matrix...")
+        # Parse the site matrix TSV
+        mat_df <- utils::read.delim(site_tmp, check.names = FALSE, stringsAsFactors = FALSE)
+
+        # Extract site info columns and numeric matrix (same logic as site matrix upload)
+        info_cols <- c("Protein.Group", "Protein.Ids", "Protein.Names",
+                       "Genes", "Modified.Sequence", "Stripped.Sequence")
+        present_cols <- intersect(info_cols, names(mat_df))
+        numeric_cols <- setdiff(names(mat_df), info_cols)
+
+        mat <- as.matrix(mat_df[, numeric_cols, drop = FALSE])
+        mat[mat == 0] <- NA
+        mat <- log2(mat)
+
+        # Build site info
+        site_info <- if (length(present_cols) > 0) {
+          mat_df[, present_cols, drop = FALSE]
+        } else {
+          data.frame(row.names = seq_len(nrow(mat)))
+        }
+
+        # Parse site IDs from modified sequences if available
+        if ("Modified.Sequence" %in% names(site_info)) {
+          parsed <- parse_phospho_positions(site_info$Modified.Sequence)
+          site_info$Residue <- parsed$residue
+          site_info$Position <- parsed$position
+          site_info$SiteID <- paste0(
+            if ("Protein.Group" %in% names(site_info)) site_info$Protein.Group else "Unknown",
+            "_", parsed$residue, parsed$position
+          )
+        } else {
+          site_info$SiteID <- paste0("Site_", seq_len(nrow(mat)))
+          site_info$Residue <- NA
+          site_info$Position <- NA
+        }
+
+        rownames(mat) <- site_info$SiteID
+        values$phospho_site_matrix <- mat
+        values$phospho_site_info <- site_info
+        values$phospho_input_mode <- "site_matrix"
+
+        incProgress(1.0, detail = "Complete!")
+
+        add_to_log("Example Phospho Data Loaded", c(
+          "# Example phospho dataset downloaded from GitHub releases v1.0",
+          "# Report: phospho.parquet",
+          "# Site matrix: report.phosphosites_90.tsv (90% localization confidence)",
+          sprintf("# %d sites x %d samples", nrow(mat), ncol(mat))
+        ))
+
+        showNotification(
+          sprintf("Example phospho data loaded: %d sites x %d samples. Assign groups and run the pipeline!",
+                  nrow(mat), ncol(mat)),
+          type = "message", duration = 8
+        )
+
+        nav_select("main_tabs", "Data Overview")
+        nav_select("data_overview_tabs", "Assign Groups & Run")
+
+      }, error = function(e) {
+        showNotification(paste("Error loading example phospho data:", e$message),
+          type = "error", duration = 10)
+      })
+    })
+  })
+
+  # ============================================================================
   #  Site matrix upload (Path A: DIA-NN 1.9+ site matrix)
   # ============================================================================
   observeEvent(input$phospho_site_matrix_file, {

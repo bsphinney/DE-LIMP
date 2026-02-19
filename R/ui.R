@@ -141,6 +141,9 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
           "Upload the site localization matrix from DIA-NN (TSV or parquet format)."
         )
       ),
+      actionButton("load_example_phospho", "Load Example Phospho Data",
+        class = "btn-outline-info btn-sm w-100", icon = icon("flask"),
+        style = "margin-bottom: 10px;"),
       conditionalPanel(
         condition = "input.phospho_input_mode == 'parsed_report'",
         sliderInput("phospho_loc_threshold", "Site Localization Confidence",
