@@ -113,6 +113,19 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         # Detect phospho data
         values$phospho_detected <- detect_phospho(session_report)
 
+        incProgress(0.7, detail = "Downloading FASTA...")
+        # Download FASTA for motif analysis
+        fasta_url <- "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0/UP000005640_9606-2.fasta"
+        fasta_tmp <- tempfile(fileext = ".fasta")
+        tryCatch({
+          download.file(fasta_url, fasta_tmp, mode = "wb", quiet = TRUE)
+          values$phospho_fasta_sequences <- read_fasta_sequences(fasta_tmp)
+        }, error = function(e) {
+          showNotification(
+            paste("FASTA download failed (motif analysis unavailable):", e$message),
+            type = "warning", duration = 8)
+        })
+
         incProgress(0.8, detail = "Loading site matrix...")
         # Parse the site matrix TSV
         mat_df <- utils::read.delim(site_tmp, check.names = FALSE, stringsAsFactors = FALSE)
@@ -160,6 +173,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
           "# Example phospho dataset downloaded from GitHub releases v1.0",
           "# Report: phospho.parquet",
           "# Site matrix: report.phosphosites_90.tsv (90% localization confidence)",
+          "# FASTA: UP000005640_9606-2.fasta (human, for motif analysis)",
           sprintf("# %d sites x %d samples", nrow(mat), ncol(mat))
         ))
 
