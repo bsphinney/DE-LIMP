@@ -2,6 +2,8 @@
 
 Run DE-LIMP with full DIA-NN search capability on Windows — no R installation required.
 
+> **DIA-NN License Notice:** DIA-NN is developed by Vadim Demichev and is **free for academic and non-commercial use**. It is **not open source and cannot be redistributed**. The build script in Step 2 downloads DIA-NN directly from the [official GitHub release](https://github.com/vdemichev/DiaNN/releases) and builds a local Docker image on your machine — the binary never leaves your computer. By using this script, you agree to the [DIA-NN license terms](https://github.com/vdemichev/DiaNN/blob/master/LICENSE.md). For commercial use, contact the author directly.
+
 ## What You'll Get
 
 - DE-LIMP running at **http://localhost:3838**

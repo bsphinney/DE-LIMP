@@ -112,6 +112,8 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Methodology Capture** - Search parameters automatically added to the Methodology tab for publication-ready methods
 - **Job Queue Persistence** - Queue survives app restarts; active jobs resume polling automatically
 
+> **DIA-NN License:** DIA-NN is developed by [Vadim Demichev](https://github.com/vdemichev/DiaNN) and is free for academic/non-commercial use. It is **not open source and cannot be redistributed**. DE-LIMP does not bundle DIA-NN — the included build scripts download it directly from the official GitHub release and build a local Docker image on your machine. See the [DIA-NN license](https://github.com/vdemichev/DiaNN/blob/master/LICENSE.md) for full terms.
+
 ### 🎓 Education Tab
 - Embedded proteomics resources and training materials
 - Latest UC Davis Proteomics YouTube videos

@@ -167,6 +167,8 @@ The **"New Search"** tab lets you submit DIA-NN database searches directly from 
 > **Note:** The New Search tab only appears when at least one backend is detected. It is not shown on the Hugging Face web version.
 >
 > **Windows users:** The easiest setup is `docker compose up` which gives you the Local (Embedded) backend with no R installation. See [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md).
+>
+> **DIA-NN License:** DIA-NN is developed by [Vadim Demichev](https://github.com/vdemichev/DiaNN) and is **free for academic and non-commercial use only**. It cannot be redistributed. DE-LIMP does not bundle DIA-NN — the build scripts download it directly from the [official GitHub release](https://github.com/vdemichev/DiaNN/releases) and create a local Docker image on your machine. By using the DIA-NN search features, you agree to the [DIA-NN license terms](https://github.com/vdemichev/DiaNN/blob/master/LICENSE.md). For commercial use, contact the author directly.
 
 ### 🔌 3.1 Backend Selection
 
