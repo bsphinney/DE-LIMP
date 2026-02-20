@@ -42,6 +42,13 @@ Welcome to **DE-LIMP** (Differential Expression & Limpa Proteomics), your intera
 - **Search modes**: Library-free (default), Library-based, and Phosphoproteomics (auto-configures STY mods, --phospho-output)
 - **Methodology integration**: Search parameters automatically appear in the Methodology tab as a "0. DIA-NN DATABASE SEARCH" section
 
+### Multi-Omics Integration (MOFA2)
+- **Multi-Omics MOFA2 tab**: Unsupervised integration of 2-6 data views using MOFA2 (Multi-Omics Factor Analysis)
+- **Smart data import**: Upload RDS (DE-LIMP sessions, limma objects), CSV, TSV, or Parquet matrices with auto-log2 detection
+- **5 results visualizations**: Variance explained heatmap, factor weights browser, sample scores scatter, top features table, Factor-DE correlation
+- **Built-in example datasets**: Mouse Brain (proteomics + phospho) and TCGA Breast Cancer (mRNA + miRNA + protein) — load with one click
+- **Session support**: MOFA results saved/loaded with sessions; methodology auto-generated for publications
+
 ### Code Modularization
 - App split from a single `DE-LIMP.R` monolith into a modular `R/` directory with `app.R` orchestrator
 - 12 focused module files for easier maintenance and development
@@ -567,7 +574,65 @@ DE-LIMP can save your entire analysis state for later use.
 
 ---
 
-## 6. 🤖 AI Chat (Gemini Integration)
+## 6. Multi-Omics MOFA2
+
+The **Multi-Omics MOFA2** tab provides unsupervised multi-omics integration using MOFA2 (Multi-Omics Factor Analysis). It discovers latent factors — hidden patterns that explain variation across your datasets.
+
+### When to Use MOFA2
+- **Global + Phospho**: Separate protein abundance effects from true phospho-regulation changes
+- **Multiple experiments**: Find what's shared vs unique between different measurements
+- **QC discovery**: Identify hidden batch effects or sample outliers across views
+- **Multi-omics**: Integrate proteomics with RNA-seq, metabolomics, or other -omics data
+
+### 6.1 Loading Data Views
+
+Each MOFA view is a features × samples matrix. You can load views from:
+
+| Source | How |
+| :--- | :--- |
+| **Current DE pipeline** | View 1 auto-populates from your loaded proteomics data |
+| **Phospho tab** | Click "Use Phospho Data" to add site-level data as a view |
+| **File upload** | Upload CSV/TSV/Parquet (first column = feature IDs, remaining = samples) |
+| **RDS import** | Upload DE-LIMP session files or limma objects — the smart parser extracts the expression matrix |
+| **Example data** | Click "Mouse Brain (2-view)" or "TCGA Breast (3-view)" buttons |
+
+- **2-6 views required** — use the "Add View" button to add more, "Remove" to delete
+- **Sample matching** — the app automatically finds common samples across all views and reports overlap statistics
+
+### 6.2 Training Parameters
+
+| Parameter | Description | Default |
+| :--- | :--- | :--- |
+| **Number of Factors** | Latent factors to discover (auto or manual) | Auto (up to 15) |
+| **Convergence Mode** | Fast (~500 iter), Medium (~1000), Thorough (~5000) | Medium |
+| **Scale Views** | Equalize contribution of each view (recommended when views have different feature counts) | ON |
+| **Min Variance** | Drop factors explaining less than this % of total variance | 1% |
+| **Seed** | Random seed for reproducibility | 42 |
+
+Click **"Train MOFA Model"** to start. Training runs in an isolated subprocess and typically takes 1-5 minutes depending on data size.
+
+### 6.3 Results Tabs
+
+After training completes, five results tabs appear:
+
+1. **Variance Explained** — Heatmap showing % variance each factor explains per view. Factors loading heavily on one view indicate view-specific variation; factors loading similarly across views indicate shared biology.
+2. **Factor Weights** — Bar chart of top N features driving each factor. Select a view and factor from the dropdowns. High |weight| = strong contributor.
+3. **Sample Scores** — Scatter plot of samples in factor space, colored by experimental group. Clustering indicates shared biology captured by those factors.
+4. **Top Features** — Sortable table ranking features by absolute weight across all views for a selected factor.
+5. **Factor-DE Correlation** — Bar chart showing Pearson correlation between each factor's weights and DE log-fold-changes. Requires the DE pipeline to have been run first.
+
+### 6.4 Example Datasets
+
+Two built-in datasets for testing:
+
+| Dataset | Button | Views | Samples | Groups |
+| :--- | :--- | :--- | :--- | :--- |
+| **Mouse Brain** | "Mouse Brain (2-view)" | Global Proteomics (10,333) + Phospho (89 sites) | 16 | F_PME, F_PSE, M_PME, M_PSE |
+| **TCGA Breast Cancer** | "TCGA Breast (3-view)" | mRNA (~200) + miRNA (184) + Protein (142) | 150 | Basal, Her2, LumA |
+
+---
+
+## 7. 🤖 AI Chat (Gemini Integration)
 
 DE-LIMP features a context-aware AI assistant.
 
@@ -589,7 +654,7 @@ You aren't just chatting with a bot; you are chatting with **your specific datas
 
 ---
 
-## 7. Accessing DE-LIMP
+## 8. Accessing DE-LIMP
 
 You have multiple options to access DE-LIMP:
 
@@ -615,7 +680,7 @@ You have multiple options to access DE-LIMP:
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Issue | Solution |
 | :--- | :--- |

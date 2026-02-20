@@ -38,6 +38,13 @@
 - Results auto-load when complete, search parameters captured in Methodology tab
 - UniProt FASTA download, 6 contaminant libraries, and phosphoproteomics search mode built in
 
+**🧬 Multi-Omics MOFA2**:
+- Unsupervised integration of 2-6 data views using MOFA2 (Multi-Omics Factor Analysis)
+- Smart data import: RDS (DE-LIMP sessions, limma objects), CSV, TSV, Parquet with auto-log2 detection
+- Variance explained heatmap, factor weights browser, sample scores scatter, top features table
+- Factor-DE correlation links MOFA factors to differential expression results
+- Built-in example datasets: Mouse Brain (2-view proteomics+phospho) and TCGA Breast Cancer (3-view mRNA+miRNA+protein)
+
 **🗺️ MDS Plot Coloring**: Color by Group, Batch, or covariates
 **📦 Complete Dataset Export**: Download all contrasts + expression + metadata
 **🏗️ Code Modularization**: Split from 5,139-line monolith into app.R + 12 R/ modules
@@ -100,6 +107,14 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **KSEA Kinase Activity** - Infer upstream kinase activity from phosphosite fold-changes with bar plots and results tables
 - **Motif Analysis** - Sequence logo visualization for regulated phosphosites
 - **Abundance Correction** - Protein-level correction to isolate stoichiometry changes
+
+### 🧬 Multi-Omics Integration (MOFA2)
+- **2-6 data views** — Combine proteomics, phosphoproteomics, transcriptomics, metabolomics, etc.
+- **Smart RDS parser** — Import DE-LIMP sessions, limma EList/MArrayLM objects, or plain matrices
+- **Sample matching** — Automatic intersection of samples across views with overlap statistics
+- **5 results tabs** — Variance Explained heatmap, Factor Weights browser, Sample Scores scatter, Top Features table, Factor-DE Correlation
+- **Example datasets** — Mouse Brain (proteomics + phospho) and TCGA Breast Cancer (mRNA + miRNA + protein)
+- **Session save/load** — MOFA results persist across sessions; methodology auto-generated
 
 ### 🔬 DIA-NN Search Integration
 - **Three backends** - Local (embedded), Docker, and HPC (SSH/SLURM) — choose what fits your setup
@@ -169,13 +184,13 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 1. **Download the app:**
    ```bash
-   wget https://github.com/bsphinney/DE-LIMP/releases/latest/download/DE-LIMP.R
-   # Or download from: https://github.com/bsphinney/DE-LIMP/releases
+   git clone https://github.com/bsphinney/DE-LIMP.git
+   cd DE-LIMP
    ```
 
 2. **Run the app:**
    ```r
-   shiny::runApp('DE-LIMP.R', port=3838, launch.browser=TRUE)
+   shiny::runApp('.', port=3838, launch.browser=TRUE)
    ```
 
 3. **First-time setup:**
@@ -196,6 +211,7 @@ dplyr, tidyr, stringr, readr, arrow
 limpa, limma, ComplexHeatmap, clusterProfiler
 org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi
 KSEAapp, ggseqlogo
+MOFA2, basilisk, callr
 
 # Visualization
 ggplot2, ggrepel, ggridges, enrichplot
@@ -246,6 +262,7 @@ httr2, curl
 - **limpa:** Bioconductor package for DIA proteomics
 - **limma:** Ritchie ME et al. (2015) Nucleic Acids Res
 - **DIA-NN:** Demichev V et al. (2020) Nat Methods
+- **MOFA2:** Argelaguet R et al. (2020) Genome Biology
 
 Full methodology available in the app's "Reproducibility > Methodology" tab.
 
