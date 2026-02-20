@@ -120,36 +120,39 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 ---
 
-## 🚀 Deployment & Access
+## 🚀 Which Installation Should I Use?
 
-**DE-LIMP is available in three ways:**
+| Platform | Recommended Method | DIA-NN Search? | Guide |
+|----------|-------------------|----------------|-------|
+| **Any (just exploring)** | Web browser | No | [Hugging Face](https://huggingface.co/spaces/brettsp/de-limp-proteomics) |
+| **Windows** | Docker Compose | Yes (embedded) | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
+| **Mac** | R/RStudio (native) | Via HPC or Docker | See [Installation](#-installation) below |
+| **Linux** | R/RStudio (native) | Via HPC or Docker | See [Installation](#-installation) below |
+| **HPC cluster** | Apptainer/Singularity | Via SLURM | [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md) |
 
-### 🌐 Web Access (No Installation Required)
+### 🌐 Web Access (No Installation)
 **Try it now:** [huggingface.co/spaces/brettsp/de-limp-proteomics](https://huggingface.co/spaces/brettsp/de-limp-proteomics)
-- Run directly in your browser
-- No R installation needed
-- Perfect for quick analyses and exploring features
-- Note: Limited computational resources compared to local installation
+- Run directly in your browser — no R, no Docker, nothing to install
+- Perfect for exploring features or quick analyses with small datasets
+- Note: No DIA-NN search capability; limited computational resources
 
-### 🐳 Docker (Windows — Recommended)
-- **No R installation required** — everything runs inside Docker
-- Build DIA-NN image once, then `docker compose up`
-- Full guide: [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)
+### 🐳 Docker Compose (Windows)
+- **No R installation required** — DE-LIMP and DIA-NN both run inside Docker
+- Build DIA-NN image once, then `docker compose up` — that's it
+- Full step-by-step guide: **[WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)**
 
-### 💻 Local Installation (Mac/Linux)
-- Full computational power of your machine
-- Better for large datasets and multiple analyses
-- See Installation section below for setup instructions
-- Download from: [GitHub Releases](https://github.com/bsphinney/DE-LIMP/releases)
+> R package installation on Windows is notoriously difficult. Docker sidesteps this entirely.
 
-### 🖥️ HPC Deployment (High-Performance Computing)
-- Deploy on cluster environments (SLURM, PBS, etc.)
-- Use Apptainer/Singularity containers
-- Three deployment options including direct pull from Hugging Face
-- **SSH Remote Submission** — Run DE-LIMP on a local Mac/laptop and submit DIA-NN searches to a remote HPC cluster
+### 💻 Native R Installation (Mac / Linux)
+- Install R 4.5+ and run `shiny::runApp()` — all packages auto-install on first launch
+- Full computational power of your machine, best performance
+- For DIA-NN searches: connect to an HPC cluster via SSH, or install Docker for local searches
+- See [Installation](#-installation) section below
+
+### 🖥️ HPC Deployment
+- Deploy on cluster environments (SLURM, PBS, etc.) using Apptainer/Singularity
+- **SSH Remote Submission** — Run DE-LIMP on your laptop and submit DIA-NN searches to the cluster
 - Full guide: [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md)
-
-> **Note for Developers:** This repository is deployed to both GitHub (source code + releases) and Hugging Face Spaces (web deployment). The repositories track the same codebase but have different README.md files due to platform requirements.
 
 ---
 

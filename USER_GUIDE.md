@@ -64,7 +64,18 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
 ## 1. Getting Started
 
-### Prerequisites
+### Which Installation Method?
+
+| Platform | Recommended | What You Need | Guide |
+|----------|-------------|---------------|-------|
+| **Just exploring** | Web browser | Nothing | [Hugging Face](https://huggingface.co/spaces/brettsp/de-limp-proteomics) |
+| **Windows** | Docker Compose | Docker Desktop + Git | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
+| **Mac / Linux** | Native R | R 4.5+ and RStudio | Continue reading below |
+| **HPC cluster** | Apptainer | Singularity/Apptainer | [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md) |
+
+> **Windows users:** R package installation on Windows is often problematic. We strongly recommend the Docker approach — it bundles everything (R, all packages, and DIA-NN) in one container. See **[WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)** for a step-by-step walkthrough.
+
+### Prerequisites (Native R — Mac / Linux)
 * **R & RStudio:** Ensure you have R (version 4.5 or newer) installed.
   * **Important:** The limpa package requires R 4.5+ and Bioconductor 3.22+
   * Download R from: https://cloud.r-project.org/
@@ -593,11 +604,12 @@ You have multiple options to access DE-LIMP:
 * Full computational power of your machine
 * Better for large datasets or multiple analyses
 
-### 🐳 Docker Deployment (Windows — Recommended)
+### 🐳 Docker Compose (Windows — Recommended)
 * **No R installation required** — DE-LIMP and DIA-NN run entirely inside Docker
-* Three commands: build DIA-NN image, then `docker compose up`
+* Build DIA-NN image once, then `docker compose up` — that's it
+* Includes embedded DIA-NN search capability out of the box
 * Full step-by-step guide: [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)
-* Also works on Mac/Linux, though native R installation is easier on those platforms
+* Also works on Mac/Linux, though native R installation is typically easier on those platforms
 
 ---
 
