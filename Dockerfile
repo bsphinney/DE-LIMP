@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install R Dependencies (CRAN)
-RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager', 'markdown', 'shinyFiles', 'jsonlite'), repos='https://cloud.r-project.org/')"
+RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager', 'markdown', 'shinyFiles', 'jsonlite', 'callr'), repos='https://cloud.r-project.org/')"
 
 # 2b. Install phosphoproteomics packages (KSEA kinase activity, sequence logos)
 RUN R -e "install.packages(c('KSEAapp', 'ggseqlogo'), repos='https://cloud.r-project.org/')"
@@ -37,6 +37,10 @@ RUN R -e "BiocManager::install(c('DOSE', 'GOSemSim', 'yulab.utils'), ask=FALSE, 
 RUN R -e "BiocManager::install(c('limma', 'limpa', 'ComplexHeatmap', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'ggridges'), ask=FALSE, update=FALSE)"
 RUN R -e "BiocManager::install(c('ggtree', 'ggtangle'), ask=FALSE, update=FALSE)"
 RUN R -e "BiocManager::install(c('clusterProfiler', 'enrichplot'), ask=FALSE, update=FALSE)"
+
+# 3b. MOFA2 + basilisk (Python env managed by basilisk for mofapy2)
+RUN R -e "BiocManager::install(c('MOFA2', 'basilisk'), ask=FALSE, update=FALSE)"
+RUN R -e "library(MOFA2); basilisk::basiliskStart(MOFA2:::mofa_env) |> basilisk::basiliskStop()" 2>/dev/null || true
 
 # 4. Copy the App Files into the image
 COPY app.R /srv/shiny-server/app.R
