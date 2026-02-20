@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     libcairo2-dev \
     libxt-dev \
     cmake \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install R Dependencies (CRAN)
