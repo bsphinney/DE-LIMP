@@ -24,8 +24,10 @@ server_mofa <- function(input, output, session, values, add_to_log) {
                    style = "margin: 5px 0 0 0; opacity: 0.9; font-size: 0.9em;")
           ),
           div(style = "display: flex; gap: 8px; align-items: center;",
-            actionButton("load_mofa_example", "Load Test Data",
+            actionButton("load_mofa_example", "Mouse Brain (2-view)",
                          class = "btn-info btn-sm", icon = icon("download")),
+            actionButton("load_mofa_tcga", "TCGA Breast (3-view)",
+                         class = "btn-outline-info btn-sm", icon = icon("download")),
             actionButton("mofa_info_btn", icon("question-circle"),
                          class = "btn-outline-light btn-sm", title = "About MOFA")
           )
@@ -1189,8 +1191,34 @@ server_mofa <- function(input, output, session, values, add_to_log) {
       ),
 
       tags$hr(),
+      tags$h5("Example Datasets"),
+
+      tags$h6("Mouse Brain (2-view)"),
+      tags$ul(
+        tags$li(tags$b("Source:"), " Bhattacharya et al. ",
+                tags$em("Open-source multi-omics dataset of mouse somatosensory cortex")),
+        tags$li(tags$b("GitHub:"), " ",
+                tags$a(href = "https://github.com/gggrecco/Open-Source-Multi-Omics-Dataset-of-the-Somatosensory-Cortex-Mice",
+                       target = "_blank", "gggrecco/Open-Source-Multi-Omics-Dataset")),
+        tags$li(tags$b("Views:"), " Global proteomics (10,333 proteins) + Phosphoproteomics (89 sites)"),
+        tags$li(tags$b("Design:"), " 16 samples, prenatal methadone exposure study (PME vs PSE, Male vs Female)"),
+        tags$li(tags$b("Best for:"), " Testing abundance vs phospho-regulation deconvolution")
+      ),
+
+      tags$h6("TCGA Breast Cancer (3-view)"),
+      tags$ul(
+        tags$li(tags$b("Source:"), " The Cancer Genome Atlas (TCGA) via mixOmics R package (breast.TCGA dataset)"),
+        tags$li(tags$b("Publication:"), " ",
+                tags$a(href = "https://genomebiology.biomedcentral.com/articles/10.1186/s13059-020-02015-1",
+                       target = "_blank", "Rohart et al. (2017) PLOS Comp. Bio.")),
+        tags$li(tags$b("Views:"), " mRNA (~200 genes) + miRNA (184 features) + Protein (142 features)"),
+        tags$li(tags$b("Design:"), " 150 samples, 3 breast cancer subtypes (Basal, Her2, LumA)"),
+        tags$li(tags$b("Best for:"), " Testing 3-view multi-omics integration")
+      ),
+
+      tags$hr(),
       tags$p(class = "text-muted",
-        "Reference: Argelaguet et al. (2020) Genome Biology. ",
+        "MOFA reference: Argelaguet et al. (2020) Genome Biology. ",
         tags$a(href = "https://doi.org/10.1186/s13059-020-02015-1",
                target = "_blank", "DOI:10.1186/s13059-020-02015-1")
       ),
@@ -1243,14 +1271,13 @@ server_mofa <- function(input, output, session, values, add_to_log) {
       r2 <- values$mofa_variance_explained$r2_per_factor
       var_list <- list()
       for (group_name in names(r2)) {
-        group_data <- r2[[group_name]]
-        for (view_name in names(group_data)) {
-          vals <- group_data[[view_name]]
-          for (factor_name in names(vals)) {
+        mat <- r2[[group_name]]
+        for (i in seq_len(nrow(mat))) {
+          for (j in seq_len(ncol(mat))) {
             var_list[[length(var_list) + 1]] <- data.frame(
-              View = view_name,
-              Factor = factor_name,
-              Variance = vals[[factor_name]],
+              View = colnames(mat)[j],
+              Factor = rownames(mat)[i],
+              Variance = mat[i, j],
               stringsAsFactors = FALSE
             )
           }
@@ -1368,6 +1395,127 @@ server_mofa <- function(input, output, session, values, add_to_log) {
 
       }, error = function(e) {
         showNotification(paste("Error loading test data:", e$message),
+                         type = "error", duration = 10)
+      })
+    })
+  })
+
+  # ============================================================================
+  #      Load TCGA Breast Cancer Multi-Omics (3-view: mRNA + miRNA + Protein)
+  # ============================================================================
+
+  observeEvent(input$load_mofa_tcga, {
+    withProgress(message = "Loading TCGA breast cancer data...", {
+
+      base_url <- "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0"
+      mrna_url    <- paste0(base_url, "/tcga_mRNA.csv")
+      mirna_url   <- paste0(base_url, "/tcga_miRNA.csv")
+      protein_url <- paste0(base_url, "/tcga_protein.csv")
+      meta_url    <- paste0(base_url, "/tcga_metadata.csv")
+
+      tryCatch({
+        # Download files
+        incProgress(0.1, detail = "Downloading mRNA...")
+        mrna_tmp <- tempfile(fileext = ".csv")
+        curl::curl_download(mrna_url, mrna_tmp, quiet = TRUE)
+
+        incProgress(0.25, detail = "Downloading miRNA...")
+        mirna_tmp <- tempfile(fileext = ".csv")
+        curl::curl_download(mirna_url, mirna_tmp, quiet = TRUE)
+
+        incProgress(0.4, detail = "Downloading protein...")
+        protein_tmp <- tempfile(fileext = ".csv")
+        curl::curl_download(protein_url, protein_tmp, quiet = TRUE)
+
+        incProgress(0.55, detail = "Downloading metadata...")
+        meta_tmp <- tempfile(fileext = ".csv")
+        curl::curl_download(meta_url, meta_tmp, quiet = TRUE)
+
+        # Parse matrices
+        incProgress(0.7, detail = "Loading matrices...")
+        mrna_df <- read.csv(mrna_tmp, row.names = 1, check.names = FALSE)
+        mrna_mat <- as.matrix(mrna_df)
+
+        mirna_df <- read.csv(mirna_tmp, row.names = 1, check.names = FALSE)
+        mirna_mat <- as.matrix(mirna_df)
+
+        protein_df <- read.csv(protein_tmp, row.names = 1, check.names = FALSE)
+        protein_mat <- as.matrix(protein_df)
+
+        meta_df <- read.csv(meta_tmp, stringsAsFactors = FALSE)
+
+        # Use Subtype as Group
+        if ("Subtype" %in% names(meta_df)) {
+          meta_df$Group <- meta_df$Subtype
+        }
+
+        incProgress(0.85, detail = "Configuring views...")
+
+        # Store as MOFA views
+        values$mofa_views[["mRNA"]] <- mrna_mat
+        values$mofa_views[["miRNA"]] <- mirna_mat
+        values$mofa_views[["Protein"]] <- protein_mat
+
+        # Store metadata for sample score coloring
+        values$mofa_sample_metadata <- meta_df
+
+        # Build view configs
+        values$mofa_view_configs <- list(
+          list(
+            id = "v1", num = 1, name = "mRNA",
+            type = "proteomics_other", source = "example",
+            matrix = mrna_mat, fit = NULL,
+            n_features = nrow(mrna_mat), n_samples = ncol(mrna_mat),
+            status = "ready"
+          ),
+          list(
+            id = "v2", num = 2, name = "miRNA",
+            type = "proteomics_other", source = "example",
+            matrix = mirna_mat, fit = NULL,
+            n_features = nrow(mirna_mat), n_samples = ncol(mirna_mat),
+            status = "ready"
+          ),
+          list(
+            id = "v3", num = 3, name = "Protein",
+            type = "proteomics_other", source = "example",
+            matrix = protein_mat, fit = NULL,
+            n_features = nrow(protein_mat), n_samples = ncol(protein_mat),
+            status = "ready"
+          )
+        )
+
+        # Clear any previous MOFA results
+        values$mofa_object <- NULL
+        values$mofa_factors <- NULL
+        values$mofa_weights <- list()
+        values$mofa_variance_explained <- NULL
+        values$mofa_last_run_params <- NULL
+        values$mofa_view_fits <- list()
+
+        showNotification(
+          sprintf(paste0(
+            "TCGA breast cancer data loaded!\n",
+            "View 1: mRNA (%d genes x %d samples)\n",
+            "View 2: miRNA (%d features x %d samples)\n",
+            "View 3: Protein (%d features x %d samples)\n",
+            "Subtypes: %s"),
+            nrow(mrna_mat), ncol(mrna_mat),
+            nrow(mirna_mat), ncol(mirna_mat),
+            nrow(protein_mat), ncol(protein_mat),
+            paste(names(table(meta_df$Group)), collapse = ", ")),
+          type = "message", duration = 8
+        )
+
+        add_to_log("Load TCGA MOFA Test Data", c(
+          "# TCGA breast cancer multi-omics (mRNA + miRNA + Protein)",
+          sprintf("# View 1: mRNA (%d x %d)", nrow(mrna_mat), ncol(mrna_mat)),
+          sprintf("# View 2: miRNA (%d x %d)", nrow(mirna_mat), ncol(mirna_mat)),
+          sprintf("# View 3: Protein (%d x %d)", nrow(protein_mat), ncol(protein_mat)),
+          sprintf("# Subtypes: %s", paste(names(table(meta_df$Group)), collapse = ", "))
+        ))
+
+      }, error = function(e) {
+        showNotification(paste("Error loading TCGA data:", e$message),
                          type = "error", duration = 10)
       })
     })
