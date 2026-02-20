@@ -32,6 +32,13 @@
 - Analyzes all contrasts simultaneously with cross-comparison biomarker detection
 - Biological insights on high-confidence candidates
 
+**🐳 DIA-NN Docker Search & Windows Deployment**:
+- Run DIA-NN searches locally via Docker — no HPC required
+- Three search backends: Local (embedded), Docker, and HPC (SSH/SLURM)
+- `docker compose up` runs DE-LIMP + DIA-NN on Windows with zero R installation
+- PowerShell and Bash build scripts for DIA-NN Docker image (license-compliant)
+- Full step-by-step guide: [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)
+
 **🔬 DIA-NN HPC Search Integration**:
 - Submit DIA-NN database searches to an HPC cluster directly from DE-LIMP via SSH
 - Non-blocking job queue — submit multiple searches and continue using the app
