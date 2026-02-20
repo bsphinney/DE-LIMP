@@ -148,13 +148,34 @@ options(shiny.maxRequestSize = 5000 * 1024^2)  # 5 GB upload limit
 # Detect Hugging Face Spaces environment (SPACE_ID is set automatically by HF)
 is_hf_space <- nzchar(Sys.getenv("SPACE_ID", ""))
 
-# Detect HPC mode (sbatch on PATH for local, or ssh for remote submission)
+# Detect search backends (Docker local + HPC SSH/SLURM)
 # Disabled on Hugging Face Spaces — search tab not useful in cloud environment
 local_sbatch <- nzchar(Sys.which("sbatch"))
-hpc_mode <- !is_hf_space && (local_sbatch || nzchar(Sys.which("ssh")))
+hpc_available <- !is_hf_space && (local_sbatch || nzchar(Sys.which("ssh")))
 
-# Conditionally load HPC-only packages
-if (hpc_mode) {
+# Docker backend detection
+docker_available <- FALSE
+docker_config <- list(diann_image = "diann:2.0")
+if (!is_hf_space && nzchar(Sys.which("docker"))) {
+  docker_available <- tryCatch({
+    system2("docker", "info", stdout = TRUE, stderr = TRUE)
+    TRUE
+  }, error = function(e) FALSE, warning = function(e) FALSE)
+  # Optional config from ~/.delimp_docker.conf
+  docker_conf_path <- path.expand("~/.delimp_docker.conf")
+  if (docker_available && file.exists(docker_conf_path)) {
+    docker_config <- tryCatch(
+      jsonlite::fromJSON(docker_conf_path),
+      error = function(e) docker_config
+    )
+  }
+}
+
+# Combined flag — at least one backend available
+search_enabled <- docker_available || hpc_available
+
+# Conditionally load search-related packages
+if (search_enabled) {
   for (pkg in c("shinyFiles", "jsonlite")) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
       install.packages(pkg, quiet = TRUE)
@@ -203,7 +224,7 @@ local({
   }
 })
 
-ui <- build_ui(is_hf_space, hpc_mode, local_sbatch)
+ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules
@@ -249,7 +270,7 @@ server <- function(input, output, session) {
     phospho_fasta_sequences = NULL,
     phospho_corrected_active = FALSE,
     phospho_annotations = NULL,
-    # DIA-NN HPC Search
+    # DIA-NN Search (HPC + Docker backends)
     diann_jobs = list(),
     diann_raw_files = NULL,
     diann_fasta_files = character(),
@@ -257,7 +278,8 @@ server <- function(input, output, session) {
     uniprot_results = NULL,
     fasta_info = NULL,
     ssh_connected = FALSE,
-    diann_search_settings = NULL
+    diann_search_settings = NULL,
+    docker_available = docker_available
   )
 
   # --- Shared helper: append to reproducibility log ---
@@ -276,7 +298,8 @@ server <- function(input, output, session) {
   server_ai(input, output, session, values)
   server_xic(input, output, session, values, is_hf_space)
   server_phospho(input, output, session, values, add_to_log)
-  server_search(input, output, session, values, add_to_log, hpc_mode)
+  server_search(input, output, session, values, add_to_log,
+                search_enabled, docker_available, docker_config, hpc_available, local_sbatch)
   server_session(input, output, session, values, add_to_log)
 }
 

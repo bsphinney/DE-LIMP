@@ -1,5 +1,6 @@
-# helpers_search.R — Pure helper functions for DIA-NN HPC Search Integration
+# helpers_search.R — Pure helper functions for DIA-NN Search Integration
 # No Shiny reactivity. All functions are testable standalone.
+# Supports both HPC (SSH/SLURM) and Local Docker backends.
 
 # =============================================================================
 # UniProt API Functions
@@ -240,18 +241,19 @@ scan_prestaged_databases <- function(fasta_dir) {
 }
 
 # =============================================================================
-# sbatch Script Generation
+# DIA-NN Flag Building (shared by HPC and Docker backends)
 # =============================================================================
 
-#' Generate a complete sbatch script for DIA-NN search
-#' @return Character string: complete sbatch script content
-generate_sbatch_script <- function(
-  analysis_name, raw_files, fasta_files, speclib_path = NULL,
-  output_dir, diann_sif, normalization = "on", search_mode = "libfree",
-  cpus = 64, mem_gb = 512, time_hours = 12,
-  partition = "high", account = "genome-center-grp",
-  search_params = list()
-) {
+#' Build DIA-NN CLI flags from search parameters
+#' Returns a character vector of flags (without --f, --fasta, --out, --threads).
+#' Used by both generate_sbatch_script() and build_docker_command().
+#' @param search_params List of search parameters (qvalue, enzyme, mods, etc.)
+#' @param search_mode Character: "libfree", "library", or "phospho"
+#' @param normalization Character: "on" or "off"
+#' @param speclib_mount Character or NULL: container-internal path to spectral library
+#' @return Character vector of DIA-NN CLI flags
+build_diann_flags <- function(search_params = list(), search_mode = "libfree",
+                              normalization = "on", speclib_mount = NULL) {
   # Defaults for search params
   sp <- list(
     qvalue = 0.01, max_var_mods = 1, scan_window = 6,
@@ -266,9 +268,102 @@ generate_sbatch_script <- function(
     mod_met_ox = TRUE, mod_nterm_acetyl = FALSE,
     extra_var_mods = "", extra_cli_flags = ""
   )
-  # Override defaults with provided params
   for (nm in names(search_params)) sp[[nm]] <- search_params[[nm]]
 
+  flags <- c()
+  is_phospho <- identical(search_mode, "phospho")
+
+  # Variable modification flags
+  if (isTRUE(sp$mod_met_ox)) flags <- c(flags, "--var-mod UniMod:35,15.994915,M")
+  if (isTRUE(sp$mod_nterm_acetyl)) flags <- c(flags, "--var-mod UniMod:1,42.010565,*n")
+  if (nzchar(sp$extra_var_mods)) {
+    extra_lines <- trimws(strsplit(sp$extra_var_mods, "\n")[[1]])
+    for (mod in extra_lines) {
+      if (nzchar(mod)) flags <- c(flags, sprintf("--var-mod %s", mod))
+    }
+  }
+
+  # Core shared flags
+  flags <- c(flags,
+    "--out-lib /work/out/report-lib.parquet",
+    "--matrices",
+    "--gen-spec-lib",
+    sprintf("--qvalue %s", sp$qvalue),
+    "--verbose 1",
+    sprintf("--var-mods %d", sp$max_var_mods)
+  )
+
+  if (isTRUE(sp$xic)) flags <- c(flags, "--xic")
+  if (isTRUE(sp$unimod4)) flags <- c(flags, "--unimod4")
+
+  # Library mode
+  if (search_mode == "library" && !is.null(speclib_mount)) {
+    flags <- c(flags,
+      sprintf("--lib %s", speclib_mount),
+      sprintf("--window %d", sp$scan_window),
+      "--use-quant"
+    )
+  }
+
+  # Library-free mode (and phospho)
+  if (search_mode != "library") {
+    flags <- c(flags,
+      "--fasta-search",
+      "--predictor",
+      sprintf("--cut %s", sp$enzyme),
+      sprintf("--missed-cleavages %d", sp$missed_cleavages),
+      sprintf("--min-pep-len %d", sp$min_pep_len),
+      sprintf("--max-pep-len %d", sp$max_pep_len),
+      sprintf("--min-pr-mz %d", sp$min_pr_mz),
+      sprintf("--max-pr-mz %d", sp$max_pr_mz),
+      sprintf("--min-pr-charge %d", sp$min_pr_charge),
+      sprintf("--max-pr-charge %d", sp$max_pr_charge),
+      sprintf("--min-fr-mz %d", sp$min_fr_mz),
+      sprintf("--max-fr-mz %d", sp$max_fr_mz)
+    )
+    if (isTRUE(sp$met_excision)) flags <- c(flags, "--met-excision")
+  }
+
+  # Mass accuracy
+  if (sp$mass_acc_mode == "manual") {
+    flags <- c(flags,
+      sprintf("--window %d", sp$scan_window),
+      sprintf("--mass-acc %s", sp$mass_acc),
+      sprintf("--mass-acc-ms1 %s", sp$mass_acc_ms1)
+    )
+  }
+
+  # Toggles
+  if (isTRUE(sp$mbr)) flags <- c(flags, "--reanalyse")
+  if (isTRUE(sp$rt_profiling)) flags <- c(flags, "--rt-profiling")
+  if (normalization == "off") flags <- c(flags, "--no-norm")
+
+  # Phospho-specific
+  if (is_phospho) {
+    flags <- c(flags, "--phospho-output", "--report-lib-info")
+  }
+
+  # Extra CLI flags
+  if (nzchar(sp$extra_cli_flags)) {
+    flags <- c(flags, trimws(sp$extra_cli_flags))
+  }
+
+  flags
+}
+
+# =============================================================================
+# sbatch Script Generation (HPC backend)
+# =============================================================================
+
+#' Generate a complete sbatch script for DIA-NN search
+#' @return Character string: complete sbatch script content
+generate_sbatch_script <- function(
+  analysis_name, raw_files, fasta_files, speclib_path = NULL,
+  output_dir, diann_sif, normalization = "on", search_mode = "libfree",
+  cpus = 64, mem_gb = 512, time_hours = 12,
+  partition = "high", account = "genome-center-grp",
+  search_params = list()
+) {
   # Determine output filename
   report_name <- if (normalization == "off") "no_norm_report.parquet" else "report.parquet"
 
@@ -305,110 +400,34 @@ generate_sbatch_script <- function(
   fasta_flags <- paste(sprintf("    --fasta %s/%s", fasta_mount_map, basename(fasta_files)),
                        collapse = " \\\n")
 
-  # Build variable modification flags
-  var_mod_flags <- c()
-  if (isTRUE(sp$mod_met_ox)) {
-    var_mod_flags <- c(var_mod_flags, "    --var-mod UniMod:35,15.994915,M")
-  }
-  if (isTRUE(sp$mod_nterm_acetyl)) {
-    var_mod_flags <- c(var_mod_flags, "    --var-mod UniMod:1,42.010565,*n")
-  }
-  if (nzchar(sp$extra_var_mods)) {
-    extra_lines <- trimws(strsplit(sp$extra_var_mods, "\n")[[1]])
-    for (mod in extra_lines) {
-      if (nzchar(mod)) var_mod_flags <- c(var_mod_flags, sprintf("    --var-mod %s", mod))
-    }
-  }
-  var_mod_str <- if (length(var_mod_flags) > 0) {
-    paste(var_mod_flags, collapse = " \\\n")
-  } else ""
+  # Get shared DIA-NN flags via build_diann_flags()
+  speclib_mount <- if (!is.null(speclib_path) && nzchar(speclib_path)) {
+    sprintf("/work/lib/%s", basename(speclib_path))
+  } else NULL
+  shared_flags <- build_diann_flags(search_params, search_mode, normalization, speclib_mount)
 
-  # Phospho-specific flags
-  is_phospho <- identical(search_mode, "phospho")
-
-  # Build DIA-NN command
-  if (search_mode == "library" && !is.null(speclib_path) && nzchar(speclib_path)) {
-    # Library mode
-    diann_cmd_parts <- c(
-      sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
-      paste0(run_flags, " \\"),
-      paste0(fasta_flags, " \\"),
-      sprintf("    --lib /work/lib/%s \\", basename(speclib_path)),
-      sprintf("    --threads %d \\", cpus),
-      "    --verbose 1 \\",
-      sprintf("    --out /work/out/%s \\", report_name),
-      sprintf("    --qvalue %s \\", sp$qvalue),
-      "    --matrices \\",
-      "    --out-lib /work/out/report-lib.parquet \\",
-      "    --gen-spec-lib \\",
-      if (isTRUE(sp$xic)) "    --xic \\" else NULL,
-      if (isTRUE(sp$unimod4)) "    --unimod4 \\" else NULL,
-      sprintf("    --var-mods %d \\", sp$max_var_mods),
-      sprintf("    --window %d \\", sp$scan_window),
-      if (sp$mass_acc_mode == "manual") c(
-        sprintf("    --mass-acc %s \\", sp$mass_acc),
-        sprintf("    --mass-acc-ms1 %s \\", sp$mass_acc_ms1)
-      ) else NULL,
-      if (isTRUE(sp$mbr)) "    --reanalyse \\" else NULL,
-      if (isTRUE(sp$rt_profiling)) "    --rt-profiling \\" else NULL,
-      if (normalization == "off") "    --no-norm \\" else NULL,
-      "    --use-quant",
-      if (nzchar(var_mod_str)) var_mod_str else NULL
-    )
-  } else {
-    # Library-free mode
-    diann_cmd_parts <- c(
-      sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
-      paste0(run_flags, " \\"),
-      paste0(fasta_flags, " \\"),
-      sprintf("    --out /work/out/%s \\", report_name),
-      "    --out-lib /work/out/report-lib.parquet \\",
-      "    --matrices \\",
-      "    --fasta-search \\",
-      sprintf("    --qvalue %s \\", sp$qvalue),
-      "    --gen-spec-lib \\",
-      "    --verbose 1 \\",
-      "    --predictor \\",
-      if (isTRUE(sp$xic)) "    --xic \\" else NULL,
-      sprintf("    --threads %d \\", cpus),
-      if (isTRUE(sp$met_excision)) "    --met-excision \\" else NULL,
-      sprintf("    --min-pep-len %d \\", sp$min_pep_len),
-      sprintf("    --max-pep-len %d \\", sp$max_pep_len),
-      sprintf("    --min-pr-mz %d \\", sp$min_pr_mz),
-      sprintf("    --max-pr-mz %d \\", sp$max_pr_mz),
-      sprintf("    --min-pr-charge %d \\", sp$min_pr_charge),
-      sprintf("    --max-pr-charge %d \\", sp$max_pr_charge),
-      sprintf("    --min-fr-mz %d \\", sp$min_fr_mz),
-      sprintf("    --max-fr-mz %d \\", sp$max_fr_mz),
-      sprintf("    --cut %s \\", sp$enzyme),
-      sprintf("    --missed-cleavages %d \\", sp$missed_cleavages),
-      if (isTRUE(sp$unimod4)) "    --unimod4 \\" else NULL,
-      sprintf("    --var-mods %d \\", sp$max_var_mods),
-      if (sp$mass_acc_mode == "manual") c(
-        sprintf("    --window %d \\", sp$scan_window),
-        sprintf("    --mass-acc %s \\", sp$mass_acc),
-        sprintf("    --mass-acc-ms1 %s \\", sp$mass_acc_ms1)
-      ) else NULL,
-      if (isTRUE(sp$mbr)) "    --reanalyse \\" else NULL,
-      if (isTRUE(sp$rt_profiling)) "    --rt-profiling \\" else NULL,
-      if (normalization == "off") "    --no-norm \\" else NULL,
-      if (is_phospho) "    --phospho-output \\" else NULL,
-      if (is_phospho) "    --report-lib-info \\" else NULL,
-      if (nzchar(var_mod_str)) var_mod_str else NULL
-    )
-  }
+  # Build DIA-NN command for apptainer
+  diann_cmd_parts <- c(
+    sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
+    paste0(run_flags, " \\"),
+    paste0(fasta_flags, " \\"),
+    sprintf("    --out /work/out/%s \\", report_name),
+    sprintf("    --threads %d \\", cpus),
+    paste0("    ", shared_flags)
+  )
 
   # Remove NULLs and trailing backslash on last line
   diann_cmd_parts <- Filter(Negate(is.null), diann_cmd_parts)
+  # Add line continuations to all but last flag line
+  for (i in seq_along(diann_cmd_parts)) {
+    if (i < length(diann_cmd_parts) && !grepl(" \\\\$", diann_cmd_parts[i])) {
+      diann_cmd_parts[i] <- paste0(diann_cmd_parts[i], " \\")
+    }
+  }
+  # Ensure last line has no trailing backslash
   last <- length(diann_cmd_parts)
   diann_cmd_parts[last] <- sub(" \\\\$", "", diann_cmd_parts[last])
   diann_cmd <- paste(diann_cmd_parts, collapse = "\n")
-
-  # Extra CLI flags
-  extra_cli <- ""
-  if (nzchar(sp$extra_cli_flags)) {
-    extra_cli <- paste0(" \\\n    ", trimws(sp$extra_cli_flags))
-  }
 
   # Assemble full sbatch script
   script <- paste0(
@@ -428,7 +447,7 @@ generate_sbatch_script <- function(
     'echo "Started: $(date)"\n',
     sprintf('echo "Output: %s"\n', output_dir),
     '\n',
-    diann_cmd, extra_cli, '\n',
+    diann_cmd, '\n',
     '\n',
     'EXIT_CODE=$?\n',
     'echo ""\n',
@@ -438,6 +457,292 @@ generate_sbatch_script <- function(
   )
 
   return(script)
+}
+
+# =============================================================================
+# Docker Helper Functions (Local backend)
+# =============================================================================
+
+#' Check if Docker is installed and daemon is running
+#' @return list(available, daemon_running, error)
+check_docker_available <- function() {
+  if (!nzchar(Sys.which("docker"))) {
+    return(list(available = FALSE, daemon_running = FALSE,
+                error = "Docker CLI not found on PATH"))
+  }
+  daemon_ok <- tryCatch({
+    out <- system2("docker", "info", stdout = TRUE, stderr = TRUE)
+    TRUE
+  }, error = function(e) FALSE, warning = function(e) FALSE)
+
+  list(available = TRUE, daemon_running = daemon_ok,
+       error = if (!daemon_ok) "Docker daemon not running" else NULL)
+}
+
+#' Check if a DIA-NN Docker image exists locally
+#' @param image_name Character — Docker image name (e.g., "diann:2.3.0")
+#' @return list(exists, image_name, error)
+check_diann_image <- function(image_name = "diann:2.3.0") {
+  exists <- tryCatch({
+    out <- system2("docker", c("image", "inspect", image_name),
+                   stdout = TRUE, stderr = TRUE)
+    TRUE
+  }, error = function(e) FALSE, warning = function(e) FALSE)
+
+  list(exists = exists, image_name = image_name,
+       error = if (!exists) paste("Image not found:", image_name) else NULL)
+}
+
+#' Detect host machine CPU and memory resources
+#' @return list(cpus, memory_gb)
+get_host_resources <- function() {
+  cpus <- tryCatch(parallel::detectCores(), error = function(e) 4L)
+  if (is.na(cpus)) cpus <- 4L
+
+  mem_gb <- tryCatch({
+    os <- Sys.info()[["sysname"]]
+    if (os == "Darwin") {
+      # macOS: sysctl hw.memsize returns bytes
+      raw <- system2("sysctl", c("-n", "hw.memsize"), stdout = TRUE, stderr = TRUE)
+      as.integer(as.numeric(raw) / 1024^3)
+    } else if (os == "Linux") {
+      raw <- readLines("/proc/meminfo", n = 1)
+      kb <- as.numeric(gsub("[^0-9]", "", raw))
+      as.integer(kb / 1024^2)
+    } else {
+      # Windows or unknown
+      64L
+    }
+  }, error = function(e) 64L)
+
+  list(cpus = cpus, memory_gb = mem_gb)
+}
+
+#' Build Docker command arguments for running DIA-NN locally
+#' @param raw_files Character vector — local paths to raw data files/dirs
+#' @param fasta_files Character vector — local paths to FASTA files
+#' @param output_dir Character — local output directory
+#' @param image_name Character — Docker image name
+#' @param diann_flags Character vector — flags from build_diann_flags()
+#' @param cpus Integer — CPU limit
+#' @param mem_gb Integer — memory limit (GB)
+#' @param container_name Character — name for the container
+#' @param speclib_path Character or NULL — local path to spectral library
+#' @param report_name Character — output report filename
+#' @return Character vector suitable for system2("docker", args)
+build_docker_command <- function(raw_files, fasta_files, output_dir, image_name,
+                                 diann_flags, cpus, mem_gb, container_name,
+                                 speclib_path = NULL, report_name = "report.parquet") {
+  # Identify unique data and fasta directories
+  data_dirs <- unique(dirname(raw_files))
+  fasta_dirs <- unique(dirname(fasta_files))
+
+  # Build volume mounts
+  volumes <- c()
+
+  # Data directory mount (read-only)
+  if (length(data_dirs) == 1) {
+    volumes <- c(volumes, "-v", sprintf("%s:/work/data:ro", data_dirs[1]))
+  } else {
+    for (i in seq_along(data_dirs)) {
+      volumes <- c(volumes, "-v", sprintf("%s:/work/data%d:ro", data_dirs[i], i))
+    }
+  }
+
+  # FASTA directory mount(s) (read-only)
+  if (length(fasta_dirs) == 1) {
+    volumes <- c(volumes, "-v", sprintf("%s:/work/fasta:ro", fasta_dirs[1]))
+  } else {
+    for (i in seq_along(fasta_dirs)) {
+      volumes <- c(volumes, "-v", sprintf("%s:/work/fasta%d:ro", fasta_dirs[i], i))
+    }
+  }
+
+  # Output directory mount (read-write)
+  volumes <- c(volumes, "-v", sprintf("%s:/work/out", output_dir))
+
+  # Spectral library mount
+  if (!is.null(speclib_path) && nzchar(speclib_path)) {
+    volumes <- c(volumes, "-v", sprintf("%s:/work/lib:ro", dirname(speclib_path)))
+  }
+
+  # Build --f flags for raw files (mapped to container paths)
+  f_flags <- c()
+  if (length(data_dirs) == 1) {
+    f_flags <- sprintf("--f /work/data/%s", basename(raw_files))
+  } else {
+    data_map <- match(dirname(raw_files), data_dirs)
+    f_flags <- sprintf("--f /work/data%d/%s", data_map, basename(raw_files))
+  }
+
+  # Build --fasta flags (mapped to container paths)
+  fasta_flags <- c()
+  if (length(fasta_dirs) == 1) {
+    fasta_flags <- sprintf("--fasta /work/fasta/%s", basename(fasta_files))
+  } else {
+    fasta_map <- match(dirname(fasta_files), fasta_dirs)
+    fasta_flags <- sprintf("--fasta /work/fasta%d/%s", fasta_map, basename(fasta_files))
+  }
+
+  # Assemble full docker run command args
+  args <- c(
+    "run", "--rm", "-d",
+    "--platform", "linux/amd64",
+    "--name", container_name,
+    sprintf("--cpus=%d", cpus),
+    sprintf("--memory=%dg", mem_gb),
+    volumes,
+    image_name,
+    f_flags,
+    fasta_flags,
+    sprintf("--out /work/out/%s", report_name),
+    sprintf("--threads %d", cpus),
+    diann_flags
+  )
+
+  args
+}
+
+#' Check Docker container status
+#' @param container_id Character — Docker container ID or name
+#' @return list(status, exit_code, log_tail)
+check_docker_container_status <- function(container_id) {
+  # Get container state
+  state <- tryCatch({
+    out <- system2("docker", c("inspect", "--format", "{{.State.Status}}",
+                               container_id), stdout = TRUE, stderr = TRUE)
+    trimws(out[1])
+  }, error = function(e) "unknown",
+     warning = function(e) "unknown")
+
+  exit_code <- NA_integer_
+  if (state == "exited") {
+    exit_code <- tryCatch({
+      out <- system2("docker", c("inspect", "--format", "{{.State.ExitCode}}",
+                                 container_id), stdout = TRUE, stderr = TRUE)
+      as.integer(trimws(out[1]))
+    }, error = function(e) NA_integer_,
+       warning = function(e) NA_integer_)
+  }
+
+  # Map Docker state to DE-LIMP job status
+  status <- switch(state,
+    "running"    = "running",
+    "created"    = "queued",
+    "exited"     = if (!is.na(exit_code) && exit_code == 0) "completed" else "failed",
+    "dead"       = "failed",
+    "removing"   = "running",
+    "unknown"
+  )
+
+  # Tail logs
+  log_tail <- tryCatch({
+    out <- system2("docker", c("logs", "--tail", "30", container_id),
+                   stdout = TRUE, stderr = TRUE)
+    paste(out, collapse = "\n")
+  }, error = function(e) "",
+     warning = function(e) "")
+
+  list(status = status, exit_code = exit_code, log_tail = log_tail)
+}
+
+# =============================================================================
+# Job Recovery Functions
+# =============================================================================
+
+#' Recover DIA-NN jobs from SLURM accounting (sacct)
+#' @param ssh_config SSH config list, or NULL for local
+#' @param sbatch_path Full path to sbatch binary (used to find sacct)
+#' @param days_back Integer — how many days back to search (default 7)
+#' @return data.frame with job_id, name, state, elapsed, or empty data.frame
+recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back = 7) {
+  empty <- data.frame(job_id = character(), name = character(),
+                      state = character(), elapsed = character(),
+                      stringsAsFactors = FALSE)
+
+  # Build sacct path from sbatch path if available
+  sacct_bin <- if (!is.null(sbatch_path) && nzchar(sbatch_path)) {
+    file.path(dirname(sbatch_path), "sacct")
+  } else {
+    "sacct"
+  }
+
+  # Query sacct for recent jobs with "diann" in the name
+  # Include WorkDir so we can find log files and output
+  cmd <- paste0(
+    sacct_bin,
+    " --starttime=$(date -d '", days_back, " days ago' +%Y-%m-%d 2>/dev/null || ",
+    "date -v-", days_back, "d +%Y-%m-%d)",
+    " --format=JobID%20,JobName%50,State%20,Elapsed%15,WorkDir%120",
+    " --parsable2 --noheader",
+    " 2>/dev/null | grep -i diann | grep -v '\\.' "
+  )
+
+  result <- if (!is.null(ssh_config)) {
+    ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path))
+  } else {
+    tryCatch({
+      stdout <- system2("bash", args = c("-c", cmd), stdout = TRUE, stderr = TRUE)
+      list(status = 0, stdout = stdout)
+    }, error = function(e) list(status = 1, stdout = character()))
+  }
+
+  if (result$status != 0 || length(result$stdout) == 0) return(empty)
+
+  lines <- result$stdout[nzchar(result$stdout)]
+  if (length(lines) == 0) return(empty)
+
+  parsed <- strsplit(lines, "\\|")
+  parsed <- parsed[vapply(parsed, length, integer(1)) >= 4]
+  if (length(parsed) == 0) return(empty)
+
+  df <- data.frame(
+    job_id = vapply(parsed, `[`, character(1), 1),
+    name = trimws(vapply(parsed, `[`, character(1), 2)),
+    state = trimws(vapply(parsed, `[`, character(1), 3)),
+    elapsed = trimws(vapply(parsed, `[`, character(1), 4)),
+    stringsAsFactors = FALSE
+  )
+
+  # WorkDir is field 5 (may be missing for some jobs)
+  df$work_dir <- vapply(parsed, function(p) {
+    if (length(p) >= 5) trimws(p[5]) else ""
+  }, character(1))
+
+  df
+}
+
+#' Recover DIA-NN jobs from Docker containers
+#' @return data.frame with container_id, name, state, created
+recover_docker_jobs <- function() {
+  empty <- data.frame(container_id = character(), name = character(),
+                      state = character(), created = character(),
+                      stringsAsFactors = FALSE)
+
+  result <- tryCatch({
+    out <- system2("docker", c("ps", "-a",
+      "--filter", "name=delimp_",
+      "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.CreatedAt}}"),
+      stdout = TRUE, stderr = TRUE)
+    list(status = 0, stdout = out)
+  }, error = function(e) list(status = 1, stdout = character()))
+
+  if (result$status != 0 || length(result$stdout) == 0) return(empty)
+
+  lines <- result$stdout[nzchar(result$stdout)]
+  if (length(lines) == 0) return(empty)
+
+  parsed <- strsplit(lines, "\t")
+  parsed <- parsed[vapply(parsed, length, integer(1)) >= 4]
+  if (length(parsed) == 0) return(empty)
+
+  data.frame(
+    container_id = vapply(parsed, `[`, character(1), 1),
+    name = vapply(parsed, `[`, character(1), 2),
+    state = vapply(parsed, `[`, character(1), 3),
+    created = vapply(parsed, `[`, character(1), 4),
+    stringsAsFactors = FALSE
+  )
 }
 
 # =============================================================================
@@ -497,6 +802,8 @@ ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
     structure(msg, status = 124L)
   })
   status <- attr(stdout, "status") %||% 0L
+  # Sanitize output to valid UTF-8 (SSH may return ANSI codes, MOTD banners, etc.)
+  stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")
   list(status = status, stdout = stdout)
 }
 
@@ -521,6 +828,8 @@ scp_download <- function(ssh_config, remote_path, local_path) {
     }
   )
   status <- attr(stdout, "status") %||% 0L
+  # Sanitize output to valid UTF-8 (SSH may return ANSI codes, MOTD banners, etc.)
+  stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")
   list(status = status, stdout = stdout)
 }
 
@@ -545,6 +854,8 @@ scp_upload <- function(ssh_config, local_path, remote_path) {
     }
   )
   status <- attr(stdout, "status") %||% 0L
+  # Sanitize output to valid UTF-8 (SSH may return ANSI codes, MOTD banners, etc.)
+  stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")
   list(status = status, stdout = stdout)
 }
 

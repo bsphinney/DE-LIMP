@@ -1,20 +1,24 @@
 # ==============================================================================
 #  server_search.R
-#  DIA-NN HPC Search Integration — New Search tab server logic
+#  DIA-NN Search Integration — New Search tab server logic
+#  Supports two backends: Local Docker and HPC (SSH/SLURM).
 #  Handles: file browsing, UniProt FASTA download, sbatch generation,
-#  job submission, monitoring, auto-load, and job queue management.
+#  Docker execution, job submission, monitoring, auto-load, and job queue.
 # ==============================================================================
 
-server_search <- function(input, output, session, values, add_to_log, hpc_mode) {
+server_search <- function(input, output, session, values, add_to_log,
+                          search_enabled, docker_available, docker_config,
+                          hpc_available, local_sbatch) {
 
-  # Early return if not HPC mode
-  if (!hpc_mode) return(invisible())
+  # Early return if no search backend available
+  if (!search_enabled) return(invisible())
 
   # ============================================================================
-  #    SSH Config Reactive
+  #    SSH Config Reactive (HPC backend only)
   # ============================================================================
 
   ssh_config <- reactive({
+    if (is.null(input$search_backend) || input$search_backend != "hpc") return(NULL)
     if (is.null(input$search_connection_mode) ||
         input$search_connection_mode != "ssh") return(NULL)
     list(
@@ -24,6 +28,79 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       key_path = input$ssh_key_path,
       modules = input$ssh_modules %||% ""
     )
+  })
+
+  # ============================================================================
+  #    Docker Backend UI (image status, resource controls, output path)
+  # ============================================================================
+
+  # Docker image status
+  output$docker_image_status <- renderUI({
+    if (!docker_available) return(NULL)
+    img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
+    result <- check_diann_image(img)
+
+    if (result$exists) {
+      # Image found — check for ARM/Rosetta
+      arch <- Sys.info()[["machine"]]
+      arm_warning <- if (arch %in% c("arm64", "aarch64")) {
+        tags$div(class = "alert alert-warning py-1 px-2 mt-1",
+          style = "font-size: 0.82em;",
+          icon("triangle-exclamation"),
+          tags$strong(" Apple Silicon detected."),
+          " DIA-NN runs under Rosetta 2 emulation (~3-5x slower). ",
+          "Fine for small datasets; use HPC for large experiments.")
+      }
+      tagList(
+        tags$div(class = "alert alert-success py-1 px-2",
+          style = "font-size: 0.85em;",
+          icon("check-circle"),
+          sprintf(" DIA-NN Docker image ready: %s", img)),
+        arm_warning
+      )
+    } else {
+      tags$div(class = "alert alert-warning py-2 px-3",
+        icon("docker"),
+        tags$strong(" DIA-NN Docker image not found."),
+        tags$p("Image ", tags$code(img), " is not available locally. ",
+          "DIA-NN must be built locally due to licensing restrictions."),
+        tags$p("Run the build script included with DE-LIMP:"),
+        tags$pre(style = "font-size: 0.8em; margin-bottom: 4px;",
+          "bash build_diann_docker.sh"),
+        tags$small(class = "text-muted",
+          "See ", tags$a(href = "https://github.com/vdemichev/DiaNN/blob/master/LICENSE.md",
+                         "DIA-NN license", target = "_blank"), " for terms.")
+      )
+    }
+  })
+
+  # Docker resource controls (CPU/memory sliders)
+  output$docker_resources_ui <- renderUI({
+    res <- get_host_resources()
+    max_cpus <- res$cpus
+    max_mem <- res$memory_gb
+    tagList(
+      div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+        div(style = "flex: 1; min-width: 150px;",
+          sliderInput("docker_cpus", "CPUs:",
+            min = 1, max = max_cpus,
+            value = min(max_cpus, 16), step = 1)
+        ),
+        div(style = "flex: 1; min-width: 150px;",
+          sliderInput("docker_mem_gb", "Memory (GB):",
+            min = 4, max = max_mem,
+            value = min(max_mem, 64), step = 4)
+        )
+      ),
+      tags$p(class = "text-muted", style = "font-size: 0.8em;",
+        sprintf("System: %d CPUs, %d GB RAM. Leave headroom for OS + DE-LIMP.", max_cpus, max_mem))
+    )
+  })
+
+  # Docker output path display
+  output$docker_output_path <- renderText({
+    dir_chosen <- shinyFiles::parseDirPath(volumes, input$docker_output_dir)
+    if (length(dir_chosen) > 0) as.character(dir_chosen) else "(not selected)"
   })
 
   # ============================================================================
@@ -39,6 +116,10 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       tryCatch({
         saved_jobs <- readRDS(job_queue_path)
         if (is.list(saved_jobs) && length(saved_jobs) > 0) {
+          # Backward compat: add backend field to old jobs
+          for (i in seq_along(saved_jobs)) {
+            if (is.null(saved_jobs[[i]]$backend)) saved_jobs[[i]]$backend <- "hpc"
+          }
           values$diann_jobs <- saved_jobs
           n_active <- sum(vapply(saved_jobs, function(j)
             j$status %in% c("queued", "running"), logical(1)))
@@ -57,15 +138,16 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
   }) |> bindEvent(TRUE)  # Run once on startup
 
   # Save jobs to disk whenever the queue changes (after initial load)
-  observe({
-    jobs <- values$diann_jobs
+  # CRITICAL: ignoreInit = TRUE prevents overwriting saved jobs with the empty
+  # initial value of values$diann_jobs before the load observer restores them.
+  observeEvent(values$diann_jobs, {
     req(job_queue_loaded())
     tryCatch({
-      saveRDS(jobs, job_queue_path)
+      saveRDS(values$diann_jobs, job_queue_path)
     }, error = function(e) {
       message("[DE-LIMP] Failed to save job queue: ", e$message)
     })
-  })
+  }, ignoreInit = TRUE)
 
   # ============================================================================
   #    SSH Connection Test
@@ -147,6 +229,7 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
   shinyFiles::shinyDirChoose(input, "output_base_dir", roots = volumes, session = session)
   shinyFiles::shinyFileChoose(input, "lib_file", roots = volumes, session = session,
     filetypes = c("speclib", "tsv", "csv"))
+  shinyFiles::shinyDirChoose(input, "docker_output_dir", roots = volumes, session = session)
 
   # ============================================================================
   #    File Selection Observers
@@ -478,6 +561,15 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     }
   })
 
+  # Docker mode: update output base from directory chooser
+  observeEvent(input$docker_output_dir, {
+    if (is.integer(input$docker_output_dir)) return()
+    dir_path <- shinyFiles::parseDirPath(volumes, input$docker_output_dir)
+    if (length(dir_path) > 0 && nzchar(dir_path)) {
+      output_base(as.character(dir_path))
+    }
+  })
+
   output$full_output_path <- renderText({
     base <- output_base()
     name <- gsub("[^A-Za-z0-9._-]", "_", input$analysis_name)
@@ -510,7 +602,9 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
   observeEvent(input$submit_diann, {
     tryCatch({
 
-    # --- Validation ---
+    backend <- input$search_backend %||% "hpc"
+
+    # --- Validation (shared) ---
     errors <- character()
 
     if (is.null(values$diann_raw_files) || nrow(values$diann_raw_files) == 0) {
@@ -522,23 +616,31 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     if (!has_fasta && !has_speclib) {
       errors <- c(errors, "No FASTA database or spectral library selected.")
     }
-
-    sif_path <- input$diann_sif_path
-    cfg <- ssh_config()
-    if (is.null(cfg)) {
-      if (!file.exists(sif_path)) {
-        errors <- c(errors, sprintf("DIA-NN container not found: %s", sif_path))
-      }
-    } else {
-      # SSH mode: check remote file existence
-      sif_check <- ssh_exec(cfg, paste("test -f", shQuote(sif_path), "&& echo EXISTS"))
-      if (!any(grepl("EXISTS", sif_check$stdout))) {
-        errors <- c(errors, sprintf("DIA-NN container not found on remote: %s", sif_path))
-      }
-    }
-
     if (!nzchar(input$analysis_name)) {
       errors <- c(errors, "Analysis name is required.")
+    }
+
+    # Backend-specific validation
+    if (backend == "docker") {
+      img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
+      img_check <- check_diann_image(img)
+      if (!img_check$exists) {
+        errors <- c(errors, sprintf(
+          "DIA-NN Docker image '%s' not found. Run build_diann_docker.sh first.", img))
+      }
+    } else {
+      sif_path <- input$diann_sif_path
+      cfg <- ssh_config()
+      if (is.null(cfg)) {
+        if (!file.exists(sif_path)) {
+          errors <- c(errors, sprintf("DIA-NN container not found: %s", sif_path))
+        }
+      } else {
+        sif_check <- ssh_exec(cfg, paste("test -f", shQuote(sif_path), "&& echo EXISTS"))
+        if (!any(grepl("EXISTS", sif_check$stdout))) {
+          errors <- c(errors, sprintf("DIA-NN container not found on remote: %s", sif_path))
+        }
+      }
     }
 
     if (length(errors) > 0) {
@@ -550,17 +652,23 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       return()
     }
 
-    # --- Prepare submission ---
+    # --- Prepare submission (shared) ---
     analysis_name <- gsub("[^A-Za-z0-9._-]", "_", input$analysis_name)
     output_dir <- file.path(output_base(), analysis_name)
 
-    if (!is.null(cfg)) {
-      ssh_exec(cfg, paste("mkdir -p", shQuote(output_dir)))
-    } else {
+    if (backend == "docker") {
       dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+      cfg <- NULL
+    } else {
+      cfg <- ssh_config()
+      if (!is.null(cfg)) {
+        ssh_exec(cfg, paste("mkdir -p", shQuote(output_dir)))
+      } else {
+        dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+      }
     }
 
-    # Collect search params
+    # Collect search params (shared between backends)
     search_params <- list(
       qvalue = input$diann_fdr %||% 0.01,
       max_var_mods = input$diann_max_var_mods,
@@ -594,7 +702,7 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       contam_result <- get_contaminant_fasta(contam_lib)
 
       if (contam_result$success) {
-        if (!is.null(cfg)) {
+        if (backend == "hpc" && !is.null(cfg)) {
           # SSH mode: upload contaminant FASTA to same remote dir as proteome
           remote_contam_dir <- file.path(output_base(), "databases")
           remote_contam_path <- file.path(remote_contam_dir, basename(contam_result$path))
@@ -607,6 +715,7 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
           }
           fasta_files <- c(fasta_files, remote_contam_path)
         } else {
+          # Docker or local HPC: use local path directly
           fasta_files <- c(fasta_files, contam_result$path)
         }
         showNotification(
@@ -620,126 +729,222 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       }
     }
 
-    # Generate sbatch script
-    script_content <- generate_sbatch_script(
-      analysis_name = analysis_name,
-      raw_files = values$diann_raw_files$full_path,
-      fasta_files = fasta_files,
-      speclib_path = values$diann_speclib,
-      output_dir = output_dir,
-      diann_sif = sif_path,
-      normalization = input$diann_normalization,
-      search_mode = input$search_mode,
-      cpus = input$diann_cpus,
-      mem_gb = input$diann_mem_gb,
-      time_hours = input$diann_time_hours,
-      partition = input$diann_partition,
-      account = input$diann_account,
-      search_params = search_params
-    )
+    # ====================================================================
+    #  Backend-specific submission
+    # ====================================================================
 
-    # Write sbatch script and submit
-    script_path <- file.path(output_dir, "diann_search.sbatch")
+    if (backend == "docker") {
+      # --- Docker submission ---
+      img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
+      cpus <- input$docker_cpus %||% 8
+      mem_gb <- input$docker_mem_gb %||% 32
 
-    if (!is.null(cfg)) {
-      # SSH mode: write script locally, SCP to remote, then submit
-      local_tmp <- tempfile(fileext = ".sbatch")
-      writeLines(script_content, local_tmp)
-      on.exit(unlink(local_tmp), add = TRUE)
+      # Build DIA-NN flags (shared with HPC via build_diann_flags)
+      speclib_mount <- if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib)) {
+        sprintf("/work/lib/%s", basename(values$diann_speclib))
+      } else NULL
+      diann_flags <- build_diann_flags(search_params, input$search_mode,
+                                        input$diann_normalization, speclib_mount)
 
-      scp_result <- scp_upload(cfg, local_tmp, script_path)
-      if (scp_result$status != 0) {
-        showNotification(
-          paste("Failed to write sbatch script to remote host:",
-                paste(scp_result$stdout, collapse = " ")),
-          type = "error")
+      # Generate unique container name
+      container_name <- sprintf("delimp_%s_%s", analysis_name,
+                                 format(Sys.time(), "%Y%m%d_%H%M%S"))
+
+      # Build docker run command
+      docker_args <- build_docker_command(
+        raw_files = values$diann_raw_files$full_path,
+        fasta_files = fasta_files,
+        output_dir = output_dir,
+        image_name = img,
+        diann_flags = diann_flags,
+        cpus = cpus,
+        mem_gb = mem_gb,
+        container_name = container_name,
+        speclib_path = values$diann_speclib
+      )
+
+      # Launch Docker container (detached mode — returns container ID)
+      submit_result <- tryCatch({
+        stdout <- suppressWarnings(
+          system2("docker", args = docker_args, stdout = TRUE, stderr = TRUE)
+        )
+        exit_status <- attr(stdout, "status")
+        if (!is.null(exit_status) && exit_status != 0) {
+          list(success = FALSE, error = paste(stdout, collapse = "\n"))
+        } else {
+          container_id <- trimws(stdout[length(stdout)])
+          list(success = TRUE, container_id = container_id)
+        }
+      }, error = function(e) {
+        list(success = FALSE, error = e$message)
+      })
+
+      if (!submit_result$success) {
+        showNotification(paste("Docker launch failed:", submit_result$error),
+          type = "error", duration = 15)
         return()
       }
 
-      # Use stored full sbatch path to avoid slow login shell initialization
-      sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
-      sbatch_cmd <- paste(sbatch_bin, shQuote(script_path))
-      submit_result <- tryCatch({
-        result <- ssh_exec(cfg, sbatch_cmd,
-                           login_shell = is.null(values$ssh_sbatch_path))
-        list(success = result$status == 0, stdout = result$stdout,
-             error = if (result$status != 0) paste(result$stdout, collapse = " ") else NULL)
-      }, error = function(e) {
-        list(success = FALSE, error = e$message)
-      })
-    } else {
-      # Local mode: write and submit locally
-      writeLines(script_content, script_path)
+      job_id <- container_name
 
-      submit_result <- tryCatch({
-        stdout <- system2("sbatch", args = script_path, stdout = TRUE, stderr = TRUE)
-        list(success = TRUE, stdout = stdout)
-      }, error = function(e) {
-        list(success = FALSE, error = e$message)
-      })
-    }
-
-    if (!submit_result$success) {
-      showNotification(paste("sbatch submission failed:", submit_result$error), type = "error")
-      return()
-    }
-
-    job_id <- parse_sbatch_output(submit_result$stdout)
-    if (is.null(job_id)) {
-      showNotification(
-        paste("Could not parse job ID from sbatch output:",
-          paste(submit_result$stdout, collapse = " ")),
-        type = "error"
-      )
-      return()
-    }
-
-    # Add to job queue
-    job_entry <- list(
-      job_id = job_id,
-      name = analysis_name,
-      status = "queued",
-      output_dir = output_dir,
-      script_path = script_path,
-      submitted_at = Sys.time(),
-      n_files = nrow(values$diann_raw_files),
-      search_mode = input$search_mode,
-      search_settings = list(
-        search_params = search_params,
-        fasta_files = fasta_files,
-        contaminant_library = contam_lib,
-        n_raw_files = nrow(values$diann_raw_files),
-        raw_file_type = if (nrow(values$diann_raw_files) > 0)
-          tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+      # Create Docker job entry
+      job_entry <- list(
+        job_id = job_id,
+        container_id = submit_result$container_id,
+        backend = "docker",
+        name = analysis_name,
+        status = "running",
+        output_dir = output_dir,
+        submitted_at = Sys.time(),
+        n_files = nrow(values$diann_raw_files),
         search_mode = input$search_mode,
-        normalization = input$diann_normalization,
-        diann_sif = basename(sif_path),
-        speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
-          basename(values$diann_speclib) else NULL,
-        slurm = list(
-          cpus = input$diann_cpus,
-          mem_gb = input$diann_mem_gb,
-          time_hours = input$diann_time_hours,
-          partition = input$diann_partition
-        )
-      ),
-      auto_load = input$auto_load_results,
-      log_content = "",
-      completed_at = NULL,
-      loaded = FALSE,
-      is_ssh = !is.null(cfg)
-    )
+        search_settings = list(
+          search_params = search_params,
+          fasta_files = fasta_files,
+          contaminant_library = contam_lib,
+          n_raw_files = nrow(values$diann_raw_files),
+          raw_file_type = if (nrow(values$diann_raw_files) > 0)
+            tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          docker_image = img,
+          speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            basename(values$diann_speclib) else NULL,
+          docker = list(cpus = cpus, mem_gb = mem_gb, image = img)
+        ),
+        auto_load = input$auto_load_results,
+        log_content = "",
+        completed_at = NULL,
+        loaded = FALSE,
+        is_ssh = FALSE
+      )
 
+    } else {
+      # --- HPC (SLURM) submission ---
+      sif_path <- input$diann_sif_path
+
+      # Generate sbatch script
+      script_content <- generate_sbatch_script(
+        analysis_name = analysis_name,
+        raw_files = values$diann_raw_files$full_path,
+        fasta_files = fasta_files,
+        speclib_path = values$diann_speclib,
+        output_dir = output_dir,
+        diann_sif = sif_path,
+        normalization = input$diann_normalization,
+        search_mode = input$search_mode,
+        cpus = input$diann_cpus,
+        mem_gb = input$diann_mem_gb,
+        time_hours = input$diann_time_hours,
+        partition = input$diann_partition,
+        account = input$diann_account,
+        search_params = search_params
+      )
+
+      # Write sbatch script and submit
+      script_path <- file.path(output_dir, "diann_search.sbatch")
+
+      if (!is.null(cfg)) {
+        # SSH mode: write script locally, SCP to remote, then submit
+        local_tmp <- tempfile(fileext = ".sbatch")
+        writeLines(script_content, local_tmp)
+        on.exit(unlink(local_tmp), add = TRUE)
+
+        scp_result <- scp_upload(cfg, local_tmp, script_path)
+        if (scp_result$status != 0) {
+          showNotification(
+            paste("Failed to write sbatch script to remote host:",
+                  paste(scp_result$stdout, collapse = " ")),
+            type = "error")
+          return()
+        }
+
+        # Use stored full sbatch path to avoid slow login shell initialization
+        sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
+        sbatch_cmd <- paste(sbatch_bin, shQuote(script_path))
+        submit_result <- tryCatch({
+          result <- ssh_exec(cfg, sbatch_cmd,
+                             login_shell = is.null(values$ssh_sbatch_path))
+          list(success = result$status == 0, stdout = result$stdout,
+               error = if (result$status != 0) paste(result$stdout, collapse = " ") else NULL)
+        }, error = function(e) {
+          list(success = FALSE, error = e$message)
+        })
+      } else {
+        # Local mode: write and submit locally
+        writeLines(script_content, script_path)
+
+        submit_result <- tryCatch({
+          stdout <- system2("sbatch", args = script_path, stdout = TRUE, stderr = TRUE)
+          list(success = TRUE, stdout = stdout)
+        }, error = function(e) {
+          list(success = FALSE, error = e$message)
+        })
+      }
+
+      if (!submit_result$success) {
+        showNotification(paste("sbatch submission failed:", submit_result$error), type = "error")
+        return()
+      }
+
+      job_id <- parse_sbatch_output(submit_result$stdout)
+      if (is.null(job_id)) {
+        showNotification(
+          paste("Could not parse job ID from sbatch output:",
+            paste(submit_result$stdout, collapse = " ")),
+          type = "error"
+        )
+        return()
+      }
+
+      # Create HPC job entry
+      job_entry <- list(
+        job_id = job_id,
+        backend = "hpc",
+        name = analysis_name,
+        status = "queued",
+        output_dir = output_dir,
+        script_path = script_path,
+        submitted_at = Sys.time(),
+        n_files = nrow(values$diann_raw_files),
+        search_mode = input$search_mode,
+        search_settings = list(
+          search_params = search_params,
+          fasta_files = fasta_files,
+          contaminant_library = contam_lib,
+          n_raw_files = nrow(values$diann_raw_files),
+          raw_file_type = if (nrow(values$diann_raw_files) > 0)
+            tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          diann_sif = basename(sif_path),
+          speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            basename(values$diann_speclib) else NULL,
+          slurm = list(
+            cpus = input$diann_cpus,
+            mem_gb = input$diann_mem_gb,
+            time_hours = input$diann_time_hours,
+            partition = input$diann_partition
+          )
+        ),
+        auto_load = input$auto_load_results,
+        log_content = "",
+        completed_at = NULL,
+        loaded = FALSE,
+        is_ssh = !is.null(cfg)
+      )
+    }
+
+    # --- Shared: add to queue & notify ---
     values$diann_jobs <- c(values$diann_jobs, list(job_entry))
 
-    # Log the submission
     add_to_log("DIA-NN Search Submitted", c(
       sprintf("# Job ID: %s", job_id),
+      sprintf("# Backend: %s", backend),
       sprintf("# Analysis: %s", analysis_name),
       sprintf("# Files: %d raw data files", nrow(values$diann_raw_files)),
       sprintf("# Mode: %s", input$search_mode),
-      sprintf("# Output: %s", output_dir),
-      sprintf("# sbatch script: %s", script_path)
+      sprintf("# Output: %s", output_dir)
     ))
 
     showNotification(
@@ -781,10 +986,45 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     for (i in seq_along(jobs)) {
       if (!jobs[[i]]$status %in% c("queued", "running")) next
 
-      # Use SSH for jobs submitted via SSH, local for local jobs
-      job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
-      new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
-                                        sbatch_path = values$ssh_sbatch_path)
+      if (isTRUE(jobs[[i]]$backend == "docker")) {
+        # --- Docker monitoring ---
+        cid <- jobs[[i]]$container_id %||% jobs[[i]]$job_id
+        result <- check_docker_container_status(cid)
+        new_status <- result$status
+
+        if (nzchar(result$log_tail)) {
+          jobs[[i]]$log_content <- result$log_tail
+          changed <- TRUE
+        }
+      } else {
+        # --- HPC (SLURM) monitoring ---
+        job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+        new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
+                                          sbatch_path = values$ssh_sbatch_path)
+
+        # Tail the log file (local or remote)
+        if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+          log_result <- ssh_exec(cfg, sprintf(
+            "ls -t %s/diann_*.{out,err} 2>/dev/null | head -1 | xargs tail -50 2>/dev/null",
+            shQuote(jobs[[i]]$output_dir)))
+          if (log_result$status == 0 && length(log_result$stdout) > 0) {
+            jobs[[i]]$log_content <- paste(log_result$stdout, collapse = "\n")
+            changed <- TRUE
+          }
+        } else {
+          log_files <- list.files(jobs[[i]]$output_dir,
+            pattern = "^diann_.*\\.(out|err)$", full.names = TRUE)
+          if (length(log_files) > 0) {
+            log_file <- log_files[which.max(file.mtime(log_files))]
+            log_lines <- tryCatch(
+              tail(readLines(log_file, warn = FALSE), 50),
+              error = function(e) character(0)
+            )
+            jobs[[i]]$log_content <- paste(log_lines, collapse = "\n")
+            changed <- TRUE
+          }
+        }
+      }
 
       if (new_status != jobs[[i]]$status) {
         jobs[[i]]$status <- new_status
@@ -796,34 +1036,17 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
             sprintf("DIA-NN search '%s' completed!", jobs[[i]]$name),
             type = "message", duration = 15
           )
+          # Docker cleanup: remove stopped container
+          if (isTRUE(jobs[[i]]$backend == "docker")) {
+            cid <- jobs[[i]]$container_id %||% jobs[[i]]$job_id
+            tryCatch(system2("docker", c("rm", cid),
+              stdout = FALSE, stderr = FALSE), error = function(e) NULL)
+          }
         } else if (new_status == "failed") {
           showNotification(
             sprintf("DIA-NN search '%s' failed. Check log for details.", jobs[[i]]$name),
             type = "error", duration = 15
           )
-        }
-      }
-
-      # Tail the log file (local or remote)
-      if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
-        log_result <- ssh_exec(cfg, sprintf(
-          "ls -t %s/diann_*.{out,err} 2>/dev/null | head -1 | xargs tail -50 2>/dev/null",
-          shQuote(jobs[[i]]$output_dir)))
-        if (log_result$status == 0 && length(log_result$stdout) > 0) {
-          jobs[[i]]$log_content <- paste(log_result$stdout, collapse = "\n")
-          changed <- TRUE
-        }
-      } else {
-        log_files <- list.files(jobs[[i]]$output_dir,
-          pattern = "^diann_.*\\.(out|err)$", full.names = TRUE)
-        if (length(log_files) > 0) {
-          log_file <- log_files[which.max(file.mtime(log_files))]
-          log_lines <- tryCatch(
-            tail(readLines(log_file, warn = FALSE), 50),
-            error = function(e) character(0)
-          )
-          jobs[[i]]$log_content <- paste(log_lines, collapse = "\n")
-          changed <- TRUE
         }
       }
     }
@@ -893,7 +1116,8 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       # Load the results into DE-LIMP pipeline
       tryCatch({
         withProgress(message = sprintf("Loading results from %s...", job$name), {
-          raw_data <- limpa::readDIANN(report_path)
+          raw_data <- suppressMessages(suppressWarnings(
+            limpa::readDIANN(report_path, format = "parquet")))
 
           values$raw_data <- raw_data
           values$uploaded_report_path <- report_path
@@ -1015,11 +1239,20 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
         sprintf("%.1f hrs", as.numeric(elapsed) / 60)
       }
 
+      backend_icon <- if (isTRUE(job$backend == "docker")) {
+        span(class = "badge bg-info text-white", style = "font-size: 0.7em; margin-right: 4px;",
+          icon("docker", lib = "font-awesome"), " Docker")
+      } else {
+        span(class = "badge bg-secondary", style = "font-size: 0.7em; margin-right: 4px;",
+          icon("server"), " HPC")
+      }
+
       div(style = "border: 1px solid #dee2e6; border-radius: 5px; padding: 8px; margin-bottom: 8px; font-size: 0.82em;",
         div(style = "display: flex; justify-content: space-between; align-items: center;",
           div(
+            backend_icon,
             strong(job$name), " ",
-            span(style = "color: #999;", sprintf("(#%s)", job$job_id))
+            span(style = "color: #999;", sprintf("(#%s)", substr(job$job_id, 1, 16)))
           ),
           status_badge
         ),
@@ -1083,11 +1316,12 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
         # View log modal
         observeEvent(input[[sprintf("view_log_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
+          safe_log <- iconv(job$log_content %||% "", from = "", to = "UTF-8", sub = "")
           showModal(modalDialog(
             title = sprintf("Log: %s (#%s)", job$name, job$job_id),
             size = "l", easyClose = TRUE, footer = modalButton("Close"),
             pre(style = "max-height: 500px; overflow-y: auto; font-size: 0.8em;",
-              job$log_content
+              safe_log
             )
           ))
         }, ignoreInit = TRUE)
@@ -1096,9 +1330,15 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
         observeEvent(input[[sprintf("refresh_job_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
           tryCatch({
-            job_cfg <- if (isTRUE(job$is_ssh)) isolate(ssh_config()) else NULL
-            new_status <- check_slurm_status(job$job_id, ssh_config = job_cfg,
-                                              sbatch_path = values$ssh_sbatch_path)
+            if (isTRUE(job$backend == "docker")) {
+              cid <- job$container_id %||% job$job_id
+              result <- check_docker_container_status(cid)
+              new_status <- result$status
+            } else {
+              job_cfg <- if (isTRUE(job$is_ssh)) isolate(ssh_config()) else NULL
+              new_status <- check_slurm_status(job$job_id, ssh_config = job_cfg,
+                                                sbatch_path = values$ssh_sbatch_path)
+            }
             jobs <- values$diann_jobs
             jobs[[idx]]$status <- new_status
             if (new_status == "completed" && is.null(jobs[[idx]]$completed_at)) {
@@ -1115,7 +1355,13 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
         observeEvent(input[[sprintf("cancel_job_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
           tryCatch({
-            if (isTRUE(job$is_ssh)) {
+            if (isTRUE(job$backend == "docker")) {
+              # Docker: stop + remove container
+              cid <- job$container_id %||% job$job_id
+              system2("docker", c("stop", cid), stdout = TRUE, stderr = TRUE)
+              tryCatch(system2("docker", c("rm", cid),
+                stdout = FALSE, stderr = FALSE), error = function(e) NULL)
+            } else if (isTRUE(job$is_ssh)) {
               cfg <- ssh_config()
               if (!is.null(cfg)) {
                 scancel_cmd <- if (!is.null(values$ssh_sbatch_path)) {
@@ -1138,16 +1384,25 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
         # Manual load results
         observeEvent(input[[sprintf("load_results_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
+          report_path <- NULL
 
           tryCatch({
             if (isTRUE(job$is_ssh)) {
               # SSH mode: SCP download first
               cfg <- ssh_config()
               if (is.null(cfg)) {
-                showNotification("SSH not configured. Re-enter connection details.", type = "error")
+                showNotification("SSH not configured. Test connection first.", type = "error", duration = 8)
                 return()
               }
 
+              if (!nzchar(job$output_dir %||% "")) {
+                showNotification("No output directory known for this job. Try Recover first.", type = "error", duration = 8)
+                return()
+              }
+
+              showNotification("Locating report on remote...", type = "message", duration = 3, id = "load_progress")
+
+              # Find the report.parquet file on remote
               remote_report <- file.path(job$output_dir, "report.parquet")
               find_result <- ssh_exec(cfg, paste("ls", shQuote(remote_report), "2>/dev/null"))
               if (find_result$status != 0) {
@@ -1155,21 +1410,22 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
                   "ls %s/report*.parquet 2>/dev/null | head -1", shQuote(job$output_dir)))
                 if (find_result$status != 0 || length(find_result$stdout) == 0 ||
                     !nzchar(trimws(find_result$stdout[1]))) {
-                  showNotification("No report.parquet found on remote.", type = "error")
+                  showNotification("No report.parquet found on remote.", type = "error", duration = 8)
                   return()
                 }
                 remote_report <- trimws(find_result$stdout[1])
               }
 
-              withProgress(message = "Downloading results via SCP...", {
-                local_report <- file.path(tempdir(), paste0(job$name, "_", basename(remote_report)))
-                dl_result <- scp_download(cfg, remote_report, local_report)
-                if (dl_result$status != 0) {
-                  showNotification("SCP download failed.", type = "error")
-                  return()
-                }
-                report_path <- local_report
-              })
+              # Download via SCP
+              showNotification("Downloading report via SCP...", type = "message", duration = 30, id = "load_progress")
+              local_report <- file.path(tempdir(), paste0(job$name, "_", basename(remote_report)))
+              dl_result <- scp_download(cfg, remote_report, local_report)
+              if (dl_result$status != 0) {
+                showNotification("SCP download failed.", type = "error", duration = 8)
+                return()
+              }
+              report_path <- local_report
+
             } else {
               # Local mode: direct access
               report_path <- file.path(job$output_dir, "report.parquet")
@@ -1179,13 +1435,20 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
                 if (length(parquet_files) > 0) {
                   report_path <- parquet_files[1]
                 } else {
-                  showNotification("No report.parquet found in output directory.", type = "error")
+                  showNotification("No report.parquet found in output directory.", type = "error", duration = 8)
                   return()
                 }
               }
             }
 
-            raw_data <- limpa::readDIANN(report_path)
+            if (is.null(report_path) || !file.exists(report_path)) {
+              showNotification("Report file not available.", type = "error", duration = 8)
+              return()
+            }
+
+            showNotification("Reading DIA-NN report...", type = "message", duration = 30, id = "load_progress")
+            raw_data <- suppressMessages(suppressWarnings(
+              limpa::readDIANN(report_path, format = "parquet")))
             values$raw_data <- raw_data
             values$uploaded_report_path <- report_path
             values$original_report_name <- basename(report_path)
@@ -1203,13 +1466,19 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
             jobs[[idx]]$loaded <- TRUE
             values$diann_jobs <- jobs
 
+            removeNotification(id = "load_progress")
             nav_select("main_tabs", "Data Overview")
             nav_select("data_overview_tabs", "Assign Groups & Run")
 
             showNotification("Results loaded! Assign groups and run pipeline.",
-              type = "message")
+              type = "message", duration = 8)
           }, error = function(e) {
-            showNotification(paste("Failed to load:", e$message), type = "error")
+            removeNotification(id = "load_progress")
+            err_msg <- tryCatch(
+              iconv(conditionMessage(e), from = "", to = "UTF-8", sub = ""),
+              error = function(e2) "Unknown error (possible encoding issue)"
+            )
+            showNotification(paste("Failed to load:", err_msg), type = "error", duration = 10)
           })
         }, ignoreInit = TRUE)
       })
@@ -1229,9 +1498,15 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     for (i in seq_along(jobs)) {
       if (jobs[[i]]$status != "unknown") next
       tryCatch({
-        job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
-        new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
-                                          sbatch_path = values$ssh_sbatch_path)
+        if (isTRUE(jobs[[i]]$backend == "docker")) {
+          cid <- jobs[[i]]$container_id %||% jobs[[i]]$job_id
+          result <- check_docker_container_status(cid)
+          new_status <- result$status
+        } else {
+          job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+          new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
+                                            sbatch_path = values$ssh_sbatch_path)
+        }
         jobs[[i]]$status <- new_status
         if (new_status == "completed" && is.null(jobs[[i]]$completed_at)) {
           jobs[[i]]$completed_at <- Sys.time()
@@ -1242,6 +1517,259 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
 
     if (changed) values$diann_jobs <- jobs
     showNotification("Job statuses refreshed.", type = "message", duration = 3)
+  })
+
+  # ============================================================================
+  #    Recover Jobs from SLURM / Docker
+  # ============================================================================
+
+  observeEvent(input$recover_jobs_btn, {
+    recovered <- 0
+    updated <- 0
+
+    # --- Recover HPC jobs via sacct ---
+    if (hpc_available) {
+      cfg <- isolate(ssh_config())
+      withProgress(message = "Scanning SLURM for previous DIA-NN jobs...", {
+        slurm_jobs <- recover_slurm_jobs(
+          ssh_config = cfg,
+          sbatch_path = values$ssh_sbatch_path,
+          days_back = 14
+        )
+      })
+
+      if (nrow(slurm_jobs) > 0) {
+        existing_ids <- vapply(values$diann_jobs, function(j) j$job_id, character(1))
+
+        for (i in seq_len(nrow(slurm_jobs))) {
+          row <- slurm_jobs[i, ]
+
+          # Map SLURM state to DE-LIMP status
+          status <- switch(toupper(row$state),
+            "COMPLETED" = "completed",
+            "RUNNING"   = "running",
+            "PENDING"   = "queued",
+            "FAILED"    = "failed",
+            "CANCELLED" = "cancelled",
+            "TIMEOUT"   = "failed",
+            "unknown"
+          )
+
+          # Find the actual log file and output directory.
+          # Strategy 1: scontrol show job → StdOut path (most reliable for recent jobs)
+          # Strategy 2: sacct SubmitLine → script path → derive output dir
+          # Strategy 3: find in common HPC paths
+          output_dir <- ""
+          log_content <- ""
+          n_files <- 0
+          log_file <- ""
+
+          run_ssh <- function(cmd) {
+            if (!is.null(cfg)) ssh_exec(cfg, cmd, timeout = 30)
+            else {
+              out <- tryCatch(system2("bash", c("-c", cmd), stdout = TRUE, stderr = TRUE),
+                error = function(e) character())
+              list(status = 0, stdout = out)
+            }
+          }
+
+          # Derive SLURM tool paths from sbatch path
+          slurm_bin_dir <- if (!is.null(values$ssh_sbatch_path) && nzchar(values$ssh_sbatch_path)) {
+            dirname(values$ssh_sbatch_path)
+          } else ""
+
+          scontrol_bin <- if (nzchar(slurm_bin_dir)) file.path(slurm_bin_dir, "scontrol") else "scontrol"
+          sacct_bin <- if (nzchar(slurm_bin_dir)) file.path(slurm_bin_dir, "sacct") else "sacct"
+
+          # Strategy 1: scontrol show job → extract StdOut path
+          # Use sed instead of grep -oP for portability (not all systems have PCRE grep)
+          scontrol_result <- tryCatch({
+            run_ssh(sprintf(
+              "%s show job %s 2>/dev/null | sed -n 's/.*StdOut=//p' | tr -d ' '",
+              scontrol_bin, row$job_id))
+          }, error = function(e) list(status = 1, stdout = character()))
+
+          if (scontrol_result$status == 0 && length(scontrol_result$stdout) > 0 &&
+              nzchar(trimws(scontrol_result$stdout[1]))) {
+            log_file <- trimws(scontrol_result$stdout[1])
+            output_dir <- dirname(log_file)
+          }
+
+          # Strategy 2: sacct SubmitLine → derive from script path
+          if (!nzchar(log_file)) {
+            submit_result <- tryCatch({
+              run_ssh(sprintf(
+                "%s -j %s --format=SubmitLine%%300 --parsable2 --noheader 2>/dev/null | head -1",
+                sacct_bin, row$job_id))
+            }, error = function(e) list(status = 1, stdout = character()))
+
+            if (submit_result$status == 0 && length(submit_result$stdout) > 0 &&
+                nzchar(trimws(submit_result$stdout[1]))) {
+              submit_line <- trimws(submit_result$stdout[1])
+              parts <- strsplit(submit_line, "[[:space:]]+")[[1]]
+              script_path <- parts[grepl("/.*\\.sbatch$", parts)]
+              if (length(script_path) > 0) {
+                output_dir <- dirname(script_path[1])
+                log_file <- file.path(output_dir, sprintf("diann_%s.out", row$job_id))
+              }
+            }
+          }
+
+          # Strategy 3: search configured output base + common HPC paths
+          # Use timeout to avoid long waits on large shared filesystems
+          if (!nzchar(log_file)) {
+            search_base <- isolate(output_base())
+            find_result <- tryCatch({
+              find_cmd <- sprintf(paste0(
+                "timeout 10 find %s -maxdepth 4 -name 'diann_%s.out' 2>/dev/null | head -1"),
+                shQuote(search_base), row$job_id)
+              if (!is.null(cfg)) ssh_exec(cfg, find_cmd, timeout = 15)
+              else {
+                out <- system2("bash", c("-c", find_cmd), stdout = TRUE, stderr = TRUE)
+                list(status = 0, stdout = out)
+              }
+            }, error = function(e) list(status = 1, stdout = character()))
+
+            if (find_result$status == 0 && length(find_result$stdout) > 0 &&
+                nzchar(trimws(find_result$stdout[1]))) {
+              log_file <- trimws(find_result$stdout[1])
+              output_dir <- dirname(log_file)
+            }
+          }
+
+          # Fetch actual log content and file count
+          if (nzchar(log_file)) {
+            # Get file count from the "N files will be processed" line near the top
+            count_result <- tryCatch(
+              run_ssh(sprintf(
+                "grep -m1 'files will be processed' %s 2>/dev/null", shQuote(log_file))),
+              error = function(e) list(status = 1, stdout = character()))
+
+            if (count_result$status == 0 && length(count_result$stdout) > 0 &&
+                nzchar(count_result$stdout[1])) {
+              # Line format: "[HH:MM] N files will be processed"
+              m <- regexpr("[0-9]+(?=\\s+files will be processed)",
+                count_result$stdout[1], perl = TRUE)
+              if (m > 0) n_files <- as.integer(regmatches(count_result$stdout[1], m))
+            }
+
+            # Tail the log for display
+            tail_result <- tryCatch(
+              run_ssh(sprintf("tail -150 %s 2>/dev/null", shQuote(log_file))),
+              error = function(e) list(status = 1, stdout = character()))
+
+            if (tail_result$status == 0 && length(tail_result$stdout) > 0) {
+              log_content <- iconv(paste(tail_result$stdout, collapse = "\n"),
+                from = "", to = "UTF-8", sub = "")
+            }
+          }
+
+          if (!nzchar(log_content)) {
+            log_content <- sprintf(paste0(
+              "Recovered from SLURM sacct.\nState: %s, Elapsed: %s\n",
+              "Output dir: %s\n\n",
+              "Could not locate log file diann_%s.out on the cluster.\n",
+              "Tried: scontrol show job, sacct SubmitLine, find in common paths."),
+              row$state, row$elapsed,
+              if (nzchar(output_dir)) output_dir else "(unknown)", row$job_id)
+          }
+
+          # Check if job already exists in queue
+          existing_idx <- match(row$job_id, existing_ids)
+
+          if (!is.na(existing_idx)) {
+            # Update existing entry with fresh data from cluster
+            jobs <- values$diann_jobs
+            jobs[[existing_idx]]$status <- status
+            jobs[[existing_idx]]$log_content <- log_content
+            if (nzchar(output_dir)) jobs[[existing_idx]]$output_dir <- output_dir
+            if (n_files > 0) jobs[[existing_idx]]$n_files <- n_files
+            if (status %in% c("completed", "failed", "cancelled") &&
+                is.null(jobs[[existing_idx]]$completed_at)) {
+              jobs[[existing_idx]]$completed_at <- Sys.time()
+            }
+            values$diann_jobs <- jobs
+            updated <- updated + 1
+          } else {
+            # Add new entry
+            job_entry <- list(
+              job_id = row$job_id,
+              backend = "hpc",
+              name = row$name,
+              status = status,
+              output_dir = output_dir,
+              submitted_at = Sys.time(),
+              n_files = n_files,
+              search_mode = "unknown",
+              search_settings = NULL,
+              auto_load = FALSE,
+              log_content = log_content,
+              completed_at = if (status %in% c("completed", "failed", "cancelled")) Sys.time() else NULL,
+              loaded = FALSE,
+              is_ssh = !is.null(cfg)
+            )
+            values$diann_jobs <- c(values$diann_jobs, list(job_entry))
+            recovered <- recovered + 1
+          }
+        }
+      }
+    }
+
+    # --- Recover Docker jobs ---
+    if (docker_available) {
+      withProgress(message = "Scanning Docker for previous DIA-NN containers...", {
+        docker_jobs <- recover_docker_jobs()
+      })
+
+      if (nrow(docker_jobs) > 0) {
+        existing_ids <- vapply(values$diann_jobs, function(j) j$job_id, character(1))
+        for (i in seq_len(nrow(docker_jobs))) {
+          row <- docker_jobs[i, ]
+
+          # Check actual container status
+          result <- check_docker_container_status(row$container_id)
+
+          existing_idx <- match(row$name, existing_ids)
+
+          if (!is.na(existing_idx)) {
+            jobs <- values$diann_jobs
+            jobs[[existing_idx]]$status <- result$status
+            jobs[[existing_idx]]$log_content <- result$log_tail
+            values$diann_jobs <- jobs
+            updated <- updated + 1
+          } else {
+            job_entry <- list(
+              job_id = row$name,
+              container_id = row$container_id,
+              backend = "docker",
+              name = sub("^delimp_", "", row$name),
+              status = result$status,
+              output_dir = "",
+              submitted_at = Sys.time(),
+              n_files = 0,
+              search_mode = "unknown",
+              search_settings = NULL,
+              auto_load = FALSE,
+              log_content = result$log_tail,
+              completed_at = if (result$status %in% c("completed", "failed")) Sys.time() else NULL,
+              loaded = FALSE,
+              is_ssh = FALSE
+            )
+            values$diann_jobs <- c(values$diann_jobs, list(job_entry))
+            recovered <- recovered + 1
+          }
+        }
+      }
+    }
+
+    if (recovered > 0 || updated > 0) {
+      parts <- c()
+      if (recovered > 0) parts <- c(parts, sprintf("%d new job(s) recovered", recovered))
+      if (updated > 0) parts <- c(parts, sprintf("%d existing job(s) updated", updated))
+      showNotification(paste(parts, collapse = ", "), type = "message", duration = 8)
+    } else {
+      showNotification("No DIA-NN jobs found on cluster.", type = "message", duration = 5)
+    }
   })
 
 }

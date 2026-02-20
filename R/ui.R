@@ -1,9 +1,11 @@
 # ==============================================================================
 #  USER INTERFACE (UI) — Build the complete app UI
-#  Called from app.R as: ui <- build_ui(is_hf_space, hpc_mode, local_sbatch)
+#  Called from app.R as: ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch)
 # ==============================================================================
 
-build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
+build_ui <- function(is_hf_space, search_enabled = FALSE,
+                     docker_available = FALSE, hpc_available = FALSE,
+                     local_sbatch = FALSE) {
   page_sidebar(
   title = "DE-LIMP Proteomics",
   theme = bs_theme(bootswatch = "flatly"),
@@ -202,9 +204,9 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
     id = "main_tabs",
 
     # ==========================================================================
-    # New Search tab (HPC only — visible when sbatch is on PATH)
+    # New Search tab — visible when Docker or HPC backend is available
     # ==========================================================================
-    if (hpc_mode) nav_panel("New Search", icon = icon("rocket"),
+    if (search_enabled) nav_panel("New Search", icon = icon("rocket"),
       # Three-panel wizard layout
       layout_column_wrap(
         width = 1/3,
@@ -221,12 +223,16 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
 
             hr(),
             tags$h6(icon("hard-drive"), " Raw Data"),
-            conditionalPanel("input.search_connection_mode != 'ssh'",
+            # Local file browser: shown for Docker backend OR local-sbatch HPC
+            conditionalPanel(
+              "input.search_backend == 'docker' || (input.search_backend == 'hpc' && input.search_connection_mode != 'ssh')",
               shinyFiles::shinyDirButton("raw_data_dir", "Select Raw Data Folder",
                 title = "Choose directory with .d / .raw / .mzML files",
                 class = "btn-outline-primary btn-sm w-100")
             ),
-            conditionalPanel("input.search_connection_mode == 'ssh'",
+            # SSH remote path: only for HPC + SSH mode
+            conditionalPanel(
+              "input.search_backend == 'hpc' && input.search_connection_mode == 'ssh'",
               div(style = "display: flex; gap: 5px;",
                 div(style = "flex: 1;",
                   textInput("ssh_raw_data_dir", NULL,
@@ -280,12 +286,14 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
 
             # --- Browse / path source ---
             conditionalPanel("input.fasta_source == 'browse'",
-              conditionalPanel("input.search_connection_mode != 'ssh'",
+              conditionalPanel(
+                "input.search_backend == 'docker' || (input.search_backend == 'hpc' && input.search_connection_mode != 'ssh')",
                 shinyFiles::shinyDirButton("fasta_browse_dir", "Browse for FASTA Folder",
                   title = "Navigate to FASTA directory",
                   class = "btn-outline-primary btn-sm w-100")
               ),
-              conditionalPanel("input.search_connection_mode == 'ssh'",
+              conditionalPanel(
+                "input.search_backend == 'hpc' && input.search_connection_mode == 'ssh'",
                 div(style = "display: flex; gap: 5px;",
                   div(style = "flex: 1;",
                     textInput("ssh_fasta_browse_dir", NULL,
@@ -318,13 +326,15 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
 
             hr(),
             tags$h6(icon("book"), " Spectral Library (optional)"),
-            conditionalPanel("input.search_connection_mode != 'ssh'",
+            conditionalPanel(
+              "input.search_backend == 'docker' || (input.search_backend == 'hpc' && input.search_connection_mode != 'ssh')",
               shinyFiles::shinyFilesButton("lib_file", "Select .speclib File",
                 title = "Choose spectral library",
                 class = "btn-outline-secondary btn-sm w-100",
                 multiple = FALSE)
             ),
-            conditionalPanel("input.search_connection_mode == 'ssh'",
+            conditionalPanel(
+              "input.search_backend == 'hpc' && input.search_connection_mode == 'ssh'",
               textInput("ssh_lib_file", NULL,
                 placeholder = "/share/proteomics/libraries/my.speclib")
             ),
@@ -332,7 +342,7 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
           )
         ),
 
-        # === PANEL 2: SEARCH SETTINGS ===
+        # === PANEL 2: SEARCH SETTINGS (shared across backends) ===
         card(
           card_header(tagList(icon("sliders"), " 2. Search Settings")),
           card_body(
@@ -460,70 +470,105 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
           card_body(
             style = "overflow-y: auto; max-height: calc(100vh - 200px);",
 
-            tags$h6(icon("plug"), " Connection Mode"),
-            radioButtons("search_connection_mode", NULL,
-              choices = c("Local (on HPC)" = "local", "Remote (SSH)" = "ssh"),
-              selected = if (local_sbatch) "local" else "ssh", inline = TRUE),
-            conditionalPanel("input.search_connection_mode == 'ssh'",
-              textInput("ssh_host", "HPC Hostname",
-                value = "hive.hpc.ucdavis.edu"),
+            # Backend selector
+            tags$h6(icon("microchip"), " Compute Backend"),
+            if (docker_available && hpc_available) {
+              radioButtons("search_backend", NULL,
+                choices = c("Local (Docker)" = "docker", "HPC (SSH/SLURM)" = "hpc"),
+                selected = "docker", inline = TRUE)
+            } else {
+              # Single backend — use real Shiny input (hidden) so conditionalPanel works
+              div(style = "display: none;",
+                radioButtons("search_backend", NULL,
+                  choices = if (docker_available) c("Local (Docker)" = "docker")
+                            else c("HPC (SSH/SLURM)" = "hpc"),
+                  selected = if (docker_available) "docker" else "hpc")
+              )
+            },
+
+            # ---------- Docker backend controls ----------
+            conditionalPanel("input.search_backend == 'docker'",
+              uiOutput("docker_image_status"),
+              hr(),
+              tags$h6("Docker Resources"),
+              uiOutput("docker_resources_ui"),
+              hr(),
+              tags$h6("Output Directory"),
+              shinyFiles::shinyDirButton("docker_output_dir", "Select Output Folder",
+                title = "Choose output directory for DIA-NN results",
+                class = "btn-outline-primary btn-sm w-100"),
+              verbatimTextOutput("docker_output_path"),
+              textInput("docker_image_name", "DIA-NN Docker Image:",
+                value = "diann:2.0")
+            ),
+
+            # ---------- HPC backend controls ----------
+            conditionalPanel("input.search_backend == 'hpc'",
+              tags$h6(icon("plug"), " Connection Mode"),
+              radioButtons("search_connection_mode", NULL,
+                choices = c("Local (on HPC)" = "local", "Remote (SSH)" = "ssh"),
+                selected = if (local_sbatch) "local" else "ssh", inline = TRUE),
+              conditionalPanel("input.search_connection_mode == 'ssh'",
+                textInput("ssh_host", "HPC Hostname",
+                  value = "hive.hpc.ucdavis.edu"),
+                div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+                  div(style = "flex: 1; min-width: 100px;",
+                    textInput("ssh_user", "Username", value = "brettsp")
+                  ),
+                  div(style = "flex: 1; min-width: 80px;",
+                    numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)
+                  )
+                ),
+                textInput("ssh_key_path", "SSH Key Path",
+                  value = paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
+                textInput("ssh_modules", "Modules to Load (optional)",
+                  value = "",
+                  placeholder = "e.g., slurm apptainer"),
+                actionButton("test_ssh_btn", "Test Connection",
+                  icon = icon("plug"), class = "btn-outline-info btn-sm"),
+                uiOutput("ssh_status_ui")
+              ),
+
+              hr(),
+              tags$h6("SLURM Resources"),
               div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                 div(style = "flex: 1; min-width: 100px;",
-                  textInput("ssh_user", "Username", value = "brettsp")
+                  numericInput("diann_cpus", "CPUs:", value = 64, min = 4, max = 128, step = 4)
                 ),
-                div(style = "flex: 1; min-width: 80px;",
-                  numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)
+                div(style = "flex: 1; min-width: 100px;",
+                  numericInput("diann_mem_gb", "Memory (GB):", value = 512, min = 16, max = 1024, step = 16)
                 )
               ),
-              textInput("ssh_key_path", "SSH Key Path",
-                value = paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
-              textInput("ssh_modules", "Modules to Load (optional)",
-                value = "",
-                placeholder = "e.g., slurm apptainer"),
-              actionButton("test_ssh_btn", "Test Connection",
-                icon = icon("plug"), class = "btn-outline-info btn-sm"),
-              uiOutput("ssh_status_ui")
-            ),
-
-            hr(),
-            tags$h6("SLURM Resources"),
-            div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
-              div(style = "flex: 1; min-width: 100px;",
-                numericInput("diann_cpus", "CPUs:", value = 64, min = 4, max = 128, step = 4)
+              div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+                div(style = "flex: 1; min-width: 100px;",
+                  numericInput("diann_time_hours", "Time (hrs):", value = 12, min = 1, max = 48)
+                ),
+                div(style = "flex: 1; min-width: 100px;",
+                  textInput("diann_partition", "Partition:", value = "high")
+                )
               ),
-              div(style = "flex: 1; min-width: 100px;",
-                numericInput("diann_mem_gb", "Memory (GB):", value = 512, min = 16, max = 1024, step = 16)
-              )
-            ),
-            div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
-              div(style = "flex: 1; min-width: 100px;",
-                numericInput("diann_time_hours", "Time (hrs):", value = 12, min = 1, max = 48)
+              textInput("diann_account", "Account:", value = "genome-center-grp"),
+
+              hr(),
+              tags$h6("DIA-NN Container"),
+              textInput("diann_sif_path", "Apptainer SIF Path:",
+                value = "/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif",
+                placeholder = "/path/to/diann_2.3.0.sif"),
+
+              hr(),
+              tags$h6("Output Directory"),
+              conditionalPanel("input.search_connection_mode != 'ssh'",
+                shinyFiles::shinyDirButton("output_base_dir", "Select Output Folder",
+                  title = "Choose base output directory",
+                  class = "btn-outline-primary btn-sm w-100")
               ),
-              div(style = "flex: 1; min-width: 100px;",
-                textInput("diann_partition", "Partition:", value = "high")
-              )
+              conditionalPanel("input.search_connection_mode == 'ssh'",
+                textInput("ssh_output_base_dir", NULL,
+                  value = "/quobyte/proteomics-grp/de-limp/phospho/nophossearch",
+                  placeholder = "/share/proteomics/results/")
+              ),
+              verbatimTextOutput("full_output_path")
             ),
-            textInput("diann_account", "Account:", value = "genome-center-grp"),
-
-            hr(),
-            tags$h6("DIA-NN Container"),
-            textInput("diann_sif_path", "Apptainer SIF Path:",
-              value = "/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif",
-              placeholder = "/path/to/diann_2.3.0.sif"),
-
-            hr(),
-            tags$h6("Output Directory"),
-            conditionalPanel("input.search_connection_mode != 'ssh'",
-              shinyFiles::shinyDirButton("output_base_dir", "Select Output Folder",
-                title = "Choose base output directory",
-                class = "btn-outline-primary btn-sm w-100")
-            ),
-            conditionalPanel("input.search_connection_mode == 'ssh'",
-              textInput("ssh_output_base_dir", NULL,
-                value = "/quobyte/proteomics-grp/de-limp/phospho/nophossearch",
-                placeholder = "/share/proteomics/results/")
-            ),
-            verbatimTextOutput("full_output_path"),
 
             hr(),
             uiOutput("time_estimate_ui"),
@@ -536,8 +581,21 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
             checkboxInput("auto_load_results", "Auto-load results when complete", TRUE),
 
             hr(),
-            tags$h6(icon("list-check"), " Job Queue"),
-            uiOutput("search_queue_ui")
+            div(style = "display: flex; justify-content: space-between; align-items: center;",
+              tags$h6(icon("list-check"), " Job Queue", style = "margin-bottom: 0;"),
+              actionButton("recover_jobs_btn", "Recover",
+                class = "btn-outline-info btn-sm",
+                style = "font-size: 0.75em; padding: 2px 8px;",
+                icon = icon("magnifying-glass"))
+            ),
+            uiOutput("search_queue_ui"),
+
+            # License attribution
+            tags$div(class = "text-muted", style = "font-size: 0.78em; margin-top: 12px; border-top: 1px solid #dee2e6; padding-top: 8px;",
+              "DIA-NN by Vadim Demichev. ",
+              tags$a(href = "https://github.com/vdemichev/DiaNN/blob/master/LICENSE.md",
+                     "License", target = "_blank"), " | ",
+              "Demichev V et al. (2020) ", tags$em("Nature Methods"), " 17:41-44")
           )
         )
       )

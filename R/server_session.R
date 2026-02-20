@@ -447,9 +447,29 @@ server_session <- function(input, output, session, values, add_to_log) {
         sprintf("MS2 %s ppm, MS1 %s ppm", sp$mass_acc, sp$mass_acc_ms1)
       }
 
+      # DIA-NN engine description (Docker vs HPC/Singularity)
+      engine_desc <- if (!is.null(ss$docker_image)) {
+        sprintf("DIA-NN (%s, Docker)", ss$docker_image)
+      } else if (!is.null(ss$diann_sif)) {
+        sprintf("DIA-NN (%s)", ss$diann_sif)
+      } else {
+        "DIA-NN"
+      }
+
+      # Compute resource description
+      resource_desc <- if (!is.null(ss$docker)) {
+        sprintf("Docker resources: %d CPUs, %d GB RAM (image: %s).",
+                ss$docker$cpus, ss$docker$mem_gb, ss$docker$image)
+      } else if (!is.null(ss$slurm)) {
+        sprintf("SLURM resources: %s CPUs, %s GB RAM, %s hour(s), partition: %s.",
+                ss$slurm$cpus, ss$slurm$mem_gb, ss$slurm$time_hours, ss$slurm$partition)
+      } else {
+        ""
+      }
+
       diann_section <- paste0(
         "0. DIA-NN DATABASE SEARCH\n",
-        "Raw data files (", ss$n_raw_files, " ", toupper(ss$raw_file_type), " files) were searched using DIA-NN (", ss$diann_sif, ") ",
+        "Raw data files (", ss$n_raw_files, " ", toupper(ss$raw_file_type), " files) were searched using ", engine_desc, " ",
         "in ", ss$search_mode, " mode",
         if (!is.null(ss$speclib)) paste0(" with spectral library (", ss$speclib, ")") else "",
         ".\n",
@@ -467,8 +487,7 @@ server_session <- function(input, output, session, values, add_to_log) {
           "Phosphoproteomics mode: STY phosphorylation (UniMod:21, +79.966 Da), phospho-specific output and library info reporting enabled.\n"
         else "",
         if (nzchar(sp$extra_cli_flags)) paste0("Additional flags: ", sp$extra_cli_flags, "\n") else "",
-        "SLURM resources: ", ss$slurm$cpus, " CPUs, ", ss$slurm$mem_gb, " GB RAM, ",
-        ss$slurm$time_hours, " hour(s), partition: ", ss$slurm$partition, ".\n\n"
+        resource_desc, "\n\n"
       )
     }
 

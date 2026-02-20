@@ -22,8 +22,8 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 
 | File | Purpose |
 |------|---------|
-| `app.R` | Thin orchestrator (~230 lines) — package loading, reactive values init, calls R/ modules |
-| `R/ui.R` | `build_ui(is_hf_space)` — full UI definition (~700 lines) |
+| `app.R` | Thin orchestrator (~270 lines) — package loading, backend detection, reactive values init, calls R/ modules |
+| `R/ui.R` | `build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch)` — full UI definition (~900 lines) |
 | `R/server_data.R` | Data upload, example load, group assignment, pipeline execution (~576 lines) |
 | `R/server_de.R` | Volcano, DE table, heatmap, consistent DE, selection sync (~498 lines) |
 | `R/server_qc.R` | QC trends, diagnostic plots, p-value distribution (~828 lines) |
@@ -37,8 +37,9 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 | `R/helpers_xic.R` | `detect_xic_format()`, `load_xic_for_protein()`, `reshape_xic_for_plotting()` |
 | `R/helpers_phospho.R` | `detect_phospho()`, `parse_phospho_positions()`, `extract_phosphosites()` (~210 lines) |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table, residue dist, completeness QC (~650 lines) |
-| `R/helpers_search.R` | `ssh_exec()`, `scp_download()`, `scp_upload()`, `test_ssh_connection()`, `check_slurm_status()`, `generate_sbatch_script()`, UniProt proteome search (~450 lines) |
-| `R/server_search.R` | SSH connection UI, DIA-NN search config, remote file scanning, job queue (submit/monitor/cancel), SCP result download (~750 lines) |
+| `R/helpers_search.R` | `ssh_exec()`, `scp_download/upload()`, `build_diann_flags()`, `build_docker_command()`, `check_docker_*()`, `recover_slurm_jobs()`, `recover_docker_jobs()`, `generate_sbatch_script()`, UniProt proteome search (~1050 lines) |
+| `R/server_search.R` | Docker/HPC dual backend, SSH connection, DIA-NN search config, file browsing, job queue (submit/monitor/cancel/recover/load), SCP result download (~1750 lines) |
+| `build_diann_docker.sh` | User-facing script to build DIA-NN Docker image locally (license notice, downloads from GitHub, builds x86_64 image) |
 | `Dockerfile` | Docker container for HF Spaces and HPC deployment |
 | `HPC_DEPLOYMENT.md` | Guide for HPC cluster deployment with Apptainer/Singularity |
 | `USER_GUIDE.md` | End-user documentation |
@@ -53,7 +54,7 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 
 ### Structure (modular, ~6,100 lines total)
 ```
-app.R (250 lines):      Package loading, auto-install, reactive values, module calls
+app.R (270 lines):      Package loading, auto-install, backend detection (Docker/HPC), reactive values, module calls
 R/ui.R:                 build_ui() — CSS/JS, sidebar, all 10 tab nav_panels
 R/server_*.R (10 files): Server modules, each receives (input, output, session, values, ...)
 R/helpers*.R (4 files): Pure utility functions (no Shiny reactivity)
@@ -73,7 +74,8 @@ server <- function(input, output, session) {
   server_ai(input, output, session, values)
   server_xic(input, output, session, values, is_hf_space)
   server_phospho(input, output, session, values, add_to_log)
-  server_search(input, output, session, values)
+  server_search(input, output, session, values, add_to_log,
+                search_enabled, docker_available, docker_config, hpc_available, local_sbatch)
   server_session(input, output, session, values, add_to_log)
 }
 ```
@@ -87,7 +89,7 @@ server <- function(input, output, session) {
 - **Reproducibility** - Code Log + Methodology sub-tabs
 - **Phosphoproteomics** - Site-level DE: Phospho Volcano, Site Table, Residue Distribution, QC Completeness (conditional on phospho detection)
 - **Gene Set Enrichment** - Ontology selector (BP/MF/CC/KEGG), Dot Plot, Enrichment Map, Ridgeplot, Results Table, per-ontology caching
-- **New Search** - DIA-NN search submission: file selection (local shinyFiles or SSH text inputs), FASTA database (UniProt download + upload), search settings (standard/phospho), SLURM resources, SSH connection panel, job queue with monitoring (conditional on HPC/SSH availability)
+- **New Search** - DIA-NN search: dual backend (Docker local + HPC SSH/SLURM), file selection, FASTA database (UniProt download + upload), search settings (standard/phospho), resource controls, job queue (submit/monitor/cancel/recover/load), auto-load results (conditional on search backend availability)
 - **Data Chat** - AI-powered analysis (Google Gemini API)
 - **Education** - Learning resources
 
@@ -116,7 +118,7 @@ server <- function(input, output, session) {
 - `values$gsea_last_contrast` - Contrast used for cached GSEA results
 - `values$gsea_last_org_db` - OrgDb used for cached GSEA results
 - `values$ssh_sbatch_path` - Full path to sbatch binary on remote HPC (cached from test connection)
-- `values$diann_job_queue` - List of submitted DIA-NN search jobs (id, status, log, output_dir)
+- `values$diann_jobs` - List of DIA-NN job entries (job_id, backend, name, status, output_dir, n_files, log_content, is_ssh, loaded, etc.)
 
 ### LIMPA Pipeline Flow
 1. `readDIANN()` - Load DIA-NN parquet file
@@ -279,6 +281,21 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 - **R regex gotcha**: `\\s` is NOT valid in base R regex (POSIX ERE). Use `[:space:]` in character classes — `[,;[:space:]]+` not `[,;\\s]+`.
 - **Shell line continuations**: When building multi-line shell commands from R vectors, use `paste0(flags, " \\")` to append `\` to each flag line — NOT `c(flags, " \\")` which puts `\` on its own line.
 
+### Docker/HPC Dual Backend Patterns
+- **Backend detection at startup** (`app.R`): Checks `Sys.which("docker")` + `docker info` for Docker; `Sys.which("sbatch")` + `Sys.which("ssh")` for HPC. Sets `search_enabled`, `docker_available`, `hpc_available` flags passed to UI and server modules.
+- **Backend selector UI**: When both backends available, `radioButtons("search_backend", ...)` with Docker/HPC choices. When only one, hidden `radioButtons` in `div(style="display:none;")` — must be a real Shiny input for `conditionalPanel` to work (raw `tags$input(type="hidden")` is NOT registered by Shiny JS).
+- **Shared flag builder**: `build_diann_flags()` extracts DIA-NN CLI flag generation from `generate_sbatch_script()`. Called by both HPC (sbatch) and Docker (`build_docker_command()`) paths. Eliminates flag duplication.
+- **Docker execution**: `docker run -d --platform linux/amd64 --cpus=N --memory=Xg` returns container ID. Monitoring via `check_docker_container_status()` → `docker inspect` + `docker logs --tail 30`.
+- **DIA-NN license compliance**: DO NOT bundle DIA-NN binary. Users build their own image via `build_diann_docker.sh`. UI footer has license attribution + citation link.
+- **Job queue persistence**: Saved to `~/.delimp_job_queue.rds`. `observeEvent(values$diann_jobs, {...}, ignoreInit = TRUE)` prevents race condition where save observer fires before load observer restores data.
+- **Job entry schema**: `list(job_id, backend="docker"|"hpc", name, status, output_dir, n_files, search_mode, search_settings, auto_load, log_content, submitted_at, completed_at, loaded, is_ssh, container_id)`. Old jobs missing `backend` field default to `"hpc"`.
+- **Recover Jobs**: Queries `sacct` for DIA-NN jobs, then enriches with `scontrol show job` (StdOut path), log tailing, file count extraction. Updates existing entries instead of skipping. Docker recovery via `docker ps -a --filter name=delimp_`.
+- **SLURM log discovery** (3 strategies): 1) `scontrol show job <id>` → `sed -n 's/.*StdOut=//p'` (most reliable), 2) `sacct SubmitLine` → parse script path, 3) `timeout 10 find <output_base> -maxdepth 4` (targeted, with timeout).
+- **File count extraction**: DIA-NN log format is `[HH:MM] N files will be processed`. Use `grep -m1 'files will be processed'` then `regexpr("[0-9]+(?=\\s+files will be processed)", ..., perl=TRUE)` — NOT `^[0-9]+` which matches the `[HH:MM]` timestamp.
+- **SSH output encoding**: All `ssh_exec()`/`scp_download()`/`scp_upload()` sanitize output with `iconv(stdout, from="", to="UTF-8", sub="")` to prevent `nchar(msg): invalid multibyte string` crashes from ANSI codes, MOTD banners, or binary data in SSH output.
+- **Loading results**: Must pass `format = "parquet"` to `limpa::readDIANN()` — default is `"tsv"` which uses `fread()` (returns data.table), causing `DT[, extra.columns]` syntax error. Wrap in `suppressMessages(suppressWarnings(...))` to prevent crashes from arrow messages with invalid encoding.
+- **`return()` inside `withProgress`**: `return()` exits `withProgress` (not the calling function) because `withProgress` uses `eval(expr, envir=env)`. Never rely on `return()` inside `withProgress` to exit an observer handler — restructure as flat `tryCatch` instead.
+
 ### XIC Viewer Patterns
 - **Arrow masks dplyr**: `arrow::select()` masks `dplyr::select()` — always use `dplyr::select()` explicitly in XIC code
 - **Avoid rlang in Arrow context**: `rlang::sym()` and tidy `rename()` fail with Arrow — use base R `df[df$col %in% vals, ]` and `names(df)[...] <- "new"`
@@ -310,6 +327,13 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 | SSH glob patterns not expanding | `shQuote()` wrapping glob prevents bash expansion. Fixed: quote only directory path, leave `/*.d` unquoted |
 | UniProt proteome search returns "No proteomes found" | `proteome_type` removed from UniProt REST API `fields`. Fixed: removed from query params |
 | sbatch script "command not found" errors | Line continuation `\` was on its own line. Fixed: `paste0(flags, " \\")` appends backslash directly |
+| `nchar(msg): invalid multibyte string` crash | SSH/SCP output contains ANSI codes or non-UTF-8 bytes. Fixed: `iconv(..., sub="")` in `ssh_exec`/`scp_download`/`scp_upload`. Also wrap `readDIANN` in `suppressMessages(suppressWarnings(...))`. |
+| Shiny hidden input not registered by JS | `tags$input(type="hidden")` doesn't register with Shiny. Use `div(style="display:none;", radioButtons(...))` for `conditionalPanel` to see the input. |
+| Job queue wiped on app restart | `observe()` for save fires on initial empty `reactiveValues`. Fixed: `observeEvent(..., ignoreInit=TRUE)`. |
+| `readDIANN` data.table column error | `limpa::readDIANN()` defaults to `format="tsv"`. Must pass `format="parquet"` for .parquet files or `fread()` returns data.table causing `DT[,extra.columns]` error. |
+| `return()` inside `withProgress` doesn't exit handler | `withProgress` uses `eval()` — `return()` exits `withProgress`, not the enclosing function. Restructure with flat `tryCatch` + early returns outside `withProgress`. |
+| Recovered job file count wrong (e.g. 83 instead of 6) | DIA-NN log lines start with `[HH:MM]`. Regex `^[0-9]+` matches the timestamp. Use lookahead: `[0-9]+(?=\\s+files will be processed)`. |
+| Recover button appears to hang | `find` on large shared filesystems (e.g. `/quobyte/`) is very slow. Fixed: use `timeout 10 find <output_base> -maxdepth 4` targeted search. |
 
 ## Version History
 
@@ -329,6 +353,8 @@ Current version: **v2.5.0** (2026-02-18). See [CHANGELOG.md](CHANGELOG.md) for d
 - **AI Summary All-Contrasts** (v2.5): Loops over all `colnames(values$fit$contrasts)`, computes cross-comparison biomarkers (significant in >=2 contrasts), scales token budget by contrast count (30/20/10 top proteins).
 - **SSH Remote Job Submission** (v2.5): Run DE-LIMP on local Mac, submit DIA-NN searches to remote HPC via SSH. Non-blocking job queue (submit multiple, continue using app). `ssh_exec()` single chokepoint, full SLURM path caching after connection test, `processx::run()` timeouts, SCP for file transfer. No new R packages (uses system `ssh`/`scp`).
 - **Phosphoproteomics Search Mode** (v2.5): DIA-NN search preset for phospho analysis — auto-configures STY modification (UniMod:21), max 3 variable mods, 2 missed cleavages, `--phospho-output` and `--report-lib-info` flags.
+- **Docker Local Backend** (v2.5): "One UI, two engines" — same search config UI for both Docker (local) and HPC (SSH/SLURM) backends. Backend detection at startup (`docker info` / `Sys.which("sbatch")`). Shared `build_diann_flags()` eliminates flag duplication. DIA-NN Docker image built separately by users via `build_diann_docker.sh` (license compliance — DIA-NN is proprietary, free for academic use, cannot be redistributed).
+- **Job Queue Recovery** (v2.5): "Recover" button queries `sacct`/`scontrol`/`docker ps -a` to repopulate lost job queue. 3-strategy log discovery for HPC (scontrol → sacct SubmitLine → find). Updates existing entries with fresh data.
 
 ## Current TODO
 
@@ -345,12 +371,16 @@ Current version: **v2.5.0** (2026-02-18). See [CHANGELOG.md](CHANGELOG.md) for d
 - [ ] **AI context for phospho**: Append phosphosite DE results and KSEA kinase activities to Gemini chat context when phospho analysis is active
 - [ ] **Phospho-specific FASTA upload**: Map peptide-relative positions to protein-relative positions for accurate site IDs and motif extraction
 
-### DIA-NN Local Search (Docker)
+### DIA-NN Local Search (Docker) — IMPLEMENTED
 **Spec**: `DIANN_SEARCH_INTEGRATION_SPEC.md` — full design for unified Local Docker + HPC backends ("one UI, two engines")
-- [ ] **Bundle DIA-NN in Docker image**: Install DIA-NN binary in the Dockerfile so searches can run locally inside the container without SSH to an HPC
-- [ ] **Local compute backend**: Add "Local Docker" option to compute backend toggle that runs DIA-NN directly (no SLURM, no SSH) with progress monitoring via log file polling
-- [ ] **Unified UI**: Same search configuration UI for both backends; only resource controls differ (Docker: CPU/RAM limits vs HPC: SLURM partition/nodes)
-- [ ] **Update `hpc_mode` logic**: Detect local DIA-NN availability as a third mode alongside `sbatch`/`ssh`
+- [x] **Docker backend detection**: `app.R` detects Docker daemon + DIA-NN image at startup
+- [x] **Local compute backend**: Docker option runs DIA-NN via `docker run -d` with resource limits (CPU/RAM sliders)
+- [x] **Unified UI**: Backend selector (Docker/HPC), shared search config, backend-specific resource controls
+- [x] **`build_diann_docker.sh`**: User builds own DIA-NN Docker image (license compliance)
+- [x] **Job queue dual backend**: Docker/HPC badges, backend-specific monitoring/cancel/refresh
+- [x] **Job recovery**: Recover button queries sacct (HPC) and docker ps (Docker) to repopulate lost queue
+- [x] **Load results**: SCP download for SSH jobs, direct filesystem for Docker/local, auto-load on completion
+- [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 
 ### General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
