@@ -32,14 +32,12 @@ Open **PowerShell** or **Git Bash** and run:
 ```
 git clone https://github.com/bsphinney/DE-LIMP.git
 cd DE-LIMP
-git checkout diann-integration
 ```
 
 If you already have DE-LIMP:
 
 ```
 cd C:\path\to\DE-LIMP
-git checkout diann-integration
 git pull
 ```
 
