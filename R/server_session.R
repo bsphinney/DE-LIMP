@@ -408,13 +408,77 @@ server_session <- function(input, output, session, values, add_to_log) {
   # ============================================================================
 
   output$methodology_text <- renderText({
-    req(values$fit)
+    req(values$fit %||% values$phospho_fit)
+
+    # DIA-NN search parameters section (conditional)
+    diann_section <- ""
+    ss <- values$diann_search_settings
+    if (!is.null(ss)) {
+      sp <- ss$search_params
+
+      # Build enzyme name
+      enzyme_name <- switch(sp$enzyme,
+        "K*,R*" = "Trypsin/P (cleaves after K, R)",
+        "K*,R*,!*P" = "Trypsin (not before P)",
+        "R*" = "Arg-C",
+        "K*" = "Lys-C",
+        sp$enzyme)
+
+      # Build modifications list
+      mods <- c()
+      if (isTRUE(sp$mod_met_ox)) mods <- c(mods, "Oxidation (M) [UniMod:35]")
+      if (isTRUE(sp$mod_nterm_acetyl)) mods <- c(mods, "N-terminal acetylation [UniMod:1]")
+      if (nzchar(sp$extra_var_mods)) {
+        extra <- trimws(strsplit(sp$extra_var_mods, "\n")[[1]])
+        mods <- c(mods, extra[nzchar(extra)])
+      }
+      if (isTRUE(sp$unimod4)) mods <- c(mods, "Carbamidomethylation (C) [UniMod:4, fixed]")
+
+      # FASTA description
+      fasta_desc <- paste(basename(ss$fasta_files), collapse = ", ")
+      contam_desc <- if (!is.null(ss$contaminant_library) && ss$contaminant_library != "none")
+        sprintf(" with %s contaminant library", gsub("_", " ", ss$contaminant_library))
+      else ""
+
+      # Mass accuracy description
+      mass_acc_desc <- if (sp$mass_acc_mode == "auto") {
+        "automatic (DIA-NN optimized)"
+      } else {
+        sprintf("MS2 %s ppm, MS1 %s ppm", sp$mass_acc, sp$mass_acc_ms1)
+      }
+
+      diann_section <- paste0(
+        "0. DIA-NN DATABASE SEARCH\n",
+        "Raw data files (", ss$n_raw_files, " ", toupper(ss$raw_file_type), " files) were searched using DIA-NN (", ss$diann_sif, ") ",
+        "in ", ss$search_mode, " mode",
+        if (!is.null(ss$speclib)) paste0(" with spectral library (", ss$speclib, ")") else "",
+        ".\n",
+        "Sequence database: ", fasta_desc, contam_desc, ".\n",
+        "Enzyme: ", enzyme_name, " with up to ", sp$missed_cleavages, " missed cleavage(s).\n",
+        "Peptide length: ", sp$min_pep_len, "-", sp$max_pep_len, " amino acids. ",
+        "Precursor m/z: ", sp$min_pr_mz, "-", sp$max_pr_mz, ". ",
+        "Precursor charge: ", sp$min_pr_charge, "-", sp$max_pr_charge, ".\n",
+        "Mass accuracy: ", mass_acc_desc, ".\n",
+        "Variable modifications (max ", sp$max_var_mods, "): ", paste(mods, collapse = "; "), ".\n",
+        "FDR threshold: ", sp$qvalue, " at precursor and protein levels.\n",
+        "Match-between-runs: ", if (isTRUE(sp$mbr)) "enabled" else "disabled", ". ",
+        "RT-dependent normalization: ", if (isTRUE(sp$rt_profiling)) "enabled" else "disabled", ".\n",
+        if (ss$search_mode == "phospho")
+          "Phosphoproteomics mode: STY phosphorylation (UniMod:21, +79.966 Da), phospho-specific output and library info reporting enabled.\n"
+        else "",
+        if (nzchar(sp$extra_cli_flags)) paste0("Additional flags: ", sp$extra_cli_flags, "\n") else "",
+        "SLURM resources: ", ss$slurm$cpus, " CPUs, ", ss$slurm$mem_gb, " GB RAM, ",
+        ss$slurm$time_hours, " hour(s), partition: ", ss$slurm$partition, ".\n\n"
+      )
+    }
 
     methodology <- paste(
       "METHODOLOGY\n",
       "===========\n",
       "Data Processing and Statistical Analysis Pipeline\n",
       "---------------------------------------------------\n\n",
+
+      diann_section,
 
       "1. DATA INPUT\n",
       "Raw DIA-NN output files (parquet format) containing precursor-level quantification were\n",
@@ -489,6 +553,155 @@ server_session <- function(input, output, session, values, add_to_log) {
       "    \u2022 Positive NES: Gene set enriched in up-regulated proteins\n",
       "    \u2022 Negative NES: Gene set enriched in down-regulated proteins\n\n\n",
 
+      if (!is.null(values$phospho_fit)) paste(
+        "7. PHOSPHOSITE-LEVEL DIFFERENTIAL EXPRESSION\n",
+        "Unlike standard proteomics where peptides are aggregated to proteins, phosphoproteomics\n",
+        "requires site-level analysis because a single protein can harbour dozens of independently\n",
+        "regulated phosphorylation sites. DE-LIMP implements site-level DE in a dedicated pipeline\n",
+        "that runs in parallel with (and independently of) the protein-level analysis.\n\n",
+
+        "  a) Site Matrix Input:\n",
+        "     Two input paths are supported. Path A (recommended): Upload the DIA-NN 1.9+\n",
+        "     site-localization matrix (report.phosphosites_*.tsv) which provides protein-relative\n",
+        "     residue positions and localization confidence scores. Path B: Parse phosphosites\n",
+        "     directly from the DIA-NN report.parquet using UniMod:21 annotations, with peptide-\n",
+        "     relative positions.\n\n",
+
+        "  b) Data Filtering:\n",
+        "     Sites are filtered for quantification completeness: each site must have at least 2\n",
+        "     non-missing values per experimental group. Sites failing this threshold are removed\n",
+        "     before imputation. This prevents false discoveries driven by imputation of sites\n",
+        "     detected in only one group.\n\n",
+
+        "  c) Missing Value Imputation:\n",
+        "     Remaining missing values are imputed using a tail-based (Perseus-style) approach.\n",
+        "     Random values are drawn from a downshifted normal distribution:\n",
+        "       mean = global_mean - 1.8 * global_sd\n",
+        "       sd   = 0.3 * global_sd\n",
+        "     This assumes missing values are predominantly 'missing not at random' (MNAR), i.e.,\n",
+        "     below the limit of detection. The shift of 1.8 standard deviations places imputed\n",
+        "     values in the lower tail of the observed distribution. A fixed random seed (42) is\n",
+        "     used for reproducibility.\n\n",
+
+        "     Reference: Tyanova S et al. (2016) The Perseus computational platform for\n",
+        "     comprehensive analysis of (prote)omics data. Nature Methods 13:731-740.\n\n",
+
+        "  d) Normalization (Optional):\n",
+        "     Three normalization modes are available for the site-level matrix:\n",
+        "       - None (default): Use DIA-NN's built-in normalization as-is\n",
+        "       - Median centering: Subtract each sample's median, then add back the grand mean.\n",
+        "         This aligns sample distributions without changing relative differences.\n",
+        "       - Quantile normalization: Forces all sample distributions to be identical using\n",
+        "         limma::normalizeBetweenArrays(method='quantile'). This is the most aggressive\n",
+        "         option and assumes most sites are unchanged between conditions.\n\n",
+        "     CAUTION for phospho-enriched samples: DIA-NN's global normalization assumes most\n",
+        "     peptides are unchanged. In phospho-enriched datasets (>30% phosphopeptides), this\n",
+        "     assumption may be partially violated. Median centering is recommended if systematic\n",
+        "     biases are observed in the QC completeness plot.\n\n",
+
+        "  e) Statistical Testing:\n",
+        "     Site-level differential expression is performed using the limma framework:\n",
+        "       1. A linear model is fit to each site: lmFit(site_matrix, design)\n",
+        "       2. Pairwise contrasts are computed: contrasts.fit(fit, contrasts)\n",
+        "       3. Empirical Bayes moderation stabilises variance: eBayes(fit)\n",
+        "     This is identical to the protein-level approach but applied to log2-transformed\n",
+        "     site intensities rather than aggregated protein quantities. Each site receives:\n",
+        "       - logFC: log2 fold change between conditions\n",
+        "       - P.Value: raw p-value from the moderated t-test\n",
+        "       - adj.P.Val: Benjamini-Hochberg FDR-corrected p-value\n\n",
+
+        "  f) Phosphosite Volcano Plot:\n",
+        "     The volcano plot visualises all tested phosphosites with logFC on the x-axis and\n",
+        "     -log10(adj.P.Val) on the y-axis. Significance thresholds are |logFC| > 1 (2-fold\n",
+        "     change) AND FDR < 0.05. Sites are coloured:\n",
+        "       - Red: Significant (both thresholds)\n",
+        "       - Blue: FDR < 0.05 only\n",
+        "       - Grey: Not significant\n",
+        "     The top 15 significant sites are labelled with Gene + Residue + Position.\n",
+        "     When protein-level abundance correction is enabled, logFC values represent\n",
+        "     phosphorylation stoichiometry changes (site logFC minus protein logFC).\n\n",
+
+        "  g) Residue Distribution:\n",
+        "     A bar chart comparing residue composition (Ser/Thr/Tyr) across all quantified\n",
+        "     sites versus significant sites. Expected distribution from TiO2 or IMAC enrichment:\n",
+        "     ~85% pSer, ~14% pThr, ~1% pTyr. Enrichment of pTyr among significant hits suggests\n",
+        "     active tyrosine kinase signalling.\n\n",
+
+        "     Reference: Olsen JV et al. (2006) Global, in vivo, and site-specific\n",
+        "     phosphorylation dynamics in signaling networks. Cell 127:635-648.\n\n\n",
+
+        "8. KINASE-SUBSTRATE ENRICHMENT ANALYSIS (KSEA)\n",
+        "KSEA infers upstream kinase activity from the phosphosite fold-changes in your data,\n",
+        "analogous to gene set enrichment but for kinase-substrate relationships.\n\n",
+
+        "  a) Kinase-Substrate Database:\n",
+        "     The KSEAapp R package bundles known kinase-substrate relationships from\n",
+        "     PhosphoSitePlus (curated literature evidence) and NetworKIN (computationally\n",
+        "     predicted based on motifs and network context). When NetworKIN mode is enabled\n",
+        "     (default), predicted substrates with a confidence score >= 5 are included,\n",
+        "     substantially increasing coverage.\n\n",
+
+        "  b) Scoring Algorithm:\n",
+        "     For each kinase with >= 1 matched substrate in the dataset:\n",
+        "       1. Substrate fold-changes are collected from the DE results\n",
+        "       2. A mean enrichment score (mS) is computed across matched substrates\n",
+        "       3. The z-score normalises the enrichment against the background:\n",
+        "            z = (mS * sqrt(m)) / delta\n",
+        "          where m = number of substrates and delta = standard deviation of all log2FC\n",
+        "       4. P-values are computed from the z-score (normal distribution)\n",
+        "       5. FDR correction (Benjamini-Hochberg) is applied across all kinases\n\n",
+
+        "  c) Interpretation:\n",
+        "     - Positive z-score (red bars): Substrates collectively up-phosphorylated,\n",
+        "       suggesting the kinase is MORE ACTIVE in the treatment condition\n",
+        "     - Negative z-score (blue bars): Substrates collectively down-phosphorylated,\n",
+        "       suggesting the kinase is LESS ACTIVE in the treatment condition\n",
+        "     - The 'n=' label indicates how many substrates contributed to each score;\n",
+        "       higher n provides more statistical power and confidence\n\n",
+
+        "     References:\n",
+        "     Casado P et al. (2013) Kinase-substrate enrichment analysis provides insights\n",
+        "     into the heterogeneity of signaling pathway activation in leukemia cells.\n",
+        "     Sci Signaling 6:rs6.\n",
+        "     Wiredja DD et al. (2017) The KSEA App: a web-based tool for kinase activity\n",
+        "     inference from quantitative phosphoproteomics. Bioinformatics 33:3489-3491.\n\n\n",
+
+        "9. SEQUENCE MOTIF ANALYSIS (Optional)\n",
+        "Sequence logos reveal enriched amino acid motifs around regulated phosphosites,\n",
+        "which can suggest the kinase families responsible for observed phosphorylation changes.\n\n",
+
+        "  a) Flanking Sequence Extraction:\n",
+        "     For each significant phosphosite (FDR < 0.05 and |logFC| > 1), the +/- 7 amino\n",
+        "     acid flanking sequence is extracted from the uploaded FASTA protein sequences.\n",
+        "     Sites near protein termini are padded with '_' characters. A minimum of 10 sites\n",
+        "     is required per direction (up/down) to generate a logo.\n\n",
+
+        "  b) Sequence Logo Visualisation:\n",
+        "     Logos are rendered using Shannon information content (bits). Amino acids enriched\n",
+        "     above background frequency appear taller. Common motifs:\n",
+        "       - Proline at +1: CDK, MAPK, GSK3 (proline-directed kinases)\n",
+        "       - Acidic (D/E) at +1 to +3: CK2 family\n",
+        "       - Arginine at -3: PKA, PKC, CaMKII (basophilic kinases)\n\n",
+
+        "     Reference: Schwartz D & Gygi SP (2005) An iterative statistical approach to\n",
+        "     the identification of protein phosphorylation motifs from large-scale data sets.\n",
+        "     Nature Biotechnology 23:1391-1398.\n\n\n",
+
+        "10. PHOSPHOSITE ANNOTATION (Optional)\n",
+        "Each phosphosite is annotated as Known (previously reported) or Novel by querying:\n",
+        "  - UniProt REST API: Curated 'Modified residue' features with evidence codes\n",
+        "    (ECO:0000269 = published experiment, ECO:0007744 = large-scale study)\n",
+        "  - PhosphoSitePlus: Kinase-substrate database bundled with KSEAapp\n\n",
+        "Matching uses protein accession + residue type + position number. Path A (site matrix)\n",
+        "provides protein-relative positions that match database numbering more accurately than\n",
+        "Path B (peptide-relative positions).\n\n",
+
+        "  Reference: Hornbeck PV et al. (2015) PhosphoSitePlus, 2014: mutations, PTMs and\n",
+        "  recalibrations. Nucleic Acids Res 43:D512-D520.\n\n\n",
+
+        sep = ""
+      ) else "",
+
       "SOFTWARE AND PACKAGES\n",
       "---------------------\n",
       "Primary analysis: limpa R package (Bioconductor 3.22+)\n",
@@ -497,6 +710,11 @@ server_session <- function(input, output, session, values, add_to_log) {
       "Visualization: ggplot2, ComplexHeatmap, plotly\n",
       "Enrichment: clusterProfiler (gseGO, gseKEGG), enrichplot\n",
       "Annotation DBs: org.Hs.eg.db, org.Mm.eg.db (auto-detected)\n",
+      if (!is.null(values$phospho_fit)) paste(
+        "Phosphoproteomics: KSEAapp (kinase activity inference), ggseqlogo (motif analysis)\n",
+        "Phosphosite databases: PhosphoSitePlus (via KSEAapp), UniProt REST API\n",
+        sep = ""
+      ) else "",
       sprintf("R version: %s\n\n\n", R.version.string),
 
       "REFERENCES\n",
@@ -510,7 +728,18 @@ server_session <- function(input, output, session, values, add_to_log) {
       "  Society 57(1):289-300\n",
       "\u2022 clusterProfiler: Yu G, et al. (2012) OMICS 16(5):284-287\n",
       "\u2022 GSEA method: Subramanian A, et al. (2005) PNAS 102(43):15545-15550\n",
-      "\u2022 KEGG database: Kanehisa M, Goto S (2000) Nucleic Acids Research 28(1):27-30\n\n\n",
+      "\u2022 KEGG database: Kanehisa M, Goto S (2000) Nucleic Acids Research 28(1):27-30\n",
+      if (!is.null(values$phospho_fit)) paste(
+        "\u2022 Perseus imputation: Tyanova S, et al. (2016) Nature Methods 13:731-740\n",
+        "\u2022 Phosphoproteome dynamics: Olsen JV, et al. (2006) Cell 127:635-648\n",
+        "\u2022 KSEA: Casado P, et al. (2013) Sci Signaling 6:rs6\n",
+        "\u2022 KSEAapp: Wiredja DD, et al. (2017) Bioinformatics 33:3489-3491\n",
+        "\u2022 PhosphoSitePlus: Hornbeck PV, et al. (2015) Nucleic Acids Res 43:D512-D520\n",
+        "\u2022 Phospho motifs: Schwartz D & Gygi SP (2005) Nature Biotechnology 23:1391-1398\n",
+        "\u2022 ggseqlogo: Wagih O (2017) Bioinformatics 33:3645-3647\n",
+        sep = ""
+      ) else "",
+      "\n\n",
 
       "CITATION\n",
       "--------\n",

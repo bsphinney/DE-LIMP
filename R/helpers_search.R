@@ -13,7 +13,7 @@ search_uniprot_proteomes <- function(query) {
     "https://rest.uniprot.org/proteomes/search?",
     "query=", utils::URLencode(paste0("(", query, ") AND (proteome_type:1)")),
     "&format=json",
-    "&fields=upid,organism,organism_id,protein_count,proteome_type",
+    "&fields=upid,organism,organism_id,protein_count",
     "&size=25"
   )
 
@@ -37,23 +37,20 @@ search_uniprot_proteomes <- function(query) {
     data.frame(
       upid = vapply(data$results, function(r) r$id %||% "", character(1)),
       organism = vapply(data$results, function(r) {
-        r$taxonomy$scientificName %||% r$organism$scientificName %||% ""
+        r$taxonomy$scientificName %||% ""
       }, character(1)),
       common_name = vapply(data$results, function(r) {
-        r$taxonomy$commonName %||% r$organism$commonName %||% ""
+        r$taxonomy$commonName %||% ""
       }, character(1)),
       taxonomy_id = vapply(data$results, function(r) {
-        as.integer(r$taxonomy$taxonId %||% r$organism$taxonId %||% 0L)
+        as.integer(r$taxonomy$taxonId %||% 0L)
       }, integer(1)),
       protein_count = vapply(data$results, function(r) {
         as.integer(r$proteinCount %||% 0L)
       }, integer(1)),
       proteome_type = vapply(data$results, function(r) {
-        if (identical(r$proteomeType, "1") || identical(r$isReferenceProteome, TRUE)) {
-          "Reference"
-        } else {
-          "Other"
-        }
+        pt <- r$proteomeType %||% ""
+        if (grepl("Reference", pt, ignore.case = TRUE)) "Reference" else "Other"
       }, character(1)),
       stringsAsFactors = FALSE
     )
@@ -72,13 +69,8 @@ search_uniprot_proteomes <- function(query) {
 #' @param proteome_id Character — UniProt proteome ID (e.g., "UP000005640")
 #' @param content_type Character — "one_per_gene", "reviewed", "full", "full_isoforms"
 #' @param output_path Character — full path where FASTA will be saved
-#' @param append_contaminants Logical — append contaminant sequences
-#' @param contaminants_path Character — path to contaminants FASTA (NULL = auto-detect)
 #' @return List with success status, path, sequence count, file size
-download_uniprot_fasta <- function(
-  proteome_id, content_type, output_path,
-  append_contaminants = TRUE, contaminants_path = NULL
-) {
+download_uniprot_fasta <- function(proteome_id, content_type, output_path) {
   # Build query based on content type
   base_query <- sprintf("(proteome:%s)", proteome_id)
   query <- switch(content_type,
@@ -112,25 +104,7 @@ download_uniprot_fasta <- function(
     }
 
     # Count sequences
-    fasta_lines <- readLines(tmp_file, warn = FALSE)
-    n_seqs <- sum(grepl("^>", fasta_lines))
-
-    # Append contaminants if requested
-    n_contam <- 0
-    if (append_contaminants) {
-      contam_path <- contaminants_path
-      if (is.null(contam_path)) {
-        contam_path <- getOption("delimp.contaminants_fasta",
-          default = "/share/proteomics/databases/contaminants/crap.fasta")
-      }
-      if (file.exists(contam_path)) {
-        contam_lines <- readLines(contam_path, warn = FALSE)
-        n_contam <- sum(grepl("^>", contam_lines))
-        writeLines(c(fasta_lines, "", contam_lines), tmp_file)
-      } else {
-        message("[DE-LIMP Search] Contaminants file not found: ", contam_path)
-      }
-    }
+    n_seqs <- sum(grepl("^>", readLines(tmp_file, warn = FALSE)))
 
     # Move to final location
     dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
@@ -141,13 +115,37 @@ download_uniprot_fasta <- function(
       success = TRUE,
       path = output_path,
       n_sequences = n_seqs,
-      n_contaminants = n_contam,
       file_size = file.size(output_path),
       url = url
     )
   }, error = function(e) {
     list(success = FALSE, error = e$message)
   })
+}
+
+#' Get path to a bundled contaminant FASTA file
+#' @param library_name Character — one of: "universal", "cell_culture", etc.
+#' @param app_dir Character — app root directory (where contaminants/ lives)
+#' @return List with success, path, n_sequences, file_size
+get_contaminant_fasta <- function(library_name, app_dir = ".") {
+  lib_map <- c(
+    universal         = "Universal_Contaminants.fasta",
+    cell_culture      = "Cell_Culture_Contaminants.fasta",
+    mouse_tissue      = "Mouse_Tissue_Contaminants.fasta",
+    rat_tissue        = "Rat_Tissue_Contaminants.fasta",
+    neuron_culture    = "Neuron_Culture_Contaminants.fasta",
+    stem_cell_culture = "Stem_Cell_Culture_Contaminants.fasta"
+  )
+  fname <- lib_map[[library_name]]
+  if (is.null(fname)) return(list(success = FALSE, error = "Unknown library"))
+
+  local_path <- file.path(app_dir, "contaminants", fname)
+  if (!file.exists(local_path)) {
+    return(list(success = FALSE, error = paste("File not found:", local_path)))
+  }
+  n_seqs <- sum(grepl("^>", readLines(local_path, warn = FALSE)))
+  list(success = TRUE, path = local_path, n_sequences = n_seqs,
+       file_size = file.size(local_path))
 }
 
 #' Generate a descriptive FASTA filename
@@ -278,10 +276,15 @@ generate_sbatch_script <- function(
   data_dirs <- unique(dirname(raw_files))
   fasta_dirs <- unique(dirname(fasta_files))
 
-  # Build bind mount string
+  # Build bind mount string — handle multiple FASTA directories
+  fasta_bind_parts <- if (length(fasta_dirs) == 1) {
+    sprintf("%s:/work/fasta", fasta_dirs[1])
+  } else {
+    sprintf("%s:/work/fasta%d", fasta_dirs, seq_along(fasta_dirs))
+  }
   bind_parts <- c(
     sprintf("%s:/work/data", data_dirs[1]),
-    sprintf("%s:/work/fasta", fasta_dirs[1]),
+    fasta_bind_parts,
     sprintf("%s:/work/out", output_dir)
   )
   if (!is.null(speclib_path) && nzchar(speclib_path)) {
@@ -293,8 +296,13 @@ generate_sbatch_script <- function(
   run_flags <- paste(sprintf("    --f /work/data/%s", basename(raw_files)),
                      collapse = " \\\n")
 
-  # Build --fasta flags
-  fasta_flags <- paste(sprintf("    --fasta /work/fasta/%s", basename(fasta_files)),
+  # Build --fasta flags — map each file to its mount point
+  fasta_mount_map <- if (length(fasta_dirs) == 1) {
+    rep("/work/fasta", length(fasta_files))
+  } else {
+    sprintf("/work/fasta%d", match(dirname(fasta_files), fasta_dirs))
+  }
+  fasta_flags <- paste(sprintf("    --fasta %s/%s", fasta_mount_map, basename(fasta_files)),
                        collapse = " \\\n")
 
   # Build variable modification flags
@@ -315,13 +323,16 @@ generate_sbatch_script <- function(
     paste(var_mod_flags, collapse = " \\\n")
   } else ""
 
+  # Phospho-specific flags
+  is_phospho <- identical(search_mode, "phospho")
+
   # Build DIA-NN command
   if (search_mode == "library" && !is.null(speclib_path) && nzchar(speclib_path)) {
     # Library mode
     diann_cmd_parts <- c(
       sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
-      run_flags, " \\",
-      fasta_flags, " \\",
+      paste0(run_flags, " \\"),
+      paste0(fasta_flags, " \\"),
       sprintf("    --lib /work/lib/%s \\", basename(speclib_path)),
       sprintf("    --threads %d \\", cpus),
       "    --verbose 1 \\",
@@ -348,8 +359,8 @@ generate_sbatch_script <- function(
     # Library-free mode
     diann_cmd_parts <- c(
       sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
-      run_flags, " \\",
-      fasta_flags, " \\",
+      paste0(run_flags, " \\"),
+      paste0(fasta_flags, " \\"),
       sprintf("    --out /work/out/%s \\", report_name),
       "    --out-lib /work/out/report-lib.parquet \\",
       "    --matrices \\",
@@ -381,6 +392,8 @@ generate_sbatch_script <- function(
       if (isTRUE(sp$mbr)) "    --reanalyse \\" else NULL,
       if (isTRUE(sp$rt_profiling)) "    --rt-profiling \\" else NULL,
       if (normalization == "off") "    --no-norm \\" else NULL,
+      if (is_phospho) "    --phospho-output \\" else NULL,
+      if (is_phospho) "    --report-lib-info \\" else NULL,
       if (nzchar(var_mod_str)) var_mod_str else NULL
     )
   }
@@ -435,23 +448,54 @@ generate_sbatch_script <- function(
 #' @param ssh_config list(host, user, port, key_path) or NULL for local
 #' @param command Character — command to execute remotely
 #' @return list(status, stdout) — status is exit code, stdout is character vector
-ssh_exec <- function(ssh_config, command) {
+ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
+  # Optionally wrap in login shell so .bash_profile / module paths are loaded
+  # Prepend module loads if specified
+  if (login_shell) {
+    modules <- ssh_config$modules %||% ""
+    mod_cmd <- if (nzchar(modules)) {
+      mod_names <- trimws(strsplit(modules, "[,;[:space:]]+")[[1]])
+      mod_names <- mod_names[nzchar(mod_names)]
+      if (length(mod_names) > 0) {
+        paste0(paste("module load", mod_names, "2>/dev/null;"), collapse = " ")
+      } else ""
+    } else ""
+    full_cmd <- if (nzchar(mod_cmd)) paste(mod_cmd, command) else command
+    remote_cmd <- paste0("bash -l -c ", shQuote(full_cmd))
+  } else {
+    remote_cmd <- command
+  }
   args <- c(
     "-i", ssh_config$key_path,
     "-p", as.character(ssh_config$port %||% 22),
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=6",
     "-o", "BatchMode=yes",
     paste0(ssh_config$user, "@", ssh_config$host),
-    command
+    remote_cmd
   )
-  stdout <- tryCatch(
-    system2("ssh", args = args, stdout = TRUE, stderr = TRUE),
-    error = function(e) {
-      msg <- conditionMessage(e)
-      structure(msg, status = 1L)
+  # Use processx for timeout support if available, else system2
+  # Suppress macOS ARM64 MallocStackLogging warnings via environment
+  stdout <- tryCatch({
+    if (requireNamespace("processx", quietly = TRUE)) {
+      res <- processx::run("ssh", args = args, timeout = timeout,
+                           error_on_status = FALSE,
+                           env = c("current", MallocStackLogging = "0"))
+      out <- strsplit(res$stdout, "\n")[[1]]
+      if (res$status != 0) attr(out, "status") <- res$status
+      out
+    } else {
+      system2("ssh", args = args, stdout = TRUE, stderr = TRUE)
     }
-  )
+  }, error = function(e) {
+    msg <- conditionMessage(e)
+    if (grepl("timeout", msg, ignore.case = TRUE)) {
+      msg <- paste("Command timed out after", timeout, "seconds")
+    }
+    structure(msg, status = 124L)
+  })
   status <- attr(stdout, "status") %||% 0L
   list(status = status, stdout = stdout)
 }
@@ -480,6 +524,30 @@ scp_download <- function(ssh_config, remote_path, local_path) {
   list(status = status, stdout = stdout)
 }
 
+#' Upload a local file to remote host via SCP
+#' @param ssh_config list(host, user, port, key_path)
+#' @param local_path Character — full path on local machine
+#' @param remote_path Character — full path on remote
+#' @return list(status, stdout)
+scp_upload <- function(ssh_config, local_path, remote_path) {
+  args <- c(
+    "-i", ssh_config$key_path,
+    "-P", as.character(ssh_config$port %||% 22),
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "BatchMode=yes",
+    local_path,
+    paste0(ssh_config$user, "@", ssh_config$host, ":", remote_path)
+  )
+  stdout <- tryCatch(
+    system2("scp", args = args, stdout = TRUE, stderr = TRUE),
+    error = function(e) {
+      structure(conditionMessage(e), status = 1L)
+    }
+  )
+  status <- attr(stdout, "status") %||% 0L
+  list(status = status, stdout = stdout)
+}
+
 #' Test SSH connection and verify sbatch is available
 #' @param ssh_config list(host, user, port, key_path)
 #' @return list(success, message, sbatch_path)
@@ -493,20 +561,47 @@ test_ssh_connection <- function(ssh_config) {
                 sbatch_path = NULL))
   }
 
-  result <- ssh_exec(ssh_config, "echo SSH_OK && which sbatch 2>/dev/null")
-  if (result$status != 0 || !any(grepl("SSH_OK", result$stdout))) {
+  # Step 1: Test basic SSH connectivity (no login shell wrapper)
+  result <- ssh_exec(ssh_config, "echo SSH_OK", login_shell = FALSE)
+  if (!any(grepl("SSH_OK", result$stdout))) {
     msg <- paste(result$stdout, collapse = " ")
+    if (!nzchar(msg)) msg <- paste("Exit code", result$status)
     return(list(success = FALSE,
                 message = paste("SSH connection failed:", msg),
                 sbatch_path = NULL))
   }
 
-  sbatch_line <- grep("^/", result$stdout, value = TRUE)
-  sbatch_path <- if (length(sbatch_line) > 0) sbatch_line[1] else NULL
+  # Step 2: Probe for sbatch — try multiple approaches
+  sbatch_path <- NULL
+
+  # Try 1: login shell with modules
+  result2 <- ssh_exec(ssh_config, "which sbatch 2>/dev/null",
+                       login_shell = TRUE)
+  sbatch_line <- grep("^/", result2$stdout, value = TRUE)
+  if (length(sbatch_line) > 0) sbatch_path <- sbatch_line[1]
+
+  # Try 2: common HPC paths
+  if (is.null(sbatch_path)) {
+    result3 <- ssh_exec(ssh_config,
+      "for p in /usr/bin/sbatch /usr/local/bin/sbatch /opt/slurm/bin/sbatch /cm/shared/apps/slurm/current/bin/sbatch; do [ -x \"$p\" ] && echo \"$p\" && break; done",
+      login_shell = FALSE)
+    sbatch_line <- grep("^/", result3$stdout, value = TRUE)
+    if (length(sbatch_line) > 0) sbatch_path <- sbatch_line[1]
+  }
+
+  # Try 3: use locate or find
+  if (is.null(sbatch_path)) {
+    result4 <- ssh_exec(ssh_config,
+      "command -v sbatch 2>/dev/null || type -P sbatch 2>/dev/null",
+      login_shell = FALSE)
+    sbatch_line <- grep("^/", result4$stdout, value = TRUE)
+    if (length(sbatch_line) > 0) sbatch_path <- sbatch_line[1]
+  }
 
   if (is.null(sbatch_path)) {
     return(list(success = TRUE,
-                message = "Connected but sbatch not found on remote PATH",
+                message = paste0("Connected to ", ssh_config$host,
+                                 " but sbatch not found. Check 'Modules to Load' or contact HPC admin."),
                 sbatch_path = NULL))
   }
 
@@ -520,34 +615,34 @@ test_ssh_connection <- function(ssh_config) {
 #' @param dir_path Character — remote directory path
 #' @return data.frame(filename, size_mb, type) or empty data.frame
 ssh_scan_raw_files <- function(ssh_config, dir_path) {
-  # Find .d directories, .raw files, and .mzML files
+  empty_df <- data.frame(filename = character(), size_mb = numeric(),
+                         type = character(), stringsAsFactors = FALSE)
+
+  # du -sm with globs — no recursion into .d directories
+  # Quote the directory path (may contain spaces) but leave glob unquoted for expansion
+  qdir <- shQuote(dir_path)
   cmd <- paste0(
-    "find ", shQuote(dir_path), " -maxdepth 2 \\( ",
-    "-name '*.d' -type d -o ",
-    "-name '*.raw' -type f -o ",
-    "-name '*.mzML' -type f ",
-    "\\) -exec du -sm {} \\; 2>/dev/null"
+    "du -sm ", qdir, "/*.d ", qdir, "/*.raw ", qdir, "/*.mzML ", qdir, "/*.wiff",
+    " 2>/dev/null; true"
   )
   result <- ssh_exec(ssh_config, cmd)
-  if (result$status != 0 || length(result$stdout) == 0) {
-    return(data.frame(filename = character(), size_mb = numeric(), type = character(),
-                      stringsAsFactors = FALSE))
-  }
 
   lines <- result$stdout[nzchar(result$stdout)]
-  if (length(lines) == 0) {
-    return(data.frame(filename = character(), size_mb = numeric(), type = character(),
-                      stringsAsFactors = FALSE))
-  }
+  if (length(lines) == 0) return(empty_df)
 
   parsed <- strsplit(lines, "\t")
+  # Filter out malformed lines
+  parsed <- parsed[vapply(parsed, length, integer(1)) >= 2]
+  if (length(parsed) == 0) return(empty_df)
+
   data.frame(
-    filename = vapply(parsed, function(x) basename(x[2]), character(1)),
-    size_mb  = as.numeric(vapply(parsed, function(x) x[1], character(1))),
+    filename = vapply(parsed, function(x) basename(trimws(x[2])), character(1)),
+    size_mb  = as.numeric(vapply(parsed, function(x) trimws(x[1]), character(1))),
     type     = vapply(parsed, function(x) {
       f <- x[2]
-      if (grepl("\\.d$", f)) "Bruker .d"
+      if (grepl("\\.d/?$", f)) "Bruker .d"
       else if (grepl("\\.raw$", f, ignore.case = TRUE)) "Thermo .raw"
+      else if (grepl("\\.wiff$", f, ignore.case = TRUE)) "SCIEX .wiff"
       else "mzML"
     }, character(1)),
     stringsAsFactors = FALSE
@@ -559,12 +654,13 @@ ssh_scan_raw_files <- function(ssh_config, dir_path) {
 #' @param fasta_dir Character — remote directory path
 #' @return Named character vector (display name -> full path)
 ssh_scan_fasta_files <- function(ssh_config, fasta_dir) {
-  cmd <- paste0("find ", shQuote(fasta_dir),
-                " -maxdepth 1 -name '*.fasta' -o -name '*.fa' 2>/dev/null")
+  qdir <- shQuote(fasta_dir)
+  cmd <- paste0("ls -1d ", qdir, "/*.fasta ", qdir, "/*.fa 2>/dev/null; true")
   result <- ssh_exec(ssh_config, cmd)
-  if (result$status != 0 || length(result$stdout) == 0) return(character())
 
   paths <- result$stdout[nzchar(result$stdout)]
+  # Filter out lines that are literal unexpanded globs (no matches)
+  paths <- paths[!grepl("\\*", paths)]
   if (length(paths) == 0) return(character())
 
   names(paths) <- basename(paths)
@@ -578,12 +674,24 @@ ssh_scan_fasta_files <- function(ssh_config, fasta_dir) {
 #' Check SLURM job status (local or remote via SSH)
 #' @param job_id Character — SLURM job ID
 #' @param ssh_config list(host, user, port, key_path) or NULL for local
+#' @param sbatch_path Character — full path to sbatch (to derive squeue/sacct paths)
 #' @return Character: "queued", "running", "completed", "failed", "cancelled", "unknown"
-check_slurm_status <- function(job_id, ssh_config = NULL) {
+check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
+  # Derive squeue/sacct/scancel paths from sbatch path
+  slurm_cmd <- function(cmd) {
+    if (!is.null(sbatch_path)) {
+      file.path(dirname(sbatch_path), cmd)
+    } else {
+      cmd
+    }
+  }
+
   # First try squeue (for active jobs)
   if (!is.null(ssh_config)) {
     squeue_result <- ssh_exec(ssh_config,
-      sprintf("squeue --job %s --format=%%T --noheader 2>/dev/null", job_id))
+      sprintf("%s --job %s --format=%%T --noheader 2>/dev/null",
+              slurm_cmd("squeue"), job_id),
+      login_shell = is.null(sbatch_path))
     status_output <- if (squeue_result$status == 0) squeue_result$stdout else character(0)
   } else {
     status_output <- tryCatch({
@@ -606,7 +714,9 @@ check_slurm_status <- function(job_id, ssh_config = NULL) {
   # Job not in queue — check sacct for final state
   if (!is.null(ssh_config)) {
     sacct_result <- ssh_exec(ssh_config,
-      sprintf("sacct -j %s --format=State --noheader --parsable2 2>/dev/null", job_id))
+      sprintf("%s -j %s --format=State --noheader --parsable2 2>/dev/null",
+              slurm_cmd("sacct"), job_id),
+      login_shell = is.null(sbatch_path))
     sacct_output <- if (sacct_result$status == 0) sacct_result$stdout else "UNKNOWN"
   } else {
     sacct_output <- tryCatch({
@@ -616,12 +726,18 @@ check_slurm_status <- function(job_id, ssh_config = NULL) {
     }, error = function(e) "UNKNOWN")
   }
 
+  # Filter empty lines and look for meaningful state
+  sacct_output <- trimws(sacct_output)
+  sacct_output <- sacct_output[nzchar(sacct_output)]
   if (length(sacct_output) == 0) return("unknown")
 
-  state <- toupper(trimws(sacct_output[1]))
-  if (grepl("COMPLETED", state)) return("completed")
-  if (grepl("FAILED|TIMEOUT|OUT_OF_ME", state)) return("failed")
-  if (grepl("CANCELLED", state)) return("cancelled")
+  # Check all returned states (sacct may return multiple lines for job + steps)
+  states <- toupper(sacct_output)
+  if (any(grepl("COMPLETED", states))) return("completed")
+  if (any(grepl("FAILED|TIMEOUT|OUT_OF_ME", states))) return("failed")
+  if (any(grepl("CANCELLED", states))) return("cancelled")
+  if (any(grepl("RUNNING", states))) return("running")
+  if (any(grepl("PENDING", states))) return("queued")
   return("unknown")
 }
 

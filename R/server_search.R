@@ -21,8 +21,50 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       host = input$ssh_host,
       user = input$ssh_user,
       port = input$ssh_port %||% 22,
-      key_path = input$ssh_key_path
+      key_path = input$ssh_key_path,
+      modules = input$ssh_modules %||% ""
     )
+  })
+
+  # ============================================================================
+  #    Job Queue Persistence (survives app restarts)
+  # ============================================================================
+
+  job_queue_path <- file.path(Sys.getenv("HOME"), ".delimp_job_queue.rds")
+  job_queue_loaded <- reactiveVal(FALSE)
+
+  # Load saved jobs on startup
+  observe({
+    if (file.exists(job_queue_path)) {
+      tryCatch({
+        saved_jobs <- readRDS(job_queue_path)
+        if (is.list(saved_jobs) && length(saved_jobs) > 0) {
+          values$diann_jobs <- saved_jobs
+          n_active <- sum(vapply(saved_jobs, function(j)
+            j$status %in% c("queued", "running"), logical(1)))
+          if (n_active > 0) {
+            showNotification(
+              sprintf("Restored %d job(s) from previous session (%d active).",
+                      length(saved_jobs), n_active),
+              type = "message", duration = 5)
+          }
+        }
+      }, error = function(e) {
+        message("[DE-LIMP] Failed to load saved job queue: ", e$message)
+      })
+    }
+    job_queue_loaded(TRUE)
+  }) |> bindEvent(TRUE)  # Run once on startup
+
+  # Save jobs to disk whenever the queue changes (after initial load)
+  observe({
+    jobs <- values$diann_jobs
+    req(job_queue_loaded())
+    tryCatch({
+      saveRDS(jobs, job_queue_path)
+    }, error = function(e) {
+      message("[DE-LIMP] Failed to save job queue: ", e$message)
+    })
   })
 
   # ============================================================================
@@ -50,6 +92,7 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     })
 
     values$ssh_connected <- result$success
+    values$ssh_sbatch_path <- result$sbatch_path
   })
 
   # ============================================================================
@@ -173,6 +216,25 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
   })
 
   # ============================================================================
+  #    Phosphoproteomics Search Mode — auto-configure settings
+  # ============================================================================
+
+  observeEvent(input$search_mode, {
+    if (input$search_mode == "phospho") {
+      # Phospho-optimized DIA-NN settings
+      updateNumericInput(session, "diann_max_var_mods", value = 3)
+      updateCheckboxInput(session, "mod_met_ox", value = TRUE)
+      updateTextAreaInput(session, "extra_var_mods",
+        value = "UniMod:21,79.966331,STY")
+      updateNumericInput(session, "diann_missed_cleavages", value = 2)
+      showNotification(
+        paste("Phospho mode: STY phosphorylation (UniMod:21) added,",
+              "max var mods = 3, missed cleavages = 2"),
+        type = "message", duration = 8)
+    }
+  }, ignoreInit = TRUE)
+
+  # ============================================================================
   #    UniProt FASTA Download
   # ============================================================================
 
@@ -241,21 +303,62 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       result <- download_uniprot_fasta(
         proteome_id = row$upid,
         content_type = input$fasta_content_type,
-        output_path = output_path,
-        append_contaminants = input$append_contaminants
+        output_path = output_path
       )
     })
 
     if (result$success) {
-      values$diann_fasta_files <- output_path
-      values$fasta_info <- result
-      showNotification(
-        sprintf("FASTA downloaded: %d proteins%s (%.1f MB)",
-          result$n_sequences,
-          if (result$n_contaminants > 0) sprintf(" + %d contaminants", result$n_contaminants) else "",
-          result$file_size / 1e6),
-        type = "message", duration = 8
-      )
+      cfg <- ssh_config()
+      if (!is.null(cfg)) {
+        # SSH mode: check if FASTA already exists on remote
+        remote_fasta_dir <- file.path(output_base(), "databases")
+        remote_path <- file.path(remote_fasta_dir, fname)
+
+        exists_check <- ssh_exec(cfg,
+          paste("test -f", shQuote(remote_path), "&& echo EXISTS"))
+        if (any(grepl("EXISTS", exists_check$stdout))) {
+          # Already exists — just use it
+          values$diann_fasta_files <- remote_path
+          values$fasta_info <- result
+          showNotification(
+            sprintf("FASTA already exists on HPC, using: %s", remote_path),
+            type = "message", duration = 8)
+        } else {
+          # Upload to remote
+          ssh_exec(cfg, paste("mkdir -p", shQuote(remote_fasta_dir)))
+
+          withProgress(message = "Uploading FASTA to remote HPC...", {
+            up_result <- scp_upload(cfg, output_path, remote_path)
+          })
+
+          if (up_result$status != 0) {
+            showNotification(
+              paste("FASTA downloaded locally but upload to HPC failed:",
+                    paste(up_result$stdout, collapse = " ")),
+              type = "error", duration = 10)
+            return()
+          }
+
+          values$diann_fasta_files <- remote_path
+          values$fasta_info <- result
+          showNotification(
+            sprintf("FASTA uploaded to HPC: %d proteins (%.1f MB)\n%s",
+              result$n_sequences,
+              result$file_size / 1e6,
+              remote_path),
+            type = "message", duration = 10)
+        }
+      } else {
+        # Local mode: use local path directly
+        values$diann_fasta_files <- output_path
+        values$fasta_info <- result
+        showNotification(
+          sprintf("FASTA downloaded: %d proteins (%.1f MB)",
+            result$n_sequences,
+            result$file_size / 1e6),
+          type = "message", duration = 8
+        )
+      }
     } else {
       showNotification(paste("Download failed:", result$error), type = "error")
     }
@@ -405,17 +508,17 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
   # ============================================================================
 
   observeEvent(input$submit_diann, {
+    tryCatch({
+
     # --- Validation ---
     errors <- character()
 
     if (is.null(values$diann_raw_files) || nrow(values$diann_raw_files) == 0) {
       errors <- c(errors, "No raw data files selected.")
     }
-
     has_fasta <- length(values$diann_fasta_files) > 0 &&
       all(nzchar(values$diann_fasta_files))
     has_speclib <- !is.null(values$diann_speclib) && nzchar(values$diann_speclib)
-
     if (!has_fasta && !has_speclib) {
       errors <- c(errors, "No FASTA database or spectral library selected.")
     }
@@ -484,11 +587,44 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       extra_cli_flags = input$extra_cli_flags %||% ""
     )
 
+    # Handle contaminant library — add as separate FASTA file
+    fasta_files <- values$diann_fasta_files
+    contam_lib <- input$contaminant_library
+    if (!is.null(contam_lib) && contam_lib != "none") {
+      contam_result <- get_contaminant_fasta(contam_lib)
+
+      if (contam_result$success) {
+        if (!is.null(cfg)) {
+          # SSH mode: upload contaminant FASTA to same remote dir as proteome
+          remote_contam_dir <- file.path(output_base(), "databases")
+          remote_contam_path <- file.path(remote_contam_dir, basename(contam_result$path))
+
+          exists_check <- ssh_exec(cfg,
+            paste("test -f", shQuote(remote_contam_path), "&& echo EXISTS"))
+          if (!any(grepl("EXISTS", exists_check$stdout))) {
+            ssh_exec(cfg, paste("mkdir -p", shQuote(remote_contam_dir)))
+            scp_upload(cfg, contam_result$path, remote_contam_path)
+          }
+          fasta_files <- c(fasta_files, remote_contam_path)
+        } else {
+          fasta_files <- c(fasta_files, contam_result$path)
+        }
+        showNotification(
+          sprintf("Added %s contaminant library (%d proteins)",
+                  gsub("_", " ", contam_lib), contam_result$n_sequences),
+          type = "message", duration = 5)
+      } else {
+        showNotification(
+          paste("Warning: Contaminant library not found:", contam_result$error),
+          type = "warning", duration = 8)
+      }
+    }
+
     # Generate sbatch script
     script_content <- generate_sbatch_script(
       analysis_name = analysis_name,
       raw_files = values$diann_raw_files$full_path,
-      fasta_files = values$diann_fasta_files,
+      fasta_files = fasta_files,
       speclib_path = values$diann_speclib,
       output_dir = output_dir,
       diann_sif = sif_path,
@@ -506,18 +642,26 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     script_path <- file.path(output_dir, "diann_search.sbatch")
 
     if (!is.null(cfg)) {
-      # SSH mode: write script remotely via heredoc, then submit
-      escaped_content <- gsub("'", "'\\''", script_content)
-      write_cmd <- sprintf("cat > %s << 'SBATCH_SCRIPT_EOF'\n%s\nSBATCH_SCRIPT_EOF",
-                           shQuote(script_path), script_content)
-      write_result <- ssh_exec(cfg, write_cmd)
-      if (write_result$status != 0) {
-        showNotification("Failed to write sbatch script to remote host.", type = "error")
+      # SSH mode: write script locally, SCP to remote, then submit
+      local_tmp <- tempfile(fileext = ".sbatch")
+      writeLines(script_content, local_tmp)
+      on.exit(unlink(local_tmp), add = TRUE)
+
+      scp_result <- scp_upload(cfg, local_tmp, script_path)
+      if (scp_result$status != 0) {
+        showNotification(
+          paste("Failed to write sbatch script to remote host:",
+                paste(scp_result$stdout, collapse = " ")),
+          type = "error")
         return()
       }
 
+      # Use stored full sbatch path to avoid slow login shell initialization
+      sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
+      sbatch_cmd <- paste(sbatch_bin, shQuote(script_path))
       submit_result <- tryCatch({
-        result <- ssh_exec(cfg, paste("sbatch", shQuote(script_path)))
+        result <- ssh_exec(cfg, sbatch_cmd,
+                           login_shell = is.null(values$ssh_sbatch_path))
         list(success = result$status == 0, stdout = result$stdout,
              error = if (result$status != 0) paste(result$stdout, collapse = " ") else NULL)
       }, error = function(e) {
@@ -560,6 +704,25 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       submitted_at = Sys.time(),
       n_files = nrow(values$diann_raw_files),
       search_mode = input$search_mode,
+      search_settings = list(
+        search_params = search_params,
+        fasta_files = fasta_files,
+        contaminant_library = contam_lib,
+        n_raw_files = nrow(values$diann_raw_files),
+        raw_file_type = if (nrow(values$diann_raw_files) > 0)
+          tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+        search_mode = input$search_mode,
+        normalization = input$diann_normalization,
+        diann_sif = basename(sif_path),
+        speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+          basename(values$diann_speclib) else NULL,
+        slurm = list(
+          cpus = input$diann_cpus,
+          mem_gb = input$diann_mem_gb,
+          time_hours = input$diann_time_hours,
+          partition = input$diann_partition
+        )
+      ),
       auto_load = input$auto_load_results,
       log_content = "",
       completed_at = NULL,
@@ -583,6 +746,14 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       sprintf("Job %s submitted successfully! Monitoring in background.", job_id),
       type = "message", duration = 8
     )
+
+    }, error = function(e) {
+      showNotification(
+        paste("Submission error:", e$message),
+        type = "error", duration = 15
+      )
+      message("[DE-LIMP] Submit error: ", e$message)
+    })
   })
 
   # ============================================================================
@@ -612,7 +783,8 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
 
       # Use SSH for jobs submitted via SSH, local for local jobs
       job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
-      new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg)
+      new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
+                                        sbatch_path = values$ssh_sbatch_path)
 
       if (new_status != jobs[[i]]$status) {
         jobs[[i]]$status <- new_status
@@ -755,17 +927,36 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
             }
           }
 
+          # Save search settings for methodology tab
+          if (!is.null(job$search_settings)) {
+            values$diann_search_settings <- job$search_settings
+          }
+
           # Mark job as loaded
           jobs <- values$diann_jobs
           jobs[[i]]$loaded <- TRUE
           values$diann_jobs <- jobs
 
-          add_to_log("Auto-Load DIA-NN Results", c(
+          # Build log with key search parameters
+          log_lines <- c(
             sprintf("# Loaded from: %s", report_path),
             sprintf("# Job ID: %s, Analysis: %s", job$job_id, job$name),
-            sprintf("# Mode: %s", if (isTRUE(job$is_ssh)) "SSH (SCP download)" else "Local"),
+            sprintf("# Mode: %s", if (isTRUE(job$is_ssh)) "SSH (SCP download)" else "Local")
+          )
+          if (!is.null(job$search_settings)) {
+            ss <- job$search_settings
+            sp <- ss$search_params
+            log_lines <- c(log_lines,
+              sprintf("# Search mode: %s", ss$search_mode),
+              sprintf("# FASTA: %s", paste(basename(ss$fasta_files), collapse = ", ")),
+              sprintf("# Enzyme: %s, Missed cleavages: %d", sp$enzyme, sp$missed_cleavages),
+              sprintf("# FDR: %s, MBR: %s", sp$qvalue, sp$mbr)
+            )
+          }
+          log_lines <- c(log_lines,
             sprintf("raw_data <- limpa::readDIANN('%s')", report_path)
-          ))
+          )
+          add_to_log("Auto-Load DIA-NN Results", log_lines)
 
           # Navigate to Assign Groups tab
           nav_select("main_tabs", "Data Overview")
@@ -797,6 +988,9 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       ))
     }
 
+    # Refresh all button at top
+    has_unknown <- any(vapply(jobs, function(j) j$status == "unknown", logical(1)))
+
     job_rows <- lapply(seq_along(jobs), function(i) {
       job <- jobs[[i]]
 
@@ -806,6 +1000,7 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
         "completed" = span(class = "badge bg-success", "Completed"),
         "failed"    = span(class = "badge bg-danger", "Failed"),
         "cancelled" = span(class = "badge bg-warning", "Cancelled"),
+        "unknown"   = span(class = "badge bg-light text-dark", "Unknown"),
         span(class = "badge bg-light text-dark", job$status)
       )
 
@@ -836,6 +1031,11 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
             actionButton(sprintf("view_log_%d", i), "Log",
               class = "btn-outline-secondary btn-xs",
               style = "font-size: 0.75em; padding: 2px 6px;"),
+            if (job$status == "unknown") {
+              actionButton(sprintf("refresh_job_%d", i), "Refresh",
+                class = "btn-outline-info btn-xs",
+                style = "font-size: 0.75em; padding: 2px 6px;")
+            },
             if (job$status %in% c("queued", "running")) {
               actionButton(sprintf("cancel_job_%d", i), "Cancel",
                 class = "btn-outline-danger btn-xs",
@@ -851,7 +1051,15 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
       )
     })
 
-    tagList(job_rows)
+    tagList(
+      if (has_unknown) div(style = "text-align: right; margin-bottom: 6px;",
+        actionButton("refresh_all_jobs", "Refresh All",
+          class = "btn-outline-info btn-xs",
+          style = "font-size: 0.75em; padding: 2px 8px;",
+          icon = icon("arrows-rotate"))
+      ),
+      job_rows
+    )
   })
 
   # ============================================================================
@@ -884,13 +1092,37 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
           ))
         }, ignoreInit = TRUE)
 
+        # Refresh job status
+        observeEvent(input[[sprintf("refresh_job_%d", idx)]], {
+          job <- values$diann_jobs[[idx]]
+          tryCatch({
+            job_cfg <- if (isTRUE(job$is_ssh)) isolate(ssh_config()) else NULL
+            new_status <- check_slurm_status(job$job_id, ssh_config = job_cfg,
+                                              sbatch_path = values$ssh_sbatch_path)
+            jobs <- values$diann_jobs
+            jobs[[idx]]$status <- new_status
+            if (new_status == "completed" && is.null(jobs[[idx]]$completed_at)) {
+              jobs[[idx]]$completed_at <- Sys.time()
+            }
+            values$diann_jobs <- jobs
+            showNotification(sprintf("Job %s: %s", job$job_id, new_status), type = "message")
+          }, error = function(e) {
+            showNotification(sprintf("Refresh failed: %s", e$message), type = "error")
+          })
+        }, ignoreInit = TRUE)
+
         # Cancel job
         observeEvent(input[[sprintf("cancel_job_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
           tryCatch({
             if (isTRUE(job$is_ssh)) {
               cfg <- ssh_config()
-              if (!is.null(cfg)) ssh_exec(cfg, paste("scancel", job$job_id))
+              if (!is.null(cfg)) {
+                scancel_cmd <- if (!is.null(values$ssh_sbatch_path)) {
+                  file.path(dirname(values$ssh_sbatch_path), "scancel")
+                } else "scancel"
+                ssh_exec(cfg, paste(scancel_cmd, job$job_id))
+              }
             } else {
               system2("scancel", args = job$job_id, stdout = TRUE, stderr = TRUE)
             }
@@ -986,6 +1218,30 @@ server_search <- function(input, output, session, values, add_to_log, hpc_mode) 
     }
 
     registered_observers(existing)
+  })
+
+  # Refresh all jobs with unknown status
+  observeEvent(input$refresh_all_jobs, {
+    jobs <- values$diann_jobs
+    cfg <- isolate(ssh_config())
+    changed <- FALSE
+
+    for (i in seq_along(jobs)) {
+      if (jobs[[i]]$status != "unknown") next
+      tryCatch({
+        job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+        new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
+                                          sbatch_path = values$ssh_sbatch_path)
+        jobs[[i]]$status <- new_status
+        if (new_status == "completed" && is.null(jobs[[i]]$completed_at)) {
+          jobs[[i]]$completed_at <- Sys.time()
+        }
+        changed <- TRUE
+      }, error = function(e) NULL)
+    }
+
+    if (changed) values$diann_jobs <- jobs
+    showNotification("Job statuses refreshed.", type = "message", duration = 3)
   })
 
 }

@@ -255,7 +255,8 @@ server <- function(input, output, session) {
     diann_speclib = NULL,
     uniprot_results = NULL,
     fasta_info = NULL,
-    ssh_connected = FALSE
+    ssh_connected = FALSE,
+    diann_search_settings = NULL
   )
 
   # --- Shared helper: append to reproducibility log ---

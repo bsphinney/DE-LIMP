@@ -71,6 +71,12 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     nav_select("main_tabs", "Phosphoproteomics")
   })
 
+  # Navigate to Assign Groups from phospho tab reminder
+  observeEvent(input$phospho_go_to_assign, {
+    nav_select("main_tabs", "Data Overview")
+    nav_select("data_overview_tabs", "Assign Groups & Run")
+  })
+
   # ============================================================================
   #  Load Example Phospho Data (downloads from GitHub release)
   # ============================================================================
@@ -130,10 +136,19 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         # Parse the site matrix TSV
         mat_df <- utils::read.delim(site_tmp, check.names = FALSE, stringsAsFactors = FALSE)
 
+        # Known DIA-NN phosphosite metadata columns — always metadata even if numeric
+        # (e.g., "Site" is integer but represents residue position, not sample intensity)
+        known_meta_cols <- c("Protein", "Protein.Group", "Protein.Names", "Gene.Names",
+                             "Genes", "Residue", "Site", "Position", "Sequence",
+                             "Modified.Sequence", "Stripped.Sequence", "Best.Loc.Conf",
+                             "PTM.Site.Confidence")
+
         # Identify numeric vs info columns by checking actual content
         is_numeric_col <- vapply(mat_df, function(col) {
           is.numeric(col) || all(grepl("^[0-9eE.+\\-]*$", col[!is.na(col) & col != ""]))
         }, logical(1))
+        # Override: known metadata columns are never sample data
+        is_numeric_col[names(mat_df) %in% known_meta_cols] <- FALSE
         numeric_cols <- names(mat_df)[is_numeric_col]
         info_col_names <- names(mat_df)[!is_numeric_col]
 
@@ -167,17 +182,21 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         if (all(c("Residue", "Site") %in% names(site_info))) {
           protein_col <- if ("Protein.Group" %in% names(site_info)) site_info$Protein.Group else "Unknown"
           site_info$Position <- site_info$Site
-          site_info$SiteID <- paste0(protein_col, "_", site_info$Residue, site_info$Site)
+          # make.unique prevents duplicate SiteIDs (e.g. same protein+residue+position
+          # from different peptides) which would cause rowname issues in limma
+          site_info$SiteID <- make.unique(
+            paste0(protein_col, "_", site_info$Residue, site_info$Site), sep = "."
+          )
         } else if ("Modified.Sequence" %in% names(site_info)) {
           parsed <- parse_phospho_positions(site_info$Modified.Sequence)
           site_info$Residue <- parsed$residue
           site_info$Position <- parsed$position
-          site_info$SiteID <- paste0(
+          site_info$SiteID <- make.unique(paste0(
             if ("Protein.Group" %in% names(site_info)) site_info$Protein.Group else "Unknown",
             "_", parsed$residue, parsed$position
-          )
+          ), sep = ".")
         } else {
-          site_info$SiteID <- paste0("Site_", seq_len(nrow(mat)))
+          site_info$SiteID <- paste0("Site_", seq_len(nrow(mat)))  # Already unique
           site_info$Residue <- NA
           site_info$Position <- NA
         }
@@ -230,7 +249,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       }
 
       # First column is SiteID / row index; rest are sample intensities
-      site_ids <- mat_df[[1]]
+      site_ids <- make.unique(as.character(mat_df[[1]]), sep = ".")
       mat <- as.matrix(mat_df[, -1, drop = FALSE])
       rownames(mat) <- site_ids
 
@@ -426,17 +445,64 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         type = "message", duration = 8
       )
 
-      # Log to reproducibility
+      # Log to reproducibility (detailed, runnable code)
       add_to_log("Phosphosite DE Analysis", c(
         sprintf("# Input mode: %s", values$phospho_input_mode),
         sprintf("# Site-level matrix: %d sites x %d samples", nrow(mat_f), ncol(mat_f)),
-        sprintf("# Sites removed (missing data): %d", n_removed),
-        sprintf("# Normalization: %s", norm_method %||% "none"),
-        "# Imputation: tail-based (mean - 1.8 SD, width 0.3 SD)",
-        "fit_phospho <- lmFit(site_matrix_filtered, design)",
-        sprintf("fit_phospho <- contrasts.fit(fit_phospho, makeContrasts(contrasts=c('%s'), levels=design))",
+        sprintf("# Sites removed by completeness filter: %d", n_removed),
+        sprintf("# Groups: %s", paste(levels(groups), collapse = ", ")),
+        "",
+        "# --- Step 1: Read site matrix ---",
+        if (values$phospho_input_mode == "site_matrix") {
+          "# Path A: DIA-NN 1.9+ site-localization matrix (TSV/parquet)"
+        } else {
+          "# Path B: Extracted from report.parquet via parse_phospho_positions()"
+        },
+        "mat <- phospho_site_matrix  # log2-transformed site intensities",
+        "",
+        "# --- Step 2: Match samples to metadata & subset ---",
+        sprintf("# %d samples matched between site matrix columns and metadata", ncol(mat_f)),
+        "meta_sub <- metadata[metadata$Group != '', ]",
+        "groups <- factor(make.names(meta_sub$Group))",
+        "",
+        "# --- Step 3: Filter sites by completeness ---",
+        "# Require >= 2 non-NA values per group (prevents imputation-driven false positives)",
+        "keep <- apply(mat, 1, function(row) {",
+        "  all(tapply(!is.na(row), groups, sum) >= 2)",
+        "})",
+        sprintf("mat_f <- mat[keep, , drop = FALSE]  # %d sites retained", nrow(mat_f)),
+        "",
+        "# --- Step 4: Impute missing values (Perseus-style, tail-based) ---",
+        "# Assumes missing = below detection limit (MNAR)",
+        "# Draws from N(global_mean - 1.8*SD, 0.3*SD)",
+        "gm <- mean(mat_f, na.rm = TRUE); gs <- sd(mat_f, na.rm = TRUE)",
+        "set.seed(42)",
+        "na_idx <- which(is.na(mat_f), arr.ind = TRUE)",
+        "mat_f[na_idx] <- rnorm(nrow(na_idx), mean = gm - 1.8 * gs, sd = 0.3 * gs)",
+        "",
+        sprintf("# --- Step 5: Normalization (%s) ---", norm_method %||% "none"),
+        if (!is.null(norm_method) && norm_method == "median") {
+          c("col_meds <- apply(mat_f, 2, median, na.rm = TRUE)",
+            "mat_f <- sweep(mat_f, 2, col_meds - mean(col_meds))")
+        } else if (!is.null(norm_method) && norm_method == "quantile") {
+          "mat_f <- limma::normalizeBetweenArrays(mat_f, method = 'quantile')"
+        } else {
+          "# No additional normalization applied (using DIA-NN's built-in normalization)"
+        },
+        "",
+        "# --- Step 6: Differential expression (limma) ---",
+        "design <- model.matrix(~ 0 + groups)",
+        "colnames(design) <- levels(groups)",
+        "fit_phospho <- limma::lmFit(mat_f, design)",
+        sprintf("contrasts_mat <- limma::makeContrasts(contrasts = c('%s'), levels = design)",
                 paste(forms, collapse = "', '")),
-        "fit_phospho <- eBayes(fit_phospho)"
+        "fit_phospho <- limma::contrasts.fit(fit_phospho, contrasts_mat)",
+        "fit_phospho <- limma::eBayes(fit_phospho)",
+        "",
+        "# --- Step 7: Extract results ---",
+        sprintf("# topTable(fit_phospho, coef = '%s', number = Inf)", forms[1]),
+        "# Columns: logFC, AveExpr, t, P.Value, adj.P.Val, B",
+        "# Significance: adj.P.Val < 0.05 & |logFC| > 1"
       ))
 
       # Navigate to phospho tab
@@ -464,6 +530,8 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     }
 
     # --- Phospho detected: full UI ---
+    pipeline_done <- !is.null(values$phospho_fit)
+
     tagList(
       # Status & controls card
       tags$div(
@@ -472,14 +540,37 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         uiOutput("phospho_status_banner"),
         uiOutput("phospho_norm_warning"),
 
-        # Contrast selector
-        tags$div(
-          style = "display: flex; align-items: center; gap: 15px; flex-wrap: wrap; margin-top: 10px;",
-          tags$strong("Phosphosite Contrast:"),
-          tags$div(style = "flex-grow: 1; max-width: 400px;",
-            selectInput("phospho_contrast_selector", NULL, choices = NULL, width = "100%")
+        # Pipeline reminder — prominent call-to-action when pipeline hasn't been run
+        if (!pipeline_done) {
+          tags$div(
+            class = "alert alert-warning py-3 px-3 mb-3",
+            style = "border-left: 4px solid #ffc107; display: flex; align-items: center; gap: 15px; flex-wrap: wrap;",
+            tags$div(
+              icon("exclamation-triangle", class = "fa-lg"),
+              tags$strong(" Phosphosite pipeline not yet run."),
+              " Assign sample groups in the ",
+              tags$strong("Data Overview \u2192 Assign Groups & Run"),
+              " tab, then click ",
+              tags$strong("Run Phosphosite Pipeline"),
+              " in the sidebar to generate site-level results."
+            ),
+            actionButton("phospho_go_to_assign",
+                          "Go to Assign Groups \u2192",
+                          class = "btn btn-warning btn-sm",
+                          icon = icon("arrow-right"))
           )
-        ),
+        },
+
+        # Contrast selector (only useful after pipeline)
+        if (pipeline_done) {
+          tags$div(
+            style = "display: flex; align-items: center; gap: 15px; flex-wrap: wrap; margin-top: 10px;",
+            tags$strong("Phosphosite Contrast:"),
+            tags$div(style = "flex-grow: 1; max-width: 400px;",
+              selectInput("phospho_contrast_selector", NULL, choices = NULL, width = "100%")
+            )
+          )
+        },
 
         # Educational expandable
         tags$details(
@@ -570,7 +661,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
             )
           ),
           hr(),
-          plotOutput("ksea_barplot", height = "500px"),
+          uiOutput("ksea_barplot_ui"),
           hr(),
           tags$div(style = "text-align: right; margin-bottom: 10px;",
             downloadButton("download_ksea_table", "Export CSV",
@@ -865,7 +956,32 @@ server_phospho <- function(input, output, session, values, add_to_log) {
                           coef = input$phospho_contrast_selector,
                           number = Inf)
     de$SiteID <- rownames(de)
-    de <- merge(de, values$phospho_site_info, by = "SiteID")
+
+    # Merge with site_info (left join to keep all DE results)
+    si_cols <- intersect(c("SiteID", "Residue", "Position"), names(values$phospho_site_info))
+    de <- merge(de, values$phospho_site_info[, si_cols, drop = FALSE],
+                by = "SiteID", all.x = TRUE)
+
+    # Fallback: if Residue is mostly NA (merge failed due to SiteID mismatch from
+    # duplicate deduplication or other mangling), extract S/T/Y from the SiteID pattern
+    n_valid <- sum(de$Residue %in% c("S", "T", "Y"), na.rm = TRUE)
+    if (n_valid < nrow(de) * 0.5) {
+      # SiteID format: ProteinGroup_ResiduePosition (e.g., Q9Y6K9_S472 or Q9Y6K9_S472.1)
+      extracted <- sub(".*_([STY])\\d+.*$", "\\1", de$SiteID)
+      extracted[!extracted %in% c("S", "T", "Y")] <- NA
+      de$Residue[is.na(de$Residue) | !de$Residue %in% c("S", "T", "Y")] <-
+        extracted[is.na(de$Residue) | !de$Residue %in% c("S", "T", "Y")]
+    }
+
+    # Filter to valid residues only
+    de <- de[de$Residue %in% c("S", "T", "Y"), ]
+
+    if (nrow(de) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No residue information available for tested sites",
+           cex = 1.1, col = "gray50")
+      return()
+    }
 
     # All sites
     all_counts <- table(factor(de$Residue, levels = c("S", "T", "Y")))
@@ -1003,8 +1119,38 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         add_to_log("KSEA Kinase Activity", c(
           sprintf("# Contrast: %s", input$phospho_contrast_selector),
           sprintf("# Input: %d phosphosites with gene annotations", nrow(ksea_input)),
+          sprintf("# Significant kinases (FDR < 0.05): %d", n_sig),
+          "",
+          "# --- Kinase-Substrate Enrichment Analysis (KSEA) ---",
+          "# Uses PhosphoSitePlus + NetworKIN kinase-substrate relationships",
+          "# to infer upstream kinase activity from phosphosite fold-changes.",
+          "#",
+          "# Input format: data.frame with columns:",
+          "#   Protein (accession), Gene (symbol), Peptide (SiteID),",
+          "#   Residue.Both (e.g. 'S472'), p (p-value), FC (fold change, NOT log2)",
+          "",
+          "library(KSEAapp)",
           "data('KSData', package = 'KSEAapp')",
-          "ksea_scores <- KSEAapp::KSEA.Scores(KSData, ksea_input, NetworKIN=TRUE, NetworKIN.cutoff=5)"
+          "",
+          "# Prepare phospho DE results for KSEA input",
+          "de_phospho <- topTable(fit_phospho, coef = contrast, number = Inf)",
+          "ksea_input <- data.frame(",
+          "  Protein      = site_info$Protein.Group,",
+          "  Gene         = site_info$Genes,",
+          "  Peptide      = rownames(de_phospho),",
+          "  Residue.Both = paste0(site_info$Residue, site_info$Position),",
+          "  p            = de_phospho$P.Value,",
+          "  FC           = 2^de_phospho$logFC",
+          ")",
+          "ksea_input <- ksea_input[!is.na(ksea_input$Gene) & ksea_input$Gene != '', ]",
+          "",
+          "# Run KSEA scoring (NetworKIN enabled, cutoff=5)",
+          "ksea_scores <- KSEAapp::KSEA.Scores(",
+          "  KSData, ksea_input,",
+          "  NetworKIN = TRUE, NetworKIN.cutoff = 5",
+          ")",
+          "# Result columns: Kinase.Gene, mS, Enrichment, m, z.score, p.value, FDR",
+          "# Positive z-score = kinase activated; Negative = inhibited"
         ))
       }, error = function(e) {
         try(grDevices::dev.off(), silent = TRUE)
@@ -1014,7 +1160,20 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     })
   })
 
-  # KSEA Bar Plot
+  # KSEA Bar Plot — Dynamic height wrapper
+  output$ksea_barplot_ui <- renderUI({
+    req(values$ksea_results)
+    ks <- values$ksea_results
+    sig_ks <- ks[ks$FDR < 0.05, ]
+    if (nrow(sig_ks) == 0) sig_ks <- utils::head(ks, 20)
+    n_up   <- min(nrow(sig_ks[sig_ks$z.score > 0, ]), 8)
+    n_down <- min(nrow(sig_ks[sig_ks$z.score < 0, ]), 8)
+    n_bars <- max(n_up + n_down, 1)
+    plot_height <- paste0(max(n_bars * 30 + 80, 200), "px")
+    plotOutput("ksea_barplot", height = plot_height)
+  })
+
+  # KSEA Bar Plot — Compact default view (top 8+8)
   output$ksea_barplot <- renderPlot({
     req(values$ksea_results)
 
@@ -1025,9 +1184,9 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     sig_ks <- ks[ks$FDR < 0.05, ]
     if (nrow(sig_ks) == 0) sig_ks <- utils::head(ks, 20)
 
-    # Take top 15 activated + top 15 inhibited
-    top_up   <- utils::head(sig_ks[sig_ks$z.score > 0, ], 15)
-    top_down <- utils::tail(sig_ks[sig_ks$z.score < 0, ], 15)
+    # Compact view: top 8 activated + top 8 inhibited
+    top_up   <- utils::head(sig_ks[sig_ks$z.score > 0, ], 8)
+    top_down <- utils::tail(sig_ks[sig_ks$z.score < 0, ], 8)
     plot_ks  <- rbind(top_up, top_down)
 
     if (nrow(plot_ks) == 0) {
@@ -1040,20 +1199,32 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     plot_ks$Kinase.Gene <- factor(plot_ks$Kinase.Gene, levels = plot_ks$Kinase.Gene)
     plot_ks$Direction <- ifelse(plot_ks$z.score > 0, "Activated", "Inhibited")
 
+    # FDR significance markers
+    plot_ks$sig_label <- ifelse(plot_ks$FDR < 0.001, "***",
+                         ifelse(plot_ks$FDR < 0.01,  "**",
+                         ifelse(plot_ks$FDR < 0.05,  "*", "")))
+    plot_ks$bar_label <- sprintf("n=%d %s", plot_ks$m, plot_ks$sig_label)
+    plot_ks$bar_label <- trimws(plot_ks$bar_label)
+
     ggplot2::ggplot(plot_ks, ggplot2::aes(x = z.score, y = Kinase.Gene, fill = Direction)) +
       ggplot2::geom_col(alpha = 0.85) +
       ggplot2::scale_fill_manual(values = c("Activated" = "#E63946", "Inhibited" = "#457B9D")) +
       ggplot2::geom_text(
-        ggplot2::aes(label = sprintf("n=%d", m)),
-        hjust = ifelse(plot_ks$z.score > 0, -0.1, 1.1), size = 3
+        ggplot2::aes(label = bar_label),
+        hjust = ifelse(plot_ks$z.score > 0, -0.05, 1.05), size = 3.2
       ) +
       ggplot2::labs(
         title = paste("Kinase Activity:", values$ksea_last_contrast),
-        subtitle = "KSEA z-scores (PhosphoSitePlus + NetworKIN substrates)",
-        x = "KSEA z-score", y = NULL
+        subtitle = "KSEA z-scores  (* FDR<0.05, ** <0.01, *** <0.001)",
+        x = "KSEA z-score", y = NULL,
+        caption = "Click expand for full view"
       ) +
-      ggplot2::theme_bw(base_size = 13) +
-      ggplot2::theme(legend.position = "bottom")
+      ggplot2::theme_bw(base_size = 12) +
+      ggplot2::theme(
+        legend.position = "bottom",
+        axis.text.y = ggplot2::element_text(size = 11),
+        plot.caption = ggplot2::element_text(color = "gray60", size = 9)
+      )
   })
 
   # KSEA Results Table
@@ -1386,6 +1557,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         "Benjamini Y & Hochberg Y (1995) Controlling the false discovery rate. ",
         tags$em("J Royal Stat Soc B"), " 57:289-300."
       ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details, see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+      ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
   })
@@ -1418,6 +1593,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         "Tyanova S et al. (2016) The Perseus computational platform for comprehensive ",
         "analysis of (prote)omics data. ", tags$em("Nature Methods"), " 13:731-740."
       ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details, see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+      ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
   })
@@ -1447,6 +1626,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         "nature of Tyr and Ser/Thr-based signaling. ", tags$em("Cell Reports"), " 8:1583-1594.", tags$br(),
         "Humphrey SJ et al. (2015) High-throughput phosphoproteomics reveals in vivo insulin ",
         "signaling dynamics. ", tags$em("Nature Biotechnology"), " 33:990-995."
+      ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details, see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1481,6 +1664,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         "quantitative proteomics data sets to compare imputation strategies. ",
         tags$em("J Proteome Res"), " 15:1116-1125."
       ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details (imputation, filtering), see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+      ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
   })
@@ -1503,6 +1690,12 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         tags$li(tags$strong("n="), " \u2014 number of substrates from your data matched to that kinase. ",
                 "Higher n gives more statistical power.")
       ),
+      tags$p(tags$strong("Scoring: "),
+        "For each kinase, the mean log2FC of matched substrates is computed and normalised ",
+        "into a z-score: z = (mS * sqrt(m)) / delta, where m = substrate count and delta = ",
+        "standard deviation of all log2FC values. P-values are computed from the z-score ",
+        "and FDR-corrected (Benjamini-Hochberg) across all kinases."
+      ),
       tags$p(
         "FDR < 0.05 kinases are shown by default. The bar labels indicate the number of ",
         "substrate sites contributing to each kinase score."
@@ -1519,6 +1712,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         tags$em("Nucleic Acids Res"), " 43:D512-D520.", tags$br(),
         "Linding R et al. (2007) Systematic discovery of in vivo phosphorylation networks. ",
         tags$em("Cell"), " 129:1415-1426."
+      ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details (scoring algorithm, database sources), see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1553,6 +1750,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         tags$em("Nature Biotechnology"), " 23:1391-1398.", tags$br(),
         "Miller ML et al. (2008) Linear motif atlas for phosphorylation-dependent signaling. ",
         tags$em("Sci Signaling"), " 1:ra2."
+      ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details, see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1591,6 +1792,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         tags$em("Nucleic Acids Res"), " 43:D512-D520.", tags$br(),
         "Ochoa D et al. (2020) The functional landscape of the human phosphoproteome. ",
         tags$em("Nature Biotechnology"), " 38:365-373."
+      ),
+      tags$p(class = "text-muted small mt-2", icon("book"),
+        " For full methodology details, see the ",
+        tags$strong("Reproducibility \u2192 Methodology"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1686,7 +1891,25 @@ server_phospho <- function(input, output, session, values, add_to_log) {
                           coef = input$phospho_contrast_selector,
                           number = Inf)
     de$SiteID <- rownames(de)
-    de <- merge(de, values$phospho_site_info, by = "SiteID")
+
+    # Merge with site_info (left join) + fallback extraction from SiteID
+    si_cols <- intersect(c("SiteID", "Residue", "Position"), names(values$phospho_site_info))
+    de <- merge(de, values$phospho_site_info[, si_cols, drop = FALSE],
+                by = "SiteID", all.x = TRUE)
+    n_valid <- sum(de$Residue %in% c("S", "T", "Y"), na.rm = TRUE)
+    if (n_valid < nrow(de) * 0.5) {
+      extracted <- sub(".*_([STY])\\d+.*$", "\\1", de$SiteID)
+      extracted[!extracted %in% c("S", "T", "Y")] <- NA
+      de$Residue[is.na(de$Residue) | !de$Residue %in% c("S", "T", "Y")] <-
+        extracted[is.na(de$Residue) | !de$Residue %in% c("S", "T", "Y")]
+    }
+    de <- de[de$Residue %in% c("S", "T", "Y"), ]
+    if (nrow(de) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No residue information available", cex = 1.2, col = "gray50")
+      return()
+    }
+
     all_counts <- table(factor(de$Residue, levels = c("S", "T", "Y")))
     sig_de <- de[de$adj.P.Val < 0.05, ]
     sig_counts <- table(factor(sig_de$Residue, levels = c("S", "T", "Y")))
@@ -1767,16 +1990,20 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     plot_ks <- plot_ks[order(plot_ks$z.score), ]
     plot_ks$Kinase.Gene <- factor(plot_ks$Kinase.Gene, levels = plot_ks$Kinase.Gene)
     plot_ks$Direction <- ifelse(plot_ks$z.score > 0, "Activated", "Inhibited")
+    plot_ks$sig_label <- ifelse(plot_ks$FDR < 0.001, "***",
+                         ifelse(plot_ks$FDR < 0.01,  "**",
+                         ifelse(plot_ks$FDR < 0.05,  "*", "")))
+    plot_ks$bar_label <- trimws(sprintf("n=%d %s", plot_ks$m, plot_ks$sig_label))
     ggplot2::ggplot(plot_ks, ggplot2::aes(x = z.score, y = Kinase.Gene, fill = Direction)) +
       ggplot2::geom_col(alpha = 0.85) +
       ggplot2::scale_fill_manual(values = c("Activated" = "#E63946", "Inhibited" = "#457B9D")) +
       ggplot2::geom_text(
-        ggplot2::aes(label = sprintf("n=%d", m)),
-        hjust = ifelse(plot_ks$z.score > 0, -0.1, 1.1), size = 3.5
+        ggplot2::aes(label = bar_label),
+        hjust = ifelse(plot_ks$z.score > 0, -0.05, 1.05), size = 3.5
       ) +
       ggplot2::labs(
         title = paste("Kinase Activity:", values$ksea_last_contrast),
-        subtitle = "KSEA z-scores (PhosphoSitePlus + NetworKIN substrates)",
+        subtitle = "KSEA z-scores  (* FDR<0.05, ** <0.01, *** <0.001)",
         x = "KSEA z-score", y = NULL
       ) +
       ggplot2::theme_bw(base_size = 15) +

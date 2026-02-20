@@ -257,10 +257,15 @@ read_fasta_sequences <- function(fasta_path) {
 prepare_ksea_input <- function(phospho_fit, contrast, site_info) {
   de <- limma::topTable(phospho_fit, coef = contrast, number = Inf)
   de$SiteID <- rownames(de)
-  de <- merge(de, site_info, by = "SiteID")
+  de <- merge(de, site_info, by = "SiteID", all.x = TRUE)
 
+  # KSEAapp::KSEA.Scores expects exactly 6 columns in this positional order:
+  #   1=Protein (accession), 2=Gene (symbol), 3=Peptide, 4=Residue.Both, 5=p, 6=FC
+  # It renames columns by position (colnames[c(2,4)]), so order matters!
+  protein_col <- if ("Protein.Group" %in% names(de)) de$Protein.Group else de$Genes
   ksea_input <- data.frame(
-    Protein      = de$Genes,
+    Protein      = protein_col,
+    Gene         = de$Genes,
     Peptide      = de$SiteID,
     Residue.Both = paste0(de$Residue, de$Position),
     p            = de$P.Value,
@@ -268,8 +273,10 @@ prepare_ksea_input <- function(phospho_fit, contrast, site_info) {
     stringsAsFactors = FALSE
   )
 
-  # Remove rows with missing gene names (KSEA needs gene symbols)
-  ksea_input <- ksea_input[!is.na(ksea_input$Protein) & ksea_input$Protein != "", ]
+  # Remove rows with missing gene names or invalid residue info (KSEA needs both)
+  ksea_input <- ksea_input[!is.na(ksea_input$Gene) & ksea_input$Gene != "" &
+                           !is.na(ksea_input$Residue.Both) &
+                           !grepl("^NA", ksea_input$Residue.Both), ]
   ksea_input
 }
 
@@ -282,7 +289,7 @@ prepare_ksea_input <- function(phospho_fit, contrast, site_info) {
 extract_flanking_sequences <- function(site_info, de_results, fasta_sequences, window = 7L) {
   sig <- de_results[de_results$adj.P.Val < 0.05, ]
   sig$SiteID <- rownames(sig)
-  sig <- merge(sig, site_info, by = "SiteID")
+  sig <- merge(sig, site_info, by = "SiteID", all.x = TRUE)
 
   if (nrow(sig) == 0) return(list(up = character(0), down = character(0)))
 

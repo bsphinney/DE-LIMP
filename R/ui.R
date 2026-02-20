@@ -230,6 +230,7 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
               div(style = "display: flex; gap: 5px;",
                 div(style = "flex: 1;",
                   textInput("ssh_raw_data_dir", NULL,
+                    value = "/quobyte/proteomics-grp/de-limp/phospho/data",
                     placeholder = "/share/proteomics/raw/experiment_001")
                 ),
                 actionButton("ssh_scan_raw_btn", "Scan", icon = icon("magnifying-glass"),
@@ -265,7 +266,6 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
                   "Full + isoforms" = "full_isoforms"
                 ), selected = "one_per_gene", width = "100%"
               ),
-              checkboxInput("append_contaminants", "Append contaminants", TRUE),
               uiOutput("fasta_filename_preview"),
               actionButton("download_fasta_btn", "Download FASTA",
                 class = "btn-success btn-sm w-100", icon = icon("download"))
@@ -298,6 +298,24 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
               uiOutput("browsed_fasta_info")
             ),
 
+            div(style = "margin-top: 10px;",
+              selectInput("contaminant_library", "Add Contaminant Library:",
+                choices = c(
+                  "None" = "none",
+                  "Universal (Recommended)" = "universal",
+                  "Cell Culture" = "cell_culture",
+                  "Mouse Tissue" = "mouse_tissue",
+                  "Rat Tissue" = "rat_tissue",
+                  "Neuron Culture" = "neuron_culture",
+                  "Stem Cell Culture" = "stem_cell_culture"
+                ),
+                selected = "universal", width = "100%"),
+              tags$small(class = "text-muted",
+                "Contaminant libraries from ",
+                tags$a(href = "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+                       "HaoGroup-ProtContLib", target = "_blank"))
+            ),
+
             hr(),
             tags$h6(icon("book"), " Spectral Library (optional)"),
             conditionalPanel("input.search_connection_mode != 'ssh'",
@@ -323,8 +341,17 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
             radioButtons("search_mode", "Search Mode:",
               choices = c(
                 "Library-free (default)" = "libfree",
+                "Phosphoproteomics" = "phospho",
                 "Use spectral library" = "library"
               ), selected = "libfree"
+            ),
+            conditionalPanel("input.search_mode == 'phospho'",
+              tags$div(class = "alert alert-info py-1 px-2 mb-2",
+                style = "font-size: 0.82em;",
+                icon("flask"),
+                " Phospho mode: STY phosphorylation (UniMod:21), max 3 var mods,",
+                " 2 missed cleavages, --phospho-output enabled"
+              )
             ),
 
             radioButtons("diann_normalization", "DIA-NN Normalization:",
@@ -439,17 +466,20 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
               selected = if (local_sbatch) "local" else "ssh", inline = TRUE),
             conditionalPanel("input.search_connection_mode == 'ssh'",
               textInput("ssh_host", "HPC Hostname",
-                placeholder = "hive.genomecenter.ucdavis.edu"),
+                value = "hive.hpc.ucdavis.edu"),
               div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                 div(style = "flex: 1; min-width: 100px;",
-                  textInput("ssh_user", "Username", value = Sys.getenv("USER"))
+                  textInput("ssh_user", "Username", value = "brettsp")
                 ),
                 div(style = "flex: 1; min-width: 80px;",
                   numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)
                 )
               ),
               textInput("ssh_key_path", "SSH Key Path",
-                value = paste0(Sys.getenv("HOME"), "/.ssh/id_rsa")),
+                value = paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
+              textInput("ssh_modules", "Modules to Load (optional)",
+                value = "",
+                placeholder = "e.g., slurm apptainer"),
               actionButton("test_ssh_btn", "Test Connection",
                 icon = icon("plug"), class = "btn-outline-info btn-sm"),
               uiOutput("ssh_status_ui")
@@ -478,7 +508,7 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
             hr(),
             tags$h6("DIA-NN Container"),
             textInput("diann_sif_path", "Apptainer SIF Path:",
-              value = "/share/proteomics/sw/diann_2.3.0.sif",
+              value = "/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif",
               placeholder = "/path/to/diann_2.3.0.sif"),
 
             hr(),
@@ -489,7 +519,8 @@ build_ui <- function(is_hf_space, hpc_mode = FALSE, local_sbatch = FALSE) {
                 class = "btn-outline-primary btn-sm w-100")
             ),
             conditionalPanel("input.search_connection_mode == 'ssh'",
-              textInput("ssh_output_base_dir", NULL, value = "",
+              textInput("ssh_output_base_dir", NULL,
+                value = "/quobyte/proteomics-grp/de-limp/phospho/nophossearch",
                 placeholder = "/share/proteomics/results/")
             ),
             verbatimTextOutput("full_output_path"),

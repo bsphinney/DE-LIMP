@@ -37,6 +37,8 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 | `R/helpers_xic.R` | `detect_xic_format()`, `load_xic_for_protein()`, `reshape_xic_for_plotting()` |
 | `R/helpers_phospho.R` | `detect_phospho()`, `parse_phospho_positions()`, `extract_phosphosites()` (~210 lines) |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table, residue dist, completeness QC (~650 lines) |
+| `R/helpers_search.R` | `ssh_exec()`, `scp_download()`, `scp_upload()`, `test_ssh_connection()`, `check_slurm_status()`, `generate_sbatch_script()`, UniProt proteome search (~450 lines) |
+| `R/server_search.R` | SSH connection UI, DIA-NN search config, remote file scanning, job queue (submit/monitor/cancel), SCP result download (~750 lines) |
 | `Dockerfile` | Docker container for HF Spaces and HPC deployment |
 | `HPC_DEPLOYMENT.md` | Guide for HPC cluster deployment with Apptainer/Singularity |
 | `USER_GUIDE.md` | End-user documentation |
@@ -53,7 +55,7 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 ```
 app.R (250 lines):      Package loading, auto-install, reactive values, module calls
 R/ui.R:                 build_ui() — CSS/JS, sidebar, all 10 tab nav_panels
-R/server_*.R (9 files): Server modules, each receives (input, output, session, values, ...)
+R/server_*.R (10 files): Server modules, each receives (input, output, session, values, ...)
 R/helpers*.R (4 files): Pure utility functions (no Shiny reactivity)
 ```
 
@@ -71,6 +73,7 @@ server <- function(input, output, session) {
   server_ai(input, output, session, values)
   server_xic(input, output, session, values, is_hf_space)
   server_phospho(input, output, session, values, add_to_log)
+  server_search(input, output, session, values)
   server_session(input, output, session, values, add_to_log)
 }
 ```
@@ -84,6 +87,7 @@ server <- function(input, output, session) {
 - **Reproducibility** - Code Log + Methodology sub-tabs
 - **Phosphoproteomics** - Site-level DE: Phospho Volcano, Site Table, Residue Distribution, QC Completeness (conditional on phospho detection)
 - **Gene Set Enrichment** - Ontology selector (BP/MF/CC/KEGG), Dot Plot, Enrichment Map, Ridgeplot, Results Table, per-ontology caching
+- **New Search** - DIA-NN search submission: file selection (local shinyFiles or SSH text inputs), FASTA database (UniProt download + upload), search settings (standard/phospho), SLURM resources, SSH connection panel, job queue with monitoring (conditional on HPC/SSH availability)
 - **Data Chat** - AI-powered analysis (Google Gemini API)
 - **Education** - Learning resources
 
@@ -111,6 +115,8 @@ server <- function(input, output, session) {
 - `values$gsea_results_cache` - Named list of cached GSEA results per ontology (BP=res, MF=res, etc.)
 - `values$gsea_last_contrast` - Contrast used for cached GSEA results
 - `values$gsea_last_org_db` - OrgDb used for cached GSEA results
+- `values$ssh_sbatch_path` - Full path to sbatch binary on remote HPC (cached from test connection)
+- `values$diann_job_queue` - List of submitted DIA-NN search jobs (id, status, log, output_dir)
 
 ### LIMPA Pipeline Flow
 1. `readDIANN()` - Load DIA-NN parquet file
@@ -259,6 +265,20 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 - **Per-ontology caching**: `values$gsea_results_cache` is a named list keyed by ontology (BP/MF/CC/KEGG)
 - **Taxonomy mapping**: 12 species mapped from NCBI taxonomy ID to Bioconductor OrgDb name
 
+### SSH Remote Job Submission Patterns
+- **`ssh_exec()` is the single chokepoint** — all remote commands flow through one function in `helpers_search.R`
+- **Login shell vs non-interactive**: Non-interactive SSH (`ssh host "cmd"`) only sources `~/.bashrc`, NOT `~/.bash_profile`. HPC module paths (spack, conda) require `bash -l -c` (login shell). But login shell on HIVE takes 10-20s (conda init + spack loading), so use it sparingly.
+- **Save full SLURM paths at connection test**: `test_ssh_connection()` probes for sbatch once (slow, login shell), saves the full path (e.g., `/cvmfs/.../slurm/bin/sbatch`) in `values$ssh_sbatch_path`. All subsequent operations use the full path directly (fast, no login shell).
+- **`processx::run()` for timeouts**: R's `system2()` has no timeout support. `processx::run(timeout=60)` prevents indefinite SSH hangs. Falls back to `system2()` if processx unavailable.
+- **Shell quoting layers**: Commands pass through R string → `shQuote()` → SSH arg → remote sshd → bash. Each layer can mangle quotes, globs, and escapes. Key rule: **never `shQuote()` glob patterns** — quote only the directory path, leave `/*.d` unquoted for bash to expand.
+- **`find` vs `du` for Bruker .d dirs**: `find -maxdepth 2` recurses INTO `.d` directories (~33k internal files each). Use `du -sm path/*.d` to treat `.d` as a single unit.
+- **SCP for script upload**: More robust than heredoc (`cat <<'EOF'`) for writing sbatch scripts to remote — avoids nested quoting issues.
+- **FASTA upload**: After UniProt download, check remote existence with `test -f` before SCP upload to avoid overwriting.
+- **Connection mode toggle**: `radioButtons("search_connection_mode")` — local users (sbatch on PATH) unaffected; SSH users explicitly opt in.
+- **Key-based auth only**: No password storage in memory, no `sshpass` dependency. Uses `StrictHostKeyChecking=accept-new` to avoid interactive prompt on first connect.
+- **R regex gotcha**: `\\s` is NOT valid in base R regex (POSIX ERE). Use `[:space:]` in character classes — `[,;[:space:]]+` not `[,;\\s]+`.
+- **Shell line continuations**: When building multi-line shell commands from R vectors, use `paste0(flags, " \\")` to append `\` to each flag line — NOT `c(flags, " \\")` which puts `\` on its own line.
+
 ### XIC Viewer Patterns
 - **Arrow masks dplyr**: `arrow::select()` masks `dplyr::select()` — always use `dplyr::select()` explicitly in XIC code
 - **Avoid rlang in Arrow context**: `rlang::sym()` and tidy `rename()` fail with Arrow — use base R `df[df$col %in% vals, ]` and `names(df)[...] <- "new"`
@@ -284,6 +304,12 @@ HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Alway
 | XIC buttons visible on HF but don't work | Already fixed: hidden via `is_hf_space` flag |
 | Mobilogram files not detected | Pattern was `.mobilogram.parquet`; DIA-NN uses `_mobilogram.parquet` — already fixed |
 | Windows path separator in XIC regex | Already fixed: use `basename()` instead of literal `/` in regex |
+| SSH "sbatch not found on remote PATH" | Non-interactive SSH doesn't load login profile. Fixed: `test_ssh_connection()` uses `bash -l -c` + common path probing |
+| SSH submit hangs indefinitely | `bash -l` on some HPCs takes 10-20s (conda/spack init). Fixed: save full sbatch path from test, use directly without login shell |
+| SSH file scan returns thousands of spurious files | Bruker `.d` dirs contain ~33k internal files. Fixed: use `du -sm *.d` instead of `find` |
+| SSH glob patterns not expanding | `shQuote()` wrapping glob prevents bash expansion. Fixed: quote only directory path, leave `/*.d` unquoted |
+| UniProt proteome search returns "No proteomes found" | `proteome_type` removed from UniProt REST API `fields`. Fixed: removed from query params |
+| sbatch script "command not found" errors | Line continuation `\` was on its own line. Fixed: `paste0(flags, " \\")` appends backslash directly |
 
 ## Version History
 
@@ -301,6 +327,8 @@ Current version: **v2.5.0** (2026-02-18). See [CHANGELOG.md](CHANGELOG.md) for d
 - **Phosphoproteomics Phase 1** (v2.4): Site-level DE via limma with two input paths (site matrix upload or parsed from report). Auto-detection on file upload. Independent from protein-level pipeline. No new packages required.
 - **GSEA Expansion** (v2.5): Multi-database enrichment (BP/MF/CC/KEGG) with per-ontology caching. UniProt REST API organism detection when protein IDs lack species suffixes. Robust ID extraction handles pipe-separated, isoform, and organism suffix formats.
 - **AI Summary All-Contrasts** (v2.5): Loops over all `colnames(values$fit$contrasts)`, computes cross-comparison biomarkers (significant in >=2 contrasts), scales token budget by contrast count (30/20/10 top proteins).
+- **SSH Remote Job Submission** (v2.5): Run DE-LIMP on local Mac, submit DIA-NN searches to remote HPC via SSH. Non-blocking job queue (submit multiple, continue using app). `ssh_exec()` single chokepoint, full SLURM path caching after connection test, `processx::run()` timeouts, SCP for file transfer. No new R packages (uses system `ssh`/`scp`).
+- **Phosphoproteomics Search Mode** (v2.5): DIA-NN search preset for phospho analysis — auto-configures STY modification (UniMod:21), max 3 variable mods, 2 missed cleavages, `--phospho-output` and `--report-lib-info` flags.
 
 ## Current TODO
 
