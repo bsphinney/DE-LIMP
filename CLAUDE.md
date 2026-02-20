@@ -345,6 +345,9 @@ Current version: **v2.5.0** (2026-02-18). See [CHANGELOG.md](CHANGELOG.md) for d
 - [ ] **AI context for phospho**: Append phosphosite DE results and KSEA kinase activities to Gemini chat context when phospho analysis is active
 - [ ] **Phospho-specific FASTA upload**: Map peptide-relative positions to protein-relative positions for accurate site IDs and motif extraction
 
+### DIA-NN Local Search (Docker)
+- [ ] **Bundle DIA-NN in Docker image**: Install DIA-NN binary in the Dockerfile so searches can run locally inside the container without SSH to an HPC. Detect local DIA-NN availability alongside existing `sbatch`/`ssh` checks. Add a "Local" search mode that runs DIA-NN directly (no SLURM, no SSH) with progress monitoring. Update `hpc_mode` logic and Search tab UI to support local execution path.
+
 ### General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
 - [ ] Publication-quality plot exports (SVG/PNG/TIFF with size controls)
