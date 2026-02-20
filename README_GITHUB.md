@@ -32,6 +32,12 @@
 - Analyzes all contrasts simultaneously with cross-comparison biomarker detection
 - Biological insights on high-confidence candidates
 
+**🔬 DIA-NN HPC Search Integration**:
+- Submit DIA-NN database searches to an HPC cluster directly from DE-LIMP via SSH
+- Non-blocking job queue — submit multiple searches and continue using the app
+- Results auto-load when complete, search parameters captured in Methodology tab
+- UniProt FASTA download, 6 contaminant libraries, and phosphoproteomics search mode built in
+
 **🗺️ MDS Plot Coloring**: Color by Group, Batch, or covariates
 **📦 Complete Dataset Export**: Download all contrasts + expression + metadata
 **🏗️ Code Modularization**: Split from 5,139-line monolith into app.R + 12 R/ modules
@@ -95,6 +101,16 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Motif Analysis** - Sequence logo visualization for regulated phosphosites
 - **Abundance Correction** - Protein-level correction to isolate stoichiometry changes
 
+### 🔬 DIA-NN Search Integration
+- **HPC Search Submission** - Submit DIA-NN database searches to a remote HPC cluster via SSH without leaving DE-LIMP
+- **Non-Blocking Job Queue** - Submit multiple searches and continue using the app; results auto-load when complete
+- **SSH Remote Submission** - Key-based SSH authentication, automatic SLURM path detection, SCP file transfer
+- **UniProt FASTA Download** - Search and download proteome databases directly from UniProt (one-per-gene, reviewed, full, isoforms)
+- **Contaminant Libraries** - 6 curated contaminant FASTA libraries bundled (Universal, Cell Culture, Mouse/Rat Tissue, Neuron Culture, Stem Cell Culture)
+- **Phosphoproteomics Mode** - Auto-configures DIA-NN for phospho analysis (STY modification, max 3 var mods, `--phospho-output`)
+- **Methodology Capture** - Search parameters automatically added to the Methodology tab for publication-ready methods
+- **Job Queue Persistence** - Queue survives app restarts; active jobs resume SLURM polling automatically
+
 ### 🎓 Education Tab
 - Embedded proteomics resources and training materials
 - Latest UC Davis Proteomics YouTube videos
@@ -124,6 +140,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - Deploy on cluster environments (SLURM, PBS, etc.)
 - Use Apptainer/Singularity containers
 - Three deployment options including direct pull from Hugging Face
+- **SSH Remote Submission** — Run DE-LIMP on a local Mac/laptop and submit DIA-NN searches to a remote HPC cluster
 - Full guide: [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md)
 
 > **Note for Developers:** This repository is deployed to both GitHub (source code + releases) and Hugging Face Spaces (web deployment). The repositories track the same codebase but have different README.md files due to platform requirements.

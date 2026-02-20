@@ -30,6 +30,17 @@ Welcome to **DE-LIMP** (Differential Expression & Limpa Proteomics), your intera
 - **Phase 2 — Kinase Activity & Motifs**: KSEA kinase activity inference from phosphosite fold-changes, sequence logo motif analysis for enriched residue patterns
 - **Phase 3 — Advanced**: Protein-level abundance correction to isolate phosphorylation stoichiometry, AI context integration for phospho results
 
+### DIA-NN HPC Search Integration
+- **New "New Search" tab** appears when HPC/SSH mode is available — submit DIA-NN database searches directly from DE-LIMP
+- **SSH remote submission**: Connect to your HPC cluster via SSH key-based authentication and submit SLURM jobs without leaving the app
+- **Non-blocking job queue**: Submit multiple DIA-NN searches and continue using DE-LIMP while jobs run on the cluster
+- **Auto-load results**: Completed jobs automatically download results (via SCP for SSH) and load into the analysis pipeline, navigating to the Assign Groups tab
+- **File scanning**: Browse or scan remote directories for raw data files (.d, .raw, .mzML, .wiff) with file sizes
+- **FASTA database sources**: Download from UniProt (search by organism), select pre-staged server FASTAs, or browse/enter a path
+- **Contaminant libraries**: 6 curated options from HaoGroup-ProtContLib (Universal, Cell Culture, Mouse Tissue, Rat Tissue, Neuron Culture, Stem Cell Culture)
+- **Search modes**: Library-free (default), Library-based, and Phosphoproteomics (auto-configures STY mods, --phospho-output)
+- **Methodology integration**: Search parameters automatically appear in the Methodology tab as a "0. DIA-NN DATABASE SEARCH" section
+
 ### Code Modularization
 - App split from a single `DE-LIMP.R` monolith into a modular `R/` directory with `app.R` orchestrator
 - 12 focused module files for easier maintenance and development
@@ -131,7 +142,197 @@ This is the most critical step for statistical analysis. The workflow is streaml
 
 ---
 
-## 3. Deep Dive: The Data Overview & Grid View
+## 3. DIA-NN Database Search (HPC Integration)
+
+The **"New Search"** tab lets you submit DIA-NN database searches to an HPC cluster directly from DE-LIMP. This feature is available when running locally with access to a SLURM-based HPC — either on the cluster itself or remotely via SSH.
+
+> **Note:** The New Search tab only appears when HPC/SSH mode is available. It is not shown on the Hugging Face web version.
+
+### 🔌 3.1 Connection Mode
+
+At the top of the New Search tab, a **connection mode toggle** lets you choose how to reach the cluster:
+
+- **Local (on HPC):** You are running DE-LIMP directly on the cluster head node. SLURM commands (`sbatch`, `sacct`, `scancel`) are on your PATH. File browsers work natively.
+- **Remote (SSH):** You are running DE-LIMP on your local machine (e.g., a Mac or laptop) and connecting to the HPC over SSH.
+
+#### SSH Settings (Remote Mode)
+When SSH mode is selected, a connection panel appears in the SLURM Resources section:
+
+| Setting | Description |
+| :--- | :--- |
+| **Hostname** | The HPC login node address (e.g., `hive.hpc.university.edu`) |
+| **Username** | Your HPC username |
+| **Port** | SSH port (default: 22) |
+| **SSH Key Path** | Path to your private key file (e.g., `~/.ssh/id_rsa`) |
+
+- **Key-based authentication only** — no password entry or storage. Your SSH key must not require a passphrase.
+- Click **"🔗 Test Connection"** to validate the SSH connection and locate SLURM binaries on the remote system.
+- On success, the app caches the full path to `sbatch` (e.g., `/cvmfs/.../slurm/bin/sbatch`) so that all subsequent operations are fast (no login shell overhead).
+- If the test reports "sbatch not found," the app automatically probes common HPC paths (`/usr/bin`, `/usr/local/bin`, spack, module directories) to find it.
+
+### 📁 3.2 File Configuration (Panel 1)
+
+The first panel configures your input files: raw data, FASTA database, and optional spectral library.
+
+#### Raw Data Directory
+- **Local mode:** Use the file browser to select the directory containing your raw data files.
+- **SSH mode:** Type or paste the remote path and click **"🔍 Scan Files"**.
+- The scan detects mass spectrometry files and displays them with sizes:
+  - `.d` directories (Bruker timsTOF)
+  - `.raw` files (Thermo)
+  - `.mzML` files (open format)
+  - `.wiff` files (SCIEX)
+
+#### FASTA Database
+Three sources are available:
+
+**📥 Download from UniProt:**
+1. Type an organism name (e.g., "Homo sapiens", "Mus musculus") in the search box
+2. Select a proteome from the results dropdown
+3. Choose the content type:
+   - **One protein per gene** (recommended) — canonical isoform only, smallest and cleanest database
+   - **Canonical** — all reviewed canonical sequences
+   - **Canonical + isoform** — includes splice variants
+4. Click **"Download"** — the FASTA is downloaded to the HPC working directory (uploaded via SCP in SSH mode)
+
+**📂 Pre-staged on server:**
+- A dropdown of FASTA files already available on the cluster (pre-downloaded to a shared location)
+- Fastest option for commonly used organisms
+
+**📄 Browse / enter path:**
+- **Local mode:** Use the file browser to locate any `.fasta` or `.fa` file
+- **SSH mode:** Type or paste the full remote path to the FASTA file
+
+#### Contaminant Library
+Applies to all FASTA sources. Select from 6 curated contaminant libraries from [HaoGroup-ProtContLib](https://github.com/HaoGroup-ProtContLib):
+
+| Library | Use Case |
+| :--- | :--- |
+| **Universal** (default) | General-purpose, covers common lab contaminants |
+| **Cell Culture** | Optimized for cell line experiments |
+| **Mouse Tissue** | Includes mouse-specific environmental contaminants |
+| **Rat Tissue** | Includes rat-specific environmental contaminants |
+| **Neuron Culture** | Specialized for neuronal cell culture experiments |
+| **Stem Cell Culture** | Specialized for stem cell experiments |
+
+The selected contaminant library is passed as a separate `--fasta` flag to DIA-NN, ensuring contaminant proteins are properly identified and can be filtered downstream.
+
+#### Spectral Library (Optional)
+- For **library-based** search mode only
+- Browse or enter the path to a `.tsv` or `.speclib` spectral library file
+- When omitted, DIA-NN runs in library-free mode (generates its own in silico library)
+
+### ⚙️ 3.3 Search Settings (Panel 2)
+
+The second panel configures DIA-NN analysis parameters.
+
+#### Search Mode
+| Mode | Description |
+| :--- | :--- |
+| **Library-free** (default) | DIA-NN generates an in silico spectral library from the FASTA. Best for most experiments. |
+| **Library-based** | Uses a provided spectral library for peptide identification. Requires a spectral library file in Panel 1. |
+| **Phosphoproteomics** | Auto-configures phospho-specific settings (see below). |
+
+**Phosphoproteomics mode** automatically sets:
+- STY phosphorylation variable modification (`UniMod:21` on S, T, Y)
+- Maximum 3 variable modifications per peptide
+- 2 missed cleavages
+- `--phospho-output` flag (generates phosphosite-level output)
+- `--report-lib-info` flag (reports library information for site localization)
+
+#### Basic Settings
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| **Enzyme** | Trypsin/P | Digestion enzyme for in silico digest |
+| **Missed cleavages** | 1 | Maximum allowed missed cleavage sites |
+| **Mass accuracy** | Auto | MS2 mass accuracy in ppm; "Auto" lets DIA-NN optimize |
+| **MS1 mass accuracy** | Auto | MS1 mass accuracy in ppm; "Auto" lets DIA-NN optimize |
+| **Max variable mods** | 2 | Maximum variable modifications per peptide |
+
+#### Variable Modifications
+| Modification | Default | Description |
+| :--- | :--- | :--- |
+| **Met oxidation** | ✅ On | Oxidation of methionine (UniMod:35) |
+| **N-term acetylation** | Off | Acetylation of protein N-terminus (UniMod:1) |
+| **Custom modifications** | — | Add any DIA-NN-compatible modification string |
+
+#### Advanced Settings
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| **FDR** | 0.01 | False discovery rate threshold (1%) |
+| **Scan window** | Auto | Number of scans for chromatographic peak detection |
+| **Peptide length** | 7–30 | Min and max peptide length for in silico digest |
+| **Precursor m/z** | 300–1800 | Precursor mass-to-charge range |
+| **MBR (Match Between Runs)** | ✅ On | Transfer identifications between runs |
+| **RT profiling** | ✅ On | Retention time-based profiling for improved quantification |
+| **Normalization** | On | DIA-NN internal normalization |
+
+### 🖥️ 3.4 SLURM Resources (Panel 3)
+
+The third panel configures compute resources for the SLURM job.
+
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| **CPUs** | 8 | Number of CPU cores for the DIA-NN search |
+| **Memory (GB)** | 64 | RAM allocation (adjust based on FASTA size and file count) |
+| **Time limit (hours)** | 24 | Maximum walltime before the job is killed |
+| **Partition** | — | SLURM partition/queue to submit to |
+| **Account** | — | SLURM account for resource billing |
+
+In SSH mode, the SSH connection panel (hostname, username, port, key path, Test Connection button) also appears in this section.
+
+### 📋 3.5 Job Queue
+
+After clicking **"🚀 Submit Search"**, the job enters the **Job Queue** at the bottom of the New Search tab. You can submit multiple jobs and continue using the rest of DE-LIMP — searches are fully non-blocking.
+
+#### Job Information
+Each job in the queue displays:
+- **Name:** A descriptive job name
+- **SLURM Job ID:** The cluster-assigned job identifier
+- **Status badge:** Color-coded status indicator
+  - 🟡 **Queued** — Waiting in the SLURM queue
+  - 🔵 **Running** — Actively processing on cluster nodes
+  - 🟢 **Completed** — Finished successfully
+  - 🔴 **Failed** — Exited with an error
+  - ⚪ **Cancelled** — Manually cancelled by user
+  - ❓ **Unknown** — Status could not be determined (e.g., SLURM purged the record)
+- **Elapsed time:** How long the job has been running or total runtime
+- **File count:** Number of raw data files in the search
+
+#### Job Actions
+| Button | When Available | Action |
+| :--- | :--- | :--- |
+| **📄 Log** | Always | View the full stdout/stderr output from the SLURM job |
+| **❌ Cancel** | Queued or Running | Send `scancel` to terminate the job on the cluster |
+| **📂 Load** | Completed | Download results (SCP for SSH mode) and load into DE-LIMP pipeline |
+| **🔄 Refresh** | Unknown status | Re-query SLURM via `sacct` to update the job status |
+
+- **"🔄 Refresh All"** button appears when any jobs have unknown status, refreshing all job statuses at once.
+- **Auto-load:** When enabled, completed jobs automatically download results and load them into the pipeline — no manual "Load" click needed. For SSH mode, results are transferred via SCP.
+- **Persistence:** The job queue is saved to `~/.delimp_job_queue.rds` and persists across app restarts. Restarting DE-LIMP restores your full job history.
+
+### 📝 3.6 Search Settings in Methodology
+
+When results are loaded from a DIA-NN search (either via "Load" button or auto-load), DE-LIMP automatically records the search configuration in the **Methodology** tab.
+
+A new **"0. DIA-NN DATABASE SEARCH"** section appears at the top of the methodology, documenting:
+- **Raw files:** Count and file type (e.g., "24 Bruker .d files")
+- **DIA-NN version:** The version installed on the cluster
+- **Search mode:** Library-free, Library-based, or Phosphoproteomics
+- **FASTA databases:** Primary database name and source
+- **Contaminant library:** Which HaoGroup-ProtContLib contaminant FASTA was used
+- **Enzyme:** Human-readable name (e.g., "Trypsin/P" instead of the DIA-NN flag)
+- **Modifications:** Human-readable names (e.g., "Methionine oxidation, N-terminal acetylation")
+- **FDR:** False discovery rate threshold
+- **MBR:** Whether Match Between Runs was enabled
+- **Mass accuracy:** Manual values or "auto-determined by DIA-NN"
+- **SLURM resources:** CPUs, memory, and time limit used
+
+This section is **publication-ready** — it uses human-readable names for all parameters and follows standard methods section conventions. The same information is also logged in the **reproducibility code log** for programmatic access.
+
+---
+
+## 4. Deep Dive: The Data Overview & Grid View
 
 ### 📊 Data Overview
 This is your landing page with 6 sub-tabs:
@@ -160,7 +361,7 @@ Click the green **"Open Grid View"** button to open the deep-dive table.
 
 ---
 
-## 4. Visualizing Results
+## 5. Visualizing Results
 
 ### 📉 DE Dashboard
 * **Current Comparison Display (NEW in v2.0.1):** A prominent blue header banner at the top shows which comparison you're viewing (e.g., "Evosep - Affinisep"). This updates automatically when you change the comparison dropdown, making it easy to keep track of your current analysis focus.
@@ -343,7 +544,7 @@ DE-LIMP can save your entire analysis state for later use.
 
 ---
 
-## 5. 🤖 AI Chat (Gemini Integration)
+## 6. 🤖 AI Chat (Gemini Integration)
 
 DE-LIMP features a context-aware AI assistant.
 
@@ -365,7 +566,7 @@ You aren't just chatting with a bot; you are chatting with **your specific datas
 
 ---
 
-## 6. Accessing DE-LIMP
+## 7. Accessing DE-LIMP
 
 You have multiple options to access DE-LIMP:
 
@@ -389,7 +590,7 @@ You have multiple options to access DE-LIMP:
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Issue | Solution |
 | :--- | :--- |
@@ -404,6 +605,12 @@ You have multiple options to access DE-LIMP:
 | **Can't select multiple proteins in table** | Use Ctrl+Click (Windows/Linux) or Cmd+Click (Mac) for individual selections. Use Shift+Click for range selections. |
 | **Session file won't load** | Ensure the `.rds` file was created by DE-LIMP v2.0+. Older versions may not be compatible. |
 | **Covariate columns not showing** | Click "Assign Groups & Run Pipeline" to open the modal. Covariate columns (Batch, Covariate1, Covariate2) are in the table. |
+| **SSH connection fails** | Check hostname, username, and SSH key path. The key must be passwordless (key-based auth only). Ensure the remote host is reachable and your key is authorized (`~/.ssh/authorized_keys` on the server). |
+| **"sbatch not found on remote PATH"** | Click **"🔗 Test Connection"** — the app probes the login shell and common HPC paths (spack, modules, `/usr/local/bin`) automatically to locate SLURM binaries. |
+| **Job shows "Unknown" status** | Click the **"🔄 Refresh"** button on the job. This re-queries SLURM via `sacct`. Jobs older than the SLURM accounting retention period may remain unknown. |
+| **DIA-NN search fails with "command not found"** | Usually a line continuation issue in the generated sbatch script. Click **"📄 Log"** on the job to view stdout/stderr for details. |
+| **Jobs lost after app restart** | Jobs now persist automatically in `~/.delimp_job_queue.rds`. Restart the app to restore your full job history. If the file is missing or corrupted, jobs from before the persistence feature will not be recoverable. |
+| **MallocStackLogging warnings on Mac** | Harmless macOS ARM64 warnings from system libraries. These are suppressed in the latest version and do not affect functionality. |
 
 ---
 
