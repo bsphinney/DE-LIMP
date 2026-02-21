@@ -2,6 +2,18 @@
 
 This guide covers deploying DE-LIMP on HPC clusters using Apptainer/Singularity containers. While written with UC Davis HPC (FARM/HPC1/HPC2) in mind, these instructions work on any HPC system with Apptainer/Singularity.
 
+### What's Included in v3.0
+
+The DE-LIMP container includes everything you need:
+
+- **Differential Expression** — Upload DIA-NN `.parquet` results, run the limpa/limma pipeline, explore volcano plots, heatmaps, and tables
+- **DIA-NN Search Integration** — Submit DIA-NN database searches to your HPC cluster's SLURM scheduler directly from the app's **New Search** tab via SSH. Results auto-load when complete. (Requires DIA-NN installed on your cluster — see [DIA-NN Search on HPC](#-dia-nn-search-on-hpc) below)
+- **MOFA2 Multi-Omics Integration** — Combine 2-6 data views (proteomics, phospho, transcriptomics, etc.) for unsupervised factor analysis. Includes example datasets.
+- **Phosphoproteomics** — Site-level DE, KSEA kinase activity, motif analysis
+- **GSEA** — GO (BP/MF/CC) and KEGG pathways with automatic organism detection
+- **XIC Chromatogram Viewer** — Fragment-level validation with MS2 intensity alignment (see [XIC Viewing](#-xic-chromatogram-viewing-on-hpc) below)
+- **AI Chat** — Google Gemini integration for data exploration (requires API key)
+
 ---
 
 ## 🎯 Quick Start (3 Options)
@@ -293,6 +305,33 @@ DIA-NN generates `_xic` directories containing per-file `.xic.parquet` files alo
 
 ---
 
+## 🔬 DIA-NN Search on HPC
+
+DE-LIMP v3.0 can submit DIA-NN database searches to your HPC cluster's SLURM scheduler directly from the **New Search** tab — no command line needed.
+
+### Prerequisites
+- DIA-NN must be installed on your HPC cluster (contact your HPC admin or install in your home directory)
+- SSH key-based authentication to the cluster (the app uses `ssh`/`scp` — no passwords stored)
+
+### How It Works
+1. Run DE-LIMP on your **local machine** (laptop/desktop) or inside the HPC container
+2. Go to the **New Search** tab and select the **HPC (SSH/SLURM)** backend
+3. Enter your SSH connection details and click **Test Connection**
+4. Browse raw files and FASTA databases on the remote cluster
+5. Configure search settings (standard or phosphoproteomics mode) and submit
+6. The app generates a SLURM script, uploads it via SCP, and submits via `sbatch`
+7. Monitor progress in the job queue — results auto-load when complete
+
+### Notes
+- The job queue is non-blocking — submit multiple searches and continue using the app
+- Search parameters are automatically captured in the Methodology tab
+- Built-in UniProt FASTA downloader and 6 contaminant libraries
+- Job queue persists across app restarts; active jobs resume polling
+
+> **Tip:** If running DE-LIMP inside the HPC container, you can still use the SSH backend to submit searches to the same cluster — you just SSH from the container back to the login node.
+
+---
+
 ## 🔧 Troubleshooting
 
 ### Issue: "Cannot bind mount: directory doesn't exist"
@@ -310,10 +349,11 @@ apptainer exec ~/containers/de-limp.sif \
 ```
 
 ### Issue: "Out of memory"
-**Solution:** Request more memory
+**Solution:** Request more memory. MOFA2 training and large GSEA analyses can be memory-intensive.
 ```bash
 salloc --mem=128GB --cpus-per-task=16
 ```
+**Recommended minimums:** 32GB for basic DE analysis, 64GB if using MOFA2 or GSEA with large datasets.
 
 ### Issue: Port forwarding not working
 **Solution:** Check firewall and try two-step method
