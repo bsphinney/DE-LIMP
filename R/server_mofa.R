@@ -592,42 +592,56 @@ server_mofa <- function(input, output, session, values, add_to_log) {
 
         outfile <- tempfile(fileext = ".hdf5")
 
-        callr::r(
-          function(mofa_data, outfile, scale_views, num_factors,
-                   convergence_mode, seed_val) {
-            library(MOFA2)
+        tryCatch({
+          callr::r(
+            function(mofa_data, outfile, scale_views, num_factors,
+                     convergence_mode, seed_val) {
+              library(MOFA2)
 
-            mofa_obj <- create_mofa(mofa_data)
+              mofa_obj <- create_mofa(mofa_data)
 
-            data_opts <- get_default_data_options(mofa_obj)
-            data_opts$scale_views <- scale_views
+              data_opts <- get_default_data_options(mofa_obj)
+              data_opts$scale_views <- scale_views
 
-            model_opts <- get_default_model_options(mofa_obj)
-            model_opts$num_factors <- num_factors
+              model_opts <- get_default_model_options(mofa_obj)
+              model_opts$num_factors <- num_factors
 
-            train_opts <- get_default_training_options(mofa_obj)
-            train_opts$convergence_mode <- convergence_mode
-            train_opts$seed <- seed_val
-            train_opts$verbose <- FALSE
+              train_opts <- get_default_training_options(mofa_obj)
+              train_opts$convergence_mode <- convergence_mode
+              train_opts$seed <- seed_val
+              train_opts$verbose <- FALSE
 
-            mofa_obj <- prepare_mofa(mofa_obj,
-              data_options = data_opts,
-              model_options = model_opts,
-              training_options = train_opts
-            )
+              mofa_obj <- prepare_mofa(mofa_obj,
+                data_options = data_opts,
+                model_options = model_opts,
+                training_options = train_opts
+              )
 
-            run_mofa(mofa_obj, outfile = outfile, use_basilisk = TRUE)
-          },
-          args = list(
-            mofa_data = mofa_data,
-            outfile = outfile,
-            scale_views = scale_views,
-            num_factors = num_factors,
-            convergence_mode = convergence_mode,
-            seed_val = seed_val
-          ),
-          show = FALSE
-        )
+              run_mofa(mofa_obj, outfile = outfile, use_basilisk = TRUE)
+            },
+            args = list(
+              mofa_data = mofa_data,
+              outfile = outfile,
+              scale_views = scale_views,
+              num_factors = num_factors,
+              convergence_mode = convergence_mode,
+              seed_val = seed_val
+            ),
+            show = FALSE,
+            timeout = if (is_hf) 600 else 1800  # 10 min HF, 30 min local
+          )
+        }, error = function(ce) {
+          # Extract the real error from callr's wrapper
+          msg <- conditionMessage(ce)
+          # callr errors have $parent with the original error
+          if (!is.null(ce$parent)) msg <- conditionMessage(ce$parent)
+          # Also check for stderr output
+          if (!is.null(ce$stderr) && nzchar(ce$stderr)) {
+            msg <- paste0(msg, "\nSubprocess stderr: ",
+                          substr(ce$stderr, max(1, nchar(ce$stderr) - 500), nchar(ce$stderr)))
+          }
+          stop(msg, call. = FALSE)
+        })
 
         # Step 3: Load trained model back from HDF5 (no basilisk needed)
         incProgress(0.85, detail = "Loading trained model...")

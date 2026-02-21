@@ -48,4 +48,15 @@ RUN R -e "BiocManager::install(c('clusterProfiler', 'enrichplot'), ask=FALSE, up
 
 # 3b. MOFA2 + basilisk (Python env managed by basilisk for mofapy2)
 RUN R -e "BiocManager::install(c('MOFA2', 'basilisk'), ask=FALSE, update=FALSE)"
-RUN R -e "library(MOFA2); basilisk::basiliskStart(MOFA2:::mofa_env) |> basilisk::basiliskStop()" 2>/dev/null || true
+
+# Pre-initialize basilisk Python env so first MOFA run doesn't need to download anything.
+# This MUST succeed — if it fails, MOFA training will fail at runtime.
+RUN R -e "\
+  library(MOFA2); \
+  proc <- basilisk::basiliskStart(MOFA2:::mofa_env); \
+  basilisk::basiliskRun(proc, function() { \
+    reticulate::py_run_string('import mofapy2; print(\"mofapy2 version:\", mofapy2.__version__)') \
+  }); \
+  basilisk::basiliskStop(proc); \
+  cat('Basilisk + mofapy2 pre-initialization successful\n') \
+"
