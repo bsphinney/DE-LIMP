@@ -1,0 +1,372 @@
+---
+title: "DE-LIMP Proteomics Report"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    theme: flatly
+    code-fold: true
+    fig-width: 10
+    fig-height: 6
+params:
+  analysis_id: "unknown"
+  state_dir: "."
+  db_path: "delimp.db"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# Null-coalescing operator (may not be loaded outside Shiny)
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# Load state
+state_path <- file.path(params$state_dir, paste0(params$analysis_id, ".rds"))
+stopifnot(file.exists(state_path))
+state <- readRDS(state_path)
+meta  <- state$metadata_extra
+
+# DB connection for QC data
+library(DBI)
+library(RSQLite)
+db <- dbConnect(SQLite(), params$db_path)
+```
+
+## Report Metadata
+
+```{r metadata-table}
+info <- data.frame(
+  Field = c("Analysis Title", "Lab", "Instrument", "LC Method", "Project",
+            "Analyst", "Date Generated", "App Version",
+            "Total Proteins", "Contrasts"),
+  Value = c(
+    meta$title %||% "Untitled",
+    meta$lab %||% "N/A",
+    meta$instrument %||% "N/A",
+    meta$lc_method %||% "N/A",
+    meta$project %||% "N/A",
+    meta$created_by %||% "N/A",
+    format(meta$created, "%Y-%m-%d %H:%M"),
+    meta$app_version %||% "N/A",
+    as.character(meta$n_proteins %||% "N/A"),
+    paste(meta$contrast_names, collapse = ", ")
+  ),
+  stringsAsFactors = FALSE
+)
+knitr::kable(info, col.names = c("", ""), align = "rl")
+```
+
+## QC Bracket
+
+Instrument quality control runs bracketing this analysis provide context for
+data quality assessment.
+
+```{r qc-bracket, results='asis'}
+bracket <- tryCatch({
+  inst <- meta$instrument %||% ""
+  ts   <- as.character(meta$created %||% Sys.time())
+
+  qc_before <- dbGetQuery(db, "
+    SELECT run_name, run_date, n_proteins, n_peptides, n_precursors, median_cv
+    FROM qc_runs
+    WHERE instrument = ?1 AND run_date <= ?2
+    ORDER BY run_date DESC LIMIT 1",
+    params = list(inst, ts))
+
+  qc_after <- dbGetQuery(db, "
+    SELECT run_name, run_date, n_proteins, n_peptides, n_precursors, median_cv
+    FROM qc_runs
+    WHERE instrument = ?1 AND run_date >= ?2
+    ORDER BY run_date ASC LIMIT 1",
+    params = list(inst, ts))
+
+  list(before = qc_before, after = qc_after)
+}, error = function(e) list(before = data.frame(), after = data.frame()))
+
+if (nrow(bracket$before) > 0 || nrow(bracket$after) > 0) {
+  rows <- list()
+  if (nrow(bracket$before) > 0) {
+    b <- bracket$before[1, ]
+    rows[[length(rows) + 1]] <- data.frame(
+      Timing = "Before", Run = b$run_name, Date = b$run_date,
+      Proteins = b$n_proteins, Peptides = b$n_peptides,
+      Precursors = b$n_precursors, `Median CV` = b$median_cv,
+      check.names = FALSE, stringsAsFactors = FALSE)
+  }
+  if (nrow(bracket$after) > 0) {
+    a <- bracket$after[1, ]
+    rows[[length(rows) + 1]] <- data.frame(
+      Timing = "After", Run = a$run_name, Date = a$run_date,
+      Proteins = a$n_proteins, Peptides = a$n_peptides,
+      Precursors = a$n_precursors, `Median CV` = a$median_cv,
+      check.names = FALSE, stringsAsFactors = FALSE)
+  }
+  qc_table <- do.call(rbind, rows)
+  knitr::kable(qc_table, caption = paste("QC HeLa Digest Runs -", meta$instrument))
+} else {
+  cat("*No QC bracket data available for this instrument.*")
+}
+```
+
+```{r qc-rolling-stats, results='asis'}
+rolling <- tryCatch({
+  dbGetQuery(db, "
+    SELECT AVG(n_proteins) as mean_prot, COUNT(*) as n_runs
+    FROM qc_runs
+    WHERE instrument = ?1
+      AND run_date >= datetime('now', '-90 days')
+      AND n_proteins IS NOT NULL",
+    params = list(meta$instrument %||% ""))
+}, error = function(e) data.frame(mean_prot = NA, n_runs = 0))
+
+if (!is.na(rolling$mean_prot) && rolling$n_runs > 0) {
+  cat(sprintf("**90-day rolling average**: %.0f proteins across %d QC runs on %s.\n",
+              rolling$mean_prot, rolling$n_runs, meta$instrument))
+}
+```
+
+## Differential Expression Results
+
+```{r de-summary, results='asis'}
+if (!is.null(state$fit)) {
+  contrasts <- colnames(state$fit$contrasts)
+  cat(sprintf("Analysis includes **%d contrasts**: %s\n\n",
+              length(contrasts), paste(contrasts, collapse = ", ")))
+} else {
+  cat("*No DE results available.*\n")
+}
+```
+
+### Volcano Plots {.tabset}
+
+```{r volcano-plots, results='asis', fig.height=5}
+if (!is.null(state$fit) && !is.null(state$y_protein)) {
+  library(limma)
+
+  contrasts <- colnames(state$fit$contrasts)
+  logfc_cut <- state$logfc_cutoff %||% 1
+  q_cut     <- state$q_cutoff %||% 0.05
+
+  for (cname in contrasts) {
+    cat(sprintf("\n#### %s\n\n", cname))
+
+    tt <- tryCatch(
+      topTable(state$fit, coef = cname, number = Inf, sort.by = "none"),
+      error = function(e) NULL
+    )
+    if (is.null(tt) || nrow(tt) == 0) {
+      cat("*Could not extract results for this contrast.*\n\n")
+      next
+    }
+
+    n_up   <- sum(tt$logFC >  logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE)
+    n_down <- sum(tt$logFC < -logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE)
+
+    # Color by significance
+    sig_col <- ifelse(
+      tt$adj.P.Val < q_cut & abs(tt$logFC) > logfc_cut,
+      ifelse(tt$logFC > 0, "#E74C3C", "#3498DB"),
+      "#CCCCCC"
+    )
+
+    plot(tt$logFC, -log10(tt$adj.P.Val),
+         pch = 16, cex = 0.5, col = sig_col,
+         xlab = expression(log[2]~"Fold Change"),
+         ylab = expression(-log[10]~"adjusted p-value"),
+         main = cname)
+    abline(v = c(-logfc_cut, logfc_cut), lty = 2, col = "gray50")
+    abline(h = -log10(q_cut), lty = 2, col = "gray50")
+    legend("topright", bg = "white", box.col = "gray80",
+           legend = c(sprintf("Up: %d", n_up),
+                      sprintf("Down: %d", n_down)),
+           pch = 16, col = c("#E74C3C", "#3498DB"), cex = 0.9)
+
+    cat("\n\n")
+  }
+}
+```
+
+### Summary Statistics
+
+```{r de-stats-table}
+if (!is.null(state$fit)) {
+  library(limma)
+
+  contrasts <- colnames(state$fit$contrasts)
+  logfc_cut <- state$logfc_cutoff %||% 1
+  q_cut     <- state$q_cutoff %||% 0.05
+
+  stats <- do.call(rbind, lapply(contrasts, function(cname) {
+    tt <- tryCatch(
+      topTable(state$fit, coef = cname, number = Inf, sort.by = "none"),
+      error = function(e) NULL
+    )
+    if (is.null(tt)) return(NULL)
+
+    data.frame(
+      Contrast = cname,
+      `Total Proteins` = nrow(tt),
+      `Up-regulated` = sum(tt$logFC > logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE),
+      `Down-regulated` = sum(tt$logFC < -logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE),
+      `Significant (any direction)` = sum(abs(tt$logFC) > logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE),
+      check.names = FALSE, stringsAsFactors = FALSE
+    )
+  }))
+
+  if (!is.null(stats) && nrow(stats) > 0) {
+    knitr::kable(stats, caption = sprintf("DE summary (|logFC| > %.1f, adj.P < %.2f)", logfc_cut, q_cut))
+  }
+}
+```
+
+### Top DE Proteins
+
+```{r top-de-table, results='asis'}
+if (!is.null(state$fit)) {
+  library(limma)
+
+  # Show top 25 for each contrast
+  contrasts <- colnames(state$fit$contrasts)
+
+  for (cname in contrasts) {
+    tt <- tryCatch(
+      topTable(state$fit, coef = cname, number = 25),
+      error = function(e) NULL
+    )
+    if (is.null(tt) || nrow(tt) == 0) next
+
+    # Clean up for display
+    display_cols <- intersect(c("logFC", "AveExpr", "t", "P.Value", "adj.P.Val"),
+                              names(tt))
+    tt_show <- tt[, display_cols, drop = FALSE]
+
+    # Round numeric columns
+    for (col in names(tt_show)) {
+      if (is.numeric(tt_show[[col]])) {
+        tt_show[[col]] <- if (col %in% c("P.Value", "adj.P.Val")) {
+          formatC(tt_show[[col]], format = "e", digits = 2)
+        } else {
+          round(tt_show[[col]], 3)
+        }
+      }
+    }
+
+    cat(sprintf("\n#### %s (Top 25)\n\n", cname))
+    print(knitr::kable(tt_show))
+    cat("\n\n")
+  }
+}
+```
+
+## QC Diagnostics
+
+```{r normalization-diagnostic, fig.height=5}
+if (!is.null(state$y_protein)) {
+  # Extract expression matrix — y_protein may be EList (limma) or plain matrix
+  y <- if (is.list(state$y_protein) && "E" %in% names(state$y_protein)) {
+    state$y_protein$E
+  } else {
+    as.matrix(state$y_protein)
+  }
+  if (is.matrix(y) && ncol(y) >= 2) {
+    par(mar = c(8, 4, 3, 1))
+    boxplot(y, las = 2, col = "#3498DB40", border = "#2C3E50",
+            main = "Protein-Level Intensity Distribution (Post-Normalization)",
+            ylab = expression(log[2]~"Intensity"),
+            cex.axis = 0.7, outline = FALSE)
+    abline(h = median(y, na.rm = TRUE), lty = 2, col = "#E74C3C")
+  }
+}
+```
+
+```{r missing-data, results='asis', fig.height=4}
+if (!is.null(state$y_protein)) {
+  y <- if (is.list(state$y_protein) && "E" %in% names(state$y_protein)) {
+    state$y_protein$E
+  } else {
+    as.matrix(state$y_protein)
+  }
+  pct_missing <- colSums(is.na(y)) / nrow(y) * 100
+  if (any(pct_missing > 0)) {
+    par(mar = c(8, 4, 3, 1))
+    barplot(pct_missing, las = 2, col = "#E67E22",
+            main = "Missing Values per Sample",
+            ylab = "% Missing", cex.names = 0.7)
+  } else {
+    cat("*No missing values in the protein quantification matrix.*\n")
+  }
+}
+```
+
+## Phosphoproteomics
+
+```{r phospho-section, results='asis', fig.height=5}
+has_phospho <- !is.null(state$phospho_detected) &&
+               isTRUE(state$phospho_detected$detected)
+
+if (!has_phospho) {
+  cat("*No phosphoproteomics data included in this analysis.*\n")
+}
+
+if (has_phospho && !is.null(state$phospho_fit)) {
+  library(limma)
+
+  p_contrasts <- colnames(state$phospho_fit$contrasts)
+  logfc_cut <- state$logfc_cutoff %||% 1
+  q_cut     <- state$q_cutoff %||% 0.05
+
+  for (cname in p_contrasts[1:min(2, length(p_contrasts))]) {
+    tt <- tryCatch(
+      topTable(state$phospho_fit, coef = cname, number = Inf, sort.by = "none"),
+      error = function(e) NULL
+    )
+    if (is.null(tt) || nrow(tt) == 0) next
+
+    n_up   <- sum(tt$logFC >  logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE)
+    n_down <- sum(tt$logFC < -logfc_cut & tt$adj.P.Val < q_cut, na.rm = TRUE)
+
+    sig_col <- ifelse(
+      tt$adj.P.Val < q_cut & abs(tt$logFC) > logfc_cut,
+      ifelse(tt$logFC > 0, "#E74C3C", "#3498DB"),
+      "#CCCCCC"
+    )
+
+    plot(tt$logFC, -log10(tt$adj.P.Val),
+         pch = 16, cex = 0.5, col = sig_col,
+         xlab = expression(log[2]~"Fold Change"),
+         ylab = expression(-log[10]~"adjusted p-value"),
+         main = paste("Phospho:", cname))
+    abline(v = c(-logfc_cut, logfc_cut), lty = 2, col = "gray50")
+    abline(h = -log10(q_cut), lty = 2, col = "gray50")
+    legend("topright", bg = "white", box.col = "gray80",
+           legend = c(sprintf("Up: %d", n_up),
+                      sprintf("Down: %d", n_down)),
+           pch = 16, col = c("#E74C3C", "#3498DB"), cex = 0.9)
+  }
+
+  cat(sprintf("\n\n**Phospho detection**: %d phosphosites from %d total precursors (%.1f%%). %s\n",
+              state$phospho_detected$n_phospho,
+              state$phospho_detected$n_total,
+              state$phospho_detected$pct_phospho,
+              ifelse(state$phospho_detected$is_enriched,
+                     "Enriched sample.", "Not enriched.")))
+}
+```
+
+## Session Information
+
+```{r session-info, results='asis'}
+cat(sprintf("- **Analysis ID**: `%s`\n", params$analysis_id))
+cat(sprintf("- **Generated**: %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+cat(sprintf("- **R version**: %s\n", R.version.string))
+cat(sprintf("- **State file**: `%s.rds`\n", params$analysis_id))
+```
+
+---
+
+*Generated by [DE-LIMP](https://github.com/bsphinney/DE-LIMP) Proteomics Analysis Pipeline*
+
+```{r cleanup, include=FALSE}
+dbDisconnect(db)
+```

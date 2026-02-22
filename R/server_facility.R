@@ -89,29 +89,74 @@ server_facility <- function(input, output, session, values, add_to_log,
 
 
   # ============================================================================
+  #    Project Auto-Populate (staff + lab → previous projects)
+  # ============================================================================
+
+  # When staff or lab changes, query DB for existing projects from that combo
+  observe({
+    staff <- input$staff_selector %||% ""
+    lab   <- input$search_lab %||% ""
+
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+
+    # Build query: filter by staff+lab if set, otherwise show all projects
+    query <- "SELECT DISTINCT project FROM searches WHERE project IS NOT NULL AND project != ''"
+    params <- list()
+    i <- 1
+    if (nzchar(staff)) {
+      query <- paste(query, sprintf("AND submitted_by = ?%d", i))
+      params[[i]] <- staff
+      i <- i + 1
+    }
+    if (nzchar(lab)) {
+      query <- paste(query, sprintf("AND lab = ?%d", i))
+      params[[i]] <- lab
+      i <- i + 1
+    }
+    query <- paste(query, "ORDER BY project")
+
+    projects <- if (length(params) > 0) {
+      DBI::dbGetQuery(db, query, params = params)$project
+    } else {
+      DBI::dbGetQuery(db, query)$project
+    }
+
+    updateSelectizeInput(session, "search_project",
+      choices = projects, selected = character(0),
+      server = FALSE)
+  }) |> bindEvent(input$staff_selector, input$search_lab, ignoreInit = FALSE)
+
+
+  # ============================================================================
   #    Shareable HTML Reports (P2)
   # ============================================================================
 
-  observeEvent(input$generate_report, {
-    req(values$fit)
+  # Report generation implementation (called from Job History or modal)
+  generate_report_impl <- function(title, lab, instrument, lc_method = "",
+                                    project = "", search_id = NULL) {
+    if (is.null(values$fit)) {
+      showNotification(
+        "No DE results loaded. Run the analysis pipeline first.",
+        type = "warning", duration = 8)
+      return(invisible(NULL))
+    }
 
     analysis_id <- uuid::UUIDgenerate()
 
-    # -- Build state object (reuse session_data structure) --
+    # -- Build state object --
     state <- list(
-      raw_data   = NULL,  # Exclude raw precursor data to keep file small
+      raw_data   = NULL,
       metadata   = values$metadata,
       fit        = values$fit,
       y_protein  = values$y_protein,
       dpc_fit    = values$dpc_fit,
       design     = values$design,
       qc_stats   = values$qc_stats,
-      # GSEA
       gsea_results       = values$gsea_results,
       gsea_results_cache = values$gsea_results_cache,
       gsea_last_contrast = values$gsea_last_contrast,
       gsea_last_org_db   = values$gsea_last_org_db,
-      # Phospho
       phospho_detected           = values$phospho_detected,
       phospho_site_matrix        = values$phospho_site_matrix,
       phospho_site_info          = values$phospho_site_info,
@@ -121,25 +166,23 @@ server_facility <- function(input, output, session, values, add_to_log,
       ksea_results               = values$ksea_results,
       ksea_last_contrast         = values$ksea_last_contrast,
       phospho_annotations        = values$phospho_annotations,
-      # MOFA (include if available)
       mofa_object            = values$mofa_object,
       mofa_factors           = values$mofa_factors,
       mofa_variance_explained = values$mofa_variance_explained,
-      # UI state
       contrast        = input$contrast_selector,
       logfc_cutoff    = input$logfc_cutoff,
       q_cutoff        = input$q_cutoff,
       color_plot_by_de = values$color_plot_by_de,
       cov1_name       = values$cov1_name,
       cov2_name       = values$cov2_name,
-      # Normalization
       diann_norm_detected = values$diann_norm_detected,
-      # Report metadata
       metadata_extra = list(
         analysis_id    = analysis_id,
-        title          = input$analysis_title %||% "Untitled Analysis",
-        lab            = input$analysis_lab %||% "",
-        instrument     = input$analysis_instrument %||% "",
+        title          = title,
+        lab            = lab,
+        instrument     = instrument,
+        lc_method      = lc_method,
+        project        = project,
         created        = Sys.time(),
         created_by     = input$staff_selector %||% "unknown",
         app_version    = "DE-LIMP v3.0",
@@ -154,7 +197,7 @@ server_facility <- function(input, output, session, values, add_to_log,
     state_path <- file.path(cf_config$state_dir, paste0(analysis_id, ".rds"))
     saveRDS(state, state_path)
 
-    # -- Render Quarto report (if template exists) --
+    # -- Render Quarto report --
     html_path <- file.path(cf_config$reports_dir, paste0(analysis_id, ".html"))
     render_success <- FALSE
 
@@ -164,15 +207,22 @@ server_facility <- function(input, output, session, values, add_to_log,
       if (file.exists(cf_config$template_qmd) &&
           requireNamespace("quarto", quietly = TRUE)) {
         render_success <- tryCatch({
+          # quarto output_file must be just a filename, not a full path
           quarto::quarto_render(
             input = cf_config$template_qmd,
-            output_file = html_path,
+            output_file = paste0(analysis_id, ".html"),
             execute_params = list(
               analysis_id = analysis_id,
               state_dir = cf_config$state_dir,
               db_path = cf_config$db_path
             )
           )
+          # quarto renders next to the input file; move to reports dir
+          rendered_at <- file.path(dirname(cf_config$template_qmd),
+                                   paste0(analysis_id, ".html"))
+          if (file.exists(rendered_at) && rendered_at != html_path) {
+            file.rename(rendered_at, html_path)
+          }
           TRUE
         }, error = function(e) {
           showNotification(paste("Report render error:", e$message),
@@ -185,7 +235,7 @@ server_facility <- function(input, output, session, values, add_to_log,
           type = "warning", duration = 8)
       }
 
-      # -- Upload state to HF dataset repo for live links --
+      # -- Upload to HF --
       incProgress(0.6, detail = "Uploading for live link...")
       hf_url <- tryCatch({
         upload_state_to_hf(state_path, analysis_id)
@@ -200,12 +250,7 @@ server_facility <- function(input, output, session, values, add_to_log,
       db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
       on.exit(DBI::dbDisconnect(db))
 
-      # Find bracketing QC runs
-      qc_bracket <- cf_get_bracketing_qc(
-        db,
-        input$analysis_instrument %||% "",
-        as.character(Sys.time())
-      )
+      qc_bracket <- cf_get_bracketing_qc(db, instrument, as.character(Sys.time()))
 
       DBI::dbExecute(db, "
         INSERT INTO reports (id, title, created_by, lab, instrument,
@@ -214,19 +259,16 @@ server_facility <- function(input, output, session, values, add_to_log,
                              qc_before_id, qc_after_id)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params = list(
-          analysis_id,
-          input$analysis_title %||% "Untitled",
+          analysis_id, title,
           input$staff_selector %||% "unknown",
-          input$analysis_lab %||% "",
-          input$analysis_instrument %||% "",
+          lab, instrument,
           state$metadata_extra$n_proteins,
           state$metadata_extra$n_contrasts,
           paste(state$metadata_extra$contrast_names, collapse = "; "),
-          if (render_success) html_path else NA,
-          state_path,
-          hf_url,
-          if (nrow(qc_bracket$before) > 0) qc_bracket$before$id[1] else NA,
-          if (nrow(qc_bracket$after) > 0) qc_bracket$after$id[1] else NA
+          if (render_success) html_path else NA_character_,
+          state_path, if (is.null(hf_url)) NA_character_ else hf_url,
+          if (nrow(qc_bracket$before) > 0) qc_bracket$before$id[1] else NA_character_,
+          if (nrow(qc_bracket$after) > 0) qc_bracket$after$id[1] else NA_character_
         )
       )
 
@@ -239,7 +281,7 @@ server_facility <- function(input, output, session, values, add_to_log,
              analysis_id)
     } else NULL
 
-    # -- Show result --
+    # -- Show result in sidebar --
     output$report_link_ui <- renderUI({
       tags$div(
         style = "margin-top: 10px; padding: 10px; background: #f0f8f0; border-radius: 6px;",
@@ -266,8 +308,7 @@ server_facility <- function(input, output, session, values, add_to_log,
     if (render_success) {
       output$download_report_html <- downloadHandler(
         filename = function() {
-          paste0("DE-LIMP_report_",
-                 make.names(input$analysis_title %||% analysis_id), ".html")
+          paste0("DE-LIMP_report_", make.names(title), ".html")
         },
         content = function(file) {
           file.copy(html_path, file)
@@ -276,16 +317,78 @@ server_facility <- function(input, output, session, values, add_to_log,
       )
     }
 
-    # Log the action
     add_to_log("Generate Core Facility Report", c(
       sprintf("# Analysis ID: %s", analysis_id),
-      sprintf("# Title: %s", input$analysis_title %||% "Untitled"),
-      sprintf("# Lab: %s", input$analysis_lab %||% ""),
-      sprintf("# Instrument: %s", input$analysis_instrument %||% ""),
+      sprintf("# Title: %s", title),
+      sprintf("# Lab: %s, Instrument: %s", lab, instrument),
+      sprintf("# LC Method: %s, Project: %s", lc_method, project),
       sprintf("# State: %s", state_path),
       if (render_success) sprintf("# HTML: %s", html_path) else "# HTML: not rendered",
       if (!is.null(live_link)) sprintf("# Live link: %s", live_link)
     ))
+  }
+
+  # Generate report from Job History — if a job is selected, pull metadata from DB;
+  # otherwise show a modal for manual entry
+  observeEvent(input$job_generate_report, {
+    if (is.null(values$fit)) {
+      showNotification(
+        "No DE results loaded. Load example data or upload a report, assign groups, and run the pipeline first.",
+        type = "warning", duration = 8)
+      return()
+    }
+
+    sel <- input$job_history_table_rows_selected
+    df <- job_history_data()
+
+    if (length(sel) > 0 && !is.null(df) && nrow(df) >= sel) {
+      # Job selected — pull metadata from the SQLite record
+      job <- df[sel, ]
+      generate_report_impl(
+        title      = job$analysis_name %||% "Untitled",
+        lab        = job$lab %||% "",
+        instrument = job$instrument %||% "",
+        lc_method  = job$lc_method %||% "",
+        project    = job$project %||% "",
+        search_id  = job$id
+      )
+    } else {
+      # No job selected — show modal for manual metadata entry
+      showModal(modalDialog(
+        title = "Generate Report",
+        textInput("report_modal_title", "Analysis Title",
+          placeholder = "e.g., Smith Lab AP-MS Feb 2026"),
+        selectInput("report_modal_lab", "Lab",
+          choices = c("(select)" = "", cf_lab_names(cf_config)),
+          selected = ""),
+        selectInput("report_modal_instrument", "Instrument",
+          choices = c("(select)" = "", cf_instrument_names(cf_config)),
+          selected = ""),
+        selectInput("report_modal_lc_method", "LC / Gradient Method",
+          choices = c("(select)" = "", cf_lc_method_names(cf_config)),
+          selected = ""),
+        selectizeInput("report_modal_project", "Project",
+          choices = NULL, selected = NULL,
+          options = list(create = TRUE,
+                         placeholder = "Select or type new project...")),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton("confirm_report_modal", "Generate", class = "btn-success")
+        )
+      ))
+    }
+  })
+
+  # Confirm modal report generation
+  observeEvent(input$confirm_report_modal, {
+    removeModal()
+    generate_report_impl(
+      title      = input$report_modal_title %||% "Untitled",
+      lab        = input$report_modal_lab %||% "",
+      instrument = input$report_modal_instrument %||% "",
+      lc_method  = input$report_modal_lc_method %||% "",
+      project    = input$report_modal_project %||% ""
+    )
   })
 
 
@@ -301,6 +404,8 @@ server_facility <- function(input, output, session, values, add_to_log,
     input$job_filter_lab
     input$job_filter_status
     input$job_filter_staff
+    input$job_filter_instrument
+    input$job_filter_lc_method
 
     db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
     on.exit(DBI::dbDisconnect(db))
@@ -329,6 +434,16 @@ server_facility <- function(input, output, session, values, add_to_log,
       params[[i]] <- input$job_filter_staff
       i <- i + 1
     }
+    if (nzchar(input$job_filter_instrument %||% "")) {
+      query <- paste(query, sprintf("AND instrument = ?%d", i))
+      params[[i]] <- input$job_filter_instrument
+      i <- i + 1
+    }
+    if (nzchar(input$job_filter_lc_method %||% "")) {
+      query <- paste(query, sprintf("AND lc_method = ?%d", i))
+      params[[i]] <- input$job_filter_lc_method
+      i <- i + 1
+    }
 
     query <- paste(query, "ORDER BY submitted_at DESC LIMIT 500")
     if (length(params) > 0) {
@@ -345,17 +460,31 @@ server_facility <- function(input, output, session, values, add_to_log,
                            options = list(dom = "t"), rownames = FALSE))
     }
 
-    display <- df[, c("analysis_name", "lab", "submitted_by",
-                       "submitted_at", "status", "backend",
-                       "n_proteins", "organism"), drop = FALSE]
-    names(display) <- c("Name", "Lab", "By", "Submitted",
-                         "Status", "Backend", "Proteins", "Organism")
+    # Build display columns with graceful fallback for missing columns
+    col_names <- c("analysis_name", "lab", "submitted_by",
+                    "submitted_at", "status", "backend",
+                    "instrument", "lc_method", "project",
+                    "n_proteins", "organism")
+    # Only include columns that exist in the data
+    col_names <- intersect(col_names, names(df))
+    display <- df[, col_names, drop = FALSE]
+
+    # Rename for display
+    name_map <- c(
+      analysis_name = "Name", lab = "Lab", submitted_by = "By",
+      submitted_at = "Submitted", status = "Status", backend = "Backend",
+      instrument = "Instrument", lc_method = "LC Method", project = "Project",
+      n_proteins = "Proteins", organism = "Organism"
+    )
+    names(display) <- name_map[names(display)]
 
     # Format timestamps
-    display$Submitted <- tryCatch(
-      format(as.POSIXct(display$Submitted), "%b %d %H:%M"),
-      error = function(e) display$Submitted
-    )
+    if ("Submitted" %in% names(display)) {
+      display$Submitted <- tryCatch(
+        format(as.POSIXct(display$Submitted), "%b %d %H:%M"),
+        error = function(e) display$Submitted
+      )
+    }
 
     DT::datatable(display,
       selection = "single",
@@ -387,11 +516,19 @@ server_facility <- function(input, output, session, values, add_to_log,
       "SELECT DISTINCT lab FROM searches WHERE lab IS NOT NULL AND lab != ''")$lab
     staff <- DBI::dbGetQuery(db,
       "SELECT DISTINCT submitted_by FROM searches WHERE submitted_by IS NOT NULL")$submitted_by
+    instruments <- DBI::dbGetQuery(db,
+      "SELECT DISTINCT instrument FROM searches WHERE instrument IS NOT NULL AND instrument != ''")$instrument
+    lc_methods <- DBI::dbGetQuery(db,
+      "SELECT DISTINCT lc_method FROM searches WHERE lc_method IS NOT NULL AND lc_method != ''")$lc_method
 
     updateSelectInput(session, "job_filter_lab",
       choices = c("All labs" = "", labs))
     updateSelectInput(session, "job_filter_staff",
       choices = c("All staff" = "", staff))
+    updateSelectInput(session, "job_filter_instrument",
+      choices = c("All instruments" = "", instruments))
+    updateSelectInput(session, "job_filter_lc_method",
+      choices = c("All LC methods" = "", lc_methods))
   })
 
   # Load results from selected job
@@ -421,27 +558,7 @@ server_facility <- function(input, output, session, values, add_to_log,
       type = "message", duration = 5)
   })
 
-  # Generate report from selected job
-  observeEvent(input$job_generate_report, {
-    sel <- input$job_history_table_rows_selected
-    req(sel)
-    df <- job_history_data()
-    req(nrow(df) >= sel)
-
-    job <- df[sel, ]
-
-    # Pre-fill report fields
-    updateTextInput(session, "analysis_title",
-      value = job$analysis_name %||% "")
-    updateSelectInput(session, "analysis_lab",
-      selected = job$lab %||% "")
-    updateSelectInput(session, "analysis_instrument",
-      selected = job$instrument %||% "")
-
-    showNotification(
-      "Job fields loaded. Click 'Generate Report' when ready.",
-      type = "message", duration = 5)
-  })
+  # (job_generate_report observer is defined above in the Reports section)
 
 
   # ============================================================================

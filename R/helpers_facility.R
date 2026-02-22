@@ -7,6 +7,9 @@
 #' Initialize SQLite database with core facility tables
 #' @param db DBI connection to SQLite database
 cf_init_db <- function(db) {
+  # Enable WAL mode for concurrent reads across multiple staff members
+  DBI::dbExecute(db, "PRAGMA journal_mode=WAL")
+
   # -- Searches / Job Queue --
   DBI::dbExecute(db, "
     CREATE TABLE IF NOT EXISTS searches (
@@ -21,6 +24,8 @@ cf_init_db <- function(db) {
       container_id    TEXT,
       backend         TEXT,
       instrument      TEXT,
+      lc_method       TEXT,
+      project         TEXT,
       organism        TEXT,
       fasta_file      TEXT,
       n_raw_files     INTEGER,
@@ -33,6 +38,15 @@ cf_init_db <- function(db) {
       notes           TEXT
     )
   ")
+
+  # -- Migrations for existing databases --
+  cols <- DBI::dbListFields(db, "searches")
+  if (!"lc_method" %in% cols) {
+    DBI::dbExecute(db, "ALTER TABLE searches ADD COLUMN lc_method TEXT")
+  }
+  if (!"project" %in% cols) {
+    DBI::dbExecute(db, "ALTER TABLE searches ADD COLUMN project TEXT")
+  }
 
   # -- QC Runs --
   DBI::dbExecute(db, "
@@ -93,6 +107,7 @@ cf_init_db <- function(db) {
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_searches_lab ON searches(lab)")
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_searches_submitted_by ON searches(submitted_by)")
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_searches_submitted_at ON searches(submitted_at)")
+  DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_searches_project ON searches(project)")
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_qc_instrument ON qc_runs(instrument)")
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_qc_date ON qc_runs(run_date)")
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_reports_lab ON reports(lab)")
@@ -197,14 +212,17 @@ cf_record_search <- function(db_path, params) {
 
   DBI::dbExecute(db, "
     INSERT INTO searches (analysis_name, submitted_by, lab, instrument,
+                          lc_method, project,
                           organism, fasta_file, n_raw_files, search_mode,
                           slurm_job_id, container_id, backend, status, output_dir)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     params = list(
       params$analysis_name %||% "",
       params$submitted_by %||% "unknown",
       params$lab %||% "",
       params$instrument %||% "",
+      params$lc_method %||% "",
+      params$project %||% "",
       params$organism %||% "",
       params$fasta_file %||% "",
       params$n_raw_files %||% 0L,
@@ -321,4 +339,15 @@ cf_lab_names <- function(cf_config) {
     return(c())
   }
   unique(vapply(cf_config$staff$staff, function(s) s$lab %||% "", ""))
+}
+
+
+#' Get LC method names from QC config
+#' @param cf_config Core facility config list
+#' @return Character vector of LC method names
+cf_lc_method_names <- function(cf_config) {
+  if (is.null(cf_config) || is.null(cf_config$qc) || is.null(cf_config$qc$lc_methods)) {
+    return(c())
+  }
+  vapply(cf_config$qc$lc_methods, `[[`, "", "name")
 }

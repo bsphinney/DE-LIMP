@@ -1066,6 +1066,8 @@ server_search <- function(input, output, session, values, add_to_log,
           submitted_by  = input$staff_selector %||% "unknown",
           lab           = input$search_lab %||% "",
           instrument    = input$search_instrument %||% "",
+          lc_method     = input$search_lc_method %||% "",
+          project       = input$search_project %||% "",
           organism      = input$diann_organism %||% "",
           fasta_file    = if (length(values$diann_fasta_files) > 0)
                             basename(values$diann_fasta_files[1]) else "",

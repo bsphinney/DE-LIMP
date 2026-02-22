@@ -118,21 +118,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       downloadButton("save_session", "Save", class = "btn-primary w-50", icon = icon("download")),
       actionButton("load_session_btn", "Load", class = "btn-outline-primary w-50", icon = icon("upload"))
     ),
-    # --- Core Facility: Share Results ---
+    # Core facility report link (reports generated from Job History)
     if (is_core_facility) tagList(
       hr(),
-      h5(icon("share-from-square"), " Share Results"),
-      textInput("analysis_title", NULL,
-                placeholder = "e.g., Smith Lab AP-MS Feb 2026"),
-      selectInput("analysis_lab", "Lab",
-                  choices = c("(select)" = "", cf_lab_names(cf_config)),
-                  selected = ""),
-      selectInput("analysis_instrument", "Instrument",
-                  choices = c("(select)" = "", cf_instrument_names(cf_config)),
-                  selected = ""),
-      actionButton("generate_report", "Generate Report",
-                   icon = icon("file-export"),
-                   class = "btn-success w-100"),
       uiOutput("report_link_ui")
     ),
 
@@ -253,7 +241,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               value = paste0("search_", format(Sys.Date(), "%Y%m%d")),
               placeholder = "e.g., HeLa_DIA_2026"),
 
-            # Core facility: lab & instrument for search tracking
+            # Core facility: lab, instrument, project for search tracking
             if (is_core_facility) tagList(
               div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                 div(style = "flex: 1; min-width: 130px;",
@@ -266,7 +254,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     choices = c("(select)" = "", cf_instrument_names(cf_config)),
                     selected = "")
                 )
-              )
+              ),
+              selectizeInput("search_project", "Project",
+                choices = NULL, selected = NULL,
+                options = list(create = TRUE,
+                               placeholder = "Select or type new project..."))
             ),
 
             hr(),
@@ -419,6 +411,14 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               ), selected = "on"
             ),
             uiOutput("norm_guidance_search"),
+
+            # Core facility: LC / Gradient method
+            if (is_core_facility) tagList(
+              hr(),
+              selectInput("search_lc_method", "LC / Gradient Method",
+                choices = c("(select)" = "", cf_lc_method_names(cf_config)),
+                selected = "")
+            ),
 
             hr(),
             tags$h6("Basic Parameters"),
@@ -692,43 +692,6 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 icon = icon("magnifying-glass"))
             ),
             uiOutput("search_queue_ui"),
-
-            # Core facility: persistent job history from SQLite
-            if (is_core_facility) tagList(
-              hr(),
-              div(style = "display: flex; justify-content: space-between; align-items: center;",
-                tags$h6(icon("history"), " Job History", style = "margin-bottom: 0;"),
-                tags$small(class = "text-muted", textOutput("job_count_text", inline = TRUE))
-              ),
-              div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0;",
-                div(style = "flex: 2; min-width: 150px;",
-                  textInput("job_search_text", NULL, placeholder = "Search by name...")
-                ),
-                div(style = "flex: 1; min-width: 100px;",
-                  selectInput("job_filter_lab", NULL,
-                    choices = c("All labs" = ""), selected = "")
-                ),
-                div(style = "flex: 1; min-width: 100px;",
-                  selectInput("job_filter_status", NULL,
-                    choices = c("All" = "", "Queued" = "queued", "Running" = "running",
-                                "Completed" = "completed", "Failed" = "failed"),
-                    selected = "")
-                ),
-                div(style = "flex: 1; min-width: 100px;",
-                  selectInput("job_filter_staff", NULL,
-                    choices = c("All staff" = ""), selected = "")
-                )
-              ),
-              DTOutput("job_history_table"),
-              div(style = "margin-top: 8px;",
-                actionButton("job_load_results", "Load Selected Results",
-                  icon = icon("folder-open"),
-                  class = "btn-outline-primary btn-sm"),
-                actionButton("job_generate_report", "Generate Report",
-                  icon = icon("file-export"),
-                  class = "btn-outline-success btn-sm")
-              )
-            ),
 
             # License attribution
             tags$div(class = "text-muted", style = "font-size: 0.78em; margin-top: 12px; border-top: 1px solid #dee2e6; padding-top: 8px;",
@@ -1320,6 +1283,61 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
                 )
               )
+    ),
+
+    # Search Database (core facility mode only)
+    if (is_core_facility) nav_panel("Search DB", icon = icon("database"),
+      div(style = "padding: 15px;",
+        # Header with count
+        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+          tags$h5(icon("database"), " Search Database", style = "margin: 0;"),
+          tags$span(class = "text-muted", textOutput("job_count_text", inline = TRUE))
+        ),
+
+        # Filter row
+        div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;",
+          div(style = "flex: 2; min-width: 180px;",
+            textInput("job_search_text", NULL, placeholder = "Search by name...")
+          ),
+          div(style = "flex: 1; min-width: 120px;",
+            selectInput("job_filter_lab", NULL,
+              choices = c("All labs" = ""), selected = "")
+          ),
+          div(style = "flex: 1; min-width: 120px;",
+            selectInput("job_filter_status", NULL,
+              choices = c("All" = "", "Queued" = "queued", "Running" = "running",
+                          "Completed" = "completed", "Failed" = "failed"),
+              selected = "")
+          ),
+          div(style = "flex: 1; min-width: 120px;",
+            selectInput("job_filter_staff", NULL,
+              choices = c("All staff" = ""), selected = "")
+          ),
+          div(style = "flex: 1; min-width: 120px;",
+            selectInput("job_filter_instrument", NULL,
+              choices = c("All instruments" = ""), selected = "")
+          ),
+          div(style = "flex: 1; min-width: 120px;",
+            selectInput("job_filter_lc_method", NULL,
+              choices = c("All LC methods" = ""), selected = "")
+          )
+        ),
+
+        # Job history table
+        DTOutput("job_history_table"),
+
+        # Action buttons
+        div(style = "margin-top: 10px; display: flex; gap: 8px; align-items: center;",
+          actionButton("job_load_results", "Load Selected Results",
+            icon = icon("folder-open"),
+            class = "btn-outline-primary btn-sm"),
+          actionButton("job_generate_report", "Generate Report",
+            icon = icon("file-export"),
+            class = "btn-outline-success btn-sm"),
+          div(style = "flex: 1;"),
+          uiOutput("report_link_ui")
+        )
+      )
     ),
 
     # Instrument QC Dashboard (core facility mode only)
