@@ -6,7 +6,8 @@
 build_ui <- function(is_hf_space, search_enabled = FALSE,
                      docker_available = FALSE, hpc_available = FALSE,
                      local_sbatch = FALSE, local_diann = FALSE,
-                     delimp_data_dir = "") {
+                     delimp_data_dir = "",
+                     is_core_facility = FALSE, cf_config = NULL) {
   page_sidebar(
   title = "DE-LIMP Proteomics",
   theme = bs_theme(bootswatch = "flatly"),
@@ -117,6 +118,36 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       downloadButton("save_session", "Save", class = "btn-primary w-50", icon = icon("download")),
       actionButton("load_session_btn", "Load", class = "btn-outline-primary w-50", icon = icon("upload"))
     ),
+    # --- Core Facility: Share Results ---
+    if (is_core_facility) tagList(
+      hr(),
+      h5(icon("share-from-square"), " Share Results"),
+      textInput("analysis_title", NULL,
+                placeholder = "e.g., Smith Lab AP-MS Feb 2026"),
+      selectInput("analysis_lab", "Lab",
+                  choices = c("(select)" = "", cf_lab_names(cf_config)),
+                  selected = ""),
+      selectInput("analysis_instrument", "Instrument",
+                  choices = c("(select)" = "", cf_instrument_names(cf_config)),
+                  selected = ""),
+      actionButton("generate_report", "Generate Report",
+                   icon = icon("file-export"),
+                   class = "btn-success w-100"),
+      uiOutput("report_link_ui")
+    ),
+
+    # --- Core Facility: Templates ---
+    if (is_core_facility) tagList(
+      hr(),
+      h5(icon("bookmark"), " Templates"),
+      selectInput("template_selector", NULL,
+        choices = c("(none)" = ""), selected = ""),
+      div(style = "display: flex; gap: 5px;",
+        actionButton("load_template", "Apply", class = "btn-sm btn-outline-primary w-50"),
+        actionButton("save_template", "Save Current", class = "btn-sm btn-outline-success w-50")
+      )
+    ),
+
     hr(),
     h5("3. Explore Results"),
     sliderInput("logfc_cutoff", "Min Log2 Fold Change:", min=0, max=5, value=1, step=0.1),
@@ -221,6 +252,22 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             textInput("analysis_name", "Analysis Name",
               value = paste0("search_", format(Sys.Date(), "%Y%m%d")),
               placeholder = "e.g., HeLa_DIA_2026"),
+
+            # Core facility: lab & instrument for search tracking
+            if (is_core_facility) tagList(
+              div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+                div(style = "flex: 1; min-width: 130px;",
+                  selectInput("search_lab", "Lab",
+                    choices = c("(select)" = "", cf_lab_names(cf_config)),
+                    selected = "")
+                ),
+                div(style = "flex: 1; min-width: 130px;",
+                  selectInput("search_instrument", "Instrument",
+                    choices = c("(select)" = "", cf_instrument_names(cf_config)),
+                    selected = "")
+                )
+              )
+            ),
 
             hr(),
             tags$h6(icon("hard-drive"), " Raw Data"),
@@ -538,29 +585,51 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
             # ---------- HPC backend controls ----------
             conditionalPanel("input.search_backend == 'hpc'",
+
+              # Core facility: staff selector replaces manual SSH fields
+              if (is_core_facility) tagList(
+                tags$h6(icon("user"), " Staff Identity"),
+                selectInput("staff_selector", NULL,
+                  choices = c("(select)" = "", cf_staff_names(cf_config))
+                ),
+                uiOutput("staff_connection_status"),
+                hr()
+              ),
+
               tags$h6(icon("plug"), " Connection Mode"),
               radioButtons("search_connection_mode", NULL,
                 choices = c("Local (on HPC)" = "local", "Remote (SSH)" = "ssh"),
                 selected = if (local_sbatch) "local" else "ssh", inline = TRUE),
               conditionalPanel("input.search_connection_mode == 'ssh'",
-                textInput("ssh_host", "HPC Hostname",
-                  value = "hive.hpc.ucdavis.edu"),
-                div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
-                  div(style = "flex: 1; min-width: 100px;",
-                    textInput("ssh_user", "Username", value = "brettsp")
+                # SSH fields: shown always (core facility auto-fills them from staff selector)
+                if (!is_core_facility) tagList(
+                  textInput("ssh_host", "HPC Hostname",
+                    value = "hive.hpc.ucdavis.edu"),
+                  div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+                    div(style = "flex: 1; min-width: 100px;",
+                      textInput("ssh_user", "Username", value = "brettsp")
+                    ),
+                    div(style = "flex: 1; min-width: 80px;",
+                      numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)
+                    )
                   ),
-                  div(style = "flex: 1; min-width: 80px;",
-                    numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)
-                  )
+                  textInput("ssh_key_path", "SSH Key Path",
+                    value = paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
+                  textInput("ssh_modules", "Modules to Load (optional)",
+                    value = "",
+                    placeholder = "e.g., slurm apptainer"),
+                  actionButton("test_ssh_btn", "Test Connection",
+                    icon = icon("plug"), class = "btn-outline-info btn-sm"),
+                  uiOutput("ssh_status_ui")
                 ),
-                textInput("ssh_key_path", "SSH Key Path",
-                  value = paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
-                textInput("ssh_modules", "Modules to Load (optional)",
-                  value = "",
-                  placeholder = "e.g., slurm apptainer"),
-                actionButton("test_ssh_btn", "Test Connection",
-                  icon = icon("plug"), class = "btn-outline-info btn-sm"),
-                uiOutput("ssh_status_ui")
+                # Hidden SSH inputs for core facility mode (auto-filled by staff selector)
+                if (is_core_facility) div(style = "display: none;",
+                  textInput("ssh_host", "HPC Hostname", value = ""),
+                  textInput("ssh_user", "Username", value = ""),
+                  numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535),
+                  textInput("ssh_key_path", "SSH Key Path", value = ""),
+                  textInput("ssh_modules", "Modules to Load", value = "")
+                )
               ),
 
               hr(),
@@ -623,6 +692,43 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 icon = icon("magnifying-glass"))
             ),
             uiOutput("search_queue_ui"),
+
+            # Core facility: persistent job history from SQLite
+            if (is_core_facility) tagList(
+              hr(),
+              div(style = "display: flex; justify-content: space-between; align-items: center;",
+                tags$h6(icon("history"), " Job History", style = "margin-bottom: 0;"),
+                tags$small(class = "text-muted", textOutput("job_count_text", inline = TRUE))
+              ),
+              div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0;",
+                div(style = "flex: 2; min-width: 150px;",
+                  textInput("job_search_text", NULL, placeholder = "Search by name...")
+                ),
+                div(style = "flex: 1; min-width: 100px;",
+                  selectInput("job_filter_lab", NULL,
+                    choices = c("All labs" = ""), selected = "")
+                ),
+                div(style = "flex: 1; min-width: 100px;",
+                  selectInput("job_filter_status", NULL,
+                    choices = c("All" = "", "Queued" = "queued", "Running" = "running",
+                                "Completed" = "completed", "Failed" = "failed"),
+                    selected = "")
+                ),
+                div(style = "flex: 1; min-width: 100px;",
+                  selectInput("job_filter_staff", NULL,
+                    choices = c("All staff" = ""), selected = "")
+                )
+              ),
+              DTOutput("job_history_table"),
+              div(style = "margin-top: 8px;",
+                actionButton("job_load_results", "Load Selected Results",
+                  icon = icon("folder-open"),
+                  class = "btn-outline-primary btn-sm"),
+                actionButton("job_generate_report", "Generate Report",
+                  icon = icon("file-export"),
+                  class = "btn-outline-success btn-sm")
+              )
+            ),
 
             # License attribution
             tags$div(class = "text-muted", style = "font-size: 0.78em; margin-top: 12px; border-top: 1px solid #dee2e6; padding-top: 8px;",
@@ -1214,6 +1320,29 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
                 )
               )
+    ),
+
+    # Instrument QC Dashboard (core facility mode only)
+    if (is_core_facility) nav_panel("Instrument QC", icon = icon("heartbeat"),
+      div(style = "padding: 15px;",
+        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+          tags$h5("Instrument Performance Dashboard", style = "margin: 0;"),
+          div(style = "display: flex; gap: 10px; align-items: center;",
+            selectInput("qc_instrument_filter", NULL,
+              choices = c("All Instruments" = ""),
+              selected = "", width = "200px"),
+            selectInput("qc_date_range", NULL,
+              choices = c("Last 30 days" = "30", "Last 90 days" = "90",
+                          "Last 180 days" = "180", "All time" = "9999"),
+              selected = "90", width = "150px")
+          )
+        ),
+        plotly::plotlyOutput("qc_protein_trend", height = "280px"),
+        plotly::plotlyOutput("qc_precursor_trend", height = "280px"),
+        plotly::plotlyOutput("qc_tic_trend", height = "280px"),
+        hr(),
+        DTOutput("qc_runs_table")
+      )
     ),
 
     nav_panel("Education", icon = icon("graduation-cap"),

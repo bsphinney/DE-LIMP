@@ -1,0 +1,749 @@
+# ==============================================================================
+#  server_facility.R
+#  Core Facility Mode — Server module
+#  Features: Report generation, staff SSH selector, searchable job queue,
+#  instrument QC dashboard, template library.
+#  Only active when is_core_facility == TRUE.
+# ==============================================================================
+
+server_facility <- function(input, output, session, values, add_to_log,
+                            is_core_facility, cf_config,
+                            search_enabled = FALSE) {
+
+  # Early return if not in core facility mode
+  if (!is_core_facility) return(invisible())
+
+  # ============================================================================
+  #    Staff SSH Selector (P1)
+  # ============================================================================
+
+  # Auto-connect when staff member is selected
+  observeEvent(input$staff_selector, {
+    req(input$staff_selector, nzchar(input$staff_selector))
+
+    staff <- Filter(
+      function(s) s$name == input$staff_selector,
+      cf_config$staff$staff
+    )
+    if (length(staff) == 0) return()
+    staff <- staff[[1]]
+
+    # Update SSH fields (hidden but still used by server_search.R)
+    updateTextInput(session, "ssh_host", value = staff$hpc_host %||% "")
+    updateTextInput(session, "ssh_user", value = staff$hpc_username %||% "")
+    updateTextInput(session, "ssh_key_path", value = staff$ssh_key %||% "")
+    updateTextInput(session, "diann_account", value = staff$slurm_account %||% "")
+    updateTextInput(session, "diann_partition", value = staff$slurm_partition %||% "")
+
+    # Force SSH connection mode (only if HPC backend selected)
+    if (!is.null(input$search_backend) && input$search_backend == "hpc") {
+      updateRadioButtons(session, "search_connection_mode", selected = "ssh")
+    }
+
+    # Auto-test connection
+    cfg <- list(
+      host = staff$hpc_host %||% "",
+      user = staff$hpc_username %||% "",
+      port = 22,
+      key_path = staff$ssh_key %||% ""
+    )
+
+    # Only test if we have the function and required fields
+    if (nzchar(cfg$host) && nzchar(cfg$user) && nzchar(cfg$key_path) &&
+        exists("test_ssh_connection", mode = "function")) {
+      result <- tryCatch(
+        test_ssh_connection(cfg),
+        error = function(e) list(success = FALSE, error = e$message)
+      )
+
+      output$staff_connection_status <- renderUI({
+        if (isTRUE(result$success)) {
+          tags$div(class = "alert alert-success py-2 px-3",
+            style = "font-size: 0.85em;",
+            icon("check-circle"),
+            sprintf(" Connected to %s as %s", cfg$host, cfg$user)
+          )
+        } else {
+          tags$div(class = "alert alert-danger py-2 px-3",
+            style = "font-size: 0.85em;",
+            icon("times-circle"),
+            sprintf(" Connection failed: %s", result$error %||% "Unknown error"),
+            tags$br(),
+            tags$small("Check SSH key or ask admin to run ssh-copy-id.")
+          )
+        }
+      })
+
+      values$ssh_connected <- isTRUE(result$success)
+    } else {
+      output$staff_connection_status <- renderUI({
+        tags$div(class = "alert alert-info py-2 px-3",
+          style = "font-size: 0.85em;",
+          icon("info-circle"),
+          sprintf(" Staff: %s (SSH fields updated, use Test Connection to verify)",
+                  staff$name)
+        )
+      })
+    }
+  })
+
+
+  # ============================================================================
+  #    Shareable HTML Reports (P2)
+  # ============================================================================
+
+  observeEvent(input$generate_report, {
+    req(values$fit)
+
+    analysis_id <- uuid::UUIDgenerate()
+
+    # -- Build state object (reuse session_data structure) --
+    state <- list(
+      raw_data   = NULL,  # Exclude raw precursor data to keep file small
+      metadata   = values$metadata,
+      fit        = values$fit,
+      y_protein  = values$y_protein,
+      dpc_fit    = values$dpc_fit,
+      design     = values$design,
+      qc_stats   = values$qc_stats,
+      # GSEA
+      gsea_results       = values$gsea_results,
+      gsea_results_cache = values$gsea_results_cache,
+      gsea_last_contrast = values$gsea_last_contrast,
+      gsea_last_org_db   = values$gsea_last_org_db,
+      # Phospho
+      phospho_detected           = values$phospho_detected,
+      phospho_site_matrix        = values$phospho_site_matrix,
+      phospho_site_info          = values$phospho_site_info,
+      phospho_fit                = values$phospho_fit,
+      phospho_site_matrix_filtered = values$phospho_site_matrix_filtered,
+      phospho_input_mode         = values$phospho_input_mode,
+      ksea_results               = values$ksea_results,
+      ksea_last_contrast         = values$ksea_last_contrast,
+      phospho_annotations        = values$phospho_annotations,
+      # MOFA (include if available)
+      mofa_object            = values$mofa_object,
+      mofa_factors           = values$mofa_factors,
+      mofa_variance_explained = values$mofa_variance_explained,
+      # UI state
+      contrast        = input$contrast_selector,
+      logfc_cutoff    = input$logfc_cutoff,
+      q_cutoff        = input$q_cutoff,
+      color_plot_by_de = values$color_plot_by_de,
+      cov1_name       = values$cov1_name,
+      cov2_name       = values$cov2_name,
+      # Normalization
+      diann_norm_detected = values$diann_norm_detected,
+      # Report metadata
+      metadata_extra = list(
+        analysis_id    = analysis_id,
+        title          = input$analysis_title %||% "Untitled Analysis",
+        lab            = input$analysis_lab %||% "",
+        instrument     = input$analysis_instrument %||% "",
+        created        = Sys.time(),
+        created_by     = input$staff_selector %||% "unknown",
+        app_version    = "DE-LIMP v3.0",
+        n_proteins     = if (!is.null(values$y_protein)) nrow(values$y_protein) else NA,
+        n_contrasts    = if (!is.null(values$fit)) ncol(values$fit$contrasts) else NA,
+        contrast_names = if (!is.null(values$fit)) colnames(values$fit$contrasts) else NULL
+      ),
+      saved_at = Sys.time()
+    )
+
+    # -- Save state to disk --
+    state_path <- file.path(cf_config$state_dir, paste0(analysis_id, ".rds"))
+    saveRDS(state, state_path)
+
+    # -- Render Quarto report (if template exists) --
+    html_path <- file.path(cf_config$reports_dir, paste0(analysis_id, ".html"))
+    render_success <- FALSE
+
+    withProgress(message = "Generating report...", {
+      incProgress(0.2, detail = "Rendering HTML...")
+
+      if (file.exists(cf_config$template_qmd) &&
+          requireNamespace("quarto", quietly = TRUE)) {
+        render_success <- tryCatch({
+          quarto::quarto_render(
+            input = cf_config$template_qmd,
+            output_file = html_path,
+            execute_params = list(
+              analysis_id = analysis_id,
+              state_dir = cf_config$state_dir,
+              db_path = cf_config$db_path
+            )
+          )
+          TRUE
+        }, error = function(e) {
+          showNotification(paste("Report render error:", e$message),
+                           type = "warning", duration = 10)
+          FALSE
+        })
+      } else {
+        showNotification(
+          "Quarto template not found. State saved, but HTML report not generated.",
+          type = "warning", duration = 8)
+      }
+
+      # -- Upload state to HF dataset repo for live links --
+      incProgress(0.6, detail = "Uploading for live link...")
+      hf_url <- tryCatch({
+        upload_state_to_hf(state_path, analysis_id)
+      }, error = function(e) {
+        showNotification("HF upload failed - state file still saved locally.",
+                         type = "warning", duration = 8)
+        NULL
+      })
+
+      # -- Record in SQLite --
+      incProgress(0.8, detail = "Recording...")
+      db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+      on.exit(DBI::dbDisconnect(db))
+
+      # Find bracketing QC runs
+      qc_bracket <- cf_get_bracketing_qc(
+        db,
+        input$analysis_instrument %||% "",
+        as.character(Sys.time())
+      )
+
+      DBI::dbExecute(db, "
+        INSERT INTO reports (id, title, created_by, lab, instrument,
+                             n_proteins, n_contrasts, contrast_names,
+                             html_path, state_path, hf_state_url,
+                             qc_before_id, qc_after_id)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params = list(
+          analysis_id,
+          input$analysis_title %||% "Untitled",
+          input$staff_selector %||% "unknown",
+          input$analysis_lab %||% "",
+          input$analysis_instrument %||% "",
+          state$metadata_extra$n_proteins,
+          state$metadata_extra$n_contrasts,
+          paste(state$metadata_extra$contrast_names, collapse = "; "),
+          if (render_success) html_path else NA,
+          state_path,
+          hf_url,
+          if (nrow(qc_bracket$before) > 0) qc_bracket$before$id[1] else NA,
+          if (nrow(qc_bracket$after) > 0) qc_bracket$after$id[1] else NA
+        )
+      )
+
+      incProgress(1, detail = "Done!")
+    })
+
+    # -- Build live link --
+    live_link <- if (!is.null(hf_url)) {
+      paste0("https://huggingface.co/spaces/brettsp/de-limp-proteomics?analysis=",
+             analysis_id)
+    } else NULL
+
+    # -- Show result --
+    output$report_link_ui <- renderUI({
+      tags$div(
+        style = "margin-top: 10px; padding: 10px; background: #f0f8f0; border-radius: 6px;",
+        tags$p(style = "font-weight: 600; margin-bottom: 4px;",
+          icon("check-circle"), " Report generated!"),
+        if (render_success) {
+          tags$p(style = "font-size: 0.85em;",
+            "HTML report: ", tags$code(basename(html_path)))
+        },
+        tags$p(style = "font-size: 0.85em;",
+          "State saved: ", tags$code(basename(state_path))),
+        if (!is.null(live_link)) {
+          tags$p(style = "font-size: 0.85em;",
+            "Live link: ",
+            tags$a(href = live_link, target = "_blank", live_link))
+        },
+        if (render_success) {
+          downloadButton("download_report_html", "Download HTML Report",
+                         class = "btn-outline-success btn-sm w-100 mt-2")
+        }
+      )
+    })
+
+    if (render_success) {
+      output$download_report_html <- downloadHandler(
+        filename = function() {
+          paste0("DE-LIMP_report_",
+                 make.names(input$analysis_title %||% analysis_id), ".html")
+        },
+        content = function(file) {
+          file.copy(html_path, file)
+        },
+        contentType = "text/html"
+      )
+    }
+
+    # Log the action
+    add_to_log("Generate Core Facility Report", c(
+      sprintf("# Analysis ID: %s", analysis_id),
+      sprintf("# Title: %s", input$analysis_title %||% "Untitled"),
+      sprintf("# Lab: %s", input$analysis_lab %||% ""),
+      sprintf("# Instrument: %s", input$analysis_instrument %||% ""),
+      sprintf("# State: %s", state_path),
+      if (render_success) sprintf("# HTML: %s", html_path) else "# HTML: not rendered",
+      if (!is.null(live_link)) sprintf("# Live link: %s", live_link)
+    ))
+  })
+
+
+  # ============================================================================
+  #    Searchable Job Queue (P1)
+  # ============================================================================
+
+  # Reactive: query SQLite with filters
+  job_history_data <- reactive({
+    # Re-query every 30 seconds or when filters change
+    invalidateLater(30000, session)
+    input$job_search_text
+    input$job_filter_lab
+    input$job_filter_status
+    input$job_filter_staff
+
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+
+    query <- "SELECT * FROM searches WHERE 1=1"
+    params <- list()
+    i <- 1
+
+    if (nzchar(input$job_search_text %||% "")) {
+      query <- paste(query, sprintf("AND analysis_name LIKE ?%d", i))
+      params[[i]] <- paste0("%", input$job_search_text, "%")
+      i <- i + 1
+    }
+    if (nzchar(input$job_filter_lab %||% "")) {
+      query <- paste(query, sprintf("AND lab = ?%d", i))
+      params[[i]] <- input$job_filter_lab
+      i <- i + 1
+    }
+    if (nzchar(input$job_filter_status %||% "")) {
+      query <- paste(query, sprintf("AND status = ?%d", i))
+      params[[i]] <- input$job_filter_status
+      i <- i + 1
+    }
+    if (nzchar(input$job_filter_staff %||% "")) {
+      query <- paste(query, sprintf("AND submitted_by = ?%d", i))
+      params[[i]] <- input$job_filter_staff
+      i <- i + 1
+    }
+
+    query <- paste(query, "ORDER BY submitted_at DESC LIMIT 500")
+    if (length(params) > 0) {
+      DBI::dbGetQuery(db, query, params = params)
+    } else {
+      DBI::dbGetQuery(db, query)
+    }
+  })
+
+  output$job_history_table <- DT::renderDT({
+    df <- job_history_data()
+    if (is.null(df) || nrow(df) == 0) {
+      return(DT::datatable(data.frame(Message = "No jobs found"),
+                           options = list(dom = "t"), rownames = FALSE))
+    }
+
+    display <- df[, c("analysis_name", "lab", "submitted_by",
+                       "submitted_at", "status", "backend",
+                       "n_proteins", "organism"), drop = FALSE]
+    names(display) <- c("Name", "Lab", "By", "Submitted",
+                         "Status", "Backend", "Proteins", "Organism")
+
+    # Format timestamps
+    display$Submitted <- tryCatch(
+      format(as.POSIXct(display$Submitted), "%b %d %H:%M"),
+      error = function(e) display$Submitted
+    )
+
+    DT::datatable(display,
+      selection = "single",
+      options = list(pageLength = 15, scrollX = TRUE, dom = "tip"),
+      rownames = FALSE,
+      class = "compact stripe hover"
+    ) |>
+      DT::formatStyle("Status",
+        backgroundColor = DT::styleEqual(
+          c("completed", "running", "failed", "queued"),
+          c("#d4edda", "#cce5ff", "#f8d7da", "#fff3cd")
+        )
+      )
+  })
+
+  # Job count text
+  output$job_count_text <- renderText({
+    df <- job_history_data()
+    if (is.null(df)) return("0 jobs")
+    sprintf("%d job%s", nrow(df), if (nrow(df) != 1) "s" else "")
+  })
+
+  # Populate filter dropdowns from DB
+  observe({
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+
+    labs <- DBI::dbGetQuery(db,
+      "SELECT DISTINCT lab FROM searches WHERE lab IS NOT NULL AND lab != ''")$lab
+    staff <- DBI::dbGetQuery(db,
+      "SELECT DISTINCT submitted_by FROM searches WHERE submitted_by IS NOT NULL")$submitted_by
+
+    updateSelectInput(session, "job_filter_lab",
+      choices = c("All labs" = "", labs))
+    updateSelectInput(session, "job_filter_staff",
+      choices = c("All staff" = "", staff))
+  })
+
+  # Load results from selected job
+  observeEvent(input$job_load_results, {
+    sel <- input$job_history_table_rows_selected
+    req(sel)
+    df <- job_history_data()
+    req(nrow(df) >= sel)
+
+    job <- df[sel, ]
+    if (job$status != "completed" || is.na(job$output_dir) || !nzchar(job$output_dir)) {
+      showNotification("Selected job has no results to load.", type = "warning")
+      return()
+    }
+
+    # Check for report.parquet in the output directory
+    report_path <- file.path(job$output_dir, "report.parquet")
+    if (!file.exists(report_path)) {
+      showNotification(
+        sprintf("report.parquet not found in %s", job$output_dir),
+        type = "error", duration = 8)
+      return()
+    }
+
+    showNotification(
+      sprintf("Loading results from: %s", job$analysis_name),
+      type = "message", duration = 5)
+  })
+
+  # Generate report from selected job
+  observeEvent(input$job_generate_report, {
+    sel <- input$job_history_table_rows_selected
+    req(sel)
+    df <- job_history_data()
+    req(nrow(df) >= sel)
+
+    job <- df[sel, ]
+
+    # Pre-fill report fields
+    updateTextInput(session, "analysis_title",
+      value = job$analysis_name %||% "")
+    updateSelectInput(session, "analysis_lab",
+      selected = job$lab %||% "")
+    updateSelectInput(session, "analysis_instrument",
+      selected = job$instrument %||% "")
+
+    showNotification(
+      "Job fields loaded. Click 'Generate Report' when ready.",
+      type = "message", duration = 5)
+  })
+
+
+  # ============================================================================
+  #    Instrument QC Dashboard (P3)
+  # ============================================================================
+
+  # Reactive: fetch QC data from SQLite
+  qc_dashboard_data <- reactive({
+    invalidateLater(60000, session)  # refresh every minute
+    input$qc_instrument_filter
+    input$qc_date_range
+
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+
+    days <- as.integer(input$qc_date_range %||% 90)
+    cutoff <- as.character(Sys.time() - days * 86400)
+
+    query <- "SELECT * FROM qc_runs WHERE run_date >= ?1"
+    params <- list(cutoff)
+
+    if (nzchar(input$qc_instrument_filter %||% "")) {
+      query <- paste(query, "AND instrument = ?2")
+      params[[2]] <- input$qc_instrument_filter
+    }
+
+    query <- paste(query, "ORDER BY run_date ASC")
+    DBI::dbGetQuery(db, query, params = params)
+  })
+
+  # Populate instrument filter from DB
+  observe({
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+    instruments <- DBI::dbGetQuery(db,
+      "SELECT DISTINCT instrument FROM qc_runs")$instrument
+    updateSelectInput(session, "qc_instrument_filter",
+      choices = c("All Instruments" = "", instruments))
+  })
+
+  # -- Protein ID Trend --
+  output$qc_protein_trend <- plotly::renderPlotly({
+    df <- qc_dashboard_data()
+    req(nrow(df) > 0)
+
+    df$run_date <- as.POSIXct(df$run_date)
+
+    # Compute thresholds (mean +/- 2 SD per instrument)
+    thresholds <- df |>
+      dplyr::group_by(instrument) |>
+      dplyr::summarise(
+        mean_val = mean(n_proteins, na.rm = TRUE),
+        sd_val = stats::sd(n_proteins, na.rm = TRUE),
+        lower = mean_val - 2 * sd_val,
+        .groups = "drop"
+      )
+
+    p <- plotly::plot_ly(df, x = ~run_date, y = ~n_proteins, color = ~instrument,
+                 text = ~paste0(run_name, "<br>", n_proteins, " proteins<br>",
+                               format(run_date, "%b %d %H:%M")),
+                 hoverinfo = "text",
+                 type = "scatter", mode = "markers",
+                 marker = list(size = 8, opacity = 0.7)) |>
+      plotly::layout(
+        title = list(text = "Protein Identifications", font = list(size = 14)),
+        xaxis = list(title = ""),
+        yaxis = list(title = "Proteins"),
+        legend = list(orientation = "h", y = -0.15),
+        hovermode = "closest"
+      )
+
+    # Add threshold lines per instrument
+    for (i in seq_len(nrow(thresholds))) {
+      if (!is.na(thresholds$lower[i])) {
+        p <- p |> plotly::add_segments(
+          x = min(df$run_date), xend = max(df$run_date),
+          y = thresholds$lower[i], yend = thresholds$lower[i],
+          line = list(color = "red", dash = "dash", width = 1),
+          showlegend = FALSE,
+          inherit = FALSE
+        )
+      }
+    }
+
+    p
+  })
+
+  # -- Precursor ID Trend --
+  output$qc_precursor_trend <- plotly::renderPlotly({
+    df <- qc_dashboard_data()
+    req(nrow(df) > 0)
+    df$run_date <- as.POSIXct(df$run_date)
+
+    plotly::plot_ly(df, x = ~run_date, y = ~n_precursors, color = ~instrument,
+            text = ~paste0(run_name, "<br>", n_precursors, " precursors"),
+            hoverinfo = "text",
+            type = "scatter", mode = "markers",
+            marker = list(size = 8, opacity = 0.7)) |>
+      plotly::layout(
+        title = list(text = "Precursor Identifications", font = list(size = 14)),
+        xaxis = list(title = ""),
+        yaxis = list(title = "Precursors"),
+        legend = list(orientation = "h", y = -0.15)
+      )
+  })
+
+  # -- MS1 TIC Trend --
+  output$qc_tic_trend <- plotly::renderPlotly({
+    df <- qc_dashboard_data()
+    req(nrow(df) > 0)
+    df$run_date <- as.POSIXct(df$run_date)
+    df <- df[!is.na(df$median_ms1_tic), ]
+    req(nrow(df) > 0)
+
+    plotly::plot_ly(df, x = ~run_date, y = ~median_ms1_tic, color = ~instrument,
+            text = ~paste0(run_name, "<br>TIC: ", signif(median_ms1_tic, 3)),
+            hoverinfo = "text",
+            type = "scatter", mode = "markers",
+            marker = list(size = 8, opacity = 0.7)) |>
+      plotly::layout(
+        title = list(text = "Median MS1 TIC", font = list(size = 14)),
+        xaxis = list(title = ""),
+        yaxis = list(title = "TIC", type = "log"),
+        legend = list(orientation = "h", y = -0.15)
+      )
+  })
+
+  # -- QC Runs Table --
+  output$qc_runs_table <- DT::renderDT({
+    df <- qc_dashboard_data()
+    req(nrow(df) > 0)
+
+    display <- df |>
+      dplyr::arrange(dplyr::desc(run_date)) |>
+      dplyr::transmute(
+        Instrument = instrument,
+        File = run_name,
+        Date = format(as.POSIXct(run_date), "%b %d %H:%M"),
+        Proteins = n_proteins,
+        Precursors = n_precursors,
+        `MS1 TIC` = signif(median_ms1_tic, 3)
+      )
+
+    DT::datatable(display,
+      options = list(pageLength = 10, scrollX = TRUE, dom = "tip"),
+      rownames = FALSE,
+      class = "compact stripe hover"
+    )
+  })
+
+
+  # ============================================================================
+  #    Template Library (P4)
+  # ============================================================================
+
+  # Populate template dropdown
+  observe({
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+    templates <- DBI::dbGetQuery(db,
+      "SELECT id, name, type FROM templates ORDER BY name")
+    choices <- c("(none)" = "")
+    if (nrow(templates) > 0) {
+      choices <- c(choices,
+        setNames(templates$id,
+                 paste0(templates$name, " [", templates$type, "]")))
+    }
+    updateSelectInput(session, "template_selector", choices = choices)
+  })
+
+  # Save current settings as template
+  observeEvent(input$save_template, {
+    showModal(modalDialog(
+      title = "Save as Template",
+      textInput("template_name", "Template Name",
+        placeholder = "e.g., Standard AP-MS"),
+      selectInput("template_type", "Type",
+        choices = c("DIA-NN Search Preset" = "search_preset",
+                    "Group Assignment" = "group_template",
+                    "GSEA Configuration" = "gsea_config")),
+      textAreaInput("template_notes", "Notes", rows = 2),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_save_template", "Save", class = "btn-primary")
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_save_template, {
+    req(input$template_name, nzchar(input$template_name))
+
+    config <- switch(input$template_type,
+      "search_preset" = jsonlite::toJSON(list(
+        cpus = input$diann_cpus,
+        mem_gb = input$diann_mem_gb,
+        time_hours = input$diann_time_hours,
+        partition = input$diann_partition,
+        account = input$diann_account,
+        mass_acc_mode = input$mass_acc_mode,
+        mass_acc = input$diann_mass_acc,
+        ms1_acc = input$diann_mass_acc_ms1,
+        search_mode = input$search_mode,
+        enzyme = input$diann_enzyme,
+        missed_cleavages = input$diann_missed_cleavages,
+        max_var_mods = input$diann_max_var_mods,
+        normalization = input$diann_normalization
+      ), auto_unbox = TRUE),
+      "group_template" = jsonlite::toJSON(list(
+        metadata = values$metadata
+      ), auto_unbox = TRUE),
+      "gsea_config" = jsonlite::toJSON(list(
+        ontology = input$gsea_ontology,
+        logfc_cutoff = input$logfc_cutoff
+      ), auto_unbox = TRUE)
+    )
+
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+    DBI::dbExecute(db, "
+      INSERT INTO templates (name, type, created_by, config_json, notes)
+      VALUES (?1, ?2, ?3, ?4, ?5)",
+      params = list(
+        input$template_name,
+        input$template_type,
+        input$staff_selector %||% "unknown",
+        config,
+        input$template_notes %||% ""
+      )
+    )
+
+    removeModal()
+    showNotification("Template saved!", type = "message")
+  })
+
+  # Load (apply) a template
+  observeEvent(input$load_template, {
+    req(input$template_selector, nzchar(input$template_selector))
+
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    on.exit(DBI::dbDisconnect(db))
+
+    tpl <- DBI::dbGetQuery(db,
+      "SELECT * FROM templates WHERE id = ?1",
+      params = list(as.integer(input$template_selector))
+    )
+    req(nrow(tpl) > 0)
+
+    config <- tryCatch(
+      jsonlite::fromJSON(tpl$config_json[1]),
+      error = function(e) NULL
+    )
+    req(!is.null(config))
+
+    if (tpl$type[1] == "search_preset") {
+      # Apply search settings
+      if (!is.null(config$cpus))
+        updateNumericInput(session, "diann_cpus", value = config$cpus)
+      if (!is.null(config$mem_gb))
+        updateNumericInput(session, "diann_mem_gb", value = config$mem_gb)
+      if (!is.null(config$time_hours))
+        updateNumericInput(session, "diann_time_hours", value = config$time_hours)
+      if (!is.null(config$partition))
+        updateTextInput(session, "diann_partition", value = config$partition)
+      if (!is.null(config$account))
+        updateTextInput(session, "diann_account", value = config$account)
+      if (!is.null(config$mass_acc_mode))
+        updateSelectInput(session, "mass_acc_mode", selected = config$mass_acc_mode)
+      if (!is.null(config$mass_acc))
+        updateNumericInput(session, "diann_mass_acc", value = config$mass_acc)
+      if (!is.null(config$ms1_acc))
+        updateNumericInput(session, "diann_mass_acc_ms1", value = config$ms1_acc)
+      if (!is.null(config$search_mode))
+        updateRadioButtons(session, "search_mode", selected = config$search_mode)
+      if (!is.null(config$enzyme))
+        updateSelectInput(session, "diann_enzyme", selected = config$enzyme)
+      if (!is.null(config$missed_cleavages))
+        updateNumericInput(session, "diann_missed_cleavages", value = config$missed_cleavages)
+      if (!is.null(config$max_var_mods))
+        updateNumericInput(session, "diann_max_var_mods", value = config$max_var_mods)
+      if (!is.null(config$normalization))
+        updateRadioButtons(session, "diann_normalization", selected = config$normalization)
+
+      showNotification(sprintf("Applied search preset: %s", tpl$name[1]),
+                       type = "message")
+
+    } else if (tpl$type[1] == "group_template") {
+      # Restore metadata
+      if (!is.null(config$metadata)) {
+        values$metadata <- config$metadata
+        showNotification(sprintf("Applied group template: %s", tpl$name[1]),
+                         type = "message")
+      }
+
+    } else if (tpl$type[1] == "gsea_config") {
+      if (!is.null(config$ontology))
+        updateSelectInput(session, "gsea_ontology", selected = config$ontology)
+      if (!is.null(config$logfc_cutoff))
+        updateSliderInput(session, "logfc_cutoff", value = config$logfc_cutoff)
+
+      showNotification(sprintf("Applied GSEA config: %s", tpl$name[1]),
+                       type = "message")
+    }
+  })
+
+}

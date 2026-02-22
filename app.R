@@ -178,6 +178,48 @@ delimp_data_dir <- Sys.getenv("DELIMP_DATA_DIR", "")
 # Combined flag — at least one backend available
 search_enabled <- docker_available || hpc_available || local_diann
 
+# Detect core facility mode — activated by config directory + staff.yml
+# The config directory is created by delimp-server setup, never present on
+# HF Spaces or regular local installs
+core_facility_config_dir <- Sys.getenv("DELIMP_CORE_DIR", "/srv/delimp")
+is_core_facility <- dir.exists(core_facility_config_dir) &&
+                    file.exists(file.path(core_facility_config_dir, "staff.yml"))
+
+# Load core facility configuration
+cf_config <- NULL
+if (is_core_facility) {
+  # Load required packages for core facility features
+  for (pkg in c("DBI", "RSQLite", "yaml", "uuid", "jsonlite")) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      install.packages(pkg, quiet = TRUE, repos = "https://cloud.r-project.org")
+    }
+  }
+  library(DBI)
+  library(RSQLite)
+
+  cf_config <- list(
+    staff    = yaml::read_yaml(file.path(core_facility_config_dir, "staff.yml")),
+    qc       = if (file.exists(file.path(core_facility_config_dir, "qc_config.yml")))
+                 yaml::read_yaml(file.path(core_facility_config_dir, "qc_config.yml"))
+               else NULL,
+    db_path  = file.path(core_facility_config_dir, "delimp.db"),
+    reports_dir  = file.path(core_facility_config_dir, "reports"),
+    state_dir    = file.path(core_facility_config_dir, "state"),
+    template_qmd = file.path(core_facility_config_dir, "report_template.qmd")
+  )
+
+  # Ensure directories exist
+  dir.create(cf_config$reports_dir, showWarnings = FALSE, recursive = TRUE)
+  dir.create(cf_config$state_dir, showWarnings = FALSE, recursive = TRUE)
+
+  # Initialize SQLite DB if needed
+  db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+  cf_init_db(db)  # defined in helpers_facility.R
+  DBI::dbDisconnect(db)
+
+  message("Core facility mode: ENABLED (", core_facility_config_dir, ")")
+}
+
 # Conditionally load search-related packages
 if (search_enabled) {
   for (pkg in c("shinyFiles", "jsonlite")) {
@@ -229,7 +271,8 @@ local({
 })
 
 ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch,
-               local_diann, delimp_data_dir)
+               local_diann, delimp_data_dir,
+               is_core_facility, cf_config)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules
@@ -315,8 +358,11 @@ server <- function(input, output, session) {
   server_phospho(input, output, session, values, add_to_log)
   server_search(input, output, session, values, add_to_log,
                 search_enabled, docker_available, docker_config, hpc_available, local_sbatch,
-                local_diann, delimp_data_dir)
+                local_diann, delimp_data_dir,
+                is_core_facility, cf_config)
   server_mofa(input, output, session, values, add_to_log)
+  server_facility(input, output, session, values, add_to_log,
+                  is_core_facility, cf_config, search_enabled)
   server_session(input, output, session, values, add_to_log)
 }
 

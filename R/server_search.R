@@ -9,7 +9,8 @@
 server_search <- function(input, output, session, values, add_to_log,
                           search_enabled, docker_available, docker_config,
                           hpc_available, local_sbatch,
-                          local_diann = FALSE, delimp_data_dir = "") {
+                          local_diann = FALSE, delimp_data_dir = "",
+                          is_core_facility = FALSE, cf_config = NULL) {
 
   # Early return if no search backend available
   if (!search_enabled) return(invisible())
@@ -1056,6 +1057,30 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # --- Shared: add to queue & notify ---
     values$diann_jobs <- c(values$diann_jobs, list(job_entry))
+
+    # Record in SQLite if core facility mode is active
+    if (is_core_facility && !is.null(cf_config)) {
+      tryCatch({
+        cf_record_search(cf_config$db_path, list(
+          analysis_name = analysis_name,
+          submitted_by  = input$staff_selector %||% "unknown",
+          lab           = input$search_lab %||% "",
+          instrument    = input$search_instrument %||% "",
+          organism      = input$diann_organism %||% "",
+          fasta_file    = if (length(values$diann_fasta_files) > 0)
+                            basename(values$diann_fasta_files[1]) else "",
+          n_raw_files   = if (!is.null(values$diann_raw_files))
+                            nrow(values$diann_raw_files) else 0L,
+          search_mode   = input$search_mode %||% "libfree",
+          slurm_job_id  = if (backend == "hpc") job_id else NA,
+          container_id  = if (backend == "docker") job_id else NA,
+          backend       = backend,
+          output_dir    = output_dir
+        ))
+      }, error = function(e) {
+        message("Core facility DB recording failed: ", e$message)
+      })
+    }
 
     add_to_log("DIA-NN Search Submitted", c(
       sprintf("# Job ID: %s", job_id),

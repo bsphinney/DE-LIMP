@@ -13,6 +13,110 @@
 server_session <- function(input, output, session, values, add_to_log) {
 
   # ============================================================================
+  #      Load Shared Analysis from URL Query Parameter (?analysis=UUID)
+  #      Enables live links from core facility reports on HF Spaces
+  # ============================================================================
+
+  observe({
+    query <- parseQueryString(session$clientData$url_search)
+    if (is.null(query$analysis)) return()
+
+    analysis_id <- query$analysis
+
+    # Validate UUID format
+    if (!grepl("^[a-f0-9-]{36}$", analysis_id)) {
+      showNotification("Invalid analysis link.", type = "error")
+      return()
+    }
+
+    # Download .rds from HF dataset repo
+    rds_url <- paste0(
+      "https://huggingface.co/datasets/brettsp/delimp-shared-analyses/",
+      "resolve/main/", analysis_id, ".rds"
+    )
+
+    withProgress(message = "Loading shared analysis...", {
+      tryCatch({
+        temp_rds <- tempfile(fileext = ".rds")
+        download.file(rds_url, temp_rds, mode = "wb", quiet = TRUE)
+        state <- readRDS(temp_rds)
+
+        # Restore all reactive values (same pattern as session load)
+        values$metadata   <- state$metadata
+        values$fit        <- state$fit
+        values$y_protein  <- state$y_protein
+        values$dpc_fit    <- state$dpc_fit
+        values$design     <- state$design
+        values$qc_stats   <- state$qc_stats
+        values$gsea_results <- state$gsea_results
+        values$diann_norm_detected <- state$diann_norm_detected %||% "unknown"
+
+        if (!is.null(state$gsea_results_cache)) {
+          values$gsea_results_cache <- state$gsea_results_cache
+        }
+        values$gsea_last_contrast <- state$gsea_last_contrast
+        values$gsea_last_org_db   <- state$gsea_last_org_db
+
+        # Phospho
+        values$phospho_detected <- state$phospho_detected
+        values$phospho_site_matrix <- state$phospho_site_matrix
+        values$phospho_site_info <- state$phospho_site_info
+        values$phospho_fit <- state$phospho_fit
+        values$phospho_site_matrix_filtered <- state$phospho_site_matrix_filtered
+        values$phospho_input_mode <- state$phospho_input_mode
+        values$ksea_results <- state$ksea_results
+        values$ksea_last_contrast <- state$ksea_last_contrast
+        values$phospho_annotations <- state$phospho_annotations
+
+        # MOFA (if saved)
+        if (!is.null(state$mofa_object)) {
+          values$mofa_object <- state$mofa_object
+          values$mofa_factors <- state$mofa_factors
+          values$mofa_variance_explained <- state$mofa_variance_explained
+        }
+
+        # UI state
+        values$color_plot_by_de <- state$color_plot_by_de %||% FALSE
+        values$cov1_name <- state$cov1_name %||% "Covariate1"
+        values$cov2_name <- state$cov2_name %||% "Covariate2"
+
+        # Update contrast selectors
+        if (!is.null(values$fit)) {
+          cn <- colnames(values$fit$contrasts)
+          sel <- state$contrast %||% cn[1]
+          updateSelectInput(session, "contrast_selector",
+                            choices = cn, selected = sel)
+          updateSelectInput(session, "contrast_selector_signal",
+                            choices = cn, selected = sel)
+          updateSelectInput(session, "contrast_selector_grid",
+                            choices = cn, selected = sel)
+          updateSelectInput(session, "contrast_selector_pvalue",
+                            choices = cn, selected = sel)
+        }
+
+        values$status <- "Loaded from shared link"
+
+        title <- if (!is.null(state$metadata_extra))
+          state$metadata_extra$title %||% "Shared Analysis"
+        else "Shared Analysis"
+
+        showNotification(
+          sprintf("Loaded: %s", title),
+          type = "message", duration = 8
+        )
+        nav_select("main_tabs", "DE Dashboard")
+
+      }, error = function(e) {
+        showNotification(
+          paste("Could not load analysis:", e$message),
+          type = "error", duration = 10
+        )
+      })
+    })
+  }) |> bindEvent(session$clientData$url_search, once = TRUE)
+
+
+  # ============================================================================
   #      Info Modals (Contextual Help)
   # ============================================================================
 
