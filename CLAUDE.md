@@ -51,16 +51,20 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 | `README.md` | Generated - content differs between remotes |
 | `Citations/` | Reference PDFs (LIMMA, FDR, DIA-NN papers) |
 | `docs/index.html` | GitHub Pages site |
+| `R/helpers_facility.R` | `cf_get_bracketing_qc()`, `cf_get_rolling_stats()`, `compute_rolling_cv()`, WAL mode, staff/lab/instrument/LC names (~340 lines) |
+| `R/server_facility.R` | Core facility: report generation, job history, QC dashboard, templates, staff auto-config (~660 lines) |
+| `report_template.qmd` | Quarto HTML report template — metadata, QC bracket, volcanos, DE stats, top proteins, normalization |
+| `seed_test_db.R` | Synthetic test data generator (20 searches, 30 QC runs, 3 reports) |
 | `.github/workflows/sync-to-hf.yml` | Auto-sync GitHub to HF |
 
 ## App Architecture
 
-### Structure (modular, ~6,100 lines total)
+### Structure (modular, ~7,100 lines total)
 ```
-app.R (270 lines):      Package loading, auto-install, backend detection (Docker/HPC), reactive values, module calls
-R/ui.R:                 build_ui() — CSS/JS, sidebar, all 10 tab nav_panels
-R/server_*.R (10 files): Server modules, each receives (input, output, session, values, ...)
-R/helpers*.R (4 files): Pure utility functions (no Shiny reactivity)
+app.R (270 lines):      Package loading, auto-install, backend detection (Docker/HPC/Core Facility), reactive values, module calls
+R/ui.R:                 build_ui() — CSS/JS, sidebar, all 12+ tab nav_panels (some conditional on core facility mode)
+R/server_*.R (11 files): Server modules, each receives (input, output, session, values, ...)
+R/helpers*.R (5 files): Pure utility functions (no Shiny reactivity)
 ```
 
 ### Module calling pattern (app.R server function)
@@ -80,6 +84,8 @@ server <- function(input, output, session) {
   server_search(input, output, session, values, add_to_log,
                 search_enabled, docker_available, docker_config, hpc_available, local_sbatch)
   server_mofa(input, output, session, values, add_to_log)
+  server_facility(input, output, session, values, add_to_log,
+                  is_core_facility, cf_config, search_enabled)
   server_session(input, output, session, values, add_to_log)
 }
 ```
@@ -96,6 +102,8 @@ server <- function(input, output, session) {
 - **Multi-View Integration** - MOFA2: dynamic view cards (2-6), file upload (RDS/CSV/TSV/Parquet), sample matching, training, 5 results tabs (Variance Explained, Factor Weights, Sample Scores, Top Features, Factor-DE Correlation)
 - **New Search** - DIA-NN search: dual backend (Docker local + HPC SSH/SLURM), file selection, FASTA database (UniProt download + upload), search settings (standard/phospho), resource controls, job queue (submit/monitor/cancel/recover/load), auto-load results (conditional on search backend availability)
 - **Data Chat** - AI-powered analysis (Google Gemini API)
+- **Search DB** *(core facility only)* - Full-width job history table, 6 filters (text/lab/status/staff/instrument/LC method), Load Results + Generate Report buttons
+- **Instrument QC** *(core facility only)* - QC trend plots (proteins, precursors, TIC), instrument filter, date range, runs table
 - **Education** - Learning resources
 
 ### Key Reactive Values
@@ -159,6 +167,22 @@ server <- function(input, output, session) {
 - XIC sidebar section, XICs buttons (DE Dashboard + Grid View), and auto-load logic all guarded by `if (!is_hf_space)`
 - On HF: info note with GitHub download link replaces the XIC sidebar section
 - On Local/HPC: full XIC viewer with path input, auto-detect, auto-load
+
+### Core Facility Mode
+- **Activation**: `DELIMP_CORE_DIR` env var pointing to a directory containing `staff.yml` (e.g., `/srv/delimp` or `.core_facility_test/`)
+- **Detection**: `is_core_facility <- dir.exists(core_facility_config_dir) && file.exists(file.path(core_facility_config_dir, "staff.yml"))`
+- **Config object** (`cf_config`): `list(staff, qc, db_path, reports_dir, state_dir, template_qmd)` — loaded once at startup, passed to `build_ui()` and `server_facility()`
+- **SQLite database** (`delimp.db`): 4 tables — `searches` (job tracking with lab/instrument/project/LC method), `qc_runs` (HeLa QC metrics per instrument), `reports` (generated report metadata + QC bracket IDs), `templates` (saved search presets/group templates)
+- **WAL mode**: All SQLite connections use `PRAGMA journal_mode=WAL` for concurrent read performance
+- **Staff selector**: Choosing a staff member auto-fills SSH host, username, key path, SLURM account/partition from YAML config. Auto-tests SSH connection on selection.
+- **Report generation flow**: `generate_report_impl()` → save state `.rds` → render Quarto `.qmd` → move HTML to reports dir → attempt HF upload → record in SQLite reports table → show success UI with download button
+- **Quarto rendering**: `quarto::quarto_render()` with `output_file` as filename only (not full path — quarto rejects paths). Rendered HTML moved from template dir to reports dir. Requires `quarto` R package + CLI (`brew install quarto`).
+- **State object**: Full analysis snapshot (fit, y_protein, metadata, design, phospho, GSEA, MOFA results + metadata_extra with title/lab/instrument/lc_method/project/analyst)
+- **y_protein is EList**: When reading state in report template, extract `$E` for the expression matrix (not `as.matrix()` directly)
+- **Job history**: `job_history_data()` reactive queries SQLite with 6 filter params. DT table in dedicated Search DB tab (moved out of cramped Panel 3 card).
+- **Project field**: `selectizeInput` with `create = TRUE` for autocomplete + new entry. Dropdown filtered by staff + lab selections via `bindEvent(observe(...))`.
+- **Conditional UI**: All core facility tabs (`Search DB`, `Instrument QC`) and sidebar sections wrapped in `if (is_core_facility)`. Non-facility users see no difference.
+- **Test data**: `seed_test_db.R` generates synthetic SQLite data (20 searches, 30 QC runs across 2 instruments, 3 reports, 2 templates)
 
 ## Development Workflow
 
@@ -366,6 +390,11 @@ docker push brettphinney/delimp-base:latest
 | `return()` inside `withProgress` doesn't exit handler | `withProgress` uses `eval()` — `return()` exits `withProgress`, not the enclosing function. Restructure with flat `tryCatch` + early returns outside `withProgress`. |
 | Recovered job file count wrong (e.g. 83 instead of 6) | DIA-NN log lines start with `[HH:MM]`. Regex `^[0-9]+` matches the timestamp. Use lookahead: `[0-9]+(?=\\s+files will be processed)`. |
 | Recover button appears to hang | `find` on large shared filesystems (e.g. `/quobyte/`) is very slow. Fixed: use `timeout 10 find <output_base> -maxdepth 4` targeted search. |
+| Quarto `output_file` path error | `quarto::quarto_render()` rejects full paths for `output_file`. Pass filename only, then `file.rename()` to target dir. |
+| SQLite `Parameter N does not have length 1` | `NULL` has length 0; SQLite params must be length 1. Use `NA_character_` instead of `NULL` for missing values. |
+| Generate Report button does nothing | Silent `req(values$fit)` blocks without feedback. Fixed: explicit `showNotification()` warning when no DE results loaded. |
+| Quarto template `colSums` error on `y_protein` | `y_protein` is limma `EList`, not a matrix. Extract `$E` for the expression matrix: `if ("E" %in% names(y)) y$E else as.matrix(y)`. |
+| DT table invisible in bslib card_body | `DTOutput` defaults to `fill = TRUE`, collapses to zero height in `card_body` with `overflow-y: auto`. Solution: move to standalone tab or set `fill = FALSE`. |
 
 ## Version History
 
@@ -388,6 +417,7 @@ Current version: **v3.0.0** (2026-02-20). See [CHANGELOG.md](CHANGELOG.md) for d
 - **Docker Local Backend** (v3.0): "One UI, two engines" — same search config UI for both Docker (local) and HPC (SSH/SLURM) backends. Backend detection at startup (`docker info` / `Sys.which("sbatch")`). Shared `build_diann_flags()` eliminates flag duplication. DIA-NN Docker image built separately by users via `build_diann_docker.sh` (license compliance — DIA-NN is proprietary, free for academic use, cannot be redistributed).
 - **Job Queue Recovery** (v2.5): "Recover" button queries `sacct`/`scontrol`/`docker ps -a` to repopulate lost job queue. 3-strategy log discovery for HPC (scontrol → sacct SubmitLine → find). Updates existing entries with fresh data.
 - **MOFA2 Multi-View Integration** (v3.0): Standalone tab for unsupervised integration of 2-6 data views using MOFA2. Dynamic view cards with add/remove, smart RDS parser (DE-LIMP session, limma objects, matrices, data frames), CSV/TSV/Parquet matrix upload, phospho tab integration, sample matching with overlap stats. Training with configurable factors/convergence/scaling. 5 results tabs: variance explained heatmap, factor weights browser (plotly), sample scores scatter, top features table (DT), Factor-DE correlation. Session save/load, methodology text, reproducibility logging. HF resource limits (max 10 factors, fast convergence).
+- **Core Facility Mode** (v3.1, branch `claude/heuristic-wu`): Optional mode activated by `DELIMP_CORE_DIR` env var. SQLite database tracking all DIA-NN searches with metadata (lab, instrument, project, LC method, analyst). Staff YAML config auto-fills SSH/SLURM fields. Instrument QC dashboard with protein/precursor/TIC trend plots and ±2SD control lines. Search DB tab with 6-filter job history table. Quarto report generation producing standalone HTML with metadata, QC bracket comparison, volcano plots, DE stats, top proteins, normalization diagnostics. Report state saved as `.rds` for re-loading. Template system for saving/loading search presets. WAL mode for concurrent SQLite access.
 
 ## Current TODO
 
@@ -431,6 +461,16 @@ Current version: **v3.0.0** (2026-02-20). See [CHANGELOG.md](CHANGELOG.md) for d
 - [ ] **Factor annotation**: Link factors to GO terms based on top weights
 - [ ] **DIA-NN report processing**: Process raw DIA-NN .parquet as MOFA view via existing pipeline
 - [ ] **Dockerfile**: Add MOFA2 + basilisk to Docker image
+
+### Core Facility Mode — Next Steps
+- [ ] **QC run ingestion**: Auto-record QC metrics when loading HeLa digest report.parquet (detect by filename pattern or checkbox)
+- [ ] **Report template polish**: Add GSEA section, MOFA variance explained, configurable logo/header
+- [ ] **Report comparison**: Side-by-side QC bracket + DE summary for two reports on same instrument
+- [ ] **HF state upload/download**: Upload `.rds` state to HF Spaces for shareable live links
+- [ ] **Template application on search submit**: Auto-apply saved search preset when submitting new DIA-NN job
+- [ ] **Audit log**: Track who generated which report, when, with what parameters
+- [ ] **Multi-instrument QC alerts**: Flag instruments where protein count drops below rolling mean - 2*SD
+- [ ] **End-to-end testing**: Test full flow with real DIA-NN search → QC ingest → report generation
 
 ### General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
