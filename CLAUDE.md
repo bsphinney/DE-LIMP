@@ -42,7 +42,8 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 | `R/helpers_search.R` | `ssh_exec()`, `scp_download/upload()`, `build_diann_flags()`, `build_docker_command()`, `check_docker_*()`, `recover_slurm_jobs()`, `recover_docker_jobs()`, `generate_sbatch_script()`, UniProt proteome search (~1050 lines) |
 | `R/server_search.R` | Docker/HPC dual backend, SSH connection, DIA-NN search config, file browsing, job queue (submit/monitor/cancel/recover/load), SCP result download (~1750 lines) |
 | `build_diann_docker.sh` | User-facing script to build DIA-NN Docker image locally (license notice, downloads from GitHub, builds x86_64 image) |
-| `Dockerfile` | Docker container for HF Spaces and HPC deployment |
+| `Dockerfile` | Thin HF/HPC image — `FROM brettphinney/delimp-base:v3.0` + COPY app code |
+| `Dockerfile.base` | Pre-built base image with all system deps, R/CRAN/Bioc/MOFA2+basilisk (~5 GB) |
 | `HPC_DEPLOYMENT.md` | Guide for HPC cluster deployment with Apptainer/Singularity |
 | `USER_GUIDE.md` | End-user documentation |
 | `README_GITHUB.md` | **SOURCE** for GitHub README (edit this!) |
@@ -217,15 +218,35 @@ git add README.md && git commit -m "Restore GitHub README" && git push origin ma
 rm README_GITHUB_BACKUP.md
 ```
 
-### Adding New R Packages
-When adding features that require new packages:
-1. Add `library()` call to app.R
-2. Update Dockerfile to install the package (CRAN in Section 2, Bioconductor in Section 3)
-3. Consider system dependencies: graphics packages need `libcairo2-dev`, XML/web need `libxml2-dev`
-4. Commit app.R, R/ modules, and Dockerfile together
+### Docker Base Image (CRITICAL for HF deploys)
+HF has a ~30-minute build timeout. All heavy dependencies live in a **pre-built base image** on Docker Hub (`brettphinney/delimp-base:v3.0`). The HF `Dockerfile` is just `FROM` that image + `COPY` app files — builds in under 1 minute.
 
-### Minimize HF Builds
-HF Docker builds take 5-10 min (cached) or 30-45 min (Dockerfile changes). Always test locally first, batch changes, and push only when fully tested.
+- **Base image**: `brettphinney/delimp-base:v3.0` on Docker Hub (public)
+- **Contents**: rocker/shiny:4.5.0 + all system deps + CRAN + Bioconductor + MOFA2/basilisk
+- **Source**: `Dockerfile.base` in repo
+- **Size**: ~5 GB
+- **Build machine**: Windows box at `~/DE-LIMP` (has Docker Desktop)
+
+**Code-only changes** (most pushes): Just `git push origin main` — HF rebuilds instantly.
+
+**Adding new R packages** (rebuild base image required):
+```bash
+# 1. Edit Dockerfile.base — add package to appropriate RUN line
+# 2. On Windows box:
+cd ~/DE-LIMP
+git pull origin main
+docker build --platform linux/amd64 -t brettphinney/delimp-base:v3.0 -f Dockerfile.base .
+docker push brettphinney/delimp-base:v3.0
+docker tag brettphinney/delimp-base:v3.0 brettphinney/delimp-base:latest
+docker push brettphinney/delimp-base:latest
+# 3. Also update Dockerfile.search if it exists (keeps parity)
+# 4. Commit Dockerfile.base, app.R, R/ modules together
+# 5. git push origin main — HF picks up new base image on next build
+```
+
+**If HF build fails with "not found"**: Check Docker Hub repo is set to **Public** at https://hub.docker.com/r/brettphinney/delimp-base. Factory reboot the Space at HF settings if needed.
+
+**Docker Hub credentials**: Username `brettphinney`, log in with `docker login -u brettphinney` on the Windows box.
 
 ## Key Patterns & Gotchas
 
