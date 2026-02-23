@@ -1285,81 +1285,88 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )
     ),
 
-    # Search Database (core facility mode only)
-    if (is_core_facility) nav_panel("Search DB", icon = icon("database"),
-      div(style = "padding: 15px;",
-        # Header with count
-        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
-          tags$h5(icon("database"), " Search Database", style = "margin: 0;"),
-          tags$span(class = "text-muted", textOutput("job_count_text", inline = TRUE))
-        ),
+    # Core Facility (core facility mode only) — Search DB + Instrument QC sub-tabs
+    if (is_core_facility) nav_panel("Core Facility", icon = icon("building"),
+      navset_card_tab(
+        id = "core_facility_tabs",
 
-        # Filter row
-        div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;",
-          div(style = "flex: 2; min-width: 180px;",
-            textInput("job_search_text", NULL, placeholder = "Search by name...")
-          ),
-          div(style = "flex: 1; min-width: 120px;",
-            selectInput("job_filter_lab", NULL,
-              choices = c("All labs" = ""), selected = "")
-          ),
-          div(style = "flex: 1; min-width: 120px;",
-            selectInput("job_filter_status", NULL,
-              choices = c("All" = "", "Queued" = "queued", "Running" = "running",
-                          "Completed" = "completed", "Failed" = "failed"),
-              selected = "")
-          ),
-          div(style = "flex: 1; min-width: 120px;",
-            selectInput("job_filter_staff", NULL,
-              choices = c("All staff" = ""), selected = "")
-          ),
-          div(style = "flex: 1; min-width: 120px;",
-            selectInput("job_filter_instrument", NULL,
-              choices = c("All instruments" = ""), selected = "")
-          ),
-          div(style = "flex: 1; min-width: 120px;",
-            selectInput("job_filter_lc_method", NULL,
-              choices = c("All LC methods" = ""), selected = "")
+        # ---------- Search DB sub-tab ----------
+        nav_panel("Search DB", icon = icon("database"),
+          div(style = "padding: 15px;",
+            # Header with count
+            div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+              tags$h5(icon("database"), " Search Database", style = "margin: 0;"),
+              tags$span(class = "text-muted", textOutput("job_count_text", inline = TRUE))
+            ),
+
+            # Filter row
+            div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;",
+              div(style = "flex: 2; min-width: 180px;",
+                textInput("job_search_text", NULL, placeholder = "Search by name...")
+              ),
+              div(style = "flex: 1; min-width: 120px;",
+                selectInput("job_filter_lab", NULL,
+                  choices = c("All labs" = ""), selected = "")
+              ),
+              div(style = "flex: 1; min-width: 120px;",
+                selectInput("job_filter_status", NULL,
+                  choices = c("All" = "", "Queued" = "queued", "Running" = "running",
+                              "Completed" = "completed", "Failed" = "failed"),
+                  selected = "")
+              ),
+              div(style = "flex: 1; min-width: 120px;",
+                selectInput("job_filter_staff", NULL,
+                  choices = c("All staff" = ""), selected = "")
+              ),
+              div(style = "flex: 1; min-width: 120px;",
+                selectInput("job_filter_instrument", NULL,
+                  choices = c("All instruments" = ""), selected = "")
+              ),
+              div(style = "flex: 1; min-width: 120px;",
+                selectInput("job_filter_lc_method", NULL,
+                  choices = c("All LC methods" = ""), selected = "")
+              )
+            ),
+
+            # Job history table
+            DTOutput("job_history_table"),
+
+            # Action buttons
+            div(style = "margin-top: 10px; display: flex; gap: 8px; align-items: center;",
+              actionButton("job_load_results", "Load Selected Results",
+                icon = icon("folder-open"),
+                class = "btn-outline-primary btn-sm"),
+              actionButton("job_generate_report", "Generate Report",
+                icon = icon("file-export"),
+                class = "btn-outline-success btn-sm"),
+              div(style = "flex: 1;"),
+              uiOutput("report_link_ui")
+            )
           )
         ),
 
-        # Job history table
-        DTOutput("job_history_table"),
-
-        # Action buttons
-        div(style = "margin-top: 10px; display: flex; gap: 8px; align-items: center;",
-          actionButton("job_load_results", "Load Selected Results",
-            icon = icon("folder-open"),
-            class = "btn-outline-primary btn-sm"),
-          actionButton("job_generate_report", "Generate Report",
-            icon = icon("file-export"),
-            class = "btn-outline-success btn-sm"),
-          div(style = "flex: 1;"),
-          uiOutput("report_link_ui")
+        # ---------- Instrument QC sub-tab ----------
+        nav_panel("Instrument QC", icon = icon("heartbeat"),
+          div(style = "padding: 15px;",
+            div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+              tags$h5("Instrument Performance Dashboard", style = "margin: 0;"),
+              div(style = "display: flex; gap: 10px; align-items: center;",
+                selectInput("qc_instrument_filter", NULL,
+                  choices = c("All Instruments" = ""),
+                  selected = "", width = "200px"),
+                selectInput("qc_date_range", NULL,
+                  choices = c("Last 30 days" = "30", "Last 90 days" = "90",
+                              "Last 180 days" = "180", "All time" = "9999"),
+                  selected = "90", width = "150px")
+              )
+            ),
+            plotly::plotlyOutput("qc_protein_trend", height = "280px"),
+            plotly::plotlyOutput("qc_precursor_trend", height = "280px"),
+            plotly::plotlyOutput("qc_tic_trend", height = "280px"),
+            hr(),
+            DTOutput("qc_runs_table")
+          )
         )
-      )
-    ),
-
-    # Instrument QC Dashboard (core facility mode only)
-    if (is_core_facility) nav_panel("Instrument QC", icon = icon("heartbeat"),
-      div(style = "padding: 15px;",
-        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
-          tags$h5("Instrument Performance Dashboard", style = "margin: 0;"),
-          div(style = "display: flex; gap: 10px; align-items: center;",
-            selectInput("qc_instrument_filter", NULL,
-              choices = c("All Instruments" = ""),
-              selected = "", width = "200px"),
-            selectInput("qc_date_range", NULL,
-              choices = c("Last 30 days" = "30", "Last 90 days" = "90",
-                          "Last 180 days" = "180", "All time" = "9999"),
-              selected = "90", width = "150px")
-          )
-        ),
-        plotly::plotlyOutput("qc_protein_trend", height = "280px"),
-        plotly::plotlyOutput("qc_precursor_trend", height = "280px"),
-        plotly::plotlyOutput("qc_tic_trend", height = "280px"),
-        hr(),
-        DTOutput("qc_runs_table")
       )
     ),
 
