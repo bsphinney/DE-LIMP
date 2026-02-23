@@ -226,7 +226,7 @@ server_ai <- function(input, output, session, values) {
   # --- Data Chat Info Modal ---
   observeEvent(input$data_chat_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " About Data Chat"),
+      title = tagList(icon("question-circle"), " About AI Analysis"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
         tags$h6("How it works"),

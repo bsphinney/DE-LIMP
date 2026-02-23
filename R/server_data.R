@@ -596,7 +596,7 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         )
         add_to_log("Contrast Fitting", contrast_code)
 
-        nav_select("main_tabs", "QC Plots")
+        nav_select("main_tabs", "QC")
         showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
       }, error = function(e) {
         showNotification(paste("Pipeline error:", e$message), type = "error", duration = NULL)

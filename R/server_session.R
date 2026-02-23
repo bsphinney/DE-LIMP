@@ -239,6 +239,74 @@ server_session <- function(input, output, session, values, add_to_log) {
     ))
   })
 
+  # --- Dataset Summary Info Modal ---
+  observeEvent(input$dataset_summary_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " About Dataset Summary"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Overview of your uploaded dataset including the number of samples, proteins quantified, ",
+          "experimental groups, and data completeness metrics."),
+        p("Use this to verify that your data loaded correctly and that the expected number of ",
+          "samples and proteins are present before running the analysis pipeline.")
+      )
+    ))
+  })
+
+  # --- Replicate Consistency Info Modal ---
+  observeEvent(input$replicate_consistency_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " About Replicate Consistency"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        tags$h6("What this table shows"),
+        p("Per-group summary statistics including sample counts, median protein-level coefficients of variation (CV), ",
+          "and quantification completeness across replicates."),
+        tags$h6("What to look for"),
+        tags$ul(
+          tags$li(strong("Lower CV = better reproducibility. "), "CVs below 20% are excellent for proteomics."),
+          tags$li(strong("High completeness "), "means fewer missing values within each group."),
+          tags$li("Groups with consistently higher CVs may have more biological heterogeneity or technical issues.")
+        ),
+        p("Export to CSV to include in QC reports or supplementary materials.")
+      )
+    ))
+  })
+
+  # --- Replicate Consistency CSV Export ---
+  output$download_replicate_csv <- downloadHandler(
+    filename = function() {
+      paste0("Replicate_Consistency_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      req(values$y_protein, values$metadata)
+      meta <- values$metadata
+      groups <- unique(meta$Group[meta$Group != ""])
+      summary_list <- lapply(groups, function(g) {
+        files <- meta$File.Name[meta$Group == g]
+        mat <- values$y_protein$E[, intersect(colnames(values$y_protein$E), files), drop = FALSE]
+        n_samples <- ncol(mat)
+        n_proteins <- nrow(mat)
+        completeness <- round(100 * sum(!is.na(mat)) / length(mat), 1)
+        linear_mat <- 2^mat
+        cvs <- apply(linear_mat, 1, function(x) {
+          x <- x[!is.na(x)]
+          if (length(x) > 1) (sd(x) / mean(x)) * 100 else NA
+        })
+        data.frame(
+          Group = g,
+          Samples = n_samples,
+          Proteins = n_proteins,
+          Median_CV = round(median(cvs, na.rm = TRUE), 1),
+          Mean_CV = round(mean(cvs, na.rm = TRUE), 1),
+          Completeness_Pct = completeness,
+          stringsAsFactors = FALSE
+        )
+      })
+      write.csv(do.call(rbind, summary_list), file, row.names = FALSE)
+    }
+  )
+
   # --- QC Trends Info Modal ---
   observeEvent(input$qc_trends_info_btn, {
     showModal(modalDialog(
@@ -292,6 +360,36 @@ server_session <- function(input, output, session, values, add_to_log) {
           "to remove their effects before testing for group differences.")
       )
     ))
+  })
+
+  # ============================================================================
+  #      Settings Modal (Navbar Gear Icon)
+  # ============================================================================
+
+  observeEvent(input$open_settings, {
+    showModal(modalDialog(
+      title = tagList(icon("gear"), " Settings"),
+      size = "m",
+      passwordInput("settings_api_key", "Gemini API Key",
+        value = input$user_api_key %||% "", placeholder = "AIzaSy..."),
+      p(class = "text-muted small",
+        "Required for AI Analysis. Get a key at ",
+        a(href = "https://ai.google.dev", target = "_blank", "ai.google.dev")),
+      textInput("settings_model_name", "Model Name",
+        value = input$model_name %||% "gemini-3-flash-preview",
+        placeholder = "gemini-3-flash-preview"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("save_settings", "Save", class = "btn-success", icon = icon("check"))
+      )
+    ))
+  })
+
+  observeEvent(input$save_settings, {
+    updateTextInput(session, "user_api_key", value = input$settings_api_key)
+    updateTextInput(session, "model_name", value = input$settings_model_name)
+    removeModal()
+    showNotification("Settings saved", type = "message", duration = 3)
   })
 
   # ============================================================================

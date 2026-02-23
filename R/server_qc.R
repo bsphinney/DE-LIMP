@@ -117,6 +117,72 @@ server_qc <- function(input, output, session, values) {
 
   output$r_qc_table <- renderDT({ req(values$qc_stats); df_display <- values$qc_stats %>% arrange(Run) %>% mutate(ID = 1:n()) %>% dplyr::select(ID, Run, everything()); datatable(df_display, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE) })
 
+  # QC Stats CSV export
+  output$download_qc_stats_csv <- downloadHandler(
+    filename = function() {
+      paste0("QC_Stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      req(values$qc_stats)
+      write.csv(values$qc_stats %>% arrange(Run), file, row.names = FALSE)
+    }
+  )
+
+  # QC Stats info modal
+  observeEvent(input$qc_stats_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " QC Statistics Table"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Per-run QC statistics extracted from your DIA-NN report: precursor counts, protein counts, and MS1 signal intensity."),
+        p("Use this table to identify outlier runs with unusually low precursor/protein counts or signal intensity. ",
+          "Export to CSV for external QC tracking or reporting.")
+      )
+    ))
+  })
+
+  # Precursors info modal
+  observeEvent(input$qc_precursors_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Precursor Identification Counts"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Number of peptide precursors identified per run at your Q-value cutoff. ",
+          "Higher counts indicate better instrument sensitivity and sample quality."),
+        p("Dashed lines show the group average. A sudden drop in one sample may indicate ",
+          "an injection failure, sample degradation, or instrument issue.")
+      )
+    ))
+  })
+
+  # Proteins info modal
+  observeEvent(input$qc_proteins_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Protein Group Counts"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Number of protein groups quantified per run. This is derived from the precursor counts ",
+          "after grouping peptides into proteins."),
+        p("Lower counts in specific samples may indicate sample quality issues, while ",
+          "consistently lower counts in one group could suggest biological differences in proteome complexity.")
+      )
+    ))
+  })
+
+  # MS1 Signal info modal
+  observeEvent(input$qc_ms1_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " MS1 Signal Intensity"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Overall MS1 signal intensity per run. Consistent signal across runs indicates ",
+          "stable instrument performance and uniform sample loading."),
+        p("A gradual decline over time may indicate LC column degradation or source contamination. ",
+          "Sudden drops suggest injection or sample preparation problems.")
+      )
+    ))
+  })
+
   # ============================================================================
   #  3. Group QC Violin Plot
   # ============================================================================

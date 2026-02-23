@@ -1,5 +1,5 @@
 # ==============================================================================
-#  SERVER MODULE — DE Dashboard, Volcano, Consistent DE, Selection Sync
+#  SERVER MODULE — DE Dashboard, Volcano, Robust Changes (Consistent DE), Selection Sync
 #  Called from app.R as: server_de(input, output, session, values, add_to_log)
 # ==============================================================================
 
@@ -495,5 +495,122 @@ server_de <- function(input, output, session, values, add_to_log) {
         strip.text = element_text(face = "bold")
       )
   })
+
+  # --- Heatmap PNG Export ---
+  output$download_heatmap_png <- downloadHandler(
+    filename = function() {
+      paste0("Heatmap_", make.names(input$contrast_selector), ".png")
+    },
+    content = function(file) {
+      req(values$fit, values$y_protein, input$contrast_selector)
+      df_volc <- volcano_data(); prot_ids <- NULL
+      if (!is.null(input$de_table_rows_selected)) {
+        current_table_data <- df_volc
+        if (!is.null(values$plot_selected_proteins)) current_table_data <- current_table_data %>% filter(Protein.Group %in% values$plot_selected_proteins)
+        prot_ids <- current_table_data$Protein.Group[input$de_table_rows_selected]
+      } else if (!is.null(values$plot_selected_proteins)) {
+        prot_ids <- values$plot_selected_proteins; if (length(prot_ids) > 50) prot_ids <- head(prot_ids, 50)
+      } else {
+        top_prots <- topTable(values$fit, coef = input$contrast_selector, number = 20); prot_ids <- rownames(top_prots)
+      }
+      valid_ids <- intersect(prot_ids, rownames(values$y_protein$E))
+      if (length(valid_ids) == 0) return(NULL)
+      mat <- values$y_protein$E[valid_ids, , drop = FALSE]; mat_z <- t(apply(mat, 1, cal_z_score))
+      meta <- values$metadata[match(colnames(mat), values$metadata$File.Name), ]; groups <- factor(meta$Group)
+      ha <- HeatmapAnnotation(Group = groups, col = list(Group = setNames(rainbow(length(levels(groups))), levels(groups))))
+
+      png(file, width = 1200, height = 800, res = 150)
+      ComplexHeatmap::draw(Heatmap(mat_z, name = "Z-score", top_annotation = ha,
+        cluster_rows = TRUE, cluster_columns = TRUE, show_column_names = FALSE))
+      dev.off()
+    }
+  )
+
+  # --- CV Histogram PNG Export ---
+  output$download_cv_hist_png <- downloadHandler(
+    filename = function() {
+      paste0("CV_Distribution_", make.names(input$contrast_selector), ".png")
+    },
+    content = function(file) {
+      req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
+      df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
+        as.data.frame() %>% filter(adj.P.Val < 0.05)
+      if (!"Protein.Group" %in% colnames(df_res_raw)) {
+        df_res <- df_res_raw %>% rownames_to_column("Protein.Group")
+      } else { df_res <- df_res_raw }
+      if (nrow(df_res) == 0) return(NULL)
+
+      protein_ids_for_cv <- df_res$Protein.Group
+      raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]
+      linear_exprs <- 2^raw_exprs; cv_list <- list()
+      for (g in unique(values$metadata$Group)) {
+        if (g == "") next
+        files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
+        group_cols <- intersect(colnames(linear_exprs), files_in_group)
+        if (length(group_cols) > 1) {
+          group_data <- linear_exprs[, group_cols, drop = FALSE]
+          cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
+        } else { cv_list[[paste0("CV_", g)]] <- NA }
+      }
+      cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
+      cv_long <- cv_df %>%
+        pivot_longer(cols = starts_with("CV_"), names_to = "Group", values_to = "CV") %>%
+        mutate(Group = gsub("CV_", "", Group)) %>% filter(!is.na(CV))
+      cv_averages <- cv_long %>% group_by(Group) %>%
+        summarise(Avg_CV = mean(CV, na.rm = TRUE), .groups = 'drop')
+
+      p <- ggplot(cv_long, aes(x = CV)) +
+        geom_histogram(aes(fill = Group), bins = 30, alpha = 0.7, color = "white") +
+        geom_vline(data = cv_averages, aes(xintercept = Avg_CV, color = Group), linetype = "dashed", size = 1.2) +
+        geom_text(data = cv_averages, aes(x = Avg_CV, y = Inf, label = paste0("Avg: ", round(Avg_CV, 1), "%")),
+          vjust = 1.5, hjust = -0.1, size = 3.5, fontface = "bold") +
+        facet_wrap(~ Group, ncol = 2, scales = "free_y") +
+        labs(title = paste0("CV Distribution by Group (", nrow(df_res), " significant proteins)"),
+             x = "Coefficient of Variation (%)", y = "Number of Proteins") +
+        theme_bw(base_size = 14) +
+        theme(legend.position = "none",
+          strip.background = element_rect(fill = "#667eea", color = NA),
+          strip.text = element_text(color = "white", face = "bold", size = 12))
+
+      ggsave(file, plot = p, width = 10, height = 7, dpi = 150)
+    }
+  )
+
+  # --- Consistent DE Table CSV Export ---
+  output$download_consistent_csv <- downloadHandler(
+    filename = function() {
+      paste0("Robust_Changes_", make.names(input$contrast_selector), ".csv")
+    },
+    content = function(file) {
+      req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
+      df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
+        as.data.frame() %>% filter(adj.P.Val < 0.05)
+      if (!"Protein.Group" %in% colnames(df_res_raw)) {
+        df_res <- df_res_raw %>% rownames_to_column("Protein.Group")
+      } else { df_res <- df_res_raw }
+      if (nrow(df_res) == 0) { write.csv(data.frame(Status = "No significant proteins"), file, row.names = FALSE); return() }
+
+      protein_ids_for_cv <- df_res$Protein.Group
+      raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]
+      linear_exprs <- 2^raw_exprs; cv_list <- list()
+      for (g in unique(values$metadata$Group)) {
+        if (g == "") next
+        files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
+        group_cols <- intersect(colnames(linear_exprs), files_in_group)
+        if (length(group_cols) > 1) {
+          group_data <- linear_exprs[, group_cols, drop = FALSE]
+          cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
+        } else { cv_list[[paste0("CV_", g)]] <- NA }
+      }
+      cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
+      df_final <- left_join(df_res, cv_df, by = "Protein.Group") %>%
+        rowwise() %>% mutate(Avg_CV = mean(c_across(starts_with("CV_")), na.rm = TRUE)) %>%
+        ungroup() %>% arrange(Avg_CV) %>%
+        mutate(Stability = ifelse(Avg_CV < 20, "High", "Low")) %>%
+        dplyr::select(Protein.Group, Stability, Avg_CV, logFC, adj.P.Val, starts_with("CV_")) %>%
+        mutate(across(where(is.numeric), ~round(.x, 4)))
+      write.csv(df_final, file, row.names = FALSE)
+    }
+  )
 
 }

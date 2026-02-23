@@ -457,4 +457,31 @@ server_gsea <- function(input, output, session, values, add_to_log) {
     if (nrow(values$gsea_results) > 0) ridgeplot(values$gsea_results)
   }, height = 700)
 
+  # --- GSEA Results CSV Export ---
+  output$download_gsea_csv <- downloadHandler(
+    filename = function() {
+      ont <- input$gsea_ontology %||% "GSEA"
+      paste0("GSEA_", ont, "_Results_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      req(values$gsea_results)
+      write.csv(as.data.frame(values$gsea_results), file, row.names = FALSE)
+    }
+  )
+
+  # --- GSEA Dot Plot PNG Export ---
+  output$download_gsea_dot_png <- downloadHandler(
+    filename = function() {
+      ont <- input$gsea_ontology %||% "GSEA"
+      paste0("GSEA_DotPlot_", ont, ".png")
+    },
+    content = function(file) {
+      req(values$gsea_results)
+      if (nrow(values$gsea_results) == 0) return(NULL)
+      ont_label <- get_ont_label(input$gsea_ontology)
+      p <- dotplot(values$gsea_results, showCategory = 20) + ggtitle(paste("GSEA:", ont_label))
+      ggsave(file, plot = p, width = 10, height = 8, dpi = 150)
+    }
+  )
+
 }

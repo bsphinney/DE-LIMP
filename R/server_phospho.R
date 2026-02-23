@@ -1559,7 +1559,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details, see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1595,7 +1595,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details, see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1629,7 +1629,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details, see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1666,7 +1666,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details (imputation, filtering), see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1715,7 +1715,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details (scoring algorithm, database sources), see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1753,7 +1753,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details, see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))
@@ -1795,7 +1795,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ),
       tags$p(class = "text-muted small mt-2", icon("book"),
         " For full methodology details, see the ",
-        tags$strong("Reproducibility \u2192 Methodology"), " tab."
+        tags$strong("Methods & Code \u2192 Methods Summary"), " tab."
       ),
       easyClose = TRUE, footer = modalButton("Close")
     ))

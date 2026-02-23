@@ -364,6 +364,50 @@ server <- function(input, output, session) {
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_session(input, output, session, values, add_to_log)
+
+  # --- Progressive reveal: hide result-dependent tabs until state exists ---
+  session$onFlushed(once = TRUE, function() {
+    nav_hide("main_tabs", "QC")
+    nav_hide("main_tabs", "DE Dashboard")
+    nav_hide("main_tabs", "Gene Set Enrichment")
+    nav_hide("main_tabs", "mofa_tab")
+    nav_hide("main_tabs", "AI Analysis")
+    nav_hide("main_tabs", "Output")
+    nav_hide("main_tabs", "Phosphoproteomics")
+  })
+
+  observe({
+    if (!is.null(values$raw_data)) {
+      nav_show("main_tabs", "QC")
+    } else {
+      nav_hide("main_tabs", "QC")
+    }
+  })
+
+  observe({
+    if (!is.null(values$fit)) {
+      nav_show("main_tabs", "DE Dashboard")
+      nav_show("main_tabs", "Gene Set Enrichment")
+      nav_show("main_tabs", "mofa_tab")
+      nav_show("main_tabs", "AI Analysis")
+      nav_show("main_tabs", "Output")
+    } else {
+      nav_hide("main_tabs", "DE Dashboard")
+      nav_hide("main_tabs", "Gene Set Enrichment")
+      nav_hide("main_tabs", "mofa_tab")
+      nav_hide("main_tabs", "AI Analysis")
+      nav_hide("main_tabs", "Output")
+    }
+  })
+
+  observe({
+    phospho <- values$phospho_detected
+    if (!is.null(phospho) && isTRUE(phospho$detected)) {
+      nav_show("main_tabs", "Phosphoproteomics")
+    } else {
+      nav_hide("main_tabs", "Phosphoproteomics")
+    }
+  })
 }
 
 

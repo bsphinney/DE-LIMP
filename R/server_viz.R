@@ -458,6 +458,164 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     datatable(summary_df, options = list(dom = 't', pageLength = 10), rownames = FALSE)
   })
 
+  # ============================================================================
+  #  PCA Plot (Data Overview > PCA sub-tab)
+  # ============================================================================
+
+  # Reactive: PCA computation
+  pca_result <- reactive({
+    req(values$y_protein)
+    mat <- values$y_protein$E
+    mat_complete <- mat[complete.cases(mat), ]
+    req(nrow(mat_complete) > 2, ncol(mat_complete) > 2)
+    prcomp(t(mat_complete), center = TRUE, scale. = TRUE)
+  })
+
+  # Observer: dynamically populate PCA color selector (same pattern as MDS in server_qc.R)
+  observeEvent(values$metadata, {
+    req(values$metadata)
+    meta <- values$metadata
+    color_choices <- "Group"
+    if ("Batch" %in% colnames(meta) && any(nzchar(meta$Batch)))
+      color_choices <- c(color_choices, "Batch")
+    cov1_name <- if (!is.null(values$cov1_name) && nzchar(values$cov1_name)) values$cov1_name else "Covariate1"
+    cov2_name <- if (!is.null(values$cov2_name) && nzchar(values$cov2_name)) values$cov2_name else "Covariate2"
+    if ("Covariate1" %in% colnames(meta) && any(nzchar(meta$Covariate1)))
+      color_choices <- c(color_choices, setNames("Covariate1", cov1_name))
+    if ("Covariate2" %in% colnames(meta) && any(nzchar(meta$Covariate2)))
+      color_choices <- c(color_choices, setNames("Covariate2", cov2_name))
+    updateSelectInput(session, "pca_color_by", choices = color_choices, selected = "Group")
+  })
+
+  # Helper: build PCA ggplot object (shared between main and fullscreen render)
+  build_pca_plot <- function(height_mode = "main") {
+    pca <- pca_result()
+    meta <- values$metadata
+
+    # Parse axis selection
+    axes <- strsplit(input$pca_axes %||% "1_2", "_")[[1]]
+    pc_x <- as.integer(axes[1])
+    pc_y <- as.integer(axes[2])
+
+    # Variance explained
+    var_pct <- (pca$sdev^2 / sum(pca$sdev^2)) * 100
+
+    # Build plot data
+    scores <- as.data.frame(pca$x)
+    scores$Sample <- rownames(scores)
+    scores <- merge(scores, meta, by.x = "Sample", by.y = "File.Name", all.x = TRUE)
+
+    # Color variable
+    color_by <- input$pca_color_by %||% "Group"
+    col_name <- if (color_by %in% colnames(scores)) color_by else "Group"
+    scores$ColorVar <- scores[[col_name]]
+    scores$ColorVar[is.na(scores$ColorVar) | scores$ColorVar == ""] <- "(unassigned)"
+
+    # Resolve display label for legend
+    color_label <- color_by
+    if (color_by == "Covariate1" && !is.null(values$cov1_name) && nzchar(values$cov1_name))
+      color_label <- values$cov1_name
+    if (color_by == "Covariate2" && !is.null(values$cov2_name) && nzchar(values$cov2_name))
+      color_label <- values$cov2_name
+
+    pc_x_col <- paste0("PC", pc_x)
+    pc_y_col <- paste0("PC", pc_y)
+
+    # Colorblind-friendly palette (same as MDS)
+    cb_pal <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                "#0072B2", "#D55E00", "#CC79A7", "#999999",
+                "#000000", "#E41A1C", "#377EB8", "#4DAF4A")
+    n_groups <- length(unique(scores$ColorVar))
+    pal <- if (n_groups <= length(cb_pal)) cb_pal[1:n_groups] else rainbow(n_groups, v = 0.85, s = 0.8)
+
+    p <- ggplot(scores, aes(x = .data[[pc_x_col]], y = .data[[pc_y_col]],
+                             color = ColorVar, text = paste0("Sample: ", Sample, "\n", color_label, ": ", ColorVar))) +
+      stat_ellipse(aes(group = ColorVar), level = 0.95, linetype = "dashed", show.legend = FALSE) +
+      geom_point(size = 3, alpha = 0.85) +
+      scale_color_manual(values = pal, name = color_label) +
+      labs(
+        x = sprintf("PC%d (%.1f%%)", pc_x, var_pct[pc_x]),
+        y = sprintf("PC%d (%.1f%%)", pc_y, var_pct[pc_y]),
+        title = "Principal Component Analysis"
+      ) +
+      theme_bw(base_size = 13) +
+      theme(legend.position = "right")
+
+    p
+  }
+
+  # Render: PCA plotly scatter
+  output$pca_plot <- renderPlotly({
+    req(pca_result())
+    p <- build_pca_plot("main")
+    ggplotly(p, tooltip = "text") %>%
+      layout(legend = list(orientation = "v"))
+  })
+
+  # Fullscreen handler
+  observeEvent(input$fullscreen_pca, {
+    showModal(modalDialog(
+      title = "PCA - Fullscreen View",
+      plotlyOutput("pca_plot_fs", height = "700px"),
+      size = "xl", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$pca_plot_fs <- renderPlotly({
+    req(pca_result())
+    p <- build_pca_plot("fullscreen")
+    ggplotly(p, tooltip = "text") %>%
+      layout(legend = list(orientation = "v"))
+  })
+
+  # PNG export
+  output$download_pca_png <- downloadHandler(
+    filename = function() {
+      paste0("PCA_", format(Sys.Date(), "%Y%m%d"), ".png")
+    },
+    content = function(file) {
+      req(pca_result())
+      p <- build_pca_plot("export")
+      ggsave(file, plot = p, width = 10, height = 7, dpi = 150, bg = "white")
+    }
+  )
+
+  # PCA Info Modal
+  observeEvent(input$pca_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " About PCA"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        tags$h6("Principal Component Analysis"),
+        p("PCA reduces your high-dimensional protein expression data into a small number of ",
+          "principal components that capture the most variation. Each point is one sample, ",
+          "and the axes show the directions of greatest variance in the data."),
+        tags$h6("What 'good' looks like"),
+        tags$ul(
+          tags$li("Samples from the same group cluster together"),
+          tags$li("Groups are well-separated along PC1 or PC2"),
+          tags$li("The first two PCs explain a large fraction of total variance (shown in axis labels)")
+        ),
+        tags$h6("What 'bad' looks like"),
+        tags$ul(
+          tags$li("A single outlier sample dominates PC1 — consider removing it"),
+          tags$li("Groups overlap completely — the biological effect may be subtle or absent"),
+          tags$li("Samples cluster by batch instead of group — add batch as a covariate")
+        ),
+        tags$h6("PCA vs MDS"),
+        p("Both are dimensionality reduction techniques. PCA is based on variance decomposition ",
+          "of the expression matrix; MDS is based on pairwise sample distances. They usually give ",
+          "very similar results, but PCA additionally provides variance explained percentages ",
+          "and loading information for each component."),
+        tags$h6("Controls"),
+        tags$ul(
+          tags$li(strong("Color by: "), "Switch between Group, Batch, or covariates to check for confounding"),
+          tags$li(strong("Axes: "), "Switch between PC1/2, PC1/3, PC2/3 to explore additional dimensions"),
+          tags$li("Dashed ellipses show the 95% confidence region for each group")
+        )
+      )
+    ))
+  })
+
   # --- FULLSCREEN: Signal Distribution (lines 1734-1790) ---
   observeEvent(input$fullscreen_signal, {
     showModal(modalDialog(

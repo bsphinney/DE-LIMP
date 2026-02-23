@@ -8,12 +8,72 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      local_sbatch = FALSE, local_diann = FALSE,
                      delimp_data_dir = "",
                      is_core_facility = FALSE, cf_config = NULL) {
-  page_sidebar(
+  page_navbar(
   title = "DE-LIMP Proteomics",
+  id = "main_tabs",
   theme = bs_theme(bootswatch = "flatly"),
-  useShinyjs(),
+  navbar_options = navbar_options(bg = "#2c3e50"),
+  header = tagList(
+    useShinyjs(),
+    tags$head(tags$style(HTML("
+    /* Custom properties matching mockup */
+    :root {
+      --flatly-primary: #2c3e50;
+      --flatly-info: #3498db;
+      --flatly-success: #18bc9c;
+      --flatly-body: #f5f7f9;
+      --flatly-border: #dee2e6;
+      --flatly-muted: #6c757d;
+    }
 
-  tags$head(tags$style(HTML("
+    /* Hover-triggered navbar dropdowns */
+    .navbar .dropdown:hover > .dropdown-menu { display: block; }
+    .navbar .dropdown-menu {
+      border-radius: 0 0 6px 6px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+      min-width: 230px;
+      animation: dropIn 0.15s ease-out;
+    }
+    @keyframes dropIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Force white text on dark navbar */
+    .navbar .nav-link,
+    .navbar .navbar-nav .nav-link {
+      color: rgba(255,255,255,0.75) !important;
+    }
+    .navbar .nav-link:hover,
+    .navbar .navbar-nav .nav-link:hover {
+      color: #ffffff !important;
+    }
+    .navbar .nav-link.active,
+    .navbar .navbar-nav .nav-link.active {
+      color: #ffffff !important;
+      border-bottom: 3px solid var(--flatly-success);
+    }
+    .navbar .navbar-brand {
+      color: #ffffff !important;
+    }
+
+    /* Ensure hidden nav items are truly invisible (progressive reveal) */
+    .navbar .nav-item[style*='display: none'],
+    .navbar .nav-item.d-none {
+      width: 0 !important;
+      overflow: hidden !important;
+    }
+
+    /* Card consistency */
+    .card { border-radius: 8px; }
+
+    /* Sidebar accordion refinement */
+    .sidebar .accordion-button {
+      padding: 10px 12px;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
     .chat-container { height: 500px; overflow-y: auto; border: 1px solid #ddd; padding: 15px; background-color: #f8f9fa; border-radius: 5px; margin-bottom: 15px; }
     .user-msg { text-align: right; margin: 10px 0; }
     .user-msg span { background-color: #007bff; color: white; padding: 8px 12px; border-radius: 15px 15px 0 15px; display: inline-block; max-width: 80%; }
@@ -22,37 +82,6 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     .selection-banner { background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin-bottom: 10px; font-weight: bold; border: 1px solid #c3e6cb; }
 
     /* === RESPONSIVE UI ADDITIONS === */
-
-    /* DE Dashboard responsive grid */
-    .de-dashboard-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-      margin-bottom: 1rem;
-    }
-
-    @media (max-width: 1200px) {
-      .de-dashboard-grid {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    /* Card body with internal scroll for tables */
-    .card-body-scroll {
-      overflow-y: auto;
-      overflow-x: auto;
-      max-height: calc(100vh - 380px);
-    }
-
-    /* Accordion compact styling */
-    .accordion {
-      margin-top: 1rem;
-    }
-
-    .accordion-button {
-      padding: 0.75rem 1rem;
-      font-size: 0.95rem;
-    }
 
     /* Viewport-relative plot containers */
     .plot-container-vh {
@@ -90,41 +119,94 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
   "))),
 
   tags$head(tags$script(HTML("
-    $(document).on('shown.bs.modal', function() { setTimeout(function() { $(window).trigger('resize'); }, 200); });
+    // Resize plotly charts when tabs or modals become visible
+    function resizePlotlyAll() {
+      var plots = document.querySelectorAll('.js-plotly-plot');
+      plots.forEach(function(gd) {
+        if (gd.offsetParent !== null && gd.data) {
+          Plotly.Plots.resize(gd);
+        }
+      });
+    }
+    $(document).on('shown.bs.modal', function() {
+      setTimeout(resizePlotlyAll, 200);
+    });
+    $(document).on('shown.bs.tab', function() {
+      setTimeout(resizePlotlyAll, 150);
+      setTimeout(resizePlotlyAll, 500);
+    });
+
+    // Inject section labels into Analysis dropdown
+    $(document).ready(function() {
+      setTimeout(function() {
+        var items = $('a.dropdown-item');
+        items.each(function() {
+          var text = $(this).text().trim();
+          if (text === 'Data Overview') {
+            $('<h6 class=\"dropdown-header\" style=\"font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;\">Setup</h6>').insertBefore($(this));
+          }
+          if (text === 'DE Dashboard') {
+            $('<div class=\"dropdown-divider\"></div><h6 class=\"dropdown-header\" style=\"font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;\">Results</h6>').insertBefore($(this));
+          }
+          if (text === 'AI Analysis') {
+            $('<div class=\"dropdown-divider\"></div><h6 class=\"dropdown-header\" style=\"font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;\">AI</h6>').insertBefore($(this));
+          }
+        });
+      }, 300);
+    });
   "))),
+  ),  # end header
 
   sidebar = sidebar(
-    width = 320,
-    title = "Controls",
+    width = 300,
 
-    # --- MOVED TO TOP: DOCS & REPO LINKS ---
-    div(style="display: flex; gap: 5px; margin-bottom: 15px;",
+    # --- Top links ---
+    div(style="display: flex; gap: 5px; margin-bottom: 10px;",
       tags$a(href="https://github.com/bsphinney/DE-LIMP/blob/main/USER_GUIDE.md", target="_blank", class="btn btn-info w-50", icon("book"), "Guide", style="color:white; font-weight:bold;"),
       tags$a(href="https://github.com/bsphinney/DE-LIMP", target="_blank", class="btn btn-secondary w-50", icon("github"), "Code", style="color:white; font-weight:bold;")
     ),
-    hr(),
 
-    h5("1. Upload"),
-    fileInput("report_file", "DIA-NN Report (.parquet)", accept = c(".parquet")),
-    actionButton("load_example", "\U0001F4CA Load Example Data", class = "btn-info btn-sm w-100",
-                 style = "margin-bottom: 5px;"),
-    actionButton("load_example_phospho", "Load Example Phospho Data",
-      class = "btn-outline-info btn-sm w-100", icon = icon("flask"),
-      style = "margin-bottom: 10px;"),
-    numericInput("q_cutoff", "Q-Value Cutoff", value = 0.01, min = 0, max = 0.1, step = 0.01),
-    hr(),
-    h5("2. Session"),
-    div(style="display: flex; gap: 5px; margin-bottom: 5px;",
-      downloadButton("save_session", "Save", class = "btn-primary w-50", icon = icon("download")),
-      actionButton("load_session_btn", "Load", class = "btn-outline-primary w-50", icon = icon("upload"))
+    # --- Main accordion ---
+    accordion(
+      id = "sidebar_sections", multiple = TRUE, open = "Upload Data",
+
+      accordion_panel("Upload Data", icon = icon("file-arrow-up"),
+        fileInput("report_file", "DIA-NN Report (.parquet)", accept = c(".parquet")),
+        actionButton("load_example", "\U0001F4CA Load Example Data", class = "btn-info btn-sm w-100",
+                     style = "margin-bottom: 5px;"),
+        actionButton("load_example_phospho", "Load Example Phospho Data",
+          class = "btn-outline-info btn-sm w-100", icon = icon("flask"),
+          style = "margin-bottom: 10px;"),
+        numericInput("q_cutoff", "Q-Value Cutoff", value = 0.01, min = 0, max = 0.1, step = 0.01)
+      ),
+
+      accordion_panel("Pipeline Settings", icon = icon("sliders"),
+        sliderInput("logfc_cutoff", "Min Log2 Fold Change:", min=0, max=5, value=1, step=0.1)
+      ),
+
+      accordion_panel("AI Chat", icon = icon("robot"),
+        passwordInput("user_api_key", "Gemini API Key", value = "", placeholder = "AIzaSy..."),
+        actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
+        br(), br(),
+        textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview")
+      )
     ),
-    # Core facility report link (reports generated from Job History)
+
+    # --- Session buttons (outside accordion) ---
+    div(style="margin-top: 10px;",
+      div(style="display: flex; gap: 5px; margin-bottom: 5px;",
+        downloadButton("save_session", "Save", class = "btn-primary w-50", icon = icon("download")),
+        actionButton("load_session_btn", "Load", class = "btn-outline-primary w-50", icon = icon("upload"))
+      )
+    ),
+
+    # Core facility report link
     if (is_core_facility) tagList(
       hr(),
       uiOutput("report_link_ui")
     ),
 
-    # --- Core Facility: Templates ---
+    # Core Facility: Templates
     if (is_core_facility) tagList(
       hr(),
       h5(icon("bookmark"), " Templates"),
@@ -136,79 +218,75 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       )
     ),
 
-    hr(),
-    h5("3. Explore Results"),
-    sliderInput("logfc_cutoff", "Min Log2 Fold Change:", min=0, max=5, value=1, step=0.1),
-    hr(),
-    h5("4. AI Chat"),
-    passwordInput("user_api_key", "Gemini API Key", value = "", placeholder = "AIzaSy..."),
-    actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
-    br(), br(),
-    textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview"),
-    hr(),
     # Phospho controls (conditional on detection)
     conditionalPanel(
       condition = "output.phospho_detected_flag",
-      hr(),
-      h5("5. Phosphoproteomics", style = "color: #6c757d;"),
-      radioButtons("phospho_input_mode", "Site Quantification Source",
-        choices = c(
-          "DIA-NN site matrix (recommended)" = "site_matrix",
-          "Parse from report.parquet" = "parsed_report"
-        ),
-        selected = "site_matrix"
-      ),
-      conditionalPanel(
-        condition = "input.phospho_input_mode == 'site_matrix'",
-        fileInput("phospho_site_matrix_file", "Upload site matrix (.tsv or .parquet)",
-                  accept = c(".tsv", ".parquet", ".txt")),
-        tags$p(class = "text-muted small",
-          "Upload the site localization matrix from DIA-NN (TSV or parquet format)."
+      accordion(
+        id = "sidebar_phospho", open = "Phosphoproteomics",
+        accordion_panel("Phosphoproteomics", icon = icon("flask"),
+          radioButtons("phospho_input_mode", "Site Quantification Source",
+            choices = c(
+              "DIA-NN site matrix (recommended)" = "site_matrix",
+              "Parse from report.parquet" = "parsed_report"
+            ),
+            selected = "site_matrix"
+          ),
+          conditionalPanel(
+            condition = "input.phospho_input_mode == 'site_matrix'",
+            fileInput("phospho_site_matrix_file", "Upload site matrix (.tsv or .parquet)",
+                      accept = c(".tsv", ".parquet", ".txt")),
+            tags$p(class = "text-muted small",
+              "Upload the site localization matrix from DIA-NN (TSV or parquet format)."
+            )
+          ),
+          conditionalPanel(
+            condition = "input.phospho_input_mode == 'parsed_report'",
+            sliderInput("phospho_loc_threshold", "Site Localization Confidence",
+              min = 0.5, max = 1.0, value = 0.75, step = 0.05),
+            tags$p(class = "text-muted small",
+              "Recommended: 0.75 for exploratory, 0.9 for high-confidence sites."
+            )
+          ),
+          radioButtons("phospho_norm", "Site-Level Normalization",
+            choices = c(
+              "None (DIA-NN normalized)" = "none",
+              "Median centering" = "median",
+              "Quantile normalization" = "quantile"
+            ),
+            selected = "none"
+          ),
+          actionButton("run_phospho_pipeline", "Run Phosphosite Analysis",
+                       class = "btn-warning w-100", icon = icon("bolt")),
+          hr(),
+          tags$p(class = "text-muted small", style = "margin-top: 8px;",
+            tags$strong("Advanced (Phase 2/3):")
+          ),
+          fileInput("phospho_fasta_file", "Upload FASTA (for motifs)",
+                    accept = c(".fasta", ".fa", ".faa")),
+          tags$p(class = "text-muted small",
+            "Protein FASTA enables accurate motif extraction around phosphosites."
+          ),
+          checkboxInput("phospho_protein_correction",
+            "Normalize to protein abundance", value = FALSE),
+          tags$p(class = "text-muted small",
+            "Subtracts protein-level logFC from site logFC (requires total proteome pipeline to be run first)."
+          )
         )
-      ),
-      conditionalPanel(
-        condition = "input.phospho_input_mode == 'parsed_report'",
-        sliderInput("phospho_loc_threshold", "Site Localization Confidence",
-          min = 0.5, max = 1.0, value = 0.75, step = 0.05),
-        tags$p(class = "text-muted small",
-          "Recommended: 0.75 for exploratory, 0.9 for high-confidence sites."
-        )
-      ),
-      radioButtons("phospho_norm", "Site-Level Normalization",
-        choices = c(
-          "None (DIA-NN normalized)" = "none",
-          "Median centering" = "median",
-          "Quantile normalization" = "quantile"
-        ),
-        selected = "none"
-      ),
-      actionButton("run_phospho_pipeline", "Run Phosphosite Analysis",
-                   class = "btn-warning w-100", icon = icon("bolt")),
-      hr(),
-      tags$p(class = "text-muted small", style = "margin-top: 8px;",
-        tags$strong("Advanced (Phase 2/3):")
-      ),
-      fileInput("phospho_fasta_file", "Upload FASTA (for motifs)",
-                accept = c(".fasta", ".fa", ".faa")),
-      tags$p(class = "text-muted small",
-        "Protein FASTA enables accurate motif extraction around phosphosites."
-      ),
-      checkboxInput("phospho_protein_correction",
-        "Normalize to protein abundance", value = FALSE),
-      tags$p(class = "text-muted small",
-        "Subtracts protein-level logFC from site logFC (requires total proteome pipeline to be run first)."
       )
     ),
 
-    if (!is_hf_space) tagList(
-      h5("6. XIC Viewer"),
-      p(class = "text-muted small",
-        "Load .xic.parquet files from DIA-NN to inspect chromatograms."),
-      textInput("xic_dir_input", "XIC Directory Path:",
-        placeholder = "Auto-detected or paste path here"),
-      actionButton("xic_load_dir", "Load XICs", class = "btn-outline-info btn-sm w-100",
-        icon = icon("wave-square")),
-      uiOutput("xic_status_badge")
+    # XIC Viewer (conditional on !is_hf_space)
+    if (!is_hf_space) accordion(
+      id = "sidebar_xic",
+      accordion_panel("XIC Viewer", icon = icon("wave-square"),
+        p(class = "text-muted small",
+          "Load .xic.parquet files from DIA-NN to inspect chromatograms."),
+        textInput("xic_dir_input", "XIC Directory Path:",
+          placeholder = "Auto-detected or paste path here"),
+        actionButton("xic_load_dir", "Load XICs", class = "btn-outline-info btn-sm w-100",
+          icon = icon("wave-square")),
+        uiOutput("xic_status_badge")
+      )
     ),
     if (is_hf_space) div(
       style = "padding: 8px; margin-top: 4px; background: linear-gradient(135deg, #e0f2fe, #f0f9ff); border: 1px solid #bae6fd; border-radius: 8px; font-size: 0.82em;",
@@ -220,11 +298,13 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     )
   ),
 
-  navset_card_tab(
-    id = "main_tabs",
+  # ============================================================================
+  #  MAIN CONTENT — nav items directly inside page_navbar
+  #  Layout: Search | QC | Analysis v | Output v | Education | Facility v
+  # ============================================================================
 
     # ==========================================================================
-    # New Search tab — visible when Docker or HPC backend is available
+    # SEARCH (standalone, conditional) — visible when Docker or HPC backend available
     # ==========================================================================
     if (search_enabled) nav_panel("New Search", icon = icon("rocket"),
       # Three-panel wizard layout
@@ -704,177 +784,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       )
     ),
 
-    nav_panel("Data Overview", icon = icon("database"),
-              # Data views as tabs
-              navset_card_tab(
-                id = "data_overview_tabs",
-
-                nav_panel("Assign Groups & Run",
-                  icon = icon("table"),
-                  # Phospho detection banner (shown when phospho data detected)
-                  uiOutput("phospho_detection_banner"),
-                  # Tip banner
-                  div(style="background-color: #e7f3ff; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
-                    icon("info-circle"),
-                    strong(" Tip: "),
-                    "Assign experimental groups (required). Covariate columns are optional - customize names and include in model as needed."
-                  ),
-
-                  # Top row: Auto-Guess + Covariates + Run Pipeline (responsive)
-                  div(style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; align-items: flex-start;",
-                    # Auto-Guess + Template buttons
-                    div(style="min-width: 160px;",
-                      actionButton("guess_groups", "Auto-Guess Groups", class="btn-info btn-sm w-100",
-                        icon = icon("wand-magic-sparkles")),
-                      div(style="display: flex; gap: 5px; margin-top: 8px;",
-                        downloadButton("export_template", "Export", class="btn-outline-secondary btn-sm"),
-                        actionButton("import_template", "Import", class="btn-outline-secondary btn-sm")
-                      )
-                    ),
-
-                    # Covariates (compact inline)
-                    div(style="flex: 1; min-width: 250px;",
-                      strong("Covariates:", style="font-size: 0.9em;"),
-                      div(style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px;",
-                        div(style="min-width: 110px;",
-                          checkboxInput("include_batch", "Batch", value = FALSE),
-                          textInput("batch_label", NULL, value = "Batch", placeholder = "e.g., Batch")
-                        ),
-                        div(style="min-width: 130px;",
-                          checkboxInput("include_cov1", NULL, value = FALSE),
-                          textInput("cov1_label", "Name:", value = "Covariate1",
-                                   placeholder = "e.g., Sex, Diet")
-                        ),
-                        div(style="min-width: 130px;",
-                          checkboxInput("include_cov2", NULL, value = FALSE),
-                          textInput("cov2_label", "Name:", value = "Covariate2",
-                                   placeholder = "e.g., Age, Time")
-                        )
-                      )
-                    ),
-
-                    # Run Pipeline button
-                    div(style="min-width: 150px; display: flex; align-items: center;",
-                      actionButton("run_pipeline", "Run Pipeline",
-                        class="btn-success btn-lg w-100", icon = icon("play"),
-                        style="padding: 12px; font-size: 1.05em; white-space: nowrap;")
-                    )
-                  ),
-
-                  # Metadata table (with overflow scroll)
-                  div(style="overflow-y: auto; max-height: calc(100vh - 420px);",
-                    rHandsontableOutput("hot_metadata")
-                  )
-                ),
-
-                nav_panel("Signal Distribution",
-                  icon = icon("chart-area"),
-                  # Comparison selector banner
-                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; position: relative; z-index: 10;",
-                    div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
-                      icon("microscope"),
-                      span("Viewing Comparison:", style = "font-weight: 500;")
-                    ),
-                    div(style = "flex: 1 1 auto; min-width: 200px;",
-                      selectInput("contrast_selector_signal", NULL,
-                        choices = NULL,
-                        width = "100%"
-                      )
-                    )
-                  ),
-                  # Control buttons
-                  div(style = "display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 10px;",
-                    actionButton("signal_dist_info_btn", icon("question-circle"), title = "What is this?",
-                      class = "btn-outline-info btn-sm"),
-                    actionButton("fullscreen_signal", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
-                  ),
-                  plotOutput("protein_signal_plot", height = "calc(100vh - 370px)")
-                ),
-
-                nav_panel("Dataset Summary",
-                  icon = icon("info-circle"),
-                  uiOutput("dataset_summary_content")
-                ),
-
-                nav_panel("Group QC Summary",
-                  icon = icon("table"),
-                  DTOutput("group_summary_table")
-                ),
-
-                nav_panel("Expression Grid",
-                  icon = icon("th"),
-                  # Comparison selector banner
-                  div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; position: relative; z-index: 10;",
-                    div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
-                      icon("microscope"),
-                      span("Viewing Comparison:", style = "font-weight: 500;")
-                    ),
-                    div(style = "flex: 1 1 auto; min-width: 200px;",
-                      selectInput("contrast_selector_grid", NULL,
-                        choices = NULL,
-                        width = "100%"
-                      )
-                    )
-                  ),
-                  # Legend and file mapping
-                  div(style = "margin-bottom: 15px;",
-                    uiOutput("grid_legend_ui"),
-                    uiOutput("grid_file_map_ui")
-                  ),
-                  # Control buttons
-                  div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                    div(
-                      actionButton("grid_reset_selection", "Show All / Clear Selection", class = "btn-warning btn-sm"),
-                      downloadButton("download_grid_data", "\U0001F4BE Export Full Table", class = "btn-success btn-sm")
-                    ),
-                    actionButton("expression_grid_info_btn", icon("question-circle"), title = "What is this?",
-                      class = "btn-outline-info btn-sm")
-                  ),
-                  # Grid table
-                  DTOutput("grid_view_table")
-                ),
-
-                nav_panel("AI Summary",
-                  icon = icon("robot"),
-                  div(style = "padding: 20px;",
-                    # Header section
-                    div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;",
-                      tags$h4(icon("robot"), " AI-Powered Analysis Summary", style = "margin: 0; font-weight: 500;"),
-                      actionButton("ai_summary_info_btn", icon("question-circle"),
-                        class = "btn-outline-light btn-sm", title = "About AI Summary")
-                    ),
-
-                    # Instructions
-                    div(style = "background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;",
-                      tags$p(class = "mb-2",
-                        icon("info-circle"), " ",
-                        strong("How it works:"),
-                        " Click the button below to generate a comprehensive AI-powered analysis across all comparisons in your experiment."
-                      ),
-                      tags$p(class = "mb-0", style = "font-size: 0.9em; color: #6c757d;",
-                        "The AI will identify key DE proteins per comparison, cross-comparison biomarkers, ",
-                        "and provide biological insights on high-confidence candidates."
-                      )
-                    ),
-
-                    # Generate button
-                    div(style = "text-align: center; margin-bottom: 20px;",
-                      actionButton("generate_ai_summary_overview",
-                        "\U0001F916 Generate AI Summary",
-                        class = "btn-info btn-lg",
-                        style = "padding: 12px 30px; font-size: 1.1em;"
-                      )
-                    ),
-
-                    # Output area
-                    uiOutput("ai_summary_output")
-                  )
-                )
-              )
-    ),
-
-    nav_panel("QC Trends", icon = icon("chart-bar"),
-              # Global sort order control
+    # ==========================================================================
+    # QC (standalone, merged from QC Trends + QC Plots)
+    # ==========================================================================
+    nav_panel("QC", icon = icon("chart-bar"),
+              # Global sort order control (from QC Trends)
               div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
                 div(style = "display: flex; align-items: center; justify-content: space-between;",
                   div(style = "display: flex; align-items: center; gap: 15px;",
@@ -893,13 +807,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 )
               ),
 
-              # Metric tabs
+              # Merged QC sub-tabs: Sample Metrics + Diagnostics
               navset_card_tab(
-                id = "qc_trends_tabs",
+                id = "qc_merged_tabs",
 
+                # ── Sample Metrics (from QC Trends) ──
                 nav_panel("Precursors",
                   icon = icon("dna"),
-                  div(style = "text-align: right; margin-bottom: 10px;",
+                  div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                    actionButton("qc_precursors_info_btn", icon("question-circle"),
+                      title = "About Precursor Counts", class = "btn-outline-info btn-sm"),
                     actionButton("fullscreen_trend_precursors", "\U0001F50D Fullscreen",
                       class = "btn-outline-secondary btn-sm")
                   ),
@@ -908,7 +825,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
                 nav_panel("Proteins",
                   icon = icon("shapes"),
-                  div(style = "text-align: right; margin-bottom: 10px;",
+                  div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                    actionButton("qc_proteins_info_btn", icon("question-circle"),
+                      title = "About Protein Counts", class = "btn-outline-info btn-sm"),
                     actionButton("fullscreen_trend_proteins", "\U0001F50D Fullscreen",
                       class = "btn-outline-secondary btn-sm")
                   ),
@@ -917,7 +836,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
                 nav_panel("MS1 Signal",
                   icon = icon("signal"),
-                  div(style = "text-align: right; margin-bottom: 10px;",
+                  div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                    actionButton("qc_ms1_info_btn", icon("question-circle"),
+                      title = "About MS1 Signal", class = "btn-outline-info btn-sm"),
                     actionButton("fullscreen_trend_ms1", "\U0001F50D Fullscreen",
                       class = "btn-outline-secondary btn-sm")
                   ),
@@ -926,16 +847,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
                 nav_panel("Stats Table",
                   icon = icon("table"),
+                  div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                    actionButton("qc_stats_info_btn", icon("question-circle"), title = "QC Statistics",
+                      class = "btn-outline-info btn-sm"),
+                    downloadButton("download_qc_stats_csv", tagList(icon("download"), " CSV"),
+                      class = "btn-success btn-sm")
+                  ),
                   DTOutput("r_qc_table")
-                )
-              )
-    ),
+                ),
 
-    nav_panel("QC Plots", icon = icon("chart-line"),
-              navset_card_tab(
-                id = "qc_subtabs",
-
-                # TAB 1: Normalization Diagnostic (FIRST - MOST IMPORTANT)
+                # ── Diagnostics (from QC Plots) ──
                 nav_panel("Normalization Diagnostic",
                   icon = icon("stethoscope"),
                   card_body(
@@ -964,7 +885,6 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   )
                 ),
 
-                # TAB 2: DPC Fit
                 nav_panel("DPC Fit",
                   icon = icon("chart-line"),
                   card_body(
@@ -978,7 +898,6 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   )
                 ),
 
-                # TAB 3: MDS Plot
                 nav_panel("MDS Plot",
                   icon = icon("project-diagram"),
                   card_body(
@@ -997,7 +916,6 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   )
                 ),
 
-                # TAB 4: Group Distribution
                 nav_panel("Group Distribution",
                   icon = icon("chart-area"),
                   card_body(
@@ -1017,7 +935,6 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   )
                 ),
 
-                # TAB 5: P-value Distribution Diagnostic
                 nav_panel("P-value Distribution",
                   icon = icon("chart-column"),
                   # Comparison selector banner — two-row layout for full-width dropdown
@@ -1048,328 +965,450 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )
     ),
 
-    nav_panel("DE Dashboard", icon = icon("table-columns"),
-              # Interactive comparison selector
-              div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; position: relative; z-index: 10;",
-                div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;",
-                  div(style = "display: flex; align-items: center; gap: 15px;",
-                    icon("microscope"),
-                    span("Viewing Comparison:", style = "font-weight: 500;"),
-                    selectInput("contrast_selector",
-                      label = NULL,
-                      choices = NULL,
-                      width = "300px"
-                    )
-                  ),
-                  actionButton("de_dashboard_info_btn", icon("question-circle"),
-                    title = "How to use this dashboard",
-                    class = "btn-outline-light btn-sm")
-                )
-              ),
+    # ==========================================================================
+    # ANALYSIS dropdown — Data Overview, DE, Phospho, GSEA, MOFA2, AI Analysis
+    # ==========================================================================
+    nav_menu("Analysis", icon = icon("microscope"),
 
-              # Responsive two-column grid (stacks on small screens)
-              div(class = "de-dashboard-grid",
-                # Results table card (left column)
-                card(
-                  card_header(
-                    div(style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;",
-                      span("Results Table"),
-                      div(
-                        actionButton("clear_plot_selection", "Reset", class="btn-warning btn-xs"),
-                        actionButton("show_violin", "\U0001F4CA Violin", class="btn-primary btn-xs"),
-                        if (!is_hf_space) actionButton("show_xic", "\U0001F4C8 XICs", class="btn-info btn-xs"),
-                        downloadButton("download_result_csv", "\U0001F4BE Export", class="btn-success btn-xs")
+      # -- Setup section --
+      nav_panel("Data Overview", icon = icon("database"),
+                # Data views as tabs
+                navset_card_tab(
+                  id = "data_overview_tabs",
+
+                  nav_panel("Assign Groups & Run",
+                    icon = icon("table"),
+                    # Phospho detection banner (shown when phospho data detected)
+                    uiOutput("phospho_detection_banner"),
+                    # Tip banner
+                    div(style="background-color: #e7f3ff; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
+                      icon("info-circle"),
+                      strong(" Tip: "),
+                      "Assign experimental groups (required). Covariate columns are optional - customize names and include in model as needed."
+                    ),
+
+                    # Top row: Auto-Guess + Covariates + Run Pipeline (responsive)
+                    div(style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; align-items: flex-start;",
+                      # Auto-Guess + Template buttons
+                      div(style="min-width: 160px;",
+                        actionButton("guess_groups", "Auto-Guess Groups", class="btn-info btn-sm w-100",
+                          icon = icon("wand-magic-sparkles")),
+                        div(style="display: flex; gap: 5px; margin-top: 8px;",
+                          downloadButton("export_template", "Export", class="btn-outline-secondary btn-sm"),
+                          actionButton("import_template", "Import", class="btn-outline-secondary btn-sm")
+                        )
+                      ),
+
+                      # Covariates (compact inline)
+                      div(style="flex: 1; min-width: 250px;",
+                        strong("Covariates:", style="font-size: 0.9em;"),
+                        div(style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px;",
+                          div(style="min-width: 110px;",
+                            checkboxInput("include_batch", "Batch", value = FALSE),
+                            textInput("batch_label", NULL, value = "Batch", placeholder = "e.g., Batch")
+                          ),
+                          div(style="min-width: 130px;",
+                            checkboxInput("include_cov1", NULL, value = FALSE),
+                            textInput("cov1_label", "Name:", value = "Covariate1",
+                                     placeholder = "e.g., Sex, Diet")
+                          ),
+                          div(style="min-width: 130px;",
+                            checkboxInput("include_cov2", NULL, value = FALSE),
+                            textInput("cov2_label", "Name:", value = "Covariate2",
+                                     placeholder = "e.g., Age, Time")
+                          )
+                        )
+                      ),
+
+                      # Run Pipeline button
+                      div(style="min-width: 150px; display: flex; align-items: center;",
+                        actionButton("run_pipeline", "Run Pipeline",
+                          class="btn-success btn-lg w-100", icon = icon("play"),
+                          style="padding: 12px; font-size: 1.05em; white-space: nowrap;")
                       )
+                    ),
+
+                    # Metadata table (with overflow scroll)
+                    div(style="overflow-y: auto; max-height: calc(100vh - 420px);",
+                      rHandsontableOutput("hot_metadata")
                     )
                   ),
-                  card_body(
-                    class = "card-body-scroll",
-                    DTOutput("de_table")
-                  )
-                ),
 
-                # Volcano plot card (right column)
-                card(
-                  card_header(
-                    div(style="display: flex; justify-content: space-between; align-items: center;",
-                      span("Volcano Plot (Click/Box Select to Filter Table)"),
-                      actionButton("fullscreen_volcano", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
-                    )
+                  nav_panel("Signal Distribution",
+                    icon = icon("chart-area"),
+                    # Comparison selector banner
+                    div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; position: relative; z-index: 10;",
+                      div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
+                        icon("microscope"),
+                        span("Viewing Comparison:", style = "font-weight: 500;")
+                      ),
+                      div(style = "flex: 1 1 auto; min-width: 200px;",
+                        selectInput("contrast_selector_signal", NULL,
+                          choices = NULL,
+                          width = "100%"
+                        )
+                      )
+                    ),
+                    # Control buttons
+                    div(style = "display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 10px;",
+                      actionButton("signal_dist_info_btn", icon("question-circle"), title = "What is this?",
+                        class = "btn-outline-info btn-sm"),
+                      actionButton("fullscreen_signal", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
+                    ),
+                    plotOutput("protein_signal_plot", height = "calc(100vh - 370px)")
                   ),
-                  card_body(
-                    plotlyOutput("volcano_plot_interactive", height = "calc(100vh - 380px)")
-                  )
-                )
-              ),
 
-              # Heatmap as accordion (secondary visualization, collapsed by default)
-              accordion(
-                id = "de_heatmap_accordion",
-                open = TRUE,
-                accordion_panel(
-                  "Heatmap of Selected/Top Proteins",
-                  icon = icon("grip"),
-                  div(style = "text-align: right; margin-bottom: 10px;",
-                    actionButton("fullscreen_heatmap", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
+                  nav_panel("Dataset Summary",
+                    icon = icon("info-circle"),
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      actionButton("dataset_summary_info_btn", icon("question-circle"),
+                        title = "About Dataset Summary", class = "btn-outline-info btn-sm")
+                    ),
+                    uiOutput("dataset_summary_content")
                   ),
-                  plotOutput("heatmap_plot", height = "450px")
-                )
-              )
-    ),
 
-    nav_panel("Consistent DE", icon = icon("check-double"),
-              navset_card_tab(
-                id = "consistent_de_tabs",
+                  nav_panel("Replicate Consistency",
+                    icon = icon("arrows-to-circle"),
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      actionButton("replicate_consistency_info_btn", icon("question-circle"),
+                        title = "About Replicate Consistency", class = "btn-outline-info btn-sm"),
+                      downloadButton("download_replicate_csv", tagList(icon("download"), " CSV"),
+                        class = "btn-success btn-sm")
+                    ),
+                    DTOutput("group_summary_table")
+                  ),
 
-                # TAB 1: High-Consistency Table
-                nav_panel("High-Consistency Table",
-                  icon = icon("table"),
-                  card_body(
+                  nav_panel("Expression Grid",
+                    icon = icon("th"),
+                    # Comparison selector banner
+                    div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; position: relative; z-index: 10;",
+                      div(style = "display: flex; align-items: center; gap: 10px; white-space: nowrap;",
+                        icon("microscope"),
+                        span("Viewing Comparison:", style = "font-weight: 500;")
+                      ),
+                      div(style = "flex: 1 1 auto; min-width: 200px;",
+                        selectInput("contrast_selector_grid", NULL,
+                          choices = NULL,
+                          width = "100%"
+                        )
+                      )
+                    ),
+                    # Legend and file mapping
+                    div(style = "margin-bottom: 15px;",
+                      uiOutput("grid_legend_ui"),
+                      uiOutput("grid_file_map_ui")
+                    ),
+                    # Control buttons
                     div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                      p("Ranking by %CV (Coefficient of Variation) to find stable markers across all experimental groups.",
-                        class = "text-muted small mb-0"),
-                      actionButton("consistent_de_info_btn", icon("question-circle"), title = "What is this?",
+                      div(
+                        actionButton("grid_reset_selection", "Show All / Clear Selection", class = "btn-warning btn-sm"),
+                        downloadButton("download_grid_data", "\U0001F4BE Export Full Table", class = "btn-success btn-sm")
+                      ),
+                      actionButton("expression_grid_info_btn", icon("question-circle"), title = "What is this?",
                         class = "btn-outline-info btn-sm")
                     ),
-                    DTOutput("consistent_table")
-                  )
-                ),
+                    # Grid table
+                    DTOutput("grid_view_table")
+                  ),
 
-                # TAB 2: CV Distribution Histogram
-                nav_panel("CV Distribution",
-                  icon = icon("chart-bar"),
-                  card_body(
-                    # Control row
-                    div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                      p("Distribution of Coefficient of Variation (CV) for significant proteins, broken down by experimental group.",
-                        class = "text-muted small mb-0"),
-                      div(style = "display: flex; gap: 8px;",
-                        actionButton("cv_dist_info_btn", icon("question-circle"), title = "What is this?",
-                          class = "btn-outline-info btn-sm"),
-                        actionButton("fullscreen_cv_hist", "\U0001F50D Fullscreen",
-                          class = "btn-outline-secondary btn-sm")
-                      )
-                    ),
-                    plotOutput("cv_histogram", height = "calc(100vh - 320px)")
-                  )
-                )
-              )
-    ),
+                  nav_panel("AI Summary",
+                    icon = icon("robot"),
+                    div(style = "padding: 20px;",
+                      # Header section
+                      div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;",
+                        tags$h4(icon("robot"), " AI-Powered Analysis Summary", style = "margin: 0; font-weight: 500;"),
+                        actionButton("ai_summary_info_btn", icon("question-circle"),
+                          class = "btn-outline-light btn-sm", title = "About AI Summary")
+                      ),
 
-    nav_panel("Reproducibility", icon = icon("code"),
-              navset_card_tab(
-                nav_panel("Code Log",
-                          card_body(
-                            div(style="background-color: #d1ecf1; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
-                              icon("info-circle"),
-                              strong(" Action Log:"),
-                              "This code recreates your analysis step-by-step. Each section shows:",
-                              tags$ul(
-                                tags$li(strong("Action name"), " - what you did (e.g., 'Run Pipeline')"),
-                                tags$li(strong("Timestamp"), " - when you did it"),
-                                tags$li(strong("R code"), " - how to reproduce it")
-                              ),
-                              p(style="margin-bottom: 0;", "Copy this entire code block to reproduce your analysis in a fresh R session.")
-                            ),
-                            downloadButton("download_repro_log", "\U0001F4BE Download Reproducibility Log", class="btn-success mb-3"),
-                            verbatimTextOutput("reproducible_code")
-                          )
-                ),
-                nav_panel("Methodology",
-                          card_body(
-                            div(style = "display: flex; justify-content: flex-end; margin-bottom: 10px;",
-                              actionButton("methodology_info_btn", icon("question-circle"), title = "About the methods",
-                                class = "btn-outline-info btn-sm")
-                            ),
-                            verbatimTextOutput("methodology_text")
-                          )
-                )
-              )
-    ),
-
-    nav_panel("Phosphoproteomics", icon = icon("flask"),
-      uiOutput("phospho_tab_content")
-    ),
-
-    nav_panel("Gene Set Enrichment", icon = icon("sitemap"),
-              # Contrast indicator
-              uiOutput("gsea_contrast_indicator"),
-              # Compact control bar
-              card(
-                card_body(
-                  div(style = "display: flex; align-items: center; gap: 15px; flex-wrap: wrap;",
-                    div(style = "min-width: 220px;",
-                      selectInput("gsea_ontology", NULL,
-                        choices = c(
-                          "GO: Biological Process (BP)" = "BP",
-                          "GO: Molecular Function (MF)" = "MF",
-                          "GO: Cellular Component (CC)" = "CC",
-                          "KEGG Pathways" = "KEGG"
+                      # Instructions
+                      div(style = "background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;",
+                        tags$p(class = "mb-2",
+                          icon("info-circle"), " ",
+                          strong("How it works:"),
+                          " Click the button below to generate a comprehensive AI-powered analysis across all comparisons in your experiment."
                         ),
-                        selected = "BP", width = "100%"
+                        tags$p(class = "mb-0", style = "font-size: 0.9em; color: #6c757d;",
+                          "The AI will identify key DE proteins per comparison, cross-comparison biomarkers, ",
+                          "and provide biological insights on high-confidence candidates."
+                        )
+                      ),
+
+                      # Generate button
+                      div(style = "text-align: center; margin-bottom: 20px;",
+                        actionButton("generate_ai_summary_overview",
+                          "\U0001F916 Generate AI Summary",
+                          class = "btn-info btn-lg",
+                          style = "padding: 12px 30px; font-size: 1.1em;"
+                        )
+                      ),
+
+                      # Output area
+                      uiOutput("ai_summary_output")
+                    )
+                  )
+                )
+      ),
+
+      nav_spacer(),  # visual divider between Setup and Results
+
+      # -- Results section --
+      nav_panel("DE Dashboard", icon = icon("table-columns"),
+                # Interactive comparison selector banner
+                div(style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; position: relative; z-index: 10;",
+                  div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;",
+                    div(style = "display: flex; align-items: center; gap: 15px;",
+                      icon("microscope"),
+                      span("Viewing Comparison:", style = "font-weight: 500;"),
+                      selectInput("contrast_selector",
+                        label = NULL,
+                        choices = NULL,
+                        width = "300px"
                       )
                     ),
-                    actionButton("run_gsea", "\u25B6 Run GSEA", class = "btn-success", icon = icon("play")),
-                    div(style = "flex-grow: 1;",
-                      verbatimTextOutput("gsea_status", placeholder = TRUE) |>
-                        tagAppendAttributes(style = "margin: 0; padding: 5px 10px; min-height: 38px;")
-                    ),
-                    actionButton("gsea_info_btn", icon("question-circle"), title = "What is GSEA?",
-                      class = "btn-outline-info btn-sm")
-                  ),
-                  p("Enrichment analysis on DE results. Auto-detects organism. Results cached per ontology.",
-                    class = "text-muted small", style = "margin: 10px 0 0 0;")
-                )
-              ),
-
-              # Results tabs with full-height plots
-              navset_card_tab(
-                id = "gsea_results_tabs",
-
-                nav_panel("Dot Plot",
-                  div(style = "text-align: right; margin-bottom: 10px;",
-                    actionButton("fullscreen_gsea_dot", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
-                  ),
-                  plotOutput("gsea_dot_plot", height = "calc(100vh - 340px)")
-                ),
-
-                nav_panel("Enrichment Map",
-                  div(style = "text-align: right; margin-bottom: 10px;",
-                    actionButton("fullscreen_gsea_emap", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
-                  ),
-                  plotOutput("gsea_emapplot", height = "calc(100vh - 340px)")
-                ),
-
-                nav_panel("Ridgeplot",
-                  div(style = "text-align: right; margin-bottom: 10px;",
-                    actionButton("fullscreen_gsea_ridge", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
-                  ),
-                  plotOutput("gsea_ridgeplot", height = "calc(100vh - 340px)")
-                ),
-
-                nav_panel("Results Table",
-                  div(style = "display: flex; justify-content: flex-end; margin-bottom: 10px;",
-                    actionButton("gsea_table_info_btn", icon("question-circle"), title = "Column definitions",
-                      class = "btn-outline-info btn-sm")
-                  ),
-                  DTOutput("gsea_results_table")
-                )
-              )
-    ),
-
-    nav_panel("Multi-Omics MOFA2", icon = icon("layer-group"),
-              value = "mofa_tab",
-              uiOutput("mofa_tab_content")
-    ),
-
-    nav_panel("Data Chat", icon = icon("comments"),
-              card(
-                card_header(div(style="display: flex; justify-content: space-between; align-items: center;",
-                  span("Chat with Full Data (QC + Expression)"),
-                  div(style = "display: flex; gap: 8px;",
-                    actionButton("data_chat_info_btn", icon("question-circle"), title = "About Data Chat",
-                      class = "btn-outline-info btn-sm"),
-                    downloadButton("download_chat_txt", "\U0001F4BE Save Chat", class="btn-secondary btn-sm")
+                    actionButton("de_dashboard_info_btn", icon("question-circle"),
+                      title = "How to use this dashboard",
+                      class = "btn-outline-light btn-sm")
                   )
-                )),
-                card_body(
-                  verbatimTextOutput("chat_selection_indicator"),
-                  uiOutput("chat_window"),
-                  tags$div(style="margin-top: 15px; display: flex; gap: 10px;",
-                           textAreaInput("chat_input", label=NULL, placeholder="Ask e.g. 'Which group has higher precursor counts?'", width="100%", rows=2),
-                           actionButton("summarize_data", "\U0001F916 Auto-Analyze", class="btn-info", style="height: 54px; margin-top: 2px;"),
-                           actionButton("send_chat", "Send", icon=icon("paper-plane"), class="btn-primary", style="height: 54px; margin-top: 2px;")
+                ),
+
+                # Sub-tabs
+                navset_card_tab(
+                  id = "de_dashboard_subtabs",
+
+                  nav_panel("Volcano", icon = icon("chart-simple"),
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      actionButton("fullscreen_volcano", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
+                    ),
+                    plotlyOutput("volcano_plot_interactive", height = "calc(100vh - 420px)"),
+                    # Heatmap directly below volcano
+                    div(style = "margin-top: 16px;",
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                        span("Heatmap of Selected/Top Proteins", style = "font-weight: 600;"),
+                        div(style = "display: flex; gap: 8px;",
+                          downloadButton("download_heatmap_png", tagList(icon("image"), " PNG"),
+                            class = "btn-outline-secondary btn-sm"),
+                          actionButton("fullscreen_heatmap", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
+                        )
+                      ),
+                      plotOutput("heatmap_plot", height = "350px")
+                    )
                   ),
-                  p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
+
+                  nav_panel("Results Table", icon = icon("table"),
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;",
+                      actionButton("clear_plot_selection", "Reset", class="btn-warning btn-xs"),
+                      actionButton("show_violin", "\U0001F4CA Violin", class="btn-primary btn-xs"),
+                      if (!is_hf_space) actionButton("show_xic", "\U0001F4C8 XICs", class="btn-info btn-xs"),
+                      downloadButton("download_result_csv", "\U0001F4BE Export", class="btn-success btn-xs")
+                    ),
+                    DTOutput("de_table")
+                  ),
+
+                  nav_panel("PCA", icon = icon("compass"),
+                    div(style = "display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;",
+                      span("Color by:", style = "font-weight: 500; font-size: 0.85em; color: #555;"),
+                      div(style = "width: 160px;",
+                        selectInput("pca_color_by", label = NULL,
+                          choices = c("Group"), selected = "Group", width = "100%")
+                      ),
+                      span("Axes:", style = "font-weight: 500; font-size: 0.85em; color: #555;"),
+                      div(style = "width: 160px;",
+                        selectInput("pca_axes", label = NULL,
+                          choices = c("PC1 vs PC2" = "1_2", "PC1 vs PC3" = "1_3", "PC2 vs PC3" = "2_3"),
+                          width = "100%")
+                      ),
+                      actionButton("pca_info_btn", icon("question-circle"),
+                        title = "About PCA", class = "btn-outline-info btn-sm"),
+                      downloadButton("download_pca_png", tagList(icon("image"), " PNG"),
+                        class = "btn-outline-secondary btn-sm"),
+                      actionButton("fullscreen_pca", "\U0001F50D Fullscreen",
+                        class = "btn-outline-secondary btn-sm")
+                    ),
+                    plotlyOutput("pca_plot", height = "calc(100vh - 370px)")
+                  ),
+
+                  nav_panel("Robust Changes", icon = icon("check-double"),
+                    # High-Consistency Table
+                    div(style = "margin-bottom: 15px;",
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                        p("Ranking by %CV (Coefficient of Variation) to find stable markers across all experimental groups.",
+                          class = "text-muted small mb-0"),
+                        div(style = "display: flex; gap: 8px;",
+                          actionButton("consistent_de_info_btn", icon("question-circle"), title = "What is this?",
+                            class = "btn-outline-info btn-sm"),
+                          downloadButton("download_consistent_csv", tagList(icon("download"), " CSV"),
+                            class = "btn-success btn-sm")
+                        )
+                      ),
+                      DTOutput("consistent_table")
+                    ),
+                    hr(),
+                    # CV Distribution
+                    div(
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                        p("Distribution of Coefficient of Variation (CV) for significant proteins, broken down by experimental group.",
+                          class = "text-muted small mb-0"),
+                        div(style = "display: flex; gap: 8px;",
+                          actionButton("cv_dist_info_btn", icon("question-circle"), title = "What is this?",
+                            class = "btn-outline-info btn-sm"),
+                          downloadButton("download_cv_hist_png", tagList(icon("image"), " PNG"),
+                            class = "btn-outline-secondary btn-sm"),
+                          actionButton("fullscreen_cv_hist", "\U0001F50D Fullscreen",
+                            class = "btn-outline-secondary btn-sm")
+                        )
+                      ),
+                      plotOutput("cv_histogram", height = "450px")
+                    )
+                  )
                 )
-              )
-    ),
+      ),
 
-    # Core Facility (core facility mode only) — Search DB + Instrument QC sub-tabs
-    if (is_core_facility) nav_panel("Core Facility", icon = icon("building"),
-      navset_card_tab(
-        id = "core_facility_tabs",
+      nav_panel("Phosphoproteomics", icon = icon("flask"),
+        uiOutput("phospho_tab_content")
+      ),
 
-        # ---------- Search DB sub-tab ----------
-        nav_panel("Search DB", icon = icon("database"),
-          div(style = "padding: 15px;",
-            # Header with count
-            div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
-              tags$h5(icon("database"), " Search Database", style = "margin: 0;"),
-              tags$span(class = "text-muted", textOutput("job_count_text", inline = TRUE))
-            ),
+      nav_panel("Gene Set Enrichment", icon = icon("sitemap"),
+                # Contrast indicator
+                uiOutput("gsea_contrast_indicator"),
+                # Compact control bar
+                card(
+                  card_body(
+                    div(style = "display: flex; align-items: center; gap: 15px; flex-wrap: wrap;",
+                      div(style = "min-width: 220px;",
+                        selectInput("gsea_ontology", NULL,
+                          choices = c(
+                            "GO: Biological Process (BP)" = "BP",
+                            "GO: Molecular Function (MF)" = "MF",
+                            "GO: Cellular Component (CC)" = "CC",
+                            "KEGG Pathways" = "KEGG"
+                          ),
+                          selected = "BP", width = "100%"
+                        )
+                      ),
+                      actionButton("run_gsea", "\u25B6 Run GSEA", class = "btn-success", icon = icon("play")),
+                      div(style = "flex-grow: 1;",
+                        verbatimTextOutput("gsea_status", placeholder = TRUE) |>
+                          tagAppendAttributes(style = "margin: 0; padding: 5px 10px; min-height: 38px;")
+                      ),
+                      actionButton("gsea_info_btn", icon("question-circle"), title = "What is GSEA?",
+                        class = "btn-outline-info btn-sm")
+                    ),
+                    p("Enrichment analysis on DE results. Auto-detects organism. Results cached per ontology.",
+                      class = "text-muted small", style = "margin: 10px 0 0 0;")
+                  )
+                ),
 
-            # Filter row
-            div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;",
-              div(style = "flex: 2; min-width: 180px;",
-                textInput("job_search_text", NULL, placeholder = "Search by name...")
-              ),
-              div(style = "flex: 1; min-width: 120px;",
-                selectInput("job_filter_lab", NULL,
-                  choices = c("All labs" = ""), selected = "")
-              ),
-              div(style = "flex: 1; min-width: 120px;",
-                selectInput("job_filter_status", NULL,
-                  choices = c("All" = "", "Queued" = "queued", "Running" = "running",
-                              "Completed" = "completed", "Failed" = "failed"),
-                  selected = "")
-              ),
-              div(style = "flex: 1; min-width: 120px;",
-                selectInput("job_filter_staff", NULL,
-                  choices = c("All staff" = ""), selected = "")
-              ),
-              div(style = "flex: 1; min-width: 120px;",
-                selectInput("job_filter_instrument", NULL,
-                  choices = c("All instruments" = ""), selected = "")
-              ),
-              div(style = "flex: 1; min-width: 120px;",
-                selectInput("job_filter_lc_method", NULL,
-                  choices = c("All LC methods" = ""), selected = "")
-              )
-            ),
+                # Results tabs with full-height plots
+                navset_card_tab(
+                  id = "gsea_results_tabs",
 
-            # Job history table
-            DTOutput("job_history_table"),
+                  nav_panel("Dot Plot",
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      downloadButton("download_gsea_dot_png", tagList(icon("image"), " PNG"),
+                        class = "btn-outline-secondary btn-sm"),
+                      actionButton("fullscreen_gsea_dot", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
+                    ),
+                    plotOutput("gsea_dot_plot", height = "calc(100vh - 340px)")
+                  ),
 
-            # Action buttons
-            div(style = "margin-top: 10px; display: flex; gap: 8px; align-items: center;",
-              actionButton("job_load_results", "Load Selected Results",
-                icon = icon("folder-open"),
-                class = "btn-outline-primary btn-sm"),
-              actionButton("job_generate_report", "Generate Report",
-                icon = icon("file-export"),
-                class = "btn-outline-success btn-sm"),
-              div(style = "flex: 1;"),
-              uiOutput("report_link_ui")
-            )
-          )
-        ),
+                  nav_panel("Enrichment Map",
+                    div(style = "text-align: right; margin-bottom: 10px;",
+                      actionButton("fullscreen_gsea_emap", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
+                    ),
+                    plotOutput("gsea_emapplot", height = "calc(100vh - 340px)")
+                  ),
 
-        # ---------- Instrument QC sub-tab ----------
-        nav_panel("Instrument QC", icon = icon("heartbeat"),
-          div(style = "padding: 15px;",
-            div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
-              tags$h5("Instrument Performance Dashboard", style = "margin: 0;"),
-              div(style = "display: flex; gap: 10px; align-items: center;",
-                selectInput("qc_instrument_filter", NULL,
-                  choices = c("All Instruments" = ""),
-                  selected = "", width = "200px"),
-                selectInput("qc_date_range", NULL,
-                  choices = c("Last 30 days" = "30", "Last 90 days" = "90",
-                              "Last 180 days" = "180", "All time" = "9999"),
-                  selected = "90", width = "150px")
-              )
-            ),
-            plotly::plotlyOutput("qc_protein_trend", height = "280px"),
-            plotly::plotlyOutput("qc_precursor_trend", height = "280px"),
-            plotly::plotlyOutput("qc_tic_trend", height = "280px"),
-            hr(),
-            DTOutput("qc_runs_table")
-          )
-        )
+                  nav_panel("Ridgeplot",
+                    div(style = "text-align: right; margin-bottom: 10px;",
+                      actionButton("fullscreen_gsea_ridge", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
+                    ),
+                    plotOutput("gsea_ridgeplot", height = "calc(100vh - 340px)")
+                  ),
+
+                  nav_panel("Results Table",
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      actionButton("gsea_table_info_btn", icon("question-circle"), title = "Column definitions",
+                        class = "btn-outline-info btn-sm"),
+                      downloadButton("download_gsea_csv", tagList(icon("download"), " CSV"),
+                        class = "btn-success btn-sm")
+                    ),
+                    DTOutput("gsea_results_table")
+                  )
+                )
+      ),
+
+      nav_panel("Multi-Omics MOFA2", icon = icon("layer-group"),
+                value = "mofa_tab",
+                uiOutput("mofa_tab_content")
+      ),
+
+      nav_spacer(),  # visual divider before AI section
+
+      # -- AI section --
+      nav_panel("AI Analysis", icon = icon("robot"),
+                card(
+                  card_header(div(style="display: flex; justify-content: space-between; align-items: center;",
+                    span("Chat with Full Data (QC + Expression)"),
+                    div(style = "display: flex; gap: 8px;",
+                      actionButton("data_chat_info_btn", icon("question-circle"), title = "About Data Chat",
+                        class = "btn-outline-info btn-sm"),
+                      downloadButton("download_chat_txt", "\U0001F4BE Save Chat", class="btn-secondary btn-sm")
+                    )
+                  )),
+                  card_body(
+                    verbatimTextOutput("chat_selection_indicator"),
+                    uiOutput("chat_window"),
+                    tags$div(style="margin-top: 15px; display: flex; gap: 10px;",
+                             textAreaInput("chat_input", label=NULL, placeholder="Ask e.g. 'Which group has higher precursor counts?'", width="100%", rows=2),
+                             actionButton("summarize_data", "\U0001F916 Auto-Analyze", class="btn-info", style="height: 54px; margin-top: 2px;"),
+                             actionButton("send_chat", "Send", icon=icon("paper-plane"), class="btn-primary", style="height: 54px; margin-top: 2px;")
+                    ),
+                    p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
+                  )
+                )
       )
     ),
 
+    # ==========================================================================
+    # OUTPUT dropdown — Methods & Code
+    # ==========================================================================
+    nav_menu("Output", icon = icon("file-export"),
+      nav_panel("Methods & Code", icon = icon("scroll"),
+                navset_card_tab(
+                  nav_panel("R Code Log",
+                            card_body(
+                              div(style="background-color: #d1ecf1; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
+                                icon("info-circle"),
+                                strong(" Action Log:"),
+                                "This code recreates your analysis step-by-step. Each section shows:",
+                                tags$ul(
+                                  tags$li(strong("Action name"), " - what you did (e.g., 'Run Pipeline')"),
+                                  tags$li(strong("Timestamp"), " - when you did it"),
+                                  tags$li(strong("R code"), " - how to reproduce it")
+                                ),
+                                p(style="margin-bottom: 0;", "Copy this entire code block to reproduce your analysis in a fresh R session.")
+                              ),
+                              downloadButton("download_repro_log", "\U0001F4BE Download Reproducibility Log", class="btn-success mb-3"),
+                              verbatimTextOutput("reproducible_code")
+                            )
+                  ),
+                  nav_panel("Methods Summary",
+                            card_body(
+                              div(style = "display: flex; justify-content: flex-end; margin-bottom: 10px;",
+                                actionButton("methodology_info_btn", icon("question-circle"), title = "About the methods",
+                                  class = "btn-outline-info btn-sm")
+                              ),
+                              verbatimTextOutput("methodology_text")
+                            )
+                  )
+                )
+      )
+    ),
+
+    # ==========================================================================
+    # EDUCATION (standalone)
+    # ==========================================================================
     nav_panel("Education", icon = icon("graduation-cap"),
               card(
                 card_header("Proteomics Resources & Training"),
@@ -1384,7 +1423,94 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     style = "margin-top: 10px; color: #718096; font-size: 0.9em; text-align: center;")
                 )
               )
-    )
+    ),
+
+    # ==========================================================================
+    # FACILITY dropdown (conditional — core facility mode only)
+    # ==========================================================================
+    if (is_core_facility) nav_menu("Facility", icon = icon("building"),
+
+      # ---------- Search DB ----------
+      nav_panel("Search DB", icon = icon("database"),
+        div(style = "padding: 15px;",
+          # Header with count
+          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+            tags$h5(icon("database"), " Search Database", style = "margin: 0;"),
+            tags$span(class = "text-muted", textOutput("job_count_text", inline = TRUE))
+          ),
+
+          # Filter row
+          div(style = "display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;",
+            div(style = "flex: 2; min-width: 180px;",
+              textInput("job_search_text", NULL, placeholder = "Search by name...")
+            ),
+            div(style = "flex: 1; min-width: 120px;",
+              selectInput("job_filter_lab", NULL,
+                choices = c("All labs" = ""), selected = "")
+            ),
+            div(style = "flex: 1; min-width: 120px;",
+              selectInput("job_filter_status", NULL,
+                choices = c("All" = "", "Queued" = "queued", "Running" = "running",
+                            "Completed" = "completed", "Failed" = "failed"),
+                selected = "")
+            ),
+            div(style = "flex: 1; min-width: 120px;",
+              selectInput("job_filter_staff", NULL,
+                choices = c("All staff" = ""), selected = "")
+            ),
+            div(style = "flex: 1; min-width: 120px;",
+              selectInput("job_filter_instrument", NULL,
+                choices = c("All instruments" = ""), selected = "")
+            ),
+            div(style = "flex: 1; min-width: 120px;",
+              selectInput("job_filter_lc_method", NULL,
+                choices = c("All LC methods" = ""), selected = "")
+            )
+          ),
+
+          # Job history table
+          DTOutput("job_history_table"),
+
+          # Action buttons
+          div(style = "margin-top: 10px; display: flex; gap: 8px; align-items: center;",
+            actionButton("job_load_results", "Load Selected Results",
+              icon = icon("folder-open"),
+              class = "btn-outline-primary btn-sm"),
+            actionButton("job_generate_report", "Generate Report",
+              icon = icon("file-export"),
+              class = "btn-outline-success btn-sm"),
+            div(style = "flex: 1;"),
+            uiOutput("report_link_ui")
+          )
+        )
+      ),
+
+      # ---------- Instrument QC ----------
+      nav_panel("Instrument QC", icon = icon("heartbeat"),
+        div(style = "padding: 15px;",
+          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+            tags$h5("Instrument Performance Dashboard", style = "margin: 0;"),
+            div(style = "display: flex; gap: 10px; align-items: center;",
+              selectInput("qc_instrument_filter", NULL,
+                choices = c("All Instruments" = ""),
+                selected = "", width = "200px"),
+              selectInput("qc_date_range", NULL,
+                choices = c("Last 30 days" = "30", "Last 90 days" = "90",
+                            "Last 180 days" = "180", "All time" = "9999"),
+                selected = "90", width = "150px")
+            )
+          ),
+          plotly::plotlyOutput("qc_protein_trend", height = "280px"),
+          plotly::plotlyOutput("qc_precursor_trend", height = "280px"),
+          plotly::plotlyOutput("qc_tic_trend", height = "280px"),
+          hr(),
+          DTOutput("qc_runs_table")
+        )
+      )
+    ),
+
+    # Gear icon pushed to far-right of navbar
+    nav_spacer(),
+    nav_item(actionLink("open_settings", label = NULL, icon = icon("gear"), title = "Settings"))
   )
-)
 }
