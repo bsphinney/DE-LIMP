@@ -4,66 +4,42 @@ Welcome to **DE-LIMP** (Differential Expression & Limpa Proteomics), your intera
 
 ---
 
-## ✨ What's New in v3.0 (February 2026)
+## ✨ What's New in v3.1 (February 2026)
 
-### GSEA Expansion
-- **Four gene-set databases**: Biological Process (BP), Molecular Function (MF), Cellular Component (CC), and KEGG pathways
-- **Ontology selector dropdown**: Choose which database to run from the GSEA tab
-- **Per-ontology caching**: Results are cached separately for each database and contrast — switch instantly without re-running
-- **Automatic organism detection**: The app queries the UniProt API to identify organism from your protein IDs, supporting non-human datasets without manual configuration
+### UI Overhaul
+- **Professional dark navbar**: Fixed top navigation bar with hover-activated dropdown menus and smooth animations
+- **Dropdown section labels**: The Analysis menu is organized with labeled sections (Setup / Results / AI) for easier navigation
+- **Collapsible accordion sidebar**: Upload Data, Pipeline Settings, and AI Chat sections collapse independently — less scrolling, more focus
+- **Active tab indicator**: Teal underline on the currently active tab for clear visual feedback
 
-### AI Summary — All Comparisons
-- New **"Summarize All Comparisons"** mode analyzes every contrast simultaneously
-- Identifies **cross-comparison biomarkers** (proteins significant in multiple contrasts) and shared biological themes
-- **Info modal** explains exactly what data is sent to the AI and how results are generated
+### DE Dashboard Restructured
+- **Four sub-tabs**: The DE Dashboard now contains **Volcano** (with heatmap below), **Results Table**, **PCA**, and **Robust Changes** as organized sub-tabs
+- **PCA moved here**: PCA plot relocated from Data Overview to the DE Dashboard, placing it closer to your differential expression results
+- **Cleaner layout**: Each sub-tab has full width for its content — no more side-by-side cramming
 
-### MDS Plot Coloring
-- Color samples by **Group**, **Batch**, or any covariate column
-- **Colorblind-friendly palette** applied across all MDS color modes
+### Core Facility Mode *(Optional — for proteomics core labs)*
+- **Activated by environment variable**: Set `DELIMP_CORE_DIR` to a directory containing `staff.yml` to enable
+- **SQLite job tracking**: Every DIA-NN search recorded with lab, instrument, project, LC method, and analyst metadata
+- **Staff auto-configuration**: Selecting a staff member auto-fills SSH host, username, key path, and SLURM account/partition
+- **Search DB tab**: Full-width job history table with 6 filters (text search, lab, status, staff, instrument, LC method) — load results or generate reports from any past search
+- **Instrument QC dashboard**: Protein count, precursor count, and TIC trend plots per instrument with ±2SD control lines and date range filtering
+- **Quarto report generation**: One-click standalone HTML reports with metadata header, QC bracket comparison, volcano plots, DE statistics, and top proteins table
+- **Template system**: Save and load search presets for reproducible workflows across staff members
 
-### Complete Dataset Export
-- **Download all results at once** from the Dataset Summary tab
-- Export includes: all contrast tables, full expression matrix, and sample metadata
-
-### Phosphoproteomics
-- **Phase 1 — Site-Level DE**: Auto-detection of phospho data on upload, site-level differential expression with volcano plot, results table, residue distribution, and QC completeness
-- **Phase 2 — Kinase Activity & Motifs**: KSEA kinase activity inference from phosphosite fold-changes, sequence logo motif analysis for enriched residue patterns
-- **Phase 3 — Advanced**: Protein-level abundance correction to isolate phosphorylation stoichiometry, AI context integration for phospho results
-
-### DIA-NN Search Integration
-- **Three backends**: Local (embedded in Docker), Docker (separate container), and HPC (SSH/SLURM)
-- **Windows Docker deployment**: `docker compose up` runs DE-LIMP + DIA-NN with zero R installation — see [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)
-- **SSH remote submission**: Connect to your HPC cluster via SSH key-based authentication and submit SLURM jobs without leaving the app
-- **Non-blocking job queue**: Submit multiple DIA-NN searches and continue using DE-LIMP while jobs run
-- **Auto-load results**: Completed jobs automatically load into the analysis pipeline
-- **File scanning**: Browse directories for raw data files (.d, .raw, .mzML, .wiff) with file sizes
-- **FASTA database sources**: Download from UniProt (search by organism), select pre-staged server FASTAs, or browse/enter a path
-- **Contaminant libraries**: 6 curated options from HaoGroup-ProtContLib (Universal, Cell Culture, Mouse Tissue, Rat Tissue, Neuron Culture, Stem Cell Culture)
-- **Search modes**: Library-free (default), Library-based, and Phosphoproteomics (auto-configures STY mods, --phospho-output)
-- **Methodology integration**: Search parameters automatically appear in the Methodology tab as a "0. DIA-NN DATABASE SEARCH" section
-
-### Multi-Omics Integration (MOFA2)
-- **Multi-Omics MOFA2 tab**: Unsupervised integration of 2-6 data views using MOFA2 (Multi-Omics Factor Analysis)
-- **Smart data import**: Upload RDS (DE-LIMP sessions, limma objects), CSV, TSV, or Parquet matrices with auto-log2 detection
-- **5 results visualizations**: Variance explained heatmap, factor weights browser, sample scores scatter, top features table, Factor-DE correlation
-- **Built-in example datasets**: Mouse Brain (proteomics + phospho) and TCGA Breast Cancer (mRNA + miRNA + protein) — load with one click
-- **Session support**: MOFA results saved/loaded with sessions; methodology auto-generated for publications
-
-### Code Modularization
-- App split from a single `DE-LIMP.R` monolith into a modular `R/` directory with `app.R` orchestrator
-- 12 focused module files for easier maintenance and development
+> *Core Facility Mode adds a "Facility" dropdown to the navbar with Search DB and Instrument QC tabs. It is not visible on Hugging Face Spaces or standard (non-facility) installations.*
 
 ---
 
-## Previous: v2.1-2.2 Highlights
+## Previous: v3.0 Highlights
 
-- **XIC Chromatogram Viewer** (v2.1): Fragment-level chromatogram inspection with DIA-NN 1.x/2.x support, split-axis MS1/MS2 view, ion mobility, and MS2 intensity alignment
-- **Comparison Selector Sync** (v2.1): All comparison selectors sync automatically across tabs
-- **Enhanced Volcano Plot** (v2.1): Colored threshold lines, significance legend, and box-select filtering
-- **P-value Distribution Diagnostic** (v2.1): Automated pattern detection with color-coded guidance banners
-- **Contextual Help System** (v2.2): 15 info modal `?` buttons across every major tab with actionable guidance
-- **Volcano → Table Filtering** (v2.2): Selecting proteins in the volcano plot filters the results table automatically
-- **Responsive Design**: All plots use viewport-relative heights for optimal viewing on any screen size
+- **Multi-Omics MOFA2**: 2-6 view integration with variance heatmap, factor weights, sample scores, Factor-DE correlation, and built-in example datasets
+- **DIA-NN Docker Search**: Three backends (Local/Docker/HPC), Windows Docker Compose deployment
+- **Phosphoproteomics**: Site-level DE, KSEA kinase activity, motif analysis, protein-level abundance correction
+- **GSEA Expansion**: 4 databases (BP/MF/CC/KEGG) with per-ontology caching and automatic organism detection via UniProt API
+- **AI Summary**: All-contrast analysis with cross-comparison biomarker detection
+- **DIA-NN Search Integration**: SSH remote submission, non-blocking job queue, auto-load results, UniProt FASTA download, 6 contaminant libraries
+- **XIC Chromatogram Viewer** (v2.1): Fragment-level inspection with MS2 intensity alignment and ion mobility support (local/HPC only)
+- **Contextual Help System** (v2.2): 15 info modal `?` buttons with actionable guidance
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
@@ -108,7 +84,7 @@ To use the "Chat with Data" features, you need a key from Google. It is free for
 
 ## 2. Core Analysis Workflow
 
-Follow the sidebar controls on the left to process your data.
+The sidebar on the left contains collapsible sections for each stage of the workflow. Click a section header to expand or collapse it. The **Upload Data** section is open by default.
 
 ### Step 2.1: Upload Data
 You have two options to get started:
@@ -365,11 +341,11 @@ This section is **publication-ready** — it uses human-readable names for all p
 ## 4. Deep Dive: The Data Overview & Grid View
 
 ### 📊 Data Overview
-This is your landing page with 6 sub-tabs:
+This is your landing page with 5 sub-tabs:
 * **Assign Groups & Run** — Configure experimental groups and run the analysis pipeline
 * **Signal Distribution** — Visualizes the dynamic range; automatically colors by DE status with synchronized comparison selector
 * **Dataset Summary** — QC statistics and DE protein counts per comparison with directional arrows
-* **Group QC Summary** — Average precursor and protein counts per group
+* **Replicate Consistency** — Average precursor and protein counts per group
 * **Expression Grid** — Heatmap-style table with UniProt linking and click-to-plot
 * **AI Summary** — Generate AI-powered analysis summaries (requires Gemini API key)
 
@@ -394,18 +370,35 @@ Click the green **"Open Grid View"** button to open the deep-dive table.
 ## 5. Visualizing Results
 
 ### 📉 DE Dashboard
-* **Current Comparison Display (NEW in v2.0.1):** A prominent blue header banner at the top shows which comparison you're viewing (e.g., "Evosep - Affinisep"). This updates automatically when you change the comparison dropdown, making it easy to keep track of your current analysis focus.
+The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
+
+* **Current Comparison Display:** A prominent header banner at the top shows which comparison you're viewing (e.g., "Evosep - Affinisep"). This updates automatically when you change the comparison dropdown.
+
+#### Volcano Sub-tab
 * **Volcano Plot:** Interactive! Click points to select them. Box-select multiple points to analyze a cluster.
     * **Y-axis:** Shows -log10(raw P-Value) following proteomics best practices
     * **Coloring:** Red points indicate FDR-corrected significance (adj.P.Val < 0.05)
     * **Selection:** Single-click for one protein, box-select for multiple proteins
-    * *Sync:* Selecting points here updates the Grid View and the AI context
-* **Results Table:** Shows both raw P-values and FDR-adjusted P-values for transparency
+    * *Sync:* Selecting points here updates the Results Table and the AI context
+* **Heatmap:** Displayed directly below the volcano plot. Automatically scales and clusters the top 50 significant proteins (or your specific selection).
+
+#### Results Table Sub-tab
+* **DE Results Table:** Shows both raw P-values and FDR-adjusted P-values for transparency
 * **Violin Plots:** Select one or more proteins and click **"📊 Violin Plot"** button
     * Multi-protein support: View multiple proteins in a 2-column grid layout
     * Individual scales: Each protein gets its own Y-axis for better visualization
     * Dynamic height: Adjusts based on number of selected proteins
-* **Heatmap:** Automatically scales and clusters the top 50 significant proteins (or your specific selection).
+* **XICs Button:** Click "📈 XICs" to inspect fragment chromatograms (local/HPC only)
+
+#### PCA Sub-tab
+* **PCA Plot:** Interactive scatter plot of samples in principal component space
+    * **Color by:** Group, Batch, or any covariate column
+    * **Axis selection:** Choose which principal components to display (PC1 vs PC2, etc.)
+    * Helps identify sample clustering, outliers, and batch effects
+
+#### Robust Changes Sub-tab
+* **High-Consistency Table:** Proteins with the most reproducible differential expression across replicates
+* **CV Distribution:** Histogram of coefficient of variation across experimental groups
 
 ### 📐 QC Trends & Plots
 * **Trends:** Monitor precursors and proteins across run order with automatic group averages
@@ -632,12 +625,85 @@ Two built-in datasets for testing:
 
 ---
 
-## 7. 🤖 AI Chat (Gemini Integration)
+## 7. 🏢 Core Facility Mode
+
+Core Facility Mode transforms DE-LIMP into a managed proteomics analysis platform for core labs, adding job tracking, instrument QC monitoring, and automated report generation.
+
+> **Note:** Core Facility Mode is optional and not visible unless explicitly activated. Standard users and Hugging Face deployments are unaffected.
+
+### 7.1 Activation
+
+Set the `DELIMP_CORE_DIR` environment variable to a directory containing a `staff.yml` configuration file:
+
+```bash
+# Example:
+export DELIMP_CORE_DIR=/srv/delimp
+# Then launch the app normally
+shiny::runApp('.', port=3838)
+```
+
+The directory should contain:
+- `staff.yml` — Staff member profiles with SSH/SLURM configuration
+- `delimp.db` — SQLite database (auto-created on first run)
+- `reports/` — Generated HTML reports (auto-created)
+- `state/` — Saved analysis state files (auto-created)
+
+### 7.2 Staff Configuration
+
+The `staff.yml` file defines staff members and their HPC credentials:
+
+```yaml
+staff:
+  - name: "Jane Smith"
+    username: "jsmith"
+    host: "hpc.university.edu"
+    key_path: "~/.ssh/id_rsa"
+    account: "proteomics_lab"
+    partition: "high"
+    lab: "Smith Lab"
+```
+
+Selecting a staff member from the dropdown auto-fills SSH host, username, key path, and SLURM account/partition — no manual entry needed.
+
+### 7.3 Search DB Tab
+
+The **Search DB** tab (under the Facility dropdown) provides a searchable history of all DIA-NN searches:
+
+- **6 filters**: Free-text search, lab, status, staff, instrument, and LC method
+- **Load Results**: Re-load results from any past search into the analysis pipeline
+- **Generate Report**: Create a standalone HTML report from any completed search
+
+### 7.4 Instrument QC Tab
+
+The **Instrument QC** tab monitors instrument performance over time:
+
+- **Trend plots**: Protein count, precursor count, and TIC per QC run
+- **Control lines**: Rolling mean ± 2SD for anomaly detection
+- **Instrument filter**: Select specific instruments to monitor
+- **Date range**: Focus on a specific time period
+- **Runs table**: Detailed metrics for each QC run
+
+### 7.5 Report Generation
+
+Click **"Generate Report"** on any completed search to produce a standalone HTML report:
+
+- **Metadata header**: Title, lab, instrument, LC method, project, analyst, date
+- **QC bracket**: Comparison with the nearest HeLa QC runs (before and after)
+- **Volcano plots**: For each contrast in the analysis
+- **DE statistics**: Protein counts by significance threshold
+- **Top proteins table**: Most significant differentially expressed proteins
+- **Normalization diagnostics**: Pre/post normalization signal distributions
+
+Reports are saved to the `reports/` directory and recorded in the SQLite database for tracking.
+
+---
+
+## 8. 🤖 AI Chat (Gemini Integration)
 
 DE-LIMP features a context-aware AI assistant.
 
 ### Setup
-1.  Paste your **Gemini API Key** in the sidebar.
+1.  Expand the **AI Chat** section in the sidebar accordion and paste your **Gemini API Key**.
 2.  (Optional) Change the Model Name if you want to use a specific version (Default: `gemini-3-flash-preview`).
 
 ### "Chat with Your Data"
@@ -654,7 +720,7 @@ You aren't just chatting with a bot; you are chatting with **your specific datas
 
 ---
 
-## 8. Accessing DE-LIMP
+## 9. Accessing DE-LIMP
 
 You have multiple options to access DE-LIMP:
 
@@ -680,7 +746,7 @@ You have multiple options to access DE-LIMP:
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Issue | Solution |
 | :--- | :--- |

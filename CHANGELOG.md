@@ -5,6 +5,50 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-02-24
+
+### Added
+- **UI Overhaul**:
+  - `page_navbar()` layout with dark navbar (`#2c3e50`), hover-activated dropdown menus with smooth animations
+  - Dropdown section labels (Setup / Results / AI) in the Analysis menu via JS injection
+  - Active tab teal underline indicator (`--flatly-success`)
+  - `nav_spacer()` + native `nav_item()` for gear icon (replaces JS injection)
+
+- **Accordion Sidebar**:
+  - Three collapsible `accordion_panel()` sections: Upload Data (open by default), Pipeline Settings, AI Chat
+  - Phospho and XIC sections in separate conditional accordions outside the main group
+  - Session buttons and core facility controls outside accordion for always-visible access
+
+- **DE Dashboard Sub-tabs**:
+  - Replaced grid+accordion layout with `navset_card_tab(id = "de_dashboard_subtabs")`
+  - Four sub-tabs: Volcano (with heatmap below), Results Table, PCA, Robust Changes
+  - PCA moved from Data Overview into DE Dashboard
+
+- **Core Facility Mode**:
+  - Activated by `DELIMP_CORE_DIR` env var pointing to directory with `staff.yml`
+  - SQLite database (`delimp.db`) with 4 tables: searches, qc_runs, reports, templates
+  - WAL mode for concurrent SQLite access
+  - Staff YAML config auto-fills SSH host, username, key path, SLURM account/partition
+  - Search DB tab: full-width job history with 6 filters (text, lab, status, staff, instrument, LC method)
+  - Instrument QC dashboard: protein/precursor/TIC trend plots with ±2SD control lines, instrument filter, date range
+  - Quarto report generation: standalone HTML with metadata, QC bracket, volcanos, DE stats, top proteins
+  - Template system for saving/loading search presets
+  - New files: `R/helpers_facility.R`, `R/server_facility.R`, `report_template.qmd`, `seed_test_db.R`
+
+### Changed
+- `R/ui.R`: Rewritten outer wrapper from `page_sidebar()` + `navset_card_tab()` to `page_navbar()` with direct nav items
+- `R/ui.R`: Sidebar width reduced from 320 to 300px
+- `R/ui.R`: Data Overview reduced from 6 to 5 sub-tabs (PCA moved to DE Dashboard)
+- `R/ui.R`: Removed `.de-dashboard-grid` CSS class and accordion heatmap wrapper
+- `CLAUDE.md`: Condensed from ~500 to ~130 lines; detailed patterns moved to `docs/PATTERNS.md`, TODOs to `docs/TODO.md`
+- `README_GITHUB.md`, `README_HF.md`, `USER_GUIDE.md`: Updated for v3.1 features
+- App version bumped to v3.1
+
+### Fixed
+- **Navbar text invisible on dark background**: Flatly theme renders dark text on `navbar-inverse`. Fixed with CSS `!important` overrides for white text on `.navbar .nav-link` and `.navbar-brand`.
+- **Hidden tab fragments visible**: `nav_hide()` on `page_navbar` leaves letter fragments. Fixed with `width: 0 !important; overflow: hidden !important` on hidden nav items.
+- **bslib deprecation warning**: `page_navbar(bg=...)` deprecated in bslib 0.9.0+. Changed to `navbar_options = navbar_options(bg = "#2c3e50")`.
+
 ## [3.0.0] - 2026-02-20
 
 ### Added

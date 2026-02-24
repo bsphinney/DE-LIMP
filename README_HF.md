@@ -22,21 +22,18 @@ tags:
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** and **Limma** for robust statistics, with **Google Gemini AI** integration.
 
-## ✨ What's New in v3.0
+## ✨ What's New in v3.1
 
-- 🧬 **Multi-Omics MOFA2**: Unsupervised integration of 2-6 data views with variance explained heatmap, factor weights, sample scores, and built-in example datasets (Mouse Brain + TCGA Breast Cancer)
-- 🔬 **DIA-NN Docker Search**: Integrated DIA-NN search via Docker or HPC — submit, monitor, and auto-load results
-- 🧬 **GSEA**: 4 databases (BP/MF/CC/KEGG) with automatic organism detection
-- 🔬 **Phosphoproteomics**: Site-level DE, KSEA kinase activity, motif analysis
-- 🤖 **AI Summary**: Analyzes all contrasts with cross-comparison biomarkers
-- 🗺️ **MDS coloring** by Group, Batch, or covariates
-- 📦 **Complete dataset export** — all contrasts + expression + metadata
+- 🎨 **UI Overhaul**: Professional dark navbar with hover dropdowns, collapsible accordion sidebar, and active tab indicators
+- 📊 **DE Dashboard Sub-tabs**: Volcano (+heatmap), Results Table, PCA, and Robust Changes — all in one organized view
+- 🧭 **PCA moved to DE Dashboard**: Closer to your DE results for a more logical analysis workflow
 
-**Previous highlights** (v2.1–2.5):
-- ❓ Contextual Help System — 15 info modal `?` buttons
-- 🌋 Volcano → Table filtering and improved DE Dashboard
+**Previous highlights** (v3.0):
+- 🧬 Multi-Omics MOFA2: 2-6 view integration with variance heatmap, factor weights, and example datasets
+- 🔬 Phosphoproteomics: Site-level DE, KSEA kinase activity, motif analysis
+- 🧬 GSEA: 4 databases (BP/MF/CC/KEGG) with automatic organism detection
+- 🤖 AI Summary: All-contrast analysis with cross-comparison biomarkers
 - 📈 XIC Chromatogram Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
-- 🎯 Four-Way Selector Sync, P-value Diagnostics, Volcano Annotations
 
 ## 🚀 Features
 
