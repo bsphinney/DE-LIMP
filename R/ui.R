@@ -110,6 +110,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     .tab-pane, .tab-content {
       overflow: visible !important;
     }
+    /* Compact covariate checkboxes and inputs */
+    .covariate-row .checkbox { margin-top: 0; margin-bottom: 0; }
+    .covariate-row .form-group { margin-bottom: 0; }
+    .covariate-row .form-control { padding: 4px 8px; height: auto; font-size: 0.85em; }
+
     /* Re-enable horizontal scrolling for DataTables inside tab panes */
     .dataTables_wrapper {
       overflow-x: auto !important;
@@ -1044,23 +1049,24 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         )
                       ),
 
-                      # Covariates (compact inline)
+                      # Covariates (compact single-row)
                       div(style="flex: 1; min-width: 250px;",
-                        strong("Covariates:", style="font-size: 0.9em;"),
-                        div(style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px;",
-                          div(style="min-width: 110px;",
-                            checkboxInput("include_batch", "Batch", value = FALSE),
-                            textInput("batch_label", NULL, value = "Batch", placeholder = "e.g., Batch")
+                        strong("Covariates:", style="font-size: 0.85em; display: block; margin-bottom: 4px;"),
+                        div(class="covariate-row", style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;",
+                          div(style="display: flex; align-items: center; gap: 4px;",
+                            checkboxInput("include_batch", NULL, value = FALSE),
+                            div(style="margin-top: -15px; width: 80px;",
+                              textInput("batch_label", NULL, value = "Batch", placeholder = "Batch"))
                           ),
-                          div(style="min-width: 130px;",
+                          div(style="display: flex; align-items: center; gap: 4px;",
                             checkboxInput("include_cov1", NULL, value = FALSE),
-                            textInput("cov1_label", "Name:", value = "Covariate1",
-                                     placeholder = "e.g., Sex, Diet")
+                            div(style="margin-top: -15px; width: 110px;",
+                              textInput("cov1_label", NULL, value = "Covariate1", placeholder = "e.g., Sex"))
                           ),
-                          div(style="min-width: 130px;",
+                          div(style="display: flex; align-items: center; gap: 4px;",
                             checkboxInput("include_cov2", NULL, value = FALSE),
-                            textInput("cov2_label", "Name:", value = "Covariate2",
-                                     placeholder = "e.g., Age, Time")
+                            div(style="margin-top: -15px; width: 110px;",
+                              textInput("cov2_label", NULL, value = "Covariate2", placeholder = "e.g., Age"))
                           )
                         )
                       ),
