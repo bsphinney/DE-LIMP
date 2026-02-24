@@ -114,6 +114,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     .dataTables_wrapper {
       overflow-x: auto !important;
       overflow-y: visible;
+      max-width: 100%;
+      box-sizing: border-box;
     }
   "))),
 
