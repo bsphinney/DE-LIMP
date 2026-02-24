@@ -130,28 +130,49 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       setTimeout(resizePlotlyAll, 500);
     });
 
-    // Navbar dropdown: open on hover, close on leave or click
-    (function() {
+    // Navbar dropdown: hover-to-open using Bootstrap 5 Dropdown API
+    $(document).ready(function() {
       var closeTimer = null;
-      $('.navbar .dropdown').on('mouseenter', function() {
+
+      // Open dropdown on hover (event delegation for DOM safety)
+      $(document).on('mouseenter', '.navbar .nav-item.dropdown', function() {
         clearTimeout(closeTimer);
-        // Close any other open dropdowns
-        $('.navbar .dropdown').not(this).find('.dropdown-menu').removeClass('show');
-        $('.navbar .dropdown').not(this).removeClass('show');
-        $(this).addClass('show');
-        $(this).find('.dropdown-menu').addClass('show');
-      }).on('mouseleave', function() {
-        var dd = $(this);
+        var toggle = $(this).children('.dropdown-toggle')[0];
+        if (!toggle) return;
+        // Close all OTHER dropdowns via Bootstrap API
+        $('.navbar .nav-item.dropdown').not(this).each(function() {
+          var t = $(this).children('.dropdown-toggle')[0];
+          if (t) { var i = bootstrap.Dropdown.getInstance(t); if (i) i.hide(); }
+        });
+        // Open THIS dropdown via Bootstrap API
+        bootstrap.Dropdown.getOrCreateInstance(toggle).show();
+      });
+
+      // Close dropdown on mouse leave (with small delay for UX)
+      $(document).on('mouseleave', '.navbar .nav-item.dropdown', function() {
+        var toggle = $(this).children('.dropdown-toggle')[0];
+        if (!toggle) return;
         closeTimer = setTimeout(function() {
-          dd.removeClass('show');
-          dd.find('.dropdown-menu').removeClass('show');
-        }, 200);
+          var inst = bootstrap.Dropdown.getInstance(toggle);
+          if (inst) inst.hide();
+        }, 150);
       });
-      $(document).on('click', '.navbar .dropdown-item', function() {
-        $('.navbar .dropdown').removeClass('show');
-        $('.navbar .dropdown-menu').removeClass('show');
+
+      // Close ALL dropdowns when a menu item is clicked
+      $(document).on('click', '.navbar .dropdown-menu .dropdown-item', function() {
+        clearTimeout(closeTimer);
+        $('.navbar .nav-item.dropdown .dropdown-toggle').each(function() {
+          var inst = bootstrap.Dropdown.getInstance(this);
+          if (inst) inst.hide();
+        });
       });
-    })();
+
+      // Prevent default click-toggle on dropdown buttons (hover handles open/close)
+      $(document).on('click', '.navbar .nav-item.dropdown > .dropdown-toggle', function(e) {
+        e.stopPropagation();
+        e.preventDefault();
+      });
+    });
 
     // Inject section labels into Analysis dropdown
     $(document).ready(function() {

@@ -186,7 +186,8 @@ server_de <- function(input, output, session, values, add_to_log) {
       } else { cv_list[[paste0("CV_", g)]] <- NA }
     }
     cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-    df_final <- left_join(df_res, cv_df, by = "Protein.Group") %>% rowwise() %>% mutate(Avg_CV = mean(c_across(starts_with("CV_")), na.rm = TRUE)) %>% ungroup() %>% arrange(Avg_CV) %>% mutate(Stability = ifelse(Avg_CV < 20, "High", "Low")) %>% dplyr::select(Protein.Group, Stability, Avg_CV, logFC, adj.P.Val, starts_with("CV_")) %>% mutate(across(where(is.numeric), ~round(.x, 2)))
+    df_final <- left_join(df_res, cv_df, by = "Protein.Group") %>% rowwise() %>% mutate(Avg_CV = mean(c_across(starts_with("CV_")), na.rm = TRUE)) %>% ungroup() %>% filter(Avg_CV < 20) %>% arrange(Avg_CV) %>% dplyr::select(Protein.Group, Avg_CV, logFC, adj.P.Val, starts_with("CV_")) %>% mutate(across(where(is.numeric), ~round(.x, 2)))
+    if(nrow(df_final) == 0) return(datatable(data.frame(Status="No significant proteins with Avg CV < 20% found.")))
     datatable(df_final, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
   })
 

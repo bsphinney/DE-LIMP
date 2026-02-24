@@ -198,21 +198,35 @@ server_session <- function(input, output, session, values, add_to_log) {
   # --- Consistent DE Info Modal ---
   observeEvent(input$consistent_de_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " What is the Consistency Table?"),
+      title = tagList(icon("question-circle"), " How Robust Changes Works"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
-        tags$h6("What is %CV?"),
-        p("The Coefficient of Variation (CV) measures how consistent a protein's expression is within each group. ",
-          "It's calculated as (standard deviation / mean) \u00d7 100. Lower CV = more reproducible measurement."),
-        tags$h6("Why this matters"),
-        p("A protein that is differentially expressed AND has low CV across replicates is a stronger biomarker candidate. ",
-          "High CV means the measurement is noisy and the DE result may not be reproducible."),
+        tags$h6("What this table shows"),
+        p("Robust Changes identifies differentially expressed proteins that are also ",
+          strong("highly reproducible"), " across replicates. These are your strongest biomarker candidates."),
+        tags$h6("How it's calculated"),
+        tags$ol(
+          tags$li("Start with all ", strong("significant proteins"), " (FDR-adjusted p-value < 0.05) for the current contrast"),
+          tags$li("Convert log2 expression values back to linear scale (2\u207F)"),
+          tags$li("Calculate the ", strong("%CV (Coefficient of Variation)"), " for each protein within each experimental group: ",
+                   tags$code("CV = (SD / Mean) \u00d7 100")),
+          tags$li("Average the per-group CVs into a single ", strong("Avg_CV"), " score"),
+          tags$li(strong("Filter to Avg_CV < 20%"), " \u2014 only proteins with highly consistent quantification are shown")
+        ),
+        tags$h6("Why the 20% threshold?"),
+        p("In well-controlled DIA proteomics experiments, most proteins have CV < 20-30%. ",
+          "Proteins below 20% average CV represent the most reproducible measurements. ",
+          "A significant fold-change backed by low CV means the result is unlikely to be driven by a single noisy replicate."),
         tags$h6("Reading the table"),
         tags$ul(
-          tags$li("Proteins are ranked by average %CV across all groups (lowest first)"),
-          tags$li("Each group's %CV is shown in its own column"),
-          tags$li(strong("Top candidates: "), "Significant proteins (adj.P.Val < 0.05) with %CV < 20% in all groups")
-        )
+          tags$li(strong("Avg_CV: "), "Average coefficient of variation across all groups (lower = more reproducible)"),
+          tags$li(strong("CV_ columns: "), "Per-group CV values \u2014 check if variability is balanced across groups"),
+          tags$li(strong("logFC: "), "Log2 fold-change from limma"),
+          tags$li(strong("adj.P.Val: "), "FDR-adjusted p-value")
+        ),
+        tags$h6("CV Distribution tab"),
+        p("The companion histogram shows the full CV distribution for all significant proteins (not just < 20%), ",
+          "broken down by group. Use it to assess overall replicate quality \u2014 tight distributions centered below 20% indicate good data.")
       )
     ))
   })
