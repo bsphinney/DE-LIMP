@@ -110,6 +110,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     .tab-pane, .tab-content {
       overflow: visible !important;
     }
+    /* Re-enable horizontal scrolling for DataTables inside tab panes */
+    .dataTables_wrapper {
+      overflow-x: auto !important;
+      overflow-y: visible;
+    }
   "))),
 
   tags$head(tags$script(HTML("
