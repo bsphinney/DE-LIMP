@@ -110,6 +110,9 @@ server_phospho <- function(input, output, session, values, add_to_log) {
           stringsAsFactors = FALSE
         )
 
+        # Clear example data flag so auto-guess uses normal logic
+        values$is_example_data <- FALSE
+
         # Store report path
         session_report <- file.path(tempdir(), "de_limp_phospho_report.parquet")
         file.copy(report_tmp, session_report, overwrite = TRUE)

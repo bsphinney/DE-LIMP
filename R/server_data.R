@@ -235,9 +235,12 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
     fnames <- sub("\\.(d|raw|mzML|parquet)$", "", fnames, ignore.case = TRUE)
     fnames <- sub("^\\d{6,10}_", "", fnames)
 
-    # --- Special case: example data (filenames don't distinguish groups) ---
-    if (isTRUE(values$is_example_data) && n == 6) {
-      meta$Group <- c(rep("Affinisep", 3), rep("Evosep", 3))
+    # --- Special case: example data (filenames don't auto-guess cleanly) ---
+    if (isTRUE(values$is_example_data) && !isTRUE(values$is_example_phospho)) {
+      meta$Group <- ifelse(grepl("affinisepIPA", meta$File.Name), "affinisepIPA",
+                    ifelse(grepl("affinisepACN", meta$File.Name), "affinisepACN",
+                    ifelse(grepl("affinisep", meta$File.Name, ignore.case = TRUE), "Affinisep",
+                    "Evosep")))
       values$metadata <- meta
       return()
     }
@@ -596,7 +599,11 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         )
         add_to_log("Contrast Fitting", contrast_code)
 
-        nav_select("main_tabs", "QC")
+        if (isTRUE(values$phospho_detected$detected)) {
+          nav_select("main_tabs", "Phosphoproteomics")
+        } else {
+          nav_select("main_tabs", "DE Dashboard")
+        }
         showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
       }, error = function(e) {
         showNotification(paste("Pipeline error:", e$message), type = "error", duration = NULL)

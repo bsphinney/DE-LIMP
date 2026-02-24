@@ -211,6 +211,7 @@ server_xic <- function(input, output, session, values, is_hf_space) {
       return()
     }
     values$xic_protein <- values$plot_selected_proteins[1]
+    values$xic_load_trigger <- Sys.time()
     show_xic_modal(session, values)
   })
 
@@ -222,12 +223,15 @@ server_xic <- function(input, output, session, values, is_hf_space) {
     }
     req(values$grid_selected_protein)
     values$xic_protein <- values$grid_selected_protein
+    values$xic_load_trigger <- Sys.time()
     removeModal()
     show_xic_modal(session, values)
   })
 
   # --- Reactive XIC Data Loading ---
   observe({
+    # Depend on trigger so reopening same protein still reloads
+    values$xic_load_trigger
     req(values$xic_protein, values$xic_available, values$xic_dir,
         values$xic_report_map)
 

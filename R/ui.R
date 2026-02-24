@@ -26,17 +26,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       --flatly-muted: #6c757d;
     }
 
-    /* Hover-triggered navbar dropdowns */
-    .navbar .dropdown:hover > .dropdown-menu { display: block; }
+    /* Navbar dropdown styling (open/close handled by JS) */
     .navbar .dropdown-menu {
       border-radius: 0 0 6px 6px;
       box-shadow: 0 6px 20px rgba(0,0,0,0.12);
       min-width: 230px;
-      animation: dropIn 0.15s ease-out;
-    }
-    @keyframes dropIn {
-      from { opacity: 0; transform: translateY(-4px); }
-      to { opacity: 1; transform: translateY(0); }
     }
 
     /* Force white text on dark navbar */
@@ -135,6 +129,29 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       setTimeout(resizePlotlyAll, 150);
       setTimeout(resizePlotlyAll, 500);
     });
+
+    // Navbar dropdown: open on hover, close on leave or click
+    (function() {
+      var closeTimer = null;
+      $('.navbar .dropdown').on('mouseenter', function() {
+        clearTimeout(closeTimer);
+        // Close any other open dropdowns
+        $('.navbar .dropdown').not(this).find('.dropdown-menu').removeClass('show');
+        $('.navbar .dropdown').not(this).removeClass('show');
+        $(this).addClass('show');
+        $(this).find('.dropdown-menu').addClass('show');
+      }).on('mouseleave', function() {
+        var dd = $(this);
+        closeTimer = setTimeout(function() {
+          dd.removeClass('show');
+          dd.find('.dropdown-menu').removeClass('show');
+        }, 200);
+      });
+      $(document).on('click', '.navbar .dropdown-item', function() {
+        $('.navbar .dropdown').removeClass('show');
+        $('.navbar .dropdown-menu').removeClass('show');
+      });
+    })();
 
     // Inject section labels into Analysis dropdown
     $(document).ready(function() {
@@ -1177,21 +1194,27 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   id = "de_dashboard_subtabs",
 
                   nav_panel("Volcano", icon = icon("chart-simple"),
-                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
-                      actionButton("fullscreen_volcano", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
-                    ),
-                    plotlyOutput("volcano_plot_interactive", height = "calc(100vh - 420px)"),
-                    # Heatmap directly below volcano
-                    div(style = "margin-top: 16px;",
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                        span("Heatmap of Selected/Top Proteins", style = "font-weight: 600;"),
-                        div(style = "display: flex; gap: 8px;",
-                          downloadButton("download_heatmap_png", tagList(icon("image"), " PNG"),
-                            class = "btn-outline-secondary btn-sm"),
-                          actionButton("fullscreen_heatmap", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
-                        )
+                    div(style = "display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start;",
+                      # Left: Volcano plot
+                      div(
+                        div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                          actionButton("clear_plot_selection_volcano", "Reset Selection", class="btn-warning btn-sm"),
+                          actionButton("fullscreen_volcano", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
+                        ),
+                        plotlyOutput("volcano_plot_interactive", height = "calc(100vh - 340px)")
                       ),
-                      plotOutput("heatmap_plot", height = "350px")
+                      # Right: Heatmap
+                      div(
+                        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                          span("Heatmap of Selected/Top Proteins", style = "font-weight: 600; font-size: 0.9rem;"),
+                          div(style = "display: flex; gap: 8px;",
+                            downloadButton("download_heatmap_png", tagList(icon("image"), " PNG"),
+                              class = "btn-outline-secondary btn-sm"),
+                            actionButton("fullscreen_heatmap", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
+                          )
+                        ),
+                        plotOutput("heatmap_plot", height = "calc(100vh - 340px)")
+                      )
                     )
                   ),
 

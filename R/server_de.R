@@ -427,6 +427,7 @@ server_de <- function(input, output, session, values, add_to_log) {
   observeEvent(event_data("plotly_selected", source = "volcano_source"), { select_data <- event_data("plotly_selected", source = "volcano_source"); if (!is.null(select_data)) values$plot_selected_proteins <- select_data$key })
   observeEvent(event_data("plotly_click", source = "volcano_source"), { click_data <- event_data("plotly_click", source = "volcano_source"); if (!is.null(click_data)) values$plot_selected_proteins <- click_data$key })
   observeEvent(input$clear_plot_selection, { values$plot_selected_proteins <- NULL })
+  observeEvent(input$clear_plot_selection_volcano, { values$plot_selected_proteins <- NULL })
 
   # --- Table Row Selection Sync (app.R lines 3212-3227) ---
   observeEvent(input$de_table_rows_selected, {
