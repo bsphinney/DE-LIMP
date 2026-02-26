@@ -41,6 +41,9 @@ RUN R -e "install.packages(c('KSEAapp', 'ggseqlogo'), repos='https://cloud.r-pro
 RUN R -e "install.packages(c('systemfonts', 'gdtools', 'Rcpp'), repos='https://cloud.r-project.org/')"
 RUN R -e "install.packages(c('ggraph', 'graphlayouts', 'tidygraph', 'scatterpie', 'shadowtext', 'ggforce'), repos='https://cloud.r-project.org/')"
 
+# Core Facility mode packages (SQLite, YAML, UUID, Quarto rendering)
+RUN R -e "install.packages(c('DBI', 'RSQLite', 'yaml', 'uuid', 'quarto'), repos='https://cloud.r-project.org/')"
+
 # 3. Bioconductor packages
 RUN R -e "BiocManager::install(c('DOSE', 'GOSemSim', 'yulab.utils'), ask=FALSE, update=FALSE)"
 RUN R -e "BiocManager::install(c('limma', 'limpa', 'ComplexHeatmap', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'ggridges'), ask=FALSE, update=FALSE)"

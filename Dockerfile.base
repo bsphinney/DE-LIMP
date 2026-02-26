@@ -2,9 +2,9 @@
 # Contains all system deps, R packages, Bioconductor packages, and MOFA2/basilisk
 # Build and push to Docker Hub, then reference from the main Dockerfile
 #
-# Build:  docker build --platform linux/amd64 -t brettphinney/delimp-base:v3.0 -f Dockerfile.base .
-# Push:   docker push brettphinney/delimp-base:v3.0
-# Tag:    docker tag brettphinney/delimp-base:v3.0 brettphinney/delimp-base:latest
+# Build:  docker build --platform linux/amd64 -t brettphinney/delimp-base:v3.1 -f Dockerfile.base .
+# Push:   docker push brettphinney/delimp-base:v3.1
+# Tag:    docker tag brettphinney/delimp-base:v3.1 brettphinney/delimp-base:latest
 #         docker push brettphinney/delimp-base:latest
 
 FROM rocker/shiny:4.5.0
@@ -39,6 +39,9 @@ RUN R -e "install.packages(c('systemfonts', 'gdtools', 'Rcpp'), repos='https://c
 
 # 2d. Install network visualization dependencies for enrichplot
 RUN R -e "install.packages(c('ggraph', 'graphlayouts', 'tidygraph', 'scatterpie', 'shadowtext', 'ggforce'), repos='https://cloud.r-project.org/')"
+
+# 2e. Install Core Facility mode packages (SQLite, YAML, UUID, Quarto rendering)
+RUN R -e "install.packages(c('DBI', 'RSQLite', 'yaml', 'uuid', 'quarto'), repos='https://cloud.r-project.org/')"
 
 # 3. Install Bioconductor Packages (Specific versions for stability)
 # Install in correct dependency order to avoid compilation issues

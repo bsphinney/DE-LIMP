@@ -82,7 +82,7 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 
 ### Three Platforms
 1. **GitHub** (`origin`) — Source code. `git push origin main` auto-syncs to HF via GitHub Actions.
-2. **Hugging Face** (`hf`) — Docker app. Thin `Dockerfile` FROM `brettphinney/delimp-base:v3.0`.
+2. **Hugging Face** (`hf`) — Docker app. Thin `Dockerfile` FROM `brettphinney/delimp-base:v3.1`.
 3. **HPC** — Apptainer containers (see `HPC_DEPLOYMENT.md`)
 
 ### README Management (CRITICAL)
@@ -91,7 +91,7 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 - **NEVER** use `git add .` when README.md is modified
 
 ### Docker Base Image
-- `brettphinney/delimp-base:v3.0` on Docker Hub (public, ~5 GB)
+- `brettphinney/delimp-base:v3.1` on Docker Hub (public, ~5 GB)
 - Adding new R packages requires rebuilding base image on Windows box
 - Code-only changes: just `git push origin main`
 

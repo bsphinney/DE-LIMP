@@ -1,7 +1,7 @@
 # DE-LIMP Application Image
 # Uses pre-built base image with all R/Bioconductor/MOFA2 dependencies
 # Base image: Dockerfile.base (rebuild only when dependencies change)
-FROM brettphinney/delimp-base:v3.0
+FROM brettphinney/delimp-base:v3.1
 
 # Copy the App Files into the image
 COPY app.R /srv/shiny-server/app.R
