@@ -31,7 +31,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 ### Analysis & Visualization
 - **Volcano Plots** -- Interactive (Plotly), click or box-select proteins to highlight across all views; all pairwise contrasts available
 - **Heatmaps** -- Z-score heatmaps of selected or significant proteins (ComplexHeatmap)
-- **QC Trends** -- Precursor/protein counts across run order with group averages and MS1 signal
+- **QC Sample Metrics** -- Faceted trend plot (Precursors, Proteins, MS1 Signal, Data Completeness) with LOESS smoother for drift detection and group average lines
 - **MDS & DPC Plots** -- Sample clustering and normalization diagnostics
 - **Covariates** -- Include batch, sex, diet, or custom covariates in the linear model
 - **XIC Chromatogram Viewer** -- Fragment-level chromatogram validation, MS2 intensity alignment (Spectronaut-style), ion mobility/mobilogram support for timsTOF, DIA-NN v1/v2 formats (local/HPC only)

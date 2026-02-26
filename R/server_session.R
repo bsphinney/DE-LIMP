@@ -198,35 +198,40 @@ server_session <- function(input, output, session, values, add_to_log) {
   # --- Consistent DE Info Modal ---
   observeEvent(input$consistent_de_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " How Robust Changes Works"),
+      title = tagList(icon("question-circle"), " About CV Analysis"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
-        tags$h6("What this table shows"),
-        p("Robust Changes identifies differentially expressed proteins that are also ",
-          strong("highly reproducible"), " across replicates. These are your strongest biomarker candidates."),
-        tags$h6("How it's calculated"),
+        tags$h6("What this tab shows"),
+        p("CV Analysis visualizes the relationship between differential expression (logFC) and ",
+          "measurement reproducibility (CV) for significant proteins. Lower CV means more reproducible ",
+          "quantification \u2014 these are your strongest biomarker candidates."),
+        tags$h6("Scatter plot: logFC vs CV"),
+        p("Each point is a significant protein. Points in the ", strong("lower-left or lower-right"),
+          " corners have both a large effect size and low variability \u2014 the best candidates for ",
+          "follow-up validation."),
+        tags$h6("How CV is calculated"),
         tags$ol(
           tags$li("Start with all ", strong("significant proteins"), " (FDR-adjusted p-value < 0.05) for the current contrast"),
           tags$li("Convert log2 expression values back to linear scale (2\u207F)"),
-          tags$li("Calculate the ", strong("%CV (Coefficient of Variation)"), " for each protein within each experimental group: ",
+          tags$li("Calculate the ", strong("%CV"), " for each protein within each experimental group: ",
                    tags$code("CV = (SD / Mean) \u00d7 100")),
-          tags$li("Average the per-group CVs into a single ", strong("Avg_CV"), " score"),
-          tags$li(strong("Filter to Avg_CV < 20%"), " \u2014 only proteins with highly consistent quantification are shown")
+          tags$li("Average the per-group CVs into a single ", strong("Avg CV"), " score")
         ),
-        tags$h6("Why the 20% threshold?"),
-        p("In well-controlled DIA proteomics experiments, most proteins have CV < 20-30%. ",
-          "Proteins below 20% average CV represent the most reproducible measurements. ",
-          "A significant fold-change backed by low CV means the result is unlikely to be driven by a single noisy replicate."),
-        tags$h6("Reading the table"),
+        tags$h6("Color coding"),
         tags$ul(
-          tags$li(strong("Avg_CV: "), "Average coefficient of variation across all groups (lower = more reproducible)"),
-          tags$li(strong("CV_ columns: "), "Per-group CV values \u2014 check if variability is balanced across groups"),
-          tags$li(strong("logFC: "), "Log2 fold-change from limma"),
-          tags$li(strong("adj.P.Val: "), "FDR-adjusted p-value")
+          tags$li(tags$span(style = "background: #d4edda; padding: 2px 6px;", "Green"), " \u2014 CV < 20% (excellent reproducibility)"),
+          tags$li(tags$span(style = "background: #fff3cd; padding: 2px 6px;", "Yellow"), " \u2014 CV 20-35% (acceptable)"),
+          tags$li(tags$span(style = "background: #f8d7da; padding: 2px 6px;", "Red"), " \u2014 CV > 35% (high variability)")
         ),
-        tags$h6("CV Distribution tab"),
-        p("The companion histogram shows the full CV distribution for all significant proteins (not just < 20%), ",
-          "broken down by group. Use it to assess overall replicate quality \u2014 tight distributions centered below 20% indicate good data.")
+        tags$h6("Summary stats"),
+        p("The cards below the scatter plot show per-group median CV and the percentage of proteins ",
+          "with CV < 20%. Groups with high median CV may have more technical variability or biological heterogeneity."),
+        tags$h6("Results Table"),
+        p("The Avg CV (%) column also appears in the ", strong("Results Table"), " sub-tab, making it ",
+          "easy to sort and filter proteins by reproducibility alongside fold-change and p-value."),
+        tags$h6("CV Distribution"),
+        p("The histogram below shows the full CV distribution for all significant proteins, ",
+          "broken down by group. Tight distributions centered below 20% indicate good data quality.")
       )
     ))
   })
@@ -273,53 +278,26 @@ server_session <- function(input, output, session, values, add_to_log) {
       title = tagList(icon("question-circle"), " About Replicate Consistency"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
-        tags$h6("What this table shows"),
-        p("Per-group summary statistics including sample counts, median protein-level coefficients of variation (CV), ",
-          "and quantification completeness across replicates."),
-        tags$h6("What to look for"),
+        tags$h6("Correlation Heatmap"),
+        p("Pairwise Pearson correlation of protein intensities across all samples. ",
+          "Values near 1.0 indicate high reproducibility. Hierarchical clustering groups ",
+          "similar samples together, making it easy to spot outlier replicates that appear ",
+          "as rows/columns with lower correlation values."),
+        tags$h6("Per-Group Replicate Statistics"),
         tags$ul(
-          tags$li(strong("Lower CV = better reproducibility. "), "CVs below 20% are excellent for proteomics."),
-          tags$li(strong("High completeness "), "means fewer missing values within each group."),
-          tags$li("Groups with consistently higher CVs may have more biological heterogeneity or technical issues.")
+          tags$li(strong("Median CV (%) "), "measures intensity variability across replicates. ",
+            "Values below 20% are excellent for proteomics data."),
+          tags$li(strong("Mean Correlation "), "is the average pairwise Pearson r within a group. ",
+            "Values above 0.95 indicate strong replicate agreement."),
+          tags$li(strong("Completeness (%) "), "shows the percentage of proteins quantified in ",
+            "every replicate of the group. Higher is better.")
         ),
         p("Export to CSV to include in QC reports or supplementary materials.")
       )
     ))
   })
 
-  # --- Replicate Consistency CSV Export ---
-  output$download_replicate_csv <- downloadHandler(
-    filename = function() {
-      paste0("Replicate_Consistency_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
-    },
-    content = function(file) {
-      req(values$y_protein, values$metadata)
-      meta <- values$metadata
-      groups <- unique(meta$Group[meta$Group != ""])
-      summary_list <- lapply(groups, function(g) {
-        files <- meta$File.Name[meta$Group == g]
-        mat <- values$y_protein$E[, intersect(colnames(values$y_protein$E), files), drop = FALSE]
-        n_samples <- ncol(mat)
-        n_proteins <- nrow(mat)
-        completeness <- round(100 * sum(!is.na(mat)) / length(mat), 1)
-        linear_mat <- 2^mat
-        cvs <- apply(linear_mat, 1, function(x) {
-          x <- x[!is.na(x)]
-          if (length(x) > 1) (sd(x) / mean(x)) * 100 else NA
-        })
-        data.frame(
-          Group = g,
-          Samples = n_samples,
-          Proteins = n_proteins,
-          Median_CV = round(median(cvs, na.rm = TRUE), 1),
-          Mean_CV = round(mean(cvs, na.rm = TRUE), 1),
-          Completeness_Pct = completeness,
-          stringsAsFactors = FALSE
-        )
-      })
-      write.csv(do.call(rbind, summary_list), file, row.names = FALSE)
-    }
-  )
+  # --- Replicate Consistency CSV Export (handler in server_viz.R, co-located with replicate_stats_data) ---
 
   # --- QC Trends Info Modal ---
   observeEvent(input$qc_trends_info_btn, {
@@ -328,22 +306,25 @@ server_session <- function(input, output, session, values, add_to_log) {
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
         tags$h6("What these plots show"),
-        p("QC trend plots track key quality metrics across all samples in your experiment. ",
-          "They help identify systematic issues like instrument drift, sample degradation, or injection problems."),
+        p("The Sample Metrics plot tracks key quality metrics (Precursors, Proteins, MS1 Signal, Data Completeness) ",
+          "across all runs in a single faceted view. A LOESS trendline on each facet makes injection drift ",
+          "immediately visible."),
         tags$h6("The metrics"),
         tags$ul(
           tags$li(strong("Precursors: "), "Number of peptide precursors identified. A sudden drop may indicate instrument issues or sample problems."),
           tags$li(strong("Proteins: "), "Number of proteins quantified. Should be relatively stable across runs."),
-          tags$li(strong("MS1 Signal: "), "Overall MS1 intensity. Gradual decline may indicate column degradation or source contamination.")
+          tags$li(strong("MS1 Signal: "), "Overall MS1 intensity. Gradual decline may indicate column degradation or source contamination."),
+          tags$li(strong("Data Completeness (%): "), "Percentage of precursors detected per sample. Low completeness indicates many missed detections.")
         ),
         tags$h6("Sort order"),
         p(strong("Run Order"), " shows samples in the order they were acquired \u2014 useful for spotting instrument drift over time. ",
           strong("Group"), " sorts by experimental condition \u2014 useful for comparing groups side by side."),
         tags$h6("What to look for"),
         tags$ul(
-          tags$li("Stable, flat trends are ideal"),
+          tags$li("A flat LOESS trendline means stable instrument performance"),
+          tags$li("A downward-sloping trendline suggests drift (column degradation, source contamination)"),
           tags$li("Sudden drops or spikes in individual samples flag potential outliers"),
-          tags$li("Gradual downward trends may indicate column or instrument degradation")
+          tags$li("Dashed lines show group averages for quick between-group comparison")
         )
       )
     ))

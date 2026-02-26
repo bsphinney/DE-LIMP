@@ -850,7 +850,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       selected = "Run Order"
                     ),
                     span(style = "color: #6c757d; font-size: 0.85em;",
-                      "(Applies to all metric tabs)")
+                      "(Applies to Sample Metrics)")
                   ),
                   actionButton("qc_trends_info_btn", icon("question-circle"), title = "What are QC Trends?",
                     class = "btn-outline-info btn-sm")
@@ -861,38 +861,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               navset_card_tab(
                 id = "qc_merged_tabs",
 
-                # ── Sample Metrics (from QC Trends) ──
-                nav_panel("Precursors",
-                  icon = icon("dna"),
+                # ── Sample Metrics (faceted: Precursors, Proteins, MS1 Signal) ──
+                nav_panel("Sample Metrics",
+                  icon = icon("chart-line"),
                   div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
-                    actionButton("qc_precursors_info_btn", icon("question-circle"),
-                      title = "About Precursor Counts", class = "btn-outline-info btn-sm"),
-                    actionButton("fullscreen_trend_precursors", "\U0001F50D Fullscreen",
+                    actionButton("qc_metrics_info_btn", icon("question-circle"),
+                      title = "About Sample Metrics", class = "btn-outline-info btn-sm"),
+                    actionButton("fullscreen_qc_metrics", "\U0001F50D Fullscreen",
                       class = "btn-outline-secondary btn-sm")
                   ),
-                  plotlyOutput("qc_trend_plot_precursors", height = "calc(100vh - 380px)")
-                ),
-
-                nav_panel("Proteins",
-                  icon = icon("shapes"),
-                  div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
-                    actionButton("qc_proteins_info_btn", icon("question-circle"),
-                      title = "About Protein Counts", class = "btn-outline-info btn-sm"),
-                    actionButton("fullscreen_trend_proteins", "\U0001F50D Fullscreen",
-                      class = "btn-outline-secondary btn-sm")
-                  ),
-                  plotlyOutput("qc_trend_plot_proteins", height = "calc(100vh - 380px)")
-                ),
-
-                nav_panel("MS1 Signal",
-                  icon = icon("signal"),
-                  div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
-                    actionButton("qc_ms1_info_btn", icon("question-circle"),
-                      title = "About MS1 Signal", class = "btn-outline-info btn-sm"),
-                    actionButton("fullscreen_trend_ms1", "\U0001F50D Fullscreen",
-                      class = "btn-outline-secondary btn-sm")
-                  ),
-                  plotlyOutput("qc_trend_plot_ms1", height = "calc(100vh - 380px)")
+                  plotlyOutput("qc_metrics_trend", height = "calc(100vh - 380px)")
                 ),
 
                 nav_panel("Stats Table",
@@ -1123,10 +1101,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
                       actionButton("replicate_consistency_info_btn", icon("question-circle"),
                         title = "About Replicate Consistency", class = "btn-outline-info btn-sm"),
+                      actionButton("fullscreen_corr_heatmap", "\U0001F50D Fullscreen",
+                        class = "btn-outline-secondary btn-sm"),
                       downloadButton("download_replicate_csv", tagList(icon("download"), " CSV"),
                         class = "btn-success btn-sm")
                     ),
-                    DTOutput("group_summary_table")
+                    plotOutput("correlation_heatmap", height = "500px"),
+                    div(style = "margin-top: 16px;",
+                      tags$h6(icon("table"), " Per-Group Replicate Statistics",
+                        style = "font-weight: 600; margin-bottom: 8px;"),
+                      DTOutput("replicate_stats_table")
+                    )
                   ),
 
                   nav_panel("Expression Grid",
@@ -1159,7 +1144,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         class = "btn-outline-info btn-sm")
                     ),
                     # Grid table
-                    DTOutput("grid_view_table")
+                    div(style = "overflow-x: auto; width: 100%;",
+                      DTOutput("grid_view_table")
+                    )
                   ),
 
                   nav_panel("AI Summary",
@@ -1285,23 +1272,20 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     plotlyOutput("pca_plot", height = "calc(100vh - 370px)")
                   ),
 
-                  nav_panel("Robust Changes", icon = icon("check-double"),
-                    # High-Consistency Table
-                    div(style = "margin-bottom: 15px;",
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                        p("Ranking by %CV (Coefficient of Variation) to find stable markers across all experimental groups.",
-                          class = "text-muted small mb-0"),
-                        div(style = "display: flex; gap: 8px;",
-                          actionButton("consistent_de_info_btn", icon("question-circle"), title = "What is this?",
-                            class = "btn-outline-info btn-sm"),
-                          downloadButton("download_consistent_csv", tagList(icon("download"), " CSV"),
-                            class = "btn-success btn-sm")
-                        )
-                      ),
-                      DTOutput("consistent_table")
+                  nav_panel("CV Analysis", icon = icon("check-double"),
+                    # Controls row: info + CSV download
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      actionButton("consistent_de_info_btn", icon("question-circle"),
+                        title = "About CV Analysis", class = "btn-outline-info btn-sm"),
+                      downloadButton("download_consistent_csv", tagList(icon("download"), " CSV"),
+                        class = "btn-success btn-sm"),
+                      actionButton("fullscreen_cv_scatter", "\U0001F50D Fullscreen",
+                        class = "btn-outline-secondary btn-sm")
                     ),
+                    # logFC vs Avg CV scatter plot with summary stats cards above
+                    plotlyOutput("cv_scatter_plot", height = "580px"),
                     hr(),
-                    # CV Distribution
+                    # CV Distribution histogram (unchanged)
                     div(
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
                         p("Distribution of Coefficient of Variation (CV) for significant proteins, broken down by experimental group.",

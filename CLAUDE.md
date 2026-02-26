@@ -31,7 +31,7 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `R/ui.R` | `page_navbar` layout, accordion sidebar, all tab definitions |
 | `R/server_data.R` | Data upload, example load, group assignment, pipeline execution |
 | `R/server_de.R` | Volcano, DE table, heatmap, consistent DE, selection sync |
-| `R/server_qc.R` | QC trends, diagnostic plots, p-value distribution |
+| `R/server_qc.R` | QC sample metrics (faceted trend plot), diagnostic plots, p-value distribution |
 | `R/server_viz.R` | Expression grid, signal distribution, PCA |
 | `R/server_gsea.R` | GSEA analysis, multi-DB (BP/MF/CC/KEGG), organism detection |
 | `R/server_ai.R` | AI Summary (all contrasts), Data Chat, Gemini integration |
@@ -59,7 +59,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 
 #### Analysis dropdown
 - **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
-- **DE Dashboard** — `navset_card_tab(id = "de_dashboard_subtabs")`: Volcano (+heatmap), Results Table, PCA, Robust Changes. Comparison selector banner above sub-tabs.
+- **DE Dashboard** — `navset_card_tab(id = "de_dashboard_subtabs")`: Volcano (+heatmap), Results Table, PCA, CV Analysis. Comparison selector banner above sub-tabs.
 - **Phosphoproteomics** — conditional on phospho detection
 - **Gene Set Enrichment** — BP/MF/CC/KEGG with per-ontology caching
 - **Multi-Omics MOFA2** — `value = "mofa_tab"`
@@ -100,8 +100,9 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 - **`page_navbar` layout**: Dark navbar with white text (CSS `!important`). `nav_spacer()` + `nav_item()` for gear icon. Hover dropdowns via `.navbar .dropdown:hover > .dropdown-menu { display: block; }`. Active tab gets teal underline.
 - **bslib `navbar_options()` required**: bslib 0.9.0+ deprecated `bg` as direct arg to `page_navbar()`. Use `navbar_options = navbar_options(bg = ...)`.
 - **Sidebar accordion**: Three collapsible panels: "Upload Data" (open), "Pipeline Settings", "AI Chat". Conditional phospho/XIC sections use separate `accordion()` blocks.
-- **DE Dashboard sub-tabs**: `navset_card_tab(id = "de_dashboard_subtabs")` — Volcano+heatmap, Results Table, PCA, Robust Changes.
+- **DE Dashboard sub-tabs**: `navset_card_tab(id = "de_dashboard_subtabs")` — Volcano+heatmap, Results Table, PCA, CV Analysis.
 - **CRITICAL bslib issue**: `card()`/`card_body()` don't render at top level inside `nav_panel()`. Use plain `div()` with inline CSS.
+- **CRITICAL bslib sub-tab issue**: `renderUI`/`uiOutput` content disappears inside `navset_card_tab` sub-tabs. `renderPlot` crashes with `invalid quartz() device size` on macOS (0-width hidden container). **Use `plotlyOutput`/`renderPlotly`** — only reliable output type in bslib sub-tabs. See @docs/PATTERNS.md for details.
 - **Info modal pattern**: `actionButton("[id]_info_btn", icon("question-circle"), class="btn-outline-info btn-sm")` + `observeEvent(...)`.
 - **Plotly annotations**: Use `layout(annotations = ...)` with paper coordinates, not ggplot `annotate()`.
 - Plot heights use viewport-relative units (`vh`, `calc()`) — no fixed pixel heights.

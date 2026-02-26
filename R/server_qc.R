@@ -9,106 +9,125 @@ server_qc <- function(input, output, session, values) {
   #  1. QC Trend Plots (Precursors, Proteins, MS1 Signal)
   # ============================================================================
 
-  # Helper function to generate QC trend plot (parameterized by metric)
-  generate_qc_trend_plot <- function(metric) {
-    reactive({
-      req(values$qc_stats, values$metadata)
-      df <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>%
-        mutate(Run_Number = as.numeric(str_extract(Run, "\\d+$")))
+  # Shared reactive: faceted QC metrics data (Precursors, Proteins, MS1 Signal, Data Completeness)
+  qc_metrics_data <- reactive({
+    req(values$qc_stats, values$metadata)
+    df <- left_join(values$qc_stats, values$metadata, by = c("Run" = "File.Name")) %>%
+      mutate(Run_Number = as.numeric(str_extract(Run, "\\d+$")))
 
-      if (input$qc_sort_order == "Group") {
-        df <- df %>% arrange(Group, Run_Number)
-      } else {
-        df <- df %>% arrange(Run_Number)
-      }
+    # Compute per-sample data completeness from precursor matrix
+    if (!is.null(values$raw_data)) {
+      raw_mat <- values$raw_data$E
+      completeness <- colMeans(!is.na(raw_mat)) * 100  # % non-NA per sample
+      df$Completeness <- completeness[match(df$Run, names(completeness))]
+    } else {
+      df$Completeness <- NA_real_
+    }
 
-      df$Sort_Index <- 1:nrow(df)
-      df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Group:</b> ", df$Group,
-                           "<br><b>", metric, ":</b> ", round(df[[metric]], 2))
+    if (input$qc_sort_order == "Group") {
+      df <- df %>% arrange(Group, Run_Number)
+    } else {
+      df <- df %>% arrange(Run_Number)
+    }
+    df$Sort_Index <- 1:nrow(df)
 
-      # Calculate group means and ranges for average lines
-      group_stats <- df %>%
-        group_by(Group) %>%
-        summarise(
-          mean_value = mean(.data[[metric]], na.rm = TRUE),
-          x_min = min(Sort_Index),
-          x_max = max(Sort_Index),
-          .groups = 'drop'
-        )
+    # Pivot to long format for faceting
+    pivot_cols <- c("Precursors", "Proteins", "MS1_Signal")
+    metric_levels <- c("Precursors", "Proteins", "MS1_Signal")
+    metric_labels <- c("Precursors", "Proteins", "MS1 Signal")
+    if (!all(is.na(df$Completeness))) {
+      pivot_cols <- c(pivot_cols, "Completeness")
+      metric_levels <- c(metric_levels, "Completeness")
+      metric_labels <- c(metric_labels, "Data Completeness (%)")
+    }
 
-      # Create plot with bars and group average lines
-      p <- ggplot(df, aes(x = Sort_Index, y = .data[[metric]], fill = Group, text = Tooltip)) +
-        geom_bar(stat = "identity", width = 0.8) +
-        geom_segment(data = group_stats,
-                     aes(x = x_min - 0.5, xend = x_max + 0.5,
-                         y = mean_value, yend = mean_value,
-                         color = Group),
-                     linewidth = 1, linetype = "dashed", inherit.aes = FALSE,
-                     show.legend = FALSE) +
-        scale_color_discrete(guide = "none") +
-        theme_minimal() +
-        labs(title = paste(metric, "per Run (dashed lines = group averages)"),
-             x = "Sample Index (Sorted)", y = metric) +
-        theme(panel.grid.major.x = element_blank(), axis.text.x = element_text(size=8))
+    long <- df %>%
+      pivot_longer(
+        cols = all_of(pivot_cols),
+        names_to = "Metric",
+        values_to = "Value"
+      ) %>%
+      mutate(
+        Metric = factor(Metric, levels = metric_levels, labels = metric_labels),
+        Tooltip = paste0("<b>File:</b> ", Run, "<br><b>Group:</b> ", Group,
+                         "<br><b>", Metric, ":</b> ", round(Value, 2))
+      )
 
-      ggplotly(p, tooltip = "text") %>% config(displayModeBar = TRUE)
-    })
+    # Group averages per metric per group
+    group_stats <- long %>%
+      group_by(Group, Metric) %>%
+      summarise(
+        mean_value = mean(Value, na.rm = TRUE),
+        x_min = min(Sort_Index),
+        x_max = max(Sort_Index),
+        .groups = "drop"
+      )
+
+    list(long = long, group_stats = group_stats)
+  })
+
+  # Build faceted trend plot from prepared data
+  build_qc_metrics_plot <- function(data) {
+    long <- data$long
+    group_stats <- data$group_stats
+
+    # Split data: bars for counts/intensity, dots for completeness
+    is_completeness <- "Data Completeness (%)"
+    bar_data <- long %>% filter(Metric != is_completeness)
+    dot_data <- long %>% filter(Metric == is_completeness)
+    bar_stats <- group_stats %>% filter(Metric != is_completeness)
+    dot_stats <- group_stats %>% filter(Metric == is_completeness)
+
+    p <- ggplot(long, aes(x = Sort_Index, y = Value, text = Tooltip)) +
+      geom_bar(data = bar_data, aes(fill = Group),
+               stat = "identity", width = 0.8) +
+      geom_point(data = dot_data, aes(color = Group),
+                 size = 3, alpha = 0.8) +
+      geom_segment(data = bar_stats,
+                   aes(x = x_min - 0.5, xend = x_max + 0.5,
+                       y = mean_value, yend = mean_value, color = Group),
+                   linewidth = 0.8, linetype = "dashed", inherit.aes = FALSE,
+                   show.legend = FALSE) +
+      geom_segment(data = dot_stats,
+                   aes(x = x_min - 0.5, xend = x_max + 0.5,
+                       y = mean_value, yend = mean_value, color = Group),
+                   linewidth = 0.8, linetype = "dashed", inherit.aes = FALSE,
+                   show.legend = FALSE) +
+      geom_smooth(aes(group = 1), method = "loess", se = FALSE,
+                  color = "black", linewidth = 1, span = 0.75) +
+      facet_wrap(~ Metric, ncol = 1, scales = "free_y",
+                 strip.position = "top") +
+      scale_color_discrete(guide = "none") +
+      theme_minimal() +
+      labs(x = "Sample Index (Sorted)", y = NULL) +
+      theme(
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(size = 8),
+        strip.background = element_rect(fill = "#2c3e50", color = NA),
+        strip.text = element_text(color = "white", face = "bold", size = 11)
+      )
+
+    ggplotly(p, tooltip = "text") %>% config(displayModeBar = TRUE)
   }
 
-  # Three separate plot outputs for the three metrics
-  output$qc_trend_plot_precursors <- renderPlotly({
-    generate_qc_trend_plot("Precursors")()
+  # Main faceted trend plot
+  output$qc_metrics_trend <- renderPlotly({
+    build_qc_metrics_plot(qc_metrics_data())
   })
 
-  output$qc_trend_plot_proteins <- renderPlotly({
-    generate_qc_trend_plot("Proteins")()
-  })
-
-  output$qc_trend_plot_ms1 <- renderPlotly({
-    generate_qc_trend_plot("MS1_Signal")()
-  })
-
-  # Fullscreen modals for each metric
-  observeEvent(input$fullscreen_trend_precursors, {
+  # Fullscreen modal
+  observeEvent(input$fullscreen_qc_metrics, {
     showModal(modalDialog(
-      title = "Precursors Trend - Fullscreen View",
-      plotlyOutput("qc_trend_plot_precursors_fs", height = "700px"),
+      title = "Sample Metrics - Fullscreen View",
+      plotlyOutput("qc_metrics_trend_fs", height = "800px"),
       size = "xl",
       easyClose = TRUE,
       footer = modalButton("Close")
     ))
   })
 
-  output$qc_trend_plot_precursors_fs <- renderPlotly({
-    generate_qc_trend_plot("Precursors")()
-  })
-
-  observeEvent(input$fullscreen_trend_proteins, {
-    showModal(modalDialog(
-      title = "Proteins Trend - Fullscreen View",
-      plotlyOutput("qc_trend_plot_proteins_fs", height = "700px"),
-      size = "xl",
-      easyClose = TRUE,
-      footer = modalButton("Close")
-    ))
-  })
-
-  output$qc_trend_plot_proteins_fs <- renderPlotly({
-    generate_qc_trend_plot("Proteins")()
-  })
-
-  observeEvent(input$fullscreen_trend_ms1, {
-    showModal(modalDialog(
-      title = "MS1 Signal Trend - Fullscreen View",
-      plotlyOutput("qc_trend_plot_ms1_fs", height = "700px"),
-      size = "xl",
-      easyClose = TRUE,
-      footer = modalButton("Close")
-    ))
-  })
-
-  output$qc_trend_plot_ms1_fs <- renderPlotly({
-    generate_qc_trend_plot("MS1_Signal")()
+  output$qc_metrics_trend_fs <- renderPlotly({
+    build_qc_metrics_plot(qc_metrics_data())
   })
 
   # ============================================================================
@@ -141,44 +160,41 @@ server_qc <- function(input, output, session, values) {
     ))
   })
 
-  # Precursors info modal
-  observeEvent(input$qc_precursors_info_btn, {
+  # Sample Metrics info modal (combined)
+  observeEvent(input$qc_metrics_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " Precursor Identification Counts"),
+      title = tagList(icon("question-circle"), " Sample Metrics"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("Number of peptide precursors identified per run at your Q-value cutoff. ",
-          "Higher counts indicate better instrument sensitivity and sample quality."),
-        p("Dashed lines show the group average. A sudden drop in one sample may indicate ",
-          "an injection failure, sample degradation, or instrument issue.")
-      )
-    ))
-  })
-
-  # Proteins info modal
-  observeEvent(input$qc_proteins_info_btn, {
-    showModal(modalDialog(
-      title = tagList(icon("question-circle"), " Protein Group Counts"),
-      size = "l", easyClose = TRUE, footer = modalButton("Close"),
-      div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("Number of protein groups quantified per run. This is derived from the precursor counts ",
-          "after grouping peptides into proteins."),
-        p("Lower counts in specific samples may indicate sample quality issues, while ",
-          "consistently lower counts in one group could suggest biological differences in proteome complexity.")
-      )
-    ))
-  })
-
-  # MS1 Signal info modal
-  observeEvent(input$qc_ms1_info_btn, {
-    showModal(modalDialog(
-      title = tagList(icon("question-circle"), " MS1 Signal Intensity"),
-      size = "l", easyClose = TRUE, footer = modalButton("Close"),
-      div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("Overall MS1 signal intensity per run. Consistent signal across runs indicates ",
-          "stable instrument performance and uniform sample loading."),
-        p("A gradual decline over time may indicate LC column degradation or source contamination. ",
-          "Sudden drops suggest injection or sample preparation problems.")
+        p("This faceted plot shows key quality metrics for every run in your experiment, ",
+          "stacked vertically so you can spot correlated trends at a glance."),
+        tags$h6("The metrics"),
+        tags$ul(
+          tags$li(strong("Precursors: "), "Number of peptide precursors identified at your Q-value cutoff. ",
+            "Higher counts indicate better instrument sensitivity and sample quality."),
+          tags$li(strong("Proteins: "), "Number of protein groups quantified per run. ",
+            "Should be relatively stable across runs; lower counts may indicate sample quality issues."),
+          tags$li(strong("MS1 Signal: "), "Overall MS1 intensity per run. ",
+            "Consistent signal indicates stable instrument performance and uniform sample loading."),
+          tags$li(strong("Data Completeness (%): "), "Percentage of precursors detected (non-missing) per sample ",
+            "in the raw expression matrix. Samples with low completeness had many missed detections, ",
+            "which may indicate injection failures or low sample loading.")
+        ),
+        tags$h6("Reading the plot"),
+        tags$ul(
+          tags$li(strong("Bars: "), "Per-run values, colored by experimental group."),
+          tags$li(strong("Dashed lines: "), "Group averages \u2014 compare groups at a glance."),
+          tags$li(strong("Black trend line (LOESS): "), "Smoothed trend across all runs. ",
+            "A flat line means stable performance; a downward slope suggests instrument drift ",
+            "(e.g., column degradation, source contamination).")
+        ),
+        tags$h6("What to look for"),
+        tags$ul(
+          tags$li("Sudden drops in a single sample flag potential injection failures or outliers"),
+          tags$li("Gradual downward trends across all metrics suggest instrument degradation"),
+          tags$li("Use ", strong("Sort Order: Run Order"), " to see acquisition-time drift; ",
+            strong("Group"), " to compare conditions side by side")
+        )
       )
     ))
   })

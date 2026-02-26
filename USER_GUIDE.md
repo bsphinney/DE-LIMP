@@ -400,12 +400,16 @@ The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
 * **High-Consistency Table:** Proteins with the most reproducible differential expression across replicates
 * **CV Distribution:** Histogram of coefficient of variation across experimental groups
 
-### 📐 QC Trends & Plots
-* **Trends:** Monitor precursors and proteins across run order with automatic group averages
+### 📐 QC Sample Metrics & Plots
+* **Sample Metrics:** A single faceted trend plot showing four key per-run quality metrics stacked vertically:
+    * **Precursors:** Number of peptide precursors identified at your Q-value cutoff
+    * **Proteins:** Number of protein groups quantified per run
+    * **MS1 Signal:** Overall MS1 intensity per run
+    * **Data Completeness (%):** Percentage of precursors detected (non-missing) per sample in the raw expression matrix — shown as dots (not bars) to zoom into the relevant range
+    * **LOESS Trendline:** A black smoothed trend line on each facet makes injection drift immediately visible — a flat line means stable performance, a downward slope suggests instrument degradation
     * **Group Average Lines:** Dashed horizontal lines show the mean for each experimental group
-    * Color-coded by group for easy comparison
-    * **Fullscreen View:** Click **"🔍 View Fullscreen"** to open the plot in a large modal for detailed inspection
-    * Helps spot batch effects, instrument drift, or quality issues
+    * **Sort Order:** Toggle between Run Order (spot acquisition-time drift) and Group (compare conditions side by side)
+    * **Fullscreen View:** Click **"🔍 Fullscreen"** to open the plot in a large modal for detailed inspection
 * **MDS Plot:** A multidimensional scaling plot to visualize how samples cluster. (Good samples should cluster by Group).
 
 ### 📋 Reproducibility & Code Export
