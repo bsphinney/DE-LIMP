@@ -451,12 +451,177 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       geom_text_repel(data = selected_df, aes(label = Protein.Group), size = 4, max.overlaps = 20)
   }, height = 500) # FIXED HEIGHT
 
-  # --- GROUP QC SUMMARY TABLE (lines 1244-1248) ---
-  output$group_summary_table <- renderDT({
-    req(values$qc_stats, values$metadata)
-    summary_df <- values$qc_stats %>% left_join(values$metadata, by = c("Run" = "File.Name")) %>% filter(Group != "") %>% group_by(Group) %>% summarise(`Avg. Precursors` = mean(Precursors, na.rm = TRUE), `Avg. MS1 Signal` = mean(MS1_Signal, na.rm = TRUE), `Avg. Proteins` = mean(Proteins, na.rm = TRUE)) %>% mutate(across(where(is.numeric), ~round(.x, 0)))
-    datatable(summary_df, options = list(dom = 't', pageLength = 10), rownames = FALSE)
+  # --- SAMPLE CORRELATION HEATMAP ---
+  # Helper: build correlation heatmap object (returns Heatmap, caller draws it)
+  build_correlation_heatmap <- function(font_size = 9, cell_font_size = NULL) {
+    mat <- values$y_protein$E
+    mat <- mat[complete.cases(mat), ]
+    if (nrow(mat) < 2 || ncol(mat) < 2) return(NULL)
+
+    cor_mat <- cor(mat, use = "pairwise.complete.obs")
+
+    # Build group annotation
+    meta <- values$metadata
+    col_names <- colnames(cor_mat)
+    group_vec <- meta$Group[match(col_names, meta$File.Name)]
+    group_vec[is.na(group_vec) | group_vec == ""] <- "Unassigned"
+    groups <- factor(group_vec)
+    group_colors <- setNames(rainbow(length(levels(groups))), levels(groups))
+
+    # Short sample labels
+    sample_labels <- paste0("S", seq_along(col_names))
+    rownames(cor_mat) <- sample_labels
+    colnames(cor_mat) <- sample_labels
+
+    ha <- HeatmapAnnotation(
+      Group = groups,
+      col = list(Group = group_colors),
+      show_annotation_name = TRUE
+    )
+
+    col_fun <- circlize::colorRamp2(
+      c(min(cor_mat, na.rm = TRUE), mean(c(min(cor_mat, na.rm = TRUE), 1)), 1),
+      c("#2166AC", "white", "#B2182B")
+    )
+
+    n_samples <- ncol(cor_mat)
+    default_cell_size <- if (is.null(cell_font_size)) {
+      if (n_samples <= 8) 9 else 7
+    } else cell_font_size
+    cell_fn <- if (n_samples <= 12) {
+      function(j, i, x, y, width, height, fill) {
+        grid::grid.text(sprintf("%.2f", cor_mat[i, j]), x, y,
+          gp = grid::gpar(fontsize = default_cell_size))
+      }
+    } else NULL
+
+    Heatmap(
+      cor_mat,
+      name = "Pearson r",
+      col = col_fun,
+      top_annotation = ha,
+      cluster_rows = TRUE,
+      cluster_columns = TRUE,
+      show_row_names = TRUE,
+      show_column_names = TRUE,
+      cell_fun = cell_fn,
+      row_names_gp = grid::gpar(fontsize = font_size),
+      column_names_gp = grid::gpar(fontsize = font_size),
+      column_title = "Sample Correlation Heatmap (Pearson r)"
+    )
+  }
+
+  # Render to temp PNG with explicit dimensions (avoids zero-dimension container crash)
+  render_heatmap_png <- function(font_size = 9, cell_font_size = NULL,
+                                  width = 700, height = 500) {
+    ht <- build_correlation_heatmap(font_size, cell_font_size)
+    if (is.null(ht)) return(NULL)
+    tmp <- tempfile(fileext = ".png")
+    png(tmp, width = width, height = height, res = 96)
+    ComplexHeatmap::draw(ht)
+    dev.off()
+    tmp
+  }
+
+  output$correlation_heatmap <- renderImage({
+    req(values$y_protein, values$metadata)
+    tmp <- render_heatmap_png(font_size = 9, width = 700, height = 500)
+    req(tmp)
+    list(src = tmp, width = 700, height = 500, alt = "Sample Correlation Heatmap")
+  }, deleteFile = TRUE)
+
+  # --- Fullscreen Correlation Heatmap ---
+  observeEvent(input$fullscreen_corr_heatmap, {
+    req(values$y_protein, values$metadata)
+    showModal(modalDialog(
+      title = "Sample Correlation Heatmap - Fullscreen View",
+      renderImage({
+        tmp <- render_heatmap_png(font_size = 11, cell_font_size = 10,
+                                   width = 1000, height = 700)
+        req(tmp)
+        list(src = tmp, width = 1000, height = 700, alt = "Sample Correlation Heatmap")
+      }, deleteFile = TRUE),
+      size = "xl", easyClose = TRUE, footer = modalButton("Close")
+    ))
   })
+
+  # --- PER-GROUP REPLICATE STATISTICS ---
+  replicate_stats_data <- reactive({
+    req(values$y_protein, values$metadata)
+    meta <- values$metadata
+    mat <- values$y_protein$E
+    groups <- unique(meta$Group[meta$Group != ""])
+    total_proteins <- nrow(mat)
+
+    stats_list <- lapply(groups, function(g) {
+      files <- meta$File.Name[meta$Group == g]
+      group_cols <- intersect(colnames(mat), files)
+      n_samples <- length(group_cols)
+      if (n_samples == 0) return(NULL)
+
+      group_mat <- mat[, group_cols, drop = FALSE]
+
+      # Median CV: log2 -> linear -> SD/mean * 100
+      linear_mat <- 2^group_mat
+      cvs <- apply(linear_mat, 1, function(x) {
+        x <- x[!is.na(x)]
+        if (length(x) > 1) (sd(x) / mean(x)) * 100 else NA
+      })
+      median_cv <- round(median(cvs, na.rm = TRUE), 2)
+
+      # Mean within-group pairwise correlation
+      if (n_samples > 1) {
+        group_cor <- cor(group_mat, use = "pairwise.complete.obs")
+        # Extract upper triangle (exclude diagonal)
+        upper_vals <- group_cor[upper.tri(group_cor)]
+        mean_cor <- round(mean(upper_vals, na.rm = TRUE), 4)
+      } else {
+        mean_cor <- NA
+      }
+
+      # Proteins in all reps (no NA in any replicate)
+      proteins_all_reps <- sum(complete.cases(group_mat))
+      completeness <- round(100 * proteins_all_reps / total_proteins, 2)
+
+      data.frame(
+        Group = g,
+        `N Samples` = n_samples,
+        `Median CV (%)` = median_cv,
+        `Mean Correlation` = mean_cor,
+        `Proteins in All Reps` = proteins_all_reps,
+        `Completeness (%)` = completeness,
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      )
+    })
+
+    do.call(rbind, stats_list)
+  })
+
+  output$replicate_stats_table <- renderDT({
+    df <- replicate_stats_data()
+    req(df)
+    dt <- datatable(df, options = list(dom = 't', pageLength = 20), rownames = FALSE)
+    dt <- formatStyle(dt, "Median CV (%)",
+      backgroundColor = styleInterval(c(20, 35), c("#d4edda", "#fff3cd", "#f8d7da")))
+    dt <- formatStyle(dt, "Mean Correlation",
+      backgroundColor = styleInterval(c(0.90, 0.95), c("#f8d7da", "#fff3cd", "#d4edda")))
+    dt <- formatStyle(dt, "Completeness (%)",
+      backgroundColor = styleInterval(c(70, 90), c("#f8d7da", "#fff3cd", "#d4edda")))
+    dt
+  })
+
+  # --- Replicate Consistency CSV Export ---
+  output$download_replicate_csv <- downloadHandler(
+    filename = function() {
+      paste0("Replicate_Consistency_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      df <- replicate_stats_data()
+      req(df)
+      write.csv(df, file, row.names = FALSE)
+    }
+  )
 
   # ============================================================================
   #  PCA Plot (Data Overview > PCA sub-tab)

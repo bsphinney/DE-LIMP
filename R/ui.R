@@ -1106,7 +1106,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       downloadButton("download_replicate_csv", tagList(icon("download"), " CSV"),
                         class = "btn-success btn-sm")
                     ),
-                    plotOutput("correlation_heatmap", height = "500px"),
+                    imageOutput("correlation_heatmap", height = "500px"),
                     div(style = "margin-top: 16px;",
                       tags$h6(icon("table"), " Per-Group Replicate Statistics",
                         style = "font-weight: 600; margin-bottom: 8px;"),
