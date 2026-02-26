@@ -45,22 +45,26 @@ server_de <- function(input, output, session, values, add_to_log) {
     df <- volcano_data()
     cols <- c("Not Sig" = "grey", "Significant" = "red")
 
-    p <- ggplot(df, aes(x = logFC, y = -log10(adj.P.Val), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
+    # Compute the raw P.Value threshold that corresponds to adj.P.Val = 0.05
+    sig_proteins <- df %>% filter(adj.P.Val < 0.05)
+    pval_threshold <- if (nrow(sig_proteins) > 0) max(sig_proteins$P.Value) else 0.05
+
+    p <- ggplot(df, aes(x = logFC, y = -log10(P.Value), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
       geom_point(alpha = 0.6) +
       scale_color_manual(values = cols) +
 
-      # Threshold lines with color
+      # Threshold lines: horizontal line at raw P.Value corresponding to adj.P.Val = 0.05
       geom_vline(xintercept = c(-input$logfc_cutoff, input$logfc_cutoff),
                  linetype = "dashed", color = "#FFA500", size = 0.8) +
-      geom_hline(yintercept = -log10(0.05),
+      geom_hline(yintercept = -log10(pval_threshold),
                  linetype = "dashed", color = "#4169E1", size = 0.8) +
 
       theme_minimal() +
-      labs(y = "-log10(adj. P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
+      labs(y = "-log10(P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
 
     df_sel <- df %>% filter(Selected == "Yes")
     if (nrow(df_sel) > 0) {
-      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(adj.P.Val)),
+      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(P.Value)),
                          shape = 21, size = 4, fill = NA, color = "blue", stroke = 2)
     }
 
@@ -486,22 +490,26 @@ server_de <- function(input, output, session, values, add_to_log) {
     df <- volcano_data()
     cols <- c("Not Sig" = "grey", "Significant" = "red")
 
-    p <- ggplot(df, aes(x = logFC, y = -log10(adj.P.Val), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
+    # Compute the raw P.Value threshold that corresponds to adj.P.Val = 0.05
+    sig_proteins <- df %>% filter(adj.P.Val < 0.05)
+    pval_threshold <- if (nrow(sig_proteins) > 0) max(sig_proteins$P.Value) else 0.05
+
+    p <- ggplot(df, aes(x = logFC, y = -log10(P.Value), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
       geom_point(alpha = 0.6) +
       scale_color_manual(values = cols) +
 
-      # Threshold lines with color
+      # Threshold lines: horizontal line at raw P.Value corresponding to adj.P.Val = 0.05
       geom_vline(xintercept = c(-input$logfc_cutoff, input$logfc_cutoff),
                  linetype = "dashed", color = "#FFA500", size = 0.7) +
-      geom_hline(yintercept = -log10(0.05),
+      geom_hline(yintercept = -log10(pval_threshold),
                  linetype = "dashed", color = "#4169E1", size = 0.7) +
 
       theme_minimal() +
-      labs(y = "-log10(adj. P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
+      labs(y = "-log10(P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
 
     df_sel <- df %>% filter(Selected == "Yes")
     if (nrow(df_sel) > 0) {
-      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(adj.P.Val)),
+      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(P.Value)),
                          shape = 21, size = 4, fill = NA, color = "blue", stroke = 2)
     }
 
