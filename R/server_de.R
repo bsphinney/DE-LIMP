@@ -68,20 +68,26 @@ server_de <- function(input, output, session, values, add_to_log) {
                          shape = 21, size = 4, fill = NA, color = "blue", stroke = 2)
     }
 
+    # Summary counts
+    n_sig <- nrow(sig_proteins)
+    n_up <- sum(sig_proteins$logFC > 0)
+    n_down <- sum(sig_proteins$logFC < 0)
+
     # Convert to plotly and add annotations using plotly's native system
     ggplotly(p, tooltip = "text") %>%
       layout(
         annotations = list(
-          # Significance criteria box text (using plotly annotations for better positioning)
           list(x = 0.02, y = 0.98, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
                text = "<b>Significant if:</b>", showarrow = FALSE, font = list(size = 14)),
           list(x = 0.02, y = 0.93, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
                text = "• FDR-adj. p < 0.05",
-               showarrow = FALSE, font = list(size = 12, color = "#555555"))
+               showarrow = FALSE, font = list(size = 12, color = "#555555")),
+          list(x = 0.02, y = 0.87, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
+               text = paste0("<b>", n_sig, " DE proteins</b> (", n_up, " up, ", n_down, " down)"),
+               showarrow = FALSE, font = list(size = 12, color = "#d9534f"))
         ),
         shapes = list(
-          # White background box for legend
-          list(type = "rect", x0 = 0.01, x1 = 0.28, y0 = 0.88, y1 = 0.99,
+          list(type = "rect", x0 = 0.01, x1 = 0.42, y0 = 0.83, y1 = 0.99,
                xref = "paper", yref = "paper", fillcolor = "white", opacity = 0.85,
                line = list(color = "#333333", width = 1))
         )
@@ -513,21 +519,27 @@ server_de <- function(input, output, session, values, add_to_log) {
                          shape = 21, size = 4, fill = NA, color = "blue", stroke = 2)
     }
 
+    # Summary counts
+    n_sig <- nrow(sig_proteins)
+    n_up <- sum(sig_proteins$logFC > 0)
+    n_down <- sum(sig_proteins$logFC < 0)
+
     # Convert to plotly and add annotations using plotly's native system
     ggplotly(p, tooltip = "text", source = "volcano_source") %>%
       layout(
         dragmode = "select",
         annotations = list(
-          # Significance criteria box text (using plotly annotations for better positioning)
           list(x = 0.02, y = 0.98, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
                text = "<b>Significant if:</b>", showarrow = FALSE, font = list(size = 12)),
           list(x = 0.02, y = 0.93, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
                text = "• FDR-adj. p < 0.05",
-               showarrow = FALSE, font = list(size = 11, color = "#555555"))
+               showarrow = FALSE, font = list(size = 11, color = "#555555")),
+          list(x = 0.02, y = 0.87, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
+               text = paste0("<b>", n_sig, " DE proteins</b> (", n_up, " up, ", n_down, " down)"),
+               showarrow = FALSE, font = list(size = 11, color = "#d9534f"))
         ),
         shapes = list(
-          # White background box for legend
-          list(type = "rect", x0 = 0.01, x1 = 0.28, y0 = 0.88, y1 = 0.99,
+          list(type = "rect", x0 = 0.01, x1 = 0.42, y0 = 0.83, y1 = 0.99,
                xref = "paper", yref = "paper", fillcolor = "white", opacity = 0.85,
                line = list(color = "#333333", width = 1))
         )
