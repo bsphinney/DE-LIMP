@@ -28,7 +28,7 @@ server_de <- function(input, output, session, values, add_to_log) {
       df$Gene <- df$Accession; df$Protein.Name <- df$Protein.Group
     }
 
-    df$Significance <- "Not Sig"; df$Significance[df$adj.P.Val < 0.05 & abs(df$logFC) > input$logfc_cutoff] <- "Significant"
+    df$Significance <- "Not Sig"; df$Significance[df$adj.P.Val < 0.05] <- "Significant"
     df$Selected <- "No"; if (!is.null(values$plot_selected_proteins)) { df$Selected[df$Protein.Group %in% values$plot_selected_proteins] <- "Yes" }
     df
   })
@@ -76,7 +76,7 @@ server_de <- function(input, output, session, values, add_to_log) {
           list(x = 0.02, y = 0.98, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
                text = "<b>Significant if:</b>", showarrow = FALSE, font = list(size = 14)),
           list(x = 0.02, y = 0.93, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
-               text = paste0("• FDR-adj. p < 0.05<br>• |log2FC| > ", round(input$logfc_cutoff, 2)),
+               text = "• FDR-adj. p < 0.05",
                showarrow = FALSE, font = list(size = 12, color = "#555555"))
         ),
         shapes = list(
@@ -146,7 +146,7 @@ server_de <- function(input, output, session, values, add_to_log) {
     }
 
     df_full$Significance <- "Not Sig"
-    df_full$Significance[df_full$adj.P.Val < 0.05 & abs(df_full$logFC) > input$logfc_cutoff] <- "Significant"
+    df_full$Significance[df_full$adj.P.Val < 0.05] <- "Significant"
 
     # Compute Avg CV (%) per protein across groups
     df_full$`Avg CV (%)` <- NA_real_
@@ -522,7 +522,7 @@ server_de <- function(input, output, session, values, add_to_log) {
           list(x = 0.02, y = 0.98, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
                text = "<b>Significant if:</b>", showarrow = FALSE, font = list(size = 12)),
           list(x = 0.02, y = 0.93, xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
-               text = paste0("• FDR-adj. p < 0.05<br>• |log2FC| > ", round(input$logfc_cutoff, 2)),
+               text = "• FDR-adj. p < 0.05",
                showarrow = FALSE, font = list(size = 11, color = "#555555"))
         ),
         shapes = list(
