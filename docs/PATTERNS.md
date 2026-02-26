@@ -10,6 +10,15 @@ This file contains detailed patterns that are referenced from CLAUDE.md but too 
 - Use `isolate()` to break reactive dependencies when needed
 - DT tables with `selection = "multiple"` support Ctrl+Click and Shift+Click
 
+## bslib navset_card_tab Rendering Issues
+
+- **`renderUI`/`uiOutput` inside `navset_card_tab` sub-tabs**: Content renders briefly then disappears. Tried `cancelOutput = TRUE`, `htmlOutput` + `renderText`, `insertUI`/`removeUI` — all fail. bslib clears the DOM for HTML output bindings on tab re-activation.
+- **`renderPlot`/`plotOutput` in hidden sub-tabs**: Crashes with `invalid quartz() device size` on macOS. The quartz PNG device gets 0 width/height when the tab isn't visible. Adding `req(input$tab_id == "Tab Name")` does NOT reliably prevent this — the container may still have 0 dimensions even when the tab is "active".
+- **`plotlyOutput` works reliably**: Plotly renders via JavaScript in the browser and handles hidden/0-width containers gracefully. Use `renderPlotly`/`plotlyOutput` for any dynamic content inside `navset_card_tab` sub-tabs.
+- **First child compression**: The first `plotlyOutput` inside a `navset_card_tab` `nav_panel` can get compressed to a thin strip. Place the primary chart first; secondary/smaller plotly widgets after.
+- **Native plotly for non-chart content**: Use `plot_ly()` with `shapes` + `annotations` (paper coordinates) to render card-like summary stats as plotly widgets. Avoids ggplot→PNG→quartz pipeline entirely. Use `config(displayModeBar = FALSE)` to hide toolbar.
+- **Safe pattern**: `plotlyOutput` > `plotOutput` > `uiOutput` for reliability in bslib sub-tabs.
+
 ## Package Installation & Loading
 
 - Install packages BEFORE any `library()` calls (attempting to update loaded packages causes unload errors)

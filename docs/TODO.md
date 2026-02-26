@@ -32,10 +32,18 @@
 ## DIA-NN Search
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 
+## CV Analysis Tab Redesign (In Progress)
+- [x] Replace broken DT table with plotly scatter plot (logFC vs Avg CV, color-coded by CV category)
+- [x] Add Avg CV (%) column to DE Results Table (inline computation, no reactive dependency)
+- [x] Simplify CSV export (removed toggle filter, exports all significant proteins)
+- [x] Update info modal for new design (scatter plot, summary stats, Results Table column)
+- [ ] **Fix summary stats cards sizing**: Cards render as plotly shapes+annotations but get compressed to a thin strip when placed first in `navset_card_tab`. Currently placed after scatter plot but height/layout still not right. Need to debug why `plotlyOutput` height is ignored. Possible approaches: (1) embed stats as plotly annotations on the scatter plot itself, (2) use a second ggplotly with explicit autosize=FALSE, (3) use CSS `min-height` on the container div.
+- [ ] **Polish scatter plot legend**: Legend overlaps x-axis label at default size. Current fix uses `y = -0.22` + `margin(b = 80)` — verify on different screen sizes.
+
 ## General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
 - [ ] Publication-quality plot exports (SVG/PNG/TIFF with size controls)
-- [ ] Sample correlation heatmap (QC Plots tab)
+- [x] Sample correlation heatmap (Replicate Consistency tab)
 - [ ] Venn diagram of significant proteins across comparisons
 - [ ] Sample CV distribution plots
 - [ ] Protein numbers bar plot per sample

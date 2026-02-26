@@ -1,5 +1,5 @@
 # ==============================================================================
-#  SERVER MODULE — DE Dashboard, Volcano, Robust Changes (Consistent DE), Selection Sync
+#  SERVER MODULE — DE Dashboard, Volcano, CV Analysis, Selection Sync
 #  Called from app.R as: server_de(input, output, session, values, add_to_log)
 # ==============================================================================
 
@@ -45,7 +45,7 @@ server_de <- function(input, output, session, values, add_to_log) {
     df <- volcano_data()
     cols <- c("Not Sig" = "grey", "Significant" = "red")
 
-    p <- ggplot(df, aes(x = logFC, y = -log10(P.Value), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
+    p <- ggplot(df, aes(x = logFC, y = -log10(adj.P.Val), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
       geom_point(alpha = 0.6) +
       scale_color_manual(values = cols) +
 
@@ -56,11 +56,11 @@ server_de <- function(input, output, session, values, add_to_log) {
                  linetype = "dashed", color = "#4169E1", size = 0.8) +
 
       theme_minimal() +
-      labs(y = "-log10(P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
+      labs(y = "-log10(adj. P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
 
     df_sel <- df %>% filter(Selected == "Yes")
     if (nrow(df_sel) > 0) {
-      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(P.Value)),
+      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(adj.P.Val)),
                          shape = 21, size = 4, fill = NA, color = "blue", stroke = 2)
     }
 
@@ -144,18 +144,45 @@ server_de <- function(input, output, session, values, add_to_log) {
     df_full$Significance <- "Not Sig"
     df_full$Significance[df_full$adj.P.Val < 0.05 & abs(df_full$logFC) > input$logfc_cutoff] <- "Significant"
 
+    # Compute Avg CV (%) per protein across groups
+    df_full$`Avg CV (%)` <- NA_real_
+    tryCatch({
+      if (!is.null(values$y_protein) && !is.null(values$metadata)) {
+        valid_prots <- intersect(df_full$Protein.Group, rownames(values$y_protein$E))
+        if (length(valid_prots) > 0) {
+          raw_exprs <- values$y_protein$E[valid_prots, , drop = FALSE]
+          linear_exprs <- 2^raw_exprs
+          groups <- unique(values$metadata$Group)
+          groups <- groups[groups != ""]
+          cv_per_group <- matrix(NA_real_, nrow = length(valid_prots), ncol = length(groups))
+          for (gi in seq_along(groups)) {
+            files_in_group <- values$metadata$File.Name[values$metadata$Group == groups[gi]]
+            gcols <- intersect(colnames(linear_exprs), files_in_group)
+            if (length(gcols) > 1) {
+              gdata <- linear_exprs[, gcols, drop = FALSE]
+              cv_per_group[, gi] <- apply(gdata, 1, function(x) sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE) * 100)
+            }
+          }
+          avg_cv <- round(rowMeans(cv_per_group, na.rm = TRUE), 1)
+          names(avg_cv) <- valid_prots
+          df_full$`Avg CV (%)` <- avg_cv[df_full$Protein.Group]
+        }
+      }
+    }, error = function(e) NULL)
+
     # Filter to selected proteins from volcano/AI selection
     if (!is.null(values$plot_selected_proteins) && length(values$plot_selected_proteins) > 0) {
       df_full <- df_full %>% filter(Protein.Group %in% values$plot_selected_proteins)
     }
 
     df_display <- df_full %>% mutate(across(where(is.numeric), function(x) round(x,4))) %>%
+      mutate(`Avg CV (%)` = round(`Avg CV (%)`, 1)) %>%
       mutate(Protein.Name_Link = ifelse(!is.na(Accession) & str_detect(Accession, "^[A-Z0-9]{6,}$"),
                                        paste0("<a href='https://www.uniprot.org/uniprotkb/", Accession,
                                               "/entry' target='_blank' onclick='window.open(this.href, \"_blank\"); return false;'>",
                                               Protein.Name, "</a>"),
                                        Protein.Name)) %>%
-      dplyr::select(Gene, `Protein Name` = Protein.Name_Link, logFC, P.Value, adj.P.Val, Significance)
+      dplyr::select(Gene, `Protein Name` = Protein.Name_Link, logFC, P.Value, adj.P.Val, `Avg CV (%)`, Significance)
 
     datatable(df_display, selection = "multiple", options = list(pageLength = 10, scrollX = TRUE), escape = FALSE, rownames = FALSE)
   })
@@ -173,56 +200,26 @@ server_de <- function(input, output, session, values, add_to_log) {
   }, height = 400) # FIXED HEIGHT
 
   # --- Consistent DE Table (app.R lines 2535-2550) ---
-  output$consistent_table <- renderDT({
+  # Shared reactive: CV data for all significant proteins in current contrast
+  cv_analysis_data <- reactive({
     req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
-    df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>% as.data.frame() %>% filter(adj.P.Val < 0.05)
-    if (!"Protein.Group" %in% colnames(df_res_raw)) { df_res <- df_res_raw %>% rownames_to_column("Protein.Group") } else { df_res <- df_res_raw }
-    if(nrow(df_res) == 0) return(datatable(data.frame(Status="No significant proteins found.")))
-    protein_ids_for_cv <- df_res$Protein.Group; raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]; linear_exprs <- 2^raw_exprs; cv_list <- list()
-    for(g in unique(values$metadata$Group)) {
-      if (g == "") next
-      files_in_group <- values$metadata$File.Name[values$metadata$Group == g]; group_cols <- intersect(colnames(linear_exprs), files_in_group)
-      if (length(group_cols) > 1) { group_data <- linear_exprs[, group_cols, drop = FALSE]; cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
-      } else { cv_list[[paste0("CV_", g)]] <- NA }
-    }
-    cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-    df_final <- left_join(df_res, cv_df, by = "Protein.Group") %>% rowwise() %>% mutate(Avg_CV = mean(c_across(starts_with("CV_")), na.rm = TRUE)) %>% ungroup() %>% filter(Avg_CV < 20) %>% arrange(Avg_CV) %>% dplyr::select(Protein.Group, Avg_CV, logFC, adj.P.Val, starts_with("CV_")) %>% mutate(across(where(is.numeric), ~round(.x, 2)))
-    if(nrow(df_final) == 0) return(datatable(data.frame(Status="No significant proteins with Avg CV < 20% found.")))
-    datatable(df_final, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
-  })
-
-  # --- CV Histogram (app.R lines 2553-2630) ---
-  output$cv_histogram <- renderPlot({
-    req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
-
-    # Get significant proteins
     df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
-      as.data.frame() %>%
-      filter(adj.P.Val < 0.05)
+      as.data.frame() %>% filter(adj.P.Val < 0.05)
     if (!"Protein.Group" %in% colnames(df_res_raw)) {
       df_res <- df_res_raw %>% rownames_to_column("Protein.Group")
     } else {
       df_res <- df_res_raw
     }
-    if(nrow(df_res) == 0) {
-      # Show message if no significant proteins
-      plot.new()
-      text(0.5, 0.5, "No significant proteins found.\nAdjust significance threshold or check data.",
-           cex = 1.2, col = "gray50")
-      return()
-    }
+    if (nrow(df_res) == 0) return(NULL)
 
-    # Calculate CV for each group
-    protein_ids_for_cv <- df_res$Protein.Group
-    raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]
+    protein_ids <- df_res$Protein.Group
+    raw_exprs <- values$y_protein$E[protein_ids, , drop = FALSE]
     linear_exprs <- 2^raw_exprs
     cv_list <- list()
-
-    for(g in unique(values$metadata$Group)) {
+    for (g in unique(values$metadata$Group)) {
       if (g == "") next
       files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
       group_cols <- intersect(colnames(linear_exprs), files_in_group)
-
       if (length(group_cols) > 1) {
         group_data <- linear_exprs[, group_cols, drop = FALSE]
         cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) {
@@ -232,22 +229,169 @@ server_de <- function(input, output, session, values, add_to_log) {
         cv_list[[paste0("CV_", g)]] <- NA
       }
     }
-
-    # Convert to long format for ggplot
     cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-    cv_long <- cv_df %>%
-      pivot_longer(cols = starts_with("CV_"),
-                   names_to = "Group",
-                   values_to = "CV") %>%
+    cv_col_names <- grep("^CV_", colnames(cv_df), value = TRUE)
+
+    merged <- left_join(df_res, cv_df, by = "Protein.Group")
+    # Compute Avg_CV from CV_ columns using base R (avoids c_across issues)
+    cv_mat <- as.matrix(merged[, cv_col_names, drop = FALSE])
+    merged$Avg_CV <- round(rowMeans(cv_mat, na.rm = TRUE), 2)
+    merged <- merged %>%
+      arrange(Avg_CV) %>%
+      dplyr::select(Protein.Group, Avg_CV, logFC, adj.P.Val, all_of(cv_col_names)) %>%
+      mutate(across(where(is.numeric), ~round(.x, 2)))
+    merged
+  })
+
+  # --- CV Scatter Plot: logFC vs Avg_CV ---
+  output$cv_scatter_plot <- renderPlotly({
+    df <- cv_analysis_data()
+    if (is.null(df) || nrow(df) == 0) {
+      return(plotly_empty() %>% layout(title = "No significant proteins found"))
+    }
+
+    # Grab CV columns BEFORE adding CV_Category (which also starts with CV_)
+    cv_cols <- grep("^CV_", colnames(df), value = TRUE)
+
+    # Color by CV category
+    df$CV_Category <- ifelse(df$Avg_CV < 20, "< 20% (Low)",
+                      ifelse(df$Avg_CV < 35, "20-35% (Moderate)", "> 35% (High)"))
+    df$CV_Category <- factor(df$CV_Category, levels = c("< 20% (Low)", "20-35% (Moderate)", "> 35% (High)"))
+
+    cv_colors <- c("< 20% (Low)" = "#28a745", "20-35% (Moderate)" = "#ffc107", "> 35% (High)" = "#dc3545")
+
+    p <- ggplot(df, aes(x = logFC, y = Avg_CV,
+                        text = paste0("Protein: ", Protein.Group,
+                                      "\nlogFC: ", round(logFC, 3),
+                                      "\nAvg CV: ", round(Avg_CV, 1), "%",
+                                      "\nadj.P.Val: ", signif(adj.P.Val, 3)),
+                        color = CV_Category)) +
+      geom_point(alpha = 0.7, size = 2) +
+      scale_color_manual(values = cv_colors, name = "CV Category") +
+      geom_hline(yintercept = 20, linetype = "dashed", color = "#28a745", alpha = 0.5) +
+      geom_hline(yintercept = 35, linetype = "dashed", color = "#dc3545", alpha = 0.5) +
+      theme_minimal(base_size = 13) +
+      labs(x = "log2 Fold Change", y = "Avg CV (%)",
+           title = paste0("logFC vs CV: ", input$contrast_selector)) +
+      theme(plot.title = element_text(face = "bold", size = 14),
+            panel.grid.minor = element_blank())
+
+    # Build per-group CV summary stats as colored annotation cards above the plot
+    card_annotations <- list()
+    stats_list <- lapply(cv_cols, function(col) {
+      vals <- df[[col]]; vals <- vals[!is.na(vals) & is.finite(vals)]
+      if (length(vals) == 0) return(NULL)
+      data.frame(group = gsub("^CV_", "", col), med_cv = median(vals),
+        pct_low = round(sum(vals < 20) / length(vals) * 100, 1),
+        n_prots = length(vals), stringsAsFactors = FALSE)
+    })
+    stats <- do.call(rbind, Filter(Negate(is.null), stats_list))
+
+    if (!is.null(stats) && nrow(stats) > 0) {
+      ns <- nrow(stats)
+      stats$bg <- ifelse(stats$med_cv < 20, "#d4edda", ifelse(stats$med_cv < 35, "#fff3cd", "#f8d7da"))
+      stats$accent <- ifelse(stats$med_cv < 20, "#28a745", ifelse(stats$med_cv < 35, "#ffc107", "#dc3545"))
+      cw <- 0.85 / ns; cg <- 0.15 / (ns + 1)
+
+      for (i in seq_len(ns)) {
+        cxm <- cg * i + cw * (i - 1) + cw / 2
+        # Single annotation per card: bgcolor gives the colored background
+        card_annotations <- c(card_annotations, list(list(
+          x = cxm, y = 1.15, xref = "paper", yref = "paper",
+          xanchor = "center", yanchor = "middle",
+          text = paste0(
+            "<b>", stats$group[i], "</b><br>",
+            "<span style='font-size:20px'><b>", round(stats$med_cv[i], 1), "%</b></span><br>",
+            stats$pct_low[i], "% proteins &lt; 20% CV<br>",
+            "<span style='color:#888'>", stats$n_prots[i], " proteins</span>"
+          ),
+          showarrow = FALSE, align = "center",
+          font = list(size = 11, color = "#333"),
+          bgcolor = stats$bg[i], bordercolor = stats$accent[i],
+          borderwidth = 2, borderpad = 8
+        )))
+      }
+    }
+
+    ggplotly(p, tooltip = "text") %>%
+      layout(
+        legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15),
+        margin = list(t = 140, b = 60),
+        annotations = card_annotations
+      )
+  })
+
+  # --- Fullscreen CV Scatter Plot ---
+  observeEvent(input$fullscreen_cv_scatter, {
+    df <- cv_analysis_data()
+    if (is.null(df) || nrow(df) == 0) {
+      showNotification("No significant proteins found for CV analysis.", type = "warning")
+      return()
+    }
+
+    cv_cols <- grep("^CV_", colnames(df), value = TRUE)
+
+    df$CV_Category <- ifelse(df$Avg_CV < 20, "< 20% (Low)",
+                      ifelse(df$Avg_CV < 35, "20-35% (Moderate)", "> 35% (High)"))
+    df$CV_Category <- factor(df$CV_Category, levels = c("< 20% (Low)", "20-35% (Moderate)", "> 35% (High)"))
+    cv_colors <- c("< 20% (Low)" = "#28a745", "20-35% (Moderate)" = "#ffc107", "> 35% (High)" = "#dc3545")
+
+    p <- ggplot(df, aes(x = logFC, y = Avg_CV,
+                        text = paste0("Protein: ", Protein.Group,
+                                      "\nlogFC: ", round(logFC, 3),
+                                      "\nAvg CV: ", round(Avg_CV, 1), "%",
+                                      "\nadj.P.Val: ", signif(adj.P.Val, 3)),
+                        color = CV_Category)) +
+      geom_point(alpha = 0.7, size = 2.5) +
+      scale_color_manual(values = cv_colors, name = "CV Category") +
+      geom_hline(yintercept = 20, linetype = "dashed", color = "#28a745", alpha = 0.5) +
+      geom_hline(yintercept = 35, linetype = "dashed", color = "#dc3545", alpha = 0.5) +
+      theme_minimal(base_size = 14) +
+      labs(x = "log2 Fold Change", y = "Avg CV (%)",
+           title = paste0("logFC vs CV: ", input$contrast_selector)) +
+      theme(plot.title = element_text(face = "bold", size = 16),
+            panel.grid.minor = element_blank())
+
+    pl <- ggplotly(p, tooltip = "text", height = 650, width = 950) %>%
+      layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.12))
+
+    showModal(modalDialog(
+      title = "logFC vs CV - Fullscreen View",
+      renderPlotly({ pl }),
+      size = "xl",
+      easyClose = TRUE,
+      footer = modalButton("Close")
+    ))
+  })
+
+  # Helper: build CV long-format data from cv_analysis_data for histograms
+  cv_long_data <- reactive({
+    df_all <- cv_analysis_data()
+    if (is.null(df_all) || nrow(df_all) == 0) return(NULL)
+    cv_cols <- grep("^CV_", colnames(df_all), value = TRUE)
+    if (length(cv_cols) == 0) return(NULL)
+    df_all %>%
+      dplyr::select(Protein.Group, all_of(cv_cols)) %>%
+      pivot_longer(cols = all_of(cv_cols), names_to = "Group", values_to = "CV") %>%
       mutate(Group = gsub("CV_", "", Group)) %>%
       filter(!is.na(CV))
+  })
 
-    # Calculate averages for each group
+  # --- CV Histogram ---
+  output$cv_histogram <- renderPlot({
+    cv_long <- cv_long_data()
+    if (is.null(cv_long) || nrow(cv_long) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No significant proteins found.\nAdjust significance threshold or check data.",
+           cex = 1.2, col = "gray50")
+      return()
+    }
+
+    n_proteins <- length(unique(cv_long$Protein.Group))
     cv_averages <- cv_long %>%
       group_by(Group) %>%
       summarise(Avg_CV = mean(CV, na.rm = TRUE), .groups = 'drop')
 
-    # Create histogram with facets
     ggplot(cv_long, aes(x = CV)) +
       geom_histogram(aes(fill = Group), bins = 30, alpha = 0.7, color = "white") +
       geom_vline(data = cv_averages, aes(xintercept = Avg_CV, color = Group),
@@ -256,7 +400,7 @@ server_de <- function(input, output, session, values, add_to_log) {
                 aes(x = Avg_CV, y = Inf, label = paste0("Avg: ", round(Avg_CV, 1), "%")),
                 vjust = 1.5, hjust = -0.1, size = 3.5, fontface = "bold") +
       facet_wrap(~ Group, ncol = 2, scales = "free_y") +
-      labs(title = paste0("CV Distribution by Group (", nrow(df_res), " significant proteins)"),
+      labs(title = paste0("CV Distribution by Group (", n_proteins, " significant proteins)"),
            subtitle = "Dashed line shows average CV for each group",
            x = "Coefficient of Variation (%)",
            y = "Number of Proteins") +
@@ -271,60 +415,19 @@ server_de <- function(input, output, session, values, add_to_log) {
       )
   })
 
-  # --- Fullscreen CV Histogram (app.R lines 2633-2715) ---
+  # --- Fullscreen CV Histogram ---
   observeEvent(input$fullscreen_cv_hist, {
-    req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
-
-    # Get significant proteins
-    df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
-      as.data.frame() %>%
-      filter(adj.P.Val < 0.05)
-    if (!"Protein.Group" %in% colnames(df_res_raw)) {
-      df_res <- df_res_raw %>% rownames_to_column("Protein.Group")
-    } else {
-      df_res <- df_res_raw
-    }
-    if(nrow(df_res) == 0) {
+    cv_long <- cv_long_data()
+    if (is.null(cv_long) || nrow(cv_long) == 0) {
       showNotification("No significant proteins found for CV analysis.", type = "warning")
       return()
     }
 
-    # Calculate CV for each group
-    protein_ids_for_cv <- df_res$Protein.Group
-    raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]
-    linear_exprs <- 2^raw_exprs
-    cv_list <- list()
-
-    for(g in unique(values$metadata$Group)) {
-      if (g == "") next
-      files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
-      group_cols <- intersect(colnames(linear_exprs), files_in_group)
-
-      if (length(group_cols) > 1) {
-        group_data <- linear_exprs[, group_cols, drop = FALSE]
-        cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) {
-          (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100
-        })
-      } else {
-        cv_list[[paste0("CV_", g)]] <- NA
-      }
-    }
-
-    # Convert to long format for ggplot
-    cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-    cv_long <- cv_df %>%
-      pivot_longer(cols = starts_with("CV_"),
-                   names_to = "Group",
-                   values_to = "CV") %>%
-      mutate(Group = gsub("CV_", "", Group)) %>%
-      filter(!is.na(CV))
-
-    # Calculate averages for each group
+    n_proteins <- length(unique(cv_long$Protein.Group))
     cv_averages <- cv_long %>%
       group_by(Group) %>%
       summarise(Avg_CV = mean(CV, na.rm = TRUE), .groups = 'drop')
 
-    # Create fullscreen histogram
     p <- ggplot(cv_long, aes(x = CV)) +
       geom_histogram(aes(fill = Group), bins = 40, alpha = 0.7, color = "white") +
       geom_vline(data = cv_averages, aes(xintercept = Avg_CV, color = Group),
@@ -333,7 +436,7 @@ server_de <- function(input, output, session, values, add_to_log) {
                 aes(x = Avg_CV, y = Inf, label = paste0("Avg: ", round(Avg_CV, 1), "%")),
                 vjust = 1.5, hjust = -0.1, size = 4, fontface = "bold") +
       facet_wrap(~ Group, ncol = 2, scales = "free_y") +
-      labs(title = paste0("CV Distribution by Group (", nrow(df_res), " significant proteins)"),
+      labs(title = paste0("CV Distribution by Group (", n_proteins, " significant proteins)"),
            subtitle = "Dashed line shows average CV for each group. Lower CV = more stable/reproducible biomarker",
            x = "Coefficient of Variation (%)",
            y = "Number of Proteins") +
@@ -383,8 +486,7 @@ server_de <- function(input, output, session, values, add_to_log) {
     df <- volcano_data()
     cols <- c("Not Sig" = "grey", "Significant" = "red")
 
-    # Use non-adjusted P.Value for y-axis, but color by adjusted p-value significance
-    p <- ggplot(df, aes(x = logFC, y = -log10(P.Value), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
+    p <- ggplot(df, aes(x = logFC, y = -log10(adj.P.Val), text = paste("Protein:", Protein.Group), key = Protein.Group, color = Significance)) +
       geom_point(alpha = 0.6) +
       scale_color_manual(values = cols) +
 
@@ -395,11 +497,11 @@ server_de <- function(input, output, session, values, add_to_log) {
                  linetype = "dashed", color = "#4169E1", size = 0.7) +
 
       theme_minimal() +
-      labs(y = "-log10(P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
+      labs(y = "-log10(adj. P-Value)", title = paste0("Volcano Plot: ", input$contrast_selector))
 
     df_sel <- df %>% filter(Selected == "Yes")
     if (nrow(df_sel) > 0) {
-      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(P.Value)),
+      p <- p + geom_point(data = df_sel, aes(x = logFC, y = -log10(adj.P.Val)),
                          shape = 21, size = 4, fill = NA, color = "blue", stroke = 2)
     }
 
@@ -534,30 +636,10 @@ server_de <- function(input, output, session, values, add_to_log) {
       paste0("CV_Distribution_", make.names(input$contrast_selector), ".png")
     },
     content = function(file) {
-      req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
-      df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
-        as.data.frame() %>% filter(adj.P.Val < 0.05)
-      if (!"Protein.Group" %in% colnames(df_res_raw)) {
-        df_res <- df_res_raw %>% rownames_to_column("Protein.Group")
-      } else { df_res <- df_res_raw }
-      if (nrow(df_res) == 0) return(NULL)
+      cv_long <- cv_long_data()
+      if (is.null(cv_long) || nrow(cv_long) == 0) return(NULL)
 
-      protein_ids_for_cv <- df_res$Protein.Group
-      raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]
-      linear_exprs <- 2^raw_exprs; cv_list <- list()
-      for (g in unique(values$metadata$Group)) {
-        if (g == "") next
-        files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
-        group_cols <- intersect(colnames(linear_exprs), files_in_group)
-        if (length(group_cols) > 1) {
-          group_data <- linear_exprs[, group_cols, drop = FALSE]
-          cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
-        } else { cv_list[[paste0("CV_", g)]] <- NA }
-      }
-      cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-      cv_long <- cv_df %>%
-        pivot_longer(cols = starts_with("CV_"), names_to = "Group", values_to = "CV") %>%
-        mutate(Group = gsub("CV_", "", Group)) %>% filter(!is.na(CV))
+      n_proteins <- length(unique(cv_long$Protein.Group))
       cv_averages <- cv_long %>% group_by(Group) %>%
         summarise(Avg_CV = mean(CV, na.rm = TRUE), .groups = 'drop')
 
@@ -567,7 +649,7 @@ server_de <- function(input, output, session, values, add_to_log) {
         geom_text(data = cv_averages, aes(x = Avg_CV, y = Inf, label = paste0("Avg: ", round(Avg_CV, 1), "%")),
           vjust = 1.5, hjust = -0.1, size = 3.5, fontface = "bold") +
         facet_wrap(~ Group, ncol = 2, scales = "free_y") +
-        labs(title = paste0("CV Distribution by Group (", nrow(df_res), " significant proteins)"),
+        labs(title = paste0("CV Distribution by Group (", n_proteins, " significant proteins)"),
              x = "Coefficient of Variation (%)", y = "Number of Proteins") +
         theme_bw(base_size = 14) +
         theme(legend.position = "none",
@@ -578,40 +660,18 @@ server_de <- function(input, output, session, values, add_to_log) {
     }
   )
 
-  # --- Consistent DE Table CSV Export ---
+  # --- CV Analysis CSV Export ---
   output$download_consistent_csv <- downloadHandler(
     filename = function() {
-      paste0("Robust_Changes_", make.names(input$contrast_selector), ".csv")
+      paste0("CV_Analysis_", make.names(input$contrast_selector), ".csv")
     },
     content = function(file) {
-      req(values$fit, values$y_protein, input$contrast_selector, values$metadata)
-      df_res_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>%
-        as.data.frame() %>% filter(adj.P.Val < 0.05)
-      if (!"Protein.Group" %in% colnames(df_res_raw)) {
-        df_res <- df_res_raw %>% rownames_to_column("Protein.Group")
-      } else { df_res <- df_res_raw }
-      if (nrow(df_res) == 0) { write.csv(data.frame(Status = "No significant proteins"), file, row.names = FALSE); return() }
-
-      protein_ids_for_cv <- df_res$Protein.Group
-      raw_exprs <- values$y_protein$E[protein_ids_for_cv, , drop = FALSE]
-      linear_exprs <- 2^raw_exprs; cv_list <- list()
-      for (g in unique(values$metadata$Group)) {
-        if (g == "") next
-        files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
-        group_cols <- intersect(colnames(linear_exprs), files_in_group)
-        if (length(group_cols) > 1) {
-          group_data <- linear_exprs[, group_cols, drop = FALSE]
-          cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
-        } else { cv_list[[paste0("CV_", g)]] <- NA }
+      df_all <- cv_analysis_data()
+      if (is.null(df_all) || nrow(df_all) == 0) {
+        write.csv(data.frame(Status = "No significant proteins"), file, row.names = FALSE)
+        return()
       }
-      cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-      df_final <- left_join(df_res, cv_df, by = "Protein.Group") %>%
-        rowwise() %>% mutate(Avg_CV = mean(c_across(starts_with("CV_")), na.rm = TRUE)) %>%
-        ungroup() %>% arrange(Avg_CV) %>%
-        mutate(Stability = ifelse(Avg_CV < 20, "High", "Low")) %>%
-        dplyr::select(Protein.Group, Stability, Avg_CV, logFC, adj.P.Val, starts_with("CV_")) %>%
-        mutate(across(where(is.numeric), ~round(.x, 4)))
-      write.csv(df_final, file, row.names = FALSE)
+      write.csv(df_all, file, row.names = FALSE)
     }
   )
 
