@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install R Dependencies (CRAN)
+# Install arrow with full codec support (zstd needed for parquet files)
+ENV LIBARROW_MINIMAL=false
 RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager', 'markdown', 'shinyFiles', 'jsonlite', 'callr'), repos='https://cloud.r-project.org/')"
 
 # 2b. Install phosphoproteomics packages (KSEA kinase activity, sequence logos)
