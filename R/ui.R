@@ -231,7 +231,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       ),
 
       accordion_panel("Pipeline Settings", icon = icon("sliders"),
-        sliderInput("logfc_cutoff", "Min Log2 Fold Change:", min=0, max=5, value=1, step=0.1)
+        sliderInput("logfc_cutoff", "Min Log2 Fold Change:", min=0, max=5, value=0.6, step=0.1)
       ),
 
       accordion_panel("AI Chat", icon = icon("robot"),
