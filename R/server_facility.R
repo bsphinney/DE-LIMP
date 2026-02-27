@@ -544,18 +544,76 @@ server_facility <- function(input, output, session, values, add_to_log,
       return()
     }
 
-    # Check for report.parquet in the output directory
+    # Find report.parquet in the output directory
     report_path <- file.path(job$output_dir, "report.parquet")
     if (!file.exists(report_path)) {
-      showNotification(
-        sprintf("report.parquet not found in %s", job$output_dir),
-        type = "error", duration = 8)
-      return()
+      # Try any report parquet
+      parquet_files <- list.files(job$output_dir, pattern = "report.*\\.parquet$",
+                                  full.names = TRUE)
+      if (length(parquet_files) > 0) {
+        report_path <- parquet_files[1]
+      } else {
+        showNotification(
+          sprintf("report.parquet not found in %s", job$output_dir),
+          type = "error", duration = 8)
+        return()
+      }
     }
 
-    showNotification(
-      sprintf("Loading results from: %s", job$analysis_name),
-      type = "message", duration = 5)
+    # Load the results into the pipeline
+    tryCatch({
+      withProgress(message = sprintf("Loading results from %s...", job$analysis_name), {
+        incProgress(0.1, detail = "Reading parquet...")
+        raw_data <- suppressMessages(suppressWarnings(
+          limpa::readDIANN(report_path, format = "parquet")))
+
+        values$raw_data <- raw_data
+        values$uploaded_report_path <- report_path
+        values$original_report_name <- basename(report_path)
+
+        # Initialize metadata from raw_data
+        sample_names <- colnames(raw_data$E)
+        values$metadata <- data.frame(
+          ID = seq_along(sample_names),
+          File.Name = sample_names,
+          Group = "",
+          Batch = "",
+          Covariate1 = "",
+          Covariate2 = "",
+          stringsAsFactors = FALSE
+        )
+
+        incProgress(0.5, detail = "Checking phospho...")
+        # Run phospho detection
+        tryCatch({
+          report_df <- arrow::read_parquet(report_path,
+            col_select = c("Modified.Sequence"))
+          values$phospho_detected <- detect_phospho(report_df)
+        }, error = function(e) NULL)
+
+        incProgress(0.8, detail = "Done!")
+
+        # Log the action
+        add_to_log("Load from Job History", c(
+          sprintf("# Job: %s (ID: %s)", job$analysis_name, job$id),
+          sprintf("# Output dir: %s", job$output_dir),
+          sprintf("raw_data <- limpa::readDIANN('%s', format = 'parquet')", report_path)
+        ))
+
+        # Navigate to Assign Groups tab
+        nav_select("main_tabs", "Data Overview")
+        nav_select("data_overview_tabs", "Assign Groups & Run")
+
+        showNotification(
+          sprintf("Results loaded from '%s'! Assign groups and run the pipeline.",
+                  job$analysis_name),
+          type = "message", duration = 10)
+      })
+    }, error = function(e) {
+      showNotification(
+        sprintf("Failed to load results: %s", e$message),
+        type = "error", duration = 10)
+    })
   })
 
   # (job_generate_report observer is defined above in the Reports section)
@@ -707,6 +765,89 @@ server_facility <- function(input, output, session, values, add_to_log,
       rownames = FALSE,
       class = "compact stripe hover"
     )
+  })
+
+
+  # ============================================================================
+  #    QC Run Ingestion
+  # ============================================================================
+
+  # Ingest QC run — modal dialog for file path + instrument
+  observeEvent(input$qc_ingest_btn, {
+    instruments <- cf_instrument_names(cf_config)
+    if (length(instruments) == 0) instruments <- c("timsTOF HT", "Exploris 480")
+
+    showModal(modalDialog(
+      title = "Ingest QC Run",
+      tags$p("Record QC metrics from a DIA-NN report.parquet (e.g., HeLa digest standard)."),
+      textInput("qc_ingest_path", "Path to report.parquet",
+        placeholder = "/path/to/qc_output/report.parquet"),
+      selectizeInput("qc_ingest_instrument", "Instrument",
+        choices = instruments, options = list(create = TRUE)),
+      textInput("qc_ingest_run_name", "Run Name (optional)",
+        placeholder = "Auto-detected from directory name"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_qc_ingest", "Record QC Metrics",
+          icon = icon("check"), class = "btn-success")
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_qc_ingest, {
+    req(input$qc_ingest_path)
+    req(input$qc_ingest_instrument)
+
+    report_path <- trimws(input$qc_ingest_path)
+    instrument <- input$qc_ingest_instrument
+    run_name <- if (nzchar(input$qc_ingest_run_name %||% "")) {
+      input$qc_ingest_run_name
+    } else NULL
+
+    if (!file.exists(report_path)) {
+      showNotification(
+        sprintf("File not found: %s", report_path),
+        type = "error", duration = 8)
+      return()
+    }
+
+    # Check if already ingested
+    db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+    existing <- DBI::dbGetQuery(db, "SELECT id FROM qc_runs WHERE file_path = ?1",
+      params = list(report_path))
+    DBI::dbDisconnect(db)
+
+    if (nrow(existing) > 0) {
+      showNotification("This file has already been ingested.", type = "warning")
+      return()
+    }
+
+    tryCatch({
+      withProgress(message = "Ingesting QC metrics...", {
+        row_id <- cf_ingest_qc_metrics(
+          db_path = cf_config$db_path,
+          report_path = report_path,
+          instrument = instrument,
+          run_name = run_name
+        )
+
+        add_to_log("Ingest QC Run", c(
+          sprintf("# Instrument: %s", instrument),
+          sprintf("# File: %s", report_path),
+          sprintf("cf_ingest_qc_metrics('%s', '%s', '%s')",
+                  cf_config$db_path, report_path, instrument)
+        ))
+      })
+
+      removeModal()
+      showNotification(
+        sprintf("QC run ingested for %s!", instrument),
+        type = "message", duration = 8)
+    }, error = function(e) {
+      showNotification(
+        sprintf("QC ingestion failed: %s", e$message),
+        type = "error", duration = 10)
+    })
   })
 
 

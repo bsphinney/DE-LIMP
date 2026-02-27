@@ -354,3 +354,114 @@ cf_lc_method_names <- function(cf_config) {
   }
   vapply(cf_config$qc$lc_methods, `[[`, "", "name")
 }
+
+
+#' Ingest QC metrics from a DIA-NN report.parquet into qc_runs table
+#' @param db_path Path to SQLite database
+#' @param report_path Path to report.parquet file
+#' @param instrument Instrument name
+#' @param run_name Name for this QC run (defaults to parent dir name)
+#' @param run_date Run date (defaults to file modification time)
+#' @param search_id Optional search ID to link to
+#' @return Invisibly returns the inserted row ID
+cf_ingest_qc_metrics <- function(db_path, report_path, instrument,
+                                  run_name = NULL, run_date = NULL,
+                                  search_id = NULL) {
+  if (!file.exists(report_path)) {
+    stop("Report file not found: ", report_path)
+  }
+
+  # Read parquet
+  df <- arrow::read_parquet(report_path)
+  col_names <- names(df)
+
+  # Default run_name from parent dir
+  if (is.null(run_name)) {
+    run_name <- basename(dirname(report_path))
+  }
+  # Default run_date from file mtime
+  if (is.null(run_date)) {
+    run_date <- as.character(file.info(report_path)$mtime)
+  }
+
+  # Extract metrics
+  n_proteins <- if ("Protein.Group" %in% col_names) {
+    length(unique(df$Protein.Group))
+  } else NA_integer_
+
+  n_peptides <- if ("Stripped.Sequence" %in% col_names) {
+    length(unique(df$Stripped.Sequence))
+  } else NA_integer_
+
+  n_precursors <- if ("Precursor.Id" %in% col_names) {
+    length(unique(df$Precursor.Id))
+  } else nrow(df)
+
+  # Median MS1 TIC
+  ms1_col <- intersect(c("Ms1.Area", "MS1.Area"), col_names)
+  median_ms1_tic <- if (length(ms1_col) > 0) {
+    median(as.numeric(df[[ms1_col[1]]]), na.rm = TRUE)
+  } else NA_real_
+
+  # Protein intensities for rolling CV computation
+  # Get mean intensity per protein (top 500)
+  intensity_col <- intersect(c("Precursor.Normalised", "Precursor.Quantity",
+                                "Normalised.Intensity", "Intensity"), col_names)
+  protein_intensities_json <- NA_character_
+  median_cv <- NA_real_
+
+  if (length(intensity_col) > 0 && "Protein.Group" %in% col_names) {
+    int_vals <- as.numeric(df[[intensity_col[1]]])
+    prot_groups <- df$Protein.Group
+
+    # Mean intensity per protein
+    prot_means <- tapply(int_vals, prot_groups, mean, na.rm = TRUE)
+    prot_means <- sort(prot_means, decreasing = TRUE)
+    top_n <- min(500, length(prot_means))
+    top_prots <- prot_means[seq_len(top_n)]
+
+    protein_intensities_json <- jsonlite::toJSON(as.list(top_prots), auto_unbox = TRUE)
+
+    # Compute median CV across proteins if multiple runs in file
+    if ("Run" %in% col_names || "File.Name" %in% col_names) {
+      run_col <- intersect(c("Run", "File.Name"), col_names)[1]
+      n_runs <- length(unique(df[[run_col]]))
+
+      if (n_runs > 1) {
+        # Aggregate per protein per run, then compute CV
+        top_prot_names <- names(top_prots)
+        sub_df <- df[df$Protein.Group %in% top_prot_names, ]
+        agg <- tapply(as.numeric(sub_df[[intensity_col[1]]]),
+                       list(sub_df$Protein.Group, sub_df[[run_col]]),
+                       mean, na.rm = TRUE)
+        cvs <- apply(agg, 1, function(x) {
+          x <- x[!is.na(x)]
+          if (length(x) < 2) return(NA)
+          sd(x) / mean(x) * 100
+        })
+        median_cv <- median(cvs, na.rm = TRUE)
+      }
+    }
+  }
+
+  # Insert into database
+  db <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+  on.exit(DBI::dbDisconnect(db))
+
+  DBI::dbExecute(db, "
+    INSERT INTO qc_runs (run_name, instrument, run_date, file_path,
+                          n_proteins, n_peptides, n_precursors,
+                          median_ms1_tic, median_cv, protein_intensities,
+                          search_id, report_path)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    params = list(
+      run_name, instrument, run_date, report_path,
+      n_proteins %||% NA, n_peptides %||% NA, n_precursors %||% NA,
+      median_ms1_tic %||% NA, median_cv %||% NA,
+      protein_intensities_json %||% NA,
+      search_id %||% NA, report_path
+    )
+  )
+
+  invisible(DBI::dbGetQuery(db, "SELECT last_insert_rowid()")[[1]])
+}
