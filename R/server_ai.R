@@ -314,7 +314,35 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
-        # --- 5. Build the prompt .md ---
+        # --- 5. GSEA results CSV (if any ontologies have been run) ---
+        gsea_note <- ""
+        if (!is.null(values$gsea_results_cache) && length(values$gsea_results_cache) > 0) {
+          incProgress(0.65, detail = "Exporting GSEA results...")
+          tryCatch({
+            gsea_all <- do.call(rbind, lapply(names(values$gsea_results_cache), function(ont) {
+              res <- values$gsea_results_cache[[ont]]
+              if (!is.null(res) && nrow(as.data.frame(res)) > 0) {
+                df <- as.data.frame(res)
+                df$Ontology <- ont
+                df
+              }
+            }))
+            if (!is.null(gsea_all) && nrow(gsea_all) > 0) {
+              gsea_file <- file.path(tmp_dir, "GSEA_Results.csv")
+              write.csv(gsea_all, gsea_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, gsea_file)
+              n_terms <- nrow(gsea_all)
+              ontologies <- paste(names(values$gsea_results_cache), collapse = ", ")
+              gsea_note <- paste0(
+                "\n- **`GSEA_Results.csv`** — Gene Set Enrichment Analysis results (",
+                n_terms, " terms across ", ontologies,
+                "). Columns: ID, Description, setSize, enrichmentScore, NES, pvalue, p.adjust, Ontology\n"
+              )
+            }
+          }, error = function(e) NULL)
+        }
+
+        # --- 6. Build the prompt .md ---
         incProgress(0.7, detail = "Assembling prompt...")
 
         # QC summary for inline prompt
@@ -358,6 +386,7 @@ server_ai <- function(input, output, session, values) {
           ctx$n_contrasts, " comparison(s). Columns: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val, B, Contrast\n",
           "- **`Expression_Matrix.csv`** — Log2 expression values for all proteins across all samples\n",
           if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics (precursor/protein counts, MS1 signal)\n" else "",
+          gsea_note,
           phospho_note, "\n\n",
           "Please provide a comprehensive analysis with these sections:\n\n",
           "## Overview\n",
@@ -378,6 +407,12 @@ server_ai <- function(input, output, session, values) {
           "pathway involvement, and disease associations. ",
           "Assess their potential as reliable biomarkers based on the combination of low CV, ",
           "significant p-value, and meaningful fold-change.\n\n",
+          if (nzchar(gsea_note)) paste0(
+            "## Pathway & Gene Set Enrichment Analysis\n",
+            "GSEA results are in `GSEA_Results.csv`. Summarize the top enriched pathways by ontology. ",
+            "Highlight pathways with the highest normalized enrichment scores (NES). ",
+            "Connect enriched pathways to the DE protein findings above.\n\n"
+          ) else "",
           "## Biological Interpretation\n",
           "Suggest what biological processes or pathways may be affected based on the protein lists. ",
           "Note any well-known protein families, complexes, or signaling cascades represented. ",
