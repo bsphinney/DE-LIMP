@@ -1199,7 +1199,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                           style = "padding: 12px 30px; font-size: 1.1em;"
                         ),
                         downloadButton("download_claude_prompt",
-                          tagList(icon("download"), " Export Prompt"),
+                          tagList(icon("download"), " Export for Claude"),
                           class = "btn-outline-secondary btn-lg",
                           style = "padding: 12px 30px; font-size: 1.1em;"
                         )

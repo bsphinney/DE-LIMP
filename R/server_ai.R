@@ -247,39 +247,95 @@ server_ai <- function(input, output, session, values) {
     }
   )
 
-  # --- Export Prompt for Claude (downloads .md with full data context) ---
+  # --- Export Prompt for Claude (downloads .zip with prompt + full data CSVs) ---
   output$download_claude_prompt <- downloadHandler(
     filename = function() {
-      paste0("DE-LIMP_Prompt_", format(Sys.time(), "%Y%m%d_%H%M"), ".md")
+      paste0("DE-LIMP_Claude_Export_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
     },
     content = function(file) {
       req(values$fit, values$y_protein)
 
-      withProgress(message = "Building prompt...", value = 0, {
-        incProgress(0.2, detail = "Gathering DE data...")
+      withProgress(message = "Building export...", value = 0, {
+        tmp_dir <- tempdir()
+        timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
+        files_to_zip <- character(0)
+
+        incProgress(0.1, detail = "Gathering DE data...")
         ctx <- build_ai_data_context()
 
-        # --- QC metrics ---
-        qc_section <- ""
+        # --- 1. Full DE results CSV (all proteins, all contrasts) ---
+        incProgress(0.3, detail = "Exporting full DE results...")
+        all_contrasts <- colnames(values$fit$contrasts)
+        full_results <- do.call(rbind, lapply(all_contrasts, function(cname) {
+          tt <- topTable(values$fit, coef = cname, number = Inf) %>% as.data.frame()
+          if (!"Protein.Group" %in% colnames(tt)) tt <- tt %>% rownames_to_column("Protein.Group")
+          tt$Contrast <- cname
+          tt
+        }))
+        results_file <- file.path(tmp_dir, "DE_Results_Full.csv")
+        write.csv(full_results, results_file, row.names = FALSE)
+        files_to_zip <- c(files_to_zip, results_file)
+
+        # --- 2. QC stats CSV ---
         if (!is.null(values$qc_stats) && !is.null(values$metadata)) {
-          incProgress(0.4, detail = "Adding QC metrics...")
+          incProgress(0.4, detail = "Exporting QC metrics...")
           qc_df <- left_join(values$qc_stats, values$metadata,
+            by = c("Run" = "File.Name")) %>%
+            arrange(Group, Run)
+          qc_file <- file.path(tmp_dir, "QC_Metrics.csv")
+          write.csv(qc_df, qc_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, qc_file)
+        }
+
+        # --- 3. Expression matrix CSV ---
+        incProgress(0.5, detail = "Exporting expression matrix...")
+        expr_mat <- values$y_protein$E
+        expr_df <- as.data.frame(expr_mat) %>% rownames_to_column("Protein.Group")
+        expr_file <- file.path(tmp_dir, "Expression_Matrix.csv")
+        write.csv(expr_df, expr_file, row.names = FALSE)
+        files_to_zip <- c(files_to_zip, expr_file)
+
+        # --- 4. Phospho results CSV (if available) ---
+        phospho_note <- ""
+        if (!is.null(values$phospho_fit)) {
+          incProgress(0.6, detail = "Exporting phospho data...")
+          phospho_note <- "\n\n**Phosphoproteomics data included** — see `Phospho_DE_Results.csv` for site-level results."
+          tryCatch({
+            phospho_contrasts <- colnames(values$phospho_fit$contrasts)
+            phospho_results <- do.call(rbind, lapply(phospho_contrasts, function(cname) {
+              tt <- limma::topTable(values$phospho_fit, coef = cname, number = Inf) %>% as.data.frame()
+              tt$SiteID <- rownames(tt)
+              tt$Contrast <- cname
+              tt
+            }))
+            phospho_file <- file.path(tmp_dir, "Phospho_DE_Results.csv")
+            write.csv(phospho_results, phospho_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, phospho_file)
+          }, error = function(e) NULL)
+        }
+
+        # --- 5. Build the prompt .md ---
+        incProgress(0.7, detail = "Assembling prompt...")
+
+        # QC summary for inline prompt
+        qc_inline <- ""
+        if (!is.null(values$qc_stats) && !is.null(values$metadata)) {
+          qc_summary <- left_join(values$qc_stats, values$metadata,
             by = c("Run" = "File.Name")) %>%
             dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) %>%
             arrange(Group, Run)
-          qc_text <- paste(capture.output(print(as.data.frame(qc_df), row.names = FALSE)), collapse = "\n")
-          qc_section <- paste0(
-            "\n\n--- QC METRICS PER SAMPLE ---\n",
-            "These metrics reflect the technical quality of each LC-MS/MS run.\n",
-            "- Precursors: number of identified precursor ions\n",
-            "- Proteins: number of identified protein groups\n",
-            "- MS1_Signal: median MS1 precursor intensity (proxy for total signal)\n\n",
+          qc_text <- paste(capture.output(print(as.data.frame(qc_summary), row.names = FALSE)), collapse = "\n")
+          qc_inline <- paste0(
+            "\n\n--- QC METRICS SUMMARY ---\n",
+            "Full data in `QC_Metrics.csv`. Key columns:\n",
+            "- Precursors: identified precursor ions per run\n",
+            "- Proteins: identified protein groups per run\n",
+            "- MS1_Signal: median MS1 intensity (total signal proxy)\n\n",
             qc_text
           )
         }
 
-        # --- Experimental design ---
-        incProgress(0.5, detail = "Adding experimental design...")
+        # Experimental design
         design_section <- ""
         if (!is.null(values$metadata)) {
           group_summary <- values$metadata %>%
@@ -287,33 +343,22 @@ server_ai <- function(input, output, session, values) {
             group_by(Group) %>%
             summarise(N_Replicates = n(), .groups = "drop")
           design_text <- paste(capture.output(print(as.data.frame(group_summary), row.names = FALSE)), collapse = "\n")
-          design_section <- paste0(
-            "\n\n--- EXPERIMENTAL DESIGN ---\n",
-            design_text
-          )
+          design_section <- paste0("\n\n--- EXPERIMENTAL DESIGN ---\n", design_text)
         }
 
-        # --- Phospho context (if available) ---
-        incProgress(0.6, detail = "Checking phospho data...")
-        phospho_section <- ""
-        if (!is.null(values$phospho_fit)) {
-          phospho_section <- tryCatch({
-            phospho_contrasts <- colnames(values$phospho_fit$contrasts)
-            phospho_parts <- sapply(phospho_contrasts, function(cname) {
-              phospho_ai_context(values$phospho_fit, cname, values$ksea_results)
-            })
-            paste(phospho_parts, collapse = "\n")
-          }, error = function(e) "")
-        }
+        n_total <- nrow(topTable(values$fit, coef = all_contrasts[1], number = Inf))
 
-        incProgress(0.8, detail = "Assembling prompt...")
-
-        # --- Full prompt assembly ---
         prompt <- paste0(
           "# Proteomics Differential Expression Analysis\n\n",
           "You are a senior proteomics and systems biology consultant. ",
           "Analyze the following differential expression results from a DIA-NN / limma pipeline. ",
           "The data was processed by DE-LIMP (Differential Expression - LIMPA Pipeline).\n\n",
+          "## Attached Data Files\n\n",
+          "- **`DE_Results_Full.csv`** — Complete DE statistics for all ", n_total, " proteins across ",
+          ctx$n_contrasts, " comparison(s). Columns: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val, B, Contrast\n",
+          "- **`Expression_Matrix.csv`** — Log2 expression values for all proteins across all samples\n",
+          if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics (precursor/protein counts, MS1 signal)\n" else "",
+          phospho_note, "\n\n",
           "Please provide a comprehensive analysis with these sections:\n\n",
           "## Overview\n",
           "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
@@ -338,22 +383,32 @@ server_ai <- function(input, output, session, values) {
           "Note any well-known protein families, complexes, or signaling cascades represented. ",
           "If the data suggests a clear biological narrative, describe it.\n\n",
           "Use markdown formatting with headers. Be scientific but accessible.\n",
+          "Reference specific proteins from the CSV files to support your analysis.\n",
           design_section,
-          qc_section,
-          "\n\n--- DIFFERENTIAL EXPRESSION DATA ---\n\n",
+          qc_inline,
+          "\n\n--- TOP DE PROTEINS (summary — full data in CSV) ---\n\n",
           "Number of comparisons: ", ctx$n_contrasts, "\n\n",
           ctx$contrast_text, "\n\n",
           "--- CROSS-COMPARISON PROTEINS (significant in >= 2 comparisons) ---\n",
           ctx$cross_text, "\n\n",
           "--- MOST STABLE SIGNIFICANT PROTEINS (lowest CV across replicates) ---\n",
-          ctx$stable_prots_text,
-          phospho_section
+          ctx$stable_prots_text
         )
 
-        writeLines(prompt, file)
-        message(sprintf("[DE-LIMP] Claude prompt exported: %d characters", nchar(prompt)))
+        prompt_file <- file.path(tmp_dir, "PROMPT.md")
+        writeLines(prompt, prompt_file)
+        files_to_zip <- c(files_to_zip, prompt_file)
+
+        incProgress(0.9, detail = "Creating zip...")
+        # zip expects relative paths — use basenames
+        old_wd <- setwd(tmp_dir)
+        on.exit(setwd(old_wd), add = TRUE)
+        zip(file, basename(files_to_zip))
+
+        message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars", length(files_to_zip), nchar(prompt)))
       })
-    }
+    },
+    contentType = "application/zip"
   )
 
   # --- AI Summary Info Modal ---
