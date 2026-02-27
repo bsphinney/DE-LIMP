@@ -1419,6 +1419,28 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     # OUTPUT dropdown — Methods & Code
     # ==========================================================================
     nav_menu("Output", icon = icon("file-export"),
+      nav_panel("Export Data", icon = icon("download"),
+        div(style = "max-width: 700px; margin: 30px auto; padding: 20px;",
+          div(style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #28a745;",
+            tags$h4(icon("file-csv"), " Export Complete Dataset"),
+            tags$p(class = "text-muted",
+              "Download the full results table for the selected comparison, including DE statistics ",
+              "(logFC, P.Value, adj.P.Val) and normalized expression values for all samples."
+            ),
+            downloadButton("download_result_csv_output", tagList(icon("download"), " Export Results CSV"),
+              class = "btn-success btn-lg mt-2")
+          ),
+          div(style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #17a2b8;",
+            tags$h4(icon("chart-bar"), " Export CV Analysis"),
+            tags$p(class = "text-muted",
+              "Download CV analysis for significant proteins, including per-group coefficient of ",
+              "variation and average CV values."
+            ),
+            downloadButton("download_consistent_csv_output", tagList(icon("download"), " Export CV Analysis CSV"),
+              class = "btn-info btn-lg mt-2")
+          )
+        )
+      ),
       nav_panel("Methods & Code", icon = icon("scroll"),
                 navset_card_tab(
                   nav_panel("R Code Log",

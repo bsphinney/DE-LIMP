@@ -488,6 +488,30 @@ server_de <- function(input, output, session, values, add_to_log) {
     }
   )
 
+  # --- Output tab: duplicate download handlers ---
+  output$download_result_csv_output <- downloadHandler(
+    filename = function() { paste0("Limpa_Results_", make.names(input$contrast_selector), ".csv") },
+    content = function(file) {
+      req(values$fit, values$y_protein)
+      de_stats <- topTable(values$fit, coef=input$contrast_selector, number=Inf) %>% as.data.frame()
+      if (!"Protein.Group" %in% colnames(de_stats)) de_stats <- de_stats %>% rownames_to_column("Protein.Group")
+      exprs_data <- as.data.frame(values$y_protein$E) %>% rownames_to_column("Protein.Group")
+      full_data <- left_join(de_stats, exprs_data, by="Protein.Group")
+      write.csv(full_data, file, row.names=FALSE)
+    }
+  )
+  output$download_consistent_csv_output <- downloadHandler(
+    filename = function() { paste0("CV_Analysis_", make.names(input$contrast_selector), ".csv") },
+    content = function(file) {
+      df_all <- cv_analysis_data()
+      if (is.null(df_all) || nrow(df_all) == 0) {
+        write.csv(data.frame(Status = "No significant proteins"), file, row.names = FALSE)
+        return()
+      }
+      write.csv(df_all, file, row.names = FALSE)
+    }
+  )
+
   # --- Volcano Plot Interactive (app.R lines 3162-3205) ---
   output$volcano_plot_interactive <- renderPlotly({
     df <- volcano_data()
