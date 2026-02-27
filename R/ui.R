@@ -1273,33 +1273,37 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   ),
 
                   nav_panel("CV Analysis", icon = icon("check-double"),
-                    # Controls row: info + CSV download
-                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
-                      actionButton("consistent_de_info_btn", icon("question-circle"),
-                        title = "About CV Analysis", class = "btn-outline-info btn-sm"),
-                      downloadButton("download_consistent_csv", tagList(icon("download"), " CSV"),
-                        class = "btn-success btn-sm"),
-                      actionButton("fullscreen_cv_scatter", "\U0001F50D Fullscreen",
-                        class = "btn-outline-secondary btn-sm")
-                    ),
-                    # logFC vs Avg CV scatter plot with summary stats cards above
-                    plotlyOutput("cv_scatter_plot", height = "580px"),
-                    hr(),
-                    # CV Distribution histogram (unchanged)
-                    div(
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                        p("Distribution of Coefficient of Variation (CV) for significant proteins, broken down by experimental group.",
-                          class = "text-muted small mb-0"),
-                        div(style = "display: flex; gap: 8px;",
-                          actionButton("cv_dist_info_btn", icon("question-circle"), title = "What is this?",
-                            class = "btn-outline-info btn-sm"),
-                          downloadButton("download_cv_hist_png", tagList(icon("image"), " PNG"),
-                            class = "btn-outline-secondary btn-sm"),
-                          actionButton("fullscreen_cv_hist", "\U0001F50D Fullscreen",
-                            class = "btn-outline-secondary btn-sm")
-                        )
+                    div(style = "overflow-y: auto; max-height: calc(100vh - 200px); padding-right: 5px;",
+                      # Controls row: info + CSV download
+                      div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                        actionButton("consistent_de_info_btn", icon("question-circle"),
+                          title = "About CV Analysis", class = "btn-outline-info btn-sm"),
+                        downloadButton("download_consistent_csv", tagList(icon("download"), " CSV"),
+                          class = "btn-success btn-sm"),
+                        actionButton("fullscreen_cv_scatter", "\U0001F50D Fullscreen",
+                          class = "btn-outline-secondary btn-sm")
                       ),
-                      plotOutput("cv_histogram", height = "450px")
+                      # logFC vs Avg CV scatter plot
+                      div(style = "min-height: 500px;",
+                        plotlyOutput("cv_scatter_plot", height = "500px")
+                      ),
+                      hr(),
+                      # CV Distribution histogram
+                      div(
+                        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                          p("Distribution of Coefficient of Variation (CV) for significant proteins, broken down by experimental group.",
+                            class = "text-muted small mb-0"),
+                          div(style = "display: flex; gap: 8px;",
+                            actionButton("cv_dist_info_btn", icon("question-circle"), title = "What is this?",
+                              class = "btn-outline-info btn-sm"),
+                            downloadButton("download_cv_hist_png", tagList(icon("image"), " PNG"),
+                              class = "btn-outline-secondary btn-sm"),
+                            actionButton("fullscreen_cv_hist", "\U0001F50D Fullscreen",
+                              class = "btn-outline-secondary btn-sm")
+                          )
+                        ),
+                        plotOutput("cv_histogram", height = "450px")
+                      )
                     )
                   )
                 )
