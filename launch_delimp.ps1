@@ -122,6 +122,30 @@ function Find-SshKey {
     exit 1
 }
 
+# --- Fix SSH key permissions (Windows requires strict perms) ---
+function Repair-SshKeyPermissions {
+    $key = $script:SshKey
+    if (-not $key -or -not (Test-Path $key)) { return }
+
+    try {
+        $acl = Get-Acl $key
+        # Check if anyone besides the current user has access
+        $otherRules = $acl.Access | Where-Object {
+            $_.IdentityReference -notmatch [regex]::Escape($env:USERNAME) -and
+            $_.IdentityReference -ne "NT AUTHORITY\SYSTEM" -and
+            $_.IdentityReference -ne "BUILTIN\Administrators"
+        }
+        if ($otherRules) {
+            Write-Host "  Fixing SSH key permissions..." -ForegroundColor Yellow
+            & icacls $key /inheritance:r /grant:r "${env:USERNAME}:(R)" 2>$null | Out-Null
+            Write-Host "  Permissions fixed."
+        }
+    } catch {
+        # Non-fatal — SSH will error if perms are still wrong
+        Write-Host "  Warning: Could not check key permissions." -ForegroundColor Yellow
+    }
+}
+
 # --- Step 2: Get HIVE username ---
 function Get-HiveUsername {
     Write-Host "[2/7] Getting HIVE username..." -ForegroundColor Green
@@ -319,6 +343,7 @@ function Open-Browser {
 # --- Main ---
 Write-Header
 Find-SshKey
+Repair-SshKeyPermissions
 Get-HiveUsername
 Test-Container
 Update-Repo
