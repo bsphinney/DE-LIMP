@@ -1186,8 +1186,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         )
                       ),
 
-                      # Generate button + export
-                      div(style = "text-align: center; margin-bottom: 20px; display: flex; justify-content: center; gap: 12px;",
+                      # Generate button + export + Claude prompt
+                      div(style = "text-align: center; margin-bottom: 20px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;",
                         actionButton("generate_ai_summary_overview",
                           "\U0001F916 Generate AI Summary",
                           class = "btn-info btn-lg",
@@ -1196,6 +1196,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         downloadButton("download_ai_summary_html",
                           tagList(icon("file-export"), " Export Report"),
                           class = "btn-success btn-lg",
+                          style = "padding: 12px 30px; font-size: 1.1em;"
+                        ),
+                        downloadButton("download_claude_prompt",
+                          tagList(icon("download"), " Export Prompt"),
+                          class = "btn-outline-secondary btn-lg",
                           style = "padding: 12px 30px; font-size: 1.1em;"
                         )
                       ),
