@@ -342,7 +342,27 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
-        # --- 6. Build the prompt .md ---
+        # --- 6. Methodology text file ---
+        methods_note <- ""
+        if (!is.null(values$methodology_text) && nzchar(values$methodology_text)) {
+          methods_file <- file.path(tmp_dir, "Methods_and_References.txt")
+          writeLines(values$methodology_text, methods_file)
+          files_to_zip <- c(files_to_zip, methods_file)
+          methods_note <- "\n- **`Methods_and_References.txt`** — Full statistical methodology, software versions, and literature references\n"
+        }
+
+        # --- 7. Reproducibility R code log ---
+        repro_note <- ""
+        if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
+          repro_file <- file.path(tmp_dir, "Reproducibility_Code.R")
+          log_content <- paste(values$repro_log, collapse = "\n")
+          session_info_text <- paste(capture.output(sessionInfo()), collapse = "\n")
+          writeLines(paste(log_content, "\n\n# --- Session Info ---\n", session_info_text), repro_file)
+          files_to_zip <- c(files_to_zip, repro_file)
+          repro_note <- "\n- **`Reproducibility_Code.R`** — R code log recording every analysis step with timestamps (can reproduce the full analysis)\n"
+        }
+
+        # --- 8. Build the prompt .md ---
         incProgress(0.7, detail = "Assembling prompt...")
 
         # QC summary for inline prompt
@@ -387,7 +407,9 @@ server_ai <- function(input, output, session, values) {
           "- **`Expression_Matrix.csv`** — Log2 expression values for all proteins across all samples\n",
           if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics (precursor/protein counts, MS1 signal)\n" else "",
           gsea_note,
-          phospho_note, "\n\n",
+          phospho_note,
+          methods_note,
+          repro_note, "\n\n",
           "Please provide a comprehensive analysis with these sections:\n\n",
           "## Overview\n",
           "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
@@ -417,6 +439,15 @@ server_ai <- function(input, output, session, values) {
           "Suggest what biological processes or pathways may be affected based on the protein lists. ",
           "Note any well-known protein families, complexes, or signaling cascades represented. ",
           "If the data suggests a clear biological narrative, describe it.\n\n",
+          if (nzchar(methods_note)) paste0(
+            "## Methodology & Reproducibility\n",
+            "A detailed methodology is in `Methods_and_References.txt`. ",
+            "Summarize the key steps of the analysis pipeline (normalization, statistical testing, ",
+            "multiple testing correction) in a concise Methods section suitable for a publication. ",
+            "Include the R code log (`Reproducibility_Code.R`) as context — cite the specific ",
+            "parameters and software versions used. Include proper literature citations from the ",
+            "methods file.\n\n"
+          ) else "",
           "Use markdown formatting with headers. Be scientific but accessible.\n",
           "Reference specific proteins from the CSV files to support your analysis.\n",
           design_section,

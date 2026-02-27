@@ -627,7 +627,8 @@ server_session <- function(input, output, session, values, add_to_log) {
   #      Methodology Text
   # ============================================================================
 
-  output$methodology_text <- renderText({
+  # Helper function to build methodology text (used by render + Claude export)
+  build_methodology_text <- function() {
     req(values$fit %||% values$phospho_fit)
 
     # DIA-NN search parameters section (conditional)
@@ -1019,6 +1020,15 @@ server_session <- function(input, output, session, values, add_to_log) {
     )
 
     methodology
+  }
+
+  output$methodology_text <- renderText({ build_methodology_text() })
+
+  # Store methodology text in values so other modules (e.g., Claude export) can access it
+  observe({
+    tryCatch({
+      values$methodology_text <- build_methodology_text()
+    }, error = function(e) NULL)
   })
 
   # ============================================================================
