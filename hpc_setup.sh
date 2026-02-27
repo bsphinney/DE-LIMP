@@ -198,17 +198,167 @@ cmd_packages() {
     echo "These packages will be available when you run: bash hpc_setup.sh run"
 }
 
+# --- Clone / Update Repo (for bind-mount code overlay) ---
+cmd_repo() {
+    local REPO_DIR="${HOME}/DE-LIMP"
+    local REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
+
+    if [ -d "${REPO_DIR}/.git" ]; then
+        echo -e "${GREEN}Updating DE-LIMP repo...${NC}"
+        cd "${REPO_DIR}" && git pull --ff-only
+        echo -e "${GREEN}Repo updated: ${REPO_DIR}${NC}"
+    else
+        echo -e "${GREEN}Cloning DE-LIMP repo...${NC}"
+        git clone "${REPO_URL}" "${REPO_DIR}"
+        echo -e "${GREEN}Repo cloned: ${REPO_DIR}${NC}"
+    fi
+}
+
+# --- Submit App via sbatch (non-interactive, for launcher scripts) ---
+cmd_sbatch() {
+    local CORE_DIR="${2:-}"
+    local REPO_DIR="${3:-${HOME}/DE-LIMP}"
+    local LOG_DIR="${HOME}/logs"
+    local JOB_DIR="${HOME}/jobs"
+    local SBATCH_FILE="${JOB_DIR}/delimp_app.sbatch"
+
+    # Ensure directories exist
+    mkdir -p "${LOG_DIR}" "${JOB_DIR}" "${R_USER_LIB}"
+
+    # Check container exists
+    if [ ! -f "${SIF_FILE}" ]; then
+        echo "ERROR: Container not found at ${SIF_FILE}" >&2
+        echo "Run 'bash hpc_setup.sh install' first." >&2
+        exit 1
+    fi
+
+    # Build optional Core Facility env
+    local ENV_ARGS=""
+    if [ -n "${CORE_DIR}" ]; then
+        ENV_ARGS="--env DELIMP_CORE_DIR=${CORE_DIR}"
+    fi
+
+    # Build optional repo bind-mount
+    local REPO_BINDS=""
+    if [ -d "${REPO_DIR}/R" ]; then
+        REPO_BINDS="--bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R --bind ${REPO_DIR}/R:/srv/shiny-server/R"
+    fi
+
+    # Write sbatch script
+    cat > "${SBATCH_FILE}" <<SBATCH_EOF
+#!/bin/bash
+#SBATCH --job-name=delimp
+#SBATCH --account=${ACCOUNT}
+#SBATCH --partition=${PARTITION}
+#SBATCH --time=${TIME}
+#SBATCH --mem=${MEM}
+#SBATCH --cpus-per-task=${CPUS}
+#SBATCH --output=${LOG_DIR}/delimp_%j.out
+#SBATCH --error=${LOG_DIR}/delimp_%j.err
+
+# Write hostname sentinel for launcher to discover compute node
+echo "\$(hostname)" > ${LOG_DIR}/delimp_node_\${SLURM_JOB_ID}.txt
+
+module load apptainer 2>/dev/null || module load singularity 2>/dev/null
+
+apptainer exec \\
+    --env R_LIBS_USER="${R_USER_LIB}" \\
+    ${ENV_ARGS} \\
+    --bind ${HOME}/data:/data \\
+    --bind ${HOME}/results:/results \\
+    --bind ${R_USER_LIB}:${R_USER_LIB} \\
+    ${REPO_BINDS} \\
+    "${SIF_FILE}" \\
+    R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})"
+SBATCH_EOF
+
+    # Submit and parse job ID
+    local SUBMIT_OUTPUT
+    SUBMIT_OUTPUT=$(sbatch "${SBATCH_FILE}" 2>&1)
+    local SUBMIT_RC=$?
+
+    if [ ${SUBMIT_RC} -ne 0 ]; then
+        echo "ERROR: sbatch submission failed: ${SUBMIT_OUTPUT}" >&2
+        exit 1
+    fi
+
+    # sbatch outputs "Submitted batch job 12345678"
+    local JOB_ID
+    JOB_ID=$(echo "${SUBMIT_OUTPUT}" | grep -oE '[0-9]+$')
+
+    if [ -z "${JOB_ID}" ]; then
+        echo "ERROR: Could not parse job ID from: ${SUBMIT_OUTPUT}" >&2
+        exit 1
+    fi
+
+    echo "JOBID:${JOB_ID}"
+}
+
+# --- Setup Core Facility Shared Directory ---
+cmd_setup_facility() {
+    local CF_DIR="${2:-/share/genome-center/delimp}"
+
+    echo -e "${GREEN}Setting up Core Facility directory: ${CF_DIR}${NC}"
+
+    mkdir -p "${CF_DIR}/reports"
+    mkdir -p "${CF_DIR}/state"
+
+    # Write template staff.yml if it doesn't exist
+    if [ ! -f "${CF_DIR}/staff.yml" ]; then
+        cat > "${CF_DIR}/staff.yml" <<'STAFF_EOF'
+# DE-LIMP Core Facility Staff Configuration
+# Each entry maps a staff member to their SSH and SLURM settings.
+
+staff:
+  - name: "Your Name"
+    email: "you@ucdavis.edu"
+    lab: "Genome Center"
+    ssh_host: "hive.hpc.ucdavis.edu"
+    ssh_user: "your_username"
+    ssh_key: "~/.ssh/id_ed25519"
+    slurm_account: "genome-center-grp"
+    slurm_partition: "high"
+
+# Instruments tracked for QC
+instruments:
+  - name: "timsTOF HT"
+  - name: "Exploris 480"
+
+# LC methods
+lc_methods:
+  - name: "30min-Evosep"
+  - name: "60min-nanoLC"
+  - name: "90min-nanoLC"
+STAFF_EOF
+        echo -e "${GREEN}Template staff.yml written to ${CF_DIR}/staff.yml${NC}"
+        echo "  Edit this file to add your team members."
+    else
+        echo "  staff.yml already exists — skipping."
+    fi
+
+    # Set group-writable permissions
+    chmod -R g+w "${CF_DIR}" 2>/dev/null || true
+
+    echo -e "${GREEN}Core Facility setup complete!${NC}"
+    echo "  Reports dir: ${CF_DIR}/reports/"
+    echo "  State dir:   ${CF_DIR}/state/"
+    echo "  Staff config: ${CF_DIR}/staff.yml"
+}
+
 # --- Help ---
 cmd_help() {
     print_header
     echo "Usage: bash hpc_setup.sh <command>"
     echo ""
     echo "Commands:"
-    echo "  install    Pull container from Hugging Face and set up directories"
-    echo "  update     Pull the latest container version"
-    echo "  packages   Install extra R packages (GSEA, MOFA2) — run once"
-    echo "  run        Request a compute node and launch DE-LIMP"
-    echo "  help       Show this help message"
+    echo "  install          Pull container from Hugging Face and set up directories"
+    echo "  update           Pull the latest container version"
+    echo "  packages         Install extra R packages (GSEA, MOFA2) — run once"
+    echo "  run              Request a compute node and launch DE-LIMP (interactive)"
+    echo "  sbatch           Submit DE-LIMP as a batch job (for launchers)"
+    echo "  repo             Clone or update the DE-LIMP GitHub repo"
+    echo "  setup-facility   Create Core Facility shared directory structure"
+    echo "  help             Show this help message"
     echo ""
     echo "Configuration (edit the top of this script to change):"
     echo "  PORT=${PORT}  MEM=${MEM}  CPUS=${CPUS}  TIME=${TIME}"
@@ -223,11 +373,14 @@ cmd_help() {
 
 # --- Main ---
 case "${1:-help}" in
-    install)  cmd_install ;;
-    update)   cmd_update ;;
-    packages) cmd_packages ;;
-    run)      cmd_run ;;
-    help)     cmd_help ;;
+    install)          cmd_install ;;
+    update)           cmd_update ;;
+    packages)         cmd_packages ;;
+    run)              cmd_run ;;
+    sbatch)           cmd_sbatch "$@" ;;
+    repo)             cmd_repo ;;
+    setup-facility)   cmd_setup_facility "$@" ;;
+    help)             cmd_help ;;
     *)
         echo -e "${RED}Unknown command: $1${NC}"
         cmd_help

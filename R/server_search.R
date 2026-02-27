@@ -1201,6 +1201,14 @@ server_search <- function(input, output, session, values, add_to_log,
         jobs[[i]]$status <- new_status
         changed <- TRUE
 
+        # Sync status to Core Facility SQLite database
+        if (is_core_facility && !is.null(cf_config)) {
+          tryCatch({
+            job_id_key <- jobs[[i]]$container_id %||% jobs[[i]]$job_id
+            cf_update_search_status(cf_config$db_path, job_id_key, new_status)
+          }, error = function(e) message("CF DB update failed: ", e$message))
+        }
+
         if (new_status == "completed") {
           jobs[[i]]$completed_at <- Sys.time()
           showNotification(
@@ -1331,6 +1339,19 @@ server_search <- function(input, output, session, values, add_to_log,
           jobs <- values$diann_jobs
           jobs[[i]]$loaded <- TRUE
           values$diann_jobs <- jobs
+
+          # Update Core Facility DB with protein/peptide counts
+          if (is_core_facility && !is.null(cf_config)) {
+            tryCatch({
+              job_id_key <- job$container_id %||% job$job_id
+              n_prot <- if (!is.null(values$raw_data)) nrow(values$raw_data$E) else NA
+              n_pep <- if (!is.null(values$raw_data) && !is.null(values$raw_data$genes$Stripped.Sequence)) {
+                length(unique(values$raw_data$genes$Stripped.Sequence))
+              } else NA
+              cf_update_search_status(cf_config$db_path, job_id_key, "completed",
+                                      n_proteins = n_prot, n_peptides = n_pep)
+            }, error = function(e) message("CF DB stats update failed: ", e$message))
+          }
 
           # Build log with key search parameters
           log_lines <- c(

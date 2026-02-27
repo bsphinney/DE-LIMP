@@ -242,9 +242,11 @@ cf_record_search <- function(db_path, params) {
 #' @param job_id SLURM job ID or Docker container ID
 #' @param status New status
 #' @param n_proteins Optional protein count
+#' @param n_peptides Optional peptide count
 #' @param n_precursors Optional precursor count
 cf_update_search_status <- function(db_path, job_id, status,
-                                     n_proteins = NULL, n_precursors = NULL) {
+                                     n_proteins = NULL, n_peptides = NULL,
+                                     n_precursors = NULL) {
   db <- DBI::dbConnect(RSQLite::SQLite(), db_path)
   on.exit(DBI::dbDisconnect(db))
 
@@ -252,9 +254,10 @@ cf_update_search_status <- function(db_path, job_id, status,
     DBI::dbExecute(db, "
       UPDATE searches
       SET status = ?1, completed_at = CURRENT_TIMESTAMP,
-          n_proteins = ?2, n_precursors = ?3
-      WHERE slurm_job_id = ?4 OR container_id = ?4",
-      params = list(status, n_proteins, n_precursors %||% NA, job_id)
+          n_proteins = ?2, n_peptides = ?3, n_precursors = ?4
+      WHERE slurm_job_id = ?5 OR container_id = ?5",
+      params = list(status, n_proteins, n_peptides %||% NA,
+                    n_precursors %||% NA, job_id)
     )
   } else {
     DBI::dbExecute(db, "
