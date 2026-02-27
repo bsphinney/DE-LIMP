@@ -755,7 +755,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     )
                   ),
                   textInput("ssh_key_path", "SSH Key Path",
-                    value = paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
+                    value = if (nzchar(delimp_data_dir))
+                      paste0(delimp_data_dir, "/ssh/id_ed25519")
+                    else
+                      paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
                   textInput("ssh_modules", "Modules to Load (optional)",
                     value = "",
                     placeholder = "e.g., slurm apptainer"),

@@ -50,6 +50,10 @@ DE-LIMP_OVERVIEW.md
 DE-LIMP_Wiki.html
 DIANN_HPC_INTEGRATION_SPEC.md
 
+# SSH keys (never commit private keys)
+data/ssh/*
+!data/ssh/.gitkeep
+
 # HPC batch scripts
 *.sbatch
 

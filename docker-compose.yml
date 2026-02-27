@@ -21,6 +21,7 @@
 #   data/raw/       ← .d / .raw / .mzML files
 #   data/fasta/     ← .fasta files
 #   data/output/    ← DIA-NN results appear here
+#   data/ssh/       ← SSH key for HPC search (e.g., id_ed25519)
 # =============================================================================
 
 services:

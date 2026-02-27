@@ -55,40 +55,44 @@ cmd_install() {
     echo "  (SIF conversion is CPU-intensive — should not run on head node)"
     echo ""
 
-    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
-        echo -e '${GREEN}[3/4] Loading Apptainer...${NC}'
+    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c '
+        SIF="$1"; IMAGE="$2"
+
+        echo "[3/4] Loading Apptainer..."
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null || {
-            echo -e '${RED}ERROR: Neither apptainer nor singularity module found.${NC}'
+            echo "ERROR: Neither apptainer nor singularity module found."
             exit 1
         }
 
-        echo -e '${GREEN}[4/4] Pulling DE-LIMP container from Hugging Face...${NC}'
-        echo 'This may take 10-20 minutes on first pull.'
-        echo ''
-        apptainer pull --force ${SIF_FILE} ${HF_IMAGE}
+        echo "[4/4] Pulling DE-LIMP container from Hugging Face..."
+        echo "This may take 10-20 minutes on first pull."
+        echo ""
+        apptainer pull --force "${SIF}" "${IMAGE}"
 
-        echo ''
-        echo -e '${GREEN}Setup complete!${NC}'
-        echo ''
-        echo 'Container: ${SIF_FILE}'
-        echo \"Size: \$(du -h ${SIF_FILE} | cut -f1)\"
-        echo ''
-        echo -e 'To launch DE-LIMP, run: ${YELLOW}bash hpc_setup.sh run${NC}'
-    "
+        echo ""
+        echo "Setup complete!"
+        echo ""
+        echo "Container: ${SIF}"
+        echo "Size: $(du -h "${SIF}" | cut -f1)"
+        echo ""
+        echo "To launch DE-LIMP, run: bash hpc_setup.sh run"
+    ' _ "${SIF_FILE}" "${HF_IMAGE}"
 }
 
 # --- Update Container ---
 cmd_update() {
     print_header
     echo -e "${GREEN}Requesting compute node for build...${NC}"
-    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
-        echo -e '${GREEN}Updating DE-LIMP container...${NC}'
+    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c '
+        SIF="$1"; IMAGE="$2"
+
+        echo "Updating DE-LIMP container..."
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null
-        apptainer pull --force ${SIF_FILE} ${HF_IMAGE}
-        echo ''
-        echo -e '${GREEN}Update complete!${NC}'
-        echo \"Size: \$(du -h ${SIF_FILE} | cut -f1)\"
-    "
+        apptainer pull --force "${SIF}" "${IMAGE}"
+        echo ""
+        echo "Update complete!"
+        echo "Size: $(du -h "${SIF}" | cut -f1)"
+    ' _ "${SIF_FILE}" "${HF_IMAGE}"
 }
 
 # --- Run Interactive ---
@@ -109,31 +113,34 @@ cmd_run() {
     echo "  Account: ${ACCOUNT} | Partition: ${PARTITION} | Time: ${TIME} | Memory: ${MEM} | CPUs: ${CPUS}"
     echo ""
 
-    ${SALLOC_CMD} bash -c "
-        echo ''
-        echo -e '${GREEN}==========================================${NC}'
-        echo -e '${GREEN}  DE-LIMP is starting on: \$(hostname)${NC}'
-        echo -e '${GREEN}==========================================${NC}'
-        echo ''
-        echo -e '${YELLOW}>>> On your LOCAL computer, run this command:${NC}'
-        echo ''
-        echo -e '  ssh -L ${PORT}:\$(hostname):${PORT} ${USER}@hive.hpc.ucdavis.edu'
-        echo ''
-        echo -e '${YELLOW}>>> Then open your browser to:${NC}'
-        echo ''
-        echo -e '  http://localhost:${PORT}'
-        echo ''
-        echo -e '${GREEN}==========================================${NC}'
-        echo 'Press Ctrl+C to stop DE-LIMP'
-        echo ''
+    ${SALLOC_CMD} bash -c '
+        PORT="$1"; SIF="$2"; HIVE_USER="$3"
+        NODE=$(hostname)
+
+        echo ""
+        echo "=========================================="
+        echo "  DE-LIMP is starting on: ${NODE}"
+        echo "=========================================="
+        echo ""
+        echo ">>> On your LOCAL computer, run this command:"
+        echo ""
+        echo "  ssh -L ${PORT}:${NODE}:${PORT} ${HIVE_USER}@hive.hpc.ucdavis.edu"
+        echo ""
+        echo ">>> Then open your browser to:"
+        echo ""
+        echo "  http://localhost:${PORT}"
+        echo ""
+        echo "=========================================="
+        echo "Press Ctrl+C to stop DE-LIMP"
+        echo ""
 
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null
-        apptainer exec \\
-            --bind \${HOME}/data:/data \\
-            --bind \${HOME}/results:/results \\
-            ${SIF_FILE} \\
-            R -e \"shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})\"
-    "
+        apptainer exec \
+            --bind ${HOME}/data:/data \
+            --bind ${HOME}/results:/results \
+            "${SIF}" \
+            R -e "shiny::runApp('"'"'/srv/shiny-server/'"'"', host='"'"'0.0.0.0'"'"', port=${PORT})"
+    ' _ "${PORT}" "${SIF_FILE}" "${USER}"
 }
 
 # --- Help ---
