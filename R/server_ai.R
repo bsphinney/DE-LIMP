@@ -314,7 +314,102 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
-        # --- 5. GSEA results CSV (if any ontologies have been run) ---
+        # --- 5. Session RDS (full app state — reload into DE-LIMP) ---
+        incProgress(0.55, detail = "Saving session state...")
+        rds_note <- ""
+        tryCatch({
+          session_data <- list(
+            raw_data = values$raw_data, metadata = values$metadata,
+            fit = values$fit, y_protein = values$y_protein,
+            dpc_fit = values$dpc_fit, design = values$design,
+            qc_stats = values$qc_stats,
+            gsea_results = values$gsea_results,
+            gsea_results_cache = values$gsea_results_cache,
+            gsea_last_contrast = values$gsea_last_contrast,
+            gsea_last_org_db = values$gsea_last_org_db,
+            repro_log = values$repro_log,
+            phospho_detected = values$phospho_detected,
+            phospho_site_matrix = values$phospho_site_matrix,
+            phospho_fit = values$phospho_fit,
+            ksea_results = values$ksea_results,
+            mofa_object = values$mofa_object,
+            mofa_variance_explained = values$mofa_variance_explained,
+            mofa_last_run_params = values$mofa_last_run_params,
+            diann_search_settings = values$diann_search_settings,
+            saved_at = Sys.time(),
+            app_version = "DE-LIMP v3.1.1"
+          )
+          rds_file <- file.path(tmp_dir, "Session.rds")
+          saveRDS(session_data, rds_file)
+          files_to_zip <- c(files_to_zip, rds_file)
+          rds_size <- round(file.size(rds_file) / 1024 / 1024, 1)
+          rds_note <- paste0("\n- **`Session.rds`** — Full DE-LIMP session state (", rds_size,
+                             " MB). Reload via DE-LIMP > Load Session to restore all results\n")
+        }, error = function(e) message("[DE-LIMP] Could not save RDS: ", e$message))
+
+        # --- 5b. Group assignments CSV ---
+        groups_note <- ""
+        if (!is.null(values$metadata)) {
+          groups_df <- values$metadata %>%
+            dplyr::select(File.Name, Group) %>%
+            filter(Group != "")
+          if (nrow(groups_df) > 0) {
+            groups_file <- file.path(tmp_dir, "Group_Assignments.csv")
+            write.csv(groups_df, groups_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, groups_file)
+            groups_note <- "\n- **`Group_Assignments.csv`** — Sample-to-group mapping used in this analysis\n"
+          }
+        }
+
+        # --- 5c. Pipeline parameters summary ---
+        params_note <- ""
+        tryCatch({
+          params <- c(
+            "DE-LIMP Analysis Parameters",
+            paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
+            paste0("App version: DE-LIMP v3.1.1"),
+            paste0("R version: ", R.version.string),
+            ""
+          )
+          # Contrasts
+          params <- c(params, "CONTRASTS:", paste0("  ", all_contrasts), "")
+          # Groups
+          if (!is.null(values$metadata)) {
+            grp_counts <- table(values$metadata$Group[values$metadata$Group != ""])
+            params <- c(params, "GROUPS:",
+              paste0("  ", names(grp_counts), ": n=", grp_counts), "")
+          }
+          # Covariates
+          if (!is.null(values$cov1_name) && nzchar(values$cov1_name))
+            params <- c(params, paste0("Covariate 1: ", values$cov1_name))
+          if (!is.null(values$cov2_name) && nzchar(values$cov2_name))
+            params <- c(params, paste0("Covariate 2: ", values$cov2_name))
+          # DIA-NN search settings
+          ss <- values$diann_search_settings
+          if (!is.null(ss)) {
+            sp <- ss$search_params
+            params <- c(params, "", "DIA-NN SEARCH SETTINGS:",
+              paste0("  FASTA: ", paste(basename(ss$fasta_files), collapse = ", ")),
+              paste0("  Enzyme: ", sp$enzyme),
+              paste0("  Missed cleavages: ", sp$missed_cleavages),
+              paste0("  FDR: ", sp$qvalue),
+              paste0("  MBR: ", sp$mbr),
+              paste0("  Search mode: ", ss$search_mode))
+          }
+          # Input file info
+          if (!is.null(values$raw_data)) {
+            params <- c(params, "", "INPUT DATA:",
+              paste0("  Total samples: ", length(unique(values$raw_data$Run))),
+              paste0("  Total proteins: ", nrow(values$y_protein$E)),
+              paste0("  Source: ", if (!is.null(values$original_report_name)) values$original_report_name else "unknown"))
+          }
+          params_file <- file.path(tmp_dir, "Analysis_Parameters.txt")
+          writeLines(params, params_file)
+          files_to_zip <- c(files_to_zip, params_file)
+          params_note <- "\n- **`Analysis_Parameters.txt`** — Pipeline settings, contrasts, group sizes, DIA-NN search parameters\n"
+        }, error = function(e) NULL)
+
+        # --- 6. GSEA results CSV (if any ontologies have been run) ---
         gsea_note <- ""
         if (!is.null(values$gsea_results_cache) && length(values$gsea_results_cache) > 0) {
           incProgress(0.65, detail = "Exporting GSEA results...")
@@ -409,7 +504,10 @@ server_ai <- function(input, output, session, values) {
           gsea_note,
           phospho_note,
           methods_note,
-          repro_note, "\n\n",
+          repro_note,
+          rds_note,
+          groups_note,
+          params_note, "\n\n",
           "Please provide a comprehensive analysis with these sections:\n\n",
           "## Overview\n",
           "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
