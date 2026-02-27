@@ -44,42 +44,50 @@ print_header() {
 # --- Install / Pull Container ---
 cmd_install() {
     print_header
-    echo -e "${GREEN}[1/3] Loading Apptainer...${NC}"
-    module load apptainer 2>/dev/null || module load singularity 2>/dev/null || {
-        echo -e "${RED}ERROR: Neither apptainer nor singularity module found.${NC}"
-        echo "Run 'module avail' to check available modules on your cluster."
-        exit 1
-    }
-
-    echo -e "${GREEN}[2/3] Creating directories...${NC}"
+    echo -e "${GREEN}[1/4] Creating directories...${NC}"
     mkdir -p "${CONTAINER_DIR}"
     mkdir -p "${HOME}/data"
     mkdir -p "${HOME}/results"
     mkdir -p "${HOME}/logs"
 
-    echo -e "${GREEN}[3/3] Pulling DE-LIMP container from Hugging Face...${NC}"
-    echo "This may take 5-10 minutes on first pull."
+    echo -e "${GREEN}[2/4] Requesting compute node for build...${NC}"
+    echo "  (SIF conversion is CPU-intensive — should not run on head node)"
     echo ""
-    apptainer pull --force "${SIF_FILE}" "${HF_IMAGE}"
 
-    echo ""
-    echo -e "${GREEN}Setup complete!${NC}"
-    echo ""
-    echo "Container: ${SIF_FILE}"
-    echo "Size: $(du -h "${SIF_FILE}" | cut -f1)"
-    echo ""
-    echo -e "To launch DE-LIMP, run: ${YELLOW}bash hpc_setup.sh run${NC}"
+    salloc --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
+        echo -e '${GREEN}[3/4] Loading Apptainer...${NC}'
+        module load apptainer 2>/dev/null || module load singularity 2>/dev/null || {
+            echo -e '${RED}ERROR: Neither apptainer nor singularity module found.${NC}'
+            exit 1
+        }
+
+        echo -e '${GREEN}[4/4] Pulling DE-LIMP container from Hugging Face...${NC}'
+        echo 'This may take 10-20 minutes on first pull.'
+        echo ''
+        apptainer pull --force ${SIF_FILE} ${HF_IMAGE}
+
+        echo ''
+        echo -e '${GREEN}Setup complete!${NC}'
+        echo ''
+        echo 'Container: ${SIF_FILE}'
+        echo \"Size: \$(du -h ${SIF_FILE} | cut -f1)\"
+        echo ''
+        echo -e 'To launch DE-LIMP, run: ${YELLOW}bash hpc_setup.sh run${NC}'
+    "
 }
 
 # --- Update Container ---
 cmd_update() {
     print_header
-    echo -e "${GREEN}Updating DE-LIMP container...${NC}"
-    module load apptainer 2>/dev/null || module load singularity 2>/dev/null
-    apptainer pull --force "${SIF_FILE}" "${HF_IMAGE}"
-    echo ""
-    echo -e "${GREEN}Update complete!${NC}"
-    echo "Size: $(du -h "${SIF_FILE}" | cut -f1)"
+    echo -e "${GREEN}Requesting compute node for build...${NC}"
+    salloc --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
+        echo -e '${GREEN}Updating DE-LIMP container...${NC}'
+        module load apptainer 2>/dev/null || module load singularity 2>/dev/null
+        apptainer pull --force ${SIF_FILE} ${HF_IMAGE}
+        echo ''
+        echo -e '${GREEN}Update complete!${NC}'
+        echo \"Size: \$(du -h ${SIF_FILE} | cut -f1)\"
+    "
 }
 
 # --- Run Interactive ---
