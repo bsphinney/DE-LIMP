@@ -16,8 +16,16 @@ This file contains detailed patterns that are referenced from CLAUDE.md but too 
 - **`renderPlot`/`plotOutput` in hidden sub-tabs**: Crashes with `invalid quartz() device size` on macOS. The quartz PNG device gets 0 width/height when the tab isn't visible. Adding `req(input$tab_id == "Tab Name")` does NOT reliably prevent this — the container may still have 0 dimensions even when the tab is "active".
 - **`plotlyOutput` works reliably**: Plotly renders via JavaScript in the browser and handles hidden/0-width containers gracefully. Use `renderPlotly`/`plotlyOutput` for any dynamic content inside `navset_card_tab` sub-tabs.
 - **First child compression**: The first `plotlyOutput` inside a `navset_card_tab` `nav_panel` can get compressed to a thin strip. Place the primary chart first; secondary/smaller plotly widgets after.
-- **Native plotly for non-chart content**: Use `plot_ly()` with `shapes` + `annotations` (paper coordinates) to render card-like summary stats as plotly widgets. Avoids ggplot→PNG→quartz pipeline entirely. Use `config(displayModeBar = FALSE)` to hide toolbar.
+- **Plotly annotation cards are fragile**: `layout(annotations = ...)` with `bgcolor` for card-like summary stats gets compressed, overlaps, and renders inconsistently in bslib sub-tabs. After 15+ attempts, **use ggplot subtitles instead** — a single line of text that's always reliable.
+- **Scrollable wrappers prevent compression**: Wrap dense sub-tab content in `div(style = "overflow-y: auto; max-height: calc(100vh - 200px);")` and add `div(style = "min-height: Npx;")` around key widgets.
 - **Safe pattern**: `plotlyOutput` > `plotOutput` > `uiOutput` for reliability in bslib sub-tabs.
+
+## Volcano Plot Patterns
+
+- **Y-axis**: Use raw `P.Value` for y-axis (gives classic volcano spread). Do NOT use `adj.P.Val` — it compresses the plot to a flat strip.
+- **Threshold line**: Compute as `max(P.Value)` among proteins with `adj.P.Val < 0.05`. This draws the dashed line at the raw P.Value that corresponds to the FDR boundary. BH adjustment is monotonic, so this is exact.
+- **Significance coloring**: Base on `adj.P.Val < 0.05` only (not logFC cutoff). logFC vertical lines are visual guides the user can adjust, but don't gate the coloring.
+- **Count annotation**: Show "N DE proteins (X up, Y down)" in the info box — users can't easily count overlapping dots.
 
 ## Package Installation & Loading
 

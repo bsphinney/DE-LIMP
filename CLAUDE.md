@@ -30,11 +30,11 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `app.R` | Orchestrator — package loading, backend detection, reactive values, module calls |
 | `R/ui.R` | `page_navbar` layout, accordion sidebar, all tab definitions |
 | `R/server_data.R` | Data upload, example load, group assignment, pipeline execution |
-| `R/server_de.R` | Volcano, DE table, heatmap, consistent DE, selection sync |
+| `R/server_de.R` | Volcano, DE table, heatmap, CV analysis, selection sync |
 | `R/server_qc.R` | QC sample metrics (faceted trend plot), diagnostic plots, p-value distribution |
 | `R/server_viz.R` | Expression grid, signal distribution, PCA |
 | `R/server_gsea.R` | GSEA analysis, multi-DB (BP/MF/CC/KEGG), organism detection |
-| `R/server_ai.R` | AI Summary (all contrasts), Data Chat, Gemini integration |
+| `R/server_ai.R` | AI Summary (all contrasts), Data Chat, Gemini integration, HTML report export |
 | `R/server_search.R` | Docker/HPC dual backend, SSH, DIA-NN search, job queue |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
@@ -43,7 +43,7 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, UniProt search |
 
 ### Tab Structure (page_navbar)
-Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
+Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
 
 - `page_navbar(id = "main_tabs", navbar_options = navbar_options(bg = "#2c3e50"))` — dark navbar, global sidebar, hover dropdowns
 - Dropdown section labels ("Setup"/"Results"/"AI") injected via JS
@@ -94,6 +94,7 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 - `brettphinney/delimp-base:v3.1` on Docker Hub (public, ~5 GB)
 - Adding new R packages requires rebuilding base image on Windows box
 - Code-only changes: just `git push origin main`
+- **Windows update shortcut**: `bash update_docker.sh` (pulls latest + rebuilds container)
 
 ## UI Design Patterns
 
@@ -104,7 +105,8 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 - **CRITICAL bslib issue**: `card()`/`card_body()` don't render at top level inside `nav_panel()`. Use plain `div()` with inline CSS.
 - **CRITICAL bslib sub-tab issue**: `renderUI`/`uiOutput` content disappears inside `navset_card_tab` sub-tabs. `renderPlot` crashes with `invalid quartz() device size` on macOS (0-width hidden container). **Use `plotlyOutput`/`renderPlotly`** — only reliable output type in bslib sub-tabs. See @docs/PATTERNS.md for details.
 - **Info modal pattern**: `actionButton("[id]_info_btn", icon("question-circle"), class="btn-outline-info btn-sm")` + `observeEvent(...)`.
-- **Plotly annotations**: Use `layout(annotations = ...)` with paper coordinates, not ggplot `annotate()`.
+- **Plotly annotations**: Use `layout(annotations = ...)` with paper coordinates, not ggplot `annotate()`. For summary stats, prefer ggplot subtitles over plotly annotation cards (more robust in bslib sub-tabs).
+- **Scrollable tab content**: Wrap dense sub-tab content in `div(style = "overflow-y: auto; max-height: calc(100vh - 200px);")` with `min-height` on key widgets to prevent bslib compression.
 - Plot heights use viewport-relative units (`vh`, `calc()`) — no fixed pixel heights.
 
 ## Key Gotchas
@@ -117,6 +119,7 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | `source()` doesn't start app | Use `shiny::runApp()` instead |
 | Selections disappear after clicking | Reactive loop — table must not depend on selection-derived reactives |
 | bslib `card()` doesn't render | Use plain `div()` for top-level nav_panel content |
+| Volcano P.Value vs adj.P.Val mismatch | Y-axis uses raw P.Value for spread; dashed line at `max(P.Value)` among adj.P.Val < 0.05 proteins |
 | `arrow::select` masks `dplyr::select` | Use `dplyr::select()` explicitly |
 | Shiny hidden input not registered by JS | Use `div(style="display:none;", radioButtons(...))` for `conditionalPanel` |
 | `readDIANN` data.table column error | Must pass `format="parquet"` for .parquet files |
@@ -129,6 +132,6 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 
 ## Version History
 
-Current version: **v3.1** (2026-02-23). See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.1.1** (2026-02-26). See [CHANGELOG.md](CHANGELOG.md) for details.
 
-Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1)
+Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1)

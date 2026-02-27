@@ -32,13 +32,19 @@
 ## DIA-NN Search
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 
-## CV Analysis Tab Redesign (In Progress)
+## CV Analysis Tab Redesign (Complete)
 - [x] Replace broken DT table with plotly scatter plot (logFC vs Avg CV, color-coded by CV category)
 - [x] Add Avg CV (%) column to DE Results Table (inline computation, no reactive dependency)
 - [x] Simplify CSV export (removed toggle filter, exports all significant proteins)
 - [x] Update info modal for new design (scatter plot, summary stats, Results Table column)
-- [ ] **Fix summary stats cards sizing**: Cards render as plotly shapes+annotations but get compressed to a thin strip when placed first in `navset_card_tab`. Currently placed after scatter plot but height/layout still not right. Need to debug why `plotlyOutput` height is ignored. Possible approaches: (1) embed stats as plotly annotations on the scatter plot itself, (2) use a second ggplotly with explicit autosize=FALSE, (3) use CSS `min-height` on the container div.
-- [ ] **Polish scatter plot legend**: Legend overlaps x-axis label at default size. Current fix uses `y = -0.22` + `margin(b = 80)` — verify on different screen sizes.
+- [x] **Fix summary stats cards**: Replaced fragile plotly annotation cards with ggplot subtitle (per-group median CV + % below 20%)
+- [x] **Fix scatter plot compression**: Wrapped CV Analysis tab in scrollable div with min-height on scatter plot container
+
+## Volcano Plot Fixes (Complete — v3.1.1)
+- [x] Fix P.Value vs adj.P.Val mismatch: y-axis raw P.Value, dashed line at FDR-equivalent threshold
+- [x] Color significance by adj.P.Val only (not logFC cutoff) — logFC lines are visual guides
+- [x] Add DE protein count annotation ("78 DE proteins (X up, Y down)")
+- [x] Default logFC cutoff changed from 1.0 (2FC) to 0.6 (~1.5FC)
 
 ## General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle

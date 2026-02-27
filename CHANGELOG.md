@@ -5,6 +5,21 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-02-26
+
+### Fixed
+- **Volcano plot significance mismatch**: Y-axis used raw P.Value but coloring used adj.P.Val, causing ~746 proteins to appear above the threshold line while colored as "Not Sig". Now the horizontal dashed line is drawn at the raw P.Value corresponding to adj.P.Val = 0.05, so the line and coloring agree visually.
+- **Volcano significance coloring**: Removed logFC cutoff from significance determination — all proteins with adj.P.Val < 0.05 are now colored red. logFC vertical lines remain as visual guides.
+- **Default logFC cutoff**: Changed from 1.0 (2-fold change) to 0.6 (~1.5-fold change).
+- **CV Analysis cards compressed**: Plotly annotation cards above the scatter plot kept overlapping and rendering incorrectly in bslib sub-tabs. Replaced with a ggplot subtitle showing per-group median CV and % proteins below 20% CV.
+- **CV Analysis tab layout**: Wrapped in scrollable div with min-height to prevent bslib from compressing the scatter plot. Content stacks vertically with overflow-y scroll.
+
+### Added
+- **Volcano DE protein count**: Info box now shows "78 DE proteins (X up, Y down)" so users can immediately see the count.
+- **Export Data panel**: New "Export Data" tab in the Output dropdown with prominent buttons for downloading Results CSV and CV Analysis CSV.
+- **AI Summary HTML export**: "Export Report" button on AI Summary tab generates a styled standalone HTML report with gradient header, formatted tables, and print-friendly CSS.
+- **Docker update scripts**: `update_docker.sh` (bash) and `update_docker.ps1` (PowerShell) for one-command pull + rebuild on Windows/Mac/Linux.
+
 ## [3.1.0] - 2026-02-24
 
 ### Added
