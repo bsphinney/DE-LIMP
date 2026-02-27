@@ -24,7 +24,8 @@ PORT=7860
 MEM="32GB"
 CPUS=8
 TIME="8:00:00"
-PARTITION=""  # Leave empty for default, or set to "high", "low", etc.
+ACCOUNT="genome-center-grp"
+PARTITION="high"
 
 # --- Colors ---
 GREEN='\033[0;32m'
@@ -54,7 +55,7 @@ cmd_install() {
     echo "  (SIF conversion is CPU-intensive — should not run on head node)"
     echo ""
 
-    salloc --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
+    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
         echo -e '${GREEN}[3/4] Loading Apptainer...${NC}'
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null || {
             echo -e '${RED}ERROR: Neither apptainer nor singularity module found.${NC}'
@@ -80,7 +81,7 @@ cmd_install() {
 cmd_update() {
     print_header
     echo -e "${GREEN}Requesting compute node for build...${NC}"
-    salloc --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
+    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c "
         echo -e '${GREEN}Updating DE-LIMP container...${NC}'
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null
         apptainer pull --force ${SIF_FILE} ${HF_IMAGE}
@@ -102,13 +103,10 @@ cmd_run() {
     fi
 
     # Build salloc command
-    SALLOC_CMD="salloc --time=${TIME} --mem=${MEM} --cpus-per-task=${CPUS}"
-    if [ -n "${PARTITION}" ]; then
-        SALLOC_CMD="${SALLOC_CMD} --partition=${PARTITION}"
-    fi
+    SALLOC_CMD="salloc --account=${ACCOUNT} --partition=${PARTITION} --time=${TIME} --mem=${MEM} --cpus-per-task=${CPUS}"
 
     echo -e "${GREEN}Requesting compute node...${NC}"
-    echo "  Time: ${TIME} | Memory: ${MEM} | CPUs: ${CPUS}"
+    echo "  Account: ${ACCOUNT} | Partition: ${PARTITION} | Time: ${TIME} | Memory: ${MEM} | CPUs: ${CPUS}"
     echo ""
 
     ${SALLOC_CMD} bash -c "
