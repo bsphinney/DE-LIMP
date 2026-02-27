@@ -270,6 +270,21 @@ server_de <- function(input, output, session, values, add_to_log) {
 
     cv_colors <- c("< 20% (Low)" = "#28a745", "20-35% (Moderate)" = "#ffc107", "> 35% (High)" = "#dc3545")
 
+    # Build subtitle with per-group median CV stats
+    stats_list <- lapply(cv_cols, function(col) {
+      vals <- df[[col]]; vals <- vals[!is.na(vals) & is.finite(vals)]
+      if (length(vals) == 0) return(NULL)
+      data.frame(group = gsub("^CV_", "", col), med_cv = round(median(vals), 1),
+        pct_low = round(sum(vals < 20) / length(vals) * 100, 1), stringsAsFactors = FALSE)
+    })
+    stats <- do.call(rbind, Filter(Negate(is.null), stats_list))
+    subtitle_text <- if (!is.null(stats) && nrow(stats) > 0) {
+      paste0(nrow(df), " proteins | ",
+        paste(stats$group, "median:", stats$med_cv, "%", paste0("(", stats$pct_low, "% < 20%)"), collapse = "  |  "))
+    } else {
+      paste0(nrow(df), " significant proteins")
+    }
+
     p <- ggplot(df, aes(x = logFC, y = Avg_CV,
                         text = paste0("Protein: ", Protein.Group,
                                       "\nlogFC: ", round(logFC, 3),
@@ -282,52 +297,16 @@ server_de <- function(input, output, session, values, add_to_log) {
       geom_hline(yintercept = 35, linetype = "dashed", color = "#dc3545", alpha = 0.5) +
       theme_minimal(base_size = 13) +
       labs(x = "log2 Fold Change", y = "Avg CV (%)",
-           title = paste0("logFC vs CV: ", input$contrast_selector)) +
+           title = paste0("logFC vs CV: ", input$contrast_selector),
+           subtitle = subtitle_text) +
       theme(plot.title = element_text(face = "bold", size = 14),
+            plot.subtitle = element_text(color = "gray40", size = 11),
             panel.grid.minor = element_blank())
-
-    # Build per-group CV summary stats as colored annotation cards above the plot
-    card_annotations <- list()
-    stats_list <- lapply(cv_cols, function(col) {
-      vals <- df[[col]]; vals <- vals[!is.na(vals) & is.finite(vals)]
-      if (length(vals) == 0) return(NULL)
-      data.frame(group = gsub("^CV_", "", col), med_cv = median(vals),
-        pct_low = round(sum(vals < 20) / length(vals) * 100, 1),
-        n_prots = length(vals), stringsAsFactors = FALSE)
-    })
-    stats <- do.call(rbind, Filter(Negate(is.null), stats_list))
-
-    if (!is.null(stats) && nrow(stats) > 0) {
-      ns <- nrow(stats)
-      stats$bg <- ifelse(stats$med_cv < 20, "#d4edda", ifelse(stats$med_cv < 35, "#fff3cd", "#f8d7da"))
-      stats$accent <- ifelse(stats$med_cv < 20, "#28a745", ifelse(stats$med_cv < 35, "#ffc107", "#dc3545"))
-      cw <- 0.85 / ns; cg <- 0.15 / (ns + 1)
-
-      for (i in seq_len(ns)) {
-        cxm <- cg * i + cw * (i - 1) + cw / 2
-        # Single annotation per card: bgcolor gives the colored background
-        card_annotations <- c(card_annotations, list(list(
-          x = cxm, y = 1.15, xref = "paper", yref = "paper",
-          xanchor = "center", yanchor = "middle",
-          text = paste0(
-            "<b>", stats$group[i], "</b><br>",
-            "<span style='font-size:20px'><b>", round(stats$med_cv[i], 1), "%</b></span><br>",
-            stats$pct_low[i], "% proteins &lt; 20% CV<br>",
-            "<span style='color:#888'>", stats$n_prots[i], " proteins</span>"
-          ),
-          showarrow = FALSE, align = "center",
-          font = list(size = 11, color = "#333"),
-          bgcolor = stats$bg[i], bordercolor = stats$accent[i],
-          borderwidth = 2, borderpad = 8
-        )))
-      }
-    }
 
     ggplotly(p, tooltip = "text") %>%
       layout(
         legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15),
-        margin = list(t = 140, b = 60),
-        annotations = card_annotations
+        margin = list(b = 60)
       )
   })
 
@@ -346,6 +325,22 @@ server_de <- function(input, output, session, values, add_to_log) {
     df$CV_Category <- factor(df$CV_Category, levels = c("< 20% (Low)", "20-35% (Moderate)", "> 35% (High)"))
     cv_colors <- c("< 20% (Low)" = "#28a745", "20-35% (Moderate)" = "#ffc107", "> 35% (High)" = "#dc3545")
 
+    # Build subtitle with per-group median CV stats
+    fs_cv_cols <- grep("^CV_", colnames(df), value = TRUE)
+    fs_stats_list <- lapply(fs_cv_cols, function(col) {
+      vals <- df[[col]]; vals <- vals[!is.na(vals) & is.finite(vals)]
+      if (length(vals) == 0) return(NULL)
+      data.frame(group = gsub("^CV_", "", col), med_cv = round(median(vals), 1),
+        pct_low = round(sum(vals < 20) / length(vals) * 100, 1), stringsAsFactors = FALSE)
+    })
+    fs_stats <- do.call(rbind, Filter(Negate(is.null), fs_stats_list))
+    fs_subtitle <- if (!is.null(fs_stats) && nrow(fs_stats) > 0) {
+      paste0(nrow(df), " proteins | ",
+        paste(fs_stats$group, "median:", fs_stats$med_cv, "%", paste0("(", fs_stats$pct_low, "% < 20%)"), collapse = "  |  "))
+    } else {
+      paste0(nrow(df), " significant proteins")
+    }
+
     p <- ggplot(df, aes(x = logFC, y = Avg_CV,
                         text = paste0("Protein: ", Protein.Group,
                                       "\nlogFC: ", round(logFC, 3),
@@ -358,8 +353,10 @@ server_de <- function(input, output, session, values, add_to_log) {
       geom_hline(yintercept = 35, linetype = "dashed", color = "#dc3545", alpha = 0.5) +
       theme_minimal(base_size = 14) +
       labs(x = "log2 Fold Change", y = "Avg CV (%)",
-           title = paste0("logFC vs CV: ", input$contrast_selector)) +
+           title = paste0("logFC vs CV: ", input$contrast_selector),
+           subtitle = fs_subtitle) +
       theme(plot.title = element_text(face = "bold", size = 16),
+            plot.subtitle = element_text(color = "gray40", size = 12),
             panel.grid.minor = element_blank())
 
     pl <- ggplotly(p, tooltip = "text", height = 650, width = 950) %>%
