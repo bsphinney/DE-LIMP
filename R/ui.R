@@ -236,6 +236,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
       accordion_panel("AI Chat", icon = icon("robot"),
         passwordInput("user_api_key", "Gemini API Key", value = "", placeholder = "AIzaSy..."),
+        tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
+          tags$summary(style = "cursor: pointer; color: #17a2b8;", "How to get a free API key"),
+          tags$ol(style = "margin-top: 5px; padding-left: 20px;",
+            tags$li("Go to ", tags$a("Google AI Studio", href = "https://aistudio.google.com/apikey",
+              target = "_blank", rel = "noopener noreferrer")),
+            tags$li("Sign in with your Google account"),
+            tags$li('Click "Create API Key"'),
+            tags$li("Copy and paste the key above")
+          ),
+          tags$p(style = "margin-bottom: 0;", "The free tier is sufficient for DE-LIMP.")
+        ),
         actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
         br(), br(),
         textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview")
