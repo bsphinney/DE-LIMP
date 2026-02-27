@@ -89,16 +89,19 @@ if (!requireNamespace("limpa", quietly = TRUE)) {
 }
 
 # Required packages (excluding limpa which was handled above)
-required_pkgs <- c("shiny", "bslib", "readr", "tibble", "dplyr", "tidyr",
-                   "ggplot2", "httr2", "rhandsontable", "DT", "arrow",
-                   "ComplexHeatmap", "shinyjs", "plotly", "stringr", "limma",
-                   "clusterProfiler", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db",
-                   "enrichplot", "ggridges", "ggrepel", "markdown", "curl",
-                   "KSEAapp", "ggseqlogo", "MOFA2")
+# Core packages: app won't start without these
+core_pkgs <- c("shiny", "bslib", "readr", "tibble", "dplyr", "tidyr",
+               "ggplot2", "httr2", "rhandsontable", "DT", "arrow",
+               "ComplexHeatmap", "shinyjs", "plotly", "stringr", "limma",
+               "AnnotationDbi", "ggridges", "ggrepel", "markdown", "curl")
+
+# Optional packages: app runs without them (features disabled gracefully)
+optional_pkgs <- c("clusterProfiler", "enrichplot", "org.Hs.eg.db", "org.Mm.eg.db",
+                    "KSEAapp", "ggseqlogo", "MOFA2")
 
 # Only install truly missing packages (don't update already-loaded packages)
 missing_pkgs <- character(0)
-for (pkg in required_pkgs) {
+for (pkg in c(core_pkgs, optional_pkgs)) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     missing_pkgs <- c(missing_pkgs, pkg)
   }
@@ -106,7 +109,34 @@ for (pkg in required_pkgs) {
 
 if (length(missing_pkgs) > 0) {
   message(paste0("Installing missing packages: ", paste(missing_pkgs, collapse = ", ")))
-  BiocManager::install(missing_pkgs, ask = FALSE, update = FALSE, quiet = TRUE)
+  tryCatch(
+    BiocManager::install(missing_pkgs, ask = FALSE, update = FALSE, quiet = TRUE),
+    error = function(e) {
+      message("Note: Could not install packages (no internet?). Checking core dependencies...")
+    }
+  )
+  # Verify core packages are available — these are required
+  still_missing_core <- character(0)
+  for (pkg in core_pkgs) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      still_missing_core <- c(still_missing_core, pkg)
+    }
+  }
+  if (length(still_missing_core) > 0) {
+    stop(paste0("Missing required packages: ", paste(still_missing_core, collapse = ", "),
+                "\nRebuild the container image to include these packages."))
+  }
+  # Report optional packages that are unavailable
+  still_missing_opt <- character(0)
+  for (pkg in optional_pkgs) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      still_missing_opt <- c(still_missing_opt, pkg)
+    }
+  }
+  if (length(still_missing_opt) > 0) {
+    message(paste0("Optional packages unavailable (features disabled): ",
+                   paste(still_missing_opt, collapse = ", ")))
+  }
 }
 
 # --- 2. SERVER CONFIGURATION ---
@@ -137,11 +167,19 @@ library(ComplexHeatmap)
 library(shinyjs)
 library(plotly)
 library(stringr)
-library(clusterProfiler)
 library(AnnotationDbi)
-library(enrichplot)
 library(ggrepel)
 library(markdown) # Needed for AI formatting
+
+# Optional packages — load if available, features degrade gracefully
+gsea_available <- requireNamespace("clusterProfiler", quietly = TRUE) &&
+                  requireNamespace("enrichplot", quietly = TRUE)
+if (gsea_available) {
+  library(clusterProfiler)
+  library(enrichplot)
+} else {
+  message("Note: clusterProfiler/enrichplot not available — GSEA tab will be disabled")
+}
 
 options(shiny.maxRequestSize = 5000 * 1024^2)  # 5 GB upload limit
 
@@ -387,7 +425,7 @@ server <- function(input, output, session) {
   observe({
     if (!is.null(values$fit)) {
       nav_show("main_tabs", "DE Dashboard")
-      nav_show("main_tabs", "Gene Set Enrichment")
+      if (gsea_available) nav_show("main_tabs", "Gene Set Enrichment")
       nav_show("main_tabs", "mofa_tab")
       nav_show("main_tabs", "AI Analysis")
       nav_show("main_tabs", "Output")

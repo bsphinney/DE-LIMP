@@ -55,7 +55,7 @@ cmd_install() {
     echo "  (SIF conversion is CPU-intensive — should not run on head node)"
     echo ""
 
-    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c '
+    srun --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 --pty bash -c '
         SIF="$1"; IMAGE="$2"
 
         echo "[3/4] Loading Apptainer..."
@@ -83,7 +83,7 @@ cmd_install() {
 cmd_update() {
     print_header
     echo -e "${GREEN}Requesting compute node for build...${NC}"
-    salloc --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 bash -c '
+    srun --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 --pty bash -c '
         SIF="$1"; IMAGE="$2"
 
         echo "Updating DE-LIMP container..."
@@ -106,14 +106,14 @@ cmd_run() {
         exit 1
     fi
 
-    # Build salloc command
-    SALLOC_CMD="salloc --account=${ACCOUNT} --partition=${PARTITION} --time=${TIME} --mem=${MEM} --cpus-per-task=${CPUS}"
+    # Use srun to execute directly on compute node (not login node)
+    SRUN_CMD="srun --account=${ACCOUNT} --partition=${PARTITION} --time=${TIME} --mem=${MEM} --cpus-per-task=${CPUS} --pty"
 
     echo -e "${GREEN}Requesting compute node...${NC}"
     echo "  Account: ${ACCOUNT} | Partition: ${PARTITION} | Time: ${TIME} | Memory: ${MEM} | CPUs: ${CPUS}"
     echo ""
 
-    ${SALLOC_CMD} bash -c '
+    ${SRUN_CMD} bash -c '
         PORT="$1"; SIF="$2"; HIVE_USER="$3"
         NODE=$(hostname)
 
