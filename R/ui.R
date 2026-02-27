@@ -1172,11 +1172,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         )
                       ),
 
-                      # Generate button
-                      div(style = "text-align: center; margin-bottom: 20px;",
+                      # Generate button + export
+                      div(style = "text-align: center; margin-bottom: 20px; display: flex; justify-content: center; gap: 12px;",
                         actionButton("generate_ai_summary_overview",
                           "\U0001F916 Generate AI Summary",
                           class = "btn-info btn-lg",
+                          style = "padding: 12px 30px; font-size: 1.1em;"
+                        ),
+                        downloadButton("download_ai_summary_html",
+                          tagList(icon("file-export"), " Export Report"),
+                          class = "btn-success btn-lg",
                           style = "padding: 12px 30px; font-size: 1.1em;"
                         )
                       ),
