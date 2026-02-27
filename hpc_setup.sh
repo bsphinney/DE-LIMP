@@ -114,7 +114,7 @@ cmd_run() {
     echo ""
 
     ${SRUN_CMD} bash -c '
-        PORT="$1"; SIF="$2"; HIVE_USER="$3"
+        PORT="$1"; SIF="$2"; HIVE_USER="$3"; REPO_DIR="$4"
         NODE=$(hostname)
 
         echo ""
@@ -135,12 +135,17 @@ cmd_run() {
         echo ""
 
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null
+
+        # Bind-mount local code over container code so git pull takes effect
+        # without rebuilding the container image
         apptainer exec \
             --bind ${HOME}/data:/data \
             --bind ${HOME}/results:/results \
+            --bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R \
+            --bind ${REPO_DIR}/R:/srv/shiny-server/R \
             "${SIF}" \
             R -e "shiny::runApp('"'"'/srv/shiny-server/'"'"', host='"'"'0.0.0.0'"'"', port=${PORT})"
-    ' _ "${PORT}" "${SIF_FILE}" "${USER}"
+    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "$(pwd)"
 }
 
 # --- Help ---
