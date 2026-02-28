@@ -22,6 +22,7 @@ $ACCOUNT         = "genome-center-grp"
 $PARTITION       = "high"
 $CONFIG_FILE     = ".delimp_config.ps1"
 $SETUP_SCRIPT    = "hpc_setup.sh"
+$GITHUB_RAW      = "https://raw.githubusercontent.com/bsphinney/DE-LIMP/main"
 $MAX_WAIT_NODE   = 600    # seconds to wait for compute node
 $MAX_WAIT_APP    = 120    # seconds to wait for app to respond
 
@@ -143,6 +144,32 @@ function Repair-SshKeyPermissions {
     } catch {
         # Non-fatal — SSH will error if perms are still wrong
         Write-Host "  Warning: Could not check key permissions." -ForegroundColor Yellow
+    }
+}
+
+# --- Auto-download missing files from GitHub ---
+function Get-RequiredFiles {
+    $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
+    if (-not $scriptDir) { $scriptDir = $PWD.Path }
+
+    $files = @(
+        @{ Name = $SETUP_SCRIPT;      Url = "$GITHUB_RAW/$SETUP_SCRIPT" }
+        @{ Name = "launch_delimp.ps1"; Url = "$GITHUB_RAW/launch_delimp.ps1" }
+    )
+
+    foreach ($f in $files) {
+        $local = Join-Path $scriptDir $f.Name
+        if (-not (Test-Path $local)) {
+            Write-Host "  Downloading $($f.Name) from GitHub..." -ForegroundColor Yellow
+            try {
+                Invoke-WebRequest -Uri $f.Url -OutFile $local -UseBasicParsing
+                Write-Host "  Saved: $local"
+            } catch {
+                Write-Host "  Failed to download $($f.Name): $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "  Download it manually from: $($f.Url)"
+                exit 1
+            }
+        }
     }
 }
 
@@ -342,6 +369,7 @@ function Open-Browser {
 
 # --- Main ---
 Write-Header
+Get-RequiredFiles
 Find-SshKey
 Repair-SshKeyPermissions
 Get-HiveUsername
