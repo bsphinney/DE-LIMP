@@ -272,17 +272,13 @@ apptainer exec \\
     R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})"
 SBATCH_EOF
 
-    # Find sbatch — may need module load on some clusters
+    # Find sbatch — non-interactive SSH may not have full PATH
     local SBATCH_CMD="sbatch"
     if ! command -v sbatch &>/dev/null; then
-        # Try common module names
-        module load slurm 2>/dev/null || module load SLURM 2>/dev/null || true
-        if ! command -v sbatch &>/dev/null; then
-            # Last resort: search common paths
-            for p in /usr/bin/sbatch /opt/slurm/bin/sbatch /usr/local/bin/sbatch; do
-                if [ -x "$p" ]; then SBATCH_CMD="$p"; break; fi
-            done
-        fi
+        for p in /cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sbatch \
+                 /usr/bin/sbatch /opt/slurm/bin/sbatch /usr/local/bin/sbatch; do
+            if [ -x "$p" ]; then SBATCH_CMD="$p"; break; fi
+        done
     fi
 
     # Submit and parse job ID
