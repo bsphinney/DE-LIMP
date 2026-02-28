@@ -779,6 +779,8 @@ recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back 
 
   result <- if (!is.null(ssh_config)) {
     ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path))
+  } else if (slurm_proxy_available()) {
+    slurm_proxy_exec(cmd, timeout = 30)
   } else {
     tryCatch({
       stdout <- system2("bash", args = c("-c", cmd), stdout = TRUE, stderr = TRUE)
@@ -1081,6 +1083,49 @@ ssh_scan_fasta_files <- function(ssh_config, fasta_dir) {
 # SLURM Helper Functions
 # =============================================================================
 
+#' Execute a command via the SLURM proxy (for running sbatch/squeue/sacct from
+#' inside an Apptainer container). The proxy runs host-side and watches a shared
+#' directory for command requests.
+#' @param cmd Character — shell command to execute (e.g. "sbatch /path/to/script.sh")
+#' @param timeout Numeric — seconds to wait for result (default 30)
+#' @return list(status, stdout) where status is exit code and stdout is character vector
+slurm_proxy_exec <- function(cmd, timeout = 30) {
+  proxy_dir <- Sys.getenv("DELIMP_SLURM_PROXY", "")
+  if (!nzchar(proxy_dir) || !dir.exists(proxy_dir)) {
+    return(list(status = 1, stdout = "SLURM proxy not available"))
+  }
+
+  id <- paste0(as.integer(Sys.time()), "_", sample(1000:9999, 1))
+  cmd_file <- file.path(proxy_dir, paste0("cmd_", id))
+  result_file <- file.path(proxy_dir, paste0("result_", id))
+
+  writeLines(cmd, cmd_file)
+
+  # Poll for result
+  start <- Sys.time()
+  while (as.numeric(difftime(Sys.time(), start, units = "secs")) < timeout) {
+    if (file.exists(result_file)) {
+      lines <- readLines(result_file, warn = FALSE)
+      unlink(result_file)
+      rc <- as.integer(lines[1])
+      stdout <- if (length(lines) > 1) lines[-1] else character(0)
+      return(list(status = rc, stdout = stdout))
+    }
+    Sys.sleep(0.5)
+  }
+
+  # Timeout — clean up
+  unlink(cmd_file)
+  list(status = 1, stdout = "SLURM proxy timed out")
+}
+
+#' Check if the SLURM proxy is available (inside Apptainer container)
+#' @return logical
+slurm_proxy_available <- function() {
+  proxy_dir <- Sys.getenv("DELIMP_SLURM_PROXY", "")
+  nzchar(proxy_dir) && dir.exists(proxy_dir)
+}
+
 #' Check SLURM job status (local or remote via SSH)
 #' @param job_id Character — SLURM job ID
 #' @param ssh_config list(host, user, port, key_path) or NULL for local
@@ -1103,9 +1148,15 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
               slurm_cmd("squeue"), job_id),
       login_shell = is.null(sbatch_path))
     status_output <- if (squeue_result$status == 0) squeue_result$stdout else character(0)
+  } else if (slurm_proxy_available()) {
+    # Inside Apptainer container — use SLURM proxy
+    squeue_cmd <- sprintf("%s --job %s --format=%%T --noheader 2>/dev/null",
+                          slurm_cmd("squeue"), job_id)
+    proxy_result <- slurm_proxy_exec(squeue_cmd, timeout = 15)
+    status_output <- if (proxy_result$status == 0) proxy_result$stdout else character(0)
   } else {
     status_output <- tryCatch({
-      system2("squeue",
+      system2(slurm_cmd("squeue"),
         args = c("--job", job_id, "--format=%T", "--noheader"),
         stdout = TRUE, stderr = TRUE)
     }, error = function(e) character(0))
@@ -1128,9 +1179,14 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
               slurm_cmd("sacct"), job_id),
       login_shell = is.null(sbatch_path))
     sacct_output <- if (sacct_result$status == 0) sacct_result$stdout else "UNKNOWN"
+  } else if (slurm_proxy_available()) {
+    sacct_cmd <- sprintf("%s -j %s --format=State --noheader --parsable2 2>/dev/null",
+                         slurm_cmd("sacct"), job_id)
+    proxy_result <- slurm_proxy_exec(sacct_cmd, timeout = 15)
+    sacct_output <- if (proxy_result$status == 0) proxy_result$stdout else "UNKNOWN"
   } else {
     sacct_output <- tryCatch({
-      system2("sacct",
+      system2(slurm_cmd("sacct"),
         args = c("-j", job_id, "--format=State", "--noheader", "--parsable2"),
         stdout = TRUE, stderr = TRUE)
     }, error = function(e) "UNKNOWN")

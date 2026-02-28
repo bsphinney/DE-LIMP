@@ -138,20 +138,46 @@ cmd_run() {
 
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null
 
+        # --- SLURM Proxy ---
+        # The Shiny app runs inside an Apptainer container where sbatch/squeue/sacct
+        # are not available. This proxy runs OUTSIDE the container, watches a shared
+        # directory for command requests, executes them, and writes results back.
+        PROXY_DIR="${HOME}/.delimp_slurm_proxy"
+        mkdir -p "${PROXY_DIR}"
+        rm -f "${PROXY_DIR}"/cmd_* "${PROXY_DIR}"/result_*
+
+        (
+            while true; do
+                for cmd_file in "${PROXY_DIR}"/cmd_*; do
+                    [ -f "$cmd_file" ] || continue
+                    id="${cmd_file##*/cmd_}"
+                    result_file="${PROXY_DIR}/result_${id}"
+                    cmd=$(cat "$cmd_file")
+                    output=$(eval "$cmd" 2>&1)
+                    rc=$?
+                    printf "%d\n%s\n" "$rc" "$output" > "$result_file"
+                    rm -f "$cmd_file"
+                done
+                sleep 1
+            done
+        ) &
+        PROXY_PID=$!
+        echo "SLURM proxy started (PID ${PROXY_PID})"
+
+        # Ensure proxy is cleaned up when container exits
+        cleanup_proxy() {
+            kill $PROXY_PID 2>/dev/null
+            rm -rf "${PROXY_DIR}"
+        }
+        trap cleanup_proxy EXIT
+
         # Bind-mount local code over container code so git pull takes effect
         # without rebuilding the container image.
         # R_LIBS_USER provides a writable library for packages missing from the image
         # (install with: bash hpc_setup.sh packages)
-        # Bind-mount /cvmfs so SLURM tools (sbatch, squeue, sacct) are accessible
-        # inside the container for Local (on HPC) search submissions
-        CVMFS_BIND=""
-        if [ -d /cvmfs ]; then
-            CVMFS_BIND="--bind /cvmfs:/cvmfs"
-        fi
-
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
-            ${CVMFS_BIND} \
+            --env DELIMP_SLURM_PROXY="${PROXY_DIR}" \
             --bind ${HOME}/data:/data \
             --bind ${HOME}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
@@ -270,8 +296,31 @@ echo "\$(hostname)" > ${LOG_DIR}/delimp_node_\${SLURM_JOB_ID}.txt
 
 module load apptainer 2>/dev/null || module load singularity 2>/dev/null
 
+# Start SLURM proxy for container
+PROXY_DIR="\${HOME}/.delimp_slurm_proxy"
+mkdir -p "\${PROXY_DIR}"
+rm -f "\${PROXY_DIR}"/cmd_* "\${PROXY_DIR}"/result_*
+(
+    while true; do
+        for cmd_file in "\${PROXY_DIR}"/cmd_*; do
+            [ -f "\$cmd_file" ] || continue
+            id="\${cmd_file##*/cmd_}"
+            result_file="\${PROXY_DIR}/result_\${id}"
+            cmd=\$(cat "\$cmd_file")
+            output=\$(eval "\$cmd" 2>&1)
+            rc=\$?
+            printf "%d\n%s\n" "\$rc" "\$output" > "\$result_file"
+            rm -f "\$cmd_file"
+        done
+        sleep 1
+    done
+) &
+PROXY_PID=\$!
+trap "kill \$PROXY_PID 2>/dev/null; rm -rf \${PROXY_DIR}" EXIT
+
 apptainer exec \\
     --env R_LIBS_USER="${R_USER_LIB}" \\
+    --env DELIMP_SLURM_PROXY="\${PROXY_DIR}" \\
     ${ENV_ARGS} \\
     --bind ${HOME}/data:/data \\
     --bind ${HOME}/results:/results \\
