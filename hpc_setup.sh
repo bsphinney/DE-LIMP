@@ -147,6 +147,7 @@ cmd_run() {
             --bind ${HOME}/data:/data \
             --bind ${HOME}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
+            --bind /quobyte/proteomics-grp:/quobyte/proteomics-grp \
             --bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R \
             --bind ${REPO_DIR}/R:/srv/shiny-server/R \
             "${SIF}" \
@@ -267,6 +268,7 @@ apptainer exec \\
     --bind ${HOME}/data:/data \\
     --bind ${HOME}/results:/results \\
     --bind ${R_USER_LIB}:${R_USER_LIB} \\
+    --bind /quobyte/proteomics-grp:/quobyte/proteomics-grp \\
     ${REPO_BINDS} \\
     "${SIF_FILE}" \\
     R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})"
