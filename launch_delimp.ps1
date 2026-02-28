@@ -279,7 +279,9 @@ function Submit-Job {
     & scp -i $script:SshKey -o StrictHostKeyChecking=accept-new `
         $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
 
-    $submitOutput = Invoke-HiveSsh "bash ~/$SETUP_SCRIPT sbatch '$CORE_DIR' ~/DE-LIMP"
+    $submitOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 `
+        "$($script:HiveUser)@$HIVE_HOST" "bash ~/$SETUP_SCRIPT sbatch '$CORE_DIR' ~/DE-LIMP 2>&1"
+    $submitOutput = ($submitOutput -join "`n").Trim()
 
     # Parse JOBID:<number>
     if ($submitOutput -match "JOBID:(\d+)") {
@@ -287,6 +289,10 @@ function Submit-Job {
     } else {
         Write-Host "Failed to submit job. Output:" -ForegroundColor Red
         Write-Host $submitOutput
+        Write-Host ""
+        Write-Host "Debug: running sbatch command manually..." -ForegroundColor Yellow
+        $debugOutput = Invoke-HiveSsh "bash -x ~/$SETUP_SCRIPT sbatch '$CORE_DIR' ~/DE-LIMP 2>&1 | tail -30"
+        Write-Host $debugOutput
         exit 1
     }
 
