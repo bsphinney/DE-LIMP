@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 $HIVE_HOST       = "hive.hpc.ucdavis.edu"
 $PORT            = 7860
 $CORE_DIR        = "/share/genome-center/delimp"
+$REPO_DIR        = "/quobyte/proteomics-grp/de-limp/DE-LIMP"
 $ACCOUNT         = "genome-center-grp"
 $PARTITION       = "high"
 $CONFIG_FILE     = ".delimp_config.ps1"
@@ -240,7 +241,7 @@ function Test-Container {
 function Update-Repo {
     Write-Host "[4/7] Syncing DE-LIMP repo on HIVE..." -ForegroundColor Green
 
-    $result = Invoke-HiveSsh "if [ -d ~/DE-LIMP/.git ]; then cd ~/DE-LIMP && git pull --ff-only 2>&1 | tail -1; else git clone https://github.com/bsphinney/DE-LIMP.git ~/DE-LIMP 2>&1 | tail -1; fi"
+    $result = Invoke-HiveSsh "if [ -d $REPO_DIR/.git ]; then cd $REPO_DIR && git pull --ff-only 2>&1 | tail -1; else git clone https://github.com/bsphinney/DE-LIMP.git $REPO_DIR 2>&1 | tail -1; fi"
     Write-Host "  $result"
 }
 
@@ -280,7 +281,7 @@ function Submit-Job {
         $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
 
     $submitOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 `
-        "$($script:HiveUser)@$HIVE_HOST" "bash -l ~/$SETUP_SCRIPT sbatch '$CORE_DIR' ~/DE-LIMP 2>&1"
+        "$($script:HiveUser)@$HIVE_HOST" "bash -l ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1"
     $submitOutput = ($submitOutput -join "`n").Trim()
 
     # Parse JOBID:<number>
@@ -291,7 +292,7 @@ function Submit-Job {
         Write-Host $submitOutput
         Write-Host ""
         Write-Host "Debug: running sbatch command manually..." -ForegroundColor Yellow
-        $debugOutput = Invoke-HiveSsh "bash -x ~/$SETUP_SCRIPT sbatch '$CORE_DIR' ~/DE-LIMP 2>&1 | tail -30"
+        $debugOutput = Invoke-HiveSsh "bash -x ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1 | tail -30"
         Write-Host $debugOutput
         exit 1
     }
