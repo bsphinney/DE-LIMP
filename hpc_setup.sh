@@ -142,8 +142,16 @@ cmd_run() {
         # without rebuilding the container image.
         # R_LIBS_USER provides a writable library for packages missing from the image
         # (install with: bash hpc_setup.sh packages)
+        # Bind-mount /cvmfs so SLURM tools (sbatch, squeue, sacct) are accessible
+        # inside the container for Local (on HPC) search submissions
+        CVMFS_BIND=""
+        if [ -d /cvmfs ]; then
+            CVMFS_BIND="--bind /cvmfs:/cvmfs"
+        fi
+
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
+            ${CVMFS_BIND} \
             --bind ${HOME}/data:/data \
             --bind ${HOME}/results:/results \
             --bind ${R_LIB}:${R_LIB} \

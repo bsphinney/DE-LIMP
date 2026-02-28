@@ -10,7 +10,8 @@ server_search <- function(input, output, session, values, add_to_log,
                           search_enabled, docker_available, docker_config,
                           hpc_available, local_sbatch,
                           local_diann = FALSE, delimp_data_dir = "",
-                          is_core_facility = FALSE, cf_config = NULL) {
+                          is_core_facility = FALSE, cf_config = NULL,
+                          local_sbatch_path = "") {
 
   # Early return if no search backend available
   if (!search_enabled) return(invisible())
@@ -999,8 +1000,10 @@ server_search <- function(input, output, session, values, add_to_log,
         # Local mode: write and submit locally
         writeLines(script_content, script_path)
 
+        # Use full sbatch path (may be on CVMFS inside Apptainer container)
+        sbatch_local <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
         submit_result <- tryCatch({
-          stdout <- system2("sbatch", args = script_path, stdout = TRUE, stderr = TRUE)
+          stdout <- system2(sbatch_local, args = script_path, stdout = TRUE, stderr = TRUE)
           list(success = TRUE, stdout = stdout)
         }, error = function(e) {
           list(success = FALSE, error = e$message)
@@ -1175,8 +1178,16 @@ server_search <- function(input, output, session, values, add_to_log,
       } else {
         # --- HPC (SLURM) monitoring ---
         job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+        # Use SSH sbatch path for remote jobs, local CVMFS path for local jobs
+        slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) {
+          values$ssh_sbatch_path
+        } else if (nzchar(local_sbatch_path)) {
+          local_sbatch_path
+        } else {
+          NULL
+        }
         new_status <- check_slurm_status(jobs[[i]]$job_id, ssh_config = job_cfg,
-                                          sbatch_path = values$ssh_sbatch_path)
+                                          sbatch_path = slurm_path)
 
         # Tail the log file (local or remote)
         if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
@@ -1770,7 +1781,8 @@ server_search <- function(input, output, session, values, add_to_log,
       withProgress(message = "Scanning SLURM for previous DIA-NN jobs...", {
         slurm_jobs <- recover_slurm_jobs(
           ssh_config = cfg,
-          sbatch_path = values$ssh_sbatch_path,
+          sbatch_path = values$ssh_sbatch_path %||%
+            (if (nzchar(local_sbatch_path)) local_sbatch_path else NULL),
           days_back = 14
         )
       })

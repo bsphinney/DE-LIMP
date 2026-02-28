@@ -188,7 +188,18 @@ is_hf_space <- nzchar(Sys.getenv("SPACE_ID", ""))
 
 # Detect search backends (Docker local + HPC SSH/SLURM)
 # Disabled on Hugging Face Spaces — search tab not useful in cloud environment
-local_sbatch <- nzchar(Sys.which("sbatch"))
+local_sbatch_path <- Sys.which("sbatch")
+if (!nzchar(local_sbatch_path)) {
+  # Inside Apptainer container, sbatch may not be on PATH but exists on CVMFS
+  cvmfs_sbatch <- c(
+    "/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sbatch",
+    "/usr/bin/sbatch", "/opt/slurm/bin/sbatch", "/usr/local/bin/sbatch"
+  )
+  for (p in cvmfs_sbatch) {
+    if (file.exists(p)) { local_sbatch_path <- p; break }
+  }
+}
+local_sbatch <- nzchar(local_sbatch_path)
 hpc_available <- !is_hf_space && (local_sbatch || nzchar(Sys.which("ssh")))
 
 # Docker backend detection
@@ -397,7 +408,7 @@ server <- function(input, output, session) {
   server_search(input, output, session, values, add_to_log,
                 search_enabled, docker_available, docker_config, hpc_available, local_sbatch,
                 local_diann, delimp_data_dir,
-                is_core_facility, cf_config)
+                is_core_facility, cf_config, local_sbatch_path)
   server_mofa(input, output, session, values, add_to_log)
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
