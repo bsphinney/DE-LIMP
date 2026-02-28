@@ -272,9 +272,22 @@ apptainer exec \\
     R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})"
 SBATCH_EOF
 
+    # Find sbatch — may need module load on some clusters
+    local SBATCH_CMD="sbatch"
+    if ! command -v sbatch &>/dev/null; then
+        # Try common module names
+        module load slurm 2>/dev/null || module load SLURM 2>/dev/null || true
+        if ! command -v sbatch &>/dev/null; then
+            # Last resort: search common paths
+            for p in /usr/bin/sbatch /opt/slurm/bin/sbatch /usr/local/bin/sbatch; do
+                if [ -x "$p" ]; then SBATCH_CMD="$p"; break; fi
+            done
+        fi
+    fi
+
     # Submit and parse job ID
     local SUBMIT_OUTPUT
-    SUBMIT_OUTPUT=$(sbatch "${SBATCH_FILE}" 2>&1)
+    SUBMIT_OUTPUT=$($SBATCH_CMD "${SBATCH_FILE}" 2>&1)
     local SUBMIT_RC=$?
 
     if [ ${SUBMIT_RC} -ne 0 ]; then
