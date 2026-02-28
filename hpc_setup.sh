@@ -108,6 +108,13 @@ cmd_run() {
         exit 1
     fi
 
+    # Auto-update code from GitHub (login node has internet)
+    if [ -d "$(pwd)/.git" ]; then
+        echo -e "${GREEN}Updating code from GitHub...${NC}"
+        git pull --ff-only 2>&1 | tail -1
+        echo ""
+    fi
+
     # Use srun to execute directly on compute node (not login node)
     SRUN_CMD="srun --account=${ACCOUNT} --partition=${PARTITION} --time=${TIME} --mem=${MEM} --cpus-per-task=${CPUS} --pty"
 
@@ -259,6 +266,11 @@ cmd_sbatch() {
 
     # Ensure directories exist
     mkdir -p "${LOG_DIR}" "${JOB_DIR}" "${R_USER_LIB}"
+
+    # Auto-update code from GitHub
+    if [ -d "${REPO_DIR}/.git" ]; then
+        (cd "${REPO_DIR}" && git pull --ff-only 2>&1 | tail -1)
+    fi
 
     # Check container exists
     if [ ! -f "${SIF_FILE}" ]; then
