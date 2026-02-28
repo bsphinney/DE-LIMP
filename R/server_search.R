@@ -261,7 +261,12 @@ server_search <- function(input, output, session, values, add_to_log,
   volumes <- if (nzchar(delimp_data_dir)) {
     c(Data = delimp_data_dir)
   } else {
-    c(Home = Sys.getenv("HOME"), Root = "/")
+    vols <- c(Home = Sys.getenv("HOME"), Root = "/")
+    # Add proteomics shared storage if available (HPC default)
+    if (dir.exists("/quobyte/proteomics-grp")) {
+      vols <- c(Proteomics = "/quobyte/proteomics-grp", vols)
+    }
+    vols
   }
 
   shinyFiles::shinyDirChoose(input, "raw_data_dir", roots = volumes, session = session)
