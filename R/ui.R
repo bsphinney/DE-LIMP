@@ -436,26 +436,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
             # --- UniProt source ---
             conditionalPanel("input.fasta_source == 'uniprot'",
-              div(style = "display: flex; gap: 5px; margin-bottom: 8px;",
-                div(style = "flex: 1;",
-                  textInput("uniprot_search_query", NULL,
-                    placeholder = "e.g., human, mouse, E. coli")
-                ),
-                actionButton("search_uniprot", "Search",
-                  class = "btn-info btn-sm", style = "margin-top: 0;")
-              ),
-              DTOutput("uniprot_results_table", height = "150px"),
-              selectInput("fasta_content_type", "Content:",
-                choices = c(
-                  "One per gene (recommended)" = "one_per_gene",
-                  "Swiss-Prot reviewed" = "reviewed",
-                  "Full proteome" = "full",
-                  "Full + isoforms" = "full_isoforms"
-                ), selected = "one_per_gene", width = "100%"
-              ),
+              actionButton("open_uniprot_modal", "Search UniProt",
+                class = "btn-info btn-sm w-100", icon = icon("search")),
               uiOutput("fasta_filename_preview"),
-              actionButton("download_fasta_btn", "Download FASTA",
-                class = "btn-success btn-sm w-100", icon = icon("download"))
+              uiOutput("fasta_selected_summary")
             ),
 
             # --- Pre-staged source ---

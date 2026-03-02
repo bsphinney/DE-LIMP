@@ -370,6 +370,44 @@ server_search <- function(input, output, session, values, add_to_log,
   #    UniProt FASTA Download
   # ============================================================================
 
+  # Open UniProt search modal
+  observeEvent(input$open_uniprot_modal, {
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " UniProt FASTA Database Search"),
+      size = "l",
+      easyClose = TRUE,
+      div(style = "display: flex; gap: 8px; margin-bottom: 12px;",
+        div(style = "flex: 1;",
+          textInput("uniprot_search_query", NULL,
+            placeholder = "e.g., human, mouse, E. coli", width = "100%")
+        ),
+        actionButton("search_uniprot", "Search",
+          class = "btn-info", style = "margin-top: 0;")
+      ),
+      DTOutput("uniprot_results_table"),
+      hr(),
+      div(style = "display: flex; gap: 12px; align-items: flex-end;",
+        div(style = "flex: 1;",
+          selectInput("fasta_content_type", "Content:",
+            choices = c(
+              "One per gene (recommended)" = "one_per_gene",
+              "Swiss-Prot reviewed" = "reviewed",
+              "Full proteome" = "full",
+              "Full + isoforms" = "full_isoforms"
+            ), selected = "one_per_gene", width = "100%")
+        ),
+        div(style = "flex: 1;",
+          uiOutput("fasta_filename_preview_modal")
+        )
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("download_fasta_btn", "Download FASTA",
+          class = "btn-success", icon = icon("download"))
+      )
+    ))
+  })
+
   observeEvent(input$search_uniprot, {
     req(nzchar(input$uniprot_search_query))
 
@@ -392,16 +430,16 @@ server_search <- function(input, output, session, values, add_to_log,
     DT::datatable(display_df,
       selection = "single",
       options = list(
-        pageLength = 5, dom = "t", scrollY = "150px",
-        columnDefs = list(list(width = "80px", targets = 0))
+        pageLength = 10, dom = "tip", scrollY = "300px",
+        columnDefs = list(list(width = "90px", targets = 0))
       ),
       rownames = FALSE,
-      class = "compact"
+      class = "compact stripe"
     )
   })
 
-  # FASTA filename preview
-  output$fasta_filename_preview <- renderUI({
+  # Filename preview inside modal
+  output$fasta_filename_preview_modal <- renderUI({
     req(values$uniprot_results, nrow(values$uniprot_results) > 0)
     sel <- input$uniprot_results_table_rows_selected
     req(length(sel) > 0)
@@ -409,8 +447,28 @@ server_search <- function(input, output, session, values, add_to_log,
     row <- values$uniprot_results[sel, ]
     fname <- generate_fasta_filename(row$upid, row$organism, input$fasta_content_type)
 
-    div(style = "font-size: 0.8em; color: #6c757d; margin-top: 5px;",
+    div(style = "font-size: 0.85em; color: #6c757d; padding-top: 28px;",
       icon("file"), " ", fname
+    )
+  })
+
+  # Filename preview in sidebar (after download)
+  output$fasta_filename_preview <- renderUI({
+    req(length(values$diann_fasta_files) > 0, all(nzchar(values$diann_fasta_files)))
+    div(style = "font-size: 0.8em; color: #6c757d; margin-top: 5px;",
+      icon("check-circle", style = "color: #28a745;"), " ",
+      basename(values$diann_fasta_files[1])
+    )
+  })
+
+  # Summary of selected proteome in sidebar
+  output$fasta_selected_summary <- renderUI({
+    req(values$uniprot_results, nrow(values$uniprot_results) > 0)
+    sel <- input$uniprot_results_table_rows_selected
+    req(length(sel) > 0)
+    row <- values$uniprot_results[sel, ]
+    div(style = "font-size: 0.8em; color: #495057; margin-top: 5px;",
+      tags$strong(row$common_name), " — ", row$protein_count, " proteins"
     )
   })
 
@@ -440,6 +498,7 @@ server_search <- function(input, output, session, values, add_to_log,
     })
 
     if (result$success) {
+      removeModal()
       cfg <- ssh_config()
       if (!is.null(cfg)) {
         # SSH mode: check if FASTA already exists on remote
