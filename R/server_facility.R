@@ -663,41 +663,72 @@ server_facility <- function(input, output, session, values, add_to_log,
     req(nrow(df) > 0)
 
     df$run_date <- as.POSIXct(df$run_date)
+    df$is_excluded <- !is.na(df$excluded) & df$excluded == 1
 
-    # Compute thresholds (mean +/- 2 SD per instrument)
-    thresholds <- df |>
-      dplyr::group_by(instrument) |>
-      dplyr::summarise(
-        mean_val = mean(n_proteins, na.rm = TRUE),
-        sd_val = stats::sd(n_proteins, na.rm = TRUE),
-        lower = mean_val - 2 * sd_val,
-        .groups = "drop"
-      )
+    # Compute thresholds from non-excluded runs only
+    included_df <- df[!df$is_excluded, ]
+    thresholds <- if (nrow(included_df) > 0) {
+      included_df |>
+        dplyr::group_by(instrument) |>
+        dplyr::summarise(
+          mean_val = mean(n_proteins, na.rm = TRUE),
+          sd_val = stats::sd(n_proteins, na.rm = TRUE),
+          lower = mean_val - 2 * sd_val,
+          .groups = "drop"
+        )
+    } else NULL
 
-    p <- plotly::plot_ly(df, x = ~run_date, y = ~n_proteins, color = ~instrument,
-                 text = ~paste0(run_name, "<br>", n_proteins, " proteins<br>",
-                               format(run_date, "%b %d %H:%M")),
-                 hoverinfo = "text",
-                 type = "scatter", mode = "markers",
-                 marker = list(size = 8, opacity = 0.7)) |>
-      plotly::layout(
-        title = list(text = "Protein Identifications", font = list(size = 14)),
-        xaxis = list(title = ""),
-        yaxis = list(title = "Proteins"),
-        legend = list(orientation = "h", y = -0.15),
-        hovermode = "closest"
-      )
+    # Plot included runs
+    p <- plotly::plot_ly()
+    if (nrow(included_df) > 0) {
+      p <- p |> plotly::add_trace(
+        data = included_df,
+        x = ~run_date, y = ~n_proteins, color = ~instrument,
+        text = ~paste0(run_name, "<br>", n_proteins, " proteins<br>",
+                       format(run_date, "%b %d %H:%M")),
+        hoverinfo = "text",
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, opacity = 0.7))
+    }
+
+    # Plot excluded runs as faded X markers
+    excluded_df <- df[df$is_excluded, ]
+    if (nrow(excluded_df) > 0) {
+      p <- p |> plotly::add_trace(
+        data = excluded_df,
+        x = ~run_date, y = ~n_proteins,
+        text = ~paste0(run_name, "<br>", n_proteins, " proteins<br>",
+                       format(run_date, "%b %d %H:%M"),
+                       "<br><b>EXCLUDED</b>",
+                       ifelse(!is.na(exclude_reason), paste0("<br>", exclude_reason), "")),
+        hoverinfo = "text",
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, opacity = 0.25, symbol = "x",
+                       color = "gray"),
+        name = "Excluded",
+        showlegend = TRUE)
+    }
+
+    p <- p |> plotly::layout(
+      title = list(text = "Protein Identifications", font = list(size = 14)),
+      xaxis = list(title = ""),
+      yaxis = list(title = "Proteins"),
+      legend = list(orientation = "h", y = -0.15),
+      hovermode = "closest"
+    )
 
     # Add threshold lines per instrument
-    for (i in seq_len(nrow(thresholds))) {
-      if (!is.na(thresholds$lower[i])) {
-        p <- p |> plotly::add_segments(
-          x = min(df$run_date), xend = max(df$run_date),
-          y = thresholds$lower[i], yend = thresholds$lower[i],
-          line = list(color = "red", dash = "dash", width = 1),
-          showlegend = FALSE,
-          inherit = FALSE
-        )
+    if (!is.null(thresholds)) {
+      for (i in seq_len(nrow(thresholds))) {
+        if (!is.na(thresholds$lower[i])) {
+          p <- p |> plotly::add_segments(
+            x = min(df$run_date), xend = max(df$run_date),
+            y = thresholds$lower[i], yend = thresholds$lower[i],
+            line = list(color = "red", dash = "dash", width = 1),
+            showlegend = FALSE,
+            inherit = FALSE
+          )
+        }
       }
     }
 
@@ -709,18 +740,36 @@ server_facility <- function(input, output, session, values, add_to_log,
     df <- qc_dashboard_data()
     req(nrow(df) > 0)
     df$run_date <- as.POSIXct(df$run_date)
+    df$is_excluded <- !is.na(df$excluded) & df$excluded == 1
 
-    plotly::plot_ly(df, x = ~run_date, y = ~n_precursors, color = ~instrument,
-            text = ~paste0(run_name, "<br>", n_precursors, " precursors"),
-            hoverinfo = "text",
-            type = "scatter", mode = "markers",
-            marker = list(size = 8, opacity = 0.7)) |>
-      plotly::layout(
-        title = list(text = "Precursor Identifications", font = list(size = 14)),
-        xaxis = list(title = ""),
-        yaxis = list(title = "Precursors"),
-        legend = list(orientation = "h", y = -0.15)
-      )
+    included_df <- df[!df$is_excluded, ]
+    p <- plotly::plot_ly()
+    if (nrow(included_df) > 0) {
+      p <- p |> plotly::add_trace(
+        data = included_df,
+        x = ~run_date, y = ~n_precursors, color = ~instrument,
+        text = ~paste0(run_name, "<br>", n_precursors, " precursors"),
+        hoverinfo = "text",
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, opacity = 0.7))
+    }
+    excluded_df <- df[df$is_excluded, ]
+    if (nrow(excluded_df) > 0) {
+      p <- p |> plotly::add_trace(
+        data = excluded_df,
+        x = ~run_date, y = ~n_precursors,
+        text = ~paste0(run_name, "<br>", n_precursors, " precursors<br><b>EXCLUDED</b>"),
+        hoverinfo = "text",
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, opacity = 0.25, symbol = "x", color = "gray"),
+        name = "Excluded", showlegend = FALSE)
+    }
+    p |> plotly::layout(
+      title = list(text = "Precursor Identifications", font = list(size = 14)),
+      xaxis = list(title = ""),
+      yaxis = list(title = "Precursors"),
+      legend = list(orientation = "h", y = -0.15)
+    )
   })
 
   # -- MS1 TIC Trend --
@@ -730,18 +779,37 @@ server_facility <- function(input, output, session, values, add_to_log,
     df$run_date <- as.POSIXct(df$run_date)
     df <- df[!is.na(df$median_ms1_tic), ]
     req(nrow(df) > 0)
+    df$is_excluded <- !is.na(df$excluded) & df$excluded == 1
 
-    plotly::plot_ly(df, x = ~run_date, y = ~median_ms1_tic, color = ~instrument,
-            text = ~paste0(run_name, "<br>TIC: ", signif(median_ms1_tic, 3)),
-            hoverinfo = "text",
-            type = "scatter", mode = "markers",
-            marker = list(size = 8, opacity = 0.7)) |>
-      plotly::layout(
-        title = list(text = "Median MS1 TIC", font = list(size = 14)),
-        xaxis = list(title = ""),
-        yaxis = list(title = "TIC", type = "log"),
-        legend = list(orientation = "h", y = -0.15)
-      )
+    included_df <- df[!df$is_excluded, ]
+    p <- plotly::plot_ly()
+    if (nrow(included_df) > 0) {
+      p <- p |> plotly::add_trace(
+        data = included_df,
+        x = ~run_date, y = ~median_ms1_tic, color = ~instrument,
+        text = ~paste0(run_name, "<br>TIC: ", signif(median_ms1_tic, 3)),
+        hoverinfo = "text",
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, opacity = 0.7))
+    }
+    excluded_df <- df[df$is_excluded, ]
+    if (nrow(excluded_df) > 0) {
+      p <- p |> plotly::add_trace(
+        data = excluded_df,
+        x = ~run_date, y = ~median_ms1_tic,
+        text = ~paste0(run_name, "<br>TIC: ", signif(median_ms1_tic, 3),
+                        "<br><b>EXCLUDED</b>"),
+        hoverinfo = "text",
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, opacity = 0.25, symbol = "x", color = "gray"),
+        name = "Excluded", showlegend = FALSE)
+    }
+    p |> plotly::layout(
+      title = list(text = "Median MS1 TIC", font = list(size = 14)),
+      xaxis = list(title = ""),
+      yaxis = list(title = "TIC", type = "log"),
+      legend = list(orientation = "h", y = -0.15)
+    )
   })
 
   # -- QC Runs Table --
@@ -755,45 +823,437 @@ server_facility <- function(input, output, session, values, add_to_log,
         Instrument = instrument,
         File = run_name,
         Date = format(as.POSIXct(run_date), "%b %d %H:%M"),
+        ng = ng_loaded,
+        Gradient = gradient,
         Proteins = n_proteins,
         Precursors = n_precursors,
-        `MS1 TIC` = signif(median_ms1_tic, 3)
+        `MS1 TIC` = signif(median_ms1_tic, 3),
+        Status = ifelse(!is.na(excluded) & excluded == 1,
+          paste0("Excluded", ifelse(!is.na(exclude_reason) & nzchar(exclude_reason),
+                                     paste0(": ", exclude_reason), "")),
+          "")
       )
 
-    DT::datatable(display,
+    dt <- DT::datatable(display,
+      selection = "multiple",
       options = list(pageLength = 10, scrollX = TRUE, dom = "tip"),
       rownames = FALSE,
       class = "compact stripe hover"
     )
+    # Highlight rows with non-empty Status (excluded runs)
+    excluded_rows <- which(nzchar(display$Status))
+    if (length(excluded_rows) > 0) {
+      dt <- dt |> DT::formatStyle("Status",
+        backgroundColor = DT::styleEqual(
+          display$Status[excluded_rows],
+          rep("#fff3cd", length(excluded_rows))
+        ),
+        color = DT::styleEqual(
+          display$Status[excluded_rows],
+          rep("#856404", length(excluded_rows))
+        )
+      )
+    }
+    dt
   })
 
 
   # ============================================================================
-  #    QC Run Ingestion
+  #    QC Run Ingestion (two-mode modal: Scan & Submit / Ingest Existing)
   # ============================================================================
 
-  # Ingest QC run — modal dialog for file path + instrument
+  # Reactive to hold scan results
+  qc_scan_results <- reactiveVal(NULL)
+
+  # QC modal — two-mode: Scan & Submit vs Ingest Existing
   observeEvent(input$qc_ingest_btn, {
     instruments <- cf_instrument_names(cf_config)
     if (length(instruments) == 0) instruments <- c("timsTOF HT", "Exploris 480")
 
+    qc_search_cfg <- cf_config$qc$qc_search
+    has_qc_search <- !is.null(qc_search_cfg)
+
     showModal(modalDialog(
-      title = "Ingest QC Run",
-      tags$p("Record QC metrics from a DIA-NN report.parquet (e.g., HeLa digest standard)."),
-      textInput("qc_ingest_path", "Path to report.parquet",
-        placeholder = "/path/to/qc_output/report.parquet"),
-      selectizeInput("qc_ingest_instrument", "Instrument",
-        choices = instruments, options = list(create = TRUE)),
-      textInput("qc_ingest_run_name", "Run Name (optional)",
-        placeholder = "Auto-detected from directory name"),
+      title = "QC Run Management",
+      size = "l",
+      # Mode toggle
+      radioButtons("qc_modal_mode", NULL,
+        choices = c("Scan & Submit" = "scan", "Ingest Existing" = "ingest"),
+        selected = if (has_qc_search) "scan" else "ingest",
+        inline = TRUE),
+
+      # --- Scan & Submit mode ---
+      conditionalPanel(
+        condition = "input.qc_modal_mode == 'scan'",
+        if (has_qc_search) {
+          tagList(
+            div(style = "display: flex; gap: 10px; align-items: flex-end; margin-bottom: 10px;",
+              div(style = "flex: 0 0 200px;",
+                selectizeInput("qc_scan_instrument", "Instrument",
+                  choices = instruments, options = list(create = TRUE))
+              ),
+              div(style = "flex: 1;",
+                textInput("qc_scan_dir", "Remote Directory",
+                  placeholder = "/path/to/instrument/data/")
+              ),
+              div(style = "flex: 0 0 auto; padding-bottom: 0px;",
+                actionButton("qc_scan_btn", "Scan", icon = icon("search"),
+                  class = "btn-primary btn-sm")
+              )
+            ),
+            tags$small(class = "text-muted",
+              "Scans for *hela* and *qc* files (.d, .raw) in the specified directory."),
+            hr(),
+            uiOutput("qc_scan_results_ui"),
+            div(style = "margin-top: 10px;",
+              actionButton("qc_submit_searches", "Submit DIA-NN Searches",
+                icon = icon("rocket"), class = "btn-success",
+                disabled = TRUE)
+            )
+          )
+        } else {
+          tags$div(class = "alert alert-info",
+            icon("info-circle"),
+            " QC search configuration not found in qc_config.yml. ",
+            "Add a ", tags$code("qc_search"), " section to enable scan & submit.")
+        }
+      ),
+
+      # --- Ingest Existing mode ---
+      conditionalPanel(
+        condition = "input.qc_modal_mode == 'ingest'",
+        tags$p("Record QC metrics from an existing DIA-NN report.parquet (e.g., HeLa digest standard)."),
+        textInput("qc_ingest_path", "Path to report.parquet",
+          placeholder = "/path/to/qc_output/report.parquet"),
+        selectizeInput("qc_ingest_instrument", "Instrument",
+          choices = instruments, options = list(create = TRUE)),
+        div(style = "display: flex; gap: 10px;",
+          div(style = "flex: 1;",
+            textInput("qc_ingest_run_name", "Run Name (optional)",
+              placeholder = "Auto-detected from directory name")
+          ),
+          div(style = "flex: 0 0 120px;",
+            numericInput("qc_ingest_ng", "ng Loaded", value = NA, min = 1)
+          ),
+          div(style = "flex: 0 0 150px;",
+            textInput("qc_ingest_gradient", "Gradient",
+              placeholder = "e.g., 60SPD")
+          )
+        )
+      ),
+
       footer = tagList(
         modalButton("Cancel"),
-        actionButton("confirm_qc_ingest", "Record QC Metrics",
-          icon = icon("check"), class = "btn-success")
+        conditionalPanel(
+          condition = "input.qc_modal_mode == 'ingest'",
+          style = "display: inline;",
+          actionButton("confirm_qc_ingest", "Record QC Metrics",
+            icon = icon("check"), class = "btn-success")
+        )
       )
     ))
   })
 
+  # Scan for QC files via SSH
+  observeEvent(input$qc_scan_btn, {
+    req(input$qc_scan_dir, nzchar(input$qc_scan_dir))
+
+    cfg <- isolate(ssh_config())
+    if (is.null(cfg) || !isTRUE(values$ssh_connected)) {
+      showNotification("SSH not connected. Select a staff member first.",
+        type = "warning")
+      return()
+    }
+
+    scan_dir <- trimws(input$qc_scan_dir)
+
+    withProgress(message = "Scanning for QC files...", {
+      # Find .d directories and .raw files matching HeLa/QC patterns
+      scan_cmd <- sprintf(
+        "find %s -maxdepth 1 \\( -name '*.d' -o -name '*.raw' \\) | grep -i -E '(hela|qc)' | sort",
+        shQuote(scan_dir))
+      result <- ssh_exec(cfg, scan_cmd)
+
+      if (result$status != 0 || length(result$stdout) == 0 ||
+          !any(nzchar(trimws(result$stdout)))) {
+        showNotification("No QC files found in that directory.", type = "warning")
+        qc_scan_results(NULL)
+        return()
+      }
+
+      files <- trimws(result$stdout)
+      files <- files[nzchar(files)]
+
+      # Check which files are already ingested
+      db <- DBI::dbConnect(RSQLite::SQLite(), cf_config$db_path)
+      existing <- DBI::dbGetQuery(db,
+        "SELECT DISTINCT run_name FROM qc_runs")$run_name
+      DBI::dbDisconnect(db)
+
+      # Build scan results data frame
+      scan_df <- data.frame(
+        path = files,
+        filename = basename(files),
+        stringsAsFactors = FALSE
+      )
+
+      # Parse metadata from filenames
+      parsed <- lapply(scan_df$filename, parse_qc_filename)
+      scan_df$ng_loaded <- vapply(parsed, function(p) {
+        if (is.na(p$ng_loaded)) NA_integer_ else p$ng_loaded
+      }, integer(1))
+      scan_df$gradient <- vapply(parsed, function(p) {
+        if (is.na(p$gradient)) NA_character_ else p$gradient
+      }, character(1))
+
+      scan_df$status <- ifelse(scan_df$filename %in% existing, "Ingested", "New")
+      scan_df$selected <- scan_df$status == "New"
+
+      qc_scan_results(scan_df)
+    })
+  })
+
+  # Render scan results table
+  output$qc_scan_results_ui <- renderUI({
+    df <- qc_scan_results()
+    if (is.null(df) || nrow(df) == 0) {
+      return(tags$p(class = "text-muted", "No scan results. Click 'Scan' to search for QC files."))
+    }
+
+    n_new <- sum(df$status == "New")
+
+    # Enable/disable submit button
+    shinyjs_available <- requireNamespace("shinyjs", quietly = TRUE)
+
+    tagList(
+      tags$p(sprintf("Found %d file%s (%d new, %d already ingested)",
+        nrow(df), if (nrow(df) != 1) "s" else "",
+        n_new, sum(df$status == "Ingested"))),
+
+      # Editable table of scan results
+      tags$div(style = "max-height: 300px; overflow-y: auto;",
+        tags$table(class = "table table-sm table-striped",
+          tags$thead(
+            tags$tr(
+              tags$th(style = "width: 40px;", ""),
+              tags$th("File"),
+              tags$th(style = "width: 60px;", "Status"),
+              tags$th(style = "width: 100px;", "ng Loaded"),
+              tags$th(style = "width: 120px;", "Gradient")
+            )
+          ),
+          tags$tbody(
+            lapply(seq_len(nrow(df)), function(i) {
+              is_new <- df$status[i] == "New"
+              tags$tr(
+                style = if (!is_new) "opacity: 0.5;" else NULL,
+                tags$td(
+                  checkboxInput(
+                    paste0("qc_sel_", i), NULL,
+                    value = is_new, width = "30px")
+                ),
+                tags$td(df$filename[i]),
+                tags$td(
+                  if (is_new) {
+                    tags$span(class = "badge bg-success", "New")
+                  } else {
+                    tags$span(class = "badge bg-secondary", "Ingested")
+                  }
+                ),
+                tags$td(
+                  numericInput(paste0("qc_ng_", i), NULL,
+                    value = df$ng_loaded[i], min = 1, width = "90px")
+                ),
+                tags$td(
+                  textInput(paste0("qc_grad_", i), NULL,
+                    value = df$gradient[i] %||% "", width = "110px")
+                )
+              )
+            })
+          )
+        )
+      )
+    )
+  })
+
+  # Submit QC DIA-NN searches
+  observeEvent(input$qc_submit_searches, {
+    df <- qc_scan_results()
+    req(df, nrow(df) > 0)
+
+    qc_search_cfg <- cf_config$qc$qc_search
+    req(qc_search_cfg)
+
+    cfg <- isolate(ssh_config())
+    req(cfg, values$ssh_connected)
+
+    instrument <- input$qc_scan_instrument %||% ""
+
+    # Collect selected files with their metadata
+    selected_files <- list()
+    for (i in seq_len(nrow(df))) {
+      if (isTRUE(input[[paste0("qc_sel_", i)]])) {
+        selected_files[[length(selected_files) + 1]] <- list(
+          path = df$path[i],
+          filename = df$filename[i],
+          ng_loaded = input[[paste0("qc_ng_", i)]],
+          gradient = input[[paste0("qc_grad_", i)]] %||% ""
+        )
+      }
+    }
+
+    if (length(selected_files) == 0) {
+      showNotification("No files selected for submission.", type = "warning")
+      return()
+    }
+
+    # SLURM settings from config
+    slurm_cfg <- qc_search_cfg$slurm %||% list()
+    cpus <- slurm_cfg$cpus %||% 32
+    mem_gb <- slurm_cfg$mem_gb %||% 128
+    time_hours <- slurm_cfg$time_hours %||% 4
+    account <- input$diann_account %||% "genome-center-grp"
+    partition <- input$diann_partition %||% "high"
+
+    # Search params from config
+    sp <- qc_search_cfg$default_search_params %||% list()
+    search_params <- list(
+      qvalue = sp$qvalue %||% 0.01,
+      max_var_mods = sp$max_var_mods %||% 1,
+      mbr = sp$mbr %||% TRUE,
+      rt_profiling = sp$rt_profiling %||% FALSE,
+      xic = sp$xic %||% FALSE,
+      enzyme = sp$enzyme %||% "K*,R*",
+      missed_cleavages = sp$missed_cleavages %||% 1
+    )
+
+    withProgress(message = "Submitting QC searches...",
+      value = 0, max = length(selected_files), {
+
+      jobs <- values$diann_jobs %||% list()
+
+      for (idx in seq_along(selected_files)) {
+        f <- selected_files[[idx]]
+        analysis_name <- paste0("QC_", tools::file_path_sans_ext(f$filename))
+        date_str <- format(Sys.Date(), "%Y-%m-%d")
+        output_dir <- file.path(qc_search_cfg$output_base, instrument,
+                                 date_str, analysis_name)
+
+        incProgress(1, detail = sprintf("Submitting %s...", f$filename))
+
+        tryCatch({
+          # Create output directory
+          ssh_exec(cfg, paste("mkdir -p", shQuote(output_dir)))
+
+          # Generate sbatch script (library-only, no FASTA)
+          script <- generate_sbatch_script(
+            analysis_name = analysis_name,
+            raw_files = f$path,
+            fasta_files = character(0),
+            speclib_path = qc_search_cfg$hela_library,
+            output_dir = output_dir,
+            diann_sif = qc_search_cfg$diann_sif,
+            search_mode = "library",
+            cpus = cpus,
+            mem_gb = mem_gb,
+            time_hours = time_hours,
+            partition = partition,
+            account = account,
+            search_params = search_params
+          )
+
+          # Upload sbatch script via SCP
+          script_local <- tempfile(fileext = ".sh")
+          writeLines(script, script_local)
+          script_remote <- file.path(output_dir,
+            paste0("qc_search_", analysis_name, ".sh"))
+          scp_upload(cfg, script_local, script_remote)
+          unlink(script_local)
+
+          # Submit via sbatch
+          sbatch_path <- values$ssh_sbatch_path %||% "sbatch"
+          submit_result <- ssh_exec(cfg, paste(sbatch_path, shQuote(script_remote)))
+
+          if (submit_result$status != 0) {
+            showNotification(
+              sprintf("Failed to submit %s: %s", f$filename,
+                paste(submit_result$stderr, collapse = " ")),
+              type = "error", duration = 10)
+            next
+          }
+
+          # Parse SLURM job ID
+          slurm_id <- regmatches(
+            paste(submit_result$stdout, collapse = " "),
+            regexpr("\\d+", paste(submit_result$stdout, collapse = " "))
+          )
+          if (length(slurm_id) == 0) slurm_id <- paste0("qc_", idx)
+
+          # Add to job queue with QC metadata
+          jobs[[length(jobs) + 1]] <- list(
+            job_id = slurm_id,
+            name = analysis_name,
+            status = "queued",
+            output_dir = output_dir,
+            n_files = 1,
+            auto_load = FALSE,
+            backend = "hpc",
+            is_ssh = TRUE,
+            qc_run = TRUE,
+            qc_instrument = instrument,
+            qc_ng_loaded = f$ng_loaded,
+            qc_gradient = if (nzchar(f$gradient)) f$gradient else NA_character_,
+            qc_raw_file = f$path,
+            submitted_at = Sys.time()
+          )
+
+          # Record in facility DB
+          if (!is.null(cf_config$db_path)) {
+            tryCatch(
+              cf_record_search(cf_config$db_path, list(
+                analysis_name = analysis_name,
+                submitted_by = input$staff_selector %||% "unknown",
+                lab = "",
+                instrument = instrument,
+                lc_method = f$gradient,
+                project = "QC",
+                organism = "Human",
+                fasta_file = "",
+                n_raw_files = 1L,
+                search_mode = "library",
+                slurm_job_id = slurm_id,
+                backend = "hpc",
+                output_dir = output_dir
+              )),
+              error = function(e) message("CF DB record failed: ", e$message)
+            )
+          }
+        }, error = function(e) {
+          showNotification(
+            sprintf("Error submitting %s: %s", f$filename, e$message),
+            type = "error", duration = 10)
+        })
+      }
+
+      values$diann_jobs <- jobs
+    })
+
+    removeModal()
+    showNotification(
+      sprintf("Submitted %d QC search%s!", length(selected_files),
+        if (length(selected_files) != 1) "es" else ""),
+      type = "message", duration = 10)
+
+    add_to_log("Submit QC Searches", c(
+      sprintf("# Instrument: %s", instrument),
+      sprintf("# Files: %d", length(selected_files)),
+      sprintf("# Library: %s", qc_search_cfg$hela_library),
+      vapply(selected_files, function(f) sprintf("#   %s (%s ng, %s)",
+        f$filename, f$ng_loaded %||% "?", f$gradient %||% "?"), character(1))
+    ))
+  })
+
+  # Ingest Existing — confirm handler
   observeEvent(input$confirm_qc_ingest, {
     req(input$qc_ingest_path)
     req(input$qc_ingest_instrument)
@@ -802,6 +1262,10 @@ server_facility <- function(input, output, session, values, add_to_log,
     instrument <- input$qc_ingest_instrument
     run_name <- if (nzchar(input$qc_ingest_run_name %||% "")) {
       input$qc_ingest_run_name
+    } else NULL
+    ng_loaded <- input$qc_ingest_ng
+    gradient <- if (nzchar(input$qc_ingest_gradient %||% "")) {
+      input$qc_ingest_gradient
     } else NULL
 
     if (!file.exists(report_path)) {
@@ -828,12 +1292,15 @@ server_facility <- function(input, output, session, values, add_to_log,
           db_path = cf_config$db_path,
           report_path = report_path,
           instrument = instrument,
-          run_name = run_name
+          run_name = run_name,
+          ng_loaded = ng_loaded,
+          gradient = gradient
         )
 
         add_to_log("Ingest QC Run", c(
           sprintf("# Instrument: %s", instrument),
           sprintf("# File: %s", report_path),
+          sprintf("# ng: %s, Gradient: %s", ng_loaded %||% "NA", gradient %||% "NA"),
           sprintf("cf_ingest_qc_metrics('%s', '%s', '%s')",
                   cf_config$db_path, report_path, instrument)
         ))
@@ -847,6 +1314,77 @@ server_facility <- function(input, output, session, values, add_to_log,
       showNotification(
         sprintf("QC ingestion failed: %s", e$message),
         type = "error", duration = 10)
+    })
+  })
+
+  # ============================================================================
+  #    QC Exclude / Re-include
+  # ============================================================================
+
+  # Exclude selected QC runs
+  observeEvent(input$qc_exclude_btn, {
+    sel <- input$qc_runs_table_rows_selected
+    req(length(sel) > 0)
+
+    showModal(modalDialog(
+      title = "Exclude QC Runs",
+      tags$p(sprintf("Exclude %d selected run%s from trend analysis?",
+        length(sel), if (length(sel) != 1) "s" else "")),
+      textInput("qc_exclude_reason", "Reason (optional)",
+        placeholder = "e.g., Loading error, column degraded"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_qc_exclude", "Exclude",
+          icon = icon("ban"), class = "btn-warning")
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_qc_exclude, {
+    sel <- input$qc_runs_table_rows_selected
+    req(length(sel) > 0)
+
+    df <- qc_dashboard_data()
+    req(nrow(df) >= max(sel))
+
+    # Get IDs in display order (descending by run_date)
+    display_df <- df |> dplyr::arrange(dplyr::desc(run_date))
+    run_ids <- display_df$id[sel]
+
+    tryCatch({
+      cf_update_qc_excluded(cf_config$db_path, run_ids,
+        excluded = TRUE, reason = input$qc_exclude_reason)
+      removeModal()
+      showNotification(
+        sprintf("Excluded %d QC run%s.", length(sel),
+          if (length(sel) != 1) "s" else ""),
+        type = "message", duration = 5)
+    }, error = function(e) {
+      showNotification(sprintf("Exclude failed: %s", e$message),
+        type = "error", duration = 8)
+    })
+  })
+
+  # Re-include selected QC runs
+  observeEvent(input$qc_include_btn, {
+    sel <- input$qc_runs_table_rows_selected
+    req(length(sel) > 0)
+
+    df <- qc_dashboard_data()
+    req(nrow(df) >= max(sel))
+
+    display_df <- df |> dplyr::arrange(dplyr::desc(run_date))
+    run_ids <- display_df$id[sel]
+
+    tryCatch({
+      cf_update_qc_excluded(cf_config$db_path, run_ids, excluded = FALSE)
+      showNotification(
+        sprintf("Re-included %d QC run%s.", length(sel),
+          if (length(sel) != 1) "s" else ""),
+        type = "message", duration = 5)
+    }, error = function(e) {
+      showNotification(sprintf("Re-include failed: %s", e$message),
+        type = "error", duration = 8)
     })
   })
 

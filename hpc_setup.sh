@@ -142,11 +142,20 @@ cmd_run() {
         # without rebuilding the container image.
         # R_LIBS_USER provides a writable library for packages missing from the image
         # (install with: bash hpc_setup.sh packages)
+        # Bind-mount /cvmfs so SLURM tools (sbatch, squeue, sacct) are accessible
+        # inside the container for Local (on HPC) search submissions
+        CVMFS_BIND=""
+        if [ -d /cvmfs ]; then
+            CVMFS_BIND="--bind /cvmfs:/cvmfs"
+        fi
+
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
+            ${CVMFS_BIND} \
             --bind ${HOME}/data:/data \
             --bind ${HOME}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
+            --bind /quobyte/proteomics-grp:/quobyte/proteomics-grp \
             --bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R \
             --bind ${REPO_DIR}/R:/srv/shiny-server/R \
             "${SIF}" \
@@ -267,14 +276,24 @@ apptainer exec \\
     --bind ${HOME}/data:/data \\
     --bind ${HOME}/results:/results \\
     --bind ${R_USER_LIB}:${R_USER_LIB} \\
+    --bind /quobyte/proteomics-grp:/quobyte/proteomics-grp \\
     ${REPO_BINDS} \\
     "${SIF_FILE}" \\
     R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})"
 SBATCH_EOF
 
+    # Find sbatch — non-interactive SSH may not have full PATH
+    local SBATCH_CMD="sbatch"
+    if ! command -v sbatch &>/dev/null; then
+        for p in /cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sbatch \
+                 /usr/bin/sbatch /opt/slurm/bin/sbatch /usr/local/bin/sbatch; do
+            if [ -x "$p" ]; then SBATCH_CMD="$p"; break; fi
+        done
+    fi
+
     # Submit and parse job ID
     local SUBMIT_OUTPUT
-    SUBMIT_OUTPUT=$(sbatch "${SBATCH_FILE}" 2>&1)
+    SUBMIT_OUTPUT=$($SBATCH_CMD "${SBATCH_FILE}" 2>&1)
     local SUBMIT_RC=$?
 
     if [ ${SUBMIT_RC} -ne 0 ]; then

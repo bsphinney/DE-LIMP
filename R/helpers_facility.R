@@ -102,6 +102,21 @@ cf_init_db <- function(db) {
     )
   ")
 
+  # -- Migrations for qc_runs --
+  cols_qc <- DBI::dbListFields(db, "qc_runs")
+  if (!"ng_loaded" %in% cols_qc) {
+    DBI::dbExecute(db, "ALTER TABLE qc_runs ADD COLUMN ng_loaded INTEGER")
+  }
+  if (!"gradient" %in% cols_qc) {
+    DBI::dbExecute(db, "ALTER TABLE qc_runs ADD COLUMN gradient TEXT")
+  }
+  if (!"excluded" %in% cols_qc) {
+    DBI::dbExecute(db, "ALTER TABLE qc_runs ADD COLUMN excluded INTEGER DEFAULT 0")
+  }
+  if (!"exclude_reason" %in% cols_qc) {
+    DBI::dbExecute(db, "ALTER TABLE qc_runs ADD COLUMN exclude_reason TEXT")
+  }
+
   # -- Indexes --
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
   DBI::dbExecute(db, "CREATE INDEX IF NOT EXISTS idx_searches_lab ON searches(lab)")
@@ -366,7 +381,8 @@ cf_lc_method_names <- function(cf_config) {
 #' @return Invisibly returns the inserted row ID
 cf_ingest_qc_metrics <- function(db_path, report_path, instrument,
                                   run_name = NULL, run_date = NULL,
-                                  search_id = NULL) {
+                                  search_id = NULL, ng_loaded = NULL,
+                                  gradient = NULL) {
   if (!file.exists(report_path)) {
     stop("Report file not found: ", report_path)
   }
@@ -452,16 +468,55 @@ cf_ingest_qc_metrics <- function(db_path, report_path, instrument,
     INSERT INTO qc_runs (run_name, instrument, run_date, file_path,
                           n_proteins, n_peptides, n_precursors,
                           median_ms1_tic, median_cv, protein_intensities,
-                          search_id, report_path)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                          search_id, report_path, ng_loaded, gradient)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     params = list(
       run_name, instrument, run_date, report_path,
       n_proteins %||% NA, n_peptides %||% NA, n_precursors %||% NA,
       median_ms1_tic %||% NA, median_cv %||% NA,
       protein_intensities_json %||% NA,
-      search_id %||% NA, report_path
+      search_id %||% NA, report_path,
+      ng_loaded %||% NA, gradient %||% NA
     )
   )
 
   invisible(DBI::dbGetQuery(db, "SELECT last_insert_rowid()")[[1]])
+}
+
+
+#' Parse QC filename to extract ng loaded and gradient
+#' @param filename Character — e.g., "HeLa_200ng_60SPD.d"
+#' @return list(ng_loaded, gradient) — NA if not parseable
+parse_qc_filename <- function(filename) {
+  ng <- regmatches(filename, regexpr("(\\d+)(?=ng)", filename, perl = TRUE))
+  spd <- regmatches(filename, regexpr("\\d+SPD", filename, ignore.case = TRUE))
+  mins <- regmatches(filename, regexpr("\\d+min", filename, ignore.case = TRUE))
+  gradient <- if (length(spd) > 0) spd else if (length(mins) > 0) mins else NA_character_
+  list(
+    ng_loaded = if (length(ng) > 0) as.integer(ng) else NA_integer_,
+    gradient = gradient
+  )
+}
+
+
+#' Update exclude status for QC runs
+#' @param db_path Path to SQLite database
+#' @param run_ids Integer vector of qc_runs IDs
+#' @param excluded Logical — TRUE to exclude, FALSE to re-include
+#' @param reason Optional reason text (only used when excluding)
+cf_update_qc_excluded <- function(db_path, run_ids, excluded = TRUE,
+                                   reason = NULL) {
+  db <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+  on.exit(DBI::dbDisconnect(db))
+
+  for (rid in run_ids) {
+    DBI::dbExecute(db, "
+      UPDATE qc_runs SET excluded = ?1, exclude_reason = ?2 WHERE id = ?3",
+      params = list(
+        as.integer(excluded),
+        if (excluded) (reason %||% NA_character_) else NA_character_,
+        rid
+      )
+    )
+  }
 }

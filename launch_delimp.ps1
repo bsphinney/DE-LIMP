@@ -18,10 +18,12 @@ $ErrorActionPreference = "Stop"
 $HIVE_HOST       = "hive.hpc.ucdavis.edu"
 $PORT            = 7860
 $CORE_DIR        = "/share/genome-center/delimp"
+$REPO_DIR        = "/quobyte/proteomics-grp/de-limp/DE-LIMP"
 $ACCOUNT         = "genome-center-grp"
 $PARTITION       = "high"
 $CONFIG_FILE     = ".delimp_config.ps1"
 $SETUP_SCRIPT    = "hpc_setup.sh"
+$GITHUB_RAW      = "https://raw.githubusercontent.com/bsphinney/DE-LIMP/main"
 $MAX_WAIT_NODE   = 600    # seconds to wait for compute node
 $MAX_WAIT_APP    = 120    # seconds to wait for app to respond
 
@@ -122,6 +124,56 @@ function Find-SshKey {
     exit 1
 }
 
+# --- Fix SSH key permissions (Windows requires strict perms) ---
+function Repair-SshKeyPermissions {
+    $key = $script:SshKey
+    if (-not $key -or -not (Test-Path $key)) { return }
+
+    try {
+        $acl = Get-Acl $key
+        # Check if anyone besides the current user has access
+        $otherRules = $acl.Access | Where-Object {
+            $_.IdentityReference -notmatch [regex]::Escape($env:USERNAME) -and
+            $_.IdentityReference -ne "NT AUTHORITY\SYSTEM" -and
+            $_.IdentityReference -ne "BUILTIN\Administrators"
+        }
+        if ($otherRules) {
+            Write-Host "  Fixing SSH key permissions..." -ForegroundColor Yellow
+            & icacls $key /inheritance:r /grant:r "${env:USERNAME}:(R)" 2>$null | Out-Null
+            Write-Host "  Permissions fixed."
+        }
+    } catch {
+        # Non-fatal — SSH will error if perms are still wrong
+        Write-Host "  Warning: Could not check key permissions." -ForegroundColor Yellow
+    }
+}
+
+# --- Auto-download missing files from GitHub ---
+function Get-RequiredFiles {
+    $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
+    if (-not $scriptDir) { $scriptDir = $PWD.Path }
+
+    $files = @(
+        @{ Name = $SETUP_SCRIPT;      Url = "$GITHUB_RAW/$SETUP_SCRIPT" }
+        @{ Name = "launch_delimp.ps1"; Url = "$GITHUB_RAW/launch_delimp.ps1" }
+    )
+
+    foreach ($f in $files) {
+        $local = Join-Path $scriptDir $f.Name
+        if (-not (Test-Path $local)) {
+            Write-Host "  Downloading $($f.Name) from GitHub..." -ForegroundColor Yellow
+            try {
+                Invoke-WebRequest -Uri $f.Url -OutFile $local -UseBasicParsing
+                Write-Host "  Saved: $local"
+            } catch {
+                Write-Host "  Failed to download $($f.Name): $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "  Download it manually from: $($f.Url)"
+                exit 1
+            }
+        }
+    }
+}
+
 # --- Step 2: Get HIVE username ---
 function Get-HiveUsername {
     Write-Host "[2/7] Getting HIVE username..." -ForegroundColor Green
@@ -189,7 +241,7 @@ function Test-Container {
 function Update-Repo {
     Write-Host "[4/7] Syncing DE-LIMP repo on HIVE..." -ForegroundColor Green
 
-    $result = Invoke-HiveSsh "if [ -d ~/DE-LIMP/.git ]; then cd ~/DE-LIMP && git pull --ff-only 2>&1 | tail -1; else git clone https://github.com/bsphinney/DE-LIMP.git ~/DE-LIMP 2>&1 | tail -1; fi"
+    $result = Invoke-HiveSsh "if [ -d $REPO_DIR/.git ]; then cd $REPO_DIR && git pull --ff-only 2>&1 | tail -1; else git clone https://github.com/bsphinney/DE-LIMP.git $REPO_DIR 2>&1 | tail -1; fi"
     Write-Host "  $result"
 }
 
@@ -228,7 +280,10 @@ function Submit-Job {
     & scp -i $script:SshKey -o StrictHostKeyChecking=accept-new `
         $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
 
-    $submitOutput = Invoke-HiveSsh "bash ~/$SETUP_SCRIPT sbatch '$CORE_DIR' ~/DE-LIMP"
+    $submitErr = $null
+    $submitOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 `
+        "$($script:HiveUser)@$HIVE_HOST" "bash -l ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1"
+    $submitOutput = ($submitOutput -join "`n").Trim()
 
     # Parse JOBID:<number>
     if ($submitOutput -match "JOBID:(\d+)") {
@@ -236,6 +291,10 @@ function Submit-Job {
     } else {
         Write-Host "Failed to submit job. Output:" -ForegroundColor Red
         Write-Host $submitOutput
+        Write-Host ""
+        Write-Host "Debug: running sbatch command manually..." -ForegroundColor Yellow
+        $debugOutput = Invoke-HiveSsh "bash -x ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1 | tail -30"
+        Write-Host $debugOutput
         exit 1
     }
 
@@ -318,7 +377,9 @@ function Open-Browser {
 
 # --- Main ---
 Write-Header
+Get-RequiredFiles
 Find-SshKey
+Repair-SshKeyPermissions
 Get-HiveUsername
 Test-Container
 Update-Repo
