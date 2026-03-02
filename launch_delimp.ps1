@@ -280,6 +280,7 @@ function Submit-Job {
     & scp -i $script:SshKey -o StrictHostKeyChecking=accept-new `
         $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
 
+    $submitErr = $null
     $submitOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 `
         "$($script:HiveUser)@$HIVE_HOST" "bash -l ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1"
     $submitOutput = ($submitOutput -join "`n").Trim()

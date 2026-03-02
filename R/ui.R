@@ -1598,6 +1598,15 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           plotly::plotlyOutput("qc_precursor_trend", height = "280px"),
           plotly::plotlyOutput("qc_tic_trend", height = "280px"),
           hr(),
+          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+            tags$h6("QC Runs", style = "margin: 0;"),
+            div(style = "display: flex; gap: 8px;",
+              actionButton("qc_exclude_btn", "Exclude Selected",
+                icon = icon("ban"), class = "btn-outline-warning btn-sm"),
+              actionButton("qc_include_btn", "Re-include Selected",
+                icon = icon("undo"), class = "btn-outline-info btn-sm")
+            )
+          ),
           DTOutput("qc_runs_table")
         )
       )

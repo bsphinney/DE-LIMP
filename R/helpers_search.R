@@ -369,19 +369,20 @@ generate_sbatch_script <- function(
 
   # Determine unique directories for data and fasta
   data_dirs <- unique(dirname(raw_files))
-  fasta_dirs <- unique(dirname(fasta_files))
+  has_fasta <- length(fasta_files) > 0 && any(nzchar(fasta_files))
 
   # Build bind mount string — handle multiple FASTA directories
-  fasta_bind_parts <- if (length(fasta_dirs) == 1) {
-    sprintf("%s:/work/fasta", fasta_dirs[1])
-  } else {
-    sprintf("%s:/work/fasta%d", fasta_dirs, seq_along(fasta_dirs))
+  bind_parts <- sprintf("%s:/work/data", data_dirs[1])
+  if (has_fasta) {
+    fasta_dirs <- unique(dirname(fasta_files))
+    fasta_bind_parts <- if (length(fasta_dirs) == 1) {
+      sprintf("%s:/work/fasta", fasta_dirs[1])
+    } else {
+      sprintf("%s:/work/fasta%d", fasta_dirs, seq_along(fasta_dirs))
+    }
+    bind_parts <- c(bind_parts, fasta_bind_parts)
   }
-  bind_parts <- c(
-    sprintf("%s:/work/data", data_dirs[1]),
-    fasta_bind_parts,
-    sprintf("%s:/work/out", output_dir)
-  )
+  bind_parts <- c(bind_parts, sprintf("%s:/work/out", output_dir))
   if (!is.null(speclib_path) && nzchar(speclib_path)) {
     bind_parts <- c(bind_parts, sprintf("%s:/work/lib", dirname(speclib_path)))
   }
@@ -391,14 +392,17 @@ generate_sbatch_script <- function(
   run_flags <- paste(sprintf("    --f /work/data/%s", basename(raw_files)),
                      collapse = " \\\n")
 
-  # Build --fasta flags — map each file to its mount point
-  fasta_mount_map <- if (length(fasta_dirs) == 1) {
-    rep("/work/fasta", length(fasta_files))
-  } else {
-    sprintf("/work/fasta%d", match(dirname(fasta_files), fasta_dirs))
+  # Build --fasta flags — map each file to its mount point (skip if library-only)
+  fasta_flags <- NULL
+  if (has_fasta) {
+    fasta_mount_map <- if (length(fasta_dirs) == 1) {
+      rep("/work/fasta", length(fasta_files))
+    } else {
+      sprintf("/work/fasta%d", match(dirname(fasta_files), fasta_dirs))
+    }
+    fasta_flags <- paste(sprintf("    --fasta %s/%s", fasta_mount_map, basename(fasta_files)),
+                         collapse = " \\\n")
   }
-  fasta_flags <- paste(sprintf("    --fasta %s/%s", fasta_mount_map, basename(fasta_files)),
-                       collapse = " \\\n")
 
   # Get shared DIA-NN flags via build_diann_flags()
   speclib_mount <- if (!is.null(speclib_path) && nzchar(speclib_path)) {
@@ -410,7 +414,7 @@ generate_sbatch_script <- function(
   diann_cmd_parts <- c(
     sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
     paste0(run_flags, " \\"),
-    paste0(fasta_flags, " \\"),
+    if (!is.null(fasta_flags)) paste0(fasta_flags, " \\"),
     sprintf("    --out /work/out/%s \\", report_name),
     sprintf("    --threads %d \\", cpus),
     paste0("    ", shared_flags)

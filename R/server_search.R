@@ -1000,25 +1000,14 @@ server_search <- function(input, output, session, values, add_to_log,
         # Local mode: write and submit locally
         writeLines(script_content, script_path)
 
-        if (slurm_proxy_available()) {
-          # Inside Apptainer container — use host-side SLURM proxy
-          submit_result <- tryCatch({
-            result <- slurm_proxy_exec(paste("sbatch", shQuote(script_path)), timeout = 30)
-            list(success = result$status == 0, stdout = result$stdout,
-                 error = if (result$status != 0) paste(result$stdout, collapse = " ") else NULL)
-          }, error = function(e) {
-            list(success = FALSE, error = e$message)
-          })
-        } else {
-          # Direct execution (sbatch available on PATH)
-          sbatch_local <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
-          submit_result <- tryCatch({
-            stdout <- system2(sbatch_local, args = script_path, stdout = TRUE, stderr = TRUE)
-            list(success = TRUE, stdout = stdout)
-          }, error = function(e) {
-            list(success = FALSE, error = e$message)
-          })
-        }
+        # Use full sbatch path (may be on CVMFS inside Apptainer container)
+        sbatch_local <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
+        submit_result <- tryCatch({
+          stdout <- system2(sbatch_local, args = script_path, stdout = TRUE, stderr = TRUE)
+          list(success = TRUE, stdout = stdout)
+        }, error = function(e) {
+          list(success = FALSE, error = e$message)
+        })
       }
 
       if (!submit_result$success) {
@@ -1189,7 +1178,7 @@ server_search <- function(input, output, session, values, add_to_log,
       } else {
         # --- HPC (SLURM) monitoring ---
         job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
-        # Use SSH sbatch path for remote jobs, local CVMFS path for local jobs
+        # Use SSH sbatch path for remote jobs, local path for local jobs
         slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) {
           values$ssh_sbatch_path
         } else if (nzchar(local_sbatch_path)) {
@@ -1247,6 +1236,50 @@ server_search <- function(input, output, session, values, add_to_log,
             cid <- jobs[[i]]$container_id %||% jobs[[i]]$job_id
             tryCatch(system2("docker", c("rm", cid),
               stdout = FALSE, stderr = FALSE), error = function(e) NULL)
+          }
+          # QC auto-ingest: download report.parquet and ingest metrics
+          if (isTRUE(jobs[[i]]$qc_run) && !isTRUE(jobs[[i]]$qc_ingested) &&
+              is_core_facility && !is.null(cf_config)) {
+            tryCatch({
+              remote_report <- file.path(jobs[[i]]$output_dir, "report.parquet")
+              local_report <- file.path(tempdir(),
+                paste0(jobs[[i]]$name, "_report.parquet"))
+
+              dl_ok <- FALSE
+              if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+                dl_result <- scp_download(cfg, remote_report, local_report)
+                dl_ok <- dl_result$status == 0 && file.exists(local_report)
+              } else if (file.exists(remote_report)) {
+                file.copy(remote_report, local_report)
+                dl_ok <- TRUE
+              }
+
+              if (dl_ok) {
+                cf_ingest_qc_metrics(
+                  db_path = cf_config$db_path,
+                  report_path = local_report,
+                  instrument = jobs[[i]]$qc_instrument %||% "Unknown",
+                  run_name = jobs[[i]]$name,
+                  search_id = NULL,
+                  ng_loaded = jobs[[i]]$qc_ng_loaded,
+                  gradient = jobs[[i]]$qc_gradient
+                )
+                jobs[[i]]$qc_ingested <- TRUE
+                changed <- TRUE
+                showNotification(
+                  sprintf("QC metrics auto-ingested for '%s'!", jobs[[i]]$name),
+                  type = "message", duration = 10)
+              } else {
+                message("[DE-LIMP] QC auto-ingest: report.parquet not found for ",
+                  jobs[[i]]$name)
+              }
+            }, error = function(e) {
+              message("[DE-LIMP] QC auto-ingest error: ", e$message)
+              showNotification(
+                sprintf("QC auto-ingest failed for '%s': %s",
+                  jobs[[i]]$name, e$message),
+                type = "warning", duration = 10)
+            })
           }
         } else if (new_status == "failed") {
           showNotification(
@@ -1500,15 +1533,36 @@ server_search <- function(input, output, session, values, add_to_log,
               actionButton(sprintf("load_results_%d", i), "Load",
                 class = "btn-outline-success btn-xs",
                 style = "font-size: 0.75em; padding: 2px 6px;")
+            },
+            if (job$status %in% c("failed", "cancelled") &&
+                isTRUE(job$backend == "hpc")) {
+              actionButton(sprintf("resubmit_job_%d", i), "Resubmit",
+                class = "btn-outline-warning btn-xs",
+                style = "font-size: 0.75em; padding: 2px 6px;",
+                icon = icon("rotate-right"))
+            },
+            if (job$status %in% c("completed", "failed", "cancelled")) {
+              actionButton(sprintf("remove_job_%d", i), NULL,
+                class = "btn-outline-secondary btn-xs",
+                style = "font-size: 0.75em; padding: 2px 6px;",
+                icon = icon("xmark"))
             }
           )
         )
       )
     })
 
+    # Count terminal jobs for Clear Finished button
+    n_terminal <- sum(vapply(jobs, function(j)
+      j$status %in% c("completed", "failed", "cancelled"), logical(1)))
+
     tagList(
-      if (has_unknown) div(style = "text-align: right; margin-bottom: 6px;",
-        actionButton("refresh_all_jobs", "Refresh All",
+      div(style = "display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px;",
+        if (n_terminal >= 2) actionButton("clear_finished_jobs", "Clear Finished",
+          class = "btn-outline-secondary btn-xs",
+          style = "font-size: 0.75em; padding: 2px 8px;",
+          icon = icon("broom")),
+        if (has_unknown) actionButton("refresh_all_jobs", "Refresh All",
           class = "btn-outline-info btn-xs",
           style = "font-size: 0.75em; padding: 2px 8px;",
           icon = icon("arrows-rotate"))
@@ -1725,6 +1779,112 @@ server_search <- function(input, output, session, values, add_to_log,
             showNotification(paste("Failed to load:", err_msg), type = "error", duration = 10)
           })
         }, ignoreInit = TRUE)
+
+        # Remove job from queue
+        observeEvent(input[[sprintf("remove_job_%d", idx)]], {
+          job <- values$diann_jobs[[idx]]
+          jobs <- values$diann_jobs
+          jobs[[idx]] <- NULL
+          values$diann_jobs <- jobs
+          showNotification(sprintf("Removed job '%s' from queue.", job$name), type = "message")
+        }, ignoreInit = TRUE)
+
+        # Resubmit failed/cancelled HPC job
+        observeEvent(input[[sprintf("resubmit_job_%d", idx)]], {
+          job <- values$diann_jobs[[idx]]
+          script_path <- job$script_path
+
+          tryCatch({
+            cfg <- if (isTRUE(job$is_ssh)) isolate(ssh_config()) else NULL
+
+            # If script_path is missing, try to recover from output_dir or scontrol
+            if (is.null(script_path) || !nzchar(script_path %||% "")) {
+              # Try inferring from output_dir
+              if (!is.null(job$output_dir) && nzchar(job$output_dir %||% "")) {
+                script_path <- file.path(job$output_dir, "diann_search.sbatch")
+              }
+
+              # Still missing — try scontrol show job to get Command field
+              if (is.null(script_path) || !nzchar(script_path %||% "")) {
+                if (!is.null(cfg)) {
+                  scontrol_bin <- if (!is.null(values$ssh_sbatch_path)) {
+                    file.path(dirname(values$ssh_sbatch_path), "scontrol")
+                  } else "scontrol"
+                  sctl <- ssh_exec(cfg, paste(scontrol_bin, "show job", job$job_id, "2>/dev/null"),
+                                   login_shell = is.null(values$ssh_sbatch_path))
+                  if (sctl$status == 0) {
+                    cmd_line <- grep("Command=", sctl$stdout, value = TRUE)
+                    if (length(cmd_line) > 0) {
+                      script_path <- trimws(sub(".*Command=", "", cmd_line[1]))
+                    }
+                  }
+                }
+              }
+
+              if (is.null(script_path) || !nzchar(script_path %||% "")) {
+                showNotification(
+                  "Cannot resubmit: sbatch script path unknown. This job was recovered without full metadata.",
+                  type = "error", duration = 10)
+                return()
+              }
+            }
+
+            # Verify script still exists
+            if (!is.null(cfg)) {
+              check <- ssh_exec(cfg, paste("test -f", shQuote(script_path), "&& echo OK"))
+              if (check$status != 0 || !any(grepl("OK", check$stdout))) {
+                showNotification("Sbatch script no longer exists on remote.", type = "error")
+                return()
+              }
+            } else {
+              if (!file.exists(script_path)) {
+                showNotification("Sbatch script no longer exists locally.", type = "error")
+                return()
+              }
+            }
+
+            # Submit via sbatch
+            if (!is.null(cfg)) {
+              sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
+              sbatch_cmd <- paste(sbatch_bin, shQuote(script_path))
+              result <- ssh_exec(cfg, sbatch_cmd,
+                                 login_shell = is.null(values$ssh_sbatch_path))
+              if (result$status != 0) {
+                showNotification(paste("sbatch failed:",
+                  paste(result$stdout, collapse = " ")), type = "error")
+                return()
+              }
+              new_job_id <- parse_sbatch_output(result$stdout)
+            } else {
+              local_sbatch <- Sys.which("sbatch")
+              if (!nzchar(local_sbatch)) local_sbatch <- "sbatch"
+              stdout <- system2(local_sbatch, args = script_path,
+                                stdout = TRUE, stderr = TRUE)
+              new_job_id <- parse_sbatch_output(stdout)
+            }
+
+            if (is.null(new_job_id)) {
+              showNotification("Could not parse new job ID from sbatch output.", type = "error")
+              return()
+            }
+
+            # Clone job entry with new ID and reset status
+            new_entry <- job
+            new_entry$job_id <- new_job_id
+            new_entry$status <- "queued"
+            new_entry$script_path <- script_path
+            new_entry$submitted_at <- Sys.time()
+            new_entry$completed_at <- NULL
+            new_entry$log_content <- ""
+            new_entry$loaded <- FALSE
+
+            values$diann_jobs <- c(values$diann_jobs, list(new_entry))
+            showNotification(sprintf("Resubmitted as job %s", new_job_id),
+              type = "message", duration = 8)
+          }, error = function(e) {
+            showNotification(sprintf("Resubmit failed: %s", e$message), type = "error")
+          })
+        }, ignoreInit = TRUE)
       })
 
       existing <- c(existing, job_key)
@@ -1732,6 +1892,16 @@ server_search <- function(input, output, session, values, add_to_log,
 
     registered_observers(existing)
   })
+
+  # Clear all finished jobs
+  observeEvent(input$clear_finished_jobs, {
+    jobs <- values$diann_jobs
+    terminal <- c("completed", "failed", "cancelled")
+    kept <- Filter(function(j) !(j$status %in% terminal), jobs)
+    n_removed <- length(jobs) - length(kept)
+    values$diann_jobs <- kept
+    showNotification(sprintf("Cleared %d finished job(s).", n_removed), type = "message")
+  }, ignoreInit = TRUE)
 
   # Refresh all jobs with unknown status
   observeEvent(input$refresh_all_jobs, {
