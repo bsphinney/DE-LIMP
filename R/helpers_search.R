@@ -362,7 +362,7 @@ generate_sbatch_script <- function(
   output_dir, diann_sif, normalization = "on", search_mode = "libfree",
   cpus = 64, mem_gb = 512, time_hours = 12,
   partition = "high", account = "genome-center-grp",
-  search_params = list()
+  search_params = list(), requeue = FALSE
 ) {
   # Determine output filename
   report_name <- if (normalization == "off") "no_norm_report.parquet" else "report.parquet"
@@ -444,6 +444,7 @@ generate_sbatch_script <- function(
     sprintf('#SBATCH --account=%s\n', account),
     sprintf('#SBATCH --time=%d:00:00\n', time_hours),
     sprintf('#SBATCH --partition=%s\n', partition),
+    if (isTRUE(requeue)) '#SBATCH --requeue\n' else '',
     '\n',
     'module load apptainer\n',
     '\n',
@@ -771,12 +772,12 @@ recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back 
   }
 
   # Query sacct for recent jobs with "diann" in the name
-  # Include WorkDir so we can find log files and output
+  # Include WorkDir and StdOut so we can find log files and output
   cmd <- paste0(
     sacct_bin,
     " --starttime=$(date -d '", days_back, " days ago' +%Y-%m-%d 2>/dev/null || ",
     "date -v-", days_back, "d +%Y-%m-%d)",
-    " --format=JobID%20,JobName%50,State%20,Elapsed%15,WorkDir%120",
+    " --format=JobID%20,JobName%50,State%20,Elapsed%15,WorkDir%120,StdOut%300",
     " --parsable2 --noheader",
     " 2>/dev/null | grep -i diann | grep -v '\\.' "
   )
@@ -812,6 +813,11 @@ recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back 
   # WorkDir is field 5 (may be missing for some jobs)
   df$work_dir <- vapply(parsed, function(p) {
     if (length(p) >= 5) trimws(p[5]) else ""
+  }, character(1))
+
+  # StdOut is field 6 — contains log path template (may have %j, %A placeholders)
+  df$std_out <- vapply(parsed, function(p) {
+    if (length(p) >= 6) trimws(p[6]) else ""
   }, character(1))
 
   df
@@ -1281,6 +1287,132 @@ estimate_search_time <- function(n_files, search_mode = "libfree", cpus = 64) {
 }
 
 # =============================================================================
+# Search Info Archive
+# =============================================================================
+
+#' Generate search_info.md content for archiving search metadata
+#'
+#' Creates a markdown file with all search parameters, job IDs, and file paths
+#' so that search history is preserved even if SLURM purges its records.
+#'
+#' @param analysis_name Character: name of the analysis
+#' @param output_dir Character: output directory path
+#' @param raw_files Character vector: raw file paths
+#' @param fasta_files Character vector: FASTA file paths
+#' @param search_params List: search parameters
+#' @param search_mode Character: "libfree", "lib", or "phospho"
+#' @param normalization Character: "on" or "off"
+#' @param sif_path Character: path to DIA-NN Apptainer SIF
+#' @param job_ids Named list or character: job ID(s). For parallel: list(step1="id", ...).
+#'   For single: character scalar.
+#' @param parallel Logical: whether this is a parallel (5-step) search
+#' @param resources Named list: CPU/memory/time per step
+#' @param partition Character: SLURM partition
+#' @param account Character: SLURM account
+#' @return Character: markdown content
+generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_files,
+                                  search_params, search_mode = "libfree",
+                                  normalization = "on", sif_path = "",
+                                  job_ids = NULL, parallel = FALSE,
+                                  resources = list(), partition = "", account = "",
+                                  cached_speclib = NULL, custom_fasta_sequences = NULL) {
+
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
+
+  # Job IDs section
+  if (parallel && is.list(job_ids)) {
+    step_labels <- c(step1 = "Library Prediction", step2 = "First-pass Quant (array)",
+                     step3 = "Empirical Library Assembly", step4 = "Final-pass Quant (array)",
+                     step5 = "Cross-run Report")
+    job_lines <- vapply(names(job_ids), function(s) {
+      sprintf("- **%s** (%s): `%s`", step_labels[s] %||% s, s, job_ids[[s]])
+    }, character(1))
+    job_section <- paste(c("### Job IDs (5-Step Parallel)", job_lines), collapse = "\n")
+  } else {
+    job_section <- sprintf("### Job ID\n- `%s`", as.character(job_ids)[1])
+  }
+
+  # Resources section
+  res_lines <- character()
+  if (length(resources) > 0) {
+    for (nm in names(resources)) {
+      r <- resources[[nm]]
+      res_lines <- c(res_lines, sprintf("- **%s**: %d CPUs, %dG memory, %dh walltime",
+        nm, r$cpus %||% 0, r$mem %||% 0, r$time %||% 0))
+    }
+  }
+  res_section <- if (length(res_lines) > 0) {
+    paste(c("### Resources", res_lines), collapse = "\n")
+  } else ""
+
+  # Search params section
+  param_lines <- vapply(names(search_params), function(nm) {
+    val <- search_params[[nm]]
+    if (is.null(val)) return("")
+    sprintf("- **%s**: `%s`", nm, paste(as.character(val), collapse = ", "))
+  }, character(1))
+  param_lines <- param_lines[nzchar(param_lines)]
+
+  # Raw files
+  file_lines <- sprintf("- `%s`", raw_files)
+  if (length(file_lines) > 50) {
+    file_lines <- c(file_lines[1:50], sprintf("- ... and %d more files", length(file_lines) - 50))
+  }
+
+  # FASTA files
+  fasta_lines <- if (length(fasta_files) > 0 && any(nzchar(fasta_files))) {
+    sprintf("- `%s`", fasta_files[nzchar(fasta_files)])
+  } else "- (none)"
+
+  # Cached spectral library section
+  cache_section <- if (!is.null(cached_speclib)) {
+    paste(c(
+      "### Cached Spectral Library",
+      sprintf("- **Source**: `%s` (from analysis: %s)",
+              cached_speclib$speclib_path, cached_speclib$analysis_name),
+      sprintf("- **Cache key**: `%s`", cached_speclib$key)
+    ), collapse = "\n")
+  } else ""
+
+  # Custom FASTA sequences section
+  custom_fasta_section <- if (!is.null(custom_fasta_sequences) &&
+                               nzchar(trimws(custom_fasta_sequences))) {
+    paste(c(
+      "### Custom Protein Sequences",
+      "```fasta",
+      trimws(custom_fasta_sequences),
+      "```"
+    ), collapse = "\n")
+  } else ""
+
+  paste(c(
+    sprintf("# DIA-NN Search: %s", analysis_name),
+    "",
+    sprintf("**Submitted**: %s", timestamp),
+    sprintf("**Output directory**: `%s`", output_dir),
+    sprintf("**Search mode**: %s", search_mode),
+    sprintf("**Normalization**: %s", normalization),
+    sprintf("**DIA-NN container**: `%s`", sif_path),
+    sprintf("**Partition**: %s | **Account**: %s", partition, account),
+    "",
+    job_section,
+    "",
+    res_section,
+    "",
+    "### Search Parameters",
+    param_lines,
+    "",
+    sprintf("### Raw Files (%d)", length(raw_files)),
+    file_lines,
+    "",
+    "### FASTA Files",
+    fasta_lines,
+    if (nzchar(cache_section)) c("", cache_section),
+    if (nzchar(custom_fasta_section)) c("", custom_fasta_section)
+  ), collapse = "\n")
+}
+
+# =============================================================================
 # Parallel DIA-NN Search (5-Step Workflow)
 # =============================================================================
 
@@ -1329,7 +1461,9 @@ generate_parallel_scripts <- function(
   libpred_cpus = 16, libpred_mem = 64, libpred_time = 4,
   assembly_cpus = 64, assembly_mem = 512, assembly_time = 12,
   partition = "high", account = "genome-center-grp",
-  search_params = list(), max_simultaneous = 20
+  search_params = list(), max_simultaneous = 20,
+  array_partition = NULL, array_account = NULL,
+  assembly_partition = NULL, assembly_account = NULL
 ) {
   n_files <- length(raw_files)
   has_fasta <- length(fasta_files) > 0 && any(nzchar(fasta_files))
@@ -1396,8 +1530,17 @@ generate_parallel_scripts <- function(
     step_flags <- step_flags[!grepl(pat, step_flags)]
   }
 
+  # Resolve per-step partition/account overrides (NULL = use default)
+  arr_part <- array_partition %||% partition
+  arr_acct <- array_account %||% account
+  asm_part <- assembly_partition %||% partition
+  asm_acct <- assembly_account %||% account
+  arr_requeue <- tolower(arr_part) == "low"  # preemptible partition
+
   # --- SBATCH header helper ---
-  sbatch_header <- function(job_suffix, cpus, mem_gb, time_hours, array_spec = NULL) {
+  sbatch_header <- function(job_suffix, cpus, mem_gb, time_hours,
+                            array_spec = NULL, step_partition = partition,
+                            step_account = account, requeue = FALSE) {
     lines <- c(
       '#!/bin/bash -l',
       sprintf('#SBATCH --job-name=diann_%s_%s', analysis_name, job_suffix),
@@ -1405,10 +1548,13 @@ generate_parallel_scripts <- function(
       sprintf('#SBATCH --mem=%dG', mem_gb),
       sprintf('#SBATCH -o %s/diann_%s_%%j.out', output_dir, job_suffix),
       sprintf('#SBATCH -e %s/diann_%s_%%j.err', output_dir, job_suffix),
-      sprintf('#SBATCH --account=%s', account),
+      sprintf('#SBATCH --account=%s', step_account),
       sprintf('#SBATCH --time=%d:00:00', time_hours),
-      sprintf('#SBATCH --partition=%s', partition)
+      sprintf('#SBATCH --partition=%s', step_partition)
     )
+    if (isTRUE(requeue)) {
+      lines <- c(lines, '#SBATCH --requeue')
+    }
     if (!is.null(array_spec)) {
       lines <- c(lines, sprintf('#SBATCH --array=%s', array_spec))
     }
@@ -1435,7 +1581,7 @@ generate_parallel_scripts <- function(
       "--fasta-search",
       "--predictor",
       "--gen-spec-lib",
-      sprintf("--out-lib /work/out/predicted.speclib"),
+      sprintf("--out-lib /work/out/step1.speclib"),
       sprintf("--threads %d", libpred_cpus)
     )
     # Remove --fasta-search and --predictor from step_flags if already present (avoid dups)
@@ -1458,7 +1604,9 @@ generate_parallel_scripts <- function(
     step1_cmd_parts[last] <- sub(" \\\\$", "", step1_cmd_parts[last])
 
     paste0(
-      sbatch_header("s1_libpred", libpred_cpus, libpred_mem, libpred_time), "\n\n",
+      sbatch_header("s1_libpred", libpred_cpus, libpred_mem, libpred_time,
+                    step_partition = arr_part, step_account = arr_acct,
+                    requeue = arr_requeue), "\n\n",
       "module load apptainer\n\n",
       sprintf('echo "Step 1/5: Library Prediction for %s"\n', analysis_name),
       'echo "Started: $(date)"\n\n',
@@ -1473,12 +1621,13 @@ generate_parallel_scripts <- function(
   # =========================================================================
   # Step 2 — First-pass per-file (SLURM array)
   # =========================================================================
-  predicted_lib <- if (has_speclib) speclib_mount else "/work/out/predicted.speclib"
+  predicted_lib <- if (has_speclib) speclib_mount else "/work/out/step1.predicted.speclib"
   array_spec_2 <- sprintf("0-%d%%%d", n_files - 1, max_simultaneous)
 
   step2_script <- paste0(
     sbatch_header("s2_firstpass", cpus_per_file, mem_per_file, time_per_file,
-                  array_spec = array_spec_2), "\n\n",
+                  array_spec = array_spec_2, step_partition = arr_part,
+                  step_account = arr_acct, requeue = arr_requeue), "\n\n",
     "module load apptainer\n\n",
     sprintf('echo "Step 2/5: First-pass file ${SLURM_ARRAY_TASK_ID} of %d"\n', n_files),
     'echo "Started: $(date)"\n\n',
@@ -1512,7 +1661,8 @@ generate_parallel_scripts <- function(
   # Step 3 — Empirical Library Assembly (single job)
   # =========================================================================
   step3_script <- paste0(
-    sbatch_header("s3_assembly", assembly_cpus, assembly_mem, assembly_time), "\n\n",
+    sbatch_header("s3_assembly", assembly_cpus, assembly_mem, assembly_time,
+                  step_partition = asm_part, step_account = asm_acct), "\n\n",
     "module load apptainer\n\n",
     sprintf('echo "Step 3/5: Empirical Library Assembly for %s"\n', analysis_name),
     'echo "Started: $(date)"\n\n',
@@ -1540,7 +1690,8 @@ generate_parallel_scripts <- function(
 
   step4_script <- paste0(
     sbatch_header("s4_finalpass", cpus_per_file, mem_per_file, time_per_file,
-                  array_spec = array_spec_4), "\n\n",
+                  array_spec = array_spec_4, step_partition = arr_part,
+                  step_account = arr_acct, requeue = arr_requeue), "\n\n",
     "module load apptainer\n\n",
     sprintf('echo "Step 4/5: Final-pass file ${SLURM_ARRAY_TASK_ID} of %d"\n', n_files),
     'echo "Started: $(date)"\n\n',
@@ -1575,7 +1726,8 @@ generate_parallel_scripts <- function(
   norm_flag <- if (normalization == "off") "--no-norm" else ""
 
   step5_script <- paste0(
-    sbatch_header("s5_report", assembly_cpus, assembly_mem, assembly_time), "\n\n",
+    sbatch_header("s5_report", assembly_cpus, assembly_mem, assembly_time,
+                  step_partition = asm_part, step_account = asm_acct), "\n\n",
     "module load apptainer\n\n",
     sprintf('echo "Step 5/5: Cross-run Report for %s"\n', analysis_name),
     'echo "Started: $(date)"\n\n',
@@ -1718,4 +1870,115 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
   }
 
   result
+}
+
+# =============================================================================
+# Predicted Spectral Library Caching
+# =============================================================================
+
+#' Compute a cache key for a predicted spectral library
+#'
+#' The key is an MD5 hash of the FASTA file basenames (sorted, path-independent)
+#' plus the subset of search parameters that affect library prediction.
+#'
+#' @param fasta_files Character vector of FASTA file paths
+#' @param search_params Named list of search parameters
+#' @param search_mode Character: "libfree", "phospho", etc.
+#' @param custom_fasta_text Character or NULL: raw custom FASTA sequences text
+#'   (included in hash since the filename is always custom_proteins.fasta)
+#' @return Character: MD5 hex digest
+speclib_cache_key <- function(fasta_files, search_params, search_mode,
+                               custom_fasta_text = NULL) {
+  # Parameters that affect library prediction
+  libpred_params <- c("enzyme", "missed_cleavages", "min_pep_len", "max_pep_len",
+                       "min_pr_mz", "max_pr_mz", "min_pr_charge", "max_pr_charge",
+                       "min_fr_mz", "max_fr_mz", "met_excision", "mod_met_ox",
+                       "mod_nterm_acetyl", "extra_var_mods", "max_var_mods", "unimod4")
+  sp_subset <- search_params[intersect(names(search_params), libpred_params)]
+  # Sort for deterministic ordering
+  sp_subset <- sp_subset[sort(names(sp_subset))]
+
+  canonical <- list(
+    fasta = sort(basename(fasta_files)),
+    search_mode = search_mode,
+    params = sp_subset,
+    custom_fasta = if (!is.null(custom_fasta_text) && nzchar(trimws(custom_fasta_text))) {
+      trimws(custom_fasta_text)
+    }
+  )
+  digest::digest(canonical, algo = "md5")
+}
+
+#' Path to the speclib cache file
+#' @return Character: file path
+speclib_cache_path <- function() {
+  file.path(Sys.getenv("HOME"), ".delimp_speclib_cache.rds")
+}
+
+#' Load the speclib cache registry
+#' @return List of cache entries
+speclib_cache_load <- function() {
+  path <- speclib_cache_path()
+  if (file.exists(path)) {
+    tryCatch(readRDS(path), error = function(e) list())
+  } else {
+    list()
+  }
+}
+
+#' Save the speclib cache registry
+#' @param cache List of cache entries
+speclib_cache_save <- function(cache) {
+  saveRDS(cache, speclib_cache_path())
+}
+
+#' Register a predicted spectral library in the cache
+#'
+#' @param fasta_files Character vector of FASTA paths
+#' @param search_params Named list of search parameters
+#' @param search_mode Character: search mode
+#' @param speclib_path Character: full path to the .predicted.speclib file
+#' @param analysis_name Character: name of the analysis that produced this library
+#' @param output_dir Character: output directory of the analysis
+speclib_cache_register <- function(fasta_files, search_params, search_mode,
+                                    speclib_path, analysis_name, output_dir,
+                                    custom_fasta_text = NULL) {
+  key <- speclib_cache_key(fasta_files, search_params, search_mode, custom_fasta_text)
+  cache <- speclib_cache_load()
+
+  entry <- list(
+    key = key,
+    speclib_path = speclib_path,
+    fasta_files = basename(fasta_files),
+    search_mode = search_mode,
+    params_subset = search_params[intersect(names(search_params),
+      c("enzyme", "missed_cleavages", "min_pep_len", "max_pep_len",
+        "min_pr_mz", "max_pr_mz", "min_pr_charge", "max_pr_charge",
+        "min_fr_mz", "max_fr_mz", "met_excision", "mod_met_ox",
+        "mod_nterm_acetyl", "extra_var_mods", "max_var_mods", "unimod4"))],
+    analysis_name = analysis_name,
+    created_at = Sys.time(),
+    output_dir = output_dir
+  )
+
+  # Deduplicate on key (newer wins)
+  cache <- Filter(function(e) e$key != key, cache)
+  cache <- c(cache, list(entry))
+  speclib_cache_save(cache)
+}
+
+#' Look up a cached predicted spectral library
+#'
+#' @param fasta_files Character vector of FASTA paths
+#' @param search_params Named list of search parameters
+#' @param search_mode Character: search mode
+#' @return Matching cache entry (list) or NULL
+speclib_cache_lookup <- function(fasta_files, search_params, search_mode,
+                                  custom_fasta_text = NULL) {
+  key <- speclib_cache_key(fasta_files, search_params, search_mode, custom_fasta_text)
+  cache <- speclib_cache_load()
+  for (entry in cache) {
+    if (identical(entry$key, key)) return(entry)
+  }
+  NULL
 }

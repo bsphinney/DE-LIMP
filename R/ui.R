@@ -489,6 +489,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                        "HaoGroup-ProtContLib", target = "_blank"))
             ),
 
+            div(style = "margin-top: 10px;",
+              textAreaInput("custom_fasta_sequences",
+                "Custom Protein Sequences (FASTA format):",
+                placeholder = ">sp|CUSTOM1|My_Protein\nMSEQUENCE...",
+                rows = 3, width = "100%"),
+              tags$small(class = "text-muted",
+                "Paste FASTA-formatted sequences for custom proteins, tagged constructs, etc. ",
+                "These are added to your search alongside the main database.")
+            ),
+
             hr(),
             tags$h6(icon("book"), " Spectral Library (optional)"),
             conditionalPanel(

@@ -313,8 +313,20 @@ server_search <- function(input, output, session, values, add_to_log,
       }, error = function(e) {
         values$cluster_resources <- list(success = FALSE, error = e$message)
       })
+      # Also check publicgrp/low for free capacity recommendation
+      acct <- isolate(input$diann_account) %||% ""
+      if (tolower(acct) != "publicgrp") {
+        tryCatch({
+          pub_res <- check_cluster_resources(
+            ssh_config = cfg, account = "publicgrp",
+            partition = "low", sbatch_path = result$sbatch_path
+          )
+          values$public_resources <- pub_res
+        }, error = function(e) NULL)
+      }
     } else {
       values$cluster_resources <- NULL
+      values$public_resources <- NULL
     }
   })
 
@@ -335,6 +347,14 @@ server_search <- function(input, output, session, values, add_to_log,
       res <- check_cluster_resources(cfg, account, partition, sbatch_path)
       values$cluster_resources <- res
     }, error = function(e) NULL)
+
+    # Also check publicgrp/low for free capacity recommendation
+    if (tolower(account) != "publicgrp") {
+      tryCatch({
+        pub_res <- check_cluster_resources(cfg, "publicgrp", "low", sbatch_path)
+        values$public_resources <- pub_res
+      }, error = function(e) NULL)
+    }
   })
 
   output$cluster_status_ui <- renderUI({
@@ -410,14 +430,117 @@ server_search <- function(input, output, session, values, add_to_log,
     indicator <- span(style = sprintf("color: %s; font-size: 1.1em;", color),
       HTML("&#9679;"))  # filled circle
 
+    # --- Partition recommendation banner ---
+    recommendation_ui <- NULL
+    pub_res <- values$public_resources
+    is_parallel <- isTRUE(isolate(input$parallel_search))
+    already_public <- tolower(account_name) == "publicgrp"
+
+    if (!already_public && (has_group || has_partition)) {
+      # Estimate peak CPU need
+      if (is_parallel) {
+        cpus_per <- isolate(input$parallel_cpus) %||% 16
+        max_sim <- isolate(input$max_simultaneous) %||% 20
+        peak_cpus <- max(32, cpus_per * max_sim)
+      } else {
+        peak_cpus <- isolate(input$diann_cpus) %||% 64
+      }
+
+      pub_idle <- if (!is.null(pub_res) && isTRUE(pub_res$success)) {
+        pub_res$partition_idle %||% 0
+      } else 0
+
+      # Determine if current partition is tight
+      # Use group limit if available, otherwise fall back to partition idle %
+      partition_tight <- FALSE
+      capacity_msg <- ""
+      if (has_group && res$group_limit > 0) {
+        group_avail <- res$group_available %||% 0
+        partition_tight <- group_avail < peak_cpus
+        capacity_msg <- sprintf("Your group is near its CPU limit (%s/%s). ",
+          format(res$group_used, big.mark = ","),
+          format(res$group_limit, big.mark = ","))
+      } else if (has_partition && res$partition_total > 0) {
+        partition_idle <- res$partition_idle %||% 0
+        pct_idle <- partition_idle / res$partition_total
+        # Tight if <30% idle or fewer idle CPUs than the job needs
+        partition_tight <- pct_idle < 0.3 || partition_idle < peak_cpus
+        capacity_msg <- sprintf("%s partition: %s idle of %s total (%d%% idle). ",
+          partition_name,
+          format(partition_idle, big.mark = ","),
+          format(res$partition_total, big.mark = ","),
+          round(pct_idle * 100))
+      } else if (!is.na(res$group_used) && res$group_used > 0) {
+        # No limit known, but usage is high — suggest if >500 CPUs in use
+        partition_tight <- res$group_used > 500
+        capacity_msg <- sprintf("Your group has %s CPUs in use. ",
+          format(res$group_used, big.mark = ","))
+      }
+
+      if (!partition_tight) {
+        # Green — enough capacity, no recommendation needed
+      } else if (pub_idle > peak_cpus) {
+        # Amber — suggest publicgrp/low
+        recommendation_ui <- div(
+          style = "background: #fff3cd; border: 1px solid #ffecb5; border-radius: 4px; padding: 5px 8px; margin-top: 6px; font-size: 0.8em;",
+          tags$strong("Suggestion: "),
+          capacity_msg,
+          sprintf("The free cluster has %s idle CPUs", format(pub_idle, big.mark = ",")),
+          if (is_parallel) " \u2014 array steps can run on publicgrp/low (preemptible, auto-requeued)."
+          else " \u2014 your job can run on publicgrp/low (preemptible, auto-requeued).",
+          div(style = "margin-top: 4px;",
+            actionButton("apply_partition_suggestion", "Apply publicgrp/low",
+              class = "btn-warning btn-sm",
+              style = "padding: 1px 8px; font-size: 0.8em;"))
+        )
+      } else {
+        # Red — both tight
+        recommendation_ui <- div(
+          style = "background: #f8d7da; border: 1px solid #f5c2c7; border-radius: 4px; padding: 5px 8px; margin-top: 6px; font-size: 0.8em;",
+          tags$strong("Cluster congested: "),
+          capacity_msg,
+          sprintf("Free cluster: %s idle CPUs. Jobs may queue.",
+            format(pub_idle, big.mark = ","))
+        )
+      }
+    }
+
     div(
       style = sprintf(
         "background: %s; border: 1px solid %s; border-radius: 6px; padding: 6px 10px; margin-top: 8px; font-size: 0.82em;",
         bg, border),
       div(indicator, " ", if (!is.null(group_line)) group_line),
       if (!is.null(partition_line)) div(
-        style = "margin-left: 20px; color: #555;", partition_line)
+        style = "margin-left: 20px; color: #555;", partition_line),
+      recommendation_ui
     )
+  })
+
+  # ============================================================================
+  #    Apply Partition Recommendation
+  # ============================================================================
+
+  observeEvent(input$apply_partition_suggestion, {
+    is_parallel <- isTRUE(input$parallel_search)
+    if (is_parallel) {
+      # Hybrid mode: array steps on publicgrp/low, assembly stays on user's group
+      values$use_hybrid_partition <- TRUE
+      values$original_partition <- input$diann_partition
+      values$original_account <- input$diann_account
+      updateTextInput(session, "diann_partition", value = "low")
+      updateTextInput(session, "diann_account", value = "publicgrp")
+      showNotification(
+        "Hybrid mode: array steps (1/2/4) will use publicgrp/low (preemptible). Assembly steps (3/5) stay on your group.",
+        type = "message", duration = 8)
+    } else {
+      # Single job: switch entirely to publicgrp/low
+      values$use_hybrid_partition <- FALSE
+      updateTextInput(session, "diann_partition", value = "low")
+      updateTextInput(session, "diann_account", value = "publicgrp")
+      showNotification(
+        "Partition set to publicgrp/low. Job will be preemptible (auto-requeued if preempted).",
+        type = "message", duration = 6)
+    }
   })
 
   # ============================================================================
@@ -1084,6 +1207,77 @@ server_search <- function(input, output, session, values, add_to_log,
     }
 
     # ====================================================================
+    #  Custom FASTA sequences — write temp file, append to fasta_files
+    # ====================================================================
+    custom_fasta_text <- NULL
+    if (!is.null(input$custom_fasta_sequences) &&
+        nzchar(trimws(input$custom_fasta_sequences))) {
+      custom_seq <- trimws(input$custom_fasta_sequences)
+      # Basic validation: must start with >
+      if (!grepl("^>", custom_seq)) {
+        showNotification("Custom sequences must be in FASTA format (start with '>')",
+          type = "warning", duration = 8)
+      } else {
+        custom_fasta_text <- custom_seq
+        custom_fasta_local <- file.path(tempdir(), "custom_proteins.fasta")
+        writeLines(custom_seq, custom_fasta_local)
+
+        if (backend == "hpc" && !is.null(cfg)) {
+          # SSH mode: upload to output dir
+          remote_custom_path <- file.path(output_dir, "custom_proteins.fasta")
+          scp_upload(cfg, custom_fasta_local, remote_custom_path)
+          fasta_files <- c(fasta_files, remote_custom_path)
+        } else {
+          # Docker/local: write to output dir
+          local_custom_path <- file.path(output_dir, "custom_proteins.fasta")
+          file.copy(custom_fasta_local, local_custom_path, overwrite = TRUE)
+          fasta_files <- c(fasta_files, local_custom_path)
+        }
+        showNotification("Added custom protein sequences to search",
+          type = "message", duration = 5)
+      }
+    }
+
+    # ====================================================================
+    #  Predicted library cache lookup — reuse if same FASTA + params
+    # ====================================================================
+    cached_entry <- NULL
+    if (is.null(values$diann_speclib) || !nzchar(values$diann_speclib)) {
+      cached_entry <- speclib_cache_lookup(fasta_files, search_params, input$search_mode,
+                                           custom_fasta_text)
+      if (!is.null(cached_entry)) {
+        # Verify the cached speclib file still exists
+        speclib_exists <- FALSE
+        if (backend == "hpc" && !is.null(cfg)) {
+          res <- tryCatch(
+            ssh_exec(cfg, paste("test -f", shQuote(cached_entry$speclib_path),
+                                "&& echo EXISTS")),
+            error = function(e) list(stdout = ""))
+          speclib_exists <- any(grepl("EXISTS", res$stdout))
+        } else {
+          speclib_exists <- file.exists(cached_entry$speclib_path)
+        }
+
+        if (speclib_exists) {
+          values$diann_speclib <- cached_entry$speclib_path
+          showNotification(
+            sprintf("Reusing predicted library from '%s' \u2014 skipping Step 1",
+                    cached_entry$analysis_name),
+            type = "message", duration = 10)
+        } else {
+          cached_entry <- NULL  # File gone, can't reuse
+        }
+      }
+
+      # Notify when no cache hit and Step 1 will run
+      if (is.null(cached_entry) && (is.null(values$diann_speclib) || !nzchar(values$diann_speclib))) {
+        showNotification(
+          "No cached library found \u2014 Step 1 (library prediction) will run (~30\u201360 min for human proteome)",
+          type = "message", duration = 8)
+      }
+    }
+
+    # ====================================================================
     #  Backend-specific submission
     # ====================================================================
 
@@ -1248,7 +1442,20 @@ server_search <- function(input, output, session, values, add_to_log,
       use_login_shell <- is.null(values$ssh_sbatch_path)
 
       # Generate all 5 scripts
-      scripts <- generate_parallel_scripts(
+      # Hybrid partition: array steps on publicgrp/low, assembly on user's group
+      hybrid <- isTRUE(values$use_hybrid_partition)
+      hybrid_args <- if (hybrid) {
+        list(
+          array_partition = input$diann_partition,
+          array_account = input$diann_account,
+          assembly_partition = values$original_partition %||% input$diann_partition,
+          assembly_account = values$original_account %||% input$diann_account
+        )
+      } else {
+        list()
+      }
+
+      scripts <- do.call(generate_parallel_scripts, c(list(
         analysis_name = analysis_name,
         raw_files = values$diann_raw_files$full_path,
         fasta_files = fasta_files,
@@ -1260,14 +1467,14 @@ server_search <- function(input, output, session, values, add_to_log,
         cpus_per_file = input$parallel_cpus %||% 16,
         mem_per_file = input$parallel_mem_gb %||% 32,
         time_per_file = input$parallel_time_hours %||% 2,
-        assembly_cpus = input$diann_cpus,
-        assembly_mem = input$diann_mem_gb,
+        assembly_cpus = 32,
+        assembly_mem = 256,
         assembly_time = input$diann_time_hours,
         partition = input$diann_partition,
         account = input$diann_account,
         search_params = search_params,
         max_simultaneous = input$max_simultaneous %||% 20
-      )
+      ), hybrid_args))
 
       # --- Upload all files + launcher, then submit via one SSH call ---
       # Minimizes SSH connections to avoid HPC MaxStartups throttling.
@@ -1329,6 +1536,36 @@ server_search <- function(input, output, session, values, add_to_log,
       file.copy(file_list_local, file.path(upload_dir, "file_list.txt"))
       writeLines(paste(launcher_lines, collapse = "\n"),
                  file.path(upload_dir, "submit_all.sh"))
+
+      # Write search_info.md — archives all metadata so recovery works
+      # even after SLURM purges job records
+      search_info <- generate_search_info(
+        analysis_name = analysis_name,
+        output_dir = output_dir,
+        raw_files = values$diann_raw_files$full_path,
+        fasta_files = fasta_files,
+        search_params = search_params,
+        search_mode = input$search_mode,
+        normalization = input$diann_normalization,
+        sif_path = sif_path,
+        job_ids = NULL,  # Updated after submission with actual IDs
+        parallel = TRUE,
+        resources = list(
+          "Step 1 (Library Prediction)" = list(cpus = 16, mem = 64, time = 4),
+          "Steps 2/4 (Per-file Quant)" = list(
+            cpus = input$parallel_cpus %||% 16,
+            mem = input$parallel_mem_gb %||% 32,
+            time = input$parallel_time_hours %||% 2),
+          "Steps 3/5 (Assembly/Report)" = list(
+            cpus = 32, mem = 256,
+            time = input$diann_time_hours)
+        ),
+        partition = input$diann_partition,
+        account = input$diann_account,
+        cached_speclib = cached_entry,
+        custom_fasta_sequences = custom_fasta_text
+      )
+      writeLines(search_info, file.path(upload_dir, "search_info.md"))
 
       step_ids <- new.env(parent = emptyenv())
       pstate <- new.env(parent = emptyenv())
@@ -1515,6 +1752,7 @@ server_search <- function(input, output, session, values, add_to_log,
           search_params = search_params,
           fasta_files = fasta_files,
           contaminant_library = contam_lib,
+          custom_fasta_text = custom_fasta_text,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
             tools::file_ext(values$diann_raw_files$filename[1]) else "unknown",
@@ -1540,8 +1778,48 @@ server_search <- function(input, output, session, values, add_to_log,
         log_content = "",
         completed_at = NULL,
         loaded = FALSE,
-        is_ssh = !is.null(cfg)
+        is_ssh = !is.null(cfg),
+        speclib_cached = !is.null(cached_entry)
       )
+
+      # Update search_info.md with actual job IDs
+      tryCatch({
+        job_id_list <- as.list(step_ids)
+        updated_info <- generate_search_info(
+          analysis_name = analysis_name,
+          output_dir = output_dir,
+          raw_files = values$diann_raw_files$full_path,
+          fasta_files = fasta_files,
+          search_params = search_params,
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          sif_path = sif_path,
+          job_ids = job_id_list,
+          parallel = TRUE,
+          resources = list(
+            "Step 1 (Library Prediction)" = list(cpus = 16, mem = 64, time = 4),
+            "Steps 2/4 (Per-file Quant)" = list(
+              cpus = input$parallel_cpus %||% 16,
+              mem = input$parallel_mem_gb %||% 32,
+              time = input$parallel_time_hours %||% 2),
+            "Steps 3/5 (Assembly/Report)" = list(
+              cpus = 32, mem = 256,
+              time = input$diann_time_hours)
+          ),
+          partition = input$diann_partition,
+          account = input$diann_account,
+          cached_speclib = cached_entry,
+          custom_fasta_sequences = custom_fasta_text
+        )
+        local_info <- tempfile(fileext = ".md")
+        writeLines(updated_info, local_info)
+        if (!is.null(cfg)) {
+          scp_upload(cfg, local_info, file.path(output_dir, "search_info.md"))
+        } else {
+          file.copy(local_info, file.path(output_dir, "search_info.md"), overwrite = TRUE)
+        }
+        unlink(local_info)
+      }, error = function(e) message("[DE-LIMP] Could not update search_info.md: ", e$message))
 
     } else {
       # --- HPC (SLURM) standard single-job submission ---
@@ -1562,7 +1840,8 @@ server_search <- function(input, output, session, values, add_to_log,
         time_hours = input$diann_time_hours,
         partition = input$diann_partition,
         account = input$diann_account,
-        search_params = search_params
+        search_params = search_params,
+        requeue = (tolower(input$diann_partition) == "low")
       )
 
       # Write sbatch script and submit
@@ -1660,10 +1939,47 @@ server_search <- function(input, output, session, values, add_to_log,
         loaded = FALSE,
         is_ssh = !is.null(cfg)
       )
+
+      # Write search_info.md for single-job submission
+      tryCatch({
+        search_info <- generate_search_info(
+          analysis_name = analysis_name,
+          output_dir = output_dir,
+          raw_files = values$diann_raw_files$full_path,
+          fasta_files = fasta_files,
+          search_params = search_params,
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          sif_path = sif_path,
+          job_ids = job_id,
+          parallel = FALSE,
+          resources = list(
+            "Single Job" = list(
+              cpus = input$diann_cpus,
+              mem = input$diann_mem_gb,
+              time = input$diann_time_hours)
+          ),
+          partition = input$diann_partition,
+          account = input$diann_account,
+          cached_speclib = cached_entry,
+          custom_fasta_sequences = custom_fasta_text
+        )
+        local_info <- tempfile(fileext = ".md")
+        writeLines(search_info, local_info)
+        if (!is.null(cfg)) {
+          scp_upload(cfg, local_info, file.path(output_dir, "search_info.md"))
+        } else {
+          file.copy(local_info, file.path(output_dir, "search_info.md"), overwrite = TRUE)
+        }
+        unlink(local_info)
+      }, error = function(e) message("[DE-LIMP] Could not write search_info.md: ", e$message))
     }
 
     # --- Shared: add to queue & notify ---
     values$diann_jobs <- c(values$diann_jobs, list(job_entry))
+
+    # Reset hybrid partition state after submission
+    values$use_hybrid_partition <- FALSE
 
     # Record in SQLite if core facility mode is active
     if (is_core_facility && !is.null(cf_config)) {
@@ -1984,6 +2300,36 @@ server_search <- function(input, output, session, values, add_to_log,
                 type = "warning", duration = 10)
             })
           }
+
+          # Register predicted spectral library in cache
+          if (isTRUE(jobs[[i]]$parallel) && !isTRUE(jobs[[i]]$speclib_cached)) {
+            tryCatch({
+              ss <- jobs[[i]]$search_settings
+              speclib_path <- file.path(jobs[[i]]$output_dir, "step1.predicted.speclib")
+              speclib_exists <- if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+                res <- ssh_exec(cfg, paste("test -f", shQuote(speclib_path),
+                                            "&& echo EXISTS"))
+                any(grepl("EXISTS", res$stdout))
+              } else {
+                file.exists(speclib_path)
+              }
+              if (speclib_exists) {
+                speclib_cache_register(
+                  fasta_files = ss$fasta_files,
+                  search_params = ss$search_params,
+                  search_mode = ss$search_mode,
+                  speclib_path = speclib_path,
+                  analysis_name = jobs[[i]]$name,
+                  output_dir = jobs[[i]]$output_dir,
+                  custom_fasta_text = ss$custom_fasta_text
+                )
+                jobs[[i]]$speclib_cached <- TRUE
+                changed <- TRUE
+              }
+            }, error = function(e) {
+              message("[DE-LIMP] speclib cache registration failed: ", e$message)
+            })
+          }
         } else if (new_status == "failed") {
           showNotification(
             sprintf("DIA-NN search '%s' failed. Check log for details.", jobs[[i]]$name),
@@ -2295,12 +2641,18 @@ server_search <- function(input, output, session, values, add_to_log,
       )
     })
 
-    # Count terminal jobs for Clear Finished button
+    # Count terminal and failed jobs for action buttons
     n_terminal <- sum(vapply(jobs, function(j)
       j$status %in% c("completed", "failed", "cancelled"), logical(1)))
+    n_failed <- sum(vapply(jobs, function(j)
+      j$status %in% c("failed", "cancelled"), logical(1)))
 
     tagList(
       div(style = "display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px;",
+        if (n_failed >= 1) actionButton("clear_failed_jobs", "Clear Failed",
+          class = "btn-outline-danger btn-xs",
+          style = "font-size: 0.75em; padding: 2px 8px;",
+          icon = icon("trash-can")),
         if (n_terminal >= 2) actionButton("clear_finished_jobs", "Clear Finished",
           class = "btn-outline-secondary btn-xs",
           style = "font-size: 0.75em; padding: 2px 8px;",
@@ -2335,6 +2687,32 @@ server_search <- function(input, output, session, values, add_to_log,
         # View log modal
         observeEvent(input[[sprintf("view_log_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
+
+          # On-demand log fetch: if cached log says "Could not locate" but we have
+          # an output_dir, try fetching the log from the cluster now
+          if (grepl("Could not locate log file", job$log_content %||% "") &&
+              nzchar(job$output_dir %||% "") && job$output_dir != "(unknown)" &&
+              isTRUE(job$is_ssh)) {
+            cfg <- isolate(ssh_config())
+            if (!is.null(cfg)) {
+              log_path <- file.path(job$output_dir, sprintf("diann_%s.out", job$job_id))
+              tail_result <- tryCatch(
+                ssh_exec(cfg, sprintf("tail -150 %s 2>/dev/null", shQuote(log_path)),
+                  timeout = 15),
+                error = function(e) list(status = 1, stdout = character()))
+              if (tail_result$status == 0 && length(tail_result$stdout) > 0) {
+                fetched <- iconv(paste(tail_result$stdout, collapse = "\n"),
+                  from = "", to = "UTF-8", sub = "")
+                if (nzchar(fetched)) {
+                  jobs <- values$diann_jobs
+                  jobs[[idx]]$log_content <- fetched
+                  values$diann_jobs <- jobs
+                  job <- jobs[[idx]]
+                }
+              }
+            }
+          }
+
           safe_log <- iconv(job$log_content %||% "", from = "", to = "UTF-8", sub = "")
           showModal(modalDialog(
             title = sprintf("Log: %s (#%s)", job$name, job$job_id),
@@ -2649,6 +3027,16 @@ server_search <- function(input, output, session, values, add_to_log,
     registered_observers(existing)
   })
 
+  # Clear failed/cancelled jobs only
+  observeEvent(input$clear_failed_jobs, {
+    jobs <- values$diann_jobs
+    failed_statuses <- c("failed", "cancelled")
+    kept <- Filter(function(j) !(j$status %in% failed_statuses), jobs)
+    n_removed <- length(jobs) - length(kept)
+    values$diann_jobs <- kept
+    showNotification(sprintf("Cleared %d failed/cancelled job(s).", n_removed), type = "message")
+  }, ignoreInit = TRUE)
+
   # Clear all finished jobs
   observeEvent(input$clear_finished_jobs, {
     jobs <- values$diann_jobs
@@ -2746,7 +3134,8 @@ server_search <- function(input, output, session, values, add_to_log,
           )
 
           # Find the actual log file and output directory.
-          # Strategy 1: scontrol show job → StdOut path (most reliable for recent jobs)
+          # Strategy 0: StdOut from bulk sacct query (most reliable — works for old jobs)
+          # Strategy 1: scontrol show job → StdOut path (fallback for recent jobs)
           # Strategy 2: sacct SubmitLine → script path → derive output dir
           # Strategy 3: find in common HPC paths
           output_dir <- ""
@@ -2771,18 +3160,37 @@ server_search <- function(input, output, session, values, add_to_log,
           scontrol_bin <- if (nzchar(slurm_bin_dir)) file.path(slurm_bin_dir, "scontrol") else "scontrol"
           sacct_bin <- if (nzchar(slurm_bin_dir)) file.path(slurm_bin_dir, "sacct") else "sacct"
 
-          # Strategy 1: scontrol show job → extract StdOut path
-          # Use sed instead of grep -oP for portability (not all systems have PCRE grep)
-          scontrol_result <- tryCatch({
-            run_ssh(sprintf(
-              "%s show job %s 2>/dev/null | sed -n 's/.*StdOut=//p' | tr -d ' '",
-              scontrol_bin, row$job_id))
-          }, error = function(e) list(status = 1, stdout = character()))
+          # Strategy 0: Use StdOut from bulk sacct query (most reliable — works for old jobs)
+          # StdOut contains the log path template with %j/%A placeholders
+          if (nzchar(row$std_out %||% "")) {
+            expanded <- row$std_out
+            expanded <- gsub("%j", row$job_id, expanded, fixed = TRUE)
+            expanded <- gsub("%A", row$job_id, expanded, fixed = TRUE)
+            # Verify file exists on cluster
+            check_result <- tryCatch(
+              run_ssh(sprintf("ls %s 2>/dev/null", shQuote(expanded))),
+              error = function(e) list(status = 1, stdout = character()))
+            if (check_result$status == 0 && length(check_result$stdout) > 0 &&
+                nzchar(trimws(check_result$stdout[1]))) {
+              log_file <- trimws(check_result$stdout[1])
+              output_dir <- dirname(log_file)
+            }
+          }
 
-          if (scontrol_result$status == 0 && length(scontrol_result$stdout) > 0 &&
-              nzchar(trimws(scontrol_result$stdout[1]))) {
-            log_file <- trimws(scontrol_result$stdout[1])
-            output_dir <- dirname(log_file)
+          # Strategy 1: scontrol show job → extract StdOut path (skip if Strategy 0 worked)
+          # Use sed instead of grep -oP for portability (not all systems have PCRE grep)
+          if (!nzchar(log_file)) {
+            scontrol_result <- tryCatch({
+              run_ssh(sprintf(
+                "%s show job %s 2>/dev/null | sed -n 's/.*StdOut=//p' | tr -d ' '",
+                scontrol_bin, row$job_id))
+            }, error = function(e) list(status = 1, stdout = character()))
+
+            if (scontrol_result$status == 0 && length(scontrol_result$stdout) > 0 &&
+                nzchar(trimws(scontrol_result$stdout[1]))) {
+              log_file <- trimws(scontrol_result$stdout[1])
+              output_dir <- dirname(log_file)
+            }
           }
 
           # Strategy 2: sacct SubmitLine → derive from script path
