@@ -2,9 +2,13 @@
 
 # DE-LIMP: Differential Expression & Limpa Proteomics
 
-An R Shiny application for differential expression analysis of **label-free DIA proteomics data** (DIA-NN output). Uses the [limpa](https://bioconductor.org/packages/limpa/) pipeline (DPC-CN normalization, modified maxLFQ quantification) with [limma](https://bioconductor.org/packages/limma/) empirical Bayes moderated *t*-statistics and Benjamini-Hochberg FDR correction.
+Find which proteins are significantly different between your experimental conditions -- upload a DIA-NN output file and get interactive volcano plots, heatmaps, pathway enrichment, and AI-powered interpretation, all without writing code.
 
-**Input:** DIA-NN `report.parquet` (or `report.tsv`) | **Not for:** DDA data, TMT/iTRAQ, Spectronaut/MaxQuant output
+Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipeline (DPC-CN normalization, maxLFQ quantification) and [limma](https://bioconductor.org/packages/limma/) empirical Bayes moderated *t*-statistics with Benjamini-Hochberg FDR correction.
+
+**Input:** DIA-NN `report.parquet` | **Not for:** DDA data, TMT/iTRAQ, Spectronaut/MaxQuant output
+
+> **Not sure if your data is DIA?** If your core facility used DIA-NN to process your samples, you have DIA data. Look for a `report.parquet` file in your results folder. If your data was processed with MaxQuant, Spectronaut, or Proteome Discoverer, or if you used isobaric labels (TMT, iTRAQ), DE-LIMP is not the right tool.
 
 <br clear="left"/>
 
@@ -14,11 +18,13 @@ An R Shiny application for differential expression analysis of **label-free DIA 
 
 ---
 
-## What's New in v3.1
+## What's New in v3.2.0
 
-**UI Overhaul** -- Dark navbar with hover-activated dropdowns, collapsible accordion sidebar, DE Dashboard restructured into sub-tabs (Volcano, Results Table, PCA, Robust Changes), PCA moved from Data Overview into DE Dashboard.
+**About Tab & Community Dashboard** -- Live GitHub stats (stars, forks, visitors, clones) with 14-day trend sparklines, GitHub Discussions feed, version info, and project links.
 
-**Core Facility Mode** *(optional)* -- Activated by `DELIMP_CORE_DIR` env var. SQLite job tracking with lab/instrument/project metadata. Staff YAML auto-configures SSH/SLURM. Search DB tab with 6-filter job history. Instrument QC dashboard with trend plots and control lines. One-click Quarto HTML report generation. Template system for reproducible presets.
+**DIA-NN Search Improvements** -- Spectral library caching (reuse predicted libraries across searches), custom FASTA sequences (add protein sequences inline at submit time), real-time cluster resource indicator (traffic-light HPC CPU monitoring), parallel 5-step SLURM pipeline with dependency chaining, and reorganized search logs.
+
+**Previous highlights (v3.1 / v3.1.1):** UI overhaul (dark navbar, hover dropdowns, accordion sidebar, DE Dashboard sub-tabs). Core Facility Mode (SQLite job tracking, staff YAML, QC dashboard, Quarto reports). Volcano plot fixes (correct P.Value/adj.P.Val handling, DE count annotation, default logFC cutoff 0.6). CV Analysis redesign (scatter plot, ggplot subtitle). Export Data panel and AI Summary HTML export.
 
 **v3.0 highlights:** Multi-Omics MOFA2 (2-6 views), DIA-NN Docker search backend, phosphoproteomics (site-level DE, KSEA, motif analysis), GSEA expansion (BP/MF/CC/KEGG), all-contrast AI summary.
 
@@ -31,7 +37,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 ### Analysis & Visualization
 - **Volcano Plots** -- Interactive (Plotly), click or box-select proteins to highlight across all views; all pairwise contrasts available
 - **Heatmaps** -- Z-score heatmaps of selected or significant proteins (ComplexHeatmap)
-- **QC Trends** -- Precursor/protein counts across run order with group averages and MS1 signal
+- **QC Sample Metrics** -- Faceted trend plot (Precursors, Proteins, MS1 Signal, Data Completeness) with LOESS smoother for drift detection and group average lines
 - **MDS & DPC Plots** -- Sample clustering and normalization diagnostics
 - **Covariates** -- Include batch, sex, diet, or custom covariates in the linear model
 - **XIC Chromatogram Viewer** -- Fragment-level chromatogram validation, MS2 intensity alignment (Spectronaut-style), ion mobility/mobilogram support for timsTOF, DIA-NN v1/v2 formats (local/HPC only)
@@ -55,10 +61,15 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 ### DIA-NN Search Integration
 - **Three backends** -- Local, Docker, and HPC (SSH/SLURM)
+- **Parallel 5-step SLURM pipeline** -- Optimized search with dependency chaining and array jobs for maximum HPC throughput
+- **Spectral library caching** -- Reuse predicted libraries across searches to save compute time
+- **Custom FASTA sequences** -- Add custom protein sequences inline when submitting searches
+- **Cluster resource indicator** -- Real-time HPC CPU usage monitoring with traffic-light display (green/yellow/red)
 - **Windows Docker** -- `docker compose up` runs DE-LIMP + DIA-NN with zero R installation ([guide](WINDOWS_DOCKER_INSTALL.md))
 - **UniProt FASTA download** -- Search and download proteome databases directly; 6 bundled contaminant libraries
 - **Non-blocking job queue** -- Submit multiple searches, results auto-load on completion
 - **Phospho mode** -- Auto-configures DIA-NN for phospho analysis (STY modification, `--phospho-output`)
+- **Organized search logs** -- SLURM `.out`/`.err` and local `.log` files written to `{output_dir}/logs/`
 
 > **DIA-NN License:** DIA-NN is developed by [Vadim Demichev](https://github.com/vdemichev/DiaNN) and is free for academic/non-commercial use. It is not open source and cannot be redistributed. DE-LIMP does not bundle DIA-NN. See the [DIA-NN license](https://github.com/vdemichev/DiaNN/blob/master/LICENSE.md).
 
@@ -71,6 +82,8 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 > *Activated by setting `DELIMP_CORE_DIR`. Not visible on standard installations.*
 
 ### Session Management & Education
+- **About tab** -- Community stats dashboard with GitHub stars, forks, visitors, and clones (14-day trend sparklines), GitHub Discussions feed, version info, and project links
+- **Centralized versioning** -- `VERSION` file drives version display across all modules via `values$app_version`
 - Save/load full analysis state as `.rds`; export reproducibility R code log
 - One-click example data (Affinisep vs Evosep comparison)
 - Group assignment templates (CSV export/import)
@@ -117,7 +130,7 @@ All dependencies install automatically on first run:
 
 ## Usage
 
-1. **Load Data** -- Upload a DIA-NN `report.parquet` (or `.tsv`) output file, or click "Load Example Data" for a demo HeLa dataset
+1. **Load Data** -- Upload a DIA-NN `report.parquet` output file, or click "Load Example Data" for a demo HeLa dataset
 2. **Assign Groups & Run** -- Auto-guess groups from filenames or manually assign; optionally add covariates (batch, etc.); click "Run Pipeline" to execute DPC-CN normalization, maxLFQ quantification, and limma DE
 3. **Explore Results** -- Data Overview, QC, DE Dashboard (Volcano/Table/PCA/Robust Changes), Phospho, GSEA, MOFA2, AI Analysis, XIC Viewer (local/HPC)
 4. **Export** -- Download reproducibility log (.R), save session (.rds), export tables and plots
@@ -148,6 +161,7 @@ All dependencies install automatically on first run:
 ## Resources
 
 - **Project Website:** [bsphinney.github.io/DE-LIMP](https://bsphinney.github.io/DE-LIMP/)
+- **Discussions:** [github.com/bsphinney/DE-LIMP/discussions](https://github.com/bsphinney/DE-LIMP/discussions) -- Q&A, feature ideas, and announcements
 - **Video Tutorials:** [UC Davis Proteomics YouTube](https://www.youtube.com/channel/UCpulhf8gl-HVxACyJUEFPRw)
 - **Training:** [Hands-On Proteomics Short Course](https://proteomics.ucdavis.edu/events/hands-proteomics-short-course)
 - **Core Facility:** [proteomics.ucdavis.edu](https://proteomics.ucdavis.edu)
@@ -160,7 +174,7 @@ This project is open source. See repository for license details.
 
 ## Contributing
 
-Issues and pull requests welcome! See [CLAUDE.md](CLAUDE.md) for development documentation.
+Issues, pull requests, and [Discussions](https://github.com/bsphinney/DE-LIMP/discussions) welcome! See [CLAUDE.md](CLAUDE.md) for development documentation.
 
 **Developer:** Brett Phinney, UC Davis Proteomics Core Facility | **Contact:** [GitHub Issues](https://github.com/bsphinney/DE-LIMP/issues)
 
