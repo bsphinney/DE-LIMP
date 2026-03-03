@@ -748,7 +748,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     placeholder = "e.g., slurm apptainer"),
                   actionButton("test_ssh_btn", "Test Connection",
                     icon = icon("plug"), class = "btn-outline-info btn-sm"),
-                  uiOutput("ssh_status_ui")
+                  uiOutput("ssh_status_ui"),
+                  uiOutput("cluster_status_ui")
                 ),
                 # Hidden SSH inputs for core facility mode (auto-filled by staff selector)
                 if (is_core_facility) div(style = "display: none;",
@@ -780,6 +781,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               ),
               textInput("diann_account", "Account:", value = "genome-center-grp"),
 
+              # Parallel search mode (rendered server-side based on file count)
+              uiOutput("parallel_mode_ui"),
+
               hr(),
               tags$h6("DIA-NN Container"),
               textInput("diann_sif_path", "Apptainer SIF Path:",
@@ -787,18 +791,19 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 placeholder = "/path/to/diann_2.3.0.sif"),
 
               hr(),
-              tags$h6("Output Directory"),
               conditionalPanel("input.search_connection_mode != 'ssh'",
+                tags$h6("Output Directory"),
                 shinyFiles::shinyDirButton("output_base_dir", "Select Output Folder",
                   title = "Choose base output directory",
-                  class = "btn-outline-primary btn-sm w-100")
+                  class = "btn-outline-primary btn-sm w-100"),
+                verbatimTextOutput("full_output_path")
               ),
-              conditionalPanel("input.search_connection_mode == 'ssh'",
+              # SSH mode: output dir auto-generated from raw data dir, keep input hidden
+              div(style = "display: none;",
                 textInput("ssh_output_base_dir", NULL,
-                  value = "/quobyte/proteomics-grp/de-limp/phospho/nophossearch",
+                  value = "",
                   placeholder = "/share/proteomics/results/")
-              ),
-              verbatimTextOutput("full_output_path")
+              )
             ),
 
             hr(),

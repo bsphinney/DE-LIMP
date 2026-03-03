@@ -375,6 +375,8 @@ server <- function(input, output, session) {
     uniprot_results = NULL,
     fasta_info = NULL,
     ssh_connected = FALSE,
+    ssh_sbatch_path = NULL,
+    cluster_resources = NULL,
     diann_search_settings = NULL,
     docker_available = docker_available,
     # Multi-View Integration (MOFA2)
@@ -419,7 +421,6 @@ server <- function(input, output, session) {
     nav_hide("main_tabs", "QC")
     nav_hide("main_tabs", "DE Dashboard")
     nav_hide("main_tabs", "Gene Set Enrichment")
-    nav_hide("main_tabs", "mofa_tab")
     nav_hide("main_tabs", "AI Analysis")
     nav_hide("main_tabs", "Output")
     nav_hide("main_tabs", "Phosphoproteomics")
@@ -437,13 +438,11 @@ server <- function(input, output, session) {
     if (!is.null(values$fit)) {
       nav_show("main_tabs", "DE Dashboard")
       if (gsea_available) nav_show("main_tabs", "Gene Set Enrichment")
-      nav_show("main_tabs", "mofa_tab")
       nav_show("main_tabs", "AI Analysis")
       nav_show("main_tabs", "Output")
     } else {
       nav_hide("main_tabs", "DE Dashboard")
       nav_hide("main_tabs", "Gene Set Enrichment")
-      nav_hide("main_tabs", "mofa_tab")
       nav_hide("main_tabs", "AI Analysis")
       nav_hide("main_tabs", "Output")
     }

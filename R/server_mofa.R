@@ -719,8 +719,12 @@ server_mofa <- function(input, output, session, values, add_to_log) {
     div(
       # Results header
       div(class = "alert alert-success py-2 mb-3",
-        sprintf("Model trained: %d views, %d samples, %d active factors",
-                params$n_views, params$n_samples, params$n_factors)
+        style = "display: flex; justify-content: space-between; align-items: center;",
+        tags$span(sprintf("Model trained: %d views, %d samples, %d active factors",
+                params$n_views, params$n_samples, params$n_factors)),
+        downloadButton("download_mofa_claude", "Export for Claude",
+                       class = "btn-outline-primary btn-sm",
+                       icon = icon("file-export"))
       ),
 
       # Results tabs
@@ -1534,4 +1538,366 @@ server_mofa <- function(input, output, session, values, add_to_log) {
       })
     })
   })
+
+  # ============================================================================
+  #  Export for Claude — MOFA2
+  # ============================================================================
+
+  output$download_mofa_claude <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_MOFA_Claude_Export_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
+    },
+    content = function(file) {
+      req(values$mofa_object, values$mofa_variance_explained, values$mofa_last_run_params)
+
+      withProgress(message = "Building MOFA export...", value = 0, {
+        tmp_dir <- tempdir()
+        files_to_zip <- character(0)
+        params <- values$mofa_last_run_params
+
+        # --- 1. Variance Explained ---
+        incProgress(0.1, detail = "Exporting variance explained...")
+        tryCatch({
+          r2 <- values$mofa_variance_explained$r2_per_factor
+          var_list <- list()
+          for (group_name in names(r2)) {
+            mat <- r2[[group_name]]
+            for (i in seq_len(nrow(mat))) {
+              for (j in seq_len(ncol(mat))) {
+                var_list[[length(var_list) + 1]] <- data.frame(
+                  Factor = rownames(mat)[i],
+                  View = colnames(mat)[j],
+                  Variance_Pct = round(mat[i, j], 4),
+                  stringsAsFactors = FALSE
+                )
+              }
+            }
+          }
+          var_df <- do.call(rbind, var_list)
+          var_file <- file.path(tmp_dir, "MOFA_Variance_Explained.csv")
+          write.csv(var_df, var_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, var_file)
+        }, error = function(e) NULL)
+
+        # --- 2. Factor Scores ---
+        incProgress(0.2, detail = "Exporting factor scores...")
+        if (!is.null(values$mofa_factors)) {
+          scores_df <- as.data.frame(values$mofa_factors)
+          scores_df$Sample <- rownames(values$mofa_factors)
+          # Add group info if available
+          if (!is.null(values$mofa_sample_metadata) &&
+              "Sample" %in% names(values$mofa_sample_metadata) &&
+              "Group" %in% names(values$mofa_sample_metadata)) {
+            scores_df <- merge(scores_df,
+              values$mofa_sample_metadata[, c("Sample", "Group")],
+              by = "Sample", all.x = TRUE)
+          } else if (!is.null(values$metadata)) {
+            meta_map <- values$metadata %>%
+              dplyr::select(File.Name, Group) %>%
+              dplyr::filter(Group != "")
+            scores_df <- merge(scores_df, meta_map,
+              by.x = "Sample", by.y = "File.Name", all.x = TRUE)
+          }
+          scores_file <- file.path(tmp_dir, "MOFA_Factor_Scores.csv")
+          write.csv(scores_df, scores_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, scores_file)
+        }
+
+        # --- 3. Top Weights (top 50 per factor per view) ---
+        incProgress(0.3, detail = "Exporting top weights...")
+        if (!is.null(values$mofa_weights)) {
+          all_top <- lapply(names(values$mofa_weights), function(view) {
+            w_mat <- values$mofa_weights[[view]]
+            do.call(rbind, lapply(colnames(w_mat), function(fac) {
+              w <- w_mat[, fac]
+              top_idx <- head(order(abs(w), decreasing = TRUE), 50)
+              data.frame(
+                View = view,
+                Factor = fac,
+                Feature = rownames(w_mat)[top_idx],
+                Weight = round(w[top_idx], 6),
+                stringsAsFactors = FALSE
+              )
+            }))
+          })
+          weights_df <- do.call(rbind, all_top)
+          weights_file <- file.path(tmp_dir, "MOFA_Top_Weights.csv")
+          write.csv(weights_df, weights_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, weights_file)
+        }
+
+        # --- 4. View Summary ---
+        incProgress(0.35, detail = "Exporting view summary...")
+        if (!is.null(values$mofa_view_configs) && length(values$mofa_view_configs) > 0) {
+          view_summary <- do.call(rbind, lapply(values$mofa_view_configs, function(vc) {
+            data.frame(
+              View = vc$name,
+              Type = vc$type,
+              N_Features = if (!is.null(vc$n_features)) vc$n_features else NA,
+              N_Samples = if (!is.null(vc$n_samples)) vc$n_samples else NA,
+              Source = vc$source,
+              stringsAsFactors = FALSE
+            )
+          }))
+          view_file <- file.path(tmp_dir, "MOFA_View_Summary.csv")
+          write.csv(view_summary, view_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, view_file)
+        }
+
+        # --- 5. Group assignments ---
+        incProgress(0.4, detail = "Exporting group assignments...")
+        if (!is.null(values$mofa_sample_metadata)) {
+          groups_file <- file.path(tmp_dir, "Group_Assignments.csv")
+          write.csv(values$mofa_sample_metadata, groups_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, groups_file)
+        } else if (!is.null(values$metadata)) {
+          groups_df <- values$metadata %>%
+            dplyr::select(File.Name, Group) %>%
+            dplyr::filter(Group != "")
+          if (nrow(groups_df) > 0) {
+            groups_file <- file.path(tmp_dir, "Group_Assignments.csv")
+            write.csv(groups_df, groups_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, groups_file)
+          }
+        }
+
+        # --- 6. Analysis parameters ---
+        incProgress(0.45, detail = "Saving parameters...")
+        tryCatch({
+          p_lines <- c(
+            "DE-LIMP MOFA2 Analysis Parameters",
+            paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
+            paste0("App version: DE-LIMP v3.1.1"),
+            paste0("R version: ", R.version.string),
+            "",
+            "MOFA TRAINING PARAMETERS:",
+            paste0("  Number of views: ", params$n_views),
+            paste0("  View names: ", paste(params$view_names, collapse = ", ")),
+            paste0("  Number of samples: ", params$n_samples),
+            paste0("  Active factors retained: ", params$n_factors),
+            paste0("  Convergence mode: ", params$convergence),
+            paste0("  Scale views: ", params$scale_views),
+            paste0("  Random seed: ", params$seed),
+            paste0("  Training timestamp: ", format(params$timestamp, "%Y-%m-%d %H:%M"))
+          )
+          params_file <- file.path(tmp_dir, "Analysis_Parameters.txt")
+          writeLines(p_lines, params_file)
+          files_to_zip <- c(files_to_zip, params_file)
+        }, error = function(e) NULL)
+
+        # --- 7. Session RDS ---
+        incProgress(0.5, detail = "Saving session state...")
+        tryCatch({
+          session_data <- list(
+            raw_data = values$raw_data, metadata = values$metadata,
+            fit = values$fit, y_protein = values$y_protein,
+            dpc_fit = values$dpc_fit, design = values$design,
+            qc_stats = values$qc_stats,
+            repro_log = values$repro_log,
+            mofa_object = values$mofa_object,
+            mofa_factors = values$mofa_factors,
+            mofa_weights = values$mofa_weights,
+            mofa_variance_explained = values$mofa_variance_explained,
+            mofa_last_run_params = values$mofa_last_run_params,
+            mofa_view_configs = values$mofa_view_configs,
+            mofa_sample_metadata = values$mofa_sample_metadata,
+            saved_at = Sys.time(),
+            app_version = "DE-LIMP v3.1.1"
+          )
+          rds_file <- file.path(tmp_dir, "Session.rds")
+          saveRDS(session_data, rds_file)
+          files_to_zip <- c(files_to_zip, rds_file)
+        }, error = function(e) message("[DE-LIMP] Could not save MOFA RDS: ", e$message))
+
+        # --- 8. Reproducibility code log ---
+        incProgress(0.55, detail = "Saving code log...")
+        if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
+          repro_file <- file.path(tmp_dir, "Reproducibility_Code.R")
+          log_content <- paste(values$repro_log, collapse = "\n")
+          session_info_text <- paste(capture.output(sessionInfo()), collapse = "\n")
+          writeLines(paste(log_content, "\n\n# --- Session Info ---\n", session_info_text), repro_file)
+          files_to_zip <- c(files_to_zip, repro_file)
+        }
+
+        # --- 9. Build PROMPT.md ---
+        incProgress(0.6, detail = "Assembling prompt...")
+
+        # Variance explained inline table
+        var_inline <- tryCatch({
+          r2 <- values$mofa_variance_explained$r2_per_factor
+          mat <- r2[[1]]
+          lines <- c("Factor | ", paste(colnames(mat), collapse = " | "), " |")
+          header <- paste0("| Factor | ", paste(colnames(mat), collapse = " | "), " |")
+          sep <- paste0("|", paste(rep("------|", ncol(mat) + 1), collapse = ""))
+          rows <- apply(mat, 1, function(r) {
+            paste0("| ", rownames(mat)[which(apply(mat, 1, function(x) all(x == r)))[1]],
+                   " | ", paste(sprintf("%.2f%%", r), collapse = " | "), " |")
+          })
+          paste(c(header, sep, rows), collapse = "\n")
+        }, error = function(e) "Variance explained data not available.")
+
+        # Top features per factor per view inline
+        top_features_text <- tryCatch({
+          if (!is.null(values$mofa_weights)) {
+            parts <- lapply(names(values$mofa_weights), function(view) {
+              w_mat <- values$mofa_weights[[view]]
+              fac_parts <- lapply(colnames(w_mat)[1:min(ncol(w_mat), params$n_factors)], function(fac) {
+                w <- w_mat[, fac]
+                top_idx <- head(order(abs(w), decreasing = TRUE), 10)
+                lines <- sprintf("  %s (w=%.3f)", rownames(w_mat)[top_idx], w[top_idx])
+                paste0("  ", fac, ":\n", paste(lines, collapse = "\n"))
+              })
+              paste0("### ", view, "\n", paste(fac_parts, collapse = "\n\n"))
+            })
+            paste(parts, collapse = "\n\n")
+          } else "Weight data not available."
+        }, error = function(e) "Could not extract top features.")
+
+        # Sample group counts
+        group_text <- tryCatch({
+          if (!is.null(values$mofa_sample_metadata) && "Group" %in% names(values$mofa_sample_metadata)) {
+            grp_counts <- table(values$mofa_sample_metadata$Group)
+            paste(sprintf("  %s: n=%d", names(grp_counts), grp_counts), collapse = "\n")
+          } else if (!is.null(values$metadata)) {
+            grp_counts <- table(values$metadata$Group[values$metadata$Group != ""])
+            paste(sprintf("  %s: n=%d", names(grp_counts), grp_counts), collapse = "\n")
+          } else "Group information not available."
+        }, error = function(e) "")
+
+        prompt <- paste0(
+          "# Multi-Omics Factor Analysis (MOFA2)\n\n",
+          "You are a senior multi-omics data integration and systems biology expert. ",
+          "Analyze the following MOFA2 results from a multi-view factor analysis. ",
+          "The model was trained using DE-LIMP (Differential Expression - LIMPA Pipeline) with the MOFA2 framework.\n\n",
+
+          "## Attached Data Files\n\n",
+          "- **`MOFA_Variance_Explained.csv`** -- Variance explained per factor per view (% of total variance in each view captured by each factor)\n",
+          "- **`MOFA_Factor_Scores.csv`** -- Factor scores per sample (where each sample sits along each factor axis, plus group labels)\n",
+          "- **`MOFA_Top_Weights.csv`** -- Top 50 features per factor per view by |weight| (how strongly each feature contributes to each factor)\n",
+          "- **`MOFA_View_Summary.csv`** -- View names, types, feature counts, sample counts\n",
+          "- **`Group_Assignments.csv`** -- Sample-to-group mapping\n",
+          "- **`Analysis_Parameters.txt`** -- MOFA training parameters (n_factors, convergence, scaling, seed)\n",
+          "- **`Session.rds`** -- Full DE-LIMP session state (reload via DE-LIMP > Load Session)\n",
+          "- **`Reproducibility_Code.R`** -- R code log with timestamps for full reproducibility\n\n",
+
+          "## Model Summary\n",
+          "- **Views**: ", params$n_views, " (", paste(params$view_names, collapse = ", "), ")\n",
+          "- **Samples**: ", params$n_samples, "\n",
+          "- **Active factors**: ", params$n_factors, "\n",
+          "- **Convergence**: ", params$convergence, "\n",
+          "- **Seed**: ", params$seed, "\n\n",
+
+          "Please provide a comprehensive analysis with these sections:\n\n",
+
+          "## 1. Overview\n",
+          "Number of views integrated, samples, factors retained. Total variance captured per view. ",
+          "Assess whether the model has captured meaningful structure (are factors non-trivial? ",
+          "does variance explained look reasonable for the number of views and samples?).\n\n",
+
+          "## 2. Factor Interpretation\n",
+          "For each active factor: identify which views contribute the most variance. ",
+          "List the top features by |weight| from each contributing view. Suggest a biological theme ",
+          "for the factor based on the top features (e.g., 'Factor 1: cell cycle -- top features are ",
+          "cyclins and CDKs in the proteomics view, with corresponding phosphosites in the phospho view'). ",
+          "Distinguish between shared factors (loading across multiple views) and view-specific factors.\n\n",
+
+          "## 3. Cross-View Integration\n",
+          "This is the key value of MOFA2 -- identify features that co-vary across views. ",
+          "For factors that load on multiple views, highlight feature pairs (e.g., a protein and its ",
+          "phosphosite) that have high weights on the same factor. These represent coordinated regulation ",
+          "across data types. Note any cases where protein abundance and phosphorylation load on DIFFERENT ",
+          "factors (indicating phosphorylation regulation independent of abundance).\n\n",
+
+          "## 4. Sample Structure\n",
+          "Analyze how factors separate experimental groups using the factor scores. ",
+          "Which factors best separate the groups? Are there unexpected sample clusters or outliers? ",
+          "Does the factor structure agree with the known experimental design?\n\n",
+
+          "## 5. Biological Interpretation\n",
+          "Integrate the factor interpretations into a biological narrative. What pathways or processes ",
+          "are suggested by the top-weighted features per factor? Are there known biological connections ",
+          "between features from different views that load on the same factor? Suggest hypotheses about ",
+          "the biological mechanisms driving each major factor.\n\n",
+
+          "## 6. How MOFA2 Works\n",
+          "Write an educational background section that a PhD student or biologist with no computational ",
+          "background can understand. Cover each topic in plain language with analogies:\n\n",
+          "### What is multi-omics integration?\n",
+          "Modern biology can measure proteins, phosphorylation, mRNA, metabolites, and more from the same samples. ",
+          "Each measurement type is a 'view' or 'layer' of the same biological system. The challenge: different views ",
+          "have different scales, different numbers of features, and different noise characteristics. ",
+          "Analyzing them separately misses the coordinated patterns that connect them.\n\n",
+          "### The MOFA2 concept\n",
+          "MOFA2 (Multi-Omics Factor Analysis v2) finds hidden 'factors' -- latent variables that explain coordinated ",
+          "variation across ALL views simultaneously. Think of it like finding the puppet strings: the factors are the ",
+          "hidden forces (biological processes like cell cycle, stress response, differentiation) that pull on features ",
+          "across multiple data types at once.\n\n",
+          "### PCA analogy\n",
+          "If you know PCA (Principal Component Analysis), MOFA2 is like PCA but across multiple data types simultaneously. ",
+          "PCA finds axes of maximum variation in one dataset. MOFA2 finds axes of variation shared across datasets. ",
+          "Where PCA gives you components, MOFA2 gives you factors that can load on any combination of views.\n\n",
+          "### Views, Factors, Weights, and Scores\n",
+          "- **Views** = your data types (proteomics, phosphoproteomics, mRNA, metabolomics, etc.)\n",
+          "- **Factors** = latent biological axes of variation discovered by the model\n",
+          "- **Weights** = how strongly each feature loads on each factor (like PCA loadings). High |weight| means that ",
+          "feature is important for that factor. Positive weight = feature increases with factor value; negative = decreases.\n",
+          "- **Scores** = where each sample sits along each factor axis (like PCA scores). Samples with similar biology ",
+          "will have similar factor scores.\n\n",
+          "### Variance explained\n",
+          "The variance explained heatmap shows what percentage of each view's total variation is captured by each factor. ",
+          "A factor that explains 20% of proteomics and 15% of phospho variance is a strong shared factor. ",
+          "A factor that explains 10% of phospho but 0% of proteomics captures phospho-specific variation ",
+          "(perhaps signaling changes without abundance changes).\n\n",
+          "### Missing data handling\n",
+          "MOFA2 naturally handles partial overlap between views. Not all samples need all views -- the model ",
+          "uses available data and infers missing patterns. This is a major advantage over methods that require ",
+          "complete data matrices.\n\n",
+          "### Bayesian framework\n",
+          "MOFA2 uses a Bayesian statistical framework with automatic relevance determination (ARD). In plain terms: ",
+          "the model automatically prunes factors that don't explain meaningful variance and promotes sparse solutions ",
+          "(factors driven by a small number of important features rather than weak contributions from everything). ",
+          "This prevents overfitting and makes results more interpretable.\n\n",
+          "### When to use MOFA2\n",
+          "MOFA2 is most powerful when you have 2+ complementary measurement types from the same samples and suspect ",
+          "they share underlying biological drivers. It's less useful when views measure completely independent aspects ",
+          "or when you have very few samples (< 10). For best results, each view should have at least 500+ features.\n\n",
+
+          "## 7. Methodology & Reproducibility\n",
+          "Summarize the MOFA2 training pipeline: view preparation, feature filtering, scaling, model training, ",
+          "factor selection. Reference the attached `Analysis_Parameters.txt` for specific settings and ",
+          "`Reproducibility_Code.R` for the complete R code log. Note the software versions.\n\n",
+
+          "Use markdown formatting with headers. Be scientific but accessible.\n",
+          "Reference specific features from the CSV files to support your analysis.\n\n",
+
+          "--- INLINE DATA SUMMARIES ---\n\n",
+          "### Variance Explained (factors x views)\n",
+          var_inline, "\n\n",
+          "### Sample Groups\n",
+          group_text, "\n\n",
+          "### Top 10 Features Per Factor Per View\n",
+          top_features_text, "\n\n",
+          "### Training Parameters\n",
+          "  Convergence mode: ", params$convergence, "\n",
+          "  Factors requested: auto-select with ", params$n_factors, " active\n",
+          "  Scale views: ", params$scale_views, "\n",
+          "  Seed: ", params$seed, "\n"
+        )
+
+        prompt_file <- file.path(tmp_dir, "PROMPT.md")
+        writeLines(prompt, prompt_file)
+        files_to_zip <- c(files_to_zip, prompt_file)
+
+        incProgress(0.9, detail = "Creating zip...")
+        old_wd <- setwd(tmp_dir)
+        on.exit(setwd(old_wd), add = TRUE)
+        zip(file, basename(files_to_zip))
+
+        message(sprintf("[DE-LIMP] MOFA Claude export: %d files, prompt %d chars",
+                        length(files_to_zip), nchar(prompt)))
+      })
+    },
+    contentType = "application/zip"
+  )
+
 }

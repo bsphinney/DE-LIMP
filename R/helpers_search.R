@@ -858,6 +858,21 @@ recover_docker_jobs <- function() {
 #' @param ssh_config list(host, user, port, key_path) or NULL for local
 #' @param command Character — command to execute remotely
 #' @return list(status, stdout) — status is exit code, stdout is character vector
+# SSH ControlMaster multiplexing: reuse one TCP connection for all SSH/SCP calls.
+# First call creates the socket; subsequent calls reuse it (no new TCP handshake).
+# Eliminates HPC MaxStartups throttling from rapid SSH connections.
+ssh_control_path <- function(ssh_config) {
+  # Unix domain sockets have max 104-byte path on macOS — keep it short.
+  file.path("/tmp", sprintf(".delimp_%s_%s",
+    ssh_config$user, gsub("[^a-zA-Z0-9]", "", ssh_config$host)))
+}
+
+ssh_mux_args <- function(ssh_config) {
+  c("-o", sprintf("ControlPath=%s", ssh_control_path(ssh_config)),
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=300")
+}
+
 ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
   # Optionally wrap in login shell so .bash_profile / module paths are loaded
   # Prepend module loads if specified
@@ -883,16 +898,16 @@ ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
     "-o", "ServerAliveInterval=5",
     "-o", "ServerAliveCountMax=6",
     "-o", "BatchMode=yes",
+    ssh_mux_args(ssh_config),
     paste0(ssh_config$user, "@", ssh_config$host),
     remote_cmd
   )
   # Use processx for timeout support if available, else system2
-  # Suppress macOS ARM64 MallocStackLogging warnings via environment
   stdout <- tryCatch({
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("ssh", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = "0"))
+                           env = c("current", MallocStackLogging = ""))
       out <- strsplit(res$stdout, "\n")[[1]]
       if (res$status != 0) attr(out, "status") <- res$status
       out
@@ -922,18 +937,27 @@ scp_download <- function(ssh_config, remote_path, local_path) {
     "-i", ssh_config$key_path,
     "-P", as.character(ssh_config$port %||% 22),
     "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ConnectTimeout=10",
     "-o", "BatchMode=yes",
+    ssh_mux_args(ssh_config),
     paste0(ssh_config$user, "@", ssh_config$host, ":", remote_path),
     local_path
   )
-  stdout <- tryCatch(
-    system2("scp", args = args, stdout = TRUE, stderr = TRUE),
-    error = function(e) {
-      structure(conditionMessage(e), status = 1L)
+  stdout <- tryCatch({
+    if (requireNamespace("processx", quietly = TRUE)) {
+      res <- processx::run("scp", args = args, timeout = 60,
+                           error_on_status = FALSE,
+                           env = c("current", MallocStackLogging = ""))
+      out <- paste0(res$stdout, res$stderr)
+      if (res$status != 0) attr(out, "status") <- res$status
+      out
+    } else {
+      system2("scp", args = args, stdout = TRUE, stderr = TRUE)
     }
-  )
+  }, error = function(e) {
+    structure(conditionMessage(e), status = 1L)
+  })
   status <- attr(stdout, "status") %||% 0L
-  # Sanitize output to valid UTF-8 (SSH may return ANSI codes, MOTD banners, etc.)
   stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")
   list(status = status, stdout = stdout)
 }
@@ -948,18 +972,27 @@ scp_upload <- function(ssh_config, local_path, remote_path) {
     "-i", ssh_config$key_path,
     "-P", as.character(ssh_config$port %||% 22),
     "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ConnectTimeout=10",
     "-o", "BatchMode=yes",
+    ssh_mux_args(ssh_config),
     local_path,
     paste0(ssh_config$user, "@", ssh_config$host, ":", remote_path)
   )
-  stdout <- tryCatch(
-    system2("scp", args = args, stdout = TRUE, stderr = TRUE),
-    error = function(e) {
-      structure(conditionMessage(e), status = 1L)
+  stdout <- tryCatch({
+    if (requireNamespace("processx", quietly = TRUE)) {
+      res <- processx::run("scp", args = args, timeout = 60,
+                           error_on_status = FALSE,
+                           env = c("current", MallocStackLogging = ""))
+      out <- paste0(res$stdout, res$stderr)
+      if (res$status != 0) attr(out, "status") <- res$status
+      out
+    } else {
+      system2("scp", args = args, stdout = TRUE, stderr = TRUE)
     }
-  )
+  }, error = function(e) {
+    structure(conditionMessage(e), status = 1L)
+  })
   status <- attr(stdout, "status") %||% 0L
-  # Sanitize output to valid UTF-8 (SSH may return ANSI codes, MOTD banners, etc.)
   stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")
   list(status = status, stdout = stdout)
 }
@@ -1217,7 +1250,7 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
 parse_sbatch_output <- function(sbatch_stdout) {
   match_line <- grep("Submitted batch job", sbatch_stdout, value = TRUE)
   if (length(match_line) == 0) return(NULL)
-  gsub(".*job\\s+", "", match_line[1])
+  trimws(gsub(".*job[[:space:]]+", "", match_line[1]))
 }
 
 #' Estimate search time for display
@@ -1245,4 +1278,444 @@ estimate_search_time <- function(n_files, search_mode = "libfree", cpus = 64) {
   }
 
   sprintf("~%s to %s for %d files", format_time(total_min), format_time(total_max), n_files)
+}
+
+# =============================================================================
+# Parallel DIA-NN Search (5-Step Workflow)
+# =============================================================================
+
+#' Write a file_list.txt for SLURM array jobs
+#' @param raw_files Character vector of raw file paths
+#' @param output_dir Character: directory to write file_list.txt
+#' @return Character: path to the written file
+write_file_list <- function(raw_files, output_dir) {
+  file_list_path <- file.path(output_dir, "file_list.txt")
+  writeLines(raw_files, file_list_path)
+  file_list_path
+}
+
+#' Generate 5 sbatch scripts for parallel DIA-NN search
+#'
+#' Implements the canonical parallel workflow:
+#' Step 1: Library prediction (single job, no raw files)
+#' Step 2: First-pass per-file (SLURM array, predicted library)
+#' Step 3: Empirical library assembly (single job, --use-quant)
+#' Step 4: Final per-file pass (SLURM array, empirical library)
+#' Step 5: Cross-run report (single job, --use-quant, matrices)
+#'
+#' @param analysis_name Character: sanitized analysis name
+#' @param raw_files Character vector: full paths to raw files
+#' @param fasta_files Character vector: full paths to FASTA files
+#' @param speclib_path Character or NULL: path to user-provided spectral library
+#' @param output_dir Character: remote output directory
+#' @param diann_sif Character: path to Apptainer SIF
+#' @param normalization Character: "on" or "off"
+#' @param search_mode Character: "libfree" or "phospho"
+#' @param cpus_per_file Integer: CPUs per array task
+#' @param mem_per_file Integer: GB per array task
+#' @param time_per_file Integer: hours per array task
+#' @param assembly_cpus Integer: CPUs for assembly/report steps
+#' @param assembly_mem Integer: GB for assembly/report steps
+#' @param assembly_time Integer: hours for assembly/report steps
+#' @param partition Character: SLURM partition
+#' @param account Character: SLURM account
+#' @param search_params List: search parameters for build_diann_flags()
+#' @param max_simultaneous Integer: max concurrent array tasks
+#' @return Named list of 5 script strings
+generate_parallel_scripts <- function(
+  analysis_name, raw_files, fasta_files, speclib_path = NULL,
+  output_dir, diann_sif, normalization = "on", search_mode = "libfree",
+  cpus_per_file = 16, mem_per_file = 32, time_per_file = 2,
+  libpred_cpus = 16, libpred_mem = 64, libpred_time = 4,
+  assembly_cpus = 64, assembly_mem = 512, assembly_time = 12,
+  partition = "high", account = "genome-center-grp",
+  search_params = list(), max_simultaneous = 20
+) {
+  n_files <- length(raw_files)
+  has_fasta <- length(fasta_files) > 0 && any(nzchar(fasta_files))
+  has_speclib <- !is.null(speclib_path) && nzchar(speclib_path)
+  report_name <- if (normalization == "off") "no_norm_report.parquet" else "report.parquet"
+
+  # --- Shared bind mount computation ---
+  data_dirs <- unique(dirname(raw_files))
+  data_bind <- sprintf("%s:/work/data", data_dirs[1])
+
+  fasta_bind_parts <- character()
+  fasta_mount_map <- character()
+  if (has_fasta) {
+    fasta_dirs <- unique(dirname(fasta_files))
+    if (length(fasta_dirs) == 1) {
+      fasta_bind_parts <- sprintf("%s:/work/fasta", fasta_dirs[1])
+      fasta_mount_map <- rep("/work/fasta", length(fasta_files))
+    } else {
+      fasta_bind_parts <- sprintf("%s:/work/fasta%d", fasta_dirs, seq_along(fasta_dirs))
+      fasta_mount_map <- sprintf("/work/fasta%d", match(dirname(fasta_files), fasta_dirs))
+    }
+  }
+
+  speclib_bind <- if (has_speclib) sprintf("%s:/work/lib", dirname(speclib_path)) else NULL
+  out_bind <- sprintf("%s:/work/out", output_dir)
+
+  # Full bind mount for assembly/report steps (need all data dirs)
+  all_binds <- c(data_bind, fasta_bind_parts, out_bind, speclib_bind)
+  all_binds <- Filter(Negate(is.null), all_binds)
+  full_bind_mount <- paste(all_binds, collapse = ",")
+
+  # Per-file bind mount (single file dir + output)
+  # Array jobs bind $FILE_DIR dynamically
+  perfile_bind_parts <- c("${FILE_DIR}:/work/data", fasta_bind_parts, out_bind, speclib_bind)
+  perfile_bind_parts <- Filter(Negate(is.null), perfile_bind_parts)
+  perfile_bind_mount <- paste(perfile_bind_parts, collapse = ",")
+
+  # FASTA flags
+  fasta_flags_str <- ""
+  if (has_fasta) {
+    fasta_flags_str <- paste(sprintf("    --fasta %s/%s", fasta_mount_map, basename(fasta_files)),
+                              collapse = " \\\n")
+  }
+
+  # All --f flags (for assembly/report steps)
+  all_f_flags <- paste(sprintf("    --f /work/data/%s", basename(raw_files)),
+                        collapse = " \\\n")
+
+  # --- Base search params for build_diann_flags ---
+  # Override settings for parallel mode
+  parallel_sp <- search_params
+  parallel_sp$mbr <- FALSE        # No MBR in parallel (5-step replaces it)
+  parallel_sp$rt_profiling <- FALSE  # Controlled per-step
+
+  speclib_mount <- if (has_speclib) sprintf("/work/lib/%s", basename(speclib_path)) else NULL
+  base_flags <- build_diann_flags(parallel_sp, search_mode, "on", speclib_mount)
+
+  # Remove flags that are step-specific (we add them per-step)
+  remove_patterns <- c("^--out-lib ", "^--matrices$", "^--gen-spec-lib$",
+                        "^--reanalyse$", "^--rt-profiling$", "^--no-norm$",
+                        "^--xic$", "^--lib ")
+  step_flags <- base_flags
+  for (pat in remove_patterns) {
+    step_flags <- step_flags[!grepl(pat, step_flags)]
+  }
+
+  # --- SBATCH header helper ---
+  sbatch_header <- function(job_suffix, cpus, mem_gb, time_hours, array_spec = NULL) {
+    lines <- c(
+      '#!/bin/bash -l',
+      sprintf('#SBATCH --job-name=diann_%s_%s', analysis_name, job_suffix),
+      sprintf('#SBATCH --cpus-per-task=%d', cpus),
+      sprintf('#SBATCH --mem=%dG', mem_gb),
+      sprintf('#SBATCH -o %s/diann_%s_%%j.out', output_dir, job_suffix),
+      sprintf('#SBATCH -e %s/diann_%s_%%j.err', output_dir, job_suffix),
+      sprintf('#SBATCH --account=%s', account),
+      sprintf('#SBATCH --time=%d:00:00', time_hours),
+      sprintf('#SBATCH --partition=%s', partition)
+    )
+    if (!is.null(array_spec)) {
+      lines <- c(lines, sprintf('#SBATCH --array=%s', array_spec))
+    }
+    paste(lines, collapse = "\n")
+  }
+
+  # --- Apptainer exec prefix ---
+  apptainer_cmd <- function(bind_mount) {
+    sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux", bind_mount, diann_sif)
+  }
+
+  # --- Mass accuracy flags (always manual in parallel mode) ---
+  mass_acc_flags <- step_flags[grepl("^--mass-acc|^--window", step_flags)]
+
+  # =========================================================================
+  # Step 1 — Library Prediction (single job, no raw files)
+  # =========================================================================
+  step1_script <- if (has_speclib) {
+    # Skip step 1 if user provides a spectral library
+    NULL
+  } else {
+    step1_flags <- c(
+      step_flags,
+      "--fasta-search",
+      "--predictor",
+      "--gen-spec-lib",
+      sprintf("--out-lib /work/out/predicted.speclib"),
+      sprintf("--threads %d", libpred_cpus)
+    )
+    # Remove --fasta-search and --predictor from step_flags if already present (avoid dups)
+    step1_flags <- unique(step1_flags)
+
+    step1_cmd_parts <- c(
+      sprintf("%s \\", apptainer_cmd(full_bind_mount)),
+      if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\"),
+      sprintf("    --out /work/out/step1_lib.parquet \\"),
+      paste0("    ", step1_flags)
+    )
+    step1_cmd_parts <- Filter(Negate(is.null), step1_cmd_parts)
+    # Add line continuations
+    for (i in seq_along(step1_cmd_parts)) {
+      if (i < length(step1_cmd_parts) && !grepl(" \\\\$", step1_cmd_parts[i])) {
+        step1_cmd_parts[i] <- paste0(step1_cmd_parts[i], " \\")
+      }
+    }
+    last <- length(step1_cmd_parts)
+    step1_cmd_parts[last] <- sub(" \\\\$", "", step1_cmd_parts[last])
+
+    paste0(
+      sbatch_header("s1_libpred", libpred_cpus, libpred_mem, libpred_time), "\n\n",
+      "module load apptainer\n\n",
+      sprintf('echo "Step 1/5: Library Prediction for %s"\n', analysis_name),
+      'echo "Started: $(date)"\n\n',
+      paste(step1_cmd_parts, collapse = "\n"), "\n\n",
+      'EXIT_CODE=$?\n',
+      'echo "Step 1 finished with exit code: $EXIT_CODE"\n',
+      'echo "Completed: $(date)"\n',
+      'exit $EXIT_CODE\n'
+    )
+  }
+
+  # =========================================================================
+  # Step 2 — First-pass per-file (SLURM array)
+  # =========================================================================
+  predicted_lib <- if (has_speclib) speclib_mount else "/work/out/predicted.speclib"
+  array_spec_2 <- sprintf("0-%d%%%d", n_files - 1, max_simultaneous)
+
+  step2_script <- paste0(
+    sbatch_header("s2_firstpass", cpus_per_file, mem_per_file, time_per_file,
+                  array_spec = array_spec_2), "\n\n",
+    "module load apptainer\n\n",
+    sprintf('echo "Step 2/5: First-pass file ${SLURM_ARRAY_TASK_ID} of %d"\n', n_files),
+    'echo "Started: $(date)"\n\n',
+    '# Read file path from file list\n',
+    sprintf('FILE_LIST="%s/file_list.txt"\n', output_dir),
+    'RAW_FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$FILE_LIST")\n',
+    'FILE_DIR=$(dirname "$RAW_FILE")\n',
+    'FILE_BASE=$(basename "$RAW_FILE")\n\n',
+    'if [ -z "$RAW_FILE" ]; then\n',
+    '  echo "ERROR: No file found for array task $SLURM_ARRAY_TASK_ID"\n',
+    '  exit 1\n',
+    'fi\n\n',
+    sprintf('echo "Processing: $RAW_FILE"\n\n'),
+    sprintf('%s \\\n', apptainer_cmd(perfile_bind_mount)),
+    sprintf('    --f /work/data/$FILE_BASE \\\n'),
+    sprintf('    --lib %s \\\n', predicted_lib),
+    sprintf('    --temp /work/out/quant_step2 \\\n'),
+    '    --rt-profiling \\\n',
+    '    --gen-spec-lib \\\n',
+    '    --quant-ori-names \\\n',
+    sprintf('    --threads %d \\\n', cpus_per_file),
+    if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
+    paste0("    ", paste(step_flags, collapse = " \\\n    ")), "\n\n",
+    'EXIT_CODE=$?\n',
+    'echo "Step 2 task ${SLURM_ARRAY_TASK_ID} finished with exit code: $EXIT_CODE"\n',
+    'echo "Completed: $(date)"\n',
+    'exit $EXIT_CODE\n'
+  )
+
+  # =========================================================================
+  # Step 3 — Empirical Library Assembly (single job)
+  # =========================================================================
+  step3_script <- paste0(
+    sbatch_header("s3_assembly", assembly_cpus, assembly_mem, assembly_time), "\n\n",
+    "module load apptainer\n\n",
+    sprintf('echo "Step 3/5: Empirical Library Assembly for %s"\n', analysis_name),
+    'echo "Started: $(date)"\n\n',
+    sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
+    paste0(all_f_flags, " \\\n"),
+    if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
+    '    --use-quant \\\n',
+    '    --rt-profiling \\\n',
+    '    --gen-spec-lib \\\n',
+    sprintf('    --out-lib /work/out/empirical.speclib \\\n'),
+    sprintf('    --temp /work/out/quant_step2 \\\n'),
+    sprintf('    --out /work/out/step3_assembly.parquet \\\n'),
+    sprintf('    --threads %d \\\n', assembly_cpus),
+    paste0("    ", paste(step_flags, collapse = " \\\n    ")), "\n\n",
+    'EXIT_CODE=$?\n',
+    'echo "Step 3 finished with exit code: $EXIT_CODE"\n',
+    'echo "Completed: $(date)"\n',
+    'exit $EXIT_CODE\n'
+  )
+
+  # =========================================================================
+  # Step 4 — Final per-file pass (SLURM array)
+  # =========================================================================
+  array_spec_4 <- sprintf("0-%d%%%d", n_files - 1, max_simultaneous)
+
+  step4_script <- paste0(
+    sbatch_header("s4_finalpass", cpus_per_file, mem_per_file, time_per_file,
+                  array_spec = array_spec_4), "\n\n",
+    "module load apptainer\n\n",
+    sprintf('echo "Step 4/5: Final-pass file ${SLURM_ARRAY_TASK_ID} of %d"\n', n_files),
+    'echo "Started: $(date)"\n\n',
+    '# Read file path from file list\n',
+    sprintf('FILE_LIST="%s/file_list.txt"\n', output_dir),
+    'RAW_FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$FILE_LIST")\n',
+    'FILE_DIR=$(dirname "$RAW_FILE")\n',
+    'FILE_BASE=$(basename "$RAW_FILE")\n\n',
+    'if [ -z "$RAW_FILE" ]; then\n',
+    '  echo "ERROR: No file found for array task $SLURM_ARRAY_TASK_ID"\n',
+    '  exit 1\n',
+    'fi\n\n',
+    sprintf('echo "Processing: $RAW_FILE"\n\n'),
+    sprintf('%s \\\n', apptainer_cmd(perfile_bind_mount)),
+    sprintf('    --f /work/data/$FILE_BASE \\\n'),
+    sprintf('    --lib /work/out/empirical.speclib \\\n'),
+    sprintf('    --temp /work/out/quant_step4 \\\n'),
+    '    --no-ifs-removal \\\n',
+    '    --quant-ori-names \\\n',
+    sprintf('    --threads %d \\\n', cpus_per_file),
+    if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
+    paste0("    ", paste(step_flags, collapse = " \\\n    ")), "\n\n",
+    'EXIT_CODE=$?\n',
+    'echo "Step 4 task ${SLURM_ARRAY_TASK_ID} finished with exit code: $EXIT_CODE"\n',
+    'echo "Completed: $(date)"\n',
+    'exit $EXIT_CODE\n'
+  )
+
+  # =========================================================================
+  # Step 5 — Cross-run Report (single job)
+  # =========================================================================
+  norm_flag <- if (normalization == "off") "--no-norm" else ""
+
+  step5_script <- paste0(
+    sbatch_header("s5_report", assembly_cpus, assembly_mem, assembly_time), "\n\n",
+    "module load apptainer\n\n",
+    sprintf('echo "Step 5/5: Cross-run Report for %s"\n', analysis_name),
+    'echo "Started: $(date)"\n\n',
+    sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
+    paste0(all_f_flags, " \\\n"),
+    if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
+    '    --use-quant \\\n',
+    sprintf('    --temp /work/out/quant_step4 \\\n'),
+    '    --matrices \\\n',
+    sprintf('    --out /work/out/%s \\\n', report_name),
+    sprintf('    --threads %d \\\n', assembly_cpus),
+    if (nzchar(norm_flag)) paste0("    ", norm_flag, " \\\n"),
+    paste0("    ", paste(step_flags, collapse = " \\\n    ")), "\n\n",
+    'EXIT_CODE=$?\n',
+    'echo "Step 5 finished with exit code: $EXIT_CODE"\n',
+    'echo "Completed: $(date)"\n',
+    'exit $EXIT_CODE\n'
+  )
+
+  list(
+    step1_library   = step1_script,
+    step2_firstpass = step2_script,
+    step3_assembly  = step3_script,
+    step4_finalpass = step4_script,
+    step5_report    = step5_script
+  )
+}
+
+# =============================================================================
+# Cluster Resource Monitoring
+# =============================================================================
+
+#' Check SLURM cluster resource utilization
+#'
+#' Queries SLURM for group CPU allocation, usage, and partition stats.
+#' Supports both SSH and local SLURM access.
+#'
+#' @param ssh_config list(host, user, port, key_path, modules) or NULL for local
+#' @param account Character — SLURM account name (e.g., "genome-center-grp")
+#' @param partition Character — SLURM partition name (e.g., "high")
+#' @param sbatch_path Character or NULL — full path to sbatch (to derive other SLURM tool paths)
+#' @return list(success, group_limit, group_used, group_available,
+#'              partition_idle, partition_total, error)
+check_cluster_resources <- function(ssh_config, account, partition, sbatch_path = NULL) {
+  # Derive SLURM command paths from sbatch path
+  slurm_cmd <- function(cmd) {
+    if (!is.null(sbatch_path) && nzchar(sbatch_path)) {
+      file.path(dirname(sbatch_path), cmd)
+    } else {
+      cmd
+    }
+  }
+
+  run_cmd <- function(command) {
+    if (!is.null(ssh_config)) {
+      ssh_exec(ssh_config, command, login_shell = is.null(sbatch_path), timeout = 15)
+    } else if (slurm_proxy_available()) {
+      slurm_proxy_exec(command, timeout = 15)
+    } else {
+      parts <- strsplit(command, " ")[[1]]
+      stdout <- tryCatch(
+        system2(parts[1], args = parts[-1], stdout = TRUE, stderr = TRUE),
+        error = function(e) structure(e$message, status = 1L)
+      )
+      list(status = attr(stdout, "status") %||% 0L, stdout = stdout)
+    }
+  }
+
+  result <- list(
+    success = FALSE, group_limit = NA_integer_, group_used = NA_integer_,
+    group_available = NA_integer_, partition_idle = NA_integer_,
+    partition_total = NA_integer_, error = NULL
+  )
+
+  # --- 1. Group CPU limit via sacctmgr ---
+  tryCatch({
+    sacctmgr_cmd <- sprintf(
+      "%s show assoc where account=%s format=GrpTRES%%80 --noheader --parsable2",
+      slurm_cmd("sacctmgr"), account
+    )
+    res <- run_cmd(sacctmgr_cmd)
+    if (res$status == 0 && length(res$stdout) > 0) {
+      all_lines <- trimws(res$stdout)
+      all_lines <- all_lines[nzchar(all_lines)]
+      # Look for cpu=NNN in any line
+      cpu_match <- regmatches(all_lines, regexpr("cpu=[0-9]+", all_lines))
+      cpu_match <- cpu_match[nzchar(cpu_match)]
+      if (length(cpu_match) > 0) {
+        result$group_limit <- as.integer(sub("cpu=", "", cpu_match[1]))
+      }
+    }
+  }, error = function(e) NULL)
+
+  # --- 2. Group CPUs in use via squeue ---
+  tryCatch({
+    squeue_cmd <- sprintf(
+      "%s -A %s -t RUNNING -o \"%%C\" --noheader",
+      slurm_cmd("squeue"), account
+    )
+    res <- run_cmd(squeue_cmd)
+    if (res$status == 0 && length(res$stdout) > 0) {
+      cpu_counts <- suppressWarnings(as.integer(trimws(res$stdout)))
+      cpu_counts <- cpu_counts[!is.na(cpu_counts)]
+      result$group_used <- if (length(cpu_counts) > 0) sum(cpu_counts) else 0L
+    } else {
+      result$group_used <- 0L
+    }
+  }, error = function(e) {
+    result$group_used <<- 0L
+  })
+
+  # --- 3. Partition stats via sinfo ---
+  tryCatch({
+    sinfo_cmd <- sprintf(
+      "%s -p %s -o \"%%C\" --noheader",
+      slurm_cmd("sinfo"), partition
+    )
+    res <- run_cmd(sinfo_cmd)
+    if (res$status == 0 && length(res$stdout) > 0) {
+      # sinfo %C format: Allocated/Idle/Other/Total
+      line <- trimws(res$stdout[1])
+      parts <- strsplit(line, "/")[[1]]
+      if (length(parts) == 4) {
+        result$partition_idle <- as.integer(parts[2])
+        result$partition_total <- as.integer(parts[4])
+      }
+    }
+  }, error = function(e) NULL)
+
+  # Compute group available
+  if (!is.na(result$group_limit) && !is.na(result$group_used)) {
+    result$group_available <- result$group_limit - result$group_used
+  }
+
+  # Success if we got at least squeue data
+  if (!is.na(result$group_used)) {
+    result$success <- TRUE
+  } else {
+    result$error <- "Could not query SLURM cluster resources"
+  }
+
+  result
 }

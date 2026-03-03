@@ -571,7 +571,10 @@ server_phospho <- function(input, output, session, values, add_to_log) {
             tags$strong("Phosphosite Contrast:"),
             tags$div(style = "flex-grow: 1; max-width: 400px;",
               selectInput("phospho_contrast_selector", NULL, choices = NULL, width = "100%")
-            )
+            ),
+            downloadButton("download_phospho_claude", "Export for Claude",
+                           class = "btn-outline-primary btn-sm",
+                           icon = icon("file-export"))
           )
         },
 
@@ -2056,5 +2059,399 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       ggplot2::ggtitle(sprintf("Down-regulated phosphosites (n=%d)", length(seqs$down))) +
       ggplot2::theme(plot.title = ggplot2::element_text(size = 14))
   })
+
+  # ============================================================================
+  #  Export for Claude — Phosphoproteomics
+  # ============================================================================
+
+  output$download_phospho_claude <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_Phospho_Claude_Export_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
+    },
+    content = function(file) {
+      req(values$phospho_fit)
+
+      withProgress(message = "Building phospho export...", value = 0, {
+        tmp_dir <- tempdir()
+        files_to_zip <- character(0)
+
+        # --- 1. Phospho DE Results (all sites x all contrasts) ---
+        incProgress(0.1, detail = "Gathering phospho DE data...")
+        phospho_contrasts <- colnames(values$phospho_fit$contrasts)
+        phospho_results <- do.call(rbind, lapply(phospho_contrasts, function(cname) {
+          tt <- limma::topTable(values$phospho_fit, coef = cname, number = Inf) %>% as.data.frame()
+          tt$SiteID <- rownames(tt)
+          tt$Contrast <- cname
+          # Merge site info if available
+          if (!is.null(values$phospho_site_info)) {
+            si_cols <- intersect(c("SiteID", "Protein.Group", "Genes", "Residue", "Position", "Best.Loc.Conf"),
+                                 names(values$phospho_site_info))
+            tt <- merge(tt, values$phospho_site_info[, si_cols, drop = FALSE],
+                        by = "SiteID", all.x = TRUE)
+          }
+          tt
+        }))
+        results_file <- file.path(tmp_dir, "Phospho_DE_Results.csv")
+        write.csv(phospho_results, results_file, row.names = FALSE)
+        files_to_zip <- c(files_to_zip, results_file)
+
+        # --- 2. Site intensity matrix ---
+        incProgress(0.2, detail = "Exporting site matrix...")
+        if (!is.null(values$phospho_site_matrix_filtered)) {
+          mat_df <- as.data.frame(values$phospho_site_matrix_filtered) %>%
+            tibble::rownames_to_column("SiteID")
+          mat_file <- file.path(tmp_dir, "Phospho_Site_Matrix.csv")
+          write.csv(mat_df, mat_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, mat_file)
+        }
+
+        # --- 3. Site metadata ---
+        incProgress(0.3, detail = "Exporting site info...")
+        if (!is.null(values$phospho_site_info)) {
+          info_file <- file.path(tmp_dir, "Phospho_Site_Info.csv")
+          write.csv(values$phospho_site_info, info_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, info_file)
+        }
+
+        # --- 4. KSEA results (if available) ---
+        ksea_available <- !is.null(values$ksea_results)
+        if (ksea_available) {
+          incProgress(0.35, detail = "Exporting KSEA results...")
+          ksea_file <- file.path(tmp_dir, "KSEA_Results.csv")
+          write.csv(values$ksea_results, ksea_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, ksea_file)
+        }
+
+        # --- 5. Group assignments ---
+        incProgress(0.4, detail = "Exporting group assignments...")
+        if (!is.null(values$metadata)) {
+          groups_df <- values$metadata %>%
+            dplyr::select(File.Name, Group) %>%
+            dplyr::filter(Group != "")
+          if (nrow(groups_df) > 0) {
+            groups_file <- file.path(tmp_dir, "Group_Assignments.csv")
+            write.csv(groups_df, groups_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, groups_file)
+          }
+        }
+
+        # --- 6. Analysis parameters ---
+        incProgress(0.45, detail = "Saving parameters...")
+        tryCatch({
+          n_sites <- if (!is.null(values$phospho_site_matrix_filtered)) nrow(values$phospho_site_matrix_filtered) else "N/A"
+          n_sites_total <- if (!is.null(values$phospho_site_matrix)) nrow(values$phospho_site_matrix) else "N/A"
+          params <- c(
+            "DE-LIMP Phosphoproteomics Analysis Parameters",
+            paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
+            paste0("App version: DE-LIMP v3.1.1"),
+            paste0("R version: ", R.version.string),
+            "",
+            "PHOSPHO PIPELINE SETTINGS:",
+            paste0("  Total sites detected: ", n_sites_total),
+            paste0("  Sites after filtering: ", n_sites),
+            paste0("  Imputation: tail-based (Perseus-style, seed=42)"),
+            paste0("  Normalization: ", if (!is.null(input$phospho_norm)) input$phospho_norm else "none"),
+            paste0("  Filtering: require >= 2 non-NA values per group (sites missing in too many replicates within any group are removed)"),
+            paste0("  Sites removed by filter: ", as.numeric(n_sites_total) - as.numeric(n_sites)),
+            "",
+            "CONTRASTS:",
+            paste0("  ", phospho_contrasts),
+            ""
+          )
+          if (!is.null(values$metadata)) {
+            grp_counts <- table(values$metadata$Group[values$metadata$Group != ""])
+            params <- c(params, "GROUPS:",
+              paste0("  ", names(grp_counts), ": n=", grp_counts), "")
+          }
+          params_file <- file.path(tmp_dir, "Analysis_Parameters.txt")
+          writeLines(params, params_file)
+          files_to_zip <- c(files_to_zip, params_file)
+        }, error = function(e) NULL)
+
+        # --- 7. Session RDS ---
+        incProgress(0.5, detail = "Saving session state...")
+        tryCatch({
+          session_data <- list(
+            raw_data = values$raw_data, metadata = values$metadata,
+            fit = values$fit, y_protein = values$y_protein,
+            dpc_fit = values$dpc_fit, design = values$design,
+            qc_stats = values$qc_stats,
+            repro_log = values$repro_log,
+            phospho_detected = values$phospho_detected,
+            phospho_site_matrix = values$phospho_site_matrix,
+            phospho_site_matrix_filtered = values$phospho_site_matrix_filtered,
+            phospho_site_info = values$phospho_site_info,
+            phospho_fit = values$phospho_fit,
+            ksea_results = values$ksea_results,
+            saved_at = Sys.time(),
+            app_version = "DE-LIMP v3.1.1"
+          )
+          rds_file <- file.path(tmp_dir, "Session.rds")
+          saveRDS(session_data, rds_file)
+          files_to_zip <- c(files_to_zip, rds_file)
+        }, error = function(e) message("[DE-LIMP] Could not save phospho RDS: ", e$message))
+
+        # --- 8. Reproducibility code log ---
+        incProgress(0.55, detail = "Saving code log...")
+        if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
+          repro_file <- file.path(tmp_dir, "Reproducibility_Code.R")
+          log_content <- paste(values$repro_log, collapse = "\n")
+          session_info_text <- paste(capture.output(sessionInfo()), collapse = "\n")
+          writeLines(paste(log_content, "\n\n# --- Session Info ---\n", session_info_text), repro_file)
+          files_to_zip <- c(files_to_zip, repro_file)
+        }
+
+        # --- 9. Build PROMPT.md ---
+        incProgress(0.6, detail = "Assembling prompt...")
+
+        # Compute inline summaries
+        n_total_sites <- if (!is.null(values$phospho_site_matrix_filtered)) nrow(values$phospho_site_matrix_filtered) else 0
+
+        # Per-contrast summaries
+        contrast_summaries <- lapply(phospho_contrasts, function(cname) {
+          tt <- limma::topTable(values$phospho_fit, coef = cname, number = Inf) %>% as.data.frame()
+          tt$SiteID <- rownames(tt)
+          sig <- tt[tt$adj.P.Val < 0.05, ]
+          n_up <- sum(sig$logFC > 0)
+          n_down <- sum(sig$logFC < 0)
+          top20 <- head(tt[order(tt$adj.P.Val), ], 20)
+          if (!is.null(values$phospho_site_info)) {
+            si_cols <- intersect(c("SiteID", "Genes", "Residue", "Position"),
+                                 names(values$phospho_site_info))
+            top20 <- merge(top20, values$phospho_site_info[, si_cols, drop = FALSE],
+                           by = "SiteID", all.x = TRUE)
+          }
+          list(name = cname, n_sig = nrow(sig), n_up = n_up, n_down = n_down, top20 = top20)
+        })
+
+        # Contrast text with top 20
+        contrast_text <- paste(sapply(contrast_summaries, function(cs) {
+          top_lines <- paste(apply(cs$top20, 1, function(r) {
+            gene <- if ("Genes" %in% names(r) && !is.na(r["Genes"])) r["Genes"] else ""
+            res <- if ("Residue" %in% names(r) && !is.na(r["Residue"])) r["Residue"] else ""
+            pos <- if ("Position" %in% names(r) && !is.na(r["Position"])) r["Position"] else ""
+            sprintf("  %s | %s %s%s | logFC=%.2f | adj.P.Val=%.2e",
+                    r["SiteID"], gene, res, pos,
+                    as.numeric(r["logFC"]), as.numeric(r["adj.P.Val"]))
+          }), collapse = "\n")
+          sprintf("### %s\n%d significant sites (%d up, %d down)\n\nTop 20 by significance:\n%s",
+                  cs$name, cs$n_sig, cs$n_up, cs$n_down, top_lines)
+        }), collapse = "\n\n")
+
+        # Cross-comparison sites
+        cross_text <- tryCatch({
+          all_sig <- do.call(rbind, lapply(phospho_contrasts, function(cname) {
+            tt <- limma::topTable(values$phospho_fit, coef = cname, number = Inf) %>% as.data.frame()
+            tt$SiteID <- rownames(tt)
+            sig <- tt[tt$adj.P.Val < 0.05, c("SiteID", "logFC", "adj.P.Val")]
+            sig$Contrast <- cname
+            sig
+          }))
+          site_counts <- table(all_sig$SiteID)
+          multi <- names(site_counts[site_counts >= 2])
+          if (length(multi) > 0) {
+            cross_df <- all_sig[all_sig$SiteID %in% multi, ]
+            cross_df <- cross_df[order(cross_df$SiteID, cross_df$Contrast), ]
+            paste(capture.output(print(head(as.data.frame(cross_df), 60), row.names = FALSE)), collapse = "\n")
+          } else {
+            "No sites significant in >= 2 contrasts."
+          }
+        }, error = function(e) "Could not compute cross-comparison sites.")
+
+        # Residue distribution
+        residue_text <- tryCatch({
+          if (!is.null(values$phospho_site_info) && "Residue" %in% names(values$phospho_site_info)) {
+            res_table <- table(values$phospho_site_info$Residue)
+            paste(sprintf("  %s: %d sites", names(res_table), res_table), collapse = "\n")
+          } else "Residue information not available."
+        }, error = function(e) "")
+
+        # KSEA inline summary
+        ksea_text <- ""
+        ksea_section <- ""
+        if (ksea_available) {
+          ks <- values$ksea_results
+          top_kinases <- head(ks[order(ks$FDR), ], 10)
+          ksea_text <- paste0(
+            "\n\n--- TOP KINASES (KSEA, up to 10 by FDR) ---\n",
+            paste(capture.output(print(as.data.frame(top_kinases[, intersect(c("Kinase.Gene", "z.score", "p.value", "FDR", "m"),
+              names(top_kinases))]), row.names = FALSE)), collapse = "\n"),
+            "\n"
+          )
+          ksea_section <- paste0(
+            "## 5. Kinase Activity Analysis\n",
+            "KSEA results are in `KSEA_Results.csv`. Identify the top activated and inhibited kinases ",
+            "(highest positive and negative z-scores with FDR < 0.05). Report substrate counts (`m` column). ",
+            "Discuss what signaling pathways these kinases belong to and what their activation/inhibition implies ",
+            "for the biological system under study. Note any kinases with very few substrates (m < 3) as lower confidence.\n\n"
+          )
+        }
+
+        prompt <- paste0(
+          "# Phosphoproteomics Analysis\n\n",
+          "You are a senior phosphoproteomics and cell signaling expert. ",
+          "Analyze the following phosphosite-level differential expression results from a DIA-NN / limma pipeline. ",
+          "The data was processed by DE-LIMP (Differential Expression - LIMPA Pipeline) with site-level quantification.\n\n",
+
+          "## Attached Data Files\n\n",
+          "- **`Phospho_DE_Results.csv`** -- Complete site-level DE statistics for all ", n_total_sites,
+          " phosphosites across ", length(phospho_contrasts), " comparison(s). Columns: SiteID, logFC, AveExpr, t, P.Value, adj.P.Val, B, Contrast, plus site metadata\n",
+          "- **`Phospho_Site_Matrix.csv`** -- Log2-transformed site intensities (filtered, imputed) across all samples\n",
+          "- **`Phospho_Site_Info.csv`** -- Site metadata: SiteID, Protein.Group, Genes, Residue, Position, localization confidence\n",
+          if (ksea_available) "- **`KSEA_Results.csv`** -- Kinase-Substrate Enrichment Analysis results (kinase z-scores, p-values, FDR, substrate counts)\n" else "",
+          "- **`Group_Assignments.csv`** -- Sample-to-group mapping\n",
+          "- **`Analysis_Parameters.txt`** -- Phospho pipeline settings (imputation, normalization, filtering, contrasts)\n",
+          "- **`Session.rds`** -- Full DE-LIMP session state (reload via DE-LIMP > Load Session)\n",
+          "- **`Reproducibility_Code.R`** -- R code log with timestamps for full reproducibility\n\n",
+
+          "Please provide a comprehensive analysis with these sections:\n\n",
+
+          "## 1. Overview\n",
+          "Number of phosphosites quantified, number significant per contrast (up/down split). ",
+          "Residue distribution (S/T/Y counts, both total and among significant sites). ",
+          "Overall assessment of the phosphoproteomics data quality and depth.\n\n",
+
+          "## 2. QC Assessment\n",
+          "Evaluate site localization confidence distribution (what fraction are Class I, >= 0.75). ",
+          "Assess data completeness before and after filtering. The filtering rule is: a site must have ",
+          "at least 2 non-missing (non-NA) values in EVERY experimental group to be retained. Sites failing ",
+          "this criterion are removed before imputation and testing because limma needs at least 2 real ",
+          "measurements per group to estimate within-group variance. Report how many sites were removed ",
+          "and what fraction of the remaining matrix required imputation. Comment on whether imputation ",
+          "affects any comparisons disproportionately. Flag any concerns about data quality.\n\n",
+
+          "## 3. Key Regulated Phosphosites Per Comparison\n",
+          "For each comparison: highlight the top differentially phosphorylated sites by significance. ",
+          "Include gene names, residue type + position. Note known functional phosphosites from literature ",
+          "(e.g., activating/inhibiting phosphorylation events). Flag any sites on well-studied signaling proteins.\n\n",
+
+          "## 4. Cross-Comparison Sites\n",
+          "Phosphosites significant in >= 2 contrasts are high-confidence regulated sites. ",
+          "Discuss direction consistency (always hyper/hypo-phosphorylated, or context-dependent). ",
+          "These are the most robust candidates for follow-up validation.\n\n",
+
+          ksea_section,
+
+          "## ", if (ksea_available) "6" else "5", ". Biological Interpretation\n",
+          "Discuss signaling cascades, kinase-substrate networks, and known pathway involvement. ",
+          "Look for coordinated phosphorylation of proteins in the same complex or pathway. ",
+          "If KSEA is available, integrate kinase activity with individual site changes. ",
+          "Suggest what upstream signals (growth factors, stress, drugs) could explain the observed phosphorylation pattern.\n\n",
+
+          "## ", if (ksea_available) "7" else "6", ". How Phosphoproteomics Works\n",
+          "Write an educational background section that a PhD student or biologist with no mass spectrometry ",
+          "or bioinformatics background can understand. Cover each topic in plain language with analogies:\n\n",
+          "### What is protein phosphorylation?\n",
+          "Phosphorylation is a molecular on/off switch. Kinase enzymes add a phosphate group (PO4) to specific ",
+          "amino acids (serine S, threonine T, or tyrosine Y) on proteins, changing the protein's shape and activity. ",
+          "Phosphatases remove it. This is the cell's fastest signaling mechanism -- it happens in seconds, ",
+          "much faster than making new proteins. Though phosphoproteins are < 1% of the proteome at any moment, ",
+          "they control most cellular decisions (growth, division, death, movement).\n\n",
+          "### Why study phosphorylation?\n",
+          "Many diseases (cancer, diabetes, neurodegeneration) involve broken signaling. Most targeted drugs ",
+          "(kinase inhibitors like imatinib) work by blocking phosphorylation. Measuring which sites change ",
+          "tells us which signaling pathways are active or disrupted.\n\n",
+          "### Phospho-enrichment\n",
+          "Phosphopeptides are rare (< 2% of all peptides) and ionize poorly. Without enrichment, they're ",
+          "invisible to the mass spectrometer. TiO2 or IMAC beads selectively capture phosphopeptides, ",
+          "concentrating them 50-100x before measurement.\n\n",
+          "### DIA-NN phospho search\n",
+          "DIA-NN searches for phosphopeptides by adding UniMod:21 (+80 Da on S/T/Y) as a variable modification. ",
+          "It also scores how confident we are that the phosphate is on the correct residue within the peptide ",
+          "(site localization). This is crucial because a peptide like ABCSTDEF could be phosphorylated on S or T.\n\n",
+          "### Site-level vs protein-level analysis\n",
+          "In standard proteomics, all peptides from one protein are aggregated into a single measurement. ",
+          "In phosphoproteomics, each phosphorylation site is analyzed independently -- one protein can have ",
+          "dozens of sites, each with different regulation. Site A on a kinase might activate it while site B inhibits it.\n\n",
+          "### Filtering: why sites are removed before analysis\n",
+          "Not every phosphosite detected in the experiment can be reliably tested for differential expression. ",
+          "The pipeline requires each site to have **at least 2 non-missing values in every experimental group**. ",
+          "Why this specific rule?\n\n",
+          "- **Statistical necessity**: limma needs variance estimates per site. With 0 or 1 real measurement ",
+          "in a group, there is no within-group variance to estimate -- the math literally cannot produce ",
+          "a meaningful p-value. Two values is the bare minimum for a variance calculation.\n",
+          "- **Per-group requirement**: The filter checks EACH group independently. A site measured in 3/3 replicates ",
+          "of Group A but 0/3 of Group B would be removed, because Group B has no real data to compare against. ",
+          "Even if imputation could fill those zeros, testing a group where every value is imputed is not meaningful.\n",
+          "- **Why not just impute everything?**: Imputation works best when most values are real and a few are missing. ",
+          "If an entire group is missing, imputation is just inventing data -- any 'significant' result would be ",
+          "an artifact of the imputation parameters, not biology.\n",
+          "- **Impact**: This filter typically removes 10-30% of sites, predominantly low-abundance sites that were ",
+          "sporadically detected. The sites that survive are the ones with enough real measurements to support ",
+          "reliable statistical testing.\n\n",
+          "Sites that pass this filter then proceed to imputation (for their remaining scattered missing values) ",
+          "and statistical testing.\n\n",
+          "### Missing value imputation\n",
+          "After filtering, the surviving sites may still have some missing values in individual samples (just not ",
+          "entire groups). Phospho data missingness is usually not random -- values are missing because the ",
+          "phosphopeptide was below the detection limit (called 'missing not at random' or MNAR). ",
+          "Perseus-style tail-based imputation fills these with small values drawn from the low end of the ",
+          "intensity distribution (global mean shifted down by 1.8 standard deviations, with narrow spread at 0.3 SD). ",
+          "This preserves the biological signal that 'missing = probably very low abundance' rather than treating it ",
+          "as average (which would artificially reduce fold-changes). A fixed random seed (42) ensures reproducibility -- ",
+          "running the pipeline twice on the same data gives identical results.\n\n",
+          "### limma for phosphosites\n",
+          "The same empirical Bayes framework used for protein-level DE is applied per-site. ",
+          "limma borrows variance information across all sites to stabilize estimates, which is especially ",
+          "important in phospho data where individual sites may have few valid measurements.\n\n",
+          "### KSEA (Kinase-Substrate Enrichment Analysis)\n",
+          "KSEA infers upstream kinase activity from downstream substrate fold-changes. If many known substrates ",
+          "of kinase X are hyper-phosphorylated, kinase X is likely more active. It uses the PhosphoSitePlus + ",
+          "NetworKIN database of known kinase-substrate relationships. The z-score indicates activation (positive) ",
+          "or inhibition (negative). This is powerful because you can detect kinase activity changes even if the ",
+          "kinase protein itself doesn't change in abundance.\n\n",
+          "### Key concepts\n",
+          "- **Localization confidence & Class I sites**: Confidence score (0-1) that the phosphate is on the correct residue. ",
+          "Class I (>= 0.75) are reliably localized and should be prioritized for biological interpretation.\n",
+          "- **Site ID format**: Gene_Residue_Position (e.g., MAPK1_T185). Position may be peptide-relative if no FASTA mapping.\n",
+          "- **S > T > Y prevalence**: In mammalian cells, ~85% serine, ~12% threonine, ~3% tyrosine phosphorylation. ",
+          "Tyrosine sites are rare but disproportionately important in signaling (growth factor receptors, oncogenes).\n\n",
+
+          "## ", if (ksea_available) "8" else "7", ". Methodology & Reproducibility\n",
+          "Summarize the phosphoproteomics pipeline: site extraction, filtering, imputation, normalization, ",
+          "limma DE testing, and KSEA (if run). Reference the attached `Analysis_Parameters.txt` for specific ",
+          "settings and `Reproducibility_Code.R` for the complete R code log. Note the software versions from session info.\n\n",
+
+          "Use markdown formatting with headers. Be scientific but accessible.\n",
+          "Reference specific phosphosites from the CSV files to support your analysis.\n\n",
+
+          "--- INLINE DATA SUMMARIES ---\n\n",
+          "Filtering summary:\n",
+          "  Sites before filtering: ", if (!is.null(values$phospho_site_matrix)) nrow(values$phospho_site_matrix) else "N/A", "\n",
+          "  Sites after filtering: ", n_total_sites, "\n",
+          "  Sites removed: ", if (!is.null(values$phospho_site_matrix)) nrow(values$phospho_site_matrix) - n_total_sites else "N/A", "\n",
+          "  Filter rule: >= 2 non-NA values required in every group\n",
+          "  Values imputed (after filtering): ",
+          tryCatch({
+            if (!is.null(values$phospho_site_matrix)) {
+              mat_pre <- values$phospho_site_matrix[rownames(values$phospho_site_matrix_filtered), colnames(values$phospho_site_matrix_filtered), drop = FALSE]
+              n_na <- sum(is.na(mat_pre))
+              n_total <- length(mat_pre)
+              sprintf("%d of %d (%.1f%%)", n_na, n_total, 100 * n_na / n_total)
+            } else "N/A"
+          }, error = function(e) "N/A"),
+          "\n\n",
+          "Residue distribution (all sites):\n", residue_text, "\n\n",
+          contrast_text, "\n\n",
+          "--- CROSS-COMPARISON SITES (significant in >= 2 contrasts) ---\n",
+          cross_text,
+          ksea_text
+        )
+
+        prompt_file <- file.path(tmp_dir, "PROMPT.md")
+        writeLines(prompt, prompt_file)
+        files_to_zip <- c(files_to_zip, prompt_file)
+
+        incProgress(0.9, detail = "Creating zip...")
+        old_wd <- setwd(tmp_dir)
+        on.exit(setwd(old_wd), add = TRUE)
+        zip(file, basename(files_to_zip))
+
+        message(sprintf("[DE-LIMP] Phospho Claude export: %d files, prompt %d chars",
+                        length(files_to_zip), nchar(prompt)))
+      })
+    },
+    contentType = "application/zip"
+  )
 
 }

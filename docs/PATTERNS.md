@@ -9,6 +9,7 @@ This file contains detailed patterns that are referenced from CLAUDE.md but too 
 - **CRITICAL reactive loop**: If `renderDT` depends on a reactive that uses `values$selection`, AND selecting rows updates `values$selection`, you get an infinite loop. **Solution**: Make `renderDT` build data independently.
 - Use `isolate()` to break reactive dependencies when needed
 - DT tables with `selection = "multiple"` support Ctrl+Click and Shift+Click
+- **CRITICAL `<<-` inside `withProgress`**: `withProgress` uses `eval(substitute(expr), env)` internally. The `<<-` operator does NOT work on lists/scalars inside this eval — it fails with "object not found" because the parent environment chain is broken. **Solution**: Use `new.env(parent = emptyenv())` instead of `list()` for mutable state, and `<-` (not `<<-`) to modify fields. Environments are pass-by-reference, so mutations inside `withProgress` are visible outside. Convert back with `as.list(env)` if needed.
 
 ## bslib navset_card_tab Rendering Issues
 
@@ -64,6 +65,21 @@ This file contains detailed patterns that are referenced from CLAUDE.md but too 
 - **Key-based auth only**: No password storage, no `sshpass`. Uses `StrictHostKeyChecking=accept-new`.
 - **R regex gotcha**: `\\s` is NOT valid in base R regex (POSIX ERE). Use `[:space:]` in character classes.
 - **Shell line continuations**: Use `paste0(flags, " \\")` to append `\` — NOT `c(flags, " \\")`.
+- **SSH ControlMaster multiplexing**: All `ssh_exec()`, `scp_upload()`, `scp_download()` include `-o ControlMaster=auto -o ControlPath=<path> -o ControlPersist=300`. Reuses a single TCP connection across all SSH/SCP calls, eliminating HPC `MaxStartups` throttling. Control socket path must be short (`/tmp/.delimp_<user>_<host>`) — macOS limits Unix domain sockets to 104 bytes.
+- **`parse_sbatch_output()` must `trimws()`**: SSH stdout often has trailing `\r` or whitespace. Without trimming, dependency chains like `--dependency=afterok:12345\r` silently fail.
+- **`MallocStackLogging` noise**: macOS injects `MallocStackLogging` warnings into stderr. Set `MallocStackLogging = ""` in processx env to suppress.
+
+## Parallel DIA-NN Search (5-Step)
+
+- **Architecture**: 5 SLURM steps with dependency chaining: (1) library prediction → (2) first-pass quant array → (3) assemble → (4) second-pass quant array → (5) final assembly
+- **3-connection approach**: Batch all remote operations into 3 SSH/SCP calls to avoid HPC `MaxStartups` throttling:
+  1. One SSH: `mkdir -p` for output dir + quant subdirs
+  2. One SCP: upload all sbatch scripts + file_list.txt + `submit_all.sh` launcher
+  3. One SSH: `bash submit_all.sh` — chains all `sbatch` submissions with `--dependency=afterok:$PREV_ID`
+- **Launcher script**: Shell script that submits each step, parses job IDs with `grep -oP "[0-9]+$"`, outputs `STEP1:id` through `STEP5:id`. R-side parses with `regexec("^STEP([1-5]):(.+)$", line)`.
+- **Resource allocation**: Step 1 (lib prediction) uses `libpred_cpus=16, libpred_mem=64G` — lighter than assembly steps (64 CPUs, 512G) to avoid QOS CPU limits. Steps 2/4 (per-file quant) use `cpus_per_file=16, mem_per_file=32G` as array jobs.
+- **`generate_parallel_scripts()`** in `helpers_search.R`: Builds all 5 sbatch scripts + launcher. Parameters include per-step resource controls, max simultaneous array tasks, search params.
+- **Cluster resource indicator**: `check_cluster_resources()` queries sacctmgr (group CPU limit), squeue (group CPUs in use), sinfo (partition idle/total). Polled every 60s when SSH connected. Traffic-light UI: green (<50%), yellow (50-80%), red (>80%).
 
 ## Docker/HPC Dual Backend Patterns
 

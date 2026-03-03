@@ -40,7 +40,7 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility |
-| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, UniProt search |
+| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `check_cluster_resources()`, UniProt search |
 
 ### Tab Structure (page_navbar)
 Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
@@ -129,6 +129,10 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | SQLite `Parameter N does not have length 1` | Use `NA_character_` instead of `NULL` |
 | SSH output encoding crash | `iconv(..., sub="")` in `ssh_exec`/`scp_download`/`scp_upload` |
 | R regex `\\s` invalid | Use `[:space:]` in base R regex (POSIX ERE) |
+| `<<-` inside `withProgress` fails | `withProgress` uses `eval(substitute(expr), env)` — `<<-` can't find parent vars. Use `new.env()` + `<-` instead. |
+| SSH rapid connections rejected (255) | HPC `MaxStartups` throttling. Batch operations into fewer SSH calls; use ControlMaster multiplexing. |
+| macOS SSH ControlPath too long | Unix domain sockets limited to 104 bytes on macOS. R's `tempdir()` paths are ~105 chars. Use `/tmp/.delimp_<user>_<host>`. |
+| `parse_sbatch_output` returns dirty ID | SSH stdout may have trailing `\r`/whitespace. Always `trimws()` parsed job IDs. |
 
 ## Version History
 
