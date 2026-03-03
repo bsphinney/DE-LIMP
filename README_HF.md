@@ -48,10 +48,14 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 - **QC Trends** - Monitor run quality with group averages
 - **Multi-Protein Violin Plots** - Compare expression distributions
 
-### 🤖 AI-Powered Exploration
-- **Chat with Your Data** - Google Gemini integration
-- **Bi-Directional Sync** - Select proteins ↔ AI suggestions
-- **Auto-Summary** - Generate draft analysis summaries
+### 🤖 AI-Powered Analysis (Google Gemini)
+> **API Key Required:** You must provide your own free Gemini API key. Get one at [Google AI Studio](https://aistudio.google.com/) and paste it into the sidebar. AI Summary sends only summary statistics (protein names, logFC, adj.P.Val). Data Chat sends per-sample expression data for top DE proteins to enable interactive Q&A.
+
+- **AI Summary** - Analyzes all contrasts at once: top DE proteins, cross-comparison biomarkers, and CV stability metrics. Export as standalone HTML report
+- **Interactive Data Chat** - Conversational AI with full dataset context (QC stats, top DE proteins, phospho sites when available). Auto-Analyze button for one-click reports
+- **Interactive AI + Plot Connection** - Select proteins in volcano/table to set AI context; AI responses highlight proteins in your plots automatically
+- **Export for Claude** - Download your complete analysis as a .zip for deep analysis with Claude, ChatGPT, or other AI assistants (includes DE results, expression matrix, QC metrics, GSEA, methods text, and more)
+- **Save Chat History** - Download conversations as plain text
 
 ### 💾 Session Management
 - **Save/Load Sessions** - Preserve analysis state (.rds files)

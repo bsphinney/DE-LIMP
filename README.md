@@ -55,8 +55,14 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **MOFA2** (Multi-Omics Factor Analysis) -- unsupervised integration of 2-6 data views (e.g., proteomics + phosphoproteomics + transcriptomics). Import from RDS, CSV, TSV, or Parquet. Variance explained heatmap, factor weights, sample scores, Factor-DE correlation. Built-in example datasets (Mouse Brain, TCGA Breast Cancer)
 
 ### AI-Powered Analysis (Google Gemini)
-- Query DE results via Google Gemini API -- sends QC stats and top DE proteins as context (requires your own API key)
-- Bidirectional protein selection: select in plots to set AI context, AI responses can highlight proteins in the app
+> **Requires a free Gemini API key.** Get one at [Google AI Studio](https://aistudio.google.com/) and paste it into the DE-LIMP sidebar.
+
+- **AI Summary** -- Analyzes all contrasts simultaneously, identifying top DE proteins per comparison, cross-comparison biomarkers, and CV-based stability metrics. AI Summary sends only summary statistics (protein names, logFC, adj.P.Val); Data Chat sends per-sample expression data for top DE proteins to enable interactive Q&A
+- **Export for Claude** -- Download your complete analysis as a .zip optimized for deep analysis with Claude, ChatGPT, or other AI assistants (includes DE results, expression matrix, QC metrics, GSEA, methods text, and more)
+- **AI Summary HTML Export** -- Styled standalone HTML report with gradient header and markdown formatting, suitable for sharing with collaborators
+- **Interactive Data Chat** -- Conversational interface with Google Gemini, auto-injecting QC stats and 100-800 top DE proteins as context. Phospho context (top 20 sites + KSEA kinase results) auto-included when phospho analysis is active
+- **Interactive AI + plot connection** -- Select proteins in volcano/table to set AI context; AI can highlight proteins in plots via `[[SELECT: protein1; protein2]]` syntax
+- **Auto-Analyze** button for one-click dataset analysis; **Save Chat** to download conversation as plain text
 - Auto-generated methodology text for methods sections
 
 ### DIA-NN Search Integration

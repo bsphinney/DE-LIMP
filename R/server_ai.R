@@ -572,7 +572,7 @@ server_ai <- function(input, output, session, values) {
           "Explain the multiple testing problem with an intuitive example (e.g., flipping coins)\n",
           "- **Volcano plot**: Why it's shaped like a volcano and how to read it (x = effect size, y = significance)\n",
           "- **Coefficient of Variation (CV)**: A measure of measurement reproducibility — lower is more reliable\n",
-          "- **Normalization**: Why raw intensities need correction (loading differences between samples) and how cyclic loess works conceptually\n\n",
+          "- **Normalization**: Why raw intensities need correction (loading differences between samples) and how DPC-CN (Data Point Correspondence - Cyclic Normalization) works conceptually\n\n",
           "Keep the tone approachable and encouraging. Avoid jargon where possible, and define it when unavoidable.\n\n",
           if (nzchar(methods_note)) paste0(
             "## Methodology & Reproducibility\n",
@@ -655,7 +655,7 @@ server_ai <- function(input, output, session, values) {
       div(style = "font-size: 0.9em; line-height: 1.7;",
         tags$h6("How it works"),
         p("Data Chat uses the Google Gemini API to provide AI-powered analysis of your proteomics data. ",
-          "Your QC statistics and the top 800 proteins are uploaded to Gemini for context-aware responses."),
+          "Your QC statistics and the top 100-800 differentially expressed proteins (scaled by dataset size) are uploaded to Gemini for context-aware responses."),
         tags$h6("What data is sent"),
         tags$ul(
           tags$li("QC statistics (precursor counts, protein counts, MS1 signal per sample)"),

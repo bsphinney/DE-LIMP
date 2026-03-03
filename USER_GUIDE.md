@@ -315,7 +315,7 @@ This is your landing page with 5 sub-tabs:
 * **Dataset Summary** — QC statistics and DE protein counts per comparison with directional arrows
 * **Replicate Consistency** — Average precursor and protein counts per group
 * **Expression Grid** — Heatmap-style table with UniProt linking and click-to-plot
-* **AI Summary** — Generate AI-powered analysis summaries (requires Gemini API key); includes an **"Export Report"** button to download a styled standalone HTML report
+* **AI Summary** — Generate AI-powered analysis summaries that analyze all contrasts simultaneously (requires Gemini API key); includes **"Export Report"** for standalone HTML and **"Export for Claude"** for a comprehensive .zip archive (see [Section 8](#8--ai-powered-analysis--export))
 
 ### 🔬 The Grid View (New!)
 Click the green **"Open Grid View"** button to open the deep-dive table.
@@ -705,33 +705,147 @@ Reports are saved to the `reports/` directory and recorded in the SQLite databas
 
 ---
 
-## 8. 🤖 AI Chat (Gemini Integration)
+## 8. 🤖 AI-Powered Analysis & Export
 
-DE-LIMP features a context-aware AI assistant.
+DE-LIMP offers two complementary AI pathways:
 
-### Setup
-1.  Expand the **AI Chat** section in the sidebar accordion and paste your **Gemini API Key**.
-2.  (Optional) Change the Model Name if you want to use a specific version (Default: `gemini-3-flash-preview`).
+- **In-app AI (Google Gemini):** Quick questions and summaries powered by Google Gemini, right inside the app. This includes **AI Summary** (a one-click overview of all comparisons) and **Data Chat** (interactive Q&A about your data). Requires a free Gemini API key.
+- **Export for External AI:** Download your complete analysis as a .zip to upload to Claude, ChatGPT, or other AI tools for deeper analysis, manuscript writing, or extended interpretation. No API key needed for the export itself.
 
-### "Chat with Your Data"
-You aren't just chatting with a bot; you are chatting with **your specific dataset**.
-* **Auto-Analyze:** Click this button to generate a comprehensive report summarizing QC quality and the top biological findings.
-* **Ask Questions:**
+### 8.1 Setup — Google Gemini API Key
+
+A free API key from Google is required for all AI features (AI Summary, Data Chat, Auto-Analyze).
+
+1.  Go to **[Google AI Studio](https://aistudio.google.com/)**.
+2.  Sign in with your Google Account.
+3.  Click **"Get API key"** in the top-left corner.
+4.  Click **"Create API key"** (select "Create API key in new project" if prompted).
+5.  Copy the key (starts with `AIza...`).
+6.  Paste it into the **"Gemini API Key"** box in the DE-LIMP sidebar (under the AI Chat accordion section).
+7.  (Optional) Change the Model Name to use a specific Gemini version (default: `gemini-3-flash-preview`).
+
+> **Privacy:**
+> - **AI Summary** sends only summary statistics to Gemini: protein names, logFC, adj.P.Val, CV metrics, and dataset dimensions. No raw expression values or sample identifiers are included.
+> - **Data Chat** sends per-sample expression values for the top DE proteins and QC metrics that include run identifiers, giving Gemini richer context for interactive Q&A.
+> - Neither feature sends file paths or server information.
+> - Google retains API data for approximately 48 hours for abuse monitoring. If you are working with clinical or patient-derived data, consult your institutional data governance office before using any AI features.
+
+### 8.2 AI Summary (Data Overview > AI Summary Sub-tab)
+
+The AI Summary analyzes **all contrasts (pairwise comparisons between your experimental groups, e.g., Treatment vs. Control) simultaneously**, not just the currently selected comparison. This provides a global view of your experiment.
+
+**What data is sent to Gemini:**
+* Top differentially expressed proteins per comparison (gene names, logFC (log2 fold change -- a value of 1.0 means the protein doubled), adj.P.Val (p-value corrected for multiple testing))
+* Cross-comparison biomarkers -- proteins that are significant in two or more contrasts
+* CV-based stability metrics -- median coefficient of variation per group, percentage of proteins below 20% CV
+* Dataset dimensions (number of proteins, samples, groups, contrasts)
+
+**What is NOT sent:**
+* Raw expression values or intensity matrices
+* Sample file names or identifiers
+* File paths or server information
+
+**The AI generates:**
+* Biological interpretation of the top DE proteins in each comparison
+* Cross-comparison patterns -- proteins that change consistently across multiple contrasts
+* Pathway and functional context for the findings
+* Suggestions for follow-up experiments
+
+#### AI Summary HTML Export
+
+Click **"Export Report"** below the AI Summary to download a styled standalone HTML file:
+* Gradient header with experiment metadata
+* Full AI analysis with markdown formatting preserved
+* Print-friendly CSS suitable for sharing with collaborators
+* Self-contained -- no external dependencies, opens in any browser
+
+### 8.3 Data Chat (AI Analysis Tab)
+
+The **AI Analysis** tab provides an interactive conversational interface with Google Gemini, where the AI has full awareness of your dataset context.
+
+#### How It Works
+
+When you open the Data Chat, the app automatically sends Gemini:
+* QC statistics (protein counts, precursor counts, data completeness per sample)
+* Top differentially expressed proteins **for the currently selected comparison** -- change the comparison selector in the DE Dashboard to explore other contrasts with the AI
+* Smart data scaling: sends 100-800 proteins depending on dataset size (smaller datasets send more complete results; larger datasets focus on the most significant)
+* When phosphoproteomics analysis is active, the top 20 phosphosites and KSEA kinase activity results are automatically included
+
+#### Using Data Chat
+
+* **Ask questions** about your specific data:
     * *"Which group has the highest variance?"*
     * *"Are there any mitochondrial proteins upregulated?"*
+    * *"What biological processes are enriched among the top hits?"*
     * *"Generate a figure caption for the volcano plot."*
+    * *"Summarize the key findings for a lab meeting presentation."*
+* **Auto-Analyze:** Click the **"Auto-Analyze"** button for a one-click comprehensive report. The AI generates a structured analysis covering data quality assessment, top differentially expressed proteins, and biological interpretation in approximately 30-60 seconds -- no manual prompting needed.
 
-### AI Summary — All-Contrast Analysis
-The **AI Summary** sub-tab (under Data Overview) analyzes all contrasts simultaneously, identifying:
-* Top differentially expressed proteins per comparison
-* Cross-comparison biomarkers (proteins significant in 2+ contrasts)
-* Biological interpretation and pathway context
+#### Interactive AI and Plot Connection
 
-Click **"Export Report"** to download a styled standalone HTML report with gradient header, formatted tables, and print-friendly CSS.
+This is one of DE-LIMP's most powerful features -- the AI and the interactive plots are connected in both directions:
 
-### Bi-Directional AI Sync
-* **User -> AI:** Select points on the Volcano Plot. Then ask: *"What are the functions of these selected proteins?"*. The AI knows exactly which ones you clicked.
-* **AI -> User:** If the AI finds interesting proteins (e.g., *"I found several glycolytic enzymes..."*), it will highlight them in your plots automatically.
+**User to AI (select proteins, then ask):**
+1. Select proteins on the Volcano Plot (click or box-select) or in the Results Table
+2. Ask: *"What are the functions of these selected proteins?"*
+3. The AI receives the exact protein list you selected and responds with targeted analysis
+
+**AI to User (AI highlights proteins in plots):**
+1. The AI can suggest proteins using a special syntax: `[[SELECT: GAPDH; ENO1; PKM]]`
+2. When the AI includes this in a response, DE-LIMP automatically highlights those proteins in the volcano plot and filters the Results Table
+3. Example: Ask *"Show me glycolytic enzymes"* -- the AI identifies them and highlights them in your plots
+
+> **Note:** You do not need to type `[[SELECT:]]` yourself. The AI automatically uses this format when it identifies proteins of interest, and DE-LIMP reads it to update your plots.
+
+#### Save Chat History
+
+Click **"Save Chat"** to download the full conversation as a plain text file. The export includes both your messages and all AI responses, with timestamps. Useful for documenting your analytical reasoning or sharing insights with collaborators.
+
+### 8.4 Export for Claude (.zip Archive)
+
+> **Works with any AI:** This export is optimized for Claude but works equally well with ChatGPT, Gemini, Copilot, or any AI assistant that accepts file uploads.
+
+The **"Export for Claude"** button (in the Output > Export Data panel) downloads a comprehensive multi-file package designed for deep analysis with Claude or other external AI systems. While the in-app AI features use Google Gemini, this export creates a portable dataset package optimized for extended conversation-based analysis.
+
+**The .zip archive contains:**
+
+| File | Contents |
+| :--- | :--- |
+| **`PROMPT.md`** | Full context document explaining the experimental design, statistical methodology, and how to interpret each file -- serves as an instruction manual for the AI |
+| **`DE_Results_Full.csv`** | All proteins across all contrasts with logFC, P.Value, adj.P.Val, and expression values |
+| **`Expression_Matrix.csv`** | Log2 expression values (rows = proteins, columns = samples) |
+| **`QC_Metrics.csv`** | Per-sample quality control statistics (precursor counts, protein counts, MS1 signal, data completeness) |
+| **`GSEA_Results.csv`** | Gene set enrichment results across all ontologies (included if GSEA has been run) |
+| **`Phospho_DE_Results.csv`** | Site-level phospho differential expression results (included if phospho data is detected) |
+| **`Session.rds`** | Full DE-LIMP session state -- can be reloaded into DE-LIMP to restore the exact analysis. **Note:** Contains all raw and processed data, so this file can be very large |
+| **`Group_Assignments.csv`** | Sample-to-group mapping table |
+| **`Analysis_Parameters.txt`** | Pipeline settings (Q-value cutoff, covariates, normalization method) |
+| **`Methods_and_References.txt`** | Statistical methodology text suitable for a paper's Methods section, with citations |
+| **`Reproducibility_Code.R`** | Complete R code log with timestamps for every analysis step |
+
+**How to use it:**
+1. Click **"Export for Claude"** on the AI Summary sub-tab to download the .zip file
+2. Go to [claude.ai](https://claude.ai) (free tier available), [chatgpt.com](https://chatgpt.com), or another AI assistant
+3. Start a new conversation and upload the .zip file (or individual files like `PROMPT.md` + the relevant CSVs)
+4. Ask questions like *"Summarize the key biological findings"*, *"Help me write a results paragraph for my paper"*, or *"What pathways are most affected?"*
+
+**Use cases:**
+* In-depth biological interpretation beyond what the in-app chat provides
+* Help writing a methods section or results narrative for a manuscript
+* Compare your results against known biology or published datasets
+* Generate publication-quality figure descriptions
+* Explore specific pathways or protein families in detail
+
+> **Note:** The Export for Claude package is for use with external AI tools (Claude, ChatGPT, etc.). It does not connect to or require any Anthropic API key. The in-app AI features (Sections 8.2 and 8.3) use Google Gemini.
+
+### 8.5 Other Export Features
+
+These additional export options are available from the **Output** dropdown in the navbar:
+
+* **Export Data panel** -- One-click CSV downloads for DE Results and CV Analysis data
+* **Reproducibility Code Log** -- Timestamped R script documenting every analysis step (download as `.R` file from the Methods & Code tab)
+* **Methods Summary** -- Publication-ready methodology text with citations for limpa, limma, and DIA-NN
+* **Session Save/Load** -- Save the full analysis state as `.rds` for later use or sharing (see Section 9 below)
 
 ---
 
