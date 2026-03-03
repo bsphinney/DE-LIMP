@@ -1,0 +1,62 @@
+name: Claude Analysis Drift Test
+
+# Runs weekly to detect if Claude's interpretation of the example dataset
+# has drifted. Saves each response as a golden baseline for comparison.
+# Also runs on manual trigger for ad-hoc testing.
+
+on:
+  schedule:
+    - cron: '0 10 * * 1'  # Every Monday at 10:00 UTC (3 AM Pacific)
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  claude-drift-test:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4'
+
+      - name: Install R dependencies
+        run: |
+          Rscript -e '
+            install.packages(c("testthat", "httr2"), repos = "https://cloud.r-project.org")
+          '
+
+      - name: Run Claude drift test
+        run: |
+          Rscript -e '
+            results <- testthat::test_file(
+              "tests/testthat/test-claude_export.R",
+              reporter = testthat::SummaryReporter$new()
+            )
+            if (any(as.data.frame(results)$failed > 0)) quit(status = 1)
+          '
+
+      - name: Commit golden baseline
+        if: always()
+        run: |
+          if [ -d tests/golden ] && [ "$(git status tests/golden --porcelain)" != "" ]; then
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git add tests/golden/
+            git commit -m "chore: Update Claude drift test golden baseline ($(date +%Y-%m-%d))"
+            git push
+          fi
+
+      - name: Upload response as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-response-${{ github.run_number }}
+          path: tests/golden/
+          retention-days: 90

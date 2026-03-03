@@ -63,6 +63,11 @@ Affinisep_vs_evosep_noNorm_xic/
 # Screenshots
 Screenshot *.png
 
+# Test fixtures and golden baselines
+!tests/fixtures/*.zip
+!tests/golden/*.rds
+!tests/golden/*.md
+
 # Keep documentation
 !CLAUDE.md
 !README.md

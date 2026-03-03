@@ -141,6 +141,93 @@ server_search <- function(input, output, session, values, add_to_log,
   })
 
   # ============================================================================
+  #    Parallel Search Mode UI (HPC backend, >= 8 files)
+  # ============================================================================
+
+  output$parallel_mode_ui <- renderUI({
+    # Only show for HPC backend with >= 8 files
+    req(input$search_backend == "hpc")
+    n_files <- if (!is.null(values$diann_raw_files)) nrow(values$diann_raw_files) else 0
+    if (n_files < 8) return(NULL)
+
+    # Recommendation badge based on file count
+    rec_badge <- if (n_files >= 50) {
+      span(class = "badge bg-danger", "Strongly recommended")
+    } else if (n_files >= 20) {
+      span(class = "badge bg-warning text-dark", "Recommended")
+    } else {
+      span(class = "badge bg-info", "Optional")
+    }
+
+    tagList(
+      hr(),
+      tags$h6(icon("layer-group"), " Parallel Search Mode ", rec_badge),
+      checkboxInput("parallel_search", "Enable Parallel Search (split across nodes)",
+        value = FALSE),
+      tags$p(class = "text-muted", style = "font-size: 0.8em;",
+        sprintf("With %d files, parallel search splits processing into 5 steps: ", n_files),
+        "library prediction, per-file first-pass, library assembly, ",
+        "per-file final-pass, and cross-run report. Each file runs as a ",
+        "separate SLURM array task."),
+
+      conditionalPanel("input.parallel_search",
+        tags$div(class = "alert alert-info py-1 px-2",
+          style = "font-size: 0.82em;",
+          icon("circle-info"),
+          " Mass accuracy is forced to Manual mode in parallel search. ",
+          "MBR is disabled (replaced by the 5-step workflow)."),
+
+        tags$h6("Per-File Resources", style = "margin-top: 10px;"),
+        div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+          div(style = "flex: 1; min-width: 100px;",
+            numericInput("parallel_cpus", "CPUs/file:", value = 16, min = 4, max = 32, step = 4)
+          ),
+          div(style = "flex: 1; min-width: 100px;",
+            numericInput("parallel_mem_gb", "Memory/file (GB):", value = 32, min = 8, max = 128, step = 8)
+          )
+        ),
+        div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+          div(style = "flex: 1; min-width: 100px;",
+            numericInput("parallel_time_hours", "Time/file (hrs):", value = 2, min = 1, max = 8, step = 1)
+          ),
+          div(style = "flex: 1; min-width: 100px;",
+            numericInput("max_simultaneous", "Max concurrent:", value = 20, min = 4, max = 100, step = 4)
+          )
+        ),
+        tags$p(class = "text-muted", style = "font-size: 0.78em;",
+          "Assembly/report steps use the main SLURM resource settings above. ",
+          "Per-file resources apply to the array jobs (steps 2 & 4).")
+      )
+    )
+  })
+
+  # Force mass accuracy to manual when parallel mode is enabled
+  observeEvent(input$parallel_search, {
+    if (isTRUE(input$parallel_search)) {
+      updateRadioButtons(session, "mass_acc_mode", selected = "manual")
+
+      # Set instrument-aware defaults based on file extensions
+      if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+        ext <- tolower(tools::file_ext(values$diann_raw_files$filename[1]))
+        if (ext == "d") {
+          # timsTOF
+          updateNumericInput(session, "diann_mass_acc", value = 15)
+          updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
+        } else if (ext == "raw") {
+          # Orbitrap
+          updateNumericInput(session, "diann_mass_acc", value = 10)
+          updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
+        }
+        # .mzML: keep current values (can't detect instrument)
+      }
+
+      showNotification(
+        "Parallel mode: mass accuracy set to Manual with instrument-aware defaults. MBR disabled.",
+        type = "message", duration = 6)
+    }
+  }, ignoreInit = TRUE)
+
+  # ============================================================================
   #    Job Queue Persistence (survives app restarts)
   # ============================================================================
 
@@ -212,6 +299,125 @@ server_search <- function(input, output, session, values, add_to_log,
 
     values$ssh_connected <- result$success
     values$ssh_sbatch_path <- result$sbatch_path
+
+    # Trigger immediate cluster resource check on successful connect
+    if (result$success) {
+      tryCatch({
+        res <- check_cluster_resources(
+          ssh_config = cfg,
+          account = isolate(input$diann_account) %||% "",
+          partition = isolate(input$diann_partition) %||% "",
+          sbatch_path = result$sbatch_path
+        )
+        values$cluster_resources <- res
+      }, error = function(e) {
+        values$cluster_resources <- list(success = FALSE, error = e$message)
+      })
+    } else {
+      values$cluster_resources <- NULL
+    }
+  })
+
+  # ============================================================================
+  #    Cluster Resource Indicator (auto-refresh every 60s)
+  # ============================================================================
+
+  observe({
+    invalidateLater(60000)
+    req(isTRUE(values$ssh_connected))
+    cfg <- isolate(ssh_config())
+    req(cfg)
+    account <- isolate(input$diann_account) %||% ""
+    partition <- isolate(input$diann_partition) %||% ""
+    sbatch_path <- isolate(values$ssh_sbatch_path)
+
+    tryCatch({
+      res <- check_cluster_resources(cfg, account, partition, sbatch_path)
+      values$cluster_resources <- res
+    }, error = function(e) NULL)
+  })
+
+  output$cluster_status_ui <- renderUI({
+    res <- values$cluster_resources
+    if (is.null(res) || !isTRUE(res$success)) return(NULL)
+
+    has_group <- !is.na(res$group_limit)
+    has_partition <- !is.na(res$partition_idle)
+
+    if (!has_group && !has_partition) return(NULL)
+
+    # Determine traffic light color from group utilization
+    if (has_group && res$group_limit > 0) {
+      pct_used <- res$group_used / res$group_limit
+      if (pct_used > 0.8) {
+        color <- "#dc3545"  # red
+        bg <- "#f8d7da"
+        border <- "#f5c2c7"
+      } else if (pct_used > 0.5) {
+        color <- "#ffc107"  # yellow
+        bg <- "#fff3cd"
+        border <- "#ffecb5"
+      } else {
+        color <- "#198754"  # green
+        bg <- "#d1e7dd"
+        border <- "#badbcc"
+      }
+    } else if (has_partition && res$partition_total > 0) {
+      # Fall back to partition-level stats
+      pct_idle <- res$partition_idle / res$partition_total
+      if (pct_idle < 0.2) {
+        color <- "#dc3545"
+        bg <- "#f8d7da"
+        border <- "#f5c2c7"
+      } else if (pct_idle < 0.5) {
+        color <- "#ffc107"
+        bg <- "#fff3cd"
+        border <- "#ffecb5"
+      } else {
+        color <- "#198754"
+        bg <- "#d1e7dd"
+        border <- "#badbcc"
+      }
+    } else {
+      color <- "#6c757d"
+      bg <- "#e9ecef"
+      border <- "#dee2e6"
+    }
+
+    # Build text lines
+    account_name <- isolate(input$diann_account) %||% "account"
+    partition_name <- isolate(input$diann_partition) %||% "partition"
+
+    group_line <- if (has_group) {
+      sprintf("%s: %s/%s CPUs used (%s available)",
+        account_name,
+        format(res$group_used, big.mark = ","),
+        format(res$group_limit, big.mark = ","),
+        format(res$group_available, big.mark = ","))
+    } else if (!is.na(res$group_used)) {
+      sprintf("%s: %s CPUs in use",
+        account_name,
+        format(res$group_used, big.mark = ","))
+    } else NULL
+
+    partition_line <- if (has_partition) {
+      sprintf("%s partition: %s idle of %s total",
+        partition_name,
+        format(res$partition_idle, big.mark = ","),
+        format(res$partition_total, big.mark = ","))
+    } else NULL
+
+    indicator <- span(style = sprintf("color: %s; font-size: 1.1em;", color),
+      HTML("&#9679;"))  # filled circle
+
+    div(
+      style = sprintf(
+        "background: %s; border: 1px solid %s; border-radius: 6px; padding: 6px 10px; margin-top: 8px; font-size: 0.82em;",
+        bg, border),
+      div(indicator, " ", if (!is.null(group_line)) group_line),
+      if (!is.null(partition_line)) div(
+        style = "margin-left: 20px; color: #555;", partition_line)
+    )
   })
 
   # ============================================================================
@@ -662,10 +868,15 @@ server_search <- function(input, output, session, values, add_to_log,
     }
   })
 
-  # SSH mode: update output base from text input
+  # SSH mode: derive output base from raw data directory
   observeEvent(input$ssh_output_base_dir, {
     if (nzchar(input$ssh_output_base_dir %||% "")) {
       output_base(input$ssh_output_base_dir)
+    }
+  })
+  observeEvent(input$ssh_raw_data_dir, {
+    if (nzchar(input$ssh_raw_data_dir %||% "")) {
+      output_base(input$ssh_raw_data_dir)
     }
   })
 
@@ -679,9 +890,18 @@ server_search <- function(input, output, session, values, add_to_log,
   })
 
   output$full_output_path <- renderText({
-    base <- output_base()
-    name <- gsub("[^A-Za-z0-9._-]", "_", input$analysis_name)
-    file.path(base, name)
+    # Preview shows output as subfolder of input directory
+    input_dir <- tryCatch({
+      backend <- input$search_backend %||% "hpc"
+      if (backend == "hpc" && nzchar(input$ssh_raw_data_dir %||% "")) {
+        input$ssh_raw_data_dir
+      } else if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+        dirname(values$diann_raw_files$full_path[1])
+      } else {
+        output_base()
+      }
+    }, error = function(e) output_base())
+    file.path(input_dir, paste0("output_", format(Sys.time(), "%Y%m%d_%H%M")))
   })
 
   # ============================================================================
@@ -768,7 +988,19 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # --- Prepare submission (shared) ---
     analysis_name <- gsub("[^A-Za-z0-9._-]", "_", input$analysis_name)
-    output_dir <- file.path(output_base(), analysis_name)
+
+    # Auto-set output directory as <input_dir>/output_YYYYMMDD_HHMM
+    timestamp_suffix <- format(Sys.time(), "%Y%m%d_%H%M")
+    input_dir <- tryCatch({
+      if (backend == "hpc" && nzchar(input$ssh_raw_data_dir %||% "")) {
+        input$ssh_raw_data_dir
+      } else if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+        dirname(values$diann_raw_files$full_path[1])
+      } else {
+        output_base()
+      }
+    }, error = function(e) output_base())
+    output_dir <- gsub("//+", "/", file.path(input_dir, paste0("output_", timestamp_suffix)))
 
     if (backend == "local") {
       dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
@@ -779,7 +1011,12 @@ server_search <- function(input, output, session, values, add_to_log,
     } else {
       cfg <- ssh_config()
       if (!is.null(cfg)) {
-        ssh_exec(cfg, paste("mkdir -p", shQuote(output_dir)))
+        mkdir_res <- ssh_exec(cfg, paste("mkdir -p", shQuote(output_dir)))
+        if (mkdir_res$status != 0) {
+          showNotification(paste("Failed to create remote directory:",
+            paste(mkdir_res$stdout, collapse = " ")), type = "error")
+          return()
+        }
       } else {
         dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
       }
@@ -901,7 +1138,7 @@ server_search <- function(input, output, session, values, add_to_log,
           contaminant_library = contam_lib,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
-            tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+            tools::file_ext(values$diann_raw_files$filename[1]) else "unknown",
           search_mode = input$search_mode,
           normalization = input$diann_normalization,
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
@@ -989,7 +1226,7 @@ server_search <- function(input, output, session, values, add_to_log,
           contaminant_library = contam_lib,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
-            tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+            tools::file_ext(values$diann_raw_files$filename[1]) else "unknown",
           search_mode = input$search_mode,
           normalization = input$diann_normalization,
           docker_image = img,
@@ -1004,8 +1241,310 @@ server_search <- function(input, output, session, values, add_to_log,
         is_ssh = FALSE
       )
 
+    } else if (isTRUE(input$parallel_search)) {
+      # --- HPC Parallel (5-step SLURM array) submission ---
+      sif_path <- input$diann_sif_path
+      sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
+      use_login_shell <- is.null(values$ssh_sbatch_path)
+
+      # Generate all 5 scripts
+      scripts <- generate_parallel_scripts(
+        analysis_name = analysis_name,
+        raw_files = values$diann_raw_files$full_path,
+        fasta_files = fasta_files,
+        speclib_path = values$diann_speclib,
+        output_dir = output_dir,
+        diann_sif = sif_path,
+        normalization = input$diann_normalization,
+        search_mode = input$search_mode,
+        cpus_per_file = input$parallel_cpus %||% 16,
+        mem_per_file = input$parallel_mem_gb %||% 32,
+        time_per_file = input$parallel_time_hours %||% 2,
+        assembly_cpus = input$diann_cpus,
+        assembly_mem = input$diann_mem_gb,
+        assembly_time = input$diann_time_hours,
+        partition = input$diann_partition,
+        account = input$diann_account,
+        search_params = search_params,
+        max_simultaneous = input$max_simultaneous %||% 20
+      )
+
+      # --- Upload all files + launcher, then submit via one SSH call ---
+      # Minimizes SSH connections to avoid HPC MaxStartups throttling.
+      # Total: 1 SSH (mkdir) + 1 SCP (all files) + 1 SSH (launcher) = 3 connections.
+      has_step1 <- !is.null(scripts$step1_library)
+      script_names <- c("step1_libpred.sbatch", "step2_firstpass.sbatch",
+                         "step3_assembly.sbatch", "step4_finalpass.sbatch",
+                         "step5_report.sbatch")
+      script_contents <- list(scripts$step1_library, scripts$step2_firstpass,
+                               scripts$step3_assembly, scripts$step4_finalpass,
+                               scripts$step5_report)
+      step_script_paths <- file.path(output_dir, script_names)
+
+      # Build launcher script that chains sbatch submissions with dependencies
+      launcher_lines <- c("#!/bin/bash", "set -e", "")
+      if (has_step1) {
+        launcher_lines <- c(launcher_lines,
+          sprintf('JOB1=$(%s %s 2>&1)', sbatch_bin, step_script_paths[1]),
+          'JOB1_ID=$(echo "$JOB1" | grep -oP "[0-9]+$")',
+          'echo "STEP1:$JOB1_ID"',
+          sprintf('JOB2=$(%s --dependency=afterok:$JOB1_ID %s 2>&1)',
+                  sbatch_bin, step_script_paths[2])
+        )
+      } else {
+        launcher_lines <- c(launcher_lines,
+          sprintf('JOB2=$(%s %s 2>&1)', sbatch_bin, step_script_paths[2]),
+          'echo "STEP1:skipped"'
+        )
+      }
+      launcher_lines <- c(launcher_lines,
+        'JOB2_ID=$(echo "$JOB2" | grep -oP "[0-9]+$")',
+        'echo "STEP2:$JOB2_ID"', "",
+        sprintf('JOB3=$(%s --dependency=afterok:$JOB2_ID %s 2>&1)',
+                sbatch_bin, step_script_paths[3]),
+        'JOB3_ID=$(echo "$JOB3" | grep -oP "[0-9]+$")',
+        'echo "STEP3:$JOB3_ID"', "",
+        sprintf('JOB4=$(%s --dependency=afterok:$JOB3_ID %s 2>&1)',
+                sbatch_bin, step_script_paths[4]),
+        'JOB4_ID=$(echo "$JOB4" | grep -oP "[0-9]+$")',
+        'echo "STEP4:$JOB4_ID"', "",
+        sprintf('JOB5=$(%s --dependency=afterok:$JOB4_ID %s 2>&1)',
+                sbatch_bin, step_script_paths[5]),
+        'JOB5_ID=$(echo "$JOB5" | grep -oP "[0-9]+$")',
+        'echo "STEP5:$JOB5_ID"'
+      )
+
+      # Write file_list.txt locally
+      file_list_local <- write_file_list(values$diann_raw_files$full_path, tempdir())
+
+      # Write everything to a temp dir for upload
+      upload_dir <- tempfile("delimp_scripts_")
+      dir.create(upload_dir)
+      on.exit(unlink(upload_dir, recursive = TRUE), add = TRUE)
+      for (i in seq_along(script_names)) {
+        if (!is.null(script_contents[[i]])) {
+          writeLines(script_contents[[i]], file.path(upload_dir, script_names[i]))
+        }
+      }
+      file.copy(file_list_local, file.path(upload_dir, "file_list.txt"))
+      writeLines(paste(launcher_lines, collapse = "\n"),
+                 file.path(upload_dir, "submit_all.sh"))
+
+      step_ids <- new.env(parent = emptyenv())
+      pstate <- new.env(parent = emptyenv())
+      pstate$failed <- FALSE
+
+      if (!is.null(cfg)) {
+        # SSH mode: 1 mkdir + 1 SCP + 1 bash = 3 SSH connections total
+        mkdir_cmd <- sprintf("mkdir -p %s %s/quant_step2 %s/quant_step4",
+                              shQuote(output_dir), shQuote(output_dir), shQuote(output_dir))
+        mkdir_result <- ssh_exec(cfg, mkdir_cmd)
+        if (mkdir_result$status != 0) {
+          showNotification(paste("Failed to create remote directories:",
+            paste(mkdir_result$stdout, collapse = " ")), type = "error")
+          return()
+        }
+
+        # Single SCP: upload all sbatch scripts + file_list + launcher
+        local_files <- list.files(upload_dir, full.names = TRUE)
+        scp_args <- c(
+          "-i", cfg$key_path,
+          "-P", as.character(cfg$port %||% 22),
+          "-o", "StrictHostKeyChecking=accept-new",
+          "-o", "ConnectTimeout=10",
+          "-o", "BatchMode=yes",
+          ssh_mux_args(cfg),
+          local_files,
+          paste0(cfg$user, "@", cfg$host, ":", output_dir, "/")
+        )
+        message("[DE-LIMP] Uploading ", length(local_files), " files to ", output_dir)
+        scp_result <- tryCatch({
+          if (requireNamespace("processx", quietly = TRUE)) {
+            res <- processx::run("scp", args = scp_args, timeout = 120,
+                                 error_on_status = FALSE,
+                                 env = c("current", MallocStackLogging = ""))
+            list(status = res$status, stdout = iconv(paste0(res$stdout, res$stderr),
+                                                      to = "UTF-8", sub = ""))
+          } else {
+            out <- system2("scp", args = scp_args, stdout = TRUE, stderr = TRUE)
+            list(status = attr(out, "status") %||% 0L,
+                 stdout = iconv(out, to = "UTF-8", sub = ""))
+          }
+        }, error = function(e) list(status = 1L, stdout = e$message))
+
+        if (scp_result$status != 0) {
+          showNotification(paste("Failed to upload scripts:", scp_result$stdout),
+            type = "error")
+          return()
+        }
+        message("[DE-LIMP] All files uploaded. Executing launcher...")
+
+        # Execute launcher: one SSH call submits all 5 sbatch jobs
+        launcher_remote <- file.path(output_dir, "submit_all.sh")
+        result <- ssh_exec(cfg, paste("bash", launcher_remote),
+                           login_shell = use_login_shell, timeout = 120)
+        message("[DE-LIMP] Launcher status=", result$status,
+                " stdout=", paste(result$stdout, collapse = " | "))
+
+        if (result$status != 0) {
+          showNotification(paste("Parallel submission failed:",
+            paste(result$stdout, collapse = " ")), type = "error", duration = 15)
+          return()
+        }
+
+        # Parse STEP1:id through STEP5:id from output
+        for (line in result$stdout) {
+          m <- regmatches(line, regexec("^STEP([1-5]):(.+)$", line))[[1]]
+          if (length(m) == 3) {
+            step_name <- paste0("step", m[2])
+            job_id_val <- trimws(m[3])
+            if (job_id_val != "skipped" && nzchar(job_id_val)) {
+              step_ids[[step_name]] <- job_id_val
+            }
+            message("[DE-LIMP] ", step_name, " = ", job_id_val)
+          }
+        }
+
+        if (is.null(step_ids$step5)) {
+          showNotification("Could not parse all step job IDs from sbatch output.",
+            type = "error", duration = 15)
+          return()
+        }
+
+      } else {
+        # Local mode: submit sequentially
+        local_sbatch_bin <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
+        has_step1 <- !is.null(scripts$step1_library)
+
+        withProgress(message = "Submitting 5-step parallel search...", value = 0, {
+          # Step 1
+          if (!pstate$failed && has_step1) {
+            incProgress(0.1, detail = "Step 1: Library prediction")
+            tryCatch({
+              out <- system2(local_sbatch_bin,
+                args = file.path(output_dir, "step1_libpred.sbatch"),
+                stdout = TRUE, stderr = TRUE)
+              step_ids$step1 <- parse_sbatch_output(out)
+              if (is.null(step_ids$step1)) pstate$failed <- TRUE
+            }, error = function(e) { pstate$failed <- TRUE })
+          }
+          # Step 2
+          if (!pstate$failed) {
+            incProgress(0.2, detail = "Step 2: First-pass array")
+            dep <- if (!is.null(step_ids$step1))
+              sprintf("--dependency=afterok:%s", step_ids$step1)
+            tryCatch({
+              out <- system2(local_sbatch_bin,
+                args = c(dep, file.path(output_dir, "step2_firstpass.sbatch")),
+                stdout = TRUE, stderr = TRUE)
+              step_ids$step2 <- parse_sbatch_output(out)
+              if (is.null(step_ids$step2)) pstate$failed <- TRUE
+            }, error = function(e) { pstate$failed <- TRUE })
+          }
+          # Step 3
+          if (!pstate$failed) {
+            incProgress(0.2, detail = "Step 3: Library assembly")
+            tryCatch({
+              out <- system2(local_sbatch_bin,
+                args = c(sprintf("--dependency=afterok:%s", step_ids$step2),
+                         file.path(output_dir, "step3_assembly.sbatch")),
+                stdout = TRUE, stderr = TRUE)
+              step_ids$step3 <- parse_sbatch_output(out)
+              if (is.null(step_ids$step3)) pstate$failed <- TRUE
+            }, error = function(e) { pstate$failed <- TRUE })
+          }
+          # Step 4
+          if (!pstate$failed) {
+            incProgress(0.2, detail = "Step 4: Final-pass array")
+            tryCatch({
+              out <- system2(local_sbatch_bin,
+                args = c(sprintf("--dependency=afterok:%s", step_ids$step3),
+                         file.path(output_dir, "step4_finalpass.sbatch")),
+                stdout = TRUE, stderr = TRUE)
+              step_ids$step4 <- parse_sbatch_output(out)
+              if (is.null(step_ids$step4)) pstate$failed <- TRUE
+            }, error = function(e) { pstate$failed <- TRUE })
+          }
+          # Step 5
+          if (!pstate$failed) {
+            incProgress(0.2, detail = "Step 5: Cross-run report")
+            tryCatch({
+              out <- system2(local_sbatch_bin,
+                args = c(sprintf("--dependency=afterok:%s", step_ids$step4),
+                         file.path(output_dir, "step5_report.sbatch")),
+                stdout = TRUE, stderr = TRUE)
+              step_ids$step5 <- parse_sbatch_output(out)
+              if (is.null(step_ids$step5)) pstate$failed <- TRUE
+            }, error = function(e) { pstate$failed <- TRUE })
+          }
+        })
+
+        if (pstate$failed) {
+          showNotification("Parallel submission failed (local mode).", type = "error")
+          return()
+        }
+      }
+
+      # Abort if any step failed to submit
+      if (pstate$failed) return()
+
+      # The main job_id is the final step (its completion = workflow done)
+      job_id <- step_ids$step5
+
+      # Create parallel HPC job entry
+      job_entry <- list(
+        job_id = job_id,
+        backend = "hpc",
+        name = analysis_name,
+        status = "queued",
+        output_dir = output_dir,
+        script_path = file.path(output_dir, "step5_report.sbatch"),
+        submitted_at = Sys.time(),
+        n_files = nrow(values$diann_raw_files),
+        search_mode = input$search_mode,
+        parallel = TRUE,
+        parallel_steps = as.list(step_ids),
+        parallel_n_files = nrow(values$diann_raw_files),
+        parallel_current_step = if (is.null(step_ids$step1)) 2L else 1L,
+        parallel_step_status = list(
+          step1 = if (is.null(step_ids$step1)) "skipped" else "queued",
+          step2 = "queued", step3 = "queued",
+          step4 = "queued", step5 = "queued"
+        ),
+        search_settings = list(
+          search_params = search_params,
+          fasta_files = fasta_files,
+          contaminant_library = contam_lib,
+          n_raw_files = nrow(values$diann_raw_files),
+          raw_file_type = if (nrow(values$diann_raw_files) > 0)
+            tools::file_ext(values$diann_raw_files$filename[1]) else "unknown",
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          diann_sif = basename(sif_path),
+          speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            basename(values$diann_speclib) else NULL,
+          slurm = list(
+            cpus = input$diann_cpus,
+            mem_gb = input$diann_mem_gb,
+            time_hours = input$diann_time_hours,
+            partition = input$diann_partition
+          ),
+          parallel = list(
+            cpus_per_file = input$parallel_cpus %||% 16,
+            mem_per_file = input$parallel_mem_gb %||% 32,
+            time_per_file = input$parallel_time_hours %||% 2,
+            max_simultaneous = input$max_simultaneous %||% 20
+          )
+        ),
+        auto_load = input$auto_load_results,
+        log_content = "",
+        completed_at = NULL,
+        loaded = FALSE,
+        is_ssh = !is.null(cfg)
+      )
+
     } else {
-      # --- HPC (SLURM) submission ---
+      # --- HPC (SLURM) standard single-job submission ---
       sif_path <- input$diann_sif_path
 
       # Generate sbatch script
@@ -1063,7 +1602,8 @@ server_search <- function(input, output, session, values, add_to_log,
         sbatch_local <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
         submit_result <- tryCatch({
           stdout <- system2(sbatch_local, args = script_path, stdout = TRUE, stderr = TRUE)
-          list(success = TRUE, stdout = stdout)
+          exit_code <- attr(stdout, "status")
+          list(success = is.null(exit_code) || exit_code == 0L, stdout = stdout)
         }, error = function(e) {
           list(success = FALSE, error = e$message)
         })
@@ -1101,7 +1641,7 @@ server_search <- function(input, output, session, values, add_to_log,
           contaminant_library = contam_lib,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
-            tools::file_ext(values$diann_raw_files$name[1]) else "unknown",
+            tools::file_ext(values$diann_raw_files$filename[1]) else "unknown",
           search_mode = input$search_mode,
           normalization = input$diann_normalization,
           diann_sif = basename(sif_path),
@@ -1234,8 +1774,112 @@ server_search <- function(input, output, session, values, add_to_log,
           jobs[[i]]$log_content <- result$log_tail
           changed <- TRUE
         }
+      } else if (isTRUE(jobs[[i]]$parallel)) {
+        # --- HPC Parallel (5-step) monitoring ---
+        job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+        slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) {
+          values$ssh_sbatch_path
+        } else if (nzchar(local_sbatch_path)) {
+          local_sbatch_path
+        } else NULL
+
+        steps <- jobs[[i]]$parallel_steps
+        step_status <- jobs[[i]]$parallel_step_status %||% list()
+        step_names <- c("step1", "step2", "step3", "step4", "step5")
+        current_step <- jobs[[i]]$parallel_current_step %||% 1L
+        n_files <- jobs[[i]]$parallel_n_files %||% 0
+
+        # Poll each non-terminal step
+        for (sn in step_names) {
+          sid <- steps[[sn]]
+          if (is.null(sid)) next
+          prev <- step_status[[sn]] %||% "queued"
+          if (prev %in% c("completed", "skipped", "failed", "cancelled")) next
+
+          s_status <- check_slurm_status(sid, ssh_config = job_cfg, sbatch_path = slurm_path)
+          step_status[[sn]] <- s_status
+        }
+        jobs[[i]]$parallel_step_status <- step_status
+
+        # Determine current_step (first non-completed step)
+        for (si in seq_along(step_names)) {
+          ss <- step_status[[step_names[si]]] %||% "queued"
+          if (!ss %in% c("completed", "skipped")) {
+            current_step <- si
+            break
+          }
+        }
+        jobs[[i]]$parallel_current_step <- current_step
+
+        # For array steps (2 & 4), count completed tasks via sacct
+        for (array_step in c("step2", "step4")) {
+          arr_id <- steps[[array_step]]
+          arr_status <- step_status[[array_step]] %||% "queued"
+          if (is.null(arr_id) || !arr_status %in% c("running", "queued")) next
+
+          slurm_cmd_fn <- function(cmd) {
+            if (!is.null(slurm_path)) file.path(dirname(slurm_path), cmd)
+            else cmd
+          }
+          sacct_cmd <- sprintf(
+            "%s -j %s --format=State --noheader --parsable2 2>/dev/null",
+            slurm_cmd_fn("sacct"), arr_id)
+
+          sacct_result <- if (!is.null(job_cfg)) {
+            ssh_exec(job_cfg, sacct_cmd, login_shell = is.null(slurm_path))
+          } else {
+            tryCatch({
+              out <- system2(slurm_cmd_fn("sacct"),
+                args = c("-j", arr_id, "--format=State", "--noheader", "--parsable2"),
+                stdout = TRUE, stderr = TRUE)
+              list(status = 0, stdout = out)
+            }, error = function(e) list(status = 1, stdout = character()))
+          }
+
+          if (sacct_result$status == 0 && length(sacct_result$stdout) > 0) {
+            states <- toupper(trimws(sacct_result$stdout))
+            states <- states[nzchar(states)]
+            n_done <- sum(grepl("COMPLETED", states))
+            n_running <- sum(grepl("RUNNING", states))
+            n_pending <- sum(grepl("PENDING", states))
+            n_failed <- sum(grepl("FAILED|TIMEOUT|OUT_OF_ME", states))
+            jobs[[i]][[paste0(array_step, "_progress")]] <- list(
+              completed = n_done, running = n_running,
+              pending = n_pending, failed = n_failed)
+          }
+        }
+
+        # Overall status: check step5 final state
+        step5_status <- step_status[["step5"]] %||% "queued"
+        new_status <- if (step5_status == "completed") "completed"
+          else if (any(vapply(step_status, function(s) s %in% c("failed"), logical(1)))) "failed"
+          else if (any(vapply(step_status, function(s) s %in% c("cancelled"), logical(1)))) "cancelled"
+          else if (any(vapply(step_status, function(s) s %in% c("running"), logical(1)))) "running"
+          else "queued"
+
+        # Tail the most recent log for display
+        if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+          log_result <- ssh_exec(cfg, sprintf(
+            "ls -t %s/diann_*.{out,err} 2>/dev/null | head -1 | xargs tail -50 2>/dev/null",
+            shQuote(jobs[[i]]$output_dir)))
+          if (log_result$status == 0 && length(log_result$stdout) > 0) {
+            jobs[[i]]$log_content <- paste(log_result$stdout, collapse = "\n")
+          }
+        } else {
+          log_files <- list.files(jobs[[i]]$output_dir,
+            pattern = "^diann_.*\\.(out|err)$", full.names = TRUE)
+          if (length(log_files) > 0) {
+            log_file <- log_files[which.max(file.mtime(log_files))]
+            log_lines <- tryCatch(
+              tail(readLines(log_file, warn = FALSE), 50),
+              error = function(e) character(0))
+            jobs[[i]]$log_content <- paste(log_lines, collapse = "\n")
+          }
+        }
+        changed <- TRUE
+
       } else {
-        # --- HPC (SLURM) monitoring ---
+        # --- HPC (SLURM) standard single-job monitoring ---
         job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
         # Use SSH sbatch path for remote jobs, local path for local jobs
         slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) {
@@ -1556,9 +2200,48 @@ server_search <- function(input, output, session, values, add_to_log,
       } else if (isTRUE(job$backend == "docker")) {
         span(class = "badge bg-info text-white", style = "font-size: 0.7em; margin-right: 4px;",
           icon("docker", lib = "font-awesome"), " Docker")
+      } else if (isTRUE(job$parallel)) {
+        span(class = "badge bg-primary text-white", style = "font-size: 0.7em; margin-right: 4px;",
+          icon("layer-group"), " HPC Parallel")
       } else {
         span(class = "badge bg-secondary", style = "font-size: 0.7em; margin-right: 4px;",
           icon("server"), " HPC")
+      }
+
+      # Build parallel step progress display
+      parallel_progress_ui <- if (isTRUE(job$parallel)) {
+        step_labels <- c("1: Lib Predict", "2: First Pass", "3: Assembly",
+                          "4: Final Pass", "5: Report")
+        step_names <- c("step1", "step2", "step3", "step4", "step5")
+        step_status <- job$parallel_step_status %||% list()
+        n_files <- job$parallel_n_files %||% 0
+
+        step_icons <- lapply(seq_along(step_names), function(si) {
+          sn <- step_names[si]
+          ss <- step_status[[sn]] %||% "queued"
+          step_icon <- switch(ss,
+            "completed" = icon("check", style = "color: #28a745;"),
+            "running"   = icon("spinner", class = "fa-spin", style = "color: #007bff;"),
+            "failed"    = icon("xmark", style = "color: #dc3545;"),
+            "skipped"   = icon("forward", style = "color: #999;"),
+            icon("clock", style = "color: #999;"))
+
+          # Array step progress for steps 2 & 4
+          progress_text <- ""
+          if (sn %in% c("step2", "step4") && ss == "running") {
+            prog <- job[[paste0(sn, "_progress")]]
+            if (!is.null(prog)) {
+              pct <- if (n_files > 0) round(prog$completed / n_files * 100) else 0
+              progress_text <- sprintf(" (%d/%d, %d%%)", prog$completed, n_files, pct)
+            }
+          }
+
+          div(style = "display: flex; align-items: center; gap: 4px; font-size: 0.78em; padding: 1px 0;",
+            step_icon, span(paste0(step_labels[si], progress_text)))
+        })
+
+        div(style = "margin-top: 4px; border-top: 1px dashed #dee2e6; padding-top: 4px;",
+          step_icons)
       }
 
       div(style = "border: 1px solid #dee2e6; border-radius: 5px; padding: 8px; margin-bottom: 8px; font-size: 0.82em;",
@@ -1607,7 +2290,8 @@ server_search <- function(input, output, session, values, add_to_log,
                 icon = icon("xmark"))
             }
           )
-        )
+        ),
+        parallel_progress_ui
       )
     })
 
@@ -1724,10 +2408,23 @@ server_search <- function(input, output, session, values, add_to_log,
                 scancel_cmd <- if (!is.null(values$ssh_sbatch_path)) {
                   file.path(dirname(values$ssh_sbatch_path), "scancel")
                 } else "scancel"
-                ssh_exec(cfg, paste(scancel_cmd, job$job_id))
+                # Cancel all step IDs for parallel jobs
+                if (isTRUE(job$parallel) && !is.null(job$parallel_steps)) {
+                  all_ids <- paste(Filter(Negate(is.null), job$parallel_steps), collapse = " ")
+                  ssh_exec(cfg, paste(scancel_cmd, all_ids))
+                } else {
+                  ssh_exec(cfg, paste(scancel_cmd, job$job_id))
+                }
               }
             } else {
-              system2("scancel", args = job$job_id, stdout = TRUE, stderr = TRUE)
+              if (isTRUE(job$parallel) && !is.null(job$parallel_steps)) {
+                all_ids <- Filter(Negate(is.null), job$parallel_steps)
+                for (sid in all_ids) {
+                  system2("scancel", args = sid, stdout = TRUE, stderr = TRUE)
+                }
+              } else {
+                system2("scancel", args = job$job_id, stdout = TRUE, stderr = TRUE)
+              }
             }
             jobs <- values$diann_jobs
             jobs[[idx]]$status <- "cancelled"
@@ -2028,7 +2725,11 @@ server_search <- function(input, output, session, values, add_to_log,
       })
 
       if (nrow(slurm_jobs) > 0) {
-        existing_ids <- vapply(values$diann_jobs, function(j) j$job_id, character(1))
+        existing_ids <- if (length(values$diann_jobs) > 0) {
+          vapply(values$diann_jobs, function(j) j$job_id %||% "", character(1))
+        } else {
+          character(0)
+        }
 
         for (i in seq_len(nrow(slurm_jobs))) {
           row <- slurm_jobs[i, ]
@@ -2211,7 +2912,11 @@ server_search <- function(input, output, session, values, add_to_log,
       })
 
       if (nrow(docker_jobs) > 0) {
-        existing_ids <- vapply(values$diann_jobs, function(j) j$job_id, character(1))
+        existing_ids <- if (length(values$diann_jobs) > 0) {
+          vapply(values$diann_jobs, function(j) j$job_id %||% "", character(1))
+        } else {
+          character(0)
+        }
         for (i in seq_len(nrow(docker_jobs))) {
           row <- docker_jobs[i, ]
 

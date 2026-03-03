@@ -1,0 +1,131 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'R/**'
+      - 'tests/**'
+      - 'app.R'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'R/**'
+      - 'tests/**'
+      - 'app.R'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    name: Helper unit tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4'
+
+      - name: Install test dependencies
+        run: |
+          Rscript -e '
+            install.packages("testthat", repos = "https://cloud.r-project.org")
+          '
+
+      - name: Run unit tests (helpers)
+        run: |
+          Rscript -e '
+            results <- testthat::test_dir("tests/testthat",
+              filter = "helpers",
+              reporter = testthat::SummaryReporter$new()
+            )
+            df <- as.data.frame(results)
+            cat(sprintf("\nTotal: %d passed, %d failed, %d skipped\n",
+              sum(df$passed), sum(df$failed), sum(df$skipped)))
+            if (any(df$failed > 0)) quit(status = 1)
+          '
+
+  data-integrity:
+    runs-on: ubuntu-latest
+    name: Data integrity tests
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4'
+          extra-repositories: https://bioc.r-universe.dev
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Install R dependencies
+        run: |
+          Rscript -e '
+            options(repos = c(
+              BiocRUniverse = "https://bioc.r-universe.dev",
+              CRAN = "https://cloud.r-project.org"
+            ))
+            install.packages(c("testthat", "dplyr", "arrow", "stringr", "tibble"))
+            install.packages("BiocManager")
+            BiocManager::install(c("limma", "limpa"), ask = FALSE, update = FALSE)
+          '
+
+      - name: Download example dataset
+        run: |
+          curl -L -o Affinisep_vs_evosep_noNorm.parquet \
+            "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0/Affinisep_vs_evosep_noNorm.parquet"
+
+      - name: Run data integrity tests
+        run: |
+          Rscript -e '
+            results <- testthat::test_dir("tests/testthat",
+              filter = "data_integrity",
+              reporter = testthat::SummaryReporter$new()
+            )
+            df <- as.data.frame(results)
+            cat(sprintf("\nTotal: %d passed, %d failed, %d skipped\n",
+              sum(df$passed), sum(df$failed), sum(df$skipped)))
+            if (any(df$failed > 0)) quit(status = 1)
+          '
+
+  export-structure:
+    runs-on: ubuntu-latest
+    name: Export zip structure tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4'
+
+      - name: Install test dependencies
+        run: |
+          Rscript -e 'install.packages("testthat", repos = "https://cloud.r-project.org")'
+
+      - name: Run export structure tests
+        run: |
+          Rscript -e '
+            results <- testthat::test_dir("tests/testthat",
+              filter = "claude_export",
+              reporter = testthat::SummaryReporter$new()
+            )
+            df <- as.data.frame(results)
+            cat(sprintf("\nTotal: %d passed, %d failed, %d skipped\n",
+              sum(df$passed), sum(df$failed), sum(df$skipped)))
+            if (any(df$failed > 0)) quit(status = 1)
+          '
