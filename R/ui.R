@@ -586,6 +586,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             ),
 
             conditionalPanel(
+              condition = "input.mass_acc_mode == 'auto'",
+              tags$p(class = "text-muted", style = "font-size: 0.78em; margin-top: -4px;",
+                "DIA-NN will determine optimal MS1/MS2 mass accuracy from the data.")
+            ),
+            conditionalPanel(
               condition = "input.mass_acc_mode == 'manual'",
               div(style = "display: flex; gap: 8px;",
                 div(style = "flex: 1;",
@@ -594,7 +599,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 div(style = "flex: 1;",
                   numericInput("diann_mass_acc_ms1", "MS1 (ppm):", value = 14, min = 1, max = 50)
                 )
-              )
+              ),
+              uiOutput("mass_acc_hint")
             ),
 
             tags$h6("Variable Modifications"),

@@ -127,6 +127,8 @@ server_mofa <- function(input, output, session, values, add_to_log) {
   observe({
     req(values$fit)
     if (length(values$mofa_view_configs) == 0) {
+      # Use protein-level expression matrix (not raw EList)
+      expr_mat <- values$y_protein$E
       values$mofa_view_configs <- list(
         list(
           id = "v1",
@@ -134,15 +136,15 @@ server_mofa <- function(input, output, session, values, add_to_log) {
           name = "Global Proteomics",
           type = "proteomics_other",
           source = "current",
-          matrix = values$raw_data,
+          matrix = expr_mat,
           fit = values$fit,
-          n_features = nrow(values$raw_data),
-          n_samples = ncol(values$raw_data),
+          n_features = nrow(expr_mat),
+          n_samples = ncol(expr_mat),
           status = "ready"
         )
       )
       # Also register as a loaded view
-      values$mofa_views[["Global Proteomics"]] <- values$raw_data
+      values$mofa_views[["Global Proteomics"]] <- expr_mat
       values$mofa_view_fits[["v1"]] <- values$fit
     }
   })
@@ -939,10 +941,10 @@ server_mofa <- function(input, output, session, values, add_to_log) {
         "Group" %in% names(values$mofa_sample_metadata)) {
       factors_df <- merge(factors_df, values$mofa_sample_metadata[, c("Sample", "Group")],
                           by = "Sample", all.x = TRUE)
-    } else if (!is.null(values$metadata) && "Run" %in% names(values$metadata) &&
+    } else if (!is.null(values$metadata) && "File.Name" %in% names(values$metadata) &&
                "Group" %in% names(values$metadata)) {
-      factors_df <- merge(factors_df, values$metadata[, c("Run", "Group")],
-                          by.x = "Sample", by.y = "Run", all.x = TRUE)
+      factors_df <- merge(factors_df, values$metadata[, c("File.Name", "Group")],
+                          by.x = "Sample", by.y = "File.Name", all.x = TRUE)
     } else {
       factors_df$Group <- "Unknown"
     }

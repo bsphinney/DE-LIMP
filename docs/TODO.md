@@ -30,6 +30,7 @@
 - [ ] **End-to-end testing**: Test full flow with real DIA-NN search → QC ingest → report generation
 
 ## DIA-NN Search
+- [ ] **Shared speclib cache**: Move `~/.delimp_speclib_cache.rds` to shared volume (`/Volumes/proteomics-grp/dia-nn/`) so all lab members benefit from cached predicted libraries. Fall back to local home dir if volume not mounted.
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 
 ## CV Analysis Tab Redesign (Complete)

@@ -340,6 +340,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
     # First, save the groups
     old_meta <- values$metadata
     new_meta <- hot_to_r(input$hot_metadata)
+    # Restore internal column names — hot_to_r returns display names from renderRHandsontable
+    colnames(new_meta) <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")
     changed_indices <- which(old_meta$Group != new_meta$Group)
     if (length(changed_indices) > 0) {
       code_lines <- sprintf("metadata$Group[%d] <- '%s'  # %s",
@@ -581,6 +583,10 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         fit <- contrasts.fit(fit, makeContrasts(contrasts=forms, levels=design))
         fit <- eBayes(fit)
         values$fit <- fit
+
+        # Clear stale GSEA cache from previous pipeline run
+        values$gsea_results_cache <- list()
+        values$gsea_last_contrast <- NULL
 
         # Update all four comparison selectors
         updateSelectInput(session, "contrast_selector", choices=forms)

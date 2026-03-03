@@ -816,7 +816,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       label_de <- sig_de[0, ]
     }
 
-    p <- ggplot2::ggplot(de, ggplot2::aes(x = logFC, y = -log10(adj.P.Val), color = sig)) +
+    p <- ggplot2::ggplot(de, ggplot2::aes(x = logFC, y = -log10(P.Value), color = sig)) +
       ggplot2::geom_point(alpha = 0.6, size = 1.5) +
       ggplot2::scale_color_manual(values = c(
         "Significant" = "#E63946",
@@ -828,7 +828,6 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         ggplot2::aes(label = label),
         size = 3, max.overlaps = 20, color = "black"
       ) +
-      ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
       ggplot2::geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray50") +
       ggplot2::labs(
         title = paste("Phosphosite Volcano:", input$phospho_contrast_selector,
@@ -836,7 +835,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         subtitle = sprintf("%d sites | %d significant (\u2191%d \u2193%d) at |FC|>2 & FDR<0.05",
                            nrow(de), n_sig, n_up, n_down),
         x = if (correction_active) "Corrected log2 FC (phospho - protein)" else "log2 Fold Change (phosphosite)",
-        y = "-log10(adjusted p-value)"
+        y = "-log10(p-value)"
       ) +
       ggplot2::theme_bw(base_size = 14) +
       ggplot2::theme(legend.position = "bottom",
@@ -871,16 +870,15 @@ server_phospho <- function(input, output, session, values, add_to_log) {
                             paste0(de$Genes, " ", de$Residue, de$Position), de$SiteID)
           sig_de <- de[de$sig == "Significant", ]
           label_de <- if (nrow(sig_de) > 0) head(sig_de[order(sig_de$adj.P.Val), ], 15) else sig_de[0, ]
-          ggplot2::ggplot(de, ggplot2::aes(x = logFC, y = -log10(adj.P.Val), color = sig)) +
+          ggplot2::ggplot(de, ggplot2::aes(x = logFC, y = -log10(P.Value), color = sig)) +
             ggplot2::geom_point(alpha = 0.6, size = 1.5) +
             ggplot2::scale_color_manual(values = c("Significant" = "#E63946", "FDR < 0.05" = "#457B9D", "NS" = "gray70")) +
             ggrepel::geom_text_repel(
               data = label_de,
               ggplot2::aes(label = label), size = 3, max.overlaps = 20, color = "black") +
-            ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
             ggplot2::geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray50") +
             ggplot2::labs(title = paste("Phosphosite Volcano:", input$phospho_contrast_selector),
-                         x = "log2 Fold Change", y = "-log10(adjusted p-value)") +
+                         x = "log2 Fold Change", y = "-log10(p-value)") +
             ggplot2::theme_bw(base_size = 14) +
             ggplot2::theme(legend.position = "bottom")
         }
@@ -1858,7 +1856,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     } else {
       label_de <- sig_de[0, ]
     }
-    ggplot2::ggplot(de, ggplot2::aes(x = logFC, y = -log10(adj.P.Val), color = sig)) +
+    ggplot2::ggplot(de, ggplot2::aes(x = logFC, y = -log10(P.Value), color = sig)) +
       ggplot2::geom_point(alpha = 0.6, size = 2) +
       ggplot2::scale_color_manual(values = c(
         "Significant" = "#E63946", "FDR < 0.05" = "#457B9D", "NS" = "gray70"
@@ -1867,7 +1865,6 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         data = label_de, ggplot2::aes(label = label),
         size = 3.5, max.overlaps = 25, color = "black"
       ) +
-      ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
       ggplot2::geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray50") +
       ggplot2::labs(
         title = paste("Phosphosite Volcano:", input$phospho_contrast_selector,
@@ -1875,7 +1872,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
         subtitle = sprintf("%d sites | %d significant (\u2191%d \u2193%d) at |FC|>2 & FDR<0.05",
                            nrow(de), n_sig, n_up, n_down),
         x = if (correction_active) "Corrected log2 FC (phospho - protein)" else "log2 Fold Change (phosphosite)",
-        y = "-log10(adjusted p-value)"
+        y = "-log10(p-value)"
       ) +
       ggplot2::theme_bw(base_size = 16) +
       ggplot2::theme(legend.position = "bottom",

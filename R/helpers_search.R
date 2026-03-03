@@ -83,12 +83,14 @@ download_uniprot_fasta <- function(proteome_id, content_type, output_path) {
   )
 
   include_isoform <- content_type == "full_isoforms"
+  one_per_gene <- content_type == "one_per_gene"
   url <- paste0(
     "https://rest.uniprot.org/uniprotkb/stream?",
     "query=", utils::URLencode(query),
     "&format=fasta",
     "&compressed=false",
-    if (include_isoform) "&includeIsoform=true" else ""
+    if (include_isoform) "&includeIsoform=true" else "",
+    if (one_per_gene) "&onePerGene=true" else ""
   )
 
   tryCatch({
@@ -371,8 +373,15 @@ generate_sbatch_script <- function(
   data_dirs <- unique(dirname(raw_files))
   has_fasta <- length(fasta_files) > 0 && any(nzchar(fasta_files))
 
-  # Build bind mount string — handle multiple FASTA directories
-  bind_parts <- sprintf("%s:/work/data", data_dirs[1])
+  # Build bind mount string — handle multiple data and FASTA directories
+  if (length(data_dirs) == 1) {
+    data_bind_parts <- sprintf("%s:/work/data", data_dirs[1])
+    data_mount_map <- rep("/work/data", length(raw_files))
+  } else {
+    data_bind_parts <- sprintf("%s:/work/data%d", data_dirs, seq_along(data_dirs))
+    data_mount_map <- sprintf("/work/data%d", match(dirname(raw_files), data_dirs))
+  }
+  bind_parts <- data_bind_parts
   if (has_fasta) {
     fasta_dirs <- unique(dirname(fasta_files))
     fasta_bind_parts <- if (length(fasta_dirs) == 1) {
@@ -388,8 +397,8 @@ generate_sbatch_script <- function(
   }
   bind_mount <- paste(bind_parts, collapse = ",")
 
-  # Build --f flags for raw files
-  run_flags <- paste(sprintf("    --f /work/data/%s", basename(raw_files)),
+  # Build --f flags for raw files — map each file to its mount point
+  run_flags <- paste(sprintf("    --f %s/%s", data_mount_map, basename(raw_files)),
                      collapse = " \\\n")
 
   # Build --fasta flags — map each file to its mount point (skip if library-only)
@@ -1473,7 +1482,14 @@ generate_parallel_scripts <- function(
 
   # --- Shared bind mount computation ---
   data_dirs <- unique(dirname(raw_files))
-  data_bind <- sprintf("%s:/work/data", data_dirs[1])
+  # Handle multiple data directories (e.g., files from different instruments/runs)
+  if (length(data_dirs) == 1) {
+    data_bind_parts <- sprintf("%s:/work/data", data_dirs[1])
+    data_mount_map <- rep("/work/data", length(raw_files))
+  } else {
+    data_bind_parts <- sprintf("%s:/work/data%d", data_dirs, seq_along(data_dirs))
+    data_mount_map <- sprintf("/work/data%d", match(dirname(raw_files), data_dirs))
+  }
 
   fasta_bind_parts <- character()
   fasta_mount_map <- character()
@@ -1492,7 +1508,7 @@ generate_parallel_scripts <- function(
   out_bind <- sprintf("%s:/work/out", output_dir)
 
   # Full bind mount for assembly/report steps (need all data dirs)
-  all_binds <- c(data_bind, fasta_bind_parts, out_bind, speclib_bind)
+  all_binds <- c(data_bind_parts, fasta_bind_parts, out_bind, speclib_bind)
   all_binds <- Filter(Negate(is.null), all_binds)
   full_bind_mount <- paste(all_binds, collapse = ",")
 
@@ -1509,8 +1525,8 @@ generate_parallel_scripts <- function(
                               collapse = " \\\n")
   }
 
-  # All --f flags (for assembly/report steps)
-  all_f_flags <- paste(sprintf("    --f /work/data/%s", basename(raw_files)),
+  # All --f flags (for assembly/report steps) — map each file to its mount point
+  all_f_flags <- paste(sprintf("    --f %s/%s", data_mount_map, basename(raw_files)),
                         collapse = " \\\n")
 
   # --- Base search params for build_diann_flags ---
@@ -1540,6 +1556,7 @@ generate_parallel_scripts <- function(
   asm_part <- assembly_partition %||% partition
   asm_acct <- assembly_account %||% account
   arr_requeue <- tolower(arr_part) == "low"  # preemptible partition
+  asm_requeue <- tolower(asm_part) == "low"
 
   # --- SBATCH header helper ---
   sbatch_header <- function(job_suffix, cpus, mem_gb, time_hours,
@@ -1666,7 +1683,8 @@ generate_parallel_scripts <- function(
   # =========================================================================
   step3_script <- paste0(
     sbatch_header("s3_assembly", assembly_cpus, assembly_mem, assembly_time,
-                  step_partition = asm_part, step_account = asm_acct), "\n\n",
+                  step_partition = asm_part, step_account = asm_acct,
+                  requeue = asm_requeue), "\n\n",
     "module load apptainer\n\n",
     sprintf('echo "Step 3/5: Empirical Library Assembly for %s"\n', analysis_name),
     'echo "Started: $(date)"\n\n',
@@ -1732,7 +1750,8 @@ generate_parallel_scripts <- function(
 
   step5_script <- paste0(
     sbatch_header("s5_report", assembly_cpus, assembly_mem, assembly_time,
-                  step_partition = asm_part, step_account = asm_acct), "\n\n",
+                  step_partition = asm_part, step_account = asm_acct,
+                  requeue = asm_requeue), "\n\n",
     "module load apptainer\n\n",
     sprintf('echo "Step 5/5: Cross-run Report for %s"\n', analysis_name),
     'echo "Started: $(date)"\n\n',
@@ -1760,6 +1779,55 @@ generate_parallel_scripts <- function(
     step4_finalpass = step4_script,
     step5_report    = step5_script
   )
+}
+
+# =============================================================================
+# Resume Launcher for Failed Parallel Search
+# =============================================================================
+
+#' Generate a resume launcher script for a failed parallel DIA-NN search
+#'
+#' When a parallel search fails at Step N, this generates a bash script that
+#' skips Steps 1..(N-1) and submits only Steps N..5 with dependency chaining.
+#' Skipped steps output "STEP<n>:skipped" for the R-side parser.
+#'
+#' @param resume_from Integer 1-5 — which step to resume from
+#' @param sbatch_bin Character — full path to sbatch binary
+#' @param step_script_paths Character vector of length 5 — remote paths to sbatch scripts
+#' @return Character — bash script content
+generate_resume_launcher <- function(resume_from, sbatch_bin, step_script_paths) {
+  resume_from <- as.integer(resume_from)
+  stopifnot(length(resume_from) == 1, resume_from >= 1L, resume_from <= 5L,
+            length(step_script_paths) == 5)
+  lines <- c("#!/bin/bash", "set -e", "")
+
+  # Mark skipped steps
+  for (s in seq_len(resume_from - 1)) {
+    lines <- c(lines, sprintf('echo "STEP%d:skipped"', s))
+  }
+
+  # Submit remaining steps with dependency chaining
+  prev_var <- NULL
+  for (s in resume_from:5) {
+    var <- sprintf("JOB%d", s)
+    if (is.null(prev_var)) {
+      # First submitted step — no dependency
+      lines <- c(lines,
+        sprintf('%s=$(%s %s 2>&1)', var, sbatch_bin, step_script_paths[s]),
+        sprintf('%s_ID=$(echo "$%s" | grep -oP "[0-9]+$")', var, var),
+        sprintf('echo "STEP%d:$%s_ID"', s, var), "")
+    } else {
+      # Chain to previous
+      lines <- c(lines,
+        sprintf('%s=$(%s --dependency=afterok:$%s_ID %s 2>&1)',
+                var, sbatch_bin, prev_var, step_script_paths[s]),
+        sprintf('%s_ID=$(echo "$%s" | grep -oP "[0-9]+$")', var, var),
+        sprintf('echo "STEP%d:$%s_ID"', s, var), "")
+    }
+    prev_var <- var
+  }
+
+  paste(lines, collapse = "\n")
 }
 
 # =============================================================================

@@ -222,7 +222,8 @@ server_de <- function(input, output, session, values, add_to_log) {
     }
     if (nrow(df_res) == 0) return(NULL)
 
-    protein_ids <- df_res$Protein.Group
+    protein_ids <- intersect(df_res$Protein.Group, rownames(values$y_protein$E))
+    if (length(protein_ids) == 0) return(NULL)
     raw_exprs <- values$y_protein$E[protein_ids, , drop = FALSE]
     linear_exprs <- 2^raw_exprs
     cv_list <- list()

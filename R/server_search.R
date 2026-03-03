@@ -201,6 +201,24 @@ server_search <- function(input, output, session, values, add_to_log,
     )
   })
 
+  # Instrument-aware mass accuracy hint
+  output$mass_acc_hint <- renderUI({
+    ext <- NULL
+    if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+      ext <- tolower(tools::file_ext(values$diann_raw_files$filename[1]))
+    }
+    hint <- if (identical(ext, "d")) {
+      "timsTOF detected \u2014 recommended: MS2 15, MS1 15"
+    } else if (identical(ext, "raw")) {
+      "Orbitrap detected \u2014 recommended: MS2 10, MS1 5"
+    } else if (identical(ext, "mzml")) {
+      "Instrument unknown (.mzML) \u2014 typical: MS2 10\u201315, MS1 5\u201315"
+    } else {
+      "These values are passed directly to DIA-NN"
+    }
+    tags$p(class = "text-muted", style = "font-size: 0.78em; margin-top: -4px;", hint)
+  })
+
   # Force mass accuracy to manual when parallel mode is enabled
   observeEvent(input$parallel_search, {
     if (isTRUE(input$parallel_search)) {
@@ -267,7 +285,9 @@ server_search <- function(input, output, session, values, add_to_log,
   observeEvent(values$diann_jobs, {
     req(job_queue_loaded())
     tryCatch({
-      saveRDS(values$diann_jobs, job_queue_path)
+      # Exclude removed jobs from persistence to avoid unbounded growth
+      active_jobs <- Filter(function(j) !isTRUE(j$removed), values$diann_jobs)
+      saveRDS(active_jobs, job_queue_path)
     }, error = function(e) {
       message("[DE-LIMP] Failed to save job queue: ", e$message)
     })
@@ -521,26 +541,11 @@ server_search <- function(input, output, session, values, add_to_log,
   # ============================================================================
 
   observeEvent(input$apply_partition_suggestion, {
-    is_parallel <- isTRUE(input$parallel_search)
-    if (is_parallel) {
-      # Hybrid mode: array steps on publicgrp/low, assembly stays on user's group
-      values$use_hybrid_partition <- TRUE
-      values$original_partition <- input$diann_partition
-      values$original_account <- input$diann_account
-      updateTextInput(session, "diann_partition", value = "low")
-      updateTextInput(session, "diann_account", value = "publicgrp")
-      showNotification(
-        "Hybrid mode: array steps (1/2/4) will use publicgrp/low (preemptible). Assembly steps (3/5) stay on your group.",
-        type = "message", duration = 8)
-    } else {
-      # Single job: switch entirely to publicgrp/low
-      values$use_hybrid_partition <- FALSE
-      updateTextInput(session, "diann_partition", value = "low")
-      updateTextInput(session, "diann_account", value = "publicgrp")
-      showNotification(
-        "Partition set to publicgrp/low. Job will be preemptible (auto-requeued if preempted).",
-        type = "message", duration = 6)
-    }
+    updateTextInput(session, "diann_partition", value = "low")
+    updateTextInput(session, "diann_account", value = "publicgrp")
+    showNotification(
+      "Partition set to publicgrp/low. All steps will be preemptible (auto-requeued if preempted).",
+      type = "message", duration = 6)
   })
 
   # ============================================================================
@@ -796,10 +801,25 @@ server_search <- function(input, output, session, values, add_to_log,
     sel <- input$uniprot_results_table_rows_selected
     req(length(sel) > 0)
     row <- values$uniprot_results[sel, ]
-    div(style = "font-size: 0.8em; color: #495057; margin-top: 5px;",
-      tags$strong(row$common_name), " — ", row$protein_count, " proteins"
-    )
+
+    if (!is.null(values$fasta_info) && !is.null(values$fasta_info$n_sequences)) {
+      # FASTA has been downloaded — show actual sequence count
+      div(style = "font-size: 0.8em; color: #495057; margin-top: 5px;",
+        tags$strong(row$common_name), " \u2014 ",
+        format(values$fasta_info$n_sequences, big.mark = ","), " sequences downloaded"
+      )
+    } else {
+      # Not yet downloaded — show organism name only
+      div(style = "font-size: 0.8em; color: #495057; margin-top: 5px;",
+        tags$strong(row$common_name), " \u2014 proteome ",
+        tags$code(row$upid)
+      )
+    }
   })
+
+  # Clear stale download info when user changes selection or content type
+  observeEvent(input$uniprot_results_table_rows_selected, { values$fasta_info <- NULL })
+  observeEvent(input$fasta_content_type, { values$fasta_info <- NULL })
 
   # Download FASTA button handler
   observeEvent(input$download_fasta_btn, {
@@ -1123,7 +1143,7 @@ server_search <- function(input, output, session, values, add_to_log,
         output_base()
       }
     }, error = function(e) output_base())
-    output_dir <- gsub("//+", "/", file.path(input_dir, paste0("output_", timestamp_suffix)))
+    output_dir <- gsub("//+", "/", file.path(input_dir, paste0(analysis_name, "_", timestamp_suffix)))
 
     if (backend == "local") {
       dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1443,21 +1463,8 @@ server_search <- function(input, output, session, values, add_to_log,
       sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
       use_login_shell <- is.null(values$ssh_sbatch_path)
 
-      # Generate all 5 scripts
-      # Hybrid partition: array steps on publicgrp/low, assembly on user's group
-      hybrid <- isTRUE(values$use_hybrid_partition)
-      hybrid_args <- if (hybrid) {
-        list(
-          array_partition = input$diann_partition,
-          array_account = input$diann_account,
-          assembly_partition = values$original_partition %||% input$diann_partition,
-          assembly_account = values$original_account %||% input$diann_account
-        )
-      } else {
-        list()
-      }
-
-      scripts <- do.call(generate_parallel_scripts, c(list(
+      # Generate all 5 scripts — all steps use the same partition/account
+      scripts <- generate_parallel_scripts(
         analysis_name = analysis_name,
         raw_files = values$diann_raw_files$full_path,
         fasta_files = fasta_files,
@@ -1476,7 +1483,7 @@ server_search <- function(input, output, session, values, add_to_log,
         account = input$diann_account,
         search_params = search_params,
         max_simultaneous = input$max_simultaneous %||% 20
-      ), hybrid_args))
+      )
 
       # --- Upload all files + launcher, then submit via one SSH call ---
       # Minimizes SSH connections to avoid HPC MaxStartups throttling.
@@ -1652,6 +1659,13 @@ server_search <- function(input, output, session, values, add_to_log,
         }
 
       } else {
+        # Local mode: copy scripts to output_dir (SSH mode uploads via SCP)
+        dir.create(file.path(output_dir, "logs"), recursive = TRUE, showWarnings = FALSE)
+        dir.create(file.path(output_dir, "quant_step2"), showWarnings = FALSE)
+        dir.create(file.path(output_dir, "quant_step4"), showWarnings = FALSE)
+        local_files <- list.files(upload_dir, full.names = TRUE)
+        file.copy(local_files, output_dir, overwrite = TRUE)
+
         # Local mode: submit sequentially
         local_sbatch_bin <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
         has_step1 <- !is.null(scripts$step1_library)
@@ -1981,9 +1995,6 @@ server_search <- function(input, output, session, values, add_to_log,
     # --- Shared: add to queue & notify ---
     values$diann_jobs <- c(values$diann_jobs, list(job_entry))
 
-    # Reset hybrid partition state after submission
-    values$use_hybrid_partition <- FALSE
-
     # Record in SQLite if core facility mode is active
     if (is_core_facility && !is.null(cf_config)) {
       tryCatch({
@@ -2056,6 +2067,7 @@ server_search <- function(input, output, session, values, add_to_log,
     cfg <- isolate(ssh_config())
 
     for (i in seq_along(jobs)) {
+      if (isTRUE(jobs[[i]]$removed)) next
       if (!jobs[[i]]$status %in% c("queued", "running")) next
 
       if (isTRUE(jobs[[i]]$backend == "local")) {
@@ -2179,14 +2191,15 @@ server_search <- function(input, output, session, values, add_to_log,
         # Tail the most recent log for display
         if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
           log_result <- ssh_exec(cfg, sprintf(
-            "ls -t %s/diann_*.{out,err} 2>/dev/null | head -1 | xargs tail -50 2>/dev/null",
+            "{ ls -t %1$s/logs/diann_*.out %1$s/logs/diann_*.err %1$s/diann_*.out %1$s/diann_*.err 2>/dev/null; } | head -1 | xargs tail -50 2>/dev/null",
             shQuote(jobs[[i]]$output_dir)))
           if (log_result$status == 0 && length(log_result$stdout) > 0) {
             jobs[[i]]$log_content <- paste(log_result$stdout, collapse = "\n")
           }
         } else {
-          log_files <- list.files(jobs[[i]]$output_dir,
-            pattern = "^diann_.*\\.(out|err)$", full.names = TRUE)
+          log_dirs <- c(file.path(jobs[[i]]$output_dir, "logs"), jobs[[i]]$output_dir)
+          log_files <- unlist(lapply(log_dirs, list.files,
+            pattern = "^diann_.*\\.(out|err)$", full.names = TRUE))
           if (length(log_files) > 0) {
             log_file <- log_files[which.max(file.mtime(log_files))]
             log_lines <- tryCatch(
@@ -2214,15 +2227,16 @@ server_search <- function(input, output, session, values, add_to_log,
         # Tail the log file (local or remote)
         if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
           log_result <- ssh_exec(cfg, sprintf(
-            "ls -t %s/diann_*.{out,err} 2>/dev/null | head -1 | xargs tail -50 2>/dev/null",
+            "{ ls -t %1$s/logs/diann_*.out %1$s/logs/diann_*.err %1$s/diann_*.out %1$s/diann_*.err 2>/dev/null; } | head -1 | xargs tail -50 2>/dev/null",
             shQuote(jobs[[i]]$output_dir)))
           if (log_result$status == 0 && length(log_result$stdout) > 0) {
             jobs[[i]]$log_content <- paste(log_result$stdout, collapse = "\n")
             changed <- TRUE
           }
         } else {
-          log_files <- list.files(jobs[[i]]$output_dir,
-            pattern = "^diann_.*\\.(out|err)$", full.names = TRUE)
+          log_dirs <- c(file.path(jobs[[i]]$output_dir, "logs"), jobs[[i]]$output_dir)
+          log_files <- unlist(lapply(log_dirs, list.files,
+            pattern = "^diann_.*\\.(out|err)$", full.names = TRUE))
           if (length(log_files) > 0) {
             log_file <- log_files[which.max(file.mtime(log_files))]
             log_lines <- tryCatch(
@@ -2510,17 +2524,19 @@ server_search <- function(input, output, session, values, add_to_log,
 
   output$search_queue_ui <- renderUI({
     jobs <- values$diann_jobs
-    if (length(jobs) == 0) {
+    active_jobs <- Filter(function(j) !isTRUE(j$removed), jobs)
+    if (length(active_jobs) == 0) {
       return(div(style = "color: #999; font-size: 0.85em; text-align: center; padding: 10px;",
         "No jobs submitted yet."
       ))
     }
 
     # Refresh all button at top
-    has_unknown <- any(vapply(jobs, function(j) j$status == "unknown", logical(1)))
+    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && j$status == "unknown", logical(1)))
 
     job_rows <- lapply(seq_along(jobs), function(i) {
       job <- jobs[[i]]
+      if (isTRUE(job$removed)) return(NULL)
 
       status_badge <- switch(job$status,
         "queued"    = span(class = "badge bg-secondary", "Queued"),
@@ -2646,9 +2662,9 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # Count terminal and failed jobs for action buttons
     n_terminal <- sum(vapply(jobs, function(j)
-      j$status %in% c("completed", "failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && j$status %in% c("completed", "failed", "cancelled"), logical(1)))
     n_failed <- sum(vapply(jobs, function(j)
-      j$status %in% c("failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && j$status %in% c("failed", "cancelled"), logical(1)))
 
     tagList(
       div(style = "display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px;",
@@ -2921,11 +2937,11 @@ server_search <- function(input, output, session, values, add_to_log,
           })
         }, ignoreInit = TRUE)
 
-        # Remove job from queue
+        # Remove job from queue (mark as removed to preserve indices)
         observeEvent(input[[sprintf("remove_job_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
           jobs <- values$diann_jobs
-          jobs[[idx]] <- NULL
+          jobs[[idx]]$removed <- TRUE
           values$diann_jobs <- jobs
           showNotification(sprintf("Removed job '%s' from queue.", job$name), type = "message")
         }, ignoreInit = TRUE)
@@ -2933,6 +2949,154 @@ server_search <- function(input, output, session, values, add_to_log,
         # Resubmit failed/cancelled HPC job
         observeEvent(input[[sprintf("resubmit_job_%d", idx)]], {
           job <- values$diann_jobs[[idx]]
+
+          # --- Smart resume for parallel jobs ---
+          if (isTRUE(job$parallel)) {
+            cfg <- if (isTRUE(job$is_ssh)) isolate(ssh_config()) else NULL
+            if (is.null(cfg)) {
+              showNotification("Parallel resubmit requires SSH connection.", type = "error")
+              return()
+            }
+
+            # Find first failed/cancelled step
+            step_status <- job$parallel_step_status %||% list()
+            resume_from <- 1L
+            for (s in 1:5) {
+              st <- step_status[[paste0("step", s)]] %||% "unknown"
+              if (st %in% c("completed", "skipped")) next
+              resume_from <- s
+              break
+            }
+
+            # Verify prerequisites exist on remote
+            output_dir <- job$output_dir
+            # Step 1 was skipped if user provided a speclib — check the original speclib path instead
+            step1_skipped <- identical(step_status[["step1"]], "skipped")
+            speclib_check <- if (step1_skipped) {
+              # User-provided speclib is at its original path (stored in search_settings)
+              speclib_path <- job$search_settings$speclib
+              if (!is.null(speclib_path) && nzchar(speclib_path %||% "")) {
+                sprintf("test -f %s", shQuote(speclib_path))
+              } else {
+                "true"  # Can't verify, assume OK
+              }
+            } else {
+              sprintf("test -f %s/step1.predicted.speclib", shQuote(output_dir))
+            }
+            prereq_checks <- list(
+              step2 = speclib_check,
+              step3 = sprintf("%s && ls %s/quant_step2/*.quant 2>/dev/null | head -1",
+                              speclib_check, output_dir),
+              step4 = sprintf("test -f %s/empirical.speclib", shQuote(output_dir)),
+              step5 = sprintf("test -f %s/empirical.speclib && ls %s/quant_step4/*.quant 2>/dev/null | head -1",
+                              shQuote(output_dir), output_dir)
+            )
+
+            if (resume_from > 1) {
+              check_key <- paste0("step", resume_from)
+              if (!is.null(prereq_checks[[check_key]])) {
+                check <- ssh_exec(cfg, prereq_checks[[check_key]])
+                if (check$status != 0 || length(check$stdout) == 0 || !nzchar(check$stdout[1])) {
+                  # Fall back: restart from Step 1 (or Step 2 if Step 1 was originally skipped)
+                  fallback <- if (step1_skipped) 2L else 1L
+                  showNotification(
+                    sprintf("Step %d prerequisites not found on remote. Restarting from Step %d.",
+                            resume_from, fallback),
+                    type = "warning", duration = 8)
+                  resume_from <- fallback
+                }
+              }
+            }
+
+            # Build script paths from output_dir
+            step_names <- c("step1_libpred.sbatch", "step2_firstpass.sbatch",
+                             "step3_assembly.sbatch", "step4_finalpass.sbatch",
+                             "step5_report.sbatch")
+            step_script_paths <- file.path(output_dir, step_names)
+
+            # Verify scripts exist on remote
+            check_cmd <- paste("ls", paste(shQuote(step_script_paths[resume_from:5]), collapse = " "),
+                                "2>/dev/null | wc -l")
+            check <- ssh_exec(cfg, check_cmd)
+            expected <- 5 - resume_from + 1
+            if (check$status != 0 || as.integer(trimws(check$stdout[1])) < expected) {
+              showNotification("Some sbatch scripts are missing on the remote. Cannot resume.",
+                               type = "error", duration = 8)
+              return()
+            }
+
+            # Generate resume launcher
+            sbatch_bin <- values$ssh_sbatch_path %||% "sbatch"
+            resume_launcher <- generate_resume_launcher(resume_from, sbatch_bin, step_script_paths)
+
+            # Upload + execute
+            resume_file <- tempfile("resume_", fileext = ".sh")
+            writeLines(resume_launcher, resume_file)
+            on.exit(unlink(resume_file), add = TRUE)
+
+            remote_launcher <- file.path(output_dir, "resume_submit.sh")
+            scp_upload(cfg, resume_file, remote_launcher)
+            result <- ssh_exec(cfg, paste("bash", shQuote(remote_launcher)))
+
+            if (result$status != 0) {
+              showNotification(paste("Resume submission failed:",
+                paste(result$stdout, collapse = " ")), type = "error")
+              return()
+            }
+
+            # Parse step IDs from launcher output
+            new_step_ids <- list()
+            new_step_status <- list()
+            for (line in result$stdout) {
+              m <- regexec("^STEP([1-5]):(.+)$", trimws(line))
+              if (m[[1]][1] != -1) {
+                parts <- regmatches(trimws(line), m)[[1]]
+                step_num <- as.integer(parts[2])
+                step_val <- trimws(parts[3])
+                step_key <- paste0("step", step_num)
+                if (step_val == "skipped") {
+                  new_step_ids[[step_key]] <- job$parallel_steps[[step_key]]
+                  new_step_status[[step_key]] <- "skipped"
+                } else {
+                  new_step_ids[[step_key]] <- step_val
+                  new_step_status[[step_key]] <- "queued"
+                }
+              }
+            }
+
+            if (length(new_step_ids) == 0) {
+              showNotification("Could not parse job IDs from resume output.", type = "error")
+              return()
+            }
+
+            # Create new job entry
+            new_entry <- job
+            # Use the last submitted step's ID as the main job_id
+            last_step_key <- paste0("step", 5)
+            new_entry$job_id <- new_step_ids[[last_step_key]] %||%
+              new_step_ids[[tail(names(Filter(function(x) x != "skipped",
+                new_step_status)), 1)]]
+            new_entry$status <- "queued"
+            new_entry$parallel_steps <- new_step_ids
+            new_entry$parallel_step_status <- new_step_status
+            new_entry$parallel_current_step <- resume_from
+            new_entry$submitted_at <- Sys.time()
+            new_entry$completed_at <- NULL
+            new_entry$log_content <- ""
+            new_entry$loaded <- FALSE
+
+            values$diann_jobs <- c(values$diann_jobs, list(new_entry))
+
+            skipped_msg <- if (resume_from > 1) {
+              sprintf(" (skipped Steps 1-%d, reusing existing results)", resume_from - 1)
+            } else ""
+            showNotification(
+              sprintf("Resumed from Step %d%s", resume_from, skipped_msg),
+              type = "message", duration = 10)
+            return()
+          }
+
+          # --- Single-job resubmit ---
           script_path <- job$script_path
 
           tryCatch({
@@ -3034,23 +3198,33 @@ server_search <- function(input, output, session, values, add_to_log,
     registered_observers(existing)
   })
 
-  # Clear failed/cancelled jobs only
+  # Clear failed/cancelled jobs (mark as removed to preserve observer indices)
   observeEvent(input$clear_failed_jobs, {
     jobs <- values$diann_jobs
     failed_statuses <- c("failed", "cancelled")
-    kept <- Filter(function(j) !(j$status %in% failed_statuses), jobs)
-    n_removed <- length(jobs) - length(kept)
-    values$diann_jobs <- kept
+    n_removed <- 0L
+    for (j in seq_along(jobs)) {
+      if (!isTRUE(jobs[[j]]$removed) && jobs[[j]]$status %in% failed_statuses) {
+        jobs[[j]]$removed <- TRUE
+        n_removed <- n_removed + 1L
+      }
+    }
+    values$diann_jobs <- jobs
     showNotification(sprintf("Cleared %d failed/cancelled job(s).", n_removed), type = "message")
   }, ignoreInit = TRUE)
 
-  # Clear all finished jobs
+  # Clear all finished jobs (mark as removed to preserve observer indices)
   observeEvent(input$clear_finished_jobs, {
     jobs <- values$diann_jobs
     terminal <- c("completed", "failed", "cancelled")
-    kept <- Filter(function(j) !(j$status %in% terminal), jobs)
-    n_removed <- length(jobs) - length(kept)
-    values$diann_jobs <- kept
+    n_removed <- 0L
+    for (j in seq_along(jobs)) {
+      if (!isTRUE(jobs[[j]]$removed) && jobs[[j]]$status %in% terminal) {
+        jobs[[j]]$removed <- TRUE
+        n_removed <- n_removed + 1L
+      }
+    }
+    values$diann_jobs <- jobs
     showNotification(sprintf("Cleared %d finished job(s).", n_removed), type = "message")
   }, ignoreInit = TRUE)
 
