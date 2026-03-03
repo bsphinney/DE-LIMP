@@ -1523,9 +1523,12 @@ generate_parallel_scripts <- function(
   base_flags <- build_diann_flags(parallel_sp, search_mode, "on", speclib_mount)
 
   # Remove flags that are step-specific (we add them per-step)
+  # --fasta-search and --predictor belong in Step 1 only; including them
+  # in Steps 2-5 causes DIA-NN to re-digest the FASTA instead of using
+  # the predicted/empirical library
   remove_patterns <- c("^--out-lib ", "^--matrices$", "^--gen-spec-lib$",
                         "^--reanalyse$", "^--rt-profiling$", "^--no-norm$",
-                        "^--xic$", "^--lib ")
+                        "^--xic$", "^--lib ", "^--fasta-search$", "^--predictor$")
   step_flags <- base_flags
   for (pat in remove_patterns) {
     step_flags <- step_flags[!grepl(pat, step_flags)]
@@ -1670,6 +1673,7 @@ generate_parallel_scripts <- function(
     sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
     paste0(all_f_flags, " \\\n"),
     if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
+    sprintf('    --lib %s \\\n', predicted_lib),
     '    --use-quant \\\n',
     '    --rt-profiling \\\n',
     '    --gen-spec-lib \\\n',
@@ -1735,6 +1739,7 @@ generate_parallel_scripts <- function(
     sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
     paste0(all_f_flags, " \\\n"),
     if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
+    '    --lib /work/out/empirical.speclib \\\n',
     '    --use-quant \\\n',
     sprintf('    --temp /work/out/quant_step4 \\\n'),
     '    --matrices \\\n',
