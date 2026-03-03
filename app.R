@@ -300,7 +300,19 @@ if (!requireNamespace("limpa", quietly = TRUE)) {
     "Then run: BiocManager::install('limpa')\n\n"
   ))
 }
-library(limpa) 
+library(limpa)
+
+# Load app version from VERSION file
+app_version <- tryCatch(
+  trimws(readLines("VERSION", n = 1, warn = FALSE)),
+  error = function(e) "unknown"
+)
+
+# Load community stats (generated daily by GitHub Actions)
+community_stats <- tryCatch({
+  stats_file <- file.path(getwd(), "stats", "community_stats.json")
+  if (file.exists(stats_file)) jsonlite::fromJSON(stats_file) else NULL
+}, error = function(e) NULL)
 
 # Source R/ modules explicitly — ensures they load whether called via
 # runApp('.') (auto-sources R/), runApp('app.R'), or Rscript app.R.
@@ -388,7 +400,10 @@ server <- function(input, output, session) {
     mofa_factors = NULL,
     mofa_weights = list(),
     mofa_variance_explained = NULL,
-    mofa_last_run_params = NULL
+    mofa_last_run_params = NULL,
+    # App metadata
+    app_version = app_version,
+    community_stats = community_stats
   )
 
   # --- Shared helper: append to reproducibility log ---

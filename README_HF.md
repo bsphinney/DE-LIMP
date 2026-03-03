@@ -20,20 +20,25 @@ tags:
 
 # DE-LIMP: Differential Expression & Limpa Proteomics 🧬
 
-An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** and **Limma** for robust statistics, with **Google Gemini AI** integration.
+An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with **Google Gemini AI** integration.
 
-## ✨ What's New in v3.1
+## ✨ What's New in v3.2.0
 
-- 🎨 **UI Overhaul**: Professional dark navbar with hover dropdowns, collapsible accordion sidebar, and active tab indicators
-- 📊 **DE Dashboard Sub-tabs**: Volcano (+heatmap), Results Table, PCA, and Robust Changes — all in one organized view
-- 🧭 **PCA moved to DE Dashboard**: Closer to your DE results for a more logical analysis workflow
+- 📊 **About Tab**: Community stats (stars, forks, visitors, clones), trend sparklines, and a live GitHub Discussions feed
+- 🔍 **DIA-NN Search Improvements**: Spectral library caching, custom FASTA sequences, cluster resource monitoring
+- 📂 **Organized Search Logs**: SLURM logs now stored in a dedicated `logs/` subdirectory
 
-**Previous highlights** (v3.0):
-- 🧬 Multi-Omics MOFA2: 2-6 view integration with variance heatmap, factor weights, and example datasets
-- 🔬 Phosphoproteomics: Site-level DE, KSEA kinase activity, motif analysis
-- 🧬 GSEA: 4 databases (BP/MF/CC/KEGG) with automatic organism detection
-- 🤖 AI Summary: All-contrast analysis with cross-comparison biomarkers
-- 📈 XIC Chromatogram Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
+**Previous highlights** (v3.1.1):
+- 🌋 Volcano plot fixes: correct significance handling with DE protein counts (up/down annotations)
+- 💾 Export Data panel with one-click CSV downloads
+- 🤖 AI Summary HTML export for standalone styled reports
+- 📈 CV Analysis redesign: interactive scatter plot (logFC vs Avg CV)
+
+**Earlier** (v3.1):
+- 🎨 UI overhaul: dark navbar, hover dropdowns, accordion sidebar
+- 📊 DE Dashboard sub-tabs: Volcano (+heatmap), Results Table, PCA, CV Analysis
+
+**Earlier** (v3.0): Multi-Omics MOFA2 | Phosphoproteomics (site-level DE, KSEA, motifs) | GSEA 4-database | AI Summary | XIC Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
 
 ## 🚀 Features
 
@@ -46,7 +51,7 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 ### 🤖 AI-Powered Exploration
 - **Chat with Your Data** - Google Gemini integration
 - **Bi-Directional Sync** - Select proteins ↔ AI suggestions
-- **Auto-Summary** - Generate publication-ready summaries
+- **Auto-Summary** - Generate draft analysis summaries
 
 ### 💾 Session Management
 - **Save/Load Sessions** - Preserve analysis state (.rds files)
@@ -62,7 +67,7 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 
 1. **Load Data**: Upload DIA-NN .parquet file or use "Load Example Data"
 2. **Assign Groups**: Use auto-guess or manual assignment
-3. **Run Pipeline**: Click "▶ Run Pipeline" for limpa analysis
+3. **Run Pipeline**: Click "▶ Run Pipeline" -- the app normalizes your data, quantifies proteins, and runs statistical tests to identify which proteins differ significantly between your groups
 4. **Explore Results**: Interactive plots, tables, GSEA, AI chat
 
 ## 🔬 Methodology
@@ -75,11 +80,24 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 ## 📚 Resources
 
 - **GitHub**: [github.com/bsphinney/DE-LIMP](https://github.com/bsphinney/DE-LIMP)
+- **Discussions**: [github.com/bsphinney/DE-LIMP/discussions](https://github.com/bsphinney/DE-LIMP/discussions)
 - **Website**: [bsphinney.github.io/DE-LIMP](https://bsphinney.github.io/DE-LIMP/)
 - **YouTube**: [UC Davis Proteomics](https://www.youtube.com/channel/UCpulhf8gl-HVxACyJUEFPRw)
 - **Core Facility**: [proteomics.ucdavis.edu](https://proteomics.ucdavis.edu)
 
-## 🛠 System Requirements
+## ⚠️ Hosted Version Limitations
+
+This Hugging Face deployment has some limitations compared to a local installation:
+- **No DIA-NN search or XIC viewer** -- these require local file access and are only available on local/HPC installations
+- **Upload size limits** -- very large files may fail to upload or cause timeouts
+- **Sessions don't persist** -- your analysis is lost when you close the browser tab; use "Save Session" to download an .rds file you can reload later
+- **Shared resources** -- large datasets or complex analyses may be slower than on a dedicated machine
+
+For the full experience, [install DE-LIMP locally](https://github.com/bsphinney/DE-LIMP).
+
+## 🛠 System Requirements (Local Installation Only)
+
+The following requirements apply only if you are installing DE-LIMP on your own machine. The hosted version above requires nothing but a web browser.
 
 - R 4.5+
 - Bioconductor 3.22+

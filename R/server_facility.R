@@ -185,7 +185,7 @@ server_facility <- function(input, output, session, values, add_to_log,
         project        = project,
         created        = Sys.time(),
         created_by     = input$staff_selector %||% "unknown",
-        app_version    = "DE-LIMP v3.0",
+        app_version    = paste0("DE-LIMP v", values$app_version),
         n_proteins     = if (!is.null(values$y_protein)) nrow(values$y_protein) else NA,
         n_contrasts    = if (!is.null(values$fit)) ncol(values$fit$contrasts) else NA,
         contrast_names = if (!is.null(values$fit)) colnames(values$fit$contrasts) else NULL

@@ -1667,7 +1667,7 @@ server_mofa <- function(input, output, session, values, add_to_log) {
           p_lines <- c(
             "DE-LIMP MOFA2 Analysis Parameters",
             paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
-            paste0("App version: DE-LIMP v3.1.1"),
+            paste0("App version: DE-LIMP v", values$app_version),
             paste0("R version: ", R.version.string),
             "",
             "MOFA TRAINING PARAMETERS:",
@@ -1702,7 +1702,7 @@ server_mofa <- function(input, output, session, values, add_to_log) {
             mofa_view_configs = values$mofa_view_configs,
             mofa_sample_metadata = values$mofa_sample_metadata,
             saved_at = Sys.time(),
-            app_version = "DE-LIMP v3.1.1"
+            app_version = paste0("DE-LIMP v", values$app_version)
           )
           rds_file <- file.path(tmp_dir, "Session.rds")
           saveRDS(session_data, rds_file)

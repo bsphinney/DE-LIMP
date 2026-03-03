@@ -17,7 +17,7 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 
 ### Structure (~7,500 lines total)
 ```
-app.R (270 lines):       Package loading, backend detection (Docker/HPC/Core Facility), reactive values, module calls
+app.R (~290 lines):      Package loading, backend detection (Docker/HPC/Core Facility), VERSION + stats loading, reactive values, module calls
 R/ui.R (~1,500 lines):   build_ui() — page_navbar layout, CSS/JS, accordion sidebar, all tab nav_panels
 R/server_*.R (11 files): Server modules, each receives (input, output, session, values, ...)
 R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
@@ -39,23 +39,25 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
-| `R/server_session.R` | Info modals, save/load session, reproducibility |
-| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `check_cluster_resources()`, UniProt search |
+| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab |
+| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search |
+| `VERSION` | Single-line app version (e.g. `3.1.1`), read at startup into `values$app_version` |
+| `stats/community_stats.json` | GitHub traffic data generated daily by `.github/workflows/track-stats.yml` |
 
 ### Tab Structure (page_navbar)
-Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
+Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **About** | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
 
 - `page_navbar(id = "main_tabs", navbar_options = navbar_options(bg = "#2c3e50"))` — dark navbar, global sidebar, hover dropdowns
 - Dropdown section labels ("Setup"/"Results"/"AI") injected via JS
 
 **Progressive reveal**: `nav_hide()`/`nav_show()` on `"main_tabs"`. Hidden on startup via `session$onFlushed(once=TRUE)`:
-- **Always visible**: New Search (if `search_enabled`), Analysis > Data Overview, Education, Facility (if `is_core_facility`)
+- **Always visible**: New Search (if `search_enabled`), Analysis > Data Overview, About, Education, Facility (if `is_core_facility`)
 - **QC**: shown when `values$raw_data` not NULL
 - **DE Dashboard, GSEA, MOFA2, AI Analysis, Output**: shown when `values$fit` not NULL
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
 **Tab values that MUST NOT change** (used by server nav_select/nav_show/nav_hide):
-`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`
+`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`
 
 #### Analysis dropdown
 - **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
@@ -95,6 +97,12 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 - Adding new R packages requires rebuilding base image on Windows box
 - Code-only changes: just `git push origin main`
 - **Windows update shortcut**: `bash update_docker.sh` (pulls latest + rebuilds container)
+
+### Version Management
+- **Single source of truth**: `VERSION` file in repo root (e.g. `3.1.1`)
+- Loaded at startup in `app.R` → stored in `values$app_version` → all modules read from there
+- **No hardcoded version strings** — always use `values$app_version`
+- Community stats (`stats/community_stats.json`) generated daily by `track-stats.yml` GitHub Action
 
 ## UI Design Patterns
 
@@ -136,6 +144,6 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 
 ## Version History
 
-Current version: **v3.1.1** (2026-02-26). See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.2.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
-Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1)
+Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0)

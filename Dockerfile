@@ -7,6 +7,8 @@ FROM brettphinney/delimp-base:v3.1
 COPY app.R /srv/shiny-server/app.R
 COPY R/ /srv/shiny-server/R/
 COPY contaminants/ /srv/shiny-server/contaminants/
+COPY VERSION /srv/shiny-server/VERSION
+COPY stats/ /srv/shiny-server/stats/
 
 # Expose the port
 EXPOSE 3838

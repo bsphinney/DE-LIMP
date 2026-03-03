@@ -1130,11 +1130,12 @@ server_search <- function(input, output, session, values, add_to_log,
       cfg <- NULL
     } else if (backend == "docker") {
       dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+      dir.create(file.path(output_dir, "logs"), recursive = TRUE, showWarnings = FALSE)
       cfg <- NULL
     } else {
       cfg <- ssh_config()
       if (!is.null(cfg)) {
-        mkdir_res <- ssh_exec(cfg, paste("mkdir -p", shQuote(output_dir)))
+        mkdir_res <- ssh_exec(cfg, sprintf("mkdir -p %s %s/logs", shQuote(output_dir), shQuote(output_dir)))
         if (mkdir_res$status != 0) {
           showNotification(paste("Failed to create remote directory:",
             paste(mkdir_res$stdout, collapse = " ")), type = "error")
@@ -1142,6 +1143,7 @@ server_search <- function(input, output, session, values, add_to_log,
         }
       } else {
         dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+        dir.create(file.path(output_dir, "logs"), recursive = TRUE, showWarnings = FALSE)
       }
     }
 
@@ -1291,7 +1293,7 @@ server_search <- function(input, output, session, values, add_to_log,
       diann_flags <- build_diann_flags(search_params, input$search_mode,
                                         input$diann_normalization, speclib_path)
 
-      log_file <- file.path(output_dir, paste0("diann_", analysis_name, ".log"))
+      log_file <- file.path(output_dir, "logs", paste0("diann_", analysis_name, ".log"))
 
       submit_result <- tryCatch({
         result <- run_local_diann(
@@ -1573,8 +1575,9 @@ server_search <- function(input, output, session, values, add_to_log,
 
       if (!is.null(cfg)) {
         # SSH mode: 1 mkdir + 1 SCP + 1 bash = 3 SSH connections total
-        mkdir_cmd <- sprintf("mkdir -p %s %s/quant_step2 %s/quant_step4",
-                              shQuote(output_dir), shQuote(output_dir), shQuote(output_dir))
+        mkdir_cmd <- sprintf("mkdir -p %s %s/logs %s/quant_step2 %s/quant_step4",
+                              shQuote(output_dir), shQuote(output_dir),
+                              shQuote(output_dir), shQuote(output_dir))
         mkdir_result <- ssh_exec(cfg, mkdir_cmd)
         if (mkdir_result$status != 0) {
           showNotification(paste("Failed to create remote directories:",
@@ -2695,10 +2698,14 @@ server_search <- function(input, output, session, values, add_to_log,
               isTRUE(job$is_ssh)) {
             cfg <- isolate(ssh_config())
             if (!is.null(cfg)) {
-              log_path <- file.path(job$output_dir, sprintf("diann_%s.out", job$job_id))
+              log_path <- file.path(job$output_dir, "logs", sprintf("diann_%s.out", job$job_id))
+              # Fallback to old location (pre-logs-subdir) if not found
+              tail_cmd <- sprintf(
+                "if [ -f %s ]; then tail -150 %s; else tail -150 %s 2>/dev/null; fi",
+                shQuote(log_path), shQuote(log_path),
+                shQuote(file.path(job$output_dir, sprintf("diann_%s.out", job$job_id))))
               tail_result <- tryCatch(
-                ssh_exec(cfg, sprintf("tail -150 %s 2>/dev/null", shQuote(log_path)),
-                  timeout = 15),
+                ssh_exec(cfg, tail_cmd, timeout = 15),
                 error = function(e) list(status = 1, stdout = character()))
               if (tail_result$status == 0 && length(tail_result$stdout) > 0) {
                 fetched <- iconv(paste(tail_result$stdout, collapse = "\n"),
@@ -3208,7 +3215,7 @@ server_search <- function(input, output, session, values, add_to_log,
               script_path <- parts[grepl("/.*\\.sbatch$", parts)]
               if (length(script_path) > 0) {
                 output_dir <- dirname(script_path[1])
-                log_file <- file.path(output_dir, sprintf("diann_%s.out", row$job_id))
+                log_file <- file.path(output_dir, "logs", sprintf("diann_%s.out", row$job_id))
               }
             }
           }
@@ -3231,7 +3238,9 @@ server_search <- function(input, output, session, values, add_to_log,
             if (find_result$status == 0 && length(find_result$stdout) > 0 &&
                 nzchar(trimws(find_result$stdout[1]))) {
               log_file <- trimws(find_result$stdout[1])
-              output_dir <- dirname(log_file)
+              log_parent <- dirname(log_file)
+              # If found in logs/ subdir, output_dir is the parent
+              output_dir <- if (basename(log_parent) == "logs") dirname(log_parent) else log_parent
             }
           }
 

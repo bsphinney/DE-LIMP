@@ -69,11 +69,37 @@ This file contains detailed patterns that are referenced from CLAUDE.md but too 
 - **`parse_sbatch_output()` must `trimws()`**: SSH stdout often has trailing `\r` or whitespace. Without trimming, dependency chains like `--dependency=afterok:12345\r` silently fail.
 - **`MallocStackLogging` noise**: macOS injects `MallocStackLogging` warnings into stderr. Set `MallocStackLogging = ""` in processx env to suppress.
 
+## Search Output Directory Layout
+
+All DIA-NN search jobs (single, parallel, Docker, local) use this structure:
+```
+{output_dir}/
+├── logs/                          # SLURM .out/.err and local .log files
+│   ├── diann_{jobid}.out          # single-job stdout
+│   ├── diann_{jobid}.err          # single-job stderr
+│   ├── diann_{step}_{jobid}.out   # parallel step stdout (e.g. diann_lib_pred_12345.out)
+│   ├── diann_{step}_{jobid}.err   # parallel step stderr
+│   └── diann_{name}.log           # local/Docker execution log
+├── search_info.md                 # Auto-generated metadata (params, job IDs, file list, logs path)
+├── *.sbatch                       # SLURM submission scripts
+├── file_list.txt                  # Raw file list (parallel mode)
+├── submit_all.sh                  # Launcher script (parallel mode)
+├── quant_step2/                   # Per-file quant output (parallel mode)
+├── quant_step4/                   # Final quant output (parallel mode)
+├── report.parquet                 # Final DIA-NN output
+└── *.tsv / *.parquet              # Other DIA-NN outputs
+```
+
+- **`logs/` subdir created at submit time**: `mkdir -p` in all paths (SSH, Docker, local)
+- **`search_info.md`** includes `**Log files**: \`{output_dir}/logs/\`` for reference
+- **Backwards compatibility**: Job monitoring checks `logs/` first, falls back to `output_dir/` root for pre-existing jobs
+- **`generate_search_info()`** in `helpers_search.R`: Generates `search_info.md` content with all search metadata
+
 ## Parallel DIA-NN Search (5-Step)
 
 - **Architecture**: 5 SLURM steps with dependency chaining: (1) library prediction → (2) first-pass quant array → (3) assemble → (4) second-pass quant array → (5) final assembly
 - **3-connection approach**: Batch all remote operations into 3 SSH/SCP calls to avoid HPC `MaxStartups` throttling:
-  1. One SSH: `mkdir -p` for output dir + quant subdirs
+  1. One SSH: `mkdir -p` for output dir + `logs/` + quant subdirs
   2. One SCP: upload all sbatch scripts + file_list.txt + `submit_all.sh` launcher
   3. One SSH: `bash submit_all.sh` — chains all `sbatch` submissions with `--dependency=afterok:$PREV_ID`
 - **Launcher script**: Shell script that submits each step, parses job IDs with `grep -oP "[0-9]+$"`, outputs `STEP1:id` through `STEP5:id`. R-side parses with `regexec("^STEP([1-5]):(.+)$", line)`.
@@ -100,6 +126,19 @@ This file contains detailed patterns that are referenced from CLAUDE.md but too 
 - **Precursor map**: Built from in-memory `values$raw_data`, not file I/O
 - **Dual format**: `detect_xic_format()` auto-detects v1 (wide) vs v2 (long) DIA-NN XIC formats
 - **Platform guard**: All XIC UI/logic wrapped in `if (!is_hf_space)`
+
+## About Tab & Community Stats
+
+- **About tab** (`value = "about_tab"`): Always visible in navbar, between Output and Education
+- **Version source**: `VERSION` file → `app.R` reads at startup → `values$app_version` → all modules use it
+- **Community stats**: `stats/community_stats.json` loaded at startup → `values$community_stats`
+  - Generated daily by `.github/workflows/track-stats.yml` (GitHub Actions)
+  - Contains: stars, forks, 14-day clone/view counts, daily trend arrays
+  - Graceful NULL fallback — app works fine without stats file
+- **Stats cards**: 4 value boxes (Stars, Forks, Visitors, Clones) rendered via `uiOutput`
+- **Trend sparklines**: 2 plotly line charts (views + clones). Uses `plotlyOutput` per bslib safety pattern.
+- **Discussions section**: Recent discussions from GitHub Discussions (title, category, author, comment count, link). Fetched via GraphQL in the workflow.
+- **Stats freshness**: Displays `updated_at` timestamp from JSON
 
 ## Core Facility Mode
 

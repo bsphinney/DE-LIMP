@@ -337,7 +337,7 @@ server_ai <- function(input, output, session, values) {
             mofa_last_run_params = values$mofa_last_run_params,
             diann_search_settings = values$diann_search_settings,
             saved_at = Sys.time(),
-            app_version = "DE-LIMP v3.1.1"
+            app_version = paste0("DE-LIMP v", values$app_version)
           )
           rds_file <- file.path(tmp_dir, "Session.rds")
           saveRDS(session_data, rds_file)
@@ -367,7 +367,7 @@ server_ai <- function(input, output, session, values) {
           params <- c(
             "DE-LIMP Analysis Parameters",
             paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
-            paste0("App version: DE-LIMP v3.1.1"),
+            paste0("App version: DE-LIMP v", values$app_version),
             paste0("R version: ", R.version.string),
             ""
           )

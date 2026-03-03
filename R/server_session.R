@@ -500,7 +500,7 @@ server_session <- function(input, output, session, values, add_to_log) {
         mofa_last_run_params = values$mofa_last_run_params,
         # Save timestamp & version
         saved_at   = Sys.time(),
-        app_version = "DE-LIMP v2.5"
+        app_version = paste0("DE-LIMP v", values$app_version)
       )
       saveRDS(session_data, file)
       showNotification("Session saved successfully!", type = "message")
@@ -1100,6 +1100,170 @@ server_session <- function(input, output, session, values, add_to_log) {
     }, error = function(e) {
       showNotification(paste("Error importing template:", e$message), type = "error", duration = 10)
     })
+  })
+
+  # ============================================================================
+  #      About Tab — Version Info, Community Stats, Trend Sparklines
+  # ============================================================================
+
+  output$about_version_text <- renderText({
+    paste0("v", values$app_version)
+  })
+
+  output$community_stats_cards <- renderUI({
+    stats <- values$community_stats
+    if (is.null(stats)) {
+      return(div(style = "text-align: center; padding: 20px; color: #a0aec0;",
+        icon("chart-bar"), " Community stats not yet available \u2014 they'll appear after the first GitHub Actions run."
+      ))
+    }
+
+    gh <- stats$github
+    make_card <- function(value, label, icon_name, color) {
+      div(style = paste0(
+        "flex: 1; min-width: 150px; text-align: center; padding: 15px; ",
+        "background: white; border-radius: 8px; border: 1px solid #e2e8f0; ",
+        "box-shadow: 0 1px 3px rgba(0,0,0,0.05);"
+      ),
+        icon(icon_name, style = paste0("font-size: 1.5em; color: ", color, "; margin-bottom: 8px;")),
+        tags$div(style = "font-size: 1.8em; font-weight: 600;", format(value, big.mark = ",")),
+        tags$div(style = "color: #718096; font-size: 0.85em;", label)
+      )
+    }
+
+    div(style = "display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; margin-bottom: 20px;",
+      make_card(gh$stars %||% 0, "Stars", "star", "#f6ad55"),
+      make_card(gh$forks %||% 0, "Forks", "code-branch", "#68d391"),
+      make_card(gh$unique_visitors_14d %||% 0, "Visitors (14d)", "eye", "#63b3ed"),
+      make_card(gh$unique_users_14d %||% 0, "Clones (14d)", "download", "#b794f4")
+    )
+  })
+
+  output$community_trend_plots <- renderUI({
+    stats <- values$community_stats
+    if (is.null(stats) || is.null(stats$trends)) return(NULL)
+
+    has_clones <- !is.null(stats$trends$clones) && length(stats$trends$clones$date) > 1
+    has_views <- !is.null(stats$trends$views) && length(stats$trends$views$date) > 1
+
+    if (!has_clones && !has_views) return(NULL)
+
+    div(style = "display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; margin-bottom: 15px;",
+      if (has_views) div(style = "flex: 1; min-width: 300px;",
+        tags$p(style = "text-align: center; font-size: 0.85em; color: #718096; margin-bottom: 4px;",
+          "Unique Visitors (14-day)"),
+        plotlyOutput("about_views_sparkline", height = "120px")
+      ),
+      if (has_clones) div(style = "flex: 1; min-width: 300px;",
+        tags$p(style = "text-align: center; font-size: 0.85em; color: #718096; margin-bottom: 4px;",
+          "Unique Clones (14-day)"),
+        plotlyOutput("about_clones_sparkline", height = "120px")
+      )
+    )
+  })
+
+  output$about_views_sparkline <- renderPlotly({
+    stats <- values$community_stats
+    req(stats, stats$trends, stats$trends$views)
+    trend <- stats$trends$views
+    req(length(trend$date) > 1)
+
+    plot_ly(x = as.Date(trend$date), y = trend$count, type = "scatter", mode = "lines+markers",
+            line = list(color = "#63b3ed", width = 2),
+            marker = list(color = "#63b3ed", size = 5),
+            hovertemplate = "%{x|%b %d}: %{y} visitors<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "", showgrid = FALSE, tickformat = "%b %d"),
+        yaxis = list(title = "", showgrid = TRUE, gridcolor = "#f0f0f0", rangemode = "tozero"),
+        margin = list(l = 30, r = 10, t = 5, b = 30),
+        plot_bgcolor = "white", paper_bgcolor = "white"
+      ) %>%
+      config(displayModeBar = FALSE)
+  })
+
+  output$about_clones_sparkline <- renderPlotly({
+    stats <- values$community_stats
+    req(stats, stats$trends, stats$trends$clones)
+    trend <- stats$trends$clones
+    req(length(trend$date) > 1)
+
+    plot_ly(x = as.Date(trend$date), y = trend$count, type = "scatter", mode = "lines+markers",
+            line = list(color = "#b794f4", width = 2),
+            marker = list(color = "#b794f4", size = 5),
+            hovertemplate = "%{x|%b %d}: %{y} clones<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "", showgrid = FALSE, tickformat = "%b %d"),
+        yaxis = list(title = "", showgrid = TRUE, gridcolor = "#f0f0f0", rangemode = "tozero"),
+        margin = list(l = 30, r = 10, t = 5, b = 30),
+        plot_bgcolor = "white", paper_bgcolor = "white"
+      ) %>%
+      config(displayModeBar = FALSE)
+  })
+
+  output$community_discussions <- renderUI({
+    stats <- values$community_stats
+    if (is.null(stats) || is.null(stats$discussions)) return(NULL)
+
+    disc <- stats$discussions
+    total <- disc$total %||% 0
+    recent <- disc$recent
+
+    if (is.null(recent) || length(recent$title) == 0) return(NULL)
+
+    # Category icon mapping
+    cat_icons <- list(
+      Announcements = "bullhorn", General = "comments",
+      Ideas = "lightbulb", "Q&A" = "circle-question",
+      Polls = "square-poll-vertical", "Show and tell" = "hands-clapping"
+    )
+
+    discussion_items <- lapply(seq_along(recent$title), function(i) {
+      cat_name <- recent$category[i]
+      ic <- cat_icons[[cat_name]] %||% "comment"
+      comment_count <- recent$comments[i] %||% 0
+      comment_badge <- if (comment_count > 0) {
+        tags$span(class = "badge bg-secondary ms-1", style = "font-size: 0.75em;",
+          icon("comment", style = "font-size: 0.8em;"), " ", comment_count)
+      }
+
+      div(style = "padding: 8px 12px; border-bottom: 1px solid #f0f0f0;",
+        div(style = "display: flex; align-items: center; gap: 8px;",
+          icon(ic, style = "color: #718096; width: 16px;"),
+          tags$a(href = recent$url[i], target = "_blank",
+            style = "color: #2d3748; text-decoration: none; font-size: 0.9em; font-weight: 500;",
+            recent$title[i]),
+          comment_badge
+        ),
+        div(style = "margin-left: 24px; color: #a0aec0; font-size: 0.78em;",
+          cat_name, " \u00b7 ", recent$author[i], " \u00b7 ", recent$created[i]
+        )
+      )
+    })
+
+    div(style = "margin-top: 25px; max-width: 700px; margin-left: auto; margin-right: auto;",
+      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
+        tags$h6(style = "margin: 0;", icon("comments"), " Recent Discussions"),
+        tags$a(href = "https://github.com/bsphinney/DE-LIMP/discussions", target = "_blank",
+          style = "font-size: 0.8em; color: #63b3ed;",
+          sprintf("View all (%d)", total))
+      ),
+      div(style = "background: white; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;",
+        discussion_items
+      )
+    )
+  })
+
+  output$stats_updated_at <- renderUI({
+    stats <- values$community_stats
+    if (is.null(stats) || is.null(stats$updated_at)) return(NULL)
+
+    updated <- tryCatch(
+      format(as.POSIXct(stats$updated_at, format = "%Y-%m-%dT%H:%M:%S"), "%B %d, %Y at %H:%M UTC"),
+      error = function(e) stats$updated_at
+    )
+    div(style = "text-align: center; margin-top: 15px; color: #a0aec0; font-size: 0.8em;",
+      paste("Last updated:", updated)
+    )
   })
 
 }

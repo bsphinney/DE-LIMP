@@ -2,46 +2,7 @@
 
 Welcome to **DE-LIMP** (Differential Expression & Limpa Proteomics), your interactive dashboard for analyzing DIA-NN proteomics data. This guide covers the complete workflow, from importing data to discovering biological insights with our integrated AI assistant.
 
----
-
-## ✨ What's New in v3.1 (February 2026)
-
-### UI Overhaul
-- **Professional dark navbar**: Fixed top navigation bar with hover-activated dropdown menus and smooth animations
-- **Dropdown section labels**: The Analysis menu is organized with labeled sections (Setup / Results / AI) for easier navigation
-- **Collapsible accordion sidebar**: Upload Data, Pipeline Settings, and AI Chat sections collapse independently — less scrolling, more focus
-- **Active tab indicator**: Teal underline on the currently active tab for clear visual feedback
-
-### DE Dashboard Restructured
-- **Four sub-tabs**: The DE Dashboard now contains **Volcano** (with heatmap below), **Results Table**, **PCA**, and **Robust Changes** as organized sub-tabs
-- **PCA moved here**: PCA plot relocated from Data Overview to the DE Dashboard, placing it closer to your differential expression results
-- **Cleaner layout**: Each sub-tab has full width for its content — no more side-by-side cramming
-
-### Core Facility Mode *(Optional — for proteomics core labs)*
-- **Activated by environment variable**: Set `DELIMP_CORE_DIR` to a directory containing `staff.yml` to enable
-- **SQLite job tracking**: Every DIA-NN search recorded with lab, instrument, project, LC method, and analyst metadata
-- **Staff auto-configuration**: Selecting a staff member auto-fills SSH host, username, key path, and SLURM account/partition
-- **Search DB tab**: Full-width job history table with 6 filters (text search, lab, status, staff, instrument, LC method) — load results or generate reports from any past search
-- **Instrument QC dashboard**: Protein count, precursor count, and TIC trend plots per instrument with ±2SD control lines and date range filtering
-- **Quarto report generation**: One-click standalone HTML reports with metadata header, QC bracket comparison, volcano plots, DE statistics, and top proteins table
-- **Template system**: Save and load search presets for reproducible workflows across staff members
-
-> *Core Facility Mode adds a "Facility" dropdown to the navbar with Search DB and Instrument QC tabs. It is not visible on Hugging Face Spaces or standard (non-facility) installations.*
-
----
-
-## Previous: v3.0 Highlights
-
-- **Multi-Omics MOFA2**: 2-6 view integration with variance heatmap, factor weights, sample scores, Factor-DE correlation, and built-in example datasets
-- **DIA-NN Docker Search**: Three backends (Local/Docker/HPC), Windows Docker Compose deployment
-- **Phosphoproteomics**: Site-level DE, KSEA kinase activity, motif analysis, protein-level abundance correction
-- **GSEA Expansion**: 4 databases (BP/MF/CC/KEGG) with per-ontology caching and automatic organism detection via UniProt API
-- **AI Summary**: All-contrast analysis with cross-comparison biomarker detection
-- **DIA-NN Search Integration**: SSH remote submission, non-blocking job queue, auto-load results, UniProt FASTA download, 6 contaminant libraries
-- **XIC Chromatogram Viewer** (v2.1): Fragment-level inspection with MS2 intensity alignment and ion mobility support (local/HPC only)
-- **Contextual Help System** (v2.2): 15 info modal `?` buttons with actionable guidance
-
-See [CHANGELOG.md](CHANGELOG.md) for complete version history.
+DE-LIMP helps you find which proteins are significantly different between experimental conditions (e.g., treatment vs. control). Upload your DIA-NN output, and the app handles normalization, statistics, and visualization -- including interactive volcano plots, heatmaps, pathway enrichment analysis (GSEA), and AI-powered summaries. No programming required.
 
 ---
 
@@ -97,12 +58,15 @@ You have two options to get started:
 
 **Option B: Upload Your Own Data**
 * **Input File:** Click **"Browse..."** and select your DIA-NN report file.
-    * *Requirement:* The file must be in **`.parquet`** format.
+    * *Requirement:* The file must be in **`.parquet`** format (the app only accepts `.parquet` files).
+    * *What is report.parquet?* When DIA-NN finishes processing your raw files, it creates a `report.parquet` file in the output directory you specified. This is a compact binary format that loads much faster than the older `.tsv` format. Look for it in your DIA-NN output folder alongside other output files.
     * *Download Example:* Available at [GitHub Releases](https://github.com/bsphinney/DE-LIMP/releases/tag/v1.0)
-* **Q-Value Cutoff:** Adjust the slider to set your False Discovery Rate (FDR) threshold (Default: 0.01).
+* **Q-Value Cutoff:** This filters DIA-NN precursors at import time -- only precursors with a confidence score (Q-value) below this threshold are kept. It is *not* the DE significance threshold (that uses adj.P.Val after the pipeline runs). Lower values are more strict, keeping only the most confident identifications. The default of 0.01 (1% FDR) is appropriate for most experiments.
 
 ### Step 2.2: Assign Groups & Run Pipeline
 This is the most critical step for statistical analysis. The workflow is streamlined into one modal dialog.
+
+> **Replicate guidance:** For reliable statistical results, we recommend at least **3 biological replicates per group**. With fewer than 3, limma's empirical Bayes moderation still works but has limited power to detect significant changes. More replicates (4-6+) improve sensitivity, especially for detecting small fold changes.
 
 1.  Click **"Assign Groups & Run Pipeline"** in the sidebar (or it will auto-open after data upload).
 2.  **Auto-Guess Groups (Recommended):**
@@ -139,7 +103,9 @@ This is the most critical step for statistical analysis. The workflow is streaml
 
 ## 3. DIA-NN Database Search
 
-The **"New Search"** tab lets you submit DIA-NN database searches directly from DE-LIMP. Three backends are supported:
+> **Already have a report.parquet file?** If your core facility or collaborator already processed the raw data and gave you a `report.parquet` file, you can skip this entire section. Go directly to **[Section 4: Deep Dive](#4-deep-dive-the-data-overview--grid-view)** -- you only need to upload your file and run the pipeline (Section 2).
+
+The **"New Search"** tab lets you submit DIA-NN database searches directly from DE-LIMP. This is for advanced users who need to process raw mass spectrometry files (.raw, .d, .mzML) into a report. Three backends are supported:
 
 | Backend | When to Use | How It Works |
 | :--- | :--- | :--- |
@@ -308,7 +274,7 @@ Each job in the queue displays:
 #### Job Actions
 | Button | When Available | Action |
 | :--- | :--- | :--- |
-| **📄 Log** | Always | View the full stdout/stderr output from the SLURM job |
+| **📄 Log** | Always | View the stdout/stderr output from the SLURM job (reads from `{output_dir}/logs/`) |
 | **❌ Cancel** | Queued or Running | Send `scancel` to terminate the job on the cluster |
 | **📂 Load** | Completed | Download results (SCP for SSH mode) and load into DE-LIMP pipeline |
 | **🔄 Refresh** | Unknown status | Re-query SLURM via `sacct` to update the job status |
@@ -316,6 +282,7 @@ Each job in the queue displays:
 - **"🔄 Refresh All"** button appears when any jobs have unknown status, refreshing all job statuses at once.
 - **Auto-load:** When enabled, completed jobs automatically download results and load them into the pipeline — no manual "Load" click needed. For SSH mode, results are transferred via SCP.
 - **Persistence:** The job queue is saved to `~/.delimp_job_queue.rds` and persists across app restarts. Restarting DE-LIMP restores your full job history.
+- **Log file organization** (v3.2+): All SLURM `.out` / `.err` files are now stored in a `logs/` subdirectory within the output directory, keeping your results folder clean. The "Log" button checks this location first, with automatic fallback to the old root-level location for backward compatibility.
 
 ### 📝 3.6 Search Settings in Methodology
 
@@ -333,6 +300,7 @@ A new **"0. DIA-NN DATABASE SEARCH"** section appears at the top of the methodol
 - **MBR:** Whether Match Between Runs was enabled
 - **Mass accuracy:** Manual values or "auto-determined by DIA-NN"
 - **SLURM resources:** CPUs, memory, and time limit used
+- **Log files:** Location of SLURM log files (`{output_dir}/logs/`)
 
 This section is **publication-ready** — it uses human-readable names for all parameters and follows standard methods section conventions. The same information is also logged in the **reproducibility code log** for programmatic access.
 
@@ -347,7 +315,7 @@ This is your landing page with 5 sub-tabs:
 * **Dataset Summary** — QC statistics and DE protein counts per comparison with directional arrows
 * **Replicate Consistency** — Average precursor and protein counts per group
 * **Expression Grid** — Heatmap-style table with UniProt linking and click-to-plot
-* **AI Summary** — Generate AI-powered analysis summaries (requires Gemini API key)
+* **AI Summary** — Generate AI-powered analysis summaries (requires Gemini API key); includes an **"Export Report"** button to download a styled standalone HTML report
 
 ### 🔬 The Grid View (New!)
 Click the green **"Open Grid View"** button to open the deep-dive table.
@@ -375,15 +343,18 @@ The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
 * **Current Comparison Display:** A prominent header banner at the top shows which comparison you're viewing (e.g., "Evosep - Affinisep"). This updates automatically when you change the comparison dropdown.
 
 #### Volcano Sub-tab
-* **Volcano Plot:** Interactive! Click points to select them. Box-select multiple points to analyze a cluster.
-    * **Y-axis:** Shows -log10(raw P-Value) following proteomics best practices
-    * **Coloring:** Red points indicate FDR-corrected significance (adj.P.Val < 0.05)
+* **Volcano Plot:** The volcano plot is the primary way to identify differentially expressed proteins. Each dot represents one protein: the x-axis shows how much the protein changed between conditions (log2 fold change), and the y-axis shows how statistically confident that change is (-log10 P-value). The most interesting candidates -- proteins with large, significant changes -- appear in the upper-left and upper-right corners (colored red). Interactive! Click points to select them. Box-select multiple points to analyze a cluster.
+    * **Y-axis:** Shows -log10(raw P-Value) following proteomics best practices — this gives the classic volcano spread shape
+    * **Coloring:** Red points indicate FDR-corrected significance (adj.P.Val < 0.05) — logFC vertical lines are visual guides only and do not gate coloring
+    * **Threshold line:** The horizontal dashed line is drawn at the raw P.Value corresponding to the FDR boundary (adj.P.Val = 0.05), so the line and coloring always agree
+    * **DE protein count:** The info box shows the total number of significant proteins with directional breakdown (e.g., "78 DE proteins (45 up, 33 down)")
+    * **Default logFC cutoff:** 0.6 (~1.5-fold change) — adjustable via the sidebar slider. The slider is in log2 units: 0.6 = ~1.5-fold, 1.0 = 2-fold, 2.0 = 4-fold
     * **Selection:** Single-click for one protein, box-select for multiple proteins
     * *Sync:* Selecting points here updates the Results Table and the AI context
 * **Heatmap:** Displayed directly below the volcano plot. Automatically scales and clusters the top 50 significant proteins (or your specific selection).
 
 #### Results Table Sub-tab
-* **DE Results Table:** Shows both raw P-values and FDR-adjusted P-values for transparency
+* **DE Results Table:** Shows both raw P-values and FDR-adjusted P-values for transparency, plus an **Avg CV (%)** column for each protein
 * **Violin Plots:** Select one or more proteins and click **"📊 Violin Plot"** button
     * Multi-protein support: View multiple proteins in a 2-column grid layout
     * Individual scales: Each protein gets its own Y-axis for better visualization
@@ -397,8 +368,11 @@ The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
     * Helps identify sample clustering, outliers, and batch effects
 
 #### Robust Changes Sub-tab
-* **High-Consistency Table:** Proteins with the most reproducible differential expression across replicates
-* **CV Distribution:** Histogram of coefficient of variation across experimental groups
+The **Coefficient of Variation (CV)** measures how reproducible a protein's measurement is across replicates -- it is the standard deviation divided by the mean, expressed as a percentage. A low CV (e.g., < 20%) means the protein was measured consistently, so you can be more confident that its fold change is real rather than noise. This tab helps you identify the most robust DE findings.
+
+* **CV Analysis scatter plot:** Interactive Plotly scatter plot showing logFC vs Average CV for all significant proteins, color-coded by CV category (Excellent < 10%, Good 10-20%, Moderate 20-30%, High > 30%)
+* **Summary stats subtitle:** Per-group median CV and percentage of proteins below 20% CV displayed directly in the plot subtitle
+* **CSV export:** Download the full CV analysis data for all significant proteins
 
 ### 📐 QC Sample Metrics & Plots
 * **Sample Metrics:** A single faceted trend plot showing four key per-run quality metrics stacked vertically:
@@ -430,6 +404,12 @@ DE-LIMP automatically logs every analysis step for complete reproducibility.
 * View detailed methodology in the **"Reproducibility > Methodology"** tab
 * Includes citations for limpa, limma, and DIA-NN
 * Explains normalization (DPC-CN), quantification (maxLFQ), and statistics (empirical Bayes)
+
+### 📋 Export Data
+The **Export Data** tab (under the Output dropdown) provides one-click access to download your results:
+
+* **Results CSV:** Full DE results table for the selected comparison, including protein IDs, gene symbols, logFC, P-values, adjusted P-values, and per-sample expression values
+* **CV Analysis CSV:** Coefficient of variation data for significant proteins across experimental groups
 
 ### 📈 XIC Chromatogram Viewer (Local/HPC Only)
 
@@ -476,6 +456,13 @@ Below the plot, the info panel shows:
 ---
 
 ### 🧬 Gene Set Enrichment (GSEA)
+
+Gene Set Enrichment Analysis (GSEA) answers the question: "Are my differentially expressed proteins enriched in known biological pathways or functions?" Instead of interpreting proteins one by one, GSEA groups them into predefined sets and tests whether any set is overrepresented. Choose the database that matches your question:
+- **Biological Process (BP):** What cellular processes are affected? (e.g., "cell division," "immune response") -- best general-purpose choice
+- **Molecular Function (MF):** What molecular activities are changed? (e.g., "kinase activity," "DNA binding")
+- **Cellular Component (CC):** Where in the cell are the changes? (e.g., "mitochondria," "nucleus")
+- **KEGG:** Which metabolic or signaling pathways are involved? (e.g., "glycolysis," "MAPK signaling")
+
 1.  Select a **database** from the ontology selector dropdown: Biological Process (BP), Molecular Function (MF), Cellular Component (CC), or KEGG pathways.
 2.  Click **"Run GSEA"** for the current contrast.
 3.  **Automatic organism detection**: The app queries the UniProt API using your protein IDs to determine the correct organism database. For human data this is instant; for non-human data (mouse, rat, etc.) the API lookup runs automatically.
@@ -484,6 +471,8 @@ Below the plot, the info panel shows:
 6.  View results as Dot Plots, Enrichment Maps (networks), Ridgeplots, or browse the full Results Table.
 
 ### 🔬 Phosphoproteomics
+
+Phosphoproteomics studies how proteins are regulated by phosphorylation -- a chemical modification where a phosphate group is added to specific amino acids (Serine, Threonine, or Tyrosine). Phosphorylation acts as an on/off switch for many cellular processes, including signaling, growth, and metabolism. "Site-level" analysis means DE-LIMP tests each individual phosphorylation site independently, so you can see exactly which positions on which proteins change between your conditions.
 
 The phosphoproteomics module provides site-level analysis of phosphorylation data, available when phospho-enriched data is detected.
 
@@ -543,6 +532,17 @@ Click the **"Education"** tab to access embedded proteomics training materials w
 * **Google NotebookLM:** Explore the key citations behind DE-LIMP's methodology (limpa, limma, DIA-NN)
 * **Proteomics News Blog:** Stay updated with the latest in the field
 
+### ℹ️ About
+Click the **"About"** tab in the navbar to view project information and community activity:
+* **Version display**: Shows the current app version, read from the `VERSION` file
+* **Community stats cards**: GitHub stars, forks, unique visitors (14-day window), and unique clones — updated daily by a GitHub Actions workflow
+* **Trend sparklines**: Interactive 14-day sparkline charts for unique visitors and unique clones, making adoption trends visible at a glance
+* **GitHub Discussions feed**: The 10 most recently updated discussions with title, category, author, comment count, and direct link — engage with the community without leaving the app
+* **Quick links**: One-click access to the GitHub repository, Hugging Face Space, documentation site, and GitHub Discussions
+* **Freshness indicator**: Shows when the stats were last updated
+
+> Community stats are collected by the `track-stats.yml` GitHub Actions workflow, which runs daily and saves data to `stats/community_stats.json`. Stats will appear after the first workflow run.
+
 ### 💾 Save & Load Analysis Sessions
 DE-LIMP can save your entire analysis state for later use.
 
@@ -556,6 +556,7 @@ DE-LIMP can save your entire analysis state for later use.
    * Processed data (normalized, quantified)
    * Statistical results (limma fit object)
    * All group assignments and settings
+   * App version tag for compatibility tracking
 
 **To Load a Session:**
 1. Click **"Load Session (.rds)"** in the sidebar
@@ -573,7 +574,9 @@ DE-LIMP can save your entire analysis state for later use.
 
 ## 6. Multi-Omics MOFA2
 
-The **Multi-Omics MOFA2** tab provides unsupervised multi-omics integration using MOFA2 (Multi-Omics Factor Analysis). It discovers latent factors — hidden patterns that explain variation across your datasets.
+The **Multi-Omics MOFA2** tab provides unsupervised multi-omics integration using MOFA2 (Multi-Omics Factor Analysis). It discovers latent factors -- hidden patterns that explain variation across your datasets.
+
+**When should you use MOFA2?** Use it when you have two or more types of data measured on the same samples and want to understand which patterns are shared versus unique to each data type. For example, if you ran both total proteomics and phosphoproteomics on the same samples, MOFA2 can separate protein abundance changes from true phosphorylation regulation. It is also useful for identifying hidden batch effects or finding biological signals that only become apparent when integrating multiple data types.
 
 ### When to Use MOFA2
 - **Global + Phospho**: Separate protein abundance effects from true phospho-regulation changes
@@ -718,6 +721,14 @@ You aren't just chatting with a bot; you are chatting with **your specific datas
     * *"Are there any mitochondrial proteins upregulated?"*
     * *"Generate a figure caption for the volcano plot."*
 
+### AI Summary — All-Contrast Analysis
+The **AI Summary** sub-tab (under Data Overview) analyzes all contrasts simultaneously, identifying:
+* Top differentially expressed proteins per comparison
+* Cross-comparison biomarkers (proteins significant in 2+ contrasts)
+* Biological interpretation and pathway context
+
+Click **"Export Report"** to download a styled standalone HTML report with gradient header, formatted tables, and print-friendly CSS.
+
 ### Bi-Directional AI Sync
 * **User -> AI:** Select points on the Volcano Plot. Then ask: *"What are the functions of these selected proteins?"*. The AI knows exactly which ones you clicked.
 * **AI -> User:** If the AI finds interesting proteins (e.g., *"I found several glycolytic enzymes..."*), it will highlight them in your plots automatically.
@@ -771,6 +782,77 @@ You have multiple options to access DE-LIMP:
 | **DIA-NN search fails with "command not found"** | Usually a line continuation issue in the generated sbatch script. Click **"📄 Log"** on the job to view stdout/stderr for details. |
 | **Jobs lost after app restart** | Jobs now persist automatically in `~/.delimp_job_queue.rds`. Restart the app to restore your full job history. If the file is missing or corrupted, jobs from before the persistence feature will not be recoverable. |
 | **MallocStackLogging warnings on Mac** | Harmless macOS ARM64 warnings from system libraries. These are suppressed in the latest version and do not affect functionality. |
+| **Community stats not showing on About tab** | Stats are populated by the `track-stats.yml` GitHub Actions workflow, which runs daily. They will appear after the first successful workflow run. You can also trigger the workflow manually from the Actions tab on GitHub. |
+| **Can't find SLURM log files** | As of v3.2, log files are stored in `{output_dir}/logs/`. For older searches, they may still be in the output directory root. The "Log" button checks both locations automatically. |
+
+---
+
+## Glossary
+
+| Term | Definition |
+| :--- | :--- |
+| **DIA** | Data-Independent Acquisition -- a mass spectrometry method that fragments all ions in wide m/z windows, providing comprehensive peptide coverage |
+| **DDA** | Data-Dependent Acquisition -- an older MS method that selects the most abundant ions for fragmentation; DE-LIMP does not support DDA data |
+| **DIA-NN** | A software tool (by Vadim Demichev) that processes DIA raw files to identify and quantify peptides and proteins |
+| **Parquet** | A columnar file format used by DIA-NN for its output (`report.parquet`). More compact and faster to read than TSV |
+| **limpa** | A Bioconductor R package for DIA proteomics data processing -- handles normalization (DPC-CN) and quantification (maxLFQ) |
+| **limma** | A Bioconductor R package for linear modeling and differential expression analysis, originally designed for microarrays but widely used in proteomics |
+| **FDR** | False Discovery Rate -- the expected proportion of false positives among all significant results. An FDR of 0.05 means ~5% of "significant" proteins may be false positives |
+| **adj.P.Val** | Adjusted P-value (after FDR correction via Benjamini-Hochberg). This is what DE-LIMP uses to determine significance (default threshold: 0.05) |
+| **P.Value** | Raw (unadjusted) P-value from the statistical test. Used on the volcano y-axis for visual spread, but significance is determined by adj.P.Val |
+| **logFC** | Log2 fold change between conditions. A logFC of 1.0 means 2-fold higher; -1.0 means 2-fold lower; 0.6 means ~1.5-fold higher |
+| **Fold change** | The ratio of expression between two conditions. A 2-fold change means one group has twice the abundance of the other |
+| **Volcano plot** | A scatter plot showing fold change (x-axis) vs. statistical significance (y-axis) for every protein. Significant proteins with large changes appear in the upper corners |
+| **PCA** | Principal Component Analysis -- a dimensionality reduction method that shows how samples cluster based on their overall protein expression profiles |
+| **GSEA** | Gene Set Enrichment Analysis -- tests whether predefined sets of genes/proteins (e.g., pathways) are statistically overrepresented among your DE results |
+| **GO** | Gene Ontology -- a standardized vocabulary for gene/protein function, organized into three categories: Biological Process (BP), Molecular Function (MF), and Cellular Component (CC) |
+| **KEGG** | Kyoto Encyclopedia of Genes and Genomes -- a database of metabolic and signaling pathways |
+| **CV** | Coefficient of Variation -- a measure of replicate reproducibility (standard deviation / mean, expressed as %). Lower CV = more reproducible measurement |
+| **MOFA2** | Multi-Omics Factor Analysis -- an unsupervised method that finds hidden patterns (latent factors) shared across multiple data types (e.g., proteomics + phospho) |
+| **FASTA** | A text file format containing protein or nucleotide sequences, used as the reference database for peptide identification |
+| **Precursor** | A peptide ion at a specific charge state as measured by the mass spectrometer. Multiple precursors can map to the same peptide sequence |
+| **maxLFQ** | A label-free quantification algorithm that rolls up precursor-level intensities to protein-level abundances while minimizing missing values |
+| **Spectral library** | A collection of previously observed peptide fragmentation patterns used to identify peptides in new DIA data |
+
+---
+
+## Version History
+
+### What's New in v3.2 (March 2026)
+
+**About Tab -- Community Dashboard**
+- New navbar tab with GitHub stars, forks, unique visitors (14-day), and unique clones (14-day) displayed as summary cards
+- 14-day trend sparklines for visitor and clone trends
+- GitHub Discussions feed with the 10 most recently updated discussions
+- Quick links to GitHub, Hugging Face, Documentation site, and Discussions
+
+**Search Logs Reorganized**
+- All SLURM `.out` / `.err` log files and local `.log` files now go to a `{output_dir}/logs/` subdirectory
+- The "Log" button in the Job Queue checks the `logs/` subdirectory first, with fallback to the old location
+
+**Community Stats Workflow**
+- GitHub Actions workflow runs daily, collecting traffic data, repository metadata, and GitHub Discussions
+
+---
+
+### v3.1.1 Fixes & Additions (February 2026)
+
+- **Volcano plot fixes**: Y-axis now uses raw P.Value for classic spread shape; FDR threshold line drawn at the correct boundary; significance coloring by adj.P.Val only; default logFC cutoff changed to 0.6 (~1.5-fold); DE protein count annotation
+- **CV Analysis redesign**: Interactive scatter plot (logFC vs Avg CV) replacing broken table view; summary stats via ggplot subtitle
+- **Export Data panel**: New Output tab with one-click CSV downloads
+- **AI Summary HTML export**: Styled standalone HTML report from AI summaries
+
+### Previous: v3.0--v3.1 Highlights
+
+- **UI Overhaul** (v3.1): Professional dark navbar, hover dropdowns, accordion sidebar, DE Dashboard with four sub-tabs
+- **Core Facility Mode** (v3.1): SQLite job tracking, staff auto-configuration, instrument QC dashboard, Quarto report generation
+- **Multi-Omics MOFA2** (v3.0): 2-6 view integration with variance heatmap, factor weights, sample scores
+- **DIA-NN Docker Search** (v3.0): Three backends (Local/Docker/HPC), Windows Docker Compose deployment
+- **Phosphoproteomics** (v2.4--v2.5): Site-level DE, KSEA kinase activity, motif analysis
+- **GSEA Expansion** (v2.5): 4 databases (BP/MF/CC/KEGG) with per-ontology caching and automatic organism detection
+- **XIC Chromatogram Viewer** (v2.1): Fragment-level inspection with MS2 intensity alignment and ion mobility support
+
+See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
 ---
 

@@ -1,0 +1,122 @@
+name: Track Repository Stats
+
+on:
+  schedule:
+    # Runs daily at 6 AM UTC (11 PM PST)
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  track-stats:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Fetch and log GitHub stats
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          
+          # Create stats directory if it doesn't exist
+          mkdir -p stats
+          
+          # Initialize CSV with headers if it doesn't exist
+          if [ ! -f stats/github_stats.csv ]; then
+            echo "date,clones_total,clones_unique,views_total,views_unique,stars,forks,open_issues" > stats/github_stats.csv
+          fi
+          
+          # Get today's date
+          DATE=$(date -I)
+          
+          # Fetch traffic data (requires push access)
+          CLONES_DATA=$(gh api repos/${{ github.repository }}/traffic/clones)
+          CLONES_TOTAL=$(echo "$CLONES_DATA" | jq '.count')
+          CLONES_UNIQUE=$(echo "$CLONES_DATA" | jq '.uniques')
+          
+          VIEWS_DATA=$(gh api repos/${{ github.repository }}/traffic/views)
+          VIEWS_TOTAL=$(echo "$VIEWS_DATA" | jq '.count')
+          VIEWS_UNIQUE=$(echo "$VIEWS_DATA" | jq '.uniques')
+          
+          # Fetch repo metadata
+          REPO_DATA=$(gh api repos/${{ github.repository }})
+          STARS=$(echo "$REPO_DATA" | jq '.stargazers_count')
+          FORKS=$(echo "$REPO_DATA" | jq '.forks_count')
+          ISSUES=$(echo "$REPO_DATA" | jq '.open_issues_count')
+          
+          # Append to CSV
+          echo "$DATE,$CLONES_TOTAL,$CLONES_UNIQUE,$VIEWS_TOTAL,$VIEWS_UNIQUE,$STARS,$FORKS,$ISSUES" >> stats/github_stats.csv
+          
+          # Save detailed daily breakdown (last 14 days) for reference
+          echo "$CLONES_DATA" | jq '.' > stats/latest_clones.json
+          echo "$VIEWS_DATA" | jq '.' > stats/latest_views.json
+          
+          # Parse daily trend data for sparklines
+          CLONE_TREND=$(echo "$CLONES_DATA" | jq '[.clones[] | {date: .timestamp[0:10], count: .uniques}]')
+          VIEW_TREND=$(echo "$VIEWS_DATA" | jq '[.views[] | {date: .timestamp[0:10], count: .uniques}]')
+
+          # Fetch recent discussions (last 10, via GraphQL)
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.repository }}"
+          REPO_NAME="${REPO_NAME#*/}"
+          DISCUSSIONS_JSON=$(gh api graphql -f query="
+            { repository(owner: \"${REPO_OWNER}\", name: \"${REPO_NAME}\") {
+              discussions(first: 10, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                totalCount
+                nodes {
+                  title
+                  category { name emoji }
+                  createdAt
+                  updatedAt
+                  author { login }
+                  comments { totalCount }
+                  url
+                }
+              }
+            } }" 2>/dev/null || echo '{}')
+
+          DISC_TOTAL=$(echo "$DISCUSSIONS_JSON" | jq '.data.repository.discussions.totalCount // 0')
+          DISC_NODES=$(echo "$DISCUSSIONS_JSON" | jq '[.data.repository.discussions.nodes[]? | {title, category: .category.name, author: .author.login, comments: .comments.totalCount, created: .createdAt[0:10], updated: .updatedAt[0:10], url}]')
+
+          # Create summary JSON for app consumption (with trends + discussions)
+          cat << EOF > stats/community_stats.json
+          {
+            "updated_at": "$(date -Is)",
+            "github": {
+              "clones_14d": $CLONES_TOTAL,
+              "unique_users_14d": $CLONES_UNIQUE,
+              "views_14d": $VIEWS_TOTAL,
+              "unique_visitors_14d": $VIEWS_UNIQUE,
+              "stars": $STARS,
+              "forks": $FORKS
+            },
+            "trends": {
+              "clones": $CLONE_TREND,
+              "views": $VIEW_TREND
+            },
+            "discussions": {
+              "total": $DISC_TOTAL,
+              "recent": $DISC_NODES
+            },
+            "version": {
+              "current": "$(cat VERSION 2>/dev/null || echo '0.0.0')"
+            }
+          }
+          EOF
+          
+          echo "📊 Stats for $DATE:"
+          echo "   Clones: $CLONES_TOTAL (unique: $CLONES_UNIQUE)"
+          echo "   Views: $VIEWS_TOTAL (unique: $VIEWS_UNIQUE)"
+          echo "   Stars: $STARS | Forks: $FORKS | Issues: $ISSUES"
+      
+      - name: Commit stats
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stats/
+          git diff --staged --quiet || git commit -m "📊 Daily stats $(date -I)"
+          git push

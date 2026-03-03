@@ -467,9 +467,9 @@
         <div class="container">
             <p class="subtitle">UC Davis Proteomics Core Facility</p>
             <h1>DE-LIMP</h1>
-            <span class="version-badge">v3.0</span>
+            <span class="version-badge">v3.2</span>
             <p class="tagline">
-                An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data, powered by Limpa and Limma. Integrated DIA-NN searching, phosphoproteomics, multi-omics factor analysis, and AI-powered data exploration.
+                Upload your DIA-NN proteomics data and instantly identify differentially expressed proteins with interactive volcano plots, pathway enrichment, and AI-powered interpretation. Supports phosphoproteomics, multi-omics integration, and core facility management.
             </p>
             <div class="btn-group">
                 <a href="https://github.com/bsphinney/DE-LIMP" class="btn btn-accent" target="_blank" rel="noopener">
@@ -609,27 +609,37 @@
     <section>
         <div class="container">
             <h2>Key Features</h2>
-            <p class="section-sub">A complete proteomics analysis platform &mdash; from raw data search to multi-omics integration.</p>
+            <p class="section-sub">A complete proteomics analysis platform &mdash; from raw data search to multi-omics integration and core facility management.</p>
             <div class="features">
                 <div class="feature-card">
+                    <div class="feat-icon">&#x1F3E2;</div>
+                    <h3>Core Facility Mode <span class="new-badge">New</span></h3>
+                    <p>Manage your proteomics lab from one dashboard. Track search jobs, monitor instrument performance over time, auto-fill staff credentials, and generate standalone HTML reports for clients.</p>
+                </div>
+                <div class="feature-card">
                     <div class="feat-icon">&#x1F50E;</div>
-                    <h3>Integrated DIA-NN Search <span class="new-badge">New</span></h3>
-                    <p>Run DIA-NN searches directly from the app via Docker (local) or HPC (SSH/SLURM). Submit jobs, monitor progress, and auto-load results.</p>
+                    <h3>Integrated DIA-NN Search</h3>
+                    <p>Run DIA-NN searches via Docker (local) or HPC (SSH/SLURM) with parallel 5-step pipelines, spectral library caching, custom FASTA sequences, and real-time cluster resource monitoring.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F4CA;</div>
+                    <h3>Community Stats Dashboard <span class="new-badge">New</span></h3>
+                    <p>Built-in About tab with GitHub stars, forks, visitors, and clones. 14-day trend sparklines and a live GitHub Discussions feed.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F9EC;</div>
-                    <h3>Multi-Omics MOFA2 <span class="new-badge">New</span></h3>
-                    <p>Unsupervised multi-omics integration with MOFA2. Combine 2-6 data views to discover shared and view-specific variation patterns.</p>
+                    <h3>Multi-Omics MOFA2</h3>
+                    <p>Find hidden patterns across multiple data types. Combine 2-6 datasets (e.g., proteomics + phospho + RNA-seq) to discover which biological signals are shared and which are unique to each measurement.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F9EA;</div>
-                    <h3>Phosphoproteomics <span class="new-badge">New</span></h3>
+                    <h3>Phosphoproteomics</h3>
                     <p>Site-level differential expression for phospho-enriched data. Auto-detection of phosphosites, volcano plots, and residue distribution.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F30B;</div>
                     <h3>Interactive Volcano Plots</h3>
-                    <p>Fully interactive Plotly volcano plots. Click or box-select proteins to highlight them across all views.</p>
+                    <p>Fully interactive Plotly volcano plots with correct P.Value/adj.P.Val handling, DE protein count annotations, and click or box-select to highlight across all views.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F916;</div>
@@ -639,17 +649,27 @@
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4C8;</div>
                     <h3>QC Trend Monitoring</h3>
-                    <p>Track precursor and protein counts, MS1 signal, and p-value distributions to identify batch effects and quality issues.</p>
+                    <p>Track precursor and protein counts, MS1 signal, and data completeness to identify batch effects and quality issues.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feat-icon">&#x1F4CA;</div>
-                    <h3>Gene Set Enrichment <span class="new-badge">New</span></h3>
+                    <div class="feat-icon">&#x1F4E6;</div>
+                    <h3>Gene Set Enrichment</h3>
                     <p>Multi-database GSEA (BP, MF, CC, KEGG) with dot plots, enrichment maps, ridgeplots, and automatic organism detection.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F4E4;</div>
+                    <h3>Export &amp; Reports <span class="new-badge">New</span></h3>
+                    <p>Dedicated Export Data panel with one-click downloads for Results CSV, CV Analysis CSV, and standalone AI Summary HTML reports.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F4DA;</div>
+                    <h3>Spectral Library Caching <span class="new-badge">New</span></h3>
+                    <p>Reuse predicted spectral libraries across DIA-NN searches. Saves hours on repeated searches against the same FASTA database.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4C9;</div>
                     <h3>XIC Viewer</h3>
-                    <p>Fragment-level chromatogram inspection with 3 display modes. Spectronaut-style MS2 intensity alignment with inconsistency detection.</p>
+                    <p>Visually validate your quantification results by inspecting fragment-level chromatograms. Three display modes including intensity alignment with automatic inconsistency detection (local/HPC only).</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F50D;</div>
@@ -668,8 +688,8 @@
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4D6;</div>
-                    <h3>Methodology Report</h3>
-                    <p>Auto-generated methods section ready for publication, covering every analysis step with parameter details and citations.</p>
+                    <h3>DE Dashboard</h3>
+                    <p>Tabbed dashboard with Volcano + Heatmap, Results Table, PCA, and interactive CV Analysis scatter plots (logFC vs Avg CV) all in one view.</p>
                 </div>
             </div>
         </div>
@@ -718,7 +738,7 @@ cd DE-LIMP</code></pre>
                 </li>
                 <li>
                     <h3>Upload your DIA-NN data</h3>
-                    <p>Use the sidebar to upload a DIA-NN parquet or TSV report, assign experimental groups, and run the analysis pipeline. Or click "Load Example Data" to try with a built-in dataset.</p>
+                    <p>Use the sidebar to upload a DIA-NN <code>report.parquet</code> file, assign experimental groups, and run the analysis pipeline. Or click "Load Example Data" to try with a built-in dataset.</p>
                 </li>
             </ol>
 
@@ -775,19 +795,19 @@ bash build_diann_docker.sh
             <ol class="steps">
                 <li>
                     <h3>Data Import</h3>
-                    <p>Load DIA-NN report files (parquet or TSV) with <code>readDIANN()</code>. Optionally search raw files directly with DIA-NN via the integrated search tab.</p>
+                    <p>Upload a DIA-NN <code>report.parquet</code> file, or search raw files directly with DIA-NN via the integrated search tab. Supports spectral library caching and custom FASTA sequences.</p>
                 </li>
                 <li>
                     <h3>Normalization</h3>
-                    <p>Apply Data Point Correspondence (DPC-CN) normalization via <code>dpcCN()</code> to correct for systematic biases.</p>
+                    <p>Apply Data Point Correspondence (DPC-CN) normalization to correct for systematic biases across runs.</p>
                 </li>
                 <li>
                     <h3>Protein Quantification</h3>
-                    <p>Roll up peptide-level data to protein-level using maxLFQ quantification with <code>dpcQuant()</code>.</p>
+                    <p>Roll up precursor-level data to protein-level abundances using the maxLFQ quantification algorithm.</p>
                 </li>
                 <li>
                     <h3>Differential Expression</h3>
-                    <p>Fit linear models with <code>dpcDE()</code>, apply contrasts, and compute empirical Bayes moderated statistics with <code>eBayes()</code>. FDR correction via Benjamini-Hochberg.</p>
+                    <p>Fit linear models, apply contrasts between your experimental groups, and compute empirical Bayes moderated statistics. FDR correction via Benjamini-Hochberg.</p>
                 </li>
                 <li>
                     <h3>Phosphoproteomics (optional)</h3>
@@ -795,7 +815,7 @@ bash build_diann_docker.sh
                 </li>
                 <li>
                     <h3>Enrichment &amp; Integration</h3>
-                    <p>Gene set enrichment analysis (GO, KEGG) with <code>clusterProfiler</code>. Multi-omics factor analysis with <code>MOFA2</code> to integrate proteomics, phosphoproteomics, transcriptomics, and more.</p>
+                    <p>Gene set enrichment analysis (GO, KEGG) to identify affected pathways. Multi-omics factor analysis to integrate proteomics, phosphoproteomics, transcriptomics, and more.</p>
                 </li>
             </ol>
         </div>
@@ -805,7 +825,7 @@ bash build_diann_docker.sh
     <div class="footer">
         <div class="container">
             <div>
-                <strong style="color:#fff;">DE-LIMP</strong> v3.0 &mdash; Open-source proteomics analysis.<br>
+                <strong style="color:#fff;">DE-LIMP</strong> v3.2 &mdash; Open-source proteomics analysis.<br>
                 Built with <a href="https://shiny.posit.co/" target="_blank" rel="noopener">Shiny</a>,
                 <a href="https://bioconductor.org/packages/limpa/" target="_blank" rel="noopener">limpa</a>,
                 <a href="https://bioconductor.org/packages/limma/" target="_blank" rel="noopener">limma</a>, and
@@ -814,6 +834,7 @@ bash build_diann_docker.sh
             <div class="footer-links">
                 <a href="https://github.com/bsphinney/DE-LIMP" target="_blank" rel="noopener">GitHub</a>
                 <a href="https://github.com/bsphinney/DE-LIMP/issues" target="_blank" rel="noopener">Report an Issue</a>
+                <a href="https://github.com/bsphinney/DE-LIMP/discussions" target="_blank" rel="noopener">Discussions</a>
                 <a href="https://huggingface.co/spaces/brettsp/de-limp-proteomics" target="_blank" rel="noopener">HF Spaces</a>
                 <a href="https://www.youtube.com/channel/UCpulhf8gl-HVxACyJUEFPRw" target="_blank" rel="noopener">YouTube</a>
                 <a href="https://proteomics.ucdavis.edu" target="_blank" rel="noopener">Core Facility</a>

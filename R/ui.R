@@ -1497,6 +1497,46 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     ),
 
     # ==========================================================================
+    # ABOUT (standalone — always visible)
+    # ==========================================================================
+    nav_panel("About", value = "about_tab", icon = icon("circle-info"),
+      div(style = "padding: 20px; max-width: 900px; margin: 0 auto;",
+        # Header with version
+        div(style = "text-align: center; margin-bottom: 25px;",
+          tags$h3("DE-LIMP"),
+          tags$p(class = "text-muted", textOutput("about_version_text", inline = TRUE)),
+          tags$p(style = "color: #718096; font-size: 0.9em;",
+            "Differential Expression \u2014 LIMPA Pipeline")
+        ),
+
+        # Stats cards row
+        uiOutput("community_stats_cards"),
+
+        # Trend sparklines row
+        uiOutput("community_trend_plots"),
+
+        # Recent discussions
+        uiOutput("community_discussions"),
+
+        # Links section
+        div(style = "text-align: center; margin-top: 25px;",
+          tags$h6("Links"),
+          tags$a(href = "https://github.com/bsphinney/DE-LIMP", target = "_blank",
+            icon("github"), " GitHub"), " | ",
+          tags$a(href = "https://huggingface.co/spaces/brettsp/de-limp-proteomics", target = "_blank",
+            icon("rocket"), " Hugging Face"), " | ",
+          tags$a(href = "https://bsphinney.github.io/DE-LIMP/", target = "_blank",
+            icon("book"), " Documentation"), " | ",
+          tags$a(href = "https://github.com/bsphinney/DE-LIMP/discussions", target = "_blank",
+            icon("comments"), " Discussions")
+        ),
+
+        # Stats freshness note
+        uiOutput("stats_updated_at")
+      )
+    ),
+
+    # ==========================================================================
     # EDUCATION (standalone)
     # ==========================================================================
     nav_panel("Education", icon = icon("graduation-cap"),
