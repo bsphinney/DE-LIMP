@@ -18,7 +18,7 @@ jobs:
       
       - name: Fetch and log GitHub stats
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.STATS_TOKEN }}
         run: |
           set -e
           
