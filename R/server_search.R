@@ -320,34 +320,165 @@ server_search <- function(input, output, session, values, add_to_log,
     values$ssh_connected <- result$success
     values$ssh_sbatch_path <- result$sbatch_path
 
-    # Trigger immediate cluster resource check on successful connect
+    # Trigger immediate cluster resource check + auto-select on successful connect
     if (result$success) {
       tryCatch({
         res <- check_cluster_resources(
-          ssh_config = cfg,
-          account = isolate(input$diann_account) %||% "",
-          partition = isolate(input$diann_partition) %||% "",
-          sbatch_path = result$sbatch_path
+          ssh_config = cfg, account = "genome-center-grp",
+          partition = "high", sbatch_path = result$sbatch_path
         )
         values$cluster_resources <- res
       }, error = function(e) {
         values$cluster_resources <- list(success = FALSE, error = e$message)
       })
-      # Also check publicgrp/low for free capacity recommendation
-      acct <- isolate(input$diann_account) %||% ""
-      if (tolower(acct) != "publicgrp") {
-        tryCatch({
-          pub_res <- check_cluster_resources(
-            ssh_config = cfg, account = "publicgrp",
-            partition = "low", sbatch_path = result$sbatch_path
-          )
-          values$public_resources <- pub_res
-        }, error = function(e) NULL)
+      tryCatch({
+        pub_res <- check_cluster_resources(
+          ssh_config = cfg, account = "publicgrp",
+          partition = "low", sbatch_path = result$sbatch_path
+        )
+        values$public_resources <- pub_res
+      }, error = function(e) NULL)
+
+      # Auto-select best partition immediately
+      best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
+      values$auto_partition <- best
+      if (!isTRUE(isolate(input$partition_override))) {
+        updateTextInput(session, "diann_account", value = best$account)
+        updateTextInput(session, "diann_partition", value = best$partition)
       }
     } else {
       values$cluster_resources <- NULL
       values$public_resources <- NULL
     }
+  })
+
+  # ============================================================================
+  #    Auto-connect SSH on startup (if credentials pre-filled)
+  # ============================================================================
+
+  observe({
+    # Wait for inputs to initialize
+    req(input$ssh_host, input$ssh_user, input$ssh_key_path)
+    req(!isTRUE(values$ssh_connected))
+    cfg <- ssh_config()
+    req(cfg)
+
+    message("[DE-LIMP] Auto-connecting SSH to ", cfg$host, "...")
+    result <- test_ssh_connection(cfg)
+
+    output$ssh_status_ui <- renderUI({
+      if (result$success) {
+        div(class = "alert alert-success py-1 px-2 mt-2",
+          style = "font-size: 0.82em;",
+          icon("check-circle"), " ", result$message)
+      } else {
+        div(class = "alert alert-warning py-1 px-2 mt-2",
+          style = "font-size: 0.82em;",
+          icon("info-circle"), " Auto-connect failed. Click Test Connection to retry.")
+      }
+    })
+
+    values$ssh_connected <- result$success
+    values$ssh_sbatch_path <- result$sbatch_path
+
+    if (result$success) {
+      tryCatch({
+        res <- check_cluster_resources(
+          ssh_config = cfg, account = "genome-center-grp",
+          partition = "high", sbatch_path = result$sbatch_path)
+        values$cluster_resources <- res
+      }, error = function(e) {
+        values$cluster_resources <- list(success = FALSE, error = e$message)
+      })
+      tryCatch({
+        pub_res <- check_cluster_resources(
+          ssh_config = cfg, account = "publicgrp",
+          partition = "low", sbatch_path = result$sbatch_path)
+        values$public_resources <- pub_res
+      }, error = function(e) NULL)
+
+      best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
+      values$auto_partition <- best
+      if (!isTRUE(isolate(input$partition_override))) {
+        updateTextInput(session, "diann_account", value = best$account)
+        updateTextInput(session, "diann_partition", value = best$partition)
+      }
+    }
+  }) |> bindEvent(input$ssh_host, once = TRUE)
+
+  # ============================================================================
+  #    Re-verify stale job statuses on SSH connect
+  # ============================================================================
+  #
+  # Jobs saved as "completed" or "running" in RDS may have stale statuses
+  # (e.g., a FAILED job showing as completed due to the .extern sacct bug,
+  # or a running job that finished while the app was closed). Re-check once
+  # when SSH connects.
+
+  jobs_reverified <- reactiveVal(FALSE)
+
+  observe({
+    req(isTRUE(values$ssh_connected))
+    req(!jobs_reverified())
+    req(length(values$diann_jobs) > 0)
+    message("[DE-LIMP] Re-verifying ", length(values$diann_jobs), " jobs after SSH connect...")
+
+    jobs <- values$diann_jobs
+    cfg <- isolate(ssh_config())
+    slurm_path <- isolate(values$ssh_sbatch_path)
+    changed <- FALSE
+    n_updated <- 0
+
+    for (i in seq_along(jobs)) {
+      if (isTRUE(jobs[[i]]$removed)) next
+      if (!isTRUE(jobs[[i]]$is_ssh)) next
+      if (!jobs[[i]]$status %in% c("completed", "running", "queued")) next
+
+      tryCatch({
+        new_status <- check_slurm_status(
+          jobs[[i]]$job_id, ssh_config = cfg, sbatch_path = slurm_path)
+
+        # For "completed" jobs, also verify report.parquet exists on remote.
+        # DIA-NN can hit internal errors (e.g. library mismatch) and exit 0
+        # without producing output — SLURM says COMPLETED but there's no report.
+        if (identical(new_status, "completed") && !isTRUE(jobs[[i]]$loaded)) {
+          out_dir <- jobs[[i]]$output_dir
+          if (!is.null(out_dir) && nzchar(out_dir)) {
+            report_check <- ssh_exec(cfg,
+              sprintf("test -f %s && echo EXISTS || echo MISSING",
+                shQuote(file.path(out_dir, "report.parquet"))))
+            if (report_check$status == 0 &&
+                any(grepl("MISSING", report_check$stdout))) {
+              message(sprintf("[DE-LIMP] Job %s: SLURM says completed but no report.parquet — marking failed",
+                jobs[[i]]$job_id))
+              new_status <- "failed"
+              jobs[[i]]$failure_reason <- "DIA-NN completed without producing report.parquet (check logs)"
+            }
+          }
+        }
+
+        if (!is.null(new_status) && new_status != jobs[[i]]$status) {
+          message(sprintf("[DE-LIMP] Job %s status corrected: %s -> %s",
+            jobs[[i]]$job_id, jobs[[i]]$status, new_status))
+          jobs[[i]]$status <- new_status
+          if (new_status == "completed" && is.null(jobs[[i]]$completed_at)) {
+            jobs[[i]]$completed_at <- Sys.time()
+          }
+          changed <- TRUE
+          n_updated <- n_updated + 1
+        }
+      }, error = function(e) {
+        message("[DE-LIMP] Re-verify failed for job ", jobs[[i]]$job_id, ": ", e$message)
+      })
+    }
+
+    if (changed) {
+      values$diann_jobs <- jobs
+      showNotification(
+        sprintf("Re-verified job statuses: %d updated", n_updated),
+        type = "message", duration = 5)
+    }
+    jobs_reverified(TRUE)
   })
 
   # ============================================================================
@@ -359,21 +490,35 @@ server_search <- function(input, output, session, values, add_to_log,
     req(isTRUE(values$ssh_connected))
     cfg <- isolate(ssh_config())
     req(cfg)
-    account <- isolate(input$diann_account) %||% ""
-    partition <- isolate(input$diann_partition) %||% ""
     sbatch_path <- isolate(values$ssh_sbatch_path)
 
+    # Always check both accounts
     tryCatch({
-      res <- check_cluster_resources(cfg, account, partition, sbatch_path)
+      res <- check_cluster_resources(cfg, "genome-center-grp", "high", sbatch_path)
       values$cluster_resources <- res
     }, error = function(e) NULL)
 
-    # Also check publicgrp/low for free capacity recommendation
-    if (tolower(account) != "publicgrp") {
-      tryCatch({
-        pub_res <- check_cluster_resources(cfg, "publicgrp", "low", sbatch_path)
-        values$public_resources <- pub_res
-      }, error = function(e) NULL)
+    tryCatch({
+      pub_res <- check_cluster_resources(cfg, "publicgrp", "low", sbatch_path)
+      values$public_resources <- pub_res
+    }, error = function(e) NULL)
+
+    # Auto-select best partition
+    peak_cpus <- if (isTRUE(isolate(input$parallel_search))) {
+      cpus_per <- isolate(input$parallel_cpus) %||% 16
+      max_sim <- isolate(input$max_simultaneous) %||% 20
+      max(32, cpus_per * max_sim)
+    } else {
+      isolate(input$diann_cpus) %||% 64
+    }
+
+    best <- select_best_partition(values$cluster_resources, values$public_resources, peak_cpus)
+    values$auto_partition <- best
+
+    # Update hidden inputs unless user is overriding
+    if (!isTRUE(isolate(input$partition_override))) {
+      updateTextInput(session, "diann_account", value = best$account)
+      updateTextInput(session, "diann_partition", value = best$partition)
     }
   })
 
@@ -390,163 +535,106 @@ server_search <- function(input, output, session, values, add_to_log,
     if (has_group && res$group_limit > 0) {
       pct_used <- res$group_used / res$group_limit
       if (pct_used > 0.8) {
-        color <- "#dc3545"  # red
-        bg <- "#f8d7da"
-        border <- "#f5c2c7"
+        color <- "#dc3545"; bg <- "#f8d7da"; border <- "#f5c2c7"
       } else if (pct_used > 0.5) {
-        color <- "#ffc107"  # yellow
-        bg <- "#fff3cd"
-        border <- "#ffecb5"
+        color <- "#ffc107"; bg <- "#fff3cd"; border <- "#ffecb5"
       } else {
-        color <- "#198754"  # green
-        bg <- "#d1e7dd"
-        border <- "#badbcc"
+        color <- "#198754"; bg <- "#d1e7dd"; border <- "#badbcc"
       }
     } else if (has_partition && res$partition_total > 0) {
-      # Fall back to partition-level stats
       pct_idle <- res$partition_idle / res$partition_total
       if (pct_idle < 0.2) {
-        color <- "#dc3545"
-        bg <- "#f8d7da"
-        border <- "#f5c2c7"
+        color <- "#dc3545"; bg <- "#f8d7da"; border <- "#f5c2c7"
       } else if (pct_idle < 0.5) {
-        color <- "#ffc107"
-        bg <- "#fff3cd"
-        border <- "#ffecb5"
+        color <- "#ffc107"; bg <- "#fff3cd"; border <- "#ffecb5"
       } else {
-        color <- "#198754"
-        bg <- "#d1e7dd"
-        border <- "#badbcc"
+        color <- "#198754"; bg <- "#d1e7dd"; border <- "#badbcc"
       }
     } else {
-      color <- "#6c757d"
-      bg <- "#e9ecef"
-      border <- "#dee2e6"
+      color <- "#6c757d"; bg <- "#e9ecef"; border <- "#dee2e6"
     }
 
     # Build text lines
-    account_name <- isolate(input$diann_account) %||% "account"
-    partition_name <- isolate(input$diann_partition) %||% "partition"
-
     group_line <- if (has_group) {
-      sprintf("%s: %s/%s CPUs used (%s available)",
-        account_name,
+      sprintf("genome-center-grp: %s/%s CPUs used (%s available)",
         format(res$group_used, big.mark = ","),
         format(res$group_limit, big.mark = ","),
         format(res$group_available, big.mark = ","))
     } else if (!is.na(res$group_used)) {
-      sprintf("%s: %s CPUs in use",
-        account_name,
+      sprintf("genome-center-grp: %s CPUs in use",
         format(res$group_used, big.mark = ","))
     } else NULL
 
-    partition_line <- if (has_partition) {
-      sprintf("%s partition: %s idle of %s total",
-        partition_name,
-        format(res$partition_idle, big.mark = ","),
-        format(res$partition_total, big.mark = ","))
+    pub_res <- values$public_resources
+    pub_line <- if (!is.null(pub_res) && isTRUE(pub_res$success) && !is.na(pub_res$partition_idle)) {
+      sprintf("publicgrp/low: %s idle of %s total",
+        format(pub_res$partition_idle, big.mark = ","),
+        format(pub_res$partition_total, big.mark = ","))
     } else NULL
 
     indicator <- span(style = sprintf("color: %s; font-size: 1.1em;", color),
-      HTML("&#9679;"))  # filled circle
-
-    # --- Partition recommendation banner ---
-    recommendation_ui <- NULL
-    pub_res <- values$public_resources
-    is_parallel <- isTRUE(isolate(input$parallel_search))
-    already_public <- tolower(account_name) == "publicgrp"
-
-    if (!already_public && (has_group || has_partition)) {
-      # Estimate peak CPU need
-      if (is_parallel) {
-        cpus_per <- isolate(input$parallel_cpus) %||% 16
-        max_sim <- isolate(input$max_simultaneous) %||% 20
-        peak_cpus <- max(32, cpus_per * max_sim)
-      } else {
-        peak_cpus <- isolate(input$diann_cpus) %||% 64
-      }
-
-      pub_idle <- if (!is.null(pub_res) && isTRUE(pub_res$success)) {
-        pub_res$partition_idle %||% 0
-      } else 0
-
-      # Determine if current partition is tight
-      # Use group limit if available, otherwise fall back to partition idle %
-      partition_tight <- FALSE
-      capacity_msg <- ""
-      if (has_group && res$group_limit > 0) {
-        group_avail <- res$group_available %||% 0
-        partition_tight <- group_avail < peak_cpus
-        capacity_msg <- sprintf("Your group is near its CPU limit (%s/%s). ",
-          format(res$group_used, big.mark = ","),
-          format(res$group_limit, big.mark = ","))
-      } else if (has_partition && res$partition_total > 0) {
-        partition_idle <- res$partition_idle %||% 0
-        pct_idle <- partition_idle / res$partition_total
-        # Tight if <30% idle or fewer idle CPUs than the job needs
-        partition_tight <- pct_idle < 0.3 || partition_idle < peak_cpus
-        capacity_msg <- sprintf("%s partition: %s idle of %s total (%d%% idle). ",
-          partition_name,
-          format(partition_idle, big.mark = ","),
-          format(res$partition_total, big.mark = ","),
-          round(pct_idle * 100))
-      } else if (!is.na(res$group_used) && res$group_used > 0) {
-        # No limit known, but usage is high — suggest if >500 CPUs in use
-        partition_tight <- res$group_used > 500
-        capacity_msg <- sprintf("Your group has %s CPUs in use. ",
-          format(res$group_used, big.mark = ","))
-      }
-
-      if (!partition_tight) {
-        # Green — enough capacity, no recommendation needed
-      } else if (pub_idle > peak_cpus) {
-        # Amber — suggest publicgrp/low
-        recommendation_ui <- div(
-          style = "background: #fff3cd; border: 1px solid #ffecb5; border-radius: 4px; padding: 5px 8px; margin-top: 6px; font-size: 0.8em;",
-          tags$strong("Suggestion: "),
-          capacity_msg,
-          sprintf("The free cluster has %s idle CPUs", format(pub_idle, big.mark = ",")),
-          if (is_parallel) " \u2014 array steps can run on publicgrp/low (preemptible, auto-requeued)."
-          else " \u2014 your job can run on publicgrp/low (preemptible, auto-requeued).",
-          div(style = "margin-top: 4px;",
-            actionButton("apply_partition_suggestion", "Apply publicgrp/low",
-              class = "btn-warning btn-sm",
-              style = "padding: 1px 8px; font-size: 0.8em;"))
-        )
-      } else {
-        # Red — both tight
-        recommendation_ui <- div(
-          style = "background: #f8d7da; border: 1px solid #f5c2c7; border-radius: 4px; padding: 5px 8px; margin-top: 6px; font-size: 0.8em;",
-          tags$strong("Cluster congested: "),
-          capacity_msg,
-          sprintf("Free cluster: %s idle CPUs. Jobs may queue.",
-            format(pub_idle, big.mark = ","))
-        )
-      }
-    }
+      HTML("&#9679;"))
 
     div(
       style = sprintf(
         "background: %s; border: 1px solid %s; border-radius: 6px; padding: 6px 10px; margin-top: 8px; font-size: 0.82em;",
         bg, border),
       div(indicator, " ", if (!is.null(group_line)) group_line),
-      if (!is.null(partition_line)) div(
-        style = "margin-left: 20px; color: #555;", partition_line),
-      recommendation_ui
+      if (!is.null(pub_line)) div(
+        style = "margin-left: 20px; color: #555;", pub_line)
     )
   })
 
   # ============================================================================
-  #    Apply Partition Recommendation
+  #    Auto-Select Partition UI + Override
   # ============================================================================
 
-  observeEvent(input$apply_partition_suggestion, {
-    updateTextInput(session, "diann_partition", value = "low")
-    updateTextInput(session, "diann_account", value = "publicgrp")
-    showNotification(
-      "Partition set to publicgrp/low. All steps will be preemptible (auto-requeued if preempted).",
-      type = "message", duration = 6)
+  output$partition_selector_ui <- renderUI({
+    selected <- values$auto_partition
+    override <- isTRUE(input$partition_override)
+
+    tagList(
+      # Auto-selected display (when not overriding)
+      if (!override && !is.null(selected)) {
+        div(style = "background: #d1e7dd; border: 1px solid #badbcc; border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; font-size: 0.85em;",
+          icon("magic"), " ",
+          tags$strong(sprintf("%s / %s", selected$account, selected$partition)),
+          span(style = "color: #555; margin-left: 6px;", sprintf("(%s)", selected$reason))
+        )
+      },
+      # Override toggle
+      checkboxInput("partition_override", "Override account/partition", value = override),
+      # Manual inputs (shown only when override checked)
+      conditionalPanel("input.partition_override",
+        div(style = "display: flex; gap: 8px;",
+          div(style = "flex: 1;", textInput("diann_account_override", "Account:", value = "genome-center-grp")),
+          div(style = "flex: 1;", textInput("diann_partition_override", "Partition:", value = "high"))
+        )
+      )
+    )
   })
+
+  # Override toggle: sync hidden inputs from override inputs or restore auto-selected
+  observeEvent(input$partition_override, {
+    if (isTRUE(input$partition_override)) {
+      updateTextInput(session, "diann_account", value = input$diann_account_override %||% "genome-center-grp")
+      updateTextInput(session, "diann_partition", value = input$diann_partition_override %||% "high")
+    } else {
+      best <- values$auto_partition
+      if (!is.null(best)) {
+        updateTextInput(session, "diann_account", value = best$account)
+        updateTextInput(session, "diann_partition", value = best$partition)
+      }
+    }
+  })
+
+  # Sync hidden inputs when override inputs change
+  observeEvent(c(input$diann_account_override, input$diann_partition_override), {
+    if (isTRUE(input$partition_override)) {
+      updateTextInput(session, "diann_account", value = input$diann_account_override)
+      updateTextInput(session, "diann_partition", value = input$diann_partition_override)
+    }
+  }, ignoreInit = TRUE)
 
   # ============================================================================
   #    SSH Remote File Scanning
@@ -726,6 +814,7 @@ server_search <- function(input, output, session, values, add_to_log,
             choices = c(
               "One per gene (recommended)" = "one_per_gene",
               "Swiss-Prot reviewed" = "reviewed",
+              "Swiss-Prot + isoforms" = "reviewed_isoforms",
               "Full proteome" = "full",
               "Full + isoforms" = "full_isoforms"
             ), selected = "one_per_gene", width = "100%")
@@ -847,6 +936,10 @@ server_search <- function(input, output, session, values, add_to_log,
     })
 
     if (result$success) {
+      # Warn if FTP one-per-gene wasn't available and we fell back to full proteome
+      if (!is.null(result$warning)) {
+        showNotification(result$warning, type = "warning", duration = 12)
+      }
       removeModal()
       cfg <- ssh_config()
       if (!is.null(cfg)) {
@@ -854,16 +947,27 @@ server_search <- function(input, output, session, values, add_to_log,
         remote_fasta_dir <- file.path(output_base(), "databases")
         remote_path <- file.path(remote_fasta_dir, fname)
 
+        # Check if FASTA already exists on remote AND has matching sequence count
+        needs_upload <- TRUE
         exists_check <- ssh_exec(cfg,
-          paste("test -f", shQuote(remote_path), "&& echo EXISTS"))
-        if (any(grepl("EXISTS", exists_check$stdout))) {
-          # Already exists — just use it
+          paste("test -f", shQuote(remote_path), "&& grep -c '^>' ", shQuote(remote_path)))
+        remote_count <- suppressWarnings(
+          as.integer(trimws(paste(exists_check$stdout, collapse = ""))))
+        if (!is.na(remote_count) && remote_count == result$n_sequences) {
+          needs_upload <- FALSE
           values$diann_fasta_files <- remote_path
           values$fasta_info <- result
           showNotification(
-            sprintf("FASTA already exists on HPC, using: %s", remote_path),
+            sprintf("FASTA already exists on HPC (%d sequences): %s",
+              remote_count, remote_path),
             type = "message", duration = 8)
-        } else {
+        } else if (!is.na(remote_count)) {
+          showNotification(
+            sprintf("Existing FASTA has %d sequences but download has %d — re-uploading.",
+              remote_count, result$n_sequences),
+            type = "warning", duration = 8)
+        }
+        if (needs_upload) {
           # Upload to remote
           ssh_exec(cfg, paste("mkdir -p", shQuote(remote_fasta_dir)))
 
@@ -902,6 +1006,607 @@ server_search <- function(input, output, session, values, add_to_log,
     } else {
       showNotification(paste("Download failed:", result$error), type = "error")
     }
+  })
+
+  # ============================================================================
+  #    Shared FASTA Database Library
+  # ============================================================================
+
+  # Reactive: FASTA library catalog (reloaded when triggered)
+  fasta_library_catalog <- reactiveVal(list())
+
+  # Load catalog on startup and when refresh is triggered
+  observe({
+    fasta_library_catalog(fasta_library_load())
+  }) |> bindEvent(TRUE)
+
+  # Open the library modal
+  observeEvent(input$open_fasta_library_modal, {
+    # Refresh catalog each time modal opens
+    fasta_library_catalog(fasta_library_load())
+
+    showModal(modalDialog(
+      title = tagList(icon("book"), " Shared FASTA Database Library"),
+      size = "xl",
+      easyClose = TRUE,
+      div(
+        # Status banner: shared vs local
+        if (fasta_library_is_shared()) {
+          div(class = "alert alert-success py-1 px-3 mb-2",
+            style = "font-size: 0.85em;",
+            icon("network-wired"), " Connected to shared proteomics volume"
+          )
+        } else {
+          div(class = "alert alert-warning py-1 px-3 mb-2",
+            style = "font-size: 0.85em;",
+            icon("user"), " Using local library (shared volume not mounted)"
+          )
+        },
+        # Catalog table
+        DTOutput("fasta_library_table"),
+        hr(),
+        # Detail panel (shown on row select)
+        uiOutput("fasta_library_detail_panel")
+      ),
+      footer = tagList(
+        actionButton("fasta_library_refresh_btn", "Refresh",
+          class = "btn-outline-secondary btn-sm", icon = icon("sync")),
+        modalButton("Cancel"),
+        actionButton("fasta_library_use_btn", "Use This Database",
+          class = "btn-success", icon = icon("check"))
+      )
+    ))
+  })
+
+  # Render the library catalog table
+  output$fasta_library_table <- DT::renderDT({
+    catalog <- fasta_library_catalog()
+    display_df <- fasta_library_display_df(catalog)
+
+    if (nrow(display_df) == 0) {
+      # Return empty table with proper columns
+      return(DT::datatable(
+        data.frame(
+          Name = character(), Organism = character(), Proteins = character(),
+          Age = character(), Status = character(), `Created By` = character(),
+          stringsAsFactors = FALSE, check.names = FALSE
+        ),
+        selection = "single",
+        options = list(dom = "t", language = list(
+          emptyTable = "No databases in library. Download from UniProt and add to library."
+        )),
+        rownames = FALSE,
+        class = "compact stripe"
+      ))
+    }
+
+    # Format proteins with comma separator
+    display_df$Proteins <- format(display_df$Proteins, big.mark = ",")
+
+    # Color-code Status column
+    display_df$Status <- vapply(display_df$Status, function(s) {
+      switch(s,
+        "fresh"    = '<span class="badge bg-success">Fresh</span>',
+        "expiring" = '<span class="badge bg-warning text-dark">Expiring soon</span>',
+        "expired"  = '<span class="badge bg-danger">Expired</span>',
+        s
+      )
+    }, character(1))
+
+    # Hide the id column (used for lookup)
+    show_df <- display_df[, !names(display_df) %in% "id", drop = FALSE]
+
+    DT::datatable(show_df,
+      selection = "single",
+      escape = FALSE,  # Allow HTML in Status column
+      options = list(
+        pageLength = 10,
+        dom = "ftip",
+        scrollY = "300px",
+        columnDefs = list(
+          list(width = "180px", targets = 0),  # Name
+          list(width = "120px", targets = 1),  # Organism
+          list(width = "80px", targets = 2),   # Proteins
+          list(width = "80px", targets = 3),   # Age
+          list(width = "100px", targets = 4),  # Status
+          list(width = "80px", targets = 5)    # Created By
+        )
+      ),
+      rownames = FALSE,
+      class = "compact stripe"
+    )
+  })
+
+  # Detail panel on row selection
+  output$fasta_library_detail_panel <- renderUI({
+    sel <- input$fasta_library_table_rows_selected
+    if (is.null(sel) || length(sel) == 0) {
+      return(div(class = "text-muted text-center py-3",
+        icon("hand-pointer"), " Select a database from the table above to see details"
+      ))
+    }
+
+    catalog <- fasta_library_catalog()
+    if (sel > length(catalog)) return(NULL)
+    entry <- catalog[[sel]]
+
+    # Check file existence
+    files_ok <- fasta_library_verify_files(entry)
+    age_status <- fasta_library_check_age(entry)
+
+    # Format file size
+    size_mb <- if (!is.null(entry$file_size_bytes) && entry$file_size_bytes > 0) {
+      sprintf("%.1f MB", entry$file_size_bytes / 1e6)
+    } else "Unknown"
+
+    # Speclib info
+    speclib_info <- if (!is.null(entry$speclib_path) && nzchar(entry$speclib_path %||% "")) {
+      tags$span(class = "badge bg-info", icon("bolt"), " Predicted speclib available")
+    } else {
+      tags$span(class = "text-muted", "None")
+    }
+
+    # Search settings
+    ss <- entry$search_settings %||% list()
+
+    div(class = "card",
+      div(class = "card-body", style = "font-size: 0.88em; padding: 12px;",
+        div(class = "row",
+          div(class = "col-md-6",
+            tags$dl(class = "row mb-0",
+              tags$dt(class = "col-sm-5", "Organism:"),
+              tags$dd(class = "col-sm-7",
+                tags$strong(entry$organism %||% ""),
+                if (nzchar(entry$organism_common %||% ""))
+                  sprintf(" (%s)", entry$organism_common)
+              ),
+              tags$dt(class = "col-sm-5", "UniProt proteome:"),
+              tags$dd(class = "col-sm-7", tags$code(entry$proteome_id %||% "N/A")),
+              tags$dt(class = "col-sm-5", "Content type:"),
+              tags$dd(class = "col-sm-7", entry$content_type %||% ""),
+              tags$dt(class = "col-sm-5", "Protein count:"),
+              tags$dd(class = "col-sm-7",
+                format(entry$protein_count %||% 0L, big.mark = ","), " sequences"),
+              tags$dt(class = "col-sm-5", "File size:"),
+              tags$dd(class = "col-sm-7", size_mb),
+              tags$dt(class = "col-sm-5", "Contaminants:"),
+              tags$dd(class = "col-sm-7",
+                if (!is.null(entry$contaminant_library))
+                  sprintf("%s (%s proteins)",
+                    entry$contaminant_library,
+                    format(entry$contaminant_count %||% 0L, big.mark = ","))
+                else "None"
+              ),
+              tags$dt(class = "col-sm-5", "Custom sequences:"),
+              tags$dd(class = "col-sm-7",
+                if ((entry$custom_sequence_count %||% 0L) > 0)
+                  sprintf("%d sequences", entry$custom_sequence_count)
+                else "None"
+              )
+            )
+          ),
+          div(class = "col-md-6",
+            tags$dl(class = "row mb-0",
+              tags$dt(class = "col-sm-5", "Enzyme:"),
+              tags$dd(class = "col-sm-7", ss$enzyme %||% "N/A"),
+              tags$dt(class = "col-sm-5", "Missed cleavages:"),
+              tags$dd(class = "col-sm-7", as.character(ss$missed_cleavages %||% "")),
+              tags$dt(class = "col-sm-5", "Variable mods:"),
+              tags$dd(class = "col-sm-7", ss$var_mods %||% "None"),
+              tags$dt(class = "col-sm-5", "Fixed mods:"),
+              tags$dd(class = "col-sm-7", ss$fixed_mods %||% "None"),
+              tags$dt(class = "col-sm-5", "Peptide length:"),
+              tags$dd(class = "col-sm-7",
+                sprintf("%d-%d aa",
+                  ss$min_pep_len %||% 7L, ss$max_pep_len %||% 30L)),
+              tags$dt(class = "col-sm-5", "Precursor m/z:"),
+              tags$dd(class = "col-sm-7",
+                sprintf("%d-%d",
+                  as.integer(ss$min_pr_mz %||% 300),
+                  as.integer(ss$max_pr_mz %||% 1200))),
+              tags$dt(class = "col-sm-5", "Predicted speclib:"),
+              tags$dd(class = "col-sm-7", speclib_info)
+            )
+          )
+        ),
+        # FASTA files
+        div(style = "margin-top: 8px;",
+          tags$strong("FASTA files: "),
+          tags$ul(style = "margin-bottom: 4px;",
+            lapply(entry$fasta_files %||% character(), function(f) {
+              tags$li(tags$code(f))
+            })
+          )
+        ),
+        # Metadata footer
+        div(class = "d-flex justify-content-between align-items-center",
+          style = "margin-top: 8px; padding-top: 8px; border-top: 1px solid #dee2e6;",
+          div(
+            tags$small(class = "text-muted",
+              sprintf("Created %s by %s",
+                entry$created_at %||% "Unknown",
+                entry$created_by %||% "Unknown")),
+            if (nzchar(entry$notes %||% ""))
+              div(tags$small(class = "text-muted fst-italic",
+                icon("comment"), " ", entry$notes))
+          ),
+          div(
+            # File status indicator
+            if (!files_ok) {
+              tags$span(class = "badge bg-danger",
+                icon("exclamation-triangle"), " Files missing")
+            } else if (age_status == "expired") {
+              tags$span(class = "badge bg-danger",
+                icon("clock"), " Expired")
+            } else if (age_status == "expiring") {
+              tags$span(class = "badge bg-warning text-dark",
+                icon("clock"), " Expiring soon")
+            } else {
+              tags$span(class = "badge bg-success",
+                icon("check-circle"), " Ready")
+            },
+            # Delete button
+            actionButton("fasta_library_delete_btn", "Delete",
+              class = "btn-outline-danger btn-sm ms-2", icon = icon("trash"))
+          )
+        )
+      )
+    )
+  })
+
+  # Refresh catalog button
+  observeEvent(input$fasta_library_refresh_btn, {
+    fasta_library_catalog(fasta_library_load())
+    showNotification("Library catalog refreshed", type = "message", duration = 3)
+  })
+
+  # "Use This Database" button
+  observeEvent(input$fasta_library_use_btn, {
+    sel <- input$fasta_library_table_rows_selected
+
+    if (is.null(sel) || length(sel) == 0) {
+      showNotification("Please select a database from the table first.", type = "warning")
+      return()
+    }
+
+    catalog <- fasta_library_catalog()
+    if (sel > length(catalog)) return()
+    entry <- catalog[[sel]]
+
+    # Verify files exist
+    if (!fasta_library_verify_files(entry)) {
+      showNotification(
+        "FASTA files for this entry are missing from disk. The entry may need to be removed.",
+        type = "error", duration = 8)
+      return()
+    }
+
+    # Check age/expiration
+    age_status <- fasta_library_check_age(entry)
+    if (age_status == "expired") {
+      showNotification(
+        paste("This database is over 6 months old and cannot be used for new searches.",
+              "Please download a fresh version from UniProt."),
+        type = "error", duration = 10)
+      return()
+    }
+
+    # Get file paths — use remote paths if HPC/SSH mode
+    cfg <- ssh_config()
+    use_remote <- !is.null(cfg)
+    fasta_paths <- fasta_library_file_paths(entry, use_remote = use_remote)
+
+    # Set the FASTA files
+    values$diann_fasta_files <- fasta_paths
+
+    # Store the selected library entry for reference
+    values$fasta_info <- list(
+      n_sequences = entry$protein_count %||% 0L,
+      file_size = entry$file_size_bytes %||% 0L,
+      library_entry_id = entry$id,
+      library_entry_name = entry$name
+    )
+
+    # Check for linked speclib
+    if (!is.null(entry$speclib_path) && nzchar(entry$speclib_path %||% "")) {
+      # Verify speclib still exists
+      speclib_exists <- if (use_remote && !is.null(cfg)) {
+        check_result <- ssh_exec(cfg,
+          paste("test -f", shQuote(entry$speclib_path), "&& echo EXISTS"))
+        any(grepl("EXISTS", check_result$stdout))
+      } else {
+        file.exists(entry$speclib_path)
+      }
+
+      if (speclib_exists && age_status != "expired") {
+        values$diann_speclib <- entry$speclib_path
+        showNotification(
+          sprintf("Database loaded: %s\nPredicted speclib available — Step 1 will be skipped.",
+            entry$name),
+          type = "message", duration = 8)
+      } else {
+        showNotification(
+          sprintf("Database loaded: %s (%s proteins)",
+            entry$name,
+            format(entry$protein_count %||% 0L, big.mark = ",")),
+          type = "message", duration = 6)
+      }
+    } else {
+      # Show expiring warning if applicable
+      notify_msg <- sprintf("Database loaded: %s (%s proteins)",
+        entry$name,
+        format(entry$protein_count %||% 0L, big.mark = ","))
+      if (age_status == "expiring") {
+        notify_msg <- paste0(notify_msg,
+          "\nNote: This database is nearing expiration. Consider refreshing soon.")
+      }
+      showNotification(notify_msg, type = "message", duration = 6)
+    }
+
+    removeModal()
+  })
+
+  # Delete library entry
+  observeEvent(input$fasta_library_delete_btn, {
+    sel <- input$fasta_library_table_rows_selected
+    if (is.null(sel) || length(sel) == 0) return()
+
+    catalog <- fasta_library_catalog()
+    if (sel > length(catalog)) return()
+    entry <- catalog[[sel]]
+
+    showModal(modalDialog(
+      title = "Confirm Delete",
+      div(
+        tags$p(sprintf("Are you sure you want to remove '%s' from the library?",
+          entry$name)),
+        checkboxInput("fasta_library_delete_files", "Also delete FASTA files from disk",
+          value = FALSE)
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("fasta_library_confirm_delete", "Delete",
+          class = "btn-danger", icon = icon("trash"))
+      )
+    ))
+  })
+
+  observeEvent(input$fasta_library_confirm_delete, {
+    sel <- input$fasta_library_table_rows_selected
+    if (is.null(sel) || length(sel) == 0) {
+      removeModal()
+      return()
+    }
+
+    catalog <- fasta_library_catalog()
+    if (sel > length(catalog)) {
+      removeModal()
+      return()
+    }
+    entry <- catalog[[sel]]
+
+    # Remove entry
+    success <- fasta_library_remove(entry$id,
+      delete_files = isTRUE(input$fasta_library_delete_files))
+
+    if (success) {
+      showNotification(sprintf("Removed '%s' from library", entry$name),
+        type = "message", duration = 5)
+      # Refresh catalog
+      fasta_library_catalog(fasta_library_load())
+    } else {
+      showNotification("Failed to remove entry from library", type = "error")
+    }
+
+    # Re-open the library modal
+    removeModal()
+    # Slight delay to let modal close before reopening
+    shinyjs::delay(300, {
+      shinyjs::click("open_fasta_library_modal")
+    })
+  })
+
+  # Summary display in sidebar when library DB is selected
+  output$fasta_library_selected_summary <- renderUI({
+    req(length(values$diann_fasta_files) > 0)
+
+    # Check if the current selection came from the library
+    finfo <- values$fasta_info
+    if (!is.null(finfo$library_entry_name)) {
+      div(style = "font-size: 0.8em; color: #495057; margin-top: 5px;",
+        icon("check-circle", style = "color: #28a745;"), " ",
+        tags$strong(finfo$library_entry_name), " \u2014 ",
+        format(finfo$n_sequences %||% 0L, big.mark = ","), " sequences"
+      )
+    }
+  })
+
+  # ============================================================================
+  #    "Add to Library" after UniProt download
+  # ============================================================================
+
+  # Show "Add to Library" button after a successful UniProt download
+  output$fasta_add_to_library_btn_ui <- renderUI({
+    req(values$fasta_info)
+    req(values$fasta_info$success %||% !is.null(values$fasta_info$n_sequences))
+    # Only show if this wasn't already from the library
+    if (!is.null(values$fasta_info$library_entry_id)) return(NULL)
+    # Only show if we have downloaded fasta files
+    req(length(values$diann_fasta_files) > 0)
+
+    div(style = "margin-top: 8px;",
+      actionButton("add_fasta_to_library", "Add to Library",
+        class = "btn-outline-primary btn-sm w-100",
+        icon = icon("book-medical")),
+      tags$small(class = "text-muted d-block mt-1",
+        "Save this database to the shared library for reuse")
+    )
+  })
+
+  observeEvent(input$add_fasta_to_library, {
+    req(values$fasta_info, values$uniprot_results)
+
+    # Get the selected UniProt row
+    sel <- input$uniprot_results_table_rows_selected
+    if (is.null(sel) || length(sel) == 0) {
+      # Try to reconstruct from fasta_info if no selection (modal was closed)
+      showNotification(
+        "Could not determine the UniProt source. Please re-download the FASTA first.",
+        type = "warning")
+      return()
+    }
+
+    uniprot_row <- values$uniprot_results[sel, ]
+    download_result <- values$fasta_info
+
+    # Get contaminant info if used
+    contam_name <- input$contaminant_library %||% "none"
+    contam_info <- NULL
+    if (contam_name != "none") {
+      contam_info <- get_contaminant_fasta(contam_name)
+    }
+
+    # Get custom sequences
+    custom_seq <- input$custom_fasta_sequences
+    if (!is.null(custom_seq) && !nzchar(trimws(custom_seq))) custom_seq <- NULL
+
+    # Collect current search params
+    search_params <- list(
+      enzyme = input$diann_enzyme %||% "K*,R*",
+      missed_cleavages = input$diann_missed_cleavages %||% 1L,
+      mod_met_ox = isTRUE(input$mod_met_ox),
+      unimod4 = isTRUE(input$diann_unimod4),
+      min_pep_len = input$min_pep_len %||% 7L,
+      max_pep_len = input$max_pep_len %||% 30L,
+      min_pr_mz = input$min_pr_mz %||% 300,
+      max_pr_mz = input$max_pr_mz %||% 1200
+    )
+
+    # Show a dialog to add notes before saving
+    showModal(modalDialog(
+      title = tagList(icon("book-medical"), " Add to FASTA Library"),
+      div(
+        tags$p(sprintf("Adding %s to the shared FASTA library.",
+          uniprot_row$common_name %||% uniprot_row$organism)),
+        textInput("fasta_library_add_notes", "Notes (optional):",
+          placeholder = "e.g., Standard human database for routine DIA searches",
+          width = "100%"),
+        textInput("fasta_library_add_created_by", "Your name:",
+          value = Sys.info()[["user"]], width = "100%")
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("fasta_library_confirm_add", "Add to Library",
+          class = "btn-success", icon = icon("plus"))
+      )
+    ))
+  })
+
+  observeEvent(input$fasta_library_confirm_add, {
+    req(values$fasta_info, values$uniprot_results)
+
+    sel <- input$uniprot_results_table_rows_selected
+    if (is.null(sel) || length(sel) == 0) {
+      removeModal()
+      showNotification("UniProt selection lost. Please try again.", type = "warning")
+      return()
+    }
+
+    uniprot_row <- values$uniprot_results[sel, ]
+    download_result <- values$fasta_info
+
+    # Get contaminant info
+    contam_name <- input$contaminant_library %||% "none"
+    contam_info <- NULL
+    if (contam_name != "none") {
+      contam_info <- get_contaminant_fasta(contam_name)
+    }
+
+    # Custom sequences
+    custom_seq <- input$custom_fasta_sequences
+    if (!is.null(custom_seq) && !nzchar(trimws(custom_seq))) custom_seq <- NULL
+
+    # Search params
+    search_params <- list(
+      enzyme = input$diann_enzyme %||% "K*,R*",
+      missed_cleavages = input$diann_missed_cleavages %||% 1L,
+      mod_met_ox = isTRUE(input$mod_met_ox),
+      unimod4 = isTRUE(input$diann_unimod4),
+      min_pep_len = input$min_pep_len %||% 7L,
+      max_pep_len = input$max_pep_len %||% 30L,
+      min_pr_mz = input$min_pr_mz %||% 300,
+      max_pr_mz = input$max_pr_mz %||% 1200
+    )
+
+    # Build the catalog entry
+    entry <- fasta_library_build_entry(
+      download_result = download_result,
+      uniprot_row = uniprot_row,
+      content_type = input$fasta_content_type %||% "one_per_gene",
+      contam_info = contam_info,
+      contam_name = contam_name,
+      custom_sequences = custom_seq,
+      search_params = search_params,
+      created_by = input$fasta_library_add_created_by %||% Sys.info()[["user"]],
+      notes = input$fasta_library_add_notes %||% ""
+    )
+
+    # Copy FASTA files to library directory
+    lib_path <- fasta_library_path()
+    entry_dir <- file.path(lib_path, entry$fasta_dir)
+
+    tryCatch({
+      dir.create(entry_dir, recursive = TRUE, showWarnings = FALSE)
+
+      # Copy the main FASTA file
+      main_fasta_path <- values$diann_fasta_files[1]
+      if (file.exists(main_fasta_path)) {
+        file.copy(main_fasta_path,
+          file.path(entry_dir, basename(main_fasta_path)),
+          overwrite = TRUE)
+      }
+
+      # Copy contaminant FASTA if used
+      if (!is.null(contam_info) && isTRUE(contam_info$success)) {
+        file.copy(contam_info$path,
+          file.path(entry_dir, basename(contam_info$path)),
+          overwrite = TRUE)
+      }
+
+      # Write custom sequences if provided
+      if (!is.null(custom_seq) && nzchar(trimws(custom_seq))) {
+        writeLines(custom_seq,
+          file.path(entry_dir, "custom_proteins.fasta"))
+        entry$fasta_files <- c(entry$fasta_files, "custom_proteins.fasta")
+      }
+
+      # Write metadata.json for non-R tools
+      tryCatch({
+        jsonlite::write_json(
+          entry[!names(entry) %in% "custom_sequences"],
+          file.path(entry_dir, "metadata.json"),
+          pretty = TRUE, auto_unbox = TRUE)
+      }, error = function(e) NULL)  # Non-critical
+
+      # Add to catalog
+      success <- fasta_library_add(entry)
+
+      if (success) {
+        removeModal()
+        showNotification(
+          sprintf("Added '%s' to FASTA library", entry$name),
+          type = "message", duration = 8)
+        # Update fasta_info to reflect library membership
+        values$fasta_info$library_entry_id <- entry$id
+        values$fasta_info$library_entry_name <- entry$name
+      } else {
+        showNotification("Failed to save catalog entry", type = "error")
+      }
+    }, error = function(e) {
+      showNotification(
+        sprintf("Failed to copy files to library: %s", e$message),
+        type = "error", duration = 10)
+    })
   })
 
   # ============================================================================
@@ -1265,8 +1970,9 @@ server_search <- function(input, output, session, values, add_to_log,
     # ====================================================================
     cached_entry <- NULL
     if (is.null(values$diann_speclib) || !nzchar(values$diann_speclib)) {
+      fasta_seq_count <- values$fasta_info$n_sequences
       cached_entry <- speclib_cache_lookup(fasta_files, search_params, input$search_mode,
-                                           custom_fasta_text)
+                                           custom_fasta_text, fasta_seq_count)
       if (!is.null(cached_entry)) {
         # Verify the cached speclib file still exists
         speclib_exists <- FALSE
@@ -1351,6 +2057,7 @@ server_search <- function(input, output, session, values, add_to_log,
         search_settings = list(
           search_params = search_params,
           fasta_files = fasta_files,
+          fasta_seq_count = values$fasta_info$n_sequences,
           contaminant_library = contam_lib,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
@@ -1439,6 +2146,7 @@ server_search <- function(input, output, session, values, add_to_log,
         search_settings = list(
           search_params = search_params,
           fasta_files = fasta_files,
+          fasta_seq_count = values$fasta_info$n_sequences,
           contaminant_library = contam_lib,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
@@ -1768,6 +2476,7 @@ server_search <- function(input, output, session, values, add_to_log,
         search_settings = list(
           search_params = search_params,
           fasta_files = fasta_files,
+          fasta_seq_count = values$fasta_info$n_sequences,
           contaminant_library = contam_lib,
           custom_fasta_text = custom_fasta_text,
           n_raw_files = nrow(values$diann_raw_files),
@@ -1934,6 +2643,7 @@ server_search <- function(input, output, session, values, add_to_log,
         search_settings = list(
           search_params = search_params,
           fasta_files = fasta_files,
+          fasta_seq_count = values$fasta_info$n_sequences,
           contaminant_library = contam_lib,
           n_raw_files = nrow(values$diann_raw_files),
           raw_file_type = if (nrow(values$diann_raw_files) > 0)
@@ -2338,7 +3048,8 @@ server_search <- function(input, output, session, values, add_to_log,
                   speclib_path = speclib_path,
                   analysis_name = jobs[[i]]$name,
                   output_dir = jobs[[i]]$output_dir,
-                  custom_fasta_text = ss$custom_fasta_text
+                  custom_fasta_text = ss$custom_fasta_text,
+                  fasta_seq_count = ss$fasta_seq_count
                 )
                 jobs[[i]]$speclib_cached <- TRUE
                 changed <- TRUE
@@ -2470,7 +3181,9 @@ server_search <- function(input, output, session, values, add_to_log,
           if (is_core_facility && !is.null(cf_config)) {
             tryCatch({
               job_id_key <- job$container_id %||% job$job_id
-              n_prot <- if (!is.null(values$raw_data)) nrow(values$raw_data$E) else NA
+              n_prot <- if (!is.null(values$raw_data) && !is.null(values$raw_data$genes$Protein.Group))
+                length(unique(values$raw_data$genes$Protein.Group))
+              else if (!is.null(values$raw_data)) nrow(values$raw_data$E) else NA
               n_pep <- if (!is.null(values$raw_data) && !is.null(values$raw_data$genes$Stripped.Sequence)) {
                 length(unique(values$raw_data$genes$Stripped.Sequence))
               } else NA
@@ -2499,6 +3212,30 @@ server_search <- function(input, output, session, values, add_to_log,
             sprintf("raw_data <- limpa::readDIANN('%s')", report_path)
           )
           add_to_log("Auto-Load DIA-NN Results", log_lines)
+
+          # Record to analysis history log
+          tryCatch({
+            record_analysis(list(
+              timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+              user = Sys.getenv("USER", "unknown"),
+              source_type = "auto-load",
+              source_file = basename(report_path),
+              source_path = report_path,
+              remote_path = if (isTRUE(job$is_ssh)) remote_report else NA,
+              fasta_file = if (!is.null(job$search_settings))
+                paste(basename(job$search_settings$fasta_files), collapse = ", ") else NA,
+              fasta_seq_count = if (!is.null(job$search_settings)) job$search_settings$fasta_seq_count else NA,
+              n_proteins = if (!is.null(values$raw_data) && !is.null(values$raw_data$genes$Protein.Group))
+                length(unique(values$raw_data$genes$Protein.Group))
+              else if (!is.null(values$raw_data)) nrow(values$raw_data$E) else NA,
+              n_samples = if (!is.null(values$raw_data)) ncol(values$raw_data$E) else NA,
+              n_contrasts = NA,
+              n_de_proteins = NA,
+              output_dir = job$output_dir,
+              app_version = values$app_version %||% "unknown",
+              notes = sprintf("Job: %s (%s)", job$name, job$job_id)
+            ))
+          }, error = function(e) message("[DE-LIMP] History record failed: ", e$message))
 
           # Navigate to Assign Groups tab
           nav_select("main_tabs", "Data Overview")
@@ -2542,7 +3279,7 @@ server_search <- function(input, output, session, values, add_to_log,
         "queued"    = span(class = "badge bg-secondary", "Queued"),
         "running"   = span(class = "badge bg-primary", "Running"),
         "completed" = span(class = "badge bg-success", "Completed"),
-        "failed"    = span(class = "badge bg-danger", "Failed"),
+        "failed"    = span(class = "badge bg-danger", title = job$failure_reason %||% "", "Failed"),
         "cancelled" = span(class = "badge bg-warning", "Cancelled"),
         "unknown"   = span(class = "badge bg-light text-dark", "Unknown"),
         span(class = "badge bg-light text-dark", job$status)
@@ -2623,6 +3360,10 @@ server_search <- function(input, output, session, values, add_to_log,
             sprintf("%d files | %s", job$n_files, elapsed_str)
           ),
           div(style = "display: flex; gap: 4px;",
+            actionButton(sprintf("view_info_%d", i), "Info",
+              class = "btn-outline-info btn-xs",
+              style = "font-size: 0.75em; padding: 2px 6px;",
+              icon = icon("circle-info")),
             actionButton(sprintf("view_log_%d", i), "Log",
               class = "btn-outline-secondary btn-xs",
               style = "font-size: 0.75em; padding: 2px 6px;"),
@@ -2640,6 +3381,11 @@ server_search <- function(input, output, session, values, add_to_log,
               actionButton(sprintf("load_results_%d", i), "Load",
                 class = "btn-outline-success btn-xs",
                 style = "font-size: 0.75em; padding: 2px 6px;")
+            } else if (job$status == "completed" && isTRUE(job$loaded)) {
+              actionButton(sprintf("load_results_%d", i), "Reload",
+                class = "btn-outline-secondary btn-xs",
+                style = "font-size: 0.75em; padding: 2px 6px;",
+                icon = icon("rotate-right"))
             },
             if (job$status %in% c("failed", "cancelled") &&
                 isTRUE(job$backend == "hpc")) {
@@ -2743,6 +3489,40 @@ server_search <- function(input, output, session, values, add_to_log,
             pre(style = "max-height: 500px; overflow-y: auto; font-size: 0.8em;",
               safe_log
             )
+          ))
+        }, ignoreInit = TRUE)
+
+        # View search_info.md
+        observeEvent(input[[sprintf("view_info_%d", idx)]], {
+          job <- values$diann_jobs[[idx]]
+          info_content <- ""
+
+          if (nzchar(job$output_dir %||% "") && job$output_dir != "(unknown)") {
+            info_path <- file.path(job$output_dir, "search_info.md")
+            if (isTRUE(job$is_ssh)) {
+              cfg <- isolate(ssh_config())
+              if (!is.null(cfg)) {
+                result <- tryCatch(
+                  ssh_exec(cfg, sprintf("cat %s 2>/dev/null", shQuote(info_path)), timeout = 15),
+                  error = function(e) list(status = 1, stdout = character()))
+                if (result$status == 0 && length(result$stdout) > 0) {
+                  info_content <- paste(result$stdout, collapse = "\n")
+                }
+              }
+            } else if (file.exists(info_path)) {
+              info_content <- paste(readLines(info_path, warn = FALSE), collapse = "\n")
+            }
+          }
+
+          if (!nzchar(info_content)) {
+            info_content <- "No search_info.md found in output directory."
+          }
+
+          showModal(modalDialog(
+            title = sprintf("Search Info: %s", job$name),
+            size = "l", easyClose = TRUE, footer = modalButton("Close"),
+            pre(style = "max-height: 500px; overflow-y: auto; font-size: 0.8em; white-space: pre-wrap;",
+              info_content)
           ))
         }, ignoreInit = TRUE)
 
@@ -2985,10 +3765,16 @@ server_search <- function(input, output, session, values, add_to_log,
             }
             prereq_checks <- list(
               step2 = speclib_check,
-              step3 = sprintf("%s && ls %s/quant_step2/*.quant 2>/dev/null | head -1",
-                              speclib_check, output_dir),
-              step4 = sprintf("test -f %s/empirical.speclib", shQuote(output_dir)),
-              step5 = sprintf("test -f %s/empirical.speclib && ls %s/quant_step4/*.quant 2>/dev/null | head -1",
+              # Step 3 resume: check for backup quant files first, restore if needed
+              step3 = sprintf(paste0(
+                "if [ -d %s/quant_step2_orig ]; then ",
+                "echo 'Restoring Step 2 quant files from backup...'; ",
+                "rm -rf %s/quant_step2; ",
+                "cp -r %s/quant_step2_orig %s/quant_step2; ",
+                "fi && ls %s/quant_step2/*.quant 2>/dev/null | head -1"),
+                output_dir, output_dir, output_dir, output_dir, output_dir),
+              step4 = sprintf("test -f %s/empirical.parquet", shQuote(output_dir)),
+              step5 = sprintf("test -f %s/empirical.parquet && ls %s/quant_step4/*.quant 2>/dev/null | head -1",
                               shQuote(output_dir), output_dir)
             )
 

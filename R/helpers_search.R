@@ -72,29 +72,32 @@ search_uniprot_proteomes <- function(query) {
 #' @param output_path Character — full path where FASTA will be saved
 #' @return List with success status, path, sequence count, file size
 download_uniprot_fasta <- function(proteome_id, content_type, output_path) {
-  # Build query based on content type
+
+  # One-per-gene: use FTP (REST API &onePerGene=true is silently ignored)
+  if (content_type == "one_per_gene") {
+    return(download_uniprot_fasta_ftp(proteome_id, output_path))
+  }
+
+  # All other content types: use REST API
   base_query <- sprintf("(proteome:%s)", proteome_id)
   query <- switch(content_type,
-    "one_per_gene" = base_query,
-    "reviewed"     = paste0(base_query, " AND (reviewed:true)"),
-    "full"         = base_query,
-    "full_isoforms" = base_query,
+    "reviewed"          = paste0(base_query, " AND (reviewed:true)"),
+    "reviewed_isoforms" = paste0(base_query, " AND (reviewed:true)"),
+    "full"              = base_query,
+    "full_isoforms"     = base_query,
     base_query
   )
 
-  include_isoform <- content_type == "full_isoforms"
-  one_per_gene <- content_type == "one_per_gene"
+  include_isoform <- content_type %in% c("full_isoforms", "reviewed_isoforms")
   url <- paste0(
     "https://rest.uniprot.org/uniprotkb/stream?",
     "query=", utils::URLencode(query),
     "&format=fasta",
     "&compressed=false",
-    if (include_isoform) "&includeIsoform=true" else "",
-    if (one_per_gene) "&onePerGene=true" else ""
+    if (include_isoform) "&includeIsoform=true" else ""
   )
 
   tryCatch({
-    # Download FASTA via httr2
     tmp_file <- tempfile(fileext = ".fasta")
 
     resp <- httr2::request(url) |>
@@ -106,10 +109,8 @@ download_uniprot_fasta <- function(proteome_id, content_type, output_path) {
       stop("Download failed or returned empty file")
     }
 
-    # Count sequences
     n_seqs <- sum(grepl("^>", readLines(tmp_file, warn = FALSE)))
 
-    # Move to final location
     dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
     file.copy(tmp_file, output_path, overwrite = TRUE)
     unlink(tmp_file)
@@ -120,6 +121,140 @@ download_uniprot_fasta <- function(proteome_id, content_type, output_path) {
       n_sequences = n_seqs,
       file_size = file.size(output_path),
       url = url
+    )
+  }, error = function(e) {
+    list(success = FALSE, error = e$message)
+  })
+}
+
+#' Download one-per-gene FASTA from UniProt FTP (reference proteomes)
+#'
+#' The REST API &onePerGene=true parameter is silently ignored, so we use the
+#' FTP reference proteome files which are the true canonical one-per-gene sets.
+#' URL pattern: https://ftp.uniprot.org/pub/databases/uniprot/current_release/
+#'   knowledgebase/reference_proteomes/{Kingdom}/{UPID}/{UPID}_{TAXID}.fasta.gz
+#'
+#' Falls back to REST API (full proteome) if FTP download fails (e.g., organism
+#' is not a reference proteome or FTP file doesn't exist).
+#'
+#' @param proteome_id Character — UniProt proteome ID (e.g., "UP000005640")
+#' @param output_path Character — full path where FASTA will be saved
+#' @return List with success status, path, sequence count, file size
+download_uniprot_fasta_ftp <- function(proteome_id, output_path) {
+  ftp_base <- "https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes"
+
+  # Map superkingdom to FTP directory name
+  kingdom_map <- c(
+    eukaryota = "Eukaryota",
+    bacteria  = "Bacteria",
+    archaea   = "Archaea",
+    viruses   = "Viruses"
+  )
+
+  tryCatch({
+    # Query proteomes API for superkingdom + taxonomy ID
+    meta_url <- sprintf("https://rest.uniprot.org/proteomes/%s?format=json", proteome_id)
+    meta_resp <- httr2::request(meta_url) |>
+      httr2::req_headers(Accept = "application/json") |>
+      httr2::req_timeout(30) |>
+      httr2::req_perform()
+
+    meta <- httr2::resp_body_json(meta_resp)
+    superkingdom <- tolower(meta$superkingdom %||% "")
+    taxon_id <- meta$taxonomy$taxonId %||% 0L
+
+    if (!nzchar(superkingdom) || taxon_id == 0L) {
+      stop("Could not determine superkingdom or taxonomy ID from proteomes API")
+    }
+
+    kingdom_dir <- kingdom_map[[superkingdom]]
+    if (is.null(kingdom_dir)) {
+      stop(sprintf("Unknown superkingdom '%s' — cannot map to FTP directory", superkingdom))
+    }
+
+    # Build FTP URL: {Kingdom}/{UPID}/{UPID}_{TAXID}.fasta.gz
+    ftp_url <- sprintf("%s/%s/%s/%s_%s.fasta.gz",
+                       ftp_base, kingdom_dir, proteome_id, proteome_id, taxon_id)
+
+    # Download compressed FASTA
+    tmp_gz <- tempfile(fileext = ".fasta.gz")
+    tmp_fasta <- tempfile(fileext = ".fasta")
+
+    resp <- httr2::request(ftp_url) |>
+      httr2::req_timeout(300) |>
+      httr2::req_perform(path = tmp_gz)
+
+    if (!file.exists(tmp_gz) || file.size(tmp_gz) < 100) {
+      stop("FTP download returned empty file")
+    }
+
+    # Decompress .gz → .fasta using text-mode gzfile connection
+    fasta_lines <- readLines(gzfile(tmp_gz), warn = FALSE)
+
+    if (length(fasta_lines) < 2) {
+      stop("Decompression produced empty file")
+    }
+
+    writeLines(fasta_lines, tmp_fasta)
+    n_seqs <- sum(grepl("^>", fasta_lines))
+
+    dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+    file.copy(tmp_fasta, output_path, overwrite = TRUE)
+    unlink(c(tmp_gz, tmp_fasta))
+
+    list(
+      success = TRUE,
+      path = output_path,
+      n_sequences = n_seqs,
+      file_size = file.size(output_path),
+      url = ftp_url,
+      source = "ftp"
+    )
+  }, error = function(e) {
+    message(sprintf("[DE-LIMP] FTP one-per-gene download failed: %s. Falling back to REST API.", e$message))
+    # Fallback: REST API full proteome with warning
+    fallback_result <- download_uniprot_fasta_rest_fallback(proteome_id, output_path)
+    if (fallback_result$success) {
+      fallback_result$warning <- paste0(
+        "One-per-gene FASTA not available via FTP for this organism. ",
+        "Downloaded full proteome instead (may contain multiple isoforms per gene).")
+    }
+    fallback_result
+  })
+}
+
+#' REST API fallback for one-per-gene when FTP is unavailable
+#' @keywords internal
+download_uniprot_fasta_rest_fallback <- function(proteome_id, output_path) {
+  url <- paste0(
+    "https://rest.uniprot.org/uniprotkb/stream?",
+    "query=", utils::URLencode(sprintf("(proteome:%s)", proteome_id)),
+    "&format=fasta",
+    "&compressed=false"
+  )
+  tryCatch({
+    tmp_file <- tempfile(fileext = ".fasta")
+    resp <- httr2::request(url) |>
+      httr2::req_headers(Accept = "text/plain") |>
+      httr2::req_timeout(300) |>
+      httr2::req_perform(path = tmp_file)
+
+    if (!file.exists(tmp_file) || file.size(tmp_file) < 100) {
+      stop("Fallback download failed or returned empty file")
+    }
+
+    n_seqs <- sum(grepl("^>", readLines(tmp_file, warn = FALSE)))
+    dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+    file.copy(tmp_file, output_path, overwrite = TRUE)
+    unlink(tmp_file)
+
+    list(
+      success = TRUE,
+      path = output_path,
+      n_sequences = n_seqs,
+      file_size = file.size(output_path),
+      url = url,
+      source = "rest_fallback"
     )
   }, error = function(e) {
     list(success = FALSE, error = e$message)
@@ -158,10 +293,11 @@ generate_fasta_filename <- function(proteome_id, organism_name, content_type) {
   safe_org <- substr(safe_org, 1, 30)
 
   type_suffix <- switch(content_type,
-    "one_per_gene"  = "opg",
-    "reviewed"      = "sprot",
-    "full"          = "full",
-    "full_isoforms" = "full_iso",
+    "one_per_gene"      = "opg",
+    "reviewed"          = "sprot",
+    "reviewed_isoforms" = "sprot_iso",
+    "full"              = "full",
+    "full_isoforms"     = "full_iso",
     "custom"
   )
 
@@ -1250,12 +1386,15 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   if (length(sacct_output) == 0) return("unknown")
 
   # Check all returned states (sacct may return multiple lines for job + steps)
+  # IMPORTANT: Check FAILED before COMPLETED — sacct includes an ".extern" step
+  # that always shows COMPLETED even when the main job FAILED. Without this order,
+  # a failed job with exit code 132 (SIGILL) would appear "completed".
   states <- toupper(sacct_output)
-  if (any(grepl("COMPLETED", states))) return("completed")
   if (any(grepl("FAILED|TIMEOUT|OUT_OF_ME", states))) return("failed")
   if (any(grepl("CANCELLED", states))) return("cancelled")
   if (any(grepl("RUNNING", states))) return("running")
   if (any(grepl("PENDING", states))) return("queued")
+  if (any(grepl("COMPLETED", states))) return("completed")
   return("unknown")
 }
 
@@ -1534,6 +1673,11 @@ generate_parallel_scripts <- function(
   parallel_sp <- search_params
   parallel_sp$mbr <- FALSE        # No MBR in parallel (5-step replaces it)
   parallel_sp$rt_profiling <- FALSE  # Controlled per-step
+  # Force manual mass accuracy — DIA-NN warns about auto-optimisation when
+  # reusing .quant files (Steps 3/5 use --use-quant). Auto-calibration in the
+  # assembly step may differ from per-file calibration in Step 2, producing
+  # inconsistent results. Per recommendation from Vadim Demichev (DIA-NN dev).
+  parallel_sp$mass_acc_mode <- "manual"
 
   speclib_mount <- if (has_speclib) sprintf("/work/lib/%s", basename(speclib_path)) else NULL
   base_flags <- build_diann_flags(parallel_sp, search_mode, "on", speclib_mount)
@@ -1587,8 +1731,35 @@ generate_parallel_scripts <- function(
     sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux", bind_mount, diann_sif)
   }
 
-  # --- Mass accuracy flags (always manual in parallel mode) ---
-  mass_acc_flags <- step_flags[grepl("^--mass-acc|^--window", step_flags)]
+  # --- Quant file verification block (bash) ---
+  # Generates bash code to verify all expected .quant files exist before
+  # running the assembly/report step. Prevents silent failures when array
+  # jobs crash without producing quant files. (Per Vadim Demichev recommendation)
+  # With --quant-ori-names on all steps, quant files are named BASENAME.quant
+  # (e.g., sample.raw → sample.quant, sample.d → sample.quant)
+  quant_verify_block <- function(quant_subdir, prev_step) {
+    paste0(
+      sprintf('# Verify all quant files from Step %d exist\n', prev_step),
+      sprintf('echo "Verifying Step %d quant files..."\n', prev_step),
+      'MISSING=0\n',
+      'TOTAL=0\n',
+      sprintf('while IFS= read -r RAW_FILE; do\n'),
+      '  TOTAL=$((TOTAL + 1))\n',
+      '  BASENAME=$(basename "$RAW_FILE")\n',
+      '  # --quant-ori-names: quant files use original basename with .quant extension\n',
+      '  QUANT_NAME="${BASENAME%.*}.quant"\n',
+      sprintf('  if [ ! -f "%s/%s/${QUANT_NAME}" ]; then\n', output_dir, quant_subdir),
+      '    echo "MISSING: ${QUANT_NAME} (from ${RAW_FILE})"\n',
+      '    MISSING=$((MISSING + 1))\n',
+      '  fi\n',
+      sprintf('done < "%s/file_list.txt"\n', output_dir),
+      'if [ $MISSING -gt 0 ]; then\n',
+      sprintf('  echo "ERROR: ${MISSING} of ${TOTAL} quant files missing from Step %d. Aborting."\n', prev_step),
+      '  exit 1\n',
+      'fi\n',
+      'echo "All ${TOTAL} quant files verified."\n\n'
+    )
+  }
 
   # =========================================================================
   # Step 1 — Library Prediction (single job, no raw files)
@@ -1688,14 +1859,22 @@ generate_parallel_scripts <- function(
     "module load apptainer\n\n",
     sprintf('echo "Step 3/5: Empirical Library Assembly for %s"\n', analysis_name),
     'echo "Started: $(date)"\n\n',
+    quant_verify_block("quant_step2", 2),
+    # Backup Step 2 quant files before assembly — Step 3 overwrites them
+    # (same --temp dir + --quant-ori-names = same filenames). Backup enables
+    # smart resume from Step 3 without re-running Step 2.
+    sprintf('echo "Backing up Step 2 quant files..."\n'),
+    sprintf('cp -r %s/quant_step2 %s/quant_step2_orig\n', output_dir, output_dir),
+    sprintf('echo "Backup saved to %s/quant_step2_orig/"\n\n', output_dir),
     sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
     paste0(all_f_flags, " \\\n"),
     if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
     sprintf('    --lib %s \\\n', predicted_lib),
     '    --use-quant \\\n',
+    '    --quant-ori-names \\\n',
     '    --rt-profiling \\\n',
     '    --gen-spec-lib \\\n',
-    sprintf('    --out-lib /work/out/empirical.speclib \\\n'),
+    sprintf('    --out-lib /work/out/empirical.parquet \\\n'),
     sprintf('    --temp /work/out/quant_step2 \\\n'),
     sprintf('    --out /work/out/step3_assembly.parquet \\\n'),
     sprintf('    --threads %d \\\n', assembly_cpus),
@@ -1730,7 +1909,7 @@ generate_parallel_scripts <- function(
     sprintf('echo "Processing: $RAW_FILE"\n\n'),
     sprintf('%s \\\n', apptainer_cmd(perfile_bind_mount)),
     sprintf('    --f /work/data/$FILE_BASE \\\n'),
-    sprintf('    --lib /work/out/empirical.speclib \\\n'),
+    sprintf('    --lib /work/out/empirical.parquet \\\n'),
     sprintf('    --temp /work/out/quant_step4 \\\n'),
     '    --no-ifs-removal \\\n',
     '    --quant-ori-names \\\n',
@@ -1755,11 +1934,13 @@ generate_parallel_scripts <- function(
     "module load apptainer\n\n",
     sprintf('echo "Step 5/5: Cross-run Report for %s"\n', analysis_name),
     'echo "Started: $(date)"\n\n',
+    quant_verify_block("quant_step4", 4),
     sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
     paste0(all_f_flags, " \\\n"),
     if (nzchar(fasta_flags_str)) paste0(fasta_flags_str, " \\\n"),
-    '    --lib /work/out/empirical.speclib \\\n',
+    '    --lib /work/out/empirical.parquet \\\n',
     '    --use-quant \\\n',
+    '    --quant-ori-names \\\n',
     sprintf('    --temp /work/out/quant_step4 \\\n'),
     '    --matrices \\\n',
     sprintf('    --out /work/out/%s \\\n', report_name),
@@ -1946,6 +2127,39 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
   result
 }
 
+#' Select the best SLURM account/partition based on current cluster utilization
+#'
+#' @param lab_resources Result from check_cluster_resources() for lab group
+#' @param public_resources Result from check_cluster_resources() for publicgrp
+#' @param peak_cpus Numeric — estimated peak CPU need for the job
+#' @return list(account, partition, reason)
+select_best_partition <- function(lab_resources, public_resources, peak_cpus = 64) {
+  lab_ok <- FALSE
+  if (!is.null(lab_resources) && isTRUE(lab_resources$success)) {
+    if (!is.na(lab_resources$group_limit) && lab_resources$group_limit > 0) {
+      lab_ok <- (lab_resources$group_available %||% 0) >= peak_cpus
+    } else {
+      lab_ok <- (lab_resources$group_used %||% 0) < 500
+    }
+  }
+
+  pub_ok <- FALSE
+  if (!is.null(public_resources) && isTRUE(public_resources$success)) {
+    pub_ok <- (public_resources$partition_idle %||% 0) >= peak_cpus
+  }
+
+  if (lab_ok) {
+    list(account = "genome-center-grp", partition = "high",
+         reason = "Lab group has capacity")
+  } else if (pub_ok) {
+    list(account = "publicgrp", partition = "low",
+         reason = "Lab group busy, using free cluster")
+  } else {
+    list(account = "genome-center-grp", partition = "high",
+         reason = "Both busy, using priority queue")
+  }
+}
+
 # =============================================================================
 # Predicted Spectral Library Caching
 # =============================================================================
@@ -1962,7 +2176,8 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
 #'   (included in hash since the filename is always custom_proteins.fasta)
 #' @return Character: MD5 hex digest
 speclib_cache_key <- function(fasta_files, search_params, search_mode,
-                               custom_fasta_text = NULL) {
+                               custom_fasta_text = NULL,
+                               fasta_seq_count = NULL) {
   # Parameters that affect library prediction
   libpred_params <- c("enzyme", "missed_cleavages", "min_pep_len", "max_pep_len",
                        "min_pr_mz", "max_pr_mz", "min_pr_charge", "max_pr_charge",
@@ -1978,15 +2193,43 @@ speclib_cache_key <- function(fasta_files, search_params, search_mode,
     params = sp_subset,
     custom_fasta = if (!is.null(custom_fasta_text) && nzchar(trimws(custom_fasta_text))) {
       trimws(custom_fasta_text)
-    }
+    },
+    # Include sequence count to distinguish FASTAs with same name but different content
+    fasta_seq_count = as.integer(fasta_seq_count)
   )
   digest::digest(canonical, algo = "md5")
 }
 
 #' Path to the speclib cache file
-#' @return Character: file path
+#'
+#' Checks for shared proteomics volume first, falls back to user-local.
+#' @return Character: file path to speclib_cache.rds
 speclib_cache_path <- function() {
+  # Allow env var override
+  env_path <- Sys.getenv("DELIMP_SPECLIB_CACHE", "")
+  if (nzchar(env_path)) return(env_path)
+
+  # Shared proteomics volume (macOS local mount)
+  shared_dir <- "/Volumes/proteomics-grp/dia-nn"
+  if (dir.exists(shared_dir)) {
+    return(file.path(shared_dir, "speclib_cache.rds"))
+  }
+
+  # HPC mount (Quobyte)
+  hpc_dir <- "/quobyte/proteomics-grp/dia-nn"
+  if (dir.exists(hpc_dir)) {
+    return(file.path(hpc_dir, "speclib_cache.rds"))
+  }
+
+  # Fallback to user-local
   file.path(Sys.getenv("HOME"), ".delimp_speclib_cache.rds")
+}
+
+#' Check if the speclib cache is on a shared volume
+#' @return Logical
+speclib_cache_is_shared <- function() {
+  path <- speclib_cache_path()
+  grepl("^/Volumes/proteomics-grp/|^/quobyte/proteomics-grp/", path)
 }
 
 #' Load the speclib cache registry
@@ -1994,16 +2237,92 @@ speclib_cache_path <- function() {
 speclib_cache_load <- function() {
   path <- speclib_cache_path()
   if (file.exists(path)) {
-    tryCatch(readRDS(path), error = function(e) list())
+    tryCatch(readRDS(path), error = function(e) {
+      message("[DE-LIMP] Failed to read speclib cache: ", e$message)
+      list()
+    })
   } else {
     list()
   }
 }
 
-#' Save the speclib cache registry
+#' Save the speclib cache registry with file locking
+#'
+#' Uses a lockfile to prevent concurrent write corruption when multiple
+#' users access the shared volume simultaneously.
 #' @param cache List of cache entries
+#' @return Logical: TRUE on success
 speclib_cache_save <- function(cache) {
-  saveRDS(cache, speclib_cache_path())
+  path <- speclib_cache_path()
+  lock_path <- paste0(path, ".lock")
+
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+
+  # File-based locking: retry up to 10 times with 0.5s delay
+  for (attempt in seq_len(10)) {
+    if (!file.exists(lock_path)) {
+      result <- tryCatch({
+        writeLines(as.character(Sys.getpid()), lock_path)
+        # Write atomically: temp file then rename
+        tmp_path <- paste0(path, ".tmp.", Sys.getpid())
+        saveRDS(cache, tmp_path)
+        file.rename(tmp_path, path)
+        unlink(lock_path)
+        TRUE
+      }, error = function(e) {
+        unlink(lock_path)
+        message("[DE-LIMP] speclib cache save failed: ", e$message)
+        FALSE
+      })
+      return(result)
+    }
+    Sys.sleep(0.5)
+  }
+
+  message("[DE-LIMP] speclib cache save failed: could not acquire lock after 5 seconds")
+  FALSE
+}
+
+#' Migrate user-local speclib cache entries to shared volume
+#'
+#' If a shared volume is available and a local cache exists, merge local entries
+#' into the shared cache and remove the local file. Called once at startup.
+#' @return Invisible NULL
+speclib_cache_migrate <- function() {
+  local_path <- file.path(Sys.getenv("HOME"), ".delimp_speclib_cache.rds")
+  if (!file.exists(local_path)) return(invisible(NULL))
+  if (!speclib_cache_is_shared()) return(invisible(NULL))
+
+  tryCatch({
+    local_cache <- readRDS(local_path)
+    if (length(local_cache) == 0) {
+      unlink(local_path)
+      return(invisible(NULL))
+    }
+
+    shared_cache <- speclib_cache_load()
+    shared_keys <- vapply(shared_cache, function(e) e$key %||% "", character(1))
+
+    # Merge: add local entries not already in shared cache
+    n_added <- 0L
+    for (entry in local_cache) {
+      if (!is.null(entry$key) && !(entry$key %in% shared_keys)) {
+        shared_cache <- c(shared_cache, list(entry))
+        n_added <- n_added + 1L
+      }
+    }
+
+    if (n_added > 0L) {
+      speclib_cache_save(shared_cache)
+      message(sprintf("[DE-LIMP] Migrated %d speclib cache entries to shared volume", n_added))
+    }
+
+    # Remove local file after successful migration
+    unlink(local_path)
+  }, error = function(e) {
+    message("[DE-LIMP] speclib cache migration failed: ", e$message)
+  })
+  invisible(NULL)
 }
 
 #' Register a predicted spectral library in the cache
@@ -2016,9 +2335,10 @@ speclib_cache_save <- function(cache) {
 #' @param output_dir Character: output directory of the analysis
 speclib_cache_register <- function(fasta_files, search_params, search_mode,
                                     speclib_path, analysis_name, output_dir,
-                                    custom_fasta_text = NULL) {
-  key <- speclib_cache_key(fasta_files, search_params, search_mode, custom_fasta_text)
-  cache <- speclib_cache_load()
+                                    custom_fasta_text = NULL,
+                                    fasta_seq_count = NULL) {
+  key <- speclib_cache_key(fasta_files, search_params, search_mode,
+                           custom_fasta_text, fasta_seq_count)
 
   entry <- list(
     key = key,
@@ -2032,9 +2352,13 @@ speclib_cache_register <- function(fasta_files, search_params, search_mode,
         "mod_nterm_acetyl", "extra_var_mods", "max_var_mods", "unimod4"))],
     analysis_name = analysis_name,
     created_at = Sys.time(),
-    output_dir = output_dir
+    output_dir = output_dir,
+    fasta_seq_count = as.integer(fasta_seq_count),
+    registered_by = Sys.getenv("USER", "unknown")
   )
 
+  # Re-read cache inside save to minimize race window on shared volumes
+  cache <- speclib_cache_load()
   # Deduplicate on key (newer wins)
   cache <- Filter(function(e) e$key != key, cache)
   cache <- c(cache, list(entry))
@@ -2048,11 +2372,528 @@ speclib_cache_register <- function(fasta_files, search_params, search_mode,
 #' @param search_mode Character: search mode
 #' @return Matching cache entry (list) or NULL
 speclib_cache_lookup <- function(fasta_files, search_params, search_mode,
-                                  custom_fasta_text = NULL) {
-  key <- speclib_cache_key(fasta_files, search_params, search_mode, custom_fasta_text)
+                                  custom_fasta_text = NULL,
+                                  fasta_seq_count = NULL) {
+  key <- speclib_cache_key(fasta_files, search_params, search_mode,
+                           custom_fasta_text, fasta_seq_count)
   cache <- speclib_cache_load()
   for (entry in cache) {
     if (identical(entry$key, key)) return(entry)
   }
   NULL
+}
+
+# =============================================================================
+# Shared FASTA Database Library
+# =============================================================================
+
+#' Get the base path for the shared FASTA library
+#'
+#' Checks for the shared proteomics volume first, falls back to a local
+#' user directory if the shared volume is not mounted.
+#'
+#' @return Character: directory path to the FASTA library root
+fasta_library_path <- function() {
+  # Allow env var override for custom deployments
+
+  env_path <- Sys.getenv("DELIMP_FASTA_LIBRARY", "")
+  if (nzchar(env_path) && dir.exists(env_path)) return(env_path)
+
+  # Shared proteomics volume (macOS local mount)
+  shared_path <- "/Volumes/proteomics-grp/dia-nn/fasta_library"
+  if (dir.exists(shared_path)) return(shared_path)
+
+  # HPC mount (Quobyte)
+  hpc_path <- "/quobyte/proteomics-grp/dia-nn/fasta_library"
+  if (dir.exists(hpc_path)) return(hpc_path)
+
+  # Fallback to user-local directory
+
+  local_path <- file.path(Sys.getenv("HOME"), ".delimp_fasta_library")
+  if (!dir.exists(local_path)) {
+    dir.create(local_path, recursive = TRUE, showWarnings = FALSE)
+  }
+  local_path
+}
+
+#' Check if the shared FASTA library volume is available
+#' @return Logical: TRUE if on shared volume, FALSE if using local fallback
+fasta_library_is_shared <- function() {
+  env_path <- Sys.getenv("DELIMP_FASTA_LIBRARY", "")
+  if (nzchar(env_path) && dir.exists(env_path)) return(TRUE)
+
+  dir.exists("/Volumes/proteomics-grp/dia-nn/fasta_library") ||
+    dir.exists("/quobyte/proteomics-grp/dia-nn/fasta_library")
+}
+
+#' Get the HPC-equivalent remote path for a library entry
+#'
+#' Translates the local macOS mount path to the HPC Quobyte path.
+#' @param local_dir Character: local path (e.g., /Volumes/proteomics-grp/...)
+#' @return Character: HPC path (e.g., /quobyte/proteomics-grp/...)
+fasta_library_remote_path <- function(local_dir) {
+  # macOS mount -> HPC Quobyte
+  gsub("^/Volumes/proteomics-grp/", "/quobyte/proteomics-grp/", local_dir)
+}
+
+#' Load the FASTA library catalog
+#'
+#' Reads catalog.rds from the library path. Returns an empty list if the
+#' file doesn't exist or is corrupted.
+#'
+#' @return List of catalog entries (each is a named list per the schema)
+fasta_library_load <- function() {
+  catalog_path <- file.path(fasta_library_path(), "catalog.rds")
+  if (!file.exists(catalog_path)) return(list())
+
+  tryCatch({
+    catalog <- readRDS(catalog_path)
+    if (!is.list(catalog)) return(list())
+    catalog
+  }, error = function(e) {
+    message(sprintf("[DE-LIMP] FASTA library catalog load failed: %s", e$message))
+    list()
+  })
+}
+
+#' Save the FASTA library catalog with file locking
+#'
+#' Uses a lockfile to prevent concurrent write corruption when multiple
+#' users access the shared volume simultaneously.
+#'
+#' @param catalog List of catalog entries
+#' @return Logical: TRUE on success
+fasta_library_save <- function(catalog) {
+  lib_path <- fasta_library_path()
+  catalog_path <- file.path(lib_path, "catalog.rds")
+  lock_path <- paste0(catalog_path, ".lock")
+
+  # Ensure library directory exists
+  if (!dir.exists(lib_path)) {
+    dir.create(lib_path, recursive = TRUE, showWarnings = FALSE)
+  }
+
+  # Simple file-based locking: create lockfile, write, remove lock
+  # Retry up to 10 times with 0.5s delay if lock is held
+  for (attempt in seq_len(10)) {
+    if (!file.exists(lock_path)) {
+      result <- tryCatch({
+        # Create lock
+        writeLines(as.character(Sys.getpid()), lock_path)
+
+        # Write catalog atomically: write to temp, then rename
+        tmp_path <- paste0(catalog_path, ".tmp")
+        saveRDS(catalog, tmp_path)
+        file.rename(tmp_path, catalog_path)
+
+        # Remove lock
+        unlink(lock_path)
+        TRUE
+      }, error = function(e) {
+        unlink(lock_path)
+        message(sprintf("[DE-LIMP] FASTA library save failed: %s", e$message))
+        FALSE
+      })
+      return(result)
+    }
+    Sys.sleep(0.5)
+  }
+
+  message("[DE-LIMP] FASTA library save failed: could not acquire lock after 5 seconds")
+  FALSE
+}
+
+#' Add an entry to the FASTA library catalog
+#'
+#' Deduplicates on entry id. If an entry with the same id already exists,
+#' it is replaced with the new one.
+#'
+#' @param entry Named list: catalog entry conforming to the schema
+#' @return Logical: TRUE on success
+fasta_library_add <- function(entry) {
+  if (is.null(entry$id) || !nzchar(entry$id)) {
+    message("[DE-LIMP] FASTA library add: entry missing id")
+    return(FALSE)
+  }
+
+  catalog <- fasta_library_load()
+
+  # Remove any existing entry with the same id (dedup)
+  catalog <- Filter(function(e) !identical(e$id, entry$id), catalog)
+  catalog <- c(catalog, list(entry))
+
+  fasta_library_save(catalog)
+}
+
+#' Remove an entry from the FASTA library catalog
+#'
+#' Optionally deletes the associated files on disk.
+#'
+#' @param id Character: entry id to remove
+#' @param delete_files Logical: also delete FASTA files from disk (default FALSE)
+#' @return Logical: TRUE on success
+fasta_library_remove <- function(id, delete_files = FALSE) {
+  catalog <- fasta_library_load()
+
+  # Find the entry before removing
+  entry <- NULL
+  for (e in catalog) {
+    if (identical(e$id, id)) {
+      entry <- e
+      break
+    }
+  }
+
+  if (is.null(entry)) return(FALSE)
+
+  # Optionally delete files
+  if (delete_files && !is.null(entry$fasta_dir)) {
+    dir_path <- file.path(fasta_library_path(), entry$fasta_dir)
+    if (dir.exists(dir_path)) {
+      unlink(dir_path, recursive = TRUE)
+    }
+  }
+
+  # Remove from catalog
+  catalog <- Filter(function(e) !identical(e$id, id), catalog)
+  fasta_library_save(catalog)
+}
+
+#' Check the age/freshness status of a FASTA library entry
+#'
+#' Based on `created_at` in the catalog entry. Uses 6-month default
+#' (configurable via DELIMP_FASTA_MAX_AGE_DAYS env var).
+#'
+#' @param entry Named list: catalog entry
+#' @return Character: "fresh" (< 5 months), "expiring" (5-6 months), "expired" (> 6 months)
+fasta_library_check_age <- function(entry) {
+  max_age_days <- as.integer(Sys.getenv("DELIMP_FASTA_MAX_AGE_DAYS", "180"))
+  warning_days <- max_age_days - 30L  # 1 month before expiry
+
+  created <- tryCatch(
+    as.POSIXct(entry$created_at),
+    error = function(e) NA
+  )
+  if (is.na(created)) return("expired")
+
+  age_days <- as.numeric(difftime(Sys.time(), created, units = "days"))
+
+  if (age_days > max_age_days) return("expired")
+  if (age_days > warning_days) return("expiring")
+  "fresh"
+}
+
+#' Compute human-readable age string for a library entry
+#'
+#' @param entry Named list: catalog entry
+#' @return Character: e.g., "2 months", "15 days", "8 months"
+fasta_library_age_label <- function(entry) {
+  created <- tryCatch(
+    as.POSIXct(entry$created_at),
+    error = function(e) NA
+  )
+  if (is.na(created)) return("Unknown")
+
+  age_days <- as.numeric(difftime(Sys.time(), created, units = "days"))
+
+  if (age_days < 1) return("Today")
+  if (age_days < 30) return(sprintf("%.0f days", age_days))
+  months <- floor(age_days / 30)
+  if (months == 1) return("1 month")
+  sprintf("%d months", months)
+}
+
+#' Look up a library entry by id
+#'
+#' @param id Character: entry id
+#' @return Named list (catalog entry) or NULL
+fasta_library_lookup <- function(id) {
+  catalog <- fasta_library_load()
+  for (entry in catalog) {
+    if (identical(entry$id, id)) return(entry)
+  }
+  NULL
+}
+
+#' Verify that FASTA files for a library entry actually exist on disk
+#'
+#' @param entry Named list: catalog entry
+#' @return Logical: TRUE if all FASTA files exist
+fasta_library_verify_files <- function(entry) {
+  if (is.null(entry$fasta_dir) || is.null(entry$fasta_files)) return(FALSE)
+
+  dir_path <- file.path(fasta_library_path(), entry$fasta_dir)
+  if (!dir.exists(dir_path)) return(FALSE)
+
+  all(vapply(entry$fasta_files, function(f) {
+    file.exists(file.path(dir_path, f))
+  }, logical(1)))
+}
+
+#' Get absolute file paths for a library entry's FASTA files
+#'
+#' @param entry Named list: catalog entry
+#' @param use_remote Logical: return HPC remote paths instead of local
+#' @return Character vector of absolute FASTA file paths
+fasta_library_file_paths <- function(entry, use_remote = FALSE) {
+  base_dir <- if (use_remote && !is.null(entry$remote_dir)) {
+    entry$remote_dir
+  } else {
+    file.path(fasta_library_path(), entry$fasta_dir)
+  }
+
+  file.path(base_dir, entry$fasta_files)
+}
+
+#' Build a catalog entry from a UniProt download result
+#'
+#' Convenience function that creates a properly structured catalog entry
+#' from the results of download_uniprot_fasta() plus UniProt metadata.
+#'
+#' @param download_result List from download_uniprot_fasta()
+#' @param uniprot_row data.frame row from search_uniprot_proteomes()
+#' @param content_type Character: "one_per_gene", "reviewed", "full", "full_isoforms"
+#' @param contam_info List or NULL: contaminant FASTA info (from get_contaminant_fasta)
+#' @param contam_name Character: contaminant library name (e.g., "universal")
+#' @param custom_sequences Character or NULL: custom FASTA text
+#' @param search_params List: search settings used
+#' @param speclib_path Character or NULL: path to predicted spectral library
+#' @param created_by Character: username
+#' @param notes Character: optional notes
+#' @return Named list: catalog entry
+fasta_library_build_entry <- function(download_result, uniprot_row,
+                                       content_type,
+                                       contam_info = NULL,
+                                       contam_name = "none",
+                                       custom_sequences = NULL,
+                                       search_params = list(),
+                                       speclib_path = NULL,
+                                       created_by = Sys.info()[["user"]],
+                                       notes = "") {
+  # Generate a unique id
+  id <- paste0(
+    tolower(gsub("[^A-Za-z0-9]", "", uniprot_row$organism)),
+    "_", content_type, "_",
+    format(Sys.time(), "%Y%m%d_%H%M%S")
+  )
+
+  # Build name
+  type_label <- switch(content_type,
+    "one_per_gene"  = "OPG",
+    "reviewed"      = "Swiss-Prot",
+    "full"          = "Full",
+    "full_isoforms" = "Full+Iso",
+    "Custom"
+  )
+
+  common <- uniprot_row$common_name %||% ""
+  name_parts <- c(
+    if (nzchar(common)) common else uniprot_row$organism,
+    type_label
+  )
+  if (!is.null(contam_info) && contam_name != "none") {
+    name_parts <- c(name_parts, paste0("+ ", tools::toTitleCase(gsub("_", " ", contam_name))))
+  }
+  if (!is.null(custom_sequences) && nzchar(trimws(custom_sequences %||% ""))) {
+    n_custom <- sum(grepl("^>", strsplit(custom_sequences, "\n")[[1]]))
+    if (n_custom > 0) name_parts <- c(name_parts, sprintf("+ %d custom", n_custom))
+  }
+  name <- paste(name_parts, collapse = " ")
+
+  # Collect FASTA file basenames
+  fasta_files <- basename(download_result$path)
+  if (!is.null(contam_info) && isTRUE(contam_info$success)) {
+    fasta_files <- c(fasta_files, basename(contam_info$path))
+  }
+
+  # Build directory name
+  safe_org <- tolower(gsub("[^A-Za-z0-9]", "_", uniprot_row$organism))
+  safe_org <- gsub("_+", "_", safe_org)
+  safe_org <- substr(safe_org, 1, 20)
+  fasta_dir <- sprintf("%s_%s_%s", safe_org, content_type, format(Sys.Date(), "%Y_%m"))
+
+  # Custom sequence count
+  custom_count <- 0L
+  if (!is.null(custom_sequences) && nzchar(trimws(custom_sequences %||% ""))) {
+    custom_count <- as.integer(sum(grepl("^>", strsplit(custom_sequences, "\n")[[1]])))
+  }
+
+  # Build HPC remote dir
+  lib_path <- fasta_library_path()
+  remote_dir <- fasta_library_remote_path(file.path(lib_path, fasta_dir))
+
+  list(
+    id = id,
+    name = name,
+    organism = uniprot_row$organism %||% "",
+    organism_common = uniprot_row$common_name %||% "",
+    proteome_id = uniprot_row$upid %||% "",
+    content_type = content_type,
+    protein_count = as.integer(download_result$n_sequences %||% 0L),
+    file_size_bytes = as.integer(download_result$file_size %||% 0L),
+    contaminant_library = if (contam_name != "none") tools::toTitleCase(gsub("_", " ", contam_name)) else NULL,
+    contaminant_count = as.integer(contam_info$n_sequences %||% 0L),
+    custom_sequences = custom_sequences,
+    custom_sequence_count = custom_count,
+    fasta_files = fasta_files,
+    fasta_dir = fasta_dir,
+    search_settings = list(
+      enzyme = search_params$enzyme %||% "K*,R*",
+      missed_cleavages = as.integer(search_params$missed_cleavages %||% 1L),
+      var_mods = if (isTRUE(search_params$mod_met_ox)) "UniMod:35 (Met oxidation)" else "",
+      fixed_mods = if (isTRUE(search_params$unimod4)) "UniMod:4 (Carbamidomethylation)" else "",
+      min_pep_len = as.integer(search_params$min_pep_len %||% 7L),
+      max_pep_len = as.integer(search_params$max_pep_len %||% 30L),
+      min_pr_mz = as.numeric(search_params$min_pr_mz %||% 300),
+      max_pr_mz = as.numeric(search_params$max_pr_mz %||% 1200)
+    ),
+    speclib_path = speclib_path,
+    speclib_search_mode = if (!is.null(speclib_path)) "libfree" else NULL,
+    created_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+    created_by = created_by,
+    notes = notes,
+    remote_dir = remote_dir
+  )
+}
+
+#' Build a display data.frame from the FASTA library catalog
+#'
+#' Creates a data.frame suitable for rendering in a DT table.
+#'
+#' @param catalog List of catalog entries
+#' @return data.frame with display columns
+fasta_library_display_df <- function(catalog) {
+  if (length(catalog) == 0) {
+    return(data.frame(
+      Name = character(), Organism = character(), Proteins = integer(),
+      Age = character(), Status = character(), `Created By` = character(),
+      id = character(), stringsAsFactors = FALSE, check.names = FALSE
+    ))
+  }
+
+  data.frame(
+    Name = vapply(catalog, function(e) e$name %||% "", character(1)),
+    Organism = vapply(catalog, function(e) e$organism %||% "", character(1)),
+    Proteins = vapply(catalog, function(e) {
+      n <- as.integer(e$protein_count %||% 0L)
+      contam <- as.integer(e$contaminant_count %||% 0L)
+      n + contam
+    }, integer(1)),
+    Age = vapply(catalog, fasta_library_age_label, character(1)),
+    Status = vapply(catalog, fasta_library_check_age, character(1)),
+    `Created By` = vapply(catalog, function(e) e$created_by %||% "", character(1)),
+    id = vapply(catalog, function(e) e$id %||% "", character(1)),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+# =============================================================================
+# Analysis History Log
+# =============================================================================
+
+#' Get path for the analysis history CSV
+#'
+#' Checks for shared proteomics volume first, falls back to user home dir.
+#' @return Character: path to CSV file
+analysis_history_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/analysis_history.csv"
+  if (dir.exists(dirname(shared))) return(shared)
+  file.path(Sys.getenv("HOME"), ".delimp_analysis_history.csv")
+}
+
+#' Read analysis history CSV
+#'
+#' @param path Character: path to CSV (default: analysis_history_path())
+#' @return data.frame (empty if file missing or unreadable)
+analysis_history_read <- function(path = analysis_history_path()) {
+  if (!file.exists(path)) return(data.frame())
+  tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) data.frame())
+}
+
+#' Record an analysis event to the history CSV
+#'
+#' @param entry Named list with analysis metadata
+#' @param path Character: path to CSV (default: analysis_history_path())
+record_analysis <- function(entry, path = analysis_history_path()) {
+  headers <- c("timestamp", "user", "source_type", "source_file", "source_path",
+    "remote_path", "fasta_file", "fasta_seq_count", "n_proteins", "n_samples",
+    "n_contrasts", "n_de_proteins", "output_dir", "app_version", "notes")
+
+  row <- as.data.frame(lapply(headers, function(h) entry[[h]] %||% NA), stringsAsFactors = FALSE)
+  names(row) <- headers
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  needs_header <- !file.exists(path)
+  tryCatch({
+    write.table(row, file = path, append = TRUE, sep = ",", row.names = FALSE,
+      col.names = needs_header, quote = TRUE)
+  }, error = function(e) message("[DE-LIMP] Failed to write analysis history: ", e$message))
+}
+
+#' Count DE proteins across all contrasts
+#'
+#' @param fit limma fit object with contrasts
+#' @param alpha Numeric: FDR threshold (default 0.05)
+#' @return Integer: total DE proteins across all contrasts
+count_de_proteins <- function(fit, alpha = 0.05) {
+  tryCatch({
+    n <- 0
+    for (coef in colnames(fit$contrasts)) {
+      tt <- limma::topTable(fit, coef = coef, number = Inf, sort.by = "none")
+      n <- n + sum(tt$adj.P.Val < alpha, na.rm = TRUE)
+    }
+    n
+  }, error = function(e) NA)
+}
+
+# =============================================================================
+# Projects — organize analysis history entries into named projects
+# =============================================================================
+
+projects_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/delimp_projects.json"
+  if (dir.exists(dirname(shared))) return(shared)
+  file.path(Sys.getenv("HOME"), ".delimp_projects.json")
+}
+
+projects_read <- function(path = projects_path()) {
+  if (!file.exists(path)) return(list(projects = list()))
+  tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE),
+    error = function(e) list(projects = list()))
+}
+
+projects_write <- function(data, path = projects_path()) {
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+  tryCatch(jsonlite::write_json(data, path, pretty = TRUE, auto_unbox = TRUE),
+    error = function(e) message("[DE-LIMP] Failed to write projects: ", e$message))
+}
+
+project_assign <- function(project_name, output_dirs, description = "",
+                           path = projects_path()) {
+  data <- projects_read(path)
+  if (is.null(data$projects[[project_name]])) {
+    data$projects[[project_name]] <- list(
+      created_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      description = description, entries = list())
+  }
+  existing <- unlist(data$projects[[project_name]]$entries)
+  new_dirs <- setdiff(output_dirs, existing)
+  data$projects[[project_name]]$entries <- as.list(c(existing, new_dirs))
+  if (nzchar(description)) data$projects[[project_name]]$description <- description
+  projects_write(data, path)
+}
+
+project_remove_entry <- function(project_name, output_dir, path = projects_path()) {
+  data <- projects_read(path)
+  if (!is.null(data$projects[[project_name]])) {
+    data$projects[[project_name]]$entries <- as.list(
+      setdiff(unlist(data$projects[[project_name]]$entries), output_dir))
+    projects_write(data, path)
+  }
 }

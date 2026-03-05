@@ -80,43 +80,49 @@ server_ai <- function(input, output, session, values) {
     }
 
     # Stable biomarkers (lowest CV)
+    # NOTE: Do NOT use return() inside tryCatch — it exits the enclosing function,
+    # not just the tryCatch block. Use if/else instead. (Same gotcha as withProgress.)
     stable_prots_text <- tryCatch({
       all_sig_pids <- names(all_sig_proteins)
       valid_pids <- intersect(all_sig_pids, rownames(values$y_protein$E))
-      if (length(valid_pids) == 0) return("No significant proteins to assess for stability.")
+      if (length(valid_pids) == 0) {
+        "No significant proteins to assess for stability."
+      } else {
+        raw_exprs <- values$y_protein$E[valid_pids, , drop = FALSE]
+        linear_exprs <- 2^raw_exprs
+        cv_list <- list()
 
-      raw_exprs <- values$y_protein$E[valid_pids, , drop = FALSE]
-      linear_exprs <- 2^raw_exprs
-      cv_list <- list()
+        for (g in unique(values$metadata$Group)) {
+          if (g == "") next
+          files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
+          group_cols <- intersect(colnames(linear_exprs), files_in_group)
+          if (length(group_cols) > 1) {
+            group_data <- linear_exprs[, group_cols, drop = FALSE]
+            cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
+          }
+        }
 
-      for (g in unique(values$metadata$Group)) {
-        if (g == "") next
-        files_in_group <- values$metadata$File.Name[values$metadata$Group == g]
-        group_cols <- intersect(colnames(linear_exprs), files_in_group)
-        if (length(group_cols) > 1) {
-          group_data <- linear_exprs[, group_cols, drop = FALSE]
-          cv_list[[paste0("CV_", g)]] <- apply(group_data, 1, function(x) (sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)) * 100)
+        if (length(cv_list) == 0) {
+          "Could not calculate CVs (not enough replicates)."
+        } else {
+          cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
+          cv_df$Avg_CV <- rowMeans(cv_df[, grep("^CV_", colnames(cv_df)), drop = FALSE], na.rm = TRUE)
+
+          stable_df <- cv_df %>% arrange(Avg_CV) %>% head(5)
+          stable_df$Gene <- sapply(stable_df$Protein.Group, function(pid) {
+            info <- all_sig_proteins[[pid]]
+            if (!is.null(info)) info[[1]]$gene else pid
+          })
+          stable_df$Significant_In <- sapply(stable_df$Protein.Group, function(pid) {
+            info <- all_sig_proteins[[pid]]
+            if (!is.null(info)) paste(names(info), collapse = "; ") else ""
+          })
+
+          out <- stable_df %>% dplyr::select(Gene, Avg_CV, Significant_In) %>%
+            mutate(Avg_CV = round(Avg_CV, 2))
+          paste(capture.output(print(as.data.frame(out), row.names = FALSE)), collapse = "\n")
         }
       }
-
-      if (length(cv_list) == 0) return("Could not calculate CVs (not enough replicates).")
-
-      cv_df <- as.data.frame(cv_list) %>% rownames_to_column("Protein.Group")
-      cv_df$Avg_CV <- rowMeans(cv_df[, grep("^CV_", colnames(cv_df)), drop = FALSE], na.rm = TRUE)
-
-      stable_df <- cv_df %>% arrange(Avg_CV) %>% head(5)
-      stable_df$Gene <- sapply(stable_df$Protein.Group, function(pid) {
-        info <- all_sig_proteins[[pid]]
-        if (!is.null(info)) info[[1]]$gene else pid
-      })
-      stable_df$Significant_In <- sapply(stable_df$Protein.Group, function(pid) {
-        info <- all_sig_proteins[[pid]]
-        if (!is.null(info)) paste(names(info), collapse = "; ") else ""
-      })
-
-      out <- stable_df %>% dplyr::select(Gene, Avg_CV, Significant_In) %>%
-        mutate(Avg_CV = round(Avg_CV, 2))
-      paste(capture.output(print(as.data.frame(out), row.names = FALSE)), collapse = "\n")
     }, error = function(e) "Could not calculate stable proteins.")
 
     all_contrast_text <- paste(contrast_texts, collapse = "\n\n")
@@ -255,13 +261,21 @@ server_ai <- function(input, output, session, values) {
     content = function(file) {
       req(values$fit, values$y_protein)
 
+      tryCatch({
       withProgress(message = "Building export...", value = 0, {
         tmp_dir <- tempdir()
         timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
         files_to_zip <- character(0)
 
+        message("[DE-LIMP] Claude export: starting...")
         incProgress(0.1, detail = "Gathering DE data...")
-        ctx <- build_ai_data_context()
+        ctx <- tryCatch(build_ai_data_context(), error = function(e) {
+          message("[DE-LIMP] Claude export: build_ai_data_context FAILED: ", e$message)
+          list(n_contrasts = length(colnames(values$fit$contrasts)),
+               contrast_text = "(Error building DE summary)",
+               cross_text = "(Error)", stable_prots_text = "(Error)")
+        })
+        message("[DE-LIMP] Claude export: ctx OK")
 
         # --- 1. Full DE results CSV (all proteins, all contrasts) ---
         incProgress(0.3, detail = "Exporting full DE results...")
@@ -275,9 +289,10 @@ server_ai <- function(input, output, session, values) {
         results_file <- file.path(tmp_dir, "DE_Results_Full.csv")
         write.csv(full_results, results_file, row.names = FALSE)
         files_to_zip <- c(files_to_zip, results_file)
+        message("[DE-LIMP] Claude export: DE results OK (", nrow(full_results), " rows)")
 
         # --- 2. QC stats CSV ---
-        if (!is.null(values$qc_stats) && !is.null(values$metadata)) {
+        if (!is.null(values$qc_stats) && is.data.frame(values$qc_stats) && !is.null(values$metadata)) {
           incProgress(0.4, detail = "Exporting QC metrics...")
           qc_df <- left_join(values$qc_stats, values$metadata,
             by = c("Run" = "File.Name")) %>%
@@ -285,6 +300,9 @@ server_ai <- function(input, output, session, values) {
           qc_file <- file.path(tmp_dir, "QC_Metrics.csv")
           write.csv(qc_df, qc_file, row.names = FALSE)
           files_to_zip <- c(files_to_zip, qc_file)
+          message("[DE-LIMP] Claude export: QC stats OK")
+        } else {
+          message("[DE-LIMP] Claude export: QC stats skipped (NULL or not data.frame)")
         }
 
         # --- 3. Expression matrix CSV ---
@@ -294,6 +312,7 @@ server_ai <- function(input, output, session, values) {
         expr_file <- file.path(tmp_dir, "Expression_Matrix.csv")
         write.csv(expr_df, expr_file, row.names = FALSE)
         files_to_zip <- c(files_to_zip, expr_file)
+        message("[DE-LIMP] Claude export: expression matrix OK")
 
         # --- 4. Phospho results CSV (if available) ---
         phospho_note <- ""
@@ -386,28 +405,37 @@ server_ai <- function(input, output, session, values) {
             params <- c(params, paste0("Covariate 2: ", values$cov2_name))
           # DIA-NN search settings
           ss <- values$diann_search_settings
-          if (!is.null(ss)) {
+          if (!is.null(ss) && is.list(ss)) {
             sp <- ss$search_params
             params <- c(params, "", "DIA-NN SEARCH SETTINGS:",
               paste0("  FASTA: ", paste(basename(ss$fasta_files), collapse = ", ")),
+              if (!is.null(ss$fasta_seq_count) && !is.na(ss$fasta_seq_count))
+                paste0("  FASTA sequences: ", format(ss$fasta_seq_count, big.mark = ","))
+              else NULL,
               paste0("  Enzyme: ", sp$enzyme),
               paste0("  Missed cleavages: ", sp$missed_cleavages),
               paste0("  FDR: ", sp$qvalue),
               paste0("  MBR: ", sp$mbr),
               paste0("  Search mode: ", ss$search_mode))
           }
+          # Package versions
+          params <- c(params, "", "PACKAGE VERSIONS:",
+            paste0("  limpa: ", tryCatch(as.character(packageVersion("limpa")), error = function(e) "unknown")),
+            paste0("  limma: ", tryCatch(as.character(packageVersion("limma")), error = function(e) "unknown")),
+            paste0("  R: ", R.version.string),
+            paste0("  DE-LIMP: v", values$app_version %||% "unknown"))
           # Input file info
-          if (!is.null(values$raw_data)) {
-            params <- c(params, "", "INPUT DATA:",
-              paste0("  Total samples: ", length(unique(values$raw_data$Run))),
-              paste0("  Total proteins: ", nrow(values$y_protein$E)),
-              paste0("  Source: ", if (!is.null(values$original_report_name)) values$original_report_name else "unknown"))
-          }
+          n_samples <- tryCatch(ncol(values$y_protein$E), error = function(e) 0)
+          n_proteins <- tryCatch(nrow(values$y_protein$E), error = function(e) 0)
+          params <- c(params, "", "INPUT DATA:",
+            paste0("  Total samples: ", n_samples),
+            paste0("  Total proteins: ", n_proteins),
+            paste0("  Source: ", if (!is.null(values$original_report_name)) values$original_report_name else "unknown"))
           params_file <- file.path(tmp_dir, "Analysis_Parameters.txt")
           writeLines(params, params_file)
           files_to_zip <- c(files_to_zip, params_file)
           params_note <- "\n- **`Analysis_Parameters.txt`** — Pipeline settings, contrasts, group sizes, DIA-NN search parameters\n"
-        }, error = function(e) NULL)
+        }, error = function(e) message("[DE-LIMP] Claude export: params section error: ", e$message))
 
         # --- 6. GSEA results CSV (if any ontologies have been run) ---
         gsea_note <- ""
@@ -460,9 +488,10 @@ server_ai <- function(input, output, session, values) {
         # --- 8. Build the prompt .md ---
         incProgress(0.7, detail = "Assembling prompt...")
 
+        message("[DE-LIMP] Claude export: sections 1-7 OK, building prompt...")
         # QC summary for inline prompt
         qc_inline <- ""
-        if (!is.null(values$qc_stats) && !is.null(values$metadata)) {
+        if (!is.null(values$qc_stats) && is.data.frame(values$qc_stats) && !is.null(values$metadata)) {
           qc_summary <- left_join(values$qc_stats, values$metadata,
             by = c("Run" = "File.Name")) %>%
             dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) %>%
@@ -607,6 +636,13 @@ server_ai <- function(input, output, session, values) {
         zip(file, basename(files_to_zip))
 
         message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars", length(files_to_zip), nchar(prompt)))
+      })
+      }, error = function(e) {
+        message("[DE-LIMP] Claude export FAILED: ", e$message)
+        message("[DE-LIMP] Error call: ", deparse(e$call))
+        showNotification(
+          paste("Export error:", e$message, "\nCheck R console for details."),
+          type = "error", duration = 15)
       })
     },
     contentType = "application/zip"

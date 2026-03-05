@@ -241,6 +241,108 @@ test_that("parallel scripts: Step 5 has --matrices for output", {
 # Array job specs
 # =============================================================================
 
+# =============================================================================
+# Mass accuracy forced to manual (prevents DIA-NN warning with --use-quant)
+# =============================================================================
+
+test_that("parallel scripts: mass accuracy flags present even when mode is auto", {
+  result <- generate_parallel_scripts(
+    analysis_name = "test",
+    raw_files = c("/data/s1.raw", "/data/s2.raw"),
+    fasta_files = "/fasta/h.fasta",
+    output_dir = "/out",
+    diann_sif = "/sif/d.sif",
+    search_params = list(mass_acc_mode = "auto", mass_acc = 14, mass_acc_ms1 = 14,
+                          scan_window = 6)
+  )
+  # Even with auto mode, parallel scripts should have fixed mass accuracy
+  step3 <- result$step3_assembly
+  expect_true(grepl("--mass-acc 14", step3),
+              info = "Step 3 should have --mass-acc even in auto mode")
+  expect_true(grepl("--mass-acc-ms1 14", step3),
+              info = "Step 3 should have --mass-acc-ms1 even in auto mode")
+  expect_true(grepl("--window 6", step3),
+              info = "Step 3 should have --window even in auto mode")
+
+  step5 <- result$step5_report
+  expect_true(grepl("--mass-acc 14", step5),
+              info = "Step 5 should have --mass-acc even in auto mode")
+})
+
+test_that("parallel scripts: mass accuracy flags use manual values when set", {
+  result <- generate_parallel_scripts(
+    analysis_name = "test",
+    raw_files = c("/data/s1.raw"),
+    fasta_files = "/fasta/h.fasta",
+    output_dir = "/out",
+    diann_sif = "/sif/d.sif",
+    search_params = list(mass_acc_mode = "manual", mass_acc = 10, mass_acc_ms1 = 5,
+                          scan_window = 8)
+  )
+  step3 <- result$step3_assembly
+  expect_true(grepl("--mass-acc 10", step3))
+  expect_true(grepl("--mass-acc-ms1 5", step3))
+  expect_true(grepl("--window 8", step3))
+})
+
+# =============================================================================
+# Quant file verification blocks
+# =============================================================================
+
+test_that("parallel scripts: Step 3 has quant file verification block", {
+  result <- generate_parallel_scripts(
+    analysis_name = "test",
+    raw_files = c("/data/s1.raw", "/data/s2.raw"),
+    fasta_files = "/fasta/h.fasta",
+    output_dir = "/out/test_dir",
+    diann_sif = "/sif/d.sif"
+  )
+  step3 <- result$step3_assembly
+  expect_true(grepl("Verifying Step 2 quant files", step3),
+              info = "Step 3 should verify Step 2 quant files")
+  expect_true(grepl("quant_step2", step3),
+              info = "Step 3 should check quant_step2 directory")
+  expect_true(grepl("exit 1", step3),
+              info = "Step 3 should abort if quant files missing")
+  expect_true(grepl("file_list.txt", step3),
+              info = "Step 3 should read from file_list.txt")
+})
+
+test_that("parallel scripts: Step 5 has quant file verification block", {
+  result <- generate_parallel_scripts(
+    analysis_name = "test",
+    raw_files = c("/data/s1.raw", "/data/s2.raw"),
+    fasta_files = "/fasta/h.fasta",
+    output_dir = "/out/test_dir",
+    diann_sif = "/sif/d.sif"
+  )
+  step5 <- result$step5_report
+  expect_true(grepl("Verifying Step 4 quant files", step5),
+              info = "Step 5 should verify Step 4 quant files")
+  expect_true(grepl("quant_step4", step5),
+              info = "Step 5 should check quant_step4 directory")
+})
+
+test_that("parallel scripts: Steps 2/4 do NOT have quant verification", {
+  result <- generate_parallel_scripts(
+    analysis_name = "test",
+    raw_files = c("/data/s1.raw"),
+    fasta_files = "/fasta/h.fasta",
+    output_dir = "/out",
+    diann_sif = "/sif/d.sif"
+  )
+  step2 <- result$step2_firstpass
+  step4 <- result$step4_finalpass
+  expect_false(grepl("Verifying.*quant files", step2),
+               info = "Step 2 creates quant files, should not verify them")
+  expect_false(grepl("Verifying.*quant files", step4),
+               info = "Step 4 creates quant files, should not verify them")
+})
+
+# =============================================================================
+# Array job specs
+# =============================================================================
+
 test_that("parallel scripts: Step 2 array spec matches file count", {
   result <- generate_parallel_scripts(
     analysis_name = "test",

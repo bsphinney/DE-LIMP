@@ -34,6 +34,10 @@ server_facility <- function(input, output, session, values, add_to_log,
     updateTextInput(session, "ssh_key_path", value = staff$ssh_key %||% "")
     updateTextInput(session, "diann_account", value = staff$slurm_account %||% "")
     updateTextInput(session, "diann_partition", value = staff$slurm_partition %||% "")
+    # Set override mode so staff config isn't overwritten by auto-select
+    updateTextInput(session, "diann_account_override", value = staff$slurm_account %||% "")
+    updateTextInput(session, "diann_partition_override", value = staff$slurm_partition %||% "")
+    updateCheckboxInput(session, "partition_override", value = TRUE)
 
     # Force SSH connection mode (only if HPC backend selected)
     if (!is.null(input$search_backend) && input$search_backend == "hpc") {
@@ -1499,10 +1503,16 @@ server_facility <- function(input, output, session, values, add_to_log,
         updateNumericInput(session, "diann_mem_gb", value = config$mem_gb)
       if (!is.null(config$time_hours))
         updateNumericInput(session, "diann_time_hours", value = config$time_hours)
-      if (!is.null(config$partition))
+      if (!is.null(config$partition)) {
         updateTextInput(session, "diann_partition", value = config$partition)
-      if (!is.null(config$account))
+        updateTextInput(session, "diann_partition_override", value = config$partition)
+      }
+      if (!is.null(config$account)) {
         updateTextInput(session, "diann_account", value = config$account)
+        updateTextInput(session, "diann_account_override", value = config$account)
+      }
+      if (!is.null(config$partition) || !is.null(config$account))
+        updateCheckboxInput(session, "partition_override", value = TRUE)
       if (!is.null(config$mass_acc_mode))
         updateSelectInput(session, "mass_acc_mode", selected = config$mass_acc_mode)
       if (!is.null(config$mass_acc))

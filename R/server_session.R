@@ -618,6 +618,29 @@ server_session <- function(input, output, session, values, add_to_log) {
         paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
         type = "message", duration = 5
       )
+
+      # Record to analysis history log
+      tryCatch({
+        record_analysis(list(
+          timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          user = Sys.getenv("USER", "unknown"),
+          source_type = "session-load",
+          source_file = basename(input$session_file$name),
+          source_path = input$session_file$datapath,
+          remote_path = NA,
+          fasta_file = if (!is.null(values$diann_search_settings))
+            paste(basename(values$diann_search_settings$fasta_files), collapse = ", ") else NA,
+          fasta_seq_count = if (!is.null(values$diann_search_settings)) values$diann_search_settings$fasta_seq_count else NA,
+          n_proteins = if (!is.null(values$y_protein)) nrow(values$y_protein$E) else NA,
+          n_samples = if (!is.null(values$y_protein)) ncol(values$y_protein$E) else NA,
+          n_contrasts = if (!is.null(values$fit)) length(colnames(values$fit$contrasts)) else NA,
+          n_de_proteins = if (!is.null(values$fit)) count_de_proteins(values$fit) else NA,
+          output_dir = NA,
+          app_version = values$app_version %||% "unknown",
+          notes = "Loaded from session file"
+        ))
+      }, error = function(e) message("[DE-LIMP] History record failed: ", e$message))
+
     }, error = function(e) {
       showNotification(paste("Error loading session:", e$message), type = "error")
     })
@@ -634,7 +657,7 @@ server_session <- function(input, output, session, values, add_to_log) {
     # DIA-NN search parameters section (conditional)
     diann_section <- ""
     ss <- values$diann_search_settings
-    if (!is.null(ss)) {
+    if (!is.null(ss) && is.list(ss)) {
       sp <- ss$search_params
 
       # Build enzyme name
@@ -698,7 +721,11 @@ server_session <- function(input, output, session, values, add_to_log) {
         "in ", ss$search_mode, " mode",
         if (!is.null(ss$speclib)) paste0(" with spectral library (", ss$speclib, ")") else "",
         ".\n",
-        "Sequence database: ", fasta_desc, contam_desc, ".\n",
+        "Sequence database: ", fasta_desc, contam_desc,
+        if (!is.null(ss$fasta_seq_count) && !is.na(ss$fasta_seq_count))
+          sprintf(" (%s sequences)", format(ss$fasta_seq_count, big.mark = ","))
+        else "",
+        ".\n",
         "Enzyme: ", enzyme_name, " with up to ", sp$missed_cleavages, " missed cleavage(s).\n",
         "Peptide length: ", sp$min_pep_len, "-", sp$max_pep_len, " amino acids. ",
         "Precursor m/z: ", sp$min_pr_mz, "-", sp$max_pr_mz, ". ",
@@ -964,8 +991,10 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       "SOFTWARE AND PACKAGES\n",
       "---------------------\n",
-      "Primary analysis: limpa R package (Bioconductor 3.22+)\n",
-      "Statistical framework: limma (Linear Models for Microarray and RNA-Seq Data)\n",
+      sprintf("Primary analysis: limpa v%s (Bioconductor)\n",
+        tryCatch(as.character(packageVersion("limpa")), error = function(e) "unknown")),
+      sprintf("Statistical framework: limma v%s (Linear Models for Microarray and RNA-Seq Data)\n",
+        tryCatch(as.character(packageVersion("limma")), error = function(e) "unknown")),
       "Data manipulation: dplyr, tidyr\n",
       "Visualization: ggplot2, ComplexHeatmap, plotly\n",
       "Enrichment: clusterProfiler (gseGO, gseKEGG), enrichplot\n",
@@ -979,7 +1008,8 @@ server_session <- function(input, output, session, values, add_to_log) {
         "Phosphosite databases: PhosphoSitePlus (via KSEAapp), UniProt REST API\n",
         sep = ""
       ) else "",
-      sprintf("R version: %s\n\n\n", R.version.string),
+      sprintf("R version: %s\n", R.version.string),
+      sprintf("DE-LIMP version: %s\n\n\n", values$app_version %||% "unknown"),
 
       "REFERENCES\n",
       "----------\n",
@@ -1265,5 +1295,454 @@ server_session <- function(input, output, session, values, add_to_log) {
       paste("Last updated:", updated)
     )
   })
+
+  # ==========================================================================
+  #   Projects — reactive state + dropdown population
+  # ==========================================================================
+
+  project_data <- reactiveVal(list(projects = list()))
+
+  # Load projects on startup and whenever we need to refresh
+  project_refresh <- reactiveVal(0)
+  observe({
+    project_refresh()  # trigger re-read
+    project_data(projects_read())
+  })
+
+  observe({
+    choices <- names(project_data()$projects)
+    updateSelectizeInput(session, "project_filter",
+      choices = c("All projects" = "", choices),
+      selected = input$project_filter %||% "",
+      server = FALSE)
+  })
+
+  # ==========================================================================
+  #   Project summary cards (shown when a project is selected)
+  # ==========================================================================
+
+  output$project_summary_cards <- renderUI({
+    proj_name <- input$project_filter
+    if (is.null(proj_name) || !nzchar(proj_name)) return(NULL)
+
+    proj <- project_data()$projects[[proj_name]]
+    if (is.null(proj)) return(NULL)
+
+    hist <- analysis_history_read()
+    if (nrow(hist) == 0) return(NULL)
+
+    entries <- unlist(proj$entries)
+    proj_hist <- hist[hist$output_dir %in% entries, , drop = FALSE]
+    if (nrow(proj_hist) == 0) return(NULL)
+
+    n_analyses <- nrow(proj_hist)
+    total_samples <- sum(as.numeric(proj_hist$n_samples), na.rm = TRUE)
+    total_de <- sum(as.numeric(proj_hist$n_de_proteins), na.rm = TRUE)
+    dates <- sort(proj_hist$timestamp)
+    date_range <- if (length(dates) >= 2) {
+      paste(substr(dates[1], 1, 10), "\u2013", substr(dates[length(dates)], 1, 10))
+    } else if (length(dates) == 1) {
+      substr(dates[1], 1, 10)
+    } else ""
+
+    desc <- proj$description %||% ""
+
+    div(style = "margin-bottom: 15px;",
+      div(style = "display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px;",
+        div(style = "flex: 1; min-width: 120px; background: #e8f5e9; padding: 10px; border-radius: 6px; text-align: center;",
+          tags$strong(n_analyses), tags$br(), tags$small("Analyses")),
+        div(style = "flex: 1; min-width: 120px; background: #e3f2fd; padding: 10px; border-radius: 6px; text-align: center;",
+          tags$strong(total_samples), tags$br(), tags$small("Total Samples")),
+        div(style = "flex: 1; min-width: 120px; background: #fff3e0; padding: 10px; border-radius: 6px; text-align: center;",
+          tags$strong(total_de), tags$br(), tags$small("Total DE Proteins")),
+        div(style = "flex: 1; min-width: 120px; background: #f3e5f5; padding: 10px; border-radius: 6px; text-align: center;",
+          tags$strong(date_range), tags$br(), tags$small("Date Range"))
+      ),
+      if (nzchar(desc)) div(style = "color: #718096; font-size: 0.85em; font-style: italic;", desc)
+    )
+  })
+
+  # ==========================================================================
+  #   Analysis History Table (About tab)
+  # ==========================================================================
+
+  output$analysis_history_table <- renderDT({
+    message("[DE-LIMP] Rendering analysis history table...")
+    hist <- analysis_history_read()
+    if (nrow(hist) == 0) return(NULL)
+
+    hist <- hist[order(hist$timestamp, decreasing = TRUE), ]
+
+    # Join status from live job queue — wrapped in tryCatch so table still renders on error
+    status_result <- tryCatch({
+      jobs <- values$diann_jobs
+      job_status_map <- list()
+      if (length(jobs) > 0) {
+        for (j in jobs) {
+          if (!is.null(j$output_dir) && nzchar(j$output_dir)) {
+            job_status_map[[j$output_dir]] <- j$status
+          }
+        }
+      }
+      vapply(hist$output_dir, function(od) {
+        if (is.na(od) || !nzchar(od)) return("")
+        job_status_map[[od]] %||% ""
+      }, character(1))
+    }, error = function(e) {
+      message("[DE-LIMP] History status join error: ", e$message)
+      rep("", nrow(hist))
+    })
+    hist$status <- status_result
+
+    # Join project names from project_data by output_dir
+    proj <- tryCatch({
+      pd <- project_data()
+      proj_map <- list()
+      for (pname in names(pd$projects)) {
+        for (od in unlist(pd$projects[[pname]]$entries)) {
+          proj_map[[od]] <- pname
+        }
+      }
+      vapply(hist$output_dir, function(od) {
+        if (is.na(od) || !nzchar(od)) return("")
+        proj_map[[od]] %||% ""
+      }, character(1))
+    }, error = function(e) rep("", nrow(hist)))
+    hist$project <- proj
+
+    # Filter by project if selected
+    proj_filter <- input$project_filter
+    if (!is.null(proj_filter) && nzchar(proj_filter)) {
+      hist <- hist[hist$project == proj_filter, , drop = FALSE]
+      if (nrow(hist) == 0) return(NULL)
+    }
+
+    # Status badge HTML
+    hist$status_badge <- vapply(hist$status, function(s) {
+      switch(s,
+        "completed" = '<span class="badge bg-success">Completed</span>',
+        "failed"    = '<span class="badge bg-danger">Failed</span>',
+        "running"   = '<span class="badge bg-primary">Running</span>',
+        "queued"    = '<span class="badge bg-secondary">Queued</span>',
+        "cancelled" = '<span class="badge bg-warning">Cancelled</span>',
+        "")
+    }, character(1))
+
+    # Action buttons: Info + Load + Assign project (pass output_dir directly)
+    btn_style <- "font-size:0.75em;padding:2px 6px;margin:1px;"
+    hist$actions <- vapply(seq_len(nrow(hist)), function(i) {
+      od <- hist$output_dir[i]
+      btns <- ""
+      if (!is.na(od) && nzchar(od)) {
+        od_esc <- gsub("'", "\\\\'", od)
+        btns <- sprintf(
+          '<button class="btn btn-outline-info btn-xs" style="%s" onclick="event.stopPropagation();Shiny.setInputValue(\'history_info_click\', {od: \'%s\', ts: Date.now()})"><i class="fa fa-circle-info"></i> Info</button>',
+          btn_style, od_esc)
+        if (identical(hist$status[i], "completed")) {
+          btns <- paste0(btns, sprintf(
+            '<button class="btn btn-outline-success btn-xs" style="%s" onclick="event.stopPropagation();Shiny.setInputValue(\'history_load_click\', {od: \'%s\', ts: Date.now()})"><i class="fa fa-download"></i> Load</button>',
+            btn_style, od_esc))
+        }
+        btns <- paste0(btns, sprintf(
+          '<button class="btn btn-outline-secondary btn-xs" style="%s" onclick="event.stopPropagation();Shiny.setInputValue(\'history_assign_click\', {od: \'%s\', ts: Date.now()})"><i class="fa fa-folder-open"></i></button>',
+          btn_style, od_esc))
+      }
+      btns
+    }, character(1))
+
+    # Build hidden details column for child row expansion
+    hist$details <- vapply(seq_len(nrow(hist)), function(i) {
+      items <- c()
+      if ("source_file" %in% names(hist) && !is.na(hist$source_file[i]) && nzchar(hist$source_file[i]))
+        items <- c(items, paste0("<b>File:</b> ", htmltools::htmlEscape(hist$source_file[i])))
+      if ("fasta_file" %in% names(hist) && !is.na(hist$fasta_file[i]) && nzchar(hist$fasta_file[i]))
+        items <- c(items, paste0("<b>FASTA:</b> ", htmltools::htmlEscape(hist$fasta_file[i])))
+      if ("output_dir" %in% names(hist) && !is.na(hist$output_dir[i]) && nzchar(hist$output_dir[i]))
+        items <- c(items, paste0("<b>Output:</b> <code style='font-size:0.85em;'>", htmltools::htmlEscape(hist$output_dir[i]), "</code>"))
+      if ("notes" %in% names(hist) && !is.na(hist$notes[i]) && nzchar(hist$notes[i]))
+        items <- c(items, paste0("<b>Notes:</b> ", htmltools::htmlEscape(hist$notes[i])))
+      if (length(items) == 0) return("")
+      paste0('<div style="padding:8px 12px;background:#f8f9fa;color:#2d3748;font-size:0.9em;line-height:1.8;">',
+        paste(items, collapse = "<br>"), '</div>')
+    }, character(1))
+
+    # Compact display: truncated File, no FASTA/Notes (shown in expanded row)
+    # Columns: expand icon, Time, Source, File(truncated), Proteins, Samples, DE, Project, Status, Actions
+    trunc <- function(x, n = 35) {
+      ifelse(nchar(x) > n, paste0(substr(x, 1, n), "\u2026"), x)
+    }
+    hist$file_short <- trunc(hist$source_file %||% "", 35)
+
+    display_cols <- c("details", "timestamp", "source_type", "file_short",
+      "n_proteins", "n_samples", "n_de_proteins", "project", "status_badge", "actions")
+    display_cols <- intersect(display_cols, names(hist))
+
+    # details column (index 0) is hidden; actions and status_badge not orderable
+    no_sort_cols <- which(display_cols %in% c("details", "status_badge", "actions")) - 1
+
+    col_names <- c(details = "", timestamp = "Time", source_type = "Source",
+      file_short = "File", n_proteins = "Proteins", n_samples = "Samples",
+      n_de_proteins = "DE Proteins", project = "Project",
+      status_badge = "Status", actions = "")
+
+    # JS callback: click row to toggle child detail row
+    child_row_js <- DT::JS("
+      table.on('click', 'tbody tr td:not(:last-child)', function() {
+        var tr = $(this).closest('tr');
+        var row = table.row(tr);
+        if (row.child.isShown()) {
+          row.child.hide();
+          tr.removeClass('shown');
+        } else {
+          var d = row.data()[0];
+          if (d && d.length > 0) {
+            row.child(d).show();
+            tr.addClass('shown');
+          }
+        }
+      });
+    ")
+
+    datatable(hist[, display_cols, drop = FALSE],
+      options = list(
+        pageLength = 10, dom = "ftp",
+        columnDefs = list(
+          list(visible = FALSE, targets = 0),
+          list(orderable = FALSE, targets = no_sort_cols)
+        ),
+        order = list(list(1, "desc"))
+      ),
+      callback = child_row_js,
+      rownames = FALSE, escape = FALSE,
+      colnames = unname(col_names[display_cols]))
+  }, server = FALSE)
+
+  # Handle Info button click from analysis history table
+  observeEvent(input$history_info_click, {
+    out_dir <- input$history_info_click$od
+    if (is.null(out_dir) || !nzchar(out_dir)) return()
+
+    # Look up source_file for modal title
+    hist <- analysis_history_read()
+    src_file <- ""
+    if (nrow(hist) > 0) {
+      match_row <- which(hist$output_dir == out_dir)
+      if (length(match_row) > 0) src_file <- hist$source_file[match_row[1]] %||% ""
+    }
+
+    info_content <- ""
+    info_path <- file.path(out_dir, "search_info.md")
+
+    # Try SSH first (most common for HPC jobs)
+    cfg <- if (isTRUE(values$ssh_connected) && nzchar(input$ssh_host %||% ""))
+      list(host = input$ssh_host, user = input$ssh_user,
+           port = input$ssh_port %||% 22, key_path = input$ssh_key_path) else NULL
+    if (!is.null(cfg)) {
+      result <- tryCatch(
+        ssh_exec(cfg, sprintf("cat %s 2>/dev/null", shQuote(info_path)), timeout = 15),
+        error = function(e) list(status = 1, stdout = character()))
+      if (result$status == 0 && length(result$stdout) > 0) {
+        info_content <- paste(result$stdout, collapse = "\n")
+      }
+    }
+
+    # Fall back to local file
+    if (!nzchar(info_content) && file.exists(info_path)) {
+      info_content <- paste(readLines(info_path, warn = FALSE), collapse = "\n")
+    }
+
+    if (!nzchar(info_content)) {
+      info_content <- sprintf("No search_info.md found at:\n%s", info_path)
+    }
+
+    showModal(modalDialog(
+      title = sprintf("Search Info — %s", src_file),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      pre(style = "max-height: 500px; overflow-y: auto; font-size: 0.8em; white-space: pre-wrap;",
+        info_content)
+    ))
+  }, ignoreInit = TRUE)
+
+  # Handle Load button click from analysis history table
+  observeEvent(input$history_load_click, {
+    out_dir <- input$history_load_click$od
+    if (is.null(out_dir) || !nzchar(out_dir)) return()
+
+    tryCatch({
+      report_path <- NULL
+      cfg <- if (isTRUE(values$ssh_connected) && nzchar(input$ssh_host %||% ""))
+        list(host = input$ssh_host, user = input$ssh_user,
+             port = input$ssh_port %||% 22, key_path = input$ssh_key_path) else NULL
+
+      if (!is.null(cfg) && isTRUE(values$ssh_connected)) {
+        # SSH: download report.parquet
+        remote_report <- file.path(out_dir, "report.parquet")
+        find_result <- ssh_exec(cfg, paste("ls", shQuote(remote_report), "2>/dev/null"))
+        if (find_result$status != 0) {
+          showNotification("No report.parquet found on remote.", type = "error", duration = 8)
+          return()
+        }
+
+        showNotification("Downloading report via SCP...", type = "message", duration = 30, id = "hist_load")
+        local_report <- file.path(tempdir(),
+          paste0("hist_", basename(out_dir), "_report.parquet"))
+        dl_result <- scp_download(cfg, remote_report, local_report)
+        if (dl_result$status != 0) {
+          showNotification("SCP download failed.", type = "error", duration = 8)
+          return()
+        }
+        report_path <- local_report
+      } else {
+        # Local: direct access
+        report_path <- file.path(out_dir, "report.parquet")
+        if (!file.exists(report_path)) {
+          showNotification("No report.parquet found locally.", type = "error", duration = 8)
+          return()
+        }
+      }
+
+      showNotification("Reading DIA-NN report...", type = "message", duration = 30, id = "hist_load")
+      raw_data <- suppressMessages(suppressWarnings(
+        limpa::readDIANN(report_path, format = "parquet")))
+      values$raw_data <- raw_data
+      values$uploaded_report_path <- report_path
+      values$original_report_name <- basename(report_path)
+
+      sample_names <- colnames(raw_data$E)
+      values$metadata <- data.frame(
+        ID = seq_along(sample_names),
+        File.Name = sample_names,
+        Group = "", Batch = "",
+        Covariate1 = "", Covariate2 = "",
+        stringsAsFactors = FALSE
+      )
+
+      removeNotification("hist_load")
+      showNotification(
+        sprintf("Loaded %s: %d proteins, %d samples",
+          basename(report_path), nrow(raw_data$E), ncol(raw_data$E)),
+        type = "message", duration = 10)
+
+      # Navigate to data overview
+      nav_select("main_tabs", "Data Overview", session = session)
+
+    }, error = function(e) {
+      removeNotification("hist_load")
+      showNotification(sprintf("Load failed: %s", e$message), type = "error", duration = 10)
+    })
+  }, ignoreInit = TRUE)
+
+  # ==========================================================================
+  #   Assign to Project (folder icon button in history table)
+  # ==========================================================================
+
+  assign_od <- reactiveVal(NULL)
+
+  observeEvent(input$history_assign_click, {
+    od <- input$history_assign_click$od
+    if (is.null(od) || !nzchar(od)) return()
+
+    assign_od(od)
+    existing_projects <- names(project_data()$projects)
+
+    showModal(modalDialog(
+      title = "Assign to Project",
+      size = "s", easyClose = TRUE,
+      selectizeInput("assign_project_name", "Project",
+        choices = existing_projects,
+        options = list(create = TRUE, placeholder = "Select or type new project name...")),
+      textInput("assign_project_desc", "Description (optional)", value = ""),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("assign_project_confirm", "Assign", class = "btn-primary")
+      )
+    ))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$assign_project_confirm, {
+    proj_name <- input$assign_project_name
+    od <- assign_od()
+    desc <- input$assign_project_desc %||% ""
+
+    if (is.null(proj_name) || !nzchar(proj_name)) {
+      showNotification("Please enter a project name.", type = "warning")
+      return()
+    }
+    if (is.null(od) || !nzchar(od)) return()
+
+    tryCatch({
+      project_assign(proj_name, od, description = desc)
+      project_refresh(isolate(project_refresh()) + 1)
+      removeModal()
+      showNotification(sprintf("Assigned to project: %s", proj_name), type = "message")
+    }, error = function(e) {
+      showNotification(sprintf("Failed to assign: %s", e$message), type = "error")
+    })
+  }, ignoreInit = TRUE)
+
+  # ==========================================================================
+  #   Manage Projects modal
+  # ==========================================================================
+
+  observeEvent(input$project_manage_btn, {
+    pd <- project_data()
+    proj_names <- names(pd$projects)
+
+    if (length(proj_names) == 0) {
+      showModal(modalDialog(
+        title = "Manage Projects", size = "m", easyClose = TRUE,
+        p(class = "text-muted", "No projects yet. Use the folder icon in the history table to assign analyses to a project."),
+        footer = modalButton("Close")
+      ))
+      return()
+    }
+
+    rows <- lapply(proj_names, function(pn) {
+      proj <- pd$projects[[pn]]
+      n_entries <- length(unlist(proj$entries))
+      desc <- proj$description %||% ""
+      created <- proj$created_at %||% ""
+      tags$tr(
+        tags$td(tags$strong(pn)),
+        tags$td(n_entries),
+        tags$td(style = "font-size:0.85em; color:#718096;", desc),
+        tags$td(style = "font-size:0.8em; color:#a0aec0;", created),
+        tags$td(
+          actionButton(paste0("proj_del_", gsub("[^a-zA-Z0-9]", "_", pn)),
+            icon("trash"), class = "btn-outline-danger btn-xs",
+            onclick = sprintf("Shiny.setInputValue('project_delete_click', {name: '%s', ts: Date.now()})",
+              gsub("'", "\\\\'", pn)))
+        )
+      )
+    })
+
+    showModal(modalDialog(
+      title = "Manage Projects", size = "l", easyClose = TRUE,
+      tags$table(class = "table table-sm table-hover",
+        tags$thead(tags$tr(
+          tags$th("Project"), tags$th("Entries"), tags$th("Description"),
+          tags$th("Created"), tags$th("")
+        )),
+        tags$tbody(rows)
+      ),
+      footer = modalButton("Close")
+    ))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$project_delete_click, {
+    pn <- input$project_delete_click$name
+    if (is.null(pn) || !nzchar(pn)) return()
+
+    tryCatch({
+      data <- projects_read()
+      data$projects[[pn]] <- NULL
+      projects_write(data)
+      project_refresh(isolate(project_refresh()) + 1)
+      removeModal()
+      showNotification(sprintf("Deleted project: %s", pn), type = "message")
+    }, error = function(e) {
+      showNotification(sprintf("Failed to delete: %s", e$message), type = "error")
+    })
+  }, ignoreInit = TRUE)
 
 }

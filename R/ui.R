@@ -430,6 +430,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             tags$h6(icon("dna"), " FASTA Database"),
             selectInput("fasta_source", NULL,
               choices = c("Download from UniProt" = "uniprot",
+                          "Database Library" = "library",
                           "Pre-staged on server" = "prestaged",
                           "Browse / enter path" = "browse"),
               width = "100%"),
@@ -439,7 +440,15 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               actionButton("open_uniprot_modal", "Search UniProt",
                 class = "btn-info btn-sm w-100", icon = icon("search")),
               uiOutput("fasta_filename_preview"),
-              uiOutput("fasta_selected_summary")
+              uiOutput("fasta_selected_summary"),
+              uiOutput("fasta_add_to_library_btn_ui")
+            ),
+
+            # --- Database Library source ---
+            conditionalPanel("input.fasta_source == 'library'",
+              actionButton("open_fasta_library_modal", "Browse Library",
+                class = "btn-primary btn-sm w-100", icon = icon("book")),
+              uiOutput("fasta_library_selected_summary")
             ),
 
             # --- Pre-staged source ---
@@ -790,12 +799,15 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                 div(style = "flex: 1; min-width: 100px;",
                   numericInput("diann_time_hours", "Time (hrs):", value = 12, min = 1, max = 48)
-                ),
-                div(style = "flex: 1; min-width: 100px;",
-                  textInput("diann_partition", "Partition:", value = "high")
                 )
               ),
-              textInput("diann_account", "Account:", value = "genome-center-grp"),
+              # Auto-select partition/account display + override
+              uiOutput("partition_selector_ui"),
+              # Hidden textInputs — actual values used by job submission
+              div(style = "display: none;",
+                textInput("diann_partition", NULL, value = "high"),
+                textInput("diann_account", NULL, value = "genome-center-grp")
+              ),
 
               # Parallel search mode (rendered server-side based on file count)
               uiOutput("parallel_mode_ui"),
@@ -1503,42 +1515,62 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     ),
 
     # ==========================================================================
-    # ABOUT (standalone — always visible)
+    # ABOUT dropdown — Community stats + Analysis History as separate tabs
     # ==========================================================================
-    nav_panel("About", value = "about_tab", icon = icon("circle-info"),
-      div(style = "padding: 20px; max-width: 900px; margin: 0 auto;",
-        # Header with version
-        div(style = "text-align: center; margin-bottom: 25px;",
-          tags$h3("DE-LIMP"),
-          tags$p(class = "text-muted", textOutput("about_version_text", inline = TRUE)),
-          tags$p(style = "color: #718096; font-size: 0.9em;",
-            "Differential Expression \u2014 LIMPA Pipeline")
-        ),
+    nav_menu("About", icon = icon("circle-info"),
+      nav_panel("Community", value = "about_tab", icon = icon("chart-line"),
+        div(style = "padding: 20px; max-width: 900px; margin: 0 auto;",
+          # Header with version
+          div(style = "text-align: center; margin-bottom: 25px;",
+            tags$h3("DE-LIMP"),
+            tags$p(class = "text-muted", textOutput("about_version_text", inline = TRUE)),
+            tags$p(style = "color: #718096; font-size: 0.9em;",
+              "Differential Expression \u2014 LIMPA Pipeline")
+          ),
 
-        # Stats cards row
-        uiOutput("community_stats_cards"),
+          # Stats cards row
+          uiOutput("community_stats_cards"),
 
-        # Trend sparklines row
-        uiOutput("community_trend_plots"),
+          # Trend sparklines row
+          uiOutput("community_trend_plots"),
 
-        # Recent discussions
-        uiOutput("community_discussions"),
+          # Recent discussions
+          uiOutput("community_discussions"),
 
-        # Links section
-        div(style = "text-align: center; margin-top: 25px;",
-          tags$h6("Links"),
-          tags$a(href = "https://github.com/bsphinney/DE-LIMP", target = "_blank",
-            icon("github"), " GitHub"), " | ",
-          tags$a(href = "https://huggingface.co/spaces/brettsp/de-limp-proteomics", target = "_blank",
-            icon("rocket"), " Hugging Face"), " | ",
-          tags$a(href = "https://bsphinney.github.io/DE-LIMP/", target = "_blank",
-            icon("book"), " Documentation"), " | ",
-          tags$a(href = "https://github.com/bsphinney/DE-LIMP/discussions", target = "_blank",
-            icon("comments"), " Discussions")
-        ),
+          # Links section
+          div(style = "text-align: center; margin-top: 25px;",
+            tags$h6("Links"),
+            tags$a(href = "https://github.com/bsphinney/DE-LIMP", target = "_blank",
+              icon("github"), " GitHub"), " | ",
+            tags$a(href = "https://huggingface.co/spaces/brettsp/de-limp-proteomics", target = "_blank",
+              icon("rocket"), " Hugging Face"), " | ",
+            tags$a(href = "https://bsphinney.github.io/DE-LIMP/", target = "_blank",
+              icon("book"), " Documentation"), " | ",
+            tags$a(href = "https://github.com/bsphinney/DE-LIMP/discussions", target = "_blank",
+              icon("comments"), " Discussions")
+          ),
 
-        # Stats freshness note
-        uiOutput("stats_updated_at")
+          # Stats freshness note
+          uiOutput("stats_updated_at")
+        )
+      ),
+      nav_panel("Analysis History", value = "analysis_history_tab", icon = icon("clock-rotate-left"),
+        div(style = "padding: 20px;",
+          div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;",
+            h4("Analysis History", style = "margin: 0;"),
+            div(style = "display: flex; align-items: center; gap: 6px;",
+              div(style = "width: 200px;",
+                selectizeInput("project_filter", NULL, choices = NULL,
+                  options = list(placeholder = "Filter by project...", allowEmptyOption = TRUE))
+              ),
+              actionButton("project_manage_btn", "Projects",
+                icon = icon("folder-open"), class = "btn-outline-primary btn-sm")
+            )
+          ),
+          p(class = "text-muted", "Recent analyses recorded on this machine/volume."),
+          uiOutput("project_summary_cards"),
+          DTOutput("analysis_history_table")
+        )
       )
     ),
 

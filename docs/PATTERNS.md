@@ -127,9 +127,11 @@ All DIA-NN search jobs (single, parallel, Docker, local) use this structure:
 - **Dual format**: `detect_xic_format()` auto-detects v1 (wide) vs v2 (long) DIA-NN XIC formats
 - **Platform guard**: All XIC UI/logic wrapped in `if (!is_hf_space)`
 
-## About Tab & Community Stats
+## About Dropdown & Community Stats
 
-- **About tab** (`value = "about_tab"`): Always visible in navbar, between Output and Education
+- **About** is a `nav_menu()` dropdown with two sub-tabs:
+  - **Community** (`value = "about_tab"`): Stats, sparklines, discussions, links — narrow layout (`max-width: 900px`)
+  - **Analysis History** (`value = "analysis_history_tab"`): Full-width page with project filter, DT table, expandable rows
 - **Version source**: `VERSION` file → `app.R` reads at startup → `values$app_version` → all modules use it
 - **Community stats**: `stats/community_stats.json` loaded at startup → `values$community_stats`
   - Generated daily by `.github/workflows/track-stats.yml` (GitHub Actions)
@@ -139,6 +141,18 @@ All DIA-NN search jobs (single, parallel, Docker, local) use this structure:
 - **Trend sparklines**: 2 plotly line charts (views + clones). Uses `plotlyOutput` per bslib safety pattern.
 - **Discussions section**: Recent discussions from GitHub Discussions (title, category, author, comment count, link). Fetched via GraphQL in the workflow.
 - **Stats freshness**: Displays `updated_at` timestamp from JSON
+
+## Analysis History & Projects
+
+- **Analysis history CSV**: `analysis_history_path()` in `helpers_search.R` — shared volume first, local `~/.delimp_analysis_history.csv` fallback. Append-only with `filelock`.
+- **Record points**: Pipeline completion (`server_data.R`), auto-load from search (`server_search.R`), session file load (`server_session.R`).
+- **n_proteins pitfall**: `nrow(raw_data$E)` = precursors (~40k). Correct: `length(unique(raw_data$genes$Protein.Group))` for protein groups (~3k). `y_protein$E` rows are protein groups (post-pipeline only).
+- **Projects JSON**: `projects_path()` — shared volume first, local `~/.delimp_projects.json` fallback. Schema: `{projects: {name: {created_at, description, entries: [output_dir, ...]}}}`
+- **Join key**: `output_dir` links history CSV rows to projects and live job queue statuses.
+- **DT expandable rows**: Hidden column 0 contains detail HTML. JS callback on `tbody tr td:not(:last-child)` toggles `row.child()`. Detail div forces `color:#2d3748` to avoid white-on-white with DT row selection highlighting.
+- **Action buttons**: Use `event.stopPropagation()` to prevent row expansion when clicking Info/Load/Assign buttons. Pass `output_dir` directly in JS `Shiny.setInputValue()` (not row index, which breaks with project filtering).
+- **Project summary cards**: Shown above table when project filter is active. Computed from filtered history rows.
+- **Assign modal**: `selectizeInput(create = TRUE)` for existing/new project names. Uses `reactiveVal(assign_od)` to store the target output_dir (not a hidden HTML input, which Shiny can't read).
 
 ## Core Facility Mode
 
@@ -152,3 +166,45 @@ All DIA-NN search jobs (single, parallel, Docker, local) use this structure:
 - **y_protein is EList**: Extract `$E` for the expression matrix (not `as.matrix()` directly)
 - **Project field**: `selectizeInput` with `create = TRUE` for autocomplete + new entry
 - **Test data**: `seed_test_db.R` generates synthetic SQLite data
+
+## DIA-NN Parallel Search — Critical Flags & Gotchas
+
+Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussions/1414) (Vadim Demichev)
+
+### 5-Step Pipeline
+
+| Step | Purpose | Key Flags |
+|------|---------|-----------|
+| 1 | Library prediction (from FASTA) | `--fasta-search --predictor --gen-spec-lib --out-lib step1.speclib` |
+| 2 | First-pass per-file quant (array) | `--lib step1.predicted.speclib --gen-spec-lib --quant-ori-names` |
+| 3 | Empirical library assembly | `--lib step1.predicted.speclib --use-quant --quant-ori-names --gen-spec-lib --rt-profiling --out-lib empirical.parquet` |
+| 4 | Final per-file quant (array) | `--lib empirical.parquet --no-ifs-removal --quant-ori-names` |
+| 5 | Cross-run report | `--lib empirical.parquet --use-quant --quant-ori-names --matrices` |
+
+### Critical Rules (per Vadim)
+
+1. **`--quant-ori-names` at ALL steps** — Preserves original filenames in `.quant` files. Without it, quant file naming can mismatch between steps when container bind mount paths differ.
+2. **Fixed mass accuracy when using `--use-quant`** — Auto-optimisation + quant reuse produces different results from the original analysis. Always set `--mass-acc`, `--mass-acc-ms1`, and `--window` explicitly. Our `generate_parallel_scripts()` forces `mass_acc_mode = "manual"` for this reason.
+3. **`--fasta-search` and `--predictor` in Step 1 ONLY** — Including these in Steps 2-5 causes DIA-NN to re-digest the FASTA from scratch instead of using the predicted/empirical library. This was the original FASTA re-digest bug (commit `d2b9bc6`).
+4. **Empirical library is `.parquet`, not `.speclib`** — DIA-NN 2.0+ saves empirical libraries (from `--gen-spec-lib --out-lib`) in Apache Parquet format. Predicted libraries (Step 1) remain `.predicted.speclib`. Both formats are loadable with `--lib`.
+5. **Verify quant files before assembly steps** — Array jobs can fail silently (preemption, OOM, CPU mismatch). Steps 3 and 5 include a bash verification block that checks all expected `.quant` files exist before running DIA-NN. With `--quant-ori-names`, quant files are named `BASENAME.quant` (e.g., `sample.raw` → `sample.quant`).
+7. **Backup Step 2 quant files before Step 3** — Step 3 uses `--use-quant --temp quant_step2`, which OVERWRITES the Step 2 quant files (same names with `--quant-ori-names`). A `cp -r quant_step2 quant_step2_orig` backup runs before DIA-NN in Step 3. Smart resume from Step 3 restores from this backup. Without it, a Step 3 failure would require re-running Step 2.
+6. **`--no-ifs-removal`** — Used in Step 4 (second-pass quant) for high-precision quantification with the empirical library.
+
+### Common Failure Modes
+
+| Failure | Cause | Fix |
+|---------|-------|-----|
+| "Cannot load spectral library" in Step 4 | Library file referenced as `.speclib` but DIA-NN saved it as `.parquet` | Use `empirical.parquet` in `--lib` and `--out-lib` |
+| "Illegal instruction (core dumped)" | DIA-NN binary compiled for newer CPU (e.g., AVX-512) than the assigned HPC node | Add `--constraint` to sbatch or rebuild container for wider CPU compatibility |
+| Step 3 re-digests FASTA from scratch | `--fasta-search` or `--predictor` leaked into Steps 2-5 | `step_flags` filtering in `generate_parallel_scripts()` removes these |
+| Quant files not found by assembly step | Array tasks failed/were preempted, or naming mismatch from different bind mount paths | Quant verification block + `--quant-ori-names` on all steps |
+| DIA-NN warning about mass accuracy + quant reuse | Auto mass accuracy mode with `--use-quant` | Force manual mode: `--mass-acc N --mass-acc-ms1 N --window N` |
+
+### Implementation
+
+- **Script generator**: `generate_parallel_scripts()` in `R/helpers_search.R` (~lines 1467-1815)
+- **Step flag filtering**: Lines 1541-1551 strip step-specific flags from `base_flags`
+- **Mass accuracy enforcement**: `parallel_sp$mass_acc_mode <- "manual"` (line ~1540)
+- **Quant verification**: `quant_verify_block()` helper generates bash check code
+- **Resume launcher**: `generate_resume_launcher()` for resubmitting from failed step

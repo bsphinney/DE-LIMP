@@ -611,6 +611,29 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
           nav_select("main_tabs", "DE Dashboard")
         }
         showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
+
+        # Record to analysis history log
+        tryCatch({
+          ss <- values$diann_search_settings
+          record_analysis(list(
+            timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+            user = Sys.getenv("USER", "unknown"),
+            source_type = if (!is.null(ss)) "search" else "upload",
+            source_file = values$original_report_name %||% NA,
+            source_path = values$uploaded_report_path %||% NA,
+            remote_path = NA,
+            fasta_file = if (!is.null(ss)) paste(basename(ss$fasta_files), collapse = ", ") else NA,
+            fasta_seq_count = if (!is.null(ss)) ss$fasta_seq_count else NA,
+            n_proteins = nrow(values$y_protein$E),
+            n_samples = ncol(values$y_protein$E),
+            n_contrasts = length(colnames(values$fit$contrasts)),
+            n_de_proteins = count_de_proteins(values$fit),
+            output_dir = if (!is.null(ss)) ss$output_dir else NA,
+            app_version = values$app_version %||% "unknown",
+            notes = ""
+          ))
+        }, error = function(e) message("[DE-LIMP] Analysis history record failed: ", e$message))
+
       }, error = function(e) {
         showNotification(paste("Pipeline error:", e$message), type = "error", duration = NULL)
       })

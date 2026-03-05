@@ -278,6 +278,8 @@ if (search_enabled) {
   }
   library(shinyFiles)
   library(jsonlite)
+  # Migrate user-local speclib cache to shared volume if available
+  tryCatch(speclib_cache_migrate(), error = function(e) NULL)
 }
 
 # Verify Limpa installation
@@ -389,6 +391,8 @@ server <- function(input, output, session) {
     ssh_connected = FALSE,
     ssh_sbatch_path = NULL,
     cluster_resources = NULL,
+    public_resources = NULL,
+    auto_partition = NULL,
     diann_search_settings = NULL,
     docker_available = docker_available,
     # Multi-View Integration (MOFA2)

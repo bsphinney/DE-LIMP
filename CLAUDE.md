@@ -39,13 +39,13 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
-| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab |
-| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search |
+| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, analysis history, projects |
+| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, analysis history, projects |
 | `VERSION` | Single-line app version (e.g. `3.1.1`), read at startup into `values$app_version` |
 | `stats/community_stats.json` | GitHub traffic data generated daily by `.github/workflows/track-stats.yml` |
 
 ### Tab Structure (page_navbar)
-Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **About** | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
+Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **About** dropdown (Community, Analysis History) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
 
 - `page_navbar(id = "main_tabs", navbar_options = navbar_options(bg = "#2c3e50"))` — dark navbar, global sidebar, hover dropdowns
 - Dropdown section labels ("Setup"/"Results"/"AI") injected via JS
@@ -57,7 +57,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
 **Tab values that MUST NOT change** (used by server nav_select/nav_show/nav_hide):
-`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`
+`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"analysis_history_tab"`
 
 #### Analysis dropdown
 - **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
@@ -66,6 +66,16 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **Gene Set Enrichment** — BP/MF/CC/KEGG with per-ontology caching
 - **Multi-Omics MOFA2** — `value = "mofa_tab"`
 - **AI Analysis** — Gemini chat
+
+#### About dropdown
+- **Community** (`value = "about_tab"`) — Version, GitHub stats cards, trend sparklines, recent discussions, links
+- **Analysis History** (`value = "analysis_history_tab"`) — DT table with expandable detail rows, project filter, project management
+
+### Analysis History & Projects
+- **Analysis history CSV**: `analysis_history_path()` → shared `/Volumes/proteomics-grp/delimp/analysis_history.csv` or local `~/.delimp_analysis_history.csv`. Append-only with file locking.
+- **Projects JSON**: `projects_path()` → shared or local `delimp_projects.json`. Maps project names to `output_dir` entries.
+- **DT expandable rows**: Click a row to show full File, FASTA, Output dir, Notes in a child row. JS callback on `tbody tr td` with `row.child()` toggle. Buttons use `event.stopPropagation()`.
+- **n_proteins**: Use `length(unique(raw_data$genes$Protein.Group))` not `nrow(raw_data$E)` — the latter counts precursors (~40k), not protein groups (~3k).
 
 ### Comparison Selector Sync
 Four synchronized selectors: `contrast_selector` (DE Dashboard), `contrast_selector_signal`, `contrast_selector_grid`, `contrast_selector_pvalue`. Bidirectional sync — changing any updates all.
@@ -141,6 +151,11 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | SSH rapid connections rejected (255) | HPC `MaxStartups` throttling. Batch operations into fewer SSH calls; use ControlMaster multiplexing. |
 | macOS SSH ControlPath too long | Unix domain sockets limited to 104 bytes on macOS. R's `tempdir()` paths are ~105 chars. Use `/tmp/.delimp_<user>_<host>`. |
 | `parse_sbatch_output` returns dirty ID | SSH stdout may have trailing `\r`/whitespace. Always `trimws()` parsed job IDs. |
+| DIA-NN empirical lib is `.parquet` not `.speclib` | DIA-NN 2.0+ saves empirical libraries in parquet format. Use `empirical.parquet` in `--lib` and `--out-lib`. Predicted libs remain `.predicted.speclib`. |
+| DIA-NN `--quant-ori-names` required on ALL steps | Per Vadim (DIA-NN dev): preserves original filenames in `.quant` files. Without it, container bind mount path differences cause naming mismatches between steps. |
+| DIA-NN `--fasta-search`/`--predictor` Step 1 only | Including in Steps 2-5 causes full FASTA re-digest. `generate_parallel_scripts()` strips these from `step_flags`. |
+| DIA-NN auto mass acc + `--use-quant` | Produces different results. `generate_parallel_scripts()` forces `mass_acc_mode = "manual"`. See @docs/PATTERNS.md for full flag reference. |
+| `nrow(raw_data$E)` counts precursors not proteins | Use `length(unique(raw_data$genes$Protein.Group))` for protein group count. `y_protein$E` rows are protein groups (post-pipeline). |
 
 ## Version History
 
