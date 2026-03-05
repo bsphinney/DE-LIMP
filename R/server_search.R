@@ -246,6 +246,208 @@ server_search <- function(input, output, session, values, add_to_log,
   }, ignoreInit = TRUE)
 
   # ============================================================================
+  #    DIA-NN Log File Import (with lock/unlock)
+  # ============================================================================
+
+  # All search setting input IDs that get locked on import
+  search_input_ids <- c(
+    "search_mode", "diann_normalization",
+    "diann_enzyme", "diann_missed_cleavages", "diann_max_var_mods",
+    "mass_acc_mode", "diann_mass_acc", "diann_mass_acc_ms1", "diann_scan_window",
+    "mod_met_ox", "mod_nterm_acetyl", "extra_var_mods",
+    "diann_mbr", "diann_rt_profiling", "diann_xic", "diann_unimod4",
+    "diann_met_excision",
+    "min_pep_len", "max_pep_len", "min_pr_mz", "max_pr_mz",
+    "diann_fdr", "extra_cli_flags"
+  )
+
+  log_import_locked <- reactiveVal(FALSE)
+
+  lock_search_inputs <- function() {
+    for (id in search_input_ids) shinyjs::disable(id)
+    log_import_locked(TRUE)
+  }
+
+  unlock_search_inputs <- function() {
+    for (id in search_input_ids) shinyjs::enable(id)
+    log_import_locked(FALSE)
+  }
+
+  # Reset all search inputs to defaults, then apply imported params
+  apply_log_params <- function(result) {
+    p <- result$params
+
+    # Reset to defaults first (so settings NOT in the log get clean defaults)
+    updateRadioButtons(session, "search_mode", selected = "libfree")
+    updateRadioButtons(session, "diann_normalization", selected = "on")
+    updateSelectInput(session, "diann_enzyme", selected = "K*,R*")
+    updateNumericInput(session, "diann_missed_cleavages", value = 1)
+    updateNumericInput(session, "diann_max_var_mods", value = 1)
+    updateSelectInput(session, "mass_acc_mode", selected = "auto")
+    updateNumericInput(session, "diann_mass_acc", value = 14)
+    updateNumericInput(session, "diann_mass_acc_ms1", value = 14)
+    updateNumericInput(session, "diann_scan_window", value = 6)
+    updateCheckboxInput(session, "mod_met_ox", value = TRUE)
+    updateCheckboxInput(session, "mod_nterm_acetyl", value = FALSE)
+    updateTextAreaInput(session, "extra_var_mods", value = "")
+    updateCheckboxInput(session, "diann_mbr", value = TRUE)
+    updateCheckboxInput(session, "diann_rt_profiling", value = TRUE)
+    updateCheckboxInput(session, "diann_xic", value = TRUE)
+    updateCheckboxInput(session, "diann_unimod4", value = TRUE)
+    updateCheckboxInput(session, "diann_met_excision", value = TRUE)
+    updateNumericInput(session, "min_pep_len", value = 7)
+    updateNumericInput(session, "max_pep_len", value = 30)
+    updateNumericInput(session, "min_pr_mz", value = 300)
+    updateNumericInput(session, "max_pr_mz", value = 1200)
+    updateNumericInput(session, "diann_fdr", value = 0.01)
+    updateTextAreaInput(session, "extra_cli_flags", value = "")
+
+    # Apply imported values over the defaults
+    if (!is.null(result$search_mode))   updateRadioButtons(session, "search_mode", selected = result$search_mode)
+    if (!is.null(result$normalization)) updateRadioButtons(session, "diann_normalization", selected = result$normalization)
+    if (!is.null(p$qvalue))             updateNumericInput(session, "diann_fdr", value = p$qvalue)
+    if (!is.null(p$max_var_mods))       updateNumericInput(session, "diann_max_var_mods", value = p$max_var_mods)
+    if (!is.null(p$scan_window))        updateNumericInput(session, "diann_scan_window", value = p$scan_window)
+    if (!is.null(p$mass_acc_mode))      updateSelectInput(session, "mass_acc_mode", selected = p$mass_acc_mode)
+    if (!is.null(p$mass_acc))           updateNumericInput(session, "diann_mass_acc", value = p$mass_acc)
+    if (!is.null(p$mass_acc_ms1))       updateNumericInput(session, "diann_mass_acc_ms1", value = p$mass_acc_ms1)
+    if (!is.null(p$enzyme))             updateSelectInput(session, "diann_enzyme", selected = p$enzyme)
+    if (!is.null(p$missed_cleavages))   updateNumericInput(session, "diann_missed_cleavages", value = p$missed_cleavages)
+    if (!is.null(p$min_pep_len))        updateNumericInput(session, "min_pep_len", value = p$min_pep_len)
+    if (!is.null(p$max_pep_len))        updateNumericInput(session, "max_pep_len", value = p$max_pep_len)
+    if (!is.null(p$min_pr_mz))          updateNumericInput(session, "min_pr_mz", value = p$min_pr_mz)
+    if (!is.null(p$max_pr_mz))          updateNumericInput(session, "max_pr_mz", value = p$max_pr_mz)
+    if (!is.null(p$mbr))                updateCheckboxInput(session, "diann_mbr", value = p$mbr)
+    if (!is.null(p$rt_profiling))       updateCheckboxInput(session, "diann_rt_profiling", value = p$rt_profiling)
+    if (!is.null(p$xic))                updateCheckboxInput(session, "diann_xic", value = p$xic)
+    if (!is.null(p$unimod4))            updateCheckboxInput(session, "diann_unimod4", value = p$unimod4)
+    if (!is.null(p$met_excision))       updateCheckboxInput(session, "diann_met_excision", value = p$met_excision)
+    if (!is.null(p$mod_met_ox))         updateCheckboxInput(session, "mod_met_ox", value = p$mod_met_ox)
+    if (!is.null(p$mod_nterm_acetyl))   updateCheckboxInput(session, "mod_nterm_acetyl", value = p$mod_nterm_acetyl)
+    if (!is.null(p$extra_var_mods))     updateTextAreaInput(session, "extra_var_mods", value = p$extra_var_mods)
+    if (!is.null(p$extra_cli_flags))    updateTextAreaInput(session, "extra_cli_flags", value = p$extra_cli_flags)
+  }
+
+  observeEvent(input$diann_log_file, {
+    req(input$diann_log_file)
+    result <- parse_diann_log(input$diann_log_file$datapath)
+
+    if (!result$success) {
+      output$log_import_feedback <- renderUI({
+        tags$div(class = "alert alert-danger py-1 px-2 mb-0",
+          style = "font-size: 0.82em;",
+          icon("exclamation-triangle"), " ", result$message)
+      })
+      return()
+    }
+
+    # Reset to defaults, then apply imported values
+    apply_log_params(result)
+
+    # Lock all search inputs
+    lock_search_inputs()
+
+    # Build search_params compatible with build_diann_flags() defaults
+    p <- result$params
+    sp_defaults <- list(
+      qvalue = 0.01, max_var_mods = 1, scan_window = 6,
+      mass_acc_mode = "auto", mass_acc = 14, mass_acc_ms1 = 14,
+      unimod4 = TRUE, met_excision = TRUE,
+      min_pep_len = 7, max_pep_len = 30,
+      min_pr_mz = 300, max_pr_mz = 1200,
+      min_pr_charge = 1, max_pr_charge = 4,
+      min_fr_mz = 200, max_fr_mz = 1200,
+      enzyme = "K*,R*", missed_cleavages = 1,
+      mbr = TRUE, rt_profiling = TRUE, xic = TRUE,
+      mod_met_ox = TRUE, mod_nterm_acetyl = FALSE,
+      extra_var_mods = "", extra_cli_flags = ""
+    )
+    for (nm in names(p)) sp_defaults[[nm]] <- p[[nm]]
+
+    # Store for methodology tab + AI context
+    values$diann_search_settings <- list(
+      search_params = sp_defaults,
+      fasta_files = result$fasta_files,
+      fasta_seq_count = NULL,
+      contaminant_library = "none",
+      n_raw_files = result$n_raw_files,
+      raw_file_type = if (result$n_raw_files > 0 && length(result$fasta_files) > 0) "raw" else "unknown",
+      search_mode = result$search_mode,
+      normalization = result$normalization,
+      speclib = NULL,
+      imported_from_log = TRUE,
+      diann_version = result$version
+    )
+
+    # Build feedback message
+    n_params <- sum(!sapply(p, is.null))
+    fasta_info <- if (length(result$fasta_files) > 0) {
+      paste0("FASTA: ", paste(basename(result$fasta_files), collapse = ", "))
+    } else NULL
+    version_info <- if (!is.null(result$version)) paste0("DIA-NN ", result$version) else NULL
+
+    details <- paste(c(
+      version_info,
+      paste0(n_params, " parameters imported"),
+      if (result$n_raw_files > 0) paste0(result$n_raw_files, " raw files referenced"),
+      fasta_info
+    ), collapse = " | ")
+
+    output$log_import_feedback <- renderUI({
+      tagList(
+        tags$div(class = "alert alert-info py-1 px-2 mb-1",
+          style = "font-size: 0.82em;",
+          icon("lock"), " Settings locked from imported log. ",
+          details
+        ),
+        actionButton("unlock_search_settings", "Override Settings",
+          class = "btn-outline-warning btn-sm w-100",
+          icon = icon("unlock"))
+      )
+    })
+
+    showNotification("DIA-NN log imported — settings locked for reproducibility.",
+      type = "message", duration = 4)
+  })
+
+  # Unlock button handler
+  observeEvent(input$unlock_search_settings, {
+    unlock_search_inputs()
+    output$log_import_feedback <- renderUI({
+      tags$div(class = "alert alert-warning py-1 px-2 mb-0",
+        style = "font-size: 0.82em;",
+        icon("unlock"), " Settings unlocked — edits may differ from the original search.")
+    })
+  })
+
+  # Info modal for log import
+  observeEvent(input$import_log_info_btn, {
+    showModal(modalDialog(
+      title = "Import DIA-NN Log File",
+      tags$p("Upload a DIA-NN log file (.log, .txt, .out) to auto-fill and lock search settings from a previous run."),
+      tags$h6("What gets imported:"),
+      tags$ul(
+        tags$li("Search mode (library-free, phospho, library)"),
+        tags$li("Enzyme, missed cleavages, peptide/precursor ranges"),
+        tags$li("Mass accuracy (auto vs manual + values)"),
+        tags$li("Variable modifications (Met-ox, N-term acetyl, custom)"),
+        tags$li("Processing toggles (MBR, RT profiling, XICs, etc.)"),
+        tags$li("FDR threshold, normalization mode"),
+        tags$li("Scan window and extra CLI flags")
+      ),
+      tags$h6("What does NOT get imported:"),
+      tags$ul(
+        tags$li("Raw data files (select these separately)"),
+        tags$li("FASTA files (shown for reference only)"),
+        tags$li("Compute resources (threads, output paths)"),
+        tags$li("Spectral library path")
+      ),
+      tags$p(class = "text-muted", "Settings are locked after import to ensure reproducibility. Click 'Override Settings' to edit."),
+      easyClose = TRUE, footer = modalButton("Got it")
+    ))
+  })
+
+  # ============================================================================
   #    Job Queue Persistence (survives app restarts)
   # ============================================================================
 
@@ -791,6 +993,11 @@ server_search <- function(input, output, session, values, add_to_log,
   # ============================================================================
   #    UniProt FASTA Download
   # ============================================================================
+
+  # Close any open modal when FASTA source changes
+  observeEvent(input$fasta_source, {
+    removeModal()
+  }, ignoreInit = TRUE)
 
   # Open UniProt search modal
   observeEvent(input$open_uniprot_modal, {
@@ -1558,11 +1765,13 @@ server_search <- function(input, output, session, values, add_to_log,
     tryCatch({
       dir.create(entry_dir, recursive = TRUE, showWarnings = FALSE)
 
-      # Copy the main FASTA file
-      main_fasta_path <- values$diann_fasta_files[1]
-      if (file.exists(main_fasta_path)) {
+      # Copy the main FASTA file (use local download path, not remote HPC path)
+      main_fasta_path <- download_result$path
+      if (!is.null(main_fasta_path) && file.exists(main_fasta_path)) {
+        # Use the filename the catalog entry expects
+        dest_name <- entry$fasta_files[1]
         file.copy(main_fasta_path,
-          file.path(entry_dir, basename(main_fasta_path)),
+          file.path(entry_dir, dest_name),
           overwrite = TRUE)
       }
 
@@ -1762,7 +1971,9 @@ server_search <- function(input, output, session, values, add_to_log,
     est <- estimate_search_time(
       n_files = nrow(values$diann_raw_files),
       search_mode = input$search_mode,
-      cpus = input$diann_cpus
+      cpus = input$diann_cpus,
+      parallel = isTRUE(input$parallel_search),
+      jobs = values$diann_jobs
     )
 
     div(class = "alert alert-info",
@@ -1886,8 +2097,10 @@ server_search <- function(input, output, session, values, add_to_log,
       max_pep_len = input$max_pep_len %||% 30,
       min_pr_mz = input$min_pr_mz %||% 300,
       max_pr_mz = input$max_pr_mz %||% 1200,
-      min_pr_charge = 1, max_pr_charge = 4,
-      min_fr_mz = 200, max_fr_mz = 1200,
+      min_pr_charge = values$diann_search_settings$search_params$min_pr_charge %||% 1,
+      max_pr_charge = values$diann_search_settings$search_params$max_pr_charge %||% 4,
+      min_fr_mz = values$diann_search_settings$search_params$min_fr_mz %||% 200,
+      max_fr_mz = values$diann_search_settings$search_params$max_fr_mz %||% 1200,
       enzyme = input$diann_enzyme,
       missed_cleavages = input$diann_missed_cleavages,
       mbr = input$diann_mbr %||% TRUE,
@@ -2091,8 +2304,9 @@ server_search <- function(input, output, session, values, add_to_log,
       diann_flags <- build_diann_flags(search_params, input$search_mode,
                                         input$diann_normalization, speclib_mount)
 
-      # Generate unique container name
-      container_name <- sprintf("delimp_%s_%s", analysis_name,
+      # Generate unique container name (sanitize for Docker naming rules)
+      safe_name <- gsub("[^a-zA-Z0-9_.-]", "_", analysis_name)
+      container_name <- sprintf("delimp_%s_%s", safe_name,
                                  format(Sys.time(), "%Y%m%d_%H%M%S"))
 
       # Build docker run command
@@ -2731,6 +2945,38 @@ server_search <- function(input, output, session, values, add_to_log,
       })
     }
 
+    # Record in search history CSV
+    tryCatch({
+      record_search(list(
+        timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        completed_at = NA,
+        user = Sys.info()[["user"]],
+        search_name = analysis_name,
+        backend = backend,
+        search_mode = input$search_mode,
+        parallel = isTRUE(input$parallel_search) && backend == "hpc",
+        n_files = nrow(values$diann_raw_files),
+        fasta_files = paste(basename(values$diann_fasta_files), collapse = ", "),
+        fasta_seq_count = values$fasta_info$n_sequences,
+        normalization = input$diann_normalization,
+        enzyme = search_params$enzyme,
+        mass_acc_mode = search_params$mass_acc_mode,
+        mass_acc = search_params$mass_acc,
+        mass_acc_ms1 = search_params$mass_acc_ms1,
+        scan_window = search_params$scan_window,
+        mbr = isTRUE(search_params$mbr),
+        extra_cli_flags = search_params$extra_cli_flags,
+        output_dir = output_dir,
+        job_id = job_id,
+        status = "submitted",
+        duration_min = NA,
+        speclib_cached = !is.null(cached_entry),
+        imported_from_log = isTRUE(values$diann_search_settings$imported_from_log),
+        app_version = values$app_version %||% "unknown",
+        notes = ""
+      ))
+    }, error = function(e) message("[DE-LIMP] Search history recording failed: ", e$message))
+
     add_to_log("DIA-NN Search Submitted", c(
       sprintf("# Job ID: %s", job_id),
       sprintf("# Backend: %s", backend),
@@ -2778,6 +3024,24 @@ server_search <- function(input, output, session, values, add_to_log,
 
     for (i in seq_along(jobs)) {
       if (isTRUE(jobs[[i]]$removed)) next
+
+      # Fix parallel jobs with inconsistent status: overall "completed" but
+      # substeps still running/queued. This can happen if sacct's .extern step
+      # falsely reported COMPLETED (fixed in check_slurm_status). Re-open
+      # these jobs for re-polling.
+      if (isTRUE(jobs[[i]]$parallel) && jobs[[i]]$status == "completed") {
+        ss <- jobs[[i]]$parallel_step_status %||% list()
+        terminal <- c("completed", "skipped", "failed", "cancelled")
+        all_done <- all(vapply(ss, function(s) s %in% terminal, logical(1)))
+        if (!all_done) {
+          message(sprintf("[DE-LIMP] Reopening parallel job '%s' — substeps not all terminal",
+            jobs[[i]]$name))
+          jobs[[i]]$status <- "running"
+          jobs[[i]]$completed_at <- NULL
+          changed <- TRUE
+        }
+      }
+
       if (!jobs[[i]]$status %in% c("queued", "running")) next
 
       if (isTRUE(jobs[[i]]$backend == "local")) {
@@ -2863,7 +3127,7 @@ server_search <- function(input, output, session, values, add_to_log,
             else cmd
           }
           sacct_cmd <- sprintf(
-            "%s -j %s --format=State --noheader --parsable2 2>/dev/null",
+            "%s -j %s --format=JobID,State --noheader --parsable2 2>/dev/null",
             slurm_cmd_fn("sacct"), arr_id)
 
           sacct_result <- if (!is.null(job_cfg)) {
@@ -2871,15 +3135,25 @@ server_search <- function(input, output, session, values, add_to_log,
           } else {
             tryCatch({
               out <- system2(slurm_cmd_fn("sacct"),
-                args = c("-j", arr_id, "--format=State", "--noheader", "--parsable2"),
+                args = c("-j", arr_id, "--format=JobID,State", "--noheader", "--parsable2"),
                 stdout = TRUE, stderr = TRUE)
               list(status = 0, stdout = out)
             }, error = function(e) list(status = 1, stdout = character()))
           }
 
           if (sacct_result$status == 0 && length(sacct_result$stdout) > 0) {
-            states <- toupper(trimws(sacct_result$stdout))
-            states <- states[nzchar(states)]
+            # Only count actual array task entries (JOBID_N format)
+            # Excludes: parent job (no _), substeps (.extern/.batch)
+            states <- character(0)
+            for (line in sacct_result$stdout) {
+              parts <- strsplit(trimws(line), "\\|")[[1]]
+              if (length(parts) >= 2) {
+                jid <- trimws(parts[1])
+                st <- toupper(trimws(parts[2]))
+                if (grepl("_", jid) && !grepl("\\.", jid) && nzchar(st))
+                  states <- c(states, st)
+              }
+            }
             n_done <- sum(grepl("COMPLETED", states))
             n_running <- sum(grepl("RUNNING", states))
             n_pending <- sum(grepl("PENDING", states))
@@ -2962,6 +3236,21 @@ server_search <- function(input, output, session, values, add_to_log,
       if (new_status != jobs[[i]]$status) {
         jobs[[i]]$status <- new_status
         changed <- TRUE
+
+        # Update search history CSV
+        if (new_status %in% c("completed", "failed", "cancelled")) {
+          tryCatch({
+            dur <- if (!is.null(jobs[[i]]$submitted_at)) {
+              round(as.numeric(difftime(Sys.time(), jobs[[i]]$submitted_at, units = "mins")), 1)
+            } else NA
+            update_search_status(
+              output_dir = jobs[[i]]$output_dir,
+              status = new_status,
+              completed_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+              duration_min = dur
+            )
+          }, error = function(e) message("[DE-LIMP] Search history update failed: ", e$message))
+        }
 
         # Sync status to Core Facility SQLite database
         if (is_core_facility && !is.null(cf_config)) {

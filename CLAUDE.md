@@ -45,7 +45,7 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `stats/community_stats.json` | GitHub traffic data generated daily by `.github/workflows/track-stats.yml` |
 
 ### Tab Structure (page_navbar)
-Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **About** dropdown (Community, Analysis History) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
+Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **About** dropdown (Community, Search History, Analysis History) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
 
 - `page_navbar(id = "main_tabs", navbar_options = navbar_options(bg = "#2c3e50"))` — dark navbar, global sidebar, hover dropdowns
 - Dropdown section labels ("Setup"/"Results"/"AI") injected via JS
@@ -57,7 +57,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
 **Tab values that MUST NOT change** (used by server nav_select/nav_show/nav_hide):
-`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"analysis_history_tab"`
+`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"search_history_tab"`, `"analysis_history_tab"`
 
 #### Analysis dropdown
 - **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
@@ -69,7 +69,14 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 
 #### About dropdown
 - **Community** (`value = "about_tab"`) — Version, GitHub stats cards, trend sparklines, recent discussions, links
-- **Analysis History** (`value = "analysis_history_tab"`) — DT table with expandable detail rows, project filter, project management
+- **Search History** (`value = "search_history_tab"`) — DT table with expandable detail rows (enzyme, mass acc, flags), Import Settings + View Log buttons, cross-reference to Analysis History
+- **Analysis History** (`value = "analysis_history_tab"`) — DT table with expandable detail rows, project filter, project management, cross-reference to Search History
+
+### Search History
+- **Search history CSV**: `search_history_path()` → shared `/Volumes/proteomics-grp/delimp/search_history.csv` or local `~/.delimp_search_history.csv`. Append-only with file locking; updates via `update_search_status()` (rewrite matching row).
+- **Record points**: Job submission (`server_search.R` — all 4 backends) and job completion/failure (monitoring observer).
+- **Cross-reference**: `output_dir` joins search history ↔ analysis history. Both tables show a link icon to navigate to the matching entry in the other table.
+- **Import Settings**: Reads CSV row fields and applies to search UI inputs (mass acc, enzyme, mode, etc.).
 
 ### Analysis History & Projects
 - **Analysis history CSV**: `analysis_history_path()` → shared `/Volumes/proteomics-grp/delimp/analysis_history.csv` or local `~/.delimp_analysis_history.csv`. Append-only with file locking.
@@ -156,9 +163,13 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | DIA-NN `--fasta-search`/`--predictor` Step 1 only | Including in Steps 2-5 causes full FASTA re-digest. `generate_parallel_scripts()` strips these from `step_flags`. |
 | DIA-NN auto mass acc + `--use-quant` | Produces different results. `generate_parallel_scripts()` forces `mass_acc_mode = "manual"`. See @docs/PATTERNS.md for full flag reference. |
 | `nrow(raw_data$E)` counts precursors not proteins | Use `length(unique(raw_data$genes$Protein.Group))` for protein group count. `y_protein$E` rows are protein groups (post-pipeline). |
+| `sacct` `.extern` step falsely reports COMPLETED | `sacct` includes `.extern`/`.batch` substeps that COMPLETE even when the main job is PENDING/FAILED. `check_slurm_status()` now requests `JobID,State` format and filters out substep lines (those containing `.`). |
+| Log import ignores `fr_mz`/`pr_charge` | `parse_diann_log` previously put `--max-fr-mz`, `--min-fr-mz`, `--min-pr-charge`, `--max-pr-charge` into `extra_cli_flags` instead of `params`. Now parsed via `value_map` so they flow properly into `search_params` and `build_diann_flags`. |
+| Array progress sacct inflated counts | `sacct -j ARRAY_ID` returns parent job + `.extern`/`.batch` substeps for each task. Filter to only `JOBID_N` format entries: `grepl("_", jid) && !grepl("\\.", jid)`. |
+| Docker container name rejected | `analysis_name` with spaces/special chars fails Docker naming rules `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. Sanitize with `gsub("[^a-zA-Z0-9_.-]", "_", name)`. |
 
 ## Version History
 
-Current version: **v3.2.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.2.1** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
-Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0)
+Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1)

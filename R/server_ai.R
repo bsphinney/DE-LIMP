@@ -188,8 +188,10 @@ server_ai <- function(input, output, session, values) {
       incProgress(0.8, detail = "Asking AI...")
       ai_summary <- ask_gemini_text_chat(final_prompt, input$user_api_key, input$model_name)
 
-      # Store for export
+      # Store for export and show download buttons
       values$ai_summary_text <- ai_summary
+      shinyjs::show("download_ai_summary_html")
+      shinyjs::show("download_claude_prompt")
 
       # Render the summary to the output area
       output$ai_summary_output <- renderUI({
@@ -408,6 +410,9 @@ server_ai <- function(input, output, session, values) {
           if (!is.null(ss) && is.list(ss)) {
             sp <- ss$search_params
             params <- c(params, "", "DIA-NN SEARCH SETTINGS:",
+              if (!is.null(ss$diann_version) && nzchar(ss$diann_version))
+                paste0("  DIA-NN version: ", ss$diann_version) else NULL,
+              paste0("  Search mode: ", ss$search_mode %||% "unknown"),
               paste0("  FASTA: ", paste(basename(ss$fasta_files), collapse = ", ")),
               if (!is.null(ss$fasta_seq_count) && !is.na(ss$fasta_seq_count))
                 paste0("  FASTA sequences: ", format(ss$fasta_seq_count, big.mark = ","))
@@ -415,8 +420,35 @@ server_ai <- function(input, output, session, values) {
               paste0("  Enzyme: ", sp$enzyme),
               paste0("  Missed cleavages: ", sp$missed_cleavages),
               paste0("  FDR: ", sp$qvalue),
-              paste0("  MBR: ", sp$mbr),
-              paste0("  Search mode: ", ss$search_mode))
+              paste0("  MBR: ", if (isTRUE(sp$mbr)) "enabled" else "disabled"),
+              if (!is.null(sp$mass_acc_mode) && nzchar(sp$mass_acc_mode))
+                paste0("  Mass accuracy mode: ", sp$mass_acc_mode) else NULL,
+              if (!is.null(sp$mass_acc) && !is.na(sp$mass_acc))
+                paste0("  Mass accuracy (MS2): ", sp$mass_acc, " ppm") else NULL,
+              if (!is.null(sp$mass_acc_ms1) && !is.na(sp$mass_acc_ms1))
+                paste0("  Mass accuracy (MS1): ", sp$mass_acc_ms1, " ppm") else NULL,
+              if (!is.null(sp$scan_window) && !is.na(sp$scan_window) && sp$scan_window > 0)
+                paste0("  Scan window: ", sp$scan_window) else NULL,
+              if (isTRUE(sp$mod_met_ox))
+                "  Variable mod: Methionine oxidation (UniMod:35)" else NULL,
+              if (isTRUE(sp$mod_nterm_acetyl))
+                "  Variable mod: N-terminal acetylation (UniMod:1)" else NULL,
+              if (!is.null(sp$extra_var_mods) && nzchar(sp$extra_var_mods))
+                paste0("  Extra variable mods: ", sp$extra_var_mods) else NULL,
+              if (!is.null(sp$min_fr_mz) && !is.na(sp$min_fr_mz))
+                paste0("  Fragment m/z range: ", sp$min_fr_mz, "-", sp$max_fr_mz %||% 1800) else NULL,
+              if (!is.null(sp$min_pr_charge) && !is.na(sp$min_pr_charge))
+                paste0("  Precursor charge range: ", sp$min_pr_charge, "-", sp$max_pr_charge %||% 4) else NULL,
+              if (isTRUE(sp$rt_profiling))
+                "  RT profiling: enabled" else NULL,
+              if (!is.null(ss$normalization) && nzchar(ss$normalization))
+                paste0("  DIA-NN normalization: ", ss$normalization) else NULL,
+              if (!is.null(sp$extra_cli_flags) && nzchar(sp$extra_cli_flags))
+                paste0("  Extra CLI flags: ", sp$extra_cli_flags) else NULL,
+              if (!is.null(ss$n_raw_files) && !is.na(ss$n_raw_files))
+                paste0("  Raw files searched: ", ss$n_raw_files) else NULL,
+              if (isTRUE(ss$imported_from_log))
+                "  (Settings imported from DIA-NN log file)" else NULL)
           }
           # Package versions
           params <- c(params, "", "PACKAGE VERSIONS:",
@@ -507,7 +539,7 @@ server_ai <- function(input, output, session, values) {
           )
         }
 
-        # Experimental design
+        # Experimental design (with covariates if present)
         design_section <- ""
         if (!is.null(values$metadata)) {
           group_summary <- values$metadata %>%
@@ -516,7 +548,173 @@ server_ai <- function(input, output, session, values) {
             summarise(N_Replicates = n(), .groups = "drop")
           design_text <- paste(capture.output(print(as.data.frame(group_summary), row.names = FALSE)), collapse = "\n")
           design_section <- paste0("\n\n--- EXPERIMENTAL DESIGN ---\n", design_text)
+
+          # Add covariate info if present
+          cov1 <- values$cov1_name
+          cov2 <- values$cov2_name
+          has_cov1 <- !is.null(cov1) && nzchar(cov1) && cov1 != "Covariate1" &&
+            any(nzchar(values$metadata$Covariate1))
+          has_cov2 <- !is.null(cov2) && nzchar(cov2) && cov2 != "Covariate2" &&
+            any(nzchar(values$metadata$Covariate2))
+          if (has_cov1 || has_cov2) {
+            cov_lines <- "\n\nCOVARIATES IN MODEL:"
+            if (has_cov1) {
+              cov1_vals <- values$metadata %>%
+                filter(Group != "", nzchar(Covariate1)) %>%
+                dplyr::select(File.Name, Group, Covariate1)
+              colnames(cov1_vals)[3] <- cov1
+              cov1_text <- paste(capture.output(print(as.data.frame(cov1_vals), row.names = FALSE)), collapse = "\n")
+              cov_lines <- paste0(cov_lines, "\n\n", cov1, ":\n", cov1_text)
+            }
+            if (has_cov2) {
+              cov2_vals <- values$metadata %>%
+                filter(Group != "", nzchar(Covariate2)) %>%
+                dplyr::select(File.Name, Group, Covariate2)
+              colnames(cov2_vals)[3] <- cov2
+              cov2_text <- paste(capture.output(print(as.data.frame(cov2_vals), row.names = FALSE)), collapse = "\n")
+              cov_lines <- paste0(cov_lines, "\n\n", cov2, ":\n", cov2_text)
+            }
+            design_section <- paste0(design_section, cov_lines)
+          }
         }
+
+        # DIA-NN search settings inline block for prompt
+        search_settings_inline <- ""
+        ss <- values$diann_search_settings
+        if (!is.null(ss) && is.list(ss)) {
+          sp <- ss$search_params
+          ss_lines <- c(
+            "--- DIA-NN SEARCH SETTINGS ---",
+            if (!is.null(ss$diann_version) && nzchar(ss$diann_version))
+              paste0("DIA-NN version: ", ss$diann_version) else NULL,
+            paste0("Search mode: ", ss$search_mode %||% "unknown"),
+            paste0("FASTA database: ", paste(basename(ss$fasta_files), collapse = ", ")),
+            if (!is.null(ss$fasta_seq_count) && !is.na(ss$fasta_seq_count))
+              paste0("FASTA sequences: ", format(ss$fasta_seq_count, big.mark = ",")) else NULL,
+            paste0("Enzyme: ", sp$enzyme),
+            paste0("Missed cleavages: ", sp$missed_cleavages),
+            paste0("Precursor FDR: ", sp$qvalue),
+            paste0("Match between runs (MBR): ", if (isTRUE(sp$mbr)) "enabled" else "disabled"),
+            if (!is.null(sp$mass_acc_mode) && nzchar(sp$mass_acc_mode))
+              paste0("Mass accuracy mode: ", sp$mass_acc_mode) else NULL,
+            if (!is.null(sp$mass_acc) && !is.na(sp$mass_acc))
+              paste0("Mass accuracy MS2: ", sp$mass_acc, " ppm") else NULL,
+            if (!is.null(sp$mass_acc_ms1) && !is.na(sp$mass_acc_ms1))
+              paste0("Mass accuracy MS1: ", sp$mass_acc_ms1, " ppm") else NULL,
+            if (!is.null(sp$scan_window) && !is.na(sp$scan_window) && sp$scan_window > 0)
+              paste0("Scan window: ", sp$scan_window) else NULL,
+            if (isTRUE(sp$mod_met_ox)) "Variable mod: Methionine oxidation" else NULL,
+            if (isTRUE(sp$mod_nterm_acetyl)) "Variable mod: N-terminal acetylation" else NULL,
+            if (!is.null(sp$extra_var_mods) && nzchar(sp$extra_var_mods))
+              paste0("Extra variable mods: ", sp$extra_var_mods) else NULL,
+            if (!is.null(sp$min_fr_mz) && !is.na(sp$min_fr_mz))
+              paste0("Fragment m/z range: ", sp$min_fr_mz, "-", sp$max_fr_mz %||% 1800) else NULL,
+            if (!is.null(sp$min_pr_charge) && !is.na(sp$min_pr_charge))
+              paste0("Precursor charge range: ", sp$min_pr_charge, "-", sp$max_pr_charge %||% 4) else NULL,
+            if (isTRUE(sp$rt_profiling)) "RT profiling: enabled" else NULL,
+            if (!is.null(ss$normalization) && nzchar(ss$normalization))
+              paste0("DIA-NN normalization: ", ss$normalization) else NULL,
+            if (!is.null(sp$extra_cli_flags) && nzchar(sp$extra_cli_flags))
+              paste0("Extra CLI flags: ", sp$extra_cli_flags) else NULL,
+            if (!is.null(ss$n_raw_files) && !is.na(ss$n_raw_files))
+              paste0("Raw files searched: ", ss$n_raw_files) else NULL
+          )
+          search_settings_inline <- paste0("\n\n", paste(ss_lines, collapse = "\n"))
+        }
+
+        # Missingness summary (pre vs post imputation)
+        missingness_inline <- ""
+        tryCatch({
+          if (!is.null(values$raw_data) && !is.null(values$y_protein) && !is.null(values$metadata)) {
+            raw_mat <- values$raw_data$E
+            post_mat <- values$y_protein$E
+            meta <- values$metadata %>% filter(Group != "")
+
+            # Per-group missingness in raw data (precursor-level)
+            miss_lines <- c("--- DATA COMPLETENESS ---",
+              paste0("Precursor-level (raw): ", nrow(raw_mat), " precursors x ", ncol(raw_mat), " samples"),
+              paste0("Protein-level (after pipeline): ", nrow(post_mat), " proteins x ", ncol(post_mat), " samples"),
+              paste0("Overall raw missingness: ", round(100 * sum(is.na(raw_mat)) / length(raw_mat), 1), "%"),
+              paste0("Overall post-pipeline missingness: ", round(100 * sum(is.na(post_mat)) / length(post_mat), 1), "%"),
+              "", "Per-group raw missingness (precursor-level):")
+            for (grp in unique(meta$Group)) {
+              grp_samples <- meta$File.Name[meta$Group == grp]
+              grp_cols <- colnames(raw_mat) %in% grp_samples
+              if (any(grp_cols)) {
+                grp_mat <- raw_mat[, grp_cols, drop = FALSE]
+                pct <- round(100 * sum(is.na(grp_mat)) / length(grp_mat), 1)
+                miss_lines <- c(miss_lines, paste0("  ", grp, ": ", pct, "% missing (n=", sum(grp_cols), " samples)"))
+              }
+            }
+            missingness_inline <- paste0("\n\n", paste(miss_lines, collapse = "\n"))
+          }
+        }, error = function(e) NULL)
+
+        # MOFA2 variance explained summary
+        mofa_inline <- ""
+        tryCatch({
+          if (!is.null(values$mofa_variance_explained)) {
+            r2 <- values$mofa_variance_explained$r2_per_factor
+            mofa_lines <- c("--- MOFA2 MULTI-OMICS INTEGRATION ---")
+            for (group_name in names(r2)) {
+              mat <- r2[[group_name]]
+              if (length(names(r2)) > 1)
+                mofa_lines <- c(mofa_lines, paste0("Group: ", group_name))
+              for (i in seq_len(nrow(mat))) {
+                vals <- paste(paste0(colnames(mat), ": ", round(mat[i, ], 1), "%"), collapse = ", ")
+                mofa_lines <- c(mofa_lines, paste0("  ", rownames(mat)[i], " — ", vals))
+              }
+            }
+            # Total variance per view
+            r2_total <- values$mofa_variance_explained$r2_total
+            if (!is.null(r2_total)) {
+              for (group_name in names(r2_total)) {
+                totals <- r2_total[[group_name]]
+                mofa_lines <- c(mofa_lines, "",
+                  paste0("Total variance explained per view: ",
+                    paste(paste0(names(totals), ": ", round(totals, 1), "%"), collapse = ", ")))
+              }
+            }
+            if (!is.null(values$mofa_last_run_params)) {
+              mp <- values$mofa_last_run_params
+              mofa_lines <- c(mofa_lines, "",
+                paste0("MOFA2 params: ", mp$n_factors %||% "?", " factors, ",
+                  length(mp$views %||% list()), " views (",
+                  paste(mp$views %||% "?", collapse = ", "), ")"))
+            }
+            mofa_inline <- paste0("\n\n", paste(mofa_lines, collapse = "\n"))
+          }
+        }, error = function(e) NULL)
+
+        # Phosphoproteomics summary
+        phospho_inline <- ""
+        tryCatch({
+          if (!is.null(values$phospho_fit)) {
+            phospho_contrasts <- colnames(values$phospho_fit$contrasts)
+            phospho_lines <- c("--- PHOSPHOPROTEOMICS SUMMARY ---",
+              paste0("Total phosphosites quantified: ", nrow(values$phospho_fit$coefficients)),
+              paste0("Contrasts: ", paste(phospho_contrasts, collapse = ", ")))
+            for (pc in phospho_contrasts) {
+              tt <- limma::topTable(values$phospho_fit, coef = pc, number = Inf)
+              n_sig <- sum(tt$adj.P.Val < 0.05, na.rm = TRUE)
+              n_up <- sum(tt$adj.P.Val < 0.05 & tt$logFC > 0, na.rm = TRUE)
+              n_down <- sum(tt$adj.P.Val < 0.05 & tt$logFC < 0, na.rm = TRUE)
+              phospho_lines <- c(phospho_lines,
+                paste0("  ", pc, ": ", n_sig, " significant sites (", n_up, " up, ", n_down, " down)"))
+              # Top 5 sites by absolute logFC
+              top5 <- head(tt[order(-abs(tt$logFC)), ], 5)
+              if (nrow(top5) > 0) {
+                site_ids <- if (!is.null(top5$SiteID)) top5$SiteID else rownames(top5)
+                for (j in seq_len(nrow(top5))) {
+                  phospho_lines <- c(phospho_lines,
+                    paste0("    ", site_ids[j], ": logFC=", round(top5$logFC[j], 2),
+                      ", adj.P=", formatC(top5$adj.P.Val[j], format = "e", digits = 2)))
+                }
+              }
+            }
+            phospho_inline <- paste0("\n\n", paste(phospho_lines, collapse = "\n"))
+          }
+        }, error = function(e) NULL)
 
         n_total <- nrow(topTable(values$fit, coef = all_contrasts[1], number = Inf))
 
@@ -562,6 +760,28 @@ server_ai <- function(input, output, session, values) {
             "Highlight pathways with the highest normalized enrichment scores (NES). ",
             "Connect enriched pathways to the DE protein findings above.\n\n"
           ) else "",
+          if (nzchar(mofa_inline)) paste0(
+            "## Multi-Omics Integration (MOFA2)\n",
+            "MOFA2 variance explained data is provided below. Discuss:\n",
+            "- Which factors capture the most variance and in which views\n",
+            "- Whether the multi-omics integration reveals structure not visible in single-view analysis\n",
+            "- How the MOFA factors relate to the experimental groups and DE findings\n\n"
+          ) else "",
+          if (nzchar(phospho_inline)) paste0(
+            "## Phosphoproteomics\n",
+            "Phosphosite-level DE results are provided below and in `Phospho_DE_Results.csv`. Discuss:\n",
+            "- Number and direction of significant phosphosites per comparison\n",
+            "- Top regulated phosphosites and their known regulatory roles\n",
+            "- Whether phospho changes are concordant or discordant with protein-level changes\n",
+            "- Any kinase activity implications from the regulated sites\n\n"
+          ) else "",
+          if (nzchar(missingness_inline)) paste0(
+            "## Data Completeness\n",
+            "Missingness data is provided below. Comment on:\n",
+            "- Overall data completeness and whether missingness varies across groups\n",
+            "- Whether group-specific missingness could introduce bias\n",
+            "- The effectiveness of imputation (compare pre vs post-pipeline missingness)\n\n"
+          ) else "",
           "## Biological Interpretation\n",
           "Suggest what biological processes or pathways may be affected based on the protein lists. ",
           "Note any well-known protein families, complexes, or signaling cascades represented. ",
@@ -603,6 +823,20 @@ server_ai <- function(input, output, session, values) {
           "- **Coefficient of Variation (CV)**: A measure of measurement reproducibility — lower is more reliable\n",
           "- **Normalization**: Why raw intensities need correction (loading differences between samples) and how DPC-CN (Data Point Correspondence - Cyclic Normalization) works conceptually\n\n",
           "Keep the tone approachable and encouraging. Avoid jargon where possible, and define it when unavoidable.\n\n",
+          if (nzchar(search_settings_inline)) paste0(
+            "## DIA-NN Search Methods\n",
+            "DIA-NN search parameters are provided below under 'DIA-NN SEARCH SETTINGS'. ",
+            "Write a publication-ready Methods subsection describing the database search. Include:\n",
+            "- The FASTA database used (name, number of sequences if available)\n",
+            "- DIA-NN version and search mode (library-free vs spectral library)\n",
+            "- Enzyme specificity and missed cleavages\n",
+            "- Mass accuracy settings (MS1 and MS2) and whether they were auto-optimized or manually set\n",
+            "- Variable modifications (e.g., methionine oxidation, N-terminal acetylation)\n",
+            "- FDR threshold and match-between-runs status\n",
+            "- Any other relevant search parameters (scan window, normalization, extra flags)\n",
+            "Write this in third person past tense, suitable for a journal Methods section. ",
+            "Cite DIA-NN (Demichev et al., Nature Methods, 2020) appropriately.\n\n"
+          ) else "",
           if (nzchar(methods_note)) paste0(
             "## Methodology & Reproducibility\n",
             "A detailed methodology is in `Methods_and_References.txt`. ",
@@ -616,6 +850,10 @@ server_ai <- function(input, output, session, values) {
           "Reference specific proteins from the CSV files to support your analysis.\n",
           design_section,
           qc_inline,
+          search_settings_inline,
+          missingness_inline,
+          mofa_inline,
+          phospho_inline,
           "\n\n--- TOP DE PROTEINS (summary — full data in CSV) ---\n\n",
           "Number of comparisons: ", ctx$n_contrasts, "\n\n",
           ctx$contrast_text, "\n\n",

@@ -379,7 +379,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             style = "overflow-y: auto; max-height: calc(100vh - 200px);",
 
             textInput("analysis_name", "Analysis Name",
-              value = paste0("search_", format(Sys.Date(), "%Y%m%d")),
+              value = "",
               placeholder = "e.g., HeLa_DIA_2026"),
 
             # Core facility: lab, instrument, project for search tracking
@@ -531,6 +531,22 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           card_header(tagList(icon("sliders"), " 2. Search Settings")),
           card_body(
             style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+
+            tags$div(
+              style = "margin-bottom: 12px; padding: 8px 10px; background: #f0f4f8; border-radius: 6px; border: 1px solid #dee2e6;",
+              div(style = "display: flex; align-items: center; gap: 8px;",
+                div(style = "flex: 1;",
+                  fileInput("diann_log_file", NULL,
+                    placeholder = "Import from DIA-NN log...",
+                    width = "100%")
+                ),
+                actionButton("import_log_info_btn", icon("question-circle"),
+                  class = "btn-outline-info btn-sm",
+                  style = "margin-top: -18px;",
+                  title = "How to use log import")
+              ),
+              uiOutput("log_import_feedback")
+            ),
 
             radioButtons("search_mode", "Search Mode:",
               choices = c(
@@ -842,7 +858,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               icon = icon("rocket"),
               style = "margin-top: 10px;"),
 
-            checkboxInput("auto_load_results", "Auto-load results when complete", TRUE),
+            checkboxInput("auto_load_results", "Auto-load results when complete", FALSE),
 
             hr(),
             div(style = "display: flex; justify-content: space-between; align-items: center;",
@@ -1210,15 +1226,19 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                           class = "btn-info btn-lg",
                           style = "padding: 12px 30px; font-size: 1.1em;"
                         ),
-                        downloadButton("download_ai_summary_html",
-                          tagList(icon("file-export"), " Export Report"),
-                          class = "btn-success btn-lg",
-                          style = "padding: 12px 30px; font-size: 1.1em;"
+                        shinyjs::hidden(
+                          downloadButton("download_ai_summary_html",
+                            tagList(icon("download"), " Download as HTML"),
+                            class = "btn-success btn-lg",
+                            style = "padding: 12px 30px; font-size: 1.1em;"
+                          )
                         ),
-                        downloadButton("download_claude_prompt",
-                          tagList(icon("download"), " Export for Claude"),
-                          class = "btn-outline-secondary btn-lg",
-                          style = "padding: 12px 30px; font-size: 1.1em;"
+                        shinyjs::hidden(
+                          downloadButton("download_claude_prompt",
+                            tagList(icon("download"), " Export for Claude"),
+                            class = "btn-outline-secondary btn-lg",
+                            style = "padding: 12px 30px; font-size: 1.1em;"
+                          )
                         )
                       ),
 
@@ -1554,7 +1574,18 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           uiOutput("stats_updated_at")
         )
       ),
-      nav_panel("Analysis History", value = "analysis_history_tab", icon = icon("clock-rotate-left"),
+      if (!is_hf_space) nav_panel("Search History", value = "search_history_tab", icon = icon("magnifying-glass"),
+        div(style = "padding: 20px;",
+          div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;",
+            h4("Search History", style = "margin: 0;"),
+            actionButton("search_history_refresh_btn", "Refresh",
+              icon = icon("arrows-rotate"), class = "btn-outline-primary btn-sm")
+          ),
+          p(class = "text-muted", "DIA-NN searches submitted from this machine/volume. Click a row to expand details."),
+          DTOutput("search_history_table")
+        )
+      ),
+      if (!is_hf_space) nav_panel("Analysis History", value = "analysis_history_tab", icon = icon("clock-rotate-left"),
         div(style = "padding: 20px;",
           div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;",
             h4("Analysis History", style = "margin: 0;"),

@@ -5,6 +5,27 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-03-05
+
+### Added
+- **Search history**: Track all DIA-NN searches with full parameter logging (enzyme, mass accuracy, scan window, MBR, normalization, extra CLI flags). CSV-based with file locking, shared volume support. Expandable detail rows, Import Settings button, View Log button, cross-reference to Analysis History via `output_dir`.
+- **DIA-NN log parser** (`parse_diann_log`): Extract search parameters from DIA-NN log files — version, FASTA, enzyme, mass accuracy, scan window, MBR, modifications, fragment m/z range, precursor charge range. Inverse of `build_diann_flags()`. 107 unit tests.
+- **Claude export enhancements**: Export for Claude now includes DIA-NN search settings (version, mass accuracy, modifications, scan window, etc.) with prompt for publication-ready Methods section; per-group missingness summary; MOFA2 variance explained per factor/view; phosphosite DE summary with top sites; covariate metadata per sample.
+- **Parallel job consistency check**: Validates step dependency chain integrity before monitoring parallel search jobs.
+- **Search history unit tests**: 51 tests covering `record_search()`, `update_search_status()`, `search_history_path()`, `backfill_search_history()`.
+
+### Fixed
+- **Array progress inflated counts**: `sacct` for parallel array jobs counted parent job and `.extern`/`.batch` substeps, inflating progress (e.g., 51/41 instead of 37/41). Now filters to only array task entries (`JOBID_N` format).
+- **`sacct` `.extern` step false COMPLETED**: `check_slurm_status()` now uses `--format=JobID,State` and filters out `.extern`/`.batch` substep lines that report COMPLETED even when the main job is PENDING/FAILED.
+- **`parse_diann_log` fr_mz/pr_charge**: `--max-fr-mz`, `--min-fr-mz`, `--min-pr-charge`, `--max-pr-charge` were incorrectly routed to `extra_cli_flags`. Now parsed via `value_map` and flow properly into `search_params`.
+- **Docker container name with special characters**: `analysis_name` is now sanitized via `gsub("[^a-zA-Z0-9_.-]", "_", ...)` before building container name.
+
+### Changed
+- **AI Summary export buttons**: "Export Report" renamed to "Download as HTML"; both "Download as HTML" and "Export for Claude" are hidden until AI summary is generated (progressive reveal via `shinyjs`).
+- **Analysis name field**: No longer has a default value — users must provide a name before submitting a DIA-NN search.
+- **HF Space**: Search History and Analysis History tabs hidden on Hugging Face deployment (not useful in ephemeral container).
+- **DIA-NN search settings in Analysis_Parameters.txt**: Expanded from 7 fields to ~20 (version, mass accuracy MS1/MS2, mode, scan window, variable mods, fragment m/z range, precursor charge range, RT profiling, normalization, extra CLI flags).
+
 ## [3.1.1] - 2026-02-26
 
 ### Fixed

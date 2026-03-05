@@ -2,6 +2,7 @@
 #  DE-LIMP: Differential Expression & Limpa Proteomics App
 #  (Formerly LIMP-D)
 #  Status: Production Ready (Hugging Face Compatible v1.2)
+
 # ==============================================================================
 
 # Set CRAN mirror to avoid interactive popup (especially in VS Code)

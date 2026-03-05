@@ -490,6 +490,271 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
 }
 
 # =============================================================================
+# DIA-NN Log File Parsing (inverse of build_diann_flags)
+# =============================================================================
+
+#' Parse a DIA-NN log file and extract search parameters
+#' @param log_path Path to DIA-NN log file (.log, .txt, .out)
+#' @return List with success, message, params, search_mode, normalization,
+#'   version, fasta_files, n_raw_files, command_line
+parse_diann_log <- function(log_path) {
+  fail <- function(msg) list(success = FALSE, message = msg,
+    params = list(), search_mode = NULL, normalization = NULL,
+    version = NULL, fasta_files = character(), n_raw_files = 0L,
+    command_line = NULL)
+
+  if (!file.exists(log_path)) return(fail("File not found."))
+
+  lines <- tryCatch(readLines(log_path, warn = FALSE), error = function(e) NULL)
+  if (is.null(lines) || length(lines) == 0) return(fail("Could not read file or file is empty."))
+
+  # Strip \r from Windows-style logs
+  lines <- gsub("\r", "", lines)
+
+  # Extract DIA-NN version from early log lines
+  version <- NULL
+  ver_match <- regmatches(lines, regexpr("DIA-NN\\s+([0-9]+\\.[0-9]+\\.?[0-9]*)", lines))
+  if (length(ver_match) > 0 && any(nzchar(ver_match))) {
+    ver_line <- ver_match[nzchar(ver_match)][1]
+    version <- sub("DIA-NN\\s+", "", ver_line)
+  }
+
+  # Find command line: first line matching diann binary followed by flags
+  cmd_idx <- grep("^(diann[^[:space:]]*|.*/diann[^[:space:]]*)\\s+--", lines)
+  if (length(cmd_idx) == 0) return(fail("No DIA-NN command line found in log file."))
+  cmd_line <- lines[cmd_idx[1]]
+
+  # Split into flag chunks: first remove the binary name, then split on --
+  binary_end <- regexpr("\\s+--", cmd_line)
+  if (binary_end < 1) return(fail("Could not parse command line."))
+  flags_str <- substring(cmd_line, binary_end + 1)
+
+  # Split on whitespace-preceded -- to get individual flag chunks
+  # Each chunk is like "flag-name value" or just "flag-name"
+  chunks <- strsplit(flags_str, "\\s+--")[[1]]
+  # First chunk still has leading --, strip it
+  chunks[1] <- sub("^--", "", chunks[1])
+
+  # Parse each chunk into flag name + value
+  parsed <- list()
+  for (chunk in chunks) {
+    chunk <- trimws(chunk)
+    if (!nzchar(chunk)) next
+    # Split flag name from value (value may contain spaces, e.g. var-mod)
+    parts <- regmatches(chunk, regexec("^([^[:space:]]+)(\\s+(.*))?$", chunk))[[1]]
+    flag_name <- parts[2]
+    flag_value <- if (length(parts) >= 4 && nzchar(parts[4])) trimws(parts[4]) else NULL
+    parsed <- c(parsed, list(list(flag = flag_name, value = flag_value)))
+  }
+
+  # Operational flags to skip (these don't map to user-facing settings)
+  # Note: "lib" is NOT here — it's handled separately to detect library mode
+  skip_flags <- c("f", "out", "out-lib", "temp", "threads", "verbose",
+                  "matrices", "gen-spec-lib", "use-quant", "no-ifs-removal",
+                  "report-lib-info", "quant-ori-names")
+
+
+  # Valid enzyme values for the dropdown
+
+  valid_enzymes <- c("K*,R*", "K,R", "K", "F,W,Y,L", "-")
+
+  # Initialize output params with NULLs (only set what the log contains)
+  params <- list()
+  fasta_files <- character()
+  n_raw_files <- 0L
+  var_mods <- character()
+  extra_cli_parts <- character()
+  has_mass_acc <- FALSE
+  has_fasta_search <- FALSE
+  has_phospho <- FALSE
+  has_lib <- FALSE
+  has_no_norm <- FALSE
+
+  # Value flag mapping: DIA-NN flag -> params key + type
+  value_map <- list(
+    "qvalue"           = list(key = "qvalue", type = "numeric"),
+    "var-mods"         = list(key = "max_var_mods", type = "integer"),
+    "window"           = list(key = "scan_window", type = "integer"),
+    "mass-acc"         = list(key = "mass_acc", type = "numeric"),
+    "mass-acc-ms1"     = list(key = "mass_acc_ms1", type = "numeric"),
+    "cut"              = list(key = "enzyme", type = "character"),
+    "missed-cleavages" = list(key = "missed_cleavages", type = "integer"),
+    "min-pep-len"      = list(key = "min_pep_len", type = "integer"),
+    "max-pep-len"      = list(key = "max_pep_len", type = "integer"),
+    "min-pr-mz"        = list(key = "min_pr_mz", type = "integer"),
+    "max-pr-mz"        = list(key = "max_pr_mz", type = "integer"),
+    "min-pr-charge"    = list(key = "min_pr_charge", type = "integer"),
+    "max-pr-charge"    = list(key = "max_pr_charge", type = "integer"),
+    "min-fr-mz"        = list(key = "min_fr_mz", type = "integer"),
+    "max-fr-mz"        = list(key = "max_fr_mz", type = "integer")
+  )
+
+  # Boolean flag mapping: DIA-NN flag -> params key
+  bool_map <- list(
+    "reanalyse"    = "mbr",
+    "rt-profiling" = "rt_profiling",
+    "xic"          = "xic",
+    "unimod4"      = "unimod4",
+    "met-excision" = "met_excision"
+  )
+
+  # Track which boolean flags we see
+  seen_bools <- character()
+
+  for (item in parsed) {
+    fl <- item$flag
+    val <- item$value
+
+    # Count raw files
+    if (fl == "f") {
+      n_raw_files <- n_raw_files + 1L
+      next
+    }
+
+    # Collect FASTA paths
+    if (fl == "fasta") {
+      if (!is.null(val)) fasta_files <- c(fasta_files, val)
+      next
+    }
+
+    # Detect library mode
+    if (fl == "lib") {
+      has_lib <- TRUE
+      next
+    }
+
+    # Skip operational flags
+    if (fl %in% skip_flags) next
+
+    # Special: --fasta-search
+    if (fl == "fasta-search") {
+      has_fasta_search <- TRUE
+      next
+    }
+
+    # Special: --predictor (skip, implied by fasta-search)
+    if (fl == "predictor") next
+
+    # Special: --phospho-output
+    if (fl == "phospho-output") {
+      has_phospho <- TRUE
+      next
+    }
+
+    # Special: --no-norm
+    if (fl == "no-norm") {
+      has_no_norm <- TRUE
+      next
+    }
+
+    # Special: --var-mod
+    if (fl == "var-mod") {
+      if (!is.null(val)) {
+        if (grepl("^UniMod:35", val)) {
+          params$mod_met_ox <- TRUE
+        } else if (grepl("^UniMod:1", val)) {
+          params$mod_nterm_acetyl <- TRUE
+        } else {
+          var_mods <- c(var_mods, val)
+        }
+      }
+      next
+    }
+
+    # Value flags
+    if (fl %in% names(value_map)) {
+      mapping <- value_map[[fl]]
+      if (!is.null(val)) {
+        converted <- switch(mapping$type,
+          "numeric" = suppressWarnings(as.numeric(val)),
+          "integer" = suppressWarnings(as.integer(val)),
+          "character" = val
+        )
+        # Enzyme validation
+        if (fl == "cut") {
+          if (!(val %in% valid_enzymes)) {
+            extra_cli_parts <- c(extra_cli_parts, paste0("--", fl, " ", val))
+            next
+          }
+        }
+        if (!is.na(converted)) params[[mapping$key]] <- converted
+        if (fl %in% c("mass-acc", "mass-acc-ms1")) has_mass_acc <- TRUE
+      }
+      next
+    }
+
+    # Boolean flags
+    if (fl %in% names(bool_map)) {
+      params[[bool_map[[fl]]]] <- TRUE
+      seen_bools <- c(seen_bools, fl)
+      next
+    }
+
+    # Unrecognized flag → extra_cli_flags
+    flag_str <- paste0("--", fl)
+    if (!is.null(val)) flag_str <- paste(flag_str, val)
+    extra_cli_parts <- c(extra_cli_parts, flag_str)
+  }
+
+  # Boolean flags not seen → FALSE
+  for (fl in names(bool_map)) {
+    key <- bool_map[[fl]]
+    if (!(fl %in% seen_bools)) params[[key]] <- FALSE
+  }
+
+  # Set mod defaults if not seen
+  if (is.null(params$mod_met_ox)) params$mod_met_ox <- FALSE
+  if (is.null(params$mod_nterm_acetyl)) params$mod_nterm_acetyl <- FALSE
+
+  # Extra var mods
+  if (length(var_mods) > 0) {
+    params$extra_var_mods <- paste(var_mods, collapse = "\n")
+  }
+
+  # Mass accuracy mode
+  if (has_mass_acc) {
+    params$mass_acc_mode <- "manual"
+  } else {
+    params$mass_acc_mode <- "auto"
+  }
+
+  # Extra CLI flags
+  if (length(extra_cli_parts) > 0) {
+    params$extra_cli_flags <- paste(extra_cli_parts, collapse = " ")
+  }
+
+  # Search mode
+  # If --fasta + --cut are present alongside --lib, this is likely a second pass
+  # of a library-free search (DIA-NN uses --lib for the predicted speclib).
+  # Prefer libfree so the user can reproduce the full workflow.
+  has_fasta_with_enzyme <- length(fasta_files) > 0 && !is.null(params$enzyme)
+  search_mode <- if (has_phospho) {
+    "phospho"
+  } else if (has_fasta_search || has_fasta_with_enzyme) {
+    "libfree"
+  } else if (has_lib) {
+    "library"
+  } else {
+    "libfree"
+  }
+
+  # Normalization
+  normalization <- if (has_no_norm) "off" else "on"
+
+  list(
+    success = TRUE,
+    message = NULL,
+    params = params,
+    search_mode = search_mode,
+    normalization = normalization,
+    version = version,
+    fasta_files = fasta_files,
+    n_raw_files = n_raw_files,
+    command_line = cmd_line
+  )
+}
+
+# =============================================================================
 # sbatch Script Generation (HPC backend)
 # =============================================================================
 
@@ -1361,35 +1626,53 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   }
 
   # Job not in queue — check sacct for final state
+  # Include JobID so we can filter out .extern/.batch substeps
+  sacct_fmt <- "JobID,State"
   if (!is.null(ssh_config)) {
     sacct_result <- ssh_exec(ssh_config,
-      sprintf("%s -j %s --format=State --noheader --parsable2 2>/dev/null",
-              slurm_cmd("sacct"), job_id),
+      sprintf("%s -j %s --format=%s --noheader --parsable2 2>/dev/null",
+              slurm_cmd("sacct"), job_id, sacct_fmt),
       login_shell = is.null(sbatch_path))
     sacct_output <- if (sacct_result$status == 0) sacct_result$stdout else "UNKNOWN"
   } else if (slurm_proxy_available()) {
-    sacct_cmd <- sprintf("%s -j %s --format=State --noheader --parsable2 2>/dev/null",
-                         slurm_cmd("sacct"), job_id)
+    sacct_cmd <- sprintf("%s -j %s --format=%s --noheader --parsable2 2>/dev/null",
+                         slurm_cmd("sacct"), job_id, sacct_fmt)
     proxy_result <- slurm_proxy_exec(sacct_cmd, timeout = 15)
     sacct_output <- if (proxy_result$status == 0) proxy_result$stdout else "UNKNOWN"
   } else {
     sacct_output <- tryCatch({
       system2(slurm_cmd("sacct"),
-        args = c("-j", job_id, "--format=State", "--noheader", "--parsable2"),
+        args = c("-j", job_id, paste0("--format=", sacct_fmt), "--noheader", "--parsable2"),
         stdout = TRUE, stderr = TRUE)
     }, error = function(e) "UNKNOWN")
   }
 
-  # Filter empty lines and look for meaningful state
+  # Filter empty lines
   sacct_output <- trimws(sacct_output)
   sacct_output <- sacct_output[nzchar(sacct_output)]
   if (length(sacct_output) == 0) return("unknown")
 
-  # Check all returned states (sacct may return multiple lines for job + steps)
-  # IMPORTANT: Check FAILED before COMPLETED — sacct includes an ".extern" step
-  # that always shows COMPLETED even when the main job FAILED. Without this order,
-  # a failed job with exit code 132 (SIGILL) would appear "completed".
-  states <- toupper(sacct_output)
+  # Parse JobID|State lines — filter out .extern/.batch substeps
+  # sacct returns lines like "12345|COMPLETED", "12345.extern|COMPLETED", "12345.batch|COMPLETED"
+  # The .extern step always COMPLETED immediately (even for PENDING/FAILED jobs),
+  # so we must only look at the main job line (no dot in the JobID).
+  states <- character(0)
+  for (line in sacct_output) {
+    parts <- strsplit(line, "\\|")[[1]]
+    if (length(parts) >= 2) {
+      jid <- trimws(parts[1])
+      st <- toupper(trimws(parts[2]))
+      # Keep only main job line (no .extern, .batch, .0, etc.)
+      if (!grepl("\\.", jid)) states <- c(states, st)
+    } else {
+      # Fallback for lines without JobID (shouldn't happen with new format)
+      states <- c(states, toupper(trimws(line)))
+    }
+  }
+
+  if (length(states) == 0) return("unknown")
+
+  # Check states — order matters: FAILED before COMPLETED
   if (any(grepl("FAILED|TIMEOUT|OUT_OF_ME", states))) return("failed")
   if (any(grepl("CANCELLED", states))) return("cancelled")
   if (any(grepl("RUNNING", states))) return("running")
@@ -1409,29 +1692,64 @@ parse_sbatch_output <- function(sbatch_stdout) {
 
 #' Estimate search time for display
 #' @return Character: human-readable estimate
-estimate_search_time <- function(n_files, search_mode = "libfree", cpus = 64) {
+estimate_search_time <- function(n_files, search_mode = "libfree", cpus = 64,
+                                  parallel = FALSE, jobs = NULL) {
   if (n_files == 0) return("")
-
-  # Rough heuristics (minutes per file at 64 cores)
-  min_per_file <- if (search_mode == "libfree") 45 else 20
-  max_per_file <- if (search_mode == "libfree") 60 else 30
-
-  # Scale by CPU count (assume ~linear scaling from 64)
-  scale <- 64 / max(cpus, 4)
-  min_per_file <- min_per_file * scale
-  max_per_file <- max_per_file * scale
-
-  total_min <- n_files * min_per_file
-  total_max <- n_files * max_per_file
 
   format_time <- function(minutes) {
     if (minutes < 60) return(sprintf("%.0f min", minutes))
     hours <- minutes / 60
-    if (hours < 24) return(sprintf("%.0f hours", ceiling(hours)))
+    if (hours < 24) return(sprintf("%.1f hours", hours))
     sprintf("%.1f days", hours / 24)
   }
 
-  sprintf("~%s to %s for %d files", format_time(total_min), format_time(total_max), n_files)
+  # Try to compute from historical job data
+  hist_rates <- NULL
+  if (!is.null(jobs) && length(jobs) > 0) {
+    rates <- c()
+    for (j in jobs) {
+      if (!identical(j$status, "completed")) next
+      if (is.null(j$submitted_at) || is.null(j$completed_at)) next
+      n <- j$n_files %||% 0
+      if (n < 2) next
+      elapsed <- as.numeric(difftime(j$completed_at, j$submitted_at, units = "mins"))
+      if (elapsed < 1) next
+      is_par <- isTRUE(j$parallel) || grepl("parallel", j$name, ignore.case = TRUE)
+      if (is_par == parallel) rates <- c(rates, elapsed / n)
+    }
+    if (length(rates) >= 1) hist_rates <- rates
+  }
+
+  if (!is.null(hist_rates)) {
+    med_rate <- median(hist_rates)
+    lo <- min(hist_rates) * 0.9
+    hi <- max(hist_rates) * 1.1
+    # Ensure lo < hi
+    if (lo >= hi) { lo <- med_rate * 0.8; hi <- med_rate * 1.2 }
+    total_lo <- n_files * lo
+    total_hi <- n_files * hi
+    source_note <- sprintf(" (based on %d past %s)",
+      length(hist_rates), if (length(hist_rates) == 1) "search" else "searches")
+  } else {
+    # Fallback heuristics (minutes per file)
+    if (parallel) {
+      min_per_file <- if (search_mode == "libfree") 3 else 2
+      max_per_file <- if (search_mode == "libfree") 8 else 5
+    } else {
+      min_per_file <- if (search_mode == "libfree") 15 else 8
+      max_per_file <- if (search_mode == "libfree") 30 else 15
+      # Scale by CPU count (assume ~linear scaling from 64)
+      scale <- 64 / max(cpus, 4)
+      min_per_file <- min_per_file * scale
+      max_per_file <- max_per_file * scale
+    }
+    total_lo <- n_files * min_per_file
+    total_hi <- n_files * max_per_file
+    source_note <- ""
+  }
+
+  sprintf("~%s to %s for %d files%s",
+    format_time(total_lo), format_time(total_hi), n_files, source_note)
 }
 
 # =============================================================================
@@ -2896,4 +3214,132 @@ project_remove_entry <- function(project_name, output_dir, path = projects_path(
       setdiff(unlist(data$projects[[project_name]]$entries), output_dir))
     projects_write(data, path)
   }
+}
+
+# =============================================================================
+# Search History — persistent record of DIA-NN search submissions
+# =============================================================================
+
+search_history_headers <- c(
+  "timestamp", "completed_at", "user", "search_name", "backend", "search_mode",
+  "parallel", "n_files", "fasta_files", "fasta_seq_count", "normalization",
+  "enzyme", "mass_acc_mode", "mass_acc", "mass_acc_ms1", "scan_window", "mbr",
+  "extra_cli_flags", "output_dir", "job_id", "status", "duration_min",
+  "speclib_cached", "imported_from_log", "app_version", "notes"
+)
+
+search_history_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/search_history.csv"
+  if (dir.exists(dirname(shared))) return(shared)
+  file.path(Sys.getenv("HOME"), ".delimp_search_history.csv")
+}
+
+search_history_read <- function(path = search_history_path()) {
+  if (!file.exists(path)) return(data.frame())
+  tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) data.frame())
+}
+
+record_search <- function(entry, path = search_history_path()) {
+  row <- as.data.frame(
+    lapply(search_history_headers, function(h) entry[[h]] %||% NA),
+    stringsAsFactors = FALSE
+  )
+  names(row) <- search_history_headers
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  needs_header <- !file.exists(path)
+  tryCatch({
+    suppressWarnings(
+      write.table(row, file = path, append = TRUE, sep = ",", row.names = FALSE,
+        col.names = needs_header, quote = TRUE)
+    )
+  }, error = function(e) message("[DE-LIMP] Failed to write search history: ", e$message))
+}
+
+update_search_status <- function(output_dir, status, completed_at = NA,
+                                  duration_min = NA,
+                                  path = search_history_path()) {
+  if (!file.exists(path)) return(invisible(NULL))
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  tryCatch({
+    hist <- read.csv(path, stringsAsFactors = FALSE)
+    if (nrow(hist) == 0) return(invisible(NULL))
+
+    idx <- which(hist$output_dir == output_dir)
+    if (length(idx) == 0) return(invisible(NULL))
+    idx <- idx[length(idx)]  # most recent match
+
+    hist$status[idx] <- status
+    if (!is.na(completed_at)) hist$completed_at[idx] <- completed_at
+    if (!is.na(duration_min)) hist$duration_min[idx] <- duration_min
+
+    write.csv(hist, file = path, row.names = FALSE, quote = TRUE)
+  }, error = function(e) message("[DE-LIMP] Failed to update search history: ", e$message))
+}
+
+#' Backfill search history from existing job queue RDS
+#'
+#' Called once on startup if search_history.csv is empty but job queue has entries.
+#' Extracts search parameters from job_entry$search_settings.
+backfill_search_history <- function(jobs, path = search_history_path(),
+                                     app_version = "unknown") {
+  if (length(jobs) == 0) return(invisible(NULL))
+
+  existing <- search_history_read(path)
+  existing_ods <- if (nrow(existing) > 0) existing$output_dir else character(0)
+
+  n_added <- 0
+  for (j in jobs) {
+    # Skip if already in search history
+    if (j$output_dir %in% existing_ods) next
+
+    ss <- j$search_settings
+    sp <- ss$search_params
+
+    dur <- if (!is.null(j$submitted_at) && !is.null(j$completed_at)) {
+      round(as.numeric(difftime(j$completed_at, j$submitted_at, units = "mins")), 1)
+    } else NA
+
+    entry <- list(
+      timestamp = if (!is.null(j$submitted_at)) format(j$submitted_at, "%Y-%m-%d %H:%M:%S") else NA,
+      completed_at = if (!is.null(j$completed_at)) format(j$completed_at, "%Y-%m-%d %H:%M:%S") else NA,
+      user = Sys.info()[["user"]],
+      search_name = j$name %||% NA,
+      backend = j$backend %||% "hpc",
+      search_mode = ss$search_mode %||% j$search_mode %||% NA,
+      parallel = isTRUE(j$parallel),
+      n_files = j$n_files %||% ss$n_raw_files %||% NA,
+      fasta_files = if (!is.null(ss$fasta_files)) paste(basename(ss$fasta_files), collapse = ", ") else NA,
+      fasta_seq_count = ss$fasta_seq_count %||% NA,
+      normalization = ss$normalization %||% NA,
+      enzyme = sp$enzyme %||% NA,
+      mass_acc_mode = sp$mass_acc_mode %||% NA,
+      mass_acc = sp$mass_acc %||% NA,
+      mass_acc_ms1 = sp$mass_acc_ms1 %||% NA,
+      scan_window = sp$scan_window %||% NA,
+      mbr = isTRUE(sp$mbr),
+      extra_cli_flags = sp$extra_cli_flags %||% NA,
+      output_dir = j$output_dir,
+      job_id = j$job_id %||% NA,
+      status = j$status %||% "unknown",
+      duration_min = dur,
+      speclib_cached = isTRUE(j$speclib_cached),
+      imported_from_log = FALSE,
+      app_version = app_version,
+      notes = "Backfilled from job queue"
+    )
+
+    record_search(entry, path = path)
+    n_added <- n_added + 1
+  }
+
+  if (n_added > 0) message(sprintf("[DE-LIMP] Backfilled %d entries into search history", n_added))
+  invisible(n_added)
 }

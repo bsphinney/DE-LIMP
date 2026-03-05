@@ -142,6 +142,18 @@ All DIA-NN search jobs (single, parallel, Docker, local) use this structure:
 - **Discussions section**: Recent discussions from GitHub Discussions (title, category, author, comment count, link). Fetched via GraphQL in the workflow.
 - **Stats freshness**: Displays `updated_at` timestamp from JSON
 
+## Search History
+
+- **Search history CSV**: `search_history_path()` in `helpers_search.R` — shared volume first, local `~/.delimp_search_history.csv` fallback. Same `filelock` pattern as analysis history.
+- **Schema (26 fields)**: timestamp, completed_at, user, search_name, backend, search_mode, parallel, n_files, fasta_files, fasta_seq_count, normalization, enzyme, mass_acc_mode, mass_acc, mass_acc_ms1, scan_window, mbr, extra_cli_flags, output_dir, job_id, status, duration_min, speclib_cached, imported_from_log, app_version, notes
+- **Record points**: Job submission (`server_search.R` — single shared block after all 4 backends converge at `values$diann_jobs` assignment). Status update in job monitoring observer on completion/failure.
+- **`record_search()`**: Append-only, same pattern as `record_analysis()`.
+- **`update_search_status()`**: Read-modify-write for status/completed_at/duration_min by `output_dir` match. Not append-only (file rewrite) but file is small.
+- **Cross-reference**: `output_dir` joins search history ↔ analysis history. Both DT tables show a link icon button when a matching row exists in the other table. Click navigates to that tab via `nav_select("main_tabs", ...)`.
+- **Import Settings button**: Reads CSV row fields, builds settings list, applies to search UI inputs (mass_acc, enzyme, mode, normalization, extra flags). Stores in `values$diann_search_settings` with `imported_from_log = TRUE`.
+- **View Log button**: Reads `search_info.md` from `output_dir` (SSH first, local fallback) and displays in modal.
+- **Expandable detail rows**: Same JS `row.child()` pattern as analysis history. Shows enzyme, mass acc, scan window, MBR, normalization, extra flags, output_dir, job_id, speclib cached, imported from log, notes.
+
 ## Analysis History & Projects
 
 - **Analysis history CSV**: `analysis_history_path()` in `helpers_search.R` — shared volume first, local `~/.delimp_analysis_history.csv` fallback. Append-only with `filelock`.
