@@ -298,7 +298,7 @@ server_search <- function(input, output, session, values, add_to_log,
     updateNumericInput(session, "min_pep_len", value = 7)
     updateNumericInput(session, "max_pep_len", value = 30)
     updateNumericInput(session, "min_pr_mz", value = 300)
-    updateNumericInput(session, "max_pr_mz", value = 1200)
+    updateNumericInput(session, "max_pr_mz", value = 1800)
     updateNumericInput(session, "diann_fdr", value = 0.01)
     updateTextAreaInput(session, "extra_cli_flags", value = "")
 
@@ -354,7 +354,7 @@ server_search <- function(input, output, session, values, add_to_log,
       mass_acc_mode = "auto", mass_acc = 14, mass_acc_ms1 = 14,
       unimod4 = TRUE, met_excision = TRUE,
       min_pep_len = 7, max_pep_len = 30,
-      min_pr_mz = 300, max_pr_mz = 1200,
+      min_pr_mz = 300, max_pr_mz = 1800,
       min_pr_charge = 1, max_pr_charge = 4,
       min_fr_mz = 200, max_fr_mz = 1200,
       enzyme = "K*,R*", missed_cleavages = 1,
@@ -1410,7 +1410,7 @@ server_search <- function(input, output, session, values, add_to_log,
               tags$dd(class = "col-sm-7",
                 sprintf("%d-%d",
                   as.integer(ss$min_pr_mz %||% 300),
-                  as.integer(ss$max_pr_mz %||% 1200))),
+                  as.integer(ss$max_pr_mz %||% 1800))),
               tags$dt(class = "col-sm-5", "Predicted speclib:"),
               tags$dd(class = "col-sm-7", speclib_info)
             )
@@ -1686,7 +1686,7 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pep_len = input$min_pep_len %||% 7L,
       max_pep_len = input$max_pep_len %||% 30L,
       min_pr_mz = input$min_pr_mz %||% 300,
-      max_pr_mz = input$max_pr_mz %||% 1200
+      max_pr_mz = input$max_pr_mz %||% 1800
     )
 
     # Show a dialog to add notes before saving
@@ -1742,7 +1742,7 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pep_len = input$min_pep_len %||% 7L,
       max_pep_len = input$max_pep_len %||% 30L,
       min_pr_mz = input$min_pr_mz %||% 300,
-      max_pr_mz = input$max_pr_mz %||% 1200
+      max_pr_mz = input$max_pr_mz %||% 1800
     )
 
     # Build the catalog entry
@@ -2096,7 +2096,7 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pep_len = input$min_pep_len %||% 7,
       max_pep_len = input$max_pep_len %||% 30,
       min_pr_mz = input$min_pr_mz %||% 300,
-      max_pr_mz = input$max_pr_mz %||% 1200,
+      max_pr_mz = input$max_pr_mz %||% 1800,
       min_pr_charge = values$diann_search_settings$search_params$min_pr_charge %||% 1,
       max_pr_charge = values$diann_search_settings$search_params$max_pr_charge %||% 4,
       min_fr_mz = values$diann_search_settings$search_params$min_fr_mz %||% 200,

@@ -656,7 +656,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     numericInput("min_pr_mz", "Min m/z:", value = 300, min = 100, max = 500)
                   ),
                   div(style = "flex: 1; min-width: 100px;",
-                    numericInput("max_pr_mz", "Max m/z:", value = 1200, min = 800, max = 2000)
+                    numericInput("max_pr_mz", "Max m/z:", value = 1800, min = 800, max = 2000)
                   )
                 ),
 

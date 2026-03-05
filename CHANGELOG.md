@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sacct` `.extern` step false COMPLETED**: `check_slurm_status()` now uses `--format=JobID,State` and filters out `.extern`/`.batch` substep lines that report COMPLETED even when the main job is PENDING/FAILED.
 - **`parse_diann_log` fr_mz/pr_charge**: `--max-fr-mz`, `--min-fr-mz`, `--min-pr-charge`, `--max-pr-charge` were incorrectly routed to `extra_cli_flags`. Now parsed via `value_map` and flow properly into `search_params`.
 - **Docker container name with special characters**: `analysis_name` is now sanitized via `gsub("[^a-zA-Z0-9_.-]", "_", ...)` before building container name.
+- **`max_pr_mz` default wrong**: UI and all fallbacks used 1200 instead of DIA-NN's actual default of 1800. FASTA library entries and searches recorded incorrect precursor m/z range when Advanced Options wasn't opened.
 
 ### Changed
 - **AI Summary export buttons**: "Export Report" renamed to "Download as HTML"; both "Download as HTML" and "Export for Claude" are hidden until AI summary is generated (progressive reveal via `shinyjs`).
