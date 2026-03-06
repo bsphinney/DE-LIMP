@@ -183,7 +183,7 @@ server_search <- function(input, output, session, values, add_to_log,
             numericInput("parallel_cpus", "CPUs/file:", value = 16, min = 4, max = 32, step = 4)
           ),
           div(style = "flex: 1; min-width: 100px;",
-            numericInput("parallel_mem_gb", "Memory/file (GB):", value = 32, min = 8, max = 128, step = 8)
+            numericInput("parallel_mem_gb", "Memory/file (GB):", value = 64, min = 8, max = 128, step = 8)
           )
         ),
         div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
@@ -203,18 +203,31 @@ server_search <- function(input, output, session, values, add_to_log,
 
   # Instrument-aware mass accuracy hint
   output$mass_acc_hint <- renderUI({
-    ext <- NULL
-    if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
-      ext <- tolower(tools::file_ext(values$diann_raw_files$filename[1]))
-    }
-    hint <- if (identical(ext, "d")) {
-      "timsTOF detected \u2014 recommended: MS2 15, MS1 15"
-    } else if (identical(ext, "raw")) {
-      "Orbitrap detected \u2014 recommended: MS2 10, MS1 5"
-    } else if (identical(ext, "mzml")) {
-      "Instrument unknown (.mzML) \u2014 typical: MS2 10\u201315, MS1 5\u201315"
+    meta <- values$instrument_metadata
+    if (!is.null(meta) && !is.null(meta$instrument_model) && !is.na(meta$instrument_model)) {
+      model <- meta$instrument_model
+      hint <- if (meta$instrument_type == "timsTOF") {
+        sprintf("%s detected \u2014 recommended: MS2 15, MS1 15", model)
+      } else if (meta$instrument_type == "Thermo") {
+        sprintf("%s detected \u2014 recommended: MS2 10, MS1 5", model)
+      } else {
+        sprintf("%s detected", model)
+      }
     } else {
-      "These values are passed directly to DIA-NN"
+      # Fall back to extension-based detection
+      ext <- NULL
+      if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+        ext <- tolower(tools::file_ext(values$diann_raw_files$filename[1]))
+      }
+      hint <- if (identical(ext, "d")) {
+        "timsTOF detected \u2014 recommended: MS2 15, MS1 15"
+      } else if (identical(ext, "raw")) {
+        "Orbitrap detected \u2014 recommended: MS2 10, MS1 5"
+      } else if (identical(ext, "mzml")) {
+        "Instrument unknown (.mzML) \u2014 typical: MS2 10\u201315, MS1 5\u201315"
+      } else {
+        "These values are passed directly to DIA-NN"
+      }
     }
     tags$p(class = "text-muted", style = "font-size: 0.78em; margin-top: -4px;", hint)
   })
@@ -224,19 +237,25 @@ server_search <- function(input, output, session, values, add_to_log,
     if (isTRUE(input$parallel_search)) {
       updateRadioButtons(session, "mass_acc_mode", selected = "manual")
 
-      # Set instrument-aware defaults based on file extensions
-      if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
-        ext <- tolower(tools::file_ext(values$diann_raw_files$filename[1]))
-        if (ext == "d") {
-          # timsTOF
+      # Set instrument-aware defaults based on metadata or file extensions
+      meta <- values$instrument_metadata
+      if (!is.null(meta) && !is.null(meta$instrument_type)) {
+        if (meta$instrument_type == "timsTOF") {
           updateNumericInput(session, "diann_mass_acc", value = 15)
           updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
-        } else if (ext == "raw") {
-          # Orbitrap
+        } else if (meta$instrument_type == "Thermo") {
           updateNumericInput(session, "diann_mass_acc", value = 10)
           updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
         }
-        # .mzML: keep current values (can't detect instrument)
+      } else if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+        ext <- tolower(tools::file_ext(values$diann_raw_files$filename[1]))
+        if (ext == "d") {
+          updateNumericInput(session, "diann_mass_acc", value = 15)
+          updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
+        } else if (ext == "raw") {
+          updateNumericInput(session, "diann_mass_acc", value = 10)
+          updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
+        }
       }
 
       showNotification(
@@ -855,6 +874,40 @@ server_search <- function(input, output, session, values, add_to_log,
       raw_files$full_path <- file.path(input$ssh_raw_data_dir, raw_files$filename)
     }
     values$diann_raw_files <- raw_files
+
+    # Extract instrument metadata from first remote file
+    if (nrow(raw_files) > 0) {
+      tryCatch({
+        ext <- tolower(tools::file_ext(raw_files$filename[1]))
+        meta <- NULL
+        if (ext == "d") {
+          # timsTOF: SCP download analysis.tdf (small SQLite, ~few MB)
+          remote_tdf <- file.path(input$ssh_raw_data_dir, raw_files$filename[1], "analysis.tdf")
+          local_tdf <- file.path(tempdir(), "inst_meta_analysis.tdf")
+          dl <- scp_download(cfg, remote_tdf, local_tdf)
+          if (dl$status == 0 && file.exists(local_tdf)) {
+            meta <- parse_timstof_from_tdf(local_tdf)
+            unlink(local_tdf)
+          }
+        } else if (ext == "raw") {
+          # Thermo .raw: Try ThermoRawFileParser on remote system
+          first_file <- file.path(input$ssh_raw_data_dir, raw_files$filename[1])
+          meta <- run_thermorawfileparser_ssh(cfg, first_file)
+        }
+        if (!is.null(meta) && is.null(meta$parse_error)) {
+          values$instrument_metadata <- meta
+          if (!is.na(meta$mz_range_low %||% NA) && !is.na(meta$mz_range_high %||% NA)) {
+            updateNumericInput(session, "min_pr_mz", value = as.numeric(meta$mz_range_low))
+            updateNumericInput(session, "max_pr_mz", value = as.numeric(meta$mz_range_high))
+          }
+          showNotification(
+            sprintf("Instrument detected: %s", meta$instrument_model %||% meta$instrument_type),
+            type = "message", duration = 5)
+        }
+      }, error = function(e) {
+        message("[instrument_meta] SSH extraction failed: ", e$message)
+      })
+    }
   })
 
   observeEvent(input$ssh_scan_fasta_btn, {
@@ -917,6 +970,27 @@ server_search <- function(input, output, session, values, add_to_log,
 
     raw_files <- scan_raw_files(as.character(dir_path))
     values$diann_raw_files <- raw_files
+
+    # Extract instrument metadata from first raw file
+    if (nrow(raw_files) > 0) {
+      tryCatch({
+        first_file <- raw_files$full_path[1]
+        meta <- parse_raw_file_metadata(first_file)
+        if (!is.null(meta) && is.null(meta$parse_error)) {
+          values$instrument_metadata <- meta
+          # Auto-set m/z range from instrument
+          if (!is.na(meta$mz_range_low %||% NA) && !is.na(meta$mz_range_high %||% NA)) {
+            updateNumericInput(session, "min_pr_mz", value = as.numeric(meta$mz_range_low))
+            updateNumericInput(session, "max_pr_mz", value = as.numeric(meta$mz_range_high))
+          }
+          showNotification(
+            sprintf("Instrument detected: %s", meta$instrument_model %||% meta$instrument_type),
+            type = "message", duration = 5)
+        }
+      }, error = function(e) {
+        message("[instrument_meta] Local extraction failed: ", e$message)
+      })
+    }
   })
 
   output$raw_file_summary <- renderUI({
@@ -935,11 +1009,206 @@ server_search <- function(input, output, session, values, add_to_log,
     total_size <- sum(df$size_mb)
     types <- paste(unique(df$type), collapse = ", ")
 
-    div(class = "alert alert-success",
-      style = "margin-top: 8px; padding: 8px; font-size: 0.85em;",
-      icon("check-circle"),
-      sprintf(" %d files found (%s) — %.1f GB total", n_files, types, total_size / 1024)
+    # Instrument metadata badge (if available)
+    meta <- values$instrument_metadata
+    inst_badge <- NULL
+    if (!is.null(meta) && is.null(meta$parse_error)) {
+      inst_parts <- c()
+      model <- meta$instrument_model %||% meta$instrument_type
+      if (!is.na(model) && nzchar(model)) inst_parts <- c(inst_parts, model)
+      if (!is.na(meta$mz_range_low %||% NA) && !is.na(meta$mz_range_high %||% NA))
+        inst_parts <- c(inst_parts, sprintf("m/z: %.0f\u2013%.0f", meta$mz_range_low, meta$mz_range_high))
+      if (!is.null(meta$acquisition_mode) && meta$acquisition_mode != "unknown")
+        inst_parts <- c(inst_parts, meta$acquisition_mode)
+      if (!is.null(meta$lc_system) && nzchar(meta$lc_system)) {
+        lc_str <- meta$lc_system
+        if (!is.null(meta$lc_method) && nzchar(meta$lc_method))
+          lc_str <- paste0(lc_str, " (", meta$lc_method, ")")
+        inst_parts <- c(inst_parts, lc_str)
+      }
+      if (!is.null(meta$lc_runtime_min) && !is.na(meta$lc_runtime_min))
+        inst_parts <- c(inst_parts, sprintf("%.0f min", meta$lc_runtime_min))
+      else if (!is.na(meta$rt_end_min %||% NA))
+        inst_parts <- c(inst_parts, sprintf("%.0f min acq", meta$rt_end_min))
+      if (length(inst_parts) > 0) {
+        inst_badge <- tags$div(class = "alert alert-info py-1 px-2 mt-1",
+          style = "font-size: 0.82em; margin-bottom: 0;",
+          icon("microscope"),
+          paste0(" ", paste(inst_parts, collapse = " | ")))
+      }
+    }
+
+    tagList(
+      div(class = "alert alert-success",
+        style = "margin-top: 8px; padding: 8px; font-size: 0.85em; margin-bottom: 4px;",
+        icon("check-circle"),
+        sprintf(" %d files found (%s) \u2014 %.1f GB total", n_files, types, total_size / 1024)
+      ),
+      inst_badge
     )
+  })
+
+  # ============================================================================
+  #    TIC Extraction — Extract button + observers
+  # ============================================================================
+
+  output$tic_extract_ui <- renderUI({
+    req(values$diann_raw_files)
+    df <- values$diann_raw_files
+    if (nrow(df) == 0) return(NULL)
+
+    # Only show for .d files (timsTOF)
+    n_d_files <- sum(grepl("\\.d$", df$filename, ignore.case = TRUE))
+    if (n_d_files == 0) return(NULL)
+
+    # Check if already extracted
+    if (!is.null(values$tic_traces) && length(values$tic_traces) > 0) {
+      n_extracted <- length(values$tic_traces)
+      tagList(
+        div(class = "alert alert-success py-1 px-2 mt-1",
+          style = "font-size: 0.82em; margin-bottom: 0; display: flex; justify-content: space-between; align-items: center;",
+          span(icon("check-circle"), sprintf(" TIC extracted for %d/%d files", n_extracted, n_d_files)),
+          actionButton("tic_reextract_btn", "Re-extract", icon = icon("redo"),
+            class = "btn-outline-secondary btn-sm", style = "padding: 1px 8px; font-size: 0.78em;")
+        )
+      )
+    } else {
+      div(style = "margin-top: 6px;",
+        div(style = "display: flex; gap: 5px;",
+          actionButton("tic_extract_btn",
+            tagList(icon("chart-area"), sprintf(" Extract TIC (%d files)", n_d_files)),
+            class = "btn-outline-info btn-sm w-100"),
+          actionButton("tic_skip_btn", "Skip", class = "btn-outline-secondary btn-sm")
+        ),
+        tags$small(class = "text-muted", "Optional \u2014 does not affect search")
+      )
+    }
+  })
+
+  observeEvent(input$tic_skip_btn, {
+    showNotification("TIC extraction skipped", type = "message", duration = 3)
+  })
+
+  tic_extract_trigger <- reactiveVal(0)
+
+  observeEvent(input$tic_extract_btn, {
+    tic_extract_trigger(isolate(tic_extract_trigger()) + 1)
+  })
+
+  observeEvent(input$tic_reextract_btn, {
+    values$tic_traces <- NULL
+    values$tic_metrics <- NULL
+    tic_extract_trigger(isolate(tic_extract_trigger()) + 1)
+  })
+
+  observeEvent(tic_extract_trigger(), ignoreInit = TRUE, {
+    req(values$diann_raw_files)
+    df <- values$diann_raw_files
+    d_files <- df[grepl("\\.d$", df$filename, ignore.case = TRUE), ]
+    req(nrow(d_files) > 0)
+
+    is_ssh <- (input$search_connection_mode %||% "local") == "ssh"
+    cfg <- if (is_ssh) isolate(ssh_config()) else NULL
+
+    traces <- list()
+    n_total <- nrow(d_files)
+
+    withProgress(message = "Extracting TIC traces...", value = 0, {
+      for (i in seq_len(n_total)) {
+        fname <- d_files$filename[i]
+        setProgress(value = i / n_total,
+          detail = sprintf("File %d of %d: %s", i, n_total, fname))
+
+        tic_df <- NULL
+
+        if (is_ssh) {
+          # SSH mode: SCP each analysis.tdf to temp, extract, delete
+          tryCatch({
+            remote_dir <- input$ssh_raw_data_dir
+            remote_tdf <- file.path(remote_dir, fname, "analysis.tdf")
+            local_tdf <- file.path(tempdir(), paste0("tic_", i, "_analysis.tdf"))
+            dl <- scp_download(cfg, remote_tdf, local_tdf)
+            if (dl$status != 0) {
+              message("[tic] SCP failed for ", fname, ": status=", dl$status,
+                      " stdout=", paste(dl$stdout, collapse = " "))
+            } else if (!file.exists(local_tdf)) {
+              message("[tic] SCP succeeded but file not found: ", local_tdf)
+            } else {
+              tic_df <- extract_tic_timstof(local_tdf)
+              if (is.null(tic_df)) message("[tic] extract_tic_timstof returned NULL for ", fname)
+              unlink(local_tdf)
+            }
+          }, error = function(e) {
+            message("[tic] SSH extraction failed for ", fname, ": ", e$message)
+          })
+        } else {
+          # Local mode: read analysis.tdf directly
+          tdf_path <- file.path(d_files$full_path[i], "analysis.tdf")
+          tic_df <- extract_tic_timstof(tdf_path)
+        }
+
+        if (!is.null(tic_df)) {
+          traces[[fname]] <- tic_df
+        }
+      }
+    })
+
+    if (length(traces) == 0) {
+      showNotification("TIC extraction failed for all files", type = "error")
+      return()
+    }
+
+    # Compute per-run metrics
+    metrics_list <- lapply(names(traces), function(nm) {
+      compute_tic_metrics(traces[[nm]], nm)
+    })
+    metrics_df <- do.call(rbind, lapply(metrics_list, function(m) {
+      data.frame(
+        run = m$run, valid = m$valid,
+        total_auc = m$total_auc %||% NA_real_,
+        peak_rt_min = m$peak_rt_min %||% NA_real_,
+        peak_tic = m$peak_tic %||% NA_real_,
+        ramp_rt_min = m$ramp_rt_min %||% NA_real_,
+        tail_rt_min = m$tail_rt_min %||% NA_real_,
+        gradient_width_min = m$gradient_width_min %||% NA_real_,
+        baseline_ratio = m$baseline_ratio %||% NA_real_,
+        late_signal_ratio = m$late_signal_ratio %||% NA_real_,
+        asymmetry = m$asymmetry %||% NA_real_,
+        stringsAsFactors = FALSE
+      )
+    }))
+
+    # Add file sizes from scan data
+    metrics_df$size_mb <- d_files$size_mb[match(metrics_df$run, d_files$filename)]
+
+    # Shape similarity
+    shape_df <- compute_shape_similarity(traces)
+    if (!is.null(shape_df)) {
+      metrics_df <- merge(metrics_df, shape_df, by = "run", all.x = TRUE)
+    } else {
+      metrics_df$shape_r <- 1.0
+    }
+
+    # Run diagnostics
+    diag_results <- lapply(seq_len(nrow(metrics_df)), function(i) {
+      m <- as.list(metrics_df[i, ])
+      diagnose_run(m, metrics_df, metrics_df$shape_r[i])
+    })
+    metrics_df$status <- sapply(diag_results, function(d) d$status)
+    metrics_df$flags <- sapply(diag_results, function(d) paste(d$flags, collapse = "; "))
+
+    # Normalize traces for overlay
+    traces <- lapply(traces, normalize_tic)
+
+    values$tic_traces <- traces
+    values$tic_metrics <- metrics_df
+
+    n_pass <- sum(metrics_df$status == "pass")
+    n_warn <- sum(metrics_df$status == "warn")
+    n_fail <- sum(metrics_df$status == "fail")
+    showNotification(
+      sprintf("TIC extracted: %d pass, %d warn, %d fail", n_pass, n_warn, n_fail),
+      type = if (n_fail > 0) "warning" else "message", duration = 6)
   })
 
   # Spectral library selection
@@ -2396,7 +2665,7 @@ server_search <- function(input, output, session, values, add_to_log,
         normalization = input$diann_normalization,
         search_mode = input$search_mode,
         cpus_per_file = input$parallel_cpus %||% 16,
-        mem_per_file = input$parallel_mem_gb %||% 32,
+        mem_per_file = input$parallel_mem_gb %||% 64,
         time_per_file = input$parallel_time_hours %||% 2,
         assembly_cpus = 32,
         assembly_mem = 256,
@@ -2485,7 +2754,7 @@ server_search <- function(input, output, session, values, add_to_log,
           "Step 1 (Library Prediction)" = list(cpus = 16, mem = 64, time = 4),
           "Steps 2/4 (Per-file Quant)" = list(
             cpus = input$parallel_cpus %||% 16,
-            mem = input$parallel_mem_gb %||% 32,
+            mem = input$parallel_mem_gb %||% 64,
             time = input$parallel_time_hours %||% 2),
           "Steps 3/5 (Assembly/Report)" = list(
             cpus = 32, mem = 256,
@@ -2709,7 +2978,7 @@ server_search <- function(input, output, session, values, add_to_log,
           ),
           parallel = list(
             cpus_per_file = input$parallel_cpus %||% 16,
-            mem_per_file = input$parallel_mem_gb %||% 32,
+            mem_per_file = input$parallel_mem_gb %||% 64,
             time_per_file = input$parallel_time_hours %||% 2,
             max_simultaneous = input$max_simultaneous %||% 20
           )
@@ -2740,7 +3009,7 @@ server_search <- function(input, output, session, values, add_to_log,
             "Step 1 (Library Prediction)" = list(cpus = 16, mem = 64, time = 4),
             "Steps 2/4 (Per-file Quant)" = list(
               cpus = input$parallel_cpus %||% 16,
-              mem = input$parallel_mem_gb %||% 32,
+              mem = input$parallel_mem_gb %||% 64,
               time = input$parallel_time_hours %||% 2),
             "Steps 3/5 (Assembly/Report)" = list(
               cpus = 32, mem = 256,

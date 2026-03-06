@@ -425,6 +425,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )
             ),
             uiOutput("raw_file_summary"),
+            uiOutput("tic_extract_ui"),
 
             hr(),
             tags$h6(icon("dna"), " FASTA Database"),
@@ -918,6 +919,47 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       class = "btn-outline-secondary btn-sm")
                   ),
                   plotlyOutput("qc_metrics_trend", height = "calc(100vh - 380px)")
+                ),
+
+                # ── Chromatography QC (TIC traces, run diagnostics) ──
+                nav_panel("Chromatography QC",
+                  icon = icon("chart-area"),
+                  div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                    conditionalPanel(
+                      condition = "typeof output.tic_qc_has_data !== 'undefined' && output.tic_qc_has_data",
+                      uiOutput("tic_qc_status_badges"),
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin: 8px 0;",
+                        radioButtons("tic_view_mode", NULL,
+                          choices = c("Faceted" = "faceted", "Overlay" = "overlay", "Metrics" = "metrics"),
+                          inline = TRUE
+                        ),
+                        div(style = "display: flex; gap: 5px;",
+                          actionButton("tic_qc_info_btn", icon("question-circle"),
+                            title = "About Chromatography QC", class = "btn-outline-info btn-sm"),
+                          actionButton("tic_qc_fullscreen_btn", "\U0001F50D Fullscreen",
+                            class = "btn-outline-secondary btn-sm")
+                        )
+                      ),
+                      div(style = "min-height: 400px;",
+                        plotlyOutput("tic_qc_main_plot", height = "calc(100vh - 420px)")
+                      ),
+                      conditionalPanel(
+                        condition = "input.tic_view_mode == 'metrics'",
+                        div(style = "margin-top: 12px;",
+                          DTOutput("tic_metrics_table")
+                        )
+                      ),
+                      uiOutput("tic_qc_diagnostics")
+                    ),
+                    conditionalPanel(
+                      condition = "typeof output.tic_qc_has_data === 'undefined' || !output.tic_qc_has_data",
+                      div(class = "alert alert-info", style = "margin-top: 20px;",
+                        icon("info-circle"),
+                        " Extract TIC data from the Search tab to view chromatography QC. ",
+                        "Click ", tags$b("Extract TIC"), " after scanning raw files."
+                      )
+                    )
+                  )
                 ),
 
                 nav_panel("Stats Table",

@@ -395,6 +395,9 @@ server <- function(input, output, session) {
     public_resources = NULL,
     auto_partition = NULL,
     diann_search_settings = NULL,
+    instrument_metadata = NULL,    # List from parse_*_metadata() — instrument model, m/z range, etc.
+    tic_traces = NULL,             # Named list of data.frames from extract_tic_timstof(), keyed by filename
+    tic_metrics = NULL,            # data.frame: run, valid, total_auc, ..., shape_r, status, flags
     docker_available = docker_available,
     # Multi-View Integration (MOFA2)
     mofa_view_configs = list(),
@@ -447,7 +450,7 @@ server <- function(input, output, session) {
   })
 
   observe({
-    if (!is.null(values$raw_data)) {
+    if (!is.null(values$raw_data) || !is.null(values$tic_traces)) {
       nav_show("main_tabs", "QC")
     } else {
       nav_hide("main_tabs", "QC")

@@ -1924,7 +1924,7 @@ write_file_list <- function(raw_files, output_dir) {
 generate_parallel_scripts <- function(
   analysis_name, raw_files, fasta_files, speclib_path = NULL,
   output_dir, diann_sif, normalization = "on", search_mode = "libfree",
-  cpus_per_file = 16, mem_per_file = 32, time_per_file = 2,
+  cpus_per_file = 16, mem_per_file = 64, time_per_file = 2,
   libpred_cpus = 16, libpred_mem = 64, libpred_time = 4,
   assembly_cpus = 64, assembly_mem = 512, assembly_time = 12,
   partition = "high", account = "genome-center-grp",

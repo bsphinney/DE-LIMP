@@ -969,4 +969,272 @@ server_qc <- function(input, output, session, values) {
     ))
   })
 
+  # ============================================================================
+  #    Section 8: Chromatography QC — TIC traces, diagnostics
+  # ============================================================================
+
+  # Flag for conditionalPanel
+  output$tic_qc_has_data <- reactive({
+    !is.null(values$tic_traces) && length(values$tic_traces) > 0
+  })
+  outputOptions(output, "tic_qc_has_data", suspendWhenHidden = FALSE)
+
+  # Status badges
+  output$tic_qc_status_badges <- renderUI({
+    req(values$tic_metrics)
+    m <- values$tic_metrics
+
+    n_pass <- sum(m$status == "pass")
+    n_warn <- sum(m$status == "warn")
+    n_fail <- sum(m$status == "fail")
+    n_total <- nrow(m)
+
+    div(style = "display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;",
+      tags$span(class = "badge bg-success", style = "font-size: 0.85em; padding: 5px 10px;",
+        sprintf("%d Pass", n_pass)),
+      if (n_warn > 0) tags$span(class = "badge bg-warning text-dark",
+        style = "font-size: 0.85em; padding: 5px 10px;",
+        sprintf("%d Warn", n_warn)),
+      if (n_fail > 0) tags$span(class = "badge bg-danger",
+        style = "font-size: 0.85em; padding: 5px 10px;",
+        sprintf("%d Fail", n_fail)),
+      tags$span(class = "badge bg-secondary", style = "font-size: 0.85em; padding: 5px 10px;",
+        sprintf("%d Total", n_total))
+    )
+  })
+
+  # Helper: build TIC plot
+  build_tic_plot <- function(view_mode, traces, metrics) {
+    status_colors <- c(pass = "#28a745", warn = "#ffc107", fail = "#dc3545")
+
+    if (view_mode == "faceted") {
+      # Build combined data.frame with run labels
+      plot_data <- do.call(rbind, lapply(names(traces), function(nm) {
+        df <- traces[[nm]]
+        df$run <- nm
+        df$status <- metrics$status[metrics$run == nm]
+        df
+      }))
+
+      # Compute median trace on common grid for overlay
+      grid_rt <- seq(
+        max(sapply(traces, function(x) min(x$rt_min))),
+        min(sapply(traces, function(x) max(x$rt_min))),
+        length.out = 300
+      )
+      interp_matrix <- sapply(traces, function(x) {
+        stats::approx(x$rt_min, x$tic, xout = grid_rt, rule = 2)$y
+      })
+      median_trace <- if (is.matrix(interp_matrix)) {
+        apply(interp_matrix, 1, median)
+      } else {
+        interp_matrix  # single file case
+      }
+      median_df <- data.frame(rt_min = grid_rt, tic = median_trace)
+
+      # Short run labels (remove .d extension)
+      plot_data$run_label <- sub("\\.d$", "", plot_data$run)
+
+      p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = rt_min, y = tic / 1e6)) +
+        ggplot2::geom_line(ggplot2::aes(color = status), linewidth = 0.5) +
+        ggplot2::geom_line(data = data.frame(rt_min = grid_rt, tic = median_trace / 1e6),
+          ggplot2::aes(x = rt_min, y = tic), color = "#007bff",
+          linetype = "dashed", linewidth = 0.4, alpha = 0.7) +
+        ggplot2::facet_wrap(~ run_label, ncol = 4, scales = "free_y") +
+        ggplot2::scale_color_manual(values = status_colors, guide = "none") +
+        ggplot2::labs(x = "Retention Time (min)", y = "TIC (M)",
+          title = "TIC Traces by Run",
+          subtitle = "Blue dashed = median trace across all runs") +
+        ggplot2::theme_bw(base_size = 11) +
+        ggplot2::theme(
+          strip.background = ggplot2::element_rect(fill = "#2c3e50"),
+          strip.text = ggplot2::element_text(color = "white", size = 8),
+          panel.grid.minor = ggplot2::element_blank(),
+          plot.title = ggplot2::element_text(face = "bold", size = 13),
+          plot.subtitle = ggplot2::element_text(color = "gray50", size = 10)
+        )
+
+      plotly::ggplotly(p, tooltip = c("x", "y")) %>%
+        plotly::layout(showlegend = FALSE)
+
+    } else if (view_mode == "overlay") {
+      # All runs normalized, overlaid
+      plot_data <- do.call(rbind, lapply(names(traces), function(nm) {
+        df <- traces[[nm]]
+        df$run <- sub("\\.d$", "", nm)
+        df$status <- metrics$status[metrics$run == nm]
+        df
+      }))
+
+      p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = rt_min, y = tic_norm,
+                                                     group = run, color = status,
+                                                     text = run)) +
+        ggplot2::geom_line(alpha = 0.5, linewidth = 0.4) +
+        ggplot2::scale_color_manual(values = status_colors) +
+        ggplot2::labs(x = "Retention Time (min)", y = "Normalized TIC",
+          title = "TIC Overlay (Normalized 0-1)",
+          subtitle = sprintf("%d runs colored by QC status", length(traces))) +
+        ggplot2::theme_bw(base_size = 12) +
+        ggplot2::theme(
+          panel.grid.minor = ggplot2::element_blank(),
+          plot.title = ggplot2::element_text(face = "bold", size = 14),
+          plot.subtitle = ggplot2::element_text(color = "gray50", size = 11),
+          legend.position = "bottom"
+        )
+
+      plotly::ggplotly(p, tooltip = c("text", "x", "y")) %>%
+        plotly::layout(legend = list(orientation = "h", x = 0.3, y = -0.15))
+
+    } else {
+      # Metrics view: bar chart of AUC by run
+      bar_data <- metrics[metrics$valid, ]
+      bar_data$run_label <- sub("\\.d$", "", bar_data$run)
+      bar_data$auc_m <- bar_data$total_auc / 1e6
+      med_auc <- median(bar_data$auc_m, na.rm = TRUE)
+
+      # Sort by AUC
+      bar_data <- bar_data[order(bar_data$auc_m), ]
+      bar_data$run_label <- factor(bar_data$run_label, levels = bar_data$run_label)
+
+      p <- ggplot2::ggplot(bar_data, ggplot2::aes(
+          x = run_label, y = auc_m, fill = status,
+          text = sprintf("Run: %s\nAUC: %.1fM\nPeak RT: %.1f min\nShape r: %.3f\nStatus: %s",
+                          run_label, auc_m, peak_rt_min, shape_r, status))) +
+        ggplot2::geom_col(width = 0.7) +
+        ggplot2::geom_hline(yintercept = med_auc, linetype = "dashed", color = "#666", linewidth = 0.5) +
+        ggplot2::scale_fill_manual(values = status_colors) +
+        ggplot2::labs(x = NULL, y = "Total AUC (M)",
+          title = "TIC Area Under Curve by Run",
+          subtitle = sprintf("Dashed line = median AUC (%.1fM)", med_auc)) +
+        ggplot2::coord_flip() +
+        ggplot2::theme_bw(base_size = 12) +
+        ggplot2::theme(
+          panel.grid.minor = ggplot2::element_blank(),
+          plot.title = ggplot2::element_text(face = "bold", size = 14),
+          plot.subtitle = ggplot2::element_text(color = "gray50", size = 11),
+          legend.position = "none"
+        )
+
+      plotly::ggplotly(p, tooltip = "text")
+    }
+  }
+
+  # Main TIC plot
+  output$tic_qc_main_plot <- plotly::renderPlotly({
+    req(values$tic_traces, values$tic_metrics)
+    view_mode <- input$tic_view_mode %||% "faceted"
+    build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
+  })
+
+  # Metrics DT table
+  output$tic_metrics_table <- DT::renderDT({
+    req(values$tic_metrics)
+    m <- values$tic_metrics[values$tic_metrics$valid, ]
+
+    size_col <- if ("size_mb" %in% names(m) && !all(is.na(m$size_mb))) {
+      data.frame(`Size (MB)` = round(m$size_mb), check.names = FALSE)
+    } else {
+      NULL
+    }
+
+    display <- data.frame(
+      Run = sub("\\.d$", "", m$run),
+      Status = ifelse(m$status == "pass",
+        '<span class="badge bg-success">Pass</span>',
+        ifelse(m$status == "warn",
+          '<span class="badge bg-warning text-dark">Warn</span>',
+          '<span class="badge bg-danger">Fail</span>')),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    if (!is.null(size_col)) display <- cbind(display, size_col)
+    display <- cbind(display, data.frame(
+      `AUC (M)` = round(m$total_auc / 1e6, 1),
+      `Peak RT` = m$peak_rt_min,
+      `Gradient Width` = m$gradient_width_min,
+      `Baseline Ratio` = sprintf("%.1f%%", m$baseline_ratio * 100),
+      `Late Signal` = sprintf("%.1f%%", m$late_signal_ratio * 100),
+      `Shape r` = m$shape_r,
+      Flags = ifelse(nzchar(m$flags), m$flags, "\u2014"),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    ))
+
+    DT::datatable(display, escape = FALSE, rownames = FALSE,
+      options = list(
+        pageLength = 50, dom = "t",
+        columnDefs = list(list(className = "dt-center", targets = 1))
+      )
+    )
+  })
+
+  # Diagnostics panel
+  output$tic_qc_diagnostics <- renderUI({
+    req(values$tic_metrics)
+    m <- values$tic_metrics
+    flagged <- m[m$status != "pass" & nzchar(m$flags), ]
+
+    if (nrow(flagged) == 0) {
+      div(class = "alert alert-success", style = "margin-top: 12px;",
+        icon("check-circle"), " All runs pass chromatography QC checks.")
+    } else {
+      alerts <- lapply(seq_len(nrow(flagged)), function(i) {
+        row <- flagged[i, ]
+        alert_class <- if (row$status == "fail") "alert-danger" else "alert-warning"
+        size_info <- if (!is.null(row$size_mb) && !is.na(row$size_mb)) {
+          sprintf(" [%d MB]", round(row$size_mb))
+        } else ""
+        div(class = paste("alert", alert_class), style = "padding: 8px; margin-bottom: 4px; font-size: 0.88em;",
+          tags$b(sub("\\.d$", "", row$run)), size_info, ": ",
+          row$flags
+        )
+      })
+      div(style = "margin-top: 12px;", alerts)
+    }
+  })
+
+  # Info modal
+  observeEvent(input$tic_qc_info_btn, {
+    showModal(modalDialog(
+      title = "Chromatography QC",
+      size = "l",
+      easyClose = TRUE,
+      tags$h5("Overview"),
+      tags$p("TIC (Total Ion Chromatogram) traces show the summed MS1 signal across the gradient.",
+        "Comparing TIC shapes across runs reveals injection failures, loading anomalies, RT drift, and carryover."),
+      tags$h5("Views"),
+      tags$ul(
+        tags$li(tags$b("Faceted:"), " Each run in its own panel with median trace overlay (blue dashed). Color indicates QC status."),
+        tags$li(tags$b("Overlay:"), " All runs on one axis, normalized 0-1. Quickly spot outlier shapes."),
+        tags$li(tags$b("Metrics:"), " Bar chart of total AUC per run with metrics table below.")
+      ),
+      tags$h5("Automated Diagnostics"),
+      tags$ul(
+        tags$li(tags$b("Shape deviation:"), " Pearson r of each trace vs median. r < 0.90 = fail, r < 0.95 = warn."),
+        tags$li(tags$b("RT shift:"), " Peak RT > 3 MAD from median."),
+        tags$li(tags$b("Loading anomaly:"), " AUC > 3x or < 0.3x median = fail; 2x/0.5x = warn."),
+        tags$li(tags$b("Late elution:"), " > 15% signal in last 20% of gradient (carryover)."),
+        tags$li(tags$b("Elevated baseline:"), " Baseline > 10% of peak intensity."),
+        tags$li(tags$b("Narrow gradient:"), " Effective width < 70% of median.")
+      ),
+      footer = modalButton("Close")
+    ))
+  })
+
+  # Fullscreen modal
+  observeEvent(input$tic_qc_fullscreen_btn, {
+    req(values$tic_traces, values$tic_metrics)
+    view_mode <- input$tic_view_mode %||% "faceted"
+    p <- build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
+
+    showModal(modalDialog(
+      title = "Chromatography QC \u2014 Fullscreen",
+      size = "xl",
+      easyClose = TRUE,
+      plotly::plotlyOutput("tic_qc_fullscreen_plot", height = "800px"),
+      footer = modalButton("Close")
+    ))
+    output$tic_qc_fullscreen_plot <- plotly::renderPlotly({ p })
+  })
+
 }

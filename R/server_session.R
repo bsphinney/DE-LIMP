@@ -498,6 +498,11 @@ server_session <- function(input, output, session, values, add_to_log) {
         mofa_weights = values$mofa_weights,
         mofa_variance_explained = values$mofa_variance_explained,
         mofa_last_run_params = values$mofa_last_run_params,
+        # Instrument metadata
+        instrument_metadata = values$instrument_metadata,
+        # TIC Chromatography QC
+        tic_traces = values$tic_traces,
+        tic_metrics = values$tic_metrics,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -580,6 +585,17 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$mofa_last_run_params <- session_data$mofa_last_run_params
       }
 
+      # Restore instrument metadata
+      if (!is.null(session_data$instrument_metadata)) {
+        values$instrument_metadata <- session_data$instrument_metadata
+      }
+
+      # Restore TIC Chromatography QC
+      if (!is.null(session_data$tic_traces)) {
+        values$tic_traces <- session_data$tic_traces
+        values$tic_metrics <- session_data$tic_metrics
+      }
+
       # Restore repro log and append load event
       values$repro_log  <- session_data$repro_log %||% values$repro_log
       add_to_log("Session Loaded", c(
@@ -653,6 +669,15 @@ server_session <- function(input, output, session, values, add_to_log) {
   # Helper function to build methodology text (used by render + Claude export)
   build_methodology_text <- function() {
     req(values$fit %||% values$phospho_fit)
+
+    # Instrument & acquisition section (conditional)
+    instrument_section <- ""
+    if (!is.null(values$instrument_metadata)) {
+      inst_text <- format_instrument_methods_text(values$instrument_metadata)
+      if (nzchar(inst_text)) {
+        instrument_section <- paste0("0a. INSTRUMENT & DATA ACQUISITION\n", inst_text, "\n\n")
+      }
+    }
 
     # DIA-NN search parameters section (conditional)
     diann_section <- ""
@@ -753,6 +778,7 @@ server_session <- function(input, output, session, values, add_to_log) {
       "Data Processing and Statistical Analysis Pipeline\n",
       "---------------------------------------------------\n\n",
 
+      instrument_section,
       diann_section,
 
       "1. DATA INPUT\n",

@@ -20,7 +20,7 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 app.R (~290 lines):      Package loading, backend detection (Docker/HPC/Core Facility), VERSION + stats loading, reactive values, module calls
 R/ui.R (~1,500 lines):   build_ui() — page_navbar layout, CSS/JS, accordion sidebar, all tab nav_panels
 R/server_*.R (11 files): Server modules, each receives (input, output, session, values, ...)
-R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
+R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 ```
 
 ### Key Files
@@ -41,6 +41,7 @@ R/helpers*.R (5 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, analysis history, projects |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, analysis history, projects |
+| `R/helpers_instrument.R` | `parse_timstof_metadata()`, `parse_thermo_metadata()`, `parse_raw_file_metadata()`, `extract_tic_timstof()`, `compute_tic_metrics()`, `diagnose_run()`, instrument formatters for Methods/AI |
 | `VERSION` | Single-line app version (e.g. `3.1.1`), read at startup into `values$app_version` |
 | `stats/community_stats.json` | GitHub traffic data generated daily by `.github/workflows/track-stats.yml` |
 
@@ -52,7 +53,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 
 **Progressive reveal**: `nav_hide()`/`nav_show()` on `"main_tabs"`. Hidden on startup via `session$onFlushed(once=TRUE)`:
 - **Always visible**: New Search (if `search_enabled`), Analysis > Data Overview, About, Education, Facility (if `is_core_facility`)
-- **QC**: shown when `values$raw_data` not NULL
+- **QC**: shown when `values$raw_data` not NULL OR `values$tic_traces` not NULL
 - **DE Dashboard, GSEA, MOFA2, AI Analysis, Output**: shown when `values$fit` not NULL
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
@@ -168,6 +169,9 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | Array progress sacct inflated counts | `sacct -j ARRAY_ID` returns parent job + `.extern`/`.batch` substeps for each task. Filter to only `JOBID_N` format entries: `grepl("_", jid) && !grepl("\\.", jid)`. |
 | Docker container name rejected | `analysis_name` with spaces/special chars fails Docker naming rules `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. Sanitize with `gsub("[^a-zA-Z0-9_.-]", "_", name)`. |
 | `max_pr_mz` default was 1200 not 1800 | DIA-NN default for `--max-pr-mz` is 1800. UI and all fallbacks were incorrectly set to 1200, causing FASTA library entries and searches to use wrong range when Advanced Options wasn't opened. |
+| Parallel search OOM on timsTOF | Default `mem_per_file` was 32 GB, insufficient for timsTOF DIA-PASEF. Now 64 GB. |
+| TIC extraction auto-triggered | `observeEvent(list(btn, trigger))` fires when button first renders (NULL→0). Use separate `reactiveVal` trigger pattern instead. |
+| Older TDF missing `SummedIntensities` | `extract_tic_timstof()` auto-detects intensity column: `SummedIntensities` → `AccumulatedIntensity` → `MaxIntensity` → any `*ntensit*`. |
 
 ## Version History
 

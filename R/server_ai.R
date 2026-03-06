@@ -506,6 +506,24 @@ server_ai <- function(input, output, session, values) {
           methods_note <- "\n- **`Methods_and_References.txt`** — Full statistical methodology, software versions, and literature references\n"
         }
 
+        # --- 6b. Instrument metadata CSV ---
+        instrument_note <- ""
+        if (!is.null(values$instrument_metadata)) {
+          tryCatch({
+            meta <- values$instrument_metadata
+            meta_clean <- meta[!sapply(meta, is.null)]
+            inst_df <- data.frame(
+              Parameter = names(meta_clean),
+              Value = vapply(meta_clean, function(x) as.character(x), character(1)),
+              stringsAsFactors = FALSE
+            )
+            inst_file <- file.path(tmp_dir, "Instrument_Metadata.csv")
+            write.csv(inst_df, inst_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, inst_file)
+            instrument_note <- "\n- **`Instrument_Metadata.csv`** — Instrument model, m/z range, gradient length, and acquisition parameters extracted from raw files\n"
+          }, error = function(e) NULL)
+        }
+
         # --- 7. Reproducibility R code log ---
         repro_note <- ""
         if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
@@ -622,6 +640,15 @@ server_ai <- function(input, output, session, values) {
           search_settings_inline <- paste0("\n\n", paste(ss_lines, collapse = "\n"))
         }
 
+        # Instrument metadata inline block for prompt
+        instrument_inline <- ""
+        if (!is.null(values$instrument_metadata)) {
+          inst_text <- format_instrument_for_prompt(values$instrument_metadata)
+          if (nzchar(inst_text)) {
+            instrument_inline <- paste0("\n\n--- INSTRUMENT & ACQUISITION ---\n", inst_text)
+          }
+        }
+
         # Missingness summary (pre vs post imputation)
         missingness_inline <- ""
         tryCatch({
@@ -730,6 +757,7 @@ server_ai <- function(input, output, session, values) {
           if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics (precursor/protein counts, MS1 signal)\n" else "",
           gsea_note,
           phospho_note,
+          instrument_note,
           methods_note,
           repro_note,
           rds_note,
@@ -837,6 +865,13 @@ server_ai <- function(input, output, session, values) {
             "Write this in third person past tense, suitable for a journal Methods section. ",
             "Cite DIA-NN (Demichev et al., Nature Methods, 2020) appropriately.\n\n"
           ) else "",
+          if (nzchar(instrument_inline)) paste0(
+            "## Instrument & Acquisition\n",
+            "Instrument metadata was extracted from the raw files. Use this to write a complete ",
+            "Sample Preparation & Data Acquisition section for the Methods. Include the instrument model, ",
+            "m/z scan range, gradient length, and ion mobility range (if timsTOF). ",
+            "Write in third person past tense.\n\n"
+          ) else "",
           if (nzchar(methods_note)) paste0(
             "## Methodology & Reproducibility\n",
             "A detailed methodology is in `Methods_and_References.txt`. ",
@@ -851,6 +886,7 @@ server_ai <- function(input, output, session, values) {
           design_section,
           qc_inline,
           search_settings_inline,
+          instrument_inline,
           missingness_inline,
           mofa_inline,
           phospho_inline,

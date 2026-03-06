@@ -119,6 +119,43 @@ All DIA-NN search jobs (single, parallel, Docker, local) use this structure:
 - **`return()` inside `withProgress`**: Exits `withProgress` not the calling function. Restructure as flat `tryCatch`.
 - **SSH output encoding**: All `ssh_exec()`/`scp_download()`/`scp_upload()` sanitize with `iconv(..., sub="")`.
 
+## Instrument Metadata Extraction
+
+- **Auto-extraction at file scan time**: `parse_raw_file_metadata()` dispatches to `parse_timstof_metadata()` or `parse_thermo_metadata()` based on file extension. Only ONE file is parsed (first in list).
+- **timsTOF (.d)**: Reads `analysis.tdf` SQLite — `GlobalMetadata` table for instrument model/serial/m/z range/1/K0 range, `Frames` table for RT range/MS1+MS2 spectra counts/dia-PASEF detection/cycle time. Also tries `submethods/*.method` XML for LC method name.
+- **Thermo (.raw)**: Uses `rawrr::readFileHeader()` for instrument model, serial, mass range, time range, scan counts, mass resolution, software version. `rawrr` is optional — graceful fallback if not installed.
+- **SSH remote timsTOF**: SCP downloads `analysis.tdf` (~few MB) from first `.d` dir to temp, parses locally.
+- **SSH remote Thermo (.raw)**: Uses ThermoRawFileParser (`-m=0 -f=0`) on remote system to extract JSON metadata, then SCP downloads the JSON and parses locally via `parse_thermorawfileparser_json()`. ThermoRawFileParser probed via `which` + login shell fallback. Does NOT extract LC method/gradient (GitHub issue #86). Available as BioContainer on HPC systems.
+- **timsTOF LC info**: Extracted from `HyStarMetadata.xml` (UTF-8 XML with LC system name, method, runtime, serial). DIA windows from `.m/diaSettings.diasqlite`.
+- **Auto-sets m/z range**: Updates `min_pr_mz`/`max_pr_mz` UI inputs from actual instrument range, fixing the 300-1200 default issue.
+- **Stored in `values$instrument_metadata`**: Named list, persisted in session save/load.
+- **Surfaces in**: mass accuracy hint, raw file summary badge, methodology text, Claude export (CSV + PROMPT.md inline block).
+
+## Chromatography QC — TIC Extraction & Diagnostics
+
+- **Purpose**: Extract TIC traces from raw files at scan time (before search) to flag dead injections, carryover, RT drift, and loading anomalies before committing to hours-long DIA-NN searches.
+- **User-triggered**: "Extract TIC" button appears after file scan. Users can skip for verified good files. Not automatic.
+- **timsTOF only**: Reads MS1 frames (`MsMsType = 0`) from `analysis.tdf` SQLite. Auto-detects intensity column (`SummedIntensities` → `AccumulatedIntensity` → `MaxIntensity` → any `*ntensit*`) for older TDF compatibility. Also handles missing `MsMsType` column (falls back to `ScanMode` or no filter).
+- **SSH mode**: SCP downloads each `analysis.tdf` (~5-30 MB) to temp, extracts locally, deletes temp. Same pattern as instrument metadata extraction.
+- **Reactive values**: `values$tic_traces` (named list of data.frames), `values$tic_metrics` (data.frame with per-run metrics, diagnostics, file sizes).
+- **QC tab visibility**: QC tab shown when `values$raw_data` OR `values$tic_traces` is not NULL — allows viewing TIC QC before search runs.
+- **Per-run metrics** (`compute_tic_metrics()`): Total AUC (trapezoid), peak RT, gradient boundaries (10% threshold), gradient width, baseline ratio, late signal ratio, asymmetry. Smoothed with 2% moving average.
+- **Shape similarity** (`compute_shape_similarity()`): Interpolates all traces onto 500-point common RT grid, computes Pearson r vs median trace. Single-file returns r=1.0.
+- **Diagnostics** (`diagnose_run()`): MAD-based outlier detection (needs 3+ runs for cohort checks):
+  - Shape deviation: r < 0.90 = fail, r < 0.95 = warn
+  - RT shift: peak RT > 3 MAD from median
+  - Loading anomaly (AUC): >3x/<0.3x median = fail; >2x/<0.5x = warn
+  - File size outlier: >3x/<0.3x median = fail; >2x/<0.5x = warn
+  - Late elution: >15% signal in last 20% of gradient
+  - Elevated baseline: >10% of peak intensity
+  - Narrow gradient: <70% of median width
+- **Three plot views** (all plotlyOutput for bslib safety):
+  - Faceted: Per-run panels (ncol=4) with median trace overlay (blue dashed). Status-colored lines (green/yellow/red).
+  - Overlay: All runs normalized 0-1 on one axis. Quick outlier shape detection.
+  - Metrics: Horizontal bar chart of AUC per run with DT table below (Size, AUC, Peak RT, Gradient Width, Baseline Ratio, Late Signal, Shape r, Flags).
+- **Session persistence**: `tic_traces` and `tic_metrics` saved/loaded with session `.rds`.
+- **Auto-trigger bug**: `observeEvent(list(btn, trigger))` fires when button first renders (NULL→0 change). Fixed by using separate `reactiveVal` trigger that both Extract and Re-extract buttons increment.
+
 ## XIC Viewer Patterns
 
 - **Arrow masks dplyr**: `arrow::select()` masks `dplyr::select()` — always use `dplyr::select()` explicitly
