@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-03-06T06:56:42+00:00",
+  "updated_at": "2026-03-07T06:49:22+00:00",
   "github": {
     "clones_14d": 1204,
     "unique_users_14d": 340,
@@ -141,6 +141,6 @@
 ]
   },
   "version": {
-    "current": "3.2.0"
+    "current": "3.3.0"
   }
 }
