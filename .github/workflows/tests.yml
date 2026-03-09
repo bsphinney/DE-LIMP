@@ -20,7 +20,7 @@ on:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    name: Helper unit tests
+    name: All unit tests
 
     steps:
       - name: Checkout
@@ -31,17 +31,20 @@ jobs:
         with:
           r-version: '4.4'
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
       - name: Install test dependencies
         run: |
           Rscript -e '
-            install.packages("testthat", repos = "https://cloud.r-project.org")
+            install.packages(c("testthat", "glue", "data.table"),
+                             repos = "https://cloud.r-project.org")
           '
 
-      - name: Run unit tests (helpers)
+      - name: Run all unit tests
         run: |
           Rscript -e '
             results <- testthat::test_dir("tests/testthat",
-              filter = "helpers",
               reporter = testthat::SummaryReporter$new()
             )
             df <- as.data.frame(results)
@@ -92,36 +95,6 @@ jobs:
           Rscript -e '
             results <- testthat::test_dir("tests/testthat",
               filter = "data_integrity",
-              reporter = testthat::SummaryReporter$new()
-            )
-            df <- as.data.frame(results)
-            cat(sprintf("\nTotal: %d passed, %d failed, %d skipped\n",
-              sum(df$passed), sum(df$failed), sum(df$skipped)))
-            if (any(df$failed > 0)) quit(status = 1)
-          '
-
-  export-structure:
-    runs-on: ubuntu-latest
-    name: Export zip structure tests
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up R
-        uses: r-lib/actions/setup-r@v2
-        with:
-          r-version: '4.4'
-
-      - name: Install test dependencies
-        run: |
-          Rscript -e 'install.packages("testthat", repos = "https://cloud.r-project.org")'
-
-      - name: Run export structure tests
-        run: |
-          Rscript -e '
-            results <- testthat::test_dir("tests/testthat",
-              filter = "claude_export",
               reporter = testthat::SummaryReporter$new()
             )
             df <- as.data.frame(results)
