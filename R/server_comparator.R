@@ -165,7 +165,308 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
   )
 }
 
-#' Parse Spectronaut protein group report (quantities file + optional DE candidates file)
+#' Parse Spectronaut Candidates.tsv into per-comparison DE results
+#' @param de_path Path to Candidates.tsv
+#' @return Named list of data.frames (one per comparison), or NULL
+parse_spectronaut_candidates <- function(de_path) {
+  de_df <- data.table::fread(de_path, data.table = TRUE)
+  de_prot_col  <- grep("ProteinGroup|ProteinAccession", names(de_df), value = TRUE)[1]
+  de_gene_col  <- grep("^PG\\.Genes$|^Gene$|Genes", names(de_df), value = TRUE)[1]
+  de_logfc_col <- grep("Log2Ratio|log2FC|AVG\\.Log2\\.Ratio|AVG Log2 Ratio", names(de_df), value = TRUE)[1]
+  de_qval_col  <- grep("Qvalue|q\\.value|adj", names(de_df), ignore.case = TRUE, value = TRUE)[1]
+  de_pval_col  <- grep("^.*Pvalue$|^.*p\\.value$|PValue", names(de_df), ignore.case = TRUE, value = TRUE)[1]
+  nratios_col  <- grep("# of Ratios|NrOfRatios|NumberOfRatios", names(de_df), value = TRUE)[1]
+
+  if (is.na(de_prot_col)) stop("Candidates file missing protein column")
+  if (is.na(de_logfc_col)) stop("Candidates file missing Log2Ratio / logFC column")
+
+  # Handle multiple comparisons
+  comp_col <- grep("^Comparison$|^R\\.Condition$|^Contrast$", names(de_df), value = TRUE)[1]
+  build_de_frame <- function(sub_df) {
+    sub_ids <- normalize_protein_id(sub_df[[de_prot_col]])
+    out <- data.frame(
+      protein_id = sub_ids,
+      gene       = if (!is.na(de_gene_col)) as.character(sub_df[[de_gene_col]]) else sub_ids,
+      logFC      = as.numeric(sub_df[[de_logfc_col]]),
+      P.Value    = as.numeric(if (!is.na(de_pval_col)) sub_df[[de_pval_col]] else NA),
+      adj.P.Val  = as.numeric(if (!is.na(de_qval_col)) sub_df[[de_qval_col]] else NA),
+      stringsAsFactors = FALSE
+    )
+    if (!is.na(nratios_col)) out$n_ratios <- as.integer(sub_df[[nratios_col]])
+    out
+  }
+
+  if (!is.na(comp_col)) {
+    comparisons <- unique(de_df[[comp_col]])
+    de_stats_list <- lapply(comparisons, function(comp) {
+      build_de_frame(de_df[de_df[[comp_col]] == comp, ])
+    })
+    names(de_stats_list) <- comparisons
+    de_stats_list
+  } else {
+    list(comparison = build_de_frame(de_df))
+  }
+}
+
+#' Parse Spectronaut RunSummaries directory into per-sample QC table
+#' @param run_summary_paths Character vector of paths to RunSummary TSV files
+#' @return data.frame with per-sample QC metrics, or NULL
+parse_spectronaut_run_summaries <- function(run_summary_paths) {
+  rows <- lapply(run_summary_paths, function(p) {
+    tryCatch({
+      df <- data.table::fread(p, data.table = FALSE)
+      # RunSummary files are typically key-value pairs or single-row tables
+      # Try single-row table first (most common Spectronaut export)
+      if (nrow(df) >= 1 && ncol(df) > 3) {
+        find_col <- function(patterns) {
+          for (pat in patterns) {
+            m <- grep(pat, names(df), ignore.case = TRUE, value = TRUE)
+            if (length(m) > 0) return(m[1])
+          }
+          NA_character_
+        }
+        data.frame(
+          file_name       = basename(tools::file_path_sans_ext(p)),
+          precursors      = as.integer(df[[find_col(c("Precursors$", "^EG\\.Count"))]] %||% NA),
+          peptides        = as.integer(df[[find_col(c("Peptides$", "StrippedSequences"))]] %||% NA),
+          protein_groups  = as.integer(df[[find_col(c("Protein.?Groups?$", "^PG\\.Count"))]] %||% NA),
+          avg_pep_per_pg  = as.numeric(df[[find_col(c("AVG Peptides", "AvgPeptides"))]] %||% NA),
+          ms1_ppm         = as.numeric(df[[find_col(c("MS1.*Delta.*ppm", "MS1.*Mass.*Acc"))]] %||% NA),
+          ms2_ppm         = as.numeric(df[[find_col(c("MS2.*Delta.*ppm", "MS2.*Mass.*Acc"))]] %||% NA),
+          instrument      = as.character(df[[find_col(c("Instrument.?Model", "^R\\.Instrument"))]] %||% NA),
+          raw_file        = as.character(df[[find_col(c("Raw.?File.?Name", "^R\\.RawFileName", "^R\\.FileName"))]] %||% NA),
+          gradient_min    = as.numeric(df[[find_col(c("Gradient.?Length", "^R\\.GradientLength"))]] %||% NA),
+          stringsAsFactors = FALSE
+        )
+      } else NULL
+    }, error = function(e) NULL)
+  })
+  rows <- rows[!sapply(rows, is.null)]
+  if (length(rows) == 0) return(NULL)
+  do.call(rbind, rows)
+}
+
+#' Parse Spectronaut ConditionSetup.tsv into sample map
+#' @param path Path to ConditionSetup.tsv
+#' @return data.frame with columns: run_label, condition, file_name
+parse_spectronaut_condition_setup <- function(path) {
+  df <- data.table::fread(path, data.table = FALSE)
+  # Expected columns: Run Label, Condition, Replicate, File Name (Spectronaut standard)
+  label_col <- grep("Run.?Label", names(df), ignore.case = TRUE, value = TRUE)[1]
+  cond_col  <- grep("^Condition$", names(df), ignore.case = TRUE, value = TRUE)[1]
+  file_col  <- grep("File.?Name", names(df), ignore.case = TRUE, value = TRUE)[1]
+
+  if (is.na(file_col)) stop("ConditionSetup.tsv missing 'File Name' column")
+  if (is.na(cond_col)) stop("ConditionSetup.tsv missing 'Condition' column")
+
+  data.frame(
+    run_label  = if (!is.na(label_col)) as.character(df[[label_col]]) else as.character(df[[file_col]]),
+    condition  = as.character(df[[cond_col]]),
+    file_name  = as.character(df[[file_col]]),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Parse Spectronaut ExperimentSetupOverview text file into settings list
+#' @param path Path to ExperimentSetupOverview.txt
+#' @return Named list of settings key-value pairs
+parse_spectronaut_setup_overview <- function(path) {
+  lines <- readLines(path, warn = FALSE)
+  lines <- trimws(lines)
+  lines <- lines[nzchar(lines)]
+  settings <- list()
+  for (line in lines) {
+    # Try "Key: Value" or "Key\tValue" patterns
+    if (grepl(":\t|:\\s{2,}", line)) {
+      parts <- strsplit(line, ":\t|:\\s{2,}")[[1]]
+      if (length(parts) == 2) settings[[trimws(parts[1])]] <- trimws(parts[2])
+    } else if (grepl("^[^:]+:\\s+.+", line)) {
+      key <- sub(":.*", "", line)
+      val <- sub("^[^:]+:\\s+", "", line)
+      settings[[trimws(key)]] <- trimws(val)
+    }
+  }
+  settings
+}
+
+#' Parse Spectronaut ZIP export (primary Mode B input)
+#' Detects and parses: ConditionSetup.tsv, Pivot quantities, Candidates.tsv,
+#' RunSummaries/*.tsv, ExperimentSetupOverview.txt
+#' @param zip_path Path to the ZIP file
+#' @return Named list compatible with comparator pipeline (same structure as parse_spectronaut)
+parse_spectronaut_zip <- function(zip_path) {
+  tmp <- tempdir()
+  zip_dir <- file.path(tmp, paste0("spectronaut_zip_", format(Sys.time(), "%H%M%S")))
+  dir.create(zip_dir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(zip_dir, recursive = TRUE), add = TRUE)
+
+  utils::unzip(zip_path, exdir = zip_dir)
+  all_files <- list.files(zip_dir, recursive = TRUE, full.names = TRUE)
+  basenames <- tolower(basename(all_files))
+
+  # --- Detect files ---
+  detect <- function(patterns, files = all_files, bases = basenames) {
+    for (pat in patterns) {
+      idx <- grep(pat, bases)
+      if (length(idx) > 0) return(files[idx[1]])
+    }
+    NULL
+  }
+
+  condition_file <- detect(c("conditionsetup\\.tsv$", "conditionsetup\\.csv$"))
+  pivot_file     <- detect(c("pivot.*\\.tsv$", "bgs factory report.*\\.tsv$",
+                             "pivot.*\\.csv$", "bgs factory report.*\\.csv$"))
+  candidates_file <- detect(c("^candidates\\.tsv$", "^candidates\\.csv$",
+                              "candidates.*\\.tsv$"))
+  setup_file     <- detect(c("experimentsetupoverview.*\\.txt$",
+                             "experimentsetupoverview.*\\.tsv$"))
+
+  # RunSummaries: look for a RunSummaries directory or matching files
+  run_summary_files <- all_files[grep("runsummar", basenames)]
+  # If there's a RunSummaries subdirectory, get all .tsv files inside it
+  rs_dirs <- list.dirs(zip_dir, recursive = TRUE, full.names = TRUE)
+  rs_dir <- rs_dirs[grep("RunSummar", basename(rs_dirs), ignore.case = TRUE)]
+  if (length(rs_dir) > 0) {
+    rs_candidates <- list.files(rs_dir[1], pattern = "\\.(tsv|csv)$",
+                                full.names = TRUE, recursive = FALSE)
+    if (length(rs_candidates) > 0) run_summary_files <- rs_candidates
+  }
+
+  # Build detection manifest
+  manifest <- list(
+    condition_setup = !is.null(condition_file),
+    quantities      = !is.null(pivot_file),
+    candidates      = !is.null(candidates_file),
+    run_summaries   = length(run_summary_files) > 0,
+    n_run_summaries = length(run_summary_files),
+    settings        = !is.null(setup_file)
+  )
+
+  if (!manifest$quantities) stop("ZIP must contain a Pivot quantities file (*Pivot*.tsv or *BGS Factory Report*.tsv)")
+
+  # --- Parse each component ---
+
+  # 1. ConditionSetup (sample map)
+  sample_map <- if (manifest$condition_setup) {
+    tryCatch(parse_spectronaut_condition_setup(condition_file),
+             error = function(e) { message("Warning: Could not parse ConditionSetup: ", e$message); NULL })
+  } else NULL
+
+  # 2. Pivot quantities (reuse existing column-detection logic)
+  df <- data.table::fread(pivot_file, data.table = TRUE)
+  protein_col <- grep("ProteinGroup|ProteinAccession", names(df), value = TRUE)[1]
+  gene_col    <- grep("^PG\\.Genes$|^Gene$|Genes", names(df), value = TRUE)[1]
+  quant_cols  <- grep("PG\\.Quantity$", names(df), value = TRUE)
+  npep_col    <- grep("NrOfStrippedSequences", names(df), value = TRUE)[1]
+
+  if (is.na(protein_col)) stop("Pivot file missing protein column (PG.ProteinGroups)")
+  if (length(quant_cols) == 0) stop("Pivot file has no quantity columns (*.PG.Quantity)")
+
+  protein_ids <- normalize_protein_id(df[[protein_col]])
+  quant_mat <- as.data.frame(df[, quant_cols, with = FALSE])
+
+  # If we have a sample_map, rename quant columns from Spectronaut labels to File Name keys
+  # This makes match_samples() work against DE-LIMP colnames which are file-based
+  if (!is.null(sample_map)) {
+    # Spectronaut pivot columns are like "RunLabel.PG.Quantity" — extract the prefix
+    col_prefixes <- sub("\\.PG\\.Quantity$", "", quant_cols)
+    # Match to sample_map run_label to get file_name
+    map_idx <- match(col_prefixes, sample_map$run_label)
+    new_names <- ifelse(is.na(map_idx), col_prefixes, sample_map$file_name[map_idx])
+    colnames(quant_mat) <- new_names
+  } else {
+    # Strip .PG.Quantity suffix for cleaner column names
+    colnames(quant_mat) <- sub("\\.PG\\.Quantity$", "", quant_cols)
+  }
+
+  # Inline DE columns in pivot (single-file mode fallback)
+  logfc_col <- grep("Log2Ratio|log2FC", names(df), value = TRUE)[1]
+  qval_col  <- grep("Qvalue|q\\.value|adj", names(df), ignore.case = TRUE, value = TRUE)[1]
+  pval_col  <- grep("^.*Pvalue$|^.*p\\.value$", names(df), ignore.case = TRUE, value = TRUE)[1]
+  has_inline_de <- !is.na(logfc_col) && !is.na(pval_col)
+
+  # 3. Candidates (DE results) — prefer separate file over inline
+  de_stats_df <- NULL
+  has_de <- FALSE
+  if (manifest$candidates) {
+    tryCatch({
+      de_stats_df <- parse_spectronaut_candidates(candidates_file)
+      has_de <- TRUE
+    }, error = function(e) message("Warning: Could not parse Candidates: ", e$message))
+  }
+  if (!has_de && has_inline_de) {
+    de_stats_df <- list(comparison = data.frame(
+      protein_id = protein_ids,
+      gene       = if (!is.na(gene_col)) as.character(df[[gene_col]]) else protein_ids,
+      logFC      = as.numeric(df[[logfc_col]]),
+      P.Value    = as.numeric(if (!is.na(pval_col)) df[[pval_col]] else NA),
+      adj.P.Val  = as.numeric(if (!is.na(qval_col)) df[[qval_col]] else NA),
+      stringsAsFactors = FALSE
+    ))
+    has_de <- TRUE
+  }
+
+  # 4. RunSummaries (per-sample QC)
+  run_qc <- if (manifest$run_summaries) {
+    tryCatch(parse_spectronaut_run_summaries(run_summary_files),
+             error = function(e) { message("Warning: Could not parse RunSummaries: ", e$message); NULL })
+  } else NULL
+
+  # 5. ExperimentSetupOverview (settings)
+  setup_overview <- if (manifest$settings) {
+    tryCatch(parse_spectronaut_setup_overview(setup_file),
+             error = function(e) { message("Warning: Could not parse SetupOverview: ", e$message); NULL })
+  } else NULL
+
+  # --- Peptide counts ---
+  n_pep <- NULL
+  if (!is.na(npep_col)) {
+    n_pep <- data.frame(
+      protein_id = protein_ids,
+      n_peptides = as.integer(df[[npep_col]]),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  # --- Build settings from parsed components ---
+  settings <- list(
+    software         = "Spectronaut",
+    version          = if (!is.null(setup_overview) && !is.null(setup_overview[["Software Version"]])) {
+      setup_overview[["Software Version"]]
+    } else detect_spectronaut_version(df),
+    normalization    = if (!is.null(setup_overview) && !is.null(setup_overview[["Normalization"]])) {
+      setup_overview[["Normalization"]]
+    } else "Local regression (Spectronaut default)",
+    rollup_method    = "Protein group quantity (PG.Quantity)",
+    de_engine        = if (has_de) "Spectronaut internal statistics" else "None (quantities only)",
+    fdr_threshold    = if (!is.null(setup_overview) && !is.null(setup_overview[["FDR"]])) {
+      setup_overview[["FDR"]]
+    } else "Not available in export",
+    lfc_threshold    = "Not available in export",
+    min_peptides     = "Not available in export",
+    n_proteins_total = as.character(length(protein_ids)),
+    n_samples        = as.character(ncol(quant_mat))
+  )
+
+  contrasts <- if (!is.null(de_stats_df)) names(de_stats_df) else character(0)
+
+  list(
+    source      = "spectronaut",
+    de_stats    = de_stats_df,
+    intensities = quant_mat,
+    protein_ids = protein_ids,
+    n_peptides  = n_pep,
+    missing_pct = setNames(apply(quant_mat, 1, function(x) mean(is.na(x) | x == 0)), protein_ids),
+    settings    = settings,
+    contrasts   = contrasts,
+    sample_map  = sample_map,
+    run_qc      = run_qc,
+    manifest    = manifest
+  )
+}
+
+#' Parse Spectronaut protein group report (single TSV fallback for Mode B)
+#' Accepts quantities TSV + optional DE candidates TSV (legacy 2-file mode)
 parse_spectronaut <- function(file_path, de_file_path = NULL) {
   df <- data.table::fread(file_path, data.table = TRUE)
 
@@ -190,47 +491,7 @@ parse_spectronaut <- function(file_path, de_file_path = NULL) {
   has_de <- !is.na(logfc_col) && !is.na(pval_col)
 
   if (!is.null(de_file_path)) {
-    # Two-file mode: separate Candidates export
-    de_df <- data.table::fread(de_file_path, data.table = TRUE)
-    de_prot_col  <- grep("ProteinGroup|ProteinAccession", names(de_df), value = TRUE)[1]
-    de_gene_col  <- grep("^PG\\.Genes$|^Gene$|Genes", names(de_df), value = TRUE)[1]
-    de_logfc_col <- grep("Log2Ratio|log2FC|AVG\\.Log2\\.Ratio", names(de_df), value = TRUE)[1]
-    de_qval_col  <- grep("Qvalue|q\\.value|adj", names(de_df), ignore.case = TRUE, value = TRUE)[1]
-    de_pval_col  <- grep("^.*Pvalue$|^.*p\\.value$|PValue", names(de_df), ignore.case = TRUE, value = TRUE)[1]
-
-    if (is.na(de_prot_col)) stop("Candidates file missing protein column")
-    if (is.na(de_logfc_col)) stop("Candidates file missing Log2Ratio / logFC column")
-
-    de_protein_ids <- normalize_protein_id(de_df[[de_prot_col]])
-
-    # Handle multiple comparisons: detect comparison columns
-    comp_col <- grep("^Comparison$|^R\\.Condition$|^Contrast$", names(de_df), value = TRUE)[1]
-    if (!is.na(comp_col)) {
-      comparisons <- unique(de_df[[comp_col]])
-      de_stats_list <- lapply(comparisons, function(comp) {
-        sub_df <- de_df[de_df[[comp_col]] == comp, ]
-        sub_ids <- normalize_protein_id(sub_df[[de_prot_col]])
-        data.frame(
-          protein_id = sub_ids,
-          gene       = if (!is.na(de_gene_col)) as.character(sub_df[[de_gene_col]]) else sub_ids,
-          logFC      = as.numeric(sub_df[[de_logfc_col]]),
-          P.Value    = as.numeric(if (!is.na(de_pval_col)) sub_df[[de_pval_col]] else NA),
-          adj.P.Val  = as.numeric(if (!is.na(de_qval_col)) sub_df[[de_qval_col]] else NA),
-          stringsAsFactors = FALSE
-        )
-      })
-      names(de_stats_list) <- comparisons
-      de_stats_df <- de_stats_list
-    } else {
-      de_stats_df <- list(comparison = data.frame(
-        protein_id = de_protein_ids,
-        gene       = if (!is.na(de_gene_col)) as.character(de_df[[de_gene_col]]) else de_protein_ids,
-        logFC      = as.numeric(de_df[[de_logfc_col]]),
-        P.Value    = as.numeric(if (!is.na(de_pval_col)) de_df[[de_pval_col]] else NA),
-        adj.P.Val  = as.numeric(if (!is.na(de_qval_col)) de_df[[de_qval_col]] else NA),
-        stringsAsFactors = FALSE
-      ))
-    }
+    de_stats_df <- parse_spectronaut_candidates(de_file_path)
     has_de <- TRUE
   } else if (has_de) {
     # Single-file mode: DE columns in the same file
@@ -1086,11 +1347,17 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         "  DE-LIMP Run Comparator: Spectronaut Export Guide",
         "==========================================================",
         "",
-        "Export TWO files from Spectronaut for the Run Comparator:",
+        "RECOMMENDED: Export as a ZIP archive from Spectronaut",
+        "containing all files below. DE-LIMP auto-detects each file.",
         "",
-        "FILE 1: Protein Quantities (required)",
-        "---------------------------------------",
+        "Alternatively, upload individual .tsv files using the",
+        "'Or upload individual files...' dropdown.",
+        "",
+        "",
+        "FILE 1: Protein Quantities (REQUIRED)",
+        "--------------------------------------",
         "  Report > Report Schema > Protein Group Pivot Report",
+        "  Look for: *Pivot*.tsv or *BGS Factory Report*.tsv",
         "",
         "  Required columns:",
         "    - PG.ProteinGroups      (protein accessions)",
@@ -1100,49 +1367,58 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         "    - PG.Genes                    (gene symbols)",
         "    - PG.NrOfStrippedSequences    (peptide count per protein)",
         "",
-        "  How to set up:",
-        "    1. Go to Report tab in Spectronaut",
-        "    2. Select 'Protein Group Pivot Report' schema (or create custom)",
-        "    3. Make sure the report level is 'Protein Group'",
-        "    4. Ensure columns above are checked",
-        "    5. Export as .tsv (tab-separated)",
+        "",
+        "FILE 2: ConditionSetup.tsv (REQUIRED in ZIP mode)",
+        "-------------------------------------------------",
+        "  Automatically included in Spectronaut analysis exports.",
+        "  Maps Run Labels to conditions and original file names.",
+        "",
+        "  Columns: Run Label, Condition, Replicate, File Name",
+        "  File Name is the join key to match DE-LIMP sample names.",
         "",
         "",
-        "FILE 2: Candidates / DE Results (optional, enables DE Concordance)",
-        "------------------------------------------------------------------",
-        "  Report > Report Schema > Candidates Report",
+        "FILE 3: Candidates.tsv (optional, enables DE Concordance)",
+        "---------------------------------------------------------",
+        "  Post Analysis > Differential Expression > Export Candidates",
         "",
         "  Required columns:",
-        "    - PG.ProteinGroups          (protein accessions)",
-        "    - AVG.Log2.Ratio            (log2 fold change)",
-        "    - Qvalue                    (adjusted p-value / FDR)",
+        "    - PG.ProteinGroups or ProteinGroups",
+        "    - AVG Log2 Ratio (log2 fold change)",
+        "    - Qvalue (adjusted p-value / FDR)",
         "",
         "  Recommended columns:",
-        "    - PG.Genes                  (gene symbols)",
-        "    - PValue                    (raw p-value)",
-        "    - Comparison                (comparison label, for multi-comparison exports)",
+        "    - PG.Genes, PValue, Comparison, # of Ratios",
         "",
-        "  How to set up:",
-        "    1. Go to Report tab in Spectronaut",
-        "    2. Run your statistical analysis (Post Analysis > Differential Expression)",
-        "    3. Select 'Candidate' report schema",
-        "    4. Ensure columns above are checked",
-        "    5. Export as .tsv",
+        "",
+        "FILE 4: RunSummaries/*.tsv (optional, enables per-sample QC)",
+        "------------------------------------------------------------",
+        "  One file per sample with QC metrics: Precursors, Peptides,",
+        "  Protein Groups, mass accuracy, gradient length, instrument.",
+        "  Auto-detected from a RunSummaries/ subdirectory in the ZIP.",
+        "",
+        "",
+        "FILE 5: ExperimentSetupOverview.txt (optional)",
+        "----------------------------------------------",
+        "  Spectronaut analysis settings (normalization, version, etc.).",
+        "  Enriches the Settings Diff comparison.",
         "",
         "",
         "WHAT EACH FILE ENABLES",
         "----------------------",
         "  Quantities only:     Settings Diff, Protein Universe, Quantification",
-        "  Quantities + DE:     All above + DE Concordance, Hypothesis Engine, AI Analysis",
+        "  + Candidates:        DE Concordance, Hypothesis Engine, AI Analysis",
+        "  + ConditionSetup:    Automatic sample name matching",
+        "  + RunSummaries:      Per-sample QC comparison",
+        "  + SetupOverview:     Enriched settings comparison",
         "",
         "",
         "TIPS",
         "----",
         "  - Column names are auto-detected, so exact schema isn't critical",
-        "  - If you have a single combined file with both quantities and DE stats,",
-        "    you can upload it as File 1 and skip File 2",
         "  - The comparator normalizes protein IDs across formats (sp|ACC|NAME -> ACC)",
         "  - For best results, use the same FASTA for both DIA-NN and Spectronaut",
+        "  - ZIP upload is preferred: it keeps all files organized and auto-detects",
+        "    which components are present",
         "",
         "Generated by DE-LIMP Run Comparator"
       ), file)
@@ -1271,7 +1547,49 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     })
   })
 
-  # Re-parse Spectronaut when either file changes
+  # --- Spectronaut ZIP upload (primary Mode B input) ---
+  spec_manifest <- reactiveVal(NULL)
+
+  observeEvent(input$comparator_run_b_spec_zip, {
+    req(input$comparator_mode == "delimp_spectronaut")
+    tryCatch({
+      parsed <- parse_spectronaut_zip(input$comparator_run_b_spec_zip$datapath)
+      comp_run_b(parsed)
+      spec_manifest(parsed$manifest)
+      n_files <- sum(c(parsed$manifest$quantities, parsed$manifest$candidates,
+                       parsed$manifest$run_summaries, parsed$manifest$settings,
+                       parsed$manifest$condition_setup))
+      showNotification(
+        sprintf("Spectronaut ZIP loaded: %d components detected", n_files),
+        type = "message"
+      )
+    }, error = function(e) {
+      showNotification(paste("Error parsing Spectronaut ZIP:", e$message), type = "error")
+      comp_run_b(NULL)
+      spec_manifest(NULL)
+    })
+  })
+
+  # Manifest display (green checkmarks for detected files)
+  output$spectronaut_zip_manifest <- renderUI({
+    m <- spec_manifest()
+    if (is.null(m)) return(NULL)
+    check <- function(ok, label) {
+      icon_tag <- if (ok) tags$span("\u2705", style = "margin-right: 4px;")
+                  else     tags$span("\u274C", style = "margin-right: 4px;")
+      tags$div(icon_tag, tags$small(label))
+    }
+    div(style = "background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px;",
+      tags$small(tags$b("Found:")),
+      check(m$quantities, "Quantities"),
+      check(m$candidates, "DE Results"),
+      check(m$run_summaries, paste0("Run Summaries (", m$n_run_summaries, ")")),
+      check(m$settings, "Settings"),
+      check(m$condition_setup, "Sample Map")
+    )
+  })
+
+  # --- Spectronaut individual TSV uploads (fallback) ---
   observeEvent(input$comparator_run_b_spectronaut, {
     req(input$comparator_mode == "delimp_spectronaut")
     tryCatch({
@@ -1279,6 +1597,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       parsed <- parse_spectronaut(input$comparator_run_b_spectronaut$datapath,
                                   de_file_path = de_path)
       comp_run_b(parsed)
+      spec_manifest(NULL)  # Clear ZIP manifest when using individual files
       msg <- if (!is.null(de_path)) "Spectronaut quantities + DE loaded" else "Spectronaut quantities loaded (no DE file)"
       showNotification(msg, type = "message")
     }, error = function(e) {
