@@ -18,15 +18,17 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## What's New in v3.2.0
+## What's New in v3.5.0
 
-**About Tab & Community Dashboard** -- Live GitHub stats (stars, forks, visitors, clones) with 14-day trend sparklines, GitHub Discussions feed, version info, and project links.
+**Run Comparator** -- Compare two analyses of the same dataset across tools. Supports DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe. Four diagnostic layers (Settings Diff, Protein Universe, Quantification, DE Concordance) with a 7-rule hypothesis engine that explains *why* each discordant protein disagrees. Optional DIA-NN log upload enriches the comparison with search-derived parameters. Optional MOFA2 decomposition identifies hidden variance patterns.
 
-**DIA-NN Search Improvements** -- Spectral library caching (reuse predicted libraries across searches), custom FASTA sequences (add protein sequences inline at submit time), real-time cluster resource indicator (traffic-light HPC CPU monitoring), parallel 5-step SLURM pipeline with dependency chaining, and reorganized search logs.
+**Search & Analysis History** -- Full audit trail for DIA-NN searches (26 parameters logged) and pipeline runs. Import Settings or Import Results from past searches. Cross-reference links between search and analysis history. Project-based grouping with summary cards.
 
-**Previous highlights (v3.1 / v3.1.1):** UI overhaul (dark navbar, hover dropdowns, accordion sidebar, DE Dashboard sub-tabs). Core Facility Mode (SQLite job tracking, staff YAML, QC dashboard, Quarto reports). Volcano plot fixes (correct P.Value/adj.P.Val handling, DE count annotation, default logFC cutoff 0.6). CV Analysis redesign (scatter plot, ggplot subtitle). Export Data panel and AI Summary HTML export.
+**Chromatography QC** -- Extract TIC traces from timsTOF .d files before committing to long searches. Faceted, overlay, and metrics views with per-run diagnostics (shape deviation, RT shift, loading anomaly, late elution, and more). Flag dead injections and carryover before wasting HPC hours.
 
-**v3.0 highlights:** Multi-Omics MOFA2 (2-6 views), DIA-NN Docker search backend, phosphoproteomics (site-level DE, KSEA, motif analysis), GSEA expansion (BP/MF/CC/KEGG), all-contrast AI summary.
+**Smart HPC Job Submission** -- Per-user CPU limit detection (queries SLURM QOS), auto-switches partition when at capacity. FASTA database library with auto-upload to HPC. Path validation prevents local-only FASTA files from reaching HPC jobs.
+
+**Previous highlights:** v3.1 UI overhaul (dark navbar, accordion sidebar, DE Dashboard sub-tabs, Core Facility Mode). v3.0 Multi-Omics MOFA2, Docker search, phosphoproteomics (KSEA, motifs), GSEA (BP/MF/CC/KEGG), all-contrast AI summary.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
@@ -65,11 +67,27 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Auto-Analyze** button for one-click dataset analysis; **Save Chat** to download conversation as plain text
 - Auto-generated methodology text for methods sections
 
+### Run Comparator
+- **Cross-tool comparison** -- Compare your DE-LIMP analysis against a second DE-LIMP run, Spectronaut export, or FragPipe output to understand how tool choice affects your results
+- **4 diagnostic layers** -- Settings Diff (parameter-by-parameter comparison), Protein Universe (overlap analysis), Quantification (log2 intensity correlation, per-sample concordance, systematic bias detection), DE Concordance (3x3 Up/Down/NS matrix, volcano overlay, discordant protein table)
+- **7-rule hypothesis engine** -- For each discordant protein, assigns a tool-aware hypothesis explaining *why* the tools disagree (direction reversal, normalization offset, variance estimation, missing values, peptide count, FC magnitude, or borderline significance)
+- **Optional DIA-NN log upload** -- Enrich Mode A comparisons with search-derived parameters (pg-level quantification, proteoforms, library precursor counts, pipeline step)
+- **Optional MOFA2 decomposition** -- Treats the two runs as views and decomposes joint variance to find hidden patterns among discordant proteins
+- **AI integration** -- Tool-aware Gemini prompt and Claude ZIP export for deeper analysis
+
+### Chromatography QC
+- **Pre-search quality check** -- Extract TIC traces from timsTOF .d files *before* committing to hours-long DIA-NN searches
+- **Three views** -- Faceted panels (per-run with median overlay), Overlay (all runs normalized 0-1 on one axis), Metrics (AUC bar chart + diagnostics table)
+- **Automated diagnostics** -- Shape deviation (Pearson r vs median trace), RT shift, loading anomaly (AUC outlier), file size outlier, late elution, elevated baseline, narrow gradient
+- **SSH support** -- SCP downloads analysis.tdf from remote .d directories, extracts locally
+
 ### DIA-NN Search Integration
 - **Three backends** -- Local, Docker, and HPC (SSH/SLURM)
 - **Parallel 5-step SLURM pipeline** -- Optimized search with dependency chaining and array jobs for maximum HPC throughput
 - **Spectral library caching** -- Reuse predicted libraries across searches to save compute time
 - **Custom FASTA sequences** -- Add custom protein sequences inline when submitting searches
+- **Smart partition selection** -- Detects per-user SLURM CPU limits, auto-switches to public queue when at capacity
+- **FASTA database library** -- Shared catalog with auto-upload to HPC, fragment m/z range tracking, path validation
 - **Cluster resource indicator** -- Real-time HPC CPU usage monitoring with traffic-light display (green/yellow/red)
 - **Windows Docker** -- `docker compose up` runs DE-LIMP + DIA-NN with zero R installation ([guide](WINDOWS_DOCKER_INSTALL.md))
 - **UniProt FASTA download** -- Search and download proteome databases directly; 6 bundled contaminant libraries
@@ -87,9 +105,10 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 > *Activated by setting `DELIMP_CORE_DIR`. Not visible on standard installations.*
 
-### Session Management & Education
+### Session Management & History
+- **Search History** -- Full audit trail for every DIA-NN search (26 parameters). Import Settings to reuse parameters; Import Results to load completed search output directly. View Log shows search metadata. Cross-reference links to Analysis History.
+- **Analysis History & Projects** -- Track every pipeline run with expandable detail rows. Assign analyses to projects for organized grouping with summary cards.
 - **About tab** -- Community stats dashboard with GitHub stars, forks, visitors, and clones (14-day trend sparklines), GitHub Discussions feed, version info, and project links
-- **Centralized versioning** -- `VERSION` file drives version display across all modules via `values$app_version`
 - Save/load full analysis state as `.rds`; export reproducibility R code log
 - One-click example data (Affinisep vs Evosep comparison)
 - Group assignment templates (CSV export/import)

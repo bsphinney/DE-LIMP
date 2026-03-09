@@ -51,7 +51,7 @@
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
 - [ ] Publication-quality plot exports (SVG/PNG/TIFF with size controls)
 - [x] Sample correlation heatmap (Replicate Consistency tab)
-- [ ] Venn diagram of significant proteins across comparisons
+- [x] Venn diagram of significant proteins across comparisons (→ Run Comparator protein universe)
 - [ ] Sample CV distribution plots
 - [ ] Protein numbers bar plot per sample
 - [ ] Absence/presence table for on/off proteins

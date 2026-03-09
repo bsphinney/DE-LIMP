@@ -612,9 +612,51 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         }
         showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
 
-        # Record to analysis history log
+        # Record to analysis history log + auto-save session .rds
         tryCatch({
           ss <- values$diann_search_settings
+          out_dir <- if (!is.null(ss)) ss$output_dir else NA
+
+          # Auto-save session .rds alongside the search output
+          rds_path <- NA
+          if (!is.na(out_dir) && nzchar(out_dir %||% "")) {
+            tryCatch({
+              rds_name <- paste0("DE-LIMP_session_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
+              # Save to output_dir if accessible, otherwise to home dir
+              save_dir <- if (dir.exists(out_dir)) out_dir
+                          else path.expand("~/.delimp_sessions")
+              dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
+              rds_path <- file.path(save_dir, rds_name)
+              session_data <- list(
+                raw_data = values$raw_data, metadata = values$metadata,
+                fit = values$fit, y_protein = values$y_protein,
+                dpc_fit = values$dpc_fit, design = values$design,
+                qc_stats = values$qc_stats,
+                gsea_results = values$gsea_results,
+                gsea_results_cache = values$gsea_results_cache,
+                repro_log = values$repro_log,
+                color_plot_by_de = values$color_plot_by_de,
+                contrast = input$contrast_selector,
+                logfc_cutoff = input$logfc_cutoff, q_cutoff = input$q_cutoff,
+                phospho_detected = values$phospho_detected,
+                phospho_site_matrix = values$phospho_site_matrix,
+                phospho_site_info = values$phospho_site_info,
+                phospho_fit = values$phospho_fit,
+                diann_search_settings = ss,
+                instrument_metadata = values$instrument_metadata,
+                tic_traces = values$tic_traces, tic_metrics = values$tic_metrics,
+                saved_at = Sys.time(),
+                app_version = paste0("DE-LIMP v", values$app_version),
+                auto_saved = TRUE
+              )
+              saveRDS(session_data, rds_path)
+              message("[DE-LIMP] Auto-saved session: ", rds_path)
+            }, error = function(e) {
+              message("[DE-LIMP] Auto-save failed: ", e$message)
+              rds_path <- NA
+            })
+          }
+
           record_analysis(list(
             timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
             user = Sys.getenv("USER", "unknown"),
@@ -628,7 +670,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
             n_samples = ncol(values$y_protein$E),
             n_contrasts = length(colnames(values$fit$contrasts)),
             n_de_proteins = count_de_proteins(values$fit),
-            output_dir = if (!is.null(ss)) ss$output_dir else NA,
+            output_dir = out_dir,
+            session_file = if (!is.na(rds_path)) rds_path else NA,
             app_version = values$app_version %||% "unknown",
             notes = ""
           ))

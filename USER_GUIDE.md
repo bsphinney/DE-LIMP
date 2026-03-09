@@ -849,7 +849,152 @@ These additional export options are available from the **Output** dropdown in th
 
 ---
 
-## 9. Accessing DE-LIMP
+## 9. Run Comparator
+
+The **Run Comparator** lets you compare two analyses of the same dataset to understand how different tools, settings, or pipelines affect your results. This is essential for benchmarking, validating findings across platforms, and building confidence in your DE protein list.
+
+### 9.1 When to Use It
+
+- You ran the same samples through DE-LIMP twice with different settings (e.g., different normalization, mass accuracy, or FASTA database) and want to know what changed
+- Your core facility processed samples with Spectronaut or FragPipe, and you want to compare against your DE-LIMP analysis
+- You want to identify which DE proteins are robust (consistent across tools) vs. tool-dependent
+
+### 9.2 Comparison Modes
+
+| Mode | Run A | Run B | What You Need |
+|------|-------|-------|---------------|
+| **A: DE-LIMP vs DE-LIMP** | Current session or .rds file | .rds file | Two DE-LIMP session files (or one + current session) |
+| **B: DE-LIMP vs Spectronaut** | Current session or .rds file | Spectronaut candidates.tsv export | Spectronaut "Candidates" export with IntensityPG columns |
+| **C: DE-LIMP vs FragPipe** | Current session or .rds file | combined_protein.tsv | FragPipe combined_protein.tsv; optionally with FragPipe-Analyst DE stats |
+
+### 9.3 Running a Comparison
+
+1. Navigate to **Analysis > Run Comparator** in the navbar
+2. Select the comparison mode (A, B, or C)
+3. For **Run A**: Choose "Use current session" (if you have a loaded analysis) or upload a DE-LIMP `.rds` session file
+4. For **Run B**: Upload the appropriate file for the chosen mode
+5. Select the **contrast** to compare (must exist in both runs -- e.g., "Treatment - Control")
+6. Click **Run Comparison**
+
+**Mode A bonus -- DIA-NN Log Upload**: In the collapsible "DIA-NN Log Files" section, you can optionally upload DIA-NN log files for each run. This enriches the Settings Diff with search-derived parameters like pg-level quantification mode, proteoform detection, library precursor counts, and which pipeline step produced the output. Useful when comparing a first-pass quant vs final assembly output.
+
+### 9.4 The Four Diagnostic Layers
+
+Results appear as sub-tabs, each building on the previous:
+
+**Settings Diff** -- A side-by-side parameter table highlighting differences in red. Covers pipeline settings (normalization, imputation, covariates), DIA-NN search settings (mass accuracy, enzyme, scan window), and DIA-NN log-derived settings (if uploaded). Mismatched rows are highlighted for quick scanning.
+
+**Protein Universe** -- A stacked bar chart showing how many proteins are shared, Run A-only, and Run B-only. Summary cards show total protein counts for each run and the overlap percentage. Large differences here often indicate different FASTA databases, different filtering thresholds, or dramatically different data completeness.
+
+**Quantification** -- Three views of how protein-level intensities compare:
+- *Correlation scatter*: Log2 intensity of each protein in Run A vs Run B. Pearson r and systematic bias (median offset) displayed.
+- *Per-sample correlation*: Bar chart showing how well each sample's intensities agree between runs. Low-correlation samples may indicate normalization differences or batch effects.
+- *Bias density*: Histogram of log2(Run A / Run B) per protein. A symmetric distribution centered at zero means no systematic bias. Shifts indicate normalization or quantification differences.
+
+**DE Concordance** -- The core diagnostic:
+- *3x3 concordance matrix*: Each protein classified as Up, Down, or Not Significant in each run. The 9 cells show counts and percentages. Ideally, most proteins fall on the diagonal (agree) rather than off-diagonal (disagree).
+- *Volcano overlay*: Both runs' volcano plots superimposed, colored by concordance status.
+- *Discordant protein table*: Every protein where the two runs disagree, with per-protein hypothesis explaining why.
+- *Hypothesis distribution chart*: Bar chart showing the dominant causes of discordance at a glance.
+- *Summary banner*: One-line overview with concordance rate, bias detection badge, and dominant cause badge.
+
+### 9.5 Understanding Hypotheses
+
+The hypothesis engine assigns one of 7 categories to each discordant protein:
+
+| Category | Meaning | Typical Cause |
+|----------|---------|---------------|
+| **Direction reversal** | One run says Up, the other says Down | Different normalization centering or peptide selection |
+| **Normalization offset** | Same direction but one run crosses the significance threshold | Systematic intensity shift between tools |
+| **Variance estimation** | Similar fold changes but different significance | Different variance shrinkage (limma vs tool-specific methods) |
+| **Missing values** | One run has fewer observations | Different MBR (match-between-runs) settings or imputation |
+| **Peptide count** | Different number of supporting peptides | One tool uses more peptides for quantification |
+| **FC magnitude** | Fold change is larger in one run | Different rollup algorithms (maxLFQ vs Top3 vs iBAQ) |
+| **Borderline** | Both runs have the protein near the significance boundary | Not a true disagreement -- just statistical noise near the cutoff |
+
+**"Borderline" is the most common and least concerning** -- it means the protein is close to adj.P.Val = 0.05 in both runs and small perturbations push it across the threshold. Focus your attention on Direction Reversals and Normalization Offsets.
+
+### 9.6 AI Analysis & Export
+
+- **Gemini Analysis**: Click "Analyze with Gemini" on the AI Analysis sub-tab for a narrative interpretation. The prompt is tool-aware -- it includes context about structural differences between the compared tools.
+- **MOFA2 Decomposition**: Click "Run MOFA2" to decompose the joint variance between runs into latent factors. Helps identify whether discordant proteins share hidden biological or technical patterns.
+- **Claude ZIP Export**: Download a .zip optimized for deep analysis with Claude or ChatGPT. Includes settings diff, protein universe, DE results, discordant proteins with hypotheses, DIA-NN log parameters (if uploaded), and a structured prompt.
+
+---
+
+## 10. Chromatography QC
+
+The **Chromatography QC** system lets you inspect TIC (Total Ion Current) traces from your raw files *before* committing to a DIA-NN search. This catches common problems -- dead injections, carryover, RT drift, loading anomalies -- that would otherwise waste hours of compute time.
+
+### 10.1 Extracting TIC Traces
+
+1. **Scan your raw data directory** on the New Search tab (SSH or local)
+2. After files are scanned, click the **"Extract TIC"** button that appears
+3. TIC extraction reads MS1 frames from each timsTOF `.d` file's `analysis.tdf` SQLite database
+4. For SSH mode, each `analysis.tdf` is downloaded via SCP, extracted locally, then cleaned up
+
+> **Currently timsTOF only.** Thermo .raw TIC extraction is planned for a future release.
+
+### 10.2 QC Tab Views
+
+After extraction, the **QC** tab in the navbar becomes visible with three views:
+
+**Faceted View** -- Each run gets its own panel (4 columns). The blue dashed line is the median trace across all runs. Run traces are colored by diagnostic status: green (pass), yellow (warning), red (fail). Quickly spot runs that deviate from the cohort.
+
+**Overlay View** -- All runs normalized to 0-1 intensity on a single axis. Excellent for spotting outlier shapes -- a run with a very different peak position or width stands out immediately.
+
+**Metrics View** -- Horizontal AUC bar chart plus a detailed diagnostics table with columns: File Size, AUC, Peak RT, Gradient Width, Baseline Ratio, Late Signal, Shape Correlation (r), and Flags. Each flag links to a specific diagnostic:
+
+| Diagnostic | Warning | Fail | What It Means |
+|-----------|---------|------|---------------|
+| Shape deviation | r < 0.95 | r < 0.90 | Run shape differs from the cohort median |
+| RT shift | >2 MAD from median peak RT | >3 MAD | Retention time shifted (column degradation, gradient problem) |
+| Loading anomaly | AUC >2x or <0.5x median | >3x or <0.3x | Much more or less sample loaded |
+| File size outlier | >2x or <0.5x median | >3x or <0.3x | Acquisition anomaly |
+| Late elution | -- | >15% signal in last 20% of gradient | Carryover or column bleed |
+| Elevated baseline | -- | >10% of peak intensity | Dirty source or contamination |
+| Narrow gradient | -- | <70% of median width | Truncated acquisition |
+
+### 10.3 Interpreting Results
+
+- **All green**: Your data looks good. Proceed to search.
+- **Yellow warnings**: Worth investigating but often acceptable. Check the specific flags.
+- **Red failures**: Strongly consider excluding these files or re-acquiring them. A dead injection or severe carryover will waste search time and can distort downstream normalization.
+
+TIC traces and metrics are saved with your session, so you can review them later without re-extracting.
+
+---
+
+## 11. Search & Analysis History
+
+### 11.1 Search History
+
+Navigate to **About > Search History** in the navbar. Every DIA-NN search submitted through DE-LIMP is logged with 26 fields including timestamp, backend, search mode, FASTA files, enzyme, mass accuracy, scan window, MBR, normalization, extra CLI flags, and job status.
+
+**Key features:**
+- **Expandable rows**: Click any row to reveal full details (enzyme, mass accuracy, scan window, MBR, normalization, extra flags, output directory, job ID)
+- **Import Settings**: Click the yellow "Settings" button to apply that search's parameters to the current search UI -- no need to remember what settings you used last time
+- **Import Results**: Click the green "Results" button (only for completed searches) to load the search output (`report.parquet`) directly. Works over SSH for remote files. Auto-runs phospho detection and records to Analysis History.
+- **View Log**: Click the log icon to display the `search_info.md` metadata file from the search output directory
+- **Cross-reference**: The link icon navigates to the matching entry in Analysis History (if that search output was loaded and analyzed)
+
+### 11.2 Analysis History
+
+Navigate to **About > Analysis History** in the navbar. Every pipeline run (from any source -- upload, example data, search import, session load) is logged with file details, protein counts, contrast names, and pipeline settings.
+
+**Key features:**
+- **Expandable rows**: Click to reveal full file path, FASTA, output directory, and notes
+- **Project assignment**: Click "Assign" on any entry to group it into a project. Use existing project names or create new ones.
+- **Project filtering**: Select a project from the dropdown to filter the table. Summary cards appear above showing total analyses, date range, and protein count range.
+- **Load button**: Re-load a previous analysis directly from the history table
+
+### 11.3 Cross-Referencing
+
+Search History and Analysis History are linked by `output_dir`. When you complete a DIA-NN search and load its results, both tables will show a link icon on the matching rows. Click the link icon to jump between them -- useful for tracing which search parameters produced which analysis results.
+
+---
+
+## 12. Accessing DE-LIMP
 
 You have multiple options to access DE-LIMP:
 
@@ -875,7 +1020,7 @@ You have multiple options to access DE-LIMP:
 
 ---
 
-## 10. Troubleshooting
+## 13. Troubleshooting
 
 | Issue | Solution |
 | :--- | :--- |
@@ -932,29 +1077,29 @@ You have multiple options to access DE-LIMP:
 
 ## Version History
 
-### What's New in v3.2 (March 2026)
+### What's New in v3.5.0 (March 2026)
 
-**About Tab -- Community Dashboard**
-- New navbar tab with GitHub stars, forks, unique visitors (14-day), and unique clones (14-day) displayed as summary cards
-- 14-day trend sparklines for visitor and clone trends
-- GitHub Discussions feed with the 10 most recently updated discussions
-- Quick links to GitHub, Hugging Face, Documentation site, and Discussions
+**Run Comparator** -- Compare two analyses of the same dataset across tools (DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe). 4 diagnostic layers, 7-rule hypothesis engine, optional MOFA2 decomposition, tool-aware AI integration.
 
-**Search Logs Reorganized**
-- All SLURM `.out` / `.err` log files and local `.log` files now go to a `{output_dir}/logs/` subdirectory
-- The "Log" button in the Job Queue checks the `logs/` subdirectory first, with fallback to the old location
+**Search & Analysis History** -- Full audit trail for DIA-NN searches (26 parameters) and pipeline runs. Import Settings or Import Results from past searches. Project-based organization.
 
-**Community Stats Workflow**
-- GitHub Actions workflow runs daily, collecting traffic data, repository metadata, and GitHub Discussions
+**Chromatography QC** -- TIC extraction from timsTOF .d files before search. Three views (Faceted, Overlay, Metrics) with automated per-run diagnostics.
 
----
+**Smart HPC Job Submission** -- Per-user SLURM CPU limit detection, auto-partition switching, FASTA database library with auto-upload, path validation.
 
-### v3.1.1 Fixes & Additions (February 2026)
+**DIA-NN Log Parser** -- Extended with pg-level, proteoforms, library precursor count, pipeline step detection.
 
-- **Volcano plot fixes**: Y-axis now uses raw P.Value for classic spread shape; FDR threshold line drawn at the correct boundary; significance coloring by adj.P.Val only; default logFC cutoff changed to 0.6 (~1.5-fold); DE protein count annotation
-- **CV Analysis redesign**: Interactive scatter plot (logFC vs Avg CV) replacing broken table view; summary stats via ggplot subtitle
-- **Export Data panel**: New Output tab with one-click CSV downloads
-- **AI Summary HTML export**: Styled standalone HTML report from AI summaries
+### Previous Releases
+
+**v3.2** -- About tab with community dashboard, search log reorganization, DIA-NN log parser, Claude export enhancements, sacct array fix.
+
+**v3.1.1** -- Volcano plot fixes (P.Value/adj.P.Val handling, DE count annotation), CV Analysis scatter plot redesign, Export Data panel, AI Summary HTML export.
+
+**v3.1** -- UI overhaul (page_navbar, dark navbar, hover dropdowns, accordion sidebar, DE Dashboard sub-tabs). Core Facility Mode (SQLite, staff YAML, QC dashboard, Quarto reports).
+
+**v3.0** -- Multi-Omics MOFA2, DIA-NN Docker backend, phosphoproteomics (KSEA, motifs), GSEA expansion (BP/MF/CC/KEGG), all-contrast AI summary.
+
+See [CHANGELOG.md](CHANGELOG.md) for complete release notes.
 
 ### Previous: v3.0--v3.1 Highlights
 

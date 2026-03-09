@@ -417,8 +417,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               div(style = "display: flex; gap: 5px;",
                 div(style = "flex: 1;",
                   textInput("ssh_raw_data_dir", NULL,
-                    value = "/quobyte/proteomics-grp/de-limp/phospho/data",
-                    placeholder = "/share/proteomics/raw/experiment_001")
+                    value = "",
+                    placeholder = "/quobyte/proteomics-grp/raw/experiment")
                 ),
                 actionButton("ssh_scan_raw_btn", "Scan", icon = icon("magnifying-glass"),
                   class = "btn-outline-secondary btn-sm", style = "margin-top: 0;")
@@ -1489,6 +1489,203 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       nav_panel("Multi-Omics MOFA2", icon = icon("layer-group"),
                 value = "mofa_tab",
                 uiOutput("mofa_tab_content")
+      ),
+
+      # -- Run Comparator --
+      nav_panel("Run Comparator", icon = icon("code-compare"),
+                value = "comparator_tab",
+        div(style = "overflow-y: auto; max-height: calc(100vh - 120px); padding: 15px;",
+          # Configure Comparison card
+          div(style = "border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: #f8f9fa;",
+            div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+              tags$h5("Configure Comparison", style = "margin: 0;"),
+              actionButton("comparator_info_btn", icon("question-circle"),
+                           class = "btn-outline-info btn-sm", title = "About Run Comparator")
+            ),
+            div(style = "display: flex; gap: 15px; flex-wrap: wrap;",
+              # Column 1: Mode
+              div(style = "flex: 1; min-width: 200px;",
+                radioButtons("comparator_mode", "Comparison Type",
+                  choices = c(
+                    "DE-LIMP vs DE-LIMP"     = "delimp_delimp",
+                    "DE-LIMP vs Spectronaut" = "delimp_spectronaut",
+                    "DE-LIMP vs FragPipe"    = "delimp_fragpipe"
+                  )
+                )
+              ),
+              # Column 2: Run A
+              div(style = "flex: 1; min-width: 200px;",
+                radioButtons("comparator_run_a_source", "Run A Source",
+                  choices = c("Current session" = "current", "Load from file" = "file")),
+                conditionalPanel("input.comparator_run_a_source == 'file'",
+                  fileInput("comparator_run_a_file", "Load Run A (.rds)", accept = ".rds")
+                )
+              ),
+              # Column 3: Run B (conditional on mode)
+              div(style = "flex: 1; min-width: 200px;",
+                conditionalPanel("input.comparator_mode == 'delimp_delimp'",
+                  fileInput("comparator_run_b_rds", "Load Run B (.rds)", accept = ".rds")
+                ),
+                conditionalPanel("input.comparator_mode == 'delimp_spectronaut'",
+                  fileInput("comparator_run_b_spectronaut", "Protein Quantities (.tsv)",
+                            accept = c(".tsv", ".csv", ".txt")),
+                  fileInput("comparator_run_b_spectronaut_de", "Candidates / DE Stats (.tsv, optional)",
+                            accept = c(".tsv", ".csv", ".txt")),
+                  div(style = "display: flex; gap: 6px; align-items: center; margin-top: -8px;",
+                    downloadButton("download_spectronaut_schema",
+                      "Spectronaut Setup Guide", class = "btn-outline-info btn-xs"),
+                    tags$small(class = "text-muted", "How to export from Spectronaut")
+                  )
+                ),
+                conditionalPanel("input.comparator_mode == 'delimp_fragpipe'",
+                  radioButtons("comparator_fragpipe_type", "FragPipe output type",
+                    choices = c(
+                      "FragPipe-Analyst DE export" = "fp_analyst",
+                      "combined_protein.tsv (intensities only)" = "fp_raw"
+                    )
+                  ),
+                  conditionalPanel("input.comparator_fragpipe_type == 'fp_analyst'",
+                    fileInput("comparator_fp_analyst_file",
+                              "FragPipe-Analyst DE results (.csv/.tsv)",
+                              accept = c(".csv", ".tsv"))
+                  ),
+                  conditionalPanel("input.comparator_fragpipe_type == 'fp_raw'",
+                    fileInput("comparator_fp_combined_protein", "combined_protein.tsv",
+                              accept = ".tsv"),
+                    div(class = "alert alert-info py-1 mt-1", style = "font-size: 0.8em;",
+                      icon("info-circle"), " Layers 1-3 only. ",
+                      "Run FragPipe-Analyst for full DE comparison."
+                    )
+                  )
+                )
+              )
+            ),
+            # Optional DIA-NN log upload (Mode A only)
+            conditionalPanel("input.comparator_mode == 'delimp_delimp'",
+              div(style = "margin-top: 8px; border-top: 1px solid #dee2e6; padding-top: 8px;",
+                actionLink("toggle_diann_logs",
+                  tagList(icon("chevron-right", id = "diann_log_chevron"),
+                          " Attach DIA-NN log files (optional \u2014 fills in search parameters)")),
+                conditionalPanel("input.toggle_diann_logs % 2 == 1",
+                  div(class = "mt-2",
+                    div(class = "alert alert-info py-1 px-2", style = "font-size: 0.82em;",
+                      icon("info-circle"), " Upload ",
+                      tags$code("report_log.txt"), " or the SLURM ",
+                      tags$code(".out"), " file from each DIA-NN search. ",
+                      "Only the command line and summary stats are read."
+                    ),
+                    div(style = "display: flex; gap: 12px; flex-wrap: wrap;",
+                      div(style = "flex: 1; min-width: 200px;",
+                        fileInput("comparator_diann_log_a", "Run A \u2014 DIA-NN log",
+                                  accept = c(".txt", ".log", ".out"))
+                      ),
+                      div(style = "flex: 1; min-width: 200px;",
+                        fileInput("comparator_diann_log_b", "Run B \u2014 DIA-NN log",
+                                  accept = c(".txt", ".log", ".out"))
+                      )
+                    ),
+                    div(id = "comparator_diann_log_status")
+                  )
+                )
+              )
+            ),
+            # Contrast selectors + sample status (dynamic)
+            uiOutput("comparator_contrast_selectors"),
+            uiOutput("comparator_sample_status"),
+            div(style = "margin-top: 10px;",
+              actionButton("run_comparison", "Run Comparison",
+                           class = "btn-primary", icon = icon("play"))
+            )
+          ),
+
+          # Results (shown after comparison runs)
+          conditionalPanel("input.run_comparison > 0",
+            uiOutput("comparator_summary_banner"),
+            navset_card_tab(id = "comparator_subtabs",
+              nav_panel("Settings Diff", icon = icon("sliders"),
+                div(style = "min-height: 300px;",
+                  div(id = "comparator_pipeline_warning"),
+                  DT::DTOutput("comparator_settings_diff")
+                )
+              ),
+              nav_panel("Protein Universe", icon = icon("circle-nodes"),
+                div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+                  div(style = "display: flex; gap: 15px; flex-wrap: wrap; align-items: start;",
+                    div(style = "flex: 1; min-width: 350px;",
+                      plotly::plotlyOutput("comparator_universe_plot", height = "300px")
+                    ),
+                    div(style = "flex: 1; min-width: 350px;",
+                      uiOutput("comparator_universe_summary")
+                    )
+                  ),
+                  div(style = "display: flex; align-items: center; gap: 12px; margin-top: 12px;",
+                    tags$h6("Protein Details", style = "margin: 0;"),
+                    div(style = "display: flex; gap: 6px;",
+                      actionButton("universe_filter_all", "All",
+                        class = "btn-outline-secondary btn-sm active"),
+                      actionButton("universe_filter_shared", "Shared",
+                        class = "btn-outline-success btn-sm"),
+                      actionButton("universe_filter_a_only", "Run A only",
+                        class = "btn-outline-primary btn-sm"),
+                      actionButton("universe_filter_b_only", "Run B only",
+                        class = "btn-outline-warning btn-sm")
+                    ),
+                    div(style = "margin-left: auto;",
+                      downloadButton("download_universe_csv", "Export CSV",
+                        class = "btn-outline-secondary btn-sm")
+                    )
+                  ),
+                  DT::DTOutput("comparator_universe_table")
+                )
+              ),
+              nav_panel("Quantification", icon = icon("chart-line"),
+                div(style = "display: flex; gap: 15px; flex-wrap: wrap; min-height: 350px;",
+                  div(style = "flex: 1; min-width: 400px;",
+                    plotly::plotlyOutput("comparator_quant_scatter", height = "380px")
+                  ),
+                  div(style = "flex: 1; min-width: 300px;",
+                    plotly::plotlyOutput("comparator_correlation_heatmap", height = "380px")
+                  )
+                ),
+                plotly::plotlyOutput("comparator_bias_density", height = "250px")
+              ),
+              nav_panel("DE Concordance", icon = icon("code-compare"),
+                uiOutput("comparator_layer4_content")
+              ),
+              nav_panel("AI Analysis", icon = icon("robot"), value = "comparator_ai_tab",
+                tags$div(style = "padding: 12px 4px; min-height: 400px;",
+                  tags$h6("AI-Powered Comparison Analysis"),
+                  tags$p(class = "text-muted small",
+                    "Generate an AI narrative summary or export data for external analysis."),
+                  tags$div(style = "display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;",
+                    actionButton("comparator_gemini_btn", "Generate Gemini Summary",
+                                 icon = icon("wand-magic-sparkles"),
+                                 class = "btn-outline-primary"),
+                    downloadButton("comparator_claude_export",
+                                   "Export ZIP for Claude Analysis",
+                                   icon = icon("file-zipper"),
+                                   class = "btn-outline-secondary")
+                  ),
+                  tags$div(id = "comparator_gemini_container"),
+                  tags$hr(),
+                  tags$h6("MOFA2 Factor Decomposition", class = "text-muted"),
+                  tags$p(class = "text-muted small",
+                    "Treats Run A and Run B as two views of the same samples and decomposes ",
+                    "joint variance into shared and run-specific factors."),
+                  actionButton("comparator_mofa_btn",
+                    "Run MOFA2 Decomposition (~1-2 min)",
+                    icon = icon("circle-nodes"),
+                    class = "btn-outline-secondary"),
+                  tags$div(style = "margin-top: 12px;",
+                    plotly::plotlyOutput("comparator_mofa_variance", height = "320px"),
+                    plotly::plotlyOutput("comparator_mofa_weights", height = "380px"),
+                    DT::DTOutput("comparator_mofa_top_weights")
+                  )
+                )
+              )
+            )
+          )
+        )
       ),
 
       nav_spacer(),  # visual divider before AI section

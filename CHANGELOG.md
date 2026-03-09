@@ -5,6 +5,87 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-03-09
+
+### Added
+- **Run Comparator** (`R/server_comparator.R`): New module for comparing two analyses of the same dataset across tools. Three modes: DE-LIMP vs DE-LIMP (Mode A), DE-LIMP vs Spectronaut (Mode B), DE-LIMP vs FragPipe (Mode C, with or without FragPipe-Analyst DE stats).
+  - **4-layer diagnostic pipeline**: Settings Diff (parameter comparison with highlighting), Protein Universe (overlap bar chart with summary cards), Quantification (scatter plot, per-sample correlation, bias density), DE Concordance (3x3 matrix, volcano overlay, discordant protein table).
+  - **7-rule hypothesis engine**: Per-protein diagnostic explaining *why* each discordant protein disagrees. Tool-aware rules with context for Spectronaut and FragPipe structural differences. Categories: Direction reversal, Normalization offset, Variance estimation, Missing values, Peptide count, FC magnitude, Borderline.
+  - **3x3 concordance matrix**: Classifies proteins as Up/Down/NS in each run for nuanced concordance analysis.
+  - **Optional DIA-NN log upload** (Mode A): Upload DIA-NN log files to enrich Settings Diff with search-derived parameters (pg-level, proteoforms, library precursor count, pipeline step). Amber warning for library prediction logs; blue info banner for >1.2x library size mismatch.
+  - **Optional MOFA2 decomposition**: Treats Run A and Run B as two views, decomposes joint variance. Variance heatmap, factor weights scatter, top weights table.
+  - **Tool-aware Gemini prompt**: Includes structural differences between compared tools; DIA-NN library size context when log-derived.
+  - **Claude ZIP export**: Settings diff, protein universe, DE results combined, discordant proteins with hypotheses, DIA-NN log parameters, comparison context, claude_prompt.md.
+  - **Summary banner**: One-line overview with concordance rate, bias badge, dominant cause badge.
+  - **Session persistence**: All comparator state saved/loaded with session .rds.
+
+- **Search History** (`server_session.R`, `helpers_search.R`): Track all DIA-NN searches with 26-field parameter logging. CSV-based with file locking and shared volume support. Features:
+  - **Expandable detail rows**: Click to view enzyme, mass accuracy, scan window, MBR, normalization, extra CLI flags, output dir, job ID.
+  - **Import Settings button**: Apply search parameters from a previous search to the current search UI.
+  - **Import Results button**: Load completed search results (report.parquet) directly from history, with SSH/SCP support for remote files. Auto-runs phospho detection and records to Analysis History.
+  - **View Log button**: Display search_info.md from output directory (SSH or local).
+  - **Cross-reference**: Link icon navigates between Search History and Analysis History via shared `output_dir`.
+
+- **Analysis History & Projects** (`server_session.R`, `helpers_search.R`): Track pipeline runs with expandable detail rows, project assignment, and filtering.
+  - **Projects JSON**: Group analyses by project name. Summary cards when filtered. `selectizeInput(create=TRUE)` for existing/new project names.
+  - **DT expandable rows**: Click row to show full metadata. Action buttons (Info/Load/Assign) with `event.stopPropagation()`.
+
+- **Chromatography QC**: TIC extraction from timsTOF .d files before search submission.
+  - **Three plot views**: Faceted (per-run with median overlay), Overlay (normalized 0-1), Metrics (AUC bar chart + diagnostics table).
+  - **Per-run diagnostics**: Shape deviation, RT shift, loading anomaly, file size outlier, late elution, elevated baseline, narrow gradient. MAD-based outlier detection.
+  - **SSH mode**: SCP downloads `analysis.tdf` to temp, extracts locally.
+
+- **DIA-NN log parser enhancements**: Extended `parse_diann_log()` with pg-level, proteoforms, library precursor count, lib/out-lib paths, pipeline step detection from SLURM job name.
+
+- **FASTA database library**: Shared catalog with auto-upload to HPC when local-only paths detected. Fragment m/z range (`min_fr_mz`/`max_fr_mz`) recorded per entry. Path validation blocks HPC submission with local-only FASTA paths.
+
+- **Smart partition selection**: Queries SLURM QOS limits (`sacctmgr show qos`) for per-user CPU limits (e.g., 64 CPUs on genome-center-grp/high). Auto-switches to publicgrp/low when user at capacity. Shows "Your usage: X/64 CPUs" in partition selector.
+
+- Added `glue` and `data.table` to core package dependencies.
+
+### Fixed
+- **FASTA library local path bug**: Catalog entries stored macOS-local paths (`/Users/...`) in `remote_dir`, causing Apptainer bind mount failures on HPC. Now validates remote paths and auto-uploads via SCP.
+- **Partition selector "no limit info"**: `sacctmgr show assoc` returned empty limits; limits are on QOS objects, not associations. Changed to `sacctmgr show qos where name={account}-{partition}-qos`.
+- **Array progress inflated counts**: `sacct` counted parent job + `.extern`/`.batch` substeps. Now filters to `JOBID_N` format entries only.
+- **`parse_diann_log` fr_mz/pr_charge**: Fragment m/z and precursor charge flags routed to `extra_cli_flags` instead of `params`. Now parsed via `value_map`.
+- **Docker container name with special characters**: Sanitized with `gsub("[^a-zA-Z0-9_.-]", "_", ...)`.
+- **`max_pr_mz` default was 1200**: Changed to DIA-NN's actual default of 1800.
+- **Parallel search OOM on timsTOF**: Default `mem_per_file` bumped from 32 GB to 64 GB.
+- **TIC extraction auto-triggered**: `observeEvent(list(btn, trigger))` fired on button render. Fixed with separate `reactiveVal` trigger pattern.
+- **Removed default raw data path**: SSH raw data directory input no longer pre-filled with a test path.
+
+### Changed
+- All comparator visualizations use `plotlyOutput`/`renderPlotly` (bslib sub-tab safety).
+- Protein universe uses plotly stacked bar instead of ComplexUpset (simpler for 2-set comparison).
+- App version bumped to v3.5.0.
+
+## [3.4.0] - 2026-03-06
+
+### Added
+- **Run Comparator** (`R/server_comparator.R`): New module for comparing two analyses of the same dataset. Supports three modes: DE-LIMP vs DE-LIMP, DE-LIMP vs Spectronaut, DE-LIMP vs FragPipe (with or without FragPipe-Analyst DE stats).
+- **4-layer diagnostic pipeline**: Settings Diff (parameter comparison with highlighting), Protein Universe (overlap bar chart with summary cards), Quantification (scatter plot, per-sample correlation, bias density), DE Concordance (3x3 matrix, volcano overlay, discordant protein table).
+- **7-rule hypothesis engine**: Per-protein diagnostic explaining *why* each discordant protein disagrees. Tool-aware rules include context for Spectronaut (local regression vs RT-dependent normalization) and FragPipe (MaxLFQ vs DPC-Quant rollup, IonQuant vs DIA-NN MBR). Categories: Direction reversal, Normalization offset, Variance estimation, Missing values, Peptide count, FC magnitude, Borderline.
+- **3x3 concordance matrix**: Classifies proteins as Up/Down/NS in each run (improvement over spec's 2x2 for more nuanced view).
+- **Hypothesis distribution chart**: Plotly bar chart showing the dominant causes of discordance at a glance.
+- **4 parsers**: `parse_delimp_session()`, `parse_spectronaut()`, `parse_fragpipe_analyst()`, `parse_fragpipe_combined_protein()` with `normalize_protein_id()` for cross-tool protein matching.
+- **Tool-aware Gemini prompt**: `build_gemini_comparator_prompt()` includes tool-specific context paragraph explaining structural differences between compared tools.
+- **Claude ZIP export**: Settings diff, protein universe, DE results combined, discordant proteins with hypotheses, comparison context, claude_prompt.md.
+- **Optional MOFA2 factor decomposition**: Treats Run A and Run B as two views, decomposes joint variance to identify whether discordant proteins share hidden patterns. Variance heatmap, factor weights scatter, top weights table.
+- **Sample matching preview**: Shows match status before running comparison, blocks if unresolved samples.
+- **Summary banner**: One-line overview with concordance rate, bias detection badge, dominant cause badge.
+- **Session save/load**: All comparator state (results, parsed runs, mode, Gemini narrative, MOFA object) persisted.
+- Added `glue` and `data.table` to core package dependencies.
+
+### Changed
+- All comparator visualizations use `plotlyOutput`/`renderPlotly` (no `renderPlot` in sub-tabs, avoiding macOS quartz device crash per bslib safety pattern).
+- Protein universe visualization uses plotly stacked bar instead of ComplexUpset (safer in bslib, simpler for 2-set comparison, no new dependency).
+
+## [3.3.0] - 2026-03-06
+
+### Added
+- **Chromatography QC**: TIC extraction from timsTOF .d files, run diagnostics, instrument metadata export.
+- **Default parallel memory**: Bumped to 64 GB (timsTOF OOM fix).
+
 ## [3.2.1] - 2026-03-05
 
 ### Added

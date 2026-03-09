@@ -817,10 +817,14 @@ server_search <- function(input, output, session, values, add_to_log,
     tagList(
       # Auto-selected display (when not overriding)
       if (!override && !is.null(selected)) {
-        div(style = "background: #d1e7dd; border: 1px solid #badbcc; border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; font-size: 0.85em;",
-          icon("magic"), " ",
+        is_public <- selected$partition == "low"
+        bg <- if (is_public) "#fff3cd" else "#d1e7dd"
+        border <- if (is_public) "#ffecb5" else "#badbcc"
+        ic <- if (is_public) "shuffle" else "bolt"
+        div(style = sprintf("background: %s; border: 1px solid %s; border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; font-size: 0.85em;", bg, border),
+          icon(ic), " ",
           tags$strong(sprintf("%s / %s", selected$account, selected$partition)),
-          span(style = "color: #555; margin-left: 6px;", sprintf("(%s)", selected$reason))
+          div(style = "color: #555; font-size: 0.92em; margin-top: 2px;", selected$reason)
         )
       },
       # Override toggle
@@ -1680,6 +1684,11 @@ server_search <- function(input, output, session, values, add_to_log,
                 sprintf("%d-%d",
                   as.integer(ss$min_pr_mz %||% 300),
                   as.integer(ss$max_pr_mz %||% 1800))),
+              tags$dt(class = "col-sm-5", "Fragment m/z:"),
+              tags$dd(class = "col-sm-7",
+                sprintf("%d-%d",
+                  as.integer(ss$min_fr_mz %||% 200),
+                  as.integer(ss$max_fr_mz %||% 1800))),
               tags$dt(class = "col-sm-5", "Predicted speclib:"),
               tags$dd(class = "col-sm-7", speclib_info)
             )
@@ -1771,6 +1780,47 @@ server_search <- function(input, output, session, values, add_to_log,
     cfg <- ssh_config()
     use_remote <- !is.null(cfg)
     fasta_paths <- fasta_library_file_paths(entry, use_remote = use_remote)
+
+    # If SSH mode and paths are local-only, upload FASTA files to remote
+    if (use_remote && !fasta_paths_are_remote(fasta_paths)) {
+      remote_fasta_dir <- file.path(output_base(), "databases")
+      tryCatch({
+        ssh_exec(cfg, paste("mkdir -p", shQuote(remote_fasta_dir)))
+        remote_paths <- character(length(fasta_paths))
+        for (i in seq_along(fasta_paths)) {
+          local_path <- fasta_paths[i]
+          remote_path <- file.path(remote_fasta_dir, basename(local_path))
+          # Check if already exists with matching size
+          exists_check <- ssh_exec(cfg,
+            paste("test -f", shQuote(remote_path), "&& grep -c '^>'", shQuote(remote_path)))
+          remote_count <- suppressWarnings(
+            as.integer(trimws(paste(exists_check$stdout, collapse = ""))))
+          if (!is.na(remote_count) && remote_count > 0) {
+            message(sprintf("[DE-LIMP] FASTA already on remote: %s", remote_path))
+          } else {
+            withProgress(
+              message = sprintf("Uploading %s to HPC...", basename(local_path)), {
+              up_result <- scp_upload(cfg, local_path, remote_path)
+              if (up_result$status != 0) {
+                showNotification(
+                  sprintf("Failed to upload %s to HPC", basename(local_path)),
+                  type = "error", duration = 8)
+                return()
+              }
+            })
+          }
+          remote_paths[i] <- remote_path
+        }
+        fasta_paths <- remote_paths
+        showNotification(
+          sprintf("FASTA files uploaded to HPC: %s", remote_fasta_dir),
+          type = "message", duration = 6)
+      }, error = function(e) {
+        showNotification(
+          sprintf("FASTA upload to HPC failed: %s. Using local paths.", e$message),
+          type = "warning", duration = 8)
+      })
+    }
 
     # Set the FASTA files
     values$diann_fasta_files <- fasta_paths
@@ -1955,7 +2005,9 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pep_len = input$min_pep_len %||% 7L,
       max_pep_len = input$max_pep_len %||% 30L,
       min_pr_mz = input$min_pr_mz %||% 300,
-      max_pr_mz = input$max_pr_mz %||% 1800
+      max_pr_mz = input$max_pr_mz %||% 1800,
+      min_fr_mz = input$min_fr_mz %||% 200,
+      max_fr_mz = input$max_fr_mz %||% 1800
     )
 
     # Show a dialog to add notes before saving
@@ -2011,7 +2063,9 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pep_len = input$min_pep_len %||% 7L,
       max_pep_len = input$max_pep_len %||% 30L,
       min_pr_mz = input$min_pr_mz %||% 300,
-      max_pr_mz = input$max_pr_mz %||% 1800
+      max_pr_mz = input$max_pr_mz %||% 1800,
+      min_fr_mz = input$min_fr_mz %||% 200,
+      max_fr_mz = input$max_fr_mz %||% 1800
     )
 
     # Build the catalog entry
@@ -2274,6 +2328,14 @@ server_search <- function(input, output, session, values, add_to_log,
     }
     if (!nzchar(input$analysis_name)) {
       errors <- c(errors, "Analysis name is required.")
+    }
+
+    # HPC FASTA path validation — catch local-only paths before submission
+    if (backend == "hpc" && has_fasta && !fasta_paths_are_remote(values$diann_fasta_files)) {
+      local_fasta <- values$diann_fasta_files[!grepl("^/quobyte/|^/share/|^/home/", values$diann_fasta_files)]
+      errors <- c(errors, sprintf(
+        "FASTA path(s) are local and not accessible on HPC:\n  %s\nPlease re-select from the database library or upload FASTA files.",
+        paste(local_fasta, collapse = "\n  ")))
     }
 
     # Backend-specific validation
@@ -3725,9 +3787,11 @@ server_search <- function(input, output, session, values, add_to_log,
             }
           }
 
-          # Save search settings for methodology tab
+          # Save search settings for methodology tab (include output_dir for history linking)
           if (!is.null(job$search_settings)) {
-            values$diann_search_settings <- job$search_settings
+            ss <- job$search_settings
+            ss$output_dir <- job$output_dir
+            values$diann_search_settings <- ss
           }
 
           # Mark job as loaded

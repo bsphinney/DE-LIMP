@@ -94,7 +94,8 @@ if (!requireNamespace("limpa", quietly = TRUE)) {
 core_pkgs <- c("shiny", "bslib", "readr", "tibble", "dplyr", "tidyr",
                "ggplot2", "httr2", "rhandsontable", "DT", "arrow",
                "ComplexHeatmap", "shinyjs", "plotly", "stringr", "limma",
-               "AnnotationDbi", "ggridges", "ggrepel", "markdown", "curl")
+               "AnnotationDbi", "ggridges", "ggrepel", "markdown", "curl",
+               "glue", "data.table")
 
 # Optional packages: app runs without them (features disabled gracefully)
 optional_pkgs <- c("clusterProfiler", "enrichplot", "org.Hs.eg.db", "org.Mm.eg.db",
@@ -409,6 +410,13 @@ server <- function(input, output, session) {
     mofa_weights = list(),
     mofa_variance_explained = NULL,
     mofa_last_run_params = NULL,
+    # Run Comparator
+    comparator_results          = NULL,
+    comparator_run_a            = NULL,
+    comparator_run_b            = NULL,
+    comparator_mode             = NULL,
+    comparator_gemini_narrative = NULL,
+    comparator_mofa             = NULL,
     # App metadata
     app_version = app_version,
     community_stats = community_stats
@@ -435,6 +443,7 @@ server <- function(input, output, session) {
                 local_diann, delimp_data_dir,
                 is_core_facility, cf_config, local_sbatch_path)
   server_mofa(input, output, session, values, add_to_log)
+  server_comparator(input, output, session, values, add_to_log)
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_session(input, output, session, values, add_to_log)

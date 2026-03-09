@@ -548,8 +548,8 @@ parse_diann_log <- function(log_path) {
   }
 
   # Operational flags to skip (these don't map to user-facing settings)
-  # Note: "lib" is NOT here — it's handled separately to detect library mode
-  skip_flags <- c("f", "out", "out-lib", "temp", "threads", "verbose",
+  # Note: "lib" and "out-lib" are NOT here — handled separately
+  skip_flags <- c("f", "out", "temp", "threads", "verbose",
                   "matrices", "gen-spec-lib", "use-quant", "no-ifs-removal",
                   "report-lib-info", "quant-ori-names")
 
@@ -568,6 +568,8 @@ parse_diann_log <- function(log_path) {
   has_fasta_search <- FALSE
   has_phospho <- FALSE
   has_lib <- FALSE
+  lib_path <- NULL
+  out_lib_path <- NULL
   has_no_norm <- FALSE
 
   # Value flag mapping: DIA-NN flag -> params key + type
@@ -586,7 +588,8 @@ parse_diann_log <- function(log_path) {
     "min-pr-charge"    = list(key = "min_pr_charge", type = "integer"),
     "max-pr-charge"    = list(key = "max_pr_charge", type = "integer"),
     "min-fr-mz"        = list(key = "min_fr_mz", type = "integer"),
-    "max-fr-mz"        = list(key = "max_fr_mz", type = "integer")
+    "max-fr-mz"        = list(key = "max_fr_mz", type = "integer"),
+    "pg-level"         = list(key = "pg_level", type = "integer")
   )
 
   # Boolean flag mapping: DIA-NN flag -> params key
@@ -595,7 +598,8 @@ parse_diann_log <- function(log_path) {
     "rt-profiling" = "rt_profiling",
     "xic"          = "xic",
     "unimod4"      = "unimod4",
-    "met-excision" = "met_excision"
+    "met-excision" = "met_excision",
+    "proteoforms"  = "proteoforms"
   )
 
   # Track which boolean flags we see
@@ -617,9 +621,16 @@ parse_diann_log <- function(log_path) {
       next
     }
 
-    # Detect library mode
+    # Detect library mode and store path
     if (fl == "lib") {
       has_lib <- TRUE
+      lib_path <- val
+      next
+    }
+
+    # Store output library path
+    if (fl == "out-lib") {
+      out_lib_path <- val
       next
     }
 
@@ -741,6 +752,24 @@ parse_diann_log <- function(log_path) {
   # Normalization
   normalization <- if (has_no_norm) "off" else "on"
 
+  # Extract library precursor count from log body
+  # Lines like "6028174 precursors generated" or "4612085 precursors in the library"
+  n_precursors_library <- tryCatch({
+    prec_lines <- grep("precursors (generated|in)", lines, value = TRUE)
+    if (length(prec_lines) > 0) {
+      # Take the last match (final library size after all steps)
+      m <- regmatches(prec_lines[length(prec_lines)],
+                      regexpr("[0-9,]+(?=\\s+precursors)", prec_lines[length(prec_lines)], perl = TRUE))
+      if (length(m) > 0) as.integer(gsub(",", "", m)) else NULL
+    } else NULL
+  }, error = function(e) NULL)
+
+  # Pipeline step detection from SLURM job name or log content
+  pipeline_step <- tryCatch({
+    job_lines <- grep("JobName=|Step [0-9]+/[0-9]+:", lines, value = TRUE)
+    if (length(job_lines) > 0) trimws(job_lines[1]) else NULL
+  }, error = function(e) NULL)
+
   list(
     success = TRUE,
     message = NULL,
@@ -750,7 +779,12 @@ parse_diann_log <- function(log_path) {
     version = version,
     fasta_files = fasta_files,
     n_raw_files = n_raw_files,
-    command_line = cmd_line
+    command_line = cmd_line,
+    # Comparator-relevant fields
+    n_precursors_library = n_precursors_library,
+    lib_path = lib_path,
+    out_lib_path = out_lib_path,
+    pipeline_step = pipeline_step
   )
 }
 
@@ -2369,32 +2403,57 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
     }
   }
 
+  # Get username for per-user queries
+  username <- if (!is.null(ssh_config)) ssh_config$user else Sys.info()[["user"]]
+
   result <- list(
-    success = FALSE, group_limit = NA_integer_, group_used = NA_integer_,
-    group_available = NA_integer_, partition_idle = NA_integer_,
-    partition_total = NA_integer_, error = NULL
+    success = FALSE,
+    # Account-level
+    group_limit = NA_integer_, group_used = NA_integer_, group_available = NA_integer_,
+    # Per-user (the real constraint)
+    user_limit = NA_integer_, user_used = NA_integer_, user_available = NA_integer_,
+    # Partition
+    partition_idle = NA_integer_, partition_total = NA_integer_,
+    error = NULL
   )
 
-  # --- 1. Group CPU limit via sacctmgr ---
+  # --- 1. Account + per-user CPU limits via sacctmgr ---
+  # Limits are set on the QOS (e.g. genome-center-grp-high-qos), not on associations
+  # QOS name follows pattern: {account}-{partition}-qos
   tryCatch({
+    qos_name <- sprintf("%s-%s-qos", account, partition)
     sacctmgr_cmd <- sprintf(
-      "%s show assoc where account=%s format=GrpTRES%%80 --noheader --parsable2",
-      slurm_cmd("sacctmgr"), account
+      "%s show qos where name=%s format=GrpTRES%%80,MaxTRESPU%%80 --noheader --parsable2",
+      slurm_cmd("sacctmgr"), qos_name
     )
     res <- run_cmd(sacctmgr_cmd)
     if (res$status == 0 && length(res$stdout) > 0) {
       all_lines <- trimws(res$stdout)
       all_lines <- all_lines[nzchar(all_lines)]
-      # Look for cpu=NNN in any line
-      cpu_match <- regmatches(all_lines, regexpr("cpu=[0-9]+", all_lines))
-      cpu_match <- cpu_match[nzchar(cpu_match)]
-      if (length(cpu_match) > 0) {
-        result$group_limit <- as.integer(sub("cpu=", "", cpu_match[1]))
+
+      # Format: "cpu=616,gres/gpu=0,mem=9856G|cpu=64,gres/gpu=0,mem=1T"
+      #          GrpTRES                       | MaxTRESPU
+      for (line in all_lines) {
+        fields <- strsplit(line, "\\|")[[1]]
+        # GrpTRES is first field — account-level limit
+        if (length(fields) >= 1 && is.na(result$group_limit)) {
+          grp_match <- regmatches(fields[1], regexpr("cpu=[0-9]+", fields[1]))
+          if (length(grp_match) > 0 && nzchar(grp_match)) {
+            result$group_limit <- as.integer(sub("cpu=", "", grp_match))
+          }
+        }
+        # MaxTRESPU is second field — per-user limit
+        if (length(fields) >= 2 && is.na(result$user_limit)) {
+          user_match <- regmatches(fields[2], regexpr("cpu=[0-9]+", fields[2]))
+          if (length(user_match) > 0 && nzchar(user_match)) {
+            result$user_limit <- as.integer(sub("cpu=", "", user_match))
+          }
+        }
       }
     }
   }, error = function(e) NULL)
 
-  # --- 2. Group CPUs in use via squeue ---
+  # --- 2a. Account-wide CPUs in use via squeue ---
   tryCatch({
     squeue_cmd <- sprintf(
       "%s -A %s -t RUNNING -o \"%%C\" --noheader",
@@ -2410,6 +2469,24 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
     }
   }, error = function(e) {
     result$group_used <<- 0L
+  })
+
+  # --- 2b. THIS USER's CPUs in use on this account ---
+  tryCatch({
+    squeue_cmd <- sprintf(
+      "%s -u %s -A %s -t RUNNING -o \"%%C\" --noheader",
+      slurm_cmd("squeue"), username, account
+    )
+    res <- run_cmd(squeue_cmd)
+    if (res$status == 0 && length(res$stdout) > 0) {
+      cpu_counts <- suppressWarnings(as.integer(trimws(res$stdout)))
+      cpu_counts <- cpu_counts[!is.na(cpu_counts)]
+      result$user_used <- if (length(cpu_counts) > 0) sum(cpu_counts) else 0L
+    } else {
+      result$user_used <- 0L
+    }
+  }, error = function(e) {
+    result$user_used <<- 0L
   })
 
   # --- 3. Partition stats via sinfo ---
@@ -2430,13 +2507,16 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
     }
   }, error = function(e) NULL)
 
-  # Compute group available
+  # Compute available CPUs
   if (!is.na(result$group_limit) && !is.na(result$group_used)) {
     result$group_available <- result$group_limit - result$group_used
   }
+  if (!is.na(result$user_limit) && !is.na(result$user_used)) {
+    result$user_available <- result$user_limit - result$user_used
+  }
 
   # Success if we got at least squeue data
-  if (!is.na(result$group_used)) {
+  if (!is.na(result$group_used) || !is.na(result$user_used)) {
     result$success <- TRUE
   } else {
     result$error <- "Could not query SLURM cluster resources"
@@ -2452,29 +2532,62 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
 #' @param peak_cpus Numeric — estimated peak CPU need for the job
 #' @return list(account, partition, reason)
 select_best_partition <- function(lab_resources, public_resources, peak_cpus = 64) {
-  lab_ok <- FALSE
+  # Per-user limits are the real constraint (e.g. 64 CPUs per user on genome-center-grp/high)
+  # Account limits (e.g. 616 CPUs) are shared across all lab members
+  user_limit <- NA_integer_
+  user_used <- 0L
+  user_available <- NA_integer_
+  group_limit <- NA_integer_
+  group_used <- 0L
+
   if (!is.null(lab_resources) && isTRUE(lab_resources$success)) {
-    if (!is.na(lab_resources$group_limit) && lab_resources$group_limit > 0) {
-      lab_ok <- (lab_resources$group_available %||% 0) >= peak_cpus
-    } else {
-      lab_ok <- (lab_resources$group_used %||% 0) < 500
-    }
+    user_limit <- lab_resources$user_limit %||% NA_integer_
+    user_used <- lab_resources$user_used %||% 0L
+    user_available <- lab_resources$user_available %||% NA_integer_
+    group_limit <- lab_resources$group_limit %||% NA_integer_
+    group_used <- lab_resources$group_used %||% 0L
   }
 
-  pub_ok <- FALSE
+  pub_idle <- 0L
   if (!is.null(public_resources) && isTRUE(public_resources$success)) {
-    pub_ok <- (public_resources$partition_idle %||% 0) >= peak_cpus
+    pub_idle <- public_resources$partition_idle %||% 0L
   }
 
-  if (lab_ok) {
+  # Use per-user limit if available, otherwise fall back to group limit
+  effective_limit <- if (!is.na(user_limit)) user_limit else group_limit
+  effective_used <- if (!is.na(user_limit)) user_used else group_used
+  effective_available <- if (!is.na(user_available)) user_available
+    else if (!is.na(effective_limit)) effective_limit - effective_used
+    else NA_integer_
+
+  min_useful_cpus <- min(peak_cpus, 16L)  # at least 1 array task worth
+
+  has_limit_info <- !is.na(effective_limit) && effective_limit > 0
+  has_capacity <- has_limit_info && !is.na(effective_available) && effective_available >= min_useful_cpus
+  at_limit <- has_limit_info && !is.na(effective_available) && effective_available < min_useful_cpus
+  pub_has_idle <- pub_idle >= min_useful_cpus
+
+  # Format the limit label for messages
+  limit_label <- if (!is.na(user_limit)) {
+    sprintf("Your usage: %d/%d CPUs", user_used, user_limit)
+  } else if (!is.na(group_limit)) {
+    sprintf("Group: %d/%d CPUs", group_used, group_limit)
+  } else "no limit info"
+
+  if (has_capacity) {
     list(account = "genome-center-grp", partition = "high",
-         reason = "Lab group has capacity")
-  } else if (pub_ok) {
+         reason = sprintf("%s (%d available)", limit_label, effective_available))
+  } else if (at_limit && pub_has_idle) {
     list(account = "publicgrp", partition = "low",
-         reason = "Lab group busy, using free cluster")
+         reason = sprintf("%s \u2014 at capacity. Public has %d idle CPUs, faster start",
+                          limit_label, pub_idle))
+  } else if (at_limit) {
+    list(account = "genome-center-grp", partition = "high",
+         reason = sprintf("%s \u2014 at capacity. Public also busy. Using priority queue",
+                          limit_label))
   } else {
     list(account = "genome-center-grp", partition = "high",
-         reason = "Both busy, using priority queue")
+         reason = "Lab group (no limit info available)")
   }
 }
 
@@ -2954,13 +3067,32 @@ fasta_library_verify_files <- function(entry) {
 #' @param use_remote Logical: return HPC remote paths instead of local
 #' @return Character vector of absolute FASTA file paths
 fasta_library_file_paths <- function(entry, use_remote = FALSE) {
-  base_dir <- if (use_remote && !is.null(entry$remote_dir)) {
-    entry$remote_dir
-  } else {
-    file.path(fasta_library_path(), entry$fasta_dir)
+  if (use_remote) {
+    # Try remote_dir first, then translate local paths
+    rd <- entry$remote_dir
+    if (!is.null(rd)) {
+      # Translate macOS shared volume mount → HPC Quobyte path
+      if (grepl("^/Volumes/proteomics-grp/", rd)) {
+        rd <- fasta_library_remote_path(rd)
+      }
+      # If path is still local-only (e.g. /Users/...), can't use it
+      if (!grepl("^/quobyte/|^/share/|^/home/", rd)) {
+        rd <- NULL
+      }
+    }
+    if (!is.null(rd)) {
+      return(file.path(rd, entry$fasta_files))
+    }
+    # Fallback: return local paths (caller must handle upload)
   }
-
+  base_dir <- file.path(fasta_library_path(), entry$fasta_dir)
   file.path(base_dir, entry$fasta_files)
+}
+
+#' Check if FASTA paths are reachable on remote HPC
+#' @return TRUE if all paths are valid HPC paths, FALSE if any are local-only
+fasta_paths_are_remote <- function(fasta_files) {
+  all(grepl("^/quobyte/|^/share/|^/home/", fasta_files))
 }
 
 #' Build a catalog entry from a UniProt download result
@@ -3063,7 +3195,9 @@ fasta_library_build_entry <- function(download_result, uniprot_row,
       min_pep_len = as.integer(search_params$min_pep_len %||% 7L),
       max_pep_len = as.integer(search_params$max_pep_len %||% 30L),
       min_pr_mz = as.numeric(search_params$min_pr_mz %||% 300),
-      max_pr_mz = as.numeric(search_params$max_pr_mz %||% 1800)
+      max_pr_mz = as.numeric(search_params$max_pr_mz %||% 1800),
+      min_fr_mz = as.numeric(search_params$min_fr_mz %||% 200),
+      max_fr_mz = as.numeric(search_params$max_fr_mz %||% 1800)
     ),
     speclib_path = speclib_path,
     speclib_search_mode = if (!is.null(speclib_path)) "libfree" else NULL,
@@ -3136,7 +3270,7 @@ analysis_history_read <- function(path = analysis_history_path()) {
 record_analysis <- function(entry, path = analysis_history_path()) {
   headers <- c("timestamp", "user", "source_type", "source_file", "source_path",
     "remote_path", "fasta_file", "fasta_seq_count", "n_proteins", "n_samples",
-    "n_contrasts", "n_de_proteins", "output_dir", "app_version", "notes")
+    "n_contrasts", "n_de_proteins", "output_dir", "session_file", "app_version", "notes")
 
   row <- as.data.frame(lapply(headers, function(h) entry[[h]] %||% NA), stringsAsFactors = FALSE)
   names(row) <- headers

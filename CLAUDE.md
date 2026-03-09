@@ -19,7 +19,7 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 ```
 app.R (~290 lines):      Package loading, backend detection (Docker/HPC/Core Facility), VERSION + stats loading, reactive values, module calls
 R/ui.R (~1,500 lines):   build_ui() — page_navbar layout, CSS/JS, accordion sidebar, all tab nav_panels
-R/server_*.R (11 files): Server modules, each receives (input, output, session, values, ...)
+R/server_*.R (12 files): Server modules, each receives (input, output, session, values, ...)
 R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 ```
 
@@ -38,6 +38,7 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_search.R` | Docker/HPC dual backend, SSH, DIA-NN search, job queue |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
+| `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, hypothesis engine, MOFA2 decomposition |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, analysis history, projects |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, analysis history, projects |
@@ -54,11 +55,11 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 **Progressive reveal**: `nav_hide()`/`nav_show()` on `"main_tabs"`. Hidden on startup via `session$onFlushed(once=TRUE)`:
 - **Always visible**: New Search (if `search_enabled`), Analysis > Data Overview, About, Education, Facility (if `is_core_facility`)
 - **QC**: shown when `values$raw_data` not NULL OR `values$tic_traces` not NULL
-- **DE Dashboard, GSEA, MOFA2, AI Analysis, Output**: shown when `values$fit` not NULL
+- **DE Dashboard, GSEA, MOFA2, Run Comparator, AI Analysis, Output**: shown when `values$fit` not NULL (Comparator also shown when `values$comparator_results` exists)
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
 **Tab values that MUST NOT change** (used by server nav_select/nav_show/nav_hide):
-`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"search_history_tab"`, `"analysis_history_tab"`
+`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"comparator_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"search_history_tab"`, `"analysis_history_tab"`
 
 #### Analysis dropdown
 - **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
@@ -66,6 +67,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **Phosphoproteomics** — conditional on phospho detection
 - **Gene Set Enrichment** — BP/MF/CC/KEGG with per-ontology caching
 - **Multi-Omics MOFA2** — `value = "mofa_tab"`
+- **Run Comparator** — `value = "comparator_tab"`, `navset_card_tab(id = "comparator_subtabs")`: Settings Diff, Protein Universe, Quantification, DE Concordance, AI Analysis. Modes: DE-LIMP vs DE-LIMP/Spectronaut/FragPipe.
 - **AI Analysis** — Gemini chat
 
 #### About dropdown
@@ -84,6 +86,8 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **Projects JSON**: `projects_path()` → shared or local `delimp_projects.json`. Maps project names to `output_dir` entries.
 - **DT expandable rows**: Click a row to show full File, FASTA, Output dir, Notes in a child row. JS callback on `tbody tr td` with `row.child()` toggle. Buttons use `event.stopPropagation()`.
 - **n_proteins**: Use `length(unique(raw_data$genes$Protein.Group))` not `nrow(raw_data$E)` — the latter counts precursors (~40k), not protein groups (~3k).
+- **Auto-save session**: Pipeline completion in `server_data.R` auto-saves `.rds` to `output_dir` (or `~/.delimp_sessions` fallback). Path stored in `session_file` column of analysis history CSV.
+- **Restore button**: Green "Restore" button in history table loads auto-saved `.rds` (full pipeline state). Outline "Load" button loads raw `report.parquet` only. Handler: `observeEvent(input$history_restore_click, ...)` in `server_session.R`.
 
 ### Comparison Selector Sync
 Four synchronized selectors: `contrast_selector` (DE Dashboard), `contrast_selector_signal`, `contrast_selector_grid`, `contrast_selector_pvalue`. Bidirectional sync — changing any updates all.
@@ -145,6 +149,9 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | `source()` doesn't start app | Use `shiny::runApp()` instead |
 | Selections disappear after clicking | Reactive loop — table must not depend on selection-derived reactives |
 | bslib `card()` doesn't render | Use plain `div()` for top-level nav_panel content |
+| `uiOutput` vanishes in `navset_card_tab` | Use static HTML + `shinyjs::html("div_id", content)` for dynamic injection. `plotlyOutput` with `req()` is safe. |
+| DIA-NN `Genes` column has accessions | Not gene symbols. Validate with length/pattern check. Real genes from `bitr()` UNIPROT → SYMBOL. |
+| MOFA2 views need same sample names | Subset to matched pairs, assign common labels (`Sample_1`, `Sample_2`, ...) |
 | Volcano P.Value vs adj.P.Val mismatch | Y-axis uses raw P.Value for spread; dashed line at `max(P.Value)` among adj.P.Val < 0.05 proteins |
 | `arrow::select` masks `dplyr::select` | Use `dplyr::select()` explicitly |
 | Shiny hidden input not registered by JS | Use `div(style="display:none;", radioButtons(...))` for `conditionalPanel` |
@@ -172,9 +179,12 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | Parallel search OOM on timsTOF | Default `mem_per_file` was 32 GB, insufficient for timsTOF DIA-PASEF. Now 64 GB. |
 | TIC extraction auto-triggered | `observeEvent(list(btn, trigger))` fires when button first renders (NULL→0). Use separate `reactiveVal` trigger pattern instead. |
 | Older TDF missing `SummedIntensities` | `extract_tic_timstof()` auto-detects intensity column: `SummedIntensities` → `AccumulatedIntensity` → `MaxIntensity` → any `*ntensit*`. |
+| FASTA library `remote_dir` stored local paths | `fasta_library_file_paths()` validates remote paths; auto-uploads via SCP if local-only. Blocks HPC submission with local-only FASTA paths. |
+| SLURM limits on QOS not associations | `sacctmgr show assoc` returns empty limits. Use `sacctmgr show qos where name={account}-{partition}-qos` to get `GrpTRES` and `MaxTRESPU`. |
+| Per-user CPU limit (not account) is binding | `MaxTRESPU` (e.g., 64 CPUs) constrains individual users. `GrpTRES` (e.g., 616 CPUs) is shared across all lab members. `select_best_partition()` uses per-user limit. |
 
 ## Version History
 
-Current version: **v3.2.1** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.5.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
-Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1)
+Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0)

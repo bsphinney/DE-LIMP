@@ -257,3 +257,27 @@ Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussi
 - **Mass accuracy enforcement**: `parallel_sp$mass_acc_mode <- "manual"` (line ~1540)
 - **Quant verification**: `quant_verify_block()` helper generates bash check code
 - **Resume launcher**: `generate_resume_launcher()` for resubmitting from failed step
+
+## Run Comparator
+
+- **Module**: `R/server_comparator.R` contains all parsers, helpers, and server logic (no separate helpers file)
+- **Three modes**: DE-LIMP vs DE-LIMP (Mode A), vs Spectronaut (Mode B), vs FragPipe (Mode C1/C2)
+- **Protein ID normalization**: `normalize_protein_id()` strips `sp|...|`, isoform suffixes, semicolon groups to bare UniProt accessions
+- **Sample matching**: `match_samples()` normalizes filenames (strip extensions, FragPipe column prefixes) and requires all samples matched before comparison proceeds
+- **4 diagnostic layers**: Settings Diff, Protein Universe, Quantification, DE Concordance
+- **3x3 concordance matrix**: Improvement over spec's 2x2 — classifies each protein as Up/Down/NS in each run for more nuanced concordance view
+- **7-rule hypothesis engine**: `assign_hypothesis()` returns hypothesis text, confidence (High/Medium/Low), and category. Tool-aware: rules include context-specific notes for Spectronaut/FragPipe differences.
+- **Hypothesis categories**: Direction reversal, Normalization offset, Variance estimation, Missing values, Peptide count, FC magnitude, Borderline
+- **Protein Universe Venn**: Plotly shape-based Venn diagram with proportional circles. Fixed center positions with minimum separation to prevent label overlap at high Jaccard. Filterable DT table below with All/Shared/A-only/B-only buttons + CSV export.
+- **Gene symbol validation**: `is_gene_symbol()` filters out accessions. DIA-NN `Genes` column often has accessions like `A0A075B6K5;P80748`. Real gene symbols from `bitr()` or `sp|ACC|GENE` format parsing.
+- **DE Concordance explanatory text**: Blue info banner above matrix explaining Up/Down/NS terminology and concordance percentage.
+- **All plotly rendering**: No `renderPlot` in sub-tabs (avoids quartz crash). Venn diagram via plotly shapes. Correlation heatmap replaced with plotly bar chart. Bias density as plotly histogram.
+- **AI Analysis tab — static HTML only**: `uiOutput`/`renderUI` vanishes inside `navset_card_tab` sub-tabs. All content is static HTML. Gemini narrative injected via `shinyjs::html("comparator_gemini_container", ...)`. MOFA2 uses static `plotlyOutput` + `DTOutput` with `req()` guards. Button hidden via `shinyjs::hide()` after MOFA2 completes.
+- **Optional MOFA2 decomposition**: Treats Run A and Run B as two views, decomposes joint variance. **CRITICAL**: MOFA2 requires all views to have identical column names. Use matched sample pairs with common labels (`Sample_1`, `Sample_2`, ...). Requires >= 4 matched pairs.
+- **Spectronaut two-file upload**: Quantities file (PG.ProteinGroups + PG.Quantity columns) + optional Candidates file (AVG.Log2.Ratio, Qvalue, PValue). If DE file uploaded after quantities, auto-re-parses. Handles multiple comparisons via `Comparison` column. Downloadable setup guide (.txt).
+- **Gemini prompt is tool-aware**: `build_gemini_comparator_prompt()` includes tool-specific context paragraph explaining structural differences between the compared tools
+- **Claude ZIP export**: Settings diff CSV, protein universe CSV, DE results combined CSV, discordant proteins CSV with hypotheses, claude_prompt.md, comparison_context.md
+- **Session persistence**: All comparator state (results, parsed runs, mode, Gemini narrative, MOFA object) saved/loaded with session .rds
+- **Progressive reveal**: Tab always visible (not gated behind pipeline completion)
+- **No ComplexUpset dependency**: Spec called for it, but Venn diagram is more intuitive for 2-set comparisons
+- **Internal reactiveVals**: `comp_run_a`, `comp_run_b`, `comp_results` are local `reactiveVal()` inside the module, synced to `values$comparator_*` for session persistence
