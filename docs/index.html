@@ -467,7 +467,7 @@
         <div class="container">
             <p class="subtitle">UC Davis Proteomics Core Facility</p>
             <h1>DE-LIMP</h1>
-            <span class="version-badge">v3.2</span>
+            <span class="version-badge">v3.5</span>
             <p class="tagline">
                 Upload your DIA-NN proteomics data and instantly identify differentially expressed proteins with interactive volcano plots, pathway enrichment, and AI-powered interpretation. Supports phosphoproteomics, multi-omics integration, and core facility management.
             </p>
@@ -612,19 +612,29 @@
             <p class="section-sub">A complete proteomics analysis platform &mdash; from raw data search to multi-omics integration and core facility management.</p>
             <div class="features">
                 <div class="feature-card">
-                    <div class="feat-icon">&#x1F3E2;</div>
-                    <h3>Core Facility Mode <span class="new-badge">New</span></h3>
-                    <p>Manage your proteomics lab from one dashboard. Track search jobs, monitor instrument performance over time, auto-fill staff credentials, and generate standalone HTML reports for clients.</p>
+                    <div class="feat-icon">&#x2696;&#xFE0F;</div>
+                    <h3>Run Comparator <span class="new-badge">New</span></h3>
+                    <p>Compare two analyses of the same dataset across tools (DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe). Four diagnostic layers with a 7-rule hypothesis engine that explains <em>why</em> each discordant protein disagrees. Optional MOFA2 decomposition and AI integration.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F4C9;</div>
+                    <h3>Chromatography QC <span class="new-badge">New</span></h3>
+                    <p>Extract TIC traces from timsTOF raw files before committing to long DIA-NN searches. Automated diagnostics flag dead injections, carryover, RT drift, and loading anomalies. Three views: faceted, overlay, and metrics.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F4CB;</div>
+                    <h3>Search &amp; Analysis History <span class="new-badge">New</span></h3>
+                    <p>Full audit trail for every DIA-NN search (26 parameters) and pipeline run. Import Settings or Results from past searches. Organize analyses into projects with summary cards and cross-reference navigation.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F50E;</div>
                     <h3>Integrated DIA-NN Search</h3>
-                    <p>Run DIA-NN searches via Docker (local) or HPC (SSH/SLURM) with parallel 5-step pipelines, spectral library caching, custom FASTA sequences, and real-time cluster resource monitoring.</p>
+                    <p>Run DIA-NN searches via Docker (local) or HPC (SSH/SLURM) with parallel 5-step pipelines, spectral library caching, FASTA database library, smart per-user CPU limit detection, and auto-partition switching.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feat-icon">&#x1F4CA;</div>
-                    <h3>Community Stats Dashboard <span class="new-badge">New</span></h3>
-                    <p>Built-in About tab with GitHub stars, forks, visitors, and clones. 14-day trend sparklines and a live GitHub Discussions feed.</p>
+                    <div class="feat-icon">&#x1F3E2;</div>
+                    <h3>Core Facility Mode</h3>
+                    <p>Manage your proteomics lab from one dashboard. Track search jobs, monitor instrument performance over time, auto-fill staff credentials, and generate standalone HTML reports for clients.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F9EC;</div>
@@ -634,7 +644,7 @@
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F9EA;</div>
                     <h3>Phosphoproteomics</h3>
-                    <p>Site-level differential expression for phospho-enriched data. Auto-detection of phosphosites, volcano plots, and residue distribution.</p>
+                    <p>Site-level differential expression, KSEA kinase activity inference, and motif analysis for phospho-enriched data. Auto-detection of phosphosites from DIA-NN output.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F30B;</div>
@@ -644,47 +654,17 @@
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F916;</div>
                     <h3>AI-Powered Analysis</h3>
-                    <p>Ask AI questions about your proteomics results. Get automatic experiment summaries, have interactive conversations about your data, and let the AI highlight interesting proteins in your plots. Powered by Google Gemini (free API key required).</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feat-icon">&#x1F4C8;</div>
-                    <h3>QC Trend Monitoring</h3>
-                    <p>Track precursor and protein counts, MS1 signal, and data completeness to identify batch effects and quality issues.</p>
+                    <p>Ask AI questions about your proteomics results. Get automatic experiment summaries, have interactive conversations about your data, and export for Claude or ChatGPT. Powered by Google Gemini (free API key required).</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4E6;</div>
                     <h3>Gene Set Enrichment</h3>
-                    <p>Multi-database GSEA (BP, MF, CC, KEGG) with dot plots, enrichment maps, ridgeplots, and automatic organism detection.</p>
+                    <p>Multi-database GSEA (BP, MF, CC, KEGG) with dot plots, enrichment maps, ridgeplots, and automatic organism detection for 12 species.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4E4;</div>
-                    <h3>Export &amp; Reports <span class="new-badge">New</span></h3>
-                    <p>Download your complete analysis as a portable .zip package for deep analysis with Claude, ChatGPT, or other AI assistants. Also includes standalone HTML reports, one-click CSV exports, and full session save/load.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feat-icon">&#x1F4DA;</div>
-                    <h3>Spectral Library Caching <span class="new-badge">New</span></h3>
-                    <p>Reuse predicted spectral libraries across DIA-NN searches. Saves hours on repeated searches against the same FASTA database.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feat-icon">&#x1F4C9;</div>
-                    <h3>XIC Viewer</h3>
-                    <p>Visually validate your quantification results by inspecting fragment-level chromatograms. Three display modes including intensity alignment with automatic inconsistency detection (local/HPC only).</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feat-icon">&#x1F50D;</div>
-                    <h3>Deep-Dive Grid View</h3>
-                    <p>Heatmap-style expression grid with color-coded values, UniProt links, and click-to-plot violin charts.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feat-icon">&#x1F4DD;</div>
-                    <h3>Reproducibility Log</h3>
-                    <p>Every analysis step is logged as executable R code with timestamps. Download a complete, runnable script.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feat-icon">&#x1F4BE;</div>
-                    <h3>Save &amp; Load Sessions</h3>
-                    <p>Save your entire analysis state as an RDS file and reload it later to continue exactly where you left off.</p>
+                    <h3>Export &amp; Reports</h3>
+                    <p>Download your complete analysis as a portable .zip package for deep analysis with AI assistants. Standalone HTML reports, one-click CSV exports, reproducibility code logs, and full session save/load.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4D6;</div>
@@ -825,7 +805,7 @@ bash build_diann_docker.sh
     <div class="footer">
         <div class="container">
             <div>
-                <strong style="color:#fff;">DE-LIMP</strong> v3.2 &mdash; Open-source proteomics analysis.<br>
+                <strong style="color:#fff;">DE-LIMP</strong> v3.5 &mdash; Open-source proteomics analysis.<br>
                 Built with <a href="https://shiny.posit.co/" target="_blank" rel="noopener">Shiny</a>,
                 <a href="https://bioconductor.org/packages/limpa/" target="_blank" rel="noopener">limpa</a>,
                 <a href="https://bioconductor.org/packages/limma/" target="_blank" rel="noopener">limma</a>, and
