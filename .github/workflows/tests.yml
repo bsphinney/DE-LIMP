@@ -80,7 +80,7 @@ jobs:
               BiocRUniverse = "https://bioc.r-universe.dev",
               CRAN = "https://cloud.r-project.org"
             ))
-            install.packages(c("testthat", "dplyr", "arrow", "nanoparquet", "stringr", "tibble"))
+            install.packages(c("testthat", "dplyr", "arrow", "stringr", "tibble"))
             install.packages("BiocManager")
             BiocManager::install(c("limma", "limpa"), ask = FALSE, update = FALSE)
           '
