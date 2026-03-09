@@ -69,7 +69,7 @@ This is the most critical step for statistical analysis. The workflow is streaml
 > **Replicate guidance:** For reliable statistical results, we recommend at least **3 biological replicates per group**.
 > - **n=2 per group**: The pipeline will run, but you can only detect very large changes (>4-fold) with any confidence. Treat results as exploratory, not publication-ready.
 > - **n=3 per group**: The standard minimum for publication-quality results. Limma's empirical Bayes moderation helps compensate for the small sample size.
-> - **n=4-6+**: Improved sensitivity for detecting smaller fold changes (e.g., 1.3-fold) and more reliable CV estimates in the Robust Changes tab.
+> - **n=4-6+**: Improved sensitivity for detecting smaller fold changes (e.g., 1.3-fold) and more reliable CV estimates in the CV Analysis tab.
 > - **Design caution**: If all treatment samples were run on Day 1 and all controls on Day 2, batch and group are confounded -- the statistics cannot separate them. Add batch as a covariate if possible, or run samples in a balanced design.
 
 1.  Click **"Assign Groups & Run Pipeline"** in the sidebar (or it will auto-open after data upload).
@@ -372,7 +372,7 @@ The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
     * **Axis selection:** Choose which principal components to display (PC1 vs PC2, etc.)
     * Helps identify sample clustering, outliers, and batch effects
 
-#### Robust Changes Sub-tab
+#### CV Analysis Sub-tab
 The **Coefficient of Variation (CV)** measures how reproducible a protein's measurement is across replicates -- it is the standard deviation divided by the mean, expressed as a percentage. A low CV (e.g., < 20%) means the protein was measured consistently, so you can be more confident that its fold change is real rather than noise. This tab helps you identify the most robust DE findings.
 
 * **CV Analysis scatter plot:** Interactive Plotly scatter plot showing logFC vs Average CV for all significant proteins, color-coded by CV category (Excellent < 10%, Good 10-20%, Moderate 20-30%, High > 30%)
@@ -396,7 +396,7 @@ DE-LIMP automatically logs every analysis step for complete reproducibility.
 
 **Features:**
 * **Automatic Logging:** Every action (upload, pipeline run, contrast change, GSEA) is recorded with timestamps
-* **Export Code:** Navigate to **"Reproducibility > Code Log"** tab
+* **Export Code:** Navigate to **Output > Methods & Code > R Code Log** tab
 * **Download Button:** Click **"📥 Download Reproducibility Log"** to save as a timestamped `.R` file
 * **Complete Script:** The exported file includes:
   * All analysis steps in executable R code
@@ -406,7 +406,7 @@ DE-LIMP automatically logs every analysis step for complete reproducibility.
 * **Publication Ready:** Use the exported code to reproduce your analysis or include in Methods sections
 
 **Methodology Summary:**
-* View detailed methodology in the **"Reproducibility > Methodology"** tab
+* View detailed methodology in the **Output > Methods & Code > Methods Summary** tab
 * Includes citations for limpa, limma, and DIA-NN
 * Explains normalization (DPC-CN), quantification (maxLFQ), and statistics (empirical Bayes)
 
@@ -553,9 +553,9 @@ DE-LIMP can save your entire analysis state for later use.
 
 **To Save a Session:**
 1. Complete your analysis (upload data, run pipeline, explore results)
-2. Navigate to the **"Reproducibility"** tab
-3. Click **"Save Current Session"**
-4. Choose a filename and location (saves as `.rds` file)
+2. Click the **"Save"** button in the sidebar (below the accordion panels)
+3. Choose a filename and location
+4. The file saves as `.rds`
 5. The session file includes:
    * Raw data
    * Processed data (normalized, quantified)
@@ -564,7 +564,7 @@ DE-LIMP can save your entire analysis state for later use.
    * App version tag for compatibility tracking
 
 **To Load a Session:**
-1. Click **"Load Session (.rds)"** in the sidebar
+1. Click the **"Load"** button in the sidebar
 2. Select a previously saved `.rds` file
 3. The entire analysis state is restored instantly
 4. Continue where you left off without re-running the pipeline
@@ -810,7 +810,7 @@ Click **"Save Chat"** to download the full conversation as a plain text file. Th
 
 > **Works with any AI:** This export is optimized for Claude but works equally well with ChatGPT, Gemini, Copilot, or any AI assistant that accepts file uploads.
 
-The **"Export for Claude"** button (in the Output > Export Data panel) downloads a comprehensive multi-file package designed for deep analysis with Claude or other external AI systems. While the in-app AI features use Google Gemini, this export creates a portable dataset package optimized for extended conversation-based analysis.
+The **"Export for Claude"** button (on the **AI Summary** sub-tab under Data Overview) downloads a comprehensive multi-file package designed for deep analysis with Claude or other external AI systems. While the in-app AI features use Google Gemini, this export creates a portable dataset package optimized for extended conversation-based analysis.
 
 **The .zip archive contains:**
 
@@ -850,7 +850,7 @@ These additional export options are available from the **Output** dropdown in th
 * **Export Data panel** -- One-click CSV downloads for DE Results and CV Analysis data
 * **Reproducibility Code Log** -- Timestamped R script documenting every analysis step (download as `.R` file from the Methods & Code tab)
 * **Methods Summary** -- Publication-ready methodology text with citations for limpa, limma, and DIA-NN
-* **Session Save/Load** -- Save the full analysis state as `.rds` for later use or sharing (see Section 9 below)
+* **Session Save/Load** -- Save the full analysis state as `.rds` for later use or sharing (Save/Load buttons are in the sidebar)
 
 ---
 

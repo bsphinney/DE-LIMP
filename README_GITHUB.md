@@ -157,7 +157,7 @@ All dependencies install automatically on first run:
 
 1. **Load Data** -- Upload a DIA-NN `report.parquet` output file, or click "Load Example Data" for a demo HeLa dataset
 2. **Assign Groups & Run** -- Auto-guess groups from filenames or manually assign; optionally add covariates (batch, etc.); click "Run Pipeline" to execute DPC-CN normalization, maxLFQ quantification, and limma DE
-3. **Explore Results** -- Data Overview, QC, DE Dashboard (Volcano/Table/PCA/Robust Changes), Phospho, GSEA, MOFA2, AI Analysis, XIC Viewer (local/HPC)
+3. **Explore Results** -- Data Overview, QC, DE Dashboard (Volcano/Table/PCA/CV Analysis), Phospho, GSEA, MOFA2, AI Analysis, XIC Viewer (local/HPC)
 4. **Export** -- Download reproducibility log (.R), save session (.rds), export tables and plots
 
 ---
