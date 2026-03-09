@@ -6,7 +6,7 @@ on:
       - main
     paths-ignore:
       - 'README.md'
-      - '.github/**'
+  workflow_dispatch:
 
 jobs:
   sync-to-hf:
@@ -28,8 +28,8 @@ jobs:
         run: |
           cd hf-repo
 
-          # Copy all files except README.md and .github
-          rsync -av --exclude='.git' --exclude='README.md' --exclude='.github' ../github-repo/ ./
+          # Copy app files only (exclude dev/test artifacts)
+          rsync -av --exclude='.git' --exclude='README.md' --exclude='.github' --exclude='tests' --exclude='docs/specs' --exclude='*_SPEC*.md' --exclude='CORE_FACILITY_PHASE2_SPEC.md' --exclude='NAV_RESTRUCTURE_SPEC.md' ../github-repo/ ./
 
           # Use HF README
           cp README_HF.md README.md
