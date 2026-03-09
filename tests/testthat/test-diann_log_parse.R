@@ -212,8 +212,10 @@ test_that("parse_diann_log parses default fr_mz and pr_charge values", {
 test_that("parse_diann_log puts unrecognized flags in extra_cli_flags", {
   log <- write_log("diann --proteoforms --pg-level 0 --ids-to-names")
   result <- parse_diann_log(log)
-  expect_true(grepl("--proteoforms", result$params$extra_cli_flags))
-  expect_true(grepl("--pg-level 0", result$params$extra_cli_flags))
+  # proteoforms and pg-level are now recognized params (not extra_cli_flags)
+  expect_true(result$params$proteoforms)
+  expect_equal(result$params$pg_level, 0)
+  # ids-to-names is still unrecognized
   expect_true(grepl("--ids-to-names", result$params$extra_cli_flags))
 })
 
@@ -364,8 +366,9 @@ test_that("parse_diann_log handles realistic full command line", {
 
   # max-pr-mz 1800 != default 1200, so it should be in extra
   expect_true(grepl("--max-pr-mz", result$command_line))
-  # Unrecognized flags in extra_cli_flags
-  expect_true(grepl("--proteoforms", p$extra_cli_flags))
-  expect_true(grepl("--pg-level 0", p$extra_cli_flags))
+  # proteoforms and pg-level are now recognized params
+  expect_true(p$proteoforms)
+  expect_equal(p$pg_level, 0)
+  # ids-to-names is still unrecognized
   expect_true(grepl("--ids-to-names", p$extra_cli_flags))
 })
