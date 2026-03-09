@@ -241,8 +241,8 @@ The second panel configures DIA-NN analysis parameters.
 | **Peptide length** | 7–30 | Min and max peptide length for in silico digest |
 | **Precursor m/z** | 300–1800 | Precursor mass-to-charge range |
 | **MBR (Match Between Runs)** | ✅ On | Transfer identifications between runs |
-| **RT profiling** | ✅ On | Retention time-based profiling for improved quantification |
-| **Normalization** | On | DIA-NN internal normalization |
+| **RT profiling** | ✅ On | Builds a retention time model from your data to improve peptide scoring and quantification accuracy |
+| **Normalization** | On | DIA-NN's built-in RT-dependent normalization (DE-LIMP applies DPC-CN on top of this during the pipeline step) |
 
 ### 🖥️ 3.4 SLURM Resources (Panel 3)
 
@@ -864,6 +864,8 @@ The **Run Comparator** lets you compare two analyses of the same dataset to unde
 - Your core facility processed samples with Spectronaut or FragPipe, and you want to compare against your DE-LIMP analysis
 - You want to identify which DE proteins are robust (consistent across tools) vs. tool-dependent
 
+> **Protein inference caveat:** Different tools may group shared peptides into different protein groups (e.g., tool A reports P12345 while tool B reports P12345;P67890 as a group). The comparator normalizes protein IDs to bare UniProt accessions, but some mismatches are unavoidable when tools resolve protein ambiguity differently. Proteins unique to one run in the Protein Universe tab may partly reflect these grouping differences rather than true identification failures.
+
 ### 9.2 Comparison Modes
 
 | Mode | Run A | Run B | What You Need |
@@ -907,7 +909,7 @@ Results appear as sub-tabs, each building on the previous:
 
 ### 9.5 Understanding Hypotheses
 
-The hypothesis engine assigns one of 7 categories to each discordant protein:
+The hypothesis engine assigns one of 7 categories to each discordant protein. These are rule-based heuristics (not formal statistical tests) designed to guide your investigation -- they indicate the most likely explanation, not a definitive cause:
 
 | Category | Meaning | Typical Cause |
 |----------|---------|---------------|
@@ -922,6 +924,8 @@ The hypothesis engine assigns one of 7 categories to each discordant protein:
 **"Borderline" is the most common and least concerning** -- it means the protein is close to adj.P.Val = 0.05 in both runs and small perturbations push it across the threshold. This is a fundamental limitation of significance thresholds, not a tool-specific problem. Focus your attention on Direction Reversals and Normalization Offsets.
 
 ### 9.6 What to Do with the Results
+
+> **Note on concordance rates:** The reported concordance rate includes proteins that are non-significant (NS) in both runs. Since most proteins are NS, the base-rate concordance is naturally high. A 90% concordance rate does not mean 90% of your DE proteins agree -- focus on the 3x3 matrix and discordant protein count for a clearer picture.
 
 - **Concordance rate >80%**: Typical when comparing the same tool with minor parameter changes. Your results are robust.
 - **Concordance rate 60-80%**: Common across different tools (e.g., DE-LIMP vs Spectronaut). Focus on proteins that are consistent across both runs -- these are your highest-confidence hits.

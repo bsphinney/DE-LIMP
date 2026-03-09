@@ -637,7 +637,7 @@
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F50E;</div>
                     <h3>Integrated DIA-NN Search</h3>
-                    <p>Run DIA-NN searches via Docker (local) or HPC (SSH/SLURM) with parallel 5-step pipelines, spectral library caching, FASTA database library, smart per-user CPU limit detection, and auto-partition switching.</p>
+                    <p>Run DIA-NN searches via Docker (local) or HPC (SSH/SLURM) with parallel 5-step pipelines, spectral library caching, FASTA database library, automatic queue management (detects when you've hit your CPU allocation and switches partitions), and FASTA database library.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F3E2;</div>
@@ -792,7 +792,7 @@ bash build_diann_docker.sh
                 </li>
                 <li>
                     <h3>Protein Quantification</h3>
-                    <p>The mass spectrometer measures individual peptide fragments (precursors). This step combines those measurements into a single abundance value for each protein using a modified maxLFQ algorithm that accurately estimates protein quantities from peptide data.</p>
+                    <p>The mass spectrometer measures individual peptide fragments (precursors). This step combines those measurements into a single abundance value for each protein using DPC-Quant (a modified maxLFQ algorithm) that accurately estimates protein quantities from peptide data.</p>
                 </li>
                 <li>
                     <h3>Differential Expression</h3>

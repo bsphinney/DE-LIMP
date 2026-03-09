@@ -43,7 +43,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **MDS & DPC Plots** -- Sample clustering and normalization diagnostics
 - **Covariates** -- Include batch, sex, diet, or custom covariates in the linear model
 - **XIC Chromatogram Viewer** -- Fragment-level chromatogram validation, MS2 intensity alignment (Spectronaut-style), ion mobility/mobilogram support for timsTOF, DIA-NN v1/v2 formats (local/HPC only)
-- **Robust Changes** -- Identify highly reproducible DE proteins via coefficient of variation analysis across replicates
+- **CV Analysis (Robust Changes)** -- Identify highly reproducible DE proteins via coefficient of variation analysis across replicates
 
 ### Phosphoproteomics
 - **Auto-detection** of phospho-enriched data on upload (scans for UniMod:21 in Modified.Sequence)

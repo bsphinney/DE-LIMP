@@ -59,31 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protein universe uses plotly stacked bar instead of ComplexUpset (simpler for 2-set comparison).
 - App version bumped to v3.5.0.
 
-## [3.4.0] - 2026-03-06
-
-### Added
-- **Run Comparator** (`R/server_comparator.R`): New module for comparing two analyses of the same dataset. Supports three modes: DE-LIMP vs DE-LIMP, DE-LIMP vs Spectronaut, DE-LIMP vs FragPipe (with or without FragPipe-Analyst DE stats).
-- **4-layer diagnostic pipeline**: Settings Diff (parameter comparison with highlighting), Protein Universe (overlap bar chart with summary cards), Quantification (scatter plot, per-sample correlation, bias density), DE Concordance (3x3 matrix, volcano overlay, discordant protein table).
-- **7-rule hypothesis engine**: Per-protein diagnostic explaining *why* each discordant protein disagrees. Tool-aware rules include context for Spectronaut (local regression vs RT-dependent normalization) and FragPipe (MaxLFQ vs DPC-Quant rollup, IonQuant vs DIA-NN MBR). Categories: Direction reversal, Normalization offset, Variance estimation, Missing values, Peptide count, FC magnitude, Borderline.
-- **3x3 concordance matrix**: Classifies proteins as Up/Down/NS in each run (improvement over spec's 2x2 for more nuanced view).
-- **Hypothesis distribution chart**: Plotly bar chart showing the dominant causes of discordance at a glance.
-- **4 parsers**: `parse_delimp_session()`, `parse_spectronaut()`, `parse_fragpipe_analyst()`, `parse_fragpipe_combined_protein()` with `normalize_protein_id()` for cross-tool protein matching.
-- **Tool-aware Gemini prompt**: `build_gemini_comparator_prompt()` includes tool-specific context paragraph explaining structural differences between compared tools.
-- **Claude ZIP export**: Settings diff, protein universe, DE results combined, discordant proteins with hypotheses, comparison context, claude_prompt.md.
-- **Optional MOFA2 factor decomposition**: Treats Run A and Run B as two views, decomposes joint variance to identify whether discordant proteins share hidden patterns. Variance heatmap, factor weights scatter, top weights table.
-- **Sample matching preview**: Shows match status before running comparison, blocks if unresolved samples.
-- **Summary banner**: One-line overview with concordance rate, bias detection badge, dominant cause badge.
-- **Session save/load**: All comparator state (results, parsed runs, mode, Gemini narrative, MOFA object) persisted.
-- Added `glue` and `data.table` to core package dependencies.
-
-### Changed
-- All comparator visualizations use `plotlyOutput`/`renderPlotly` (no `renderPlot` in sub-tabs, avoiding macOS quartz device crash per bslib safety pattern).
-- Protein universe visualization uses plotly stacked bar instead of ComplexUpset (safer in bslib, simpler for 2-set comparison, no new dependency).
-
 ## [3.3.0] - 2026-03-06
+
+*Note: v3.3.0 and v3.4.0 were development milestones rolled into v3.5.0.*
 
 ### Added
 - **Chromatography QC**: TIC extraction from timsTOF .d files, run diagnostics, instrument metadata export.
+- **Run Comparator**: Initial implementation (completed in v3.5.0).
 - **Default parallel memory**: Bumped to 64 GB (timsTOF OOM fix).
 
 ## [3.2.1] - 2026-03-05
