@@ -80,15 +80,20 @@ jobs:
               BiocRUniverse = "https://bioc.r-universe.dev",
               CRAN = "https://cloud.r-project.org"
             ))
-            install.packages(c("testthat", "dplyr", "arrow", "stringr", "tibble"))
+            install.packages(c("testthat", "dplyr", "arrow", "nanoparquet", "stringr", "tibble"))
             install.packages("BiocManager")
             BiocManager::install(c("limma", "limpa"), ask = FALSE, update = FALSE)
           '
 
-      - name: Download example dataset
+      - name: Download and convert example dataset
         run: |
           curl -L -o Affinisep_vs_evosep_noNorm.parquet \
             "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0/Affinisep_vs_evosep_noNorm.parquet"
+          # Re-save without zstd compression so nanoparquet (required by limpa) can read it
+          Rscript -e '
+            df <- arrow::read_parquet("Affinisep_vs_evosep_noNorm.parquet")
+            arrow::write_parquet(df, "Affinisep_vs_evosep_noNorm.parquet", compression = "snappy")
+          '
 
       - name: Run data integrity tests
         run: |
