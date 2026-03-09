@@ -37,7 +37,7 @@ jobs:
       - name: Install test dependencies
         run: |
           Rscript -e '
-            install.packages(c("testthat", "glue", "data.table"),
+            install.packages(c("testthat", "glue", "data.table", "filelock"),
                              repos = "https://cloud.r-project.org")
           '
 
@@ -80,7 +80,7 @@ jobs:
               BiocRUniverse = "https://bioc.r-universe.dev",
               CRAN = "https://cloud.r-project.org"
             ))
-            install.packages(c("testthat", "dplyr", "arrow", "stringr", "tibble"))
+            install.packages(c("testthat", "dplyr", "arrow", "nanoparquet", "stringr", "tibble"))
             install.packages("BiocManager")
             BiocManager::install(c("limma", "limpa"), ask = FALSE, update = FALSE)
           '
