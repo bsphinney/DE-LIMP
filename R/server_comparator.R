@@ -826,8 +826,8 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
   # Rule 2: Systematic normalization offset
   if (sys_offset && same_dir && logfc_diff < 0.5) {
     tool_note <- switch(source_b,
-      "spectronaut"      = " (Spectronaut local regression vs DIA-NN RT-dependent normalization)",
-      "fragpipe_analyst" = " (MaxLFQ rollup vs DPC-Quant - a structural difference between these protein quantification algorithms)",
+      "spectronaut"      = " (Spectronaut local regression vs DIA-NN RT-dependent + DPC-CN normalization)",
+      "fragpipe_analyst" = " (IonQuant normalization vs DIA-NN RT-dependent + DPC-CN normalization)",
       "fragpipe_raw"     = " (MaxLFQ vs DPC-Quant)",
       ""
     )
@@ -912,9 +912,9 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL) {
       paste("Run A: DE-LIMP (DIA-NN search -> DPC-Quant rollup -> limma DE).",
             "Run B: Spectronaut (proprietary DIA search -> PG.Quantity rollup -> internal statistics).",
             "Key structural differences:",
-            "- Normalization: DIA-NN RT-dependent vs Spectronaut local regression",
-            "- Protein rollup: DPC-Quant empirical Bayes vs PG.Quantity",
-            "- Statistical model: limma moderated t-test vs Spectronaut paired t-test",
+            "- Normalization: DIA-NN RT-dependent + DPC-CN cyclic loess vs Spectronaut local regression",
+            "- Protein rollup: DPC-Quant (modified maxLFQ) vs Spectronaut Top N peptide aggregation",
+            "- Statistical model: limma moderated t-test vs Spectronaut group comparison model",
             "A non-zero global intensity offset is expected."),
     "fragpipe_analyst" =
       paste("Run A: DE-LIMP (DIA-NN search -> DPC-Quant rollup -> limma DE).",

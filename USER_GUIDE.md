@@ -66,7 +66,11 @@ You have two options to get started:
 ### Step 2.2: Assign Groups & Run Pipeline
 This is the most critical step for statistical analysis. The workflow is streamlined into one modal dialog.
 
-> **Replicate guidance:** For reliable statistical results, we recommend at least **3 biological replicates per group**. With fewer than 3, limma's empirical Bayes moderation still works but has limited power to detect significant changes. More replicates (4-6+) improve sensitivity, especially for detecting small fold changes.
+> **Replicate guidance:** For reliable statistical results, we recommend at least **3 biological replicates per group**.
+> - **n=2 per group**: The pipeline will run, but you can only detect very large changes (>4-fold) with any confidence. Treat results as exploratory, not publication-ready.
+> - **n=3 per group**: The standard minimum for publication-quality results. Limma's empirical Bayes moderation helps compensate for the small sample size.
+> - **n=4-6+**: Improved sensitivity for detecting smaller fold changes (e.g., 1.3-fold) and more reliable CV estimates in the Robust Changes tab.
+> - **Design caution**: If all treatment samples were run on Day 1 and all controls on Day 2, batch and group are confounded -- the statistics cannot separate them. Add batch as a covariate if possible, or run samples in a balanced design.
 
 1.  Click **"Assign Groups & Run Pipeline"** in the sidebar (or it will auto-open after data upload).
 2.  **Auto-Guess Groups (Recommended):**
@@ -90,6 +94,7 @@ This is the most critical step for statistical analysis. The workflow is streaml
     * Examples: "Sex", "Diet", "Age", "Time_Point", "Instrument"
     * Check the boxes to include covariates in the statistical model
     * Only covariates with 2+ unique values will be used
+    * **When to use covariates**: If your samples were run on different days or instruments, adding "Batch" separates batch effects from your treatment effect. If samples come from male and female animals and sex is not your research question, adding "Sex" removes sex-related variation. Only add covariates you have reason to suspect affect protein levels -- adding too many with few samples can reduce statistical power
 6.  **Run the Analysis:**
     * Click the **"▶ Run Pipeline"** button at the top of the modal
     * **What happens?** The app uses the `limpa` package to perform DPC normalization and the `limma` package to fit linear models for differential expression
@@ -348,7 +353,7 @@ The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
     * **Coloring:** Red points indicate FDR-corrected significance (adj.P.Val < 0.05) — logFC vertical lines are visual guides only and do not gate coloring
     * **Threshold line:** The horizontal dashed line is drawn at the raw P.Value corresponding to the FDR boundary (adj.P.Val = 0.05), so the line and coloring always agree
     * **DE protein count:** The info box shows the total number of significant proteins with directional breakdown (e.g., "78 DE proteins (45 up, 33 down)")
-    * **Default logFC cutoff:** 0.6 (~1.5-fold change) — adjustable via the sidebar slider. The slider is in log2 units: 0.6 = ~1.5-fold, 1.0 = 2-fold, 2.0 = 4-fold
+    * **Default logFC cutoff:** 0.6 (~1.5-fold change) -- adjustable via the sidebar slider. The slider is in log2 units: 0.6 = ~1.5-fold, 1.0 = 2-fold, 2.0 = 4-fold. The vertical lines are visual guides only and do not gate significance coloring. **Choosing a cutoff**: For dramatic perturbations (knockout vs wild-type), many proteins change >2-fold, so 1.0 is reasonable. For subtle treatments (low-dose drug), even 1.3-fold changes may be biologically meaningful -- try 0.4. When in doubt, start with the default (0.6)
     * **Selection:** Single-click for one protein, box-select for multiple proteins
     * *Sync:* Selecting points here updates the Results Table and the AI context
 * **Heatmap:** Displayed directly below the volcano plot. Automatically scales and clusters the top 50 significant proteins (or your specific selection).
@@ -876,6 +881,8 @@ The **Run Comparator** lets you compare two analyses of the same dataset to unde
 5. Select the **contrast** to compare (must exist in both runs -- e.g., "Treatment - Control")
 6. Click **Run Comparison**
 
+**Important**: Before comparing, verify that both runs used the same MBR (match-between-runs) setting. MBR can add 10-30% more protein identifications, so comparing MBR-on vs MBR-off will produce large protein universe differences and many "Missing values" hypotheses that reflect the MBR setting rather than genuine analytical disagreement.
+
 **Mode A bonus -- DIA-NN Log Upload**: In the collapsible "DIA-NN Log Files" section, you can optionally upload DIA-NN log files for each run. This enriches the Settings Diff with search-derived parameters like pg-level quantification mode, proteoform detection, library precursor counts, and which pipeline step produced the output. Useful when comparing a first-pass quant vs final assembly output.
 
 ### 9.4 The Four Diagnostic Layers
@@ -905,16 +912,24 @@ The hypothesis engine assigns one of 7 categories to each discordant protein:
 | Category | Meaning | Typical Cause |
 |----------|---------|---------------|
 | **Direction reversal** | One run says Up, the other says Down | Different normalization centering or peptide selection |
-| **Normalization offset** | Same direction but one run crosses the significance threshold | Systematic intensity shift between tools |
-| **Variance estimation** | Similar fold changes but different significance | Different variance shrinkage (limma vs tool-specific methods) |
-| **Missing values** | One run has fewer observations | Different MBR (match-between-runs) settings or imputation |
-| **Peptide count** | Different number of supporting peptides | One tool uses more peptides for quantification |
-| **FC magnitude** | Fold change is larger in one run | Different rollup algorithms (maxLFQ vs Top3 vs iBAQ) |
-| **Borderline** | Both runs have the protein near the significance boundary | Not a true disagreement -- just statistical noise near the cutoff |
+| **Normalization offset** | Same direction but one run crosses the significance threshold | One tool normalizes differently (e.g., DIA-NN + DPC-CN vs Spectronaut local regression), shifting all intensities up or down, which pushes borderline proteins above or below the significance threshold |
+| **Variance estimation** | Similar fold changes but different significance | The two tools handle measurement noise differently. Limma borrows information across all proteins (empirical Bayes) to stabilize variance estimates; other tools may use per-protein variance only, leading to different p-values for the same fold change |
+| **Missing values** | One run has fewer observations | Different MBR (match-between-runs) settings or imputation. MBR can add 10-30% more identifications -- comparing MBR-on vs MBR-off produces many hits in this category |
+| **Peptide count** | Different number of supporting peptides | One tool used more peptide measurements for this protein. More peptides generally means a more stable estimate; the tool with fewer peptides may report a noisier fold change |
+| **FC magnitude** | Fold change is larger in one run | Different protein quantification methods (DPC-Quant vs MaxLFQ) combine peptide measurements differently, producing different fold-change estimates for the same protein |
+| **Borderline** | Both runs have the protein near the significance boundary | Not a true disagreement -- dichotomizing continuous p-values at a fixed threshold (0.05) inevitably creates disagreements for proteins near the boundary. Small perturbations in data processing push them across |
 
-**"Borderline" is the most common and least concerning** -- it means the protein is close to adj.P.Val = 0.05 in both runs and small perturbations push it across the threshold. Focus your attention on Direction Reversals and Normalization Offsets.
+**"Borderline" is the most common and least concerning** -- it means the protein is close to adj.P.Val = 0.05 in both runs and small perturbations push it across the threshold. This is a fundamental limitation of significance thresholds, not a tool-specific problem. Focus your attention on Direction Reversals and Normalization Offsets.
 
-### 9.6 AI Analysis & Export
+### 9.6 What to Do with the Results
+
+- **Concordance rate >80%**: Typical when comparing the same tool with minor parameter changes. Your results are robust.
+- **Concordance rate 60-80%**: Common across different tools (e.g., DE-LIMP vs Spectronaut). Focus on proteins that are consistent across both runs -- these are your highest-confidence hits.
+- **Concordance rate <60%**: Investigate the dominant cause. Large protein universe differences suggest different FASTA databases or MBR settings. Many "Normalization offset" hits suggest the tools center intensities differently.
+- **For publications**: Report "X proteins were significant in both analyses (Y% concordance); Z discordant proteins were predominantly borderline cases." Proteins consistent across tools are your strongest candidates for validation.
+- **Which run to trust?** Neither is inherently "correct." If one run used more replicates, better normalization, or a more complete FASTA database, prefer its results. The comparator helps you understand *where* and *why* the tools disagree, so you can make an informed decision.
+
+### 9.7 AI Analysis & Export
 
 - **Gemini Analysis**: Click "Analyze with Gemini" on the AI Analysis sub-tab for a narrative interpretation. The prompt is tool-aware -- it includes context about structural differences between the compared tools.
 - **MOFA2 Decomposition**: Click "Run MOFA2" to decompose the joint variance between runs into latent factors. Helps identify whether discordant proteins share hidden biological or technical patterns.
@@ -924,16 +939,16 @@ The hypothesis engine assigns one of 7 categories to each discordant protein:
 
 ## 10. Chromatography QC
 
-The **Chromatography QC** system lets you inspect TIC (Total Ion Current) traces from your raw files *before* committing to a DIA-NN search. This catches common problems -- dead injections, carryover, RT drift, loading anomalies -- that would otherwise waste hours of compute time.
+The **Chromatography QC** system lets you inspect TIC (Total Ion Current) traces from your timsTOF raw files *before* committing to a DIA-NN search. This catches common problems -- dead injections, sample carryover between runs, retention time shifts, and uneven sample loading -- that would otherwise waste hours of compute time.
+
+> **Currently timsTOF only.** Thermo .raw TIC extraction is planned for a future release.
 
 ### 10.1 Extracting TIC Traces
 
 1. **Scan your raw data directory** on the New Search tab (SSH or local)
 2. After files are scanned, click the **"Extract TIC"** button that appears
-3. TIC extraction reads MS1 frames from each timsTOF `.d` file's `analysis.tdf` SQLite database
-4. For SSH mode, each `analysis.tdf` is downloaded via SCP, extracted locally, then cleaned up
-
-> **Currently timsTOF only.** Thermo .raw TIC extraction is planned for a future release.
+3. The app reads the total ion signal from each raw instrument file to build a chromatographic profile for every run
+4. For SSH mode, each file is downloaded temporarily, extracted locally, then cleaned up
 
 ### 10.2 QC Tab Views
 
@@ -958,8 +973,16 @@ After extraction, the **QC** tab in the navbar becomes visible with three views:
 ### 10.3 Interpreting Results
 
 - **All green**: Your data looks good. Proceed to search.
-- **Yellow warnings**: Worth investigating but often acceptable. Check the specific flags.
+- **Yellow warnings**: Worth investigating. See guidance below for each flag type.
 - **Red failures**: Strongly consider excluding these files or re-acquiring them. A dead injection or severe carryover will waste search time and can distort downstream normalization.
+
+**Per-flag guidance:**
+- **Shape deviation (yellow)**: Look at the Faceted View for this run. If the peak is slightly shifted but the overall shape is similar, it is usually fine -- DIA-NN corrects for RT drift. If the shape is dramatically different (double peak, flat line, or no clear peak), exclude the file. Note: the first 1-2 runs after column conditioning or blank washes often show lower shape correlation -- consider whether warnings on the first injections are expected.
+- **RT shift**: A small shift (yellow) is normal for biological variation. A large shift (red) suggests column degradation, gradient issues, or autosampler problems. Check whether the shift is systematic (all late runs shifted) or isolated.
+- **Loading anomaly (yellow)**: Slightly higher loading may reflect real biology (e.g., a tissue sample yielded more protein). Dramatically lower loading (red) usually means a failed injection -- exclude it.
+- **Late elution / elevated baseline**: Suggests carryover from a previous highly-loaded sample or dirty LC system. The affected run's quantification may be unreliable.
+
+> **Note on small cohorts**: The MAD-based outlier detection requires 3+ runs for cohort-level checks. With very small batches (3-4 runs), the thresholds may be too permissive. Visually inspect the Overlay View as a sanity check.
 
 TIC traces and metrics are saved with your session, so you can review them later without re-extracting.
 
@@ -969,7 +992,7 @@ TIC traces and metrics are saved with your session, so you can review them later
 
 ### 11.1 Search History
 
-Navigate to **About > Search History** in the navbar. Every DIA-NN search submitted through DE-LIMP is logged with 26 fields including timestamp, backend, search mode, FASTA files, enzyme, mass accuracy, scan window, MBR, normalization, extra CLI flags, and job status.
+Navigate to **About > Search History** in the navbar. Every DIA-NN search submitted through DE-LIMP is logged with 26 fields including timestamp, backend, search mode, FASTA files, enzyme, mass accuracy, scan window, MBR, normalization, any additional search parameters, and job status.
 
 **Key features:**
 - **Expandable rows**: Click any row to reveal full details (enzyme, mass accuracy, scan window, MBR, normalization, extra flags, output directory, job ID)
@@ -977,6 +1000,8 @@ Navigate to **About > Search History** in the navbar. Every DIA-NN search submit
 - **Import Results**: Click the green "Results" button (only for completed searches) to load the search output (`report.parquet`) directly. Works over SSH for remote files. Auto-runs phospho detection and records to Analysis History.
 - **View Log**: Click the log icon to display the `search_info.md` metadata file from the search output directory
 - **Cross-reference**: The link icon navigates to the matching entry in Analysis History (if that search output was loaded and analyzed)
+
+In short: **Import Settings** copies the search parameters so you can start a new search with the same configuration. **Import Results** loads the actual output data (report.parquet) from that completed search into DE-LIMP for analysis -- no new search needed.
 
 ### 11.2 Analysis History
 
@@ -990,7 +1015,7 @@ Navigate to **About > Analysis History** in the navbar. Every pipeline run (from
 
 ### 11.3 Cross-Referencing
 
-Search History and Analysis History are linked by `output_dir`. When you complete a DIA-NN search and load its results, both tables will show a link icon on the matching rows. Click the link icon to jump between them -- useful for tracing which search parameters produced which analysis results.
+Search History and Analysis History are linked by the output folder -- the directory where DIA-NN saved its results. When you complete a search and load its results, both tables show a link icon on the matching rows. Click the link icon to jump between them -- useful for tracing which search parameters produced which analysis results.
 
 ---
 
@@ -1054,24 +1079,30 @@ You have multiple options to access DE-LIMP:
 | **DDA** | Data-Dependent Acquisition -- an older MS method that selects the most abundant ions for fragmentation; DE-LIMP does not support DDA data |
 | **DIA-NN** | A software tool (by Vadim Demichev) that processes DIA raw files to identify and quantify peptides and proteins |
 | **Parquet** | A columnar file format used by DIA-NN for its output (`report.parquet`). More compact and faster to read than TSV |
-| **limpa** | A Bioconductor R package for DIA proteomics data processing -- handles normalization (DPC-CN) and quantification (maxLFQ) |
-| **limma** | A Bioconductor R package for linear modeling and differential expression analysis, originally designed for microarrays but widely used in proteomics |
-| **FDR** | False Discovery Rate -- the expected proportion of false positives among all significant results. An FDR of 0.05 means ~5% of "significant" proteins may be false positives |
+| **limpa** | A Bioconductor R package for DIA proteomics data processing. Handles data import from DIA-NN, normalization (DPC-CN), and protein quantification (DPC-Quant, a modified maxLFQ algorithm). limpa reads the raw DIA-NN output; limma then performs the statistical testing |
+| **limma** | A Bioconductor R package for linear modeling and differential expression analysis. Uses empirical Bayes moderation (see below) to produce reliable statistics even with small sample sizes. Originally designed for microarrays, now widely used in proteomics |
+| **DPC-CN** | Data Point Correspondence - Cyclic Normalization -- a normalization method designed for DIA proteomics that adjusts for systematic intensity differences between runs (e.g., differences in sample loading or instrument performance) so that fold-change comparisons reflect biology, not technical variation. Applied by limpa on top of DIA-NN's built-in RT-dependent normalization |
+| **Empirical Bayes moderation** | A statistical technique used by limma that borrows information across all ~3,000+ proteins to produce more stable variance estimates for each individual protein. This is especially helpful with few replicates (n=3-4): rather than relying on noisy per-protein variance from just your replicates, limma combines each protein's variance with a prior estimated from the full dataset |
+| **FDR** | False Discovery Rate -- the expected proportion of false positives among all significant results. An FDR threshold of 0.05 means the procedure is calibrated so that, on average, no more than 5% of proteins called significant are expected to be false positives |
 | **adj.P.Val** | Adjusted P-value (after FDR correction via Benjamini-Hochberg). This is what DE-LIMP uses to determine significance (default threshold: 0.05) |
 | **P.Value** | Raw (unadjusted) P-value from the statistical test. Used on the volcano y-axis for visual spread, but significance is determined by adj.P.Val |
 | **logFC** | Log2 fold change between conditions. A logFC of 1.0 means 2-fold higher; -1.0 means 2-fold lower; 0.6 means ~1.5-fold higher |
 | **Fold change** | The ratio of expression between two conditions. A 2-fold change means one group has twice the abundance of the other |
 | **Volcano plot** | A scatter plot showing fold change (x-axis) vs. statistical significance (y-axis) for every protein. Significant proteins with large changes appear in the upper corners |
-| **PCA** | Principal Component Analysis -- a dimensionality reduction method that shows how samples cluster based on their overall protein expression profiles |
-| **GSEA** | Gene Set Enrichment Analysis -- tests whether predefined sets of genes/proteins (e.g., pathways) are statistically overrepresented among your DE results |
+| **PCA** | Principal Component Analysis -- a dimensionality reduction method that projects samples onto axes of maximum variance, helping visualize how samples relate to each other based on their overall protein expression profiles. PCA does not perform clustering; visual proximity suggests similarity |
+| **GSEA** | Gene Set Enrichment Analysis -- a rank-based method that tests whether predefined sets of genes/proteins (e.g., pathways) tend to cluster toward the top or bottom of a fold-change-ranked list, rather than being randomly distributed. This is different from overrepresentation analysis (ORA), which tests a fixed list of significant hits |
 | **GO** | Gene Ontology -- a standardized vocabulary for gene/protein function, organized into three categories: Biological Process (BP), Molecular Function (MF), and Cellular Component (CC) |
 | **KEGG** | Kyoto Encyclopedia of Genes and Genomes -- a database of metabolic and signaling pathways |
-| **CV** | Coefficient of Variation -- a measure of replicate reproducibility (standard deviation / mean, expressed as %). Lower CV = more reproducible measurement |
-| **MOFA2** | Multi-Omics Factor Analysis -- an unsupervised method that finds hidden patterns (latent factors) shared across multiple data types (e.g., proteomics + phospho) |
+| **CV** | Coefficient of Variation -- a measure of replicate reproducibility (standard deviation / mean, expressed as %). Computed on linear-scale intensities (back-transformed from log2) within each experimental group, then averaged. Lower CV = more reproducible measurement |
+| **MOFA2** | Multi-Omics Factor Analysis -- an unsupervised method that finds latent factors (mathematical patterns) shared across multiple data types (e.g., proteomics + phospho). Factors require biological interpretation -- they may capture genuine biology, batch effects, or technical variation |
 | **FASTA** | A text file format containing protein or nucleotide sequences, used as the reference database for peptide identification |
-| **Precursor** | A peptide ion at a specific charge state as measured by the mass spectrometer. Multiple precursors can map to the same peptide sequence |
-| **maxLFQ** | A label-free quantification algorithm that rolls up precursor-level intensities to protein-level abundances while minimizing missing values |
+| **Precursor** | A peptide ion at a specific charge state as measured by the mass spectrometer. The same peptide can appear at different charge states (e.g., +2 and +3), creating multiple precursor entries. This is why a dataset may show 40,000 precursors but only 4,000 protein groups |
+| **maxLFQ** | A label-free quantification algorithm (Cox et al., 2014) that estimates protein-level abundance from pairwise precursor/peptide ratios, robust to missing values. limpa uses a modified version called DPC-Quant |
+| **MBR** | Match Between Runs -- a DIA-NN feature that transfers peptide identifications from runs where a peptide was confidently identified to runs where it was not, increasing data completeness. Can add 10-30% more identifications but introduces more imputed values |
+| **TIC** | Total Ion Current -- the summed intensity of all ions detected at each time point during a mass spectrometry run. TIC traces show the chromatographic profile of each injection |
+| **MAD** | Median Absolute Deviation -- a robust measure of spread, similar to standard deviation but less sensitive to outliers. "3 MAD from median" means the value is far from the group center |
 | **Spectral library** | A collection of previously observed peptide fragmentation patterns used to identify peptides in new DIA data |
+| **Covariate** | A known source of variation that is not your variable of interest (e.g., batch, sex, instrument). Including covariates in the statistical model separates their effect from your treatment effect, reducing noise and false positives |
 
 ---
 

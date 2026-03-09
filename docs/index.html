@@ -605,6 +605,14 @@
         </div>
     </section>
 
+    <!-- What You Need -->
+    <section style="background: var(--primary-light); padding: 2rem 0;">
+        <div class="container" style="max-width: 800px; text-align: center;">
+            <h3 style="color: var(--primary); margin-bottom: 0.5rem;">What do I need to get started?</h3>
+            <p style="color: var(--text-mid); font-size: 1.05rem;">If your core facility already processed your samples with DIA-NN, you just need the <code>report.parquet</code> file from their output. Upload it to DE-LIMP, assign your experimental groups, and the app handles normalization, statistics, and visualization. No programming required.</p>
+        </div>
+    </section>
+
     <!-- Key Features -->
     <section>
         <div class="container">
@@ -614,12 +622,12 @@
                 <div class="feature-card">
                     <div class="feat-icon">&#x2696;&#xFE0F;</div>
                     <h3>Run Comparator <span class="new-badge">New</span></h3>
-                    <p>Compare two analyses of the same dataset across tools (DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe). Four diagnostic layers with a 7-rule hypothesis engine that explains <em>why</em> each discordant protein disagrees. Optional MOFA2 decomposition and AI integration.</p>
+                    <p>Compare two analyses of the same dataset across tools (DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe). Four diagnostic views highlight differences between your analyses, with plain-English explanations for why specific proteins disagree. Optionally use multi-omics factor analysis (MOFA2) or AI to explore patterns in the disagreements.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4C9;</div>
                     <h3>Chromatography QC <span class="new-badge">New</span></h3>
-                    <p>Extract TIC traces from timsTOF raw files before committing to long DIA-NN searches. Automated diagnostics flag dead injections, carryover, RT drift, and loading anomalies. Three views: faceted, overlay, and metrics.</p>
+                    <p>Check data quality before running time-consuming searches. The app reads total ion current (TIC) profiles from your timsTOF raw files and automatically flags problems like failed injections, sample carryover between runs, retention time shifts, and uneven sample loading. Three views: faceted, overlay, and metrics.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4CB;</div>
@@ -659,7 +667,7 @@
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4E6;</div>
                     <h3>Gene Set Enrichment</h3>
-                    <p>Multi-database GSEA (BP, MF, CC, KEGG) with dot plots, enrichment maps, ridgeplots, and automatic organism detection for 12 species.</p>
+                    <p>Rank-based GSEA across Gene Ontology categories (Biological Process, Molecular Function, Cellular Component) and KEGG pathways, with dot plots, enrichment maps, ridgeplots, and automatic organism detection for 12 species.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F4E4;</div>
@@ -707,9 +715,10 @@
                         Download from <a href="https://cloud.r-project.org/" target="_blank" rel="noopener">cloud.r-project.org</a>.</p>
                 </li>
                 <li>
-                    <h3>Clone the repository</h3>
+                    <h3>Download the code</h3>
                     <pre><code>git clone https://github.com/bsphinney/DE-LIMP.git
 cd DE-LIMP</code></pre>
+                    <p style="font-size: 0.9em; color: var(--text-light); margin-top: 0.5rem;">Or download as a ZIP from the <a href="https://github.com/bsphinney/DE-LIMP" target="_blank">GitHub page</a> (click the green "Code" button, then "Download ZIP") and extract it.</p>
                 </li>
                 <li>
                     <h3>Run the app</h3>
@@ -779,15 +788,15 @@ bash build_diann_docker.sh
                 </li>
                 <li>
                     <h3>Normalization</h3>
-                    <p>Apply Data Point Correspondence (DPC-CN) normalization to correct for systematic biases across runs.</p>
+                    <p>Correct for technical variation between mass spec runs (e.g., differences in sample loading or instrument performance) using DPC-CN normalization, so that observed intensity differences reflect biology, not instrumentation.</p>
                 </li>
                 <li>
                     <h3>Protein Quantification</h3>
-                    <p>Roll up precursor-level data to protein-level abundances using the maxLFQ quantification algorithm.</p>
+                    <p>The mass spectrometer measures individual peptide fragments (precursors). This step combines those measurements into a single abundance value for each protein using a modified maxLFQ algorithm that accurately estimates protein quantities from peptide data.</p>
                 </li>
                 <li>
                     <h3>Differential Expression</h3>
-                    <p>Fit linear models, apply contrasts between your experimental groups, and compute empirical Bayes moderated statistics. FDR correction via Benjamini-Hochberg.</p>
+                    <p>Compare protein levels between your experimental groups (e.g., treated vs. control) using limma, a statistical method that borrows information across all proteins to produce reliable p-values even with few replicates. Results are corrected for multiple testing (FDR) so you can be confident the hits are real.</p>
                 </li>
                 <li>
                     <h3>Phosphoproteomics (optional)</h3>

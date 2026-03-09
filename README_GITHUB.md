@@ -4,7 +4,7 @@
 
 Find which proteins are significantly different between your experimental conditions -- upload a DIA-NN output file and get interactive volcano plots, heatmaps, pathway enrichment, and AI-powered interpretation, all without writing code.
 
-Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipeline (DPC-CN normalization, maxLFQ quantification) and [limma](https://bioconductor.org/packages/limma/) empirical Bayes moderated *t*-statistics with Benjamini-Hochberg FDR correction.
+Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipeline for normalization and protein quantification, and [limma](https://bioconductor.org/packages/limma/) for statistical testing with FDR correction. See [USER_GUIDE.md](USER_GUIDE.md#glossary) for methodology details.
 
 **Input:** DIA-NN `report.parquet` | **Not for:** DDA data, TMT/iTRAQ, Spectronaut/MaxQuant output
 
@@ -167,7 +167,7 @@ All dependencies install automatically on first run:
 | Step | Method |
 |------|--------|
 | **Normalization** | Data Point Correspondence - Cyclic Normalization (DPC-CN) via `limpa::dpcCN()` |
-| **Quantification** | Modified maxLFQ (precursor-to-protein rollup) via `limpa::dpcQuant()` |
+| **Quantification** | Modified maxLFQ (DPC-Quant: precursor-to-protein rollup with pairwise ratio estimation) via `limpa::dpcQuant()` |
 | **DE model** | Linear model fit via `limpa::dpcDE()` + `limma::contrasts.fit()` |
 | **Moderation** | Empirical Bayes moderated *t*-statistics via `limma::eBayes()` |
 | **FDR** | Benjamini-Hochberg adjusted *p*-values |
