@@ -3756,6 +3756,7 @@ server_search <- function(input, output, session, values, add_to_log,
             limpa::readDIANN(report_path, format = "parquet")))
 
           values$raw_data <- raw_data
+          values$qc_stats <- get_diann_stats_r(report_path)
           values$uploaded_report_path <- report_path
           values$original_report_name <- basename(report_path)
 
@@ -4307,6 +4308,7 @@ server_search <- function(input, output, session, values, add_to_log,
             raw_data <- suppressMessages(suppressWarnings(
               limpa::readDIANN(report_path, format = "parquet")))
             values$raw_data <- raw_data
+            values$qc_stats <- get_diann_stats_r(report_path)
             values$uploaded_report_path <- report_path
             values$original_report_name <- basename(report_path)
 
@@ -4318,6 +4320,13 @@ server_search <- function(input, output, session, values, add_to_log,
               Covariate1 = "", Covariate2 = "",
               stringsAsFactors = FALSE
             )
+
+            # Carry search settings for methodology/export
+            if (!is.null(job$search_settings)) {
+              ss <- job$search_settings
+              ss$output_dir <- job$output_dir
+              values$diann_search_settings <- ss
+            }
 
             jobs <- values$diann_jobs
             jobs[[idx]]$loaded <- TRUE

@@ -3974,6 +3974,45 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             paste("Global offset:", round(res$summary_stats$global_offset, 3), "log2 units"),
             ""
           )
+
+          # Include Run A settings from session
+          run_a_data <- comp_run_a()
+          if (!is.null(run_a_data$settings)) {
+            context_lines <- c(context_lines, "## Run A Settings", "")
+            for (nm in names(run_a_data$settings)) {
+              val <- run_a_data$settings[[nm]]
+              if (!is.null(val) && nzchar(val) && val != "Unknown")
+                context_lines <- c(context_lines, paste0("- **", nm, "**: ", val))
+            }
+            context_lines <- c(context_lines, "")
+          }
+
+          # Include Run B settings
+          if (!is.null(run_b_data) && !is.null(run_b_data$settings)) {
+            context_lines <- c(context_lines, "## Run B Settings", "")
+            for (nm in names(run_b_data$settings)) {
+              val <- run_b_data$settings[[nm]]
+              if (!is.null(val) && nzchar(val) && val != "Unknown")
+                context_lines <- c(context_lines, paste0("- **", nm, "**: ", val))
+            }
+            context_lines <- c(context_lines, "")
+          }
+
+          # Include concordance summary
+          if (!is.null(res$de_concordance)) {
+            conc <- res$de_concordance
+            conc_pct <- if (conc$n_total > 0) round(100 * conc$n_concordant / conc$n_total, 1) else NA
+            context_lines <- c(context_lines,
+              "## DE Concordance Summary", "",
+              paste("Total shared proteins tested:", conc$n_total),
+              paste("Concordant:", conc$n_concordant, sprintf("(%.1f%%)", conc_pct)),
+              paste("Discordant:", conc$n_discordant),
+              paste("Run A significant:", sum(conc$merged$status_a != "NS")),
+              paste("Run B significant:", sum(conc$merged$status_b != "NS")),
+              ""
+            )
+          }
+
           if (!is.null(values$comparator_gemini_narrative)) {
             context_lines <- c(context_lines,
               "## Gemini Analysis", "",

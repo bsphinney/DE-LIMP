@@ -1950,6 +1950,7 @@ server_session <- function(input, output, session, values, add_to_log) {
           limpa::readDIANN(report_path, format = "parquet")))
 
         values$raw_data <- raw_data
+        values$qc_stats <- get_diann_stats_r(report_path)
         values$uploaded_report_path <- report_path
         values$original_report_name <- basename(report_path)
 
@@ -2135,6 +2136,7 @@ server_session <- function(input, output, session, values, add_to_log) {
       raw_data <- suppressMessages(suppressWarnings(
         limpa::readDIANN(report_path, format = "parquet")))
       values$raw_data <- raw_data
+      values$qc_stats <- get_diann_stats_r(report_path)
       values$uploaded_report_path <- report_path
       values$original_report_name <- basename(report_path)
 
