@@ -1611,13 +1611,23 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             uiOutput("comparator_summary_banner"),
             navset_card_tab(id = "comparator_subtabs",
               nav_panel("Settings Diff", icon = icon("sliders"),
-                div(style = "min-height: 300px;",
+                div(style = "overflow-y: auto; max-height: calc(100vh - 200px); min-height: 300px;",
+                  div(style = "display: flex; justify-content: flex-end; margin-bottom: 4px;",
+                    actionButton("comparator_settings_info_btn", icon("question-circle"),
+                      class = "btn-outline-info btn-sm", title = "About Settings Diff")
+                  ),
                   div(id = "comparator_pipeline_warning"),
-                  DT::DTOutput("comparator_settings_diff")
+                  DT::DTOutput("comparator_settings_diff"),
+                  # Per-Sample QC (Mode B only — shown when RunSummaries present)
+                  uiOutput("comparator_sample_qc_section")
                 )
               ),
               nav_panel("Protein Universe", icon = icon("circle-nodes"),
                 div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+                  div(style = "display: flex; justify-content: flex-end; margin-bottom: 4px;",
+                    actionButton("comparator_universe_info_btn", icon("question-circle"),
+                      class = "btn-outline-info btn-sm", title = "About Protein Universe")
+                  ),
                   div(style = "display: flex; gap: 15px; flex-wrap: wrap; align-items: start;",
                     div(style = "flex: 1; min-width: 350px;",
                       plotly::plotlyOutput("comparator_universe_plot", height = "300px")
@@ -1647,22 +1657,40 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 )
               ),
               nav_panel("Quantification", icon = icon("chart-line"),
-                div(style = "display: flex; gap: 15px; flex-wrap: wrap; min-height: 350px;",
-                  div(style = "flex: 1; min-width: 400px;",
-                    plotly::plotlyOutput("comparator_quant_scatter", height = "380px")
+                div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+                  div(style = "display: flex; justify-content: flex-end; margin-bottom: 4px;",
+                    actionButton("comparator_quant_info_btn", icon("question-circle"),
+                      class = "btn-outline-info btn-sm", title = "About Quantification")
                   ),
-                  div(style = "flex: 1; min-width: 300px;",
-                    plotly::plotlyOutput("comparator_correlation_heatmap", height = "380px")
-                  )
-                ),
-                plotly::plotlyOutput("comparator_bias_density", height = "250px")
+                  div(style = "display: flex; gap: 15px; flex-wrap: wrap; min-height: 350px;",
+                    div(style = "flex: 1; min-width: 400px;",
+                      plotly::plotlyOutput("comparator_quant_scatter", height = "380px")
+                    ),
+                    div(style = "flex: 1; min-width: 300px;",
+                      plotly::plotlyOutput("comparator_correlation_heatmap", height = "380px")
+                    )
+                  ),
+                  plotly::plotlyOutput("comparator_bias_density", height = "250px"),
+                  # TopN Effect scatter (Mode B only)
+                  uiOutput("comparator_topn_effect_section")
+                )
               ),
               nav_panel("DE Concordance", icon = icon("code-compare"),
-                uiOutput("comparator_layer4_content")
+                div(
+                  div(style = "display: flex; justify-content: flex-end; margin-bottom: 4px;",
+                    actionButton("comparator_concordance_info_btn", icon("question-circle"),
+                      class = "btn-outline-info btn-sm", title = "About DE Concordance")
+                  ),
+                  uiOutput("comparator_layer4_content")
+                )
               ),
               nav_panel("AI Analysis", icon = icon("robot"), value = "comparator_ai_tab",
                 tags$div(style = "padding: 12px 4px; min-height: 400px;",
-                  tags$h6("AI-Powered Comparison Analysis"),
+                  div(style = "display: flex; justify-content: space-between; align-items: center;",
+                    tags$h6("AI-Powered Comparison Analysis"),
+                    actionButton("comparator_ai_info_btn", icon("question-circle"),
+                      class = "btn-outline-info btn-sm", title = "About AI Analysis")
+                  ),
                   tags$p(class = "text-muted small",
                     "Generate an AI narrative summary or export data for external analysis."),
                   tags$div(style = "display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;",

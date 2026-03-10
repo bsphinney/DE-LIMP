@@ -5,6 +5,20 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-03-10
+
+### Fixed
+- **TopN Effect scatter blank**: Column name mismatch (`log2_mean_A`/`log2_mean_B` vs actual `mean_a`/`mean_b`) caused the filter to return 0 rows, silently failing the `req()`. Fixed in both the scatter renderer and interpretation block.
+
+### Added
+- **Sub-tab info modals**: Added `?` help buttons to all 5 Run Comparator sub-tabs (Settings Diff, Protein Universe, Quantification, DE Concordance, AI Analysis) with detailed explanations of each visualization, color coding, and interpretation guidance.
+- **Spectronaut parsing improvements**: Tree-character stripping for ExperimentSetupOverview, `[N]` column prefix handling, suffix-based fallback sample matching, per-sample peptide count aggregation via `rowMeans()`, gene column case-insensitive lookup, contextual TopN extraction, FASTA database deduplication, normalization chain (search_settings → AnalysisLog → setup_overview).
+
+### Changed
+- Quantification and Settings Diff sub-tabs now have scrollable wrappers with `overflow-y: auto`.
+- TopN Effect section and Per-Sample QC section added to Quantification and Settings Diff sub-tabs respectively.
+- App version bumped to v3.5.1.
+
 ## [3.5.0] - 2026-03-09
 
 ### Added

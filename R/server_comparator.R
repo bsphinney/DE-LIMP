@@ -42,6 +42,39 @@ log2_safe <- function(mat) {
   log2(mat)
 }
 
+#' Coalesce setting value — returns val if non-null/non-"Not available", else fallback
+coalesce_setting <- function(val, fallback = "Not available") {
+  if (is.null(val) || identical(val, "Not available") || identical(val, "")) fallback else val
+}
+
+#' Format integer with commas or return "N/A"
+format_or_na <- function(val) {
+  if (is.null(val) || is.na(val)) return("N/A")
+  format(as.integer(val), big.mark = ",")
+}
+
+#' Compute TopN effect summary — whether TopN drives quantification divergence
+compute_topn_effect_summary <- function(joined, topn) {
+  below <- mean(joined$quant_diff_abs[joined$n_peptides <= topn], na.rm = TRUE)
+  above <- mean(joined$quant_diff_abs[joined$n_peptides >  topn], na.rm = TRUE)
+  ratio <- above / below
+
+  if (is.nan(ratio) || is.na(ratio)) return(NULL)
+
+  if (ratio > 1.3) {
+    interpretation <- sprintf(
+      "Proteins with >%d peptides have %.1fx larger quantification divergence than proteins with <=%d peptides (%.2f vs %.2f log2 units). Spectronaut's TopN=%d cap is a primary driver of quantification differences.",
+      topn, ratio, topn, above, below, topn)
+    severity <- "warning"
+  } else {
+    interpretation <- sprintf(
+      "Quantification divergence does not increase markedly above the TopN=%d threshold (%.2f vs %.2f log2 units). TopN may not be a major driver of discordance here.",
+      topn, above, below)
+    severity <- "info"
+  }
+  list(text = interpretation, severity = severity, ratio = ratio)
+}
+
 # --- Parsers ---
 
 #' Parse a DE-LIMP session (from .rds file or current session reactive values)
@@ -170,10 +203,10 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
 #' @return Named list of data.frames (one per comparison), or NULL
 parse_spectronaut_candidates <- function(de_path) {
   de_df <- data.table::fread(de_path, data.table = TRUE)
-  de_prot_col  <- grep("ProteinGroup|ProteinAccession", names(de_df), value = TRUE)[1]
+  de_prot_col  <- grep("ProteinGroup|ProteinAccession|UniProtIds", names(de_df), value = TRUE)[1]
   de_gene_col  <- grep("^PG\\.Genes$|^Gene$|Genes", names(de_df), value = TRUE)[1]
   de_logfc_col <- grep("Log2Ratio|log2FC|AVG\\.Log2\\.Ratio|AVG Log2 Ratio", names(de_df), value = TRUE)[1]
-  de_qval_col  <- grep("Qvalue|q\\.value|adj", names(de_df), ignore.case = TRUE, value = TRUE)[1]
+  de_qval_col  <- grep("Qvalue|Q\\.Value|q\\.value|adj", names(de_df), ignore.case = TRUE, value = TRUE)[1]
   de_pval_col  <- grep("^.*Pvalue$|^.*p\\.value$|PValue", names(de_df), ignore.case = TRUE, value = TRUE)[1]
   nratios_col  <- grep("# of Ratios|NrOfRatios|NumberOfRatios", names(de_df), value = TRUE)[1]
 
@@ -272,6 +305,8 @@ parse_spectronaut_condition_setup <- function(path) {
 #' @return Named list of settings key-value pairs
 parse_spectronaut_setup_overview <- function(path) {
   lines <- readLines(path, warn = FALSE)
+  # Strip tree drawing characters (│ ├─ └─ ─) and leading whitespace
+  lines <- gsub("[\u2502\u251c\u2514\u2500\u2510\u250c\u2518\u2524\u252c\u2534\u253c]", "", lines)
   lines <- trimws(lines)
   lines <- lines[nzchar(lines)]
   settings <- list()
@@ -286,7 +321,147 @@ parse_spectronaut_setup_overview <- function(path) {
       settings[[trimws(key)]] <- trimws(val)
     }
   }
+  # Extract TopN Max values contextually (flat parser can't distinguish "Max" under different parents)
+  raw_lines_topn <- readLines(path, warn = FALSE)
+  raw_topn <- gsub("[\u2502\u251c\u2514\u2500\u2510\u250c\u2518\u2524\u252c\u2534\u253c]", "", raw_lines_topn)
+  raw_topn <- trimws(raw_topn)
+  in_major_topn <- FALSE
+  in_minor_topn <- FALSE
+  for (line in raw_topn) {
+    if (grepl("^Major Group Top N", line)) { in_major_topn <- TRUE; in_minor_topn <- FALSE; next }
+    if (grepl("^Minor Group Top N", line)) { in_minor_topn <- TRUE; in_major_topn <- FALSE; next }
+    if (grepl("^Max", line)) {
+      val <- sub("^Max[:\\s\t]+", "", line)
+      val <- trimws(val)
+      if (in_major_topn) { settings$topn_protein_max <- val; in_major_topn <- FALSE }
+      else if (in_minor_topn) { settings$topn_peptide_max <- val; in_minor_topn <- FALSE }
+    }
+    # Reset context if we hit a different key at same level
+    if (!grepl("^(Max|Min)$", sub("[:\\s\t].*", "", line))) {
+      in_major_topn <- FALSE
+      in_minor_topn <- FALSE
+    }
+  }
+
+  # Collect all FASTA databases (Original File appears multiple times under Protein Databases Used)
+  raw_lines <- readLines(path, warn = FALSE)
+  raw_clean <- gsub("[\u2502\u251c\u2514\u2500\u2510\u250c\u2518\u2524\u252c\u2534\u253c]", "", raw_lines)
+  raw_clean <- trimws(raw_clean)
+  fasta_files <- character(0)
+  fasta_entries <- integer(0)
+  for (i in seq_along(raw_clean)) {
+    if (grepl("^Original File", raw_clean[i])) {
+      val <- sub("^Original File[:\\s\t]+", "", raw_clean[i])
+      val <- trimws(val)
+      if (nzchar(val) && grepl("\\.(fasta|fa)$", val, ignore.case = TRUE)) {
+        fasta_files <- c(fasta_files, val)
+      }
+    }
+    if (grepl("^Protein Entries", raw_clean[i])) {
+      val <- sub("^Protein Entries[:\\s\t]+", "", raw_clean[i])
+      val <- trimws(val)
+      n <- suppressWarnings(as.integer(gsub(",", "", val)))
+      if (!is.na(n)) fasta_entries <- c(fasta_entries, n)
+    }
+  }
+  # Deduplicate — same FASTA listed per sample
+  if (length(fasta_files) > 0 && length(fasta_files) == length(fasta_entries)) {
+    fasta_df <- unique(data.frame(file = fasta_files, entries = fasta_entries, stringsAsFactors = FALSE))
+    fasta_files <- fasta_df$file
+    fasta_entries <- fasta_df$entries
+  } else if (length(fasta_files) > 0) {
+    fasta_files <- unique(fasta_files)
+  }
+  settings$fasta_databases <- if (length(fasta_files) > 0) {
+    paste(fasta_files, collapse = " + ")
+  } else NULL
+  settings$fasta_total_entries <- if (length(fasta_entries) > 0) {
+    format(sum(fasta_entries), big.mark = ",")
+  } else NULL
+
+  message("[Comparator] Parsed ", length(settings), " settings from ExperimentSetupOverview")
+  if (length(fasta_files) > 0) {
+    message("[Comparator] FASTA databases: ", paste(fasta_files, "(", format(fasta_entries, big.mark = ","), "entries)", collapse = " + "))
+  }
   settings
+}
+
+#' Extract typed search settings from ExperimentSetupOverview key-value pairs
+#' @param overview Named list from parse_spectronaut_setup_overview()
+#' @return Named list of search settings with standardized keys
+parse_spectronaut_search_settings <- function(overview) {
+  get_val <- function(...) {
+    keys <- c(...)
+    for (k in keys) {
+      matches <- grep(k, names(overview), ignore.case = TRUE, value = TRUE)
+      if (length(matches) > 0) return(overview[[matches[1]]])
+    }
+    "Not available"
+  }
+  list(
+    missed_cleavages   = get_val("^Missed Cleavages$"),
+    max_peptide_length = get_val("^Max Peptide Length$"),
+    min_peptide_length = get_val("^Min Peptide Length$"),
+    variable_mods      = get_val("^Variable Modifications"),
+    normalization      = get_val("^Normalization Strategy$"),
+    cross_run_norm     = get_val("^Cross-Run Normalization$"),
+    topn_protein       = get_val("^Major Group Top N$"),
+    topn_peptide       = get_val("^Minor Group Top N$"),
+    de_test            = get_val("^Differential Abundance Testing$"),
+    lfc_filter         = get_val("^Log2 Ratio Candidate Filter$"),
+    confidence_filter  = get_val("^Confidence$"),
+    interference_corr  = get_val("^Interference Correction$"),
+    imputation         = get_val("^Imputation Strategy$"),
+    use_all_ms_levels  = get_val("^Use All MS-Level Quantities$"),
+    quantity_ms_level  = get_val("^Quantity MS Level$"),
+    quantity_type      = get_val("^Quantity Type$"),
+    protein_lfq_method = get_val("^Protein LFQ Method$"),
+    # FDR thresholds
+    protein_qvalue     = get_val("^Protein Qvalue Cutoff \\(Experiment\\)$", "^Protein Group FDR$"),
+    precursor_qvalue   = get_val("^Precursor Qvalue Cutoff$"),
+    # Enzyme / search
+    enzyme             = get_val("^Enzymes / Cleavage Rules$", "^Enzyme$", "^Protease$"),
+    digest_type        = get_val("^Digest Type$")
+  )
+}
+
+#' Parse Spectronaut AnalysisLog.txt for library stats and version
+#' @param log_lines Character vector of log file lines
+#' @return Named list with version and library composition
+parse_spectronaut_log <- function(log_lines) {
+  extract_int <- function(pattern) {
+    m <- grep(pattern, log_lines, value = TRUE, ignore.case = TRUE)
+    if (length(m) == 0) return(NA_integer_)
+    as.integer(gsub("[^0-9]", "", m[length(m)]))
+  }
+  extract_val <- function(pattern) {
+    m <- grep(pattern, log_lines, value = TRUE, ignore.case = TRUE)
+    if (length(m) == 0) return(NULL)
+    # Extract value after the last colon (handles tree-style "├─ Key:    Value")
+    val <- sub("^.*:\\s+", "", trimws(m[1]))
+    if (nzchar(val)) val else NULL
+  }
+  list(
+    spectronaut_version = {
+      m <- grep("Spectronaut [0-9]", log_lines, value = TRUE)
+      if (length(m) > 0) sub(".*(Spectronaut [0-9.]+).*", "\\1", m[1]) else "Unknown"
+    },
+    library_precursors  = extract_int("precursors.*library|library.*precursors"),
+    library_peptides    = extract_int("peptides.*library|library.*peptides"),
+    library_proteins    = extract_int("protein groups.*library|library.*protein groups"),
+    unique_precursors   = extract_int("unique precursor"),
+    unique_proteins     = extract_int("unique protein"),
+    pulsar_candidates   = extract_int("candidate peptides|Pulsar"),
+    # Settings from log tree
+    normalization_strategy = extract_val("Normalization Strategy"),
+    cross_run_normalization = extract_val("Cross-Run Normalization"),
+    normalization_filter   = extract_val("Normalization Filter Type"),
+    use_all_ms_levels      = extract_val("Use All MS-Level Quantities"),
+    topn_protein           = extract_val("Major Group Top N"),
+    topn_peptide           = extract_val("Minor Group Top N"),
+    de_test                = extract_val("Differential Abundance.*Test|Statistical Testing"),
+    imputation             = extract_val("Imputation")
+  )
 }
 
 #' Parse Spectronaut ZIP export (primary Mode B input)
@@ -303,6 +478,8 @@ parse_spectronaut_zip <- function(zip_path) {
   utils::unzip(zip_path, exdir = zip_dir)
   all_files <- list.files(zip_dir, recursive = TRUE, full.names = TRUE)
   basenames <- tolower(basename(all_files))
+  message("[Comparator] ZIP contains ", length(all_files), " files: ",
+          paste(basename(all_files), collapse = ", "))
 
   # --- Detect files ---
   detect <- function(patterns, files = all_files, bases = basenames) {
@@ -314,12 +491,17 @@ parse_spectronaut_zip <- function(zip_path) {
   }
 
   condition_file <- detect(c("conditionsetup\\.tsv$", "conditionsetup\\.csv$"))
-  pivot_file     <- detect(c("pivot.*\\.tsv$", "bgs factory report.*\\.tsv$",
-                             "pivot.*\\.csv$", "bgs factory report.*\\.csv$"))
+  pivot_file     <- detect(c("de-limp.*pivot.*\\.tsv$", "pivot.*\\.tsv$",
+                             "bgs factory report.*\\.tsv$",
+                             "de-limp.*pivot.*\\.csv$", "pivot.*\\.csv$",
+                             "bgs factory report.*\\.csv$"))
   candidates_file <- detect(c("^candidates\\.tsv$", "^candidates\\.csv$",
                               "candidates.*\\.tsv$"))
   setup_file     <- detect(c("experimentsetupoverview.*\\.txt$",
                              "experimentsetupoverview.*\\.tsv$"))
+  analysis_log   <- detect(c("^analysislog\\.txt$", "^analysislog\\.log$",
+                             "spectronaut.*log\\.txt$", ".*\\.log\\.txt$",
+                             "analysis.*log.*\\.txt$"))
 
   # RunSummaries: look for a RunSummaries directory or matching files
   run_summary_files <- all_files[grep("runsummar", basenames)]
@@ -339,7 +521,8 @@ parse_spectronaut_zip <- function(zip_path) {
     candidates      = !is.null(candidates_file),
     run_summaries   = length(run_summary_files) > 0,
     n_run_summaries = length(run_summary_files),
-    settings        = !is.null(setup_file)
+    settings        = !is.null(setup_file),
+    analysis_log    = !is.null(analysis_log)
   )
 
   if (!manifest$quantities) stop("ZIP must contain a Pivot quantities file (*Pivot*.tsv or *BGS Factory Report*.tsv)")
@@ -354,7 +537,7 @@ parse_spectronaut_zip <- function(zip_path) {
 
   # 2. Pivot quantities (reuse existing column-detection logic)
   df <- data.table::fread(pivot_file, data.table = TRUE)
-  protein_col <- grep("ProteinGroup|ProteinAccession", names(df), value = TRUE)[1]
+  protein_col <- grep("ProteinGroup|ProteinAccession|UniProtIds", names(df), value = TRUE)[1]
   gene_col    <- grep("^PG\\.Genes$|^Gene$|Genes", names(df), value = TRUE)[1]
   quant_cols  <- grep("PG\\.Quantity$", names(df), value = TRUE)
   npep_col    <- grep("NrOfStrippedSequences", names(df), value = TRUE)[1]
@@ -368,20 +551,24 @@ parse_spectronaut_zip <- function(zip_path) {
   # If we have a sample_map, rename quant columns from Spectronaut labels to File Name keys
   # This makes match_samples() work against DE-LIMP colnames which are file-based
   if (!is.null(sample_map)) {
-    # Spectronaut pivot columns are like "RunLabel.PG.Quantity" — extract the prefix
+    # Spectronaut pivot columns are like "[N] RunLabel.PG.Quantity" — extract the prefix
     col_prefixes <- sub("\\.PG\\.Quantity$", "", quant_cols)
+    # Strip Spectronaut's "[N] " column numbering prefix (e.g., "[1] AD-1" → "AD-1")
+    col_prefixes <- sub("^\\[\\d+\\]\\s*", "", col_prefixes)
     # Match to sample_map run_label to get file_name
     map_idx <- match(col_prefixes, sample_map$run_label)
     new_names <- ifelse(is.na(map_idx), col_prefixes, sample_map$file_name[map_idx])
     colnames(quant_mat) <- new_names
   } else {
-    # Strip .PG.Quantity suffix for cleaner column names
-    colnames(quant_mat) <- sub("\\.PG\\.Quantity$", "", quant_cols)
+    # Strip .PG.Quantity suffix and [N] prefix for cleaner column names
+    clean_names <- sub("\\.PG\\.Quantity$", "", quant_cols)
+    clean_names <- sub("^\\[\\d+\\]\\s*", "", clean_names)
+    colnames(quant_mat) <- clean_names
   }
 
   # Inline DE columns in pivot (single-file mode fallback)
   logfc_col <- grep("Log2Ratio|log2FC", names(df), value = TRUE)[1]
-  qval_col  <- grep("Qvalue|q\\.value|adj", names(df), ignore.case = TRUE, value = TRUE)[1]
+  qval_col  <- grep("Qvalue|Q\\.Value|q\\.value|adj", names(df), ignore.case = TRUE, value = TRUE)[1]
   pval_col  <- grep("^.*Pvalue$|^.*p\\.value$", names(df), ignore.case = TRUE, value = TRUE)[1]
   has_inline_de <- !is.na(logfc_col) && !is.na(pval_col)
 
@@ -412,15 +599,63 @@ parse_spectronaut_zip <- function(zip_path) {
              error = function(e) { message("Warning: Could not parse RunSummaries: ", e$message); NULL })
   } else NULL
 
+  message("[Comparator] Manifest: quantities=", manifest$quantities,
+          ", candidates=", manifest$candidates,
+          ", condition_setup=", manifest$condition_setup,
+          ", settings=", manifest$settings,
+          ", analysis_log=", manifest$analysis_log,
+          ", run_summaries=", manifest$run_summaries, " (", manifest$n_run_summaries, ")")
+
   # 5. ExperimentSetupOverview (settings)
   setup_overview <- if (manifest$settings) {
     tryCatch(parse_spectronaut_setup_overview(setup_file),
              error = function(e) { message("Warning: Could not parse SetupOverview: ", e$message); NULL })
   } else NULL
+  if (!is.null(setup_overview)) {
+    message("[Comparator] ExperimentSetupOverview keys: ", paste(names(setup_overview), collapse = ", "))
+  }
+
+  # 6. AnalysisLog.txt (Spectronaut version + library composition)
+  library_info <- if (manifest$analysis_log) {
+    tryCatch({
+      log_lines <- readLines(analysis_log, warn = FALSE)
+      parse_spectronaut_log(log_lines)
+    }, error = function(e) { message("Warning: Could not parse AnalysisLog: ", e$message); NULL })
+  } else NULL
+
+  # 7. Typed search settings from ExperimentSetupOverview
+  search_settings <- if (!is.null(setup_overview)) {
+    tryCatch(parse_spectronaut_search_settings(setup_overview),
+             error = function(e) { message("Warning: Could not parse search settings: ", e$message); NULL })
+  } else NULL
+
+  # 8. Extract n_ratios from Candidates (if parsed)
+  n_ratios <- NULL
+  if (has_de && manifest$candidates) {
+    # Check the first comparison's data for n_ratios column
+    first_comp <- de_stats_df[[1]]
+    if ("n_ratios" %in% names(first_comp)) {
+      n_ratios <- data.frame(
+        protein_id = first_comp$protein_id,
+        n_ratios   = first_comp$n_ratios,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
 
   # --- Peptide counts ---
+  # Spectronaut pivot has per-sample peptide counts: [N] Sample.PG.NrOfStrippedSequencesIdentified
+  # Aggregate by taking the mean across samples (round to integer)
   n_pep <- NULL
-  if (!is.na(npep_col)) {
+  all_npep_cols <- grep("NrOfStrippedSequences", names(df), value = TRUE)
+  if (length(all_npep_cols) > 1) {
+    npep_mat <- as.data.frame(df[, all_npep_cols, with = FALSE])
+    n_pep <- data.frame(
+      protein_id = protein_ids,
+      n_peptides = as.integer(round(rowMeans(npep_mat, na.rm = TRUE))),
+      stringsAsFactors = FALSE
+    )
+  } else if (!is.na(npep_col)) {
     n_pep <- data.frame(
       protein_id = protein_ids,
       n_peptides = as.integer(df[[npep_col]]),
@@ -429,39 +664,118 @@ parse_spectronaut_zip <- function(zip_path) {
   }
 
   # --- Build settings from parsed components ---
+  spec_version <- if (!is.null(library_info) && !is.null(library_info$spectronaut_version) &&
+                      library_info$spectronaut_version != "Unknown") {
+    library_info$spectronaut_version
+  } else if (!is.null(setup_overview) && !is.null(setup_overview[["Software Version"]])) {
+    setup_overview[["Software Version"]]
+  } else detect_spectronaut_version(df)
+
   settings <- list(
-    software         = "Spectronaut",
-    version          = if (!is.null(setup_overview) && !is.null(setup_overview[["Software Version"]])) {
-      setup_overview[["Software Version"]]
-    } else detect_spectronaut_version(df),
-    normalization    = if (!is.null(setup_overview) && !is.null(setup_overview[["Normalization"]])) {
-      setup_overview[["Normalization"]]
-    } else "Local regression (Spectronaut default)",
-    rollup_method    = "Protein group quantity (PG.Quantity)",
-    de_engine        = if (has_de) "Spectronaut internal statistics" else "None (quantities only)",
-    fdr_threshold    = if (!is.null(setup_overview) && !is.null(setup_overview[["FDR"]])) {
-      setup_overview[["FDR"]]
-    } else "Not available in export",
-    lfc_threshold    = "Not available in export",
-    min_peptides     = "Not available in export",
-    n_proteins_total = as.character(length(protein_ids)),
-    n_samples        = as.character(ncol(quant_mat))
+    software           = "Spectronaut",
+    version            = spec_version,
+    library_type       = "directDIA+ (auto-generated)",
+    library_precursors = if (!is.null(library_info)) library_info$library_precursors else NA_integer_,
+    library_proteins   = if (!is.null(library_info)) library_info$library_proteins else NA_integer_,
+    normalization      = {
+      # Try: search_settings (ExperimentSetupOverview) → library_info (AnalysisLog) → setup_overview → fallback
+      norm_val <- coalesce_setting(
+        if (!is.null(search_settings)) search_settings$normalization else NULL,
+        coalesce_setting(
+          if (!is.null(library_info)) library_info$normalization_strategy else NULL,
+          if (!is.null(setup_overview) && !is.null(setup_overview[["Normalization"]])) setup_overview[["Normalization"]]
+          else NULL
+        )
+      )
+      # Build descriptive string from log fields
+      if (!is.null(norm_val) && !identical(norm_val, "Not available")) {
+        cross_run <- if (!is.null(library_info) && !is.null(library_info$cross_run_normalization)) {
+          paste0(" (Cross-run: ", library_info$cross_run_normalization, ")")
+        } else ""
+        paste0(norm_val, cross_run)
+      } else {
+        "Local regression normalization (Spectronaut default)"
+      }
+    },
+    topn_protein       = coalesce_setting(
+      if (!is.null(setup_overview) && !is.null(setup_overview$topn_protein_max))
+        paste0(setup_overview$topn_protein_max, " (TopN enabled)")
+      else if (!is.null(search_settings) && !identical(search_settings$topn_protein, "Not available"))
+        search_settings$topn_protein
+      else NULL,
+      "3 (default)"
+    ),
+    topn_peptide       = coalesce_setting(
+      if (!is.null(setup_overview) && !is.null(setup_overview$topn_peptide_max))
+        paste0(setup_overview$topn_peptide_max, " (TopN enabled)")
+      else if (!is.null(search_settings) && !identical(search_settings$topn_peptide, "Not available"))
+        search_settings$topn_peptide
+      else NULL,
+      "3 (default)"
+    ),
+    rollup_method      = "MaxLFQ on TopN peptides",
+    de_engine          = if (has_de) {
+      coalesce_setting(
+        if (!is.null(search_settings)) search_settings$de_test else NULL,
+        "Spectronaut internal t-test")
+    } else "None (quantities only)",
+    use_all_ms_levels  = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$use_all_ms_levels else NULL, "Not available"),
+    missed_cleavages   = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$missed_cleavages else NULL, "Not available"),
+    interference_corr  = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$interference_corr else NULL, "Not available"),
+    fdr_threshold      = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$protein_qvalue else NULL,
+      "Not available in export"
+    ),
+    lfc_threshold      = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$lfc_filter else NULL,
+      "N/A"
+    ),
+    imputation         = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$imputation else NULL, "Not available"),
+    min_peptides       = "N/A (TopN controls peptide selection)",
+    enzyme             = coalesce_setting(
+      if (!is.null(search_settings)) search_settings$enzyme else NULL, "Not available"),
+    fasta_file         = coalesce_setting(
+      if (!is.null(setup_overview) && !is.null(setup_overview$fasta_databases)) setup_overview$fasta_databases
+      else NULL, "Not available"),
+    fasta_entries      = coalesce_setting(
+      if (!is.null(setup_overview) && !is.null(setup_overview$fasta_total_entries)) setup_overview$fasta_total_entries
+      else NULL, "Not available"),
+    n_precursors       = coalesce_setting(
+      if (!is.null(library_info) && !is.na(library_info$unique_precursors))
+        format(library_info$unique_precursors, big.mark = ",") else NULL,
+      "Not available"
+    ),
+    n_proteins_total   = as.character(length(protein_ids)),
+    n_samples          = as.character(ncol(quant_mat)),
+    unique_precursors  = if (!is.null(library_info) && !is.na(library_info$unique_precursors)) {
+      format(library_info$unique_precursors, big.mark = ",")
+    } else NULL,
+    unique_proteins    = if (!is.null(library_info) && !is.na(library_info$unique_proteins)) {
+      format(library_info$unique_proteins, big.mark = ",")
+    } else NULL
   )
 
   contrasts <- if (!is.null(de_stats_df)) names(de_stats_df) else character(0)
 
   list(
-    source      = "spectronaut",
-    de_stats    = de_stats_df,
-    intensities = quant_mat,
-    protein_ids = protein_ids,
-    n_peptides  = n_pep,
-    missing_pct = setNames(apply(quant_mat, 1, function(x) mean(is.na(x) | x == 0)), protein_ids),
-    settings    = settings,
-    contrasts   = contrasts,
-    sample_map  = sample_map,
-    run_qc      = run_qc,
-    manifest    = manifest
+    source          = "spectronaut",
+    de_stats        = de_stats_df,
+    intensities     = quant_mat,
+    protein_ids     = protein_ids,
+    n_peptides      = n_pep,
+    n_ratios        = n_ratios,
+    missing_pct     = setNames(apply(quant_mat, 1, function(x) mean(is.na(x) | x == 0)), protein_ids),
+    settings        = settings,
+    contrasts       = contrasts,
+    sample_map      = sample_map,
+    run_qc          = run_qc,
+    library_info    = library_info,
+    search_settings = search_settings,
+    manifest        = manifest
   )
 }
 
@@ -470,14 +784,14 @@ parse_spectronaut_zip <- function(zip_path) {
 parse_spectronaut <- function(file_path, de_file_path = NULL) {
   df <- data.table::fread(file_path, data.table = TRUE)
 
-  protein_col <- grep("ProteinGroup|ProteinAccession", names(df), value = TRUE)[1]
+  protein_col <- grep("ProteinGroup|ProteinAccession|UniProtIds", names(df), value = TRUE)[1]
   gene_col    <- grep("^PG\\.Genes$|^Gene$|Genes", names(df), value = TRUE)[1]
   quant_cols  <- grep("PG\\.Quantity$", names(df), value = TRUE)
   npep_col    <- grep("NrOfStrippedSequences", names(df), value = TRUE)[1]
 
   # The quantities file may also contain DE columns (single-file export)
   logfc_col   <- grep("Log2Ratio|log2FC", names(df), value = TRUE)[1]
-  qval_col    <- grep("Qvalue|q\\.value|adj", names(df), ignore.case = TRUE, value = TRUE)[1]
+  qval_col    <- grep("Qvalue|Q\\.Value|q\\.value|adj", names(df), ignore.case = TRUE, value = TRUE)[1]
   pval_col    <- grep("^.*Pvalue$|^.*p\\.value$", names(df), ignore.case = TRUE, value = TRUE)[1]
 
   # Validate required columns
@@ -515,6 +829,12 @@ parse_spectronaut <- function(file_path, de_file_path = NULL) {
   }
 
   quant_mat <- if (length(quant_cols) > 0) as.data.frame(df[, quant_cols, with = FALSE]) else NULL
+  if (!is.null(quant_mat)) {
+    # Strip .PG.Quantity suffix and [N] prefix (Spectronaut column numbering)
+    clean_names <- sub("\\.PG\\.Quantity$", "", quant_cols)
+    clean_names <- sub("^\\[\\d+\\]\\s*", "", clean_names)
+    colnames(quant_mat) <- clean_names
+  }
 
   contrasts <- if (!is.null(de_stats_df)) names(de_stats_df) else character(0)
 
@@ -650,6 +970,8 @@ match_samples <- function(names_a, names_b, source_b = "delimp") {
     x <- tools::file_path_sans_ext(basename(x))
     # Strip common suffixes
     x <- gsub("\\.(raw|d|mzML|wiff)$", "", x, ignore.case = TRUE)
+    # Strip trailing dots (Spectronaut appends dot when label ends in digit)
+    x <- gsub("\\.$", "", x)
     tolower(trimws(x))
   }
 
@@ -668,6 +990,22 @@ match_samples <- function(names_a, names_b, source_b = "delimp") {
   }
 
   matched_idx <- match(stripped_a, stripped_b)
+
+  # Fallback: suffix-based matching for Spectronaut short labels
+  # E.g., DE-LIMP "exp12102021_2_ad-1" should match Spectronaut "ad-1"
+  if (any(is.na(matched_idx)) && source_b == "spectronaut") {
+    for (i in which(is.na(matched_idx))) {
+      # Check if any name_b is a suffix of name_a (after _ separator)
+      suffix_matches <- which(endsWith(stripped_a[i], stripped_b) &
+                                (nchar(stripped_a[i]) == nchar(stripped_b) |
+                                 substr(stripped_a[i],
+                                        nchar(stripped_a[i]) - nchar(stripped_b),
+                                        nchar(stripped_a[i]) - nchar(stripped_b)) == "_"))
+      if (length(suffix_matches) == 1) {
+        matched_idx[i] <- suffix_matches
+      }
+    }
+  }
 
   data.frame(
     run_a    = names_a,
@@ -804,6 +1142,80 @@ build_settings_diff <- function(run_a, run_b) {
     result$Run_A == "N/A" | result$Run_B == "N/A", "unknown",
     ifelse(result$Run_A == result$Run_B, "match", "differs")
   )
+  result$note <- ""
+
+  # --- Spectronaut-specific rows (Mode B) ---
+  if (identical(run_b$source, "spectronaut")) {
+    ss <- run_b$search_settings  # may be NULL
+    li <- run_b$library_info     # may be NULL
+    use_all_ms <- if (!is.null(ss)) trimws(coalesce_setting(ss$use_all_ms_levels, "Not available")) else "Not available"
+
+    spec_rows <- data.frame(
+      Parameter = c(
+        "--- Spectronaut-Specific ---",
+        "Library Type",
+        "Library Precursors",
+        "Library Protein Groups",
+        "Protein TopN (max peptides for quant)",
+        "Peptide TopN (max precursors per peptide)",
+        "Protein Quantity Calculation",
+        "Statistical Test",
+        "Interference Correction",
+        "Use All MS-Level Quantities (Quant3)"
+      ),
+      Run_A = c(
+        "",
+        coalesce_setting(run_a$settings$library_source, "DIA-NN empirical library"),
+        format_or_na(run_a$settings$n_precursors_lib),
+        format_or_na(run_a$settings$n_proteins_total),
+        "ALL (DPC-Quant uses all detected precursors)",
+        "ALL",
+        "DPC-Quant: empirical Bayes precursor aggregation",
+        "limma moderated t-test (empirical Bayes variance shrinkage)",
+        "DIA-NN: integrated signal correction",
+        "N/A -- DE-LIMP uses single protein intensity per sample"
+      ),
+      Run_B = c(
+        "",
+        coalesce_setting(run_b$settings$library_type, "directDIA+ (auto-generated)"),
+        format_or_na(if (!is.null(li)) li$library_precursors else NA),
+        format_or_na(if (!is.null(li)) li$library_proteins else NA),
+        coalesce_setting(run_b$settings$topn_protein, "3 (default)"),
+        coalesce_setting(run_b$settings$topn_peptide, "3 (default)"),
+        "MaxLFQ on TopN peptides",
+        coalesce_setting(run_b$settings$de_engine, "Unpaired t-test (Welch)"),
+        coalesce_setting(if (!is.null(ss)) ss$interference_corr else NULL, "Not available"),
+        use_all_ms
+      ),
+      match = c(
+        "match",
+        "structural_difference", "differs", "differs",
+        "structural_difference", "structural_difference",
+        "structural_difference", "structural_difference",
+        "unknown",
+        if (identical(use_all_ms, "True")) "severe" else "structural_difference"
+      ),
+      note = c(
+        "",
+        "Spectronaut builds its own in-experiment library from the data",
+        "Larger library = broader protein coverage",
+        "",
+        "Critical: Spectronaut TopN limits quant to N peptides; DPC-Quant is unbounded",
+        "",
+        "These algorithms weight evidence differently",
+        "Moderated t-test is substantially more conservative",
+        "",
+        if (identical(use_all_ms, "True"))
+          "ENABLED -- Quant3 doubles effective observation count; p-values not comparable to limma"
+        else "Disabled -- standard single-level quantification"
+      ),
+      stringsAsFactors = FALSE
+    )
+
+    # Ensure result has a note column before rbind
+    result <- rbind(result, spec_rows)
+  }
+
   result
 }
 
@@ -835,6 +1247,7 @@ classify_protein_universe <- function(run_a, run_b) {
         # Prefer "Gene" (from bitr mapping) over "Genes" (raw DIA-NN, often accessions)
         gene_col <- NULL
         if ("Gene" %in% names(tbl)) gene_col <- "Gene"
+        else if ("gene" %in% names(tbl)) gene_col <- "gene"
         else if ("Genes" %in% names(tbl)) gene_col <- "Genes"
         if (is.null(gene_col)) next
 
@@ -1034,8 +1447,33 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
   discordant$missing_pct_A <- run_a$missing_pct[match(discordant$protein_id, names(run_a$missing_pct))]
   discordant$missing_pct_B <- run_b$missing_pct[match(discordant$protein_id, names(run_b$missing_pct))]
 
-  # Assign hypotheses
+  # Add n_ratios from Spectronaut (Mode B)
+  discordant$n_ratios_B <- NA_integer_
+  if (source_b == "spectronaut" && !is.null(run_b$n_ratios)) {
+    nr_match <- match(discordant$protein_id, run_b$n_ratios$protein_id)
+    discordant$n_ratios_B <- run_b$n_ratios$n_ratios[nr_match]
+  }
+
+  # Compute group sizes for n_ratios context
+  n_group_a <- n_group_b <- 1L
+  if (!is.null(run_b$sample_map)) {
+    conds <- unique(run_b$sample_map$condition)
+    if (length(conds) == 2) {
+      n_group_a <- sum(run_b$sample_map$condition == conds[1])
+      n_group_b <- sum(run_b$sample_map$condition == conds[2])
+    }
+  }
+  use_all_ms_true <- if (!is.null(run_b$search_settings)) {
+    identical(trimws(coalesce_setting(run_b$search_settings$use_all_ms_levels, "")), "True")
+  } else if (!is.null(run_b$settings$use_all_ms_levels)) {
+    identical(trimws(run_b$settings$use_all_ms_levels), "True")
+  } else FALSE
+
+  # Assign hypotheses (pass context via hidden columns)
   if (nrow(discordant) > 0) {
+    discordant$.use_all_ms_true <- use_all_ms_true
+    discordant$.n_group_a <- n_group_a
+    discordant$.n_group_b <- n_group_b
     hyp_results <- lapply(seq_len(nrow(discordant)), function(i) {
       assign_hypothesis(discordant[i, ], source_b, global_offset)
     })
@@ -1050,6 +1488,10 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
 
   # Sort discordant: High confidence first, then by FC difference
   if (nrow(discordant) > 0) {
+    # Remove context columns
+    discordant$.use_all_ms_true <- NULL
+    discordant$.n_group_a <- NULL
+    discordant$.n_group_b <- NULL
     conf_order <- c("High" = 1, "Medium" = 2, "Low" = 3)
     discordant$conf_rank <- conf_order[discordant$confidence]
     discordant <- discordant[order(discordant$conf_rank,
@@ -1106,7 +1548,11 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
     engine_note <- if (source_b == "fragpipe_analyst") {
       " Both use limma, so this likely reflects imputation differences: FragPipe-Analyst uses Perseus-style; DE-LIMP uses DPC-CN modelling."
     } else if (source_b == "spectronaut") {
-      " Spectronaut uses a different variance model than limma/limpa."
+      if (isTRUE(row$.use_all_ms_true)) {
+        " Spectronaut used 'Use All MS-Level Quantities' (Quant3 method), which combines MS1 and MS2 observations to double effective sample size in its t-test. This is the most likely cause of the p-value divergence."
+      } else {
+        " Spectronaut uses an unpaired t-test; DE-LIMP uses limma empirical Bayes variance shrinkage. Borderline proteins near the FDR threshold will differ between methods."
+      }
     } else ""
     return(list(
       hypothesis = paste0("Similar fold-change but divergent p-value - likely variance estimation or effective sample size difference.", engine_note),
@@ -1127,6 +1573,31 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
       confidence = "High",
       category   = "Missing values"
     ))
+  }
+
+  # Rule 8: Low ratio count in Spectronaut (Mode B only)
+  if (source_b == "spectronaut" && !is.na(row$n_ratios_B %||% NA)) {
+    max_ratios <- (row$.n_group_a %||% 1L) * (row$.n_group_b %||% 1L)
+    if (max_ratios > 0) {
+      pct_ratios <- round(100 * row$n_ratios_B / max_ratios)
+      if (pct_ratios < 25) {
+        return(list(
+          hypothesis = sprintf(
+            "Very low ratio count in Spectronaut: only %d of %d possible pairwise ratios were computable (%d%% completeness). This protein has high missingness in Spectronaut's quantification.",
+            row$n_ratios_B, max_ratios, pct_ratios),
+          confidence = "High",
+          category   = "Low ratio count"
+        ))
+      } else if (pct_ratios < 50) {
+        return(list(
+          hypothesis = sprintf(
+            "Moderate ratio count in Spectronaut (%d of %d possible, %d%%). Protein has partial missingness; Spectronaut's t-test may be underpowered relative to limma.",
+            row$n_ratios_B, max_ratios, pct_ratios),
+          confidence = "Medium",
+          category   = "Low ratio count"
+        ))
+      }
+    }
   }
 
   # Rule 5: Peptide count differs
@@ -1169,14 +1640,62 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL) {
   tool_context <- switch(source_b,
     "delimp" =
       "Both runs used DE-LIMP (DIA-NN -> limpa/limma pipeline). The comparison isolates the effect of search or analysis parameter differences on the same raw data.",
-    "spectronaut" =
-      paste("Run A: DE-LIMP (DIA-NN search -> DPC-Quant rollup -> limma DE).",
-            "Run B: Spectronaut (proprietary DIA search -> PG.Quantity rollup -> internal statistics).",
-            "Key structural differences:",
-            "- Normalization: DIA-NN RT-dependent + DPC-CN cyclic loess vs Spectronaut local regression",
-            "- Protein rollup: DPC-Quant (modified maxLFQ) vs Spectronaut Top N peptide aggregation",
-            "- Statistical model: limma moderated t-test vs Spectronaut group comparison model",
-            "A non-zero global intensity offset is expected."),
+    "spectronaut" = {
+      run_b <- comp_results$run_b
+      ss <- run_b$search_settings
+      li <- run_b$library_info
+      topn_val <- coalesce_setting(run_b$settings$topn_protein, "3")
+      de_test <- coalesce_setting(run_b$settings$de_engine, "unpaired t-test")
+      use_all_ms <- if (!is.null(ss)) trimws(coalesce_setting(ss$use_all_ms_levels, "")) else ""
+
+      # Compute stats
+      pct_limited <- if (!is.null(run_b$n_peptides)) {
+        topn_int <- suppressWarnings(as.integer(gsub("[^0-9]", "", topn_val)))
+        if (is.na(topn_int)) topn_int <- 3L
+        round(100 * mean(run_b$n_peptides$n_peptides > topn_int, na.rm = TRUE))
+      } else "unknown"
+      mean_pep <- if (!is.null(run_b$n_peptides)) {
+        round(mean(run_b$n_peptides$n_peptides, na.rm = TRUE), 1)
+      } else "unknown"
+
+      # Sig counts from first comparison
+      first_de <- if (!is.null(run_b$de_stats)) run_b$de_stats[[1]] else NULL
+      n_sig_spec <- if (!is.null(first_de)) sum(first_de$adj.P.Val <= 0.05, na.rm = TRUE) else "unknown"
+      n_total_b <- if (!is.null(first_de)) nrow(first_de) else 0
+      pct_sig_spec <- if (n_total_b > 0) round(100 * n_sig_spec / n_total_b) else "?"
+      median_lfc_sig <- if (!is.null(first_de)) {
+        sig_rows <- first_de[!is.na(first_de$adj.P.Val) & first_de$adj.P.Val <= 0.05, ]
+        if (nrow(sig_rows) > 0) round(median(abs(sig_rows$logFC), na.rm = TRUE), 2) else "N/A"
+      } else "unknown"
+
+      quant3_note <- if (identical(use_all_ms, "True")) {
+        paste0("\n\nQUANT3 ENABLED (critical for interpretation): ",
+               "Spectronaut's 'Use All MS-Level Quantities' was ON. ",
+               "This means Spectronaut combined MS1 and MS2 measurements, effectively ",
+               "doubling the observation count in its t-test. ",
+               "p-values from this Spectronaut analysis are NOT comparable to limma results.")
+      } else ""
+
+      paste0(
+        "TOOL COMPARISON CONTEXT:\n",
+        "Run A: DE-LIMP -- DIA-NN search -> DPC-Quant protein rollup -> limma moderated t-test.\n",
+        "Run B: Spectronaut ", coalesce_setting(run_b$settings$version, ""), " -- directDIA+ search -> MaxLFQ (TopN=", topn_val, ") -> ", de_test, ".\n",
+        "\nSTRUCTURAL QUANTIFICATION DIFFERENCE:\n",
+        "Spectronaut quantified proteins using the Top ", topn_val, " most intense peptides per protein. ",
+        "This cap was actively limiting for ~", pct_limited, "% of proteins (average ", mean_pep, " peptides detected). ",
+        "DE-LIMP's DPC-Quant uses ALL detected precursors with empirical Bayes weighting.\n",
+        "\nSTATISTICAL MODEL DIFFERENCE:\n",
+        "Spectronaut called ", n_sig_spec, " proteins significant at q<=0.05 (", pct_sig_spec, "% of ", n_total_b, " total). ",
+        "Median |logFC| among significant proteins: ", median_lfc_sig, " log2. ",
+        "DE-LIMP called ", stats$n_sig_a, " proteins significant. ",
+        "This discrepancy reflects limma's moderated t-test (conservative) vs Spectronaut's t-test (high power with many samples).\n",
+        "\nNORMALIZATION DIFFERENCE:\n",
+        "DIA-NN: RT-dependent normalization + DPC-CN cyclic loess. ",
+        "Spectronaut: ", coalesce_setting(run_b$settings$normalization, "local regression"), ". ",
+        "A non-zero global intensity offset is expected.",
+        quant3_note
+      )
+    },
     "fragpipe_analyst" =
       paste("Run A: DE-LIMP (DIA-NN search -> DPC-Quant rollup -> limma DE).",
             "Run B: FragPipe + FragPipe-Analyst (MSFragger -> IonQuant MaxLFQ rollup -> limma DE).",
@@ -1201,7 +1720,7 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL) {
 
   # Settings diff summary
   settings_diff <- comp_results$settings_diff
-  diff_rows <- settings_diff[settings_diff$match == "differs", ]
+  diff_rows <- settings_diff[settings_diff$match %in% c("differs", "structural_difference", "severe"), ]
   settings_summary <- if (nrow(diff_rows) > 0) {
     paste(apply(diff_rows[, c("Parameter", "Run_A", "Run_B")], 1,
       function(r) paste0("- ", r[1], ": ", r[2], " vs ", r[3])), collapse = "\n")
@@ -1315,18 +1834,32 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
     " (", if (abs(stats$global_offset) > 0.2) "SYSTEMATIC BIAS DETECTED" else "no systematic bias", ").\n",
     gemini_section, "\n\n",
     "FILES ATTACHED:\n",
-    "- discordant_proteins.csv: All disagreements with per-protein diagnostic flags\n",
+    "- discordant_proteins.csv: All disagreements with per-protein diagnostic flags",
+    if (source_b == "spectronaut") " (includes n_ratios_B column)" else "", "\n",
     "- de_results_combined.csv: Full DE stats from both runs side-by-side\n",
     "- settings_diff.csv: Parameter comparison table\n",
     "- protein_universe.csv: All proteins with tier classification\n",
     "- diann_search_params.txt: DIA-NN search parameters for Run A (if available)\n",
-    "- precursor_summary_discordant.csv: Precursor-level data for discordant proteins (if available)\n\n",
-    "QUESTIONS:\n",
+    "- precursor_summary_discordant.csv: Precursor-level data for discordant proteins (if available)\n",
+    if (source_b == "spectronaut") {
+      paste0(
+        "- spectronaut_run_qc.csv: Per-sample QC metrics from Spectronaut (if available)\n",
+        "- spectronaut_library_info.csv: Spectronaut library composition and version\n")
+    } else "",
+    "\nQUESTIONS:\n",
     "1. Based on the discordant protein patterns and tool differences, what is the most likely root cause?\n",
     "2. Are there proteins where the two runs disagree biologically (not just statistically)?\n",
-    "3. If precursor_summary_discordant.csv is included, do any discordant proteins have unusual ",
-    "precursor characteristics (few precursors, extreme m/z, single charge state) that might explain the disagreement?\n",
-    "4. What additional information would resolve the ambiguity?"
+    if (source_b == "spectronaut") {
+      paste0(
+        "3. Do low n_ratios_B proteins in discordant_proteins.csv cluster biologically, or are they random?\n",
+        "4. If spectronaut_run_qc.csv is present, are outlier samples driving specific discordant proteins?\n",
+        "5. Among proteins significant only in DE-LIMP: do they have high or low n_ratios_B in Spectronaut?\n")
+    } else {
+      paste0(
+        "3. If precursor_summary_discordant.csv is included, do any discordant proteins have unusual ",
+        "precursor characteristics that might explain the disagreement?\n",
+        "4. What additional information would resolve the ambiguity?\n")
+    }
   )
 }
 
@@ -1345,82 +1878,208 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       writeLines(c(
         "==========================================================",
         "  DE-LIMP Run Comparator: Spectronaut Export Guide",
+        "  For use with Mode B: DE-LIMP vs Spectronaut comparison",
+        "  Spectronaut 20 / 20.5 | Updated March 2026",
         "==========================================================",
         "",
-        "RECOMMENDED: Export as a ZIP archive from Spectronaut",
-        "containing all files below. DE-LIMP auto-detects each file.",
+        "OVERVIEW",
+        "--------",
+        "The DE-LIMP Run Comparator (Mode B) accepts a single ZIP file",
+        "exported directly from Spectronaut's Report Exporter. This ZIP",
+        "contains everything the comparator needs: protein quantities,",
+        "DE results, per-run QC summaries, settings, and the sample name",
+        "map that bridges Spectronaut's short labels to your original",
+        "raw file names.",
         "",
-        "Alternatively, upload individual .tsv files using the",
-        "'Or upload individual files...' dropdown.",
-        "",
-        "",
-        "FILE 1: Protein Quantities (REQUIRED)",
-        "--------------------------------------",
-        "  Report > Report Schema > Protein Group Pivot Report",
-        "  Look for: *Pivot*.tsv or *BGS Factory Report*.tsv",
-        "",
-        "  Required columns:",
-        "    - PG.ProteinGroups      (protein accessions)",
-        "    - [Sample].PG.Quantity  (per-sample quantities, auto-included in pivot)",
-        "",
-        "  Recommended columns:",
-        "    - PG.Genes                    (gene symbols)",
-        "    - PG.NrOfStrippedSequences    (peptide count per protein)",
+        "  One ZIP, no manual column selection. The de-limp report schema",
+        "  handles all required columns automatically.",
         "",
         "",
-        "FILE 2: ConditionSetup.tsv (REQUIRED in ZIP mode)",
-        "-------------------------------------------------",
-        "  Automatically included in Spectronaut analysis exports.",
-        "  Maps Run Labels to conditions and original file names.",
+        "QUICK START (3 STEPS)",
+        "---------------------",
         "",
-        "  Columns: Run Label, Condition, Replicate, File Name",
-        "  File Name is the join key to match DE-LIMP sample names.",
-        "",
-        "",
-        "FILE 3: Candidates.tsv (optional, enables DE Concordance)",
-        "---------------------------------------------------------",
-        "  Post Analysis > Differential Expression > Export Candidates",
-        "",
-        "  Required columns:",
-        "    - PG.ProteinGroups or ProteinGroups",
-        "    - AVG Log2 Ratio (log2 fold change)",
-        "    - Qvalue (adjusted p-value / FDR)",
-        "",
-        "  Recommended columns:",
-        "    - PG.Genes, PValue, Comparison, # of Ratios",
+        "  Step  Action                                Where in Spectronaut",
+        "  ----  ------------------------------------  ------------------------------------",
+        "  1     Install the de-limp report schema     Report Perspective > Import Schema",
+        "  2     Run Report Exporter with checkboxes   Pipeline > Report Exporter",
+        "  3     Upload the ZIP to DE-LIMP             Run Comparator > Mode B",
         "",
         "",
-        "FILE 4: RunSummaries/*.tsv (optional, enables per-sample QC)",
-        "------------------------------------------------------------",
-        "  One file per sample with QC metrics: Precursors, Peptides,",
-        "  Protein Groups, mass accuracy, gradient length, instrument.",
-        "  Auto-detected from a RunSummaries/ subdirectory in the ZIP.",
+        "STEP 1 -- Install the de-limp Report Schema",
+        "============================================",
+        "",
+        "The de-limp report schema is a pre-configured Spectronaut report",
+        "layout that exports exactly the columns DE-LIMP needs. Install it",
+        "once and it will be available for all future experiments.",
+        "",
+        "Download the schema file:",
+        "  https://github.com/bsphinney/DE-LIMP/releases/download/v3.5.0/de-limp.rs",
+        "  (or find it in the DE-LIMP GitHub Releases page under current release assets)",
+        "",
+        "Import into Spectronaut:",
+        "  1. Open Spectronaut, go to Report Perspective (toolbar icon or View > Report)",
+        "  2. Click the Import button (folder icon) in the Report Schema panel",
+        "  3. Browse to de-limp.rs and click Open",
+        "  4. The schema named 'de-limp (Pivot)' will appear in the Run Reports list",
+        "",
+        "  NOTE: The schema only needs to be installed once per Spectronaut installation.",
         "",
         "",
-        "FILE 5: ExperimentSetupOverview.txt (optional)",
-        "----------------------------------------------",
-        "  Spectronaut analysis settings (normalization, version, etc.).",
-        "  Enriches the Settings Diff comparison.",
+        "STEP 2 -- Export from Report Exporter",
+        "=====================================",
+        "",
+        "Spectronaut's Report Exporter (new in Spectronaut 18+) exports",
+        "multiple report types and ancillary files into a single ZIP in",
+        "one operation. This is the recommended export method for DE-LIMP.",
+        "",
+        "Opening Report Exporter:",
+        "  - From the Pipeline Perspective: click Report Exporter in the toolbar",
+        "  - Or right-click experiment > Export > Report Exporter",
+        "  - Or from Post Analysis Perspective: Actions > Export > Report Exporter",
+        "",
+        "What to check in Report Exporter:",
+        "",
+        "  Run Reports",
+        "    [x] de-limp (Pivot)           REQUIRED   Pivot report with PG.Quantity and",
+        "                                             PG.NrOfStrippedSequencesIdentified",
+        "    [ ] BGS Factory Report         optional   Not needed for DE-LIMP comparator",
+        "",
+        "  Log and Setup Reports",
+        "    [x] Spectronaut Log            REQUIRED   Version info, unique precursor/protein counts",
+        "    [x] Experiment Settings Report  REQUIRED   FASTA, enzyme, modifications, FDR, normalization",
+        "    [x] Run Meta Report            REQUIRED   Per-sample QC: precursors, peptides, PGs,",
+        "                                             mass accuracy, instrument, gradient length",
+        "    [x] Post Analysis Reports      REQUIRED   Includes Candidates.tsv (DE results: logFC,",
+        "                                             p-value, q-value per protein group)",
+        "    [x] Condition Setup Report     REQUIRED   Maps Spectronaut short labels (e.g. AD-1) to",
+        "                                             raw file names -- critical for sample matching",
+        "    [ ] Memory Consumption Report  skip       Not used by DE-LIMP",
+        "",
+        "  Other Reports",
+        "    [ ] Spectronaut Experiment     skip       Very large file -- not needed",
+        "        Save File (.sne)",
+        "    [ ] Normalization Report       skip       PDF only -- not machine-readable",
+        "",
+        "  Leave all Calibration Reports unchecked -- they are not used by DE-LIMP.",
+        "",
+        "Click Export:",
+        "  5. Set the Destination folder at the top of the dialog",
+        "  6. Check the boxes as shown above",
+        "  7. Click the Export button at the bottom",
+        "  8. Spectronaut creates a ZIP named after your experiment",
+        "",
+        "  NOTE: The Run Meta Report generates one TSV per sample in a RunSummaries/",
+        "  subfolder. This is normal -- they are all included in the ZIP automatically.",
+        "",
+        "",
+        "STEP 3 -- Upload to DE-LIMP Run Comparator",
+        "===========================================",
+        "",
+        "  9.  Open DE-LIMP and go to the Run Comparator tab",
+        "  10. Select Mode B: DE-LIMP vs Spectronaut",
+        "  11. Under 'Spectronaut Export (ZIP)', click Browse and select the ZIP",
+        "  12. DE-LIMP will auto-detect and parse all included files",
+        "  13. Select your DE-LIMP session or upload a session .rds file as Run A",
+        "  14. Click Run Comparison",
+        "",
+        "  The comparator uses ConditionSetup.tsv to automatically map Spectronaut",
+        "  sample labels to DE-LIMP column names -- no manual matching needed.",
         "",
         "",
         "WHAT EACH FILE ENABLES",
         "----------------------",
-        "  Quantities only:     Settings Diff, Protein Universe, Quantification",
-        "  + Candidates:        DE Concordance, Hypothesis Engine, AI Analysis",
-        "  + ConditionSetup:    Automatic sample name matching",
-        "  + RunSummaries:      Per-sample QC comparison",
-        "  + SetupOverview:     Enriched settings comparison",
+        "",
+        "  File in ZIP                     Enables in Comparator",
+        "  ----------------------------    -------------------------------------------",
+        "  de-limp (Pivot).tsv             Protein Universe, Quantification, Peptides",
+        "  ConditionSetup.tsv              Automatic sample name matching (CRITICAL)",
+        "  Candidates.tsv                  DE Concordance: logFC/q-value scatter",
+        "  ExperimentSetupOverview_*.txt   Settings Diff: FASTA, enzyme, mods, FDR",
+        "  AnalysisLog.txt                 Software version, unique precursor/protein counts",
+        "  RunSummaries/*.tsv              Per-sample QC: precursors, peptides, PGs",
         "",
         "",
-        "TIPS",
-        "----",
-        "  - Column names are auto-detected, so exact schema isn't critical",
-        "  - The comparator normalizes protein IDs across formats (sp|ACC|NAME -> ACC)",
-        "  - For best results, use the same FASTA for both DIA-NN and Spectronaut",
-        "  - ZIP upload is preferred: it keeps all files organized and auto-detects",
-        "    which components are present",
+        "FALLBACK: Manual Export (without Report Exporter)",
+        "=================================================",
         "",
-        "Generated by DE-LIMP Run Comparator"
+        "If using Spectronaut 17 or earlier, or prefer manual export, you can",
+        "export files individually. Upload via 'Or upload individual files...'",
+        "",
+        "File 1: Protein Quantities (required)",
+        "  Export from: Report Perspective > de-limp (Pivot) schema > Export",
+        "  Columns: PG.ProteinGroups, PG.Genes, [N] Sample.PG.Quantity,",
+        "           [N] Sample.PG.NrOfStrippedSequencesIdentified",
+        "",
+        "  NOTE: Spectronaut 20 changed the peptide count column name from",
+        "  PG.NrOfStrippedSequences to PG.NrOfStrippedSequencesIdentified.",
+        "  DE-LIMP detects both names automatically.",
+        "",
+        "File 2: DE Results (required for DE Concordance)",
+        "  Export from: Post Analysis > Differential Abundance > Candidates > Export Table",
+        "  Set the q-value filter to 1.0 before exporting to get ALL proteins.",
+        "  Required columns: ProteinGroups, AVG Log2 Ratio, Pvalue, Qvalue, # of Ratios",
+        "",
+        "  NOTE: In Spectronaut 20 the Candidates export moved from Report Perspective",
+        "  to Post Analysis Perspective > Differential Abundance section.",
+        "",
+        "File 3: Condition Setup (required for sample matching)",
+        "  Export from: right-click experiment > Export > Condition Setup",
+        "  Maps Spectronaut short labels (e.g. 'AD-1') to raw file names.",
+        "  Without this file, matching falls back to fuzzy suffix matching.",
+        "",
+        "File 4: Experiment Settings (recommended)",
+        "  Export from: right-click experiment tab > Export Experiment Settings",
+        "  Extracted fields: FASTA, enzyme, missed cleavages, modifications,",
+        "  FDR thresholds, normalization strategy, DE test type",
+        "",
+        "",
+        "TROUBLESHOOTING",
+        "---------------",
+        "",
+        "  Problem                          Likely cause / Fix",
+        "  -------------------------------- -----------------------------------------",
+        "  'No samples matched' error       ConditionSetup.tsv missing from ZIP.",
+        "                                   Re-export with Condition Setup Report checked.",
+        "",
+        "  Sample names all unmatched       Labels differ from raw file stems.",
+        "                                   Check the sample map table and correct manually.",
+        "",
+        "  Candidates.tsv has 0 rows        q-value filter set to 0.05 before export.",
+        "                                   Set Confidence Candidate Filter to 1.0, re-export.",
+        "",
+        "  Settings diff shows 'not         Experiment Settings Report not in ZIP.",
+        "  detected'                        Re-export with that checkbox checked.",
+        "",
+        "  de-limp schema not visible       Schema not yet imported.",
+        "  in Report Exporter               Import de-limp.rs via Report Perspective.",
+        "",
+        "  ZIP upload fails                 Check file size (<500 MB). Spaces in",
+        "                                   experiment names are handled automatically.",
+        "",
+        "  AD12. / AD14. trailing dot       Spectronaut appends dot when label ends in",
+        "  in sample names                  digit. DE-LIMP strips trailing dots during matching.",
+        "",
+        "",
+        "COLUMN NAME REFERENCE",
+        "---------------------",
+        "",
+        "DE-LIMP auto-detects column names across Spectronaut versions:",
+        "",
+        "  Data Element       Spectronaut 20 column              Fallback / alternate",
+        "  -----------------  -----------------------------------  --------------------------",
+        "  Protein group ID   PG.ProteinGroups                     PG.UniProtIds",
+        "  Gene symbol        PG.Genes                             --",
+        "  Per-sample qty     [N] Sample.PG.Quantity               Sample.PG.Quantity",
+        "  Peptide count      [N] Sample.PG.NrOfStripped-          PG.NrOfStrippedSequences",
+        "                     SequencesIdentified                  (Spectronaut <=19)",
+        "  DE logFC           AVG Log2 Ratio                       AVG.Log2.Ratio",
+        "  DE p-value         Pvalue                               PValue",
+        "  DE q-value (FDR)   Qvalue                               Q.Value",
+        "  Number of ratios   # of Ratios                          NrOfRatios",
+        "  Comparison label   Comparison (group1/group2)           Comparison",
+        "",
+        "Generated by DE-LIMP v3.5.0 | UC Davis Proteomics Core",
+        "https://github.com/bsphinney/DE-LIMP"
       ), file)
     }
   )
@@ -1451,6 +2110,209 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       tags$h6("AI Analysis"),
       tags$p("Generate a Gemini summary of the comparison, optionally run MOFA2 factor decomposition, ",
              "or export a ZIP for Claude analysis."),
+      tags$hr(),
+      tags$p(class = "text-muted small",
+        icon("lightbulb"), " Tip: Click the ", icon("question-circle"),
+        " button next to the Hypothesis Distribution chart in the DE Concordance tab ",
+        "for detailed explanations of each hypothesis category."),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  # --- Hypothesis category info modal ---
+  observeEvent(input$comparator_hypothesis_info_btn, {
+    showModal(modalDialog(
+      title = "Hypothesis Categories Explained",
+      tags$p("When two runs disagree on a protein, the hypothesis engine examines the data to suggest ",
+             tags$b("why"), " they disagree. Each discordant protein is assigned one of these categories:"),
+      tags$dl(style = "margin-top: 10px;",
+        tags$dt(style = "color: #c0392b;", "Direction reversal"),
+        tags$dd("The protein's fold-change points in ", tags$b("opposite directions"),
+                " between runs (e.g., up in Run A, down in Run B). Usually indicates a quantification ",
+                "or normalization discrepancy at the precursor level. Requires careful investigation."),
+
+        tags$dt(style = "color: #e67e22;", "Normalization offset"),
+        tags$dd("A ", tags$b("global intensity shift"), " was detected between runs (e.g., all logFC values ",
+                "shifted by ~0.2 log2 units). The protein has the same fold-change direction in both runs, ",
+                "but one tool's normalization pushed it across the significance threshold. ",
+                "Common when comparing tools with different normalization strategies (e.g., Spectronaut's ",
+                "local regression vs DIA-NN's median centering)."),
+
+        tags$dt(style = "color: #8e44ad;", "Variance estimation"),
+        tags$dd("The protein has a ", tags$b("similar fold-change in both runs"), " but very different ",
+                "p-values. This happens when the two tools use different statistical models ",
+                "(e.g., limma's empirical Bayes variance shrinkage vs Spectronaut's unpaired t-test). ",
+                "Proteins near the significance threshold are most affected. ",
+                "If Spectronaut used 'Use All MS-Level Quantities' (Quant3), this effectively doubles ",
+                "the observation count, making its p-values artificially small."),
+
+        tags$dt(style = "color: #2980b9;", "Missing values"),
+        tags$dd("One tool detected the protein in significantly ", tags$b("more samples"), " than the other. ",
+                "Different match-between-runs (MBR) implementations and imputation strategies ",
+                "produce different missingness patterns, which directly affects statistical power."),
+
+        tags$dt(style = "color: #16a085;", "Low ratio count"),
+        tags$dd(tags$b("Spectronaut-specific."), " Spectronaut reports how many valid pairwise ratios ",
+                "it could form for each protein. A low ratio count (e.g., 5 out of 420 possible) means ",
+                "the protein had high missingness in Spectronaut's quantification. Its significance call ",
+                "may be underpowered relative to limma, which borrows strength across proteins."),
+
+        tags$dt(style = "color: #27ae60;", "Peptide count"),
+        tags$dd("The two tools quantified the protein using a ", tags$b("different number of peptides"), ". ",
+                "This matters because protein-level intensity is aggregated from peptide/precursor intensities. ",
+                "More peptides generally means more stable quantification. Spectronaut's TopN (default 3) ",
+                "caps the number of peptides used, while DIA-NN's DPC-Quant uses all detected precursors."),
+
+        tags$dt(style = "color: #d35400;", "FC magnitude"),
+        tags$dd("Same direction, but the ", tags$b("magnitude differs substantially"), " (>0.5 log2). ",
+                "Usually a normalization scale difference between tools."),
+
+        tags$dt(style = "color: #7f8c8d;", "Borderline"),
+        tags$dd("The protein sits ", tags$b("near the significance threshold in both runs"), ". ",
+                "Small stochastic differences (noise, imputation, FDR correction) push it above the ",
+                "cutoff in one run and below in the other. This is expected and not actionable ",
+                "\u2014 neither result is wrong.")
+      ),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  # --- Sub-tab info modals ---
+
+  observeEvent(input$comparator_settings_info_btn, {
+    showModal(modalDialog(
+      title = "Settings Diff",
+      tags$p("Side-by-side comparison of analysis parameters between the two runs."),
+      tags$h6("Color Coding"),
+      tags$dl(
+        tags$dt(style = "color: #856404;", "Amber (differs)"),
+        tags$dd("The parameter has a different value in each run. Review whether this could ",
+                "contribute to discordant DE results."),
+        tags$dt(style = "color: #004085;", "Blue (structural difference)"),
+        tags$dd("An inherent difference between the two tools (e.g., TopN vs DPC-Quant rollup). ",
+                "Expected and not necessarily problematic."),
+        tags$dt(style = "color: #721c24;", "Red (severe)"),
+        tags$dd("A setting that is known to cause major comparability problems. For example, ",
+                "Spectronaut's 'Use All MS-Level Quantities' (Quant3) doubles effective observations ",
+                "in its built-in t-test, inflating significance counts."),
+        tags$dt(style = "color: #6c757d;", "Grey (unknown)"),
+        tags$dd("The parameter could not be extracted from one or both runs.")
+      ),
+      tags$h6("Per-Sample QC (Spectronaut Mode)"),
+      tags$p("When Spectronaut RunSummaries are available, a per-sample QC bar chart and table ",
+             "appear below the settings diff. Samples with fewer than 60% of the median protein count ",
+             "are flagged as potential outliers."),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  observeEvent(input$comparator_universe_info_btn, {
+    showModal(modalDialog(
+      title = "Protein Universe",
+      tags$p("Shows the overlap of quantified proteins between the two runs."),
+      tags$h6("Venn Diagram"),
+      tags$p("Circle areas are proportional to the number of proteins in each run. ",
+             "The overlap region shows proteins quantified in both runs (shared). ",
+             "Non-overlapping regions show proteins unique to one run."),
+      tags$h6("Why Protein Universes Differ"),
+      tags$ul(
+        tags$li(tags$b("Search space:"), " Different FASTA databases, missed cleavages, or variable modifications ",
+                "can cause one tool to identify more proteins."),
+        tags$li(tags$b("Library strategy:"), " Spectronaut directDIA+ and DIA-NN empirical libraries use different ",
+                "algorithms to build spectral libraries, leading to different peptide/protein coverage."),
+        tags$li(tags$b("FDR control:"), " Different FDR methods may let slightly different protein sets pass the cutoff."),
+        tags$li(tags$b("Match-between-runs:"), " Different MBR implementations transfer IDs across runs differently.")
+      ),
+      tags$h6("Protein Details Table"),
+      tags$p("Use the filter buttons (All / Shared / Run A only / Run B only) to explore which proteins ",
+             "are detected by each tool. The Gene column shows gene symbols where available."),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  observeEvent(input$comparator_quant_info_btn, {
+    showModal(modalDialog(
+      title = "Quantification",
+      tags$p("Compares protein-level intensities between the two runs for all shared proteins."),
+      tags$h6("Scatter Plot"),
+      tags$p("Each dot is a protein, plotted by its mean log2 intensity in Run A (x-axis) vs Run B (y-axis). ",
+             "Points near the diagonal indicate agreement. A systematic shift off the diagonal suggests ",
+             "a normalization difference."),
+      tags$h6("Per-Sample Correlation"),
+      tags$p("Bar chart showing Pearson correlation for each matched sample pair between the two runs. ",
+             "High correlation (r > 0.95) indicates the tools largely agree on relative protein abundances."),
+      tags$h6("Bias Density"),
+      tags$p("Distribution of per-protein intensity offsets (Run A \u2212 Run B). ",
+             "A distribution centered near zero means no systematic bias. ",
+             "A shifted distribution indicates one tool consistently reports higher intensities."),
+      tags$h6("TopN Effect (Spectronaut Mode)"),
+      tags$p("When Spectronaut uses TopN quantification (e.g., Top 3 peptides), proteins with more ",
+             "identified peptides than the TopN cap have extra signal discarded. This scatter plot shows ",
+             "whether quantification divergence increases for proteins above the TopN threshold."),
+      tags$ul(
+        tags$li(tags$b("X-axis:"), " Number of peptides identified by Spectronaut (log scale)"),
+        tags$li(tags$b("Y-axis:"), " Absolute log2 quantification difference between the two tools"),
+        tags$li(tags$b("Vertical dashed line:"), " The TopN cap (e.g., 3). Proteins to the right ",
+                "have more peptides than Spectronaut uses for quantification."),
+        tags$li(tags$b("LOESS curve:"), " If the curve rises to the right of the dashed line, ",
+                "TopN capping is a driver of quantification divergence.")
+      ),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  observeEvent(input$comparator_concordance_info_btn, {
+    showModal(modalDialog(
+      title = "DE Concordance",
+      tags$p("Classifies every shared protein by its differential expression status in each run, ",
+             "then identifies why discordant proteins disagree."),
+      tags$h6("3\u00d73 Concordance Matrix"),
+      tags$p("Each protein is classified as:"),
+      tags$ul(
+        tags$li(tags$b("Up"), " \u2014 significant (adj. P < 0.05) with positive logFC"),
+        tags$li(tags$b("Down"), " \u2014 significant with negative logFC"),
+        tags$li(tags$b("NS"), " \u2014 not significant (adj. P \u2265 0.05)")
+      ),
+      tags$p("Diagonal cells (Up/Up, Down/Down, NS/NS) are ", tags$b("concordant"),
+             " \u2014 both runs agree. Off-diagonal cells are ", tags$b("discordant"), "."),
+      tags$h6("Hypothesis Engine"),
+      tags$p("Each discordant protein is analyzed by an 8-rule hypothesis engine that examines ",
+             "logFC values, p-values, peptide counts, and other evidence to suggest the most likely ",
+             "cause of disagreement. Click the ", icon("question-circle"),
+             " next to 'Hypothesis Distribution' for detailed descriptions of each category."),
+      tags$h6("Volcano Overlay"),
+      tags$p("Superimposes both runs' volcano plots. Blue dots = Run A, orange = Run B. ",
+             "This reveals systematic differences in fold-change distributions and p-value scales."),
+      tags$h6("Discordant Proteins Table"),
+      tags$p("Lists each discordant protein with its logFC and adj. P-value in both runs, ",
+             "the assigned hypothesis, and confidence level. Sort or filter to find proteins of interest."),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  observeEvent(input$comparator_ai_info_btn, {
+    showModal(modalDialog(
+      title = "AI Analysis",
+      tags$h6("Gemini Summary"),
+      tags$p("Generates a narrative interpretation of the comparison using Google Gemini. ",
+             "The prompt includes the settings diff, concordance statistics, systematic bias metrics, ",
+             "and top discordant proteins with hypotheses. Requires a Gemini API key in AI Chat settings."),
+      tags$h6("Export ZIP for Claude"),
+      tags$p("Downloads a ZIP file containing structured CSVs and a pre-written prompt ",
+             "for analysis in Claude or another LLM. Includes settings diff, protein universe, ",
+             "DE results, discordant proteins with hypotheses, and comparison context."),
+      tags$h6("MOFA2 Decomposition"),
+      tags$p("Treats the two runs as two 'views' of the same samples and uses MOFA2 to decompose ",
+             "joint variance into shared and run-specific factors. Helps identify whether differences ",
+             "are driven by a global shift (one factor) or multiple independent sources."),
+      tags$p(class = "text-muted small",
+        "Requires \u2265 4 matched sample pairs. Runtime: ~1\u20132 minutes."),
       easyClose = TRUE, size = "l",
       footer = modalButton("Close")
     ))
@@ -1558,7 +2420,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       spec_manifest(parsed$manifest)
       n_files <- sum(c(parsed$manifest$quantities, parsed$manifest$candidates,
                        parsed$manifest$run_summaries, parsed$manifest$settings,
-                       parsed$manifest$condition_setup))
+                       parsed$manifest$condition_setup, isTRUE(parsed$manifest$analysis_log)))
       showNotification(
         sprintf("Spectronaut ZIP loaded: %d components detected", n_files),
         type = "message"
@@ -1585,7 +2447,8 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       check(m$candidates, "DE Results"),
       check(m$run_summaries, paste0("Run Summaries (", m$n_run_summaries, ")")),
       check(m$settings, "Settings"),
-      check(m$condition_setup, "Sample Map")
+      check(m$condition_setup, "Sample Map"),
+      check(isTRUE(m$analysis_log), "Analysis Log")
     )
   })
 
@@ -1797,6 +2660,9 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         n_b_only      = sum(universe$tier == "b_only"),
         n_concordant  = if (!is.null(de_conc)) de_conc$n_concordant else NA,
         n_discordant  = if (!is.null(de_conc)) de_conc$n_discordant else NA,
+        n_sig_a       = if (!is.null(de_conc)) {
+          sum(de_conc$merged$status_a != "NS")
+        } else NA,
         n_a_only_de   = if (!is.null(de_conc)) {
           sum(de_conc$discordant_table$status_a != "NS" & de_conc$discordant_table$status_b == "NS")
         } else NA,
@@ -1816,7 +2682,8 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         summary_stats    = summary_stats,
         sample_map       = sample_map,
         diann_log_a      = log_a,
-        diann_log_b      = log_b
+        diann_log_b      = log_b,
+        run_b            = run_b
       )
 
       setProgress(1.0, detail = "Done")
@@ -1894,17 +2761,26 @@ server_comparator <- function(input, output, session, values, add_to_log) {
   output$comparator_settings_diff <- DT::renderDT({
     res <- comp_results()
     req(res)
-    DT::datatable(res$settings_diff,
+    sd <- res$settings_diff
+    # Add note column if missing (backwards compat)
+    if (!"note" %in% names(sd)) sd$note <- ""
+    DT::datatable(sd,
       rownames = FALSE,
-      colnames = c("Parameter", "Run A", "Run B", "Status"),
-      options  = list(pageLength = 25, dom = 't', ordering = FALSE),
-      class    = "compact stripe"
+      colnames = c("Parameter", "Run A", "Run B", "Status", "Note"),
+      options  = list(
+        pageLength = 50, dom = 't', ordering = FALSE,
+        columnDefs = list(
+          list(visible = FALSE, targets = which(names(sd) == "match") - 1),
+          list(width = '300px', targets = which(names(sd) == "note") - 1)
+        )
+      ),
+      class = "compact stripe"
     ) |>
       DT::formatStyle("match",
         target          = "row",
         backgroundColor = DT::styleEqual(
-          c("differs", "unknown", "match"),
-          c("#fff3cd", "#f8f9fa", "transparent")
+          c("differs", "unknown", "match", "structural_difference", "severe"),
+          c("#fff3cd", "#f8f9fa", "transparent", "#cce5ff", "#f8d7da")
         )
       )
   })
@@ -1950,6 +2826,52 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           'Different search spaces affect peptide-level evidence and protein rollup.',
           '</div>'
         ))
+      }
+    }
+
+    # Spectronaut-specific banners (Mode B)
+    run_b <- comp_run_b()
+    if (!is.null(run_b) && identical(run_b$source, "spectronaut")) {
+      # Quant3 danger banner
+      use_all_ms <- if (!is.null(run_b$search_settings)) {
+        trimws(coalesce_setting(run_b$search_settings$use_all_ms_levels, ""))
+      } else if (!is.null(run_b$settings$use_all_ms_levels)) {
+        trimws(run_b$settings$use_all_ms_levels)
+      } else ""
+      if (identical(use_all_ms, "True")) {
+        warnings <- c(warnings, paste0(
+          '<div class="alert alert-danger py-2 mb-2">',
+          '<i class="fas fa-circle-exclamation"></i> ',
+          '<b>Quant3 (Use All MS-Level Quantities) was ENABLED in Spectronaut.</b> ',
+          'Spectronaut combined MS1 and MS2 measurements to double the effective ',
+          'sample size in its t-test. This inflates statistical power significantly ',
+          'beyond the actual number of biological replicates. p-values and q-values ',
+          'from this Spectronaut analysis are NOT directly comparable to limma ',
+          'moderated t-test results.',
+          '</div>'
+        ))
+      }
+
+      # TopN banner
+      if (!is.null(run_b$n_peptides) && nrow(run_b$n_peptides) > 0) {
+        topn_val <- suppressWarnings(as.integer(
+          gsub("[^0-9]", "", coalesce_setting(run_b$settings$topn_protein, "3"))))
+        if (is.na(topn_val)) topn_val <- 3L
+        pep_counts <- run_b$n_peptides$n_peptides
+        pct_limited <- round(100 * mean(pep_counts > topn_val, na.rm = TRUE))
+        mean_pep <- round(mean(pep_counts, na.rm = TRUE), 1)
+        if (pct_limited > 30) {
+          warnings <- c(warnings, paste0(
+            '<div class="alert alert-warning py-2 mb-2">',
+            '<i class="fas fa-triangle-exclamation"></i> ',
+            '<b>TopN=', topn_val, ' quantification is limiting for ', pct_limited,
+            '% of proteins.</b> ',
+            'Spectronaut used at most ', topn_val, ' peptides per protein for quantification, ',
+            'but the average protein had ', mean_pep, ' peptides detected. ',
+            "DE-LIMP's DPC-Quant used all detected precursors.",
+            '</div>'
+          ))
+        }
       }
     }
 
@@ -2272,6 +3194,189 @@ server_comparator <- function(input, output, session, values, add_to_log) {
   })
 
   # ==========================================================================
+  #  TopN Effect Scatter (Mode B only)
+  # ==========================================================================
+
+  output$comparator_topn_effect_section <- renderUI({
+    res <- comp_results()
+    run_b <- comp_run_b()
+    if (is.null(res) || is.null(run_b) || !identical(run_b$source, "spectronaut") ||
+        is.null(run_b$n_peptides) || is.null(res$quant_comparison)) return(NULL)
+
+    tagList(
+      tags$hr(),
+      tags$h6("TopN Effect on Quantification", class = "mt-3"),
+      plotly::plotlyOutput("comparator_topn_effect", height = "380px"),
+      uiOutput("comparator_topn_interpretation")
+    )
+  })
+
+  output$comparator_topn_effect <- plotly::renderPlotly({
+    res <- comp_results()
+    run_b <- comp_run_b()
+    req(res, run_b, identical(run_b$source, "spectronaut"),
+        run_b$n_peptides, res$quant_comparison)
+
+    qc_data <- res$quant_comparison$scatter_data
+    req(nrow(qc_data) > 0)
+
+    topn_val <- suppressWarnings(as.integer(
+      gsub("[^0-9]", "", coalesce_setting(run_b$settings$topn_protein, "3"))))
+    if (is.na(topn_val)) topn_val <- 3L
+
+    joined <- merge(qc_data, run_b$n_peptides, by = "protein_id", all.x = TRUE)
+    joined <- joined[!is.na(joined$n_peptides) & !is.na(joined$mean_a) & !is.na(joined$mean_b), ]
+    req(nrow(joined) > 0)
+
+    joined$quant_diff_abs <- abs(joined$mean_a - joined$mean_b)
+    joined$topn_limited <- joined$n_peptides > topn_val
+    joined$color_label <- ifelse(joined$topn_limited,
+      paste0(">", topn_val, " peptides (TopN limiting)"),
+      paste0("<=", topn_val, " peptides"))
+    joined$hover <- paste0(
+      joined$gene %||% joined$protein_id, "\n",
+      joined$n_peptides, " peptides\n",
+      "Quant diff: ", round(joined$quant_diff_abs, 2), " log2")
+
+    p <- ggplot2::ggplot(joined, ggplot2::aes(
+      x = n_peptides, y = quant_diff_abs, color = color_label, text = hover)) +
+      ggplot2::geom_point(alpha = 0.4, size = 1.5) +
+      ggplot2::geom_vline(xintercept = topn_val + 0.5, linetype = "dashed", color = "black", alpha = 0.7) +
+      ggplot2::geom_smooth(ggplot2::aes(x = n_peptides, y = quant_diff_abs),
+                           method = "loess", se = TRUE, color = "black",
+                           inherit.aes = FALSE, linewidth = 0.8, data = joined) +
+      ggplot2::scale_color_manual(
+        values = c(setNames("#27AE60", paste0("<=", topn_val, " peptides")),
+                   setNames("#E67E22", paste0(">", topn_val, " peptides (TopN limiting)"))),
+        name = NULL) +
+      ggplot2::scale_x_continuous(trans = "log1p",
+                                  breaks = c(1, 2, 3, 5, 10, 20, 50),
+                                  labels = c(1, 2, 3, 5, 10, 20, 50)) +
+      ggplot2::labs(
+        x = "Peptides identified by Spectronaut (log scale)",
+        y = "|log2 quant difference| (DE-LIMP vs Spectronaut)",
+        title = sprintf("TopN=%d Effect on Quantification", topn_val)) +
+      ggplot2::theme_minimal(base_size = 12)
+
+    plotly::ggplotly(p, tooltip = "text")
+  })
+
+  output$comparator_topn_interpretation <- renderUI({
+    res <- comp_results()
+    run_b <- comp_run_b()
+    req(res, run_b, identical(run_b$source, "spectronaut"),
+        run_b$n_peptides, res$quant_comparison)
+
+    qc_data <- res$quant_comparison$scatter_data
+    req(nrow(qc_data) > 0)
+
+    topn_val <- suppressWarnings(as.integer(
+      gsub("[^0-9]", "", coalesce_setting(run_b$settings$topn_protein, "3"))))
+    if (is.na(topn_val)) topn_val <- 3L
+
+    joined <- merge(qc_data, run_b$n_peptides, by = "protein_id", all.x = TRUE)
+    joined <- joined[!is.na(joined$n_peptides) & !is.na(joined$mean_a) & !is.na(joined$mean_b), ]
+    req(nrow(joined) > 0)
+    joined$quant_diff_abs <- abs(joined$mean_a - joined$mean_b)
+
+    summary <- compute_topn_effect_summary(joined, topn_val)
+    if (is.null(summary)) return(NULL)
+
+    alert_class <- if (summary$severity == "warning") "alert-warning" else "alert-info"
+    div(class = paste("alert", alert_class, "mt-2"),
+      icon(if (summary$severity == "warning") "triangle-exclamation" else "info-circle"),
+      " ", summary$text
+    )
+  })
+
+  # ==========================================================================
+  #  Per-Sample QC Section (Mode B — Settings Diff)
+  # ==========================================================================
+
+  output$comparator_sample_qc_section <- renderUI({
+    run_b <- comp_run_b()
+    if (is.null(run_b) || !identical(run_b$source, "spectronaut") || is.null(run_b$run_qc)) return(NULL)
+
+    tagList(
+      tags$hr(),
+      tags$h6("Per-Sample QC (from Spectronaut RunSummaries)", class = "mt-3"),
+      plotly::plotlyOutput("comparator_sample_qc_plot", height = "400px"),
+      uiOutput("comparator_sample_qc_outlier"),
+      DT::DTOutput("comparator_sample_qc_table")
+    )
+  })
+
+  output$comparator_sample_qc_plot <- plotly::renderPlotly({
+    run_b <- comp_run_b()
+    req(run_b, identical(run_b$source, "spectronaut"), run_b$run_qc)
+
+    qc <- run_b$run_qc
+    # Use the right column names (flexible naming from parse_spectronaut_run_summaries)
+    prec_col <- intersect(c("precursors", "n_precursors"), names(qc))[1]
+    pg_col <- intersect(c("protein_groups", "n_protein_groups"), names(qc))[1]
+    name_col <- intersect(c("file_name", "run_label"), names(qc))[1]
+    req(!is.na(prec_col), !is.na(name_col))
+
+    prec_vals <- as.numeric(qc[[prec_col]])
+    qc$run_name <- qc[[name_col]]
+    med <- median(prec_vals, na.rm = TRUE)
+    qc$outlier <- prec_vals < 0.6 * med
+    qc$prec <- prec_vals
+    qc$pg <- if (!is.na(pg_col)) as.numeric(qc[[pg_col]]) else NA
+
+    qc$hover <- paste0(
+      qc$run_name, "\n",
+      format(round(qc$prec), big.mark = ","), " precursors",
+      if (!is.na(pg_col)) paste0("\n", format(round(qc$pg), big.mark = ","), " PGs") else "")
+
+    p <- ggplot2::ggplot(qc, ggplot2::aes(
+      x = stats::reorder(run_name, prec), y = prec, fill = outlier, text = hover)) +
+      ggplot2::geom_col() +
+      ggplot2::geom_hline(yintercept = med, linetype = "dashed", color = "black") +
+      ggplot2::geom_hline(yintercept = 0.6 * med, linetype = "dotted", color = "red", alpha = 0.5) +
+      ggplot2::scale_fill_manual(values = c("FALSE" = "#4A90D9", "TRUE" = "#E74C3C"), guide = "none") +
+      ggplot2::coord_flip() +
+      ggplot2::scale_y_continuous(labels = scales::comma) +
+      ggplot2::labs(x = NULL, y = "Precursors identified",
+                    caption = "Dashed = median; dotted red = 60% threshold") +
+      ggplot2::theme_minimal(base_size = 12)
+
+    plotly::ggplotly(p, tooltip = "text")
+  })
+
+  output$comparator_sample_qc_outlier <- renderUI({
+    run_b <- comp_run_b()
+    req(run_b, identical(run_b$source, "spectronaut"), run_b$run_qc)
+
+    qc <- run_b$run_qc
+    prec_col <- intersect(c("precursors", "n_precursors"), names(qc))[1]
+    name_col <- intersect(c("file_name", "run_label"), names(qc))[1]
+    req(!is.na(prec_col), !is.na(name_col))
+
+    prec_vals <- as.numeric(qc[[prec_col]])
+    med <- median(prec_vals, na.rm = TRUE)
+    outliers <- qc[[name_col]][prec_vals < 0.6 * med]
+
+    if (length(outliers) == 0) return(NULL)
+
+    div(class = "alert alert-danger mt-2",
+      icon("circle-exclamation"), " ",
+      tags$b(sprintf("%d sample(s) appear low-quality: %s.",
+                     length(outliers), paste(outliers, collapse = ", "))),
+      " These have <60% of the median precursor count and may drive discordant DE results."
+    )
+  })
+
+  output$comparator_sample_qc_table <- DT::renderDT({
+    run_b <- comp_run_b()
+    req(run_b, identical(run_b$source, "spectronaut"), run_b$run_qc)
+    DT::datatable(run_b$run_qc, rownames = FALSE,
+      options = list(pageLength = 25, dom = 'tp', scrollX = TRUE),
+      class = "compact stripe"
+    )
+  })
+
+  # ==========================================================================
   #  LAYER 4: DE Concordance
   # ==========================================================================
 
@@ -2318,7 +3423,12 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           DT::DTOutput("comparator_concordance_3x3", height = "auto")
         ),
         div(style = "flex: 1; min-width: 300px;",
-          tags$h6("Hypothesis Distribution"),
+          div(style = "display: flex; align-items: center; gap: 6px;",
+            tags$h6("Hypothesis Distribution", style = "margin: 0;"),
+            actionButton("comparator_hypothesis_info_btn", icon("question-circle"),
+                         class = "btn-outline-info btn-sm", title = "What do these categories mean?",
+                         style = "padding: 1px 5px; font-size: 0.75em;")
+          ),
           tags$p(style = "font-size: 0.82em; color: #666; margin-bottom: 4px;",
             "Why do discordant proteins disagree? Each is assigned a likely cause."),
           plotly::plotlyOutput("comparator_hypothesis_dist", height = "200px")
@@ -2823,11 +3933,32 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             export_cols <- intersect(
               c("protein_id", "logFC_A", "logFC_B", "adjP_A", "adjP_B",
                 "status_a", "status_b", "n_peptides_A", "n_peptides_B",
+                "n_ratios_B",
                 "missing_pct_A", "missing_pct_B", "hypothesis", "hypothesis_category", "confidence"),
               names(disc_export)
             )
             write.csv(disc_export[, export_cols], disc_file, row.names = FALSE)
             files_to_zip <- c(files_to_zip, disc_file)
+          }
+
+          # 4b. Spectronaut-specific files (Mode B)
+          run_b_data <- comp_run_b()
+          if (!is.null(run_b_data) && identical(run_b_data$source, "spectronaut")) {
+            if (!is.null(run_b_data$run_qc)) {
+              qc_file <- file.path(tmp_dir, "spectronaut_run_qc.csv")
+              write.csv(run_b_data$run_qc, qc_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, qc_file)
+            }
+            if (!is.null(run_b_data$library_info)) {
+              li_df <- data.frame(
+                field = names(run_b_data$library_info),
+                value = as.character(unlist(run_b_data$library_info)),
+                stringsAsFactors = FALSE
+              )
+              li_file <- file.path(tmp_dir, "spectronaut_library_info.csv")
+              write.csv(li_df, li_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, li_file)
+            }
           }
 
           # 5. Comparison context
