@@ -2757,7 +2757,7 @@ server_search <- function(input, output, session, values, add_to_log,
           sprintf('JOB1=$(%s %s 2>&1)', sbatch_bin, step_script_paths[1]),
           'JOB1_ID=$(echo "$JOB1" | grep -oP "[0-9]+$")',
           'echo "STEP1:$JOB1_ID"',
-          sprintf('JOB2=$(%s --dependency=afterok:$JOB1_ID %s 2>&1)',
+          sprintf('JOB2=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB1_ID %s 2>&1)',
                   sbatch_bin, step_script_paths[2])
         )
       } else {
@@ -2769,15 +2769,15 @@ server_search <- function(input, output, session, values, add_to_log,
       launcher_lines <- c(launcher_lines,
         'JOB2_ID=$(echo "$JOB2" | grep -oP "[0-9]+$")',
         'echo "STEP2:$JOB2_ID"', "",
-        sprintf('JOB3=$(%s --dependency=afterok:$JOB2_ID %s 2>&1)',
+        sprintf('JOB3=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB2_ID %s 2>&1)',
                 sbatch_bin, step_script_paths[3]),
         'JOB3_ID=$(echo "$JOB3" | grep -oP "[0-9]+$")',
         'echo "STEP3:$JOB3_ID"', "",
-        sprintf('JOB4=$(%s --dependency=afterok:$JOB3_ID %s 2>&1)',
+        sprintf('JOB4=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB3_ID %s 2>&1)',
                 sbatch_bin, step_script_paths[4]),
         'JOB4_ID=$(echo "$JOB4" | grep -oP "[0-9]+$")',
         'echo "STEP4:$JOB4_ID"', "",
-        sprintf('JOB5=$(%s --dependency=afterok:$JOB4_ID %s 2>&1)',
+        sprintf('JOB5=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB4_ID %s 2>&1)',
                 sbatch_bin, step_script_paths[5]),
         'JOB5_ID=$(echo "$JOB5" | grep -oP "[0-9]+$")',
         'echo "STEP5:$JOB5_ID"'
@@ -2939,7 +2939,7 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!pstate$failed) {
             incProgress(0.2, detail = "Step 2: First-pass array")
             dep <- if (!is.null(step_ids$step1))
-              sprintf("--dependency=afterok:%s", step_ids$step1)
+              sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step1)
             tryCatch({
               out <- system2(local_sbatch_bin,
                 args = c(dep, file.path(output_dir, "step2_firstpass.sbatch")),
@@ -2953,7 +2953,7 @@ server_search <- function(input, output, session, values, add_to_log,
             incProgress(0.2, detail = "Step 3: Library assembly")
             tryCatch({
               out <- system2(local_sbatch_bin,
-                args = c(sprintf("--dependency=afterok:%s", step_ids$step2),
+                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step2),
                          file.path(output_dir, "step3_assembly.sbatch")),
                 stdout = TRUE, stderr = TRUE)
               step_ids$step3 <- parse_sbatch_output(out)
@@ -2965,7 +2965,7 @@ server_search <- function(input, output, session, values, add_to_log,
             incProgress(0.2, detail = "Step 4: Final-pass array")
             tryCatch({
               out <- system2(local_sbatch_bin,
-                args = c(sprintf("--dependency=afterok:%s", step_ids$step3),
+                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step3),
                          file.path(output_dir, "step4_finalpass.sbatch")),
                 stdout = TRUE, stderr = TRUE)
               step_ids$step4 <- parse_sbatch_output(out)
@@ -2977,7 +2977,7 @@ server_search <- function(input, output, session, values, add_to_log,
             incProgress(0.2, detail = "Step 5: Cross-run report")
             tryCatch({
               out <- system2(local_sbatch_bin,
-                args = c(sprintf("--dependency=afterok:%s", step_ids$step4),
+                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step4),
                          file.path(output_dir, "step5_report.sbatch")),
                 stdout = TRUE, stderr = TRUE)
               step_ids$step5 <- parse_sbatch_output(out)

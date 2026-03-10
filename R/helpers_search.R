@@ -2352,7 +2352,7 @@ generate_resume_launcher <- function(resume_from, sbatch_bin, step_script_paths)
     } else {
       # Chain to previous
       lines <- c(lines,
-        sprintf('%s=$(%s --dependency=afterok:$%s_ID %s 2>&1)',
+        sprintf('%s=$(%s --dependency=afterok:$%s_ID --kill-on-invalid-dep=yes %s 2>&1)',
                 var, sbatch_bin, prev_var, step_script_paths[s]),
         sprintf('%s_ID=$(echo "$%s" | grep -oP "[0-9]+$")', var, var),
         sprintf('echo "STEP%d:$%s_ID"', s, var), "")
