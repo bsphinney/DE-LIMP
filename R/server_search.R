@@ -567,6 +567,14 @@ server_search <- function(input, output, session, values, add_to_log,
         updateTextInput(session, "diann_account", value = best$account)
         updateTextInput(session, "diann_partition", value = best$partition)
       }
+      # Per-user resource snapshot (both accounts)
+      tryCatch({
+        members <- get_lab_members(cfg$user)
+        lab_df <- check_per_user_resources(cfg, "genome-center-grp", "high", result$sbatch_path, members)
+        pub_df <- check_per_user_resources(cfg, "publicgrp", "low", result$sbatch_path, members)
+        user_df <- rbind(lab_df, pub_df)
+        if (nrow(user_df) > 0) values$per_user_resources <- user_df
+      }, error = function(e) NULL)
     } else {
       values$cluster_resources <- NULL
       values$public_resources <- NULL
@@ -624,6 +632,14 @@ server_search <- function(input, output, session, values, add_to_log,
         updateTextInput(session, "diann_account", value = best$account)
         updateTextInput(session, "diann_partition", value = best$partition)
       }
+      # Per-user resource snapshot (both accounts)
+      tryCatch({
+        members <- get_lab_members(cfg$user)
+        lab_df <- check_per_user_resources(cfg, "genome-center-grp", "high", result$sbatch_path, members)
+        pub_df <- check_per_user_resources(cfg, "publicgrp", "low", result$sbatch_path, members)
+        user_df <- rbind(lab_df, pub_df)
+        if (nrow(user_df) > 0) values$per_user_resources <- user_df
+      }, error = function(e) NULL)
     }
   }) |> bindEvent(input$ssh_host, once = TRUE)
 
@@ -735,6 +751,23 @@ server_search <- function(input, output, session, values, add_to_log,
 
     best <- select_best_partition(values$cluster_resources, values$public_resources, peak_cpus)
     values$auto_partition <- best
+
+    # Record snapshot for historical monitoring / grant reporting
+    tryCatch({
+      record_cluster_snapshot(values$cluster_resources, values$public_resources, best)
+    }, error = function(e) NULL)
+
+    # Per-user resource tracking (CPU + memory for lab members on both accounts)
+    tryCatch({
+      members <- get_lab_members(cfg$user)
+      lab_df <- check_per_user_resources(cfg, "genome-center-grp", "high", sbatch_path, members)
+      pub_df <- check_per_user_resources(cfg, "publicgrp", "low", sbatch_path, members)
+      user_df <- rbind(lab_df, pub_df)
+      if (nrow(user_df) > 0) {
+        values$per_user_resources <- user_df
+        record_per_user_snapshot(user_df)
+      }
+    }, error = function(e) NULL)
 
     # Update hidden inputs unless user is overriding
     if (!isTRUE(isolate(input$partition_override))) {
@@ -860,6 +893,342 @@ server_search <- function(input, output, session, values, add_to_log,
       updateTextInput(session, "diann_partition", value = input$diann_partition_override)
     }
   }, ignoreInit = TRUE)
+
+  # ============================================================================
+  #    Cluster Monitor — Historical Usage & Grant Reporting
+  # ============================================================================
+
+  # Capacity alert — shown when 64 CPUs aren't available on genome-center-grp
+  output$cluster_capacity_alert <- renderUI({
+    res <- values$cluster_resources
+    if (is.null(res) || !isTRUE(res$success)) return(NULL)
+
+    user_avail <- res$user_available
+    if (is.null(user_avail) || is.na(user_avail)) return(NULL)
+
+    if (user_avail < 32) {
+      tags$div(class = "alert alert-danger py-1 px-2 mb-2",
+        style = "font-size: 0.82em;",
+        icon("exclamation-triangle"),
+        sprintf(" genome-center-grp: Only %d of %d CPUs available. Standard 64-CPU job cannot run.",
+                user_avail, res$user_limit %||% 64))
+    } else if (user_avail < 64) {
+      tags$div(class = "alert alert-warning py-1 px-2 mb-2",
+        style = "font-size: 0.82em;",
+        icon("exclamation-triangle"),
+        sprintf(" genome-center-grp: %d of %d CPUs available. May need to reduce CPUs or use publicgrp/low.",
+                user_avail, res$user_limit %||% 64))
+    } else {
+      NULL
+    }
+  })
+
+  # Usage history chart
+  output$cluster_usage_chart <- renderPlotly({
+    # Re-render when resources update (every 60s poll) or range changes
+    values$cluster_resources
+    range_hours <- as.integer(input$cluster_history_range %||% "168")
+
+    since <- if (range_hours > 0) Sys.time() - range_hours * 3600 else NULL
+    hist_data <- cluster_usage_history_read(since = since, account = "genome-center-grp")
+    req(nrow(hist_data) > 0)
+
+    user_limit <- max(hist_data$user_limit, na.rm = TRUE)
+    if (is.na(user_limit) || !is.finite(user_limit)) user_limit <- 64
+
+    p <- plot_ly(hist_data, x = ~timestamp, y = ~group_used,
+                 type = "scatter", mode = "lines",
+                 name = "Genome Center (all users)",
+                 line = list(color = "#3b82f6", width = 2),
+                 fill = "tozeroy", fillcolor = "rgba(59,130,246,0.1)") %>%
+      add_trace(y = ~user_used, name = "Your CPUs",
+                line = list(color = "#0d9488", width = 2.5)) %>%
+      add_trace(y = ~I(pmin(round(group_used / group_limit * 100, 1), 100)),
+                name = "Genome Center % Used", yaxis = "y2",
+                line = list(color = "#f59e0b", width = 1.5, dash = "dot"),
+                visible = "legendonly") %>%
+      layout(
+        xaxis = list(title = "", type = "date"),
+        yaxis = list(title = "CPUs", rangemode = "tozero"),
+        yaxis2 = list(title = "% Used", overlaying = "y", side = "right",
+                      range = c(0, 105), showgrid = FALSE),
+        shapes = list(
+          list(type = "line", x0 = min(hist_data$timestamp), x1 = max(hist_data$timestamp),
+               y0 = user_limit, y1 = user_limit,
+               line = list(color = "#dc3545", width = 1.5, dash = "dash"))
+        ),
+        annotations = list(
+          list(x = max(hist_data$timestamp), y = user_limit,
+               text = sprintf("Per-user limit (%d)", user_limit),
+               xanchor = "right", yanchor = "bottom",
+               showarrow = FALSE, font = list(size = 10, color = "#dc3545"))
+        ),
+        legend = list(orientation = "h", y = -0.15, x = 0.5, xanchor = "center"),
+        margin = list(t = 10, b = 50, l = 50, r = 20),
+        hovermode = "x unified",
+        plot_bgcolor = "rgba(0,0,0,0)", paper_bgcolor = "rgba(0,0,0,0)"
+      ) %>%
+      config(displayModeBar = FALSE)
+
+    p
+  })
+
+  # Per-user resource chart — grouped bar by user, colored by account
+  output$per_user_chart <- renderPlotly({
+    user_df <- values$per_user_resources
+    req(!is.null(user_df), nrow(user_df) > 0)
+
+    # Only show rows with actual activity
+    user_df <- user_df[user_df$cpus_running > 0 | user_df$cpus_pending > 0, ]
+    if (nrow(user_df) == 0) return(plotly_empty(type = "bar") %>%
+      layout(title = list(text = "No active jobs for lab members", font = list(size = 12))))
+
+    # Create label: user + account
+    user_df$label <- sprintf("%s (%s)", user_df$username,
+      ifelse(user_df$account == "genome-center-grp", "high", "low"))
+
+    # Sort by CPUs
+    user_df <- user_df[order(-user_df$cpus_running), ]
+    user_df$label <- factor(user_df$label, levels = rev(user_df$label))
+
+    acct_colors <- c("genome-center-grp" = "#3b82f6", "publicgrp" = "#10b981")
+
+    p <- plot_ly(user_df, y = ~label, type = "bar", orientation = "h") %>%
+      add_trace(x = ~cpus_running, name = "Running",
+                marker = list(color = ~ifelse(account == "genome-center-grp", "#3b82f6", "#10b981")),
+                text = ~sprintf("%d CPUs, %.0f GB RAM, %d jobs", cpus_running, mem_gb_running, n_jobs_running),
+                textposition = "auto", hoverinfo = "text") %>%
+      add_trace(x = ~cpus_pending, name = "Pending",
+                marker = list(color = "#fbbf24"),
+                text = ~ifelse(cpus_pending > 0, sprintf("%d CPUs pending (%d jobs)", cpus_pending, n_jobs_pending), ""),
+                textposition = "auto", hoverinfo = "text") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "CPUs"),
+        yaxis = list(title = ""),
+        legend = list(orientation = "h", y = -0.2, x = 0.5, xanchor = "center"),
+        margin = list(t = 5, b = 40, l = 100, r = 20),
+        plot_bgcolor = "rgba(0,0,0,0)", paper_bgcolor = "rgba(0,0,0,0)"
+      ) %>%
+      config(displayModeBar = FALSE)
+    p
+  })
+
+  # Expand Cluster Monitor into full-width modal
+  observeEvent(input$cluster_monitor_expand_btn, {
+    showModal(modalDialog(
+      title = "Cluster Monitor",
+      size = "xl", easyClose = TRUE,
+      div(style = "display: flex; align-items: center; gap: 12px; margin-bottom: 10px;",
+        radioButtons("cluster_history_range_modal", NULL,
+          choices = c("24h" = "24", "7d" = "168", "30d" = "720", "All" = "0"),
+          selected = input$cluster_history_range %||% "168", inline = TRUE),
+        downloadButton("export_cluster_csv_modal", "Export for Grant",
+          class = "btn-outline-primary btn-sm", icon = icon("file-csv"))
+      ),
+      plotlyOutput("cluster_usage_chart_modal", height = "350px"),
+      tags$h5("Group Members", style = "margin-top: 16px; margin-bottom: 8px;"),
+      plotlyOutput("per_user_chart_modal", height = "250px"),
+      footer = modalButton("Close")
+    ))
+  }, ignoreInit = TRUE)
+
+  # Modal versions of the charts — full width, not constrained by sidebar
+  output$cluster_usage_chart_modal <- renderPlotly({
+    values$cluster_resources
+    range_hours <- as.integer(input$cluster_history_range_modal %||% input$cluster_history_range %||% "168")
+    since <- if (range_hours > 0) Sys.time() - range_hours * 3600 else NULL
+    hist_data <- cluster_usage_history_read(since = since, account = "genome-center-grp")
+    req(nrow(hist_data) > 0)
+
+    user_limit <- max(hist_data$user_limit, na.rm = TRUE)
+    if (is.na(user_limit) || !is.finite(user_limit)) user_limit <- 64
+
+    plot_ly(hist_data, x = ~timestamp, y = ~group_used,
+            type = "scatter", mode = "lines",
+            name = "Genome Center (all users)",
+            line = list(color = "#3b82f6", width = 2),
+            fill = "tozeroy", fillcolor = "rgba(59,130,246,0.1)") %>%
+      add_trace(y = ~user_used, name = "Your CPUs",
+                line = list(color = "#0d9488", width = 2.5)) %>%
+      add_trace(y = ~I(pmin(round(group_used / group_limit * 100, 1), 100)),
+                name = "Genome Center % Used", yaxis = "y2",
+                line = list(color = "#f59e0b", width = 1.5, dash = "dot"),
+                visible = "legendonly") %>%
+      layout(
+        xaxis = list(title = ""),
+        yaxis = list(title = "CPUs", rangemode = "tozero"),
+        yaxis2 = list(title = "% Used", overlaying = "y", side = "right",
+                      range = c(0, 105), showgrid = FALSE),
+        shapes = list(
+          list(type = "line", x0 = min(hist_data$timestamp), x1 = max(hist_data$timestamp),
+               y0 = user_limit, y1 = user_limit,
+               line = list(color = "#dc3545", width = 1.5, dash = "dash"))
+        ),
+        annotations = list(
+          list(x = max(hist_data$timestamp), y = user_limit,
+               text = sprintf("Per-user limit (%d)", user_limit),
+               xanchor = "right", yanchor = "bottom",
+               showarrow = FALSE, font = list(size = 11, color = "#dc3545"))
+        ),
+        legend = list(orientation = "h", y = -0.12, x = 0.5, xanchor = "center"),
+        margin = list(t = 10, b = 50, l = 60, r = 30),
+        hovermode = "x unified",
+        plot_bgcolor = "rgba(0,0,0,0)", paper_bgcolor = "rgba(0,0,0,0)"
+      ) %>%
+      config(displayModeBar = TRUE)
+  })
+
+  output$per_user_chart_modal <- renderPlotly({
+    user_df <- values$per_user_resources
+    req(!is.null(user_df), nrow(user_df) > 0)
+
+    user_df <- user_df[user_df$cpus_running > 0 | user_df$cpus_pending > 0, ]
+    if (nrow(user_df) == 0) return(plotly_empty(type = "bar") %>%
+      layout(title = list(text = "No active jobs for lab members", font = list(size = 12))))
+
+    user_df$label <- sprintf("%s (%s)", user_df$username,
+      ifelse(user_df$account == "genome-center-grp", "high", "low"))
+    user_df <- user_df[order(-user_df$cpus_running), ]
+    user_df$label <- factor(user_df$label, levels = rev(user_df$label))
+
+    plot_ly(user_df, y = ~label, x = ~cpus_running,
+            type = "bar", orientation = "h", name = "Running",
+            marker = list(color = ~ifelse(account == "genome-center-grp", "#3b82f6", "#10b981")),
+            text = ~sprintf("%d CPUs, %.0f GB RAM, %d jobs", cpus_running, mem_gb_running, n_jobs_running),
+            textposition = "auto", hoverinfo = "text") %>%
+      add_trace(x = ~cpus_pending, name = "Pending",
+                marker = list(color = "#fbbf24"),
+                text = ~ifelse(cpus_pending > 0, sprintf("%d CPUs pending (%d jobs)", cpus_pending, n_jobs_pending), ""),
+                textposition = "auto", hoverinfo = "text") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "CPUs"),
+        yaxis = list(title = ""),
+        legend = list(orientation = "h", y = -0.15, x = 0.5, xanchor = "center"),
+        margin = list(t = 5, b = 40, l = 120, r = 30),
+        plot_bgcolor = "rgba(0,0,0,0)", paper_bgcolor = "rgba(0,0,0,0)"
+      ) %>%
+      config(displayModeBar = TRUE)
+  })
+
+  # Modal CSV export (same handler, different output ID)
+  output$export_cluster_csv_modal <- downloadHandler(
+    filename = function() {
+      range_hours <- as.integer(input$cluster_history_range_modal %||% "168")
+      start_date <- if (range_hours > 0) format(Sys.time() - range_hours * 3600, "%Y%m%d") else "all"
+      end_date <- format(Sys.time(), "%Y%m%d")
+      sprintf("delimp_cluster_usage_%s_to_%s.csv", start_date, end_date)
+    },
+    content = function(file) {
+      range_hours <- as.integer(input$cluster_history_range_modal %||% "168")
+      since <- if (range_hours > 0) Sys.time() - range_hours * 3600 else NULL
+      hist_data <- cluster_usage_history_read(since = since)
+      if (nrow(hist_data) == 0) {
+        write.csv(data.frame(note = "No data"), file, row.names = FALSE)
+        return()
+      }
+      write.csv(hist_data, file, row.names = FALSE)
+    }
+  )
+
+  # Info modal for Cluster Monitor
+  observeEvent(input$cluster_monitor_info_btn, {
+    showModal(modalDialog(
+      title = "Cluster Monitor",
+      tags$div(
+        tags$p("This panel tracks HPC cluster resource usage over time, polling every 60 seconds while SSH is connected."),
+        tags$h6("Chart Lines"),
+        tags$ul(
+          tags$li(tags$b("Account CPUs Used"), " (blue) — Total CPUs in use across all users on genome-center-grp."),
+          tags$li(tags$b("Your CPUs Used"), " (teal) — CPUs in use by your account only."),
+          tags$li(tags$b("Per-user limit"), " (red dashed) — Maximum CPUs you can use simultaneously (typically 64)."),
+          tags$li(tags$b("Genome Center % Used"), " (amber dotted, hidden by default) — Percentage of the group's CPU allocation in use (0-100%). Click legend to show. Uses right y-axis.")
+        ),
+        tags$h6("Capacity Alerts"),
+        tags$p("Yellow/red banners appear when your available CPUs drop below the 64-CPU threshold needed for a standard DIA-NN search."),
+        tags$h6("Export for Grant"),
+        tags$p("Downloads an hourly summary CSV with utilization statistics. Includes % of time at capacity, peak usage, and average utilization — useful for justifying compute resource requests in grant applications.")
+      ),
+      easyClose = TRUE, size = "m"
+    ))
+  }, ignoreInit = TRUE)
+
+  # CSV export for grant applications
+  output$export_cluster_csv <- downloadHandler(
+    filename = function() {
+      range_hours <- as.integer(input$cluster_history_range %||% "168")
+      start_date <- if (range_hours > 0) format(Sys.time() - range_hours * 3600, "%Y%m%d") else "all"
+      end_date <- format(Sys.time(), "%Y%m%d")
+      sprintf("delimp_cluster_usage_%s_to_%s.csv", start_date, end_date)
+    },
+    content = function(file) {
+      range_hours <- as.integer(input$cluster_history_range %||% "168")
+      since <- if (range_hours > 0) Sys.time() - range_hours * 3600 else NULL
+      hist_data <- cluster_usage_history_read(since = since)
+
+      if (nrow(hist_data) == 0) {
+        write.csv(data.frame(note = "No cluster usage data collected yet"), file, row.names = FALSE)
+        return()
+      }
+
+      summary_df <- cluster_usage_grant_summary(hist_data)
+
+      # Compute overall stats for header comment
+      gc_data <- hist_data[hist_data$account == "genome-center-grp", ]
+      pub_data <- hist_data[hist_data$account == "publicgrp", ]
+      total_snapshots <- nrow(gc_data)
+      at_capacity <- sum(!is.na(gc_data$user_available) & gc_data$user_available < 64)
+      pct_at_capacity <- if (total_snapshots > 0) round(at_capacity / total_snapshots * 100, 1) else 0
+      avg_util <- if (total_snapshots > 0 && any(!is.na(gc_data$group_used)))
+        round(mean(gc_data$group_used, na.rm = TRUE) / max(gc_data$group_limit[1], 1) * 100, 1) else NA
+      avg_pub_util <- if (nrow(pub_data) > 0 && any(!is.na(pub_data$group_used)))
+        round(mean(pub_data$group_used, na.rm = TRUE) / max(pub_data$group_limit[1], 1) * 100, 1) else NA
+
+      # Write summary header as comment lines, then data
+      header_lines <- c(
+        sprintf("# DE-LIMP Cluster Usage Report — %s to %s",
+                format(min(hist_data$timestamp, na.rm = TRUE), "%Y-%m-%d %H:%M"),
+                format(max(hist_data$timestamp, na.rm = TRUE), "%Y-%m-%d %H:%M")),
+        sprintf("# Account: genome-center-grp (high) + publicgrp (low)"),
+        sprintf("# genome-center-grp: Per-user CPU limit: %d, Account limit: %s, Avg utilization: %s%%",
+                gc_data$user_limit[1] %||% 64, gc_data$group_limit[1] %||% "unknown", avg_util),
+        sprintf("# publicgrp: Per-user CPU limit: %s, Account limit: %s, Avg utilization: %s%%",
+                if (nrow(pub_data) > 0) pub_data$user_limit[1] else "unknown",
+                if (nrow(pub_data) > 0) pub_data$group_limit[1] else "unknown", avg_pub_util),
+        sprintf("# Total observation snapshots: %d (1-minute intervals)", nrow(hist_data)),
+        sprintf("# Time at per-user capacity (< 64 CPUs available on high): %d snapshots (%.1f%%)",
+                at_capacity, pct_at_capacity),
+        "#",
+        "# --- Hourly Summary (genome-center-grp) ---"
+      )
+
+      writeLines(header_lines, file)
+      suppressWarnings(
+        write.table(summary_df, file = file, append = TRUE, sep = ",",
+          row.names = FALSE, col.names = TRUE, quote = TRUE)
+      )
+
+      # Append per-user usage data if available
+      per_user <- per_user_usage_read(since = since)
+      if (nrow(per_user) > 0) {
+        writeLines(c("", "# --- Per-User Resource Usage (Lab Members) ---"), file, sep = "\n")
+        suppressWarnings(
+          write.table(per_user, file = file, append = TRUE, sep = ",",
+            row.names = FALSE, col.names = TRUE, quote = TRUE)
+        )
+      }
+
+      # Append raw publicgrp data
+      if (nrow(pub_data) > 0) {
+        writeLines(c("", "# --- Raw publicgrp/low Snapshots ---"), file, sep = "\n")
+        suppressWarnings(
+          write.table(pub_data, file = file, append = TRUE, sep = ",",
+            row.names = FALSE, col.names = TRUE, quote = TRUE)
+        )
+      }
+    }
+  )
 
   # ============================================================================
   #    SSH Remote File Scanning
@@ -1424,7 +1793,19 @@ server_search <- function(input, output, session, values, add_to_log,
       cfg <- ssh_config()
       if (!is.null(cfg)) {
         # SSH mode: check if FASTA already exists on remote
-        remote_fasta_dir <- file.path(output_base(), "databases")
+        # Ensure output_base is a valid remote path (not local macOS home)
+        ob <- output_base()
+        if (grepl("^/Users/", ob)) {
+          # Local macOS path — resolve remote home directory
+          remote_home <- tryCatch({
+            res <- ssh_exec(cfg, "echo $HOME")
+            if (res$status == 0) trimws(paste(res$stdout, collapse = ""))
+            else ob
+          }, error = function(e) ob)
+          ob <- file.path(remote_home, "diann_output")
+          output_base(ob)
+        }
+        remote_fasta_dir <- file.path(ob, "databases")
         remote_path <- file.path(remote_fasta_dir, fname)
 
         # Check if FASTA already exists on remote AND has matching sequence count
@@ -1783,7 +2164,18 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # If SSH mode and paths are local-only, upload FASTA files to remote
     if (use_remote && !fasta_paths_are_remote(fasta_paths)) {
-      remote_fasta_dir <- file.path(output_base(), "databases")
+      # Ensure output_base is a valid remote path (not local macOS home)
+      ob <- output_base()
+      if (grepl("^/Users/", ob)) {
+        remote_home <- tryCatch({
+          res <- ssh_exec(cfg, "echo $HOME")
+          if (res$status == 0) trimws(paste(res$stdout, collapse = ""))
+          else ob
+        }, error = function(e) ob)
+        ob <- file.path(remote_home, "diann_output")
+        output_base(ob)
+      }
+      remote_fasta_dir <- file.path(ob, "databases")
       tryCatch({
         ssh_exec(cfg, paste("mkdir -p", shQuote(remote_fasta_dir)))
         remote_paths <- character(length(fasta_paths))
@@ -2610,7 +3002,8 @@ server_search <- function(input, output, session, values, add_to_log,
           normalization = input$diann_normalization,
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
             basename(values$diann_speclib) else NULL,
-          local = list(threads = threads)
+          local = list(threads = threads),
+          instrument_metadata = values$instrument_metadata
         ),
         auto_load = input$auto_load_results,
         log_content = "",
@@ -2701,7 +3094,8 @@ server_search <- function(input, output, session, values, add_to_log,
           docker_image = img,
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
             basename(values$diann_speclib) else NULL,
-          docker = list(cpus = cpus, mem_gb = mem_gb, image = img)
+          docker = list(cpus = cpus, mem_gb = mem_gb, image = img),
+          instrument_metadata = values$instrument_metadata
         ),
         auto_load = input$auto_load_results,
         log_content = "",
@@ -3043,14 +3437,17 @@ server_search <- function(input, output, session, values, add_to_log,
             mem_per_file = input$parallel_mem_gb %||% 64,
             time_per_file = input$parallel_time_hours %||% 2,
             max_simultaneous = input$max_simultaneous %||% 20
-          )
+          ),
+          instrument_metadata = values$instrument_metadata
         ),
         auto_load = input$auto_load_results,
         log_content = "",
         completed_at = NULL,
         loaded = FALSE,
         is_ssh = !is.null(cfg),
-        speclib_cached = !is.null(cached_entry)
+        speclib_cached = !is.null(cached_entry),
+        slurm_account = input$diann_account,
+        slurm_partition = input$diann_partition
       )
 
       # Update search_info.md with actual job IDs
@@ -3203,13 +3600,16 @@ server_search <- function(input, output, session, values, add_to_log,
             mem_gb = input$diann_mem_gb,
             time_hours = input$diann_time_hours,
             partition = input$diann_partition
-          )
+          ),
+          instrument_metadata = values$instrument_metadata
         ),
         auto_load = input$auto_load_results,
         log_content = "",
         completed_at = NULL,
         loaded = FALSE,
-        is_ssh = !is.null(cfg)
+        is_ssh = !is.null(cfg),
+        slurm_account = input$diann_account,
+        slurm_partition = input$diann_partition
       )
 
       # Write search_info.md for single-job submission
@@ -3276,11 +3676,11 @@ server_search <- function(input, output, session, values, add_to_log,
       })
     }
 
-    # Record in search history CSV
+    # Record in unified activity log
     tryCatch({
-      record_search(list(
+      record_activity(list(
+        event_type = "search_submitted",
         timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-        completed_at = NA,
         user = Sys.info()[["user"]],
         search_name = analysis_name,
         backend = backend,
@@ -3300,13 +3700,12 @@ server_search <- function(input, output, session, values, add_to_log,
         output_dir = output_dir,
         job_id = job_id,
         status = "submitted",
-        duration_min = NA,
         speclib_cached = !is.null(cached_entry),
-        imported_from_log = isTRUE(values$diann_search_settings$imported_from_log),
         app_version = values$app_version %||% "unknown",
-        notes = ""
+        source_type = "search",
+        notes = input$search_notes %||% ""
       ))
-    }, error = function(e) message("[DE-LIMP] Search history recording failed: ", e$message))
+    }, error = function(e) message("[DE-LIMP] Activity log recording failed: ", e$message))
 
     add_to_log("DIA-NN Search Submitted", c(
       sprintf("# Job ID: %s", job_id),
@@ -3568,19 +3967,18 @@ server_search <- function(input, output, session, values, add_to_log,
         jobs[[i]]$status <- new_status
         changed <- TRUE
 
-        # Update search history CSV
+        # Update activity log
         if (new_status %in% c("completed", "failed", "cancelled")) {
           tryCatch({
             dur <- if (!is.null(jobs[[i]]$submitted_at)) {
               round(as.numeric(difftime(Sys.time(), jobs[[i]]$submitted_at, units = "mins")), 1)
             } else NA
-            update_search_status(
+            update_activity(
               output_dir = jobs[[i]]$output_dir,
-              status = new_status,
-              completed_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-              duration_min = dur
+              updates = list(status = new_status, duration_min = dur),
+              event_type_filter = "search_submitted"
             )
-          }, error = function(e) message("[DE-LIMP] Search history update failed: ", e$message))
+          }, error = function(e) message("[DE-LIMP] Activity log update failed: ", e$message))
         }
 
         # Sync status to Core Facility SQLite database
@@ -3597,6 +3995,9 @@ server_search <- function(input, output, session, values, add_to_log,
             sprintf("DIA-NN search '%s' completed!", jobs[[i]]$name),
             type = "message", duration = 15
           )
+          # Trigger notes modal for completed search
+          values$pending_notes_od <- jobs[[i]]$output_dir
+          values$pending_notes_name <- jobs[[i]]$name
           # Docker cleanup: remove stopped container
           if (isTRUE(jobs[[i]]$backend == "docker")) {
             cid <- jobs[[i]]$container_id %||% jobs[[i]]$job_id
@@ -3683,6 +4084,101 @@ server_search <- function(input, output, session, values, add_to_log,
             sprintf("DIA-NN search '%s' failed. Check log for details.", jobs[[i]]$name),
             type = "error", duration = 15
           )
+        }
+      }
+    }
+
+    # --- Auto-switch pending HPC jobs from genome-center-grp to publicgrp/low ---
+    if (isTRUE(input$auto_queue_switch)) {
+      wait_min <- input$queue_wait_minutes %||% 5
+      pub_res <- values$public_resources
+
+      # Only attempt if publicgrp has available CPUs
+      pub_available <- if (!is.null(pub_res) && isTRUE(pub_res$success))
+        pub_res$user_available %||% 0 else 0
+
+      if (pub_available > 0) {
+        for (i in seq_along(jobs)) {
+          if (isTRUE(jobs[[i]]$removed)) next
+          if (jobs[[i]]$backend != "hpc") next
+          # For parallel jobs, also check "running" — pending array tasks can be moved
+          if (isTRUE(jobs[[i]]$parallel)) {
+            if (!jobs[[i]]$status %in% c("queued", "running")) next
+          } else {
+            if (jobs[[i]]$status != "queued") next
+          }
+          # Already fully on publicgrp — skip
+          if (identical(jobs[[i]]$slurm_account, "publicgrp")) next
+
+          # Check how long it's been since submission
+          submitted <- jobs[[i]]$submitted_at
+          if (is.null(submitted)) next
+          pending_min <- as.numeric(difftime(Sys.time(), submitted, units = "mins"))
+          if (pending_min < wait_min) next
+
+          # Move the job
+          job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+          slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) values$ssh_sbatch_path else NULL
+
+          # For parallel jobs: move pending array steps (2, 4) which are independent
+          # per-file tasks. Assembly steps (1, 3, 5) stay on original partition —
+          # they're resource-heavy and may exceed publicgrp limits.
+          # SLURM won't move already-running tasks, only pending ones.
+          job_ids_to_move <- character(0)
+          movable_steps <- character(0)
+          if (isTRUE(jobs[[i]]$parallel)) {
+            ss <- jobs[[i]]$parallel_step_status %||% list()
+            steps <- jobs[[i]]$parallel_steps %||% list()
+            # Steps 2 and 4 are independent array jobs — safe to move pending tasks
+            # Steps 1, 3, 5 are assembly/single jobs — keep on original partition
+            safe_to_move <- c("step2", "step4")
+            for (sn in safe_to_move) {
+              if (!is.null(ss[[sn]]) && ss[[sn]] %in% c("queued", "pending") && !is.null(steps[[sn]])) {
+                job_ids_to_move <- c(job_ids_to_move, steps[[sn]])
+                movable_steps <- c(movable_steps, sn)
+              }
+            }
+            # If nothing has started yet, also move step 1 (lighter than assembly)
+            any_started <- any(vapply(ss, function(s) {
+              s %in% c("running", "completed")
+            }, logical(1)))
+            if (!any_started && !is.null(ss[["step1"]]) &&
+                ss[["step1"]] %in% c("queued", "pending") && !is.null(steps[["step1"]])) {
+              job_ids_to_move <- c(steps[["step1"]], job_ids_to_move)
+              movable_steps <- c("step1", movable_steps)
+            }
+          } else {
+            job_ids_to_move <- jobs[[i]]$job_id
+          }
+          if (length(job_ids_to_move) == 0) next
+
+          n_moved <- 0
+          for (jid in job_ids_to_move) {
+            result <- tryCatch(
+              slurm_move_job(jid, "publicgrp", "low",
+                ssh_config = job_cfg, sbatch_path = slurm_path),
+              error = function(e) list(success = FALSE, message = e$message))
+            if (isTRUE(result$success)) n_moved <- n_moved + 1
+          }
+
+          if (n_moved > 0) {
+            # Only mark fully switched if all steps were moved (non-parallel or all pending)
+            if (!isTRUE(jobs[[i]]$parallel) || length(movable_steps) == 5) {
+              jobs[[i]]$slurm_account <- "publicgrp"
+              jobs[[i]]$slurm_partition <- "low"
+            }
+            jobs[[i]]$queue_switched_at <- Sys.time()
+            jobs[[i]]$steps_moved_to_public <- movable_steps
+            changed <- TRUE
+            step_info <- if (length(movable_steps) > 0)
+              paste0(" [", paste(movable_steps, collapse = ", "), "]") else ""
+            showNotification(
+              sprintf("Auto-switched '%s' pending jobs to publicgrp/low%s (waited %.0f min, %d moved)",
+                jobs[[i]]$name, step_info, pending_min, n_moved),
+              type = "message", duration = 10)
+            message(sprintf("[DE-LIMP] Auto-switched '%s' %s to publicgrp/low after %.0f min pending",
+              jobs[[i]]$name, step_info, pending_min))
+          }
         }
       }
     }
@@ -3793,6 +4289,11 @@ server_search <- function(input, output, session, values, add_to_log,
             ss <- job$search_settings
             ss$output_dir <- job$output_dir
             values$diann_search_settings <- ss
+
+            # Restore instrument metadata if stored with the job
+            if (!is.null(ss$instrument_metadata)) {
+              values$instrument_metadata <- ss$instrument_metadata
+            }
           }
 
           # Mark job as loaded
@@ -3836,29 +4337,26 @@ server_search <- function(input, output, session, values, add_to_log,
           )
           add_to_log("Auto-Load DIA-NN Results", log_lines)
 
-          # Record to analysis history log
+          # Record data load to activity log
           tryCatch({
-            record_analysis(list(
+            record_activity(list(
+              event_type = "data_loaded",
               timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
               user = Sys.getenv("USER", "unknown"),
-              source_type = "auto-load",
-              source_file = basename(report_path),
-              source_path = report_path,
-              remote_path = if (isTRUE(job$is_ssh)) remote_report else NA,
-              fasta_file = if (!is.null(job$search_settings))
+              search_name = job$name,
+              fasta_files = if (!is.null(job$search_settings))
                 paste(basename(job$search_settings$fasta_files), collapse = ", ") else NA,
               fasta_seq_count = if (!is.null(job$search_settings)) job$search_settings$fasta_seq_count else NA,
               n_proteins = if (!is.null(values$raw_data) && !is.null(values$raw_data$genes$Protein.Group))
                 length(unique(values$raw_data$genes$Protein.Group))
               else if (!is.null(values$raw_data)) nrow(values$raw_data$E) else NA,
               n_samples = if (!is.null(values$raw_data)) ncol(values$raw_data$E) else NA,
-              n_contrasts = NA,
-              n_de_proteins = NA,
               output_dir = job$output_dir,
               app_version = values$app_version %||% "unknown",
+              source_type = "auto-load",
               notes = sprintf("Job: %s (%s)", job$name, job$job_id)
             ))
-          }, error = function(e) message("[DE-LIMP] History record failed: ", e$message))
+          }, error = function(e) message("[DE-LIMP] Activity log record failed: ", e$message))
 
           # Navigate to Assign Groups tab
           nav_select("main_tabs", "Data Overview")
@@ -4326,6 +4824,11 @@ server_search <- function(input, output, session, values, add_to_log,
               ss <- job$search_settings
               ss$output_dir <- job$output_dir
               values$diann_search_settings <- ss
+
+              # Restore instrument metadata if stored with the job
+              if (!is.null(ss$instrument_metadata)) {
+                values$instrument_metadata <- ss$instrument_metadata
+              }
             }
 
             jobs <- values$diann_jobs

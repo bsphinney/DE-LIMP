@@ -381,6 +381,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             textInput("analysis_name", "Analysis Name",
               value = "",
               placeholder = "e.g., HeLa_DIA_2026"),
+            textInput("search_notes", NULL,
+              value = "",
+              placeholder = "Notes (optional) — e.g., testing sprot+iso FASTA..."),
 
             # Core facility: lab, instrument, project for search tracking
             if (is_core_facility) tagList(
@@ -824,6 +827,47 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               div(style = "display: none;",
                 textInput("diann_partition", NULL, value = "high"),
                 textInput("diann_account", NULL, value = "genome-center-grp")
+              ),
+
+              # Cluster Monitor — usage history + grant reporting
+              accordion(
+                id = "cluster_monitor_accordion",
+                open = FALSE,
+                accordion_panel(
+                  "Cluster Monitor",
+                  icon = icon("chart-line"),
+                  uiOutput("cluster_capacity_alert"),
+                  div(style = "display: flex; align-items: center; gap: 8px; margin-bottom: 6px;",
+                    radioButtons("cluster_history_range", NULL,
+                      choices = c("24h" = "24", "7d" = "168", "30d" = "720", "All" = "0"),
+                      selected = "168", inline = TRUE),
+                    actionButton("cluster_monitor_expand_btn", icon("expand"),
+                      class = "btn-outline-primary btn-xs", style = "padding: 1px 5px;",
+                      title = "Open in full window"),
+                    actionButton("cluster_monitor_info_btn", icon("question-circle"),
+                      class = "btn-outline-info btn-xs", style = "padding: 1px 5px;")
+                  ),
+                  plotlyOutput("cluster_usage_chart", height = "260px"),
+                  tags$h6("Group Members", style = "margin-top: 12px; margin-bottom: 4px;"),
+                  plotlyOutput("per_user_chart", height = "200px"),
+                  hr(style = "margin: 10px 0;"),
+                  div(style = "display: flex; align-items: center; gap: 8px;",
+                    checkboxInput("auto_queue_switch", "Auto-switch pending jobs to publicgrp/low",
+                      value = TRUE, width = "100%")
+                  ),
+                  conditionalPanel("input.auto_queue_switch",
+                    div(style = "display: flex; align-items: center; gap: 6px; margin-bottom: 8px;",
+                      tags$small("After waiting"),
+                      numericInput("queue_wait_minutes", NULL, value = 5, min = 1, max = 60,
+                        step = 1, width = "65px"),
+                      tags$small("min")
+                    )
+                  ),
+                  div(style = "margin-top: 8px; text-align: right;",
+                    downloadButton("export_cluster_csv", "Export for Grant",
+                      class = "btn-outline-primary btn-sm", icon = icon("file-csv"))
+                  )
+                )
               ),
 
               # Parallel search mode (rendered server-side based on file count)
@@ -1849,33 +1893,38 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           uiOutput("stats_updated_at")
         )
       ),
-      if (!is_hf_space) nav_panel("Search History", value = "search_history_tab", icon = icon("magnifying-glass"),
+      if (!is_hf_space) nav_panel("History", value = "history_tab", icon = icon("clock-rotate-left"),
         div(style = "padding: 20px;",
           div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;",
-            h4("Search History", style = "margin: 0;"),
-            actionButton("search_history_refresh_btn", "Refresh",
-              icon = icon("arrows-rotate"), class = "btn-outline-primary btn-sm")
-          ),
-          p(class = "text-muted", "DIA-NN searches submitted from this machine/volume. Click a row to expand details."),
-          DTOutput("search_history_table")
-        )
-      ),
-      if (!is_hf_space) nav_panel("Analysis History", value = "analysis_history_tab", icon = icon("clock-rotate-left"),
-        div(style = "padding: 20px;",
-          div(style = "display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;",
-            h4("Analysis History", style = "margin: 0;"),
+            h4("History", style = "margin: 0;"),
             div(style = "display: flex; align-items: center; gap: 6px;",
-              div(style = "width: 200px;",
+              div(style = "width: 180px;",
                 selectizeInput("project_filter", NULL, choices = NULL,
                   options = list(placeholder = "Filter by project...", allowEmptyOption = TRUE))
               ),
-              actionButton("project_manage_btn", "Projects",
-                icon = icon("folder-open"), class = "btn-outline-primary btn-sm")
+              div(style = "width: 140px;",
+                selectInput("history_status_filter", NULL,
+                  choices = c("All statuses" = "", "completed", "submitted", "running", "failed"),
+                  selected = "")
+              ),
+              div(style = "width: 140px;",
+                selectizeInput("history_user_filter", NULL, choices = NULL,
+                  options = list(placeholder = "Filter by user...", allowEmptyOption = TRUE))
+              ),
+              actionButton("history_refresh_btn", "Refresh",
+                icon = icon("arrows-rotate"), class = "btn-outline-primary btn-sm"),
+              downloadButton("history_export_csv", "CSV",
+                class = "btn-outline-secondary btn-sm"),
+              tags$button(id = "history_compare_btn", type = "button",
+                class = "btn btn-outline-warning btn-sm action-button shiny-bound-input",
+                style = "display:none;",
+                onclick = "var cbs=$('.history-compare-cb:checked');if(cbs.length===2){Shiny.setInputValue('history_compare_click',{od_a:$(cbs[0]).data('od'),od_b:$(cbs[1]).data('od'),sf_a:$(cbs[0]).data('sf'),sf_b:$(cbs[1]).data('sf'),name_a:$(cbs[0]).data('name'),name_b:$(cbs[1]).data('name'),ts:Date.now()});}",
+                icon("code-compare"), " Compare")
             )
           ),
-          p(class = "text-muted", "Recent analyses recorded on this machine/volume."),
+          p(class = "text-muted", "Searches and analyses from this machine/volume. Click a row to expand details. Green ", tags$b("Load"), " = full session restore (post-pipeline). Outline ", tags$b("Raw"), " = load report.parquet only. Check two analyses to compare."),
           uiOutput("project_summary_cards"),
-          DTOutput("analysis_history_table")
+          DTOutput("history_table")
         )
       )
     ),

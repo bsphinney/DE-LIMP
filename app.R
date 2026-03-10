@@ -396,6 +396,8 @@ server <- function(input, output, session) {
     public_resources = NULL,
     auto_partition = NULL,
     diann_search_settings = NULL,
+    pending_notes_od = NULL,       # Set after search completes — triggers notes modal
+    pending_notes_name = NULL,     # Search name for notes modal title
     instrument_metadata = NULL,    # List from parse_*_metadata() — instrument model, m/z range, etc.
     tic_traces = NULL,             # Named list of data.frames from extract_tic_timstof(), keyed by filename
     tic_metrics = NULL,            # data.frame: run, valid, total_auc, ..., shape_r, status, flags
@@ -417,6 +419,10 @@ server <- function(input, output, session) {
     comparator_mode             = NULL,
     comparator_gemini_narrative = NULL,
     comparator_mofa             = NULL,
+    comparator_compare_from_history = NULL,
+    comparator_diann_log_a      = NULL,
+    comparator_diann_log_b      = NULL,
+    per_user_resources          = NULL,
     # App metadata
     app_version = app_version,
     community_stats = community_stats

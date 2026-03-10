@@ -2409,6 +2409,34 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     })
   })
 
+  # --- Load from History (compare 2 analyses) ---
+  observeEvent(values$comparator_compare_from_history, {
+    hist <- values$comparator_compare_from_history
+    req(hist)
+    tryCatch({
+      if (!is.null(values$comparator_run_a)) {
+        comp_run_a(values$comparator_run_a)
+        values$comparator_run_a <- NULL
+      }
+      if (!is.null(values$comparator_run_b)) {
+        comp_run_b(values$comparator_run_b)
+        values$comparator_run_b <- NULL
+      }
+      if (!is.null(values$comparator_diann_log_a)) {
+        comp_diann_log_a(values$comparator_diann_log_a)
+        values$comparator_diann_log_a <- NULL
+      }
+      if (!is.null(values$comparator_diann_log_b)) {
+        comp_diann_log_b(values$comparator_diann_log_b)
+        values$comparator_diann_log_b <- NULL
+      }
+      update_diann_log_status()
+      values$comparator_compare_from_history <- NULL
+    }, error = function(e) {
+      showNotification(paste("Error loading comparison:", e$message), type = "error")
+    })
+  }, ignoreInit = TRUE)
+
   # --- Spectronaut ZIP upload (primary Mode B input) ---
   spec_manifest <- reactiveVal(NULL)
 
@@ -3981,8 +4009,10 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             context_lines <- c(context_lines, "## Run A Settings", "")
             for (nm in names(run_a_data$settings)) {
               val <- run_a_data$settings[[nm]]
-              if (!is.null(val) && nzchar(val) && val != "Unknown")
-                context_lines <- c(context_lines, paste0("- **", nm, "**: ", val))
+              val_str <- tryCatch(as.character(val), error = function(e) NULL)
+              if (!is.null(val_str) && length(val_str) == 1 && !is.na(val_str) &&
+                  nzchar(val_str) && val_str != "Unknown")
+                context_lines <- c(context_lines, paste0("- **", nm, "**: ", val_str))
             }
             context_lines <- c(context_lines, "")
           }
@@ -3992,8 +4022,10 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             context_lines <- c(context_lines, "## Run B Settings", "")
             for (nm in names(run_b_data$settings)) {
               val <- run_b_data$settings[[nm]]
-              if (!is.null(val) && nzchar(val) && val != "Unknown")
-                context_lines <- c(context_lines, paste0("- **", nm, "**: ", val))
+              val_str <- tryCatch(as.character(val), error = function(e) NULL)
+              if (!is.null(val_str) && length(val_str) == 1 && !is.na(val_str) &&
+                  nzchar(val_str) && val_str != "Unknown")
+                context_lines <- c(context_lines, paste0("- **", nm, "**: ", val_str))
             }
             context_lines <- c(context_lines, "")
           }

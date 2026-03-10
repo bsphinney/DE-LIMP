@@ -2525,6 +2525,41 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
   result
 }
 
+#' Move a pending SLURM job to a different account/partition via scontrol
+#'
+#' @param job_id SLURM job ID (or array job ID)
+#' @param new_account Target account
+#' @param new_partition Target partition
+#' @param ssh_config SSH config list or NULL
+#' @param sbatch_path Path to sbatch (used to derive scontrol path)
+#' @return list(success, message)
+slurm_move_job <- function(job_id, new_account, new_partition,
+                            ssh_config = NULL, sbatch_path = NULL) {
+  scontrol_cmd <- if (!is.null(sbatch_path) && nzchar(sbatch_path)) {
+    file.path(dirname(sbatch_path), "scontrol")
+  } else "scontrol"
+
+  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s',
+    scontrol_cmd, job_id, new_account, new_partition)
+
+  res <- if (!is.null(ssh_config)) {
+    ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 15)
+  } else {
+    parts <- strsplit(cmd, " ")[[1]]
+    stdout <- tryCatch(
+      system2(parts[1], args = parts[-1], stdout = TRUE, stderr = TRUE),
+      error = function(e) structure(e$message, status = 1L))
+    list(status = attr(stdout, "status") %||% 0L, stdout = stdout)
+  }
+
+  if (res$status == 0) {
+    list(success = TRUE, message = sprintf("Job %s moved to %s/%s", job_id, new_account, new_partition))
+  } else {
+    list(success = FALSE, message = sprintf("Failed to move job %s: %s", job_id,
+      paste(res$stdout, collapse = " ")))
+  }
+}
+
 #' Select the best SLURM account/partition based on current cluster utilization
 #'
 #' @param lab_resources Result from check_cluster_resources() for lab group
@@ -3241,144 +3276,45 @@ fasta_library_display_df <- function(catalog) {
 }
 
 # =============================================================================
-# Analysis History Log
+# Unified Activity Log — replaces search_history + analysis_history + projects
 # =============================================================================
 
-#' Get path for the analysis history CSV
-#'
-#' Checks for shared proteomics volume first, falls back to user home dir.
-#' @return Character: path to CSV file
-analysis_history_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/analysis_history.csv"
-  if (dir.exists(dirname(shared))) return(shared)
-  file.path(Sys.getenv("HOME"), ".delimp_analysis_history.csv")
-}
-
-#' Read analysis history CSV
-#'
-#' @param path Character: path to CSV (default: analysis_history_path())
-#' @return data.frame (empty if file missing or unreadable)
-analysis_history_read <- function(path = analysis_history_path()) {
-  if (!file.exists(path)) return(data.frame())
-  tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) data.frame())
-}
-
-#' Record an analysis event to the history CSV
-#'
-#' @param entry Named list with analysis metadata
-#' @param path Character: path to CSV (default: analysis_history_path())
-record_analysis <- function(entry, path = analysis_history_path()) {
-  headers <- c("timestamp", "user", "source_type", "source_file", "source_path",
-    "remote_path", "fasta_file", "fasta_seq_count", "n_proteins", "n_samples",
-    "n_contrasts", "n_de_proteins", "output_dir", "session_file", "app_version", "notes")
-
-  row <- as.data.frame(lapply(headers, function(h) entry[[h]] %||% NA), stringsAsFactors = FALSE)
-  names(row) <- headers
-
-  lock_path <- paste0(path, ".lock")
-  lock <- filelock::lock(lock_path, timeout = 5000)
-  on.exit(filelock::unlock(lock), add = TRUE)
-
-  needs_header <- !file.exists(path)
-  tryCatch({
-    write.table(row, file = path, append = TRUE, sep = ",", row.names = FALSE,
-      col.names = needs_header, quote = TRUE)
-  }, error = function(e) message("[DE-LIMP] Failed to write analysis history: ", e$message))
-}
-
-#' Count DE proteins across all contrasts
-#'
-#' @param fit limma fit object with contrasts
-#' @param alpha Numeric: FDR threshold (default 0.05)
-#' @return Integer: total DE proteins across all contrasts
-count_de_proteins <- function(fit, alpha = 0.05) {
-  tryCatch({
-    n <- 0
-    for (coef in colnames(fit$contrasts)) {
-      tt <- limma::topTable(fit, coef = coef, number = Inf, sort.by = "none")
-      n <- n + sum(tt$adj.P.Val < alpha, na.rm = TRUE)
-    }
-    n
-  }, error = function(e) NA)
-}
-
-# =============================================================================
-# Projects — organize analysis history entries into named projects
-# =============================================================================
-
-projects_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/delimp_projects.json"
-  if (dir.exists(dirname(shared))) return(shared)
-  file.path(Sys.getenv("HOME"), ".delimp_projects.json")
-}
-
-projects_read <- function(path = projects_path()) {
-  if (!file.exists(path)) return(list(projects = list()))
-  tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE),
-    error = function(e) list(projects = list()))
-}
-
-projects_write <- function(data, path = projects_path()) {
-  lock_path <- paste0(path, ".lock")
-  lock <- filelock::lock(lock_path, timeout = 5000)
-  on.exit(filelock::unlock(lock), add = TRUE)
-  tryCatch(jsonlite::write_json(data, path, pretty = TRUE, auto_unbox = TRUE),
-    error = function(e) message("[DE-LIMP] Failed to write projects: ", e$message))
-}
-
-project_assign <- function(project_name, output_dirs, description = "",
-                           path = projects_path()) {
-  data <- projects_read(path)
-  if (is.null(data$projects[[project_name]])) {
-    data$projects[[project_name]] <- list(
-      created_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-      description = description, entries = list())
-  }
-  existing <- unlist(data$projects[[project_name]]$entries)
-  new_dirs <- setdiff(output_dirs, existing)
-  data$projects[[project_name]]$entries <- as.list(c(existing, new_dirs))
-  if (nzchar(description)) data$projects[[project_name]]$description <- description
-  projects_write(data, path)
-}
-
-project_remove_entry <- function(project_name, output_dir, path = projects_path()) {
-  data <- projects_read(path)
-  if (!is.null(data$projects[[project_name]])) {
-    data$projects[[project_name]]$entries <- as.list(
-      setdiff(unlist(data$projects[[project_name]]$entries), output_dir))
-    projects_write(data, path)
-  }
-}
-
-# =============================================================================
-# Search History — persistent record of DIA-NN search submissions
-# =============================================================================
-
-search_history_headers <- c(
-  "timestamp", "completed_at", "user", "search_name", "backend", "search_mode",
-  "parallel", "n_files", "fasta_files", "fasta_seq_count", "normalization",
-  "enzyme", "mass_acc_mode", "mass_acc", "mass_acc_ms1", "scan_window", "mbr",
-  "extra_cli_flags", "output_dir", "job_id", "status", "duration_min",
-  "speclib_cached", "imported_from_log", "app_version", "notes"
+activity_log_headers <- c(
+  "id", "event_type", "timestamp", "user", "search_name", "project", "notes",
+  "backend", "search_mode", "parallel", "n_files", "fasta_files", "fasta_seq_count",
+  "normalization", "enzyme", "mass_acc_mode", "mass_acc", "mass_acc_ms1",
+  "scan_window", "mbr", "extra_cli_flags",
+  "output_dir", "job_id", "status", "duration_min",
+  "n_proteins", "n_samples", "n_contrasts", "n_de_proteins",
+  "session_file", "speclib_cached", "app_version", "source_type"
 )
 
-search_history_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/search_history.csv"
+#' Get path for the unified activity log CSV
+activity_log_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/activity_log.csv"
   if (dir.exists(dirname(shared))) return(shared)
-  file.path(Sys.getenv("HOME"), ".delimp_search_history.csv")
+  file.path(Sys.getenv("HOME"), ".delimp_activity_log.csv")
 }
 
-search_history_read <- function(path = search_history_path()) {
+#' Read the activity log CSV
+activity_log_read <- function(path = activity_log_path()) {
   if (!file.exists(path)) return(data.frame())
   tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) data.frame())
 }
 
-record_search <- function(entry, path = search_history_path()) {
+#' Generate a simple unique ID (no uuid dependency)
+generate_activity_id <- function() {
+  paste0(format(Sys.time(), "%Y%m%d%H%M%S"), "_", sprintf("%06d", sample(999999, 1)))
+}
+
+#' Record an activity event (append-only)
+record_activity <- function(entry, path = activity_log_path()) {
+  if (is.null(entry$id)) entry$id <- generate_activity_id()
   row <- as.data.frame(
-    lapply(search_history_headers, function(h) entry[[h]] %||% NA),
+    lapply(activity_log_headers, function(h) entry[[h]] %||% NA),
     stringsAsFactors = FALSE
   )
-  names(row) <- search_history_headers
+  names(row) <- activity_log_headers
 
   lock_path <- paste0(path, ".lock")
   lock <- filelock::lock(lock_path, timeout = 5000)
@@ -3390,12 +3326,12 @@ record_search <- function(entry, path = search_history_path()) {
       write.table(row, file = path, append = TRUE, sep = ",", row.names = FALSE,
         col.names = needs_header, quote = TRUE)
     )
-  }, error = function(e) message("[DE-LIMP] Failed to write search history: ", e$message))
+  }, error = function(e) message("[DE-LIMP] Failed to write activity log: ", e$message))
 }
 
-update_search_status <- function(output_dir, status, completed_at = NA,
-                                  duration_min = NA,
-                                  path = search_history_path()) {
+#' Update an activity log row by output_dir (read-modify-write)
+update_activity <- function(output_dir, updates, event_type_filter = NULL,
+                            path = activity_log_path()) {
   if (!file.exists(path)) return(invisible(NULL))
 
   lock_path <- paste0(path, ".lock")
@@ -3403,47 +3339,231 @@ update_search_status <- function(output_dir, status, completed_at = NA,
   on.exit(filelock::unlock(lock), add = TRUE)
 
   tryCatch({
-    hist <- read.csv(path, stringsAsFactors = FALSE)
-    if (nrow(hist) == 0) return(invisible(NULL))
+    log <- read.csv(path, stringsAsFactors = FALSE)
+    if (nrow(log) == 0) return(invisible(NULL))
 
-    idx <- which(hist$output_dir == output_dir)
+    idx <- which(log$output_dir == output_dir)
+    if (!is.null(event_type_filter))
+      idx <- idx[log$event_type[idx] == event_type_filter]
     if (length(idx) == 0) return(invisible(NULL))
     idx <- idx[length(idx)]  # most recent match
 
-    hist$status[idx] <- status
-    if (!is.na(completed_at)) hist$completed_at[idx] <- completed_at
-    if (!is.na(duration_min)) hist$duration_min[idx] <- duration_min
-
-    write.csv(hist, file = path, row.names = FALSE, quote = TRUE)
-  }, error = function(e) message("[DE-LIMP] Failed to update search history: ", e$message))
+    for (nm in names(updates)) {
+      if (nm %in% names(log)) log[[nm]][idx] <- updates[[nm]]
+    }
+    write.csv(log, file = path, row.names = FALSE, quote = TRUE)
+  }, error = function(e) message("[DE-LIMP] Failed to update activity log: ", e$message))
 }
 
-#' Backfill search history from existing job queue RDS
-#'
-#' Called once on startup if search_history.csv is empty but job queue has entries.
-#' Extracts search parameters from job_entry$search_settings.
-backfill_search_history <- function(jobs, path = search_history_path(),
-                                     app_version = "unknown") {
+#' Update an activity log row by id
+update_activity_by_id <- function(id, updates, path = activity_log_path()) {
+  if (!file.exists(path)) return(invisible(NULL))
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  tryCatch({
+    log <- read.csv(path, stringsAsFactors = FALSE)
+    if (nrow(log) == 0) return(invisible(NULL))
+
+    idx <- which(log$id == id)
+    if (length(idx) == 0) return(invisible(NULL))
+    idx <- idx[1]
+
+    for (nm in names(updates)) {
+      if (nm %in% names(log)) log[[nm]][idx] <- updates[[nm]]
+    }
+    write.csv(log, file = path, row.names = FALSE, quote = TRUE)
+  }, error = function(e) message("[DE-LIMP] Failed to update activity by id: ", e$message))
+}
+
+#' Get unique project names from activity log
+get_projects <- function(path = activity_log_path()) {
+  log <- activity_log_read(path)
+  if (nrow(log) == 0 || !"project" %in% names(log)) return(character(0))
+  sort(unique(na.omit(log$project[nzchar(log$project)])))
+}
+
+#' Set project for all rows matching an output_dir
+set_project <- function(output_dir, project_name, path = activity_log_path()) {
+  if (!file.exists(path)) return(invisible(NULL))
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  tryCatch({
+    log <- read.csv(path, stringsAsFactors = FALSE)
+    if (nrow(log) == 0) return(invisible(NULL))
+    idx <- which(!is.na(log$output_dir) & log$output_dir == output_dir)
+    if (length(idx) > 0) {
+      log$project[idx] <- project_name
+      write.csv(log, file = path, row.names = FALSE, quote = TRUE)
+    }
+  }, error = function(e) message("[DE-LIMP] Failed to set project: ", e$message))
+}
+
+#' Migrate old search_history + analysis_history CSVs + projects.json to unified activity log
+migrate_to_activity_log <- function() {
+  new_path <- activity_log_path()
+  if (file.exists(new_path)) return(invisible(FALSE))  # already migrated
+
+  # Old paths
+  sh_shared <- "/Volumes/proteomics-grp/delimp/search_history.csv"
+  sh_local <- file.path(Sys.getenv("HOME"), ".delimp_search_history.csv")
+  ah_shared <- "/Volumes/proteomics-grp/delimp/analysis_history.csv"
+  ah_local <- file.path(Sys.getenv("HOME"), ".delimp_analysis_history.csv")
+  pj_shared <- "/Volumes/proteomics-grp/delimp/delimp_projects.json"
+  pj_local <- file.path(Sys.getenv("HOME"), ".delimp_projects.json")
+
+  sh_path <- if (file.exists(sh_shared)) sh_shared else if (file.exists(sh_local)) sh_local else NULL
+  ah_path <- if (file.exists(ah_shared)) ah_shared else if (file.exists(ah_local)) ah_local else NULL
+  pj_path <- if (file.exists(pj_shared)) pj_shared else if (file.exists(pj_local)) pj_local else NULL
+
+  if (is.null(sh_path) && is.null(ah_path)) return(invisible(FALSE))  # nothing to migrate
+
+  # Build project lookup: output_dir -> project_name
+  proj_map <- list()
+  if (!is.null(pj_path)) {
+    tryCatch({
+      pj <- jsonlite::fromJSON(pj_path, simplifyVector = FALSE)
+      for (pname in names(pj$projects)) {
+        for (od in unlist(pj$projects[[pname]]$entries)) {
+          proj_map[[od]] <- pname
+        }
+      }
+    }, error = function(e) NULL)
+  }
+
+  rows <- list()
+
+  # Migrate search history rows
+  if (!is.null(sh_path)) {
+    tryCatch({
+      sh <- read.csv(sh_path, stringsAsFactors = FALSE)
+      for (i in seq_len(nrow(sh))) {
+        evt <- if (!is.na(sh$status[i]) && sh$status[i] == "completed") "search_completed"
+               else if (!is.na(sh$status[i]) && sh$status[i] == "failed") "search_failed"
+               else "search_submitted"
+        od <- sh$output_dir[i] %||% NA
+        rows[[length(rows) + 1]] <- list(
+          id = generate_activity_id(),
+          event_type = evt,
+          timestamp = sh$timestamp[i],
+          user = sh$user[i] %||% NA,
+          search_name = sh$search_name[i] %||% NA,
+          project = if (!is.na(od) && !is.null(proj_map[[od]])) proj_map[[od]] else NA,
+          notes = sh$notes[i] %||% NA,
+          backend = sh$backend[i] %||% NA,
+          search_mode = sh$search_mode[i] %||% NA,
+          parallel = sh$parallel[i] %||% NA,
+          n_files = sh$n_files[i] %||% NA,
+          fasta_files = sh$fasta_files[i] %||% NA,
+          fasta_seq_count = sh$fasta_seq_count[i] %||% NA,
+          normalization = sh$normalization[i] %||% NA,
+          enzyme = sh$enzyme[i] %||% NA,
+          mass_acc_mode = sh$mass_acc_mode[i] %||% NA,
+          mass_acc = sh$mass_acc[i] %||% NA,
+          mass_acc_ms1 = sh$mass_acc_ms1[i] %||% NA,
+          scan_window = sh$scan_window[i] %||% NA,
+          mbr = sh$mbr[i] %||% NA,
+          extra_cli_flags = sh$extra_cli_flags[i] %||% NA,
+          output_dir = od,
+          job_id = sh$job_id[i] %||% NA,
+          status = sh$status[i] %||% NA,
+          duration_min = sh$duration_min[i] %||% NA,
+          speclib_cached = sh$speclib_cached[i] %||% NA,
+          app_version = sh$app_version[i] %||% NA,
+          source_type = "search"
+        )
+        Sys.sleep(0.001)  # ensure unique IDs
+      }
+    }, error = function(e) message("[DE-LIMP] Search history migration error: ", e$message))
+  }
+
+  # Migrate analysis history rows
+  if (!is.null(ah_path)) {
+    tryCatch({
+      ah <- read.csv(ah_path, stringsAsFactors = FALSE)
+      for (i in seq_len(nrow(ah))) {
+        od <- ah$output_dir[i] %||% NA
+        rows[[length(rows) + 1]] <- list(
+          id = generate_activity_id(),
+          event_type = "analysis_completed",
+          timestamp = ah$timestamp[i],
+          user = ah$user[i] %||% NA,
+          search_name = ah$source_file[i] %||% NA,
+          project = if (!is.na(od) && !is.null(proj_map[[od]])) proj_map[[od]] else NA,
+          notes = ah$notes[i] %||% NA,
+          output_dir = od,
+          n_proteins = ah$n_proteins[i] %||% NA,
+          n_samples = ah$n_samples[i] %||% NA,
+          n_contrasts = ah$n_contrasts[i] %||% NA,
+          n_de_proteins = ah$n_de_proteins[i] %||% NA,
+          session_file = ah$session_file[i] %||% NA,
+          fasta_files = ah$fasta_file[i] %||% NA,
+          fasta_seq_count = ah$fasta_seq_count[i] %||% NA,
+          app_version = ah$app_version[i] %||% NA,
+          source_type = ah$source_type[i] %||% NA
+        )
+        Sys.sleep(0.001)
+      }
+    }, error = function(e) message("[DE-LIMP] Analysis history migration error: ", e$message))
+  }
+
+  if (length(rows) == 0) return(invisible(FALSE))
+
+  # Write unified log — ensure every row has all headers
+  row_dfs <- lapply(rows, function(r) {
+    vals <- lapply(activity_log_headers, function(h) {
+      v <- r[[h]]
+      if (is.null(v)) NA else v
+    })
+    df <- as.data.frame(vals, stringsAsFactors = FALSE)
+    names(df) <- activity_log_headers
+    df
+  })
+  df <- do.call(rbind, row_dfs)
+  df <- df[order(df$timestamp, decreasing = FALSE), ]
+
+  tryCatch({
+    write.csv(df, file = new_path, row.names = FALSE, quote = TRUE)
+    message(sprintf("[DE-LIMP] Migrated %d entries to activity log: %s", nrow(df), new_path))
+
+    # Rename old files to .bak
+    for (f in c(sh_path, ah_path, pj_path)) {
+      if (!is.null(f) && file.exists(f)) {
+        tryCatch(file.rename(f, paste0(f, ".bak")), error = function(e) NULL)
+      }
+    }
+  }, error = function(e) message("[DE-LIMP] Migration write failed: ", e$message))
+
+  invisible(TRUE)
+}
+
+#' Backfill activity log from existing job queue RDS
+backfill_activity_log <- function(jobs, path = activity_log_path(),
+                                   app_version = "unknown") {
   if (length(jobs) == 0) return(invisible(NULL))
 
-  existing <- search_history_read(path)
+  existing <- activity_log_read(path)
   existing_ods <- if (nrow(existing) > 0) existing$output_dir else character(0)
 
   n_added <- 0
   for (j in jobs) {
-    # Skip if already in search history
     if (j$output_dir %in% existing_ods) next
 
     ss <- j$search_settings
-    sp <- ss$search_params
+    sp <- if (!is.null(ss)) ss$search_params else list()
 
     dur <- if (!is.null(j$submitted_at) && !is.null(j$completed_at)) {
       round(as.numeric(difftime(j$completed_at, j$submitted_at, units = "mins")), 1)
     } else NA
 
-    entry <- list(
+    record_activity(list(
+      event_type = "search_submitted",
       timestamp = if (!is.null(j$submitted_at)) format(j$submitted_at, "%Y-%m-%d %H:%M:%S") else NA,
-      completed_at = if (!is.null(j$completed_at)) format(j$completed_at, "%Y-%m-%d %H:%M:%S") else NA,
       user = Sys.info()[["user"]],
       search_name = j$name %||% NA,
       backend = j$backend %||% "hpc",
@@ -3465,15 +3585,407 @@ backfill_search_history <- function(jobs, path = search_history_path(),
       status = j$status %||% "unknown",
       duration_min = dur,
       speclib_cached = isTRUE(j$speclib_cached),
-      imported_from_log = FALSE,
       app_version = app_version,
-      notes = "Backfilled from job queue"
-    )
-
-    record_search(entry, path = path)
+      notes = "Backfilled from job queue",
+      source_type = "search"
+    ), path = path)
     n_added <- n_added + 1
   }
 
-  if (n_added > 0) message(sprintf("[DE-LIMP] Backfilled %d entries into search history", n_added))
+  if (n_added > 0) message(sprintf("[DE-LIMP] Backfilled %d entries into activity log", n_added))
   invisible(n_added)
+}
+
+# Legacy aliases — keep temporarily for any straggling references
+analysis_history_path <- activity_log_path
+search_history_path <- activity_log_path
+
+#' Count DE proteins across all contrasts
+#'
+#' @param fit limma fit object with contrasts
+#' @param alpha Numeric: FDR threshold (default 0.05)
+#' @return Integer: total DE proteins across all contrasts
+count_de_proteins <- function(fit, alpha = 0.05) {
+  tryCatch({
+    n <- 0
+    for (coef in colnames(fit$contrasts)) {
+      tt <- limma::topTable(fit, coef = coef, number = Inf, sort.by = "none")
+      n <- n + sum(tt$adj.P.Val < alpha, na.rm = TRUE)
+    }
+    n
+  }, error = function(e) NA)
+}
+
+# Legacy function stubs for core facility module compatibility
+record_search <- function(entry, path = activity_log_path()) {
+  entry$event_type <- "search_submitted"
+  entry$source_type <- "search"
+  record_activity(entry, path)
+}
+
+update_search_status <- function(output_dir, status, completed_at = NA,
+                                  duration_min = NA,
+                                  path = activity_log_path()) {
+  updates <- list(status = status)
+  if (!is.na(completed_at)) updates$event_type <- "search_completed"
+  if (!is.na(duration_min)) updates$duration_min <- duration_min
+  update_activity(output_dir, updates, event_type_filter = "search_submitted", path = path)
+}
+
+record_analysis <- function(entry, path = activity_log_path()) {
+  entry$event_type <- "analysis_completed"
+  record_activity(entry, path)
+}
+
+search_history_read <- function(path = activity_log_path()) activity_log_read(path)
+analysis_history_read <- function(path = activity_log_path()) activity_log_read(path)
+backfill_search_history <- function(jobs, path = activity_log_path(), app_version = "unknown") {
+  backfill_activity_log(jobs, path, app_version)
+}
+
+# =============================================================================
+# Cluster Usage History — persistent resource monitoring for grant reporting
+# =============================================================================
+
+cluster_usage_headers <- c(
+  "timestamp", "user", "account", "partition",
+  "group_limit", "group_used", "group_available",
+  "user_limit", "user_used", "user_available",
+  "partition_idle", "partition_total", "auto_selected"
+)
+
+cluster_usage_history_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/cluster_usage_history.csv"
+  if (dir.exists(dirname(shared))) return(shared)
+  file.path(Sys.getenv("HOME"), ".delimp_cluster_usage_history.csv")
+}
+
+#' Append a cluster resource snapshot to the usage history CSV
+#'
+#' @param lab_res Result from check_cluster_resources() for genome-center-grp
+#' @param pub_res Result from check_cluster_resources() for publicgrp
+#' @param auto_partition Result from select_best_partition()
+record_cluster_snapshot <- function(lab_res, pub_res, auto_partition,
+                                     path = cluster_usage_history_path()) {
+  ts <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+  usr <- Sys.info()[["user"]]
+  auto_sel <- if (!is.null(auto_partition))
+    paste0(auto_partition$account, "/", auto_partition$partition) else NA
+
+  rows <- list()
+
+  # Record genome-center-grp row
+
+  if (!is.null(lab_res) && isTRUE(lab_res$success)) {
+    rows[[1]] <- data.frame(
+      timestamp = ts, user = usr,
+      account = "genome-center-grp", partition = "high",
+      group_limit = lab_res$group_limit %||% NA,
+      group_used = lab_res$group_used %||% NA,
+      group_available = lab_res$group_available %||% NA,
+      user_limit = lab_res$user_limit %||% NA,
+      user_used = lab_res$user_used %||% NA,
+      user_available = lab_res$user_available %||% NA,
+      partition_idle = lab_res$partition_idle %||% NA,
+      partition_total = lab_res$partition_total %||% NA,
+      auto_selected = auto_sel,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  # Record publicgrp row
+  if (!is.null(pub_res) && isTRUE(pub_res$success)) {
+    rows[[length(rows) + 1]] <- data.frame(
+      timestamp = ts, user = usr,
+      account = "publicgrp", partition = "low",
+      group_limit = pub_res$group_limit %||% NA,
+      group_used = pub_res$group_used %||% NA,
+      group_available = pub_res$group_available %||% NA,
+      user_limit = pub_res$user_limit %||% NA,
+      user_used = pub_res$user_used %||% NA,
+      user_available = pub_res$user_available %||% NA,
+      partition_idle = pub_res$partition_idle %||% NA,
+      partition_total = pub_res$partition_total %||% NA,
+      auto_selected = auto_sel,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  if (length(rows) == 0) return(invisible(NULL))
+  combined <- do.call(rbind, rows)
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  needs_header <- !file.exists(path)
+  tryCatch({
+    suppressWarnings(
+      write.table(combined, file = path, append = TRUE, sep = ",",
+        row.names = FALSE, col.names = needs_header, quote = TRUE)
+    )
+  }, error = function(e) message("[DE-LIMP] Failed to write cluster usage: ", e$message))
+}
+
+#' Read cluster usage history, optionally filtered by time
+#'
+#' @param since POSIXct timestamp — only return rows newer than this
+#' @param account Filter to specific account (NULL for all)
+cluster_usage_history_read <- function(path = cluster_usage_history_path(),
+                                        since = NULL, account = NULL) {
+  if (!file.exists(path)) return(data.frame())
+  tryCatch({
+    df <- read.csv(path, stringsAsFactors = FALSE)
+    if (nrow(df) == 0) return(df)
+    df$timestamp <- as.POSIXct(df$timestamp, format = "%Y-%m-%dT%H:%M:%S")
+    if (!is.null(since)) df <- df[!is.na(df$timestamp) & df$timestamp >= since, ]
+    if (!is.null(account)) df <- df[df$account == account, ]
+    df
+  }, error = function(e) data.frame())
+}
+
+#' Summarize cluster usage for grant reporting (hourly aggregation)
+#'
+#' @param df Data frame from cluster_usage_history_read()
+#' @return Data frame with hourly summary statistics
+# =============================================================================
+# Per-user resource tracking — CPU + memory for each user in the group
+# =============================================================================
+
+per_user_usage_headers <- c(
+  "timestamp", "account", "partition", "username",
+  "cpus_running", "mem_gb_running", "n_jobs_running",
+  "cpus_pending", "n_jobs_pending"
+)
+
+per_user_usage_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/per_user_usage.csv"
+  if (dir.exists(dirname(shared))) return(shared)
+  file.path(Sys.getenv("HOME"), ".delimp_per_user_usage.csv")
+}
+
+#' Get path for lab members config JSON
+lab_members_path <- function() {
+  shared <- "/Volumes/proteomics-grp/delimp/lab_members.json"
+  if (file.exists(shared)) return(shared)
+  file.path(Sys.getenv("HOME"), ".delimp_lab_members.json")
+}
+
+#' Read lab member HPC usernames
+#' @param ssh_user Current SSH username (always included in result)
+get_lab_members <- function(ssh_user = NULL) {
+  path <- lab_members_path()
+  members <- character(0)
+  if (file.exists(path)) {
+    tryCatch({
+      cfg <- jsonlite::fromJSON(path)
+      members <- as.character(cfg$members)
+    }, error = function(e) NULL)
+  }
+  # Always include current SSH user
+  if (!is.null(ssh_user) && nzchar(ssh_user)) {
+    members <- unique(c(members, ssh_user))
+  }
+  if (length(members) == 0) members <- ssh_user %||% Sys.info()[["user"]]
+  members
+}
+
+#' Query per-user CPU and memory usage for lab members
+#'
+#' @param ssh_config SSH config list or NULL for local
+#' @param account SLURM account name
+#' @param partition SLURM partition name
+#' @param sbatch_path Path to sbatch (used to derive squeue path)
+#' @param members Character vector of usernames to track
+#' @return Data frame with one row per user
+check_per_user_resources <- function(ssh_config, account, partition, sbatch_path = NULL,
+                                      members = get_lab_members()) {
+  slurm_cmd <- function(cmd) {
+    if (!is.null(sbatch_path) && nzchar(sbatch_path)) {
+      file.path(dirname(sbatch_path), cmd)
+    } else cmd
+  }
+
+  run_cmd <- function(command) {
+    if (!is.null(ssh_config)) {
+      ssh_exec(ssh_config, command, login_shell = is.null(sbatch_path), timeout = 15)
+    } else {
+      parts <- strsplit(command, " ")[[1]]
+      stdout <- tryCatch(
+        system2(parts[1], args = parts[-1], stdout = TRUE, stderr = TRUE),
+        error = function(e) structure(e$message, status = 1L))
+      list(status = attr(stdout, "status") %||% 0L, stdout = stdout)
+    }
+  }
+
+  ts <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+  rows <- list()
+
+  # Build user filter: only query specified lab members
+  user_filter <- paste(members, collapse = ",")
+
+  # Query running jobs: user, CPUs, memory per job
+  tryCatch({
+    # %u=user, %C=CPUs, %m=min_memory
+    squeue_cmd <- sprintf(
+      '%s -u %s -A %s -p %s -t RUNNING -o "%%u|%%C|%%m" --noheader',
+      slurm_cmd("squeue"), user_filter, account, partition
+    )
+    res <- run_cmd(squeue_cmd)
+    if (res$status == 0 && length(res$stdout) > 0) {
+      lines <- trimws(res$stdout)
+      lines <- lines[nzchar(lines)]
+      if (length(lines) > 0) {
+        # Parse each line: user|cpus|memory
+        parsed <- lapply(lines, function(line) {
+          parts <- strsplit(line, "\\|")[[1]]
+          if (length(parts) < 3) return(NULL)
+          mem_str <- trimws(parts[3])
+          # Parse memory: "64G", "65536M", "64000", etc.
+          mem_gb <- tryCatch({
+            if (grepl("G$", mem_str, ignore.case = TRUE)) {
+              as.numeric(sub("[Gg]$", "", mem_str))
+            } else if (grepl("M$", mem_str, ignore.case = TRUE)) {
+              as.numeric(sub("[Mm]$", "", mem_str)) / 1024
+            } else if (grepl("T$", mem_str, ignore.case = TRUE)) {
+              as.numeric(sub("[Tt]$", "", mem_str)) * 1024
+            } else {
+              as.numeric(mem_str) / 1024  # assume MB
+            }
+          }, error = function(e) 0)
+          list(user = trimws(parts[1]), cpus = as.integer(parts[2]), mem_gb = mem_gb)
+        })
+        parsed <- Filter(Negate(is.null), parsed)
+
+        # Aggregate by user
+        user_data <- list()
+        for (p in parsed) {
+          u <- p$user
+          if (is.null(user_data[[u]])) user_data[[u]] <- list(cpus = 0L, mem_gb = 0, n = 0L)
+          user_data[[u]]$cpus <- user_data[[u]]$cpus + p$cpus
+          user_data[[u]]$mem_gb <- user_data[[u]]$mem_gb + p$mem_gb
+          user_data[[u]]$n <- user_data[[u]]$n + 1L
+        }
+
+        for (u in names(user_data)) {
+          rows[[length(rows) + 1]] <- data.frame(
+            timestamp = ts, account = account, partition = partition, username = u,
+            cpus_running = user_data[[u]]$cpus,
+            mem_gb_running = round(user_data[[u]]$mem_gb, 1),
+            n_jobs_running = user_data[[u]]$n,
+            cpus_pending = 0L, n_jobs_pending = 0L,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+  }, error = function(e) NULL)
+
+  # Query pending jobs per user
+  tryCatch({
+    squeue_cmd <- sprintf(
+      '%s -u %s -A %s -p %s -t PENDING -o "%%u|%%C" --noheader',
+      slurm_cmd("squeue"), user_filter, account, partition
+    )
+    res <- run_cmd(squeue_cmd)
+    if (res$status == 0 && length(res$stdout) > 0) {
+      lines <- trimws(res$stdout)
+      lines <- lines[nzchar(lines)]
+      if (length(lines) > 0) {
+        pending <- list()
+        for (line in lines) {
+          parts <- strsplit(line, "\\|")[[1]]
+          if (length(parts) < 2) next
+          u <- trimws(parts[1])
+          cpus <- as.integer(parts[2])
+          if (is.null(pending[[u]])) pending[[u]] <- list(cpus = 0L, n = 0L)
+          pending[[u]]$cpus <- pending[[u]]$cpus + cpus
+          pending[[u]]$n <- pending[[u]]$n + 1L
+        }
+        # Merge into existing rows or add new
+        existing_users <- vapply(rows, function(r) r$username, character(1))
+        for (u in names(pending)) {
+          idx <- which(existing_users == u)
+          if (length(idx) > 0) {
+            rows[[idx[1]]]$cpus_pending <- pending[[u]]$cpus
+            rows[[idx[1]]]$n_jobs_pending <- pending[[u]]$n
+          } else {
+            rows[[length(rows) + 1]] <- data.frame(
+              timestamp = ts, account = account, partition = partition, username = u,
+              cpus_running = 0L, mem_gb_running = 0, n_jobs_running = 0L,
+              cpus_pending = pending[[u]]$cpus, n_jobs_pending = pending[[u]]$n,
+              stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+    }
+  }, error = function(e) NULL)
+
+  if (length(rows) == 0) return(data.frame())
+  do.call(rbind, rows)
+}
+
+#' Record per-user resource snapshot to CSV
+record_per_user_snapshot <- function(user_df, path = per_user_usage_path()) {
+  if (is.null(user_df) || nrow(user_df) == 0) return(invisible(NULL))
+
+  lock_path <- paste0(path, ".lock")
+  lock <- filelock::lock(lock_path, timeout = 5000)
+  on.exit(filelock::unlock(lock), add = TRUE)
+
+  needs_header <- !file.exists(path)
+  tryCatch({
+    suppressWarnings(
+      write.table(user_df, file = path, append = TRUE, sep = ",",
+        row.names = FALSE, col.names = needs_header, quote = TRUE))
+  }, error = function(e) message("[DE-LIMP] Failed to write per-user usage: ", e$message))
+}
+
+#' Read per-user usage history
+per_user_usage_read <- function(path = per_user_usage_path(), since = NULL, account = NULL) {
+  if (!file.exists(path)) return(data.frame())
+  tryCatch({
+    df <- read.csv(path, stringsAsFactors = FALSE)
+    if (nrow(df) == 0) return(df)
+    df$timestamp <- as.POSIXct(df$timestamp, format = "%Y-%m-%dT%H:%M:%S")
+    if (!is.null(since)) df <- df[!is.na(df$timestamp) & df$timestamp >= since, ]
+    if (!is.null(account)) df <- df[df$account == account, ]
+    df
+  }, error = function(e) data.frame())
+}
+
+cluster_usage_grant_summary <- function(df) {
+  if (nrow(df) == 0) return(data.frame())
+
+  # Filter to genome-center-grp only
+  df <- df[df$account == "genome-center-grp", ]
+  if (nrow(df) == 0) return(data.frame())
+
+  df$date <- as.Date(df$timestamp)
+  df$hour <- as.integer(format(df$timestamp, "%H"))
+
+  # Aggregate by date + hour
+  result <- do.call(rbind, lapply(split(df, paste(df$date, df$hour)), function(chunk) {
+    data.frame(
+      date = chunk$date[1],
+      hour = chunk$hour[1],
+      account = "genome-center-grp",
+      n_snapshots = nrow(chunk),
+      avg_group_used = round(mean(chunk$group_used, na.rm = TRUE), 1),
+      max_group_used = max(chunk$group_used, na.rm = TRUE),
+      avg_user_used = round(mean(chunk$user_used, na.rm = TRUE), 1),
+      max_user_used = max(chunk$user_used, na.rm = TRUE),
+      group_limit = chunk$group_limit[1],
+      user_limit = chunk$user_limit[1],
+      pct_group_utilization = round(mean(chunk$group_used, na.rm = TRUE) /
+        max(chunk$group_limit[1], 1, na.rm = TRUE) * 100, 1),
+      pct_user_at_capacity = round(
+        sum(!is.na(chunk$user_available) & chunk$user_available < 64) /
+        max(nrow(chunk), 1) * 100, 1),
+      stringsAsFactors = FALSE
+    )
+  }))
+  rownames(result) <- NULL
+  result[order(result$date, result$hour), ]
 }

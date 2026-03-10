@@ -40,8 +40,8 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 8-rule hypothesis engine, Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios), MOFA2 decomposition |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
-| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, analysis history, projects |
-| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, analysis history, projects |
+| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes |
+| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, unified activity log |
 | `R/helpers_instrument.R` | `parse_timstof_metadata()`, `parse_thermo_metadata()`, `parse_raw_file_metadata()`, `extract_tic_timstof()`, `compute_tic_metrics()`, `diagnose_run()`, instrument formatters for Methods/AI |
 | `VERSION` | Single-line app version (e.g. `3.1.1`), read at startup into `values$app_version` |
 | `stats/community_stats.json` | GitHub traffic data generated daily by `.github/workflows/track-stats.yml` |
@@ -59,7 +59,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
 **Tab values that MUST NOT change** (used by server nav_select/nav_show/nav_hide):
-`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"comparator_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"search_history_tab"`, `"analysis_history_tab"`
+`"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"comparator_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"history_tab"`
 
 #### Analysis dropdown
 - **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
@@ -72,22 +72,20 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 
 #### About dropdown
 - **Community** (`value = "about_tab"`) — Version, GitHub stats cards, trend sparklines, recent discussions, links
-- **Search History** (`value = "search_history_tab"`) — DT table with expandable detail rows (enzyme, mass acc, flags), Import Settings + View Log buttons, cross-reference to Analysis History
-- **Analysis History** (`value = "analysis_history_tab"`) — DT table with expandable detail rows, project filter, project management, cross-reference to Search History
+- **History** (`value = "history_tab"`) — Unified activity log (replaces Search History + Analysis History). Single DT table with expandable detail rows, project/status filters, Load/Settings/Notes/Project buttons. Notes modal on search completion.
 
-### Search History
-- **Search history CSV**: `search_history_path()` → shared `/Volumes/proteomics-grp/delimp/search_history.csv` or local `~/.delimp_search_history.csv`. Append-only with file locking; updates via `update_search_status()` (rewrite matching row).
-- **Record points**: Job submission (`server_search.R` — all 4 backends) and job completion/failure (monitoring observer).
-- **Cross-reference**: `output_dir` joins search history ↔ analysis history. Both tables show a link icon to navigate to the matching entry in the other table.
-- **Import Settings**: Reads CSV row fields and applies to search UI inputs (mass acc, enzyme, mode, etc.).
-
-### Analysis History & Projects
-- **Analysis history CSV**: `analysis_history_path()` → shared `/Volumes/proteomics-grp/delimp/analysis_history.csv` or local `~/.delimp_analysis_history.csv`. Append-only with file locking.
-- **Projects JSON**: `projects_path()` → shared or local `delimp_projects.json`. Maps project names to `output_dir` entries.
-- **DT expandable rows**: Click a row to show full File, FASTA, Output dir, Notes in a child row. JS callback on `tbody tr td` with `row.child()` toggle. Buttons use `event.stopPropagation()`.
+### Unified Activity Log (v3.6.0)
+- **Single CSV**: `activity_log_path()` → shared `/Volumes/proteomics-grp/delimp/activity_log.csv` or local `~/.delimp_activity_log.csv`. 33 columns. Append-only with file locking; updates via `update_activity()` (read-modify-write by `output_dir`) or `update_activity_by_id()`.
+- **Replaces**: search_history.csv + analysis_history.csv + projects.json (old files migrated to `.bak` on first load).
+- **Event types**: `search_submitted`, `search_completed`, `search_failed`, `analysis_completed`, `data_loaded`, `session_restored`.
+- **Record points**: Job submission (`server_search.R`), job completion/failure (monitoring observer), pipeline completion (`server_data.R`), auto-load (`server_search.R`), session upload (`server_session.R`).
+- **Projects as column**: `project` field in CSV, not a separate JSON file. `get_projects()` reads unique values; `set_project()` updates all rows for an `output_dir`.
+- **Notes feature**: Modal pops on search completion (`values$pending_notes_od` trigger). Editable anytime via pen icon in history table. Stored in `notes` column.
+- **Deterministic RDS**: Auto-saved as `{output_dir}/session.rds` (not timestamped). Overwritten on re-analysis.
+- **Single "Load" button**: Tries `session.rds` first (full state restore), falls back to `report.parquet` (raw data only).
+- **DT expandable rows**: Click row to show FASTA, enzyme, mass acc, output dir, notes. Action buttons: Log, Load, Settings, Notes, Project.
+- **Migration**: `migrate_to_activity_log()` runs once on startup if activity_log.csv doesn't exist. Merges old CSVs + projects.json, renames to `.bak`.
 - **n_proteins**: Use `length(unique(raw_data$genes$Protein.Group))` not `nrow(raw_data$E)` — the latter counts precursors (~40k), not protein groups (~3k).
-- **Auto-save session**: Pipeline completion in `server_data.R` auto-saves `.rds` to `output_dir` (or `~/.delimp_sessions` fallback). Path stored in `session_file` column of analysis history CSV.
-- **Restore button**: Green "Restore" button in history table loads auto-saved `.rds` (full pipeline state). Outline "Load" button loads raw `report.parquet` only. Handler: `observeEvent(input$history_restore_click, ...)` in `server_session.R`.
 
 ### Comparison Selector Sync
 Four synchronized selectors: `contrast_selector` (DE Dashboard), `contrast_selector_signal`, `contrast_selector_grid`, `contrast_selector_pvalue`. Bidirectional sync — changing any updates all.
@@ -188,6 +186,6 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 
 ## Version History
 
-Current version: **v3.5.1** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.6.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0) | **Spectronaut parsing fixes, TopN scatter fix, sub-tab help modals** (v3.5.1)
