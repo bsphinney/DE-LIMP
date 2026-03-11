@@ -15,11 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DE Concordance error message referenced FragPipe in Spectronaut mode**: Mode-aware messaging now shows correct tool name.
 - **History tab slow to populate**: Replaced 7 independent `activity_log_read()` calls (network CSV reads) with single `cached_activity_log()` reactive that caches per invalidation cycle.
 - **LC/EvoSep info missing from Methods text**: `format_instrument_methods_text()` now includes EvoSep SPD and gradient length, with deduplication when method name already contains SPD info.
+- **Job queue crash (`vapply: values must be length 1`)**: Corrupt job entries with NULL/empty `status` field crashed vapply and switch. Added `sanitize_job()` validator on load/save with null-safe guards on all vapply/switch calls.
+- **Methodology text overflow**: Text didn't fit in window and couldn't scroll. Added `pre-wrap`/`word-wrap` CSS and scrollable wrapper div.
+- **Instrument metadata lost on history load**: `values$instrument_metadata` was NULL after loading from history because session.rds was remote-only. Added fallback recovery from job queue entries.
+- **Mounted drive dependency removed**: All app state files (activity log, cluster usage, lab members) now always use local `~/.delimp_*` paths. SMB mounts may be absent, slow, or disappear — no longer a failure point.
 
 ### Added
 - **Rescue stats for Spectronaut 0-ratio proteins**: Detects proteins with 0 computable ratios in Spectronaut that DE-LIMP could still test. Imputation-aware messaging (None/enabled/unknown). New Rule 0 ("Untestable in Spectronaut") as highest-priority hypothesis. Summary banner shows rescue count below main stats.
 - **Contrast mismatch warning**: Fuzzy matching detects when Spectronaut conditions don't match DE-LIMP contrasts. Amber warning div displayed in DE Concordance sub-tab.
 - **Instrument context in comparator prompts**: Both `build_gemini_comparator_prompt()` and `build_claude_comparator_prompt()` now include brief instrument/LC context (model, LC system, method, SPD, gradient length) when `instrument_metadata` is available.
+- **Debiased Gemini comparator prompt**: Rewrote prompt to be objective — balanced tool descriptions, structured 8-section output template (Factual Observations, Sources of Disagreement, Case for A/B, Settings Audit, Concordant Biology, Synthesis, Follow-ups), debiasing guidelines, neutral Quant3 framing. Adds pre-filtering context (Spectronaut LFC candidate filter, imputation strategy).
 - **Remote HyStarMetadata.xml extraction**: SSH file scan now downloads `HyStarMetadata.xml` alongside `analysis.tdf` for LC method/system/runtime extraction from remote timsTOF data.
 - **Unified activity log** (v3.6.0): Single CSV replacing dual search/analysis history CSVs + projects.json. 33 columns, append-only with file locking. One-time migration from old format.
 - **Per-user cluster monitoring**: Tracks lab member CPU/memory usage on dual partitions with historical snapshots. Queue wait time display. Auto queue switching (genome-center-grp/high → publicgrp/low).

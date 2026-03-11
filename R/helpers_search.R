@@ -3476,9 +3476,9 @@ activity_log_headers <- c(
 )
 
 #' Get path for the unified activity log CSV
+#' Always local — never depends on mounted network drives (may be absent/slow).
+#' Cross-user sharing is handled via SSH/SCP sync when connected to HPC.
 activity_log_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/activity_log.csv"
-  if (dir.exists(dirname(shared))) return(shared)
   file.path(Sys.getenv("HOME"), ".delimp_activity_log.csv")
 }
 
@@ -3595,17 +3595,14 @@ migrate_to_activity_log <- function() {
   new_path <- activity_log_path()
   if (file.exists(new_path)) return(invisible(FALSE))  # already migrated
 
-  # Old paths
-  sh_shared <- "/Volumes/proteomics-grp/delimp/search_history.csv"
+  # Old paths (local only — no mounted drive dependency)
   sh_local <- file.path(Sys.getenv("HOME"), ".delimp_search_history.csv")
-  ah_shared <- "/Volumes/proteomics-grp/delimp/analysis_history.csv"
   ah_local <- file.path(Sys.getenv("HOME"), ".delimp_analysis_history.csv")
-  pj_shared <- "/Volumes/proteomics-grp/delimp/delimp_projects.json"
   pj_local <- file.path(Sys.getenv("HOME"), ".delimp_projects.json")
 
-  sh_path <- if (file.exists(sh_shared)) sh_shared else if (file.exists(sh_local)) sh_local else NULL
-  ah_path <- if (file.exists(ah_shared)) ah_shared else if (file.exists(ah_local)) ah_local else NULL
-  pj_path <- if (file.exists(pj_shared)) pj_shared else if (file.exists(pj_local)) pj_local else NULL
+  sh_path <- if (file.exists(sh_local)) sh_local else NULL
+  ah_path <- if (file.exists(ah_local)) ah_local else NULL
+  pj_path <- if (file.exists(pj_local)) pj_local else NULL
 
   if (is.null(sh_path) && is.null(ah_path)) return(invisible(FALSE))  # nothing to migrate
 
@@ -3841,8 +3838,6 @@ cluster_usage_headers <- c(
 )
 
 cluster_usage_history_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/cluster_usage_history.csv"
-  if (dir.exists(dirname(shared))) return(shared)
   file.path(Sys.getenv("HOME"), ".delimp_cluster_usage_history.csv")
 }
 
@@ -3951,15 +3946,11 @@ per_user_usage_headers <- c(
 )
 
 per_user_usage_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/per_user_usage.csv"
-  if (dir.exists(dirname(shared))) return(shared)
   file.path(Sys.getenv("HOME"), ".delimp_per_user_usage.csv")
 }
 
 #' Get path for lab members config JSON
 lab_members_path <- function() {
-  shared <- "/Volumes/proteomics-grp/delimp/lab_members.json"
-  if (file.exists(shared)) return(shared)
   file.path(Sys.getenv("HOME"), ".delimp_lab_members.json")
 }
 

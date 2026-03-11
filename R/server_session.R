@@ -2011,6 +2011,21 @@ server_session <- function(input, output, session, values, add_to_log) {
           basename(report_path), nrow(raw_data$E), ncol(raw_data$E)), type = "message", duration = 10)
         nav_select("main_tabs", "Data Overview", session = session)
       }
+
+      # Recover instrument metadata from job queue if not already set
+      # (session.rds may predate metadata extraction, or report.parquet-only load)
+      if (is.null(values$instrument_metadata)) {
+        for (j in values$diann_jobs) {
+          if (!is.null(j$output_dir) && j$output_dir == od) {
+            im <- j$search_settings$instrument_metadata %||% j$instrument_metadata
+            if (!is.null(im)) {
+              values$instrument_metadata <- im
+              message("[DE-LIMP] Recovered instrument metadata from job queue for ", basename(od))
+              break
+            }
+          }
+        }
+      }
     }, error = function(e) {
       removeNotification("hist_load")
       showNotification(sprintf("Load failed: %s", e$message), type = "error", duration = 10)

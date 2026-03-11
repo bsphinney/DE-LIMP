@@ -25,6 +25,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       --flatly-border: #dee2e6;
       --flatly-muted: #6c757d;
     }
+    /* Methodology text: wrap long lines instead of horizontal overflow */
+    #methodology_text {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
 
     /* Navbar dropdown styling (open/close handled by JS) */
     .navbar .dropdown-menu {
@@ -1853,7 +1858,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                                 actionButton("methodology_info_btn", icon("question-circle"), title = "About the methods",
                                   class = "btn-outline-info btn-sm")
                               ),
-                              verbatimTextOutput("methodology_text")
+                              div(style = "overflow: auto; max-height: calc(100vh - 200px);",
+                                verbatimTextOutput("methodology_text")
+                              )
                             )
                   )
                 )

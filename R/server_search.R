@@ -479,13 +479,11 @@ server_search <- function(input, output, session, values, add_to_log,
       tryCatch({
         saved_jobs <- readRDS(job_queue_path)
         if (is.list(saved_jobs) && length(saved_jobs) > 0) {
-          # Backward compat: add backend field to old jobs
-          for (i in seq_along(saved_jobs)) {
-            if (is.null(saved_jobs[[i]]$backend)) saved_jobs[[i]]$backend <- "hpc"
-          }
+          # Sanitize on load — fix any corrupt/incomplete entries
+          saved_jobs <- lapply(saved_jobs, sanitize_job)
           values$diann_jobs <- saved_jobs
           n_active <- sum(vapply(saved_jobs, function(j)
-            j$status %in% c("queued", "running"), logical(1)))
+            !is.null(j$status) && length(j$status) == 1 && j$status %in% c("queued", "running"), logical(1)))
           if (n_active > 0) {
             showNotification(
               sprintf("Restored %d job(s) from previous session (%d active).",
@@ -500,6 +498,16 @@ server_search <- function(input, output, session, values, add_to_log,
     job_queue_loaded(TRUE)
   }) |> bindEvent(TRUE)  # Run once on startup
 
+  # Validate and repair job entries — ensures required fields are present.
+  # Called before save to prevent corrupt entries from persisting.
+  sanitize_job <- function(j) {
+    if (is.null(j$status) || length(j$status) != 1) j$status <- "unknown"
+    if (is.null(j$backend)) j$backend <- "hpc"
+    if (is.null(j$name) || length(j$name) != 1) j$name <- "unnamed"
+    if (is.null(j$job_id) || length(j$job_id) != 1) j$job_id <- NA_character_
+    j
+  }
+
   # Save jobs to disk whenever the queue changes (after initial load)
   # CRITICAL: ignoreInit = TRUE prevents overwriting saved jobs with the empty
   # initial value of values$diann_jobs before the load observer restores them.
@@ -508,6 +516,8 @@ server_search <- function(input, output, session, values, add_to_log,
     tryCatch({
       # Exclude removed jobs from persistence to avoid unbounded growth
       active_jobs <- Filter(function(j) !isTRUE(j$removed), values$diann_jobs)
+      # Sanitize before save — never persist corrupt entries
+      active_jobs <- lapply(active_jobs, sanitize_job)
       saveRDS(active_jobs, job_queue_path)
     }, error = function(e) {
       message("[DE-LIMP] Failed to save job queue: ", e$message)
@@ -4103,7 +4113,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # Only poll if there are active jobs
     active_jobs <- vapply(values$diann_jobs, function(j) {
-      j$status %in% c("queued", "running")
+      !is.null(j$status) && length(j$status) == 1 && j$status %in% c("queued", "running")
     }, logical(1))
 
     if (!any(active_jobs)) return()
@@ -4892,13 +4902,13 @@ server_search <- function(input, output, session, values, add_to_log,
     }
 
     # Refresh all button at top
-    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && j$status == "unknown", logical(1)))
+    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && identical(j$status, "unknown"), logical(1)))
 
     job_rows <- lapply(seq_along(jobs), function(i) {
       job <- jobs[[i]]
       if (isTRUE(job$removed)) return(NULL)
 
-      status_badge <- switch(job$status,
+      status_badge <- switch(job$status %||% "unknown",
         "queued"    = span(class = "badge bg-secondary", "Queued"),
         "running"   = span(class = "badge bg-primary", "Running"),
         "completed" = span(class = "badge bg-success", "Completed"),
