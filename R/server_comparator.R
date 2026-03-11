@@ -3973,6 +3973,44 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     })
   })
 
+  # --- View Prompt (transparency) ---
+  observeEvent(input$comparator_view_prompt_btn, {
+    res <- comp_results()
+    req(res)
+
+    mofa_obj <- values$comparator_mofa
+    prompt <- build_gemini_comparator_prompt(res, mofa_obj, values$instrument_metadata)
+
+    # JS to copy prompt text to clipboard
+    copy_js <- paste0(
+      "navigator.clipboard.writeText(document.getElementById('comparator_prompt_text').innerText)",
+      ".then(function(){ Shiny.setInputValue('comparator_prompt_copied', Math.random()); })"
+    )
+
+    showModal(modalDialog(
+      title = "Gemini Comparator Prompt",
+      size = "l",
+      easyClose = TRUE,
+      tags$p(class = "text-muted small",
+        "This is the exact prompt sent to Gemini. Review for bias or missing context. ",
+        "You can copy it to use with any AI tool."),
+      tags$div(style = "margin-bottom: 10px;",
+        actionButton("comparator_copy_prompt_btn", "Copy to Clipboard",
+                      icon = icon("clipboard"), class = "btn-outline-secondary btn-sm",
+                      onclick = copy_js)
+      ),
+      tags$pre(id = "comparator_prompt_text",
+               style = "max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.85em; background: #f8f9fa; padding: 12px; border-radius: 6px;",
+               prompt),
+      footer = modalButton("Close")
+    ))
+  })
+
+  # Clipboard copy confirmation
+  observeEvent(input$comparator_prompt_copied, {
+    showNotification("Prompt copied to clipboard", type = "message", duration = 2)
+  })
+
   # Inject Gemini narrative into static div (avoids bslib uiOutput disappearing bug)
   observe({
     narrative <- values$comparator_gemini_narrative
