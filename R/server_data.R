@@ -620,10 +620,6 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
           # Auto-save session .rds — deterministic path: {output_dir}/session.rds
           rds_path <- NA
           tryCatch({
-            save_dir <- if (!is.na(out_dir) && nzchar(out_dir %||% "") && dir.exists(out_dir)) out_dir
-                        else path.expand("~/.delimp_sessions")
-            dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
-            rds_path <- file.path(save_dir, "session.rds")
             session_data <- list(
               raw_data = values$raw_data, metadata = values$metadata,
               fit = values$fit, y_protein = values$y_protein,
@@ -646,8 +642,39 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
               app_version = paste0("DE-LIMP v", values$app_version),
               auto_saved = TRUE
             )
-            saveRDS(session_data, rds_path)
-            message("[DE-LIMP] Auto-saved session: ", rds_path)
+
+            # Save locally first (always need a local copy)
+            local_save_dir <- path.expand("~/.delimp_sessions")
+            dir.create(local_save_dir, showWarnings = FALSE, recursive = TRUE)
+            local_rds <- file.path(local_save_dir, "session.rds")
+            saveRDS(session_data, local_rds)
+
+            # Determine final path: prefer remote output_dir if SSH connected
+            cfg <- if (nzchar(input$ssh_host %||% "") && nzchar(input$ssh_user %||% ""))
+              list(host = input$ssh_host, user = input$ssh_user,
+                   port = input$ssh_port %||% 22, key_path = input$ssh_key_path)
+            else NULL
+            if (!is.null(cfg) && isTRUE(values$ssh_connected) &&
+                !is.na(out_dir) && nzchar(out_dir %||% "")) {
+              # Upload to remote {output_dir}/session.rds via SCP
+              remote_rds <- file.path(out_dir, "session.rds")
+              ul <- scp_upload(cfg, local_rds, remote_rds)
+              if (ul$status == 0) {
+                rds_path <- remote_rds
+                message("[DE-LIMP] Auto-saved session to remote: ", remote_rds)
+              } else {
+                rds_path <- local_rds
+                message("[DE-LIMP] SCP upload failed, saved locally: ", local_rds)
+              }
+            } else if (!is.na(out_dir) && nzchar(out_dir %||% "") && dir.exists(out_dir)) {
+              # Local output_dir exists (Docker/local backend)
+              rds_path <- file.path(out_dir, "session.rds")
+              file.copy(local_rds, rds_path, overwrite = TRUE)
+              message("[DE-LIMP] Auto-saved session: ", rds_path)
+            } else {
+              rds_path <- local_rds
+              message("[DE-LIMP] Auto-saved session locally: ", local_rds)
+            }
           }, error = function(e) {
             message("[DE-LIMP] Auto-save failed: ", e$message)
             rds_path <- NA

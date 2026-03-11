@@ -5,6 +5,30 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.1] - 2026-03-11
+
+### Fixed
+- **Spectronaut Candidates.tsv parsing**: Protein column regex now matches `Group` (Spectronaut's actual column name, not `ProteinGroup`). Comparison column regex matches `Comparison (group1/group2)` format (removed `$` anchor). Both fixes restore proper DE concordance analysis.
+- **DE Concordance NaN crash**: Spectronaut proteins with 0 `# of Ratios` have NaN for logFC/Pvalue/Qvalue. `classify_de()` and `assign_hypothesis()` now handle NaN/non-finite values safely, preventing "missing value where TRUE/FALSE needed" errors.
+- **Spectronaut version showing "unknown"**: Added fallback chain through `spectronaut_version` and `Software Version` keys from AnalysisOverview parsing.
+- **Spectronaut precursors "not available"**: Parse `AnalysisOverview.txt` (handles Spectronaut's `AnalyisOverview` typo) for "N of M" format precursor/protein counts. Enriches `library_info`.
+- **DE Concordance error message referenced FragPipe in Spectronaut mode**: Mode-aware messaging now shows correct tool name.
+- **History tab slow to populate**: Replaced 7 independent `activity_log_read()` calls (network CSV reads) with single `cached_activity_log()` reactive that caches per invalidation cycle.
+- **LC/EvoSep info missing from Methods text**: `format_instrument_methods_text()` now includes EvoSep SPD and gradient length, with deduplication when method name already contains SPD info.
+
+### Added
+- **Rescue stats for Spectronaut 0-ratio proteins**: Detects proteins with 0 computable ratios in Spectronaut that DE-LIMP could still test. Imputation-aware messaging (None/enabled/unknown). New Rule 0 ("Untestable in Spectronaut") as highest-priority hypothesis. Summary banner shows rescue count below main stats.
+- **Contrast mismatch warning**: Fuzzy matching detects when Spectronaut conditions don't match DE-LIMP contrasts. Amber warning div displayed in DE Concordance sub-tab.
+- **Instrument context in comparator prompts**: Both `build_gemini_comparator_prompt()` and `build_claude_comparator_prompt()` now include brief instrument/LC context (model, LC system, method, SPD, gradient length) when `instrument_metadata` is available.
+- **Remote HyStarMetadata.xml extraction**: SSH file scan now downloads `HyStarMetadata.xml` alongside `analysis.tdf` for LC method/system/runtime extraction from remote timsTOF data.
+- **Unified activity log** (v3.6.0): Single CSV replacing dual search/analysis history CSVs + projects.json. 33 columns, append-only with file locking. One-time migration from old format.
+- **Per-user cluster monitoring**: Tracks lab member CPU/memory usage on dual partitions with historical snapshots. Queue wait time display. Auto queue switching (genome-center-grp/high → publicgrp/low).
+- **Compare from History**: Select 2 analyses in history table → auto-load into Run Comparator.
+- **Session auto-save**: Deterministic RDS saved to `{output_dir}/session.rds` after pipeline completion.
+
+### Changed
+- App version bumped to v3.6.1.
+
 ## [3.5.1] - 2026-03-10
 
 ### Fixed

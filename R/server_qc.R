@@ -1008,14 +1008,6 @@ server_qc <- function(input, output, session, values) {
     status_colors <- c(pass = "#28a745", warn = "#ffc107", fail = "#dc3545")
 
     if (view_mode == "faceted") {
-      # Build combined data.frame with run labels
-      plot_data <- do.call(rbind, lapply(names(traces), function(nm) {
-        df <- traces[[nm]]
-        df$run <- nm
-        df$status <- metrics$status[metrics$run == nm]
-        df
-      }))
-
       # Compute median trace on common grid for overlay
       grid_rt <- seq(
         max(sapply(traces, function(x) min(x$rt_min))),
@@ -1030,32 +1022,47 @@ server_qc <- function(input, output, session, values) {
       } else {
         interp_matrix  # single file case
       }
-      median_df <- data.frame(rt_min = grid_rt, tic = median_trace)
 
-      # Short run labels (remove .d extension)
-      plot_data$run_label <- sub("\\.d$", "", plot_data$run)
+      # Build native plotly subplots (avoids ggplotly facet_wrap first-panel bug)
+      run_names <- names(traces)
+      ncol <- min(4L, length(run_names))
+      nrow <- ceiling(length(run_names) / ncol)
 
-      p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = rt_min, y = tic / 1e6)) +
-        ggplot2::geom_line(ggplot2::aes(color = status), linewidth = 0.5) +
-        ggplot2::geom_line(data = data.frame(rt_min = grid_rt, tic = median_trace / 1e6),
-          ggplot2::aes(x = rt_min, y = tic), color = "#007bff",
-          linetype = "dashed", linewidth = 0.4, alpha = 0.7) +
-        ggplot2::facet_wrap(~ run_label, ncol = 4, scales = "free_y") +
-        ggplot2::scale_color_manual(values = status_colors, guide = "none") +
-        ggplot2::labs(x = "Retention Time (min)", y = "TIC (M)",
-          title = "TIC Traces by Run",
-          subtitle = "Blue dashed = median trace across all runs") +
-        ggplot2::theme_bw(base_size = 11) +
-        ggplot2::theme(
-          strip.background = ggplot2::element_rect(fill = "#2c3e50"),
-          strip.text = ggplot2::element_text(color = "white", size = 8),
-          panel.grid.minor = ggplot2::element_blank(),
-          plot.title = ggplot2::element_text(face = "bold", size = 13),
-          plot.subtitle = ggplot2::element_text(color = "gray50", size = 10)
+      subplots <- lapply(seq_along(run_names), function(i) {
+        nm <- run_names[i]
+        df <- traces[[nm]]
+        run_status <- metrics$status[metrics$run == nm]
+        line_col <- status_colors[run_status] %||% "#666"
+        run_label <- sub("\\.d$", "", nm)
+
+        plotly::plot_ly() %>%
+          plotly::add_lines(x = df$rt_min, y = df$tic / 1e6,
+            line = list(color = line_col, width = 1.5),
+            hoverinfo = "text",
+            text = sprintf("%s<br>RT: %.1f min<br>TIC: %.1fM", run_label, df$rt_min, df$tic / 1e6),
+            showlegend = FALSE) %>%
+          plotly::add_lines(x = grid_rt, y = median_trace / 1e6,
+            line = list(color = "#007bff", width = 1, dash = "dash"),
+            opacity = 0.7, hoverinfo = "skip", showlegend = FALSE) %>%
+          plotly::layout(
+            annotations = list(list(
+              text = run_label, x = 0.5, y = 1.05, xref = "paper", yref = "paper",
+              showarrow = FALSE, font = list(size = 10, color = "white"),
+              bgcolor = "#2c3e50", borderpad = 3, xanchor = "center"
+            )),
+            xaxis = list(title = if (i > length(run_names) - ncol) "RT (min)" else "",
+                          showgrid = TRUE, gridcolor = "#eee"),
+            yaxis = list(title = if ((i - 1) %% ncol == 0) "TIC (M)" else "",
+                          showgrid = TRUE, gridcolor = "#eee")
+          )
+      })
+
+      plotly::subplot(subplots, nrows = nrow, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
+        plotly::layout(
+          title = list(text = "TIC Traces by Run<br><sup style='color:gray'>Blue dashed = median trace across all runs</sup>",
+                        font = list(size = 14)),
+          showlegend = FALSE
         )
-
-      plotly::ggplotly(p, tooltip = c("x", "y")) %>%
-        plotly::layout(showlegend = FALSE)
 
     } else if (view_mode == "overlay") {
       # All runs normalized, overlaid
@@ -1235,6 +1242,147 @@ server_qc <- function(input, output, session, values) {
       footer = modalButton("Close")
     ))
     output$tic_qc_fullscreen_plot <- plotly::renderPlotly({ p })
+  })
+
+  # Extract TIC from QC tab — uses raw file paths from search settings or scanned files
+  observeEvent(input$tic_extract_from_qc_btn, {
+    # Try to find .d file paths from various sources
+    d_files <- NULL
+
+    # Source 1: Already scanned raw files
+    if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+      df <- values$diann_raw_files
+      d_idx <- grepl("\\.d$", df$filename, ignore.case = TRUE)
+      if (any(d_idx)) d_files <- df[d_idx, ]
+    }
+
+    # Source 2: Search settings output_dir — scan for .d files in parent dir
+    if (is.null(d_files)) {
+      ss <- values$diann_search_settings
+      if (!is.null(ss) && !is.null(ss$output_dir) && nzchar(ss$output_dir %||% "")) {
+        # Raw files are usually in the parent of output_dir or a sibling
+        raw_dir <- dirname(ss$output_dir)
+        cfg <- if (isTRUE(values$ssh_connected) && !is.null(input$ssh_host) && nzchar(input$ssh_host %||% ""))
+          list(host = input$ssh_host, user = input$ssh_user,
+               port = input$ssh_port %||% 22, key_path = input$ssh_key_path) else NULL
+
+        if (!is.null(cfg)) {
+          res <- tryCatch(
+            ssh_exec(cfg, sprintf("ls -d %s/*.d 2>/dev/null", shQuote(raw_dir)), timeout = 15),
+            error = function(e) list(status = 1, stdout = character()))
+          if (res$status == 0 && length(res$stdout) > 0) {
+            paths <- trimws(res$stdout)
+            paths <- paths[nzchar(paths) & grepl("\\.d$", paths)]
+            if (length(paths) > 0) {
+              d_files <- data.frame(
+                filename = basename(paths),
+                full_path = paths,
+                size_mb = NA_real_,
+                stringsAsFactors = FALSE)
+              # Store so the extraction code can find them
+              values$diann_raw_files <- d_files
+              updateTextInput(session, "ssh_raw_data_dir", value = raw_dir)
+            }
+          }
+        } else if (dir.exists(raw_dir)) {
+          d_paths <- list.dirs(raw_dir, recursive = FALSE, full.names = TRUE)
+          d_paths <- d_paths[grepl("\\.d$", d_paths)]
+          if (length(d_paths) > 0) {
+            d_files <- data.frame(
+              filename = basename(d_paths),
+              full_path = d_paths,
+              size_mb = file.size(file.path(d_paths, "analysis.tdf")) / 1e6,
+              stringsAsFactors = FALSE)
+            values$diann_raw_files <- d_files
+          }
+        }
+      }
+    }
+
+    if (is.null(d_files) || nrow(d_files) == 0) {
+      showNotification(
+        "No .d files found. Go to New Search tab and scan a raw file directory first.",
+        type = "warning", duration = 8)
+      return()
+    }
+
+    # Extract TIC traces
+    n_files <- nrow(d_files)
+    cfg <- if (isTRUE(values$ssh_connected) && !is.null(input$ssh_host) && nzchar(input$ssh_host %||% ""))
+      list(host = input$ssh_host, user = input$ssh_user,
+           port = input$ssh_port %||% 22, key_path = input$ssh_key_path) else NULL
+
+    traces <- list()
+    withProgress(message = sprintf("Extracting TIC from %d files...", n_files), value = 0, {
+      for (i in seq_len(n_files)) {
+        fname <- d_files$filename[i]
+        incProgress(1 / n_files, detail = fname)
+        tic_df <- NULL
+        if (!is.null(cfg)) {
+          tryCatch({
+            raw_dir <- dirname(d_files$full_path[i])
+            remote_tdf <- file.path(raw_dir, fname, "analysis.tdf")
+            local_tdf <- file.path(tempdir(), paste0("tic_qc_", i, "_analysis.tdf"))
+            dl <- scp_download(cfg, remote_tdf, local_tdf)
+            if (dl$status == 0 && file.exists(local_tdf)) {
+              tic_df <- extract_tic_timstof(local_tdf)
+              unlink(local_tdf)
+            }
+          }, error = function(e) NULL)
+        } else {
+          tryCatch({
+            tdf_path <- file.path(d_files$full_path[i], "analysis.tdf")
+            tic_df <- extract_tic_timstof(tdf_path)
+          }, error = function(e) NULL)
+        }
+        if (!is.null(tic_df)) traces[[fname]] <- tic_df
+      }
+    })
+
+    if (length(traces) == 0) {
+      showNotification("TIC extraction failed for all files", type = "error")
+      return()
+    }
+
+    # Compute metrics (same as server_search.R)
+    metrics_list <- lapply(names(traces), function(nm) compute_tic_metrics(traces[[nm]], nm))
+    metrics_df <- do.call(rbind, lapply(metrics_list, function(m) {
+      data.frame(
+        run = m$run, valid = m$valid,
+        total_auc = m$total_auc %||% NA_real_,
+        peak_rt_min = m$peak_rt_min %||% NA_real_,
+        peak_tic = m$peak_tic %||% NA_real_,
+        ramp_rt_min = m$ramp_rt_min %||% NA_real_,
+        tail_rt_min = m$tail_rt_min %||% NA_real_,
+        gradient_width_min = m$gradient_width_min %||% NA_real_,
+        baseline_ratio = m$baseline_ratio %||% NA_real_,
+        late_signal_ratio = m$late_signal_ratio %||% NA_real_,
+        asymmetry = m$asymmetry %||% NA_real_,
+        stringsAsFactors = FALSE)
+    }))
+    metrics_df$size_mb <- d_files$size_mb[match(metrics_df$run, d_files$filename)]
+    shape_df <- compute_shape_similarity(traces)
+    if (!is.null(shape_df)) {
+      metrics_df <- merge(metrics_df, shape_df, by = "run", all.x = TRUE)
+    } else {
+      metrics_df$shape_r <- 1.0
+    }
+    diag_results <- lapply(seq_len(nrow(metrics_df)), function(i) {
+      diagnose_run(as.list(metrics_df[i, ]), metrics_df, metrics_df$shape_r[i])
+    })
+    metrics_df$status <- sapply(diag_results, function(d) d$status)
+    metrics_df$flags <- sapply(diag_results, function(d) paste(d$flags, collapse = "; "))
+    traces <- lapply(traces, normalize_tic)
+
+    values$tic_traces <- traces
+    values$tic_metrics <- metrics_df
+
+    n_pass <- sum(metrics_df$status == "pass")
+    n_warn <- sum(metrics_df$status == "warn")
+    n_fail <- sum(metrics_df$status == "fail")
+    showNotification(
+      sprintf("TIC extracted: %d pass, %d warn, %d fail", n_pass, n_warn, n_fail),
+      type = if (n_fail > 0) "warning" else "message", duration = 6)
   })
 
 }

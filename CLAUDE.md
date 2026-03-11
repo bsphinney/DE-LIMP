@@ -38,7 +38,7 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_search.R` | Docker/HPC dual backend, SSH, DIA-NN search, job queue |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
-| `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 8-rule hypothesis engine, Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios), MOFA2 decomposition |
+| `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview), contrast mismatch detection, instrument context in AI prompts, MOFA2 decomposition |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, unified activity log |
@@ -183,9 +183,14 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | Spectronaut trailing dots in sample names | Spectronaut appends `.` to labels ending in digits (e.g., "AD12." → "AD12"). `match_samples()` strips with `gsub("\\.$", "", x)`. |
 | Spectronaut `PG.UniProtIds` fallback | Some Spectronaut exports lack `PG.ProteinGroups`. Protein column regex includes `UniProtIds` as fallback. Q-value regex includes `Q.Value` variant. |
 | Spectronaut Quant3 inflates significance | "Use All MS-Level Quantities" doubles observation count (21v20 → 42v40 in t-test). Detected via `parse_spectronaut_search_settings()`, shown as red "severe" row in settings diff. |
+| Spectronaut `Group` not `ProteinGroup` | Candidates.tsv uses `Group` for protein accessions. Regex must include `^Group$`. |
+| Spectronaut `Comparison (group1/group2)` format | Comparison column has parenthetical suffix. Regex `^Comparison$` fails — remove `$` anchor. |
+| Spectronaut 0-ratio proteins have NaN | Proteins with 0 `# of Ratios` have NaN logFC/Pvalue/Qvalue. `classify_de()` uses `is.finite()`, `assign_hypothesis()` coerces to safe defaults (0 for logFC, 1 for adjP). |
+| Spectronaut `AnalyisOverview.txt` typo | Filename may be misspelled by Spectronaut. Regex detector handles both spellings: `analy.?is.?overview`. |
+| History tab slow with network CSV | Multiple `activity_log_read()` calls per render cycle. Use `cached_activity_log()` reactive to read once per invalidation. |
 
 ## Version History
 
-Current version: **v3.6.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.6.1** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
-Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0) | **Spectronaut parsing fixes, TopN scatter fix, sub-tab help modals** (v3.5.1)
+Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0) | **Spectronaut parsing fixes, TopN scatter fix, sub-tab help modals** (v3.5.1) | **Unified activity log, cluster monitoring, Spectronaut NaN/rescue fixes** (v3.6.0/v3.6.1)

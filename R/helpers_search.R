@@ -400,7 +400,7 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
     min_pep_len = 7, max_pep_len = 30,
     min_pr_mz = 300, max_pr_mz = 1800,
     min_pr_charge = 1, max_pr_charge = 4,
-    min_fr_mz = 200, max_fr_mz = 1200,
+    min_fr_mz = 200, max_fr_mz = 1800,
     enzyme = "K*,R*", missed_cleavages = 1,
     mbr = TRUE, rt_profiling = TRUE, xic = TRUE,
     mod_met_ox = TRUE, mod_nterm_acetyl = FALSE,
@@ -428,7 +428,7 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
     "--gen-spec-lib",
     sprintf("--qvalue %s", sp$qvalue),
     "--verbose 1",
-    sprintf("--var-mods %d", sp$max_var_mods)
+    sprintf("--var-mods %d", as.integer(sp$max_var_mods))
   )
 
   if (isTRUE(sp$xic)) flags <- c(flags, "--xic")
@@ -438,7 +438,7 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
   if (search_mode == "library" && !is.null(speclib_mount)) {
     flags <- c(flags,
       sprintf("--lib %s", speclib_mount),
-      sprintf("--window %d", sp$scan_window),
+      sprintf("--window %d", as.integer(sp$scan_window)),
       "--use-quant"
     )
   }
@@ -449,15 +449,15 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
       "--fasta-search",
       "--predictor",
       sprintf("--cut %s", sp$enzyme),
-      sprintf("--missed-cleavages %d", sp$missed_cleavages),
-      sprintf("--min-pep-len %d", sp$min_pep_len),
-      sprintf("--max-pep-len %d", sp$max_pep_len),
-      sprintf("--min-pr-mz %d", sp$min_pr_mz),
-      sprintf("--max-pr-mz %d", sp$max_pr_mz),
-      sprintf("--min-pr-charge %d", sp$min_pr_charge),
-      sprintf("--max-pr-charge %d", sp$max_pr_charge),
-      sprintf("--min-fr-mz %d", sp$min_fr_mz),
-      sprintf("--max-fr-mz %d", sp$max_fr_mz)
+      sprintf("--missed-cleavages %d", as.integer(sp$missed_cleavages)),
+      sprintf("--min-pep-len %d", as.integer(sp$min_pep_len)),
+      sprintf("--max-pep-len %d", as.integer(sp$max_pep_len)),
+      sprintf("--min-pr-mz %d", as.integer(sp$min_pr_mz)),
+      sprintf("--max-pr-mz %d", as.integer(sp$max_pr_mz)),
+      sprintf("--min-pr-charge %d", as.integer(sp$min_pr_charge)),
+      sprintf("--max-pr-charge %d", as.integer(sp$max_pr_charge)),
+      sprintf("--min-fr-mz %d", as.integer(sp$min_fr_mz)),
+      sprintf("--max-fr-mz %d", as.integer(sp$max_fr_mz))
     )
     if (isTRUE(sp$met_excision)) flags <- c(flags, "--met-excision")
   }
@@ -465,7 +465,7 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
   # Mass accuracy
   if (sp$mass_acc_mode == "manual") {
     flags <- c(flags,
-      sprintf("--window %d", sp$scan_window),
+      sprintf("--window %d", as.integer(sp$scan_window)),
       sprintf("--mass-acc %s", sp$mass_acc),
       sprintf("--mass-acc-ms1 %s", sp$mass_acc_ms1)
     )
@@ -797,7 +797,7 @@ parse_diann_log <- function(log_path) {
 generate_sbatch_script <- function(
   analysis_name, raw_files, fasta_files, speclib_path = NULL,
   output_dir, diann_sif, normalization = "on", search_mode = "libfree",
-  cpus = 64, mem_gb = 512, time_hours = 12,
+  cpus = 64, mem_gb = 128, time_hours = 12,
   partition = "high", account = "genome-center-grp",
   search_params = list(), requeue = FALSE
 ) {
@@ -1815,7 +1815,8 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
                                   normalization = "on", sif_path = "",
                                   job_ids = NULL, parallel = FALSE,
                                   resources = list(), partition = "", account = "",
-                                  cached_speclib = NULL, custom_fasta_sequences = NULL) {
+                                  cached_speclib = NULL, custom_fasta_sequences = NULL,
+                                  instrument_metadata = NULL) {
 
   timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 
@@ -1885,6 +1886,28 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
     ), collapse = "\n")
   } else ""
 
+  # Instrument metadata section
+  inst_section <- ""
+  if (!is.null(instrument_metadata)) {
+    inst_lines <- c("### Instrument & Acquisition")
+    if (!is.null(instrument_metadata$instrument_model))
+      inst_lines <- c(inst_lines, sprintf("- **Instrument**: %s", instrument_metadata$instrument_model))
+    if (!is.null(instrument_metadata$instrument_serial))
+      inst_lines <- c(inst_lines, sprintf("- **Serial**: %s", instrument_metadata$instrument_serial))
+    if (!is.null(instrument_metadata$acquisition_mode) && instrument_metadata$acquisition_mode != "unknown")
+      inst_lines <- c(inst_lines, sprintf("- **Acquisition mode**: %s", instrument_metadata$acquisition_mode))
+    if (!is.null(instrument_metadata$lc_system))
+      inst_lines <- c(inst_lines, sprintf("- **LC system**: %s", instrument_metadata$lc_system))
+    if (!is.null(instrument_metadata$lc_method))
+      inst_lines <- c(inst_lines, sprintf("- **LC method**: %s", instrument_metadata$lc_method))
+    if (!is.null(instrument_metadata$dia_windows))
+      inst_lines <- c(inst_lines, sprintf("- **DIA windows**: %d", instrument_metadata$dia_windows))
+    if (!is.na(instrument_metadata$mz_range_low %||% NA) && !is.na(instrument_metadata$mz_range_high %||% NA))
+      inst_lines <- c(inst_lines, sprintf("- **m/z range**: %.0f-%.0f",
+                                           instrument_metadata$mz_range_low, instrument_metadata$mz_range_high))
+    if (length(inst_lines) > 1) inst_section <- paste(inst_lines, collapse = "\n")
+  }
+
   paste(c(
     sprintf("# DIA-NN Search: %s", analysis_name),
     "",
@@ -1896,6 +1919,7 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
     sprintf("**DIA-NN container**: `%s`", sif_path),
     sprintf("**Partition**: %s | **Account**: %s", partition, account),
     "",
+    if (nzchar(inst_section)) c(inst_section, ""),
     job_section,
     "",
     res_section,
@@ -1960,7 +1984,7 @@ generate_parallel_scripts <- function(
   output_dir, diann_sif, normalization = "on", search_mode = "libfree",
   cpus_per_file = 16, mem_per_file = 64, time_per_file = 2,
   libpred_cpus = 16, libpred_mem = 64, libpred_time = 4,
-  assembly_cpus = 64, assembly_mem = 512, assembly_time = 12,
+  assembly_cpus = 64, assembly_mem = 128, assembly_time = 12,
   partition = "high", account = "genome-center-grp",
   search_params = list(), max_simultaneous = 20,
   array_partition = NULL, array_account = NULL,
@@ -2515,6 +2539,48 @@ check_cluster_resources <- function(ssh_config, account, partition, sbatch_path 
     result$user_available <- result$user_limit - result$user_used
   }
 
+  # --- 4. Queue wait time: average wait for PENDING jobs (excluding dependency) ---
+  result$pending_count <- 0L
+  result$avg_wait_min <- NA_real_
+  result$max_wait_min <- NA_real_
+  tryCatch({
+    # %V = submit time, %r = reason; filter to current user, exclude Dependency
+    squeue_cmd <- sprintf(
+      "%s -u %s -A %s -p %s -t PENDING -o \"%%V|%%r\" --noheader",
+      slurm_cmd("squeue"), username, account, partition
+    )
+    res_q <- run_cmd(squeue_cmd)
+    if (res_q$status == 0 && length(res_q$stdout) > 0) {
+      lines <- trimws(res_q$stdout)
+      lines <- lines[nzchar(lines)]
+      if (length(lines) > 0) {
+        # Parse submit_time|reason, keep only non-dependency pending
+        now <- Sys.time()
+        wait_mins <- numeric()
+        for (ln in lines) {
+          parts <- strsplit(ln, "\\|")[[1]]
+          if (length(parts) >= 2) {
+            reason <- trimws(parts[2])
+            # Skip dependency-pending jobs
+            if (grepl("Depend", reason, ignore.case = TRUE)) next
+            submit_str <- trimws(parts[1])
+            submit_time <- tryCatch(
+              as.POSIXct(submit_str, format = "%Y-%m-%dT%H:%M:%S"),
+              error = function(e) NA)
+            if (!is.na(submit_time)) {
+              wait_mins <- c(wait_mins, as.numeric(difftime(now, submit_time, units = "mins")))
+            }
+          }
+        }
+        result$pending_count <- length(wait_mins)
+        if (length(wait_mins) > 0) {
+          result$avg_wait_min <- mean(wait_mins)
+          result$max_wait_min <- max(wait_mins)
+        }
+      }
+    }
+  }, error = function(e) NULL)
+
   # Success if we got at least squeue data
   if (!is.na(result$group_used) || !is.na(result$user_used)) {
     result$success <- TRUE
@@ -2991,6 +3057,122 @@ fasta_library_add <- function(entry) {
   fasta_library_save(catalog)
 }
 
+#' Update fields on an existing FASTA library catalog entry
+#'
+#' @param id Character: entry id to update
+#' @param updates Named list of fields to merge into the entry
+#' @return Logical: TRUE on success
+fasta_library_update_entry <- function(id, updates) {
+  catalog <- fasta_library_load()
+  idx <- which(vapply(catalog, function(e) identical(e$id, id), logical(1)))
+  if (length(idx) == 0) return(FALSE)
+  for (nm in names(updates)) catalog[[idx[1]]][[nm]] <- updates[[nm]]
+  fasta_library_save(catalog)
+}
+
+#' Parse DIA-NN log output to extract actual flags used
+#'
+#' Reads a DIA-NN .out log file and extracts the command-line flags that
+#' were actually used. Returns a named list of search parameters.
+#'
+#' @param log_lines Character vector of log file lines
+#' @return Named list of verified search parameters
+parse_diann_log_flags <- function(log_lines) {
+  if (length(log_lines) == 0) return(list())
+
+  all_text <- paste(log_lines, collapse = " ")
+
+  # DIA-NN log has TWO sources of truth:
+  # 1. The apptainer/diann command line in the sbatch echo (has --flag syntax)
+  # 2. DIA-NN's own confirmation output (has "Max fragment m/z set to 1800" syntax)
+  # We parse BOTH — DIA-NN's confirmation is authoritative
+
+  # Helper: extract from DIA-NN confirmation lines like "Max fragment m/z set to 1800"
+  extract_set_to <- function(pattern) {
+    m <- regmatches(all_text, regexpr(sprintf("%s set to\\s+([0-9.]+)", pattern), all_text))
+    if (length(m) > 0) as.numeric(sub(".*set to\\s+", "", m[1])) else NULL
+  }
+
+  # Helper: extract from CLI flags like --max-fr-mz 1800
+  extract_cli_int <- function(flag) {
+    m <- regmatches(all_text, regexpr(sprintf("%s\\s+(\\d+)", flag), all_text))
+    if (length(m) > 0) as.integer(sub(sprintf("^%s\\s+", flag), "", m[1])) else NULL
+  }
+
+  has_text <- function(pattern) grepl(pattern, all_text, fixed = TRUE)
+
+  list(
+    enzyme = {
+      # "In silico digest will involve cuts at K*,R*"
+      m <- regmatches(all_text, regexpr("cuts at\\s+(\\S+)", all_text))
+      if (length(m) > 0) sub("^cuts at\\s+", "", m[1])
+      else {
+        m2 <- regmatches(all_text, regexpr("--cut\\s+(\\S+)", all_text))
+        if (length(m2) > 0) sub("^--cut\\s+", "", m2[1]) else NULL
+      }
+    },
+    missed_cleavages = as.integer(extract_set_to("Maximum number of missed cleavages") %||%
+                                    extract_cli_int("--missed-cleavages")),
+    min_pep_len = as.integer(extract_set_to("Min peptide length") %||%
+                               extract_cli_int("--min-pep-len")),
+    max_pep_len = as.integer(extract_set_to("Max peptide length") %||%
+                               extract_cli_int("--max-pep-len")),
+    min_pr_mz = as.integer(extract_set_to("Min precursor m/z") %||%
+                             extract_cli_int("--min-pr-mz")),
+    max_pr_mz = as.integer(extract_set_to("Max precursor m/z") %||%
+                             extract_cli_int("--max-pr-mz")),
+    min_fr_mz = as.integer(extract_set_to("Min fragment m/z") %||%
+                             extract_cli_int("--min-fr-mz")),
+    max_fr_mz = as.integer(extract_set_to("Max fragment m/z") %||%
+                             extract_cli_int("--max-fr-mz")),
+    min_pr_charge = as.integer(extract_set_to("Min precursor charge") %||%
+                                 extract_cli_int("--min-pr-charge")),
+    max_pr_charge = as.integer(extract_set_to("Max precursor charge") %||%
+                                 extract_cli_int("--max-pr-charge")),
+    mass_acc = {
+      m <- regmatches(all_text, regexpr("--mass-acc\\s+([0-9.]+)", all_text))
+      if (length(m) > 0 && !grepl("--mass-acc-ms1", m[1]))
+        as.numeric(sub("^--mass-acc\\s+", "", m[1])) else NULL
+    },
+    mass_acc_ms1 = {
+      m <- regmatches(all_text, regexpr("--mass-acc-ms1\\s+([0-9.]+)", all_text))
+      if (length(m) > 0) as.numeric(sub("^--mass-acc-ms1\\s+", "", m[1])) else NULL
+    },
+    qvalue = {
+      m <- regmatches(all_text, regexpr("filtered at\\s+([0-9.]+)\\s+FDR", all_text))
+      if (length(m) > 0) {
+        as.numeric(sub("\\s+FDR.*", "", sub(".*filtered at\\s+", "", m[1])))
+      } else {
+        m2 <- regmatches(all_text, regexpr("--qvalue\\s+([0-9.]+)", all_text))
+        if (length(m2) > 0) as.numeric(sub("^--qvalue\\s+", "", m2[1])) else NULL
+      }
+    },
+    max_var_mods = as.integer(extract_set_to("Maximum number of variable modifications") %||%
+                                extract_cli_int("--var-mods")),
+    scan_window = as.integer(extract_set_to("Scan window radius") %||%
+                               extract_cli_int("--window")),
+    mod_met_ox = has_text("UniMod:35") || has_text("Modification UniMod:35"),
+    mod_nterm_acetyl = has_text("UniMod:1,") || has_text("UniMod:1 "),
+    unimod4 = has_text("carbamidomethylation enabled") || has_text("--unimod4"),
+    met_excision = has_text("methionine excision enabled") || has_text("--met-excision"),
+    fasta_search = has_text("FASTA digest") || has_text("--fasta-search"),
+    gen_spec_lib = has_text("spectral library will be generated") || has_text("--gen-spec-lib"),
+    # Library generation stats
+    n_precursors = {
+      m <- regmatches(all_text, regexpr("([0-9]+)\\s+precursors generated", all_text))
+      if (length(m) > 0) as.integer(sub("\\s+precursors.*", "", m[1])) else NULL
+    },
+    n_proteins_lib = {
+      m <- regmatches(all_text, regexpr("Library contains\\s+([0-9]+)\\s+proteins", all_text))
+      if (length(m) > 0) as.integer(sub(".*contains\\s+", "", sub("\\s+proteins.*", "", m[1]))) else NULL
+    },
+    n_genes_lib = {
+      m <- regmatches(all_text, regexpr("and\\s+([0-9]+)\\s+genes", all_text))
+      if (length(m) > 0) as.integer(sub(".*and\\s+", "", sub("\\s+genes.*", "", m[1]))) else NULL
+    }
+  )
+}
+
 #' Remove an entry from the FASTA library catalog
 #'
 #' Optionally deletes the associated files on disk.
@@ -3225,7 +3407,11 @@ fasta_library_build_entry <- function(download_result, uniprot_row,
     search_settings = list(
       enzyme = search_params$enzyme %||% "K*,R*",
       missed_cleavages = as.integer(search_params$missed_cleavages %||% 1L),
-      var_mods = if (isTRUE(search_params$mod_met_ox)) "UniMod:35 (Met oxidation)" else "",
+      var_mods = paste(Filter(nzchar, c(
+        if (isTRUE(search_params$mod_met_ox)) "UniMod:35 (Met oxidation)" else NULL,
+        if (isTRUE(search_params$mod_nterm_acetyl)) "UniMod:1 (N-term acetylation)" else NULL,
+        if (nzchar(search_params$extra_var_mods %||% "")) search_params$extra_var_mods else NULL
+      )), collapse = "; "),
       fixed_mods = if (isTRUE(search_params$unimod4)) "UniMod:4 (Carbamidomethylation)" else "",
       min_pep_len = as.integer(search_params$min_pep_len %||% 7L),
       max_pep_len = as.integer(search_params$max_pep_len %||% 30L),
@@ -3688,6 +3874,9 @@ record_cluster_snapshot <- function(lab_res, pub_res, auto_partition,
       user_available = lab_res$user_available %||% NA,
       partition_idle = lab_res$partition_idle %||% NA,
       partition_total = lab_res$partition_total %||% NA,
+      pending_count = lab_res$pending_count %||% NA,
+      avg_wait_min = round(lab_res$avg_wait_min %||% NA, 1),
+      max_wait_min = round(lab_res$max_wait_min %||% NA, 1),
       auto_selected = auto_sel,
       stringsAsFactors = FALSE
     )
@@ -3706,6 +3895,9 @@ record_cluster_snapshot <- function(lab_res, pub_res, auto_partition,
       user_available = pub_res$user_available %||% NA,
       partition_idle = pub_res$partition_idle %||% NA,
       partition_total = pub_res$partition_total %||% NA,
+      pending_count = pub_res$pending_count %||% NA,
+      avg_wait_min = round(pub_res$avg_wait_min %||% NA, 1),
+      max_wait_min = round(pub_res$max_wait_min %||% NA, 1),
       auto_selected = auto_sel,
       stringsAsFactors = FALSE
     )
@@ -3983,6 +4175,12 @@ cluster_usage_grant_summary <- function(df) {
       pct_user_at_capacity = round(
         sum(!is.na(chunk$user_available) & chunk$user_available < 64) /
         max(nrow(chunk), 1) * 100, 1),
+      avg_pending_count = if ("pending_count" %in% names(chunk))
+        round(mean(chunk$pending_count, na.rm = TRUE), 1) else NA_real_,
+      avg_wait_min = if ("avg_wait_min" %in% names(chunk))
+        round(mean(chunk$avg_wait_min, na.rm = TRUE), 1) else NA_real_,
+      max_wait_min = if ("max_wait_min" %in% names(chunk))
+        round(max(chunk$max_wait_min, na.rm = TRUE), 1) else NA_real_,
       stringsAsFactors = FALSE
     )
   }))

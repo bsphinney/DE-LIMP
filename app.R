@@ -390,6 +390,7 @@ server <- function(input, output, session) {
     diann_speclib = NULL,
     uniprot_results = NULL,
     fasta_info = NULL,
+    library_locked = FALSE,
     ssh_connected = FALSE,
     ssh_sbatch_path = NULL,
     cluster_resources = NULL,

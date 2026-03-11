@@ -123,7 +123,30 @@ parse_timstof_from_tdf <- function(tdf_path) {
         lc_serial <- find_param("ConfigurationObject_SerialNumber")
 
         if (!is.na(lc_device) && nzchar(lc_device)) meta$lc_system <- lc_device
-        if (!is.na(lc_method) && nzchar(lc_method)) meta$lc_method <- lc_method
+        if (!is.na(lc_method) && nzchar(lc_method)) {
+          # Clean up raw method path (e.g., "C:\ProgramData\Evosep\...\100-samples-per-day_2025-...")
+          raw_method <- lc_method
+          # Extract just the filename without timestamp suffix
+          method_base <- basename(gsub("\\\\", "/", raw_method))
+          # Strip date-time suffix (e.g., "_2025-11-24_18-57-08")
+          method_base <- sub("_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$", "", method_base)
+          meta$lc_method <- method_base
+
+          # EvoSep SPD auto-detection from method name
+          # Handles both "100-samples-per-day" and "100 samples per day"
+          spd_match <- regmatches(method_base,
+            regexpr("(\\d+)[- ]samples[- ]per[- ]day", method_base, ignore.case = TRUE))
+          if (length(spd_match) > 0 && nzchar(spd_match)) {
+            spd_val <- as.integer(sub("[- ]samples.*", "", spd_match))
+            meta$evosep_spd <- spd_val
+            # Map SPD to gradient length (from EvoSep website)
+            spd_gradients <- c("30" = 44, "60" = 21, "100" = 11.5,
+                               "200" = 5.5, "300" = 2.3, "500" = 2.2)
+            grad_min <- spd_gradients[as.character(spd_val)]
+            if (!is.na(grad_min)) meta$evosep_gradient_min <- as.numeric(grad_min)
+            meta$lc_method <- sprintf("EvoSep %d SPD (%s)", spd_val, method_base)
+          }
+        }
         if (!is.na(lc_runtime) && nzchar(lc_runtime)) meta$lc_runtime_min <- as.numeric(lc_runtime)
         if (!is.na(lc_serial) && nzchar(lc_serial)) meta$lc_serial <- lc_serial
 
@@ -407,6 +430,19 @@ format_instrument_methods_text <- function(meta) {
     lc_parts <- c(lc_parts, sprintf("method: %s", meta$lc_method))
   if (!is.null(meta$lc_runtime_min) && !is.na(meta$lc_runtime_min))
     lc_parts <- c(lc_parts, sprintf("%.0f min run time", meta$lc_runtime_min))
+  # EvoSep SPD info (only add gradient if not already in method name)
+  if (!is.null(meta$evosep_spd) && !is.na(meta$evosep_spd) &&
+      !is.null(meta$evosep_gradient_min) && !is.na(meta$evosep_gradient_min)) {
+    # Only add standalone SPD line if method name doesn't already contain SPD info
+    method_has_spd <- any(grepl("SPD|samples per day", lc_parts, ignore.case = TRUE))
+    if (!method_has_spd) {
+      lc_parts <- c(lc_parts, sprintf("%d samples per day (%.1f min gradient)",
+                                       meta$evosep_spd, meta$evosep_gradient_min))
+    } else {
+      # Just add gradient length
+      lc_parts <- c(lc_parts, sprintf("%.1f min gradient", meta$evosep_gradient_min))
+    }
+  }
   if (length(lc_parts) > 0) {
     lines <- c(lines, paste0("LC separation: ", paste(lc_parts, collapse = ", "), "."))
   }

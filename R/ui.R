@@ -258,7 +258,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       div(style="display: flex; gap: 5px; margin-bottom: 5px;",
         downloadButton("save_session", "Save", class = "btn-primary w-50", icon = icon("download")),
         actionButton("load_session_btn", "Load", class = "btn-outline-primary w-50", icon = icon("upload"))
-      )
+      ),
+      actionButton("prepare_next_btn", "Prepare Next Analysis",
+        class = "btn-outline-secondary btn-sm w-100",
+        icon = icon("broom"),
+        style = "margin-top: 4px;")
     ),
 
     # Core facility report link
@@ -813,7 +817,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   numericInput("diann_cpus", "CPUs:", value = 64, min = 4, max = 128, step = 4)
                 ),
                 div(style = "flex: 1; min-width: 100px;",
-                  numericInput("diann_mem_gb", "Memory (GB):", value = 512, min = 16, max = 1024, step = 16)
+                  numericInput("diann_mem_gb", "Memory (GB):", value = 128, min = 16, max = 1024, step = 16)
                 )
               ),
               div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
@@ -999,8 +1003,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       condition = "typeof output.tic_qc_has_data === 'undefined' || !output.tic_qc_has_data",
                       div(class = "alert alert-info", style = "margin-top: 20px;",
                         icon("info-circle"),
-                        " Extract TIC data from the Search tab to view chromatography QC. ",
-                        "Click ", tags$b("Extract TIC"), " after scanning raw files."
+                        " No TIC data available. Extract from the Search tab before searching, or use the button below to extract from an existing output directory.",
+                        div(style = "margin-top: 8px;",
+                          actionButton("tic_extract_from_qc_btn", "Extract TIC from Raw Files",
+                            class = "btn-outline-primary btn-sm", icon = icon("chart-area"))
+                        )
                       )
                     )
                   )

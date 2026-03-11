@@ -375,7 +375,7 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pep_len = 7, max_pep_len = 30,
       min_pr_mz = 300, max_pr_mz = 1800,
       min_pr_charge = 1, max_pr_charge = 4,
-      min_fr_mz = 200, max_fr_mz = 1200,
+      min_fr_mz = 200, max_fr_mz = 1800,
       enzyme = "K*,R*", missed_cleavages = 1,
       mbr = TRUE, rt_profiling = TRUE, xic = TRUE,
       mod_met_ox = TRUE, mod_nterm_acetyl = FALSE,
@@ -826,6 +826,27 @@ server_search <- function(input, output, session, values, add_to_log,
         format(pub_res$partition_total, big.mark = ","))
     } else NULL
 
+    # Queue wait time lines
+    format_wait <- function(mins) {
+      if (is.na(mins)) return("")
+      if (mins < 1) "< 1 min"
+      else if (mins < 60) sprintf("%.0f min", mins)
+      else sprintf("%.1f hrs", mins / 60)
+    }
+
+    wait_line <- if (!is.na(res$pending_count) && res$pending_count > 0) {
+      sprintf("Queue: %d pending, avg wait %s, max %s",
+        res$pending_count, format_wait(res$avg_wait_min), format_wait(res$max_wait_min))
+    } else if (!is.na(res$pending_count) && res$pending_count == 0) {
+      "Queue: no pending jobs"
+    } else NULL
+
+    pub_wait_line <- if (!is.null(pub_res) && isTRUE(pub_res$success) &&
+                         !is.na(pub_res$pending_count) && pub_res$pending_count > 0) {
+      sprintf("Queue: %d pending, avg wait %s",
+        pub_res$pending_count, format_wait(pub_res$avg_wait_min))
+    } else NULL
+
     indicator <- span(style = sprintf("color: %s; font-size: 1.1em;", color),
       HTML("&#9679;"))
 
@@ -834,8 +855,12 @@ server_search <- function(input, output, session, values, add_to_log,
         "background: %s; border: 1px solid %s; border-radius: 6px; padding: 6px 10px; margin-top: 8px; font-size: 0.82em;",
         bg, border),
       div(indicator, " ", if (!is.null(group_line)) group_line),
+      if (!is.null(wait_line)) div(
+        style = "margin-left: 20px; color: #555;", icon("clock", style = "font-size: 0.9em;"), " ", wait_line),
       if (!is.null(pub_line)) div(
-        style = "margin-left: 20px; color: #555;", pub_line)
+        style = "margin-left: 20px; color: #555; margin-top: 2px;", pub_line),
+      if (!is.null(pub_wait_line)) div(
+        style = "margin-left: 20px; color: #555;", icon("clock", style = "font-size: 0.9em;"), " ", pub_wait_line)
     )
   })
 
@@ -1254,13 +1279,52 @@ server_search <- function(input, output, session, values, add_to_log,
         ext <- tolower(tools::file_ext(raw_files$filename[1]))
         meta <- NULL
         if (ext == "d") {
-          # timsTOF: SCP download analysis.tdf (small SQLite, ~few MB)
-          remote_tdf <- file.path(input$ssh_raw_data_dir, raw_files$filename[1], "analysis.tdf")
-          local_tdf <- file.path(tempdir(), "inst_meta_analysis.tdf")
+          # timsTOF: SCP download analysis.tdf + HyStarMetadata.xml + diaSettings
+          remote_d_dir <- file.path(input$ssh_raw_data_dir, raw_files$filename[1])
+          local_d_dir <- file.path(tempdir(), "inst_meta_d")
+          dir.create(local_d_dir, showWarnings = FALSE, recursive = TRUE)
+
+          # analysis.tdf (required — instrument model, m/z range, spectra counts)
+          remote_tdf <- file.path(remote_d_dir, "analysis.tdf")
+          local_tdf <- file.path(local_d_dir, "analysis.tdf")
           dl <- scp_download(cfg, remote_tdf, local_tdf)
+
           if (dl$status == 0 && file.exists(local_tdf)) {
+            # HyStarMetadata.xml (optional — LC system, method, runtime)
+            tryCatch({
+              remote_hystar <- file.path(remote_d_dir, "HyStarMetadata.xml")
+              scp_download(cfg, remote_hystar, file.path(local_d_dir, "HyStarMetadata.xml"))
+            }, error = function(e) NULL)
+
+            # submethods/*.method (optional — LC method fallback)
+            tryCatch({
+              remote_submethods <- file.path(remote_d_dir, "submethods")
+              # List remote method files, download first one
+              ls_res <- ssh_exec(cfg, sprintf("ls %s/*.method 2>/dev/null | head -1",
+                                              shQuote(remote_submethods)))
+              if (ls_res$status == 0 && length(ls_res$stdout) > 0 && nzchar(trimws(ls_res$stdout[1]))) {
+                remote_method <- trimws(ls_res$stdout[1])
+                local_submethods <- file.path(local_d_dir, "submethods")
+                dir.create(local_submethods, showWarnings = FALSE)
+                scp_download(cfg, remote_method, file.path(local_submethods, basename(remote_method)))
+              }
+            }, error = function(e) NULL)
+
+            # .m/diaSettings.diasqlite (optional — DIA window info)
+            tryCatch({
+              ls_res <- ssh_exec(cfg, sprintf("ls %s/*.m/diaSettings.diasqlite 2>/dev/null | head -1",
+                                              shQuote(remote_d_dir)))
+              if (ls_res$status == 0 && length(ls_res$stdout) > 0 && nzchar(trimws(ls_res$stdout[1]))) {
+                remote_dia <- trimws(ls_res$stdout[1])
+                m_dir_name <- basename(dirname(remote_dia))
+                local_m_dir <- file.path(local_d_dir, m_dir_name)
+                dir.create(local_m_dir, showWarnings = FALSE)
+                scp_download(cfg, remote_dia, file.path(local_m_dir, "diaSettings.diasqlite"))
+              }
+            }, error = function(e) NULL)
+
             meta <- parse_timstof_from_tdf(local_tdf)
-            unlink(local_tdf)
+            unlink(local_d_dir, recursive = TRUE)
           }
         } else if (ext == "raw") {
           # Thermo .raw: Try ThermoRawFileParser on remote system
@@ -1272,6 +1336,14 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!is.na(meta$mz_range_low %||% NA) && !is.na(meta$mz_range_high %||% NA)) {
             updateNumericInput(session, "min_pr_mz", value = as.numeric(meta$mz_range_low))
             updateNumericInput(session, "max_pr_mz", value = as.numeric(meta$mz_range_high))
+          }
+          # Auto-set mass accuracy defaults for instrument type
+          if (identical(meta$instrument_type, "timsTOF")) {
+            updateNumericInput(session, "diann_mass_acc", value = 15)
+            updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
+          } else if (identical(meta$instrument_type, "Thermo")) {
+            updateNumericInput(session, "diann_mass_acc", value = 10)
+            updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
           }
           showNotification(
             sprintf("Instrument detected: %s", meta$instrument_model %||% meta$instrument_type),
@@ -1355,6 +1427,14 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!is.na(meta$mz_range_low %||% NA) && !is.na(meta$mz_range_high %||% NA)) {
             updateNumericInput(session, "min_pr_mz", value = as.numeric(meta$mz_range_low))
             updateNumericInput(session, "max_pr_mz", value = as.numeric(meta$mz_range_high))
+          }
+          # Auto-set mass accuracy defaults for instrument type
+          if (identical(meta$instrument_type, "timsTOF")) {
+            updateNumericInput(session, "diann_mass_acc", value = 15)
+            updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
+          } else if (identical(meta$instrument_type, "Thermo")) {
+            updateNumericInput(session, "diann_mass_acc", value = 10)
+            updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
           }
           showNotification(
             sprintf("Instrument detected: %s", meta$instrument_model %||% meta$instrument_type),
@@ -1759,6 +1839,19 @@ server_search <- function(input, output, session, values, add_to_log,
   observeEvent(input$uniprot_results_table_rows_selected, { values$fasta_info <- NULL })
   observeEvent(input$fasta_content_type, { values$fasta_info <- NULL })
 
+  # Re-enable library-locked inputs when FASTA library is cleared
+  observeEvent(values$fasta_info, {
+    if (is.null(values$fasta_info) || is.null(values$fasta_info$library_entry_id)) {
+      if (isTRUE(values$library_locked)) {
+        lib_locked_inputs <- c("diann_enzyme", "diann_missed_cleavages",
+          "mod_met_ox", "mod_nterm_acetyl", "extra_var_mods", "diann_unimod4",
+          "diann_met_excision", "min_pep_len", "max_pep_len", "min_pr_mz", "max_pr_mz")
+        for (inp in lib_locked_inputs) shinyjs::enable(inp)
+        values$library_locked <- FALSE
+      }
+    }
+  }, ignoreNULL = FALSE)
+
   # Download FASTA button handler
   observeEvent(input$download_fasta_btn, {
     req(values$uniprot_results, nrow(values$uniprot_results) > 0)
@@ -2071,7 +2164,32 @@ server_search <- function(input, output, session, values, add_to_log,
                   as.integer(ss$min_fr_mz %||% 200),
                   as.integer(ss$max_fr_mz %||% 1800))),
               tags$dt(class = "col-sm-5", "Predicted speclib:"),
-              tags$dd(class = "col-sm-7", speclib_info)
+              tags$dd(class = "col-sm-7", speclib_info),
+              if (!is.null(entry$n_precursors)) tagList(
+                tags$dt(class = "col-sm-5", "Precursors:"),
+                tags$dd(class = "col-sm-7", format(entry$n_precursors, big.mark = ","))
+              ),
+              if (!is.null(entry$n_proteins_lib)) tagList(
+                tags$dt(class = "col-sm-5", "Library proteins:"),
+                tags$dd(class = "col-sm-7", format(entry$n_proteins_lib, big.mark = ","))
+              ),
+              if (!is.null(entry$n_genes_lib)) tagList(
+                tags$dt(class = "col-sm-5", "Library genes:"),
+                tags$dd(class = "col-sm-7", format(entry$n_genes_lib, big.mark = ","))
+              ),
+              if (!is.null(entry$last_job_id)) tagList(
+                tags$dt(class = "col-sm-5", "Last search job:"),
+                tags$dd(class = "col-sm-7", entry$last_job_id)
+              ),
+              if (isTRUE(entry$settings_verified)) tagList(
+                tags$dt(class = "col-sm-5", "Settings verified:"),
+                tags$dd(class = "col-sm-7",
+                  tags$span(class = "badge bg-success", "Verified from log"))
+              ) else if (!is.null(entry$last_job_id)) tagList(
+                tags$dt(class = "col-sm-5", "Settings verified:"),
+                tags$dd(class = "col-sm-7",
+                  tags$span(class = "badge bg-warning", "Pending"))
+              )
             )
           )
         ),
@@ -2111,6 +2229,10 @@ server_search <- function(input, output, session, values, add_to_log,
               tags$span(class = "badge bg-success",
                 icon("check-circle"), " Ready")
             },
+            # View speclib log button (only if a search has run)
+            if (!is.null(entry$last_search_output_dir) && nzchar(entry$last_search_output_dir %||% ""))
+              actionButton("fasta_library_view_log_btn", "View Log",
+                class = "btn-outline-info btn-sm ms-2", icon = icon("file-lines")),
             # Delete button
             actionButton("fasta_library_delete_btn", "Delete",
               class = "btn-outline-danger btn-sm ms-2", icon = icon("trash"))
@@ -2225,6 +2347,35 @@ server_search <- function(input, output, session, values, add_to_log,
       library_entry_name = entry$name
     )
 
+    # Apply library search settings to UI inputs so they match the speclib
+    ss <- entry$search_settings
+    if (!is.null(ss)) {
+      updateSelectInput(session, "diann_enzyme", selected = ss$enzyme %||% "K*,R*")
+      updateNumericInput(session, "diann_missed_cleavages", value = as.integer(ss$missed_cleavages %||% 1L))
+      # Parse var_mods string to set checkboxes
+      vm <- ss$var_mods %||% ""
+      updateCheckboxInput(session, "mod_met_ox", value = grepl("UniMod:35", vm))
+      updateCheckboxInput(session, "mod_nterm_acetyl", value = grepl("UniMod:1", vm))
+      # Extra var mods: strip out the standard ones
+      extra_mods <- gsub("UniMod:35 \\(Met oxidation\\);?\\s*|UniMod:1 \\(N-term acetylation\\);?\\s*", "", vm)
+      updateTextAreaInput(session, "extra_var_mods", value = trimws(extra_mods))
+      # Fixed mods
+      updateCheckboxInput(session, "diann_unimod4",
+        value = grepl("UniMod:4", ss$fixed_mods %||% ""))
+      # Ranges
+      updateNumericInput(session, "min_pep_len", value = as.integer(ss$min_pep_len %||% 7L))
+      updateNumericInput(session, "max_pep_len", value = as.integer(ss$max_pep_len %||% 30L))
+      updateNumericInput(session, "min_pr_mz", value = as.numeric(ss$min_pr_mz %||% 300))
+      updateNumericInput(session, "max_pr_mz", value = as.numeric(ss$max_pr_mz %||% 1800))
+    }
+
+    # Disable library-locked inputs (changing these would force speclib rebuild)
+    lib_locked_inputs <- c("diann_enzyme", "diann_missed_cleavages",
+      "mod_met_ox", "mod_nterm_acetyl", "extra_var_mods", "diann_unimod4",
+      "diann_met_excision", "min_pep_len", "max_pep_len", "min_pr_mz", "max_pr_mz")
+    for (inp in lib_locked_inputs) shinyjs::disable(inp)
+    values$library_locked <- TRUE
+
     # Check for linked speclib
     if (!is.null(entry$speclib_path) && nzchar(entry$speclib_path %||% "")) {
       # Verify speclib still exists
@@ -2239,19 +2390,19 @@ server_search <- function(input, output, session, values, add_to_log,
       if (speclib_exists && age_status != "expired") {
         values$diann_speclib <- entry$speclib_path
         showNotification(
-          sprintf("Database loaded: %s\nPredicted speclib available — Step 1 will be skipped.",
+          sprintf("Database loaded: %s\nPredicted speclib available — Step 1 will be skipped.\nLibrary settings locked.",
             entry$name),
           type = "message", duration = 8)
       } else {
         showNotification(
-          sprintf("Database loaded: %s (%s proteins)",
+          sprintf("Database loaded: %s (%s proteins)\nLibrary settings locked.",
             entry$name,
             format(entry$protein_count %||% 0L, big.mark = ",")),
           type = "message", duration = 6)
       }
     } else {
       # Show expiring warning if applicable
-      notify_msg <- sprintf("Database loaded: %s (%s proteins)",
+      notify_msg <- sprintf("Database loaded: %s (%s proteins)\nLibrary settings locked.",
         entry$name,
         format(entry$protein_count %||% 0L, big.mark = ","))
       if (age_status == "expiring") {
@@ -2265,6 +2416,65 @@ server_search <- function(input, output, session, values, add_to_log,
   })
 
   # Delete library entry
+  # View Step 1 DIA-NN log for selected FASTA library entry
+  observeEvent(input$fasta_library_view_log_btn, {
+    sel <- input$fasta_library_table_rows_selected
+    if (is.null(sel) || length(sel) == 0) return()
+
+    catalog <- fasta_library_catalog()
+    if (sel > length(catalog)) return()
+    entry <- catalog[[sel]]
+
+    out_dir <- entry$last_search_output_dir
+    job_id <- entry$last_job_id
+    if (is.null(out_dir) || !nzchar(out_dir %||% "")) {
+      showNotification("No search output directory recorded for this entry.", type = "warning")
+      return()
+    }
+
+    log_content <- ""
+    log_dir <- file.path(out_dir, "logs")
+
+    cfg <- ssh_config()
+    if (!is.null(cfg)) {
+      # Try Step 1 log patterns on remote
+      log_cmd <- if (!is.null(job_id) && nzchar(job_id %||% "")) {
+        sprintf("cat %s/diann_s1_libpred_%s.out %s/diann_%s.out %s/diann_*%s*.out 2>/dev/null | head -500",
+          shQuote(log_dir), job_id, shQuote(log_dir), job_id, shQuote(log_dir), job_id)
+      } else {
+        sprintf("cat %s/diann_s1_libpred_*.out 2>/dev/null | head -500", shQuote(log_dir))
+      }
+      result <- tryCatch(
+        ssh_exec(cfg, log_cmd, timeout = 15),
+        error = function(e) list(status = 1, stdout = character()))
+      if (result$status == 0 && length(result$stdout) > 0)
+        log_content <- paste(result$stdout, collapse = "\n")
+    }
+
+    # Local fallback
+    if (!nzchar(log_content) && dir.exists(log_dir)) {
+      log_files <- list.files(log_dir, pattern = "diann_.*\\.out$", full.names = TRUE)
+      if (length(log_files) > 0) {
+        log_content <- tryCatch(
+          paste(readLines(log_files[1], n = 500, warn = FALSE), collapse = "\n"),
+          error = function(e) "")
+      }
+    }
+
+    if (nzchar(log_content)) {
+      showModal(modalDialog(
+        title = sprintf("DIA-NN Step 1 Log: %s", entry$name),
+        size = "l", easyClose = TRUE,
+        tags$pre(style = "max-height:500px; overflow-y:auto; white-space:pre-wrap; font-size:0.82em; background:#1e1e1e; color:#d4d4d4; padding:12px; border-radius:4px;",
+          log_content),
+        footer = modalButton("Close")))
+    } else {
+      showNotification(
+        sprintf("No Step 1 log found in %s/logs/", out_dir),
+        type = "warning", duration = 6)
+    }
+  })
+
   observeEvent(input$fasta_library_delete_btn, {
     sel <- input$fasta_library_table_rows_selected
     if (is.null(sel) || length(sel) == 0) return()
@@ -2393,6 +2603,8 @@ server_search <- function(input, output, session, values, add_to_log,
       enzyme = input$diann_enzyme %||% "K*,R*",
       missed_cleavages = input$diann_missed_cleavages %||% 1L,
       mod_met_ox = isTRUE(input$mod_met_ox),
+      mod_nterm_acetyl = isTRUE(input$mod_nterm_acetyl),
+      extra_var_mods = input$extra_var_mods %||% "",
       unimod4 = isTRUE(input$diann_unimod4),
       min_pep_len = input$min_pep_len %||% 7L,
       max_pep_len = input$max_pep_len %||% 30L,
@@ -2823,7 +3035,7 @@ server_search <- function(input, output, session, values, add_to_log,
       min_pr_charge = values$diann_search_settings$search_params$min_pr_charge %||% 1,
       max_pr_charge = values$diann_search_settings$search_params$max_pr_charge %||% 4,
       min_fr_mz = values$diann_search_settings$search_params$min_fr_mz %||% 200,
-      max_fr_mz = values$diann_search_settings$search_params$max_fr_mz %||% 1200,
+      max_fr_mz = values$diann_search_settings$search_params$max_fr_mz %||% 1800,
       enzyme = input$diann_enzyme,
       missed_cleavages = input$diann_missed_cleavages,
       mbr = input$diann_mbr %||% TRUE,
@@ -3003,7 +3215,8 @@ server_search <- function(input, output, session, values, add_to_log,
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
             basename(values$diann_speclib) else NULL,
           local = list(threads = threads),
-          instrument_metadata = values$instrument_metadata
+          instrument_metadata = values$instrument_metadata,
+          tic_traces = values$tic_traces, tic_metrics = values$tic_metrics
         ),
         auto_load = input$auto_load_results,
         log_content = "",
@@ -3095,7 +3308,8 @@ server_search <- function(input, output, session, values, add_to_log,
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
             basename(values$diann_speclib) else NULL,
           docker = list(cpus = cpus, mem_gb = mem_gb, image = img),
-          instrument_metadata = values$instrument_metadata
+          instrument_metadata = values$instrument_metadata,
+          tic_traces = values$tic_traces, tic_metrics = values$tic_metrics
         ),
         auto_load = input$auto_load_results,
         log_content = "",
@@ -3219,7 +3433,8 @@ server_search <- function(input, output, session, values, add_to_log,
         partition = input$diann_partition,
         account = input$diann_account,
         cached_speclib = cached_entry,
-        custom_fasta_sequences = custom_fasta_text
+        custom_fasta_sequences = custom_fasta_text,
+        instrument_metadata = values$instrument_metadata
       )
       writeLines(search_info, file.path(upload_dir, "search_info.md"))
 
@@ -3438,7 +3653,8 @@ server_search <- function(input, output, session, values, add_to_log,
             time_per_file = input$parallel_time_hours %||% 2,
             max_simultaneous = input$max_simultaneous %||% 20
           ),
-          instrument_metadata = values$instrument_metadata
+          instrument_metadata = values$instrument_metadata,
+          tic_traces = values$tic_traces, tic_metrics = values$tic_metrics
         ),
         auto_load = input$auto_load_results,
         log_content = "",
@@ -3447,7 +3663,8 @@ server_search <- function(input, output, session, values, add_to_log,
         is_ssh = !is.null(cfg),
         speclib_cached = !is.null(cached_entry),
         slurm_account = input$diann_account,
-        slurm_partition = input$diann_partition
+        slurm_partition = input$diann_partition,
+        library_entry_id = values$fasta_info$library_entry_id
       )
 
       # Update search_info.md with actual job IDs
@@ -3477,7 +3694,8 @@ server_search <- function(input, output, session, values, add_to_log,
           partition = input$diann_partition,
           account = input$diann_account,
           cached_speclib = cached_entry,
-          custom_fasta_sequences = custom_fasta_text
+          custom_fasta_sequences = custom_fasta_text,
+          instrument_metadata = values$instrument_metadata
         )
         local_info <- tempfile(fileext = ".md")
         writeLines(updated_info, local_info)
@@ -3601,7 +3819,8 @@ server_search <- function(input, output, session, values, add_to_log,
             time_hours = input$diann_time_hours,
             partition = input$diann_partition
           ),
-          instrument_metadata = values$instrument_metadata
+          instrument_metadata = values$instrument_metadata,
+          tic_traces = values$tic_traces, tic_metrics = values$tic_metrics
         ),
         auto_load = input$auto_load_results,
         log_content = "",
@@ -3609,7 +3828,8 @@ server_search <- function(input, output, session, values, add_to_log,
         loaded = FALSE,
         is_ssh = !is.null(cfg),
         slurm_account = input$diann_account,
-        slurm_partition = input$diann_partition
+        slurm_partition = input$diann_partition,
+        library_entry_id = values$fasta_info$library_entry_id
       )
 
       # Write search_info.md for single-job submission
@@ -3634,7 +3854,8 @@ server_search <- function(input, output, session, values, add_to_log,
           partition = input$diann_partition,
           account = input$diann_account,
           cached_speclib = cached_entry,
-          custom_fasta_sequences = custom_fasta_text
+          custom_fasta_sequences = custom_fasta_text,
+          instrument_metadata = values$instrument_metadata
         )
         local_info <- tempfile(fileext = ".md")
         writeLines(search_info, local_info)
@@ -3728,6 +3949,149 @@ server_search <- function(input, output, session, values, add_to_log,
       )
       message("[DE-LIMP] Submit error: ", e$message)
     })
+  })
+
+  # ============================================================================
+  #    Prepare Next Analysis — clear pre-search state for a new dataset
+  # ============================================================================
+
+  observeEvent(input$prepare_next_btn, {
+    showModal(modalDialog(
+      title = "Prepare Next Analysis",
+      tags$p("This will clear all current data from memory:"),
+      tags$ul(
+        tags$li("Raw file scan, FASTA, instrument metadata, TIC traces"),
+        tags$li("Loaded data, pipeline results, QC stats"),
+        tags$li("GSEA, phospho, MOFA2, comparator results"),
+        tags$li("AI chat history")
+      ),
+      tags$p(tags$strong("SSH connection and job queue will be preserved.")),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_prepare_next", "Clear & Reset",
+                     class = "btn-danger", icon = icon("broom"))
+      ),
+      easyClose = TRUE
+    ))
+  })
+
+  observeEvent(input$confirm_prepare_next, {
+    removeModal()
+
+    # --- Pre-search state (saved in job entry) ---
+    values$diann_raw_files <- NULL
+    values$diann_fasta_files <- character()
+    values$fasta_info <- NULL
+    values$diann_speclib <- NULL
+    values$instrument_metadata <- NULL
+    values$tic_traces <- NULL
+    values$tic_metrics <- NULL
+    values$uniprot_results <- NULL
+    values$pending_notes_od <- NULL
+    values$pending_notes_name <- NULL
+
+    # --- Loaded data & pipeline results ---
+    values$raw_data <- NULL
+    values$metadata <- NULL
+    values$fit <- NULL
+    values$y_protein <- NULL
+    values$dpc_fit <- NULL
+    values$design <- NULL
+    values$qc_stats <- NULL
+    values$diann_search_settings <- NULL
+    values$uploaded_report_path <- NULL
+    values$original_report_name <- NULL
+    values$current_file_uri <- NULL
+    values$diann_norm_detected <- "unknown"
+    values$status <- "Waiting..."
+
+    # --- Analysis results ---
+    values$gsea_results <- NULL
+    values$gsea_results_cache <- list()
+    values$gsea_last_contrast <- NULL
+    values$gsea_last_org_db <- NULL
+    values$plot_selected_proteins <- NULL
+    values$grid_selected_protein <- NULL
+    values$temp_violin_target <- NULL
+    values$color_plot_by_de <- FALSE
+
+    # --- Phosphoproteomics ---
+    values$phospho_detected <- NULL
+    values$phospho_site_matrix <- NULL
+    values$phospho_site_info <- NULL
+    values$phospho_fit <- NULL
+    values$phospho_site_matrix_filtered <- NULL
+    values$phospho_input_mode <- NULL
+    values$ksea_results <- NULL
+    values$ksea_last_contrast <- NULL
+    values$phospho_fasta_sequences <- NULL
+    values$phospho_corrected_active <- FALSE
+    values$phospho_annotations <- NULL
+
+    # --- XIC ---
+    values$xic_dir <- NULL
+    values$xic_available <- FALSE
+    values$xic_format <- "v2"
+    values$xic_data <- NULL
+    values$xic_protein <- NULL
+    values$xic_report_map <- NULL
+    values$mobilogram_available <- FALSE
+    values$mobilogram_files_found <- 0
+    values$mobilogram_dir <- NULL
+
+    # --- MOFA2 ---
+    values$mofa_view_configs <- list()
+    values$mofa_views <- list()
+    values$mofa_view_fits <- list()
+    values$mofa_sample_metadata <- NULL
+    values$mofa_object <- NULL
+    values$mofa_factors <- NULL
+    values$mofa_weights <- list()
+    values$mofa_variance_explained <- NULL
+    values$mofa_last_run_params <- NULL
+
+    # --- Run Comparator ---
+    values$comparator_results <- NULL
+    values$comparator_run_a <- NULL
+    values$comparator_run_b <- NULL
+    values$comparator_mode <- NULL
+    values$comparator_gemini_narrative <- NULL
+    values$comparator_mofa <- NULL
+    values$comparator_compare_from_history <- NULL
+    values$comparator_diann_log_a <- NULL
+    values$comparator_diann_log_b <- NULL
+
+    # --- AI chat ---
+    values$chat_history <- list()
+
+    # --- Reproducibility log (fresh start) ---
+    values$repro_log <- c(
+      "# ==============================================================================",
+      "# DE-LIMP Reproducibility Log",
+      sprintf("# Session started: %s", Sys.time()),
+      "# ==============================================================================",
+      "",
+      "# --- Load Required Libraries ---",
+      "library(limpa); library(limma); library(dplyr); library(stringr); library(ggrepel);"
+    )
+
+    # --- Re-enable any library-locked inputs ---
+    if (isTRUE(values$library_locked)) {
+      lib_locked_inputs <- c("diann_enzyme", "diann_missed_cleavages",
+        "mod_met_ox", "mod_nterm_acetyl", "extra_var_mods", "diann_unimod4",
+        "diann_met_excision", "min_pep_len", "max_pep_len", "min_pr_mz", "max_pr_mz")
+      for (inp in lib_locked_inputs) shinyjs::enable(inp)
+      values$library_locked <- FALSE
+    }
+
+    # Navigate back to search tab
+    nav_select("main_tabs", "Data Overview")
+    nav_select("data_overview_tabs", "Assign Groups & Run")
+
+    showNotification(
+      "Session cleared. Ready for next dataset. SSH connection and job queue preserved.",
+      type = "message", duration = 8
+    )
   })
 
   # ============================================================================
@@ -4074,6 +4438,70 @@ server_search <- function(input, output, session, values, add_to_log,
                 )
                 jobs[[i]]$speclib_cached <- TRUE
                 changed <- TRUE
+
+                # Update FASTA library entry with job ID and verified settings
+                lib_id <- jobs[[i]]$library_entry_id
+                if (!is.null(lib_id) && nzchar(lib_id %||% "")) {
+                  tryCatch({
+                    step1_id <- jobs[[i]]$parallel_steps$step1 %||% jobs[[i]]$job_id
+                    # Read Step 1 log to verify actual DIA-NN flags
+                    log_pattern <- sprintf("diann_*%s*.out", step1_id)
+                    log_dir <- file.path(jobs[[i]]$output_dir, "logs")
+                    verified_params <- NULL
+                    if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+                      log_result <- ssh_exec(cfg, sprintf(
+                        "cat %s/%s 2>/dev/null || cat %s/diann_s1_libpred_*.out 2>/dev/null",
+                        shQuote(log_dir), log_pattern, shQuote(log_dir)))
+                      if (log_result$status == 0 && length(log_result$stdout) > 0)
+                        verified_params <- parse_diann_log_flags(log_result$stdout)
+                    } else {
+                      log_files <- list.files(log_dir, pattern = "diann_.*\\.out$", full.names = TRUE)
+                      if (length(log_files) > 0) {
+                        log_lines <- tryCatch(readLines(log_files[1], warn = FALSE), error = function(e) character(0))
+                        if (length(log_lines) > 0) verified_params <- parse_diann_log_flags(log_lines)
+                      }
+                    }
+                    # Build update fields
+                    lib_updates <- list(
+                      last_job_id = step1_id,
+                      last_search_output_dir = jobs[[i]]$output_dir,
+                      last_search_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+                      speclib_path = speclib_path,
+                      n_precursors = NULL,
+                      n_proteins_lib = NULL,
+                      n_genes_lib = NULL
+                    )
+                    if (!is.null(verified_params)) {
+                      # Update search_settings with verified values from log
+                      catalog <- fasta_library_load()
+                      idx <- which(vapply(catalog, function(e) identical(e$id, lib_id), logical(1)))
+                      if (length(idx) > 0) {
+                        existing_ss <- catalog[[idx[1]]]$search_settings %||% list()
+                        for (nm in names(verified_params)) {
+                          if (!is.null(verified_params[[nm]])) existing_ss[[nm]] <- verified_params[[nm]]
+                        }
+                        # Rebuild var_mods display string from verified flags
+                        var_mod_parts <- c(
+                          if (isTRUE(verified_params$mod_met_ox)) "UniMod:35 (Met oxidation)",
+                          if (isTRUE(verified_params$mod_nterm_acetyl)) "UniMod:1 (N-term acetylation)"
+                        )
+                        existing_ss$var_mods <- paste(Filter(nzchar, var_mod_parts), collapse = "; ")
+                        existing_ss$fixed_mods <- if (isTRUE(verified_params$unimod4))
+                          "UniMod:4 (Carbamidomethylation)" else ""
+                        lib_updates$search_settings <- existing_ss
+                        lib_updates$settings_verified <- TRUE
+                        lib_updates$n_precursors <- verified_params$n_precursors
+                        lib_updates$n_proteins_lib <- verified_params$n_proteins_lib
+                        lib_updates$n_genes_lib <- verified_params$n_genes_lib
+                      }
+                    }
+                    fasta_library_update_entry(lib_id, lib_updates)
+                    message(sprintf("[DE-LIMP] Updated FASTA library entry '%s' with job %s",
+                      lib_id, step1_id))
+                  }, error = function(e) {
+                    message("[DE-LIMP] Failed to update FASTA library entry: ", e$message)
+                  })
+                }
               }
             }, error = function(e) {
               message("[DE-LIMP] speclib cache registration failed: ", e$message)
@@ -4096,6 +4524,7 @@ server_search <- function(input, output, session, values, add_to_log,
       # Only attempt if publicgrp has available CPUs
       pub_available <- if (!is.null(pub_res) && isTRUE(pub_res$success))
         pub_res$user_available %||% 0 else 0
+      if (is.na(pub_available)) pub_available <- 0
 
       if (pub_available > 0) {
         for (i in seq_along(jobs)) {
@@ -4178,6 +4607,72 @@ server_search <- function(input, output, session, values, add_to_log,
               type = "message", duration = 10)
             message(sprintf("[DE-LIMP] Auto-switched '%s' %s to publicgrp/low after %.0f min pending",
               jobs[[i]]$name, step_info, pending_min))
+          }
+        }
+      }
+    }
+
+    # --- Auto-switch pending publicgrp jobs BACK to genome-center-grp/high ---
+    # When genome-center-grp has capacity and publicgrp job is stuck with Priority
+    if (isTRUE(input$auto_queue_switch)) {
+      lab_res <- values$cluster_resources
+      lab_available <- if (!is.null(lab_res) && isTRUE(lab_res$success))
+        lab_res$user_available %||% 0 else 0
+      if (is.na(lab_available)) lab_available <- 0
+
+      # Only move back if genome-center-grp has enough CPUs for a 64-CPU job
+      if (lab_available >= 64) {
+        wait_min <- input$queue_wait_minutes %||% 5
+        for (i in seq_along(jobs)) {
+          if (isTRUE(jobs[[i]]$removed)) next
+          if (jobs[[i]]$backend != "hpc") next
+          if (jobs[[i]]$status != "queued") next
+          # Only move jobs currently on publicgrp
+          if (!identical(jobs[[i]]$slurm_account, "publicgrp")) next
+
+          submitted <- jobs[[i]]$submitted_at
+          if (is.null(submitted)) next
+          pending_min <- as.numeric(difftime(Sys.time(), submitted, units = "mins"))
+          if (pending_min < wait_min) next
+
+          job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
+          slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) values$ssh_sbatch_path else NULL
+
+          job_ids_to_move <- if (isTRUE(jobs[[i]]$parallel)) {
+            ss <- jobs[[i]]$parallel_step_status %||% list()
+            steps <- jobs[[i]]$parallel_steps %||% list()
+            ids <- character(0)
+            for (sn in names(ss)) {
+              if (ss[[sn]] %in% c("queued", "pending") && !is.null(steps[[sn]])) {
+                ids <- c(ids, steps[[sn]])
+              }
+            }
+            ids
+          } else {
+            jobs[[i]]$job_id
+          }
+          if (length(job_ids_to_move) == 0) next
+
+          n_moved <- 0
+          for (jid in job_ids_to_move) {
+            result <- tryCatch(
+              slurm_move_job(jid, "genome-center-grp", "high",
+                ssh_config = job_cfg, sbatch_path = slurm_path),
+              error = function(e) list(success = FALSE, message = e$message))
+            if (isTRUE(result$success)) n_moved <- n_moved + 1
+          }
+
+          if (n_moved > 0) {
+            jobs[[i]]$slurm_account <- "genome-center-grp"
+            jobs[[i]]$slurm_partition <- "high"
+            jobs[[i]]$queue_switched_at <- Sys.time()
+            changed <- TRUE
+            showNotification(
+              sprintf("Auto-switched '%s' back to genome-center-grp/high (capacity available, waited %.0f min on publicgrp)",
+                jobs[[i]]$name, pending_min),
+              type = "message", duration = 10)
+            message(sprintf("[DE-LIMP] Auto-switched '%s' to genome-center-grp/high after %.0f min on publicgrp",
+              jobs[[i]]$name, pending_min))
           }
         }
       }
@@ -4293,6 +4788,13 @@ server_search <- function(input, output, session, values, add_to_log,
             # Restore instrument metadata if stored with the job
             if (!is.null(ss$instrument_metadata)) {
               values$instrument_metadata <- ss$instrument_metadata
+            }
+            # Restore TIC chromatography QC data if stored with the job
+            if (!is.null(ss$tic_traces) && length(ss$tic_traces) > 0) {
+              values$tic_traces <- ss$tic_traces
+              values$tic_metrics <- ss$tic_metrics
+              message("[DE-LIMP] Restored TIC data from job entry (",
+                      length(ss$tic_traces), " runs)")
             }
           }
 

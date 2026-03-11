@@ -287,3 +287,8 @@ Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussi
 - **Progressive reveal**: Tab always visible (not gated behind pipeline completion)
 - **No ComplexUpset dependency**: Spec called for it, but Venn diagram is more intuitive for 2-set comparisons
 - **Internal reactiveVals**: `comp_run_a`, `comp_run_b`, `comp_results` are local `reactiveVal()` inside the module, synced to `values$comparator_*` for session persistence
+- **Spectronaut 0-ratio rescue stats**: Proteins with 0 `# of Ratios` have NaN DE stats (untestable in Spectronaut). `compute_de_concordance()` computes `rescue_stats` (n_zero_ratio, n_rescued_sig, n_low_ratio) and returns them in the result list. Rule 0 in hypothesis engine ("Untestable in Spectronaut") is imputation-aware with three variants (None/enabled/unknown).
+- **Contrast mismatch detection**: `compute_de_concordance()` fuzzy-matches Spectronaut conditions against DE-LIMP contrasts via normalized alphanumeric comparison. Amber warning div shown when no contrasts overlap.
+- **NaN-safe classify_de()**: Uses `is.finite()` guards for both logFC and adjP. Returns "NS" for any non-finite value.
+- **NaN-safe assign_hypothesis()**: Coerces non-finite logFC to 0, non-finite adjP to 1 at function entry, before any conditional logic.
+- **Instrument context in AI prompts**: `build_gemini_comparator_prompt()` and `build_claude_comparator_prompt()` accept optional `instrument_meta` parameter. Emits brief "INSTRUMENT: model, LC, SPD, gradient" line when available.

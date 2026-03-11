@@ -524,6 +524,22 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
+        # --- 6c. TIC chromatography QC CSV ---
+        tic_note <- ""
+        if (!is.null(values$tic_metrics) && nrow(values$tic_metrics) > 0) {
+          tryCatch({
+            tic_file <- file.path(tmp_dir, "TIC_QC_Metrics.csv")
+            write.csv(values$tic_metrics, tic_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, tic_file)
+            n_pass <- sum(values$tic_metrics$status == "pass", na.rm = TRUE)
+            n_warn <- sum(values$tic_metrics$status == "warn", na.rm = TRUE)
+            n_fail <- sum(values$tic_metrics$status == "fail", na.rm = TRUE)
+            tic_note <- sprintf(
+              "\n- **`TIC_QC_Metrics.csv`** — Per-run chromatography QC: AUC, peak RT, gradient width, baseline ratio, late signal, shape correlation (%d pass, %d warn, %d fail)\n",
+              n_pass, n_warn, n_fail)
+          }, error = function(e) NULL)
+        }
+
         # --- 7. Reproducibility R code log ---
         repro_note <- ""
         if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
@@ -649,6 +665,41 @@ server_ai <- function(input, output, session, values) {
           }
         }
 
+        # TIC chromatography QC inline summary
+        tic_inline <- ""
+        if (!is.null(values$tic_metrics) && nrow(values$tic_metrics) > 0) {
+          tryCatch({
+            tm <- values$tic_metrics
+            n_pass <- sum(tm$status == "pass", na.rm = TRUE)
+            n_warn <- sum(tm$status == "warn", na.rm = TRUE)
+            n_fail <- sum(tm$status == "fail", na.rm = TRUE)
+            tic_lines <- c(
+              "--- CHROMATOGRAPHY QC (TIC) ---",
+              sprintf("Runs analyzed: %d (%d pass, %d warn, %d fail)", nrow(tm), n_pass, n_warn, n_fail))
+            if (any(tm$valid, na.rm = TRUE)) {
+              valid <- tm[tm$valid, ]
+              tic_lines <- c(tic_lines,
+                sprintf("Median AUC: %.1fM (range: %.1f-%.1fM)",
+                  median(valid$total_auc, na.rm = TRUE) / 1e6,
+                  min(valid$total_auc, na.rm = TRUE) / 1e6,
+                  max(valid$total_auc, na.rm = TRUE) / 1e6),
+                sprintf("Median gradient width: %.1f min", median(valid$gradient_width_min, na.rm = TRUE)),
+                sprintf("Shape correlation range: %.3f-%.3f",
+                  min(valid$shape_r, na.rm = TRUE), max(valid$shape_r, na.rm = TRUE)))
+            }
+            # List flagged runs
+            flagged <- tm[nzchar(tm$flags) & tm$flags != "", ]
+            if (nrow(flagged) > 0) {
+              tic_lines <- c(tic_lines, "", "Flagged runs:")
+              for (r in seq_len(nrow(flagged))) {
+                tic_lines <- c(tic_lines, sprintf("  %s [%s]: %s",
+                  sub("\\.d$", "", flagged$run[r]), flagged$status[r], flagged$flags[r]))
+              }
+            }
+            tic_inline <- paste0("\n\n", paste(tic_lines, collapse = "\n"))
+          }, error = function(e) NULL)
+        }
+
         # Missingness summary (pre vs post imputation)
         missingness_inline <- ""
         tryCatch({
@@ -758,6 +809,7 @@ server_ai <- function(input, output, session, values) {
           gsea_note,
           phospho_note,
           instrument_note,
+          tic_note,
           methods_note,
           repro_note,
           rds_note,
@@ -887,6 +939,7 @@ server_ai <- function(input, output, session, values) {
           qc_inline,
           search_settings_inline,
           instrument_inline,
+          tic_inline,
           missingness_inline,
           mofa_inline,
           phospho_inline,

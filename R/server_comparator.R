@@ -190,8 +190,24 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
       mass_acc_ms1    = as.character(sp$mass_acc_ms1 %||% "auto"),
       scan_window     = as.character(sp$scan_window %||% "auto"),
       enzyme          = as.character(sp$enzyme %||% "Trypsin/P"),
+      missed_cleavages = as.character(sp$missed_cleavages %||% "unknown"),
       search_mz_min   = as.character(sp$min_pr_mz %||% "300"),
       search_mz_max   = as.character(sp$max_pr_mz %||% "1800"),
+      min_fr_mz       = as.character(sp$min_fr_mz %||% "200"),
+      max_fr_mz       = as.character(sp$max_fr_mz %||% "1800"),
+      min_pr_charge   = as.character(sp$min_pr_charge %||% "1"),
+      max_pr_charge   = as.character(sp$max_pr_charge %||% "4"),
+      min_pep_len     = as.character(sp$min_pep_len %||% "7"),
+      max_pep_len     = as.character(sp$max_pep_len %||% "30"),
+      var_mods        = paste(Filter(nzchar, c(
+        if (isTRUE(sp$mod_met_ox)) "UniMod:35 (Met oxidation)",
+        if (isTRUE(sp$mod_nterm_acetyl)) "UniMod:1 (N-term acetylation)",
+        if (nzchar(sp$extra_var_mods %||% "")) sp$extra_var_mods
+      )), collapse = "; "),
+      fixed_mods      = if (isTRUE(sp$unimod4)) "UniMod:4 (Carbamidomethylation)" else "none",
+      max_var_mods    = as.character(sp$max_var_mods %||% "1"),
+      mbr             = as.character(sp$mbr %||% "unknown"),
+      search_mode     = as.character(ss$search_mode %||% "libfree"),
       library         = as.character(sp$library %||% ss$library_path %||% "FASTA-predicted")
     ),
     contrasts   = contrasts
@@ -203,7 +219,7 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
 #' @return Named list of data.frames (one per comparison), or NULL
 parse_spectronaut_candidates <- function(de_path) {
   de_df <- data.table::fread(de_path, data.table = TRUE)
-  de_prot_col  <- grep("ProteinGroup|ProteinAccession|UniProtIds", names(de_df), value = TRUE)[1]
+  de_prot_col  <- grep("ProteinGroup|ProteinAccession|UniProtIds|^Group$", names(de_df), value = TRUE)[1]
   de_gene_col  <- grep("^PG\\.Genes$|^Gene$|Genes", names(de_df), value = TRUE)[1]
   de_logfc_col <- grep("Log2Ratio|log2FC|AVG\\.Log2\\.Ratio|AVG Log2 Ratio", names(de_df), value = TRUE)[1]
   de_qval_col  <- grep("Qvalue|Q\\.Value|q\\.value|adj", names(de_df), ignore.case = TRUE, value = TRUE)[1]
@@ -214,7 +230,7 @@ parse_spectronaut_candidates <- function(de_path) {
   if (is.na(de_logfc_col)) stop("Candidates file missing Log2Ratio / logFC column")
 
   # Handle multiple comparisons
-  comp_col <- grep("^Comparison$|^R\\.Condition$|^Contrast$", names(de_df), value = TRUE)[1]
+  comp_col <- grep("^Comparison|^R\\.Condition$|^Contrast$", names(de_df), value = TRUE)[1]
   build_de_frame <- function(sub_df) {
     sub_ids <- normalize_protein_id(sub_df[[de_prot_col]])
     out <- data.frame(
@@ -310,6 +326,11 @@ parse_spectronaut_setup_overview <- function(path) {
   lines <- trimws(lines)
   lines <- lines[nzchar(lines)]
   settings <- list()
+  # First line often has version: "Spectronaut 20.5.260227.92449"
+  raw_first <- trimws(readLines(path, n = 1, warn = FALSE))
+  ver_match <- regmatches(raw_first, regexpr("Spectronaut [0-9][0-9.]+", raw_first))
+  if (length(ver_match) > 0 && nzchar(ver_match)) settings[["spectronaut_version"]] <- ver_match
+
   for (line in lines) {
     # Try "Key: Value" or "Key\tValue" patterns
     if (grepl(":\t|:\\s{2,}", line)) {
@@ -446,7 +467,23 @@ parse_spectronaut_log <- function(log_lines) {
       m <- grep("Spectronaut [0-9]", log_lines, value = TRUE)
       if (length(m) > 0) sub(".*(Spectronaut [0-9.]+).*", "\\1", m[1]) else "Unknown"
     },
-    library_precursors  = extract_int("precursors.*library|library.*precursors"),
+    library_precursors  = {
+      v <- extract_int("precursors.*library|library.*precursors")
+      # Fallback: summary line "Precursors: 94202" (no "library" keyword)
+      if (is.na(v)) {
+        m <- grep("Precursors:\\s*[0-9,]+", log_lines, value = TRUE)
+        if (length(m) > 0) {
+          nums <- regmatches(m[1], gregexpr("[0-9,]+", m[1]))[[1]]
+          # Take the number right after "Precursors:"
+          prec_idx <- grep("Precursors", strsplit(m[1], ",")[[1]])
+          if (length(prec_idx) > 0) {
+            chunk <- strsplit(m[1], ",")[[1]][prec_idx[1]]
+            v <- as.integer(gsub("[^0-9]", "", sub(".*Precursors:?\\s*", "", chunk)))
+          }
+        }
+      }
+      v
+    },
     library_peptides    = extract_int("peptides.*library|library.*peptides"),
     library_proteins    = extract_int("protein groups.*library|library.*protein groups"),
     unique_precursors   = extract_int("unique precursor"),
@@ -502,6 +539,9 @@ parse_spectronaut_zip <- function(zip_path) {
   analysis_log   <- detect(c("^analysislog\\.txt$", "^analysislog\\.log$",
                              "spectronaut.*log\\.txt$", ".*\\.log\\.txt$",
                              "analysis.*log.*\\.txt$"))
+  # AnalysisOverview (note: Spectronaut typos it as "AnalyisOverview")
+  analysis_overview_file <- detect(c("analy.?is.?overview.*\\.txt$",
+                                     "analysisoverview.*\\.txt$"))
 
   # RunSummaries: look for a RunSummaries directory or matching files
   run_summary_files <- all_files[grep("runsummar", basenames)]
@@ -521,8 +561,9 @@ parse_spectronaut_zip <- function(zip_path) {
     candidates      = !is.null(candidates_file),
     run_summaries   = length(run_summary_files) > 0,
     n_run_summaries = length(run_summary_files),
-    settings        = !is.null(setup_file),
-    analysis_log    = !is.null(analysis_log)
+    settings           = !is.null(setup_file),
+    analysis_log       = !is.null(analysis_log),
+    analysis_overview  = !is.null(analysis_overview_file)
   )
 
   if (!manifest$quantities) stop("ZIP must contain a Pivot quantities file (*Pivot*.tsv or *BGS Factory Report*.tsv)")
@@ -604,6 +645,7 @@ parse_spectronaut_zip <- function(zip_path) {
           ", condition_setup=", manifest$condition_setup,
           ", settings=", manifest$settings,
           ", analysis_log=", manifest$analysis_log,
+          ", analysis_overview=", manifest$analysis_overview,
           ", run_summaries=", manifest$run_summaries, " (", manifest$n_run_summaries, ")")
 
   # 5. ExperimentSetupOverview (settings)
@@ -622,6 +664,54 @@ parse_spectronaut_zip <- function(zip_path) {
       parse_spectronaut_log(log_lines)
     }, error = function(e) { message("Warning: Could not parse AnalysisLog: ", e$message); NULL })
   } else NULL
+
+  # 6b. AnalysisOverview (precursor/protein counts, data completeness)
+  analysis_overview <- if (manifest$analysis_overview) {
+    tryCatch({
+      ao_lines <- readLines(analysis_overview_file, warn = FALSE)
+      ao <- list()
+      for (line in ao_lines) {
+        if (grepl("^\t|^$", line)) next
+        parts <- strsplit(line, "\t")[[1]]
+        if (length(parts) == 2) ao[[trimws(parts[1])]] <- trimws(parts[2])
+      }
+      ao
+    }, error = function(e) { message("Warning: Could not parse AnalysisOverview: ", e$message); NULL })
+  } else NULL
+
+  # Enrich library_info with AnalysisOverview precursor counts (more reliable than log grep)
+  if (!is.null(analysis_overview)) {
+    ao_precursors <- analysis_overview[["Avg Profiles - Precursor"]]
+    if (!is.null(ao_precursors)) {
+      # Format: "66,071 of 94,202" — total (after "of") is library precursor count
+      total_match <- regmatches(ao_precursors, regexpr("of ([0-9,]+)", ao_precursors))
+      if (length(total_match) > 0) {
+        total_val <- as.integer(gsub("[^0-9]", "", sub("^of ", "", total_match)))
+        if (!is.na(total_val)) {
+          if (is.null(library_info)) library_info <- list()
+          if (is.na(library_info$library_precursors) || is.null(library_info$library_precursors))
+            library_info$library_precursors <- total_val
+        }
+      }
+      # Avg (before "of") is identified precursors
+      avg_match <- regmatches(ao_precursors, regexpr("^[0-9,]+", ao_precursors))
+      if (length(avg_match) > 0) {
+        avg_val <- as.integer(gsub("[^0-9]", "", avg_match))
+        if (!is.na(avg_val)) {
+          if (is.null(library_info)) library_info <- list()
+          library_info$avg_precursors_identified <- avg_val
+        }
+      }
+    }
+    # Also get protein group count
+    ao_pg <- analysis_overview[["Avg Profiles - Protein Groups"]]
+    if (!is.null(ao_pg)) {
+      pg_val <- as.integer(gsub("[^0-9]", "", ao_pg))
+      if (!is.na(pg_val) && !is.null(library_info) &&
+          (is.na(library_info$library_proteins) || is.null(library_info$library_proteins)))
+        library_info$library_proteins <- pg_val
+    }
+  }
 
   # 7. Typed search settings from ExperimentSetupOverview
   search_settings <- if (!is.null(setup_overview)) {
@@ -667,6 +757,8 @@ parse_spectronaut_zip <- function(zip_path) {
   spec_version <- if (!is.null(library_info) && !is.null(library_info$spectronaut_version) &&
                       library_info$spectronaut_version != "Unknown") {
     library_info$spectronaut_version
+  } else if (!is.null(setup_overview) && !is.null(setup_overview[["spectronaut_version"]])) {
+    setup_overview[["spectronaut_version"]]
   } else if (!is.null(setup_overview) && !is.null(setup_overview[["Software Version"]])) {
     setup_overview[["Software Version"]]
   } else detect_spectronaut_version(df)
@@ -1081,7 +1173,9 @@ build_settings_diff <- function(run_a, run_b) {
     "pg_level", "proteoforms", "reanalyse",
     "library_source", "n_precursors_lib", "pipeline_step",
     "min_fr_mz", "max_fr_mz", "min_pep_len", "max_pep_len",
-    "missed_cleavages",
+    "min_pr_charge", "max_pr_charge",
+    "missed_cleavages", "var_mods", "fixed_mods", "max_var_mods",
+    "mbr", "search_mode",
     # Data stats
     "n_precursors", "n_proteins_total", "n_samples",
     "precursor_mz_range", "charge_range"
@@ -1104,7 +1198,9 @@ build_settings_diff <- function(run_a, run_b) {
     "Protein Grouping (pg-level)", "--proteoforms", "--reanalyse",
     "Library Source", "Precursors in Library", "Pipeline Step",
     "Min Fragment m/z", "Max Fragment m/z", "Min Peptide Length", "Max Peptide Length",
-    "Missed Cleavages",
+    "Min Precursor Charge", "Max Precursor Charge",
+    "Missed Cleavages", "Variable Mods", "Fixed Mods", "Max Variable Mods",
+    "Match Between Runs", "Search Mode",
     # Data stats
     "Precursors", "Protein Groups", "Samples",
     "Precursor m/z Range", "Charge Range"
@@ -1368,7 +1464,8 @@ compute_quant_comparison <- function(run_a, run_b, universe, sample_map) {
 
 #' Compute DE concordance (3x3: Up/Down/NS for each run)
 compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_b,
-                                   source_b, global_offset = 0) {
+                                   source_b, global_offset = 0,
+                                   imputation_b = NULL) {
   shared_ids <- universe$protein_id[universe$tier == "shared"]
 
   # Get DE stats for selected contrast
@@ -1401,10 +1498,11 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
   adjp_a  <- if ("adj.P.Val_A" %in% names(merged)) merged$adj.P.Val_A else merged$adj.P.Val
   adjp_b  <- if ("adj.P.Val_B" %in% names(merged)) merged$adj.P.Val_B else merged$adj.P.Val
 
-  # Classify each protein: Up / Down / NS
+  # Classify each protein: Up / Down / NS (NaN-safe)
   classify_de <- function(logfc, adjp, threshold = 0.05) {
-    ifelse(is.na(adjp) | adjp >= threshold, "NS",
-           ifelse(logfc > 0, "Up", "Down"))
+    ifelse(!is.finite(adjp) | adjp >= threshold, "NS",
+           ifelse(is.finite(logfc) & logfc > 0, "Up",
+                  ifelse(is.finite(logfc) & logfc < 0, "Down", "NS")))
   }
 
   merged$status_a <- classify_de(logfc_a, adjp_a)
@@ -1421,24 +1519,63 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
     factor(merged$status_b, levels = levels_3)
   )
 
+  # Add n_ratios to merged data for rescue stats (Mode B)
+  merged$n_ratios_B <- NA_integer_
+  if (source_b == "spectronaut" && !is.null(run_b$n_ratios)) {
+    nr_match <- match(merged$protein_id, run_b$n_ratios$protein_id)
+    merged$n_ratios_B <- run_b$n_ratios$n_ratios[nr_match]
+  }
+
   # Identify discordant proteins (different DE status)
   merged$concordant <- merged$status_a == merged$status_b
   discordant <- merged[!merged$concordant, ]
 
+  # Compute "rescue" stats: proteins with 0 ratios in Spectronaut but tested in DE-LIMP
+  rescue_stats <- NULL
+  if (source_b == "spectronaut" && any(!is.na(merged$n_ratios_B))) {
+    zero_ratio <- merged$n_ratios_B == 0 & !is.na(merged$n_ratios_B)
+    n_zero_ratio <- sum(zero_ratio)
+    # Of those, how many are significant in DE-LIMP?
+    sig_in_a <- zero_ratio & merged$status_a != "NS"
+    n_rescued_sig <- sum(sig_in_a)
+    # Low ratio (<25% of max possible)
+    n_group_1 <- n_group_2 <- 1L
+    if (!is.null(run_b$sample_map)) {
+      conds <- unique(run_b$sample_map$condition)
+      if (length(conds) == 2) {
+        n_group_1 <- sum(run_b$sample_map$condition == conds[1])
+        n_group_2 <- sum(run_b$sample_map$condition == conds[2])
+      }
+    }
+    max_ratios <- n_group_1 * n_group_2
+    low_ratio <- !is.na(merged$n_ratios_B) & merged$n_ratios_B > 0 &
+                 merged$n_ratios_B < (max_ratios * 0.25)
+    n_low_ratio <- sum(low_ratio)
+    # Imputation context
+    imp_setting <- if (!is.null(imputation_b)) trimws(imputation_b) else "Unknown"
+    imp_none <- grepl("^none$", imp_setting, ignore.case = TRUE)
+    rescue_stats <- list(
+      n_zero_ratio   = n_zero_ratio,
+      n_rescued_sig  = n_rescued_sig,
+      n_low_ratio    = n_low_ratio,
+      max_ratios     = max_ratios,
+      imputation     = imp_setting,
+      imputation_off = imp_none
+    )
+  }
+
   # Get peptide counts and missing percentages
-  if (!is.null(run_a$n_peptides)) {
-    discordant <- merge(discordant,
-      run_a$n_peptides[, c("protein_id", "n_peptides")],
-      by = "protein_id", all.x = TRUE, suffixes = c("", "_npA"))
-    names(discordant)[names(discordant) == "n_peptides"] <- "n_peptides_A"
+  if (nrow(discordant) > 0 && !is.null(run_a$n_peptides)) {
+    pep_a <- run_a$n_peptides[, c("protein_id", "n_peptides"), drop = FALSE]
+    names(pep_a)[2] <- "n_peptides_A"
+    discordant <- merge(discordant, pep_a, by = "protein_id", all.x = TRUE)
   } else {
     discordant$n_peptides_A <- NA_integer_
   }
-  if (!is.null(run_b$n_peptides)) {
-    discordant <- merge(discordant,
-      run_b$n_peptides[, c("protein_id", "n_peptides")],
-      by = "protein_id", all.x = TRUE)
-    names(discordant)[names(discordant) == "n_peptides"] <- "n_peptides_B"
+  if (nrow(discordant) > 0 && !is.null(run_b$n_peptides)) {
+    pep_b <- run_b$n_peptides[, c("protein_id", "n_peptides"), drop = FALSE]
+    names(pep_b)[2] <- "n_peptides_B"
+    discordant <- merge(discordant, pep_b, by = "protein_id", all.x = TRUE)
   } else {
     discordant$n_peptides_B <- NA_integer_
   }
@@ -1447,12 +1584,7 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
   discordant$missing_pct_A <- run_a$missing_pct[match(discordant$protein_id, names(run_a$missing_pct))]
   discordant$missing_pct_B <- run_b$missing_pct[match(discordant$protein_id, names(run_b$missing_pct))]
 
-  # Add n_ratios from Spectronaut (Mode B)
-  discordant$n_ratios_B <- NA_integer_
-  if (source_b == "spectronaut" && !is.null(run_b$n_ratios)) {
-    nr_match <- match(discordant$protein_id, run_b$n_ratios$protein_id)
-    discordant$n_ratios_B <- run_b$n_ratios$n_ratios[nr_match]
-  }
+  # n_ratios_B already inherited from merged (added above)
 
   # Compute group sizes for n_ratios context
   n_group_a <- n_group_b <- 1L
@@ -1474,6 +1606,7 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
     discordant$.use_all_ms_true <- use_all_ms_true
     discordant$.n_group_a <- n_group_a
     discordant$.n_group_b <- n_group_b
+    discordant$.imputation_b <- imputation_b %||% "Unknown"
     hyp_results <- lapply(seq_len(nrow(discordant)), function(i) {
       assign_hypothesis(discordant[i, ], source_b, global_offset)
     })
@@ -1492,6 +1625,7 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
     discordant$.use_all_ms_true <- NULL
     discordant$.n_group_a <- NULL
     discordant$.n_group_b <- NULL
+    discordant$.imputation_b <- NULL
     conf_order <- c("High" = 1, "Medium" = 2, "Low" = 3)
     discordant$conf_rank <- conf_order[discordant$confidence]
     discordant <- discordant[order(discordant$conf_rank,
@@ -1505,15 +1639,44 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
     discordant_table = discordant,
     n_concordant     = sum(merged$concordant),
     n_discordant     = sum(!merged$concordant),
-    n_total          = nrow(merged)
+    n_total          = nrow(merged),
+    rescue_stats     = rescue_stats
   )
 }
 
-#' Assign diagnostic hypothesis for a discordant protein (7 rules, tool-aware)
+#' Assign diagnostic hypothesis for a discordant protein (8 rules + Rule 0, tool-aware)
 assign_hypothesis <- function(row, source_b, global_offset = 0) {
-  logfc_diff   <- abs(row$logFC_A - row$logFC_B)
-  same_dir     <- sign(row$logFC_A) == sign(row$logFC_B)
-  p_diff_large <- abs(log10(row$adjP_A + 1e-10) - log10(row$adjP_B + 1e-10)) > 1
+  lfc_a <- if (is.finite(row$logFC_A)) row$logFC_A else 0
+  lfc_b <- if (is.finite(row$logFC_B)) row$logFC_B else 0
+  adjp_a <- if (is.finite(row$adjP_A)) row$adjP_A else 1
+  adjp_b <- if (is.finite(row$adjP_B)) row$adjP_B else 1
+
+  # Rule 0: Spectronaut had 0 computable ratios (highest priority)
+  if (source_b == "spectronaut" && !is.na(row$n_ratios_B) && row$n_ratios_B == 0) {
+    imp <- row$.imputation_b %||% "Unknown"
+    imp_none <- grepl("^none$", imp, ignore.case = TRUE)
+    if (imp_none) {
+      msg <- paste0(
+        "Spectronaut had 0 computable ratios for this protein (complete missingness in one condition). ",
+        "Imputation was disabled in Spectronaut, so no statistical test was possible. ",
+        "DE-LIMP tested this protein via limpa empirical Bayes modelling with DIA-NN's match-between-runs quantification.")
+    } else if (grepl("unknown", imp, ignore.case = TRUE)) {
+      msg <- paste0(
+        "Spectronaut had 0 computable ratios for this protein (complete missingness in one condition). ",
+        "No statistical test was possible in Spectronaut. ",
+        "DE-LIMP tested this protein via limpa empirical Bayes modelling.")
+    } else {
+      msg <- paste0(
+        "Spectronaut had 0 computable ratios despite imputation being enabled (", imp, "). ",
+        "This protein had complete missingness in one condition that imputation could not rescue. ",
+        "DE-LIMP tested this protein via limpa empirical Bayes modelling with DIA-NN's match-between-runs quantification.")
+    }
+    return(list(hypothesis = msg, confidence = "High", category = "Untestable in Spectronaut"))
+  }
+
+  logfc_diff   <- abs(lfc_a - lfc_b)
+  same_dir     <- sign(lfc_a) == sign(lfc_b)
+  p_diff_large <- abs(log10(adjp_a + 1e-10) - log10(adjp_b + 1e-10)) > 1
   missing_diff <- abs((row$missing_pct_A %||% 0) - (row$missing_pct_B %||% 0)) > 0.2
   peptide_diff <- !is.na(row$n_peptides_A) && !is.na(row$n_peptides_B) &&
                   abs(row$n_peptides_A - row$n_peptides_B) > 2
@@ -1632,7 +1795,7 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
 # --- AI Prompt Builders ---
 
 #' Build Gemini prompt for run comparator (tool-aware)
-build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL) {
+build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instrument_meta = NULL) {
   stats    <- comp_results$summary_stats
   top_disc <- head(comp_results$de_concordance$discordant_table, 10)
   source_b <- stats$source_b
@@ -1755,8 +1918,27 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL) {
     }, error = function(e) "")
   }
 
+  # Instrument context (brief)
+  instrument_section <- ""
+  if (!is.null(instrument_meta)) {
+    inst_parts <- character(0)
+    if (!is.null(instrument_meta$instrument_model) && nzchar(instrument_meta$instrument_model))
+      inst_parts <- c(inst_parts, instrument_meta$instrument_model)
+    if (!is.null(instrument_meta$lc_system) && nzchar(instrument_meta$lc_system))
+      inst_parts <- c(inst_parts, instrument_meta$lc_system)
+    if (!is.null(instrument_meta$lc_method) && nzchar(instrument_meta$lc_method))
+      inst_parts <- c(inst_parts, instrument_meta$lc_method)
+    if (!is.null(instrument_meta$evosep_spd) && !is.na(instrument_meta$evosep_spd))
+      inst_parts <- c(inst_parts, paste0(instrument_meta$evosep_spd, " SPD"))
+    if (!is.null(instrument_meta$evosep_gradient_min) && !is.na(instrument_meta$evosep_gradient_min))
+      inst_parts <- c(inst_parts, paste0(instrument_meta$evosep_gradient_min, " min gradient"))
+    if (length(inst_parts) > 0)
+      instrument_section <- paste0("INSTRUMENT: ", paste(inst_parts, collapse = ", "), "\n")
+  }
+
   paste0(
     "You are analyzing a proteomics run comparison in DE-LIMP.\n\n",
+    instrument_section,
     "TOOL COMPARISON CONTEXT:\n", tool_context, "\n\n",
     "COMPARISON OVERVIEW:\n",
     "- Run A: ", stats$run_a_label, " (", stats$n_samples, " samples)\n",
@@ -1799,7 +1981,7 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL) {
 }
 
 #' Build Claude export prompt
-build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL) {
+build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL, instrument_meta = NULL) {
   stats    <- comp_results$summary_stats
   source_b <- stats$source_b
 
@@ -1822,8 +2004,27 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
     paste0("\n\nGEMINI PRE-ANALYSIS:\n", gemini_narrative)
   } else ""
 
+  # Instrument context (brief)
+  instrument_line <- ""
+  if (!is.null(instrument_meta)) {
+    inst_parts <- character(0)
+    if (!is.null(instrument_meta$instrument_model) && nzchar(instrument_meta$instrument_model))
+      inst_parts <- c(inst_parts, instrument_meta$instrument_model)
+    if (!is.null(instrument_meta$lc_system) && nzchar(instrument_meta$lc_system))
+      inst_parts <- c(inst_parts, instrument_meta$lc_system)
+    if (!is.null(instrument_meta$lc_method) && nzchar(instrument_meta$lc_method))
+      inst_parts <- c(inst_parts, instrument_meta$lc_method)
+    if (!is.null(instrument_meta$evosep_spd) && !is.na(instrument_meta$evosep_spd))
+      inst_parts <- c(inst_parts, paste0(instrument_meta$evosep_spd, " SPD"))
+    if (!is.null(instrument_meta$evosep_gradient_min) && !is.na(instrument_meta$evosep_gradient_min))
+      inst_parts <- c(inst_parts, paste0(instrument_meta$evosep_gradient_min, " min gradient"))
+    if (length(inst_parts) > 0)
+      instrument_line <- paste0("INSTRUMENT: ", paste(inst_parts, collapse = ", "), "\n")
+  }
+
   paste0(
     "I am sharing a proteomics run comparison from DE-LIMP.\n\n",
+    instrument_line,
     "COMPARISON TYPE: ", tool_label, "\n",
     "EXPERIMENT: ", stats$contrast, " contrast, ", stats$n_samples, " samples.\n\n",
     "KEY FINDING: Of ", stats$n_shared, " shared proteins, ",
@@ -2564,7 +2765,29 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       )
     } else {
       # Both runs have multiple contrasts — try matching by name
-      auto_match <- if (contrasts_a[1] %in% contrasts_b) contrasts_a[1] else contrasts_b[1]
+      # Normalize for fuzzy matching: lowercase, strip spaces/punctuation
+      norm <- function(x) tolower(gsub("[^a-z0-9]", "", x))
+      exact_match <- contrasts_a[1] %in% contrasts_b
+      fuzzy_match <- if (!exact_match) {
+        m <- match(norm(contrasts_a[1]), norm(contrasts_b))
+        if (!is.na(m)) contrasts_b[m] else NULL
+      } else NULL
+      auto_match <- if (exact_match) contrasts_a[1]
+                    else if (!is.null(fuzzy_match)) fuzzy_match
+                    else contrasts_b[1]
+      # Check if ANY contrast overlaps (exact or fuzzy)
+      any_overlap <- any(norm(contrasts_a) %in% norm(contrasts_b))
+      mismatch_warn <- if (!any_overlap) {
+        div(class = "alert alert-warning py-2 px-3 mt-2", style = "font-size: 0.88em;",
+          icon("triangle-exclamation"), " ",
+          tags$b("Contrast names don't match between runs. "),
+          "The ", tags$b(run_b$source %||% "external tool"),
+          " export used different condition groupings than DE-LIMP. ",
+          "Select the equivalent contrasts manually to compare the same biological question, ",
+          "or re-export from ", tags$b(run_b$source %||% "the external tool"),
+          " with matching conditions."
+        )
+      }
       tagList(
         div(style = "display: flex; gap: 15px; margin-top: 10px;",
           div(style = "flex: 1;",
@@ -2575,7 +2798,8 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             selectInput("comparator_contrast_b", "Run B Contrast",
                         choices = contrasts_b, selected = auto_match)
           )
-        )
+        ),
+        mismatch_warn
       )
     }
   })
@@ -2660,11 +2884,17 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       # Layer 4: DE Concordance (skip if Run B has no DE stats)
       setProgress(0.6, detail = "Analyzing DE concordance...")
       de_conc <- NULL
+      # Extract Spectronaut imputation setting for rescue stats
+      imputation_b <- coalesce_setting(
+        run_b$search_settings$imputation,
+        coalesce_setting(run_b$settings$imputation, NULL)
+      )
+
       if (!is.null(run_b$de_stats)) {
         de_conc <- tryCatch(
           compute_de_concordance(run_a, run_b, universe,
                                 contrast_a, contrast_b %||% "comparison",
-                                run_b$source, global_offset),
+                                run_b$source, global_offset, imputation_b),
           error = function(e) {
             showNotification(paste("DE concordance error:", e$message), type = "warning")
             NULL
@@ -2697,9 +2927,10 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         n_b_only_de   = if (!is.null(de_conc)) {
           sum(de_conc$discordant_table$status_a == "NS" & de_conc$discordant_table$status_b != "NS")
         } else NA,
-        global_offset = global_offset,
-        min_cor       = if (!is.null(quant)) quant$min_cor else NA,
-        max_cor       = if (!is.null(quant)) quant$max_cor else NA
+        global_offset  = global_offset,
+        min_cor        = if (!is.null(quant)) quant$min_cor else NA,
+        max_cor        = if (!is.null(quant)) quant$max_cor else NA,
+        rescue_stats   = if (!is.null(de_conc)) de_conc$rescue_stats else NULL
       )
 
       results <- list(
@@ -2766,6 +2997,27 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       tags$span(class = "badge bg-success", "No systematic bias")
     }
 
+    # Rescue stats line (Spectronaut Mode B)
+    rescue_line <- NULL
+    rs <- stats$rescue_stats
+    if (!is.null(rs) && rs$n_zero_ratio > 0) {
+      imp_note <- if (rs$imputation_off) " (imputation disabled)" else ""
+      rescue_line <- if (rs$n_rescued_sig > 0) {
+        div(style = "width: 100%; font-size: 0.9em; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(0,0,0,0.1);",
+          icon("flask"), " ",
+          tags$b(rs$n_rescued_sig), " proteins rescued by DE-LIMP — ",
+          "untestable in Spectronaut (0 of ", rs$max_ratios, " ratios)", imp_note,
+          " but significant in DE-LIMP via limpa modelling. ",
+          tags$span(style = "opacity: 0.75;",
+            sprintf("(%d total with 0 ratios, %d with low ratios)", rs$n_zero_ratio, rs$n_low_ratio))
+        )
+      } else {
+        div(style = "width: 100%; font-size: 0.9em; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(0,0,0,0.1);",
+          sprintf("%d proteins untestable in Spectronaut (0 ratios)%s", rs$n_zero_ratio, imp_note)
+        )
+      }
+    }
+
     div(class = "alert alert-info py-2 mb-3",
       style = "display: flex; flex-wrap: wrap; gap: 15px; align-items: center;",
       div(
@@ -2778,7 +3030,8 @@ server_comparator <- function(input, output, session, values, add_to_log) {
       if (!is.null(dom_hyp)) {
         tags$span(class = "badge bg-secondary",
                   paste("Dominant cause:", dom_hyp))
-      }
+      },
+      rescue_line
     )
   })
 
@@ -3412,15 +3665,22 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     res <- comp_results()
     req(res)
 
-    # No DE stats in Run B -> show banner
+    # No DE stats in Run B -> show banner (mode-aware message)
     if (is.null(res$de_concordance)) {
+      mode <- input$comparator_mode
+      hint <- if (identical(mode, "delimp_spectronaut")) {
+        tagList("Ensure the Spectronaut export includes a ",
+                tags$b("Candidates.tsv"), " file with DE statistics (Log2Ratio, Pvalue, Qvalue columns).")
+      } else if (identical(mode, "delimp_fragpipe")) {
+        tagList("Run ", tags$a("FragPipe-Analyst", href = "https://fragpipe-analyst.org/",
+                               target = "_blank"),
+                " and upload its DE results export to enable this layer.")
+      } else {
+        "The uploaded file contains intensities only."
+      }
       return(div(class = "alert alert-warning mt-3",
         icon("triangle-exclamation"), " ",
-        tags$b("DE Concordance requires DE statistics. "),
-        "The uploaded file contains intensities only. ",
-        "Run ", tags$a("FragPipe-Analyst", href = "https://fragpipe-analyst.org/",
-                       target = "_blank"),
-        " and upload its DE results export to enable this layer."
+        tags$b("DE Concordance requires DE statistics. "), hint
       ))
     }
 
@@ -3646,7 +3906,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     req(res, input$user_api_key)
 
     mofa_obj <- values$comparator_mofa
-    prompt <- build_gemini_comparator_prompt(res, mofa_obj)
+    prompt <- build_gemini_comparator_prompt(res, mofa_obj, values$instrument_metadata)
 
     withProgress(message = "Generating Gemini summary...", value = 0.3, {
       tryCatch({
@@ -4057,7 +4317,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
           # 6. Claude prompt
           setProgress(0.8, detail = "Building prompt...")
-          prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative)
+          prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative, values$instrument_metadata)
           prompt_file <- file.path(tmp_dir, "claude_prompt.md")
           writeLines(prompt, prompt_file)
           files_to_zip <- c(files_to_zip, prompt_file)

@@ -791,9 +791,10 @@ server_session <- function(input, output, session, values, add_to_log) {
                     else ""),
             sprintf("Enzyme: %s with up to %s missed cleavage(s).",
                     enzyme_name, sp$missed_cleavages %||% "?"),
-            sprintf("Peptide length: %s-%s amino acids. Precursor m/z: %s-%s. Precursor charge: %s-%s.",
+            sprintf("Peptide length: %s-%s amino acids. Precursor m/z: %s-%s. Fragment m/z: %s-%s. Precursor charge: %s-%s.",
                     sp$min_pep_len %||% "?", sp$max_pep_len %||% "?",
                     sp$min_pr_mz %||% "?", sp$max_pr_mz %||% "?",
+                    sp$min_fr_mz %||% "?", sp$max_fr_mz %||% "?",
                     sp$min_pr_charge %||% "?", sp$max_pr_charge %||% "?"),
             sprintf("Mass accuracy: %s.", mass_acc_desc)
           )
@@ -1413,6 +1414,12 @@ server_session <- function(input, output, session, values, add_to_log) {
 
   history_refresh <- reactiveVal(0)
 
+  # Cached activity log — reads from disk once per refresh, shared across all observers
+  cached_activity_log <- reactive({
+    history_refresh()  # dependency: re-read when refresh triggers
+    activity_log_read()
+  })
+
   # Migrate old CSVs + backfill from job queue on startup
   session$onFlushed(once = TRUE, function() {
     tryCatch({
@@ -1428,8 +1435,10 @@ server_session <- function(input, output, session, values, add_to_log) {
 
   # Populate project filter dropdown
   observe({
-    history_refresh()
-    choices <- get_projects()
+    log <- cached_activity_log()
+    choices <- if (nrow(log) > 0 && "project" %in% names(log)) {
+      sort(unique(na.omit(log$project[nzchar(log$project)])))
+    } else character(0)
     updateSelectizeInput(session, "project_filter",
       choices = c("All projects" = "", choices),
       selected = input$project_filter %||% "",
@@ -1438,8 +1447,7 @@ server_session <- function(input, output, session, values, add_to_log) {
 
   # Populate user filter dropdown
   observe({
-    history_refresh()
-    log <- activity_log_read()
+    log <- cached_activity_log()
     users <- if (nrow(log) > 0 && "user" %in% names(log)) {
       sort(unique(na.omit(log$user[nzchar(log$user)])))
     } else character(0)
@@ -1454,8 +1462,7 @@ server_session <- function(input, output, session, values, add_to_log) {
     proj_name <- input$project_filter
     if (is.null(proj_name) || !nzchar(proj_name)) return(NULL)
 
-    history_refresh()
-    log <- activity_log_read()
+    log <- cached_activity_log()
     if (nrow(log) == 0 || !"project" %in% names(log)) return(NULL)
 
     proj_log <- log[!is.na(log$project) & log$project == proj_name, , drop = FALSE]
@@ -1492,9 +1499,10 @@ server_session <- function(input, output, session, values, add_to_log) {
   }, ignoreInit = TRUE)
 
   output$history_table <- renderDT({
-    history_refresh()
+    t0 <- proc.time()
     message("[DE-LIMP] Rendering unified history table...")
-    log <- activity_log_read()
+    log <- cached_activity_log()
+    message("[DE-LIMP] History: CSV read took ", round((proc.time() - t0)[3] * 1000), "ms, ", nrow(log), " rows")
     if (nrow(log) == 0) return(NULL)
 
     log <- log[order(log$timestamp, decreasing = TRUE), ]
@@ -1716,6 +1724,7 @@ server_session <- function(input, output, session, values, add_to_log) {
       });
     ")
 
+    message("[DE-LIMP] History: table prep took ", round((proc.time() - t0)[3] * 1000), "ms")
     datatable(log[, display_cols, drop = FALSE],
       options = list(
         pageLength = 15, dom = "ftp",
@@ -1735,7 +1744,7 @@ server_session <- function(input, output, session, values, add_to_log) {
   output$history_export_csv <- downloadHandler(
     filename = function() paste0("delimp_history_", format(Sys.time(), "%Y%m%d"), ".csv"),
     content = function(file) {
-      log <- activity_log_read()
+      log <- cached_activity_log()
       write.csv(log, file, row.names = FALSE)
     }
   )
@@ -1749,7 +1758,7 @@ server_session <- function(input, output, session, values, add_to_log) {
     out_dir <- input$history_log_click$od
     if (is.null(out_dir) || !nzchar(out_dir)) return()
 
-    log <- activity_log_read()
+    log <- cached_activity_log()
     search_name <- ""
     if (nrow(log) > 0) {
       match_row <- which(log$output_dir == out_dir)
@@ -1791,7 +1800,7 @@ server_session <- function(input, output, session, values, add_to_log) {
     out_dir <- input$history_settings_click$od
     if (is.null(out_dir) || !nzchar(out_dir)) return()
 
-    log <- activity_log_read()
+    log <- cached_activity_log()
     if (nrow(log) == 0) return()
     match_row <- which(!is.na(log$output_dir) & log$output_dir == out_dir)
     if (length(match_row) == 0) return()
@@ -1965,7 +1974,7 @@ server_session <- function(input, output, session, values, add_to_log) {
 
         # Reconstruct search settings from activity log
         tryCatch({
-          log <- activity_log_read()
+          log <- cached_activity_log()
           match_rows <- log[!is.na(log$output_dir) & log$output_dir == od, , drop = FALSE]
           if (nrow(match_rows) > 0) {
             row <- match_rows[nrow(match_rows), ]
@@ -2162,16 +2171,17 @@ server_session <- function(input, output, session, values, add_to_log) {
           file.path(od, "session.rds")
         ))
         for (rds_path in candidates) {
+          # Always check local first (session_file may be a local path even when SSH connected)
+          if (file.exists(rds_path)) return(rds_path)
+          # Then try remote via SSH
           if (!is.null(cfg) && isTRUE(values$ssh_connected)) {
-            check <- tryCatch(ssh_exec(cfg, paste("ls", shQuote(rds_path), "2>/dev/null")),
-              error = function(e) list(status = 1))
-            if (check$status == 0) {
+            check <- tryCatch(ssh_exec(cfg, paste("test -f", shQuote(rds_path), "&& echo EXISTS")),
+              error = function(e) list(status = 1, stdout = ""))
+            if (check$status == 0 && any(grepl("EXISTS", check$stdout))) {
               local_rds <- file.path(tempdir(), paste0("compare_", basename(od), "_", basename(rds_path)))
               dl <- scp_download(cfg, rds_path, local_rds)
               if (dl$status == 0) return(local_rds)
             }
-          } else if (file.exists(rds_path)) {
-            return(rds_path)
           }
         }
         stop(sprintf("No session.rds found for %s. Run the LIMPA pipeline on this data first, then the RDS will be auto-saved.", basename(od)))
