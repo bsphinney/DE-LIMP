@@ -1531,7 +1531,7 @@ server_search <- function(input, output, session, values, add_to_log,
   #    TIC Extraction — Extract button + observers
   # ============================================================================
 
-  # --- Recover TIC traces from previous jobs when files are scanned ---
+  # --- Recover TIC traces from disk cache or job queue when files are scanned ---
   # Avoids re-extracting TICs for files that were already analyzed
   observe({
     req(values$diann_raw_files)
@@ -1541,7 +1541,38 @@ server_search <- function(input, output, session, values, add_to_log,
     current_files <- values$diann_raw_files$filename
     if (length(current_files) == 0) return()
 
-    # Search job queue for matching TIC data
+    # 1. Check disk cache first (keyed by directory path)
+    tryCatch({
+      cache_dir <- file.path(Sys.getenv("HOME"), ".delimp_tic_cache")
+      if (dir.exists(cache_dir) && nrow(values$diann_raw_files) > 0) {
+        raw_dir <- if ("full_path" %in% names(values$diann_raw_files))
+          dirname(values$diann_raw_files$full_path[1])
+        else if (!is.null(input$ssh_raw_data_dir) && nzchar(input$ssh_raw_data_dir))
+          input$ssh_raw_data_dir
+        else NULL
+        if (is.null(raw_dir)) return()
+        cache_key <- digest::digest(raw_dir, algo = "md5")
+        cache_file <- file.path(cache_dir, paste0(cache_key, ".rds"))
+        if (file.exists(cache_file)) {
+          cached <- readRDS(cache_file)
+          prev_files <- names(cached$traces)
+          d_files <- current_files[grepl("\\.d$", current_files, ignore.case = TRUE)]
+          matched <- intersect(d_files, prev_files)
+          if (length(matched) > 0 && length(matched) >= length(d_files) * 0.9) {
+            values$tic_traces <- cached$traces[matched]
+            values$tic_metrics <- cached$metrics[cached$metrics$run %in% matched, ]
+            age_hrs <- round(as.numeric(difftime(Sys.time(), cached$saved_at, units = "hours")), 1)
+            message(sprintf("[DE-LIMP] TIC cache hit: %d files from %s (%.1fh old)", length(matched), raw_dir, age_hrs))
+            showNotification(
+              sprintf("Recovered TIC data from cache (%d files, %.0fh old)", length(matched), age_hrs),
+              type = "message", duration = 5)
+            return()
+          }
+        }
+      }
+    }, error = function(e) message("[DE-LIMP] TIC cache read error: ", e$message))
+
+    # 2. Fall back to job queue search
     for (j in values$diann_jobs) {
       if (is.null(j$metadata$tic_traces)) next
       prev_files <- names(j$metadata$tic_traces)
@@ -1820,6 +1851,31 @@ server_search <- function(input, output, session, values, add_to_log,
 
     values$tic_traces <- traces
     values$tic_metrics <- metrics_df
+
+    # Cache TIC data to disk keyed by directory path
+    tryCatch({
+      cache_dir <- file.path(Sys.getenv("HOME"), ".delimp_tic_cache")
+      if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
+      # Use MD5 hash of the raw file directory as cache key
+      raw_dir <- if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
+        if ("full_path" %in% names(values$diann_raw_files))
+          dirname(values$diann_raw_files$full_path[1])
+        else if (!is.null(input$ssh_raw_data_dir) && nzchar(input$ssh_raw_data_dir))
+          input$ssh_raw_data_dir
+        else NULL
+      } else NULL
+      if (!is.null(raw_dir)) {
+        cache_key <- digest::digest(raw_dir, algo = "md5")
+        cache_file <- file.path(cache_dir, paste0(cache_key, ".rds"))
+        saveRDS(list(
+          dir = raw_dir,
+          traces = traces,
+          metrics = metrics_df,
+          saved_at = Sys.time()
+        ), cache_file)
+        message(sprintf("[DE-LIMP] TIC cache saved: %s (%d files)", raw_dir, length(traces)))
+      }
+    }, error = function(e) message("[DE-LIMP] TIC cache save error: ", e$message))
 
     n_pass <- sum(metrics_df$status == "pass")
     n_warn <- sum(metrics_df$status == "warn")
