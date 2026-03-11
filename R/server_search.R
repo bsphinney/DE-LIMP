@@ -505,6 +505,8 @@ server_search <- function(input, output, session, values, add_to_log,
     if (is.null(j$backend)) j$backend <- "hpc"
     if (is.null(j$name) || length(j$name) != 1) j$name <- "unnamed"
     if (is.null(j$job_id) || length(j$job_id) != 1) j$job_id <- NA_character_
+    if (is.null(j$n_files) || length(j$n_files) != 1) j$n_files <- 0L
+    if (is.null(j$submitted_at)) j$submitted_at <- Sys.time()
     j
   }
 
