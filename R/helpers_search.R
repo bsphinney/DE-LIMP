@@ -3943,6 +3943,42 @@ record_cluster_snapshot <- function(lab_res, pub_res, auto_partition,
   }, error = function(e) message("[DE-LIMP] Failed to write cluster usage: ", e$message))
 }
 
+#' Record per-job wait time for grant reporting
+#' Appends to ~/.delimp_job_wait_log.csv
+#' @param job Job list entry with job_id, submitted_at, wait_min, n_files, etc.
+record_job_wait <- function(job) {
+  path <- file.path(Sys.getenv("HOME"), ".delimp_job_wait_log.csv")
+  row <- data.frame(
+    timestamp    = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+    job_id       = job$job_id %||% NA_character_,
+    name         = job$name %||% "unnamed",
+    backend      = job$backend %||% "hpc",
+    partition    = job$partition %||% NA_character_,
+    n_files      = job$n_files %||% 0L,
+    cpus         = job$cpus %||% NA_integer_,
+    mem_gb       = job$mem_gb %||% NA_integer_,
+    parallel     = isTRUE(job$parallel),
+    submitted_at = if (!is.null(job$submitted_at)) format(job$submitted_at, "%Y-%m-%dT%H:%M:%S") else NA,
+    started_at   = if (!is.null(job$started_at)) format(job$started_at, "%Y-%m-%dT%H:%M:%S") else NA,
+    wait_min     = job$wait_min %||% NA_real_,
+    est_start    = job$est_start %||% NA_character_,
+    stringsAsFactors = FALSE
+  )
+  needs_header <- !file.exists(path)
+  tryCatch({
+    write.table(row, file = path, append = TRUE, sep = ",",
+      row.names = FALSE, col.names = needs_header, quote = TRUE)
+  }, error = function(e) message("[DE-LIMP] Failed to write job wait log: ", e$message))
+}
+
+#' Read job wait log for grant reporting
+#' @return Data frame with all recorded job wait times
+read_job_wait_log <- function() {
+  path <- file.path(Sys.getenv("HOME"), ".delimp_job_wait_log.csv")
+  if (!file.exists(path)) return(data.frame())
+  tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) data.frame())
+}
+
 #' Read cluster usage history, optionally filtered by time
 #'
 #' @param since POSIXct timestamp — only return rows newer than this

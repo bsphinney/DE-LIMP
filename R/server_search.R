@@ -4235,6 +4235,18 @@ server_search <- function(input, output, session, values, add_to_log,
       }
 
       if (new_status != jobs[[i]]$status) {
+        # Record actual wait time when transitioning from queued → running
+        if (jobs[[i]]$status == "queued" && new_status == "running" &&
+            !is.null(jobs[[i]]$submitted_at)) {
+          wait_min <- round(as.numeric(difftime(Sys.time(), jobs[[i]]$submitted_at, units = "mins")), 1)
+          jobs[[i]]$wait_min <- wait_min
+          jobs[[i]]$started_at <- Sys.time()
+          message(sprintf("[DE-LIMP] Job %s started after %.1f min wait", jobs[[i]]$job_id, wait_min))
+          # Record in cluster wait log for grant justification
+          tryCatch(record_job_wait(jobs[[i]]), error = function(e)
+            message("[DE-LIMP] Failed to record job wait: ", e$message))
+        }
+
         jobs[[i]]$status <- new_status
         changed <- TRUE
 
