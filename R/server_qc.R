@@ -1008,7 +1008,22 @@ server_qc <- function(input, output, session, values) {
     status_colors <- c(pass = "#28a745", warn = "#ffc107", fail = "#dc3545")
 
     if (view_mode == "faceted") {
-      # Compute median trace on common grid for overlay
+      # For large datasets, show only flagged runs (warn/fail) by default
+      run_names <- names(traces)
+      n_runs <- length(run_names)
+
+      # Filter to flagged runs when >40 files (show all if <=40 or all pass)
+      flagged <- metrics$run[metrics$status %in% c("warn", "fail")]
+      if (n_runs > 40 && length(flagged) > 0) {
+        show_runs <- flagged
+        subtitle_text <- sprintf("Showing %d flagged of %d total runs (use Overlay for all)",
+                                  length(show_runs), n_runs)
+      } else {
+        show_runs <- run_names
+        subtitle_text <- "Blue dashed = median trace across all runs"
+      }
+
+      # Compute median trace on common grid (from ALL traces, not just shown)
       grid_rt <- seq(
         max(sapply(traces, function(x) min(x$rt_min))),
         min(sapply(traces, function(x) max(x$rt_min))),
@@ -1023,23 +1038,32 @@ server_qc <- function(input, output, session, values) {
         interp_matrix  # single file case
       }
 
-      # Build native plotly subplots (avoids ggplotly facet_wrap first-panel bug)
-      run_names <- names(traces)
-      ncol <- min(4L, length(run_names))
-      nrow <- ceiling(length(run_names) / ncol)
+      # Adaptive layout: fewer columns and truncated names for many files
+      n_show <- length(show_runs)
+      ncol <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else 4L
+      nrow <- ceiling(n_show / ncol)
 
-      subplots <- lapply(seq_along(run_names), function(i) {
-        nm <- run_names[i]
+      # Truncate long filenames: keep last N chars after stripping .d
+      truncate_label <- function(nm, max_chars = 30) {
+        label <- sub("\\.d$", "", nm)
+        if (nchar(label) > max_chars) {
+          paste0("...", substr(label, nchar(label) - max_chars + 4, nchar(label)))
+        } else label
+      }
+
+      subplots <- lapply(seq_along(show_runs), function(i) {
+        nm <- show_runs[i]
         df <- traces[[nm]]
         run_status <- metrics$status[metrics$run == nm]
         line_col <- status_colors[run_status] %||% "#666"
-        run_label <- sub("\\.d$", "", nm)
+        run_label <- truncate_label(nm)
+        full_label <- sub("\\.d$", "", nm)
 
         plotly::plot_ly() %>%
           plotly::add_lines(x = df$rt_min, y = df$tic / 1e6,
             line = list(color = line_col, width = 1.5),
             hoverinfo = "text",
-            text = sprintf("%s<br>RT: %.1f min<br>TIC: %.1fM", run_label, df$rt_min, df$tic / 1e6),
+            text = sprintf("%s<br>RT: %.1f min<br>TIC: %.1fM", full_label, df$rt_min, df$tic / 1e6),
             showlegend = FALSE) %>%
           plotly::add_lines(x = grid_rt, y = median_trace / 1e6,
             line = list(color = "#007bff", width = 1, dash = "dash"),
@@ -1047,21 +1071,26 @@ server_qc <- function(input, output, session, values) {
           plotly::layout(
             annotations = list(list(
               text = run_label, x = 0.5, y = 1.05, xref = "paper", yref = "paper",
-              showarrow = FALSE, font = list(size = 10, color = "white"),
-              bgcolor = "#2c3e50", borderpad = 3, xanchor = "center"
+              showarrow = FALSE, font = list(size = 9, color = "white"),
+              bgcolor = line_col, borderpad = 2, xanchor = "center"
             )),
-            xaxis = list(title = if (i > length(run_names) - ncol) "RT (min)" else "",
+            xaxis = list(title = if (i > n_show - ncol) "RT (min)" else "",
                           showgrid = TRUE, gridcolor = "#eee"),
             yaxis = list(title = if ((i - 1) %% ncol == 0) "TIC (M)" else "",
                           showgrid = TRUE, gridcolor = "#eee")
           )
       })
 
+      # Dynamic height: 250px per row, minimum 400px
+      plot_height <- max(400, nrow * 250)
+
       plotly::subplot(subplots, nrows = nrow, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
         plotly::layout(
-          title = list(text = "TIC Traces by Run<br><sup style='color:gray'>Blue dashed = median trace across all runs</sup>",
+          title = list(text = paste0("TIC Traces by Run<br><sup style='color:gray'>",
+                                      subtitle_text, "</sup>"),
                         font = list(size = 14)),
-          showlegend = FALSE
+          showlegend = FALSE,
+          height = plot_height
         )
 
     } else if (view_mode == "overlay") {
@@ -1234,11 +1263,20 @@ server_qc <- function(input, output, session, values) {
     view_mode <- input$tic_view_mode %||% "faceted"
     p <- build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
 
+    # Scale modal plot height with panel count
+    n_traces <- length(values$tic_traces)
+    modal_height <- if (view_mode == "faceted" && n_traces > 8) {
+      flagged <- values$tic_metrics$run[values$tic_metrics$status %in% c("warn", "fail")]
+      n_show <- if (n_traces > 40 && length(flagged) > 0) length(flagged) else n_traces
+      ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else 4L
+      paste0(max(600, ceiling(n_show / ncol_f) * 250), "px")
+    } else "800px"
+
     showModal(modalDialog(
       title = "Chromatography QC \u2014 Fullscreen",
       size = "xl",
       easyClose = TRUE,
-      plotly::plotlyOutput("tic_qc_fullscreen_plot", height = "800px"),
+      plotly::plotlyOutput("tic_qc_fullscreen_plot", height = modal_height),
       footer = modalButton("Close")
     ))
     output$tic_qc_fullscreen_plot <- plotly::renderPlotly({ p })
