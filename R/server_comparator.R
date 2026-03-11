@@ -170,7 +170,8 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
       limpa_version   = tryCatch(as.character(packageVersion("limpa")), error = function(e) "unknown"),
       limma_version   = tryCatch(as.character(packageVersion("limma")), error = function(e) "unknown"),
       diann_version   = session_obj$diann_version %||% "unknown",
-      fdr_threshold   = session_obj$fdr_threshold %||% "0.05",
+      de_significance = session_obj$fdr_threshold %||% "0.05",
+      identification_fdr = "0.01 (DIA-NN default)",
       lfc_threshold   = session_obj$lfc_threshold %||% "0.6",
       min_peptides    = session_obj$min_peptides %||% "unknown",
       normalization   = "DIA-NN RT-dependent (Precursor.Normalised)",
@@ -817,7 +818,8 @@ parse_spectronaut_zip <- function(zip_path) {
       if (!is.null(search_settings)) search_settings$missed_cleavages else NULL, "Not available"),
     interference_corr  = coalesce_setting(
       if (!is.null(search_settings)) search_settings$interference_corr else NULL, "Not available"),
-    fdr_threshold      = coalesce_setting(
+    de_significance    = "0.05 (applied post-hoc to Spectronaut q-values)",
+    identification_fdr = coalesce_setting(
       if (!is.null(search_settings)) search_settings$protein_qvalue else NULL,
       "Not available in export"
     ),
@@ -945,7 +947,8 @@ parse_spectronaut <- function(file_path, de_file_path = NULL) {
       normalization    = "Local regression (Spectronaut default)",
       rollup_method    = "Protein group quantity (PG.Quantity)",
       de_engine        = if (has_de) "Spectronaut internal statistics" else "None (quantities only)",
-      fdr_threshold    = "Not available in export",
+      de_significance  = "0.05 (applied post-hoc)",
+      identification_fdr = "Not available in export",
       lfc_threshold    = "Not available in export",
       min_peptides     = "Not available in export",
       n_proteins_total = as.character(length(protein_ids)),
@@ -997,7 +1000,8 @@ parse_fragpipe_analyst <- function(file_path) {
       de_engine        = "limma (via FragPipe-Analyst)",
       imputation       = "Perseus-style (FragPipe-Analyst default)",
       fdr_method       = "BH (FragPipe-Analyst default)",
-      fdr_threshold    = "Not available in export",
+      de_significance  = "Not available in export",
+      identification_fdr = "0.01 (FragPipe default)",
       lfc_threshold    = "Not available in export",
       n_proteins_total = as.character(length(protein_ids)),
       n_samples        = if (!is.null(quant_mat)) as.character(ncol(quant_mat)) else "unknown"
@@ -1046,7 +1050,8 @@ parse_fragpipe_combined_protein <- function(file_path) {
       normalization   = "IonQuant MaxLFQ",
       rollup_method   = "MaxLFQ consensus ratio protein rollup",
       de_engine       = "None (run FragPipe-Analyst for DE stats)",
-      fdr_threshold   = "N/A",
+      de_significance = "N/A",
+      identification_fdr = "0.01 (FragPipe default)",
       n_proteins_total = length(unique(protein_ids)),
       n_samples        = length(quant_cols)
     ),
@@ -1163,7 +1168,7 @@ build_settings_diff <- function(run_a, run_b) {
     "diann_version", "limpa_version", "limma_version",
     # DE settings
     "de_engine", "normalization", "rollup_method",
-    "fdr_threshold", "lfc_threshold", "min_peptides",
+    "de_significance", "identification_fdr", "lfc_threshold", "min_peptides",
     "imputation", "fdr_method", "covariates", "contrast_string",
     # Search parameters
     "enzyme", "mass_acc_ms2", "mass_acc_ms1", "scan_window",
@@ -1188,7 +1193,7 @@ build_settings_diff <- function(run_a, run_b) {
     "DIA-NN Version", "limpa Version", "limma Version",
     # DE settings
     "DE Engine", "Normalization", "Protein Rollup",
-    "FDR Threshold", "logFC Threshold", "Min Peptides",
+    "DE Significance (adj.P.Val cutoff)", "Identification FDR (protein group)", "logFC Threshold", "Min Peptides",
     "Imputation", "FDR Method", "Covariates", "Contrast Formula",
     # Search parameters
     "Enzyme", "MS2 Mass Accuracy", "MS1 Mass Accuracy", "Scan Window",
