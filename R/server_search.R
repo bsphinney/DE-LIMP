@@ -1531,6 +1531,35 @@ server_search <- function(input, output, session, values, add_to_log,
   #    TIC Extraction — Extract button + observers
   # ============================================================================
 
+  # --- Recover TIC traces from previous jobs when files are scanned ---
+  # Avoids re-extracting TICs for files that were already analyzed
+  observe({
+    req(values$diann_raw_files)
+    # Only check if no TIC data already loaded
+    if (!is.null(values$tic_traces) && length(values$tic_traces) > 0) return()
+
+    current_files <- values$diann_raw_files$filename
+    if (length(current_files) == 0) return()
+
+    # Search job queue for matching TIC data
+    for (j in values$diann_jobs) {
+      if (is.null(j$metadata$tic_traces)) next
+      prev_files <- names(j$metadata$tic_traces)
+      # Match if all current files have TIC data in a previous job
+      if (all(current_files[grepl("\\.d$", current_files, ignore.case = TRUE)] %in% prev_files)) {
+        matched <- intersect(current_files, prev_files)
+        if (length(matched) == 0) next
+        values$tic_traces <- j$metadata$tic_traces[matched]
+        values$tic_metrics <- j$metadata$tic_metrics[j$metadata$tic_metrics$run %in% matched, ]
+        message(sprintf("[DE-LIMP] Recovered TIC data from previous job for %d files", length(matched)))
+        showNotification(
+          sprintf("Recovered TIC data from previous search (%d files)", length(matched)),
+          type = "message", duration = 5)
+        break
+      }
+    }
+  }) |> bindEvent(values$diann_raw_files)
+
   output$tic_extract_ui <- renderUI({
     req(values$diann_raw_files)
     df <- values$diann_raw_files
@@ -1543,12 +1572,31 @@ server_search <- function(input, output, session, values, add_to_log,
     # Check if already extracted
     if (!is.null(values$tic_traces) && length(values$tic_traces) > 0) {
       n_extracted <- length(values$tic_traces)
+      metrics <- values$tic_metrics
+      n_fail <- if (!is.null(metrics)) sum(metrics$status == "fail", na.rm = TRUE) else 0
+      n_warn <- if (!is.null(metrics)) sum(metrics$status == "warn", na.rm = TRUE) else 0
+
+      # Build status line
+      status_parts <- sprintf("%d/%d files", n_extracted, n_d_files)
+      if (n_fail > 0) status_parts <- paste0(status_parts, sprintf(", %d failed", n_fail))
+      if (n_warn > 0) status_parts <- paste0(status_parts, sprintf(", %d warn", n_warn))
+
+      alert_class <- if (n_fail > 0) "alert-warning" else "alert-success"
+
       tagList(
-        div(class = "alert alert-success py-1 px-2 mt-1",
-          style = "font-size: 0.82em; margin-bottom: 0; display: flex; justify-content: space-between; align-items: center;",
-          span(icon("check-circle"), sprintf(" TIC extracted for %d/%d files", n_extracted, n_d_files)),
-          actionButton("tic_reextract_btn", "Re-extract", icon = icon("redo"),
-            class = "btn-outline-secondary btn-sm", style = "padding: 1px 8px; font-size: 0.78em;")
+        div(class = paste("alert py-1 px-2 mt-1", alert_class),
+          style = "font-size: 0.82em; margin-bottom: 4px;",
+          div(style = "display: flex; justify-content: space-between; align-items: center;",
+            span(icon(if (n_fail > 0) "triangle-exclamation" else "check-circle"),
+                 " TIC: ", status_parts),
+            actionButton("tic_reextract_btn", "Re-extract", icon = icon("redo"),
+              class = "btn-outline-secondary btn-sm", style = "padding: 1px 8px; font-size: 0.78em;")
+          ),
+          if (n_fail > 0) div(style = "margin-top: 4px;",
+            actionButton("tic_exclude_failed_btn", sprintf("Exclude %d Failed File%s",
+              n_fail, if (n_fail > 1) "s" else ""),
+              icon = icon("ban"), class = "btn-outline-danger btn-sm w-100",
+              style = "padding: 2px 8px; font-size: 0.78em;"))
         )
       )
     } else {
@@ -1566,6 +1614,28 @@ server_search <- function(input, output, session, values, add_to_log,
 
   observeEvent(input$tic_skip_btn, {
     showNotification("TIC extraction skipped", type = "message", duration = 3)
+  })
+
+  # Exclude files that failed TIC QC from the search
+  observeEvent(input$tic_exclude_failed_btn, {
+    req(values$tic_metrics, values$diann_raw_files)
+    failed_runs <- values$tic_metrics$run[values$tic_metrics$status == "fail"]
+    if (length(failed_runs) == 0) return()
+
+    # Remove failed files from raw file list
+    before <- nrow(values$diann_raw_files)
+    values$diann_raw_files <- values$diann_raw_files[
+      !values$diann_raw_files$filename %in% failed_runs, ]
+    after <- nrow(values$diann_raw_files)
+
+    # Also remove from TIC data
+    values$tic_traces <- values$tic_traces[!names(values$tic_traces) %in% failed_runs]
+    values$tic_metrics <- values$tic_metrics[!values$tic_metrics$run %in% failed_runs, ]
+
+    showNotification(
+      sprintf("Excluded %d failed file%s (%d remaining)",
+        before - after, if (before - after > 1) "s" else "", after),
+      type = "warning", duration = 5)
   })
 
   tic_extract_trigger <- reactiveVal(0)
