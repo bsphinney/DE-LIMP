@@ -604,6 +604,20 @@ server_search <- function(input, output, session, values, add_to_log,
     cfg <- ssh_config()
     req(cfg)
 
+    # Clean up stale ControlMaster socket from previous app session.
+    # If the old master process died, the socket file remains and new
+    # connections hang trying to reuse it.
+    ctl <- ssh_control_path(cfg)
+    if (file.exists(ctl)) {
+      check <- suppressWarnings(system2("ssh", c("-O", "check",
+        "-o", sprintf("ControlPath=%s", ctl), cfg$host),
+        stdout = TRUE, stderr = TRUE))
+      if (!any(grepl("running", check, ignore.case = TRUE))) {
+        unlink(ctl)
+        message("[DE-LIMP] Removed stale SSH control socket: ", ctl)
+      }
+    }
+
     message("[DE-LIMP] Auto-connecting SSH to ", cfg$host, "...")
     result <- test_ssh_connection(cfg)
 
