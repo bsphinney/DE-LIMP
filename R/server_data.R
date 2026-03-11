@@ -202,6 +202,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
 
   output$hot_metadata <- renderRHandsontable({
     req(values$metadata)
+    message(sprintf("[DE-LIMP] Rendering metadata table: %d rows x %d cols",
+                    nrow(values$metadata), ncol(values$metadata)))
 
     # Get custom covariate names
     cov1_display <- if(!is.null(input$cov1_label) && input$cov1_label != "") input$cov1_label else "Covariate1"

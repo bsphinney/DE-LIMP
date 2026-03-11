@@ -2278,4 +2278,148 @@ server_session <- function(input, output, session, values, add_to_log) {
     })
   }, ignoreInit = TRUE)
 
+  # ============================================================================
+  #  "Prepare Next Analysis" — clears all data, preserves SSH/job queue
+  #  Moved from server_search.R so it works on ALL platforms (including HF)
+  # ============================================================================
+
+  observeEvent(input$prepare_next_btn, {
+    showModal(modalDialog(
+      title = "Prepare Next Analysis",
+      tags$p("This will clear all current data from memory:"),
+      tags$ul(
+        tags$li("Raw file scan, FASTA, instrument metadata, TIC traces"),
+        tags$li("Loaded data, pipeline results, QC stats"),
+        tags$li("GSEA, phospho, MOFA2, comparator results"),
+        tags$li("AI chat history")
+      ),
+      tags$p(tags$strong("SSH connection and job queue will be preserved.")),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_prepare_next", "Clear & Reset",
+                     class = "btn-danger", icon = icon("broom"))
+      ),
+      easyClose = TRUE
+    ))
+  })
+
+  observeEvent(input$confirm_prepare_next, {
+    removeModal()
+
+    # --- Pre-search state (saved in job entry) ---
+    values$diann_raw_files <- NULL
+    values$diann_fasta_files <- character()
+    values$fasta_info <- NULL
+    values$diann_speclib <- NULL
+    values$instrument_metadata <- NULL
+    values$tic_traces <- NULL
+    values$tic_metrics <- NULL
+    values$uniprot_results <- NULL
+    values$pending_notes_od <- NULL
+    values$pending_notes_name <- NULL
+
+    # --- Loaded data & pipeline results ---
+    values$raw_data <- NULL
+    values$metadata <- NULL
+    values$fit <- NULL
+    values$y_protein <- NULL
+    values$dpc_fit <- NULL
+    values$design <- NULL
+    values$qc_stats <- NULL
+    values$diann_search_settings <- NULL
+    values$uploaded_report_path <- NULL
+    values$original_report_name <- NULL
+    values$current_file_uri <- NULL
+    values$diann_norm_detected <- "unknown"
+    values$status <- "Waiting..."
+
+    # --- Analysis results ---
+    values$gsea_results <- NULL
+    values$gsea_results_cache <- list()
+    values$gsea_last_contrast <- NULL
+    values$gsea_last_org_db <- NULL
+    values$plot_selected_proteins <- NULL
+    values$grid_selected_protein <- NULL
+    values$temp_violin_target <- NULL
+    values$color_plot_by_de <- FALSE
+
+    # --- Phosphoproteomics ---
+    values$phospho_detected <- NULL
+    values$phospho_site_matrix <- NULL
+    values$phospho_site_info <- NULL
+    values$phospho_fit <- NULL
+    values$phospho_site_matrix_filtered <- NULL
+    values$phospho_input_mode <- NULL
+    values$ksea_results <- NULL
+    values$ksea_last_contrast <- NULL
+    values$phospho_fasta_sequences <- NULL
+    values$phospho_corrected_active <- FALSE
+    values$phospho_annotations <- NULL
+
+    # --- XIC ---
+    values$xic_dir <- NULL
+    values$xic_available <- FALSE
+    values$xic_format <- "v2"
+    values$xic_data <- NULL
+    values$xic_protein <- NULL
+    values$xic_report_map <- NULL
+    values$mobilogram_available <- FALSE
+    values$mobilogram_files_found <- 0
+    values$mobilogram_dir <- NULL
+
+    # --- MOFA2 ---
+    values$mofa_view_configs <- list()
+    values$mofa_views <- list()
+    values$mofa_view_fits <- list()
+    values$mofa_sample_metadata <- NULL
+    values$mofa_object <- NULL
+    values$mofa_factors <- NULL
+    values$mofa_weights <- list()
+    values$mofa_variance_explained <- NULL
+    values$mofa_last_run_params <- NULL
+
+    # --- Run Comparator ---
+    values$comparator_results <- NULL
+    values$comparator_run_a <- NULL
+    values$comparator_run_b <- NULL
+    values$comparator_mode <- NULL
+    values$comparator_gemini_narrative <- NULL
+    values$comparator_mofa <- NULL
+    values$comparator_compare_from_history <- NULL
+    values$comparator_diann_log_a <- NULL
+    values$comparator_diann_log_b <- NULL
+
+    # --- AI chat ---
+    values$chat_history <- list()
+
+    # --- Reproducibility log (fresh start) ---
+    values$repro_log <- c(
+      "# ==============================================================================",
+      "# DE-LIMP Reproducibility Log",
+      sprintf("# Session started: %s", Sys.time()),
+      "# ==============================================================================",
+      "",
+      "# --- Load Required Libraries ---",
+      "library(limpa); library(limma); library(dplyr); library(stringr); library(ggrepel);"
+    )
+
+    # --- Re-enable any library-locked inputs ---
+    if (isTRUE(values$library_locked)) {
+      lib_locked_inputs <- c("diann_enzyme", "diann_missed_cleavages",
+        "mod_met_ox", "mod_nterm_acetyl", "extra_var_mods", "diann_unimod4",
+        "diann_met_excision", "min_pep_len", "max_pep_len", "min_pr_mz", "max_pr_mz")
+      for (inp in lib_locked_inputs) shinyjs::enable(inp)
+      values$library_locked <- FALSE
+    }
+
+    # Navigate back to data tab
+    nav_select("main_tabs", "Data Overview")
+    nav_select("data_overview_tabs", "Assign Groups & Run")
+
+    showNotification(
+      "Session cleared. Ready for next dataset.",
+      type = "message", duration = 8
+    )
+  })
+
 }

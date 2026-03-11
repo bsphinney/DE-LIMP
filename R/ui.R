@@ -1203,7 +1203,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     ),
 
                     # Metadata table (with overflow scroll)
-                    div(style="overflow-y: auto; max-height: calc(100vh - 420px);",
+                    # min-height prevents collapse in HF iframe where 100vh can be tiny
+                    div(style="overflow-y: auto; max-height: calc(100vh - 420px); min-height: 300px;",
                       rHandsontableOutput("hot_metadata")
                     )
                   ),
