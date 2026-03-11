@@ -4217,6 +4217,23 @@ server_search <- function(input, output, session, values, add_to_log,
         }
       }
 
+      # Fetch estimated start time for queued jobs
+      if (new_status == "queued") {
+        est <- tryCatch(
+          get_slurm_start_time(jobs[[i]]$job_id, ssh_config = job_cfg,
+                                sbatch_path = slurm_path),
+          error = function(e) NULL)
+        if (!is.null(est) && !identical(est, jobs[[i]]$est_start)) {
+          jobs[[i]]$est_start <- est
+          changed <- TRUE
+        }
+      } else {
+        if (!is.null(jobs[[i]]$est_start)) {
+          jobs[[i]]$est_start <- NULL
+          changed <- TRUE
+        }
+      }
+
       if (new_status != jobs[[i]]$status) {
         jobs[[i]]$status <- new_status
         changed <- TRUE
@@ -4789,7 +4806,12 @@ server_search <- function(input, output, session, values, add_to_log,
       if (isTRUE(job$removed)) return(NULL)
 
       status_badge <- switch(job$status %||% "unknown",
-        "queued"    = span(class = "badge bg-secondary", "Queued"),
+        "queued"    = if (!is.null(job$est_start)) {
+          span(class = "badge bg-secondary", title = paste("Est. start:", job$est_start),
+               "Queued ", icon("clock", style = "font-size: 0.8em;"))
+        } else {
+          span(class = "badge bg-secondary", "Queued")
+        },
         "running"   = span(class = "badge bg-primary", "Running"),
         "completed" = span(class = "badge bg-success", "Completed"),
         "failed"    = span(class = "badge bg-danger", title = job$failure_reason %||% "", "Failed"),
@@ -4870,6 +4892,11 @@ server_search <- function(input, output, session, values, add_to_log,
           ),
           status_badge
         ),
+        if (!is.null(job$est_start) && job$status == "queued") {
+          div(style = "color: #0d6efd; font-size: 0.78em; margin-top: 3px;",
+            icon("clock", style = "font-size: 0.85em;"),
+            sprintf(" Estimated start: %s", job$est_start))
+        },
         div(style = "display: flex; justify-content: space-between; align-items: center; margin-top: 4px;",
           span(style = "color: #666;",
             sprintf("%d files | %s", job$n_files %||% 0, elapsed_str)

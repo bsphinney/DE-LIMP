@@ -1715,6 +1715,33 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   return("unknown")
 }
 
+#' Get SLURM estimated start time for a queued job
+#' @param job_id SLURM job ID
+#' @param ssh_config SSH config list (NULL for local)
+#' @param sbatch_path Full path to sbatch (used to derive squeue path)
+#' @return Character: estimated start time string, or NULL if unavailable
+get_slurm_start_time <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
+  squeue_cmd <- if (!is.null(sbatch_path)) {
+    file.path(dirname(sbatch_path), "squeue")
+  } else "squeue"
+
+  cmd <- sprintf("%s --job %s --format=%%S --noheader 2>/dev/null", squeue_cmd, job_id)
+
+  output <- if (!is.null(ssh_config)) {
+    res <- ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 10)
+    if (res$status == 0) res$stdout else character(0)
+  } else {
+    tryCatch(system2(squeue_cmd,
+      args = c("--job", job_id, "--format=%S", "--noheader"),
+      stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+  }
+
+  output <- trimws(output)
+  output <- output[nzchar(output) & output != "N/A"]
+  if (length(output) == 0) return(NULL)
+  output[1]
+}
+
 #' Parse job ID from sbatch stdout
 #' @param sbatch_stdout Character vector — stdout from system2("sbatch", ...)
 #' @return Character: job ID, or NULL if parsing fails
