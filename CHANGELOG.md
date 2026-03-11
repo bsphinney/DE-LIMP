@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Methodology text overflow**: Text didn't fit in window and couldn't scroll. Added `pre-wrap`/`word-wrap` CSS and scrollable wrapper div.
 - **Instrument metadata lost on history load**: `values$instrument_metadata` was NULL after loading from history because session.rds was remote-only. Added fallback recovery from job queue entries.
 - **Mounted drive dependency removed**: All app state files (activity log, cluster usage, lab members) now always use local `~/.delimp_*` paths. SMB mounts may be absent, slow, or disappear — no longer a failure point.
+- **FDR mislabeling in comparator**: Split `fdr_threshold` into `de_significance` and `identification_fdr` — Spectronaut's `Protein Group FDR: 0.01` is identification FDR, not DE significance. Previously caused Gemini to incorrectly flag as main discordance driver.
+- **SSH auto-connect hanging**: Stale ControlMaster socket from previous app instance caused SSH to hang. Added `ssh -O check` probe before auto-connect, removes dead sockets.
+- **Cluster monitor CSV header mismatch**: `cluster_usage_headers` had 13 columns but data rows had 16 (schema evolved). Added auto-repair on read.
+- **"Prepare Next Analysis" not working on HF**: Observer was in `server_search.R` which early-returns when `search_enabled=FALSE`. Moved to `server_session.R`.
+- **Faceted TIC plot unreadable with many files**: With 209 files, panels were tiny and labels overlapped. Now shows only flagged runs when >40 files, uses adaptive column count, truncated labels, status-colored annotations, and dynamic plot height.
 
 ### Added
 - **Rescue stats for Spectronaut 0-ratio proteins**: Detects proteins with 0 computable ratios in Spectronaut that DE-LIMP could still test. Imputation-aware messaging (None/enabled/unknown). New Rule 0 ("Untestable in Spectronaut") as highest-priority hypothesis. Summary banner shows rescue count below main stats.
@@ -30,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-user cluster monitoring**: Tracks lab member CPU/memory usage on dual partitions with historical snapshots. Queue wait time display. Auto queue switching (genome-center-grp/high → publicgrp/low).
 - **Compare from History**: Select 2 analyses in history table → auto-load into Run Comparator.
 - **Session auto-save**: Deterministic RDS saved to `{output_dir}/session.rds` after pipeline completion.
+- **View Prompt button**: Users can inspect the exact Gemini prompt in the comparator AI Analysis tab before/after running analysis. Includes copy-to-clipboard.
+- **SLURM estimated start time**: Queued jobs display `squeue --format=%S` estimated start time in the job queue UI.
+- **Per-job wait time logging**: Records queue-to-running transition time per job for grant justification. `record_job_wait()` / `read_job_wait_log()` in helpers_search.R.
+- **Exclude Failed TIC button**: One-click removal of failed TIC runs from search file list.
+- **TIC trace recovery**: Job queue entries store `metadata$tic_traces` and `metadata$tic_metrics`. On file scan, checks if matching TIC data exists in queue to avoid re-extraction.
 
 ### Changed
 - App version bumped to v3.6.1.
