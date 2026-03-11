@@ -3834,7 +3834,9 @@ cluster_usage_headers <- c(
   "timestamp", "user", "account", "partition",
   "group_limit", "group_used", "group_available",
   "user_limit", "user_used", "user_available",
-  "partition_idle", "partition_total", "auto_selected"
+  "partition_idle", "partition_total",
+  "pending_count", "avg_wait_min", "max_wait_min",
+  "auto_selected"
 )
 
 cluster_usage_history_path <- function() {
@@ -3922,6 +3924,18 @@ cluster_usage_history_read <- function(path = cluster_usage_history_path(),
                                         since = NULL, account = NULL) {
   if (!file.exists(path)) return(data.frame())
   tryCatch({
+    # Detect and fix header/column mismatch (schema evolved from 13 to 16 cols)
+    lines <- readLines(path, n = 2)
+    if (length(lines) >= 2) {
+      header_cols <- length(strsplit(lines[1], ",")[[1]])
+      data_cols <- length(strsplit(lines[2], ",")[[1]])
+      if (header_cols < data_cols) {
+        message(sprintf("[DE-LIMP] Fixing cluster usage CSV header: %d -> %d columns", header_cols, data_cols))
+        all_lines <- readLines(path)
+        all_lines[1] <- paste0('"', paste(cluster_usage_headers, collapse = '","'), '"')
+        writeLines(all_lines, path)
+      }
+    }
     df <- read.csv(path, stringsAsFactors = FALSE)
     if (nrow(df) == 0) return(df)
     df$timestamp <- as.POSIXct(df$timestamp, format = "%Y-%m-%dT%H:%M:%S")
