@@ -4769,7 +4769,7 @@ server_search <- function(input, output, session, values, add_to_log,
     has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && identical(j$status, "unknown"), logical(1)))
 
     job_rows <- lapply(seq_along(jobs), function(i) {
-      job <- jobs[[i]]
+      job <- sanitize_job(jobs[[i]])
       if (isTRUE(job$removed)) return(NULL)
 
       status_badge <- switch(job$status %||% "unknown",
@@ -4782,7 +4782,9 @@ server_search <- function(input, output, session, values, add_to_log,
         span(class = "badge bg-light text-dark", job$status)
       )
 
-      elapsed <- if (!is.null(job$completed_at)) {
+      elapsed <- if (is.null(job$submitted_at)) {
+        0
+      } else if (!is.null(job$completed_at)) {
         difftime(job$completed_at, job$submitted_at, units = "mins")
       } else {
         difftime(Sys.time(), job$submitted_at, units = "mins")
@@ -4854,7 +4856,7 @@ server_search <- function(input, output, session, values, add_to_log,
         ),
         div(style = "display: flex; justify-content: space-between; align-items: center; margin-top: 4px;",
           span(style = "color: #666;",
-            sprintf("%d files | %s", job$n_files, elapsed_str)
+            sprintf("%d files | %s", job$n_files %||% 0, elapsed_str)
           ),
           div(style = "display: flex; gap: 4px;",
             actionButton(sprintf("view_info_%d", i), "Info",
@@ -4905,9 +4907,9 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # Count terminal and failed jobs for action buttons
     n_terminal <- sum(vapply(jobs, function(j)
-      !isTRUE(j$removed) && j$status %in% c("completed", "failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && (j$status %||% "unknown") %in% c("completed", "failed", "cancelled"), logical(1)))
     n_failed <- sum(vapply(jobs, function(j)
-      !isTRUE(j$removed) && j$status %in% c("failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && (j$status %||% "unknown") %in% c("failed", "cancelled"), logical(1)))
 
     tagList(
       div(style = "display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px;",
