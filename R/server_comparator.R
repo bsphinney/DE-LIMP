@@ -4411,6 +4411,13 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           writeLines(context_lines, context_file)
           files_to_zip <- c(files_to_zip, context_file)
 
+          # 5b. Excluded files (if any)
+          if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+            excl_file <- file.path(tmp_dir, "excluded_files.csv")
+            write.csv(values$excluded_files, excl_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, excl_file)
+          }
+
           # 6. Claude prompt
           setProgress(0.8, detail = "Building prompt...")
           prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative, values$instrument_metadata)

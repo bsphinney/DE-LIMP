@@ -451,6 +451,22 @@ server_session <- function(input, output, session, values, add_to_log) {
       paste0("DE-LIMP_session_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
     },
     content = function(file) {
+      # Sync excluded file groups from table before saving
+      if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0 &&
+          !is.null(values$metadata) && !is.null(input$hot_metadata)) {
+        tbl <- hot_to_r(input$hot_metadata)
+        n_active <- nrow(values$metadata)
+        if (nrow(tbl) > n_active) {
+          excl_rows <- tbl[(n_active + 1):nrow(tbl), ]
+          for (i in seq_len(min(nrow(excl_rows), nrow(values$excluded_files)))) {
+            grp <- as.character(excl_rows[i, 3])
+            if (!identical(grp, "[Excluded]") && nzchar(grp)) {
+              values$excluded_files$group[i] <- grp
+            }
+          }
+        }
+      }
+
       session_data <- list(
         raw_data   = values$raw_data,
         metadata   = values$metadata,
@@ -503,6 +519,8 @@ server_session <- function(input, output, session, values, add_to_log) {
         # TIC Chromatography QC
         tic_traces = values$tic_traces,
         tic_metrics = values$tic_metrics,
+        # Excluded files tracking
+        excluded_files = values$excluded_files,
         # Run Comparator state
         comparator_results          = values$comparator_results,
         comparator_run_a            = values$comparator_run_a,
@@ -601,6 +619,9 @@ server_session <- function(input, output, session, values, add_to_log) {
       if (!is.null(session_data$tic_traces)) {
         values$tic_traces <- session_data$tic_traces
         values$tic_metrics <- session_data$tic_metrics
+      }
+      if (!is.null(session_data$excluded_files)) {
+        values$excluded_files <- session_data$excluded_files
       }
 
       # Restore Run Comparator state
@@ -862,6 +883,23 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       instrument_section,
       diann_section,
+
+      # Excluded files section (if any)
+      if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+        ef <- values$excluded_files
+        excl_lines <- c(
+          "0c. EXCLUDED FILES",
+          sprintf("%d file(s) were excluded from analysis based on quality control assessment:", nrow(ef)))
+        for (i in seq_len(nrow(ef))) {
+          note_part <- if (nzchar(ef$user_note[i])) paste0(" Note: ", ef$user_note[i]) else ""
+          grp_part <- if (nzchar(ef$group[i]) && ef$group[i] != "[Excluded]")
+            paste0(" Group: ", ef$group[i], ".") else ""
+          excl_lines <- c(excl_lines, sprintf("  - %s: %s (source: %s, %s)%s%s",
+            ef$filename[i], ef$reason[i], ef$source[i],
+            format(ef$excluded_at[i], "%Y-%m-%d %H:%M"), grp_part, note_part))
+        }
+        paste0(paste(excl_lines, collapse = "\n"), "\n\n")
+      } else "",
 
       "1. DATA INPUT\n",
       "Raw DIA-NN output files (parquet format) containing precursor-level quantification were\n",
@@ -1183,9 +1221,14 @@ server_session <- function(input, output, session, values, add_to_log) {
       paste0("DE-LIMP_group_template_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
     },
     content = function(file) {
-      # Get current table data (including any edits)
+      # Get current table data (including any edits), excluding excluded rows and Status column
       template_data <- if (!is.null(input$hot_metadata)) {
-        hot_to_r(input$hot_metadata)
+        tbl <- hot_to_r(input$hot_metadata)
+        n_active <- nrow(values$metadata %||% tbl)
+        tbl <- tbl[seq_len(min(n_active, nrow(tbl))), ]
+        # Drop Status column if present (last column when excluded_files tracking is active)
+        if (ncol(tbl) > 6) tbl <- tbl[, seq_len(6)]
+        tbl
       } else {
         values$metadata
       }
@@ -1898,6 +1941,9 @@ server_session <- function(input, output, session, values, add_to_log) {
             values$tic_traces <- session_data$tic_traces
             values$tic_metrics <- session_data$tic_metrics
           }
+          if (!is.null(session_data$excluded_files)) {
+            values$excluded_files <- session_data$excluded_files
+          }
           if (!is.null(session_data$comparator_results)) {
             values$comparator_results <- session_data$comparator_results
             values$comparator_run_a <- session_data$comparator_run_a
@@ -2314,6 +2360,7 @@ server_session <- function(input, output, session, values, add_to_log) {
     values$instrument_metadata <- NULL
     values$tic_traces <- NULL
     values$tic_metrics <- NULL
+    values$excluded_files <- NULL
     values$uniprot_results <- NULL
     values$pending_notes_od <- NULL
     values$pending_notes_name <- NULL

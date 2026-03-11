@@ -213,22 +213,100 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
     values$cov1_name <- cov1_display
     values$cov2_name <- cov2_display
 
-    # Create display dataframe with custom column names
+    # Append excluded files as read-only rows with "Excluded" status
     display_df <- values$metadata
+    n_active <- nrow(display_df)
+    excluded_rows <- integer(0)
+
+    if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+      ef <- values$excluded_files
+      excl_df <- data.frame(
+        ID = seq(n_active + 1, n_active + nrow(ef)),
+        File.Name = ef$filename,
+        Group = ifelse(nzchar(ef$group), ef$group, "[Excluded]"),
+        Batch = "",
+        Covariate1 = "",
+        Covariate2 = "",
+        stringsAsFactors = FALSE
+      )
+      display_df <- rbind(display_df, excl_df)
+      excluded_rows <- seq(n_active + 1, nrow(display_df))
+    }
+
     colnames(display_df) <- c("ID", "File.Name", "Group", "Batch", cov1_display, cov2_display)
 
-    rhandsontable(display_df, rowHeaders=NULL, stretchH="all", height=500, width="100%") %>%
-      hot_col("ID", readOnly=TRUE, width=50) %>%
-      hot_col("File.Name", readOnly=TRUE) %>%
-      hot_col("Group", type="text") %>%
-      hot_col("Batch", type="text", width=100) %>%
-      hot_col(cov1_display, type="text", width=100) %>%
-      hot_col(cov2_display, type="text", width=100)
+    # Add Status column to mark excluded rows
+    display_df$Status <- ""
+    if (length(excluded_rows) > 0) {
+      display_df$Status[excluded_rows] <- "Excluded"
+    }
+
+    # Custom renderer JS for red-background excluded rows
+    excluded_renderer <- if (length(excluded_rows) > 0) {
+      sprintf("function(instance, td, row, col, prop, value, cellProperties) {
+        Handsontable.renderers.TextRenderer.apply(this, arguments);
+        var excludedRows = [%s];
+        if (excludedRows.indexOf(row) > -1) {
+          td.style.backgroundColor = '#f8d7da';
+          td.style.color = '#721c24';
+          td.style.fontStyle = 'italic';
+        }
+      }", paste(excluded_rows - 1, collapse = ","))
+    } else NULL
+
+    hot <- rhandsontable(display_df, rowHeaders=NULL, stretchH="all", height=500, width="100%")
+
+    if (!is.null(excluded_renderer)) {
+      hot <- hot %>%
+        hot_col("ID", readOnly=TRUE, width=50, renderer = excluded_renderer) %>%
+        hot_col("File.Name", readOnly=TRUE, renderer = excluded_renderer) %>%
+        hot_col("Group", type="text", renderer = excluded_renderer) %>%
+        hot_col("Batch", type="text", width=100, renderer = excluded_renderer) %>%
+        hot_col(cov1_display, type="text", width=100, renderer = excluded_renderer) %>%
+        hot_col(cov2_display, type="text", width=100, renderer = excluded_renderer) %>%
+        hot_col("Status", readOnly=TRUE, width=70, renderer = excluded_renderer)
+    } else {
+      hot <- hot %>%
+        hot_col("ID", readOnly=TRUE, width=50) %>%
+        hot_col("File.Name", readOnly=TRUE) %>%
+        hot_col("Group", type="text") %>%
+        hot_col("Batch", type="text", width=100) %>%
+        hot_col(cov1_display, type="text", width=100) %>%
+        hot_col(cov2_display, type="text", width=100) %>%
+        hot_col("Status", readOnly=TRUE, width=70)
+    }
+
+    hot
   })
+
+  # Helper: sync excluded file groups from the rhandsontable back to values$excluded_files
+  sync_excluded_groups <- function() {
+    if (is.null(values$excluded_files) || nrow(values$excluded_files) == 0) return()
+    if (is.null(values$metadata) || is.null(input$hot_metadata)) return()
+
+    tbl <- hot_to_r(input$hot_metadata)
+    n_active <- nrow(values$metadata)
+    n_total <- nrow(tbl)
+    if (n_total <= n_active) return()
+
+    excl_rows <- tbl[(n_active + 1):n_total, ]
+    # Column 3 is Group regardless of display name
+    for (i in seq_len(min(nrow(excl_rows), nrow(values$excluded_files)))) {
+      grp <- as.character(excl_rows[i, 3])
+      if (!identical(grp, "[Excluded]") && nzchar(grp)) {
+        values$excluded_files$group[i] <- grp
+      }
+    }
+  }
 
   observeEvent(input$guess_groups, {
     req(values$metadata)
-    meta <- if(!is.null(input$hot_metadata)) hot_to_r(input$hot_metadata) else values$metadata
+    meta <- if(!is.null(input$hot_metadata)) {
+      tbl <- hot_to_r(input$hot_metadata)
+      colnames(tbl) <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2", "Status")
+      # Only keep active rows (exclude excluded files) and drop Status column
+      tbl[seq_len(nrow(values$metadata)), c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")]
+    } else values$metadata
     n <- nrow(meta)
     if (n < 2) return()
 
@@ -339,11 +417,17 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
   observeEvent(input$run_pipeline, {
     req(input$hot_metadata, values$metadata, values$raw_data)
 
-    # First, save the groups
+    # First, save the groups — separate active rows from excluded rows
     old_meta <- values$metadata
-    new_meta <- hot_to_r(input$hot_metadata)
-    # Restore internal column names — hot_to_r returns display names from renderRHandsontable
-    colnames(new_meta) <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")
+    full_table <- hot_to_r(input$hot_metadata)
+    # Table has Status column (7th) — name all columns including Status
+    colnames(full_table) <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2", "Status")
+    n_active <- nrow(old_meta)
+    new_meta <- full_table[seq_len(n_active), c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")]
+
+    # Sync excluded file groups from table (rows after active)
+    sync_excluded_groups()
+
     changed_indices <- which(old_meta$Group != new_meta$Group)
     if (length(changed_indices) > 0) {
       code_lines <- sprintf("metadata$Group[%d] <- '%s'  # %s",
@@ -354,7 +438,7 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
     }
     values$metadata <- new_meta
 
-    # Validate groups
+    # Validate groups (active files only)
     meta <- values$metadata
     meta$Group <- trimws(meta$Group)
     if(length(unique(meta$Group)) < 2) {

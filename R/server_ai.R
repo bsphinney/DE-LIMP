@@ -540,6 +540,19 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
+        # --- 6d. Excluded files CSV ---
+        excluded_note <- ""
+        if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+          tryCatch({
+            excl_file <- file.path(tmp_dir, "Excluded_Files.csv")
+            write.csv(values$excluded_files, excl_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, excl_file)
+            excluded_note <- sprintf(
+              "\n- **`Excluded_Files.csv`** \u2014 %d file(s) excluded from analysis with reasons, timestamps, group assignments, and user notes\n",
+              nrow(values$excluded_files))
+          }, error = function(e) NULL)
+        }
+
         # --- 7. Reproducibility R code log ---
         repro_note <- ""
         if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
@@ -700,6 +713,31 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
+        # Excluded files inline summary
+        excluded_inline <- ""
+        if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+          ef <- values$excluded_files
+          exc_lines <- c(
+            "--- EXCLUDED FILES ---",
+            sprintf("%d file(s) were excluded before analysis:", nrow(ef)))
+          for (i in seq_len(nrow(ef))) {
+            note_part <- if (nzchar(ef$user_note[i])) paste0(" | Note: ", ef$user_note[i]) else ""
+            grp_part <- if (nzchar(ef$group[i]) && ef$group[i] != "[Excluded]")
+              paste0(" | Group: ", ef$group[i]) else ""
+            exc_lines <- c(exc_lines, sprintf("  %s: %s (source: %s)%s%s",
+              ef$filename[i], ef$reason[i], ef$source[i], grp_part, note_part))
+          }
+          # Check for group bias
+          if (any(nzchar(ef$group) & ef$group != "[Excluded]")) {
+            grp_counts <- table(ef$group[nzchar(ef$group) & ef$group != "[Excluded]"])
+            exc_lines <- c(exc_lines, "",
+              "Excluded files by group: ",
+              paste(paste0("  ", names(grp_counts), ": ", grp_counts), collapse = "\n"),
+              "IMPORTANT: Assess whether exclusions are biased toward specific experimental groups.")
+          }
+          excluded_inline <- paste0("\n\n", paste(exc_lines, collapse = "\n"))
+        }
+
         # Missingness summary (pre vs post imputation)
         missingness_inline <- ""
         tryCatch({
@@ -810,6 +848,7 @@ server_ai <- function(input, output, session, values) {
           phospho_note,
           instrument_note,
           tic_note,
+          excluded_note,
           methods_note,
           repro_note,
           rds_note,
@@ -854,6 +893,14 @@ server_ai <- function(input, output, session, values) {
             "- Top regulated phosphosites and their known regulatory roles\n",
             "- Whether phospho changes are concordant or discordant with protein-level changes\n",
             "- Any kinase activity implications from the regulated sites\n\n"
+          ) else "",
+          if (nzchar(excluded_inline)) paste0(
+            "## Excluded Files Assessment\n",
+            "Files were excluded from analysis (details below and in `Excluded_Files.csv`). Assess:\n",
+            "- Whether exclusions are biased toward specific experimental groups (could introduce bias)\n",
+            "- Whether the QC reasons (TIC diagnostics) suggest technical failures vs potential biological effects\n",
+            "- Impact on statistical power given the remaining sample sizes per group\n",
+            "- Any recommendations for re-inclusion or follow-up experiments\n\n"
           ) else "",
           if (nzchar(missingness_inline)) paste0(
             "## Data Completeness\n",
@@ -940,6 +987,7 @@ server_ai <- function(input, output, session, values) {
           search_settings_inline,
           instrument_inline,
           tic_inline,
+          excluded_inline,
           missingness_inline,
           mofa_inline,
           phospho_inline,

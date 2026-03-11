@@ -402,6 +402,7 @@ server <- function(input, output, session) {
     instrument_metadata = NULL,    # List from parse_*_metadata() — instrument model, m/z range, etc.
     tic_traces = NULL,             # Named list of data.frames from extract_tic_timstof(), keyed by filename
     tic_metrics = NULL,            # data.frame: run, valid, total_auc, ..., shape_r, status, flags
+    excluded_files = NULL,         # data.frame: filename, excluded_at, reason, user_note, source, group
     docker_available = docker_available,
     # Multi-View Integration (MOFA2)
     mofa_view_configs = list(),

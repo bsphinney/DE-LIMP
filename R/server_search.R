@@ -1616,24 +1616,93 @@ server_search <- function(input, output, session, values, add_to_log,
     showNotification("TIC extraction skipped", type = "message", duration = 3)
   })
 
-  # Exclude files that failed TIC QC from the search
+  # Exclude files that failed TIC QC — show confirmation modal
   observeEvent(input$tic_exclude_failed_btn, {
     req(values$tic_metrics, values$diann_raw_files)
-    failed_runs <- values$tic_metrics$run[values$tic_metrics$status == "fail"]
-    if (length(failed_runs) == 0) return()
+    failed <- values$tic_metrics[values$tic_metrics$status == "fail", ]
+    if (nrow(failed) == 0) return()
 
-    # Remove failed files from raw file list
+    # Already-excluded filenames (prevent duplicates)
+    already_excluded <- if (!is.null(values$excluded_files)) values$excluded_files$filename else character(0)
+    failed <- failed[!failed$run %in% already_excluded, ]
+    if (nrow(failed) == 0) {
+      showNotification("All failed files already excluded", type = "message", duration = 3)
+      return()
+    }
+
+    # Build checkbox choices: filename — flags
+    choices <- setNames(failed$run,
+      paste0(sub("\\.d$", "", failed$run), " \u2014 ", failed$flags))
+
+    showModal(modalDialog(
+      title = "Exclude Failed TIC Runs",
+      size = "l",
+      tags$p("The following files failed chromatography QC. Uncheck any you want to keep."),
+      tags$p(class = "text-muted", style = "font-size: 0.85em;",
+        icon("triangle-exclamation"),
+        " Consider whether failures reflect technical issues (bad injection) or biology (low-abundance sample)."),
+      checkboxGroupInput("exclude_file_checkboxes", "Files to exclude:",
+        choices = choices, selected = failed$run),
+      textAreaInput("exclude_user_note", "Notes (optional)",
+        placeholder = "e.g., Known bad injection, sample degraded during prep",
+        rows = 2, width = "100%"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_tic_exclude", "Exclude Selected",
+          icon = icon("ban"), class = "btn-danger")
+      )
+    ))
+  })
+
+  # Confirm TIC exclusion
+  observeEvent(input$confirm_tic_exclude, {
+    selected <- input$exclude_file_checkboxes
+    if (is.null(selected) || length(selected) == 0) {
+      showNotification("No files selected", type = "warning", duration = 3)
+      return()
+    }
+    removeModal()
+
+    # Get flags for each selected file
+    flags <- vapply(selected, function(fn) {
+      idx <- which(values$tic_metrics$run == fn)
+      if (length(idx) > 0) values$tic_metrics$flags[idx[1]] else "TIC QC fail"
+    }, character(1))
+
+    # Build exclusion records
+    new_exclusions <- data.frame(
+      filename    = selected,
+      excluded_at = Sys.time(),
+      reason      = flags,
+      user_note   = input$exclude_user_note %||% "",
+      source      = "tic_qc",
+      group       = "",
+      stringsAsFactors = FALSE
+    )
+
+    # Append to existing
+    values$excluded_files <- rbind(values$excluded_files, new_exclusions)
+
+    # Remove from raw file list
     before <- nrow(values$diann_raw_files)
     values$diann_raw_files <- values$diann_raw_files[
-      !values$diann_raw_files$filename %in% failed_runs, ]
+      !values$diann_raw_files$filename %in% selected, ]
     after <- nrow(values$diann_raw_files)
 
-    # Also remove from TIC data
-    values$tic_traces <- values$tic_traces[!names(values$tic_traces) %in% failed_runs]
-    values$tic_metrics <- values$tic_metrics[!values$tic_metrics$run %in% failed_runs, ]
+    # Remove from TIC data
+    values$tic_traces <- values$tic_traces[!names(values$tic_traces) %in% selected]
+    values$tic_metrics <- values$tic_metrics[!values$tic_metrics$run %in% selected, ]
+
+    # Log for reproducibility
+    add_to_log("Excluded Files (TIC QC)", c(
+      sprintf("# Excluded %d file(s) based on TIC chromatography QC", length(selected)),
+      paste0("# Files: ", paste(selected, collapse = ", ")),
+      if (nzchar(input$exclude_user_note %||% ""))
+        paste0("# User note: ", input$exclude_user_note) else NULL
+    ))
 
     showNotification(
-      sprintf("Excluded %d failed file%s (%d remaining)",
+      sprintf("Excluded %d file%s (%d remaining)",
         before - after, if (before - after > 1) "s" else "", after),
       type = "warning", duration = 5)
   })
