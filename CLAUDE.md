@@ -188,7 +188,8 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | Spectronaut 0-ratio proteins have NaN | Proteins with 0 `# of Ratios` have NaN logFC/Pvalue/Qvalue. `classify_de()` uses `is.finite()`, `assign_hypothesis()` coerces to safe defaults (0 for logFC, 1 for adjP). |
 | Spectronaut `AnalyisOverview.txt` typo | Filename may be misspelled by Spectronaut. Regex detector handles both spellings: `analy.?is.?overview`. |
 | History tab slow with network CSV | Multiple `activity_log_read()` calls per render cycle. Use `cached_activity_log()` reactive to read once per invalidation. |
-| **NEVER use mounted drives for app state** | SMB mounts (`/Volumes/proteomics-grp/`) may be absent, slow, or disappear. All app state files (activity log, cluster usage, lab members) MUST use local paths (`~/.delimp_*`). Cross-user sharing via SSH/SCP sync when connected. Data files (speclib cache, FASTA library) may reference shared storage with local fallback. |
+| **NEVER use mounted drives for app state** | SMB mounts (`/Volumes/proteomics-grp/`) may be absent, slow, or disappear. All app state files (activity log, cluster usage, lab members) MUST use local paths (`~/.delimp_*`). Cross-user sharing via SSH/SCP sync when connected. |
+| **Derived data stays with source data** | Cached/computed data (TIC cache, session.rds, search_info.md) belongs in the raw data or output directory — NOT in a user's home directory. This ensures: (1) any lab member scanning the same directory gets cached results, (2) data is portable (copy dir = copy everything), (3) lifecycle is tied to the dataset (delete data = delete cache). Use SCP for remote directories. Pattern: `.delimp_tic_cache.rds` in raw data dir, `session.rds` in output dir. Only app-level config (activity log, lab members, cluster usage) belongs in `~/.delimp_*`. |
 
 ## Version History
 
