@@ -1541,20 +1541,34 @@ server_search <- function(input, output, session, values, add_to_log,
     current_files <- values$diann_raw_files$filename
     if (length(current_files) == 0) return()
 
-    # 1. Check disk cache first (keyed by directory path)
+    # 1. Check .delimp_tic_cache.rds in raw data directory (shared across lab members)
     tryCatch({
-      cache_dir <- file.path(Sys.getenv("HOME"), ".delimp_tic_cache")
-      if (dir.exists(cache_dir) && nrow(values$diann_raw_files) > 0) {
-        raw_dir <- if ("full_path" %in% names(values$diann_raw_files))
-          dirname(values$diann_raw_files$full_path[1])
-        else if (!is.null(input$ssh_raw_data_dir) && nzchar(input$ssh_raw_data_dir))
-          input$ssh_raw_data_dir
-        else NULL
-        if (is.null(raw_dir)) return()
-        cache_key <- digest::digest(raw_dir, algo = "md5")
-        cache_file <- file.path(cache_dir, paste0(cache_key, ".rds"))
-        if (file.exists(cache_file)) {
-          cached <- readRDS(cache_file)
+      raw_dir <- if (!is.null(input$ssh_raw_data_dir) && nzchar(input$ssh_raw_data_dir))
+        input$ssh_raw_data_dir
+      else if ("full_path" %in% names(values$diann_raw_files))
+        dirname(values$diann_raw_files$full_path[1])
+      else NULL
+
+      if (!is.null(raw_dir)) {
+        cached <- NULL
+        cfg <- ssh_config()
+        if (!is.null(cfg) && isTRUE(values$ssh_connected)) {
+          # Remote: SCP download cache file
+          remote_cache <- file.path(raw_dir, ".delimp_tic_cache.rds")
+          local_tmp <- tempfile(fileext = ".rds")
+          dl_ok <- tryCatch({
+            scp_download(cfg, remote_cache, local_tmp)
+            file.exists(local_tmp) && file.size(local_tmp) > 0
+          }, error = function(e) FALSE)
+          if (dl_ok) cached <- readRDS(local_tmp)
+          unlink(local_tmp)
+        } else {
+          # Local directory
+          local_cache <- file.path(raw_dir, ".delimp_tic_cache.rds")
+          if (file.exists(local_cache)) cached <- readRDS(local_cache)
+        }
+
+        if (!is.null(cached)) {
           prev_files <- names(cached$traces)
           d_files <- current_files[grepl("\\.d$", current_files, ignore.case = TRUE)]
           matched <- intersect(d_files, prev_files)
@@ -1562,9 +1576,12 @@ server_search <- function(input, output, session, values, add_to_log,
             values$tic_traces <- cached$traces[matched]
             values$tic_metrics <- cached$metrics[cached$metrics$run %in% matched, ]
             age_hrs <- round(as.numeric(difftime(Sys.time(), cached$saved_at, units = "hours")), 1)
-            message(sprintf("[DE-LIMP] TIC cache hit: %d files from %s (%.1fh old)", length(matched), raw_dir, age_hrs))
+            by_user <- if (!is.null(cached$saved_by)) paste0(" by ", cached$saved_by) else ""
+            message(sprintf("[DE-LIMP] TIC cache hit: %d files from %s (%.1fh old%s)",
+              length(matched), raw_dir, age_hrs, by_user))
             showNotification(
-              sprintf("Recovered TIC data from cache (%d files, %.0fh old)", length(matched), age_hrs),
+              sprintf("Recovered TIC data from cache (%d files, %.0fh old%s)",
+                length(matched), age_hrs, by_user),
               type = "message", duration = 5)
             return()
           }
@@ -1852,28 +1869,36 @@ server_search <- function(input, output, session, values, add_to_log,
     values$tic_traces <- traces
     values$tic_metrics <- metrics_df
 
-    # Cache TIC data to disk keyed by directory path
+    # Cache TIC data alongside raw files so any lab member can reuse
     tryCatch({
-      cache_dir <- file.path(Sys.getenv("HOME"), ".delimp_tic_cache")
-      if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
-      # Use MD5 hash of the raw file directory as cache key
-      raw_dir <- if (!is.null(values$diann_raw_files) && nrow(values$diann_raw_files) > 0) {
-        if ("full_path" %in% names(values$diann_raw_files))
-          dirname(values$diann_raw_files$full_path[1])
-        else if (!is.null(input$ssh_raw_data_dir) && nzchar(input$ssh_raw_data_dir))
-          input$ssh_raw_data_dir
-        else NULL
-      } else NULL
+      raw_dir <- if (!is.null(input$ssh_raw_data_dir) && nzchar(input$ssh_raw_data_dir))
+        input$ssh_raw_data_dir
+      else if (!is.null(values$diann_raw_files) && "full_path" %in% names(values$diann_raw_files))
+        dirname(values$diann_raw_files$full_path[1])
+      else NULL
       if (!is.null(raw_dir)) {
-        cache_key <- digest::digest(raw_dir, algo = "md5")
-        cache_file <- file.path(cache_dir, paste0(cache_key, ".rds"))
-        saveRDS(list(
+        cache_data <- list(
           dir = raw_dir,
           traces = traces,
           metrics = metrics_df,
-          saved_at = Sys.time()
-        ), cache_file)
-        message(sprintf("[DE-LIMP] TIC cache saved: %s (%d files)", raw_dir, length(traces)))
+          saved_at = Sys.time(),
+          saved_by = Sys.getenv("USER")
+        )
+        local_tmp <- tempfile(fileext = ".rds")
+        saveRDS(cache_data, local_tmp)
+
+        cfg <- ssh_config()
+        if (!is.null(cfg) && isTRUE(values$ssh_connected)) {
+          # Remote: SCP upload to raw data directory
+          remote_cache <- file.path(raw_dir, ".delimp_tic_cache.rds")
+          scp_upload(cfg, local_tmp, remote_cache)
+          message(sprintf("[DE-LIMP] TIC cache saved (remote): %s (%d files)", raw_dir, length(traces)))
+        } else if (dir.exists(raw_dir)) {
+          # Local: save directly
+          file.copy(local_tmp, file.path(raw_dir, ".delimp_tic_cache.rds"), overwrite = TRUE)
+          message(sprintf("[DE-LIMP] TIC cache saved (local): %s (%d files)", raw_dir, length(traces)))
+        }
+        unlink(local_tmp)
       }
     }, error = function(e) message("[DE-LIMP] TIC cache save error: ", e$message))
 
