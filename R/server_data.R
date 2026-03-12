@@ -729,13 +729,12 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
               auto_saved = TRUE
             )
 
-            # Save locally first (always need a local copy)
-            local_save_dir <- path.expand("~/.delimp_sessions")
-            dir.create(local_save_dir, showWarnings = FALSE, recursive = TRUE)
-            local_rds <- file.path(local_save_dir, "session.rds")
+            # Save to temp file first (staging for SCP upload)
+            local_rds <- tempfile(pattern = "delimp_session_", fileext = ".rds")
             saveRDS(session_data, local_rds)
+            on.exit(unlink(local_rds), add = TRUE)
 
-            # Determine final path: prefer remote output_dir if SSH connected
+            # Save to {output_dir}/session.rds — remote via SCP or local copy
             cfg <- if (nzchar(input$ssh_host %||% "") && nzchar(input$ssh_user %||% ""))
               list(host = input$ssh_host, user = input$ssh_user,
                    port = input$ssh_port %||% 22, key_path = input$ssh_key_path)
@@ -749,8 +748,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
                 rds_path <- remote_rds
                 message("[DE-LIMP] Auto-saved session to remote: ", remote_rds)
               } else {
-                rds_path <- local_rds
-                message("[DE-LIMP] SCP upload failed, saved locally: ", local_rds)
+                rds_path <- NA
+                message("[DE-LIMP] SCP upload failed for session auto-save")
               }
             } else if (!is.na(out_dir) && nzchar(out_dir %||% "") && dir.exists(out_dir)) {
               # Local output_dir exists (Docker/local backend)
@@ -758,8 +757,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
               file.copy(local_rds, rds_path, overwrite = TRUE)
               message("[DE-LIMP] Auto-saved session: ", rds_path)
             } else {
-              rds_path <- local_rds
-              message("[DE-LIMP] Auto-saved session locally: ", local_rds)
+              rds_path <- NA
+              message("[DE-LIMP] No output_dir available for session auto-save")
             }
           }, error = function(e) {
             message("[DE-LIMP] Auto-save failed: ", e$message)
