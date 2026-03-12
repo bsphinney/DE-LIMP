@@ -1715,6 +1715,83 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   return("unknown")
 }
 
+#' Get failed array task indices from a SLURM array job
+#' @param array_job_id Character — SLURM array job ID (parent, e.g. "9591429")
+#' @param ssh_config SSH config list or NULL
+#' @param sbatch_path Full path to sbatch
+#' @return list(failed_tasks = integer vector of 0-based task IDs,
+#'              reasons = character vector, max_rss_gb = numeric) or NULL
+get_failed_array_tasks <- function(array_job_id, ssh_config = NULL, sbatch_path = NULL) {
+  slurm_cmd <- function(cmd) {
+    if (!is.null(sbatch_path)) file.path(dirname(sbatch_path), cmd) else cmd
+  }
+
+  sacct_cmd <- sprintf(
+    "%s -j %s --format=JobID,State,MaxRSS --noheader --parsable2 2>/dev/null",
+    slurm_cmd("sacct"), array_job_id)
+
+  result <- if (!is.null(ssh_config)) {
+    ssh_exec(ssh_config, sacct_cmd, login_shell = is.null(sbatch_path), timeout = 15)
+  } else {
+    tryCatch({
+      out <- system2(slurm_cmd("sacct"),
+        args = c("-j", array_job_id, "--format=JobID,State,MaxRSS",
+                 "--noheader", "--parsable2"),
+        stdout = TRUE, stderr = TRUE)
+      list(status = 0, stdout = out)
+    }, error = function(e) list(status = 1, stdout = character()))
+  }
+
+  if (result$status != 0 || length(result$stdout) == 0) return(NULL)
+
+  failed_tasks <- integer(0)
+  reasons <- character(0)
+  max_rss_bytes <- 0
+  total_tasks <- 0L
+
+  for (line in result$stdout) {
+    parts <- strsplit(trimws(line), "\\|")[[1]]
+    if (length(parts) < 2) next
+    jid <- trimws(parts[1])
+    st <- toupper(trimws(parts[2]))
+    rss <- if (length(parts) >= 3) trimws(parts[3]) else ""
+
+    # Only array task entries: contain "_" but no "." (excludes .batch/.extern)
+    if (!grepl("_", jid) || grepl("\\.", jid)) next
+
+    total_tasks <- total_tasks + 1L
+    # Extract task index (e.g., "9591429_16" -> 16)
+    task_idx <- as.integer(sub(".*_", "", jid))
+
+    if (grepl("FAILED|TIMEOUT|OUT_OF_ME", st)) {
+      failed_tasks <- c(failed_tasks, task_idx)
+      reasons <- c(reasons, st)
+    }
+
+    # Parse MaxRSS (e.g., "67102388K" or "51254.50M")
+    if (nzchar(rss)) {
+      rss_val <- tryCatch({
+        num <- as.numeric(gsub("[^0-9.]", "", rss))
+        if (grepl("K", rss, ignore.case = TRUE)) num / (1024 * 1024)  # KB -> GB
+        else if (grepl("M", rss, ignore.case = TRUE)) num / 1024      # MB -> GB
+        else if (grepl("G", rss, ignore.case = TRUE)) num             # GB
+        else num / (1024^3)                                            # bytes -> GB
+      }, error = function(e) 0)
+      max_rss_bytes <- max(max_rss_bytes, rss_val)
+    }
+  }
+
+  if (length(failed_tasks) == 0) return(NULL)
+
+  list(
+    failed_tasks = sort(failed_tasks),
+    reasons = reasons,
+    max_rss_gb = round(max_rss_bytes, 1),
+    n_failed = length(failed_tasks),
+    n_total = total_tasks
+  )
+}
+
 #' Get SLURM estimated start time for a queued job
 #' @param job_id SLURM job ID
 #' @param ssh_config SSH config list (NULL for local)

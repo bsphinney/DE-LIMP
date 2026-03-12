@@ -239,10 +239,13 @@ server_search <- function(input, output, session, values, add_to_log,
 
       # Set instrument-aware defaults based on metadata or file extensions
       meta <- values$instrument_metadata
+      is_timstof <- FALSE
       if (!is.null(meta) && !is.null(meta$instrument_type)) {
         if (meta$instrument_type == "timsTOF") {
           updateNumericInput(session, "diann_mass_acc", value = 15)
           updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
+          updateNumericInput(session, "parallel_mem_gb", value = 96)
+          is_timstof <- TRUE
         } else if (meta$instrument_type == "Thermo") {
           updateNumericInput(session, "diann_mass_acc", value = 10)
           updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
@@ -252,14 +255,17 @@ server_search <- function(input, output, session, values, add_to_log,
         if (ext == "d") {
           updateNumericInput(session, "diann_mass_acc", value = 15)
           updateNumericInput(session, "diann_mass_acc_ms1", value = 15)
+          updateNumericInput(session, "parallel_mem_gb", value = 96)
+          is_timstof <- TRUE
         } else if (ext == "raw") {
           updateNumericInput(session, "diann_mass_acc", value = 10)
           updateNumericInput(session, "diann_mass_acc_ms1", value = 5)
         }
       }
 
+      mem_msg <- if (is_timstof) " Memory set to 96 GB/file for timsTOF." else ""
       showNotification(
-        "Parallel mode: mass accuracy set to Manual with instrument-aware defaults. MBR disabled.",
+        paste0("Parallel mode: mass accuracy set to Manual with instrument-aware defaults. MBR disabled.", mem_msg),
         type = "message", duration = 6)
     }
   }, ignoreInit = TRUE)
@@ -5769,7 +5775,9 @@ server_search <- function(input, output, session, values, add_to_log,
                 "true"  # Can't verify, assume OK
               }
             } else {
-              sprintf("test -f %s/step1.predicted.speclib", shQuote(output_dir))
+              # Check standard name first, fall back to any .predicted.speclib
+              sprintf("ls %s/step1.predicted.speclib %s/*.predicted.speclib 2>/dev/null | head -1",
+                      output_dir, output_dir)
             }
             prereq_checks <- list(
               step2 = speclib_check,
@@ -5817,6 +5825,70 @@ server_search <- function(input, output, session, values, add_to_log,
               showNotification("Some sbatch scripts are missing on the remote. Cannot resume.",
                                type = "error", duration = 8)
               return()
+            }
+
+            # --- Partial array retry: only rerun failed tasks when a few OOM'd ---
+            partial_retry <- FALSE
+            retry_script_remote <- NULL
+            slurm_path <- values$ssh_sbatch_path
+
+            if (resume_from %in% c(2L, 4L)) {
+              array_step_key <- paste0("step", resume_from)
+              array_job_id <- job$parallel_steps[[array_step_key]]
+
+              if (!is.null(array_job_id)) {
+                failed_info <- tryCatch(
+                  get_failed_array_tasks(array_job_id, ssh_config = cfg,
+                                          sbatch_path = slurm_path),
+                  error = function(e) NULL)
+
+                n_files <- job$parallel_n_files %||% 0
+                if (!is.null(failed_info) && failed_info$n_failed > 0 &&
+                    failed_info$n_failed < n_files) {
+                  # Partial failure — only some tasks need rerunning
+                  partial_retry <- TRUE
+
+                  # Calculate retry memory: 1.5x max RSS seen, min 96 GB, cap 256 GB
+                  orig_mem <- job$search_settings$parallel$mem %||%
+                    job$search_settings$parallel$mem_per_file %||% 64
+                  retry_mem <- if (failed_info$max_rss_gb > 0) {
+                    max(ceiling(failed_info$max_rss_gb * 1.5), orig_mem + 32)
+                  } else {
+                    orig_mem + 32  # Bump by 32 GB if RSS unknown
+                  }
+                  retry_mem <- min(retry_mem, 256)
+
+                  # Build array spec for failed tasks only
+                  array_spec <- paste(failed_info$failed_tasks, collapse = ",")
+                  step_name <- if (resume_from == 2) "step2_firstpass" else "step4_finalpass"
+                  original_script <- file.path(output_dir, paste0(step_name, ".sbatch"))
+                  retry_script_remote <- file.path(output_dir, paste0(step_name, "_retry.sbatch"))
+
+                  # Create retry script on remote via sed (modify array spec + memory)
+                  sed_cmd <- sprintf(
+                    "sed -e 's/#SBATCH --array=.*/#SBATCH --array=%s/' -e 's/#SBATCH --mem=.*/#SBATCH --mem=%dG/' %s > %s",
+                    array_spec, retry_mem, shQuote(original_script), shQuote(retry_script_remote))
+                  sed_result <- ssh_exec(cfg, sed_cmd)
+
+                  if (sed_result$status == 0) {
+                    # Replace step script path with retry script
+                    step_script_paths[resume_from] <- retry_script_remote
+
+                    showNotification(
+                      sprintf("Partial retry: %d of %d tasks failed (%s). Retrying with %d GB memory.",
+                              failed_info$n_failed, n_files,
+                              paste(unique(failed_info$reasons), collapse = "/"),
+                              retry_mem),
+                      type = "message", duration = 10)
+                    message(sprintf("[DE-LIMP] Partial retry: step %d tasks [%s] with %d GB (was %d GB)",
+                                    resume_from, array_spec, retry_mem, orig_mem))
+                  } else {
+                    partial_retry <- FALSE
+                    showNotification("Could not create retry script. Rerunning full step.",
+                                     type = "warning", duration = 6)
+                  }
+                }
+              }
             }
 
             # Generate resume launcher
@@ -5878,14 +5950,24 @@ server_search <- function(input, output, session, values, add_to_log,
             new_entry$completed_at <- NULL
             new_entry$log_content <- ""
             new_entry$loaded <- FALSE
+            if (isTRUE(partial_retry)) {
+              new_entry$partial_retry <- TRUE
+              new_entry$retry_tasks <- failed_info$failed_tasks
+              new_entry$retry_mem_gb <- retry_mem
+            }
 
             values$diann_jobs <- c(values$diann_jobs, list(new_entry))
 
             skipped_msg <- if (resume_from > 1) {
               sprintf(" (skipped Steps 1-%d, reusing existing results)", resume_from - 1)
             } else ""
+            retry_msg <- if (isTRUE(partial_retry)) {
+              sprintf(", retrying %d of %d tasks with %d GB",
+                      length(failed_info$failed_tasks),
+                      failed_info$n_total, retry_mem)
+            } else ""
             showNotification(
-              sprintf("Resumed from Step %d%s", resume_from, skipped_msg),
+              sprintf("Resumed from Step %d%s%s", resume_from, skipped_msg, retry_msg),
               type = "message", duration = 10)
             return()
           }
