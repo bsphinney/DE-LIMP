@@ -981,20 +981,29 @@ server_search <- function(input, output, session, values, add_to_log,
     range_hours <- as.integer(input$cluster_history_range %||% "168")
 
     since <- if (range_hours > 0) Sys.time() - range_hours * 3600 else NULL
-    hist_data <- cluster_usage_history_read(since = since, account = "genome-center-grp")
-    req(nrow(hist_data) > 0)
+    gc_data <- cluster_usage_history_read(since = since, account = "genome-center-grp")
+    req(nrow(gc_data) > 0)
+    pub_data <- cluster_usage_history_read(since = since, account = "publicgrp")
 
-    user_limit <- max(hist_data$user_limit, na.rm = TRUE)
+    user_limit <- max(gc_data$user_limit, na.rm = TRUE)
     if (is.na(user_limit) || !is.finite(user_limit)) user_limit <- 64
 
-    p <- plot_ly(hist_data, x = ~timestamp, y = ~group_used,
+    p <- plot_ly(gc_data, x = ~timestamp, y = ~group_used,
                  type = "scatter", mode = "lines",
                  name = "Genome Center (all users)",
                  line = list(color = "#3b82f6", width = 2),
                  fill = "tozeroy", fillcolor = "rgba(59,130,246,0.1)") %>%
-      add_trace(y = ~user_used, name = "Your CPUs",
-                line = list(color = "#0d9488", width = 2.5)) %>%
-      add_trace(y = ~I(pmin(round(group_used / group_limit * 100, 1), 100)),
+      add_trace(y = ~user_used, name = "Your CPUs (high)",
+                line = list(color = "#0d9488", width = 2.5))
+    if (nrow(pub_data) > 0) {
+      p <- p %>%
+        add_trace(data = pub_data, x = ~timestamp, y = ~user_used,
+                  name = "Your CPUs (low)",
+                  line = list(color = "#f97316", width = 2.5))
+    }
+    p <- p %>%
+      add_trace(data = gc_data, x = ~timestamp,
+                y = ~I(pmin(round(group_used / group_limit * 100, 1), 100)),
                 name = "Genome Center % Used", yaxis = "y2",
                 line = list(color = "#f59e0b", width = 1.5, dash = "dot"),
                 visible = "legendonly") %>%
@@ -1004,12 +1013,12 @@ server_search <- function(input, output, session, values, add_to_log,
         yaxis2 = list(title = "% Used", overlaying = "y", side = "right",
                       range = c(0, 105), showgrid = FALSE),
         shapes = list(
-          list(type = "line", x0 = min(hist_data$timestamp), x1 = max(hist_data$timestamp),
+          list(type = "line", x0 = min(gc_data$timestamp), x1 = max(gc_data$timestamp),
                y0 = user_limit, y1 = user_limit,
                line = list(color = "#dc3545", width = 1.5, dash = "dash"))
         ),
         annotations = list(
-          list(x = max(hist_data$timestamp), y = user_limit,
+          list(x = max(gc_data$timestamp), y = user_limit,
                text = sprintf("Per-user limit (%d)", user_limit),
                xanchor = "right", yanchor = "bottom",
                showarrow = FALSE, font = list(size = 10, color = "#dc3545"))
@@ -1089,20 +1098,29 @@ server_search <- function(input, output, session, values, add_to_log,
     values$cluster_resources
     range_hours <- as.integer(input$cluster_history_range_modal %||% input$cluster_history_range %||% "168")
     since <- if (range_hours > 0) Sys.time() - range_hours * 3600 else NULL
-    hist_data <- cluster_usage_history_read(since = since, account = "genome-center-grp")
-    req(nrow(hist_data) > 0)
+    gc_data <- cluster_usage_history_read(since = since, account = "genome-center-grp")
+    req(nrow(gc_data) > 0)
+    pub_data <- cluster_usage_history_read(since = since, account = "publicgrp")
 
-    user_limit <- max(hist_data$user_limit, na.rm = TRUE)
+    user_limit <- max(gc_data$user_limit, na.rm = TRUE)
     if (is.na(user_limit) || !is.finite(user_limit)) user_limit <- 64
 
-    plot_ly(hist_data, x = ~timestamp, y = ~group_used,
+    p <- plot_ly(gc_data, x = ~timestamp, y = ~group_used,
             type = "scatter", mode = "lines",
             name = "Genome Center (all users)",
             line = list(color = "#3b82f6", width = 2),
             fill = "tozeroy", fillcolor = "rgba(59,130,246,0.1)") %>%
-      add_trace(y = ~user_used, name = "Your CPUs",
-                line = list(color = "#0d9488", width = 2.5)) %>%
-      add_trace(y = ~I(pmin(round(group_used / group_limit * 100, 1), 100)),
+      add_trace(y = ~user_used, name = "Your CPUs (high)",
+                line = list(color = "#0d9488", width = 2.5))
+    if (nrow(pub_data) > 0) {
+      p <- p %>%
+        add_trace(data = pub_data, x = ~timestamp, y = ~user_used,
+                  name = "Your CPUs (low)",
+                  line = list(color = "#f97316", width = 2.5))
+    }
+    p %>%
+      add_trace(data = gc_data, x = ~timestamp,
+                y = ~I(pmin(round(group_used / group_limit * 100, 1), 100)),
                 name = "Genome Center % Used", yaxis = "y2",
                 line = list(color = "#f59e0b", width = 1.5, dash = "dot"),
                 visible = "legendonly") %>%
@@ -1112,12 +1130,12 @@ server_search <- function(input, output, session, values, add_to_log,
         yaxis2 = list(title = "% Used", overlaying = "y", side = "right",
                       range = c(0, 105), showgrid = FALSE),
         shapes = list(
-          list(type = "line", x0 = min(hist_data$timestamp), x1 = max(hist_data$timestamp),
+          list(type = "line", x0 = min(gc_data$timestamp), x1 = max(gc_data$timestamp),
                y0 = user_limit, y1 = user_limit,
                line = list(color = "#dc3545", width = 1.5, dash = "dash"))
         ),
         annotations = list(
-          list(x = max(hist_data$timestamp), y = user_limit,
+          list(x = max(gc_data$timestamp), y = user_limit,
                text = sprintf("Per-user limit (%d)", user_limit),
                xanchor = "right", yanchor = "bottom",
                showarrow = FALSE, font = list(size = 11, color = "#dc3545"))
@@ -1294,8 +1312,18 @@ server_search <- function(input, output, session, values, add_to_log,
     })
 
     if (nrow(raw_files) > 0) {
-      # Add full_path column for sbatch script generation
-      raw_files$full_path <- file.path(input$ssh_raw_data_dir, raw_files$filename)
+      # Resolve symlinks to real paths — critical for Apptainer bind mounts
+      # (symlink targets may be outside the bind mount scope)
+      raw_paths <- file.path(input$ssh_raw_data_dir, raw_files$filename)
+      resolve_cmd <- paste0("readlink -f ", paste(shQuote(raw_paths), collapse = " "))
+      resolve_result <- ssh_exec(cfg, resolve_cmd)
+      resolved <- trimws(resolve_result$stdout[nzchar(resolve_result$stdout)])
+      if (length(resolved) == nrow(raw_files)) {
+        raw_files$full_path <- resolved
+      } else {
+        # Fallback: use original paths if readlink failed
+        raw_files$full_path <- raw_paths
+      }
     }
     values$diann_raw_files <- raw_files
 
@@ -2215,6 +2243,12 @@ server_search <- function(input, output, session, values, add_to_log,
   # Reactive: FASTA library catalog (reloaded when triggered)
   fasta_library_catalog <- reactiveVal(list())
 
+  # Filtered view: only entries with a speclib file (what the user sees)
+  speclib_catalog <- reactive({
+    catalog <- fasta_library_catalog()
+    Filter(function(e) !is.null(e$speclib_path) && nzchar(e$speclib_path %||% ""), catalog)
+  })
+
   # Load catalog on startup and when refresh is triggered
   observe({
     fasta_library_catalog(fasta_library_load())
@@ -2226,7 +2260,7 @@ server_search <- function(input, output, session, values, add_to_log,
     fasta_library_catalog(fasta_library_load())
 
     showModal(modalDialog(
-      title = tagList(icon("book"), " Shared FASTA Database Library"),
+      title = tagList(icon("bolt"), " Speclib Library"),
       size = "xl",
       easyClose = TRUE,
       div(
@@ -2252,7 +2286,7 @@ server_search <- function(input, output, session, values, add_to_log,
         actionButton("fasta_library_refresh_btn", "Refresh",
           class = "btn-outline-secondary btn-sm", icon = icon("sync")),
         modalButton("Cancel"),
-        actionButton("fasta_library_use_btn", "Use This Database",
+        actionButton("fasta_library_use_btn", "Use This Speclib",
           class = "btn-success", icon = icon("check"))
       )
     ))
@@ -2260,7 +2294,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
   # Render the library catalog table
   output$fasta_library_table <- DT::renderDT({
-    catalog <- fasta_library_catalog()
+    catalog <- speclib_catalog()
     display_df <- fasta_library_display_df(catalog)
 
     if (nrow(display_df) == 0) {
@@ -2273,7 +2307,7 @@ server_search <- function(input, output, session, values, add_to_log,
         ),
         selection = "single",
         options = list(dom = "t", language = list(
-          emptyTable = "No databases in library. Download from UniProt and add to library."
+          emptyTable = "No spectral libraries available. Run a search to generate one."
         )),
         rownames = FALSE,
         class = "compact stripe"
@@ -2322,11 +2356,11 @@ server_search <- function(input, output, session, values, add_to_log,
     sel <- input$fasta_library_table_rows_selected
     if (is.null(sel) || length(sel) == 0) {
       return(div(class = "text-muted text-center py-3",
-        icon("hand-pointer"), " Select a database from the table above to see details"
+        icon("hand-pointer"), " Select a speclib from the table above to see details"
       ))
     }
 
-    catalog <- fasta_library_catalog()
+    catalog <- speclib_catalog()
     if (sel > length(catalog)) return(NULL)
     entry <- catalog[[sel]]
 
@@ -2340,7 +2374,8 @@ server_search <- function(input, output, session, values, add_to_log,
     } else "Unknown"
 
     # Speclib info
-    speclib_info <- if (!is.null(entry$speclib_path) && nzchar(entry$speclib_path %||% "")) {
+    has_speclib <- !is.null(entry$speclib_path) && nzchar(entry$speclib_path %||% "")
+    speclib_info <- if (has_speclib) {
       tags$span(class = "badge bg-info", icon("bolt"), " Predicted speclib available")
     } else {
       tags$span(class = "text-muted", "None")
@@ -2446,6 +2481,11 @@ server_search <- function(input, output, session, values, add_to_log,
             lapply(entry$fasta_files %||% character(), function(f) {
               tags$li(tags$code(f))
             })
+          ),
+          if (has_speclib) div(style = "margin-top: 4px;",
+            tags$strong("Predicted speclib: "),
+            tags$code(style = "font-size: 0.85em; word-break: break-all;",
+              basename(entry$speclib_path))
           )
         ),
         # Metadata footer
@@ -2475,8 +2515,8 @@ server_search <- function(input, output, session, values, add_to_log,
               tags$span(class = "badge bg-success",
                 icon("check-circle"), " Ready")
             },
-            # View speclib log button (only if a search has run)
-            if (!is.null(entry$last_search_output_dir) && nzchar(entry$last_search_output_dir %||% ""))
+            # View log button (if a search has run or speclib exists)
+            if (nzchar(entry$last_search_output_dir %||% "") || has_speclib)
               actionButton("fasta_library_view_log_btn", "View Log",
                 class = "btn-outline-info btn-sm ms-2", icon = icon("file-lines")),
             # Delete button
@@ -2494,23 +2534,23 @@ server_search <- function(input, output, session, values, add_to_log,
     showNotification("Library catalog refreshed", type = "message", duration = 3)
   })
 
-  # "Use This Database" button
+  # "Use This Speclib" button
   observeEvent(input$fasta_library_use_btn, {
     sel <- input$fasta_library_table_rows_selected
 
     if (is.null(sel) || length(sel) == 0) {
-      showNotification("Please select a database from the table first.", type = "warning")
+      showNotification("Please select a speclib from the table first.", type = "warning")
       return()
     }
 
-    catalog <- fasta_library_catalog()
+    catalog <- speclib_catalog()
     if (sel > length(catalog)) return()
     entry <- catalog[[sel]]
 
     # Verify files exist
     if (!fasta_library_verify_files(entry)) {
       showNotification(
-        "FASTA files for this entry are missing from disk. The entry may need to be removed.",
+        "FASTA files for this speclib are missing from disk. The entry may need to be removed.",
         type = "error", duration = 8)
       return()
     }
@@ -2667,7 +2707,7 @@ server_search <- function(input, output, session, values, add_to_log,
     sel <- input$fasta_library_table_rows_selected
     if (is.null(sel) || length(sel) == 0) return()
 
-    catalog <- fasta_library_catalog()
+    catalog <- speclib_catalog()
     if (sel > length(catalog)) return()
     entry <- catalog[[sel]]
 
@@ -2725,7 +2765,7 @@ server_search <- function(input, output, session, values, add_to_log,
     sel <- input$fasta_library_table_rows_selected
     if (is.null(sel) || length(sel) == 0) return()
 
-    catalog <- fasta_library_catalog()
+    catalog <- speclib_catalog()
     if (sel > length(catalog)) return()
     entry <- catalog[[sel]]
 
@@ -2752,7 +2792,7 @@ server_search <- function(input, output, session, values, add_to_log,
       return()
     }
 
-    catalog <- fasta_library_catalog()
+    catalog <- speclib_catalog()
     if (sel > length(catalog)) {
       removeModal()
       return()
@@ -3885,6 +3925,7 @@ server_search <- function(input, output, session, values, add_to_log,
           search_mode = input$search_mode,
           normalization = input$diann_normalization,
           diann_sif = basename(sif_path),
+          diann_version = NULL,  # Parsed from DIA-NN log on completion
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
             basename(values$diann_speclib) else NULL,
           slurm = list(
@@ -4057,6 +4098,7 @@ server_search <- function(input, output, session, values, add_to_log,
           search_mode = input$search_mode,
           normalization = input$diann_normalization,
           diann_sif = basename(sif_path),
+          diann_version = NULL,  # Parsed from DIA-NN log on completion
           speclib = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
             basename(values$diann_speclib) else NULL,
           slurm = list(
@@ -4320,6 +4362,25 @@ server_search <- function(input, output, session, values, add_to_log,
         }
         jobs[[i]]$parallel_current_step <- current_step
 
+        # Fetch pending_reason for parallel jobs (needed for auto-switch InvalidQOS detection)
+        # Query squeue on the first pending step to get the reason
+        current_sn <- step_names[current_step]
+        current_ss <- step_status[[current_sn]] %||% "queued"
+        current_sid <- steps[[current_sn]]
+        if (current_ss == "queued" && !is.null(current_sid)) {
+          sinfo <- tryCatch(
+            get_slurm_start_time(current_sid, ssh_config = job_cfg,
+                                  sbatch_path = slurm_path),
+            error = function(e) list(est_start = NULL, priority = NULL, reason = NULL))
+          if (!identical(sinfo$reason, jobs[[i]]$pending_reason)) {
+            jobs[[i]]$pending_reason <- sinfo$reason
+            changed <- TRUE
+          }
+        } else if (!is.null(jobs[[i]]$pending_reason) && current_ss != "queued") {
+          jobs[[i]]$pending_reason <- NULL
+          changed <- TRUE
+        }
+
         # For array steps (2 & 4), count completed tasks via sacct
         for (array_step in c("step2", "step4")) {
           arr_id <- steps[[array_step]]
@@ -4366,6 +4427,160 @@ server_search <- function(input, output, session, values, add_to_log,
               completed = n_done, running = n_running,
               pending = n_pending, failed = n_failed)
           }
+        }
+
+        # --- Register speclib as soon as Step 1 completes ---
+        # The predicted speclib is built in Step 1 and can be reused
+        # immediately, even if later steps fail.
+        if (!isTRUE(jobs[[i]]$speclib_cached) &&
+            (step_status[["step1"]] %||% "queued") == "completed") {
+          tryCatch({
+            ss <- jobs[[i]]$search_settings
+            speclib_path <- file.path(jobs[[i]]$output_dir, "step1.predicted.speclib")
+            speclib_exists <- if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+              res <- ssh_exec(cfg, paste("test -f", shQuote(speclib_path),
+                                          "&& echo EXISTS"))
+              any(grepl("EXISTS", res$stdout))
+            } else {
+              file.exists(speclib_path)
+            }
+            if (speclib_exists) {
+              speclib_cache_register(
+                fasta_files = ss$fasta_files,
+                search_params = ss$search_params,
+                search_mode = ss$search_mode,
+                speclib_path = speclib_path,
+                analysis_name = jobs[[i]]$name,
+                output_dir = jobs[[i]]$output_dir,
+                custom_fasta_text = ss$custom_fasta_text,
+                fasta_seq_count = ss$fasta_seq_count
+              )
+              jobs[[i]]$speclib_cached <- TRUE
+              changed <- TRUE
+
+              # Update FASTA library entry with speclib path and verified settings
+              lib_id <- jobs[[i]]$library_entry_id
+              if (!is.null(lib_id) && nzchar(lib_id %||% "")) {
+                tryCatch({
+                  step1_id <- jobs[[i]]$parallel_steps$step1 %||% jobs[[i]]$job_id
+                  # Read Step 1 log to verify actual DIA-NN flags
+                  log_pattern <- sprintf("diann_*%s*.out", step1_id)
+                  log_dir <- file.path(jobs[[i]]$output_dir, "logs")
+                  verified_params <- NULL
+                  if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
+                    log_result <- ssh_exec(cfg, sprintf(
+                      "cat %s/%s 2>/dev/null || cat %s/diann_s1_libpred_*.out 2>/dev/null",
+                      shQuote(log_dir), log_pattern, shQuote(log_dir)))
+                    if (log_result$status == 0 && length(log_result$stdout) > 0)
+                      verified_params <- parse_diann_log_flags(log_result$stdout)
+                  } else {
+                    log_files <- list.files(log_dir, pattern = "diann_.*\\.out$", full.names = TRUE)
+                    if (length(log_files) > 0) {
+                      log_lines <- tryCatch(readLines(log_files[1], warn = FALSE), error = function(e) character(0))
+                      if (length(log_lines) > 0) verified_params <- parse_diann_log_flags(log_lines)
+                    }
+                  }
+                  lib_updates <- list(
+                    last_job_id = step1_id,
+                    last_search_output_dir = jobs[[i]]$output_dir,
+                    last_search_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+                    speclib_path = speclib_path,
+                    n_precursors = NULL,
+                    n_proteins_lib = NULL,
+                    n_genes_lib = NULL
+                  )
+                  if (!is.null(verified_params)) {
+                    catalog <- fasta_library_load()
+                    idx <- which(vapply(catalog, function(e) identical(e$id, lib_id), logical(1)))
+                    if (length(idx) > 0) {
+                      existing_ss <- catalog[[idx[1]]]$search_settings %||% list()
+                      for (nm in names(verified_params)) {
+                        if (!is.null(verified_params[[nm]])) existing_ss[[nm]] <- verified_params[[nm]]
+                      }
+                      var_mod_parts <- c(
+                        if (isTRUE(verified_params$mod_met_ox)) "UniMod:35 (Met oxidation)",
+                        if (isTRUE(verified_params$mod_nterm_acetyl)) "UniMod:1 (N-term acetylation)"
+                      )
+                      existing_ss$var_mods <- paste(Filter(nzchar, var_mod_parts), collapse = "; ")
+                      existing_ss$fixed_mods <- if (isTRUE(verified_params$unimod4))
+                        "UniMod:4 (Carbamidomethylation)" else ""
+                      lib_updates$search_settings <- existing_ss
+                      lib_updates$settings_verified <- TRUE
+                      lib_updates$n_precursors <- verified_params$n_precursors
+                      lib_updates$n_proteins_lib <- verified_params$n_proteins_lib
+                      lib_updates$n_genes_lib <- verified_params$n_genes_lib
+                    }
+                  }
+                  fasta_library_update_entry(lib_id, lib_updates)
+                  message(sprintf("[DE-LIMP] Speclib registered for '%s' after Step 1 (job %s)",
+                    lib_id, step1_id))
+                }, error = function(e) {
+                  message("[DE-LIMP] Failed to update speclib library entry: ", e$message)
+                })
+              }
+
+              showNotification(
+                sprintf("Speclib for '%s' registered and available for reuse",
+                  jobs[[i]]$name),
+                type = "message", duration = 8)
+            }
+          }, error = function(e) {
+            message("[DE-LIMP] speclib registration failed: ", e$message)
+          })
+        }
+
+        # --- Early abort: detect silent failures in completed array steps ---
+        # DIA-NN exits 0 even when it can't read raw files (e.g., symlink
+        # targets outside bind mount). Verify quant files exist after Step 2
+        # completes; cancel downstream steps if output is missing.
+        if (!isTRUE(jobs[[i]]$parallel_quant_verified) &&
+            (step_status[["step2"]] %||% "queued") == "completed" &&
+            n_files > 0) {
+          od <- jobs[[i]]$output_dir
+          quant_check_cmd <- sprintf(
+            "ls %s/quant_step2/*.quant 2>/dev/null | wc -l",
+            shQuote(od))
+          quant_result <- if (!is.null(job_cfg)) {
+            ssh_exec(job_cfg, quant_check_cmd)
+          } else {
+            tryCatch({
+              out <- system2("bash", c("-c", shQuote(quant_check_cmd)),
+                stdout = TRUE, stderr = TRUE)
+              list(status = 0, stdout = out)
+            }, error = function(e) list(status = 1, stdout = "0"))
+          }
+          n_quant <- as.integer(trimws(quant_result$stdout[1]))
+          if (is.na(n_quant)) n_quant <- 0L
+
+          if (n_quant == 0L) {
+            # No quant files — DIA-NN silently failed on all files.
+            # Cancel remaining dependent steps.
+            cancel_ids <- c(steps[["step3"]], steps[["step4"]], steps[["step5"]])
+            cancel_ids <- cancel_ids[!is.null(cancel_ids)]
+            if (length(cancel_ids) > 0) {
+              cancel_cmd <- sprintf("%s %s 2>/dev/null; true",
+                slurm_cmd_fn("scancel"), paste(cancel_ids, collapse = " "))
+              if (!is.null(job_cfg)) {
+                ssh_exec(job_cfg, cancel_cmd, login_shell = is.null(slurm_path))
+              } else {
+                tryCatch(system2(slurm_cmd_fn("scancel"), cancel_ids,
+                  stdout = FALSE, stderr = FALSE), error = function(e) NULL)
+              }
+            }
+            step_status[["step2"]] <- "failed"
+            for (sn in c("step3", "step4", "step5")) {
+              if (!is.null(steps[[sn]])) step_status[[sn]] <- "cancelled"
+            }
+            jobs[[i]]$parallel_step_status <- step_status
+            message(sprintf(
+              "[DE-LIMP] Parallel job %s: Step 2 produced 0/%d quant files — cancelled remaining steps",
+              jobs[[i]]$name, n_files))
+            showNotification(
+              sprintf("Search '%s' failed: DIA-NN could not read raw files (0 quant files produced). Check bind mount paths.",
+                      jobs[[i]]$name),
+              type = "error", duration = 20)
+          }
+          jobs[[i]]$parallel_quant_verified <- TRUE
         }
 
         # Overall status: check step5 final state
@@ -4437,19 +4652,25 @@ server_search <- function(input, output, session, values, add_to_log,
         }
       }
 
-      # Fetch estimated start time for queued jobs
+      # Fetch estimated start time, priority, and reason for queued jobs
       if (new_status == "queued") {
-        est <- tryCatch(
+        sinfo <- tryCatch(
           get_slurm_start_time(jobs[[i]]$job_id, ssh_config = job_cfg,
                                 sbatch_path = slurm_path),
-          error = function(e) NULL)
-        if (!is.null(est) && !identical(est, jobs[[i]]$est_start)) {
-          jobs[[i]]$est_start <- est
+          error = function(e) list(est_start = NULL, priority = NULL, reason = NULL))
+        if (!identical(sinfo$est_start, jobs[[i]]$est_start) ||
+            !identical(sinfo$priority, jobs[[i]]$priority) ||
+            !identical(sinfo$reason, jobs[[i]]$pending_reason)) {
+          jobs[[i]]$est_start <- sinfo$est_start
+          jobs[[i]]$priority <- sinfo$priority
+          jobs[[i]]$pending_reason <- sinfo$reason
           changed <- TRUE
         }
       } else {
-        if (!is.null(jobs[[i]]$est_start)) {
+        if (!is.null(jobs[[i]]$est_start) || !is.null(jobs[[i]]$priority)) {
           jobs[[i]]$est_start <- NULL
+          jobs[[i]]$priority <- NULL
+          jobs[[i]]$pending_reason <- NULL
           changed <- TRUE
         }
       }
@@ -4465,6 +4686,33 @@ server_search <- function(input, output, session, values, add_to_log,
           # Record in cluster wait log for grant justification
           tryCatch(record_job_wait(jobs[[i]]), error = function(e)
             message("[DE-LIMP] Failed to record job wait: ", e$message))
+        }
+
+        # Verify report.parquet exists for "completed" single jobs —
+        # DIA-NN exits 0 even when it can't read raw files
+        if (new_status == "completed") {
+          od <- jobs[[i]]$output_dir
+          report_name <- if (isTRUE(jobs[[i]]$no_norm)) "no_norm_report.parquet" else "report.parquet"
+          report_check_cmd <- sprintf("test -f %s/%s && echo YES || echo NO",
+                                       shQuote(od), report_name)
+          report_exists <- tryCatch({
+            if (!is.null(job_cfg)) {
+              res <- ssh_exec(job_cfg, report_check_cmd)
+              trimws(res$stdout[1]) == "YES"
+            } else {
+              file.exists(file.path(od, report_name))
+            }
+          }, error = function(e) TRUE)  # assume OK on error
+
+          if (!isTRUE(report_exists)) {
+            new_status <- "failed"
+            message(sprintf("[DE-LIMP] Job '%s' SLURM COMPLETED but no %s — marking as failed",
+                            jobs[[i]]$name, report_name))
+            showNotification(
+              sprintf("Search '%s' failed: SLURM completed but no output report. Check DIA-NN log for errors.",
+                      jobs[[i]]$name),
+              type = "error", duration = 20)
+          }
         }
 
         jobs[[i]]$status <- new_status
@@ -4552,100 +4800,6 @@ server_search <- function(input, output, session, values, add_to_log,
             })
           }
 
-          # Register predicted spectral library in cache
-          if (isTRUE(jobs[[i]]$parallel) && !isTRUE(jobs[[i]]$speclib_cached)) {
-            tryCatch({
-              ss <- jobs[[i]]$search_settings
-              speclib_path <- file.path(jobs[[i]]$output_dir, "step1.predicted.speclib")
-              speclib_exists <- if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
-                res <- ssh_exec(cfg, paste("test -f", shQuote(speclib_path),
-                                            "&& echo EXISTS"))
-                any(grepl("EXISTS", res$stdout))
-              } else {
-                file.exists(speclib_path)
-              }
-              if (speclib_exists) {
-                speclib_cache_register(
-                  fasta_files = ss$fasta_files,
-                  search_params = ss$search_params,
-                  search_mode = ss$search_mode,
-                  speclib_path = speclib_path,
-                  analysis_name = jobs[[i]]$name,
-                  output_dir = jobs[[i]]$output_dir,
-                  custom_fasta_text = ss$custom_fasta_text,
-                  fasta_seq_count = ss$fasta_seq_count
-                )
-                jobs[[i]]$speclib_cached <- TRUE
-                changed <- TRUE
-
-                # Update FASTA library entry with job ID and verified settings
-                lib_id <- jobs[[i]]$library_entry_id
-                if (!is.null(lib_id) && nzchar(lib_id %||% "")) {
-                  tryCatch({
-                    step1_id <- jobs[[i]]$parallel_steps$step1 %||% jobs[[i]]$job_id
-                    # Read Step 1 log to verify actual DIA-NN flags
-                    log_pattern <- sprintf("diann_*%s*.out", step1_id)
-                    log_dir <- file.path(jobs[[i]]$output_dir, "logs")
-                    verified_params <- NULL
-                    if (isTRUE(jobs[[i]]$is_ssh) && !is.null(cfg)) {
-                      log_result <- ssh_exec(cfg, sprintf(
-                        "cat %s/%s 2>/dev/null || cat %s/diann_s1_libpred_*.out 2>/dev/null",
-                        shQuote(log_dir), log_pattern, shQuote(log_dir)))
-                      if (log_result$status == 0 && length(log_result$stdout) > 0)
-                        verified_params <- parse_diann_log_flags(log_result$stdout)
-                    } else {
-                      log_files <- list.files(log_dir, pattern = "diann_.*\\.out$", full.names = TRUE)
-                      if (length(log_files) > 0) {
-                        log_lines <- tryCatch(readLines(log_files[1], warn = FALSE), error = function(e) character(0))
-                        if (length(log_lines) > 0) verified_params <- parse_diann_log_flags(log_lines)
-                      }
-                    }
-                    # Build update fields
-                    lib_updates <- list(
-                      last_job_id = step1_id,
-                      last_search_output_dir = jobs[[i]]$output_dir,
-                      last_search_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
-                      speclib_path = speclib_path,
-                      n_precursors = NULL,
-                      n_proteins_lib = NULL,
-                      n_genes_lib = NULL
-                    )
-                    if (!is.null(verified_params)) {
-                      # Update search_settings with verified values from log
-                      catalog <- fasta_library_load()
-                      idx <- which(vapply(catalog, function(e) identical(e$id, lib_id), logical(1)))
-                      if (length(idx) > 0) {
-                        existing_ss <- catalog[[idx[1]]]$search_settings %||% list()
-                        for (nm in names(verified_params)) {
-                          if (!is.null(verified_params[[nm]])) existing_ss[[nm]] <- verified_params[[nm]]
-                        }
-                        # Rebuild var_mods display string from verified flags
-                        var_mod_parts <- c(
-                          if (isTRUE(verified_params$mod_met_ox)) "UniMod:35 (Met oxidation)",
-                          if (isTRUE(verified_params$mod_nterm_acetyl)) "UniMod:1 (N-term acetylation)"
-                        )
-                        existing_ss$var_mods <- paste(Filter(nzchar, var_mod_parts), collapse = "; ")
-                        existing_ss$fixed_mods <- if (isTRUE(verified_params$unimod4))
-                          "UniMod:4 (Carbamidomethylation)" else ""
-                        lib_updates$search_settings <- existing_ss
-                        lib_updates$settings_verified <- TRUE
-                        lib_updates$n_precursors <- verified_params$n_precursors
-                        lib_updates$n_proteins_lib <- verified_params$n_proteins_lib
-                        lib_updates$n_genes_lib <- verified_params$n_genes_lib
-                      }
-                    }
-                    fasta_library_update_entry(lib_id, lib_updates)
-                    message(sprintf("[DE-LIMP] Updated FASTA library entry '%s' with job %s",
-                      lib_id, step1_id))
-                  }, error = function(e) {
-                    message("[DE-LIMP] Failed to update FASTA library entry: ", e$message)
-                  })
-                }
-              }
-            }, error = function(e) {
-              message("[DE-LIMP] speclib cache registration failed: ", e$message)
-            })
-          }
         } else if (new_status == "failed") {
           showNotification(
             sprintf("DIA-NN search '%s' failed. Check log for details.", jobs[[i]]$name),
@@ -4678,42 +4832,54 @@ server_search <- function(input, output, session, values, add_to_log,
           # Already fully on publicgrp — skip
           if (identical(jobs[[i]]$slurm_account, "publicgrp")) next
 
-          # Check how long it's been since submission
-          submitted <- jobs[[i]]$submitted_at
-          if (is.null(submitted)) next
-          pending_min <- as.numeric(difftime(Sys.time(), submitted, units = "mins"))
+          # Check how long it's been pending on current partition
+          # Use queue_switched_at if job was previously moved, otherwise submitted_at
+          ref_time <- jobs[[i]]$queue_switched_at %||% jobs[[i]]$submitted_at
+          if (is.null(ref_time)) next
+          pending_min <- as.numeric(difftime(Sys.time(), ref_time, units = "mins"))
           if (pending_min < wait_min) next
 
           # Move the job
           job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
           slurm_path <- if (isTRUE(jobs[[i]]$is_ssh)) values$ssh_sbatch_path else NULL
 
-          # For parallel jobs: move pending array steps (2, 4) which are independent
-          # per-file tasks. Assembly steps (1, 3, 5) stay on original partition —
-          # they're resource-heavy and may exceed publicgrp limits.
-          # SLURM won't move already-running tasks, only pending ones.
+          # For parallel jobs: decide which steps to move.
+          # If pending_reason is InvalidQOS, ALL pending steps must move (original partition is broken).
+          # Otherwise, only move array steps (2, 4) — assembly steps (1, 3, 5) stay put.
           job_ids_to_move <- character(0)
           movable_steps <- character(0)
+          force_move_all <- identical(jobs[[i]]$pending_reason, "InvalidQOS")
+
           if (isTRUE(jobs[[i]]$parallel)) {
             ss <- jobs[[i]]$parallel_step_status %||% list()
             steps <- jobs[[i]]$parallel_steps %||% list()
-            # Steps 2 and 4 are independent array jobs — safe to move pending tasks
-            # Steps 1, 3, 5 are assembly/single jobs — keep on original partition
-            safe_to_move <- c("step2", "step4")
-            for (sn in safe_to_move) {
-              if (!is.null(ss[[sn]]) && ss[[sn]] %in% c("queued", "pending") && !is.null(steps[[sn]])) {
-                job_ids_to_move <- c(job_ids_to_move, steps[[sn]])
-                movable_steps <- c(movable_steps, sn)
+
+            if (force_move_all) {
+              # InvalidQOS: move ALL pending steps — nothing can run on original partition
+              for (sn in names(ss)) {
+                if (ss[[sn]] %in% c("queued", "pending") && !is.null(steps[[sn]])) {
+                  job_ids_to_move <- c(job_ids_to_move, steps[[sn]])
+                  movable_steps <- c(movable_steps, sn)
+                }
               }
-            }
-            # If nothing has started yet, also move step 1 (lighter than assembly)
-            any_started <- any(vapply(ss, function(s) {
-              s %in% c("running", "completed")
-            }, logical(1)))
-            if (!any_started && !is.null(ss[["step1"]]) &&
-                ss[["step1"]] %in% c("queued", "pending") && !is.null(steps[["step1"]])) {
-              job_ids_to_move <- c(steps[["step1"]], job_ids_to_move)
-              movable_steps <- c("step1", movable_steps)
+            } else {
+              # Normal: only move array steps (2, 4) — assembly steps stay on original
+              safe_to_move <- c("step2", "step4")
+              for (sn in safe_to_move) {
+                if (!is.null(ss[[sn]]) && ss[[sn]] %in% c("queued", "pending") && !is.null(steps[[sn]])) {
+                  job_ids_to_move <- c(job_ids_to_move, steps[[sn]])
+                  movable_steps <- c(movable_steps, sn)
+                }
+              }
+              # If nothing has started yet, also move step 1 (lighter than assembly)
+              any_started <- any(vapply(ss, function(s) {
+                s %in% c("running", "completed")
+              }, logical(1)))
+              if (!any_started && !is.null(ss[["step1"]]) &&
+                  ss[["step1"]] %in% c("queued", "pending") && !is.null(steps[["step1"]])) {
+                job_ids_to_move <- c(steps[["step1"]], job_ids_to_move)
+                movable_steps <- c("step1", movable_steps)
+              }
             }
           } else {
             job_ids_to_move <- jobs[[i]]$job_id
@@ -4730,8 +4896,8 @@ server_search <- function(input, output, session, values, add_to_log,
           }
 
           if (n_moved > 0) {
-            # Only mark fully switched if all steps were moved (non-parallel or all pending)
-            if (!isTRUE(jobs[[i]]$parallel) || length(movable_steps) == 5) {
+            # Mark fully switched if all steps were moved (non-parallel, force-move-all, or all 5 steps)
+            if (!isTRUE(jobs[[i]]$parallel) || force_move_all || length(movable_steps) == 5) {
               jobs[[i]]$slurm_account <- "publicgrp"
               jobs[[i]]$slurm_partition <- "low"
             }
@@ -4769,9 +4935,10 @@ server_search <- function(input, output, session, values, add_to_log,
           # Only move jobs currently on publicgrp
           if (!identical(jobs[[i]]$slurm_account, "publicgrp")) next
 
-          submitted <- jobs[[i]]$submitted_at
-          if (is.null(submitted)) next
-          pending_min <- as.numeric(difftime(Sys.time(), submitted, units = "mins"))
+          # Use queue_switched_at if job was previously moved, otherwise submitted_at
+          ref_time <- jobs[[i]]$queue_switched_at %||% jobs[[i]]$submitted_at
+          if (is.null(ref_time)) next
+          pending_min <- as.numeric(difftime(Sys.time(), ref_time, units = "mins"))
           if (pending_min < wait_min) next
 
           job_cfg <- if (isTRUE(jobs[[i]]$is_ssh)) cfg else NULL
@@ -4922,6 +5089,51 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!is.null(job$search_settings)) {
             ss <- job$search_settings
             ss$output_dir <- job$output_dir
+
+            # Parse DIA-NN version from log file if not already set
+            if (is.null(ss$diann_version) || !nzchar(ss$diann_version %||% "")) {
+              tryCatch({
+                # Read first 20 lines of DIA-NN log file — version is printed early
+                od <- job$output_dir
+                job_cfg <- if (isTRUE(job$is_ssh)) cfg else NULL
+                log_dir <- file.path(od, "logs")
+
+                # Find the DIA-NN .out log file
+                log_lines <- character(0)
+                if (!is.null(job_cfg)) {
+                  # Remote: read first 20 lines via SSH head
+                  find_cmd <- sprintf("head -20 %s/diann_*.out 2>/dev/null || head -20 %s/*.out 2>/dev/null",
+                    shQuote(log_dir), shQuote(od))
+                  res <- ssh_exec(job_cfg, find_cmd, timeout = 10)
+                  if (res$status == 0) log_lines <- res$stdout
+                } else {
+                  # Local: find and read log file
+                  log_files <- list.files(c(log_dir, od), pattern = "diann.*\\.out$",
+                    full.names = TRUE, recursive = FALSE)
+                  if (length(log_files) == 0)
+                    log_files <- list.files(c(log_dir, od), pattern = "\\.log$",
+                      full.names = TRUE, recursive = FALSE)
+                  if (length(log_files) > 0)
+                    log_lines <- readLines(log_files[1], n = 20, warn = FALSE)
+                }
+
+                ver_match <- regmatches(log_lines,
+                  regexpr("DIA-NN\\s+([0-9]+\\.[0-9]+\\.?[0-9]*)", log_lines))
+                ver_hit <- ver_match[nzchar(ver_match)]
+                if (length(ver_hit) > 0) {
+                  ss$diann_version <- sub("DIA-NN\\s+", "", ver_hit[1])
+                  message("[DE-LIMP] Parsed DIA-NN version from log file: ", ss$diann_version)
+                  # Also update the job entry so future session saves have it
+                  jobs <- values$diann_jobs
+                  if (!is.null(jobs[[i]]$search_settings))
+                    jobs[[i]]$search_settings$diann_version <- ss$diann_version
+                  values$diann_jobs <- jobs
+                }
+              }, error = function(e) {
+                message("[DE-LIMP] Could not parse DIA-NN version from log: ", e$message)
+              })
+            }
+
             values$diann_search_settings <- ss
 
             # Restore instrument metadata if stored with the job
@@ -5038,11 +5250,15 @@ server_search <- function(input, output, session, values, add_to_log,
       if (isTRUE(job$removed)) return(NULL)
 
       status_badge <- switch(job$status %||% "unknown",
-        "queued"    = if (!is.null(job$est_start)) {
-          span(class = "badge bg-secondary", title = paste("Est. start:", job$est_start),
-               "Queued ", icon("clock", style = "font-size: 0.8em;"))
-        } else {
-          span(class = "badge bg-secondary", "Queued")
+        "queued"    = {
+          pri_text <- if (!is.null(job$priority)) sprintf(" P:%d", job$priority) else ""
+          reason_text <- if (!is.null(job$pending_reason)) job$pending_reason else ""
+          title_text <- paste0(
+            if (nzchar(reason_text)) paste("Reason:", reason_text) else "",
+            if (!is.null(job$est_start)) paste(" | Est:", job$est_start) else ""
+          )
+          span(class = "badge bg-secondary", title = trimws(title_text),
+               paste0("Queued", pri_text), " ", icon("clock", style = "font-size: 0.8em;"))
         },
         "running"   = span(class = "badge bg-primary", "Running"),
         "completed" = span(class = "badge bg-success", "Completed"),
@@ -5124,10 +5340,15 @@ server_search <- function(input, output, session, values, add_to_log,
           ),
           status_badge
         ),
-        if (!is.null(job$est_start) && job$status == "queued") {
-          div(style = "color: #0d6efd; font-size: 0.78em; margin-top: 3px;",
+        if (job$status == "queued" && (!is.null(job$priority) || !is.null(job$est_start) || !is.null(job$pending_reason))) {
+          info_parts <- c(
+            if (!is.null(job$priority)) sprintf("Priority: %d", job$priority),
+            if (!is.null(job$pending_reason)) sprintf("Reason: %s", job$pending_reason),
+            if (!is.null(job$est_start)) sprintf("Est. start: %s", job$est_start)
+          )
+          div(style = "color: #6c757d; font-size: 0.78em; margin-top: 3px;",
             icon("clock", style = "font-size: 0.85em;"),
-            sprintf(" Estimated start: %s", job$est_start))
+            paste(" ", paste(info_parts, collapse = " | ")))
         },
         div(style = "display: flex; justify-content: space-between; align-items: center; margin-top: 4px;",
           span(style = "color: #666;",

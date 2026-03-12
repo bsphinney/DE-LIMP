@@ -1719,27 +1719,35 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
 #' @param job_id SLURM job ID
 #' @param ssh_config SSH config list (NULL for local)
 #' @param sbatch_path Full path to sbatch (used to derive squeue path)
-#' @return Character: estimated start time string, or NULL if unavailable
+#' @return List with est_start (character or NULL) and priority (integer or NULL)
 get_slurm_start_time <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   squeue_cmd <- if (!is.null(sbatch_path)) {
     file.path(dirname(sbatch_path), "squeue")
   } else "squeue"
 
-  cmd <- sprintf("%s --job %s --format=%%S --noheader 2>/dev/null", squeue_cmd, job_id)
+  # Query est start, priority, and reason in one call
+  cmd <- sprintf('%s --job %s --format="%%S|%%Q|%%r" --noheader 2>/dev/null', squeue_cmd, job_id)
 
   output <- if (!is.null(ssh_config)) {
     res <- ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 10)
     if (res$status == 0) res$stdout else character(0)
   } else {
     tryCatch(system2(squeue_cmd,
-      args = c("--job", job_id, "--format=%S", "--noheader"),
+      args = c("--job", job_id, '--format="%S|%Q|%r"', "--noheader"),
       stdout = TRUE, stderr = TRUE), error = function(e) character(0))
   }
 
   output <- trimws(output)
-  output <- output[nzchar(output) & output != "N/A"]
-  if (length(output) == 0) return(NULL)
-  output[1]
+  output <- output[nzchar(output)]
+  if (length(output) == 0) return(list(est_start = NULL, priority = NULL, reason = NULL))
+
+  # Parse first line: "est_start|priority|reason"
+  parts <- strsplit(output[1], "\\|")[[1]]
+  est_start <- if (length(parts) >= 1 && !parts[1] %in% c("N/A", "")) parts[1] else NULL
+  priority <- if (length(parts) >= 2) suppressWarnings(as.integer(parts[2])) else NULL
+  reason <- if (length(parts) >= 3 && nzchar(trimws(parts[3]))) trimws(parts[3]) else NULL
+
+  list(est_start = est_start, priority = priority, reason = reason)
 }
 
 #' Parse job ID from sbatch stdout
@@ -3948,16 +3956,26 @@ record_cluster_snapshot <- function(lab_res, pub_res, auto_partition,
 #' @param job Job list entry with job_id, submitted_at, wait_min, n_files, etc.
 record_job_wait <- function(job) {
   path <- file.path(Sys.getenv("HOME"), ".delimp_job_wait_log.csv")
+  # For parallel jobs, cpus/mem_gb/partition are in search_settings$slurm
+  slurm_ss <- job$search_settings$slurm %||% list()
+  par_ss <- job$search_settings$parallel %||% list()
+  cpus <- job$cpus %||% slurm_ss$cpus %||% NA_integer_
+  mem_gb <- job$mem_gb %||% slurm_ss$mem_gb %||% NA_integer_
+  partition <- job$partition %||% slurm_ss$partition %||% NA_character_
+  # For parallel: also record per-file resources
+  cpus_per_file <- par_ss$cpus_per_file %||% NA_integer_
   row <- data.frame(
     timestamp    = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
     job_id       = job$job_id %||% NA_character_,
     name         = job$name %||% "unnamed",
     backend      = job$backend %||% "hpc",
-    partition    = job$partition %||% NA_character_,
+    partition    = partition,
     n_files      = job$n_files %||% 0L,
-    cpus         = job$cpus %||% NA_integer_,
-    mem_gb       = job$mem_gb %||% NA_integer_,
+    cpus         = cpus,
+    mem_gb       = mem_gb,
     parallel     = isTRUE(job$parallel),
+    cpus_per_file = cpus_per_file,
+    priority     = job$priority %||% NA_integer_,
     submitted_at = if (!is.null(job$submitted_at)) format(job$submitted_at, "%Y-%m-%dT%H:%M:%S") else NA,
     started_at   = if (!is.null(job$started_at)) format(job$started_at, "%Y-%m-%dT%H:%M:%S") else NA,
     wait_min     = job$wait_min %||% NA_real_,
@@ -3965,6 +3983,21 @@ record_job_wait <- function(job) {
     stringsAsFactors = FALSE
   )
   needs_header <- !file.exists(path)
+  # If existing file has fewer columns (schema upgrade), rewrite with new header
+  if (!needs_header) {
+    existing <- tryCatch(read.csv(path, nrows = 1, stringsAsFactors = FALSE),
+      error = function(e) NULL)
+    if (!is.null(existing) && ncol(existing) < ncol(row)) {
+      # Re-read all rows, add missing columns, rewrite
+      all_rows <- tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) NULL)
+      if (!is.null(all_rows)) {
+        for (col in setdiff(names(row), names(all_rows))) all_rows[[col]] <- NA
+        all_rows <- rbind(all_rows[, names(row)], row)
+        write.csv(all_rows, file = path, row.names = FALSE, quote = TRUE)
+        return(invisible(NULL))
+      }
+    }
+  }
   tryCatch({
     write.table(row, file = path, append = TRUE, sep = ",",
       row.names = FALSE, col.names = needs_header, quote = TRUE)
@@ -4142,9 +4175,10 @@ check_per_user_resources <- function(ssh_config, account, partition, sbatch_path
   }, error = function(e) NULL)
 
   # Query pending jobs per user
+  # Include job ID (%i) to detect array jobs and compute real CPU demand
   tryCatch({
     squeue_cmd <- sprintf(
-      '%s -u %s -A %s -p %s -t PENDING -o "%%u|%%C" --noheader',
+      '%s -u %s -A %s -p %s -t PENDING -o "%%i|%%u|%%C" --noheader',
       slurm_cmd("squeue"), user_filter, account, partition
     )
     res <- run_cmd(squeue_cmd)
@@ -4155,12 +4189,28 @@ check_per_user_resources <- function(ssh_config, account, partition, sbatch_path
         pending <- list()
         for (line in lines) {
           parts <- strsplit(line, "\\|")[[1]]
-          if (length(parts) < 2) next
-          u <- trimws(parts[1])
-          cpus <- as.integer(parts[2])
+          if (length(parts) < 3) next
+          job_id <- trimws(parts[1])
+          u <- trimws(parts[2])
+          cpus_per_task <- as.integer(parts[3])
+          # For array jobs like "12345_[0-231%200]", compute max concurrent CPUs
+          # n_tasks = range size, max_simultaneous = throttle (%N)
+          array_match <- regexec("_\\[(\\d+)-(\\d+)(%\\d+)?\\]$", job_id)
+          if (array_match[[1]][1] != -1) {
+            parts_m <- regmatches(job_id, array_match)[[1]]
+            lo <- as.integer(parts_m[2])
+            hi <- as.integer(parts_m[3])
+            n_tasks <- hi - lo + 1L
+            max_simul <- if (nzchar(parts_m[4])) as.integer(sub("^%", "", parts_m[4])) else n_tasks
+            cpus <- cpus_per_task * n_tasks
+            n_jobs <- as.integer(n_tasks)
+          } else {
+            cpus <- cpus_per_task
+            n_jobs <- 1L
+          }
           if (is.null(pending[[u]])) pending[[u]] <- list(cpus = 0L, n = 0L)
           pending[[u]]$cpus <- pending[[u]]$cpus + cpus
-          pending[[u]]$n <- pending[[u]]$n + 1L
+          pending[[u]]$n <- pending[[u]]$n + n_jobs
         }
         # Merge into existing rows or add new
         existing_users <- vapply(rows, function(r) r$username, character(1))

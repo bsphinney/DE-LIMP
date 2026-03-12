@@ -125,8 +125,56 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
   names(de_stats) <- contrasts
 
   # Extract search params if available
+  # If diann_search_settings is NULL/empty, try to find settings from the most recent completed job
   ss <- session_obj$diann_search_settings
+  if (is.null(ss) || length(ss) == 0) {
+    jobs <- session_obj$diann_jobs
+    if (!is.null(jobs) && length(jobs) > 0) {
+      # Find most recent completed job with search_settings
+      for (j in rev(seq_along(jobs))) {
+        if (!is.null(jobs[[j]]$search_settings) && length(jobs[[j]]$search_settings) > 0 &&
+            identical(jobs[[j]]$status, "completed")) {
+          ss <- jobs[[j]]$search_settings
+          message("[DE-LIMP] parse_delimp_session: recovered search_settings from job '",
+                  jobs[[j]]$name %||% "?", "'")
+          break
+        }
+      }
+    }
+  }
   sp <- ss$search_params
+
+  # Extract DIA-NN version: prefer search_settings, then parse from job log_content, then SIF name
+  diann_version <- ss$diann_version
+  if (is.null(diann_version) || !nzchar(diann_version %||% "") || diann_version == "unknown") {
+    # Try parsing from job log_content (authoritative — DIA-NN prints its own version)
+    jobs <- session_obj$diann_jobs
+    if (!is.null(jobs)) {
+      for (j in rev(seq_along(jobs))) {
+        log_text <- jobs[[j]]$log_content %||% ""
+        if (nzchar(log_text)) {
+          log_lines <- strsplit(log_text, "\n")[[1]]
+          ver_hit <- regmatches(log_lines,
+            regexpr("DIA-NN\\s+([0-9]+\\.[0-9]+\\.?[0-9]*)", log_lines))
+          ver_hit <- ver_hit[nzchar(ver_hit)]
+          if (length(ver_hit) > 0) {
+            diann_version <- sub("DIA-NN\\s+", "", ver_hit[1])
+            message("[DE-LIMP] parse_delimp_session: parsed DIA-NN version ", diann_version, " from job log")
+            break
+          }
+        }
+      }
+    }
+  }
+  # Last resort: extract from SIF filename (less reliable)
+  if (is.null(diann_version) || !nzchar(diann_version %||% "") || diann_version == "unknown") {
+    sif <- ss$diann_sif %||% ""
+    ver_match <- regmatches(sif, regexec("(\\d+\\.\\d+\\.\\d+)", sif))[[1]]
+    if (length(ver_match) > 1) {
+      diann_version <- ver_match[2]
+      message("[DE-LIMP] parse_delimp_session: extracted DIA-NN version ", diann_version, " from SIF name (fallback)")
+    }
+  }
 
   # Data-level stats from raw_data
   n_precursors <- nrow(session_obj$raw_data$E) %||% NA
@@ -149,6 +197,34 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
     } else NA
   }, error = function(e) NA)
 
+  # Dynamic range from raw (precursor-level) intensities — log2 scale
+  dynamic_range <- tryCatch({
+    raw_mat <- session_obj$raw_data$E
+    if (!is.null(raw_mat) && length(raw_mat) > 0) {
+      # Per-sample dynamic range
+      per_sample <- apply(raw_mat, 2, function(col) {
+        v <- col[!is.na(col)]
+        if (length(v) < 10) return(list(min = NA, max = NA, median = NA, iqr = NA, orders = NA, n = 0, pct_missing = 100))
+        list(
+          min = min(v), max = max(v), median = median(v), iqr = IQR(v),
+          orders = round((max(v) - min(v)) / log2(10), 2),
+          n = length(v),
+          pct_missing = round(100 * mean(is.na(col)), 1)
+        )
+      })
+      # Global summary
+      all_vals <- raw_mat[!is.na(raw_mat)]
+      list(
+        global_min = min(all_vals), global_max = max(all_vals),
+        global_median = median(all_vals), global_iqr = IQR(all_vals),
+        global_orders = round((max(all_vals) - min(all_vals)) / log2(10), 2),
+        n_precursors = nrow(raw_mat),
+        pct_missing = round(100 * mean(is.na(raw_mat)), 1),
+        per_sample = per_sample
+      )
+    } else NULL
+  }, error = function(e) NULL)
+
   # FASTA info
   fasta_entries <- ss$fasta_seq_count %||% session_obj$fasta_info$n_sequences %||% NA
   fasta_file    <- if (length(ss$fasta_files %||% character()) > 0) paste(basename(ss$fasta_files), collapse = ", ") else NA
@@ -164,12 +240,13 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
       protein_ids
     ),
     metadata    = session_obj$metadata,
+    dynamic_range = dynamic_range,
     settings    = list(
       software        = "DE-LIMP",
       delimp_version  = session_obj$app_version %||% "unknown",
       limpa_version   = tryCatch(as.character(packageVersion("limpa")), error = function(e) "unknown"),
       limma_version   = tryCatch(as.character(packageVersion("limma")), error = function(e) "unknown"),
-      diann_version   = session_obj$diann_version %||% "unknown",
+      diann_version   = diann_version %||% session_obj$diann_version %||% "unknown",
       de_significance = session_obj$fdr_threshold %||% "0.05",
       identification_fdr = "0.01 (DIA-NN default)",
       lfc_threshold   = session_obj$lfc_threshold %||% "0.6",
@@ -209,7 +286,14 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
       max_var_mods    = as.character(sp$max_var_mods %||% "1"),
       mbr             = as.character(sp$mbr %||% "unknown"),
       search_mode     = as.character(ss$search_mode %||% "libfree"),
-      library         = as.character(sp$library %||% ss$library_path %||% "FASTA-predicted")
+      library         = as.character(sp$library %||% ss$library_path %||% "FASTA-predicted"),
+      # Dynamic range (from raw precursor-level intensities, log2 scale)
+      dynamic_range_orders    = if (!is.null(dynamic_range)) as.character(dynamic_range$global_orders) else NA,
+      dynamic_range_log2_min  = if (!is.null(dynamic_range)) as.character(round(dynamic_range$global_min, 1)) else NA,
+      dynamic_range_log2_max  = if (!is.null(dynamic_range)) as.character(round(dynamic_range$global_max, 1)) else NA,
+      dynamic_range_median    = if (!is.null(dynamic_range)) as.character(round(dynamic_range$global_median, 1)) else NA,
+      dynamic_range_iqr       = if (!is.null(dynamic_range)) as.character(round(dynamic_range$global_iqr, 1)) else NA,
+      dynamic_range_pct_missing = if (!is.null(dynamic_range)) as.character(dynamic_range$pct_missing) else NA
     ),
     contrasts   = contrasts
   )
@@ -1062,7 +1146,8 @@ parse_fragpipe_combined_protein <- function(file_path) {
 # --- Sample Matching ---
 
 #' Match samples between two runs by normalized filename
-match_samples <- function(names_a, names_b, source_b = "delimp") {
+match_samples <- function(names_a, names_b, source_b = "delimp",
+                          meta_a = NULL, meta_b = NULL) {
   strip_ext <- function(x) {
     x <- tools::file_path_sans_ext(basename(x))
     # Strip common suffixes
@@ -1104,10 +1189,48 @@ match_samples <- function(names_a, names_b, source_b = "delimp") {
     }
   }
 
+  # Fallback: group-based matching when filenames differ (e.g., same samples on different instruments)
+  # Match by group assignment + within-group replicate order
+  if (any(is.na(matched_idx)) && !is.null(meta_a) && !is.null(meta_b)) {
+    tryCatch({
+      # Build group lookup for each run (File.Name -> Group, case-insensitive group matching)
+      grp_a <- setNames(tolower(trimws(meta_a$Group)), meta_a$File.Name)
+      grp_b <- setNames(tolower(trimws(meta_b$Group)), meta_b$File.Name)
+      # Only proceed if group structures match
+      groups_a <- sort(unique(grp_a[grp_a != ""]))
+      groups_b <- sort(unique(grp_b[grp_b != ""]))
+      if (length(groups_a) == length(groups_b) && all(groups_a == groups_b)) {
+        # Within each group, match by replicate order (1st rep -> 1st rep, etc.)
+        for (grp in groups_a) {
+          samples_a_in_grp <- names_a[which(grp_a[names_a] == grp)]
+          samples_b_in_grp <- names_b[which(grp_b[names_b] == grp)]
+          if (length(samples_a_in_grp) == length(samples_b_in_grp)) {
+            for (j in seq_along(samples_a_in_grp)) {
+              idx_in_a <- which(names_a == samples_a_in_grp[j])
+              if (is.na(matched_idx[idx_in_a])) {
+                idx_in_b <- which(names_b == samples_b_in_grp[j])
+                matched_idx[idx_in_a] <- idx_in_b
+              }
+            }
+          }
+        }
+        message("[DE-LIMP] match_samples: group-based fallback matched ",
+                sum(!is.na(matched_idx)), "/", length(names_a), " samples")
+      }
+    }, error = function(e) {
+      message("[DE-LIMP] match_samples: group-based fallback error: ", e$message)
+    })
+  }
+
   data.frame(
     run_a    = names_a,
     run_b    = ifelse(is.na(matched_idx), NA_character_, names_b[matched_idx]),
     status   = ifelse(is.na(matched_idx), "unresolved", "matched"),
+    match_method = {
+      filename_idx <- match(stripped_a, stripped_b)
+      ifelse(is.na(matched_idx), NA_character_,
+        ifelse(!is.na(filename_idx) & filename_idx == matched_idx, "filename", "group"))
+    },
     stringsAsFactors = FALSE
   )
 }
@@ -1183,7 +1306,10 @@ build_settings_diff <- function(run_a, run_b) {
     "mbr", "search_mode",
     # Data stats
     "n_precursors", "n_proteins_total", "n_samples",
-    "precursor_mz_range", "charge_range"
+    "precursor_mz_range", "charge_range",
+    # Dynamic range
+    "dynamic_range_orders", "dynamic_range_log2_min", "dynamic_range_log2_max",
+    "dynamic_range_median", "dynamic_range_iqr", "dynamic_range_pct_missing"
   )
 
   # Nice labels
@@ -1208,7 +1334,10 @@ build_settings_diff <- function(run_a, run_b) {
     "Match Between Runs", "Search Mode",
     # Data stats
     "Precursors", "Protein Groups", "Samples",
-    "Precursor m/z Range", "Charge Range"
+    "Precursor m/z Range", "Charge Range",
+    # Dynamic range
+    "Dynamic Range (orders of magnitude)", "Log2 Intensity Min", "Log2 Intensity Max",
+    "Median Log2 Intensity", "Log2 Intensity IQR", "% Missing Values"
   )
 
   # Section boundaries (insert header before these indices)
@@ -1217,7 +1346,8 @@ build_settings_diff <- function(run_a, run_b) {
     c(which(params == "de_engine"), "--- DE Analysis ---"),
     c(which(params == "enzyme"), "--- Search Parameters ---"),
     c(which(params == "pg_level"), "--- DIA-NN Search (from log) ---"),
-    c(which(params == "n_precursors"), "--- Data Statistics ---")
+    c(which(params == "n_precursors"), "--- Data Statistics ---"),
+    c(which(params == "dynamic_range_orders"), "--- Dynamic Range (precursor-level) ---")
   )
 
   rows <- lapply(seq_along(params), function(i) {
@@ -2871,9 +3001,12 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
     sample_map <- match_samples(colnames(run_a$intensities),
                                 colnames(run_b$intensities),
-                                run_b$source)
+                                run_b$source,
+                                meta_a = run_a$metadata,
+                                meta_b = run_b$metadata)
     n_matched    <- sum(sample_map$status == "matched")
     n_unresolved <- sum(sample_map$status == "unresolved")
+    n_group_matched <- sum(sample_map$match_method == "group", na.rm = TRUE)
 
     if (n_unresolved > 0) {
       unmatched <- sample_map$run_a[sample_map$status == "unresolved"]
@@ -2883,6 +3016,13 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         paste(unmatched, collapse = ", "),
         tags$br(),
         "Check that both runs analyze the same samples."
+      )
+    } else if (n_group_matched > 0) {
+      div(class = "alert alert-info mt-2 py-2",
+        icon("link"), " ",
+        paste0("All ", n_matched, " samples matched by group assignment ",
+               "(filenames differ — matched ", n_group_matched,
+               " sample(s) by group + replicate order).")
       )
     } else {
       div(class = "alert alert-success mt-2 py-2",
@@ -2901,7 +3041,9 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     # Validate sample matching
     sample_map <- match_samples(colnames(run_a$intensities),
                                 colnames(run_b$intensities),
-                                run_b$source)
+                                run_b$source,
+                                meta_a = run_a$metadata,
+                                meta_b = run_b$metadata)
     if (any(sample_map$status == "unresolved")) {
       showNotification("Cannot run comparison: unresolved sample matches. Check sample names.",
                        type = "error")

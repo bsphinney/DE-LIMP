@@ -191,7 +191,6 @@ server_ai <- function(input, output, session, values) {
       # Store for export and show download buttons
       values$ai_summary_text <- ai_summary
       shinyjs::show("download_ai_summary_html")
-      shinyjs::show("download_claude_prompt")
 
       # Render the summary to the output area
       output$ai_summary_output <- renderUI({
@@ -256,11 +255,8 @@ server_ai <- function(input, output, session, values) {
   )
 
   # --- Export Prompt for Claude (downloads .zip with prompt + full data CSVs) ---
-  output$download_claude_prompt <- downloadHandler(
-    filename = function() {
-      paste0("DE-LIMP_Claude_Export_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
-    },
-    content = function(file) {
+  # Shared content function for both download buttons (AI Summary tab + AI Chat tab)
+  claude_export_content <- function(file) {
       req(values$fit, values$y_protein)
 
       tryCatch({
@@ -766,6 +762,33 @@ server_ai <- function(input, output, session, values) {
           }
         }, error = function(e) NULL)
 
+        # Dynamic range from precursor-level raw intensities
+        dynamic_range_inline <- ""
+        tryCatch({
+          if (!is.null(values$raw_data) && !is.null(values$raw_data$E)) {
+            raw_mat <- values$raw_data$E
+            dr_lines <- c("--- DYNAMIC RANGE (precursor-level, log2 intensities) ---")
+            all_vals <- raw_mat[!is.na(raw_mat)]
+            dr_lines <- c(dr_lines,
+              sprintf("Global: log2 %.1f - %.1f (%.1f orders of magnitude)",
+                min(all_vals), max(all_vals), (max(all_vals) - min(all_vals)) / log2(10)),
+              sprintf("Median log2 intensity: %.1f, IQR: %.1f", median(all_vals), IQR(all_vals)),
+              sprintf("Precursors: %d, Samples: %d", nrow(raw_mat), ncol(raw_mat)),
+              "", "Per-sample dynamic range:")
+            for (j in seq_len(ncol(raw_mat))) {
+              v <- raw_mat[, j]
+              v <- v[!is.na(v)]
+              if (length(v) > 0) {
+                dr_lines <- c(dr_lines, sprintf("  %s: %.1f - %.1f (%.1f orders, %d precursors, %.0f%% missing)",
+                  colnames(raw_mat)[j], min(v), max(v),
+                  (max(v) - min(v)) / log2(10), length(v),
+                  100 * mean(is.na(raw_mat[, j]))))
+              }
+            }
+            dynamic_range_inline <- paste0("\n\n", paste(dr_lines, collapse = "\n"))
+          }
+        }, error = function(e) NULL)
+
         # MOFA2 variance explained summary
         mofa_inline <- ""
         tryCatch({
@@ -989,6 +1012,7 @@ server_ai <- function(input, output, session, values) {
           tic_inline,
           excluded_inline,
           missingness_inline,
+          dynamic_range_inline,
           mofa_inline,
           phospho_inline,
           "\n\n--- TOP DE PROTEINS (summary — full data in CSV) ---\n\n",
@@ -1019,7 +1043,22 @@ server_ai <- function(input, output, session, values) {
           paste("Export error:", e$message, "\nCheck R console for details."),
           type = "error", duration = 15)
       })
+  }
+
+  output$download_claude_prompt <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_Claude_Export_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
     },
+    content = claude_export_content,
+    contentType = "application/zip"
+  )
+
+  # --- Export for Claude (AI Chat tab) — same content as download_claude_prompt ---
+  output$download_claude_prompt_chat <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_Claude_Export_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
+    },
+    content = claude_export_content,
     contentType = "application/zip"
   )
 

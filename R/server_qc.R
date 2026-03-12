@@ -1008,40 +1008,46 @@ server_qc <- function(input, output, session, values) {
     status_colors <- c(pass = "#28a745", warn = "#ffc107", fail = "#dc3545")
 
     if (view_mode == "faceted") {
-      max_panels <- 24L  # Hard cap — more than this is unreadable
       run_names <- names(traces)
       n_runs <- length(run_names)
 
-      if (n_runs <= max_panels) {
-        # Small dataset: show all
-        show_runs <- run_names
-        subtitle_text <- "Blue dashed = median trace across all runs"
-      } else {
-        # Large dataset: prioritize worst runs (fail > warn, sorted by shape_r)
-        fail_runs <- metrics$run[metrics$status == "fail"]
-        warn_runs <- metrics$run[metrics$status == "warn"]
-        # Sort warns by shape_r ascending (worst first)
-        warn_metrics <- metrics[metrics$status == "warn", ]
-        if (nrow(warn_metrics) > 0) {
-          warn_runs <- warn_metrics$run[order(warn_metrics$shape_r)]
-        }
-        # Take fails first, then worst warns, up to cap
-        prioritized <- c(fail_runs, warn_runs)
-        if (length(prioritized) > max_panels) {
-          show_runs <- prioritized[seq_len(max_panels)]
-          subtitle_text <- sprintf("Showing %d worst of %d flagged (%d total) — use Overlay for all",
-                                    max_panels, length(prioritized), n_runs)
-        } else if (length(prioritized) > 0) {
-          show_runs <- prioritized
-          subtitle_text <- sprintf("Showing %d flagged of %d total — use Overlay for all",
-                                    length(show_runs), n_runs)
+      # Categorize runs
+      fail_runs <- metrics$run[metrics$status == "fail"]
+      warn_metrics <- metrics[metrics$status == "warn", ]
+      warn_runs <- if (nrow(warn_metrics) > 0) {
+        warn_metrics$run[order(warn_metrics$shape_r)]
+      } else character(0)
+      pass_runs <- metrics$run[metrics$status == "pass"]
+      n_fail <- length(fail_runs)
+      n_warn <- length(warn_runs)
+
+      # Priority: show fails only; if none, show warns; if none, show all
+      if (n_fail > 0) {
+        show_runs <- fail_runs
+        subtitle_text <- sprintf(
+          "Showing %d failed runs (%d warn, %d total) \u2014 use Metrics for full list",
+          n_fail, n_warn, n_runs)
+      } else if (n_warn > 0) {
+        max_warn <- 48L
+        show_runs <- if (n_warn > max_warn) warn_runs[seq_len(max_warn)] else warn_runs
+        subtitle_text <- if (n_warn > max_warn) {
+          sprintf("Showing %d worst of %d warnings (%d total) \u2014 use Metrics for full list",
+                  max_warn, n_warn, n_runs)
         } else {
-          # All pass but >max_panels — show random sample
-          show_runs <- sample(run_names, max_panels)
-          subtitle_text <- sprintf("Showing %d of %d runs (random sample, all pass) — use Overlay for all",
-                                    max_panels, n_runs)
+          sprintf("Showing %d warnings (%d total) \u2014 blue dashed = median", n_warn, n_runs)
+        }
+      } else {
+        max_pass <- 48L
+        show_runs <- if (n_runs > max_pass) sample(run_names, max_pass) else run_names
+        subtitle_text <- if (n_runs > max_pass) {
+          sprintf("All %d runs pass \u2014 showing random %d \u2014 blue dashed = median",
+                  n_runs, max_pass)
+        } else {
+          sprintf("%d runs \u2014 all pass \u2014 blue dashed = median", n_runs)
         }
       }
+      # Only keep runs that have traces
+      show_runs <- show_runs[show_runs %in% run_names]
 
       # Compute median trace on common grid (from ALL traces, not just shown)
       grid_rt <- seq(
@@ -1058,9 +1064,9 @@ server_qc <- function(input, output, session, values) {
         interp_matrix  # single file case
       }
 
-      # Adaptive layout: fewer columns and truncated names for many files
+      # Adaptive layout: more columns for larger datasets
       n_show <- length(show_runs)
-      ncol <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else 4L
+      ncol <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else if (n_show <= 60) 4L else 6L
       nrow <- ceiling(n_show / ncol)
 
       # Truncate long filenames: keep last N chars after stripping .d
@@ -1101,14 +1107,17 @@ server_qc <- function(input, output, session, values) {
           )
       })
 
-      # Dynamic height: 250px per row, minimum 400px
-      plot_height <- max(400, nrow * 250)
+      # Dynamic height: scale per-row height for large datasets
+      row_height <- if (n_show <= 24) 250L else if (n_show <= 60) 200L else 160L
+      plot_height <- max(400, nrow * row_height)
 
       plotly::subplot(subplots, nrows = nrow, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
         plotly::layout(
           title = list(text = paste0("TIC Traces by Run<br><sup style='color:gray'>",
                                       subtitle_text, "</sup>"),
-                        font = list(size = 14)),
+                        font = list(size = 14),
+                        y = 0.99, yanchor = "top"),
+          margin = list(t = 80),
           showlegend = FALSE,
           height = plot_height
         )
@@ -1152,6 +1161,11 @@ server_qc <- function(input, output, session, values) {
       bar_data <- bar_data[order(bar_data$auc_m), ]
       bar_data$run_label <- factor(bar_data$run_label, levels = bar_data$run_label)
 
+      n_bars <- nrow(bar_data)
+      # For large datasets: hide y-axis text, rely on hover
+      hide_labels <- n_bars > 40
+      tick_size <- if (n_bars <= 20) 10 else if (n_bars <= 40) 8 else 6
+
       p <- ggplot2::ggplot(bar_data, ggplot2::aes(
           x = run_label, y = auc_m, fill = status,
           text = sprintf("Run: %s\nAUC: %.1fM\nPeak RT: %.1f min\nShape r: %.3f\nStatus: %s",
@@ -1161,19 +1175,48 @@ server_qc <- function(input, output, session, values) {
         ggplot2::scale_fill_manual(values = status_colors) +
         ggplot2::labs(x = NULL, y = "Total AUC (M)",
           title = "TIC Area Under Curve by Run",
-          subtitle = sprintf("Dashed line = median AUC (%.1fM)", med_auc)) +
+          subtitle = sprintf("Dashed line = median AUC (%.1fM) \u2014 %d runs (hover for details)",
+                              med_auc, n_bars)) +
         ggplot2::coord_flip() +
         ggplot2::theme_bw(base_size = 12) +
         ggplot2::theme(
           panel.grid.minor = ggplot2::element_blank(),
           plot.title = ggplot2::element_text(face = "bold", size = 14),
           plot.subtitle = ggplot2::element_text(color = "gray50", size = 11),
+          axis.text.y = if (hide_labels) ggplot2::element_blank()
+                        else ggplot2::element_text(size = tick_size),
+          axis.ticks.y = if (hide_labels) ggplot2::element_blank()
+                         else ggplot2::element_line(),
           legend.position = "none"
         )
 
-      plotly::ggplotly(p, tooltip = "text")
+      bar_height <- max(400, n_bars * if (hide_labels) 8 else 18)
+      plotly::ggplotly(p, tooltip = "text", height = bar_height)
     }
   }
+
+  # Dynamic plot container — height adapts to number of panels
+  output$tic_qc_plot_container <- renderUI({
+    req(values$tic_traces, values$tic_metrics)
+    view_mode <- input$tic_view_mode %||% "faceted"
+
+    if (view_mode == "faceted") {
+      n_runs <- length(values$tic_traces)
+      metrics <- values$tic_metrics
+      n_fail <- sum(metrics$status == "fail")
+      n_warn <- sum(metrics$status == "warn")
+      # Match the show logic in build_tic_plot
+      n_show <- if (n_fail > 0) n_fail
+        else if (n_warn > 0) min(48L, n_warn)
+        else min(48L, n_runs)
+      ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else if (n_show <= 60) 4L else 6L
+      row_h <- if (n_show <= 24) 250L else if (n_show <= 60) 200L else 160L
+      h <- max(400, ceiling(n_show / ncol_f) * row_h)
+    } else {
+      h <- 500
+    }
+    plotly::plotlyOutput("tic_qc_main_plot", height = paste0(h, "px"))
+  })
 
   # Main TIC plot
   output$tic_qc_main_plot <- plotly::renderPlotly({
@@ -1234,18 +1277,39 @@ server_qc <- function(input, output, session, values) {
       div(class = "alert alert-success", style = "margin-top: 12px;",
         icon("check-circle"), " All runs pass chromatography QC checks.")
     } else {
+      n_fail <- sum(flagged$status == "fail")
+      n_warn <- sum(flagged$status == "warn")
+      summary_parts <- c(
+        if (n_fail > 0) sprintf("%d failed", n_fail),
+        if (n_warn > 0) sprintf("%d warnings", n_warn)
+      )
+      summary_text <- sprintf("%d flagged runs: %s", nrow(flagged), paste(summary_parts, collapse = ", "))
+
+      # Cap visible alerts at 10; rest accessible via scroll
+      max_visible <- 10L
       alerts <- lapply(seq_len(nrow(flagged)), function(i) {
         row <- flagged[i, ]
         alert_class <- if (row$status == "fail") "alert-danger" else "alert-warning"
         size_info <- if (!is.null(row$size_mb) && !is.na(row$size_mb)) {
           sprintf(" [%d MB]", round(row$size_mb))
         } else ""
-        div(class = paste("alert", alert_class), style = "padding: 8px; margin-bottom: 4px; font-size: 0.88em;",
+        div(class = paste("alert", alert_class), style = "padding: 6px 8px; margin-bottom: 3px; font-size: 0.85em;",
           tags$b(sub("\\.d$", "", row$run)), size_info, ": ",
           row$flags
         )
       })
-      div(style = "margin-top: 12px;", alerts)
+
+      scroll_style <- if (nrow(flagged) > max_visible) {
+        "max-height: 250px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px; padding: 4px;"
+      } else ""
+
+      div(style = "margin-top: 12px;",
+        div(class = "alert alert-secondary", style = "padding: 8px; font-size: 0.9em; margin-bottom: 6px;",
+          icon("exclamation-triangle"), " ", summary_text,
+          if (nrow(flagged) > max_visible) tags$span(class = "text-muted", " (scroll for all)")
+        ),
+        div(style = scroll_style, alerts)
+      )
     }
   })
 
@@ -1283,11 +1347,11 @@ server_qc <- function(input, output, session, values) {
     view_mode <- input$tic_view_mode %||% "faceted"
     p <- build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
 
-    # Scale modal plot height — build_tic_plot caps at 24 panels
-    n_traces <- length(values$tic_traces)
-    n_show <- min(24L, n_traces)
-    ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else 4L
-    modal_height <- paste0(max(600, ceiling(n_show / ncol_f) * 250), "px")
+    # Scale modal plot height to match build_tic_plot
+    n_show <- length(values$tic_traces)
+    ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else if (n_show <= 60) 4L else 6L
+    row_h <- if (n_show <= 24) 250L else if (n_show <= 60) 200L else 160L
+    modal_height <- paste0(max(600, ceiling(n_show / ncol_f) * row_h), "px")
 
     showModal(modalDialog(
       title = "Chromatography QC \u2014 Fullscreen",

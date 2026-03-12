@@ -459,8 +459,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
             # --- Database Library source ---
             conditionalPanel("input.fasta_source == 'library'",
-              actionButton("open_fasta_library_modal", "Browse Library",
-                class = "btn-primary btn-sm w-100", icon = icon("book")),
+              actionButton("open_fasta_library_modal", "Browse Speclib Library",
+                class = "btn-primary btn-sm w-100", icon = icon("bolt")),
               uiOutput("fasta_library_selected_summary")
             ),
 
@@ -993,8 +993,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                             class = "btn-outline-secondary btn-sm")
                         )
                       ),
-                      div(style = "min-height: 400px;",
-                        plotlyOutput("tic_qc_main_plot", height = "calc(100vh - 420px)")
+                      div(
+                        uiOutput("tic_qc_plot_container")
                       ),
                       conditionalPanel(
                         condition = "input.tic_view_mode == 'metrics'",
@@ -1002,7 +1002,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                           DTOutput("tic_metrics_table")
                         )
                       ),
-                      uiOutput("tic_qc_diagnostics")
+                      conditionalPanel(
+                        condition = "input.tic_view_mode != 'faceted'",
+                        uiOutput("tic_qc_diagnostics")
+                      )
                     ),
                     conditionalPanel(
                       condition = "typeof output.tic_qc_has_data === 'undefined' || !output.tic_qc_has_data",
@@ -1332,12 +1335,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                             style = "padding: 12px 30px; font-size: 1.1em;"
                           )
                         ),
-                        shinyjs::hidden(
-                          downloadButton("download_claude_prompt",
-                            tagList(icon("download"), " Export for Claude"),
-                            class = "btn-outline-secondary btn-lg",
-                            style = "padding: 12px 30px; font-size: 1.1em;"
-                          )
+                        downloadButton("download_claude_prompt",
+                          tagList(icon("download"), " Export for Claude"),
+                          class = "btn-outline-secondary btn-lg",
+                          style = "padding: 12px 30px; font-size: 1.1em;"
                         )
                       ),
 
@@ -1794,7 +1795,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     div(style = "display: flex; gap: 8px;",
                       actionButton("data_chat_info_btn", icon("question-circle"), title = "About Data Chat",
                         class = "btn-outline-info btn-sm"),
-                      downloadButton("download_chat_txt", "\U0001F4BE Save Chat", class="btn-secondary btn-sm")
+                      downloadButton("download_chat_txt", "\U0001F4BE Save Chat", class="btn-secondary btn-sm"),
+                      downloadButton("download_claude_prompt_chat", tagList(icon("download"), " Export for Claude"),
+                        class = "btn-outline-secondary btn-sm")
                     )
                   )),
                   card_body(
