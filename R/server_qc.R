@@ -1008,19 +1008,39 @@ server_qc <- function(input, output, session, values) {
     status_colors <- c(pass = "#28a745", warn = "#ffc107", fail = "#dc3545")
 
     if (view_mode == "faceted") {
-      # For large datasets, show only flagged runs (warn/fail) by default
+      max_panels <- 24L  # Hard cap — more than this is unreadable
       run_names <- names(traces)
       n_runs <- length(run_names)
 
-      # Filter to flagged runs when >40 files (show all if <=40 or all pass)
-      flagged <- metrics$run[metrics$status %in% c("warn", "fail")]
-      if (n_runs > 40 && length(flagged) > 0) {
-        show_runs <- flagged
-        subtitle_text <- sprintf("Showing %d flagged of %d total runs (use Overlay for all)",
-                                  length(show_runs), n_runs)
-      } else {
+      if (n_runs <= max_panels) {
+        # Small dataset: show all
         show_runs <- run_names
         subtitle_text <- "Blue dashed = median trace across all runs"
+      } else {
+        # Large dataset: prioritize worst runs (fail > warn, sorted by shape_r)
+        fail_runs <- metrics$run[metrics$status == "fail"]
+        warn_runs <- metrics$run[metrics$status == "warn"]
+        # Sort warns by shape_r ascending (worst first)
+        warn_metrics <- metrics[metrics$status == "warn", ]
+        if (nrow(warn_metrics) > 0) {
+          warn_runs <- warn_metrics$run[order(warn_metrics$shape_r)]
+        }
+        # Take fails first, then worst warns, up to cap
+        prioritized <- c(fail_runs, warn_runs)
+        if (length(prioritized) > max_panels) {
+          show_runs <- prioritized[seq_len(max_panels)]
+          subtitle_text <- sprintf("Showing %d worst of %d flagged (%d total) — use Overlay for all",
+                                    max_panels, length(prioritized), n_runs)
+        } else if (length(prioritized) > 0) {
+          show_runs <- prioritized
+          subtitle_text <- sprintf("Showing %d flagged of %d total — use Overlay for all",
+                                    length(show_runs), n_runs)
+        } else {
+          # All pass but >max_panels — show random sample
+          show_runs <- sample(run_names, max_panels)
+          subtitle_text <- sprintf("Showing %d of %d runs (random sample, all pass) — use Overlay for all",
+                                    max_panels, n_runs)
+        }
       }
 
       # Compute median trace on common grid (from ALL traces, not just shown)
@@ -1263,14 +1283,11 @@ server_qc <- function(input, output, session, values) {
     view_mode <- input$tic_view_mode %||% "faceted"
     p <- build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
 
-    # Scale modal plot height with panel count
+    # Scale modal plot height — build_tic_plot caps at 24 panels
     n_traces <- length(values$tic_traces)
-    modal_height <- if (view_mode == "faceted" && n_traces > 8) {
-      flagged <- values$tic_metrics$run[values$tic_metrics$status %in% c("warn", "fail")]
-      n_show <- if (n_traces > 40 && length(flagged) > 0) length(flagged) else n_traces
-      ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else 4L
-      paste0(max(600, ceiling(n_show / ncol_f) * 250), "px")
-    } else "800px"
+    n_show <- min(24L, n_traces)
+    ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else 4L
+    modal_height <- paste0(max(600, ceiling(n_show / ncol_f) * 250), "px")
 
     showModal(modalDialog(
       title = "Chromatography QC \u2014 Fullscreen",
