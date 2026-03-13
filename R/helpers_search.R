@@ -2225,12 +2225,14 @@ generate_parallel_scripts <- function(
   # jobs crash without producing quant files. (Per Vadim Demichev recommendation)
   # With --quant-ori-names on all steps, quant files are named BASENAME.quant
   # (e.g., sample.raw → sample.quant, sample.d → sample.quant)
-  quant_verify_block <- function(quant_subdir, prev_step) {
+  quant_verify_block <- function(quant_subdir, prev_step, max_missing_pct = 5) {
     paste0(
-      sprintf('# Verify all quant files from Step %d exist\n', prev_step),
+      sprintf('# Verify quant files from Step %d — auto-exclude small number of failures\n', prev_step),
       sprintf('echo "Verifying Step %d quant files..."\n', prev_step),
       'MISSING=0\n',
       'TOTAL=0\n',
+      sprintf('GOOD_LIST="%s/file_list_verified.txt"\n', output_dir),
+      '> "$GOOD_LIST"\n',
       sprintf('while IFS= read -r RAW_FILE; do\n'),
       '  TOTAL=$((TOTAL + 1))\n',
       '  BASENAME=$(basename "$RAW_FILE")\n',
@@ -2239,13 +2241,29 @@ generate_parallel_scripts <- function(
       sprintf('  if [ ! -f "%s/%s/${QUANT_NAME}" ]; then\n', output_dir, quant_subdir),
       '    echo "MISSING: ${QUANT_NAME} (from ${RAW_FILE})"\n',
       '    MISSING=$((MISSING + 1))\n',
+      '  else\n',
+      '    echo "$RAW_FILE" >> "$GOOD_LIST"\n',
       '  fi\n',
       sprintf('done < "%s/file_list.txt"\n', output_dir),
       'if [ $MISSING -gt 0 ]; then\n',
-      sprintf('  echo "ERROR: ${MISSING} of ${TOTAL} quant files missing from Step %d. Aborting."\n', prev_step),
-      '  exit 1\n',
-      'fi\n',
-      'echo "All ${TOTAL} quant files verified."\n\n'
+      sprintf('  MAX_MISSING=$(( TOTAL * %d / 100 ))\n', max_missing_pct),
+      '  if [ $MAX_MISSING -lt 3 ]; then MAX_MISSING=3; fi\n',
+      '  if [ $MISSING -le $MAX_MISSING ]; then\n',
+      sprintf('    echo "WARNING: ${MISSING} of ${TOTAL} quant files missing from Step %d (within %d%% tolerance)."\n',
+              prev_step, max_missing_pct),
+      '    echo "Auto-excluding failed files and continuing with $((TOTAL - MISSING)) files."\n',
+      sprintf('    cp "%s/file_list.txt" "%s/file_list_pre_exclusion.txt"\n', output_dir, output_dir),
+      sprintf('    mv "$GOOD_LIST" "%s/file_list.txt"\n', output_dir),
+      '  else\n',
+      sprintf('    echo "ERROR: ${MISSING} of ${TOTAL} quant files missing from Step %d — exceeds %d%% tolerance. Aborting."\n',
+              prev_step, max_missing_pct),
+      '    rm -f "$GOOD_LIST"\n',
+      '    exit 1\n',
+      '  fi\n',
+      'else\n',
+      '  rm -f "$GOOD_LIST"\n',
+      '  echo "All ${TOTAL} quant files verified."\n',
+      'fi\n\n'
     )
   }
 
@@ -2486,10 +2504,12 @@ generate_resume_launcher <- function(resume_from, sbatch_bin, step_script_paths)
         sprintf('%s_ID=$(echo "$%s" | grep -oP "[0-9]+$")', var, var),
         sprintf('echo "STEP%d:$%s_ID"', s, var), "")
     } else {
-      # Chain to previous
+      # Chain to previous — use afterany for Step 2→3 so a few OOM/timeout
+      # tasks don't collapse the whole pipeline (Step 3 verify block handles it)
+      dep_type <- if (s == 3 && prev_var == "JOB2") "afterany" else "afterok"
       lines <- c(lines,
-        sprintf('%s=$(%s --dependency=afterok:$%s_ID --kill-on-invalid-dep=yes %s 2>&1)',
-                var, sbatch_bin, prev_var, step_script_paths[s]),
+        sprintf('%s=$(%s --dependency=%s:$%s_ID --kill-on-invalid-dep=yes %s 2>&1)',
+                var, sbatch_bin, dep_type, prev_var, step_script_paths[s]),
         sprintf('%s_ID=$(echo "$%s" | grep -oP "[0-9]+$")', var, var),
         sprintf('echo "STEP%d:$%s_ID"', s, var), "")
     }

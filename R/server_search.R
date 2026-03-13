@@ -3669,7 +3669,10 @@ server_search <- function(input, output, session, values, add_to_log,
       launcher_lines <- c(launcher_lines,
         'JOB2_ID=$(echo "$JOB2" | grep -oP "[0-9]+$")',
         'echo "STEP2:$JOB2_ID"', "",
-        sprintf('JOB3=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB2_ID %s 2>&1)',
+        # afterany (not afterok): Step 3 runs even if some Step 2 tasks failed.
+        # The quant verify block in Step 3 auto-excludes a small number of missing
+        # files (<5%) so the pipeline continues without manual intervention.
+        sprintf('JOB3=$(%s --kill-on-invalid-dep=yes --dependency=afterany:$JOB2_ID %s 2>&1)',
                 sbatch_bin, step_script_paths[3]),
         'JOB3_ID=$(echo "$JOB3" | grep -oP "[0-9]+$")',
         'echo "STEP3:$JOB3_ID"', "",
