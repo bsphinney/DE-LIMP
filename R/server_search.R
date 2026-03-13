@@ -5864,10 +5864,17 @@ server_search <- function(input, output, session, values, add_to_log,
                   original_script <- file.path(output_dir, paste0(step_name, ".sbatch"))
                   retry_script_remote <- file.path(output_dir, paste0(step_name, "_retry.sbatch"))
 
-                  # Create retry script on remote via sed (modify array spec + memory)
+                  # Bump time limit if any task timed out (double it)
+                  has_timeout <- any(grepl("TIMEOUT", failed_info$reasons))
+                  time_sed <- if (has_timeout) {
+                    " -e 's/#SBATCH --time=\\([0-9]*\\):\\([0-9]*\\):\\([0-9]*\\)/#SBATCH --time=04:00:00/'"
+                  } else ""
+
+                  # Create retry script on remote via sed (modify array spec + memory + time)
                   sed_cmd <- sprintf(
-                    "sed -e 's/#SBATCH --array=.*/#SBATCH --array=%s/' -e 's/#SBATCH --mem=.*/#SBATCH --mem=%dG/' %s > %s",
-                    array_spec, retry_mem, shQuote(original_script), shQuote(retry_script_remote))
+                    "sed -e 's/#SBATCH --array=.*/#SBATCH --array=%s/' -e 's/#SBATCH --mem=.*/#SBATCH --mem=%dG/'%s %s > %s",
+                    array_spec, retry_mem, time_sed,
+                    shQuote(original_script), shQuote(retry_script_remote))
                   sed_result <- ssh_exec(cfg, sed_cmd)
 
                   if (sed_result$status == 0) {
