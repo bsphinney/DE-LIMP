@@ -226,7 +226,7 @@ function Test-Container {
             exit 1
         }
 
-        & scp -i $script:SshKey -o StrictHostKeyChecking=accept-new `
+        & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
             $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT"
 
         # Run install (needs TTY for srun)
@@ -258,7 +258,7 @@ function Test-Packages {
         if (-not $scriptDir) { $scriptDir = $PWD.Path }
         $setupPath = Join-Path $scriptDir $SETUP_SCRIPT
 
-        & scp -i $script:SshKey -o StrictHostKeyChecking=accept-new `
+        & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
             $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
 
         Invoke-HiveSsh "bash ~/$SETUP_SCRIPT packages"
@@ -277,7 +277,7 @@ function Submit-Job {
     if (-not $scriptDir) { $scriptDir = $PWD.Path }
     $setupPath = Join-Path $scriptDir $SETUP_SCRIPT
 
-    & scp -i $script:SshKey -o StrictHostKeyChecking=accept-new `
+    & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
         $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
 
     $submitErr = $null

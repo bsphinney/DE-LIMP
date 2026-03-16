@@ -155,7 +155,7 @@ check_container() {
         local SCRIPT_DIR
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         if [ -f "${SCRIPT_DIR}/${SETUP_SCRIPT}" ]; then
-            scp -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
+            scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
                 "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}"
         else
             echo -e "${RED}Cannot find ${SETUP_SCRIPT} next to this launcher.${NC}"
@@ -196,7 +196,7 @@ check_packages() {
         # Copy setup script if not already there
         local SCRIPT_DIR
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        scp -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
+        scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
             "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}" 2>/dev/null || true
 
         hive_ssh "bash ~/${SETUP_SCRIPT} packages"
@@ -213,7 +213,7 @@ submit_job() {
     # Ensure hpc_setup.sh is on HIVE
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    scp -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
+    scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
         "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}" 2>/dev/null || true
 
     local SUBMIT_OUTPUT
