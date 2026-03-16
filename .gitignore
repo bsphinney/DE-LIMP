@@ -59,6 +59,13 @@ data/ssh/*
 
 # Example/test data directories
 Affinisep_vs_evosep_noNorm_xic/
+.core_facility_test/
+Citations/
+Phospho/
+
+# Temp files
+files.zip
+*.fasta
 
 # Screenshots
 Screenshot *.png
@@ -77,3 +84,4 @@ Screenshot *.png
 !USER_GUIDE.md
 !HPC_DEPLOYMENT.md
 !CORE_FACILITY_PHASE2_SPEC.md
+!contaminants/*.fasta
