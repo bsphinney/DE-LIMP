@@ -21,11 +21,11 @@ This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. The automate
 
 **Prerequisites:** OpenSSH (built into Windows 10+) and an SSH key for HIVE (see [SSH Key Setup](#ssh-key-setup) below).
 
-1. **Download [`Launch DE-LIMP.bat`](https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/Launch%20DE-LIMP.bat)** into a folder (e.g., your Desktop). That's the only file you need — it auto-downloads everything else.
+1. **Download [`Launch_DE-LIMP.bat`](https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/Launch_DE-LIMP.bat)** into a folder (e.g., your Desktop). That's the only file you need — it auto-downloads everything else.
 
 2. **Place your SSH key** (`id_ed25519` or `id_rsa`) in the same folder, or in `C:\Users\YourName\.ssh\`.
 
-3. **Double-click `Launch DE-LIMP.bat`**. On first run it will:
+3. **Double-click `Launch_DE-LIMP.bat`**. On first run it will:
    - Download the remaining scripts from GitHub automatically
    - Ask for your HIVE username (saved for next time)
    - Install the container on HIVE (~5 GB, takes 10-20 min the first time)
