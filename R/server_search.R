@@ -2314,6 +2314,161 @@ server_search <- function(input, output, session, values, add_to_log,
   })
 
   # ============================================================================
+  #    NCBI Proteome Search & Download
+  # ============================================================================
+
+  ncbi_results <- reactiveVal(data.frame())
+
+  observeEvent(input$open_ncbi_modal, {
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " NCBI Proteome Search"),
+      size = "l",
+      easyClose = TRUE,
+      div(
+        style = "font-size: 0.85em; color: #6c757d; margin-bottom: 8px;",
+        "Search for organisms not on UniProt (e.g., non-model species). ",
+        "Downloads the reference genome protein annotation."
+      ),
+      div(style = "display: flex; gap: 8px; margin-bottom: 12px;",
+        div(style = "flex: 1;",
+          textInput("ncbi_search_query", NULL,
+            placeholder = "e.g., Peromyscus californicus, Danio rerio", width = "100%")
+        ),
+        actionButton("search_ncbi_btn", "Search",
+          class = "btn-success", style = "margin-top: 0;")
+      ),
+      DTOutput("ncbi_results_table"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("download_ncbi_fasta_btn", "Download Proteome",
+          class = "btn-success", icon = icon("download"))
+      )
+    ))
+  })
+
+  observeEvent(input$search_ncbi_btn, {
+    req(nzchar(input$ncbi_search_query))
+
+    withProgress(message = "Searching NCBI...", {
+      results <- ncbi_search_assemblies(input$ncbi_search_query)
+      ncbi_results(results)
+    })
+
+    if (nrow(ncbi_results()) == 0) {
+      showNotification("No annotated assemblies found. Try a different organism name.", type = "warning")
+    }
+  })
+
+  output$ncbi_results_table <- DT::renderDT({
+    req(nrow(ncbi_results()) > 0)
+
+    df <- ncbi_results()
+    display_df <- data.frame(
+      Accession = df$accession,
+      Organism = df$organism,
+      Level = df$assembly_level,
+      Proteins = format(df$protein_count, big.mark = ","),
+      Category = df$refseq_category,
+      stringsAsFactors = FALSE
+    )
+
+    DT::datatable(display_df,
+      selection = "single",
+      options = list(
+        pageLength = 10, dom = "tip", scrollY = "300px",
+        columnDefs = list(list(width = "120px", targets = 0))
+      ),
+      rownames = FALSE,
+      class = "compact stripe"
+    )
+  })
+
+  observeEvent(input$download_ncbi_fasta_btn, {
+    req(nrow(ncbi_results()) > 0)
+    sel <- input$ncbi_results_table_rows_selected
+
+    if (length(sel) == 0) {
+      showNotification("Please select an assembly from the table first.", type = "warning")
+      return()
+    }
+
+    row <- ncbi_results()[sel, ]
+
+    # Download to pre-staged FASTA dir or local temp
+    fasta_dir <- getOption("delimp.fasta_dir",
+      default = "/quobyte/proteomics-grp/de-limp/fasta")
+    if (!dir.exists(fasta_dir)) fasta_dir <- file.path(Sys.getenv("HOME"), "proteomics_databases")
+
+    withProgress(message = sprintf("Downloading %s proteome from NCBI...", row$organism), {
+      fasta_path <- ncbi_download_proteome(row$accession, fasta_dir)
+    })
+
+    if (is.null(fasta_path) || !file.exists(fasta_path)) {
+      showNotification("Download failed. Check your internet connection.", type = "error")
+      return()
+    }
+
+    # Count sequences
+    n_seq <- sum(grepl("^>", readLines(fasta_path, n = 200000, warn = FALSE)))
+    file_mb <- round(file.size(fasta_path) / 1e6, 1)
+
+    removeModal()
+
+    # Handle SSH upload if in remote mode
+    cfg <- ssh_config()
+    if (!is.null(cfg)) {
+      ob <- output_base()
+      if (grepl("^/Users/", ob)) {
+        remote_home <- tryCatch({
+          res <- ssh_exec(cfg, "echo $HOME")
+          if (res$status == 0) trimws(paste(res$stdout, collapse = "")) else ob
+        }, error = function(e) ob)
+        ob <- file.path(remote_home, "diann_output")
+        output_base(ob)
+      }
+      remote_fasta_dir <- file.path(ob, "databases")
+      remote_path <- file.path(remote_fasta_dir, basename(fasta_path))
+
+      ssh_exec(cfg, paste("mkdir -p", shQuote(remote_fasta_dir)))
+      withProgress(message = "Uploading FASTA to remote HPC...", {
+        up_result <- scp_upload(cfg, fasta_path, remote_path)
+      })
+
+      if (up_result$status != 0) {
+        showNotification("Downloaded locally but upload to HPC failed.", type = "error")
+        return()
+      }
+
+      values$diann_fasta_files <- remote_path
+      values$fasta_info <- list(n_sequences = n_seq, file_size = file.size(fasta_path))
+      showNotification(
+        sprintf("NCBI proteome uploaded to HPC: %s — %s proteins (%.1f MB)",
+          row$organism, format(n_seq, big.mark = ","), file_mb),
+        type = "message", duration = 10)
+    } else {
+      # Local mode
+      values$diann_fasta_files <- fasta_path
+      values$fasta_info <- list(n_sequences = n_seq, file_size = file.size(fasta_path))
+      showNotification(
+        sprintf("NCBI proteome downloaded: %s — %s proteins (%.1f MB)",
+          row$organism, format(n_seq, big.mark = ","), file_mb),
+        type = "message", duration = 8)
+    }
+  })
+
+  output$ncbi_fasta_selected_summary <- renderUI({
+    req(length(values$diann_fasta_files) > 0, all(nzchar(values$diann_fasta_files)))
+    req(input$fasta_source == "ncbi")
+    info <- values$fasta_info
+    div(style = "font-size: 0.8em; color: #495057; margin-top: 5px;",
+      icon("check-circle", style = "color: #28a745;"), " ",
+      basename(values$diann_fasta_files[1]),
+      if (!is.null(info$n_sequences))
+        sprintf(" — %s sequences", format(info$n_sequences, big.mark = ","))
+    )
+  })
+
+  # ============================================================================
   #    Shared FASTA Database Library
   # ============================================================================
 

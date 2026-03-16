@@ -358,6 +358,123 @@ scan_raw_files <- function(dir_path) {
   )
 }
 
+# =============================================================================
+# NCBI Datasets API — Search and Download Proteomes
+# =============================================================================
+
+#' Search NCBI for genome assemblies with protein annotations
+#' @param query Character — organism name (e.g., "Peromyscus californicus")
+#' @return data.frame with accession, organism, assembly_level, protein_count, annotation_name
+ncbi_search_assemblies <- function(query) {
+  url <- sprintf(
+    "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/taxon/%s/dataset_report",
+    utils::URLencode(query, reserved = TRUE)
+  )
+
+  resp <- tryCatch(
+    httr2::request(url) |>
+      httr2::req_headers(Accept = "application/json") |>
+      httr2::req_timeout(30) |>
+      httr2::req_perform(),
+    error = function(e) {
+      message("[NCBI] Search failed: ", e$message)
+      return(NULL)
+    }
+  )
+  if (is.null(resp)) return(data.frame())
+
+  body <- httr2::resp_body_json(resp)
+  reports <- body$reports
+  if (length(reports) == 0) return(data.frame())
+
+  rows <- lapply(reports, function(r) {
+    acc <- r$accession %||% ""
+    paired <- r$paired_accession %||% ""
+    org <- r$organism$organism_name %||% ""
+    level <- r$assembly_info$assembly_level %||% ""
+    refseq_cat <- r$assembly_info$refseq_category %||% ""
+    ann <- r$annotation_info
+    ann_name <- ann$name %||% ""
+    prot_count <- tryCatch(
+      ann$stats$gene_counts$protein_coding %||% 0L,
+      error = function(e) 0L
+    )
+    # Prefer RefSeq (GCF_) accession which has the annotation
+    best_acc <- if (nzchar(paired) && grepl("^GCF_", paired)) paired else acc
+    data.frame(
+      accession = best_acc,
+      genbank = acc,
+      organism = org,
+      assembly_level = level,
+      refseq_category = refseq_cat,
+      protein_count = as.integer(prot_count),
+      annotation = ann_name,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  df <- do.call(rbind, rows)
+  # Keep only annotated assemblies (protein_count > 0), deduplicate by accession
+  df <- df[df$protein_count > 0, , drop = FALSE]
+  df <- df[!duplicated(df$accession), , drop = FALSE]
+  # Sort: reference genome first, then by protein count descending
+  df <- df[order(df$refseq_category == "reference genome", -df$protein_count,
+                 decreasing = c(TRUE, FALSE)), , drop = FALSE]
+  rownames(df) <- NULL
+  df
+}
+
+#' Download protein FASTA from NCBI for a genome assembly
+#' @param accession Character — RefSeq accession (e.g., "GCF_007827085.1")
+#' @param output_dir Character — directory to save the FASTA file
+#' @return Path to the downloaded .fasta file, or NULL on failure
+ncbi_download_proteome <- function(accession, output_dir) {
+  url <- sprintf(
+    "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/%s/download?include_annotation_type=PROT_FASTA",
+    accession
+  )
+
+  zip_path <- file.path(output_dir, paste0(accession, "_protein.zip"))
+  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+  # Download ZIP
+  resp <- tryCatch(
+    httr2::request(url) |>
+      httr2::req_timeout(120) |>
+      httr2::req_perform(path = zip_path),
+    error = function(e) {
+      message("[NCBI] Download failed: ", e$message)
+      return(NULL)
+    }
+  )
+  if (is.null(resp)) return(NULL)
+
+  # Extract protein.faa from ZIP
+  fasta_entry <- tryCatch({
+    entries <- utils::unzip(zip_path, list = TRUE)
+    faa <- entries$Name[grepl("protein\\.faa$", entries$Name)]
+    if (length(faa) == 0) return(NULL)
+    faa[1]
+  }, error = function(e) NULL)
+
+  if (is.null(fasta_entry)) {
+    unlink(zip_path)
+    return(NULL)
+  }
+
+  utils::unzip(zip_path, files = fasta_entry, exdir = output_dir, junkpaths = TRUE)
+  unlink(zip_path)
+
+  fasta_path <- file.path(output_dir, basename(fasta_entry))
+
+  # Rename to a descriptive filename
+  final_name <- paste0(accession, "_protein.fasta")
+  final_path <- file.path(output_dir, final_name)
+  file.rename(fasta_path, final_path)
+
+  final_path
+}
+
 #' Scan a directory for pre-staged FASTA databases
 #' @param fasta_dir Character — path to scan
 #' @return Named character vector suitable for selectInput choices

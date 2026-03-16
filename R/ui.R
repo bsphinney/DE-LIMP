@@ -464,6 +464,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             tags$h6(icon("dna"), " FASTA Database"),
             selectInput("fasta_source", NULL,
               choices = c("Download from UniProt" = "uniprot",
+                          "Download from NCBI" = "ncbi",
                           "Database Library" = "library",
                           "Pre-staged on server" = "prestaged",
                           "Browse / enter path" = "browse"),
@@ -476,6 +477,13 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               uiOutput("fasta_filename_preview"),
               uiOutput("fasta_selected_summary"),
               uiOutput("fasta_add_to_library_btn_ui")
+            ),
+
+            # --- NCBI source ---
+            conditionalPanel("input.fasta_source == 'ncbi'",
+              actionButton("open_ncbi_modal", "Search NCBI",
+                class = "btn-success btn-sm w-100", icon = icon("search")),
+              uiOutput("ncbi_fasta_selected_summary")
             ),
 
             # --- Database Library source ---
@@ -823,8 +831,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     placeholder = "e.g., slurm apptainer"),
                   actionButton("test_ssh_btn", "Test Connection",
                     icon = icon("plug"), class = "btn-outline-info btn-sm"),
-                  uiOutput("ssh_status_ui"),
-                  uiOutput("cluster_status_ui")
+                  uiOutput("ssh_status_ui")
                 ),
                 # Hidden SSH inputs for core facility mode (auto-filled by staff selector)
                 if (is_core_facility) div(style = "display: none;",
@@ -835,6 +842,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   textInput("ssh_modules", "Modules to Load", value = "")
                 )
               ),
+              # Cluster status indicator — outside SSH conditionalPanel so it shows
+              # in both "Local (on HPC)" mode (via SLURM proxy) and "Remote (SSH)" mode
+              uiOutput("cluster_status_ui"),
 
               hr(),
               tags$h6("SLURM Resources"),
