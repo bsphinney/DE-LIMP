@@ -84,7 +84,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
 ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_ed25519
 ```
 
-When prompted for a passphrase, you can press Enter for no passphrase or set one for extra security.
+When prompted for a passphrase, **press Enter for no passphrase**. The launcher scripts use non-interactive SSH and cannot prompt for a passphrase.
 
 ### 2. Upload your public key to HiPPO
 
