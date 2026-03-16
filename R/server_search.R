@@ -191,7 +191,7 @@ server_search <- function(input, output, session, values, add_to_log,
             numericInput("parallel_time_hours", "Time/file (hrs):", value = 2, min = 1, max = 8, step = 1)
           ),
           div(style = "flex: 1; min-width: 100px;",
-            numericInput("max_simultaneous", "Max concurrent:", value = 20, min = 4, max = 100, step = 4)
+            numericInput("max_simultaneous", "Max concurrent:", value = 20, min = 4, max = 64, step = 4)
           )
         ),
         tags$p(class = "text-muted", style = "font-size: 0.78em;",
@@ -3680,7 +3680,10 @@ server_search <- function(input, output, session, values, add_to_log,
                 sbatch_bin, step_script_paths[4]),
         'JOB4_ID=$(echo "$JOB4" | grep -oP "[0-9]+$")',
         'echo "STEP4:$JOB4_ID"', "",
-        sprintf('JOB5=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB4_ID %s 2>&1)',
+        # afterany (not afterok): Step 5 runs even if some Step 4 tasks failed.
+        # The quant verify block in Step 5 auto-excludes a small number of missing
+        # files (<5%) so the pipeline continues without manual intervention.
+        sprintf('JOB5=$(%s --kill-on-invalid-dep=yes --dependency=afterany:$JOB4_ID %s 2>&1)',
                 sbatch_bin, step_script_paths[5]),
         'JOB5_ID=$(echo "$JOB5" | grep -oP "[0-9]+$")',
         'echo "STEP5:$JOB5_ID"'

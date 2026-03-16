@@ -2397,7 +2397,8 @@ generate_parallel_scripts <- function(
   array_spec_4 <- sprintf("0-%d%%%d", n_files - 1, max_simultaneous)
 
   step4_script <- paste0(
-    sbatch_header("s4_finalpass", cpus_per_file, mem_per_file, time_per_file,
+    sbatch_header("s4_finalpass", cpus_per_file, mem_per_file,
+                  time_per_file,
                   array_spec = array_spec_4, step_partition = arr_part,
                   step_account = arr_acct, requeue = arr_requeue), "\n\n",
     "module load apptainer\n\n",
@@ -2504,9 +2505,10 @@ generate_resume_launcher <- function(resume_from, sbatch_bin, step_script_paths)
         sprintf('%s_ID=$(echo "$%s" | grep -oP "[0-9]+$")', var, var),
         sprintf('echo "STEP%d:$%s_ID"', s, var), "")
     } else {
-      # Chain to previous — use afterany for Step 2→3 so a few OOM/timeout
-      # tasks don't collapse the whole pipeline (Step 3 verify block handles it)
-      dep_type <- if (s == 3 && prev_var == "JOB2") "afterany" else "afterok"
+      # Chain to previous — use afterany for Step 2→3 and Step 4→5 so a few
+      # OOM/timeout tasks don't collapse the pipeline (verify blocks handle it)
+      dep_type <- if ((s == 3 && prev_var == "JOB2") ||
+                     (s == 5 && prev_var == "JOB4")) "afterany" else "afterok"
       lines <- c(lines,
         sprintf('%s=$(%s --dependency=%s:$%s_ID --kill-on-invalid-dep=yes %s 2>&1)',
                 var, sbatch_bin, dep_type, prev_var, step_script_paths[s]),
