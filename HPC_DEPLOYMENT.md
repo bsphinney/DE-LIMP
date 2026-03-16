@@ -58,9 +58,9 @@ The launcher performs the same 7 steps as the Windows version. Press Ctrl+C to s
 |------|-------------|
 | 1. Find SSH key | Checks the script directory, then `~/.ssh/` for `id_ed25519`, `id_rsa`, or `*.pem` |
 | 2. Get username | Prompts once, saves to `.delimp_config` for future runs |
-| 3. Check container | Verifies `~/containers/de-limp.sif` exists on HIVE; installs if missing |
+| 3. Check container | Verifies container exists on shared storage; installs if missing |
 | 4. Sync repo | Clones or `git pull`s the DE-LIMP repo on HIVE (for live code updates) |
-| 5. Check packages | Installs missing R packages (GSEA, MOFA2, etc.) into `~/R/delimp-lib/` |
+| 5. Check packages | Installs missing R packages (GSEA, MOFA2, etc.) into shared storage |
 | 6. Submit job | Submits an `sbatch` job, polls for the compute node hostname, opens an SSH tunnel |
 | 7. Open browser | Opens `http://localhost:7860` and waits until you press Ctrl+C |
 
@@ -141,16 +141,16 @@ bash hpc_setup.sh repo
 ssh username@hive.hpc.ucdavis.edu
 
 # Pull the container (first time only)
-mkdir -p ~/containers
+mkdir -p /quobyte/proteomics-grp/de-limp/containers
 module load apptainer
-apptainer pull ~/containers/de-limp.sif docker://registry.hf.space/brettsp-de-limp-proteomics:latest
+apptainer pull /quobyte/proteomics-grp/de-limp/containers/de-limp.sif docker://registry.hf.space/brettsp-de-limp-proteomics:latest
 
 # Request a compute node
 salloc --account=genome-center-grp --partition=high --time=8:00:00 --mem=32GB --cpus-per-task=8
 
 # Run DE-LIMP
 module load apptainer
-apptainer exec ~/containers/de-limp.sif \
+apptainer exec /quobyte/proteomics-grp/de-limp/containers/de-limp.sif \
   R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=7860)"
 
 # In a separate terminal on your local machine, set up the tunnel:
@@ -203,7 +203,7 @@ All DE-LIMP files live on shared storage (`/quobyte/proteomics-grp/de-limp/`) to
 
 ### How Code Updates Work
 
-The launcher uses a **bind-mount overlay** pattern: the latest code from the GitHub repo (`~/DE-LIMP/app.R` and `~/DE-LIMP/R/`) is bind-mounted over the container's `/srv/shiny-server/` files at runtime. This means:
+The launcher uses a **bind-mount overlay** pattern: the latest code from the GitHub repo on shared storage is bind-mounted over the container's `/srv/shiny-server/` files at runtime. This means:
 
 - **Code updates don't require rebuilding the container** — just `git pull`
 - The launcher runs `git pull --ff-only` automatically on every launch

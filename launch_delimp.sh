@@ -142,7 +142,7 @@ check_container() {
     echo -e "${GREEN}[3/7] Checking container on HIVE...${NC}"
 
     local HAS_SIF
-    HAS_SIF=$(hive_ssh "test -f ~/containers/de-limp.sif && echo yes || echo no")
+    HAS_SIF=$(hive_ssh "test -f /quobyte/proteomics-grp/de-limp/containers/de-limp.sif && echo yes || echo no")
 
     if [ "${HAS_SIF}" = "yes" ]; then
         echo "  Container found."
