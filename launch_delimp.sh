@@ -23,6 +23,7 @@ ACCOUNT="genome-center-grp"
 PARTITION="high"
 CONFIG_FILE=".delimp_config"
 SETUP_SCRIPT="hpc_setup.sh"
+GITHUB_RAW="https://raw.githubusercontent.com/bsphinney/DE-LIMP/main"
 MAX_WAIT_NODE=600    # seconds to wait for compute node (10 min)
 MAX_WAIT_APP=120     # seconds to wait for app to respond (2 min)
 
@@ -308,8 +309,25 @@ open_browser() {
     done
 }
 
+# --- Auto-download missing scripts ---
+get_required_files() {
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [ ! -f "${SCRIPT_DIR}/${SETUP_SCRIPT}" ]; then
+        echo -e "${YELLOW}Downloading ${SETUP_SCRIPT} from GitHub...${NC}"
+        curl -fsSL -o "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${GITHUB_RAW}/${SETUP_SCRIPT}" || {
+            echo -e "${RED}Failed to download ${SETUP_SCRIPT}. Get it from: ${GITHUB_RAW}/${SETUP_SCRIPT}${NC}"
+            exit 1
+        }
+        chmod +x "${SCRIPT_DIR}/${SETUP_SCRIPT}"
+        echo "  Saved: ${SCRIPT_DIR}/${SETUP_SCRIPT}"
+    fi
+}
+
 # --- Main ---
 print_header
+get_required_files
 find_ssh_key
 get_username
 check_container

@@ -98,10 +98,10 @@ When prompted for a passphrase, **press Enter for no passphrase**. The launcher 
 ### 3. Test the connection
 
 ```bash
-ssh username@hive.hpc.ucdavis.edu
+ssh -i ~/.ssh/id_ed25519 username@hive.hpc.ucdavis.edu
 ```
 
-This should log you in without a password prompt. You can also use Kerberos (campus credentials) as a fallback.
+This should log you in without a password prompt. If it asks for a password, your key wasn't uploaded correctly — go back to HiPPO and re-upload.
 
 For more details, see the [UC Davis HPC SSH key guide](https://hpc.ucdavis.edu/faq2/ssh-keypair).
 
@@ -252,6 +252,9 @@ Windows requires strict file permissions on SSH keys. The PowerShell launcher tr
 ```powershell
 icacls C:\path\to\id_ed25519 /inheritance:r /grant:r "$($env:USERNAME):(R)"
 ```
+
+### "Load key ... invalid format"
+The SSH key file is corrupted or is not actually a key (e.g., it was downloaded as an HTML page). Open it in a text editor — it should start with `-----BEGIN OPENSSH PRIVATE KEY-----`. If not, copy your real key from `C:\Users\YourName\.ssh\id_ed25519` or generate a new one.
 
 ### App shows "vunknown" for version
 The container is outdated. Update with:
