@@ -7,9 +7,30 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      docker_available = FALSE, hpc_available = FALSE,
                      local_sbatch = FALSE, local_diann = FALSE,
                      delimp_data_dir = "",
-                     is_core_facility = FALSE, cf_config = NULL) {
+                     is_core_facility = FALSE, cf_config = NULL,
+                     deploy_env = "Local") {
+
+  # Environment badge colors
+  env_colors <- list(
+    Docker = "#e74c3c",       # red
+    HPC    = "#27ae60",       # green
+    Local  = "#3498db",       # blue
+    `Hugging Face` = "#f39c12" # orange
+  )
+  env_color <- env_colors[[deploy_env]] %||% "#6c757d"
+
   page_navbar(
-  title = "DE-LIMP Proteomics",
+  title = tags$span(
+    "DE-LIMP Proteomics",
+    tags$span(
+      deploy_env,
+      style = sprintf(
+        "font-size: 0.65em; background: %s; color: white; padding: 2px 8px; border-radius: 10px; margin-left: 8px; vertical-align: middle; font-weight: 500;",
+        env_color
+      )
+    )
+  ),
+  window_title = paste0("DE-LIMP (", deploy_env, ")"),
   id = "main_tabs",
   theme = bs_theme(bootswatch = "flatly"),
   navbar_options = navbar_options(bg = "#2c3e50"),

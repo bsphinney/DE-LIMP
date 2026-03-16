@@ -229,6 +229,17 @@ delimp_data_dir <- Sys.getenv("DELIMP_DATA_DIR", "")
 # Combined flag — at least one backend available
 search_enabled <- docker_available || hpc_available || local_diann
 
+# Environment label — helps users tell where the app is running
+deploy_env <- if (is_hf_space) {
+  "Hugging Face"
+} else if (local_diann && nzchar(delimp_data_dir)) {
+  "Docker"
+} else if (local_sbatch) {
+  "HPC"
+} else {
+  "Local"
+}
+
 # Detect core facility mode — activated by config directory + staff.yml
 # The config directory is created by delimp-server setup, never present on
 # HF Spaces or regular local installs
@@ -337,7 +348,7 @@ local({
 
 ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch,
                local_diann, delimp_data_dir,
-               is_core_facility, cf_config)
+               is_core_facility, cf_config, deploy_env)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules
