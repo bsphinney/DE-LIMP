@@ -27,7 +27,7 @@ $DELIMP_BASE     = "/quobyte/proteomics-grp/de-limp"
 $REMOTE_SCRIPT   = "$DELIMP_BASE/$SETUP_SCRIPT"
 $GITHUB_RAW      = "https://raw.githubusercontent.com/bsphinney/DE-LIMP/main"
 $MAX_WAIT_NODE   = 600    # seconds to wait for compute node
-$MAX_WAIT_APP    = 120    # seconds to wait for app to respond
+$MAX_WAIT_APP    = 300    # seconds to wait for app to respond (R package loading can be slow)
 
 # --- State ---
 $script:TunnelProcess = $null
@@ -370,10 +370,11 @@ function Submit-Job {
 
     Write-Host "  Running on node: $node" -ForegroundColor Green
 
-    # Open SSH tunnel as background process
+    # Open SSH tunnel as background process (suppress "channel refused" noise during app startup)
     Write-Host "  Opening SSH tunnel (localhost:$PORT -> ${node}:$PORT)..."
-    $script:TunnelProcess = Start-Process -PassThru -NoNewWindow ssh `
+    $script:TunnelProcess = Start-Process -PassThru -NoNewWindow -RedirectStandardError "NUL" ssh `
         -ArgumentList "-i", $script:SshKey, "-o", "StrictHostKeyChecking=accept-new", `
+                      "-o", "LogLevel=ERROR", `
                       "-N", "-L", "${PORT}:${node}:${PORT}", "$($script:HiveUser)@$HIVE_HOST"
 
     # Poll until app responds
