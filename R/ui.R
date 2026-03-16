@@ -807,7 +807,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               tags$h6(icon("plug"), " Connection Mode"),
               radioButtons("search_connection_mode", NULL,
                 choices = c("Local (on HPC)" = "local", "Remote (SSH)" = "ssh"),
-                selected = if (local_sbatch) "local" else "ssh", inline = TRUE),
+                selected = if (local_sbatch || nzchar(Sys.getenv("APPTAINER_CONTAINER", "")) ||
+                               nzchar(Sys.getenv("SINGULARITY_CONTAINER", ""))) "local" else "ssh",
+                inline = TRUE),
               conditionalPanel("input.search_connection_mode == 'ssh'",
                 # SSH fields: shown always (core facility auto-fills them from staff selector)
                 if (!is_core_facility) tagList(
