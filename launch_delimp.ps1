@@ -377,20 +377,46 @@ function Submit-Job {
                       "-o", "LogLevel=ERROR", `
                       "-N", "-L", "${PORT}:${node}:${PORT}", "$($script:HiveUser)@$HIVE_HOST"
 
-    # Poll until app responds
+    # Poll until app responds, checking SLURM job is still alive
     Write-Host "  Waiting for DE-LIMP to start (loading R packages, ~30-60s)..."
     $elapsed = 0
+    $appStarted = $false
     while ($elapsed -lt $MAX_WAIT_APP) {
+        # Check if app is responding
         try {
             $response = Invoke-WebRequest -Uri "http://localhost:$PORT" -UseBasicParsing -TimeoutSec 3 -ErrorAction SilentlyContinue
-            if ($response.StatusCode -eq 200 -or $response.StatusCode -eq 302) { break }
+            if ($response.StatusCode -eq 200 -or $response.StatusCode -eq 302) {
+                $appStarted = $true
+                break
+            }
         } catch {}
+
+        # Every 15s, check if the SLURM job is still running
+        if ($elapsed % 15 -eq 0 -and $elapsed -gt 0) {
+            $jobState = (Invoke-HiveSsh "bash -l -c 'squeue -j $($script:SlurmJobId) --noheader --format=%T 2>/dev/null'").Trim()
+            if (-not $jobState -or $jobState -match "FAILED|CANCELLED|TIMEOUT|COMPLETED") {
+                Write-Host ""
+                Write-Host "  SLURM job $($script:SlurmJobId) is no longer running (state: $jobState)." -ForegroundColor Red
+                # Show last few lines of the error log
+                $errLog = Invoke-HiveSsh "tail -5 $DELIMP_BASE/users/$($script:HiveUser)/logs/delimp_$($script:SlurmJobId).err 2>/dev/null"
+                if ($errLog) {
+                    Write-Host "  Last error output:" -ForegroundColor Yellow
+                    Write-Host "  $errLog"
+                }
+                throw "SLURM job crashed before app could start."
+            }
+        }
+
         Start-Sleep -Seconds 3
         $elapsed += 3
-        Write-Host "  Starting... ($elapsed`s / $MAX_WAIT_APP`s)" -NoNewline
-        Write-Host "`r" -NoNewline
+        Write-Host "`r  Starting... ($elapsed`s / $MAX_WAIT_APP`s)    " -NoNewline
     }
     Write-Host ""
+
+    if (-not $appStarted) {
+        Write-Host "  Timed out waiting for app to start ($MAX_WAIT_APP`s)." -ForegroundColor Red
+        throw "App did not respond within $MAX_WAIT_APP seconds."
+    }
 }
 
 # --- Step 7: Open browser ---
