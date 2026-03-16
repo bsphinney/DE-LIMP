@@ -73,22 +73,40 @@ On exit (Ctrl+C), the launcher cancels the SLURM job, removes the node sentinel 
 
 ## SSH Key Setup
 
-If you don't already have an SSH key for HIVE:
+HIVE uses the **HiPPO portal** ([hippo.ucdavis.edu](https://hippo.ucdavis.edu)) for SSH key management.
+
+### 1. Generate an SSH key (if you don't have one)
+
+**Mac/Linux:**
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+```
+
+**Windows (PowerShell):**
+```powershell
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_ed25519
+```
+
+When prompted for a passphrase, you can press Enter for no passphrase or set one for extra security.
+
+### 2. Upload your public key to HiPPO
+
+1. Go to [hippo.ucdavis.edu](https://hippo.ucdavis.edu) and log in with your UC Davis CAS credentials
+2. Select **HIVE** as your cluster
+3. Upload your **public** key (`~/.ssh/id_ed25519.pub`) — you can paste the contents or upload the file
+4. Wait a few minutes for the key to propagate
+
+> **Note:** HiPPO accepts one key at a time. The same key works for both Farm and HIVE.
+
+### 3. Test the connection
 
 ```bash
-# On your local machine (Mac/Linux terminal, or Windows PowerShell)
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
-
-# Copy the public key to HIVE
-ssh-copy-id -i ~/.ssh/id_ed25519 username@hive.hpc.ucdavis.edu
+ssh username@hive.hpc.ucdavis.edu
 ```
 
-**Windows users:** If `ssh-copy-id` isn't available, run:
-```powershell
-type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh username@hive.hpc.ucdavis.edu "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
-```
+This should log you in without a password prompt. You can also use Kerberos (campus credentials) as a fallback.
 
-Test it works: `ssh -i ~/.ssh/id_ed25519 username@hive.hpc.ucdavis.edu` should log in without a password prompt.
+For more details, see the [UC Davis HPC SSH key guide](https://hpc.ucdavis.edu/faq2/ssh-keypair).
 
 ---
 
