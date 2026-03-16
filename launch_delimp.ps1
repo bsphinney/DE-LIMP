@@ -150,7 +150,7 @@ function Repair-SshKeyPermissions {
             Write-Host "  Permissions fixed."
         }
     } catch {
-        # Non-fatal — SSH will error if perms are still wrong
+        # Non-fatal - SSH will error if perms are still wrong
         Write-Host "  Warning: Could not check key permissions." -ForegroundColor Yellow
     }
 }
@@ -271,13 +271,13 @@ function Test-Packages {
         & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
             $setupPath "$($script:HiveUser)@${HIVE_HOST}:$REMOTE_SCRIPT" 2>$null
 
-        # R package installs produce stderr output that PowerShell treats as errors — suppress it
+        # R package installs produce stderr output that PowerShell treats as errors - suppress it
         try {
             $pkgOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=300 `
                 "$($script:HiveUser)@$HIVE_HOST" "bash -l $REMOTE_SCRIPT packages" 2>&1
             Write-Host ($pkgOutput -join "`n")
         } catch {
-            # Non-fatal — packages may already be installed
+            # Non-fatal - packages may already be installed
             Write-Host "  Warning: Package install had errors (may be OK if already installed)" -ForegroundColor Yellow
         }
         Write-Host "  Packages installed!" -ForegroundColor Green
@@ -338,15 +338,15 @@ function Submit-Job {
                 $statusMsg = switch ($state) {
                     "PENDING"  {
                         switch -Wildcard ($reason) {
-                            "Priority"       { "Queued — waiting for higher-priority jobs to finish" }
-                            "Resources"      { "Queued — waiting for resources to become available" }
-                            "QOSMaxCpuPerUserLimit" { "Queued — at CPU limit for your account" }
-                            "QOSMaxMemPerUserLimit" { "Queued — at memory limit for your account" }
-                            default          { "Queued — $reason" }
+                            "Priority"       { "Queued - waiting for higher-priority jobs to finish" }
+                            "Resources"      { "Queued - waiting for resources to become available" }
+                            "QOSMaxCpuPerUserLimit" { "Queued - at CPU limit for your account" }
+                            "QOSMaxMemPerUserLimit" { "Queued - at memory limit for your account" }
+                            default          { "Queued - $reason" }
                         }
                     }
-                    "RUNNING"  { "Running — app is starting up" }
-                    "CONFIGURING" { "Node allocated — configuring environment" }
+                    "RUNNING"  { "Running - app is starting up" }
+                    "CONFIGURING" { "Node allocated - configuring environment" }
                     default    { "$state" }
                 }
                 Write-Host "`r  [$statusMsg]                                        " -NoNewline -ForegroundColor Yellow
