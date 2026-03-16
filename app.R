@@ -326,6 +326,13 @@ app_version <- tryCatch(
   error = function(e) "unknown"
 )
 
+# Snapshot source file timestamps at startup for update detection
+code_snapshot <- tryCatch({
+  r_files <- list.files("R", pattern = "\\.R$", full.names = TRUE)
+  all_files <- c("app.R", r_files)
+  sum(file.mtime(all_files[file.exists(all_files)]), na.rm = TRUE)
+}, error = function(e) 0)
+
 # Load community stats (generated daily by GitHub Actions)
 community_stats <- tryCatch({
   stats_file <- file.path(getwd(), "stats", "community_stats.json")
@@ -469,6 +476,28 @@ server <- function(input, output, session) {
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_session(input, output, session, values, add_to_log)
+
+  # --- Code update detection: check if source files changed on disk ---
+  observe({
+    invalidateLater(30000)  # Check every 30 seconds
+    current <- tryCatch({
+      r_files <- list.files("R", pattern = "\\.R$", full.names = TRUE)
+      all_files <- c("app.R", r_files)
+      sum(file.mtime(all_files[file.exists(all_files)]), na.rm = TRUE)
+    }, error = function(e) code_snapshot)
+
+    if (current != code_snapshot) {
+      showNotification(
+        tagList(
+          icon("sync"), " Code update available. ",
+          tags$a("Restart the app", href = "javascript:window.location.reload()",
+                 style = "color: white; text-decoration: underline; font-weight: bold;"),
+          " to apply."
+        ),
+        type = "warning", duration = NULL, id = "code_update_banner"
+      )
+    }
+  })
 
   # --- Progressive reveal: hide result-dependent tabs until state exists ---
   session$onFlushed(once = TRUE, function() {
