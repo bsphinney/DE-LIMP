@@ -178,7 +178,7 @@ cmd_run() {
         # The Shiny app runs inside an Apptainer container where sbatch/squeue/sacct
         # are not available. This proxy runs OUTSIDE the container, watches a shared
         # directory for command requests, executes them, and writes results back.
-        PROXY_DIR="${HOME}/.delimp_slurm_proxy"
+        PROXY_DIR="${DELIMP_BASE}/users/$(whoami)/.slurm_proxy"
         mkdir -p "${PROXY_DIR}"
         rm -f "${PROXY_DIR}"/cmd_* "${PROXY_DIR}"/result_*
 
@@ -364,7 +364,7 @@ echo "\$(hostname)" > ${LOG_DIR}/delimp_node_\${SLURM_JOB_ID}.txt
 module load apptainer 2>/dev/null || module load singularity 2>/dev/null
 
 # Start SLURM proxy for container
-PROXY_DIR="\${HOME}/.delimp_slurm_proxy"
+PROXY_DIR="${DELIMP_BASE}/users/\$(whoami)/.slurm_proxy"
 mkdir -p "\${PROXY_DIR}"
 rm -f "\${PROXY_DIR}"/cmd_* "\${PROXY_DIR}"/result_*
 (
