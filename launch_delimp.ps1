@@ -318,18 +318,46 @@ function Submit-Job {
 
     Write-Host "  Submitted SLURM job: $($script:SlurmJobId)"
 
-    # Poll for compute node hostname
+    # Poll for compute node hostname, showing SLURM job status while waiting
     Write-Host "  Waiting for compute node allocation..."
     $elapsed = 0
     $node = ""
+    $lastStatus = ""
 
     while ($elapsed -lt $MAX_WAIT_NODE) {
         $node = (Invoke-HiveSsh "cat /quobyte/proteomics-grp/de-limp/users/$($script:HiveUser)/logs/delimp_node_$($script:SlurmJobId).txt 2>/dev/null").Trim()
         if ($node) { break }
+
+        # Check SLURM job status every 15s for better feedback
+        if ($elapsed % 15 -eq 0) {
+            $slurmInfo = (Invoke-HiveSsh "bash -l -c 'squeue -j $($script:SlurmJobId) --noheader --format=%T:%r 2>/dev/null'").Trim()
+            if ($slurmInfo -and $slurmInfo -ne $lastStatus) {
+                $parts = $slurmInfo -split ":"
+                $state = $parts[0]
+                $reason = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+                $statusMsg = switch ($state) {
+                    "PENDING"  {
+                        switch -Wildcard ($reason) {
+                            "Priority"       { "Queued — waiting for higher-priority jobs to finish" }
+                            "Resources"      { "Queued — waiting for resources to become available" }
+                            "QOSMaxCpuPerUserLimit" { "Queued — at CPU limit for your account" }
+                            "QOSMaxMemPerUserLimit" { "Queued — at memory limit for your account" }
+                            default          { "Queued — $reason" }
+                        }
+                    }
+                    "RUNNING"  { "Running — app is starting up" }
+                    "CONFIGURING" { "Node allocated — configuring environment" }
+                    default    { "$state" }
+                }
+                Write-Host "`r  [$statusMsg]                                        " -NoNewline -ForegroundColor Yellow
+                Write-Host ""
+                $lastStatus = $slurmInfo
+            }
+        }
+
         Start-Sleep -Seconds 5
         $elapsed += 5
-        Write-Host "  Waiting... ($elapsed`s / $MAX_WAIT_NODE`s)" -NoNewline
-        Write-Host "`r" -NoNewline
+        Write-Host "`r  Waiting... ($elapsed`s / $MAX_WAIT_NODE`s)    " -NoNewline
     }
     Write-Host ""
 
@@ -349,7 +377,7 @@ function Submit-Job {
                       "-N", "-L", "${PORT}:${node}:${PORT}", "$($script:HiveUser)@$HIVE_HOST"
 
     # Poll until app responds
-    Write-Host "  Waiting for DE-LIMP to start..."
+    Write-Host "  Waiting for DE-LIMP to start (loading R packages, ~30-60s)..."
     $elapsed = 0
     while ($elapsed -lt $MAX_WAIT_APP) {
         try {
