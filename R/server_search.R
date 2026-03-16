@@ -1444,12 +1444,38 @@ server_search <- function(input, output, session, values, add_to_log,
   volumes <- if (nzchar(delimp_data_dir)) {
     c(Data = delimp_data_dir)
   } else {
-    vols <- c(Home = Sys.getenv("HOME"), Root = "/")
-    # Add proteomics shared storage if available (HPC default)
-    if (dir.exists("/quobyte/proteomics-grp")) {
-      vols <- c(Proteomics = "/quobyte/proteomics-grp", vols)
+    c(Home = Sys.getenv("HOME"), Root = "/")
+  }
+
+  # Always add Home if not already present (useful in containers)
+  home <- Sys.getenv("HOME")
+  if (nzchar(home) && dir.exists(home) && !home %in% volumes) {
+    volumes <- c(volumes, Home = home)
+  }
+
+  # Auto-detect common shared storage paths
+  shared_paths <- c(
+    Proteomics = "/quobyte/proteomics-grp",
+    Share       = "/share",
+    Scratch     = "/scratch",
+    Group       = "/group"
+  )
+  for (i in seq_along(shared_paths)) {
+    if (dir.exists(shared_paths[i]) && !shared_paths[i] %in% volumes) {
+      volumes <- c(volumes, setNames(shared_paths[i], names(shared_paths)[i]))
     }
-    vols
+  }
+
+  # DELIMP_EXTRA_ROOTS: comma-separated name=path pairs for custom browse roots
+  # e.g., DELIMP_EXTRA_ROOTS="LabData=/mnt/lab,Archive=/mnt/archive"
+  extra_roots <- Sys.getenv("DELIMP_EXTRA_ROOTS", "")
+  if (nzchar(extra_roots)) {
+    for (entry in strsplit(extra_roots, ",")[[1]]) {
+      parts <- strsplit(trimws(entry), "=")[[1]]
+      if (length(parts) == 2 && dir.exists(trimws(parts[2]))) {
+        volumes <- c(volumes, setNames(trimws(parts[2]), trimws(parts[1])))
+      }
+    }
   }
 
   shinyFiles::shinyDirChoose(input, "raw_data_dir", roots = volumes, session = session)

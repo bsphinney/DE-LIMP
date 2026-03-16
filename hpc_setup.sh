@@ -28,6 +28,11 @@ TIME="8:00:00"
 ACCOUNT="genome-center-grp"
 PARTITION="high"
 
+# Shared storage paths to bind-mount into the container (comma-separated)
+# These become browsable in the app's file picker. Only paths that exist are mounted.
+# Example: SHARED_PATHS="/quobyte/proteomics-grp,/share/mylab/data,/scratch"
+SHARED_PATHS="/quobyte/proteomics-grp"
+
 # --- Colors ---
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -189,18 +194,28 @@ cmd_run() {
             CVMFS_BIND="--bind /cvmfs:/cvmfs"
         fi
 
+        # Build bind mounts for shared storage paths
+        SHARED_BINDS=""
+        IFS=',' read -ra SPATHS <<< "$6"
+        for sp in "${SPATHS[@]}"; do
+            sp=$(echo "$sp" | xargs)  # trim whitespace
+            if [ -d "$sp" ]; then
+                SHARED_BINDS="${SHARED_BINDS} --bind ${sp}:${sp}"
+            fi
+        done
+
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
             ${CVMFS_BIND} \
             --bind ${HOME}/data:/data \
             --bind ${HOME}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
-            --bind /quobyte/proteomics-grp:/quobyte/proteomics-grp \
+            ${SHARED_BINDS} \
             --bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R \
             --bind ${REPO_DIR}/R:/srv/shiny-server/R \
             "${SIF}" \
             R -e "shiny::runApp('"'"'/srv/shiny-server/'"'"', host='"'"'0.0.0.0'"'"', port=${PORT})"
-    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "$(pwd)" "${R_USER_LIB}"
+    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "$(pwd)" "${R_USER_LIB}" "${SHARED_PATHS}"
 }
 
 # --- Install Extra R Packages (runs on login node which has internet) ---
@@ -298,6 +313,16 @@ cmd_sbatch() {
         REPO_BINDS="--bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R --bind ${REPO_DIR}/R:/srv/shiny-server/R"
     fi
 
+    # Build shared storage bind mounts (only paths that exist)
+    local SHARED_BINDS=""
+    IFS=',' read -ra SPATHS <<< "${SHARED_PATHS}"
+    for sp in "${SPATHS[@]}"; do
+        sp=$(echo "$sp" | xargs)
+        if [ -d "$sp" ]; then
+            SHARED_BINDS="${SHARED_BINDS} --bind ${sp}:${sp}"
+        fi
+    done
+
     # Write sbatch script
     cat > "${SBATCH_FILE}" <<SBATCH_EOF
 #!/bin/bash
@@ -344,7 +369,7 @@ apptainer exec \\
     --bind ${HOME}/data:/data \\
     --bind ${HOME}/results:/results \\
     --bind ${R_USER_LIB}:${R_USER_LIB} \\
-    --bind /quobyte/proteomics-grp:/quobyte/proteomics-grp \\
+    ${SHARED_BINDS} \\
     ${REPO_BINDS} \\
     "${SIF_FILE}" \\
     R -e "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=${PORT})"
@@ -449,6 +474,7 @@ cmd_help() {
     echo ""
     echo "Configuration (edit the top of this script to change):"
     echo "  PORT=${PORT}  MEM=${MEM}  CPUS=${CPUS}  TIME=${TIME}"
+    echo "  SHARED_PATHS=${SHARED_PATHS}  (comma-separated paths to browse in app)"
     echo ""
     echo "Quick start:"
     echo "  1. bash hpc_setup.sh install"
