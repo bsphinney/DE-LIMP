@@ -756,10 +756,18 @@ server_search <- function(input, output, session, values, add_to_log,
 
   observe({
     invalidateLater(60000)
-    req(isTRUE(values$ssh_connected))
-    cfg <- isolate(ssh_config())
-    req(cfg)
-    sbatch_path <- isolate(values$ssh_sbatch_path)
+
+    # Two paths: SSH config (remote mode) or SLURM proxy (local on HPC / Apptainer)
+    cfg <- NULL
+    sbatch_path <- NULL
+    if (isTRUE(values$ssh_connected)) {
+      cfg <- isolate(ssh_config())
+      sbatch_path <- isolate(values$ssh_sbatch_path)
+    } else if (slurm_proxy_available()) {
+      # Local on HPC via SLURM proxy — cfg stays NULL, proxy handles commands
+    } else {
+      return()  # No SLURM access available
+    }
 
     # Always check both accounts
     tryCatch({
@@ -791,7 +799,8 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # Per-user resource tracking (CPU + memory for lab members on both accounts)
     tryCatch({
-      members <- get_lab_members(cfg$user)
+      username <- if (!is.null(cfg)) cfg$user else Sys.info()[["user"]]
+      members <- get_lab_members(username)
       lab_df <- check_per_user_resources(cfg, "genome-center-grp", "high", sbatch_path, members)
       pub_df <- check_per_user_resources(cfg, "publicgrp", "low", sbatch_path, members)
       user_df <- rbind(lab_df, pub_df)
@@ -1487,6 +1496,42 @@ server_search <- function(input, output, session, values, add_to_log,
   if (local_diann && !nzchar(delimp_data_dir)) {
     shinyFiles::shinyDirChoose(input, "local_output_dir_browse", roots = volumes, session = session)
   }
+
+  # ============================================================================
+  #    SLURM Proxy — Initial cluster check on startup (Apptainer / Local on HPC)
+  # ============================================================================
+
+  # When running inside Apptainer with the SLURM proxy, trigger an initial
+  # cluster resource check so the partition selector and monitor work without SSH
+  session$onFlushed(function() {
+    if (!slurm_proxy_available()) return()
+    tryCatch({
+      res <- check_cluster_resources(NULL, "genome-center-grp", "high")
+      values$cluster_resources <- res
+    }, error = function(e) NULL)
+    tryCatch({
+      pub_res <- check_cluster_resources(NULL, "publicgrp", "low")
+      values$public_resources <- pub_res
+    }, error = function(e) NULL)
+
+    best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
+    values$auto_partition <- best
+    if (!isTRUE(isolate(input$partition_override))) {
+      updateTextInput(session, "diann_account", value = best$account)
+      updateTextInput(session, "diann_partition", value = best$partition)
+    }
+
+    tryCatch({
+      username <- Sys.info()[["user"]]
+      members <- get_lab_members(username)
+      lab_df <- check_per_user_resources(NULL, "genome-center-grp", "high", NULL, members)
+      pub_df <- check_per_user_resources(NULL, "publicgrp", "low", NULL, members)
+      user_df <- rbind(lab_df, pub_df)
+      if (nrow(user_df) > 0) {
+        values$per_user_resources <- user_df
+      }
+    }, error = function(e) NULL)
+  }, once = TRUE)
 
   # ============================================================================
   #    File Selection Observers

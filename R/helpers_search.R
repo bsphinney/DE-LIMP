@@ -4201,6 +4201,8 @@ check_per_user_resources <- function(ssh_config, account, partition, sbatch_path
   run_cmd <- function(command) {
     if (!is.null(ssh_config)) {
       ssh_exec(ssh_config, command, login_shell = is.null(sbatch_path), timeout = 15)
+    } else if (slurm_proxy_available()) {
+      slurm_proxy_exec(command, timeout = 15)
     } else {
       parts <- strsplit(command, " ")[[1]]
       stdout <- tryCatch(
