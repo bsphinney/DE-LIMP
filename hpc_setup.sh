@@ -20,12 +20,16 @@ set -e
 # Base directory for all DE-LIMP files (container, R libs, logs, etc.)
 # Use shared storage to avoid home directory quota limits
 DELIMP_BASE="/quobyte/proteomics-grp/de-limp"
+# Shared resources (same for all users)
 CONTAINER_DIR="${DELIMP_BASE}/containers"
 SIF_FILE="${CONTAINER_DIR}/de-limp.sif"
 HF_IMAGE="docker://registry.hf.space/brettsp-de-limp-proteomics:latest"
-R_USER_LIB="${DELIMP_BASE}/R/delimp-lib"   # Persistent R library for extra packages
-LOG_DIR="${DELIMP_BASE}/logs"
-JOB_DIR="${DELIMP_BASE}/jobs"
+R_USER_LIB="${DELIMP_BASE}/R/delimp-lib"   # Shared R library (installed once, used by all)
+REPO_DIR="${DELIMP_BASE}/DE-LIMP"           # Shared git repo
+# Per-user resources (avoid conflicts when multiple people run simultaneously)
+USER_DIR="${DELIMP_BASE}/users/${USER}"
+LOG_DIR="${USER_DIR}/logs"
+JOB_DIR="${USER_DIR}/jobs"
 PORT=7860
 MEM="32GB"
 CPUS=8
@@ -63,6 +67,7 @@ cmd_install() {
     mkdir -p "${LOG_DIR}"
     mkdir -p "${JOB_DIR}"
     mkdir -p "${R_USER_LIB}"
+    mkdir -p "${REPO_DIR}"
 
     echo -e "${GREEN}[2/4] Requesting compute node for build...${NC}"
     echo "  (SIF conversion is CPU-intensive — should not run on head node)"
@@ -120,9 +125,9 @@ cmd_run() {
     fi
 
     # Auto-update code from GitHub (login node has internet)
-    if [ -d "$(pwd)/.git" ]; then
+    if [ -d "${REPO_DIR}/.git" ]; then
         echo -e "${GREEN}Updating code from GitHub...${NC}"
-        git pull --ff-only 2>&1 | tail -1
+        (cd "${REPO_DIR}" && git pull --ff-only 2>&1 | tail -1)
         echo ""
     fi
 
@@ -221,7 +226,7 @@ cmd_run() {
             --bind ${REPO_DIR}/R:/srv/shiny-server/R \
             "${SIF}" \
             R -e "shiny::runApp('"'"'/srv/shiny-server/'"'"', host='"'"'0.0.0.0'"'"', port=${PORT})"
-    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "$(pwd)" "${R_USER_LIB}" "${SHARED_PATHS}" "${DELIMP_BASE}"
+    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "${REPO_DIR}" "${R_USER_LIB}" "${SHARED_PATHS}" "${DELIMP_BASE}"
 }
 
 # --- Install Extra R Packages (runs on login node which has internet) ---
@@ -270,7 +275,6 @@ cmd_packages() {
 
 # --- Clone / Update Repo (for bind-mount code overlay) ---
 cmd_repo() {
-    local REPO_DIR="${DELIMP_BASE}/DE-LIMP"
     local REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
 
     if [ -d "${REPO_DIR}/.git" ]; then

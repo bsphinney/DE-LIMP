@@ -50,7 +50,7 @@ cleanup() {
         echo "  Cancelling SLURM job ${SLURM_JOB_ID}..."
         ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
             "${HIVE_USER}@${HIVE_HOST}" \
-            "scancel ${SLURM_JOB_ID} 2>/dev/null; rm -f /quobyte/proteomics-grp/de-limp/logs/delimp_node_${SLURM_JOB_ID}.txt" \
+            "scancel ${SLURM_JOB_ID} 2>/dev/null; rm -f /quobyte/proteomics-grp/de-limp/users/${HIVE_USER}/logs/delimp_node_${SLURM_JOB_ID}.txt" \
             2>/dev/null || true
     fi
 
@@ -236,7 +236,7 @@ submit_job() {
     local NODE=""
 
     while [ ${ELAPSED} -lt ${MAX_WAIT_NODE} ]; do
-        NODE=$(hive_ssh "cat /quobyte/proteomics-grp/de-limp/logs/delimp_node_${SLURM_JOB_ID}.txt 2>/dev/null" | tr -d '[:space:]')
+        NODE=$(hive_ssh "cat /quobyte/proteomics-grp/de-limp/users/${HIVE_USER}/logs/delimp_node_${SLURM_JOB_ID}.txt 2>/dev/null" | tr -d '[:space:]')
         if [ -n "${NODE}" ]; then
             break
         fi

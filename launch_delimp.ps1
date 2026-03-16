@@ -44,7 +44,7 @@ function Invoke-Cleanup {
         try {
             & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 `
                 "$($script:HiveUser)@$HIVE_HOST" `
-                "scancel $($script:SlurmJobId) 2>/dev/null; rm -f /quobyte/proteomics-grp/de-limp/logs/delimp_node_$($script:SlurmJobId).txt" 2>$null
+                "scancel $($script:SlurmJobId) 2>/dev/null; rm -f /quobyte/proteomics-grp/de-limp/users/$($script:HiveUser)/logs/delimp_node_$($script:SlurmJobId).txt" 2>$null
         } catch {}
     }
 
@@ -306,7 +306,7 @@ function Submit-Job {
     $node = ""
 
     while ($elapsed -lt $MAX_WAIT_NODE) {
-        $node = (Invoke-HiveSsh "cat /quobyte/proteomics-grp/de-limp/logs/delimp_node_$($script:SlurmJobId).txt 2>/dev/null").Trim()
+        $node = (Invoke-HiveSsh "cat /quobyte/proteomics-grp/de-limp/users/$($script:HiveUser)/logs/delimp_node_$($script:SlurmJobId).txt 2>/dev/null").Trim()
         if ($node) { break }
         Start-Sleep -Seconds 5
         $elapsed += 5

@@ -180,26 +180,27 @@ Edit the top of `hpc_setup.sh` to change defaults:
 
 ### Directory Layout on HIVE
 
-All DE-LIMP files live on shared storage (`/quobyte/proteomics-grp/de-limp/`) to avoid home directory quota limits:
+All DE-LIMP files live on shared storage (`/quobyte/proteomics-grp/de-limp/`) to avoid home directory quota limits. Shared resources are used by everyone; per-user directories prevent conflicts when multiple people run simultaneously:
 
 ```
 /quobyte/proteomics-grp/de-limp/
 ├── containers/
-│   └── de-limp.sif          # Apptainer container (~5 GB)
-├── DE-LIMP/                  # Git repo (code overlay for live updates)
-│   ├── app.R
-│   ├── R/
-│   └── ...
+│   └── de-limp.sif          # Apptainer container (~5 GB, shared)
+├── DE-LIMP/                  # Git repo — code overlay (shared)
 ├── R/
-│   └── delimp-lib/           # Extra R packages (GSEA, MOFA2, etc.)
+│   └── delimp-lib/           # R packages (shared, installed once)
 ├── data/                     # Bind-mounted as /data in container
 ├── results/                  # Bind-mounted as /results in container
-├── logs/                     # SLURM job logs
-│   └── delimp_<jobid>.out
-└── jobs/                     # Generated sbatch scripts
+└── users/
+    ├── brettsp/              # Per-user directories
+    │   ├── logs/             #   SLURM job logs + node sentinel files
+    │   └── jobs/             #   Generated sbatch scripts
+    └── jsmith/
+        ├── logs/
+        └── jobs/
 ```
 
-> **Note:** Only the small launcher script (`hpc_setup.sh`, ~17 KB) and SLURM proxy temp files use your home directory. The container, R packages, and all data stay on shared storage.
+> **Note:** Only `hpc_setup.sh` (~17 KB) and SLURM proxy temp files use your home directory. The container, R packages, repo, and all data stay on shared storage. Multiple users can run DE-LIMP simultaneously without conflicts.
 
 ### How Code Updates Work
 
