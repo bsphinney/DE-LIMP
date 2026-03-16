@@ -33,5 +33,7 @@ services:
       - "3838:3838"
     volumes:
       - ./data:/data
+      # Shared storage — comment out if not available on your system
+      - /quobyte/proteomics-grp:/quobyte/proteomics-grp
     environment:
       - DELIMP_DATA_DIR=/data
