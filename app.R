@@ -230,11 +230,14 @@ delimp_data_dir <- Sys.getenv("DELIMP_DATA_DIR", "")
 search_enabled <- docker_available || hpc_available || local_diann
 
 # Environment label — helps users tell where the app is running
+# Apptainer sets APPTAINER_CONTAINER / SINGULARITY_CONTAINER automatically
+is_apptainer <- nzchar(Sys.getenv("APPTAINER_CONTAINER", "")) ||
+                nzchar(Sys.getenv("SINGULARITY_CONTAINER", ""))
 deploy_env <- if (is_hf_space) {
   "Hugging Face"
 } else if (local_diann && nzchar(delimp_data_dir)) {
   "Docker"
-} else if (local_sbatch) {
+} else if (is_apptainer || local_sbatch) {
   "HPC"
 } else {
   "Local"
