@@ -19,16 +19,14 @@ This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. The automate
 
 ### Windows Users — Double-Click Launcher
 
-**Prerequisites:** OpenSSH (built into Windows 10+) and an SSH key for HIVE.
+**Prerequisites:** OpenSSH (built into Windows 10+) and an SSH key for HIVE (see [SSH Key Setup](#ssh-key-setup) below).
 
-1. **Get the launcher files.** Ask Brett for the launcher folder, or download these 3 files into a folder on your desktop:
-   - [`Launch DE-LIMP.bat`](https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/Launch%20DE-LIMP.bat)
-   - [`launch_delimp.ps1`](https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/launch_delimp.ps1)
-   - [`hpc_setup.sh`](https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/hpc_setup.sh)
+1. **Download [`Launch DE-LIMP.bat`](https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/Launch%20DE-LIMP.bat)** into a folder (e.g., your Desktop). That's the only file you need — it auto-downloads everything else.
 
 2. **Place your SSH key** (`id_ed25519` or `id_rsa`) in the same folder, or in `C:\Users\YourName\.ssh\`.
 
 3. **Double-click `Launch DE-LIMP.bat`**. On first run it will:
+   - Download the remaining scripts from GitHub automatically
    - Ask for your HIVE username (saved for next time)
    - Install the container on HIVE (~5 GB, takes 10-20 min the first time)
    - Install any missing R packages
@@ -42,10 +40,9 @@ This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. The automate
 ### Mac / Linux Users — Terminal Launcher
 
 ```bash
-# Download the launcher scripts (one time)
+# Download the launcher (one time) — it auto-downloads hpc_setup.sh on first run
 curl -O https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/launch_delimp.sh
-curl -O https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/hpc_setup.sh
-chmod +x launch_delimp.sh hpc_setup.sh
+chmod +x launch_delimp.sh
 
 # Launch (does everything automatically)
 bash launch_delimp.sh
