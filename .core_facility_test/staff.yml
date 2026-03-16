@@ -1,9 +1,0 @@
-staff:
-  - name: "Brett Phinney"
-    email: "bphinney@ucdavis.edu"
-    role: "Director"
-    lab: "Proteomics Core"
-  - name: "Test Analyst"
-    email: "analyst@ucdavis.edu"
-    role: "Analyst"
-    lab: "Proteomics Core"
