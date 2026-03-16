@@ -1504,18 +1504,35 @@ server_search <- function(input, output, session, values, add_to_log,
   # When running inside Apptainer with the SLURM proxy, trigger an initial
   # cluster resource check so the partition selector and monitor work without SSH
   session$onFlushed(function() {
-    if (!slurm_proxy_available()) return()
+    proxy_dir <- Sys.getenv("DELIMP_SLURM_PROXY", "")
+    message("[SLURM Proxy] Startup check: DELIMP_SLURM_PROXY='", proxy_dir, "'")
+    if (!slurm_proxy_available()) {
+      message("[SLURM Proxy] Not available — skipping startup cluster check",
+              " (env set: ", nzchar(proxy_dir),
+              ", dir exists: ", nzchar(proxy_dir) && dir.exists(proxy_dir), ")")
+      return()
+    }
+    message("[SLURM Proxy] Available — running initial cluster resource check")
+
     tryCatch({
       res <- check_cluster_resources(NULL, "genome-center-grp", "high")
       values$cluster_resources <- res
-    }, error = function(e) NULL)
+      message("[SLURM Proxy] genome-center-grp check: success=", isTRUE(res$success),
+              ", group_limit=", res$group_limit, ", user_limit=", res$user_limit)
+    }, error = function(e) {
+      message("[SLURM Proxy] genome-center-grp check failed: ", e$message)
+    })
     tryCatch({
       pub_res <- check_cluster_resources(NULL, "publicgrp", "low")
       values$public_resources <- pub_res
-    }, error = function(e) NULL)
+      message("[SLURM Proxy] publicgrp check: success=", isTRUE(pub_res$success))
+    }, error = function(e) {
+      message("[SLURM Proxy] publicgrp check failed: ", e$message)
+    })
 
     best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
     values$auto_partition <- best
+    message("[SLURM Proxy] Auto-selected partition: ", best$account, "/", best$partition)
     if (!isTRUE(isolate(input$partition_override))) {
       updateTextInput(session, "diann_account", value = best$account)
       updateTextInput(session, "diann_partition", value = best$partition)
@@ -1530,7 +1547,9 @@ server_search <- function(input, output, session, values, add_to_log,
       if (nrow(user_df) > 0) {
         values$per_user_resources <- user_df
       }
-    }, error = function(e) NULL)
+    }, error = function(e) {
+      message("[SLURM Proxy] Per-user resource check failed: ", e$message)
+    })
   }, once = TRUE)
 
   # ============================================================================

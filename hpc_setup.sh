@@ -230,10 +230,12 @@ cmd_run() {
 
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
+            --env DELIMP_SLURM_PROXY="${PROXY_DIR}" \
             ${CVMFS_BIND} \
             --bind ${DELIMP_BASE}/data:/data \
             --bind ${DELIMP_BASE}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
+            --bind ${PROXY_DIR}:${PROXY_DIR} \
             ${SHARED_BINDS} \
             --bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R \
             --bind ${REPO_DIR}/R:/srv/shiny-server/R \
@@ -390,6 +392,7 @@ apptainer exec \\
     --bind ${DELIMP_BASE}/data:/data \\
     --bind ${DELIMP_BASE}/results:/results \\
     --bind ${R_USER_LIB}:${R_USER_LIB} \\
+    --bind \${PROXY_DIR}:\${PROXY_DIR} \\
     ${SHARED_BINDS} \\
     ${REPO_BINDS} \\
     "${SIF_FILE}" \\
