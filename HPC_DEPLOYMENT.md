@@ -180,10 +180,10 @@ Edit the top of `hpc_setup.sh` to change defaults:
 
 ### Directory Layout on HIVE
 
-After setup, your home directory will contain:
+All DE-LIMP files live on shared storage (`/quobyte/proteomics-grp/de-limp/`) to avoid home directory quota limits:
 
 ```
-~/
+/quobyte/proteomics-grp/de-limp/
 ├── containers/
 │   └── de-limp.sif          # Apptainer container (~5 GB)
 ├── DE-LIMP/                  # Git repo (code overlay for live updates)
@@ -198,6 +198,8 @@ After setup, your home directory will contain:
 │   └── delimp_<jobid>.out
 └── jobs/                     # Generated sbatch scripts
 ```
+
+> **Note:** Only the small launcher script (`hpc_setup.sh`, ~17 KB) and SLURM proxy temp files use your home directory. The container, R packages, and all data stay on shared storage.
 
 ### How Code Updates Work
 

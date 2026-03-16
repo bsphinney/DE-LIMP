@@ -17,10 +17,15 @@
 set -e
 
 # --- Configuration ---
-CONTAINER_DIR="${HOME}/containers"
+# Base directory for all DE-LIMP files (container, R libs, logs, etc.)
+# Use shared storage to avoid home directory quota limits
+DELIMP_BASE="/quobyte/proteomics-grp/de-limp"
+CONTAINER_DIR="${DELIMP_BASE}/containers"
 SIF_FILE="${CONTAINER_DIR}/de-limp.sif"
 HF_IMAGE="docker://registry.hf.space/brettsp-de-limp-proteomics:latest"
-R_USER_LIB="${HOME}/R/delimp-lib"   # Persistent R library for extra packages
+R_USER_LIB="${DELIMP_BASE}/R/delimp-lib"   # Persistent R library for extra packages
+LOG_DIR="${DELIMP_BASE}/logs"
+JOB_DIR="${DELIMP_BASE}/jobs"
 PORT=7860
 MEM="32GB"
 CPUS=8
@@ -53,9 +58,10 @@ cmd_install() {
     print_header
     echo -e "${GREEN}[1/4] Creating directories...${NC}"
     mkdir -p "${CONTAINER_DIR}"
-    mkdir -p "${HOME}/data"
-    mkdir -p "${HOME}/results"
-    mkdir -p "${HOME}/logs"
+    mkdir -p "${DELIMP_BASE}/data"
+    mkdir -p "${DELIMP_BASE}/results"
+    mkdir -p "${LOG_DIR}"
+    mkdir -p "${JOB_DIR}"
     mkdir -p "${R_USER_LIB}"
 
     echo -e "${GREEN}[2/4] Requesting compute node for build...${NC}"
@@ -128,7 +134,7 @@ cmd_run() {
     echo ""
 
     ${SRUN_CMD} bash -c '
-        PORT="$1"; SIF="$2"; HIVE_USER="$3"; REPO_DIR="$4"; R_LIB="$5"
+        PORT="$1"; SIF="$2"; HIVE_USER="$3"; REPO_DIR="$4"; R_LIB="$5"; DELIMP_BASE="$7"
         NODE=$(hostname)
 
         echo ""
@@ -207,15 +213,15 @@ cmd_run() {
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
             ${CVMFS_BIND} \
-            --bind ${HOME}/data:/data \
-            --bind ${HOME}/results:/results \
+            --bind ${DELIMP_BASE}/data:/data \
+            --bind ${DELIMP_BASE}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
             ${SHARED_BINDS} \
             --bind ${REPO_DIR}/app.R:/srv/shiny-server/app.R \
             --bind ${REPO_DIR}/R:/srv/shiny-server/R \
             "${SIF}" \
             R -e "shiny::runApp('"'"'/srv/shiny-server/'"'"', host='"'"'0.0.0.0'"'"', port=${PORT})"
-    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "$(pwd)" "${R_USER_LIB}" "${SHARED_PATHS}"
+    ' _ "${PORT}" "${SIF_FILE}" "${USER}" "$(pwd)" "${R_USER_LIB}" "${SHARED_PATHS}" "${DELIMP_BASE}"
 }
 
 # --- Install Extra R Packages (runs on login node which has internet) ---
@@ -264,7 +270,7 @@ cmd_packages() {
 
 # --- Clone / Update Repo (for bind-mount code overlay) ---
 cmd_repo() {
-    local REPO_DIR="${HOME}/DE-LIMP"
+    local REPO_DIR="${DELIMP_BASE}/DE-LIMP"
     local REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
 
     if [ -d "${REPO_DIR}/.git" ]; then
@@ -281,9 +287,7 @@ cmd_repo() {
 # --- Submit App via sbatch (non-interactive, for launcher scripts) ---
 cmd_sbatch() {
     local CORE_DIR="${2:-}"
-    local REPO_DIR="${3:-${HOME}/DE-LIMP}"
-    local LOG_DIR="${HOME}/logs"
-    local JOB_DIR="${HOME}/jobs"
+    local REPO_DIR="${3:-${DELIMP_BASE}/DE-LIMP}"
     local SBATCH_FILE="${JOB_DIR}/delimp_app.sbatch"
 
     # Ensure directories exist
@@ -366,8 +370,8 @@ apptainer exec \\
     --env R_LIBS_USER="${R_USER_LIB}" \\
     --env DELIMP_SLURM_PROXY="\${PROXY_DIR}" \\
     ${ENV_ARGS} \\
-    --bind ${HOME}/data:/data \\
-    --bind ${HOME}/results:/results \\
+    --bind ${DELIMP_BASE}/data:/data \\
+    --bind ${DELIMP_BASE}/results:/results \\
     --bind ${R_USER_LIB}:${R_USER_LIB} \\
     ${SHARED_BINDS} \\
     ${REPO_BINDS} \\

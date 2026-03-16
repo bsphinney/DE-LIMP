@@ -50,7 +50,7 @@ cleanup() {
         echo "  Cancelling SLURM job ${SLURM_JOB_ID}..."
         ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
             "${HIVE_USER}@${HIVE_HOST}" \
-            "scancel ${SLURM_JOB_ID} 2>/dev/null; rm -f ~/logs/delimp_node_${SLURM_JOB_ID}.txt" \
+            "scancel ${SLURM_JOB_ID} 2>/dev/null; rm -f /quobyte/proteomics-grp/de-limp/logs/delimp_node_${SLURM_JOB_ID}.txt" \
             2>/dev/null || true
     fi
 
@@ -175,10 +175,10 @@ update_repo() {
     echo -e "${GREEN}[4/7] Syncing DE-LIMP repo on HIVE...${NC}"
 
     hive_ssh "
-        if [ -d ~/DE-LIMP/.git ]; then
-            cd ~/DE-LIMP && git pull --ff-only 2>&1 | tail -1
+        if [ -d /quobyte/proteomics-grp/de-limp/DE-LIMP/.git ]; then
+            cd /quobyte/proteomics-grp/de-limp/DE-LIMP && git pull --ff-only 2>&1 | tail -1
         else
-            git clone https://github.com/bsphinney/DE-LIMP.git ~/DE-LIMP 2>&1 | tail -1
+            git clone https://github.com/bsphinney/DE-LIMP.git /quobyte/proteomics-grp/de-limp/DE-LIMP 2>&1 | tail -1
         fi
     "
 }
@@ -188,7 +188,7 @@ check_packages() {
     echo -e "${GREEN}[5/7] Checking R packages...${NC}"
 
     local PKG_COUNT
-    PKG_COUNT=$(hive_ssh "ls -1d ~/R/delimp-lib/*/ 2>/dev/null | wc -l" | tr -d '[:space:]')
+    PKG_COUNT=$(hive_ssh "ls -1d /quobyte/proteomics-grp/de-limp/R/delimp-lib/*/ 2>/dev/null | wc -l" | tr -d '[:space:]')
 
     if [ "${PKG_COUNT:-0}" -lt 3 ]; then
         echo -e "${YELLOW}  Missing R packages. Installing (this may take a few minutes)...${NC}"
@@ -217,7 +217,7 @@ submit_job() {
         "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}" 2>/dev/null || true
 
     local SUBMIT_OUTPUT
-    SUBMIT_OUTPUT=$(hive_ssh "bash ~/${SETUP_SCRIPT} sbatch '${CORE_DIR}' ~/DE-LIMP")
+    SUBMIT_OUTPUT=$(hive_ssh "bash ~/${SETUP_SCRIPT} sbatch '${CORE_DIR}' /quobyte/proteomics-grp/de-limp/DE-LIMP")
 
     # Parse JOBID:<number>
     SLURM_JOB_ID=$(echo "${SUBMIT_OUTPUT}" | grep '^JOBID:' | cut -d: -f2)
@@ -236,7 +236,7 @@ submit_job() {
     local NODE=""
 
     while [ ${ELAPSED} -lt ${MAX_WAIT_NODE} ]; do
-        NODE=$(hive_ssh "cat ~/logs/delimp_node_${SLURM_JOB_ID}.txt 2>/dev/null" | tr -d '[:space:]')
+        NODE=$(hive_ssh "cat /quobyte/proteomics-grp/de-limp/logs/delimp_node_${SLURM_JOB_ID}.txt 2>/dev/null" | tr -d '[:space:]')
         if [ -n "${NODE}" ]; then
             break
         fi

@@ -44,7 +44,7 @@ function Invoke-Cleanup {
         try {
             & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 `
                 "$($script:HiveUser)@$HIVE_HOST" `
-                "scancel $($script:SlurmJobId) 2>/dev/null; rm -f ~/logs/delimp_node_$($script:SlurmJobId).txt" 2>$null
+                "scancel $($script:SlurmJobId) 2>/dev/null; rm -f /quobyte/proteomics-grp/de-limp/logs/delimp_node_$($script:SlurmJobId).txt" 2>$null
         } catch {}
     }
 
@@ -208,7 +208,7 @@ function Get-HiveUsername {
 function Test-Container {
     Write-Host "[3/7] Checking container on HIVE..." -ForegroundColor Green
 
-    $hasSif = Invoke-HiveSsh "test -f ~/containers/de-limp.sif && echo yes || echo no"
+    $hasSif = Invoke-HiveSsh "test -f /quobyte/proteomics-grp/de-limp/containers/de-limp.sif && echo yes || echo no"
 
     if ($hasSif -eq "yes") {
         Write-Host "  Container found."
@@ -249,7 +249,7 @@ function Update-Repo {
 function Test-Packages {
     Write-Host "[5/7] Checking R packages..." -ForegroundColor Green
 
-    $pkgCount = (Invoke-HiveSsh "ls -1d ~/R/delimp-lib/*/ 2>/dev/null | wc -l").Trim()
+    $pkgCount = (Invoke-HiveSsh "ls -1d /quobyte/proteomics-grp/de-limp/R/delimp-lib/*/ 2>/dev/null | wc -l").Trim()
 
     if ([int]$pkgCount -lt 3) {
         Write-Host "  Missing R packages. Installing..." -ForegroundColor Yellow
@@ -306,7 +306,7 @@ function Submit-Job {
     $node = ""
 
     while ($elapsed -lt $MAX_WAIT_NODE) {
-        $node = (Invoke-HiveSsh "cat ~/logs/delimp_node_$($script:SlurmJobId).txt 2>/dev/null").Trim()
+        $node = (Invoke-HiveSsh "cat /quobyte/proteomics-grp/de-limp/logs/delimp_node_$($script:SlurmJobId).txt 2>/dev/null").Trim()
         if ($node) { break }
         Start-Sleep -Seconds 5
         $elapsed += 5
