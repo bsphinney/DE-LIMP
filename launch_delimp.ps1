@@ -383,24 +383,27 @@ function Open-Browser {
     Write-Host "  Press Ctrl+C to stop."
     Write-Host ""
 
-    # Wait forever until Ctrl+C
-    try {
-        while ($true) {
-            Start-Sleep -Seconds 60
-        }
-    } finally {
-        Invoke-Cleanup
+    # Wait forever until Ctrl+C (cleanup runs from outer finally block)
+    while ($true) {
+        Start-Sleep -Seconds 60
     }
 }
 
 # --- Main ---
-Write-Header
-Get-RequiredFiles
-Find-SshKey
-Repair-SshKeyPermissions
-Get-HiveUsername
-Test-Container
-Update-Repo
-Test-Packages
-Submit-Job
-Open-Browser
+try {
+    Write-Header
+    Get-RequiredFiles
+    Find-SshKey
+    Repair-SshKeyPermissions
+    Get-HiveUsername
+    Test-Container
+    Update-Repo
+    Test-Packages
+    Submit-Job
+    Open-Browser
+} catch {
+    Write-Host ""
+    Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+} finally {
+    Invoke-Cleanup
+}
