@@ -176,8 +176,10 @@ Edit the top of `hpc_setup.sh` to change defaults:
 | `MEM` | 32GB | Increase to 64GB+ for MOFA2 or large GSEA |
 | `CPUS` | 8 | More CPUs = faster pipeline |
 | `TIME` | 8:00:00 | Max wall time for the SLURM job |
-| `ACCOUNT` | genome-center-grp | Your SLURM account |
+| `ACCOUNT` | genome-center-grp | Your SLURM account (see note below) |
 | `PARTITION` | high | SLURM partition |
+
+> **Non-Genome Center users:** All HIVE users have free access via `publicgrp`, but the `high` partition is limited to **8 CPUs and 128 GB RAM per job**, and `low` partition jobs can be **preempted (killed) without warning**. If you belong to a sponsored group, use your group account (e.g., `mylab-grp`) instead. Check your accounts with: `sacctmgr show assoc user=$USER format="account%20,partition%20"`
 
 ### Directory Layout on HIVE
 
@@ -246,7 +248,7 @@ Run `bash hpc_setup.sh install` on HIVE, or let the launcher do it automatically
 Another user may be running DE-LIMP on the same port. Edit `PORT=7860` in `hpc_setup.sh` to a different number (e.g., 7861, 8080).
 
 ### Launcher times out waiting for compute node
-The SLURM queue may be full. Check with `squeue -u $USER` on HIVE. Try the `publicgrp/low` partition if `genome-center-grp/high` is busy.
+The SLURM queue may be full. Check with `squeue -u $USER` on HIVE. Try the `publicgrp/low` partition if `genome-center-grp/high` is busy — but note that **low partition jobs can be killed and requeued** when high-priority jobs need resources, so you may lose your session without warning.
 
 ### "Permission denied" on SSH key (Windows)
 Windows requires strict file permissions on SSH keys. The PowerShell launcher tries to fix this automatically. If it fails, run:
