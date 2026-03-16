@@ -4129,7 +4129,7 @@ server_search <- function(input, output, session, values, add_to_log,
             incProgress(0.2, detail = "Step 5: Cross-run report")
             tryCatch({
               out <- system2(local_sbatch_bin,
-                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step4),
+                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterany:%s", step_ids$step4),
                          file.path(output_dir, "step5_report.sbatch")),
                 stdout = TRUE, stderr = TRUE)
               step_ids$step5 <- parse_sbatch_output(out)
