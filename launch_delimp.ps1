@@ -74,9 +74,14 @@ function Write-Header {
 # --- Helper: run command on HIVE ---
 function Invoke-HiveSsh {
     param([string]$Command)
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $result = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 `
         "$($script:HiveUser)@$HIVE_HOST" $Command 2>&1
-    return ($result -join "`n").Trim()
+    $ErrorActionPreference = $prevPref
+    # Filter out stderr ErrorRecord objects, keep only stdout strings
+    $stdout = $result | Where-Object { $_ -is [string] }
+    return ($stdout -join "`n").Trim()
 }
 
 # --- Step 1: Find SSH key ---
