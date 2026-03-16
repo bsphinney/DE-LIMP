@@ -68,6 +68,7 @@ cmd_install() {
     mkdir -p "${JOB_DIR}"
     mkdir -p "${R_USER_LIB}"
     mkdir -p "${REPO_DIR}"
+    mkdir -p "${DELIMP_BASE}/fasta"
 
     echo -e "${GREEN}[2/4] Requesting compute node for build...${NC}"
     echo "  (SIF conversion is CPU-intensive — should not run on head node)"

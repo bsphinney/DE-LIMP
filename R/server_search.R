@@ -3070,7 +3070,7 @@ server_search <- function(input, output, session, values, add_to_log,
   # Scan for pre-staged databases on startup
   observe({
     fasta_dir <- getOption("delimp.fasta_dir",
-      default = "/share/proteomics/databases/fasta")
+      default = "/quobyte/proteomics-grp/de-limp/fasta")
     databases <- scan_prestaged_databases(fasta_dir)
     if (length(databases) > 0) {
       updateSelectInput(session, "prestaged_fasta", choices = databases)
