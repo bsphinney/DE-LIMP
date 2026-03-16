@@ -73,8 +73,14 @@ cmd_install() {
     echo "  (SIF conversion is CPU-intensive — should not run on head node)"
     echo ""
 
-    srun --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 --pty bash -c '
-        SIF="$1"; IMAGE="$2"; CACHE_DIR="$3"
+    # Set cache dir BEFORE srun so it's inherited by the compute node shell
+    export APPTAINER_CACHEDIR="${DELIMP_BASE}/.apptainer_cache"
+    export SINGULARITY_CACHEDIR="${DELIMP_BASE}/.apptainer_cache"
+    mkdir -p "${DELIMP_BASE}/.apptainer_cache"
+
+    srun --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 \
+        --export=ALL --pty bash -c '
+        SIF="$1"; IMAGE="$2"
 
         echo "[3/4] Loading Apptainer..."
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null || {
@@ -82,11 +88,7 @@ cmd_install() {
             exit 1
         }
 
-        # Redirect Apptainer cache to shared storage (home dir quota is too small)
-        export APPTAINER_CACHEDIR="${CACHE_DIR}"
-        export SINGULARITY_CACHEDIR="${CACHE_DIR}"
-        mkdir -p "${CACHE_DIR}"
-
+        echo "  Cache dir: ${APPTAINER_CACHEDIR}"
         echo "[4/4] Pulling DE-LIMP container from Hugging Face..."
         echo "This may take 10-20 minutes on first pull."
         echo ""
@@ -99,26 +101,28 @@ cmd_install() {
         echo "Size: $(du -h "${SIF}" | cut -f1)"
         echo ""
         echo "To launch DE-LIMP, run: bash hpc_setup.sh run"
-    ' _ "${SIF_FILE}" "${HF_IMAGE}" "${DELIMP_BASE}/.apptainer_cache"
+    ' _ "${SIF_FILE}" "${HF_IMAGE}"
 }
 
 # --- Update Container ---
 cmd_update() {
     print_header
     echo -e "${GREEN}Requesting compute node for build...${NC}"
-    srun --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 --pty bash -c '
-        SIF="$1"; IMAGE="$2"; CACHE_DIR="$3"
+    export APPTAINER_CACHEDIR="${DELIMP_BASE}/.apptainer_cache"
+    export SINGULARITY_CACHEDIR="${DELIMP_BASE}/.apptainer_cache"
+    mkdir -p "${DELIMP_BASE}/.apptainer_cache"
+
+    srun --account=${ACCOUNT} --partition=${PARTITION} --time=1:00:00 --mem=16GB --cpus-per-task=4 \
+        --export=ALL --pty bash -c '
+        SIF="$1"; IMAGE="$2"
 
         echo "Updating DE-LIMP container..."
         module load apptainer 2>/dev/null || module load singularity 2>/dev/null
-        export APPTAINER_CACHEDIR="${CACHE_DIR}"
-        export SINGULARITY_CACHEDIR="${CACHE_DIR}"
-        mkdir -p "${CACHE_DIR}"
         apptainer pull --force "${SIF}" "${IMAGE}"
         echo ""
         echo "Update complete!"
         echo "Size: $(du -h "${SIF}" | cut -f1)"
-    ' _ "${SIF_FILE}" "${HF_IMAGE}" "${DELIMP_BASE}/.apptainer_cache"
+    ' _ "${SIF_FILE}" "${HF_IMAGE}"
 }
 
 # --- Run Interactive ---
