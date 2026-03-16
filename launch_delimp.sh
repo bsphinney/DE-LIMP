@@ -23,6 +23,8 @@ ACCOUNT="genome-center-grp"
 PARTITION="high"
 CONFIG_FILE=".delimp_config"
 SETUP_SCRIPT="hpc_setup.sh"
+DELIMP_BASE="/quobyte/proteomics-grp/de-limp"
+REMOTE_SCRIPT="${DELIMP_BASE}/${SETUP_SCRIPT}"
 GITHUB_RAW="https://raw.githubusercontent.com/bsphinney/DE-LIMP/main"
 MAX_WAIT_NODE=600    # seconds to wait for compute node (10 min)
 MAX_WAIT_APP=120     # seconds to wait for app to respond (2 min)
@@ -141,6 +143,9 @@ hive_ssh() {
 check_container() {
     echo -e "${GREEN}[3/7] Checking container on HIVE...${NC}"
 
+    # Ensure shared base directory exists
+    hive_ssh "mkdir -p ${DELIMP_BASE}" 2>/dev/null
+
     local HAS_SIF
     HAS_SIF=$(hive_ssh "test -f /quobyte/proteomics-grp/de-limp/containers/de-limp.sif && echo yes || echo no")
 
@@ -156,7 +161,7 @@ check_container() {
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         if [ -f "${SCRIPT_DIR}/${SETUP_SCRIPT}" ]; then
             scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
-                "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}"
+                "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:${REMOTE_SCRIPT}"
         else
             echo -e "${RED}Cannot find ${SETUP_SCRIPT} next to this launcher.${NC}"
             exit 1
@@ -164,7 +169,7 @@ check_container() {
 
         # Run install (needs TTY for srun)
         ssh -t -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
-            "${HIVE_USER}@${HIVE_HOST}" "bash ~/${SETUP_SCRIPT} install"
+            "${HIVE_USER}@${HIVE_HOST}" "bash -l ${REMOTE_SCRIPT} install"
 
         echo -e "${GREEN}  Container installed!${NC}"
     fi
@@ -197,9 +202,9 @@ check_packages() {
         local SCRIPT_DIR
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
-            "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}" 2>/dev/null || true
+            "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:${REMOTE_SCRIPT}" 2>/dev/null || true
 
-        hive_ssh "bash ~/${SETUP_SCRIPT} packages"
+        hive_ssh "bash -l ${REMOTE_SCRIPT} packages"
         echo -e "${GREEN}  Packages installed!${NC}"
     else
         echo "  Found ${PKG_COUNT} packages — OK."
@@ -214,10 +219,10 @@ submit_job() {
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
-        "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:~/${SETUP_SCRIPT}" 2>/dev/null || true
+        "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:${REMOTE_SCRIPT}" 2>/dev/null || true
 
     local SUBMIT_OUTPUT
-    SUBMIT_OUTPUT=$(hive_ssh "bash ~/${SETUP_SCRIPT} sbatch '${CORE_DIR}' /quobyte/proteomics-grp/de-limp/DE-LIMP")
+    SUBMIT_OUTPUT=$(hive_ssh "bash -l ${REMOTE_SCRIPT} sbatch '${CORE_DIR}' /quobyte/proteomics-grp/de-limp/DE-LIMP")
 
     # Parse JOBID:<number>
     SLURM_JOB_ID=$(echo "${SUBMIT_OUTPUT}" | grep '^JOBID:' | cut -d: -f2)

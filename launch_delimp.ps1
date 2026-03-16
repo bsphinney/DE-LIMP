@@ -23,6 +23,8 @@ $ACCOUNT         = "genome-center-grp"
 $PARTITION       = "high"
 $CONFIG_FILE     = ".delimp_config.ps1"
 $SETUP_SCRIPT    = "hpc_setup.sh"
+$DELIMP_BASE     = "/quobyte/proteomics-grp/de-limp"
+$REMOTE_SCRIPT   = "$DELIMP_BASE/$SETUP_SCRIPT"
 $GITHUB_RAW      = "https://raw.githubusercontent.com/bsphinney/DE-LIMP/main"
 $MAX_WAIT_NODE   = 600    # seconds to wait for compute node
 $MAX_WAIT_APP    = 120    # seconds to wait for app to respond
@@ -208,6 +210,9 @@ function Get-HiveUsername {
 function Test-Container {
     Write-Host "[3/7] Checking container on HIVE..." -ForegroundColor Green
 
+    # Ensure shared base directory exists
+    Invoke-HiveSsh "mkdir -p $DELIMP_BASE" 2>$null
+
     $hasSif = Invoke-HiveSsh "test -f /quobyte/proteomics-grp/de-limp/containers/de-limp.sif && echo yes || echo no"
 
     if ($hasSif -eq "yes") {
@@ -227,11 +232,11 @@ function Test-Container {
         }
 
         & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
-            $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT"
+            $setupPath "$($script:HiveUser)@${HIVE_HOST}:$REMOTE_SCRIPT"
 
         # Run install (needs TTY for srun)
         & ssh -t -i $script:SshKey -o StrictHostKeyChecking=accept-new `
-            "$($script:HiveUser)@$HIVE_HOST" "bash ~/$SETUP_SCRIPT install"
+            "$($script:HiveUser)@$HIVE_HOST" "bash -l $REMOTE_SCRIPT install"
 
         Write-Host "  Container installed!" -ForegroundColor Green
     }
@@ -259,9 +264,9 @@ function Test-Packages {
         $setupPath = Join-Path $scriptDir $SETUP_SCRIPT
 
         & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
-            $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
+            $setupPath "$($script:HiveUser)@${HIVE_HOST}:$REMOTE_SCRIPT" 2>$null
 
-        Invoke-HiveSsh "bash ~/$SETUP_SCRIPT packages"
+        Invoke-HiveSsh "bash -l $REMOTE_SCRIPT packages"
         Write-Host "  Packages installed!" -ForegroundColor Green
     } else {
         Write-Host "  Found $pkgCount packages - OK."
@@ -278,11 +283,11 @@ function Submit-Job {
     $setupPath = Join-Path $scriptDir $SETUP_SCRIPT
 
     & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
-        $setupPath "$($script:HiveUser)@${HIVE_HOST}:~/$SETUP_SCRIPT" 2>$null
+        $setupPath "$($script:HiveUser)@${HIVE_HOST}:$REMOTE_SCRIPT" 2>$null
 
     $submitErr = $null
     $submitOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 `
-        "$($script:HiveUser)@$HIVE_HOST" "bash -l ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1"
+        "$($script:HiveUser)@$HIVE_HOST" "bash -l $REMOTE_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1"
     $submitOutput = ($submitOutput -join "`n").Trim()
 
     # Parse JOBID:<number>
@@ -293,7 +298,7 @@ function Submit-Job {
         Write-Host $submitOutput
         Write-Host ""
         Write-Host "Debug: running sbatch command manually..." -ForegroundColor Yellow
-        $debugOutput = Invoke-HiveSsh "bash -x ~/$SETUP_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1 | tail -30"
+        $debugOutput = Invoke-HiveSsh "bash -x $REMOTE_SCRIPT sbatch '$CORE_DIR' '$REPO_DIR' 2>&1 | tail -30"
         Write-Host $debugOutput
         exit 1
     }
