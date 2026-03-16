@@ -259,11 +259,41 @@ icacls C:\path\to\id_ed25519 /inheritance:r /grant:r "$($env:USERNAME):(R)"
 ### "Load key ... invalid format"
 The SSH key file is corrupted or is not actually a key (e.g., it was downloaded as an HTML page). Open it in a text editor — it should start with `-----BEGIN OPENSSH PRIVATE KEY-----`. If not, copy your real key from `C:\Users\YourName\.ssh\id_ed25519` or generate a new one.
 
+### "Disk quota exceeded" during container pull
+HIVE home directories have limited quota (~5-10 GB). The launcher stores everything on shared storage, but Apptainer's default cache (`~/.apptainer/cache/`) still uses your home dir. The launcher sets `APPTAINER_CACHEDIR` to redirect this, but if you see this error, clean up your home dir:
+```bash
+ssh username@hive.hpc.ucdavis.edu
+# Check what's using space
+du -sh ~/* 2>/dev/null | sort -rh | head -10
+# Remove old DE-LIMP files (now on shared storage)
+rm -rf ~/containers ~/R/delimp-lib ~/DE-LIMP
+# Clear Apptainer cache
+rm -rf ~/.apptainer/cache
+```
+
+### "srun: command not found"
+SLURM commands aren't on the default PATH in non-login SSH sessions. The launcher uses `bash -l` (login shell) to load the environment. If you're running `hpc_setup.sh` manually, use `bash -l hpc_setup.sh install`.
+
+### "remote fsetstat: Failure" (SCP error on Windows)
+Newer Windows OpenSSH versions use the SFTP protocol by default, which some servers don't support. The launcher adds the `-O` flag to force legacy SCP protocol. If you're running SCP manually, add `-O`:
+```powershell
+scp -O -i ~/.ssh/id_ed25519 file.txt username@hive.hpc.ucdavis.edu:/path/
+```
+
+### PowerShell script won't run ("not digitally signed")
+Don't run `.\launch_delimp.ps1` directly. Use `Launch_DE-LIMP.bat` instead — it runs PowerShell with `-ExecutionPolicy Bypass` automatically.
+
+### File browser only shows "Data"
+If running via Docker (`localhost:3838`), the container only sees bind-mounted paths. Switch to **Remote (SSH)** connection mode to browse files on HIVE. If running via Apptainer on HPC (`localhost:7860`), the shared storage is auto-detected and should appear as "Proteomics" in the file picker.
+
 ### App shows "vunknown" for version
 The container is outdated. Update with:
 ```bash
 bash hpc_setup.sh update
 ```
+
+### App shows "Local" badge instead of "HPC"
+You're running the Docker container on your local machine, not Apptainer on HIVE. Use `Launch_DE-LIMP.bat` to start the HPC version (green badge, port 7860). The Docker version (`update_docker.sh`, red badge, port 3838) runs locally without the cluster.
 
 ### Out of memory
 Request more memory. MOFA2 and large GSEA analyses need 64GB+:
