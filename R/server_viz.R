@@ -254,7 +254,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       # No-DE mode (no replicates) — build from y_protein directly
       df_raw <- data.frame(
         Protein.Group = rownames(values$y_protein$E),
-        logFC = 0, adj.P.Val = 1,
+        logFC = 0, P.Value = 1, adj.P.Val = 1,
         stringsAsFactors = FALSE
       )
       # Add gene info from y_protein$genes if available
