@@ -277,13 +277,44 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     is_ncbi <- length(non_contam) > 0 && any(grepl("^[XNW]P_", head(non_contam, 50)))
 
     if (is_ncbi) {
-      # NCBI accessions — parse gene/protein names from y_protein$genes or FASTA headers
-      id_map <- NULL
-      genes_df <- values$y_protein$genes
-      if (!is.null(genes_df)) {
-        # DIA-NN stores FASTA descriptions in Protein.Names and gene info in Genes
-        pn_col <- intersect(c("Protein.Names", "Protein.Name"), colnames(genes_df))
-        gn_col <- intersect(c("Genes", "Gene.Names", "Gene"), colnames(genes_df))
+      # NCBI accessions — try gene_map.tsv first, then fall back to FASTA headers
+      ncbi_gene_map <- NULL
+      # Look for gene map TSV alongside the FASTA file
+      if (!is.null(values$fasta_info) && !is.null(values$diann_fasta_files)) {
+        for (fasta_f in values$diann_fasta_files) {
+          map_path <- sub("\\.fasta$", "_gene_map.tsv", fasta_f)
+          # Also check local temp copies
+          if (!file.exists(map_path)) map_path <- sub("\\.fasta$", "_gene_map.tsv", basename(fasta_f))
+          if (!file.exists(map_path)) {
+            # Try common download dirs
+            for (d in c("/quobyte/proteomics-grp/de-limp/fasta", tempdir())) {
+              candidate <- file.path(d, sub("\\.fasta$", "_gene_map.tsv", basename(fasta_f)))
+              if (file.exists(candidate)) { map_path <- candidate; break }
+            }
+          }
+          if (file.exists(map_path)) {
+            ncbi_gene_map <- tryCatch(read.delim(map_path, stringsAsFactors = FALSE), error = function(e) NULL)
+            break
+          }
+        }
+      }
+
+      if (!is.null(ncbi_gene_map) && nrow(ncbi_gene_map) > 0 && "gene_symbol" %in% colnames(ncbi_gene_map)) {
+        # Use gene map from batch E-utilities lookup
+        ncbi_gene_map <- ncbi_gene_map[!duplicated(ncbi_gene_map$accession), ]
+        df_raw <- df_raw %>%
+          left_join(ncbi_gene_map, by = c("Accession" = "accession")) %>%
+          mutate(
+            Gene = ifelse(!is.na(gene_symbol) & nzchar(gene_symbol), gene_symbol, Accession),
+            Protein.Name = ifelse(!is.na(protein_name) & nzchar(protein_name), protein_name, Protein.Group)
+          )
+      } else {
+        # Fallback: parse from y_protein$genes (DIA-NN FASTA header parsing)
+        id_map <- NULL
+        genes_df <- values$y_protein$genes
+        if (!is.null(genes_df)) {
+          pn_col <- intersect(c("Protein.Names", "Protein.Name"), colnames(genes_df))
+          gn_col <- intersect(c("Genes", "Gene.Names", "Gene"), colnames(genes_df))
 
         if (length(pn_col) > 0 || length(gn_col) > 0) {
           pg_col <- if ("Protein.Group" %in% colnames(genes_df)) "Protein.Group" else NULL
@@ -317,6 +348,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         df_raw$Gene <- df_raw$Accession
         df_raw$Protein.Name <- df_raw$Protein.Group
       }
+      }  # end fallback else (no gene map TSV)
     } else {
       # UniProt accessions — use bitr() for gene symbol mapping
       org_db_name <- detect_organism_db(df_raw$Protein.Group)

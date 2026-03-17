@@ -483,7 +483,76 @@ ncbi_download_proteome <- function(accession, output_dir) {
   final_path <- file.path(output_dir, final_name)
   file.rename(fasta_path, final_path)
 
+  # Build gene symbol mapping from FASTA headers + batch NCBI E-utilities
+  tryCatch({
+    gene_map_path <- sub("\\.fasta$", "_gene_map.tsv", final_path)
+    if (!file.exists(gene_map_path)) {
+      message("[NCBI] Building gene symbol mapping...")
+      gene_map <- ncbi_build_gene_map(final_path)
+      if (nrow(gene_map) > 0) {
+        write.table(gene_map, gene_map_path, sep = "\t", row.names = FALSE, quote = FALSE)
+        message("[NCBI] Gene map saved: ", nrow(gene_map), " entries")
+      }
+    }
+  }, error = function(e) message("[NCBI] Gene map build failed: ", e$message))
+
   final_path
+}
+
+#' Build gene symbol mapping for NCBI RefSeq proteins via E-utilities
+#' @param fasta_path Path to NCBI protein FASTA file
+#' @return data.frame with accession, gene_symbol, protein_name columns
+ncbi_build_gene_map <- function(fasta_path) {
+  # Parse accessions and descriptions from FASTA headers
+  headers <- grep("^>", readLines(fasta_path, warn = FALSE), value = TRUE)
+  parsed <- data.frame(
+    accession = sub("^>(\\S+).*", "\\1", headers),
+    protein_name = sub("^>\\S+\\s+(.+?)\\s*\\[.*\\]\\s*$", "\\1", headers),
+    stringsAsFactors = FALSE
+  )
+
+  # Batch lookup gene symbols via NCBI E-utilities (200 at a time)
+  accessions <- unique(parsed$accession)
+  gene_map <- data.frame(accession = character(), gene_symbol = character(),
+                         stringsAsFactors = FALSE)
+
+  batch_size <- 200
+  for (i in seq(1, length(accessions), by = batch_size)) {
+    batch <- accessions[i:min(i + batch_size - 1, length(accessions))]
+    ids <- paste(batch, collapse = ",")
+
+    result <- tryCatch({
+      url <- paste0("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&id=",
+                     utils::URLencode(ids), "&rettype=gp&retmode=xml")
+      xml_text <- paste(readLines(url, warn = FALSE), collapse = "\n")
+
+      # Extract accession + gene pairs from XML
+      # Pattern: <GBSeq_locus>ACCESSION</GBSeq_locus> ... <GBQualifier_name>gene</GBQualifier_name><GBQualifier_value>SYMBOL</GBQualifier_value>
+      seqs <- strsplit(xml_text, "<GBSeq>")[[1]][-1]
+      batch_map <- lapply(seqs, function(seq_xml) {
+        acc <- sub(".*<GBSeq_locus>(.*?)</GBSeq_locus>.*", "\\1", seq_xml)
+        # Also try accession.version
+        acc_ver <- sub(".*<GBSeq_accession-version>(.*?)</GBSeq_accession-version>.*", "\\1", seq_xml)
+        gene <- if (grepl("<GBQualifier_name>gene</GBQualifier_name>", seq_xml)) {
+          sub(".*<GBQualifier_name>gene</GBQualifier_name>\\s*<GBQualifier_value>(.*?)</GBQualifier_value>.*",
+              "\\1", seq_xml)
+        } else ""
+        data.frame(accession = acc_ver, gene_symbol = gene, stringsAsFactors = FALSE)
+      })
+      do.call(rbind, batch_map)
+    }, error = function(e) {
+      message("[NCBI] Batch ", i, " lookup failed: ", e$message)
+      data.frame(accession = character(), gene_symbol = character(), stringsAsFactors = FALSE)
+    })
+
+    gene_map <- rbind(gene_map, result)
+    if (i + batch_size <= length(accessions)) Sys.sleep(0.4)  # NCBI rate limit
+  }
+
+  # Merge with parsed descriptions
+  merged <- merge(parsed, gene_map, by = "accession", all.x = TRUE)
+  merged$gene_symbol[is.na(merged$gene_symbol)] <- ""
+  merged
 }
 
 #' Scan a directory for pre-staged FASTA databases
