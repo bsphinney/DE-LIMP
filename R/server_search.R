@@ -1842,6 +1842,20 @@ server_search <- function(input, output, session, values, add_to_log,
   shinyFiles::shinyDirChoose(input, "output_base_dir", roots = volumes, session = session)
   shinyFiles::shinyFileChoose(input, "lib_file", roots = volumes, session = session,
     filetypes = c("speclib", "tsv", "csv"))
+
+  # SSH key file browser — include .ssh directories for key discovery
+  ssh_key_roots <- c(volumes)
+  for (ssh_dir in c("/home/shiny/.ssh", file.path(Sys.getenv("HOME"), ".ssh"))) {
+    if (dir.exists(ssh_dir)) ssh_key_roots <- c(ssh_key_roots, `SSH Keys` = ssh_dir)
+  }
+  shinyFiles::shinyFileChoose(input, "ssh_key_browse", roots = ssh_key_roots, session = session)
+  observeEvent(input$ssh_key_browse, {
+    if (is.integer(input$ssh_key_browse)) return()
+    file_info <- shinyFiles::parseFilePaths(ssh_key_roots, input$ssh_key_browse)
+    if (nrow(file_info) > 0) {
+      updateTextInput(session, "ssh_key_path", value = as.character(file_info$datapath[1]))
+    }
+  })
   shinyFiles::shinyDirChoose(input, "docker_output_dir", roots = volumes, session = session)
   if (local_diann && !nzchar(delimp_data_dir)) {
     shinyFiles::shinyDirChoose(input, "local_output_dir_browse", roots = volumes, session = session)

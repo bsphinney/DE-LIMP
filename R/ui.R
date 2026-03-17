@@ -823,17 +823,30 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     value = "hive.hpc.ucdavis.edu"),
                   div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                     div(style = "flex: 1; min-width: 100px;",
-                      textInput("ssh_user", "Username", value = Sys.getenv("USER", ""))
+                      textInput("ssh_user", "Username",
+                        value = Sys.getenv("DELIMP_SSH_USER", Sys.getenv("USER", "")))
                     ),
                     div(style = "flex: 1; min-width: 80px;",
                       numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)
                     )
                   ),
-                  textInput("ssh_key_path", "SSH Key Path",
-                    value = if (nzchar(delimp_data_dir))
-                      paste0(delimp_data_dir, "/ssh/id_ed25519")
-                    else
-                      paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")),
+                  div(style = "display: flex; gap: 5px; align-items: flex-end;",
+                    div(style = "flex: 1;",
+                      textInput("ssh_key_path", "SSH Key Path",
+                        value = {
+                          # Auto-detect SSH key: env var > Docker mount > data/ssh > ~/.ssh
+                          env_key <- Sys.getenv("DELIMP_SSH_KEY", "")
+                          if (nzchar(env_key) && file.exists(env_key)) env_key
+                          else if (file.exists("/home/shiny/.ssh/id_ed25519")) "/home/shiny/.ssh/id_ed25519"
+                          else if (nzchar(delimp_data_dir) && file.exists(paste0(delimp_data_dir, "/ssh/id_ed25519")))
+                            paste0(delimp_data_dir, "/ssh/id_ed25519")
+                          else paste0(Sys.getenv("HOME"), "/.ssh/id_ed25519")
+                        })
+                    ),
+                    shinyFiles::shinyFilesButton("ssh_key_browse", "Browse",
+                      title = "Select SSH private key",
+                      class = "btn-outline-secondary btn-sm", style = "margin-bottom: 15px;")
+                  ),
                   textInput("ssh_modules", "Modules to Load (optional)",
                     value = "",
                     placeholder = "e.g., slurm apptainer"),
