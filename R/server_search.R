@@ -6359,6 +6359,17 @@ server_search <- function(input, output, session, values, add_to_log,
                 return()
               }
               new_job_id <- parse_sbatch_output(result$stdout)
+            } else if (slurm_proxy_available()) {
+              local_sbatch <- Sys.which("sbatch")
+              if (!nzchar(local_sbatch)) local_sbatch <- "sbatch"
+              result <- slurm_proxy_exec(
+                paste(local_sbatch, shQuote(script_path)), timeout = 30)
+              if (result$status != 0) {
+                showNotification(paste("sbatch failed:",
+                  paste(result$stdout, collapse = " ")), type = "error")
+                return()
+              }
+              new_job_id <- parse_sbatch_output(result$stdout)
             } else {
               local_sbatch <- Sys.which("sbatch")
               if (!nzchar(local_sbatch)) local_sbatch <- "sbatch"
