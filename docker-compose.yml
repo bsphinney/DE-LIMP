@@ -35,3 +35,5 @@ services:
       - ./data:/data
     environment:
       - DELIMP_DATA_DIR=/data
+      - DELIMP_SSH_USER=${DELIMP_SSH_USER:-}
+      - DELIMP_SSH_KEY=${DELIMP_SSH_KEY:-}

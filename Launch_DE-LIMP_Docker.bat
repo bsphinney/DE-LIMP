@@ -73,13 +73,9 @@ if not exist "data\raw" mkdir "data\raw"
 if not exist "data\fasta" mkdir "data\fasta"
 if not exist "data\output" mkdir "data\output"
 
-:: Generate per-session docker-compose override
-> docker-compose.override.yml echo services:
->> docker-compose.override.yml echo   delimp:
->> docker-compose.override.yml echo     environment:
->> docker-compose.override.yml echo       - DELIMP_DATA_DIR=/data
->> docker-compose.override.yml echo       - DELIMP_SSH_USER=%HIVE_USER%
->> docker-compose.override.yml echo       - DELIMP_SSH_KEY=%SSH_KEY_PATH%
+:: Pass user info as environment variables
+set "DELIMP_SSH_USER=%HIVE_USER%"
+set "DELIMP_SSH_KEY=%SSH_KEY_PATH%"
 
 :: Start container (only rebuild if Dockerfile changed)
 echo.
@@ -87,7 +83,7 @@ echo  Starting DE-LIMP...
 docker compose up -d 2>nul
 if errorlevel 1 (
     echo.
-    echo  Building container (first run or update - this may take a few minutes)...
+    echo  Building container - this may take a few minutes on first run...
     echo.
     docker compose up -d --build
 )
@@ -117,6 +113,5 @@ pause >nul
 :: Cleanup
 echo  Stopping DE-LIMP...
 docker compose down >nul 2>&1
-del docker-compose.override.yml 2>nul
 echo  Done!
 timeout /t 2 >nul
