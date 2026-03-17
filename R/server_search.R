@@ -33,6 +33,11 @@ server_search <- function(input, output, session, values, add_to_log,
     )
   })
 
+  # SSH connected flag for conditionalPanel in sidebar
+
+  output$ssh_connected_flag <- reactive({ isTRUE(values$ssh_connected) })
+  outputOptions(output, "ssh_connected_flag", suspendWhenHidden = FALSE)
+
   # ============================================================================
   #    Docker Backend UI (image status, resource controls, output path)
   # ============================================================================
@@ -1332,14 +1337,19 @@ server_search <- function(input, output, session, values, add_to_log,
   # File type filters per target
   browse_file_patterns <- list(
     raw = "\\.(d|raw|mzML|wiff)$",
-    fasta = "\\.(fasta|fa|fas)$"
+    fasta = "\\.(fasta|fa|fas)$",
+    parquet = "\\.parquet$"
   )
 
   # Default starting paths per target
   browse_defaults <- list(
     raw = "/quobyte/proteomics-grp/",
-    fasta = "/quobyte/proteomics-grp/"
+    fasta = "/quobyte/proteomics-grp/",
+    parquet = "/quobyte/proteomics-grp/"
   )
+
+  # Selected file path for parquet browse mode (file selection, not directory)
+  browse_selected_file <- reactiveVal(NULL)
 
   # Helper: navigate to a path and refresh listing
   browse_navigate <- function(path) {
@@ -1348,6 +1358,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
     browse_loading(TRUE)
     browse_error(NULL)
+    browse_selected_file(NULL)  # Clear file selection on navigation
 
     # Normalize path
     path <- sub("/+$", "", path)
@@ -1395,11 +1406,24 @@ server_search <- function(input, output, session, values, add_to_log,
     showModal(ssh_browse_modal())
   })
 
+  # Open browser for HPC parquet loading (from sidebar Upload Data section)
+  observeEvent(input$load_from_hpc_btn, {
+    cfg <- ssh_config()
+    req(cfg)
+    browse_target("parquet")
+    browse_selected_file(NULL)
+
+    start_path <- browse_defaults$parquet
+    browse_navigate(start_path)
+    showModal(ssh_browse_modal())
+  })
+
   # Build the modal UI
   ssh_browse_modal <- function() {
     target <- browse_target()
-    target_label <- if (target == "raw") "Raw Data Directory" else "FASTA Directory"
-    file_hint <- if (target == "raw") ".d / .raw / .mzML / .wiff" else ".fasta / .fa"
+    target_label <- if (target == "parquet") "Load Report from HPC" else if (target == "raw") "Raw Data Directory" else "FASTA Directory"
+    file_hint <- if (target == "parquet") ".parquet" else if (target == "raw") ".d / .raw / .mzML / .wiff" else ".fasta / .fa"
+    is_file_select <- (target == "parquet")
 
     modalDialog(
       title = tagList(icon("folder-open"), sprintf(" Browse Remote: %s", target_label)),
@@ -1453,8 +1477,13 @@ server_search <- function(input, output, session, values, add_to_log,
       # Info bar
       div(style = "margin-top: 8px; font-size: 0.82em; color: #6c757d;",
         icon("info-circle"),
-        sprintf(" Click folders to navigate. Looking for %s files.", file_hint),
-        " Select the directory containing your data files."
+        if (is_file_select) {
+          tagList(" Click folders to navigate. Click a ", tags$strong(".parquet"),
+            " file to select it, then press Load.")
+        } else {
+          tagList(sprintf(" Click folders to navigate. Looking for %s files.", file_hint),
+            " Select the directory containing your data files.")
+        }
       ),
 
       footer = tagList(
@@ -1465,8 +1494,9 @@ server_search <- function(input, output, session, values, add_to_log,
           ),
           div(
             modalButton("Cancel"),
-            actionButton("ssh_browse_select", "Select This Directory",
-              class = "btn-primary", icon = icon("check"))
+            actionButton("ssh_browse_select",
+              if (is_file_select) "Load Selected File" else "Select This Directory",
+              class = "btn-primary", icon = icon(if (is_file_select) "download" else "check"))
           )
         )
       )
@@ -1563,11 +1593,20 @@ server_search <- function(input, output, session, values, add_to_log,
       is_dir <- entry$type == "dir"
       is_match <- !is_dir && grepl(file_pattern, entry$name, ignore.case = TRUE)
 
+      # Check if this file is the currently selected parquet file
+      file_full_path <- gsub("//+", "/", paste0(browse_current_path(), "/", entry$name))
+      is_selected <- (target == "parquet" && is_match &&
+                      identical(browse_selected_file(), file_full_path))
+
       # Visual styling
       if (is_dir) {
         icon_el <- icon("folder", style = "color: #f0ad4e; margin-right: 6px;")
         name_style <- "color: #0d6efd; font-weight: 500;"
         row_bg <- ""
+      } else if (is_selected) {
+        icon_el <- icon("file-circle-check", style = "color: #0d6efd; margin-right: 6px;")
+        name_style <- "color: #0d6efd; font-weight: 600;"
+        row_bg <- "background: #cfe2ff; border-left: 3px solid #0d6efd;"
       } else if (is_match) {
         icon_el <- icon("file", style = "color: #198754; margin-right: 6px;")
         name_style <- "color: #198754; font-weight: 500;"
@@ -1584,9 +1623,15 @@ server_search <- function(input, output, session, values, add_to_log,
         new_path <- gsub("//+", "/", new_path)
         sprintf("Shiny.setInputValue('ssh_browse_click_dir', '%s', {priority: 'event'});",
                 gsub("'", "\\\\'", new_path))
+      } else if (is_match && target == "parquet") {
+        # In parquet mode, matching files are clickable for selection
+        file_path <- paste0(browse_current_path(), "/", entry$name)
+        file_path <- gsub("//+", "/", file_path)
+        sprintf("Shiny.setInputValue('ssh_browse_click_file', '%s', {priority: 'event'});",
+                gsub("'", "\\\\'", file_path))
       } else ""
 
-      hover_class <- if (is_dir) "ssh-browse-row-hover" else ""
+      hover_class <- if (is_dir || (is_match && target == "parquet")) "ssh-browse-row-hover" else ""
 
       div(
         style = paste0(
@@ -1605,7 +1650,17 @@ server_search <- function(input, output, session, values, add_to_log,
 
   # Show selected path in footer
   output$ssh_browse_selected_path <- renderText({
-    browse_current_path()
+    target <- browse_target()
+    if (target == "parquet" && !is.null(browse_selected_file())) {
+      browse_selected_file()
+    } else {
+      browse_current_path()
+    }
+  })
+
+  # Select a file on click (parquet browse mode)
+  observeEvent(input$ssh_browse_click_file, {
+    browse_selected_file(input$ssh_browse_click_file)
   })
 
   # Navigate into directory on click
@@ -1649,18 +1704,133 @@ server_search <- function(input, output, session, values, add_to_log,
     updateTextInput(session, "ssh_browse_path_input", value = browse_current_path())
   })
 
-  # Select the current directory and close modal
+  # Select the current directory (or file in parquet mode) and close modal
   observeEvent(input$ssh_browse_select, {
     path <- browse_current_path()
     target <- browse_target()
 
     if (target == "raw") {
       updateTextInput(session, "ssh_raw_data_dir", value = path)
+      removeModal()
     } else if (target == "fasta") {
       updateTextInput(session, "ssh_fasta_browse_dir", value = path)
-    }
+      removeModal()
+    } else if (target == "parquet") {
+      # Load the selected parquet file from HPC
+      selected <- browse_selected_file()
+      if (is.null(selected) || !grepl("\\.parquet$", selected, ignore.case = TRUE)) {
+        showNotification("Please click a .parquet file to select it first.",
+          type = "warning", duration = 5)
+        return()
+      }
+      removeModal()
 
-    removeModal()
+      cfg <- ssh_config()
+      req(cfg)
+
+      withProgress(message = "Loading report from HPC...", value = 0, {
+        incProgress(0.1, detail = "Downloading file via SCP...")
+
+        local_report <- file.path(tempdir(), paste0("hpc_", basename(selected)))
+        dl_result <- scp_download(cfg, selected, local_report)
+
+        if (dl_result$status != 0) {
+          showNotification(
+            sprintf("SCP download failed: %s",
+              paste(dl_result$stderr, collapse = " ")),
+            type = "error", duration = 10)
+          return()
+        }
+
+        if (!file.exists(local_report) || file.size(local_report) < 100) {
+          showNotification("Downloaded file is empty or missing.", type = "error", duration = 10)
+          return()
+        }
+
+        file_mb <- round(file.size(local_report) / 1e6, 1)
+        message(sprintf("[DE-LIMP] Downloaded %s from HPC (%.1f MB)", basename(selected), file_mb))
+
+        incProgress(0.2, detail = "Calculating QC stats...")
+        tryCatch({
+          values$qc_stats <- get_diann_stats_r(local_report)
+        }, error = function(e) {
+          message("[DE-LIMP] QC stats extraction failed: ", e$message)
+        })
+
+        incProgress(0.3, detail = "Reading expression matrix...")
+        tryCatch({
+          raw_data <- suppressMessages(suppressWarnings(
+            limpa::readDIANN(local_report, format = "parquet", q.cutoffs = input$q_cutoff)))
+
+          values$raw_data <- raw_data
+          values$uploaded_report_path <- local_report
+          values$original_report_name <- basename(selected)
+          values$is_example_data <- FALSE
+
+          # Initialize metadata
+          sample_names <- sort(colnames(raw_data$E))
+          values$metadata <- data.frame(
+            ID = seq_along(sample_names),
+            File.Name = sample_names,
+            Group = rep("", length(sample_names)),
+            Batch = rep("", length(sample_names)),
+            Covariate1 = rep("", length(sample_names)),
+            Covariate2 = rep("", length(sample_names)),
+            stringsAsFactors = FALSE
+          )
+          if (is.null(values$cov1_name)) values$cov1_name <- "Covariate1"
+          if (is.null(values$cov2_name)) values$cov2_name <- "Covariate2"
+
+          # Detect DIA-NN normalization status
+          values$diann_norm_detected <- tryCatch({
+            raw_parquet <- arrow::read_parquet(local_report,
+              col_select = c("Precursor.Quantity", "Precursor.Normalised"))
+            has_both <- all(c("Precursor.Quantity", "Precursor.Normalised") %in% names(raw_parquet))
+            if (has_both) {
+              sample_rows <- head(raw_parquet, 1000)
+              ratio <- sample_rows$Precursor.Normalised / sample_rows$Precursor.Quantity
+              if (sd(ratio, na.rm = TRUE) > 0.001) "on" else "off"
+            } else "unknown"
+          }, error = function(e) "unknown")
+
+          # Auto-detect phospho data
+          values$phospho_detected <- detect_phospho(local_report)
+
+          # Store the remote output directory for history linking
+          remote_dir <- dirname(selected)
+          values$diann_search_settings <- list(
+            output_dir = remote_dir,
+            loaded_from_hpc = TRUE,
+            report_file = selected
+          )
+
+          gc(verbose = FALSE)
+
+          incProgress(0.3, detail = "Done!")
+          message(sprintf("[DE-LIMP] Loaded HPC report: %s (%d samples, %d precursors)",
+            basename(selected), ncol(raw_data$E), nrow(raw_data$E)))
+
+          showNotification(
+            sprintf("Loaded %s from HPC (%d samples)",
+              basename(selected), ncol(raw_data$E)),
+            type = "message", duration = 8)
+
+          add_to_log("HPC Data Load", c(
+            sprintf("# Remote file: %s", selected),
+            sprintf("dat <- readDIANN('%s', format='parquet', q.cutoffs=%s)",
+              basename(selected), input$q_cutoff)
+          ))
+
+          # Navigate to Assign Groups sub-tab
+          nav_select("main_tabs", "Data Overview")
+          nav_select("data_overview_tabs", "Assign Groups & Run")
+
+        }, error = function(e) {
+          showNotification(paste("Error loading report:", e$message),
+            type = "error", duration = 10)
+        })
+      })
+    }
   })
 
   # ============================================================================

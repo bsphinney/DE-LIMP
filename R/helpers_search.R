@@ -3870,6 +3870,83 @@ activity_log_read <- function(path = activity_log_path()) {
   tryCatch(read.csv(path, stringsAsFactors = FALSE), error = function(e) data.frame())
 }
 
+#' Read the activity log from a remote HPC host via SSH
+#' Returns a data.frame (same schema as local CSV) or empty data.frame on failure.
+#' Results are cached for 60 seconds to avoid repeated SSH calls.
+.remote_activity_cache <- new.env(parent = emptyenv())
+.remote_activity_cache$data <- NULL
+.remote_activity_cache$timestamp <- 0
+
+read_remote_activity_log <- function(ssh_config) {
+  if (is.null(ssh_config)) return(data.frame())
+
+  # Return cached result if less than 60 seconds old
+  now <- as.numeric(Sys.time())
+  if (!is.null(.remote_activity_cache$data) &&
+      (now - .remote_activity_cache$timestamp) < 60) {
+    return(.remote_activity_cache$data)
+  }
+
+  result <- tryCatch(
+    ssh_exec(ssh_config, "cat ~/.delimp_activity_log.csv 2>/dev/null", timeout = 15),
+    error = function(e) list(status = 1, stdout = character())
+  )
+
+  if (result$status != 0 || length(result$stdout) == 0 ||
+      all(!nzchar(trimws(result$stdout)))) {
+    .remote_activity_cache$data <- data.frame()
+    .remote_activity_cache$timestamp <- now
+    return(data.frame())
+  }
+
+  df <- tryCatch({
+    txt <- paste(result$stdout, collapse = "\n")
+    read.csv(text = txt, stringsAsFactors = FALSE)
+  }, error = function(e) {
+    message("[DE-LIMP] Failed to parse remote activity log: ", e$message)
+    data.frame()
+  })
+
+  .remote_activity_cache$data <- df
+  .remote_activity_cache$timestamp <- now
+  df
+}
+
+#' Invalidate the remote activity log cache (e.g. on manual refresh)
+invalidate_remote_activity_cache <- function() {
+  .remote_activity_cache$data <- NULL
+  .remote_activity_cache$timestamp <- 0
+}
+
+#' Merge local and remote activity logs, deduplicating by timestamp + output_dir
+merge_activity_logs <- function(local_log, remote_log) {
+  if (nrow(local_log) == 0 && nrow(remote_log) == 0) return(data.frame())
+  if (nrow(remote_log) == 0) return(local_log)
+  if (nrow(local_log) == 0) return(remote_log)
+
+  # Ensure both have the same columns
+  all_cols <- union(names(local_log), names(remote_log))
+  for (col in setdiff(all_cols, names(local_log))) local_log[[col]] <- NA
+  for (col in setdiff(all_cols, names(remote_log))) remote_log[[col]] <- NA
+  remote_log <- remote_log[, names(local_log), drop = FALSE]
+
+  # Tag source before merging
+  local_log$.source <- "local"
+  remote_log$.source <- "remote"
+
+  combined <- rbind(local_log, remote_log)
+
+  # Deduplicate: prefer local rows when timestamp + output_dir match
+  if ("timestamp" %in% names(combined) && "output_dir" %in% names(combined)) {
+    dedup_key <- paste0(combined$timestamp, "|", combined$output_dir)
+    dups <- duplicated(dedup_key)
+    # Since local rows come first, duplicated() keeps local and marks remote dups
+    combined <- combined[!dups, , drop = FALSE]
+  }
+
+  combined
+}
+
 #' Generate a simple unique ID (no uuid dependency)
 generate_activity_id <- function() {
   paste0(format(Sys.time(), "%Y%m%d%H%M%S"), "_", sprintf("%06d", sample(999999, 1)))

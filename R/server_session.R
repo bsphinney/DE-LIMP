@@ -1456,11 +1456,45 @@ server_session <- function(input, output, session, values, add_to_log) {
   # ==========================================================================
 
   history_refresh <- reactiveVal(0)
+  history_source <- reactiveVal("local")  # tracks data source: "local", "remote", "merged"
 
-  # Cached activity log — reads from disk once per refresh, shared across all observers
+  # Build SSH config for history reads (same pattern as other SSH consumers in server_session)
+  history_ssh_config <- reactive({
+    if (!isTRUE(values$ssh_connected)) return(NULL)
+    host <- input$ssh_host %||% ""
+    if (!nzchar(host)) return(NULL)
+    list(host = host, user = input$ssh_user,
+         port = input$ssh_port %||% 22, key_path = input$ssh_key_path)
+  })
+
+  # Cached activity log — reads local + remote (via SSH), shared across all observers
   cached_activity_log <- reactive({
     history_refresh()  # dependency: re-read when refresh triggers
-    activity_log_read()
+    local_log <- activity_log_read()
+    cfg <- history_ssh_config()
+
+    if (is.null(cfg)) {
+      # No SSH — local only
+      history_source("local")
+      return(local_log)
+    }
+
+    # SSH available — try remote
+    remote_log <- read_remote_activity_log(cfg)
+
+    if (nrow(local_log) == 0 && nrow(remote_log) == 0) {
+      history_source("local")
+      return(data.frame())
+    } else if (nrow(local_log) == 0) {
+      history_source("remote")
+      return(remote_log)
+    } else if (nrow(remote_log) == 0) {
+      history_source("local")
+      return(local_log)
+    } else {
+      history_source("merged")
+      return(merge_activity_logs(local_log, remote_log))
+    }
   })
 
   # Migrate old CSVs + backfill from job queue on startup
@@ -1538,8 +1572,27 @@ server_session <- function(input, output, session, values, add_to_log) {
   # ==========================================================================
 
   observeEvent(input$history_refresh_btn, {
+    invalidate_remote_activity_cache()  # force fresh SSH read
     history_refresh(isolate(history_refresh()) + 1)
   }, ignoreInit = TRUE)
+
+  # History source badge — shows where the data came from
+  output$history_source_badge <- renderUI({
+    src <- history_source()
+    if (src == "remote") {
+      host <- input$ssh_host %||% "HPC"
+      tags$span(class = "badge bg-info", style = "font-size: 0.8em; vertical-align: middle;",
+        icon("server", style = "margin-right: 4px;"),
+        sprintf("Showing history from %s (via SSH)", host))
+    } else if (src == "merged") {
+      host <- input$ssh_host %||% "HPC"
+      tags$span(class = "badge bg-success", style = "font-size: 0.8em; vertical-align: middle;",
+        icon("code-merge", style = "margin-right: 4px;"),
+        sprintf("Local + %s history merged", host))
+    } else {
+      NULL
+    }
+  })
 
   output$history_table <- renderDT({
     t0 <- proc.time()
@@ -1720,6 +1773,9 @@ server_session <- function(input, output, session, values, add_to_log) {
         sprintf('<input type="checkbox" class="history-compare-cb" data-od="%s" data-name="%s" data-sf="%s" onclick="event.stopPropagation();window._delimp_updateCompare();">', od_esc, nm_esc, sf_esc)
       } else ""
     }, character(1))
+
+    # Drop internal merge column before display
+    log$.source <- NULL
 
     display_cols <- c("details", "timestamp", "user", "name_short", "type_badge", "n_files",
       "n_proteins", "n_de_proteins", "status_badge", "duration_fmt", "project", "actions", "compare_cb")
