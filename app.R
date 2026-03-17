@@ -571,6 +571,12 @@ server <- function(input, output, session) {
       if (gsea_available) nav_show("main_tabs", "Gene Set Enrichment")
       nav_show("main_tabs", "AI Analysis")
       nav_show("main_tabs", "Output")
+    } else if (!is.null(values$y_protein)) {
+      # No DE (no replicates) but quantification done — show DE Dashboard for PCA
+      nav_show("main_tabs", "DE Dashboard")
+      nav_show("main_tabs", "Output")
+      nav_hide("main_tabs", "Gene Set Enrichment")
+      nav_hide("main_tabs", "AI Analysis")
     } else {
       nav_hide("main_tabs", "DE Dashboard")
       nav_hide("main_tabs", "Gene Set Enrichment")
