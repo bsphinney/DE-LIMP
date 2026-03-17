@@ -495,7 +495,19 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     plot_df <- data.frame(Protein.Group = names(avg_signal), Average_Signal_Log2 = avg_signal) %>%
       mutate(Average_Signal_Log10 = Average_Signal_Log2 / log2(10))
 
-    # Always show DE coloring when results are available
+    # Tag contaminants
+    plot_df$Is_Contaminant <- grepl("^Cont_", plot_df$Protein.Group)
+
+    # Filter based on radio button
+    show_mode <- input$signal_show_contam %||% "sample"
+    if (show_mode == "sample") {
+      plot_df <- plot_df[!plot_df$Is_Contaminant, ]
+    } else if (show_mode == "contam") {
+      plot_df <- plot_df[plot_df$Is_Contaminant, ]
+    }
+    # "all" shows everything
+
+    # DE coloring when results are available
     if (!is.null(values$fit) && !is.null(input$contrast_selector_signal) && nchar(input$contrast_selector_signal) > 0) {
       de_data_raw <- topTable(values$fit, coef = input$contrast_selector_signal, number = Inf) %>% as.data.frame()
       if (!"Protein.Group" %in% colnames(de_data_raw)) {
@@ -516,6 +528,13 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       plot_df$DE_Status <- "Not Significant"
     }
 
+    # Override DE status for contaminants in "all" mode
+    if (show_mode == "all") {
+      plot_df$DE_Status[plot_df$Is_Contaminant] <- "Contaminant"
+    } else if (show_mode == "contam") {
+      plot_df$DE_Status <- "Contaminant"
+    }
+
     if (!is.null(values$plot_selected_proteins)) {
       plot_df$Is_Selected <- plot_df$Protein.Group %in% values$plot_selected_proteins
     } else {
@@ -523,17 +542,23 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     }
     selected_df <- filter(plot_df, Is_Selected)
 
-    # Build plot - always use DE coloring when available
+    # Color palette — includes contaminant color
+    color_values <- c(
+      "Up-regulated" = "#e41a1c", "Down-regulated" = "#377eb8",
+      "Not Significant" = "grey70", "Contaminant" = "#ff8c00"
+    )
+
+    # Build plot
     p <- ggplot(plot_df, aes(x = reorder(Protein.Group, -Average_Signal_Log10), y = Average_Signal_Log10))
-    if (!is.null(values$fit)) {
+    if (!is.null(values$fit) || show_mode != "sample") {
       p <- p + geom_point(aes(color = DE_Status), size = 1.5) +
-        scale_color_manual(name = "DE Status",
-          values = c("Up-regulated" = "#e41a1c", "Down-regulated" = "#377eb8", "Not Significant" = "grey70"))
+        scale_color_manual(name = "Status", values = color_values)
     } else {
       p <- p + geom_point(color = "cornflowerblue", size = 1.5)
     }
 
-    p + labs(title = "Signal Distribution Across All Protein Groups", x = NULL, y = "Average Signal (Log10 Intensity)") +
+    n_label <- sprintf("(%s proteins)", format(nrow(plot_df), big.mark = ","))
+    p + labs(title = paste("Signal Distribution", n_label), x = NULL, y = "Average Signal (Log10 Intensity)") +
       theme_minimal() + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
       scale_x_discrete(expand = expansion(add = 1)) +
       geom_point(data = selected_df, color = "black", shape = 1, size = 4, stroke = 1) +

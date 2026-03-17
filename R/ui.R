@@ -1290,12 +1290,19 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       )
                     ),
                     # Control buttons
-                    div(style = "display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 10px;",
-                      actionButton("signal_dist_info_btn", icon("question-circle"), title = "What is this?",
-                        class = "btn-outline-info btn-sm"),
-                      actionButton("fullscreen_signal", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
+                    div(style = "display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px;",
+                      div(style = "display: flex; align-items: center; gap: 10px;",
+                        radioButtons("signal_show_contam", NULL,
+                          choices = c("Sample Proteins" = "sample", "Contaminants" = "contam", "All" = "all"),
+                          selected = "sample", inline = TRUE)
+                      ),
+                      div(
+                        actionButton("signal_dist_info_btn", icon("question-circle"), title = "What is this?",
+                          class = "btn-outline-info btn-sm"),
+                        actionButton("fullscreen_signal", "\U0001F50D Fullscreen", class = "btn-outline-secondary btn-sm")
+                      )
                     ),
-                    plotOutput("protein_signal_plot", height = "calc(100vh - 370px)")
+                    plotOutput("protein_signal_plot", height = "calc(100vh - 400px)")
                   ),
 
                   nav_panel("Dataset Summary",
