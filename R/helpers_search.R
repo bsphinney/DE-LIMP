@@ -437,17 +437,23 @@ ncbi_download_proteome <- function(accession, output_dir) {
   zip_path <- file.path(output_dir, paste0(accession, "_protein.zip"))
   dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-  # Download ZIP
-  resp <- tryCatch(
-    httr2::request(url) |>
-      httr2::req_timeout(120) |>
-      httr2::req_perform(path = zip_path),
+  # Download ZIP — use download.file for reliability across environments
+  message("[NCBI] Downloading proteome from: ", url)
+  message("[NCBI] Saving to: ", zip_path)
+  dl_result <- tryCatch(
+    download.file(url, zip_path, mode = "wb", quiet = TRUE, timeout = 300),
     error = function(e) {
       message("[NCBI] Download failed: ", e$message)
-      return(NULL)
+      return(1L)
     }
   )
-  if (is.null(resp)) return(NULL)
+  if (dl_result != 0 || !file.exists(zip_path) || file.size(zip_path) < 1000) {
+    message("[NCBI] Download failed or file too small: ",
+            if (file.exists(zip_path)) paste0(file.size(zip_path), " bytes") else "file missing")
+    unlink(zip_path)
+    return(NULL)
+  }
+  message("[NCBI] Downloaded: ", round(file.size(zip_path) / 1e6, 1), " MB")
 
   # Extract protein.faa from ZIP
   fasta_entry <- tryCatch({
