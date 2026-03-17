@@ -34,13 +34,13 @@ for %%f in (data\ssh\*.key data\ssh\id_*) do (
     set "found_keys=1"
 )
 if "%found_keys%"=="0" (
-    echo    No SSH keys found in data\ssh\
+    echo    No SSH keys found yet.
     echo.
     echo  To set up HPC access, each user should:
-    echo    1. Copy their SSH private key to data\ssh\
-    echo    2. Rename it to their HIVE username (e.g., jsmith)
-    echo.
-    echo  Example: copy id_ed25519 to data\ssh\jsmith
+    echo    1. Copy their SSH private key to:
+    echo       %CD%\data\ssh\
+    echo    2. Rename it to their HIVE username
+    echo       Example: %CD%\data\ssh\jsmith
     echo.
 )
 echo.
@@ -57,7 +57,7 @@ if defined HIVE_USER (
         echo  Using default SSH key: data\ssh\id_ed25519
     ) else (
         echo  No SSH key found for %HIVE_USER%.
-        echo  Place your key at data\ssh\%HIVE_USER%
+        echo  Place your key at: %CD%\data\ssh\%HIVE_USER%
     )
 )
 echo.
