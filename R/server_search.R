@@ -4317,18 +4317,30 @@ server_search <- function(input, output, session, values, add_to_log,
           list(success = FALSE, error = e$message)
         })
       } else {
-        # Local mode: write and submit locally
+        # Local mode: write and submit locally (or via SLURM proxy in container)
         writeLines(script_content, script_path)
 
-        # Use full sbatch path (may be on CVMFS inside Apptainer container)
         sbatch_local <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
-        submit_result <- tryCatch({
-          stdout <- system2(sbatch_local, args = script_path, stdout = TRUE, stderr = TRUE)
-          exit_code <- attr(stdout, "status")
-          list(success = is.null(exit_code) || exit_code == 0L, stdout = stdout)
-        }, error = function(e) {
-          list(success = FALSE, error = e$message)
-        })
+        submit_result <- if (slurm_proxy_available()) {
+          # Inside Apptainer container — use SLURM proxy to reach sbatch
+          message("[Submit] Using SLURM proxy for sbatch: ", script_path)
+          tryCatch({
+            result <- slurm_proxy_exec(paste(sbatch_local, shQuote(script_path)), timeout = 30)
+            list(success = result$status == 0, stdout = result$stdout,
+                 error = if (result$status != 0) paste(result$stdout, collapse = " ") else NULL)
+          }, error = function(e) {
+            list(success = FALSE, error = e$message)
+          })
+        } else {
+          # Direct local sbatch (native install or Docker with sbatch on PATH)
+          tryCatch({
+            stdout <- system2(sbatch_local, args = script_path, stdout = TRUE, stderr = TRUE)
+            exit_code <- attr(stdout, "status")
+            list(success = is.null(exit_code) || exit_code == 0L, stdout = stdout)
+          }, error = function(e) {
+            list(success = FALSE, error = e$message)
+          })
+        }
       }
 
       if (!submit_result$success) {
