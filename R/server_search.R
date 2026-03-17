@@ -1540,6 +1540,21 @@ server_search <- function(input, output, session, values, add_to_log,
       updateTextInput(session, "diann_partition", value = best$partition)
     }
 
+    # Auto-adjust CPU default based on what's actually available
+    # (subtract our own container's CPUs from the user limit)
+    res <- isolate(values$cluster_resources)
+    if (isTRUE(res$success) && !is.null(res$user_limit) && !is.null(res$user_in_use)) {
+      available_cpus <- res$user_limit - res$user_in_use
+      # Cap to reasonable range, leave headroom
+      smart_cpus <- max(8, min(available_cpus - 4, res$user_limit))
+      smart_cpus <- smart_cpus - (smart_cpus %% 4)  # round down to multiple of 4
+      if (smart_cpus < isolate(input$diann_cpus)) {
+        updateNumericInput(session, "diann_cpus", value = smart_cpus)
+        message("[SLURM Proxy] Adjusted default CPUs: ", smart_cpus,
+                " (limit=", res$user_limit, ", in_use=", res$user_in_use, ")")
+      }
+    }
+
     tryCatch({
       username <- Sys.info()[["user"]]
       members <- get_lab_members(username)
@@ -4088,15 +4103,26 @@ server_search <- function(input, output, session, values, add_to_log,
         local_sbatch_bin <- if (nzchar(local_sbatch_path)) local_sbatch_path else "sbatch"
         has_step1 <- !is.null(scripts$step1_library)
 
+        # Helper to submit sbatch locally (proxy-aware)
+        local_sbatch_submit <- function(sbatch_bin, args) {
+          if (slurm_proxy_available()) {
+            result <- slurm_proxy_exec(
+              paste(sbatch_bin, paste(args, collapse = " ")), timeout = 30)
+            list(status = result$status, stdout = result$stdout)
+          } else {
+            out <- system2(sbatch_bin, args = args, stdout = TRUE, stderr = TRUE)
+            list(status = attr(out, "status") %||% 0L, stdout = out)
+          }
+        }
+
         withProgress(message = "Submitting 5-step parallel search...", value = 0, {
           # Step 1
           if (!pstate$failed && has_step1) {
             incProgress(0.1, detail = "Step 1: Library prediction")
             tryCatch({
-              out <- system2(local_sbatch_bin,
-                args = file.path(output_dir, "step1_libpred.sbatch"),
-                stdout = TRUE, stderr = TRUE)
-              step_ids$step1 <- parse_sbatch_output(out)
+              res <- local_sbatch_submit(local_sbatch_bin,
+                file.path(output_dir, "step1_libpred.sbatch"))
+              step_ids$step1 <- parse_sbatch_output(res$stdout)
               if (is.null(step_ids$step1)) pstate$failed <- TRUE
             }, error = function(e) { pstate$failed <- TRUE })
           }
@@ -4106,10 +4132,9 @@ server_search <- function(input, output, session, values, add_to_log,
             dep <- if (!is.null(step_ids$step1))
               sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step1)
             tryCatch({
-              out <- system2(local_sbatch_bin,
-                args = c(dep, file.path(output_dir, "step2_firstpass.sbatch")),
-                stdout = TRUE, stderr = TRUE)
-              step_ids$step2 <- parse_sbatch_output(out)
+              res <- local_sbatch_submit(local_sbatch_bin,
+                c(dep, file.path(output_dir, "step2_firstpass.sbatch")))
+              step_ids$step2 <- parse_sbatch_output(res$stdout)
               if (is.null(step_ids$step2)) pstate$failed <- TRUE
             }, error = function(e) { pstate$failed <- TRUE })
           }
@@ -4117,11 +4142,10 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!pstate$failed) {
             incProgress(0.2, detail = "Step 3: Library assembly")
             tryCatch({
-              out <- system2(local_sbatch_bin,
-                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step2),
-                         file.path(output_dir, "step3_assembly.sbatch")),
-                stdout = TRUE, stderr = TRUE)
-              step_ids$step3 <- parse_sbatch_output(out)
+              res <- local_sbatch_submit(local_sbatch_bin,
+                c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step2),
+                  file.path(output_dir, "step3_assembly.sbatch")))
+              step_ids$step3 <- parse_sbatch_output(res$stdout)
               if (is.null(step_ids$step3)) pstate$failed <- TRUE
             }, error = function(e) { pstate$failed <- TRUE })
           }
@@ -4129,11 +4153,10 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!pstate$failed) {
             incProgress(0.2, detail = "Step 4: Final-pass array")
             tryCatch({
-              out <- system2(local_sbatch_bin,
-                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step3),
-                         file.path(output_dir, "step4_finalpass.sbatch")),
-                stdout = TRUE, stderr = TRUE)
-              step_ids$step4 <- parse_sbatch_output(out)
+              res <- local_sbatch_submit(local_sbatch_bin,
+                c(sprintf("--kill-on-invalid-dep=yes --dependency=afterok:%s", step_ids$step3),
+                  file.path(output_dir, "step4_finalpass.sbatch")))
+              step_ids$step4 <- parse_sbatch_output(res$stdout)
               if (is.null(step_ids$step4)) pstate$failed <- TRUE
             }, error = function(e) { pstate$failed <- TRUE })
           }
@@ -4141,11 +4164,10 @@ server_search <- function(input, output, session, values, add_to_log,
           if (!pstate$failed) {
             incProgress(0.2, detail = "Step 5: Cross-run report")
             tryCatch({
-              out <- system2(local_sbatch_bin,
-                args = c(sprintf("--kill-on-invalid-dep=yes --dependency=afterany:%s", step_ids$step4),
-                         file.path(output_dir, "step5_report.sbatch")),
-                stdout = TRUE, stderr = TRUE)
-              step_ids$step5 <- parse_sbatch_output(out)
+              res <- local_sbatch_submit(local_sbatch_bin,
+                c(sprintf("--kill-on-invalid-dep=yes --dependency=afterany:%s", step_ids$step4),
+                  file.path(output_dir, "step5_report.sbatch")))
+              step_ids$step5 <- parse_sbatch_output(res$stdout)
               if (is.null(step_ids$step5)) pstate$failed <- TRUE
             }, error = function(e) { pstate$failed <- TRUE })
           }
@@ -4679,6 +4701,11 @@ server_search <- function(input, output, session, values, add_to_log,
 
           sacct_result <- if (!is.null(job_cfg)) {
             ssh_exec(job_cfg, sacct_cmd, login_shell = is.null(slurm_path))
+          } else if (slurm_proxy_available()) {
+            tryCatch({
+              result <- slurm_proxy_exec(sacct_cmd, timeout = 15)
+              list(status = result$status, stdout = result$stdout)
+            }, error = function(e) list(status = 1, stdout = character()))
           } else {
             tryCatch({
               out <- system2(slurm_cmd_fn("sacct"),
@@ -4844,6 +4871,10 @@ server_search <- function(input, output, session, values, add_to_log,
                 slurm_cmd_fn("scancel"), paste(cancel_ids, collapse = " "))
               if (!is.null(job_cfg)) {
                 ssh_exec(job_cfg, cancel_cmd, login_shell = is.null(slurm_path))
+              } else if (slurm_proxy_available()) {
+                tryCatch(slurm_proxy_exec(
+                  paste(slurm_cmd_fn("scancel"), paste(cancel_ids, collapse = " ")),
+                  timeout = 15), error = function(e) NULL)
               } else {
                 tryCatch(system2(slurm_cmd_fn("scancel"), cancel_ids,
                   stdout = FALSE, stderr = FALSE), error = function(e) NULL)
@@ -5873,6 +5904,15 @@ server_search <- function(input, output, session, values, add_to_log,
                 } else {
                   ssh_exec(cfg, paste(scancel_cmd, job$job_id))
                 }
+              }
+            } else if (slurm_proxy_available()) {
+              if (isTRUE(job$parallel) && !is.null(job$parallel_steps)) {
+                all_ids <- Filter(Negate(is.null), job$parallel_steps)
+                for (sid in all_ids) {
+                  slurm_proxy_exec(paste("scancel", sid), timeout = 15)
+                }
+              } else {
+                slurm_proxy_exec(paste("scancel", job$job_id), timeout = 15)
               }
             } else {
               if (isTRUE(job$parallel) && !is.null(job$parallel_steps)) {
