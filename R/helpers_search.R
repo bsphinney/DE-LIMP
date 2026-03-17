@@ -3858,9 +3858,10 @@ activity_log_headers <- c(
 )
 
 #' Get path for the unified activity log CSV
-#' Always local — never depends on mounted network drives (may be absent/slow).
-#' Cross-user sharing is handled via SSH/SCP sync when connected to HPC.
+#' Prefers shared storage on HPC, falls back to home dir.
 activity_log_path <- function() {
+  shared <- "/quobyte/proteomics-grp/de-limp/activity_log.csv"
+  if (file.exists(shared) || dir.exists(dirname(shared))) return(shared)
   file.path(Sys.getenv("HOME"), ".delimp_activity_log.csv")
 }
 
@@ -3887,8 +3888,11 @@ read_remote_activity_log <- function(ssh_config) {
     return(.remote_activity_cache$data)
   }
 
+  # Try shared storage first, fall back to home dir
   result <- tryCatch(
-    ssh_exec(ssh_config, "cat ~/.delimp_activity_log.csv 2>/dev/null", timeout = 15),
+    ssh_exec(ssh_config,
+      "cat /quobyte/proteomics-grp/de-limp/activity_log.csv 2>/dev/null || cat ~/.delimp_activity_log.csv 2>/dev/null",
+      timeout = 15),
     error = function(e) list(status = 1, stdout = character())
   )
 
