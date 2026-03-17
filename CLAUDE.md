@@ -3,6 +3,14 @@
 ## Working Preferences
 - **Update this file** when new patterns, gotchas, or architectural decisions emerge
 - For detailed change history, update `CHANGELOG.md` (not this file)
+
+## Review Agents (spawn before major releases)
+After significant changes, spawn these 5 review agents in parallel:
+1. **Biological researcher** — workflow intuitiveness, jargon, missing biology features (non-bioinformatician perspective)
+2. **Proteomics expert** — DIA-NN integration, QC, core facility readiness, instrument support
+3. **Statistician** — statistical validity, multiple testing, no-replicates caveats, methodology
+4. **Error handling & UX audit** — silent failures, blank req() screens, missing validation
+5. **Documentation audit** — stale references, version mismatches, missing features across all docs
 - Detailed patterns: @docs/PATTERNS.md | TODO list: @docs/TODO.md
 
 ## Project Overview
