@@ -1292,9 +1292,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     # Control buttons
                     div(style = "display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px;",
                       div(style = "display: flex; align-items: center; gap: 10px;",
-                        radioButtons("signal_show_contam", NULL,
-                          choices = c("Sample Proteins" = "sample", "Contaminants" = "contam", "All" = "all"),
-                          selected = "sample", inline = TRUE)
+                        checkboxInput("signal_overlay_contam", "Overlay Contaminants", value = FALSE)
                       ),
                       div(
                         actionButton("signal_dist_info_btn", icon("question-circle"), title = "What is this?",

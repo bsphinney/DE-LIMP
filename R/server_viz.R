@@ -530,16 +530,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     # Tag contaminants
     plot_df$Is_Contaminant <- grepl("^Cont_", plot_df$Protein.Group)
 
-    # Filter based on radio button
-    show_mode <- input$signal_show_contam %||% "sample"
-    if (show_mode == "sample") {
-      plot_df <- plot_df[!plot_df$Is_Contaminant, ]
-    } else if (show_mode == "contam") {
-      plot_df <- plot_df[plot_df$Is_Contaminant, ]
-    }
-    # "all" shows everything
+    # Base view: always show sample proteins
+    sample_df <- plot_df[!plot_df$Is_Contaminant, ]
+    contam_df <- plot_df[plot_df$Is_Contaminant, ]
+    show_contam <- isTRUE(input$signal_overlay_contam)
 
-    # DE coloring when results are available
+    # DE coloring for sample proteins
     if (!is.null(values$fit) && !is.null(input$contrast_selector_signal) && nchar(input$contrast_selector_signal) > 0) {
       de_data_raw <- topTable(values$fit, coef = input$contrast_selector_signal, number = Inf) %>% as.data.frame()
       if (!"Protein.Group" %in% colnames(de_data_raw)) {
@@ -554,18 +550,15 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           TRUE ~ "Not Significant"
         )) %>%
         dplyr::select(Protein.Group, DE_Status)
-      plot_df <- left_join(plot_df, de_data, by = "Protein.Group")
-      plot_df$DE_Status[is.na(plot_df$DE_Status)] <- "Not Significant"
+      sample_df <- left_join(sample_df, de_data, by = "Protein.Group")
+      sample_df$DE_Status[is.na(sample_df$DE_Status)] <- "Not Significant"
     } else {
-      plot_df$DE_Status <- "Not Significant"
+      sample_df$DE_Status <- "Not Significant"
     }
+    contam_df$DE_Status <- "Contaminant"
 
-    # Override DE status for contaminants in "all" mode
-    if (show_mode == "all") {
-      plot_df$DE_Status[plot_df$Is_Contaminant] <- "Contaminant"
-    } else if (show_mode == "contam") {
-      plot_df$DE_Status <- "Contaminant"
-    }
+    # Combine for plotting
+    plot_df <- if (show_contam) rbind(sample_df, contam_df) else sample_df
 
     if (!is.null(values$plot_selected_proteins)) {
       plot_df$Is_Selected <- plot_df$Protein.Group %in% values$plot_selected_proteins
