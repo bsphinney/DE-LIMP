@@ -354,12 +354,15 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     run_ids <- values$metadata$ID[match(valid_cols, values$metadata$File.Name)]
     new_headers <- as.character(run_ids)
 
+    # Add Type column before final select
+    df_merged$Type <- ifelse(grepl("^Cont_", df_merged$Protein.Group), "Contaminant", "Sample")
+
     df_final <- df_merged %>%
-      dplyr::select(Protein.Group, Gene, Protein.Name, Significance, logFC, P.Value, adj.P.Val, all_of(valid_cols)) %>%
+      dplyr::select(Protein.Group, Gene, Protein.Name, Significance, logFC, P.Value, adj.P.Val, Type, all_of(valid_cols)) %>%
       mutate(across(where(is.numeric), ~round(., 2)))
 
     df_final$Original.ID <- df_final$Protein.Group
-    fixed_cols <- c("Protein.Group", "Gene", "Protein.Name", "Significance", "logFC", "P.Value", "adj.P.Val")
+    fixed_cols <- c("Protein.Group", "Gene", "Protein.Name", "Significance", "logFC", "P.Value", "adj.P.Val", "Type")
     colnames(df_final) <- c(fixed_cols, new_headers, "Original.ID")
 
     unique_groups <- sort(unique(meta_sorted$Group))
@@ -431,7 +434,17 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     }))))
 
     expression_matrix <- as.matrix(df_display[, expr_cols]); brks <- quantile(expression_matrix, probs = seq(.05, .95, .05), na.rm = TRUE); clrs <- colorRampPalette(c("#4575b4", "white", "#d73027"))(length(brks) + 1)
-    datatable(df_display, container = header_html, selection = 'single', escape = FALSE, options = list(dom = 'frtip', pageLength = 15, scrollX = TRUE, columnDefs = list(list(className = 'dt-center', targets = (length(fixed_cols)):(ncol(df_display)-1)))), rownames = FALSE) %>% formatStyle(expr_cols, backgroundColor = styleInterval(brks, clrs))
+    # Find Type column index (0-based for JS)
+    type_col_idx <- which(colnames(df_display) == "Type") - 1
+
+    datatable(df_display, container = header_html, selection = 'single', escape = FALSE, options = list(dom = 'frtip', pageLength = 15, scrollX = TRUE, columnDefs = list(
+      list(className = 'dt-center', targets = (length(fixed_cols)):(ncol(df_display)-1)),
+      list(visible = FALSE, targets = type_col_idx)  # hide Type column but keep for styling
+    )), rownames = FALSE) %>%
+      formatStyle(expr_cols, backgroundColor = styleInterval(brks, clrs)) %>%
+      formatStyle("Protein.Group", "Type",
+        backgroundColor = styleEqual("Contaminant", "#fff0f0"),
+        color = styleEqual("Contaminant", "#cc3333"))
   })
 
   output$download_grid_data <- downloadHandler(
@@ -853,6 +866,291 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           tags$li(strong("Axes: "), "Switch between PC1/2, PC1/3, PC2/3 to explore additional dimensions"),
           tags$li("Dashed ellipses show the 95% confidence region for each group")
         )
+      )
+    ))
+  })
+
+  # ============================================================================
+  #  CONTAMINANT ANALYSIS
+  # ============================================================================
+
+  # Reactive: contaminant analysis data
+  contaminant_data <- reactive({
+    req(values$y_protein)
+    mat <- values$y_protein$E
+    protein_ids <- rownames(mat)
+    is_contam <- grepl("^Cont_", protein_ids)
+
+    if (sum(is_contam) == 0) return(NULL)
+
+    # Expression matrix is log2 — convert to linear for intensity sums
+    linear_mat <- 2^mat
+
+    # Per-sample intensity breakdown
+    contam_intensity <- colSums(linear_mat[is_contam, , drop = FALSE], na.rm = TRUE)
+    sample_intensity <- colSums(linear_mat[!is_contam, , drop = FALSE], na.rm = TRUE)
+    total_intensity <- contam_intensity + sample_intensity
+    contam_pct <- round(100 * contam_intensity / total_intensity, 2)
+
+    sample_df <- data.frame(
+      Sample = colnames(mat),
+      Contaminant = contam_intensity,
+      Sample_Protein = sample_intensity,
+      Total = total_intensity,
+      Contaminant_Pct = contam_pct,
+      stringsAsFactors = FALSE
+    )
+
+    # Add group info from metadata
+    if (!is.null(values$metadata)) {
+      sample_df$Group <- values$metadata$Group[match(sample_df$Sample, values$metadata$File.Name)]
+    } else {
+      sample_df$Group <- "Unknown"
+    }
+
+    # Top contaminants by total intensity
+    contam_mat <- linear_mat[is_contam, , drop = FALSE]
+    avg_intensity <- rowMeans(contam_mat, na.rm = TRUE)
+    total_int <- rowSums(contam_mat, na.rm = TRUE)
+    presence <- rowSums(!is.na(mat[is_contam, , drop = FALSE]))
+    overall_total <- sum(linear_mat, na.rm = TRUE)
+
+    # Get gene info from y_protein$genes if available
+    genes_df <- values$y_protein$genes
+    contam_ids <- protein_ids[is_contam]
+    gene_names <- rep("", length(contam_ids))
+    protein_names <- rep("", length(contam_ids))
+
+    if (!is.null(genes_df)) {
+      gn_col <- intersect(c("Genes", "Gene.Names", "Gene"), colnames(genes_df))
+      pn_col <- intersect(c("Protein.Names", "Protein.Name"), colnames(genes_df))
+
+      if (length(gn_col) > 0) {
+        # Match by row position — y_protein$genes rows correspond to y_protein$E rows
+        contam_idx <- which(is_contam)
+        gene_names <- as.character(genes_df[[gn_col[1]]][contam_idx])
+        gene_names[is.na(gene_names)] <- ""
+      }
+      if (length(pn_col) > 0) {
+        contam_idx <- which(is_contam)
+        protein_names <- as.character(genes_df[[pn_col[1]]][contam_idx])
+        protein_names[is.na(protein_names)] <- ""
+      }
+    }
+
+    # Identify keratins
+    is_keratin <- grepl("^(KRT|K1C|K2C|K22)", gene_names, ignore.case = TRUE) |
+                  grepl("keratin", protein_names, ignore.case = TRUE)
+
+    contam_df <- data.frame(
+      Protein.Group = contam_ids,
+      Gene = gene_names,
+      Protein.Name = protein_names,
+      Avg_Intensity = round(avg_intensity, 0),
+      Pct_of_Total = round(100 * total_int / overall_total, 3),
+      Present_in = paste0(presence, "/", ncol(mat)),
+      Is_Keratin = is_keratin,
+      stringsAsFactors = FALSE
+    ) %>% arrange(desc(Avg_Intensity))
+
+    list(
+      n_contam = sum(is_contam),
+      n_sample = sum(!is_contam),
+      pct_contam = round(100 * sum(is_contam) / length(protein_ids), 1),
+      sample_df = sample_df,
+      contam_df = contam_df,
+      contam_mat = mat[is_contam, , drop = FALSE]  # keep log2 for heatmap
+    )
+  })
+
+  # Summary cards
+  output$contaminant_summary_cards <- renderUI({
+    cdata <- contaminant_data()
+
+    if (is.null(cdata)) {
+      return(div(
+        style = "background-color: #d4edda; padding: 20px; border-radius: 8px; text-align: center;",
+        icon("check-circle", style = "color: #28a745; font-size: 1.5em;"),
+        tags$h5("No contaminant proteins detected", style = "color: #28a745; margin-top: 10px;"),
+        tags$p("No proteins with 'Cont_' prefix found in the dataset.",
+          style = "color: #6c757d;")
+      ))
+    }
+
+    median_pct <- round(median(cdata$sample_df$Contaminant_Pct), 2)
+    max_pct <- round(max(cdata$sample_df$Contaminant_Pct), 2)
+    n_keratins <- sum(cdata$contam_df$Is_Keratin)
+
+    # Color code the contamination level
+    pct_color <- if (median_pct < 1) "#28a745" else if (median_pct < 5) "#ffc107" else "#dc3545"
+    pct_bg <- if (median_pct < 1) "#d4edda" else if (median_pct < 5) "#fff3cd" else "#f8d7da"
+
+    div(style = "display: flex; flex-wrap: wrap; gap: 12px;",
+      # Contaminant count
+      div(style = "flex: 1; min-width: 150px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #6c757d;",
+        tags$p(style = "font-size: 0.85em; color: #6c757d; margin-bottom: 4px;", "Contaminant Proteins"),
+        tags$h4(style = "margin: 0; font-weight: 600;", cdata$n_contam),
+        tags$p(style = "font-size: 0.8em; color: #6c757d; margin: 0;",
+          paste0(cdata$pct_contam, "% of ", cdata$n_contam + cdata$n_sample, " total"))
+      ),
+      # Sample proteins
+      div(style = "flex: 1; min-width: 150px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0d6efd;",
+        tags$p(style = "font-size: 0.85em; color: #6c757d; margin-bottom: 4px;", "Sample Proteins"),
+        tags$h4(style = "margin: 0; font-weight: 600;", cdata$n_sample)
+      ),
+      # Median contaminant intensity %
+      div(style = paste0("flex: 1; min-width: 150px; background-color: ", pct_bg, "; padding: 15px; border-radius: 8px; border-left: 4px solid ", pct_color, ";"),
+        tags$p(style = "font-size: 0.85em; color: #6c757d; margin-bottom: 4px;", "Median Contam. Intensity"),
+        tags$h4(style = paste0("margin: 0; font-weight: 600; color: ", pct_color, ";"),
+          paste0(median_pct, "%")),
+        tags$p(style = "font-size: 0.8em; color: #6c757d; margin: 0;",
+          paste0("Max: ", max_pct, "%"))
+      ),
+      # Keratins
+      div(style = paste0("flex: 1; min-width: 150px; background-color: ", if (n_keratins > 0) "#fff3cd" else "#f8f9fa",
+        "; padding: 15px; border-radius: 8px; border-left: 4px solid ", if (n_keratins > 0) "#ffc107" else "#6c757d", ";"),
+        tags$p(style = "font-size: 0.85em; color: #6c757d; margin-bottom: 4px;", "Keratin Contaminants"),
+        tags$h4(style = "margin: 0; font-weight: 600;", n_keratins),
+        tags$p(style = "font-size: 0.8em; color: #6c757d; margin: 0;",
+          if (n_keratins > 0) "KRT/K1C/K2C detected" else "None detected")
+      )
+    )
+  })
+
+  # Per-sample contaminant bar chart
+  output$contaminant_bar_chart <- renderPlotly({
+    cdata <- contaminant_data()
+    req(cdata)
+
+    df <- cdata$sample_df %>% arrange(desc(Contaminant_Pct))
+
+    # Use short sample IDs if metadata available
+    if (!is.null(values$metadata)) {
+      df$Label <- paste0("S", values$metadata$ID[match(df$Sample, values$metadata$File.Name)])
+    } else {
+      df$Label <- df$Sample
+    }
+    df$Label <- factor(df$Label, levels = df$Label)
+
+    plot_ly(df, y = ~Label, x = ~Contaminant, type = "bar", orientation = "h",
+            name = "Contaminant", marker = list(color = "#dc3545"),
+            hoverinfo = "text",
+            text = ~paste0(Sample, "\nContaminant: ", format(round(Contaminant), big.mark = ","),
+                          "\n", Contaminant_Pct, "% of total")) %>%
+      add_trace(x = ~Sample_Protein, name = "Sample", marker = list(color = "#0d6efd"),
+                hoverinfo = "text",
+                text = ~paste0(Sample, "\nSample: ", format(round(Sample_Protein), big.mark = ","),
+                              "\n", round(100 - Contaminant_Pct, 2), "% of total")) %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Total Intensity (linear)"),
+        yaxis = list(title = "", categoryorder = "trace"),
+        legend = list(orientation = "h", xanchor = "center", x = 0.5, y = 1.05),
+        margin = list(l = 60)
+      )
+  })
+
+  # Top contaminants table
+  output$contaminant_top_table <- renderDT({
+    cdata <- contaminant_data()
+    req(cdata)
+
+    df <- cdata$contam_df %>%
+      dplyr::select(Protein.Group, Gene, Protein.Name, Avg_Intensity, Pct_of_Total, Present_in, Is_Keratin)
+
+    colnames(df) <- c("Protein Group", "Gene", "Protein Name", "Avg Intensity", "% of Total", "Present In", "Keratin")
+    df$Keratin <- ifelse(df$Keratin, "Yes", "")
+
+    datatable(df,
+      options = list(dom = 'frtip', pageLength = 20, scrollX = TRUE,
+        order = list(list(3, "desc"))),
+      rownames = FALSE
+    ) %>%
+      formatStyle("Keratin",
+        backgroundColor = styleEqual("Yes", "#fff3cd"),
+        fontWeight = styleEqual("Yes", "bold")
+      ) %>%
+      formatRound("Avg Intensity", digits = 0) %>%
+      formatRound("% of Total", digits = 3)
+  })
+
+  # Contaminant heatmap
+  output$contaminant_heatmap <- renderPlotly({
+    cdata <- contaminant_data()
+    req(cdata)
+
+    # Top 20 contaminants by average intensity
+    top_n <- min(20, nrow(cdata$contam_df))
+    top_ids <- cdata$contam_df$Protein.Group[1:top_n]
+
+    hm_mat <- cdata$contam_mat[top_ids, , drop = FALSE]
+
+    # Use gene names as labels where available
+    row_labels <- cdata$contam_df$Gene[1:top_n]
+    row_labels <- ifelse(nzchar(row_labels), row_labels, cdata$contam_df$Protein.Group[1:top_n])
+    # Mark keratins
+    is_ker <- cdata$contam_df$Is_Keratin[1:top_n]
+    row_labels <- ifelse(is_ker, paste0(row_labels, " *"), row_labels)
+
+    # Use short sample IDs
+    if (!is.null(values$metadata)) {
+      col_labels <- paste0("S", values$metadata$ID[match(colnames(hm_mat), values$metadata$File.Name)])
+    } else {
+      col_labels <- colnames(hm_mat)
+    }
+
+    plot_ly(
+      x = col_labels,
+      y = row_labels,
+      z = hm_mat,
+      type = "heatmap",
+      colors = colorRamp(c("#2166AC", "#F7F7F7", "#B2182B")),
+      hoverinfo = "text",
+      text = outer(1:nrow(hm_mat), 1:ncol(hm_mat), Vectorize(function(i, j) {
+        paste0(row_labels[i], "\n", col_labels[j], "\nLog2 Intensity: ", round(hm_mat[i, j], 2))
+      }))
+    ) %>%
+      layout(
+        xaxis = list(title = "", tickangle = -45),
+        yaxis = list(title = "", autorange = "reversed"),
+        margin = list(l = 120, b = 80),
+        annotations = list(
+          list(text = "* = Keratin contaminant", x = 1, y = -0.15,
+               xref = "paper", yref = "paper", showarrow = FALSE,
+               font = list(size = 11, color = "#6c757d"))
+        )
+      )
+  })
+
+  # Contaminant info modal
+  observeEvent(input$contaminant_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " About Contaminant Analysis"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        tags$h6("What are contaminant proteins?"),
+        p("Contaminant proteins (prefixed with 'Cont_') come from the contaminant FASTA library ",
+          "included in DIA-NN searches. These are common lab contaminants like keratins (skin), ",
+          "trypsin (digestion enzyme), albumin (serum), and other environmental proteins."),
+        tags$h6("Why monitor them?"),
+        tags$ul(
+          tags$li("High contaminant levels indicate sample preparation issues"),
+          tags$li("Keratins suggest skin contact during prep — check glove usage"),
+          tags$li("Sample-specific spikes may indicate individual prep failures"),
+          tags$li("Consistent high contaminants across all samples may indicate reagent contamination")
+        ),
+        tags$h6("Interpreting the results"),
+        tags$ul(
+          tags$li(strong("< 1% contaminant intensity: "), "Excellent — typical for well-prepared samples"),
+          tags$li(strong("1-5% contaminant intensity: "), "Acceptable — some contamination present"),
+          tags$li(strong("> 5% contaminant intensity: "), "Concerning — investigate sample prep workflow")
+        ),
+        tags$h6("Heatmap"),
+        p("The heatmap shows the top 20 contaminant proteins across all samples. ",
+          "Look for samples with unusually high intensity (red) in specific contaminants, ",
+          "which may indicate sample-specific issues. Keratin contaminants are marked with *."),
+        tags$h6("Expression Grid"),
+        p("Contaminant proteins are highlighted with a pink background and red text in the Expression Grid tab.")
       )
     ))
   })

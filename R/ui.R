@@ -1302,6 +1302,45 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     )
                   ),
 
+                  nav_panel("Contaminant Analysis",
+                    icon = icon("shield-virus"),
+                    div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+                      # Header with info button
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+                        tags$h5(icon("shield-virus"), " Contaminant Protein Analysis",
+                          style = "margin: 0; font-weight: 600;"),
+                        actionButton("contaminant_info_btn", icon("question-circle"),
+                          title = "About Contaminant Analysis", class = "btn-outline-info btn-sm")
+                      ),
+
+                      # Summary statistics cards
+                      div(style = "min-height: 80px;",
+                        uiOutput("contaminant_summary_cards")
+                      ),
+
+                      # Per-sample contaminant breakdown bar chart
+                      div(style = "min-height: 400px; margin-top: 15px;",
+                        tags$h6(icon("chart-bar"), " Per-Sample Contaminant Intensity",
+                          style = "font-weight: 600; margin-bottom: 8px;"),
+                        plotlyOutput("contaminant_bar_chart", height = "380px")
+                      ),
+
+                      # Top contaminants table
+                      div(style = "margin-top: 20px;",
+                        tags$h6(icon("table"), " Top Contaminant Proteins",
+                          style = "font-weight: 600; margin-bottom: 8px;"),
+                        DTOutput("contaminant_top_table")
+                      ),
+
+                      # Contaminant heatmap
+                      div(style = "min-height: 450px; margin-top: 20px;",
+                        tags$h6(icon("fire"), " Contaminant Expression Heatmap (Top 20)",
+                          style = "font-weight: 600; margin-bottom: 8px;"),
+                        plotlyOutput("contaminant_heatmap", height = "420px")
+                      )
+                    )
+                  ),
+
                   nav_panel("Expression Grid",
                     icon = icon("th"),
                     # Comparison selector banner
