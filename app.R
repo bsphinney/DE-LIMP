@@ -477,6 +477,38 @@ server <- function(input, output, session) {
                   is_core_facility, cf_config, search_enabled)
   server_session(input, output, session, values, add_to_log)
 
+  # --- Home directory quota check (HPC systems often have small quotas) ---
+  session$onFlushed(function() {
+    tryCatch({
+      home <- Sys.getenv("HOME")
+      if (!nzchar(home)) return()
+      # Try writing a small temp file to detect quota issues
+      test_file <- file.path(home, ".delimp_quota_test")
+      writeLines("test", test_file)
+      unlink(test_file)
+    }, error = function(e) {
+      if (grepl("quota|permission|read-only|no space", e$message, ignore.case = TRUE)) {
+        showNotification(
+          tagList(
+            icon("exclamation-triangle"),
+            tags$strong(" Home directory is full."),
+            " Some features (job queue, activity log) may not work.",
+            " Free up space in ", tags$code(Sys.getenv("HOME")),
+            " or contact your HPC admin."
+          ),
+          type = "error", duration = NULL, id = "home_quota_warning"
+        )
+      }
+    }, warning = function(w) {
+      if (grepl("quota|no space", w$message, ignore.case = TRUE)) {
+        showNotification(
+          tagList(icon("exclamation-triangle"), " Home directory may be full: ", w$message),
+          type = "warning", duration = 30, id = "home_quota_warning"
+        )
+      }
+    })
+  }, once = TRUE)
+
   # --- Code update detection: check if source files changed on disk ---
   observe({
     invalidateLater(30000)  # Check every 30 seconds
