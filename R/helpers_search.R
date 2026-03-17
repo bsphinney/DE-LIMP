@@ -265,7 +265,12 @@ download_uniprot_fasta_rest_fallback <- function(proteome_id, output_path) {
 #' @param library_name Character — one of: "universal", "cell_culture", etc.
 #' @param app_dir Character — app root directory (where contaminants/ lives)
 #' @return List with success, path, n_sequences, file_size
-get_contaminant_fasta <- function(library_name, app_dir = ".") {
+get_contaminant_fasta <- function(library_name, app_dir = NULL) {
+  # Find contaminants dir: try app working dir, then /srv/shiny-server (container)
+  if (is.null(app_dir)) {
+    candidates <- c(".", "/srv/shiny-server", Sys.getenv("DELIMP_APP_DIR", ""))
+    app_dir <- Find(function(d) dir.exists(file.path(d, "contaminants")), candidates) %||% "."
+  }
   lib_map <- c(
     universal         = "Universal_Contaminants.fasta",
     cell_culture      = "Cell_Culture_Contaminants.fasta",

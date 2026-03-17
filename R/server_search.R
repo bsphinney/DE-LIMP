@@ -3631,8 +3631,23 @@ server_search <- function(input, output, session, values, add_to_log,
             scp_upload(cfg, contam_result$path, remote_contam_path)
           }
           fasta_files <- c(fasta_files, remote_contam_path)
+        } else if (slurm_proxy_available()) {
+          # Local on HPC (Apptainer): contaminants are inside the DE-LIMP container
+          # but DIA-NN runs in its own container. Use the git repo copy on shared storage.
+          repo_contam <- file.path("/quobyte/proteomics-grp/de-limp/DE-LIMP/contaminants",
+                                   basename(contam_result$path))
+          if (file.exists(repo_contam)) {
+            fasta_files <- c(fasta_files, repo_contam)
+          } else {
+            # Fallback: copy from container to shared storage
+            shared_contam_dir <- "/quobyte/proteomics-grp/de-limp/contaminants"
+            dir.create(shared_contam_dir, showWarnings = FALSE, recursive = TRUE)
+            shared_contam <- file.path(shared_contam_dir, basename(contam_result$path))
+            file.copy(contam_result$path, shared_contam, overwrite = FALSE)
+            fasta_files <- c(fasta_files, shared_contam)
+          }
         } else {
-          # Docker or local HPC: use local path directly
+          # Docker or native local: use local path directly
           fasta_files <- c(fasta_files, contam_result$path)
         }
         showNotification(
