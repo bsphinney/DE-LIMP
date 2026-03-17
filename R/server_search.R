@@ -1530,7 +1530,7 @@ server_search <- function(input, output, session, values, add_to_log,
       message("[SLURM Proxy] publicgrp check failed: ", e$message)
     })
 
-    best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
+    best <- select_best_partition(isolate(values$cluster_resources), isolate(values$public_resources), 64)
     values$auto_partition <- best
     message("[SLURM Proxy] Auto-selected partition: ", best$account, "/", best$partition)
     if (!isTRUE(isolate(input$partition_override))) {
