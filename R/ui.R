@@ -248,6 +248,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
       accordion_panel("Upload Data", icon = icon("file-arrow-up"),
         fileInput("report_file", "DIA-NN Report (.parquet)", accept = c(".parquet")),
+        conditionalPanel("output.ssh_connected_flag == true",
+          actionButton("load_from_hpc_btn", "Load from HPC",
+            icon = icon("server"), class = "btn-outline-info btn-sm w-100",
+            style = "margin-bottom: 5px;")
+        ),
         actionButton("load_example", "\U0001F4CA Load Example Data", class = "btn-info btn-sm w-100",
                      style = "margin-bottom: 5px;"),
         actionButton("load_example_phospho", "Load Example Phospho Data",
@@ -739,9 +744,13 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               if (local_diann)      backends <- c(backends, "Local (Embedded)" = "local")
               if (docker_available) backends <- c(backends, "Local (Docker)" = "docker")
               if (hpc_available)    backends <- c(backends, "HPC (SSH/SLURM)" = "hpc")
-              default <- names(backends)[1]
-              # Unwrap the named values for radioButtons
-              default_val <- unname(backends[1])
+              # Default to HPC when SSH key is available (Docker + HPC is the common setup)
+              ssh_key_detected <- nzchar(Sys.getenv("DELIMP_SSH_KEY", "")) ||
+                file.exists("/tmp/.ssh/id_ed25519") ||
+                (nzchar(delimp_data_dir) && length(list.files(
+                  file.path(delimp_data_dir, "ssh"), pattern = "^[^.]", full.names = FALSE)) > 0)
+              default_val <- if (hpc_available && ssh_key_detected) "hpc"
+                            else unname(backends[1])
 
               if (length(backends) > 1) {
                 radioButtons("search_backend", NULL,
@@ -2035,6 +2044,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 icon("code-compare"), " Compare")
             )
           ),
+          uiOutput("history_source_badge"),
           p(class = "text-muted", "Searches and analyses from this machine/volume. Click a row to expand details. Green ", tags$b("Load"), " = full session restore (post-pipeline). Outline ", tags$b("Raw"), " = load report.parquet only. Check two analyses to compare."),
           uiOutput("project_summary_cards"),
           DTOutput("history_table")
