@@ -2235,8 +2235,11 @@ server_search <- function(input, output, session, values, add_to_log,
     row <- values$uniprot_results[sel, ]
     fname <- generate_fasta_filename(row$upid, row$organism, input$fasta_content_type)
 
-    # Determine output directory for FASTA
-    fasta_dir <- file.path(Sys.getenv("HOME"), "proteomics_databases")
+    # Determine output directory for FASTA (never use $HOME — quota issues on HPC)
+    fasta_dir <- getOption("delimp.fasta_dir",
+      default = "/quobyte/proteomics-grp/de-limp/fasta")
+    if (!dir.exists(fasta_dir)) dir.create(fasta_dir, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(fasta_dir)) fasta_dir <- tempdir()
     output_path <- file.path(fasta_dir, fname)
 
     withProgress(message = sprintf("Downloading %s from UniProt...", row$upid), {
@@ -2420,10 +2423,11 @@ server_search <- function(input, output, session, values, add_to_log,
 
     row <- ncbi_results()[sel, ]
 
-    # Download to pre-staged FASTA dir or local temp
+    # Download to pre-staged FASTA dir (create if needed, never use $HOME)
     fasta_dir <- getOption("delimp.fasta_dir",
       default = "/quobyte/proteomics-grp/de-limp/fasta")
-    if (!dir.exists(fasta_dir)) fasta_dir <- file.path(Sys.getenv("HOME"), "proteomics_databases")
+    if (!dir.exists(fasta_dir)) dir.create(fasta_dir, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(fasta_dir)) fasta_dir <- tempdir()  # last resort
 
     withProgress(message = sprintf("Downloading %s proteome from NCBI...", row$organism), {
       fasta_path <- ncbi_download_proteome(row$accession, fasta_dir)
