@@ -22,29 +22,26 @@ tags:
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with **Google Gemini AI** integration.
 
-## ✨ What's New in v3.2.0
+## ✨ What's New in v3.7.0
 
-- 📊 **About Tab**: Community stats (stars, forks, visitors, clones), trend sparklines, and a live GitHub Discussions feed
-- 🔍 **DIA-NN Search Improvements**: Spectral library caching, custom FASTA sequences, cluster resource monitoring
-- 📂 **Organized Search Logs**: SLURM logs now stored in a dedicated `logs/` subdirectory
+- 🧪 **Contaminant Analysis**: Summary cards, per-sample bar chart, keratin flagging, contaminant heatmap. Signal Distribution and Expression Grid also highlight contaminants.
+- 🔬 **Data Explorer**: Quartile-based abundance profiles and sample-sample scatter plots -- explore data without requiring DE analysis
+- 🌐 **NCBI Proteome Download**: Search NCBI Datasets by organism, download RefSeq FASTA with automatic gene symbol mapping (local/HPC only)
+- 📂 **SSH File Browser**: Visual directory browser for remote HPC navigation with clickable breadcrumbs and color-coded entries (local/HPC only)
+- 🔄 **No-Replicates Mode**: Quantification completes normally with n=1 per group; DE is skipped gracefully
+- 🏷️ **Environment Badge**: Colored badge showing deployment mode (Docker/HPC/Local/HF)
 
-**Previous highlights** (v3.1.1):
-- 🌋 Volcano plot fixes: correct significance handling with DE protein counts (up/down annotations)
-- 💾 Export Data panel with one-click CSV downloads
-- 🤖 AI Summary HTML export for standalone styled reports
-- 📈 CV Analysis redesign: interactive scatter plot (logFC vs Avg CV)
+**Previous highlights** (v3.5): Run Comparator (cross-tool DE comparison), Search & Analysis History, Chromatography QC, smart HPC partitions
 
-**Earlier** (v3.1):
-- 🎨 UI overhaul: dark navbar, hover dropdowns, accordion sidebar
-- 📊 DE Dashboard sub-tabs: Volcano (+heatmap), Results Table, PCA, CV Analysis
-
-**Earlier** (v3.0): Multi-Omics MOFA2 | Phosphoproteomics (site-level DE, KSEA, motifs) | GSEA 4-database | AI Summary | XIC Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
+**Earlier** (v3.1): UI overhaul (dark navbar, accordion sidebar, DE Dashboard sub-tabs). (v3.0): Multi-Omics MOFA2 | Phosphoproteomics (site-level DE, KSEA, motifs) | GSEA 4-database | AI Summary | XIC Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
 
 ## 🚀 Features
 
 ### 📊 Interactive Analysis
 - **Volcano Plots** - Fully interactive (Plotly). Click or box-select to highlight
 - **Heatmaps** - Auto-scaled Z-score heatmaps of significant proteins
+- **Contaminant Analysis** - Summary cards, bar charts, keratin flagging, and contaminant heatmap
+- **Data Explorer** - Quartile abundance profiles and sample-sample scatter plots
 - **QC Trends** - Monitor run quality with group averages
 - **Multi-Protein Violin Plots** - Compare expression distributions
 

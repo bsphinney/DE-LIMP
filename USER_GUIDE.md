@@ -67,7 +67,7 @@ You have two options to get started:
 This is the most critical step for statistical analysis. The workflow is streamlined into one modal dialog.
 
 > **Replicate guidance:** For reliable statistical results, we recommend at least **3 biological replicates per group**.
-> - **n=1 per group (NEW in v3.7)**: The pipeline will complete quantification (normalization, protein-level aggregation) but will skip differential expression analysis -- DE requires replicates. You can still explore the Expression Grid, PCA, and Signal Distribution. An informational message explains what was skipped.
+> - **n=1 per group (NEW in v3.7)**: The pipeline will complete quantification (normalization, protein-level aggregation) but will skip differential expression analysis -- DE requires replicates. You can still explore the Expression Grid, PCA, Signal Distribution, Data Explorer, and Contaminant Analysis. An informational message explains what was skipped.
 > - **n=2 per group**: The pipeline will run, but you can only detect very large changes (>4-fold) with any confidence. Treat results as exploratory, not publication-ready.
 > - **n=3 per group**: The standard minimum for publication-quality results. Limma's empirical Bayes moderation helps compensate for the small sample size.
 > - **n=4-6+**: Improved sensitivity for detecting smaller fold changes (e.g., 1.3-fold) and more reliable CV estimates in the CV Analysis tab.
@@ -81,7 +81,7 @@ This is the most critical step for statistical analysis. The workflow is streaml
 3.  **Manual Edit (If Needed):**
     * Click on any cell in the **Group** column to type a custom group name
     * You can also edit **Batch**, **Covariate1**, and **Covariate2** columns
-4.  **Template Export/Import (NEW in v2.0.1):**
+4.  **Template Export/Import:**
     * **Export Template**: Click **"📥 Export"** to download current group assignments as CSV
       - Saves all table data: File.Name, Group, Batch, and custom covariates
       - Filename format: `DE-LIMP_group_template_YYYYMMDD_HHMMSS.csv`
@@ -349,7 +349,7 @@ This is your landing page with 5 sub-tabs:
   * **Sample-Sample Scatter**: Pick any two samples and compare protein intensities. Identity line shows expected correlation. Outliers (>4-fold difference) are labeled with gene names. Shows Pearson correlation, protein count, and number of outliers. Contaminants shown as orange triangles.
 * **AI Summary** — Generate AI-powered analysis summaries that analyze all contrasts simultaneously (requires Gemini API key); includes **"Export Report"** for standalone HTML and **"Export for Claude"** for a comprehensive .zip archive (see [Section 8](#8--ai-powered-analysis--export))
 
-### 🔬 The Grid View (New!)
+### 🔬 The Grid View
 Click the green **"Open Grid View"** button to open the deep-dive table.
 
 #### **Key Features:**
@@ -1159,39 +1159,35 @@ You have multiple options to access DE-LIMP:
 
 ## Version History
 
-### What's New in v3.5.0 (March 2026)
+### What's New in v3.7.0 (March 2026)
 
-**Run Comparator** -- Compare two analyses of the same dataset across tools (DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe). 4 diagnostic layers, 7-rule hypothesis engine, optional MOFA2 decomposition, tool-aware AI integration.
+**NCBI Proteome Download** -- Search and download RefSeq protein FASTA databases from NCBI Datasets, with automatic gene symbol mapping via E-utilities. Supports non-model organisms with better NCBI than UniProt coverage.
 
-**Search & Analysis History** -- Full audit trail for DIA-NN searches (26 parameters) and pipeline runs. Import Settings or Import Results from past searches. Project-based organization.
+**Contaminant Analysis** -- New subtab in Data Overview with summary cards (contaminant count, % of total, median intensity ratio, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and contaminant heatmap. Signal Distribution and Expression Grid also highlight contaminants.
 
-**Chromatography QC** -- TIC extraction from timsTOF .d files before search. Three views (Faceted, Overlay, Metrics) with automated per-run diagnostics.
+**Data Explorer** -- Quartile-based abundance profiles and sample-sample scatter plots for exploring data without requiring DE analysis. Works with no-replicates mode.
 
-**Smart HPC Job Submission** -- Per-user SLURM CPU limit detection, auto-partition switching, FASTA database library with auto-upload, path validation.
+**SSH File Browser** -- Visual directory browser for remote HPC navigation with clickable breadcrumbs, color-coded entries, and file type filtering. Replaces manual path entry.
 
-**DIA-NN Log Parser** -- Extended with pg-level, proteoforms, library precursor count, pipeline step detection.
+**Load from HPC** -- One-click button to browse, download, and analyze completed search results from the cluster.
+
+**Docker Launcher for Windows** -- One-click `.bat` file handles SSH key detection, shared PC accounts, container startup, and browser launch. Docker + SSH to HPC is now the recommended Windows deployment.
+
+**No-Replicates Mode** -- Quantification completes normally with n=1 per group. DE analysis is skipped gracefully with an informational message. PCA, Expression Grid, and Data Explorer remain available.
+
+**SSH Auto-Connect & Environment Badge** -- Auto-connects to HPC on startup when an SSH key is detected. Colored navbar badge shows deployment mode (Docker/HPC/Local/HF).
+
+**Remote Activity Log** -- Activity log stored on shared HPC storage for multi-user visibility. History tab reads remote log via SSH when connected.
+
+**NCBI Gene Symbol Mapping** -- Batch E-utilities lookup maps RefSeq accessions (XP_, NP_, WP_) to proper gene symbols across all analysis views.
 
 ### Previous Releases
 
-**v3.2** -- About tab with community dashboard, search log reorganization, DIA-NN log parser, Claude export enhancements, sacct array fix.
+**v3.5** -- Run Comparator (cross-tool DE comparison, 4 diagnostic layers, hypothesis engine), Search & Analysis History, Chromatography QC, smart HPC partitions, FASTA database library.
 
-**v3.1.1** -- Volcano plot fixes (P.Value/adj.P.Val handling, DE count annotation), CV Analysis scatter plot redesign, Export Data panel, AI Summary HTML export.
-
-**v3.1** -- UI overhaul (page_navbar, dark navbar, hover dropdowns, accordion sidebar, DE Dashboard sub-tabs). Core Facility Mode (SQLite, staff YAML, QC dashboard, Quarto reports).
+**v3.1--v3.2** -- UI overhaul (page_navbar, dark navbar, accordion sidebar, DE Dashboard sub-tabs), Core Facility Mode, About tab with community dashboard, Export Data panel.
 
 **v3.0** -- Multi-Omics MOFA2, DIA-NN Docker backend, phosphoproteomics (KSEA, motifs), GSEA expansion (BP/MF/CC/KEGG), all-contrast AI summary.
-
-See [CHANGELOG.md](CHANGELOG.md) for complete release notes.
-
-### Previous: v3.0--v3.1 Highlights
-
-- **UI Overhaul** (v3.1): Professional dark navbar, hover dropdowns, accordion sidebar, DE Dashboard with four sub-tabs
-- **Core Facility Mode** (v3.1): SQLite job tracking, staff auto-configuration, instrument QC dashboard, Quarto report generation
-- **Multi-Omics MOFA2** (v3.0): 2-6 view integration with variance heatmap, factor weights, sample scores
-- **DIA-NN Docker Search** (v3.0): Three backends (Local/Docker/HPC), Windows Docker Compose deployment
-- **Phosphoproteomics** (v2.4--v2.5): Site-level DE, KSEA kinase activity, motif analysis
-- **GSEA Expansion** (v2.5): 4 databases (BP/MF/CC/KEGG) with per-ontology caching and automatic organism detection
-- **XIC Chromatogram Viewer** (v2.1): Fragment-level inspection with MS2 intensity alignment and ion mobility support
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
