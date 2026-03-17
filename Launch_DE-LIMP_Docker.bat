@@ -77,16 +77,10 @@ if not exist "data\output" mkdir "data\output"
 set "DELIMP_SSH_USER=%HIVE_USER%"
 set "DELIMP_SSH_KEY=%SSH_KEY_PATH%"
 
-:: Start container (only rebuild if Dockerfile changed)
+:: Start container (always rebuild to pick up code changes)
 echo.
 echo  Starting DE-LIMP...
-docker compose up -d 2>nul
-if errorlevel 1 (
-    echo.
-    echo  Building container - this may take a few minutes on first run...
-    echo.
-    docker compose up -d --build
-)
+docker compose up -d --build
 
 :: Wait for app to respond
 echo  Waiting for app to start...
