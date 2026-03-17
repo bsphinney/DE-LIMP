@@ -453,6 +453,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     value = "",
                     placeholder = "/quobyte/proteomics-grp/raw/experiment")
                 ),
+                actionButton("ssh_browse_raw_btn", NULL, icon = icon("folder-open"),
+                  class = "btn-outline-primary btn-sm",
+                  style = "margin-top: 0;", title = "Browse remote directories"),
                 actionButton("ssh_scan_raw_btn", "Scan", icon = icon("magnifying-glass"),
                   class = "btn-outline-secondary btn-sm", style = "margin-top: 0;")
               )
@@ -515,6 +518,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     textInput("ssh_fasta_browse_dir", NULL,
                       placeholder = "/share/proteomics/fasta/")
                   ),
+                  actionButton("ssh_browse_fasta_btn", NULL, icon = icon("folder-open"),
+                    class = "btn-outline-primary btn-sm",
+                    style = "margin-top: 0;", title = "Browse remote directories"),
                   actionButton("ssh_scan_fasta_btn", "Scan", icon = icon("magnifying-glass"),
                     class = "btn-outline-secondary btn-sm", style = "margin-top: 0;")
                 )
@@ -817,7 +823,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     value = "hive.hpc.ucdavis.edu"),
                   div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                     div(style = "flex: 1; min-width: 100px;",
-                      textInput("ssh_user", "Username", value = "brettsp")
+                      textInput("ssh_user", "Username", value = Sys.getenv("USER", ""))
                     ),
                     div(style = "flex: 1; min-width: 80px;",
                       numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)

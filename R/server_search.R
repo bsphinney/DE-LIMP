@@ -1466,7 +1466,6 @@ server_search <- function(input, output, session, values, add_to_log,
   # Specific subdirectories first (fast to browse), full root last (slow but complete)
   shared_paths <- c(
     Service     = "/quobyte/proteomics-grp/service",
-    Brett       = "/quobyte/proteomics-grp/brett",
     Proteomics  = "/quobyte/proteomics-grp",
     Share       = "/share",
     Scratch     = "/scratch"
