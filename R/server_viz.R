@@ -575,7 +575,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
     # Build plot
     p <- ggplot(plot_df, aes(x = reorder(Protein.Group, -Average_Signal_Log10), y = Average_Signal_Log10))
-    if (!is.null(values$fit) || show_mode != "sample") {
+    if (!is.null(values$fit) || show_contam) {
       p <- p + geom_point(aes(color = DE_Status), size = 1.5) +
         scale_color_manual(name = "Status", values = color_values)
     } else {
