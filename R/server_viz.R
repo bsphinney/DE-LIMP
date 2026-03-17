@@ -1348,15 +1348,16 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     # Step 1: Average intensity per protein
     avg_intensity <- rowMeans(mat, na.rm = TRUE)
 
-    # Step 2: Assign quartiles based on average (Q1 = highest)
-    breaks <- quantile(avg_intensity, probs = 0:4/4, na.rm = TRUE)
-    # Ensure unique breaks
-    breaks <- unique(breaks)
-    if (length(breaks) < 5) {
-      breaks <- seq(min(avg_intensity, na.rm = TRUE), max(avg_intensity, na.rm = TRUE), length.out = 5)
-    }
-    avg_quartile <- cut(avg_intensity, breaks = breaks,
-      labels = c("Q4", "Q3", "Q2", "Q1"), include.lowest = TRUE)
+    # Step 2: Assign quartiles based on average (Q1 = highest intensity)
+    # Use rank-based assignment for guaranteed equal groups
+    ranks <- rank(-avg_intensity, ties.method = "first")  # highest = rank 1
+    n <- length(ranks)
+    avg_quartile <- factor(
+      ifelse(ranks <= n/4, "Q1",
+        ifelse(ranks <= n/2, "Q2",
+          ifelse(ranks <= 3*n/4, "Q3", "Q4"))),
+      levels = c("Q1", "Q2", "Q3", "Q4")
+    )
     names(avg_quartile) <- names(avg_intensity)
 
     # Step 3: Top 10 per quartile
@@ -1376,14 +1377,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
     for (j in seq_len(ncol(mat))) {
       col_vals <- mat[, j]
-      col_breaks <- quantile(col_vals, probs = 0:4/4, na.rm = TRUE)
-      col_breaks <- unique(col_breaks)
-      if (length(col_breaks) < 5) {
-        col_breaks <- seq(min(col_vals, na.rm = TRUE), max(col_vals, na.rm = TRUE), length.out = 5)
-      }
-      col_q <- cut(col_vals[top_proteins], breaks = col_breaks,
-        labels = c(4, 3, 2, 1), include.lowest = TRUE)
-      sample_quartiles[, j] <- as.integer(as.character(col_q))
+      col_ranks <- rank(-col_vals, ties.method = "first")
+      col_n <- length(col_ranks)
+      col_q <- ifelse(col_ranks <= col_n/4, 1L,
+                ifelse(col_ranks <= col_n/2, 2L,
+                  ifelse(col_ranks <= 3*col_n/4, 3L, 4L)))
+      sample_quartiles[, j] <- col_q[match(top_proteins, names(col_vals))]
     }
 
     # Gene labels for rows
@@ -1404,14 +1403,11 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     rownames(all_sample_q) <- rownames(mat)
     for (j in seq_len(ncol(mat))) {
       col_vals <- mat[, j]
-      col_breaks <- quantile(col_vals, probs = 0:4/4, na.rm = TRUE)
-      col_breaks <- unique(col_breaks)
-      if (length(col_breaks) < 5) {
-        col_breaks <- seq(min(col_vals, na.rm = TRUE), max(col_vals, na.rm = TRUE), length.out = 5)
-      }
-      col_q <- cut(col_vals, breaks = col_breaks,
-        labels = c(4, 3, 2, 1), include.lowest = TRUE)
-      all_sample_q[, j] <- as.integer(as.character(col_q))
+      col_ranks <- rank(-col_vals, ties.method = "first")
+      col_n <- length(col_ranks)
+      all_sample_q[, j] <- ifelse(col_ranks <= col_n/4, 1L,
+                             ifelse(col_ranks <= col_n/2, 2L,
+                               ifelse(col_ranks <= 3*col_n/4, 3L, 4L)))
     }
 
     min_q <- apply(all_sample_q, 1, min, na.rm = TRUE)
@@ -1453,10 +1449,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     req(qdata)
 
     sq <- qdata$sample_quartiles
-    # Reverse row order so Q1 (highest) is at top
+    row_labels <- qdata$row_labels
+    avg_q <- qdata$avg_quartile
+    # Plotly heatmap renders bottom-to-top, so reverse so Q1 appears at top
     sq <- sq[nrow(sq):1, , drop = FALSE]
-    row_labels <- rev(qdata$row_labels)
-    avg_q <- rev(qdata$avg_quartile)
+    row_labels <- rev(row_labels)
+    avg_q <- rev(avg_q)
 
     # Build hover text
     hover_text <- matrix("", nrow = nrow(sq), ncol = ncol(sq))
@@ -1496,12 +1494,25 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       )
     )
 
-    # Add divider lines between quartile groups
-    gs <- qdata$group_sizes[c("Q4", "Q3", "Q2", "Q1")]  # reversed order
+    # Add divider lines and quartile labels between groups
+    # Row order (bottom to top): Q4, Q3, Q2, Q1
+    gs <- qdata$group_sizes[c("Q4", "Q3", "Q2", "Q1")]
     shapes <- list()
+    annotations <- list()
     cum <- 0
+    q_labels <- c("Q4 (Low)", "Q3", "Q2", "Q1 (High)")
     for (i in seq_along(gs)) {
+      # Section label at midpoint
+      mid_y <- cum + gs[i] / 2 - 0.5
+      annotations[[length(annotations) + 1]] <- list(
+        text = q_labels[i], x = -0.15, y = mid_y,
+        xref = "paper", yref = "y",
+        showarrow = FALSE, font = list(size = 11, color = "#555", family = "Arial Black"),
+        xanchor = "right"
+      )
+
       cum <- cum + gs[i]
+      # Divider line
       if (i < length(gs) && cum > 0 && cum < nrow(sq)) {
         shapes[[length(shapes) + 1]] <- list(
           type = "line",
@@ -1516,7 +1527,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       xaxis = list(title = "", tickangle = -45, tickfont = list(size = 10)),
       yaxis = list(title = "", tickfont = list(size = 9), dtick = 1),
       shapes = shapes,
-      margin = list(l = 120, b = 80)
+      annotations = annotations,
+      margin = list(l = 150, b = 80)
     )
   })
 
