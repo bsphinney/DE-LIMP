@@ -85,10 +85,15 @@ if defined SSH_KEY_PATH (
     echo       - DELIMP_SSH_KEY=%SSH_KEY_PATH% >> docker-compose.override.yml
 )
 
-:: Build and start
+:: Start container (only rebuild if Dockerfile changed)
 echo.
-echo  Starting DE-LIMP (this may take a minute)...
-docker compose up -d --build >nul 2>&1
+echo  Starting DE-LIMP...
+docker compose up -d >nul 2>&1
+if errorlevel 1 (
+    echo  First run or update detected - building container...
+    echo  This may take several minutes on first run.
+    docker compose up -d --build
+)
 
 :: Wait for app to respond
 echo  Waiting for app to start...
