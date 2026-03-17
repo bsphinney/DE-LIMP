@@ -665,38 +665,66 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         combs <- combn(levels(groups), 2)
         forms <- apply(combs, 2, function(x) paste(x[2], "-", x[1]))
 
-        fit <- limpa::dpcDE(values$y_protein, design, plot=FALSE)
-        fit <- contrasts.fit(fit, makeContrasts(contrasts=forms, levels=design))
-        fit <- eBayes(fit)
-        values$fit <- fit
+        # Check if DE analysis is possible (need >= 2 replicates in at least one group)
+        group_sizes <- table(groups)
+        has_replicates <- any(group_sizes >= 2)
 
-        # Clear stale GSEA cache from previous pipeline run
-        values$gsea_results_cache <- list()
-        values$gsea_last_contrast <- NULL
+        if (!has_replicates) {
+          showNotification(
+            paste0("No replicates detected (", length(group_sizes), " groups, 1 sample each). ",
+                   "Skipping differential expression — QC, Expression Grid, Signal Distribution, ",
+                   "and PCA are still available."),
+            type = "warning", duration = NULL)
+          message("[DE-LIMP] Skipping DE: no replicates (", paste(names(group_sizes), "=",
+                  group_sizes, collapse = ", "), ")")
+        } else {
+          tryCatch({
+            fit <- limpa::dpcDE(values$y_protein, design, plot=FALSE)
+            fit <- contrasts.fit(fit, makeContrasts(contrasts=forms, levels=design))
+            fit <- eBayes(fit)
+            values$fit <- fit
 
-        # Update all four comparison selectors
-        updateSelectInput(session, "contrast_selector", choices=forms)
-        updateSelectInput(session, "contrast_selector_signal", choices=forms, selected=forms[1])
-        updateSelectInput(session, "contrast_selector_grid", choices=forms, selected=forms[1])
-        updateSelectInput(session, "contrast_selector_pvalue", choices=forms, selected=forms[1])
+            # Clear stale GSEA cache from previous pipeline run
+            values$gsea_results_cache <- list()
+            values$gsea_last_contrast <- NULL
+
+            # Update all four comparison selectors
+            updateSelectInput(session, "contrast_selector", choices=forms)
+            updateSelectInput(session, "contrast_selector_signal", choices=forms, selected=forms[1])
+            updateSelectInput(session, "contrast_selector_grid", choices=forms, selected=forms[1])
+            updateSelectInput(session, "contrast_selector_pvalue", choices=forms, selected=forms[1])
+
+            # Log contrasts
+            contrast_code <- c(
+              sprintf("# Available contrasts: %s", paste(forms, collapse=", ")),
+              "combs <- combn(levels(groups), 2)",
+              "forms <- apply(combs, 2, function(x) paste(x[2], '-', x[1]))",
+              "fit <- contrasts.fit(fit, makeContrasts(contrasts=forms, levels=design))",
+              "fit <- eBayes(fit)"
+            )
+            add_to_log("Contrast Fitting", contrast_code)
+          }, error = function(e) {
+            message("[DE-LIMP] DE fitting failed: ", e$message)
+            showNotification(
+              paste0("Differential expression failed: ", e$message,
+                     ". QC, Expression Grid, and PCA are still available."),
+              type = "warning", duration = NULL)
+          })
+        }  # end has_replicates
+
         values$status <- "\u2705 Complete!"
 
-        # Log contrasts
-        contrast_code <- c(
-          sprintf("# Available contrasts: %s", paste(forms, collapse=", ")),
-          "combs <- combn(levels(groups), 2)",
-          "forms <- apply(combs, 2, function(x) paste(x[2], '-', x[1]))",
-          "fit <- contrasts.fit(fit, makeContrasts(contrasts=forms, levels=design))",
-          "fit <- eBayes(fit)"
-        )
-        add_to_log("Contrast Fitting", contrast_code)
-
-        if (isTRUE(values$phospho_detected$detected)) {
-          nav_select("main_tabs", "Phosphoproteomics")
+        if (!is.null(values$fit)) {
+          if (isTRUE(values$phospho_detected$detected)) {
+            nav_select("main_tabs", "Phosphoproteomics")
+          } else {
+            nav_select("main_tabs", "DE Dashboard")
+          }
+          showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
         } else {
-          nav_select("main_tabs", "DE Dashboard")
+          nav_select("main_tabs", "Data Overview")
+          showNotification("\u2713 Quantification complete! View Expression Grid and QC tabs.", type="message", duration=10)
         }
-        showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
 
         # Auto-save session .rds + record to activity log
         tryCatch({
@@ -774,8 +802,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
             fasta_seq_count = if (!is.null(ss)) ss$fasta_seq_count else NA,
             n_proteins = nrow(values$y_protein$E),
             n_samples = ncol(values$y_protein$E),
-            n_contrasts = length(colnames(values$fit$contrasts)),
-            n_de_proteins = count_de_proteins(values$fit),
+            n_contrasts = if (!is.null(values$fit)) length(colnames(values$fit$contrasts)) else 0L,
+            n_de_proteins = if (!is.null(values$fit)) count_de_proteins(values$fit) else 0L,
             output_dir = out_dir,
             session_file = if (!is.na(rds_path)) rds_path else NA,
             app_version = values$app_version %||% "unknown",
