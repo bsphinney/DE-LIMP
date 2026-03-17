@@ -150,7 +150,15 @@ if (length(missing_pkgs) > 0) {
 }
 
 # --- 2. SERVER CONFIGURATION ---
-options(repos = c(BiocManager::repositories(), CRAN = "https://cloud.r-project.org"))
+# Set repos (BiocManager::repositories() requires internet — skip in containers)
+if (is_container) {
+  options(repos = c(CRAN = "https://cloud.r-project.org"))
+} else {
+  options(repos = c(
+    tryCatch(BiocManager::repositories(), error = function(e) NULL),
+    CRAN = "https://cloud.r-project.org"
+  ))
+}
 
 library(shiny)
 library(bslib)
