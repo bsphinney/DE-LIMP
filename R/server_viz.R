@@ -1451,10 +1451,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     sq <- qdata$sample_quartiles
     row_labels <- qdata$row_labels
     avg_q <- qdata$avg_quartile
-    # Plotly heatmap renders bottom-to-top, so reverse so Q1 appears at top
-    sq <- sq[nrow(sq):1, , drop = FALSE]
-    row_labels <- rev(row_labels)
-    avg_q <- rev(avg_q)
+    # Don't reverse — use yaxis autorange="reversed" to put Q1 at top
 
     # Build hover text
     hover_text <- matrix("", nrow = nrow(sq), ncol = ncol(sq))
@@ -1495,12 +1492,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     )
 
     # Add divider lines and quartile labels between groups
-    # Row order (bottom to top): Q4, Q3, Q2, Q1
-    gs <- qdata$group_sizes[c("Q4", "Q3", "Q2", "Q1")]
+    # Row order (top to bottom with reversed y-axis): Q1, Q2, Q3, Q4
+    gs <- qdata$group_sizes[c("Q1", "Q2", "Q3", "Q4")]
     shapes <- list()
     annotations <- list()
     cum <- 0
-    q_labels <- c("Q4 (Low)", "Q3", "Q2", "Q1 (High)")
+    q_labels <- c("Q1 (High)", "Q2", "Q3", "Q4 (Low)")
     for (i in seq_along(gs)) {
       # Section label at midpoint
       mid_y <- cum + gs[i] / 2 - 0.5
@@ -1525,7 +1522,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
     p %>% layout(
       xaxis = list(title = "", tickangle = -45, tickfont = list(size = 10)),
-      yaxis = list(title = "", tickfont = list(size = 9), dtick = 1),
+      yaxis = list(title = "", tickfont = list(size = 9), dtick = 1, autorange = "reversed"),
       shapes = shapes,
       annotations = annotations,
       margin = list(l = 150, b = 80)
