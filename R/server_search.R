@@ -1315,6 +1315,355 @@ server_search <- function(input, output, session, values, add_to_log,
   )
 
   # ============================================================================
+  #    SSH Remote File Browser Modal
+  # ============================================================================
+
+  # Reactive state for the browser
+  browse_current_path <- reactiveVal("/")
+  browse_target <- reactiveVal("raw")  # "raw" or "fasta"
+  browse_entries <- reactiveVal(data.frame(
+    name = character(), type = character(),
+    size = character(), modified = character(),
+    stringsAsFactors = FALSE
+  ))
+  browse_loading <- reactiveVal(FALSE)
+  browse_error <- reactiveVal(NULL)
+
+  # File type filters per target
+  browse_file_patterns <- list(
+    raw = "\\.(d|raw|mzML|wiff)$",
+    fasta = "\\.(fasta|fa|fas)$"
+  )
+
+  # Default starting paths per target
+  browse_defaults <- list(
+    raw = "/quobyte/proteomics-grp/",
+    fasta = "/quobyte/proteomics-grp/"
+  )
+
+  # Helper: navigate to a path and refresh listing
+  browse_navigate <- function(path) {
+    cfg <- ssh_config()
+    req(cfg)
+
+    browse_loading(TRUE)
+    browse_error(NULL)
+
+    # Normalize path
+    path <- sub("/+$", "", path)
+    if (path == "" || !grepl("^/", path)) path <- "/"
+
+    tryCatch({
+      entries <- ssh_list_dir(cfg, path)
+      browse_current_path(path)
+      browse_entries(entries)
+      browse_loading(FALSE)
+    }, error = function(e) {
+      browse_error(paste("Failed to list directory:", conditionMessage(e)))
+      browse_loading(FALSE)
+    })
+  }
+
+  # Open browser for raw data dir
+  observeEvent(input$ssh_browse_raw_btn, {
+    cfg <- ssh_config()
+    req(cfg)
+    browse_target("raw")
+
+    # Start from current text input value if set, else default
+    start_path <- input$ssh_raw_data_dir
+    if (is.null(start_path) || !nzchar(start_path)) {
+      start_path <- browse_defaults$raw
+    }
+
+    browse_navigate(start_path)
+    showModal(ssh_browse_modal())
+  })
+
+  # Open browser for FASTA dir
+  observeEvent(input$ssh_browse_fasta_btn, {
+    cfg <- ssh_config()
+    req(cfg)
+    browse_target("fasta")
+
+    start_path <- input$ssh_fasta_browse_dir
+    if (is.null(start_path) || !nzchar(start_path)) {
+      start_path <- browse_defaults$fasta
+    }
+
+    browse_navigate(start_path)
+    showModal(ssh_browse_modal())
+  })
+
+  # Build the modal UI
+  ssh_browse_modal <- function() {
+    target <- browse_target()
+    target_label <- if (target == "raw") "Raw Data Directory" else "FASTA Directory"
+    file_hint <- if (target == "raw") ".d / .raw / .mzML / .wiff" else ".fasta / .fa"
+
+    modalDialog(
+      title = tagList(icon("folder-open"), sprintf(" Browse Remote: %s", target_label)),
+      size = "l",
+      easyClose = TRUE,
+
+      # CSS for hover effect on directory rows
+      tags$style(HTML("
+        .ssh-browse-row-hover:hover {
+          background-color: #e8f0fe !important;
+          cursor: pointer;
+        }
+      ")),
+
+      # Path bar with navigation + manual entry
+      div(style = "margin-bottom: 12px;",
+        div(style = "display: flex; gap: 6px; align-items: center;",
+          actionButton("ssh_browse_up", NULL, icon = icon("arrow-up"),
+            class = "btn-outline-secondary btn-sm", title = "Parent directory"),
+          actionButton("ssh_browse_home", NULL, icon = icon("home"),
+            class = "btn-outline-secondary btn-sm", title = "Go to home directory"),
+          div(style = "flex: 1;",
+            textInput("ssh_browse_path_input", NULL, value = browse_current_path(),
+              placeholder = "/path/to/directory", width = "100%")
+          ),
+          actionButton("ssh_browse_go", "Go", icon = icon("arrow-right"),
+            class = "btn-primary btn-sm")
+        )
+      ),
+
+      # Breadcrumb display
+      uiOutput("ssh_browse_breadcrumbs"),
+
+      # Loading / error states
+      uiOutput("ssh_browse_status"),
+
+      # Directory listing
+      div(style = "border: 1px solid #dee2e6; border-radius: 6px; overflow: hidden;",
+        # Column headers
+        div(style = "display: flex; padding: 8px 12px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; font-size: 0.85em; color: #495057;",
+          div(style = "flex: 3;", "Name"),
+          div(style = "flex: 1; text-align: right;", "Size"),
+          div(style = "flex: 1.5; text-align: right;", "Modified")
+        ),
+        # Scrollable file list
+        div(style = "max-height: 400px; overflow-y: auto;",
+          uiOutput("ssh_browse_listing")
+        )
+      ),
+
+      # Info bar
+      div(style = "margin-top: 8px; font-size: 0.82em; color: #6c757d;",
+        icon("info-circle"),
+        sprintf(" Click folders to navigate. Looking for %s files.", file_hint),
+        " Select the directory containing your data files."
+      ),
+
+      footer = tagList(
+        div(style = "display: flex; justify-content: space-between; width: 100%; align-items: center;",
+          div(
+            tags$small(class = "text-muted",
+              textOutput("ssh_browse_selected_path", inline = TRUE))
+          ),
+          div(
+            modalButton("Cancel"),
+            actionButton("ssh_browse_select", "Select This Directory",
+              class = "btn-primary", icon = icon("check"))
+          )
+        )
+      )
+    )
+  }
+
+  # Render breadcrumbs
+  output$ssh_browse_breadcrumbs <- renderUI({
+    path <- browse_current_path()
+    if (is.null(path) || path == "/") {
+      return(div(style = "margin-bottom: 8px; font-size: 0.85em;",
+        tags$span(class = "badge bg-secondary", "/")))
+    }
+
+    parts <- strsplit(sub("^/", "", path), "/")[[1]]
+    crumbs <- list()
+
+    # Root crumb
+    crumbs[[1]] <- tags$a(
+      href = "#", class = "text-primary", style = "text-decoration: none; cursor: pointer;",
+      onclick = "Shiny.setInputValue('ssh_browse_crumb', '/', {priority: 'event'});",
+      "/"
+    )
+
+    # Each path segment
+    cumul <- ""
+    for (i in seq_along(parts)) {
+      cumul <- paste0(cumul, "/", parts[i])
+      path_val <- cumul
+      if (i < length(parts)) {
+        crumbs[[length(crumbs) + 1]] <- tags$span(style = "color: #6c757d; margin: 0 3px;", "/")
+        crumbs[[length(crumbs) + 1]] <- tags$a(
+          href = "#", class = "text-primary",
+          style = "text-decoration: none; cursor: pointer;",
+          onclick = sprintf("Shiny.setInputValue('ssh_browse_crumb', '%s', {priority: 'event'});", path_val),
+          parts[i]
+        )
+      } else {
+        crumbs[[length(crumbs) + 1]] <- tags$span(style = "color: #6c757d; margin: 0 3px;", "/")
+        crumbs[[length(crumbs) + 1]] <- tags$strong(parts[i])
+      }
+    }
+
+    div(style = "margin-bottom: 8px; font-size: 0.85em; padding: 4px 8px; background: #f8f9fa; border-radius: 4px;",
+      do.call(tagList, crumbs))
+  })
+
+  # Loading / error status
+  output$ssh_browse_status <- renderUI({
+    if (browse_loading()) {
+      return(div(style = "text-align: center; padding: 20px; color: #6c757d;",
+        icon("spinner", class = "fa-spin"), " Loading directory..."))
+    }
+    err <- browse_error()
+    if (!is.null(err)) {
+      return(div(class = "alert alert-danger", style = "margin-bottom: 0;",
+        icon("triangle-exclamation"), " ", err))
+    }
+    NULL
+  })
+
+  # Render the directory listing
+  output$ssh_browse_listing <- renderUI({
+    if (browse_loading()) return(NULL)
+    if (!is.null(browse_error())) return(NULL)
+
+    entries <- browse_entries()
+    target <- browse_target()
+    file_pattern <- browse_file_patterns[[target]]
+
+    if (nrow(entries) == 0) {
+      return(div(style = "padding: 30px; text-align: center; color: #6c757d;",
+        icon("folder-open"), " Empty directory"))
+    }
+
+    # Count matching files for the summary
+    n_dirs <- sum(entries$type == "dir")
+    n_match <- sum(entries$type == "file" & grepl(file_pattern, entries$name, ignore.case = TRUE))
+    n_other <- sum(entries$type == "file" & !grepl(file_pattern, entries$name, ignore.case = TRUE))
+
+    summary_div <- div(style = "padding: 6px 12px; background: #f0f4f8; border-bottom: 1px solid #dee2e6; font-size: 0.82em; color: #495057;",
+      if (n_dirs > 0) tags$span(icon("folder", style = "color: #f0ad4e;"),
+        sprintf(" %d folder%s", n_dirs, if (n_dirs != 1) "s" else "")),
+      if (n_match > 0) tags$span(style = "margin-left: 12px;",
+        icon("file", style = "color: #198754;"),
+        sprintf(" %d data file%s", n_match, if (n_match != 1) "s" else "")),
+      if (n_other > 0) tags$span(style = "margin-left: 12px;",
+        icon("file", style = "color: #adb5bd;"),
+        sprintf(" %d other file%s", n_other, if (n_other != 1) "s" else ""))
+    )
+
+    rows <- lapply(seq_len(nrow(entries)), function(i) {
+      entry <- entries[i, ]
+      is_dir <- entry$type == "dir"
+      is_match <- !is_dir && grepl(file_pattern, entry$name, ignore.case = TRUE)
+
+      # Visual styling
+      if (is_dir) {
+        icon_el <- icon("folder", style = "color: #f0ad4e; margin-right: 6px;")
+        name_style <- "color: #0d6efd; font-weight: 500;"
+        row_bg <- ""
+      } else if (is_match) {
+        icon_el <- icon("file", style = "color: #198754; margin-right: 6px;")
+        name_style <- "color: #198754; font-weight: 500;"
+        row_bg <- "background: #d1e7dd;"
+      } else {
+        icon_el <- icon("file", style = "color: #adb5bd; margin-right: 6px;")
+        name_style <- "color: #6c757d;"
+        row_bg <- ""
+      }
+
+      onclick_js <- if (is_dir) {
+        new_path <- paste0(browse_current_path(), "/", entry$name)
+        # Normalize double slashes
+        new_path <- gsub("//+", "/", new_path)
+        sprintf("Shiny.setInputValue('ssh_browse_click_dir', '%s', {priority: 'event'});",
+                gsub("'", "\\\\'", new_path))
+      } else ""
+
+      hover_class <- if (is_dir) "ssh-browse-row-hover" else ""
+
+      div(
+        style = paste0(
+          "display: flex; padding: 6px 12px; border-bottom: 1px solid #f0f0f0; ",
+          "font-size: 0.88em; align-items: center; ", row_bg),
+        class = hover_class,
+        onclick = onclick_js,
+        div(style = paste0("flex: 3; ", name_style), icon_el, entry$name),
+        div(style = "flex: 1; text-align: right; color: #6c757d; font-size: 0.9em;", entry$size),
+        div(style = "flex: 1.5; text-align: right; color: #6c757d; font-size: 0.9em;", entry$modified)
+      )
+    })
+
+    tagList(summary_div, do.call(tagList, rows))
+  })
+
+  # Show selected path in footer
+  output$ssh_browse_selected_path <- renderText({
+    browse_current_path()
+  })
+
+  # Navigate into directory on click
+  observeEvent(input$ssh_browse_click_dir, {
+    browse_navigate(input$ssh_browse_click_dir)
+    updateTextInput(session, "ssh_browse_path_input", value = browse_current_path())
+  })
+
+  # Navigate via breadcrumb click
+  observeEvent(input$ssh_browse_crumb, {
+    browse_navigate(input$ssh_browse_crumb)
+    updateTextInput(session, "ssh_browse_path_input", value = browse_current_path())
+  })
+
+  # Navigate up
+  observeEvent(input$ssh_browse_up, {
+    cur <- browse_current_path()
+    parent <- dirname(cur)
+    if (parent == cur) parent <- "/"
+    browse_navigate(parent)
+    updateTextInput(session, "ssh_browse_path_input", value = browse_current_path())
+  })
+
+  # Navigate to home directory
+  observeEvent(input$ssh_browse_home, {
+    cfg <- ssh_config()
+    req(cfg)
+    result <- ssh_exec(cfg, "echo $HOME", timeout = 10)
+    home <- trimws(result$stdout[nzchar(result$stdout)])
+    if (length(home) == 0) home <- paste0("/home/", cfg$user)
+    home <- home[length(home)]  # last non-empty line
+    browse_navigate(home)
+    updateTextInput(session, "ssh_browse_path_input", value = browse_current_path())
+  })
+
+  # Navigate via Go button
+  observeEvent(input$ssh_browse_go, {
+    path <- input$ssh_browse_path_input
+    req(path, nzchar(path))
+    browse_navigate(path)
+    updateTextInput(session, "ssh_browse_path_input", value = browse_current_path())
+  })
+
+  # Select the current directory and close modal
+  observeEvent(input$ssh_browse_select, {
+    path <- browse_current_path()
+    target <- browse_target()
+
+    if (target == "raw") {
+      updateTextInput(session, "ssh_raw_data_dir", value = path)
+    } else if (target == "fasta") {
+      updateTextInput(session, "ssh_fasta_browse_dir", value = path)
+    }
+
+    removeModal()
+  })
+
+  # ============================================================================
   #    SSH Remote File Scanning
   # ============================================================================
 

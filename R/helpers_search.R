@@ -1637,6 +1637,112 @@ test_ssh_connection <- function(ssh_config) {
        sbatch_path = sbatch_path)
 }
 
+#' List directory contents on a remote host via SSH
+#' @param ssh_config list(host, user, port, key_path)
+#' @param dir_path Character — remote directory path to list
+#' @param show_hidden Logical — include dotfiles (default FALSE)
+#' @return data.frame(name, type, size, modified) sorted: dirs first then files
+ssh_list_dir <- function(ssh_config, dir_path, show_hidden = FALSE) {
+  empty_df <- data.frame(name = character(), type = character(),
+                         size = character(), modified = character(),
+                         stringsAsFactors = FALSE)
+
+  # Normalize path: resolve trailing slashes, ensure absolute
+
+  dir_path <- sub("/+$", "", dir_path)
+  if (!grepl("^/", dir_path)) dir_path <- paste0("/", dir_path)
+  if (dir_path == "") dir_path <- "/"
+
+  # Use ls -lA with --time-style for consistent parsing
+  # -p appends / to dirs. Avoid -L (breaks on dangling symlinks)
+  hidden_flag <- if (show_hidden) "a" else ""
+  cmd <- paste0(
+    "ls -l", hidden_flag, "p --time-style=long-iso ",
+    shQuote(dir_path), " 2>/dev/null; echo '---EXIT:'$?'---'"
+  )
+
+  result <- ssh_exec(ssh_config, cmd, timeout = 15)
+  lines <- result$stdout[nzchar(result$stdout)]
+
+  # Check for exit status
+  exit_line <- grep("^---EXIT:", lines, value = TRUE)
+  exit_code <- if (length(exit_line) > 0) {
+    as.integer(gsub("---EXIT:(\\d+)---", "\\1", exit_line[1]))
+  } else 0L
+  lines <- lines[!grepl("^---EXIT:", lines)]
+
+  if (exit_code != 0 || length(lines) == 0) return(empty_df)
+
+  # Skip the "total N" line from ls
+  lines <- lines[!grepl("^total\\s+", lines)]
+  if (length(lines) == 0) return(empty_df)
+
+  # Parse ls -l output:
+  # drwxr-xr-x  2 user group  4096 2025-03-17 10:30 dirname/
+  # -rw-r--r--  1 user group 12345 2025-03-17 10:30 filename
+  entries <- lapply(lines, function(line) {
+    # Split on whitespace, max 9 fields (last field is name, may contain spaces)
+    parts <- strsplit(trimws(line), "\\s+", perl = TRUE)[[1]]
+    if (length(parts) < 8) return(NULL)
+
+    perms <- parts[1]
+    size_bytes <- parts[5]
+    date_str <- parts[6]
+    time_str <- parts[7]
+    # Name is everything from field 8 onwards (handles spaces in names)
+    name <- paste(parts[8:length(parts)], collapse = " ")
+
+    # Determine type from permissions string
+    is_dir <- grepl("^d", perms) || grepl("/$", name)
+    is_link <- grepl("^l", perms)
+
+    # Strip symlink target from name (e.g., "link -> /target/path")
+    if (is_link) name <- sub(" -> .*$", "", name)
+
+    # Clean trailing / from directory names
+    name <- sub("/$", "", name)
+
+    # Skip . and .. entries
+    if (name %in% c(".", "..")) return(NULL)
+
+    # Format size for display
+    size_num <- suppressWarnings(as.numeric(size_bytes))
+    size_display <- if (is.na(size_num)) {
+      size_bytes
+    } else if (size_num >= 1073741824) {
+      sprintf("%.1f GB", size_num / 1073741824)
+    } else if (size_num >= 1048576) {
+      sprintf("%.1f MB", size_num / 1048576)
+    } else if (size_num >= 1024) {
+      sprintf("%.1f KB", size_num / 1024)
+    } else {
+      paste0(size_num, " B")
+    }
+
+    type <- if (is_dir) "dir" else "file"
+
+    data.frame(
+      name = name,
+      type = type,
+      size = if (is_dir) "--" else size_display,
+      modified = paste(date_str, time_str),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  entries <- entries[!vapply(entries, is.null, logical(1))]
+  if (length(entries) == 0) return(empty_df)
+
+  df <- do.call(rbind, entries)
+
+  # Sort: directories first (alphabetical), then files (alphabetical)
+  dirs <- df[df$type == "dir", , drop = FALSE]
+  files <- df[df$type == "file", , drop = FALSE]
+  dirs <- dirs[order(tolower(dirs$name)), , drop = FALSE]
+  files <- files[order(tolower(files$name)), , drop = FALSE]
+  rbind(dirs, files)
+}
+
 #' Scan raw files on a remote host via SSH
 #' @param ssh_config list(host, user, port, key_path)
 #' @param dir_path Character — remote directory path
