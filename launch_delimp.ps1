@@ -258,32 +258,10 @@ function Update-Repo {
 # --- Step 5: Check R packages ---
 function Test-Packages {
     Write-Host "[5/7] Checking R packages..." -ForegroundColor Green
-
-    $pkgCount = (Invoke-HiveSsh "ls -1d /quobyte/proteomics-grp/de-limp/R/delimp-lib/*/ 2>/dev/null | wc -l").Trim()
-
-    if ([int]$pkgCount -lt 3) {
-        Write-Host "  Missing R packages. Installing..." -ForegroundColor Yellow
-
-        $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
-        if (-not $scriptDir) { $scriptDir = $PWD.Path }
-        $setupPath = Join-Path $scriptDir $SETUP_SCRIPT
-
-        & scp -O -i $script:SshKey -o StrictHostKeyChecking=accept-new `
-            $setupPath "$($script:HiveUser)@${HIVE_HOST}:$REMOTE_SCRIPT" 2>$null
-
-        # R package installs produce stderr output that PowerShell treats as errors - suppress it
-        try {
-            $pkgOutput = & ssh -i $script:SshKey -o StrictHostKeyChecking=accept-new -o ConnectTimeout=300 `
-                "$($script:HiveUser)@$HIVE_HOST" "bash -l $REMOTE_SCRIPT packages" 2>&1
-            Write-Host ($pkgOutput -join "`n")
-        } catch {
-            # Non-fatal - packages may already be installed
-            Write-Host "  Warning: Package install had errors (may be OK if already installed)" -ForegroundColor Yellow
-        }
-        Write-Host "  Packages installed!" -ForegroundColor Green
-    } else {
-        Write-Host "  Found $pkgCount packages - OK."
-    }
+    # Packages are bundled in the Apptainer container. The user library at
+    # DELIMP_BASE/R/delimp-lib/ is only for extras not in the container.
+    # Skip the slow install step — it's not needed for normal operation.
+    Write-Host "  Packages bundled in container - OK."
 }
 
 # --- Step 6: Submit via sbatch ---

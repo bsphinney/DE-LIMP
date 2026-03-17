@@ -191,24 +191,9 @@ update_repo() {
 # --- Step 5: Check R packages ---
 check_packages() {
     echo -e "${GREEN}[5/7] Checking R packages...${NC}"
-
-    local PKG_COUNT
-    PKG_COUNT=$(hive_ssh "ls -1d /quobyte/proteomics-grp/de-limp/R/delimp-lib/*/ 2>/dev/null | wc -l" | tr -d '[:space:]')
-
-    if [ "${PKG_COUNT:-0}" -lt 3 ]; then
-        echo -e "${YELLOW}  Missing R packages. Installing (this may take a few minutes)...${NC}"
-
-        # Copy setup script if not already there
-        local SCRIPT_DIR
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        scp -O -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new \
-            "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${HIVE_USER}@${HIVE_HOST}:${REMOTE_SCRIPT}" 2>/dev/null || true
-
-        hive_ssh "bash -l ${REMOTE_SCRIPT} packages"
-        echo -e "${GREEN}  Packages installed!${NC}"
-    else
-        echo "  Found ${PKG_COUNT} packages — OK."
-    fi
+    # Packages are bundled in the Apptainer container. The user library at
+    # DELIMP_BASE/R/delimp-lib/ is only for extras not in the container.
+    echo "  Packages bundled in container — OK."
 }
 
 # --- Step 6: Submit via sbatch ---
