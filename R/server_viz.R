@@ -268,22 +268,74 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
     df_raw$Accession <- str_split_fixed(df_raw$Protein.Group, "[; ]", 2)[, 1]
 
-    org_db_name <- detect_organism_db(df_raw$Protein.Group)
-    id_map <- tryCatch({
-      if (!requireNamespace(org_db_name, quietly = TRUE)) BiocManager::install(org_db_name, ask = FALSE)
-      library(org_db_name, character.only = TRUE)
-      bitr(df_raw$Accession, fromType = "UNIPROT", toType = c("SYMBOL", "GENENAME"), OrgDb = get(org_db_name))
-    }, error = function(e) NULL)
+    # Clean contaminant prefixes (Cont_P04264 → P04264 for UniProt lookup)
+    df_raw$Accession_clean <- gsub("^Cont_", "", df_raw$Accession)
+    df_raw$is_contaminant <- grepl("^Cont_", df_raw$Accession)
 
-    if (!is.null(id_map)) {
-      id_map <- id_map %>% distinct(UNIPROT, .keep_all = TRUE)
-      df_raw <- df_raw %>%
-        left_join(id_map, by = c("Accession" = "UNIPROT")) %>%
-        mutate(Gene = ifelse(is.na(SYMBOL), Accession, SYMBOL),
-               Protein.Name = ifelse(is.na(GENENAME), Protein.Group, GENENAME))
+    # Detect if accessions are NCBI RefSeq (XP_, NP_, WP_) vs UniProt
+    non_contam <- df_raw$Accession_clean[!df_raw$is_contaminant]
+    is_ncbi <- length(non_contam) > 0 && any(grepl("^[XNW]P_", head(non_contam, 50)))
+
+    if (is_ncbi) {
+      # NCBI accessions — parse gene/protein names from y_protein$genes or FASTA headers
+      id_map <- NULL
+      genes_df <- values$y_protein$genes
+      if (!is.null(genes_df)) {
+        # DIA-NN stores FASTA descriptions in Protein.Names and gene info in Genes
+        pn_col <- intersect(c("Protein.Names", "Protein.Name"), colnames(genes_df))
+        gn_col <- intersect(c("Genes", "Gene.Names", "Gene"), colnames(genes_df))
+
+        if (length(pn_col) > 0 || length(gn_col) > 0) {
+          pg_col <- if ("Protein.Group" %in% colnames(genes_df)) "Protein.Group" else NULL
+          fasta_map <- data.frame(
+            Protein.Group = if (!is.null(pg_col)) genes_df[[pg_col]] else rownames(genes_df),
+            stringsAsFactors = FALSE
+          )
+          if (length(gn_col) > 0) {
+            fasta_map$SYMBOL <- genes_df[[gn_col[1]]]
+          }
+          if (length(pn_col) > 0) {
+            # Clean NCBI protein names: remove "[Organism name]" suffix
+            raw_names <- genes_df[[pn_col[1]]]
+            fasta_map$GENENAME <- gsub("\\s*\\[.*\\]\\s*$", "", raw_names)
+          }
+          fasta_map <- fasta_map %>% distinct(Protein.Group, .keep_all = TRUE)
+
+          df_raw <- df_raw %>%
+            left_join(fasta_map, by = "Protein.Group") %>%
+            mutate(
+              Gene = ifelse(!is.null(SYMBOL) & !is.na(SYMBOL) & nzchar(SYMBOL),
+                            SYMBOL, Accession),
+              Protein.Name = ifelse(!is.null(GENENAME) & !is.na(GENENAME) & nzchar(GENENAME),
+                                    GENENAME, Protein.Group)
+            )
+        } else {
+          df_raw$Gene <- df_raw$Accession
+          df_raw$Protein.Name <- df_raw$Protein.Group
+        }
+      } else {
+        df_raw$Gene <- df_raw$Accession
+        df_raw$Protein.Name <- df_raw$Protein.Group
+      }
     } else {
-      df_raw$Gene <- df_raw$Accession
-      df_raw$Protein.Name <- df_raw$Protein.Group
+      # UniProt accessions — use bitr() for gene symbol mapping
+      org_db_name <- detect_organism_db(df_raw$Protein.Group)
+      id_map <- tryCatch({
+        if (!requireNamespace(org_db_name, quietly = TRUE)) BiocManager::install(org_db_name, ask = FALSE)
+        library(org_db_name, character.only = TRUE)
+        bitr(df_raw$Accession, fromType = "UNIPROT", toType = c("SYMBOL", "GENENAME"), OrgDb = get(org_db_name))
+      }, error = function(e) NULL)
+
+      if (!is.null(id_map)) {
+        id_map <- id_map %>% distinct(UNIPROT, .keep_all = TRUE)
+        df_raw <- df_raw %>%
+          left_join(id_map, by = c("Accession" = "UNIPROT")) %>%
+          mutate(Gene = ifelse(is.na(SYMBOL), Accession, SYMBOL),
+                 Protein.Name = ifelse(is.na(GENENAME), Protein.Group, GENENAME))
+      } else {
+        df_raw$Gene <- df_raw$Accession
+        df_raw$Protein.Name <- df_raw$Protein.Group
+      }
     }
 
     df_raw$Significance <- "Not Sig"
@@ -360,7 +412,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
   output$grid_view_table <- renderDT({
     gdata <- grid_react_df(); df_display <- gdata$data
     acc <- str_split_fixed(df_display$Original.ID, "[; ]", 2)[,1]
-    df_display$Protein.Group <- paste0("<a href='https://www.uniprot.org/uniprotkb/", acc, "/entry' target='_blank'>", df_display$Protein.Group, "</a>")
+    # Link to correct database: NCBI for XP_/NP_/WP_, UniProt for others (strip Cont_ prefix)
+    link_urls <- ifelse(grepl("^[XNW]P_", acc),
+      paste0("https://www.ncbi.nlm.nih.gov/protein/", acc),
+      paste0("https://www.uniprot.org/uniprotkb/", gsub("^Cont_", "", acc), "/entry")
+    )
+    df_display$Protein.Group <- paste0("<a href='", link_urls, "' target='_blank'>", df_display$Protein.Group, "</a>")
     df_display <- df_display %>% dplyr::select(-Original.ID)
     fixed_cols <- gdata$fixed_cols; expr_cols <- gdata$expr_cols
     valid_cols_map <- gdata$valid_cols_map; meta_sorted <- gdata$meta_sorted; group_colors <- gdata$group_colors
