@@ -87,4 +87,13 @@ ENV DELIMP_DATA_DIR=/data
 
 EXPOSE 3838
 
-CMD ["R", "-e", "shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=3838)"]
+# Entrypoint: fix SSH key permissions (Windows mounts give 777 which SSH rejects)
+# then start the Shiny app
+CMD ["bash", "-c", "\
+  if [ -d /data/ssh ]; then \
+    mkdir -p /tmp/.ssh && \
+    cp /data/ssh/* /tmp/.ssh/ 2>/dev/null; \
+    chmod 600 /tmp/.ssh/* 2>/dev/null; \
+    export DELIMP_SSH_KEY=$(ls /tmp/.ssh/* 2>/dev/null | grep -v gitkeep | head -1); \
+  fi && \
+  R -e \"shiny::runApp('/srv/shiny-server/', host='0.0.0.0', port=3838)\""]
