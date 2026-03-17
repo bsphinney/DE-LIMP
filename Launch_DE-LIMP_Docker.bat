@@ -88,10 +88,11 @@ if defined SSH_KEY_PATH (
 :: Start container (only rebuild if Dockerfile changed)
 echo.
 echo  Starting DE-LIMP...
-docker compose up -d >nul 2>&1
+docker compose up -d 2>nul
 if errorlevel 1 (
-    echo  First run or update detected - building container...
-    echo  This may take several minutes on first run.
+    echo.
+    echo  Building container (first run or update - this may take a few minutes)...
+    echo.
     docker compose up -d --build
 )
 
