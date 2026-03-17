@@ -344,6 +344,9 @@ This is your landing page with 5 sub-tabs:
 * **Replicate Consistency** — Average precursor and protein counts per group
 * **Expression Grid** — Heatmap-style table with UniProt linking, click-to-plot, and contaminant highlighting (pink/red rows for `Cont_` proteins)
 * **Contaminant Analysis** (NEW in v3.7) — Summary cards (contaminant count, % of total, median intensity ratio vs endogenous, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and heatmap of top 20 contaminants by median intensity. Only visible when contaminant proteins (`Cont_` prefix) are detected.
+* **Data Explorer** (NEW in v3.7) — Two panels for exploring data without requiring DE analysis:
+  * **Abundance Profiles**: Proteins split into intensity quartiles (Q1=highest to Q4=lowest). Heatmap shows top 10 per quartile, colored by per-sample quartile assignment. Proteins that shift 2+ quartiles across samples are flagged as "Variable" — potentially biologically interesting even without replicates.
+  * **Sample-Sample Scatter**: Pick any two samples and compare protein intensities. Identity line shows expected correlation. Outliers (>4-fold difference) are labeled with gene names. Shows Pearson correlation, protein count, and number of outliers. Contaminants shown as orange triangles.
 * **AI Summary** — Generate AI-powered analysis summaries that analyze all contrasts simultaneously (requires Gemini API key); includes **"Export Report"** for standalone HTML and **"Export for Claude"** for a comprehensive .zip archive (see [Section 8](#8--ai-powered-analysis--export))
 
 ### 🔬 The Grid View (New!)

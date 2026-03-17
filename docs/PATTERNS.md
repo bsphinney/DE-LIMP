@@ -321,10 +321,21 @@ Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussi
 - **Configurable roots**: `DELIMP_EXTRA_ROOTS` env var (comma-separated paths) adds institution-specific root directories to the browser navigation.
 - **Performance**: Uses specific subdirectory roots rather than scanning from `/`. Avoids `ls` on directories with >10,000 entries.
 
+## Data Explorer Patterns (v3.7)
+
+- **Location**: Data Overview > Data Explorer subtab in `server_viz.R`
+- **No DE required**: Works with just `values$y_protein` — designed for no-replicates workflows
+- **Two panels** in scrollable accordion:
+  - **Abundance Profiles (Quartile Analysis)**: Splits proteins into Q1-Q4 by average intensity. Plotly heatmap shows top 10 per quartile, colored by per-SAMPLE quartile (not average). Reveals proteins that shift rank across samples. "Variable Proteins" DT table lists proteins with quartile range >= 2.
+  - **Sample-Sample Scatter**: Pick two samples, XY scatter with identity line. Points colored by distance from diagonal (grey=similar, red=different). Outliers (>4-fold) labeled with gene names. Contaminants as orange triangles. Stats subtitle: Pearson r, N proteins, N outliers. Built with ggplot + ggplotly.
+- **Gene label helper**: `explorer_gene_label()` resolves protein IDs via y_protein$genes > sp|ACC|GENE parsing > truncation fallback
+- **Quartile computation**: Per-sample quartile assignment uses each sample's own intensity distribution (not the average). This means a protein can be Q1 in one sample and Q3 in another — the inconsistency IS the signal.
+- **Contaminant exclusion**: Both panels have independent "Exclude contaminants" checkboxes (default TRUE)
+
 ## No-Replicates Mode (v3.7)
 
 - **Detection**: After group assignment, if any group has <2 samples, DE analysis is skipped.
-- **What works**: Data import, normalization (DPC-CN), protein quantification (DPC-Quant/maxLFQ), Expression Grid, Signal Distribution, PCA, Dataset Summary.
+- **What works**: Data import, normalization (DPC-CN), protein quantification (DPC-Quant/maxLFQ), Expression Grid, Signal Distribution, PCA, Dataset Summary, Data Explorer, Contaminant Analysis.
 - **What's skipped**: limma model fitting (`values$fit` stays NULL), volcano plot, DE results table, GSEA, CV Analysis. User sees informational message.
 - **Expression Grid fallback**: When `values$fit` is NULL, grid renders from `y_protein$E` with a dummy `P.Value = 1` column so the table structure is consistent.
 - **PCA without fit**: PCA tab checks for `y_protein` (quantified expression) not `values$fit`. Visible as soon as quantification completes.
