@@ -200,10 +200,10 @@ cmd_run() {
         PROXY_PID=$!
         echo "SLURM proxy started (PID ${PROXY_PID})"
 
-        # Ensure proxy is cleaned up when container exits
+        # Clean up proxy files (but keep directory for next launch)
         cleanup_proxy() {
             kill $PROXY_PID 2>/dev/null
-            rm -rf "${PROXY_DIR}"
+            rm -f "${PROXY_DIR}"/cmd_* "${PROXY_DIR}"/result_*
         }
         trap cleanup_proxy EXIT
 
@@ -309,8 +309,10 @@ cmd_sbatch() {
     local REPO_DIR="${3:-${DELIMP_BASE}/DE-LIMP}"
     local SBATCH_FILE="${JOB_DIR}/delimp_app.sbatch"
 
-    # Ensure directories exist
-    mkdir -p "${LOG_DIR}" "${JOB_DIR}" "${R_USER_LIB}"
+    # Ensure directories exist (proxy dir must exist BEFORE sbatch runs —
+    # Apptainer bind-mounts fail if the source dir doesn't exist at submit time)
+    local PROXY_DIR="${DELIMP_BASE}/users/${USER}/.slurm_proxy"
+    mkdir -p "${LOG_DIR}" "${JOB_DIR}" "${R_USER_LIB}" "${PROXY_DIR}"
 
     # Auto-update code from GitHub
     if [ -d "${REPO_DIR}/.git" ]; then
@@ -383,7 +385,7 @@ rm -f "\${PROXY_DIR}"/cmd_* "\${PROXY_DIR}"/result_*
     done
 ) &
 PROXY_PID=\$!
-trap "kill \$PROXY_PID 2>/dev/null; rm -rf \${PROXY_DIR}" EXIT
+trap "kill \$PROXY_PID 2>/dev/null; rm -f \${PROXY_DIR}/cmd_* \${PROXY_DIR}/result_*" EXIT
 
 apptainer exec \\
     --env R_LIBS_USER="${R_USER_LIB}" \\
