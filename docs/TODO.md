@@ -38,6 +38,18 @@
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 - [ ] **Thermo .raw TIC extraction**: Extend chromatography QC to Thermo files
 
+## Contaminant Tracking & Benchmarking
+- [ ] **Contamination level database**: Record per-sample contaminant % in activity log on every pipeline run. Build reference distribution across all analyses (percentiles).
+- [ ] **Benchmarking badge**: After pipeline, show "Your contaminant level (2.1%) is in the 35th percentile of all samples processed" — green/yellow/red badge.
+- [ ] **Core Facility QC report section**: Add contaminant summary to generated reports. Flag samples above 90th percentile.
+- [ ] **Instrument-specific baselines**: Track contaminant levels per instrument (from instrument_metadata). Different instruments have different typical contamination.
+- [ ] **Keratin trend monitoring**: Track keratin contamination over time to detect sample prep workflow degradation.
+
+## Data Explorer
+- [x] **Abundance Profiles (Quartile Analysis)**: Heatmap of top 10 proteins per intensity quartile with per-sample consistency (v3.7)
+- [x] **Sample-Sample Scatter**: Pairwise comparison with correlation, outlier labeling, contaminant overlay (v3.7)
+- [ ] **History download**: Download .rds session files from History tab for sharing with collaborators
+
 ## Deployment (v3.7 — Complete)
 - [x] **Docker launcher for Windows**: `Launch_DE-LIMP_Docker.bat` with shared PC support
 - [x] **SSH auto-connect**: Auto-connect to HPC on startup when SSH key detected

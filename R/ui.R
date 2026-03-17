@@ -1404,6 +1404,55 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     )
                   ),
 
+                  nav_panel("Data Explorer",
+                    icon = icon("search-plus"),
+                    div(style = "overflow-y: auto; max-height: calc(100vh - 200px); padding: 15px;",
+                      # Header with info button
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
+                        tags$h4(icon("search-plus"), " Data Explorer", style = "margin: 0; font-weight: 600;"),
+                        actionButton("data_explorer_info_btn", icon("question-circle"),
+                          class = "btn-outline-info btn-sm", title = "About Data Explorer")
+                      ),
+
+                      # --- Panel 1: Abundance Profiles ---
+                      tags$h5(icon("layer-group"), " Abundance Profiles (Quartile Analysis)",
+                        style = "font-weight: 600; margin-bottom: 10px; padding-top: 5px; border-top: 2px solid #dee2e6;"),
+                      div(style = "background-color: #e8f4f8; padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9em;",
+                        icon("info-circle"), " ",
+                        "Proteins split into quartiles by average intensity. Colors show per-sample quartile assignment. ",
+                        "Proteins that change quartile across samples may be biologically interesting."
+                      ),
+                      div(style = "margin-bottom: 15px;",
+                        checkboxInput("explorer_exclude_contam_profile", "Exclude contaminants", value = TRUE)
+                      ),
+                      div(style = "min-height: 500px;",
+                        plotlyOutput("explorer_quartile_heatmap", height = "500px")
+                      ),
+                      tags$h6(icon("exchange-alt"), " Variable Proteins (Quartile Range >= 2)",
+                        style = "font-weight: 600; margin-top: 20px; margin-bottom: 10px;"),
+                      DTOutput("explorer_variable_proteins_table"),
+
+                      # --- Panel 2: Sample-Sample Scatter ---
+                      tags$h5(icon("braille"), " Sample-Sample Scatter",
+                        style = "font-weight: 600; margin-top: 30px; margin-bottom: 10px; padding-top: 15px; border-top: 2px solid #dee2e6;"),
+                      div(style = "display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 15px;",
+                        div(style = "flex: 1; min-width: 150px;",
+                          selectInput("explorer_sample_a", "Sample A", choices = NULL, width = "100%")
+                        ),
+                        div(style = "flex: 1; min-width: 150px;",
+                          selectInput("explorer_sample_b", "Sample B", choices = NULL, width = "100%")
+                        ),
+                        div(style = "flex: 0 0 auto;",
+                          checkboxInput("explorer_label_outliers", "Label outliers (>4-fold)", value = TRUE),
+                          checkboxInput("explorer_exclude_contam_scatter", "Exclude contaminants", value = TRUE)
+                        )
+                      ),
+                      div(style = "min-height: 550px;",
+                        plotlyOutput("explorer_sample_scatter", height = "550px")
+                      )
+                    )
+                  ),
+
                   nav_panel("AI Summary",
                     icon = icon("robot"),
                     div(style = "padding: 20px;",

@@ -1285,4 +1285,411 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       geom_text_repel(data = selected_df, aes(label = Protein.Group), size = 4, max.overlaps = 20)
   }, height = 700)
 
+  # ==============================================================================
+  #  DATA EXPLORER — Abundance Profiles & Sample Scatter
+  # ==============================================================================
+
+  # --- Info modal ---
+  observeEvent(input$data_explorer_info_btn, {
+    showModal(modalDialog(
+      title = "Data Explorer",
+      size = "l",
+      easyClose = TRUE,
+      tags$h5("Abundance Profiles (Quartile Analysis)"),
+      tags$p("Proteins are split into four quartiles (Q1 = highest, Q4 = lowest) by their average intensity across all samples. ",
+        "The heatmap shows the top 10 proteins in each quartile (40 total). Each cell is colored by which quartile that protein falls in ",
+        "FOR THAT SPECIFIC SAMPLE — not the average. This reveals proteins whose relative abundance shifts across samples."),
+      tags$p("The 'Variable Proteins' table below lists proteins whose per-sample quartile assignment varies by 2 or more quartiles, ",
+        "indicating potential biological regulation or technical variability."),
+      tags$hr(),
+      tags$h5("Sample-Sample Scatter"),
+      tags$p("Select two samples to compare their protein intensities directly. Each point is a protein. ",
+        "Points far from the identity line (y = x) represent proteins with large intensity differences between the two samples."),
+      tags$p("Outliers (>4-fold difference) are labeled with gene names when available. ",
+        "Contaminant proteins are shown as orange triangles when not excluded.")
+    ))
+  })
+
+  # --- Helper: get gene label for a protein ID ---
+  explorer_gene_label <- function(protein_id, genes_df) {
+    if (is.null(genes_df)) return(protein_id)
+    # Try Genes column first
+    gene_col <- intersect(c("Genes", "Gene.Names", "Gene"), colnames(genes_df))
+    if (length(gene_col) > 0) {
+      idx <- match(protein_id, rownames(genes_df))
+      if (!is.na(idx)) {
+        g <- genes_df[idx, gene_col[1]]
+        if (!is.na(g) && nzchar(g) && nchar(g) < 20 && !grepl("[;|]", g)) return(g)
+      }
+    }
+    # Try parsing from sp|ACC|GENE format
+    parsed <- sub("^sp\\|[^|]+\\|([^_]+)_.*$", "\\1", protein_id)
+    if (parsed != protein_id && nchar(parsed) < 20) return(parsed)
+    # Truncate long accessions
+    if (nchar(protein_id) > 15) return(substr(protein_id, 1, 15))
+    protein_id
+  }
+
+  # --- Quartile heatmap reactive ---
+  explorer_quartile_data <- reactive({
+    req(values$y_protein)
+    mat <- values$y_protein$E
+    genes_df <- values$y_protein$genes
+
+    # Exclude contaminants if requested
+    if (isTRUE(input$explorer_exclude_contam_profile)) {
+      keep <- !grepl("^Cont_", rownames(mat))
+      mat <- mat[keep, , drop = FALSE]
+      if (!is.null(genes_df)) genes_df <- genes_df[keep, , drop = FALSE]
+    }
+
+    if (nrow(mat) < 4) return(NULL)
+
+    # Step 1: Average intensity per protein
+    avg_intensity <- rowMeans(mat, na.rm = TRUE)
+
+    # Step 2: Assign quartiles based on average (Q1 = highest)
+    breaks <- quantile(avg_intensity, probs = 0:4/4, na.rm = TRUE)
+    # Ensure unique breaks
+    breaks <- unique(breaks)
+    if (length(breaks) < 5) {
+      breaks <- seq(min(avg_intensity, na.rm = TRUE), max(avg_intensity, na.rm = TRUE), length.out = 5)
+    }
+    avg_quartile <- cut(avg_intensity, breaks = breaks,
+      labels = c("Q4", "Q3", "Q2", "Q1"), include.lowest = TRUE)
+    names(avg_quartile) <- names(avg_intensity)
+
+    # Step 3: Top 10 per quartile
+    top_proteins <- character(0)
+    for (q in c("Q1", "Q2", "Q3", "Q4")) {
+      in_q <- names(avg_quartile)[avg_quartile == q]
+      if (length(in_q) == 0) next
+      ordered <- in_q[order(-avg_intensity[in_q])]
+      top_proteins <- c(top_proteins, head(ordered, 10))
+    }
+
+    # Step 4: Per-sample quartile assignment for selected proteins
+    heatmap_mat <- mat[top_proteins, , drop = FALSE]
+    sample_quartiles <- matrix(NA_integer_, nrow = length(top_proteins), ncol = ncol(mat))
+    rownames(sample_quartiles) <- top_proteins
+    colnames(sample_quartiles) <- colnames(mat)
+
+    for (j in seq_len(ncol(mat))) {
+      col_vals <- mat[, j]
+      col_breaks <- quantile(col_vals, probs = 0:4/4, na.rm = TRUE)
+      col_breaks <- unique(col_breaks)
+      if (length(col_breaks) < 5) {
+        col_breaks <- seq(min(col_vals, na.rm = TRUE), max(col_vals, na.rm = TRUE), length.out = 5)
+      }
+      col_q <- cut(col_vals[top_proteins], breaks = col_breaks,
+        labels = c(4, 3, 2, 1), include.lowest = TRUE)
+      sample_quartiles[, j] <- as.integer(as.character(col_q))
+    }
+
+    # Gene labels for rows
+    row_labels <- vapply(top_proteins, function(pid) {
+      explorer_gene_label(pid, genes_df)
+    }, character(1))
+
+    # Short sample labels
+    if (!is.null(values$metadata)) {
+      col_labels <- paste0("S", values$metadata$ID[match(colnames(mat), values$metadata$File.Name)])
+      col_labels[is.na(col_labels)] <- colnames(mat)[is.na(col_labels)]
+    } else {
+      col_labels <- colnames(mat)
+    }
+
+    # Step 5: Variable proteins (quartile range >= 2 across ALL proteins)
+    all_sample_q <- matrix(NA_integer_, nrow = nrow(mat), ncol = ncol(mat))
+    rownames(all_sample_q) <- rownames(mat)
+    for (j in seq_len(ncol(mat))) {
+      col_vals <- mat[, j]
+      col_breaks <- quantile(col_vals, probs = 0:4/4, na.rm = TRUE)
+      col_breaks <- unique(col_breaks)
+      if (length(col_breaks) < 5) {
+        col_breaks <- seq(min(col_vals, na.rm = TRUE), max(col_vals, na.rm = TRUE), length.out = 5)
+      }
+      col_q <- cut(col_vals, breaks = col_breaks,
+        labels = c(4, 3, 2, 1), include.lowest = TRUE)
+      all_sample_q[, j] <- as.integer(as.character(col_q))
+    }
+
+    min_q <- apply(all_sample_q, 1, min, na.rm = TRUE)
+    max_q <- apply(all_sample_q, 1, max, na.rm = TRUE)
+    q_range <- max_q - min_q
+    variable_idx <- which(q_range >= 2)
+
+    variable_df <- NULL
+    if (length(variable_idx) > 0) {
+      variable_df <- data.frame(
+        Protein.Group = rownames(mat)[variable_idx],
+        Gene = vapply(rownames(mat)[variable_idx], function(pid) explorer_gene_label(pid, genes_df), character(1)),
+        Avg_Intensity = round(avg_intensity[variable_idx], 2),
+        Min_Quartile = min_q[variable_idx],
+        Max_Quartile = max_q[variable_idx],
+        Quartile_Range = q_range[variable_idx],
+        Samples = ncol(mat),
+        stringsAsFactors = FALSE
+      )
+      variable_df <- variable_df[order(-variable_df$Quartile_Range, -variable_df$Avg_Intensity), ]
+    }
+
+    # Quartile group boundaries for divider lines
+    group_sizes <- vapply(c("Q1", "Q2", "Q3", "Q4"), function(q) sum(avg_quartile[top_proteins] == q), integer(1))
+
+    list(
+      sample_quartiles = sample_quartiles,
+      row_labels = row_labels,
+      col_labels = col_labels,
+      avg_quartile = avg_quartile[top_proteins],
+      group_sizes = group_sizes,
+      variable_df = variable_df
+    )
+  })
+
+  # --- Quartile heatmap plot ---
+  output$explorer_quartile_heatmap <- renderPlotly({
+    qdata <- explorer_quartile_data()
+    req(qdata)
+
+    sq <- qdata$sample_quartiles
+    # Reverse row order so Q1 (highest) is at top
+    sq <- sq[nrow(sq):1, , drop = FALSE]
+    row_labels <- rev(qdata$row_labels)
+    avg_q <- rev(qdata$avg_quartile)
+
+    # Build hover text
+    hover_text <- matrix("", nrow = nrow(sq), ncol = ncol(sq))
+    for (i in seq_len(nrow(sq))) {
+      for (j in seq_len(ncol(sq))) {
+        hover_text[i, j] <- paste0(
+          "Protein: ", row_labels[i],
+          "<br>Sample: ", qdata$col_labels[j],
+          "<br>Sample Quartile: Q", sq[i, j],
+          "<br>Average Quartile: ", avg_q[i]
+        )
+      }
+    }
+
+    # Color scale: Q1 (highest, value 1) = dark blue, Q4 (lowest, value 4) = red
+    colorscale <- list(
+      list(0, "#08306b"),     # Q1 - darkest blue
+      list(0.333, "#2171b5"), # Q2 - medium blue
+      list(0.667, "#6baed6"), # Q3 - light blue
+      list(1, "#ef3b2c")     # Q4 - red
+    )
+
+    p <- plot_ly(
+      z = sq,
+      x = qdata$col_labels,
+      y = row_labels,
+      type = "heatmap",
+      colorscale = colorscale,
+      zmin = 1, zmax = 4,
+      text = hover_text,
+      hoverinfo = "text",
+      colorbar = list(
+        title = "Quartile",
+        tickvals = c(1, 2, 3, 4),
+        ticktext = c("Q1 (High)", "Q2", "Q3", "Q4 (Low)"),
+        len = 0.5
+      )
+    )
+
+    # Add divider lines between quartile groups
+    gs <- qdata$group_sizes[c("Q4", "Q3", "Q2", "Q1")]  # reversed order
+    shapes <- list()
+    cum <- 0
+    for (i in seq_along(gs)) {
+      cum <- cum + gs[i]
+      if (i < length(gs) && cum > 0 && cum < nrow(sq)) {
+        shapes[[length(shapes) + 1]] <- list(
+          type = "line",
+          x0 = -0.5, x1 = ncol(sq) - 0.5,
+          y0 = cum - 0.5, y1 = cum - 0.5,
+          line = list(color = "white", width = 3)
+        )
+      }
+    }
+
+    p %>% layout(
+      xaxis = list(title = "", tickangle = -45, tickfont = list(size = 10)),
+      yaxis = list(title = "", tickfont = list(size = 9), dtick = 1),
+      shapes = shapes,
+      margin = list(l = 120, b = 80)
+    )
+  })
+
+  # --- Variable proteins table ---
+  output$explorer_variable_proteins_table <- renderDT({
+    qdata <- explorer_quartile_data()
+    req(qdata, qdata$variable_df)
+
+    df <- qdata$variable_df
+    colnames(df) <- c("Protein Group", "Gene", "Avg Intensity", "Min Quartile", "Max Quartile", "Quartile Range", "Samples")
+
+    datatable(df,
+      options = list(dom = 'frtip', pageLength = 15, scrollX = TRUE,
+        order = list(list(5, "desc"))),
+      rownames = FALSE
+    ) %>%
+      formatRound("Avg Intensity", digits = 1) %>%
+      formatStyle("Quartile Range",
+        backgroundColor = styleInterval(c(2, 3), c("#fff3cd", "#f8d7da", "#f8d7da")),
+        fontWeight = "bold"
+      )
+  })
+
+  # --- Update sample selectors when y_protein changes ---
+  observeEvent(values$y_protein, {
+    req(values$y_protein)
+    sample_names <- colnames(values$y_protein$E)
+
+    if (!is.null(values$metadata)) {
+      short_ids <- paste0("S", values$metadata$ID[match(sample_names, values$metadata$File.Name)])
+      short_ids[is.na(short_ids)] <- sample_names[is.na(short_ids)]
+      choices <- setNames(sample_names, short_ids)
+    } else {
+      choices <- setNames(sample_names, sample_names)
+    }
+
+    updateSelectInput(session, "explorer_sample_a", choices = choices,
+      selected = if (length(choices) >= 1) choices[1] else NULL)
+    updateSelectInput(session, "explorer_sample_b", choices = choices,
+      selected = if (length(choices) >= 2) choices[2] else NULL)
+  })
+
+  # --- Sample-Sample Scatter ---
+  output$explorer_sample_scatter <- renderPlotly({
+    req(values$y_protein, input$explorer_sample_a, input$explorer_sample_b)
+    req(input$explorer_sample_a != input$explorer_sample_b)
+
+    mat <- values$y_protein$E
+    genes_df <- values$y_protein$genes
+    sa <- input$explorer_sample_a
+    sb <- input$explorer_sample_b
+    req(sa %in% colnames(mat), sb %in% colnames(mat))
+
+    # Build data frame
+    df <- data.frame(
+      Protein.Group = rownames(mat),
+      A = mat[, sa],
+      B = mat[, sb],
+      stringsAsFactors = FALSE
+    )
+    df$is_contaminant <- grepl("^Cont_", df$Protein.Group)
+
+    # Gene labels
+    df$Gene <- vapply(df$Protein.Group, function(pid) explorer_gene_label(pid, genes_df), character(1))
+
+    # Protein name for hover
+    if (!is.null(genes_df) && "Protein.Names" %in% colnames(genes_df)) {
+      name_idx <- match(df$Protein.Group, rownames(genes_df))
+      df$Protein.Name <- ifelse(is.na(name_idx), "", genes_df$Protein.Names[name_idx])
+    } else {
+      df$Protein.Name <- ""
+    }
+
+    # Remove rows with NA in either sample
+    df <- df[!is.na(df$A) & !is.na(df$B), ]
+
+    # Exclude contaminants if requested
+    exclude_contam <- isTRUE(input$explorer_exclude_contam_scatter)
+    if (exclude_contam) {
+      df <- df[!df$is_contaminant, ]
+    }
+
+    if (nrow(df) < 2) return(NULL)
+
+    # Compute diff and stats
+    df$diff <- df$A - df$B
+    df$abs_diff <- abs(df$diff)
+    df$fold_diff <- round(2^df$abs_diff, 1)
+    df$is_outlier <- df$abs_diff > 2  # 4-fold
+
+    pearson_r <- round(cor(df$A, df$B, use = "complete.obs"), 3)
+    n_proteins <- nrow(df)
+    n_outliers <- sum(df$is_outlier)
+
+    # Short sample labels for axis
+    sa_label <- sa
+    sb_label <- sb
+    if (!is.null(values$metadata)) {
+      sa_label <- paste0("S", values$metadata$ID[match(sa, values$metadata$File.Name)])
+      sb_label <- paste0("S", values$metadata$ID[match(sb, values$metadata$File.Name)])
+      if (is.na(sa_label)) sa_label <- sa
+      if (is.na(sb_label)) sb_label <- sb
+    }
+
+    # Color by distance from identity
+    df$color_val <- pmin(df$abs_diff, 4)  # cap for color scaling
+
+    # Hover text
+    df$hover <- paste0(
+      "Gene: ", df$Gene,
+      "<br>Protein: ", df$Protein.Name,
+      "<br>", sa_label, ": ", round(df$A, 2),
+      "<br>", sb_label, ": ", round(df$B, 2),
+      "<br>Fold diff: ", df$fold_diff, "x"
+    )
+
+    # Subtitle
+    subtitle_text <- paste0(
+      "Pearson r = ", pearson_r,
+      " | N = ", format(n_proteins, big.mark = ","), " proteins",
+      " | ", n_outliers, " with >4-fold difference"
+    )
+
+    # Separate contaminants and sample proteins
+    contam_df <- df[df$is_contaminant, ]
+    sample_df <- df[!df$is_contaminant, ]
+    outlier_df <- df[df$is_outlier & !df$is_contaminant, ]
+
+    # Build ggplot
+    axis_range <- range(c(df$A, df$B), na.rm = TRUE)
+    axis_pad <- diff(axis_range) * 0.05
+
+    p <- ggplot() +
+      # Identity line
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey60", linewidth = 0.5) +
+      # Sample proteins colored by distance
+      geom_point(data = sample_df, aes(x = A, y = B, color = color_val, text = hover),
+        size = 1.5, alpha = 0.7) +
+      scale_color_gradient(low = "grey70", high = "#e41a1c", name = "|Diff| (log2)",
+        limits = c(0, 4), guide = "colorbar")
+
+    # Add contaminants as orange triangles if not excluded
+    if (!exclude_contam && nrow(contam_df) > 0) {
+      p <- p + geom_point(data = contam_df, aes(x = A, y = B, text = hover),
+        shape = 17, color = "#ff8c00", size = 2.5, alpha = 0.8)
+    }
+
+    # Label outliers
+    if (isTRUE(input$explorer_label_outliers) && nrow(outlier_df) > 0) {
+      # Show top 30 outliers max to avoid clutter
+      outlier_label_df <- head(outlier_df[order(-outlier_df$abs_diff), ], 30)
+      p <- p + geom_text(data = outlier_label_df, aes(x = A, y = B, label = Gene),
+        size = 3, hjust = -0.15, vjust = -0.3, check_overlap = TRUE, color = "#333333")
+    }
+
+    p <- p +
+      labs(
+        title = paste0("Sample Scatter: ", sa_label, " vs ", sb_label),
+        subtitle = subtitle_text,
+        x = paste0(sa_label, " (log2 intensity)"),
+        y = paste0(sb_label, " (log2 intensity)")
+      ) +
+      coord_fixed(ratio = 1,
+        xlim = c(axis_range[1] - axis_pad, axis_range[2] + axis_pad),
+        ylim = c(axis_range[1] - axis_pad, axis_range[2] + axis_pad)) +
+      theme_bw() +
+      theme(plot.subtitle = element_text(size = 10, color = "#555555"))
+
+    ggplotly(p, tooltip = "text") %>%
+      layout(
+        margin = list(t = 60),
+        legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15)
+      )
+  })
+
 }
