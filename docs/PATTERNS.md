@@ -292,3 +292,50 @@ Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussi
 - **NaN-safe classify_de()**: Uses `is.finite()` guards for both logFC and adjP. Returns "NS" for any non-finite value.
 - **NaN-safe assign_hypothesis()**: Coerces non-finite logFC to 0, non-finite adjP to 1 at function entry, before any conditional logic.
 - **Instrument context in AI prompts**: `build_gemini_comparator_prompt()` and `build_claude_comparator_prompt()` accept optional `instrument_meta` parameter. Emits brief "INSTRUMENT: model, LC, SPD, gradient" line when available.
+
+## NCBI Integration Patterns
+
+- **NCBI Proteome Download**: Uses NCBI Datasets API (`datasets.ncbi.nlm.nih.gov/v2alpha/genome/taxon/{organism}/dataset_report`) to find reference proteomes. Downloads protein FASTA via assembly accession.
+- **Gene symbol mapping**: NCBI RefSeq accessions (XP_, NP_, WP_) lack embedded gene names unlike UniProt `sp|ACC|GENE` format. Batch E-utilities lookup: `esearch` for protein UIDs, then `esummary` to extract gene name from `DocumentSummarySet`. Results cached as TSV alongside FASTA.
+- **Gene map TSV**: Stored as `{fasta_basename}_gene_map.tsv` with columns `accession` and `gene_symbol`. Applied during data loading to populate the `Genes` column in DIA-NN output.
+- **Docker gene map download**: Docker users may lack direct E-utilities access. Gene map TSV auto-downloaded from HPC via SSH (`scp_download()`) when not found locally.
+- **NCBI protein links**: Proteins with RefSeq accessions link to `https://www.ncbi.nlm.nih.gov/protein/{accession}` instead of UniProt. `Cont_` prefixed proteins detected separately.
+
+## Contaminant Analysis Patterns
+
+- **Detection**: Contaminant proteins identified by `Cont_` prefix in `Protein.Group` column (added by DIA-NN when using `--fasta` contaminant library).
+- **Summary cards**: Count, percentage of total proteins, median intensity ratio (contaminant median / endogenous median), keratin count (grep for `KRT|Keratin|keratin` in gene/protein names).
+- **Per-sample stacked bar**: Each sample bar shows endogenous (blue) and contaminant (orange) protein counts. Useful for spotting samples with unusual contamination.
+- **Top contaminants table**: Sorted by median intensity across samples. Keratin flag column (yellow highlight). Downloadable as CSV.
+- **Contaminant heatmap**: Top 20 contaminants by median intensity. Rows = proteins, columns = samples. Color scale: white (low) to orange/red (high).
+- **Expression Grid highlighting**: `Cont_` rows get pink background CSS. Helps users visually identify contamination in the full expression matrix.
+- **Signal Distribution overlay**: Checkbox adds orange contaminant protein distribution overlaid on the main signal distribution plot. Shows where contaminants fall in the intensity range.
+
+## SSH File Browser Patterns
+
+- **Modal-based**: Opens as a Shiny modal with path display, breadcrumbs, and file list.
+- **SSH directory listing**: `ssh_exec()` with `ls -la` to list directory contents. Parsed into data frame with name, type, size.
+- **Color coding**: Folders (blue folder icon), data files `.d`/`.raw`/`.parquet`/`.fasta` (green file icon), other (grey).
+- **Breadcrumb navigation**: Path split into clickable segments. Each segment navigates to that directory level.
+- **Context-specific filtering**: Raw data browser shows `.d`/`.raw`/`.mzML`/`.wiff` directories/files. FASTA browser shows `.fasta`/`.fa`. Results browser shows `.parquet`.
+- **Configurable roots**: `DELIMP_EXTRA_ROOTS` env var (comma-separated paths) adds institution-specific root directories to the browser navigation.
+- **Performance**: Uses specific subdirectory roots rather than scanning from `/`. Avoids `ls` on directories with >10,000 entries.
+
+## No-Replicates Mode (v3.7)
+
+- **Detection**: After group assignment, if any group has <2 samples, DE analysis is skipped.
+- **What works**: Data import, normalization (DPC-CN), protein quantification (DPC-Quant/maxLFQ), Expression Grid, Signal Distribution, PCA, Dataset Summary.
+- **What's skipped**: limma model fitting (`values$fit` stays NULL), volcano plot, DE results table, GSEA, CV Analysis. User sees informational message.
+- **Expression Grid fallback**: When `values$fit` is NULL, grid renders from `y_protein$E` with a dummy `P.Value = 1` column so the table structure is consistent.
+- **PCA without fit**: PCA tab checks for `y_protein` (quantified expression) not `values$fit`. Visible as soon as quantification completes.
+
+## Docker + SSH Deployment Patterns (v3.7)
+
+- **SSH auto-connect**: On startup, `app.R` checks for SSH keys in Docker-mounted volume (`/app/data/ssh/`) and `~/.ssh/`. If found, triggers `test_ssh_connection()` via `later::later()` to avoid blocking the event loop.
+- **Stale socket detection**: `ssh -O check` probes ControlMaster socket before auto-connect. Dead sockets (from previous app instances) are removed.
+- **Environment badge**: CSS-styled badge in navbar. Detection order: `SPACE_ID` env (HF orange) > `/.singularity.d/` or `APPTAINER_*` env (HPC green) > Docker socket/env (Docker red) > fallback (Local blue).
+- **SLURM proxy for Apptainer**: Shell script outside container listens for command files in shared storage, executes SLURM commands, writes results. All 9 SLURM paths: `sbatch`, `squeue`, `scancel`, `sacct`, `sinfo`, `sacctmgr`, `scontrol`, `srun`, `sbatch --test-only`.
+- **Container detection**: `is_container()` checks for Apptainer/Docker markers. When true, skips BiocManager package validation (no internet in container = validation hangs).
+- **Home directory quota warning**: Startup check via `df -h ~` or `quota` command. Warns if >80% used. Common on HPC where home dirs are 5-10 GB.
+- **Auto-adjust search CPUs**: When submitting a DIA-NN search, CPUs automatically capped to per-user SLURM limit (from `check_cluster_resources()`). Prevents job rejection due to QOS limits.
+- **Windows Docker SSH key handling**: `Launch_DE-LIMP_Docker.bat` copies SSH keys from `C:\Users\{username}\.ssh\` into Docker-accessible volume (`./data/ssh/`). Sets permissions via `docker exec chmod 600`. Multiple Windows users on same PC each get their own key detected.

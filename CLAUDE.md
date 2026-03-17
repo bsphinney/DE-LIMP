@@ -15,10 +15,10 @@ DE-LIMP is a Shiny proteomics data analysis pipeline using the LIMPA R package f
 
 ## Architecture
 
-### Structure (~7,500 lines total)
+### Structure (~9,000 lines total)
 ```
-app.R (~290 lines):      Package loading, backend detection (Docker/HPC/Core Facility), VERSION + stats loading, reactive values, module calls
-R/ui.R (~1,500 lines):   build_ui() — page_navbar layout, CSS/JS, accordion sidebar, all tab nav_panels
+app.R (~350 lines):      Package loading, backend detection (Docker/HPC/Core Facility/Apptainer), VERSION + stats loading, reactive values, module calls, SSH auto-connect, container detection
+R/ui.R (~1,700 lines):   build_ui() — page_navbar layout, CSS/JS, accordion sidebar, all tab nav_panels, SSH file browser modals, environment badge
 R/server_*.R (12 files): Server modules, each receives (input, output, session, values, ...)
 R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 ```
@@ -27,24 +27,27 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 
 | File | Purpose |
 |------|---------|
-| `app.R` | Orchestrator — package loading, backend detection, reactive values, module calls |
-| `R/ui.R` | `page_navbar` layout, accordion sidebar, all tab definitions |
-| `R/server_data.R` | Data upload, example load, group assignment, pipeline execution |
+| `app.R` | Orchestrator — package loading, backend detection (Docker/HPC/Apptainer/Core Facility), SSH auto-connect, container detection, reactive values, module calls |
+| `R/ui.R` | `page_navbar` layout, accordion sidebar, all tab definitions, SSH file browser modals, environment badge |
+| `R/server_data.R` | Data upload, example load, group assignment, pipeline execution, contaminant analysis, no-replicates mode |
 | `R/server_de.R` | Volcano, DE table, heatmap, CV analysis, selection sync |
 | `R/server_qc.R` | QC sample metrics (faceted trend plot), diagnostic plots, p-value distribution |
-| `R/server_viz.R` | Expression grid, signal distribution, PCA |
+| `R/server_viz.R` | Expression grid (contaminant highlighting), signal distribution (contaminant overlay), PCA |
 | `R/server_gsea.R` | GSEA analysis, multi-DB (BP/MF/CC/KEGG), organism detection |
 | `R/server_ai.R` | AI Summary (all contrasts), Data Chat, Gemini integration, HTML report export |
-| `R/server_search.R` | Docker/HPC dual backend, SSH, DIA-NN search, job queue |
+| `R/server_search.R` | Docker/HPC dual backend, SSH, DIA-NN search, job queue, SSH file browser, NCBI download, SLURM proxy, Load from HPC |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview), contrast mismatch detection, instrument context in AI prompts, MOFA2 decomposition |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
-| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes |
-| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt search, unified activity log |
+| `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes, remote history |
+| `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt/NCBI search, unified activity log, SSH file browser helpers, SLURM proxy |
 | `R/helpers_instrument.R` | `parse_timstof_metadata()`, `parse_thermo_metadata()`, `parse_raw_file_metadata()`, `extract_tic_timstof()`, `compute_tic_metrics()`, `diagnose_run()`, instrument formatters for Methods/AI |
-| `VERSION` | Single-line app version (e.g. `3.1.1`), read at startup into `values$app_version` |
+| `VERSION` | Single-line app version (e.g. `3.7.0`), read at startup into `values$app_version` |
 | `stats/community_stats.json` | GitHub traffic data generated daily by `.github/workflows/track-stats.yml` |
+| `Launch_DE-LIMP_Docker.bat` | Windows one-click Docker launcher with SSH key auto-detection and shared PC support |
+| `launch_delimp.sh` | Mac/Linux launcher — auto-downloads `hpc_setup.sh`, handles container install + SSH tunnel |
+| `hpc_setup.sh` | HPC setup script — container install, R packages, code updates, SLURM proxy, per-user dirs |
 
 ### Tab Structure (page_navbar)
 Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output** dropdown (Export Data, Methods & Code) | **About** dropdown (Community, Search History, Analysis History) | **Education** | **Facility** dropdown (conditional) | gear icon (far right)
@@ -55,14 +58,14 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 **Progressive reveal**: `nav_hide()`/`nav_show()` on `"main_tabs"`. Hidden on startup via `session$onFlushed(once=TRUE)`:
 - **Always visible**: New Search (if `search_enabled`), Analysis > Data Overview, About, Education, Facility (if `is_core_facility`)
 - **QC**: shown when `values$raw_data` not NULL OR `values$tic_traces` not NULL
-- **DE Dashboard, GSEA, MOFA2, Run Comparator, AI Analysis, Output**: shown when `values$fit` not NULL (Comparator also shown when `values$comparator_results` exists)
+- **DE Dashboard, GSEA, MOFA2, Run Comparator, AI Analysis, Output**: shown when `values$fit` not NULL (Comparator also shown when `values$comparator_results` exists). PCA and Expression Grid also work without `values$fit` when quantification is complete (no-replicates mode).
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
 **Tab values that MUST NOT change** (used by server nav_select/nav_show/nav_hide):
 `"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"comparator_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"history_tab"`
 
 #### Analysis dropdown
-- **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, AI Summary
+- **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Expression Grid, Contaminant Analysis, AI Summary
 - **DE Dashboard** — `navset_card_tab(id = "de_dashboard_subtabs")`: Volcano (+heatmap), Results Table, PCA, CV Analysis. Comparison selector banner above sub-tabs.
 - **Phosphoproteomics** — conditional on phospho detection
 - **Gene Set Enrichment** — BP/MF/CC/KEGG with per-ontology caching
@@ -75,7 +78,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **History** (`value = "history_tab"`) — Unified activity log (replaces Search History + Analysis History). Single DT table with expandable detail rows, project/status filters, Load/Settings/Notes/Project buttons. Notes modal on search completion.
 
 ### Unified Activity Log (v3.6.0)
-- **Single CSV**: `activity_log_path()` → shared `/Volumes/proteomics-grp/delimp/activity_log.csv` or local `~/.delimp_activity_log.csv`. 33 columns. Append-only with file locking; updates via `update_activity()` (read-modify-write by `output_dir`) or `update_activity_by_id()`.
+- **Single CSV**: `activity_log_path()` → shared HPC storage (`/quobyte/proteomics-grp/de-limp/activity_log.csv`) or local `~/.delimp_activity_log.csv`. Remote log readable via SSH for Docker users. 33 columns. Append-only with file locking; updates via `update_activity()` (read-modify-write by `output_dir`) or `update_activity_by_id()`.
 - **Replaces**: search_history.csv + analysis_history.csv + projects.json (old files migrated to `.bak` on first load).
 - **Event types**: `search_submitted`, `search_completed`, `search_failed`, `analysis_completed`, `data_loaded`, `session_restored`.
 - **Record points**: Job submission (`server_search.R`), job completion/failure (monitoring observer), pipeline completion (`server_data.R`), auto-load (`server_search.R`), session upload (`server_session.R`).
@@ -102,10 +105,11 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 
 ## Deployment
 
-### Three Platforms
+### Four Deployment Modes
 1. **GitHub** (`origin`) — Source code. `git push origin main` auto-syncs to HF via GitHub Actions.
 2. **Hugging Face** (`hf`) — Docker app. Thin `Dockerfile` FROM `brettphinney/delimp-base:v3.1`.
-3. **HPC** — Apptainer containers (see `HPC_DEPLOYMENT.md`)
+3. **Docker + SSH** (recommended for Windows) — `Launch_DE-LIMP_Docker.bat` runs DE-LIMP locally in Docker, connects to HPC via SSH for DIA-NN search. Shared PC support with auto SSH key detection.
+4. **HPC Apptainer** (alternative) — `launch_delimp.sh` / `Launch_DE-LIMP.bat` launches via Apptainer on HPC with SLURM proxy. See `HPC_DEPLOYMENT.md`.
 
 ### README Management (CRITICAL)
 - Edit `README_GITHUB.md` for GitHub, `README_HF.md` for HF
@@ -190,9 +194,16 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 | History tab slow with network CSV | Multiple `activity_log_read()` calls per render cycle. Use `cached_activity_log()` reactive to read once per invalidation. |
 | **NEVER use mounted drives for app state** | SMB mounts (`/Volumes/proteomics-grp/`) may be absent, slow, or disappear. All app state files (activity log, cluster usage, lab members) MUST use local paths (`~/.delimp_*`). Cross-user sharing via SSH/SCP sync when connected. |
 | **Derived data stays with source data** | Cached/computed data (TIC cache, session.rds, search_info.md) belongs in the raw data or output directory — NOT in a user's home directory. This ensures: (1) any lab member scanning the same directory gets cached results, (2) data is portable (copy dir = copy everything), (3) lifecycle is tied to the dataset (delete data = delete cache). Use SCP for remote directories. Pattern: `.delimp_tic_cache.rds` in raw data dir, `session.rds` in output dir. Only app-level config (activity log, lab members, cluster usage) belongs in `~/.delimp_*`. |
+| SSH auto-connect blocks event loop | SSH connection test on startup can take 10-30s. Run via `later::later()` or ensure fast-fail with short timeout. Stale ControlMaster sockets detected with `ssh -O check`. |
+| NCBI RefSeq accessions need gene mapping | DIA-NN `Genes` column is empty/accession-only for NCBI FASTA. Use batch E-utilities (`esummary` on protein UIDs) to get gene symbols. Gene map TSV cached alongside FASTA. |
+| Contaminant proteins have `Cont_` prefix | After `--fasta` contaminant library, DIA-NN prefixes protein IDs with `Cont_`. Detect via `grepl("^Cont_", Protein.Group)`. Link to NCBI Protein (not UniProt) for these. |
+| No-replicates mode skips DE | Groups with <2 replicates get quantification only. `values$fit` remains NULL. Expression Grid, PCA, Signal Distribution still work. Volcano/DE table/GSEA require replicates. |
+| SLURM proxy inside Apptainer | SLURM commands not available inside container. Proxy process outside relays commands via temp files. All 9 SLURM command paths covered. |
+| SSH file browser Unix socket path | File browser modal creates SSH connections. Same ControlMaster socket path length constraint applies. |
+| Docker SSH key permissions | Windows Docker bind mounts lose Unix permissions. `Launch_DE-LIMP_Docker.bat` copies keys to container-internal volume with `chmod 600`. |
 
 ## Version History
 
-Current version: **v3.6.1** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
+Current version: **v3.7.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
-Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0) | **Spectronaut parsing fixes, TopN scatter fix, sub-tab help modals** (v3.5.1) | **Unified activity log, cluster monitoring, Spectronaut NaN/rescue fixes** (v3.6.0/v3.6.1)
+Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0) | **Spectronaut parsing fixes, TopN scatter fix, sub-tab help modals** (v3.5.1) | **Unified activity log, cluster monitoring, Spectronaut NaN/rescue fixes** (v3.6.0/v3.6.1) | **Docker launcher, NCBI integration, contaminant analysis, SSH file browser, Load from HPC, no-replicates mode** (v3.7.0)

@@ -31,7 +31,22 @@
 
 ## DIA-NN Search
 - [x] **Shared speclib cache**: Move `~/.delimp_speclib_cache.rds` to shared volume (`/Volumes/proteomics-grp/dia-nn/`) so all lab members benefit from cached predicted libraries. Fall back to local home dir if volume not mounted.
+- [x] **NCBI proteome download**: Download FASTA from NCBI with gene symbol mapping via E-utilities (v3.7)
+- [x] **SSH file browser**: Visual directory browser for remote mode (v3.7)
+- [x] **Load from HPC**: One-click download and load of completed search results (v3.7)
+- [x] **No-replicates mode**: Quantification completes, DE skipped gracefully (v3.7)
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
+- [ ] **Thermo .raw TIC extraction**: Extend chromatography QC to Thermo files
+
+## Deployment (v3.7 — Complete)
+- [x] **Docker launcher for Windows**: `Launch_DE-LIMP_Docker.bat` with shared PC support
+- [x] **SSH auto-connect**: Auto-connect to HPC on startup when SSH key detected
+- [x] **Environment badge**: Colored badge showing Docker/HPC/Local/HF mode
+- [x] **SLURM proxy for Apptainer**: All 9 command paths proxied
+- [x] **Shared HPC storage**: All files on `/quobyte/proteomics-grp/de-limp/`
+- [x] **Per-user HPC directories**: Multi-user support without conflicts
+- [x] **Container detection**: Skip BiocManager validation offline
+- [x] **Home directory quota warning**: Startup check for HPC quota limits
 
 ## CV Analysis Tab Redesign (Complete)
 - [x] Replace broken DT table with plotly scatter plot (logFC vs Avg CV, color-coded by CV category)

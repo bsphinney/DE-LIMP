@@ -1,23 +1,47 @@
 # DE-LIMP HPC Deployment Guide
 
-This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. The automated launcher scripts handle everything — container installation, code updates, job submission, SSH tunneling, and cleanup.
+This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. Two approaches are supported:
+
+1. **Docker + SSH (Recommended for Windows)** — Run DE-LIMP locally in Docker, connect to HPC via SSH for DIA-NN searches. See [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) for Docker setup, then use the SSH file browser and "Load from HPC" features.
+2. **Apptainer on HPC (Alternative)** — Run DE-LIMP directly on a compute node via Apptainer container with SLURM proxy. This guide focuses on this approach.
+
+The automated launcher scripts handle everything — container installation, code updates, job submission, SSH tunneling, and cleanup.
 
 ### What's Included
 
 - **Differential Expression** — Upload DIA-NN `.parquet` results, run the limpa/limma pipeline, explore volcano plots, heatmaps, and tables
 - **DIA-NN Search Integration** — Submit DIA-NN database searches to SLURM directly from the **New Search** tab. Results auto-load when complete.
+- **NCBI Proteome Download** — Download FASTA databases from NCBI with automatic gene symbol mapping
 - **MOFA2 Multi-Omics Integration** — Combine 2-6 data views for unsupervised factor analysis
 - **Phosphoproteomics** — Site-level DE, KSEA kinase activity, motif analysis
 - **GSEA** — GO (BP/MF/CC) and KEGG pathways with automatic organism detection
 - **Run Comparator** — Cross-tool DE comparison (DE-LIMP vs Spectronaut/FragPipe)
 - **AI Chat** — Google Gemini integration for data exploration (requires API key)
 - **Chromatography QC** — TIC trace extraction and per-run diagnostic flagging
+- **Contaminant Analysis** — Automatic contaminant detection, per-sample breakdown, keratin flagging
+- **SSH File Browser** — Visual directory navigation for remote data on HPC
 
 ---
 
 ## Quick Start (Recommended)
 
-### Windows Users — Double-Click Launcher
+### Windows Users — Two Options
+
+#### Option A: Docker + SSH (Recommended)
+
+Run DE-LIMP locally in Docker and connect to HIVE via SSH for DIA-NN searches. This is the easiest setup for Windows users.
+
+1. **Install Docker Desktop** and follow [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)
+2. **Double-click `Launch_DE-LIMP_Docker.bat`** — it auto-detects your SSH key, starts the Docker container, and opens `http://localhost:3838`
+3. The app auto-connects to HIVE via SSH on startup (green "HPC" badge appears)
+4. Use the **SSH File Browser** to navigate remote data directories
+5. Use **"Load from HPC"** to download and analyze completed search results
+
+> **Shared PC support:** Multiple Windows users on the same PC are handled automatically. The Docker launcher detects each user's SSH key from `C:\Users\{username}\.ssh\`.
+
+#### Option B: Apptainer on HPC
+
+Run DE-LIMP directly on a HIVE compute node via Apptainer.
 
 **Prerequisites:** OpenSSH (built into Windows 10+) and an SSH key for HIVE (see [SSH Key Setup](#ssh-key-setup) below).
 
@@ -28,8 +52,8 @@ This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. The automate
 3. **Double-click `Launch_DE-LIMP.bat`**. On first run it will:
    - Download the remaining scripts from GitHub automatically
    - Ask for your HIVE username (saved for next time)
-   - Install the container on HIVE (~5 GB, takes 10-20 min the first time)
-   - Install any missing R packages
+   - Install the container on shared storage (~5 GB, takes 10-20 min the first time)
+   - Install any missing R packages to shared storage
    - Submit a SLURM job and wait for a compute node
    - Open an SSH tunnel and launch your browser to `http://localhost:7860`
 
@@ -38,6 +62,8 @@ This guide covers running DE-LIMP on the UC Davis HIVE HPC cluster. The automate
 > **First launch takes ~20 minutes** (container download + package install). Subsequent launches take ~1-2 minutes.
 
 ### Mac / Linux Users — Terminal Launcher
+
+For Apptainer on HPC (Docker + SSH is also available for Mac/Linux — see [MACOS_DOCKER_INSTALL.md](MACOS_DOCKER_INSTALL.md) or [LINUX_DOCKER_INSTALL.md](LINUX_DOCKER_INSTALL.md)):
 
 ```bash
 # Download the launcher (one time) — it auto-downloads hpc_setup.sh on first run
@@ -48,7 +74,7 @@ chmod +x launch_delimp.sh
 bash launch_delimp.sh
 ```
 
-The launcher performs the same 7 steps as the Windows version. Press Ctrl+C to stop.
+The launcher performs the same 7 steps as the Windows Apptainer version. Press Ctrl+C to stop.
 
 ---
 
@@ -59,10 +85,11 @@ The launcher performs the same 7 steps as the Windows version. Press Ctrl+C to s
 | 1. Find SSH key | Checks the script directory, then `~/.ssh/` for `id_ed25519`, `id_rsa`, or `*.pem` |
 | 2. Get username | Prompts once, saves to `.delimp_config` for future runs |
 | 3. Check container | Verifies container exists on shared storage; installs if missing |
-| 4. Sync repo | Clones or `git pull`s the DE-LIMP repo on HIVE (for live code updates) |
+| 4. Sync repo | Clones or `git pull`s the DE-LIMP repo on HIVE (for live code updates). Code update detection banner shown in app if behind. |
 | 5. Check packages | Installs missing R packages (GSEA, MOFA2, etc.) into shared storage |
-| 6. Submit job | Submits an `sbatch` job, polls for the compute node hostname, opens an SSH tunnel |
-| 7. Open browser | Opens `http://localhost:7860` and waits until you press Ctrl+C |
+| 6. Create user dirs | Creates per-user directories on shared storage (`users/{username}/logs/`, `users/{username}/jobs/`) |
+| 7. Submit job | Submits an `sbatch` job with SLURM proxy, polls for the compute node hostname, opens an SSH tunnel |
+| 8. Open browser | Opens `http://localhost:7860` and waits until you press Ctrl+C |
 
 On exit (Ctrl+C), the launcher cancels the SLURM job, removes the node sentinel file, and kills the SSH tunnel.
 
@@ -209,10 +236,17 @@ The launcher uses a **bind-mount overlay** pattern: the latest code from the Git
 - **Code updates don't require rebuilding the container** — just `git pull`
 - The launcher runs `git pull --ff-only` automatically on every launch
 - Container rebuilds are only needed when R package dependencies change
+- The app detects when local code is behind the repo and shows an update notification banner
+
+### SLURM Proxy
+
+When running inside Apptainer, SLURM commands (`sbatch`, `squeue`, `sacct`, etc.) are not available. The launcher starts a SLURM proxy process outside the container that relays commands via temp files on shared storage. All 9 SLURM command paths are covered: `sbatch`, `squeue`, `scancel`, `sacct`, `sinfo`, `sacctmgr`, `scontrol`, `srun`, `sbatch --test-only`. The cluster monitor dashboard works inside containers via this proxy.
 
 ### Shared Storage
 
-The container bind-mounts `/quobyte/proteomics-grp` for access to the shared proteomics group storage. DIA-NN search results and raw data on this volume are accessible from within the app.
+The container bind-mounts `/quobyte/proteomics-grp` for access to the shared proteomics group storage. DIA-NN search results, raw data, FASTA databases, and activity logs on this volume are accessible from within the app.
+
+**Pre-staged FASTA files** are available at `/quobyte/proteomics-grp/de-limp/fasta/` — these appear as a dropdown option in the FASTA selector for quick access to commonly used organisms.
 
 ---
 
@@ -302,7 +336,7 @@ Request more memory. MOFA2 and large GSEA analyses need 64GB+:
 ```
 
 ### SLURM proxy errors
-The container runs inside Apptainer where SLURM commands (`sbatch`, `squeue`) aren't available. The launcher starts a SLURM proxy process outside the container that relays commands. If DIA-NN search submission fails, check that the proxy is running (`ps aux | grep delimp_slurm_proxy`).
+The container runs inside Apptainer where SLURM commands (`sbatch`, `squeue`) aren't available. The launcher starts a SLURM proxy process outside the container that relays all 9 SLURM command paths. If DIA-NN search submission fails, check that the proxy is running (`ps aux | grep delimp_slurm_proxy`). The cluster monitor dashboard also relies on this proxy.
 
 ---
 
@@ -316,6 +350,6 @@ The container runs inside Apptainer where SLURM commands (`sbatch`, `squeue`) ar
 
 ---
 
-**Last updated:** 2026-03-16
-**DE-LIMP version:** v3.6.1
+**Last updated:** 2026-03-17
+**DE-LIMP version:** v3.7.0
 **Apptainer/Singularity:** Compatible with versions 3.0+

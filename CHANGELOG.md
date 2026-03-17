@@ -5,6 +5,48 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] - 2026-03-17
+
+### Added
+- **Docker Launcher for Windows** (`Launch_DE-LIMP_Docker.bat`): One-click batch file for Windows lab PCs. Auto-detects SSH keys, supports shared PC accounts (multiple Windows users), copies SSH keys into Docker-accessible volume, handles permissions. Skips rebuild on every launch for faster startup.
+- **SSH Auto-Connect on Startup**: When an SSH key is detected (Docker volume mount or `~/.ssh/`), the app automatically connects to HPC on startup — no manual "Test Connection" click needed. Stale ControlMaster socket detection prevents hangs.
+- **Environment Badge**: Colored badge in navbar showing deployment mode — Docker (red), HPC/Apptainer (green), Local (blue), Hugging Face (orange). Auto-detects Apptainer container environment.
+- **SLURM Proxy for Apptainer**: All 9 SLURM command paths (`sbatch`, `squeue`, `scancel`, `sacct`, `sinfo`, `sacctmgr`, `scontrol`, `srun`, `sbatch --test-only`) proxied from inside Apptainer container to host via a relay process. Cluster monitor works inside containers.
+- **Shared Storage for All HPC Files**: All DE-LIMP files (container, R packages, git repo, data, results) live on `/quobyte/proteomics-grp/de-limp/` to avoid home directory quota limits. Per-user subdirectories (`users/{username}/logs/`, `users/{username}/jobs/`) prevent multi-user conflicts.
+- **Per-User Directories for Multi-User HPC**: Multiple users can run DE-LIMP simultaneously without conflicts. SLURM logs and generated scripts go to per-user dirs on shared storage.
+- **Apptainer Cache Redirect**: `APPTAINER_CACHEDIR` set to shared storage, avoiding home directory quota exhaustion during container pulls.
+- **Code Update Detection Banner**: App detects when local code is behind the git repo and shows an update notification banner.
+- **Home Directory Quota Warning**: Startup check warns if home directory usage exceeds 80% (common HPC issue).
+- **Container Detection**: Skips BiocManager package validation when running inside a container without internet access (offline-safe startup).
+- **NCBI Proteome Download**: New "Download from NCBI" option in FASTA selector. Search NCBI Datasets by organism name, select a proteome, download RefSeq protein FASTA. Supports all organisms with NCBI reference proteomes.
+- **NCBI Gene Symbol Mapping**: Batch E-utilities lookup maps RefSeq accessions (XP_, NP_, WP_) to proper gene symbols. Gene map TSV auto-downloaded to HPC via SSH for Docker users who lack direct E-utilities access. Mapping applied to expression grid, volcano plots, and all downstream analysis.
+- **Contaminant Analysis Subtab**: New subtab in Data Overview with summary cards (contaminant count, % of total, median intensity ratio, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and contaminant heatmap (top 20 by median intensity).
+- **Expression Grid Contaminant Highlighting**: Contaminant protein rows highlighted pink/red in the Expression Grid for visual identification. `Cont_` prefix proteins flagged automatically.
+- **Signal Distribution Contaminant Overlay**: Checkbox to overlay contaminant proteins in orange on the Signal Distribution plot, showing where contaminants fall relative to endogenous proteins.
+- **SSH File Browser**: Visual directory browser for Remote (SSH) mode. Browse buttons for raw data and FASTA directories open a modal with clickable breadcrumbs, Up/Home navigation, color-coded entries (folders blue, data files green, other grey). Replaces manual path entry.
+- **Load from HPC Button**: "Load from HPC" button in sidebar opens SSH file browser filtered for `.parquet` files. SCP downloads the selected file and automatically loads it through the pipeline.
+- **Remote Activity Log**: Activity log stored on shared HPC storage for multi-user visibility. History tab reads remote activity log via SSH when connected. Source badge shows whether history comes from local or remote storage. File locking for concurrent multi-user writes.
+- **Configurable File Browser Roots** (`DELIMP_EXTRA_ROOTS` env var): Additional root directories for the SSH file browser, allowing any HPC to configure institution-specific data paths.
+- **Pre-Staged FASTA Directory**: FASTA files on shared storage (`/quobyte/proteomics-grp/de-limp/fasta/`) appear as a dropdown option — fastest way to select commonly used organisms on HPC.
+
+### Fixed
+- **No-replicates mode**: When groups have fewer than 2 replicates, quantification completes normally but DE analysis is skipped gracefully instead of crashing. Users see an informational message explaining that DE requires replicates.
+- **Expression Grid without DE results**: Grid now renders with quantified data even when DE has not been run (e.g., no replicates). Missing P.Value column added as fallback.
+- **PCA tab visible without DE**: PCA works on quantified expression data and no longer requires `values$fit` to be non-NULL.
+- **Parallel pipeline quant_verify_block**: Verification block no longer corrupts `file_list.txt` by appending to it. Uses a separate temp file for the missing files list.
+- **Step 4 skips failed Step 2 files**: Array jobs in Step 4 now skip files that failed in Step 2 instead of failing the entire step.
+- **Auto-adjust search CPUs**: Search CPU count automatically reduced to match available per-user SLURM limits, preventing job rejection.
+- **Default to HPC backend in Docker**: When SSH key is detected inside Docker container, defaults to HPC backend instead of local.
+- **Hardcoded username/paths removed**: All hardcoded personal directory references and test paths removed from UI defaults.
+- **NCBI protein links**: Proteins with NCBI RefSeq accessions (XP_, NP_, WP_) link to NCBI Protein instead of UniProt. `Cont_` prefixed proteins link to their source database.
+- **Gene map download via SSH**: When NCBI gene map TSV is not found locally (Docker users), it is automatically downloaded from HPC via SSH.
+
+### Changed
+- **Recommended deployment**: Docker on Windows + SSH to HPC is now the primary recommended approach. Apptainer on HPC is documented as an alternative.
+- **HPC directory layout**: All files moved from `~/containers`, `~/DE-LIMP`, `~/R/delimp-lib` to shared storage at `/quobyte/proteomics-grp/de-limp/`.
+- **File browser performance**: SSH file browser uses specific subdirectory roots instead of scanning entire filesystem. Optimized for large HPC directory structures.
+- App version bumped to v3.7.0.
+
 ## [3.6.1] - 2026-03-11
 
 ### Fixed

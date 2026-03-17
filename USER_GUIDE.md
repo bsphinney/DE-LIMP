@@ -13,11 +13,11 @@ DE-LIMP helps you find which proteins are significantly different between experi
 | Platform | Recommended | What You Need | Guide |
 |----------|-------------|---------------|-------|
 | **Just exploring** | Web browser | Nothing | [Hugging Face](https://huggingface.co/spaces/brettsp/de-limp-proteomics) |
-| **Windows** | Docker Compose | Docker Desktop + Git | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
+| **Windows** | Docker + SSH to HPC | Docker Desktop + SSH key | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
 | **Mac / Linux** | Native R | R 4.5+ and RStudio | Continue reading below |
-| **HPC cluster** | Apptainer | Singularity/Apptainer | [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md) |
+| **HPC cluster** | Apptainer (alternative) | Singularity/Apptainer | [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md) |
 
-> **Windows users:** R package installation on Windows is often problematic. We strongly recommend the Docker approach — it bundles everything (R, all packages, and DIA-NN) in one container. See **[WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)** for a step-by-step walkthrough.
+> **Windows users:** R package installation on Windows is often problematic. We strongly recommend the Docker + SSH approach — double-click `Launch_DE-LIMP_Docker.bat` to run DE-LIMP locally in Docker, then connect to your HPC cluster via SSH for DIA-NN searches. Shared PC support is built-in. See **[WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)** for a step-by-step walkthrough.
 
 ### Prerequisites (Native R — Mac / Linux)
 * **R & RStudio:** Ensure you have R (version 4.5 or newer) installed.
@@ -67,6 +67,7 @@ You have two options to get started:
 This is the most critical step for statistical analysis. The workflow is streamlined into one modal dialog.
 
 > **Replicate guidance:** For reliable statistical results, we recommend at least **3 biological replicates per group**.
+> - **n=1 per group (NEW in v3.7)**: The pipeline will complete quantification (normalization, protein-level aggregation) but will skip differential expression analysis -- DE requires replicates. You can still explore the Expression Grid, PCA, and Signal Distribution. An informational message explains what was skipped.
 > - **n=2 per group**: The pipeline will run, but you can only detect very large changes (>4-fold) with any confidence. Treat results as exploratory, not publication-ready.
 > - **n=3 per group**: The standard minimum for publication-quality results. Limma's empirical Bayes moderation helps compensate for the small sample size.
 > - **n=4-6+**: Improved sensitivity for detecting smaller fold changes (e.g., 1.3-fold) and more reliable CV estimates in the CV Analysis tab.
@@ -153,7 +154,7 @@ The first panel configures your input files: raw data, FASTA database, and optio
 
 #### Raw Data Directory
 - **Local mode:** Use the file browser to select the directory containing your raw data files.
-- **SSH mode:** Type or paste the remote path and click **"🔍 Scan Files"**.
+- **SSH mode:** Click the **"Browse"** button to open the SSH File Browser and navigate to your data directory visually, or type/paste the remote path. Then click **"🔍 Scan Files"**.
 - The scan detects mass spectrometry files and displays them with sizes:
   - `.d` directories (Bruker timsTOF)
   - `.raw` files (Thermo)
@@ -161,7 +162,7 @@ The first panel configures your input files: raw data, FASTA database, and optio
   - `.wiff` files (SCIEX)
 
 #### FASTA Database
-Three sources are available:
+Four sources are available:
 
 **📥 Download from UniProt:**
 1. Type an organism name (e.g., "Homo sapiens", "Mus musculus") in the search box
@@ -172,13 +173,20 @@ Three sources are available:
    - **Canonical + isoform** — includes splice variants
 4. Click **"Download"** — the FASTA is downloaded to the HPC working directory (uploaded via SCP in SSH mode)
 
+**📥 Download from NCBI (NEW in v3.7):**
+1. Type an organism name in the search box
+2. Select a proteome from the NCBI Datasets results
+3. Click **"Download"** — downloads the RefSeq protein FASTA
+4. **Gene symbol mapping**: NCBI RefSeq accessions (XP_, NP_, WP_) don't have embedded gene names like UniProt. DE-LIMP automatically runs a batch E-utilities lookup to map accessions to gene symbols. The gene map TSV is cached alongside the FASTA and auto-downloaded via SSH for Docker users.
+5. Best for: non-model organisms, organisms with better NCBI than UniProt coverage
+
 **📂 Pre-staged on server:**
-- A dropdown of FASTA files already available on the cluster (pre-downloaded to a shared location)
+- A dropdown of FASTA files already available on the cluster (pre-downloaded to a shared location at `/quobyte/proteomics-grp/de-limp/fasta/`)
 - Fastest option for commonly used organisms
 
 **📄 Browse / enter path:**
 - **Local mode:** Use the file browser to locate any `.fasta` or `.fa` file
-- **SSH mode:** Type or paste the full remote path to the FASTA file
+- **SSH mode:** Click the **"Browse"** button to open the SSH File Browser (see [Section 3.7](#-37-ssh-file-browser)), or type/paste the full remote path
 
 #### Contaminant Library
 Applies to all FASTA sources. Select from 6 curated contaminant libraries from [HaoGroup-ProtContLib](https://github.com/HaoGroup-ProtContLib):
@@ -258,7 +266,22 @@ The third panel configures compute resources for the SLURM job.
 
 In SSH mode, the SSH connection panel (hostname, username, port, key path, Test Connection button) also appears in this section.
 
-### 📋 3.5 Job Queue
+### 📂 3.5 SSH File Browser (NEW in v3.7)
+
+When using **Remote (SSH)** mode, the "Browse" buttons next to the raw data directory and FASTA path inputs open a visual file browser that lets you navigate your HPC file system without typing paths manually.
+
+**Features:**
+- **Clickable breadcrumbs**: Navigate the path hierarchy by clicking any segment in the breadcrumb trail
+- **Up / Home buttons**: Go up one directory or jump to your home directory
+- **Color-coded entries**: Folders (blue), data files like `.d`, `.raw`, `.parquet` (green), other files (grey)
+- **File type filtering**: The browser shows relevant file types based on context (e.g., only `.fasta`/`.fa` when browsing for FASTA files, `.parquet` when loading results)
+- **Double-click to enter**: Double-click folders to navigate into them; click "Select" to choose the current directory or file
+
+**Performance notes:**
+- The browser uses specific subdirectory roots configured for your HPC (`DELIMP_EXTRA_ROOTS` env var) rather than scanning the entire filesystem
+- Directories with thousands of entries are paginated for responsiveness
+
+### 📋 3.6 Job Queue
 
 After clicking **"🚀 Submit Search"**, the job enters the **Job Queue** at the bottom of the New Search tab. You can submit multiple jobs and continue using the rest of DE-LIMP — searches are fully non-blocking.
 
@@ -289,7 +312,7 @@ Each job in the queue displays:
 - **Persistence:** The job queue is saved to `~/.delimp_job_queue.rds` and persists across app restarts. Restarting DE-LIMP restores your full job history.
 - **Log file organization** (v3.2+): All SLURM `.out` / `.err` files are now stored in a `logs/` subdirectory within the output directory, keeping your results folder clean. The "Log" button checks this location first, with automatic fallback to the old root-level location for backward compatibility.
 
-### 📝 3.6 Search Settings in Methodology
+### 📝 3.7 Search Settings in Methodology
 
 When results are loaded from a DIA-NN search (either via "Load" button or auto-load), DE-LIMP automatically records the search configuration in the **Methodology** tab.
 
@@ -316,10 +339,11 @@ This section is **publication-ready** — it uses human-readable names for all p
 ### 📊 Data Overview
 This is your landing page with 5 sub-tabs:
 * **Assign Groups & Run** — Configure experimental groups and run the analysis pipeline
-* **Signal Distribution** — Visualizes the dynamic range; automatically colors by DE status with synchronized comparison selector
+* **Signal Distribution** — Visualizes the dynamic range; automatically colors by DE status with synchronized comparison selector. Checkbox to overlay contaminant proteins in orange (v3.7).
 * **Dataset Summary** — QC statistics and DE protein counts per comparison with directional arrows
 * **Replicate Consistency** — Average precursor and protein counts per group
-* **Expression Grid** — Heatmap-style table with UniProt linking and click-to-plot
+* **Expression Grid** — Heatmap-style table with UniProt linking, click-to-plot, and contaminant highlighting (pink/red rows for `Cont_` proteins)
+* **Contaminant Analysis** (NEW in v3.7) — Summary cards (contaminant count, % of total, median intensity ratio vs endogenous, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and heatmap of top 20 contaminants by median intensity. Only visible when contaminant proteins (`Cont_` prefix) are detected.
 * **AI Summary** — Generate AI-powered analysis summaries that analyze all contrasts simultaneously (requires Gemini API key); includes **"Export Report"** for standalone HTML and **"Export for Claude"** for a comprehensive .zip archive (see [Section 8](#8--ai-powered-analysis--export))
 
 ### 🔬 The Grid View (New!)
@@ -992,6 +1016,19 @@ TIC traces and metrics are saved with your session, so you can review them later
 
 ---
 
+## 10.5 Load from HPC (NEW in v3.7)
+
+The **"Load from HPC"** button in the sidebar provides a quick way to download and analyze results from completed DIA-NN searches on the cluster without navigating the job queue.
+
+1. Click **"Load from HPC"** in the sidebar (visible when SSH is connected)
+2. The SSH File Browser opens, filtered to show only `.parquet` files
+3. Navigate to your search output directory and select `report.parquet`
+4. The file is downloaded via SCP and automatically loaded through the analysis pipeline
+
+This is especially useful for Docker users who run searches via SSH and want to analyze results locally.
+
+---
+
 ## 11. Search & Analysis History
 
 ### 11.1 Search History
@@ -1040,10 +1077,12 @@ You have multiple options to access DE-LIMP:
 * Full computational power of your machine
 * Better for large datasets or multiple analyses
 
-### 🐳 Docker Compose (Windows — Recommended)
-* **No R installation required** — DE-LIMP and DIA-NN run entirely inside Docker
-* Build DIA-NN image once, then `docker compose up` — that's it
-* Includes embedded DIA-NN search capability out of the box
+### 🐳 Docker + SSH (Windows — Recommended)
+* **No R installation required** — DE-LIMP runs entirely inside Docker
+* **One-click launcher**: Double-click `Launch_DE-LIMP_Docker.bat` — handles SSH key detection, container startup, and browser launch
+* **Shared PC support**: Multiple Windows users on the same PC are handled automatically
+* **SSH to HPC**: Auto-connects to your HPC cluster for DIA-NN searches via the SSH file browser
+* **Load from HPC**: Download and analyze completed search results with one click
 * Full step-by-step guide: [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)
 * Also works on Mac/Linux, though native R installation is typically easier on those platforms
 
@@ -1072,6 +1111,11 @@ You have multiple options to access DE-LIMP:
 | **MallocStackLogging warnings on Mac** | Harmless macOS ARM64 warnings from system libraries. These are suppressed in the latest version and do not affect functionality. |
 | **Community stats not showing on About tab** | Stats are populated by the `track-stats.yml` GitHub Actions workflow, which runs daily. They will appear after the first successful workflow run. You can also trigger the workflow manually from the Actions tab on GitHub. |
 | **Can't find SLURM log files** | As of v3.2, log files are stored in `{output_dir}/logs/`. For older searches, they may still be in the output directory root. The "Log" button checks both locations automatically. |
+| **App shows wrong environment badge** | The colored badge (Docker/HPC/Local/HF) is auto-detected. Docker shows red, Apptainer on HPC shows green, native R shows blue. If Docker shows "Local" instead of "Docker", check that Docker environment variables are set. |
+| **SSH auto-connect fails on startup** | SSH auto-connect runs when an SSH key is detected. If it hangs, a stale ControlMaster socket may exist. The app probes with `ssh -O check` and removes dead sockets automatically. Check that your SSH key has no passphrase. |
+| **NCBI gene symbols not appearing** | For NCBI FASTA databases, gene symbol mapping requires E-utilities access. Docker users without direct internet access to NCBI get the gene map via SSH from HPC. If symbols show as accessions, check the gene map TSV file alongside the FASTA. |
+| **File browser only shows limited directories** | The SSH file browser uses configured root directories (`DELIMP_EXTRA_ROOTS` env var) for performance. Ask your admin to add additional paths if your data is elsewhere. |
+| **"Load from HPC" button not visible** | This button only appears when SSH is connected. Click "Test Connection" or wait for SSH auto-connect. |
 
 ---
 
