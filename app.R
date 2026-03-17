@@ -8,17 +8,25 @@
 # Set CRAN mirror to avoid interactive popup (especially in VS Code)
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
+# Suppress Bioconductor internet validation (HPC compute nodes often lack internet)
+options(BIOCONDUCTOR_ONLINE_VERSION_DIAGNOSIS = FALSE)
+
 # --- 1. AUTO-INSTALLATION & SETUP ---
 # IMPORTANT: Install packages BEFORE loading libraries to avoid conflicts
 
-# Install BiocManager if needed
-if (!requireNamespace("BiocManager", quietly = TRUE)) {
+# Skip package installation inside containers (no internet on HPC compute nodes)
+is_container <- nzchar(Sys.getenv("APPTAINER_CONTAINER", "")) ||
+                nzchar(Sys.getenv("SINGULARITY_CONTAINER", "")) ||
+                file.exists("/.dockerenv")
+
+# Install BiocManager if needed (skip in containers)
+if (!is_container && !requireNamespace("BiocManager", quietly = TRUE)) {
   message("BiocManager not found. Installing...")
   install.packages("BiocManager", quiet = TRUE)
 }
 
-# Check for limpa and install if needed
-if (!requireNamespace("limpa", quietly = TRUE)) {
+# Check for limpa and install if needed (skip in containers — already installed)
+if (!is_container && !requireNamespace("limpa", quietly = TRUE)) {
   message("Package 'limpa' is missing. Attempting installation...")
 
   r_version <- getRversion()
