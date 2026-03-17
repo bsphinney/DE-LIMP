@@ -844,7 +844,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         })
                     ),
                     shinyFiles::shinyFilesButton("ssh_key_browse", "Browse",
-                      title = "Select SSH private key",
+                      title = "Select SSH private key", multiple = FALSE,
                       class = "btn-outline-secondary btn-sm", style = "margin-bottom: 15px;")
                   ),
                   textInput("ssh_modules", "Modules to Load (optional)",
