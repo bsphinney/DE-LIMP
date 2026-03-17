@@ -228,10 +228,20 @@ cmd_run() {
             fi
         done
 
+        # Performance: use local /tmp for R temp files and sass cache
+        # instead of home dir or quobyte (distributed filesystem)
+        LOCAL_TMP="/tmp/.delimp_app_$(whoami)"
+        mkdir -p "${LOCAL_TMP}"
+
         apptainer exec \
             --env R_LIBS_USER="${R_LIB}" \
             --env DELIMP_SLURM_PROXY="${PROXY_DIR}" \
+            --env TMPDIR="${LOCAL_TMP}" \
+            --env SASS_CACHE_DIR="${LOCAL_TMP}/sass" \
+            --env R_USER_DATA_DIR="${LOCAL_TMP}" \
             ${CVMFS_BIND} \
+            --writable-tmpfs \
+            --bind ${LOCAL_TMP}:${LOCAL_TMP} \
             --bind ${DELIMP_BASE}/data:/data \
             --bind ${DELIMP_BASE}/results:/results \
             --bind ${R_LIB}:${R_LIB} \
@@ -387,10 +397,18 @@ rm -f "\${PROXY_DIR}"/cmd_* "\${PROXY_DIR}"/result_*
 PROXY_PID=\$!
 trap "kill \$PROXY_PID 2>/dev/null; rm -f \${PROXY_DIR}/cmd_* \${PROXY_DIR}/result_*" EXIT
 
+LOCAL_TMP="/tmp/.delimp_app_\$(whoami)"
+mkdir -p "\${LOCAL_TMP}"
+
 apptainer exec \\
     --env R_LIBS_USER="${R_USER_LIB}" \\
     --env DELIMP_SLURM_PROXY="\${PROXY_DIR}" \\
+    --env TMPDIR="\${LOCAL_TMP}" \\
+    --env SASS_CACHE_DIR="\${LOCAL_TMP}/sass" \\
+    --env R_USER_DATA_DIR="\${LOCAL_TMP}" \\
     ${ENV_ARGS} \\
+    --writable-tmpfs \\
+    --bind \${LOCAL_TMP}:\${LOCAL_TMP} \\
     --bind ${DELIMP_BASE}/data:/data \\
     --bind ${DELIMP_BASE}/results:/results \\
     --bind ${R_USER_LIB}:${R_USER_LIB} \\
