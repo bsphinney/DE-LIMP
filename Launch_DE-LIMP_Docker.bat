@@ -74,16 +74,12 @@ if not exist "data\fasta" mkdir "data\fasta"
 if not exist "data\output" mkdir "data\output"
 
 :: Generate per-session docker-compose override
-echo services: > docker-compose.override.yml
-echo   delimp: >> docker-compose.override.yml
-echo     environment: >> docker-compose.override.yml
-echo       - DELIMP_DATA_DIR=/data >> docker-compose.override.yml
-if defined HIVE_USER (
-    echo       - DELIMP_SSH_USER=%HIVE_USER% >> docker-compose.override.yml
-)
-if defined SSH_KEY_PATH (
-    echo       - DELIMP_SSH_KEY=%SSH_KEY_PATH% >> docker-compose.override.yml
-)
+> docker-compose.override.yml echo services:
+>> docker-compose.override.yml echo   delimp:
+>> docker-compose.override.yml echo     environment:
+>> docker-compose.override.yml echo       - DELIMP_DATA_DIR=/data
+>> docker-compose.override.yml echo       - DELIMP_SSH_USER=%HIVE_USER%
+>> docker-compose.override.yml echo       - DELIMP_SSH_KEY=%SSH_KEY_PATH%
 
 :: Start container (only rebuild if Dockerfile changed)
 echo.
