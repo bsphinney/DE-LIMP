@@ -18,17 +18,25 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## What's New in v3.5.0
+## What's New in v3.7.0
 
-**Run Comparator** -- Compare two analyses of the same dataset across tools. Supports DE-LIMP vs DE-LIMP, Spectronaut, or FragPipe. Four diagnostic layers (Settings Diff, Protein Universe, Quantification, DE Concordance) with a 7-rule hypothesis engine that explains *why* each discordant protein disagrees. Optional DIA-NN log upload enriches the comparison with search-derived parameters. Optional MOFA2 decomposition identifies hidden variance patterns.
+**NCBI Proteome Download** -- Search and download RefSeq protein FASTA databases from NCBI Datasets, with automatic gene symbol mapping via E-utilities. Supports all organisms with NCBI reference proteomes, complementing the existing UniProt download for non-model organisms.
 
-**Search & Analysis History** -- Full audit trail for DIA-NN searches (26 parameters logged) and pipeline runs. Import Settings or Import Results from past searches. Cross-reference links between search and analysis history. Project-based grouping with summary cards.
+**Contaminant Analysis** -- New subtab in Data Overview with summary cards (contaminant count, % of total, median intensity ratio, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and contaminant heatmap. Signal Distribution and Expression Grid also highlight contaminants.
 
-**Chromatography QC** -- Extract TIC traces from timsTOF .d files before committing to long searches. Faceted, overlay, and metrics views with per-run diagnostics (shape deviation, RT shift, loading anomaly, late elution, and more). Flag dead injections and carryover before wasting HPC hours.
+**Data Explorer** -- Quartile-based abundance profiles and sample-sample scatter plots for exploring data without requiring DE analysis. Variable proteins that shift 2+ quartiles across samples are flagged. Works with no-replicates mode.
 
-**Smart HPC Job Submission** -- Per-user CPU limit detection (queries SLURM QOS), auto-switches partition when at capacity. FASTA database library with auto-upload to HPC. Path validation prevents local-only FASTA files from reaching HPC jobs.
+**SSH File Browser** -- Visual directory browser for remote HPC navigation. Clickable breadcrumbs, color-coded entries, file type filtering. Replaces manual path entry for raw data and FASTA directories.
 
-**Previous highlights:** v3.1 UI overhaul (dark navbar, accordion sidebar, DE Dashboard sub-tabs, Core Facility Mode). v3.0 Multi-Omics MOFA2, Docker search, phosphoproteomics (KSEA, motifs), GSEA (BP/MF/CC/KEGG), all-contrast AI summary.
+**Load from HPC** -- One-click button to download and analyze completed search results from the cluster via the SSH file browser.
+
+**Docker Launcher for Windows** -- One-click batch file (`Launch_DE-LIMP_Docker.bat`) handles SSH key detection, shared PC accounts, container startup, and browser launch. Docker + SSH to HPC is now the recommended Windows deployment.
+
+**No-Replicates Mode** -- Quantification completes normally with n=1 per group (normalization, protein aggregation, PCA, Expression Grid). DE analysis is gracefully skipped with an informational message.
+
+**SSH Auto-Connect & Environment Badge** -- Auto-connects to HPC on startup when an SSH key is detected. Colored navbar badge shows deployment mode (Docker/HPC/Local/HF).
+
+**Previous highlights:** v3.5 Run Comparator, Search & Analysis History, Chromatography QC, smart HPC partitions. v3.1 UI overhaul, Core Facility Mode. v3.0 MOFA2, Docker search, phosphoproteomics, GSEA.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
@@ -39,6 +47,8 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 ### Analysis & Visualization
 - **Volcano Plots** -- Interactive (Plotly), click or box-select proteins to highlight across all views; all pairwise contrasts available
 - **Heatmaps** -- Z-score heatmaps of selected or significant proteins (ComplexHeatmap)
+- **Contaminant Analysis** -- Summary cards, per-sample stacked bar chart, top contaminants table with keratin flagging, and contaminant heatmap; Signal Distribution and Expression Grid also highlight contaminants
+- **Data Explorer** -- Quartile-based abundance profiles and sample-sample scatter plots for exploring data without DE analysis
 - **QC Sample Metrics** -- Faceted trend plot (Precursors, Proteins, MS1 Signal, Data Completeness) with LOESS smoother for drift detection and group average lines
 - **MDS & DPC Plots** -- Sample clustering and normalization diagnostics
 - **Covariates** -- Include batch, sex, diet, or custom covariates in the linear model
@@ -84,13 +94,17 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 ### DIA-NN Search Integration
 - **Three backends** -- Local, Docker, and HPC (SSH/SLURM)
 - **Parallel 5-step SLURM pipeline** -- Optimized search with dependency chaining and array jobs for maximum HPC throughput
+- **SSH file browser** -- Visual directory browser for navigating remote HPC filesystems with clickable breadcrumbs, color-coded entries, and file type filtering
+- **SSH auto-connect** -- Automatically connects to HPC on startup when an SSH key is detected; environment badge shows deployment mode
+- **UniProt FASTA download** -- Search and download proteome databases directly; 6 bundled contaminant libraries
+- **NCBI proteome download** -- Download RefSeq protein FASTA from NCBI Datasets with automatic gene symbol mapping for non-model organisms
+- **Load from HPC** -- One-click button to browse, download, and analyze completed search results from the cluster
 - **Spectral library caching** -- Reuse predicted libraries across searches to save compute time
 - **Custom FASTA sequences** -- Add custom protein sequences inline when submitting searches
 - **Smart partition selection** -- Detects per-user SLURM CPU limits, auto-switches to public queue when at capacity
 - **FASTA database library** -- Shared catalog with auto-upload to HPC, fragment m/z range tracking, path validation
 - **Cluster resource indicator** -- Real-time HPC CPU usage monitoring with traffic-light display (green/yellow/red)
-- **Windows Docker** -- `docker compose up` runs DE-LIMP + DIA-NN with zero R installation ([guide](WINDOWS_DOCKER_INSTALL.md))
-- **UniProt FASTA download** -- Search and download proteome databases directly; 6 bundled contaminant libraries
+- **Windows Docker launcher** -- One-click `.bat` file runs DE-LIMP + DIA-NN with zero R installation, shared PC support ([guide](WINDOWS_DOCKER_INSTALL.md))
 - **Non-blocking job queue** -- Submit multiple searches, results auto-load on completion
 - **Phospho mode** -- Auto-configures DIA-NN for phospho analysis (STY modification, `--phospho-output`)
 - **Organized search logs** -- SLURM `.out`/`.err` and local `.log` files written to `{output_dir}/logs/`
@@ -106,9 +120,11 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 > *Activated by setting `DELIMP_CORE_DIR`. Not visible on standard installations.*
 
 ### Session Management & History
+- **Unified activity log** -- Single audit trail for all DIA-NN searches and pipeline runs, with remote activity log via SSH for multi-user visibility
 - **Search History** -- Full audit trail for every DIA-NN search (26 parameters). Import Settings to reuse parameters; Import Results to load completed search output directly. View Log shows search metadata. Cross-reference links to Analysis History.
 - **Analysis History & Projects** -- Track every pipeline run with expandable detail rows. Assign analyses to projects for organized grouping with summary cards.
 - **About tab** -- Community stats dashboard with GitHub stars, forks, visitors, and clones (14-day trend sparklines), GitHub Discussions feed, version info, and project links
+- **No-replicates mode** -- Quantification without DE for n=1 experiments; PCA, Expression Grid, and Data Explorer still available
 - Save/load full analysis state as `.rds`; export reproducibility R code log
 - One-click example data (Affinisep vs Evosep comparison)
 - Group assignment templates (CSV export/import)
@@ -121,7 +137,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 | Platform | Method | DIA-NN Search? | Guide |
 |----------|--------|----------------|-------|
 | **Any (just exploring)** | Web browser | No | [Hugging Face](https://huggingface.co/spaces/brettsp/de-limp-proteomics) |
-| **Windows** | Docker Compose | Yes (embedded) | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
+| **Windows** | Docker + SSH to HPC | Yes (via HPC) | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
 | **Mac / Linux** | R/RStudio (native) | Via HPC or Docker | See [Installation](#installation) below |
 | **HPC cluster** | Apptainer/Singularity | Via SLURM | [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md) |
 
