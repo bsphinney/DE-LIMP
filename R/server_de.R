@@ -15,14 +15,22 @@ server_de <- function(input, output, session, values, add_to_log) {
     df$Accession <- str_split_fixed(df$Protein.Group, "[; ]", 2)[,1]
 
     id_map <- tryCatch({
-      if (!requireNamespace(org_db_name, quietly = TRUE)) { BiocManager::install(org_db_name, ask = FALSE) }
-      library(org_db_name, character.only = TRUE)
-      bitr(df$Accession, fromType = "UNIPROT", toType = c("SYMBOL", "GENENAME"), OrgDb = get(org_db_name))
-    }, error = function(e) { NULL })
+      if (!requireNamespace(org_db_name, quietly = TRUE)) {
+        tryCatch(BiocManager::install(org_db_name, ask = FALSE, update = FALSE), error = function(e) NULL)
+      }
+      if (requireNamespace(org_db_name, quietly = TRUE)) {
+        library(org_db_name, character.only = TRUE)
+        db <- get(org_db_name)
+        # Use AnnotationDbi::select directly (doesn't need clusterProfiler)
+        suppressMessages(AnnotationDbi::select(db, keys = unique(df$Accession),
+          keytype = "UNIPROT", columns = c("SYMBOL", "GENENAME")))
+      } else NULL
+    }, error = function(e) { message("[DE] Gene mapping failed: ", e$message); NULL })
 
-    if (!is.null(id_map)) {
-      id_map <- id_map %>% distinct(UNIPROT, .keep_all = TRUE)
-      df <- df %>% left_join(id_map, by = c("Accession" = "UNIPROT")) %>%
+    if (!is.null(id_map) && nrow(id_map) > 0) {
+      colnames(id_map)[colnames(id_map) == "UNIPROT"] <- "Accession"
+      id_map <- id_map %>% distinct(Accession, .keep_all = TRUE)
+      df <- df %>% left_join(id_map, by = "Accession") %>%
         mutate(Gene = ifelse(is.na(SYMBOL), Accession, SYMBOL), Protein.Name = ifelse(is.na(GENENAME), Protein.Group, GENENAME))
     } else {
       df$Gene <- df$Accession; df$Protein.Name <- df$Protein.Group
@@ -136,14 +144,21 @@ server_de <- function(input, output, session, values, add_to_log) {
     df_full$Accession <- str_split_fixed(df_full$Protein.Group, "[; ]", 2)[,1]
 
     id_map <- tryCatch({
-      if (!requireNamespace(org_db_name, quietly = TRUE)) { BiocManager::install(org_db_name, ask = FALSE) }
-      library(org_db_name, character.only = TRUE)
-      bitr(df_full$Accession, fromType = "UNIPROT", toType = c("SYMBOL", "GENENAME"), OrgDb = get(org_db_name))
-    }, error = function(e) { NULL })
+      if (!requireNamespace(org_db_name, quietly = TRUE)) {
+        tryCatch(BiocManager::install(org_db_name, ask = FALSE, update = FALSE), error = function(e) NULL)
+      }
+      if (requireNamespace(org_db_name, quietly = TRUE)) {
+        library(org_db_name, character.only = TRUE)
+        db <- get(org_db_name)
+        suppressMessages(AnnotationDbi::select(db, keys = unique(df_full$Accession),
+          keytype = "UNIPROT", columns = c("SYMBOL", "GENENAME")))
+      } else NULL
+    }, error = function(e) { message("[DE] Gene mapping failed: ", e$message); NULL })
 
-    if (!is.null(id_map)) {
-      id_map <- id_map %>% distinct(UNIPROT, .keep_all = TRUE)
-      df_full <- df_full %>% left_join(id_map, by = c("Accession" = "UNIPROT")) %>%
+    if (!is.null(id_map) && nrow(id_map) > 0) {
+      colnames(id_map)[colnames(id_map) == "UNIPROT"] <- "Accession"
+      id_map <- id_map %>% distinct(Accession, .keep_all = TRUE)
+      df_full <- df_full %>% left_join(id_map, by = "Accession") %>%
         mutate(Gene = ifelse(is.na(SYMBOL), Accession, SYMBOL),
                Protein.Name = ifelse(is.na(GENENAME), Protein.Group, GENENAME))
     } else {

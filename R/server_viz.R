@@ -371,18 +371,25 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       }
       }  # end fallback else (no gene map TSV)
     } else {
-      # UniProt accessions — use bitr() for gene symbol mapping
+      # UniProt accessions — use AnnotationDbi::select for gene symbol mapping
       org_db_name <- detect_organism_db(df_raw$Protein.Group)
       id_map <- tryCatch({
-        if (!requireNamespace(org_db_name, quietly = TRUE)) BiocManager::install(org_db_name, ask = FALSE)
-        library(org_db_name, character.only = TRUE)
-        bitr(df_raw$Accession, fromType = "UNIPROT", toType = c("SYMBOL", "GENENAME"), OrgDb = get(org_db_name))
+        if (!requireNamespace(org_db_name, quietly = TRUE)) {
+          tryCatch(BiocManager::install(org_db_name, ask = FALSE, update = FALSE), error = function(e) NULL)
+        }
+        if (requireNamespace(org_db_name, quietly = TRUE)) {
+          library(org_db_name, character.only = TRUE)
+          db <- get(org_db_name)
+          suppressMessages(AnnotationDbi::select(db, keys = unique(df_raw$Accession),
+            keytype = "UNIPROT", columns = c("SYMBOL", "GENENAME")))
+        } else NULL
       }, error = function(e) NULL)
 
-      if (!is.null(id_map)) {
-        id_map <- id_map %>% distinct(UNIPROT, .keep_all = TRUE)
+      if (!is.null(id_map) && nrow(id_map) > 0) {
+        colnames(id_map)[colnames(id_map) == "UNIPROT"] <- "Accession"
+        id_map <- id_map %>% distinct(Accession, .keep_all = TRUE)
         df_raw <- df_raw %>%
-          left_join(id_map, by = c("Accession" = "UNIPROT")) %>%
+          left_join(id_map, by = "Accession") %>%
           mutate(Gene = ifelse(is.na(SYMBOL), Accession, SYMBOL),
                  Protein.Name = ifelse(is.na(GENENAME), Protein.Group, GENENAME))
       } else {
