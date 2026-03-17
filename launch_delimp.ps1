@@ -261,13 +261,6 @@ function Test-Packages {
 function Submit-Job {
     Write-Host "[6/7] Submitting DE-LIMP to compute node..." -ForegroundColor Green
 
-    # Cancel any leftover delimp jobs from previous sessions
-    $oldJobs = (Invoke-HiveSsh "bash -l -c 'squeue -u $($script:HiveUser) --name=delimp --noheader --format=%i 2>/dev/null'").Trim()
-    if ($oldJobs) {
-        Write-Host "  Cancelling previous DE-LIMP sessions..." -ForegroundColor Yellow
-        Invoke-HiveSsh "bash -l -c 'scancel $($oldJobs -replace "`n"," ") 2>/dev/null'" 2>$null
-    }
-
     # Ensure hpc_setup.sh is on HIVE
     $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
     if (-not $scriptDir) { $scriptDir = $PWD.Path }
