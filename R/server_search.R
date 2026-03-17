@@ -1463,8 +1463,12 @@ server_search <- function(input, output, session, values, add_to_log,
   }
 
   # Auto-detect common shared storage paths
+  # Use specific subdirectories where possible (faster than scanning huge roots)
   shared_paths <- c(
-    Proteomics = "/quobyte/proteomics-grp",
+    Service     = "/quobyte/proteomics-grp/service",
+    `Raw Data`  = "/quobyte/proteomics-grp/raw_data",
+    Brett       = "/quobyte/proteomics-grp/brett",
+    Proteomics  = "/quobyte/proteomics-grp",
     Share       = "/share",
     Scratch     = "/scratch",
     Group       = "/group"
