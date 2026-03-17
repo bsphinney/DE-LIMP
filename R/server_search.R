@@ -1462,16 +1462,14 @@ server_search <- function(input, output, session, values, add_to_log,
     volumes <- c(volumes, Home = home)
   }
 
-  # Auto-detect common shared storage paths
-  # Use specific subdirectories where possible (faster than scanning huge roots)
+  # Auto-detect shared storage paths
+  # Specific subdirectories first (fast to browse), full root last (slow but complete)
   shared_paths <- c(
     Service     = "/quobyte/proteomics-grp/service",
-    `Raw Data`  = "/quobyte/proteomics-grp/raw_data",
     Brett       = "/quobyte/proteomics-grp/brett",
     Proteomics  = "/quobyte/proteomics-grp",
     Share       = "/share",
-    Scratch     = "/scratch",
-    Group       = "/group"
+    Scratch     = "/scratch"
   )
   for (i in seq_along(shared_paths)) {
     if (dir.exists(shared_paths[i]) && !shared_paths[i] %in% volumes) {
