@@ -261,6 +261,18 @@ function Test-Packages {
 function Submit-Job {
     Write-Host "[6/7] Submitting DE-LIMP to compute node..." -ForegroundColor Green
 
+    # Check for existing DE-LIMP sessions and offer to cancel
+    $oldJobs = (Invoke-HiveSsh "bash -l -c 'squeue -u $($script:HiveUser) --name=delimp --noheader --format=%i 2>/dev/null'").Trim()
+    if ($oldJobs) {
+        $jobList = ($oldJobs -split "`n" | Where-Object { $_.Trim() }) -join ", "
+        Write-Host "  Found existing DE-LIMP sessions: $jobList" -ForegroundColor Yellow
+        $answer = Read-Host "  Cancel them? (Y/n)"
+        if ($answer -ne "n" -and $answer -ne "N") {
+            Invoke-HiveSsh "bash -l -c 'scancel $($oldJobs -replace "`n"," ") 2>/dev/null'" 2>$null
+            Write-Host "  Cancelled." -ForegroundColor Green
+        }
+    }
+
     # Ensure hpc_setup.sh is on HIVE
     $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
     if (-not $scriptDir) { $scriptDir = $PWD.Path }
