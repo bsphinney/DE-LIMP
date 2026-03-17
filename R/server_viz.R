@@ -279,24 +279,26 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     if (is_ncbi) {
       # NCBI accessions — try gene_map.tsv first, then fall back to FASTA headers
       ncbi_gene_map <- NULL
-      # Look for gene map TSV alongside the FASTA file
-      if (!is.null(values$fasta_info) && !is.null(values$diann_fasta_files)) {
+      # Look for gene map TSV in common locations
+      gene_map_candidates <- c()
+      if (!is.null(values$diann_fasta_files)) {
         for (fasta_f in values$diann_fasta_files) {
-          map_path <- sub("\\.fasta$", "_gene_map.tsv", fasta_f)
-          # Also check local temp copies
-          if (!file.exists(map_path)) map_path <- sub("\\.fasta$", "_gene_map.tsv", basename(fasta_f))
-          if (!file.exists(map_path)) {
-            # Try common download dirs
-            for (d in c("/quobyte/proteomics-grp/de-limp/fasta", tempdir())) {
-              candidate <- file.path(d, sub("\\.fasta$", "_gene_map.tsv", basename(fasta_f)))
-              if (file.exists(candidate)) { map_path <- candidate; break }
-            }
-          }
-          if (file.exists(map_path)) {
-            ncbi_gene_map <- tryCatch(read.delim(map_path, stringsAsFactors = FALSE), error = function(e) NULL)
-            break
-          }
+          base <- sub("\\.fasta$", "_gene_map.tsv", basename(fasta_f))
+          gene_map_candidates <- c(gene_map_candidates,
+            sub("\\.fasta$", "_gene_map.tsv", fasta_f),
+            file.path("/quobyte/proteomics-grp/de-limp/fasta", base),
+            file.path(tempdir(), base))
         }
+      }
+      # Also check for any gene_map.tsv with GCF_ prefix
+      for (d in c("/quobyte/proteomics-grp/de-limp/fasta", tempdir())) {
+        gmaps <- list.files(d, pattern = "gene_map\\.tsv$", full.names = TRUE)
+        gene_map_candidates <- c(gene_map_candidates, gmaps)
+      }
+
+      map_path <- Find(file.exists, unique(gene_map_candidates))
+      if (!is.null(map_path)) {
+        ncbi_gene_map <- tryCatch(read.delim(map_path, stringsAsFactors = FALSE), error = function(e) NULL)
       }
 
       if (!is.null(ncbi_gene_map) && nrow(ncbi_gene_map) > 0 && "gene_symbol" %in% colnames(ncbi_gene_map)) {

@@ -483,26 +483,15 @@ ncbi_download_proteome <- function(accession, output_dir) {
   final_path <- file.path(output_dir, final_name)
   file.rename(fasta_path, final_path)
 
-  # Build gene symbol mapping from FASTA headers + batch NCBI E-utilities
-  tryCatch({
-    gene_map_path <- sub("\\.fasta$", "_gene_map.tsv", final_path)
-    if (!file.exists(gene_map_path)) {
-      message("[NCBI] Building gene symbol mapping...")
-      gene_map <- ncbi_build_gene_map(final_path)
-      if (nrow(gene_map) > 0) {
-        write.table(gene_map, gene_map_path, sep = "\t", row.names = FALSE, quote = FALSE)
-        message("[NCBI] Gene map saved: ", nrow(gene_map), " entries")
-      }
-    }
-  }, error = function(e) message("[NCBI] Gene map build failed: ", e$message))
-
+  # Gene map is built later when report.parquet is loaded (only for identified proteins)
   final_path
 }
 
 #' Build gene symbol mapping for NCBI RefSeq proteins via E-utilities
-#' @param fasta_path Path to NCBI protein FASTA file
+#' @param fasta_path Path to NCBI protein FASTA file (for protein descriptions)
+#' @param accessions Character vector of accessions to query (default: all in FASTA)
 #' @return data.frame with accession, gene_symbol, protein_name columns
-ncbi_build_gene_map <- function(fasta_path) {
+ncbi_build_gene_map <- function(fasta_path, accessions = NULL) {
   # Parse accessions and descriptions from FASTA headers
   headers <- grep("^>", readLines(fasta_path, warn = FALSE), value = TRUE)
   parsed <- data.frame(
@@ -511,8 +500,14 @@ ncbi_build_gene_map <- function(fasta_path) {
     stringsAsFactors = FALSE
   )
 
-  # Batch lookup gene symbols via NCBI E-utilities (200 at a time)
-  accessions <- unique(parsed$accession)
+  # If specific accessions provided, only query those (much faster)
+  if (!is.null(accessions)) {
+    accessions <- unique(accessions[grepl("^[XNW]P_", accessions)])
+    message("[NCBI] Building gene map for ", length(accessions), " identified proteins")
+  } else {
+    accessions <- unique(parsed$accession)
+    message("[NCBI] Building gene map for ALL ", length(accessions), " proteins (may be slow)")
+  }
   gene_map <- data.frame(accession = character(), gene_symbol = character(),
                          stringsAsFactors = FALSE)
 
