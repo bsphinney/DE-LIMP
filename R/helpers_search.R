@@ -1855,6 +1855,11 @@ get_failed_array_tasks <- function(array_job_id, ssh_config = NULL, sbatch_path 
 
   result <- if (!is.null(ssh_config)) {
     ssh_exec(ssh_config, sacct_cmd, login_shell = is.null(sbatch_path), timeout = 15)
+  } else if (slurm_proxy_available()) {
+    tryCatch({
+      res <- slurm_proxy_exec(sacct_cmd, timeout = 15)
+      list(status = res$status, stdout = res$stdout)
+    }, error = function(e) list(status = 1, stdout = character()))
   } else {
     tryCatch({
       out <- system2(slurm_cmd("sacct"),
@@ -1931,6 +1936,11 @@ get_slurm_start_time <- function(job_id, ssh_config = NULL, sbatch_path = NULL) 
   output <- if (!is.null(ssh_config)) {
     res <- ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 10)
     if (res$status == 0) res$stdout else character(0)
+  } else if (slurm_proxy_available()) {
+    tryCatch({
+      res <- slurm_proxy_exec(cmd, timeout = 15)
+      if (res$status == 0) res$stdout else character(0)
+    }, error = function(e) character(0))
   } else {
     tryCatch(system2(squeue_cmd,
       args = c("--job", job_id, '--format="%S|%Q|%r"', "--noheader"),
@@ -2869,6 +2879,8 @@ slurm_move_job <- function(job_id, new_account, new_partition,
 
   res <- if (!is.null(ssh_config)) {
     ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 15)
+  } else if (slurm_proxy_available()) {
+    slurm_proxy_exec(cmd, timeout = 15)
   } else {
     parts <- strsplit(cmd, " ")[[1]]
     stdout <- tryCatch(
