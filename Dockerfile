@@ -3,6 +3,9 @@
 # Base image: Dockerfile.base (rebuild only when dependencies change)
 FROM brettphinney/delimp-base:v3.1
 
+# Install clusterProfiler + enrichplot if missing from base image
+RUN R -e "if (!requireNamespace('clusterProfiler', quietly=TRUE)) BiocManager::install(c('clusterProfiler','enrichplot'), ask=FALSE, update=FALSE)" 2>/dev/null || true
+
 # Copy the App Files into the image
 COPY app.R /srv/shiny-server/app.R
 COPY R/ /srv/shiny-server/R/
