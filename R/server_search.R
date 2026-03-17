@@ -1862,6 +1862,64 @@ server_search <- function(input, output, session, values, add_to_log,
   }
 
   # ============================================================================
+  #    SSH Auto-Connect on Startup (Docker mode with SSH key detected)
+  # ============================================================================
+
+  session$onFlushed(function() {
+    # Auto-connect if SSH key exists and we're in SSH mode
+    key_path <- isolate(input$ssh_key_path)
+    host <- isolate(input$ssh_host)
+    user <- isolate(input$ssh_user)
+    mode <- isolate(input$search_connection_mode)
+
+    if (!is.null(mode) && mode == "ssh" &&
+        !is.null(key_path) && nzchar(key_path) && file.exists(key_path) &&
+        !is.null(host) && nzchar(host) &&
+        !is.null(user) && nzchar(user)) {
+      message("[SSH Auto-Connect] Key found at ", key_path, " — connecting to ", host, " as ", user)
+      cfg <- list(host = host, user = user, port = isolate(input$ssh_port) %||% 22L,
+                  key_path = key_path, modules = isolate(input$ssh_modules) %||% "")
+      tryCatch({
+        result <- test_ssh_connection(cfg)
+        if (result$success) {
+          values$ssh_connected <- TRUE
+          values$ssh_sbatch_path <- result$sbatch_path
+          output$ssh_status_ui <- renderUI({
+            div(class = "alert alert-success py-1 px-2 mt-2",
+                style = "font-size: 0.82em;",
+                icon("check-circle"), " ", result$message)
+          })
+          # Trigger cluster resource check
+          tryCatch({
+            res <- check_cluster_resources(cfg, "genome-center-grp", "high", result$sbatch_path)
+            values$cluster_resources <- res
+          }, error = function(e) NULL)
+          tryCatch({
+            pub_res <- check_cluster_resources(cfg, "publicgrp", "low", result$sbatch_path)
+            values$public_resources <- pub_res
+          }, error = function(e) NULL)
+          best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
+          values$auto_partition <- best
+          if (!isTRUE(isolate(input$partition_override))) {
+            updateTextInput(session, "diann_account", value = best$account)
+            updateTextInput(session, "diann_partition", value = best$partition)
+          }
+          message("[SSH Auto-Connect] Connected successfully")
+        } else {
+          message("[SSH Auto-Connect] Failed: ", result$message)
+          output$ssh_status_ui <- renderUI({
+            div(class = "alert alert-warning py-1 px-2 mt-2",
+                style = "font-size: 0.82em;",
+                icon("info-circle"), " Auto-connect failed. Click Test Connection to retry.")
+          })
+        }
+      }, error = function(e) {
+        message("[SSH Auto-Connect] Error: ", e$message)
+      })
+    }
+  }, once = TRUE)
+
+  # ============================================================================
   #    SLURM Proxy — Initial cluster check on startup (Apptainer / Local on HPC)
   # ============================================================================
 
