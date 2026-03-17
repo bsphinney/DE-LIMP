@@ -119,10 +119,18 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 3. **Docker + SSH** (recommended for Windows) — `Launch_DE-LIMP_Docker.bat` runs DE-LIMP locally in Docker, connects to HPC via SSH for DIA-NN search. Shared PC support with auto SSH key detection.
 4. **HPC Apptainer** (alternative) — `launch_delimp.sh` / `Launch_DE-LIMP.bat` launches via Apptainer on HPC with SLURM proxy. See `HPC_DEPLOYMENT.md`.
 
-### README & Docs Management (CRITICAL)
+### Release Checklist
+On each version release, do ALL of these:
+1. Bump `VERSION` file
+2. Update `CHANGELOG.md` with new section
+3. Update `README_GITHUB.md` with new features → copy to `README.md`
+4. Update `README_HF.md` with new features
+5. Update `docs/index.html` version badge and feature cards (GitHub Pages Education site)
+6. Create GitHub release: `gh release create vX.Y.Z --title "..." --notes "..."`
+7. Run review agents (biologist, proteomics expert, statistician, error audit, docs audit)
+
+### README Management (CRITICAL)
 - Edit `README_GITHUB.md` for GitHub, `README_HF.md` for HF
-- **ALWAYS** copy `README_GITHUB.md` → `README.md` on each release (GitHub displays `README.md`, not `README_GITHUB.md`)
-- **ALWAYS** update `docs/index.html` version badge and feature cards on each release (this is the GitHub Pages Education site)
 - **NEVER** push README.md changes to both remotes
 - **NEVER** use `git add .` when README.md is modified
 
