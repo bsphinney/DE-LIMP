@@ -29,9 +29,11 @@ echo.
 :: List available SSH keys in data/ssh/
 if not exist "data\ssh" mkdir "data\ssh"
 set "found_keys=0"
-for %%f in (data\ssh\*.key data\ssh\id_*) do (
-    echo    %%~nf
-    set "found_keys=1"
+for %%f in (data\ssh\*) do (
+    if /i not "%%~nxf"==".gitkeep" (
+        echo    %%~nxf
+        set "found_keys=1"
+    )
 )
 if "%found_keys%"=="0" (
     echo    No SSH keys found yet.
