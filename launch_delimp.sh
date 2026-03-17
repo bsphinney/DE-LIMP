@@ -299,20 +299,19 @@ open_browser() {
     done
 }
 
-# --- Auto-download missing scripts ---
+# --- Always download latest scripts from GitHub ---
 get_required_files() {
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    if [ ! -f "${SCRIPT_DIR}/${SETUP_SCRIPT}" ]; then
-        echo -e "${YELLOW}Downloading ${SETUP_SCRIPT} from GitHub...${NC}"
-        curl -fsSL -o "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${GITHUB_RAW}/${SETUP_SCRIPT}" || {
-            echo -e "${RED}Failed to download ${SETUP_SCRIPT}. Get it from: ${GITHUB_RAW}/${SETUP_SCRIPT}${NC}"
+    echo -e "${YELLOW}  Updating ${SETUP_SCRIPT} from GitHub...${NC}"
+    curl -fsSL -o "${SCRIPT_DIR}/${SETUP_SCRIPT}" "${GITHUB_RAW}/${SETUP_SCRIPT}" 2>/dev/null || {
+        if [ ! -f "${SCRIPT_DIR}/${SETUP_SCRIPT}" ]; then
+            echo -e "${RED}Failed to download ${SETUP_SCRIPT} and no local copy exists.${NC}"
             exit 1
-        }
-        chmod +x "${SCRIPT_DIR}/${SETUP_SCRIPT}"
-        echo "  Saved: ${SCRIPT_DIR}/${SETUP_SCRIPT}"
-    fi
+        fi
+    }
+    chmod +x "${SCRIPT_DIR}/${SETUP_SCRIPT}"
 }
 
 # --- Main ---

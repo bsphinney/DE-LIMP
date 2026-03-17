@@ -155,28 +155,21 @@ function Repair-SshKeyPermissions {
     }
 }
 
-# --- Auto-download missing files from GitHub ---
+# --- Always download latest scripts from GitHub ---
 function Get-RequiredFiles {
     $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
     if (-not $scriptDir) { $scriptDir = $PWD.Path }
 
-    $files = @(
-        @{ Name = $SETUP_SCRIPT;      Url = "$GITHUB_RAW/$SETUP_SCRIPT" }
-        @{ Name = "launch_delimp.ps1"; Url = "$GITHUB_RAW/launch_delimp.ps1" }
-    )
-
-    foreach ($f in $files) {
-        $local = Join-Path $scriptDir $f.Name
+    # Always re-download hpc_setup.sh to get latest fixes
+    $local = Join-Path $scriptDir $SETUP_SCRIPT
+    try {
+        Write-Host "  Updating $SETUP_SCRIPT from GitHub..." -ForegroundColor Yellow
+        Invoke-WebRequest -Uri "$GITHUB_RAW/$SETUP_SCRIPT" -OutFile $local -UseBasicParsing
+        Write-Host "  Updated: $local"
+    } catch {
         if (-not (Test-Path $local)) {
-            Write-Host "  Downloading $($f.Name) from GitHub..." -ForegroundColor Yellow
-            try {
-                Invoke-WebRequest -Uri $f.Url -OutFile $local -UseBasicParsing
-                Write-Host "  Saved: $local"
-            } catch {
-                Write-Host "  Failed to download $($f.Name): $($_.Exception.Message)" -ForegroundColor Red
-                Write-Host "  Download it manually from: $($f.Url)"
-                exit 1
-            }
+            Write-Host "  Failed to download $SETUP_SCRIPT and no local copy exists." -ForegroundColor Red
+            exit 1
         }
     }
 }
