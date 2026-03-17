@@ -2367,15 +2367,22 @@ server_search <- function(input, output, session, values, add_to_log,
 
   observeEvent(input$search_ncbi_btn, {
     req(nzchar(input$ncbi_search_query))
+    message("[NCBI] Search button clicked: '", input$ncbi_search_query, "'")
 
-    withProgress(message = "Searching NCBI...", {
-      results <- ncbi_search_assemblies(input$ncbi_search_query)
-      ncbi_results(results)
+    tryCatch({
+      withProgress(message = "Searching NCBI...", {
+        results <- ncbi_search_assemblies(input$ncbi_search_query)
+        message("[NCBI] Got ", nrow(results), " results")
+        ncbi_results(results)
+      })
+
+      if (nrow(ncbi_results()) == 0) {
+        showNotification("No annotated assemblies found. Try a different organism name.", type = "warning")
+      }
+    }, error = function(e) {
+      message("[NCBI] Search error: ", e$message)
+      showNotification(paste("NCBI search failed:", e$message), type = "error")
     })
-
-    if (nrow(ncbi_results()) == 0) {
-      showNotification("No annotated assemblies found. Try a different organism name.", type = "warning")
-    }
   })
 
   output$ncbi_results_table <- DT::renderDT({
