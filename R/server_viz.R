@@ -242,13 +242,30 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
   # --- GRID VIEW & PLOT LOGIC (lines 1064-1191) ---
   grid_react_df <- reactive({
-    req(values$fit, values$y_protein, values$metadata, input$contrast_selector)
+    req(values$y_protein, values$metadata)
 
-    # Build volcano-style DE data directly (volcano_data() is local to server_de)
-    df_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>% as.data.frame()
-    if (!"Protein.Group" %in% colnames(df_raw)) {
-      df_raw <- df_raw %>% rownames_to_column("Protein.Group")
+    if (!is.null(values$fit) && !is.null(input$contrast_selector) && nzchar(input$contrast_selector)) {
+      # Full DE mode — use topTable for gene names and significance
+      df_raw <- topTable(values$fit, coef = input$contrast_selector, number = Inf) %>% as.data.frame()
+      if (!"Protein.Group" %in% colnames(df_raw)) {
+        df_raw <- df_raw %>% rownames_to_column("Protein.Group")
+      }
+    } else {
+      # No-DE mode (no replicates) — build from y_protein directly
+      df_raw <- data.frame(
+        Protein.Group = rownames(values$y_protein$E),
+        logFC = 0, adj.P.Val = 1,
+        stringsAsFactors = FALSE
+      )
+      # Add gene info from y_protein$genes if available
+      if (!is.null(values$y_protein$genes)) {
+        gene_cols <- intersect(c("Genes", "Protein.Names"), colnames(values$y_protein$genes))
+        if (length(gene_cols) > 0) {
+          df_raw <- cbind(df_raw, values$y_protein$genes[, gene_cols, drop = FALSE])
+        }
+      }
     }
+
     df_raw$Accession <- str_split_fixed(df_raw$Protein.Group, "[; ]", 2)[, 1]
 
     org_db_name <- detect_organism_db(df_raw$Protein.Group)
@@ -270,7 +287,9 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     }
 
     df_raw$Significance <- "Not Sig"
-    df_raw$Significance[df_raw$adj.P.Val < 0.05 & abs(df_raw$logFC) > input$logfc_cutoff] <- "Significant"
+    if ("adj.P.Val" %in% colnames(df_raw)) {
+      df_raw$Significance[df_raw$adj.P.Val < 0.05 & abs(df_raw$logFC) > (input$logfc_cutoff %||% 0.6)] <- "Significant"
+    }
 
     df_volc <- df_raw
     df_exprs <- as.data.frame(values$y_protein$E) %>% rownames_to_column("Protein.Group")
