@@ -4,7 +4,7 @@ color 1F
 
 echo.
 echo  ============================================
-echo    DE-LIMP Proteomics - Starting...
+echo    DE-LIMP Proteomics
 echo  ============================================
 echo.
 
@@ -20,46 +20,71 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Pull latest code
 cd /d "%~dp0"
-echo  Updating to latest version...
-git pull --ff-only 2>nul
+
+:: Ask which HIVE user
+echo  Who is using DE-LIMP today?
 echo.
 
-:: Create data dirs if needed
+:: List available SSH keys in data/ssh/
+if not exist "data\ssh" mkdir "data\ssh"
+set "found_keys=0"
+for %%f in (data\ssh\*.key data\ssh\id_*) do (
+    echo    %%~nf
+    set "found_keys=1"
+)
+if "%found_keys%"=="0" (
+    echo    No SSH keys found in data\ssh\
+    echo.
+    echo  To set up HPC access, each user should:
+    echo    1. Copy their SSH private key to data\ssh\
+    echo    2. Rename it to their HIVE username (e.g., jsmith)
+    echo.
+    echo  Example: copy id_ed25519 to data\ssh\jsmith
+    echo.
+)
+echo.
+set /p HIVE_USER="  Enter your HIVE username (or press Enter to skip HPC): "
+
+:: Set up SSH key for this user
+set "SSH_KEY_PATH="
+if defined HIVE_USER (
+    if exist "data\ssh\%HIVE_USER%" (
+        set "SSH_KEY_PATH=/data/ssh/%HIVE_USER%"
+        echo  Using SSH key: data\ssh\%HIVE_USER%
+    ) else if exist "data\ssh\id_ed25519" (
+        set "SSH_KEY_PATH=/data/ssh/id_ed25519"
+        echo  Using default SSH key: data\ssh\id_ed25519
+    ) else (
+        echo  No SSH key found for %HIVE_USER%.
+        echo  Place your key at data\ssh\%HIVE_USER%
+    )
+)
+echo.
+
+:: Pull latest code
+echo  Updating to latest version...
+git pull --ff-only 2>nul
+
+:: Create data dirs
 if not exist "data\raw" mkdir "data\raw"
 if not exist "data\fasta" mkdir "data\fasta"
 if not exist "data\output" mkdir "data\output"
 
-:: Check for SSH key
-set "SSH_DIR=%USERPROFILE%\.ssh"
-if exist "%SSH_DIR%\id_ed25519" (
-    echo  SSH key found: %SSH_DIR%\id_ed25519
-    echo  HPC search will be available.
-) else if exist "%SSH_DIR%\id_rsa" (
-    echo  SSH key found: %SSH_DIR%\id_rsa
-    echo  HPC search will be available.
-) else (
-    echo  No SSH key found in %SSH_DIR%
-    echo  HPC search will not be available.
-    echo  To set up: ssh-keygen -t ed25519
-    echo.
-)
-echo.
-
-:: Generate docker-compose override with current user's SSH dir
-:: This lets each user on a shared PC use their own SSH key
+:: Generate per-session docker-compose override
 echo services: > docker-compose.override.yml
 echo   delimp: >> docker-compose.override.yml
-echo     volumes: >> docker-compose.override.yml
-echo       - ./data:/data >> docker-compose.override.yml
-echo       - %SSH_DIR%:/home/shiny/.ssh:ro >> docker-compose.override.yml
 echo     environment: >> docker-compose.override.yml
 echo       - DELIMP_DATA_DIR=/data >> docker-compose.override.yml
-echo       - DELIMP_SSH_KEY=/home/shiny/.ssh/id_ed25519 >> docker-compose.override.yml
-echo       - DELIMP_SSH_USER=%USERNAME% >> docker-compose.override.yml
+if defined HIVE_USER (
+    echo       - DELIMP_SSH_USER=%HIVE_USER% >> docker-compose.override.yml
+)
+if defined SSH_KEY_PATH (
+    echo       - DELIMP_SSH_KEY=%SSH_KEY_PATH% >> docker-compose.override.yml
+)
 
 :: Build and start
+echo.
 echo  Starting DE-LIMP (this may take a minute)...
 docker compose up -d --build >nul 2>&1
 
@@ -77,11 +102,9 @@ echo    DE-LIMP is running!
 echo  ============================================
 echo.
 echo    URL:   http://localhost:3838
-echo    User:  %USERNAME%
-echo    SSH:   %SSH_DIR% mounted into container
-echo.
-echo    For HPC search: click New Search tab,
-echo    select Remote (SSH), click Test Connection.
+if defined HIVE_USER (
+    echo    User:  %HIVE_USER%
+)
 echo.
 start http://localhost:3838
 echo  Press any key to stop DE-LIMP...
