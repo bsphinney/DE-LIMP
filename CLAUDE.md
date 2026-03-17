@@ -119,8 +119,10 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 3. **Docker + SSH** (recommended for Windows) — `Launch_DE-LIMP_Docker.bat` runs DE-LIMP locally in Docker, connects to HPC via SSH for DIA-NN search. Shared PC support with auto SSH key detection.
 4. **HPC Apptainer** (alternative) — `launch_delimp.sh` / `Launch_DE-LIMP.bat` launches via Apptainer on HPC with SLURM proxy. See `HPC_DEPLOYMENT.md`.
 
-### README Management (CRITICAL)
+### README & Docs Management (CRITICAL)
 - Edit `README_GITHUB.md` for GitHub, `README_HF.md` for HF
+- **ALWAYS** copy `README_GITHUB.md` → `README.md` on each release (GitHub displays `README.md`, not `README_GITHUB.md`)
+- **ALWAYS** update `docs/index.html` version badge and feature cards on each release (this is the GitHub Pages Education site)
 - **NEVER** push README.md changes to both remotes
 - **NEVER** use `git add .` when README.md is modified
 

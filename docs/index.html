@@ -467,7 +467,7 @@
         <div class="container">
             <p class="subtitle">UC Davis Proteomics Core Facility</p>
             <h1>DE-LIMP</h1>
-            <span class="version-badge">v3.5</span>
+            <span class="version-badge">v3.7</span>
             <p class="tagline">
                 Upload your DIA-NN proteomics data and instantly identify differentially expressed proteins with interactive volcano plots, pathway enrichment, and AI-powered interpretation. Supports phosphoproteomics, multi-omics integration, and core facility management.
             </p>
@@ -633,6 +633,26 @@
                     <div class="feat-icon">&#x1F4CB;</div>
                     <h3>Search &amp; Analysis History <span class="new-badge">New</span></h3>
                     <p>Full audit trail for every DIA-NN search (26 parameters) and pipeline run. Import Settings or Results from past searches. Organize analyses into projects with summary cards and cross-reference navigation.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F9F9;</div>
+                    <h3>Contaminant Analysis <span class="new-badge">New</span></h3>
+                    <p>Automatic contaminant detection with per-sample breakdown, keratin flagging, intensity heatmap, and Expression Grid highlighting. Monitor contamination levels across your experiments.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F50D;</div>
+                    <h3>Data Explorer <span class="new-badge">New</span></h3>
+                    <p>Explore data without DE analysis. Quartile-based abundance profiles reveal proteins that shift rank across samples. Sample-sample scatter shows pairwise correlations with outlier labeling. Works with no-replicates mode.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F4C2;</div>
+                    <h3>SSH File Browser <span class="new-badge">New</span></h3>
+                    <p>Visual directory browser for remote HPC files via SSH. Click to navigate, color-coded file types, breadcrumb navigation. Load completed search results directly from the cluster.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F30D;</div>
+                    <h3>NCBI Proteome Download <span class="new-badge">New</span></h3>
+                    <p>Download protein FASTA databases from NCBI for non-model organisms. Automatic gene symbol mapping via E-utilities batch lookup. Complements UniProt for species with better NCBI coverage.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feat-icon">&#x1F50E;</div>
@@ -814,7 +834,7 @@ bash build_diann_docker.sh
     <div class="footer">
         <div class="container">
             <div>
-                <strong style="color:#fff;">DE-LIMP</strong> v3.5 &mdash; Open-source proteomics analysis.<br>
+                <strong style="color:#fff;">DE-LIMP</strong> v3.7 &mdash; Open-source proteomics analysis.<br>
                 Built with <a href="https://shiny.posit.co/" target="_blank" rel="noopener">Shiny</a>,
                 <a href="https://bioconductor.org/packages/limpa/" target="_blank" rel="noopener">limpa</a>,
                 <a href="https://bioconductor.org/packages/limma/" target="_blank" rel="noopener">limma</a>, and
