@@ -277,28 +277,47 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     is_ncbi <- length(non_contam) > 0 && any(grepl("^[XNW]P_", head(non_contam, 50)))
 
     if (is_ncbi) {
-      # NCBI accessions — try gene_map.tsv first, then fall back to FASTA headers
+      # NCBI accessions — try gene_map.tsv locally, then via SSH
       ncbi_gene_map <- NULL
-      # Look for gene map TSV in common locations
-      gene_map_candidates <- c()
+
+      # Search common local locations
+      search_dirs <- c(tempdir(), "/data/fasta", "/quobyte/proteomics-grp/de-limp/fasta")
       if (!is.null(values$diann_fasta_files)) {
-        for (fasta_f in values$diann_fasta_files) {
-          base <- sub("\\.fasta$", "_gene_map.tsv", basename(fasta_f))
-          gene_map_candidates <- c(gene_map_candidates,
-            sub("\\.fasta$", "_gene_map.tsv", fasta_f),
-            file.path("/quobyte/proteomics-grp/de-limp/fasta", base),
-            file.path(tempdir(), base))
+        search_dirs <- c(dirname(values$diann_fasta_files), search_dirs)
+      }
+      for (d in unique(search_dirs)) {
+        if (!dir.exists(d)) next
+        gmaps <- list.files(d, pattern = "gene_map\\.tsv$", full.names = TRUE)
+        if (length(gmaps) > 0) {
+          ncbi_gene_map <- tryCatch(read.delim(gmaps[1], stringsAsFactors = FALSE), error = function(e) NULL)
+          if (!is.null(ncbi_gene_map) && nrow(ncbi_gene_map) > 0) {
+            message("[Grid] Loaded gene map: ", gmaps[1], " (", nrow(ncbi_gene_map), " entries)")
+            break
+          }
         }
       }
-      # Also check for any gene_map.tsv with GCF_ prefix
-      for (d in c("/quobyte/proteomics-grp/de-limp/fasta", tempdir())) {
-        gmaps <- list.files(d, pattern = "gene_map\\.tsv$", full.names = TRUE)
-        gene_map_candidates <- c(gene_map_candidates, gmaps)
-      }
 
-      map_path <- Find(file.exists, unique(gene_map_candidates))
-      if (!is.null(map_path)) {
-        ncbi_gene_map <- tryCatch(read.delim(map_path, stringsAsFactors = FALSE), error = function(e) NULL)
+      # SSH fallback: download gene map from HIVE if not found locally
+      if (is.null(ncbi_gene_map) && isTRUE(values$ssh_connected)) {
+        tryCatch({
+          cfg <- list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                      port = isolate(input$ssh_port) %||% 22L,
+                      key_path = isolate(input$ssh_key_path))
+          # Find gene_map.tsv on remote
+          remote_result <- ssh_exec(cfg,
+            "ls /quobyte/proteomics-grp/de-limp/fasta/*gene_map.tsv 2>/dev/null | head -1",
+            timeout = 10)
+          if (remote_result$status == 0 && length(remote_result$stdout) > 0 &&
+              nzchar(trimws(remote_result$stdout[1]))) {
+            remote_path <- trimws(remote_result$stdout[1])
+            local_path <- file.path(tempdir(), basename(remote_path))
+            dl <- scp_download(cfg, remote_path, local_path)
+            if (dl$status == 0 && file.exists(local_path)) {
+              ncbi_gene_map <- tryCatch(read.delim(local_path, stringsAsFactors = FALSE), error = function(e) NULL)
+              message("[Grid] Downloaded gene map via SSH: ", nrow(ncbi_gene_map), " entries")
+            }
+          }
+        }, error = function(e) message("[Grid] SSH gene map download failed: ", e$message))
       }
 
       if (!is.null(ncbi_gene_map) && nrow(ncbi_gene_map) > 0 && "gene_symbol" %in% colnames(ncbi_gene_map)) {
