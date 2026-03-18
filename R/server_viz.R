@@ -1730,12 +1730,88 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         n_proteins <- nrow(mat)
         n_samples <- ncol(mat)
 
+        # --- 0. Load NCBI gene map if applicable ---
+        export_gene_map <- NULL
+        n_gene_mapped <- 0L
+        non_contam_ids <- rownames(mat)[!grepl("^Cont_", rownames(mat))]
+        first_accessions <- sub(";.*", "", head(non_contam_ids, 50))
+        is_ncbi_export <- length(first_accessions) > 0 && any(grepl("^[XNW]P_", first_accessions))
+
+        if (is_ncbi_export) {
+          # Search common local locations (same logic as grid_react_df)
+          search_dirs <- c(tempdir(), "/data/fasta", "/quobyte/proteomics-grp/de-limp/fasta")
+          if (!is.null(values$diann_fasta_files)) {
+            search_dirs <- c(dirname(values$diann_fasta_files), search_dirs)
+          }
+          for (d in unique(search_dirs)) {
+            if (!dir.exists(d)) next
+            gmaps <- list.files(d, pattern = "gene_map\\.tsv$", full.names = TRUE)
+            if (length(gmaps) > 0) {
+              export_gene_map <- tryCatch(read.delim(gmaps[1], stringsAsFactors = FALSE), error = function(e) NULL)
+              if (!is.null(export_gene_map) && nrow(export_gene_map) > 0) {
+                message("[Explorer Export] Loaded gene map: ", gmaps[1], " (", nrow(export_gene_map), " entries)")
+                break
+              }
+            }
+          }
+
+          # SSH fallback
+          if (is.null(export_gene_map) && isTRUE(values$ssh_connected)) {
+            tryCatch({
+              cfg <- list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                          port = isolate(input$ssh_port) %||% 22L,
+                          key_path = isolate(input$ssh_key_path))
+              remote_result <- ssh_exec(cfg,
+                "ls /quobyte/proteomics-grp/de-limp/fasta/*gene_map.tsv 2>/dev/null | head -1",
+                timeout = 10)
+              if (remote_result$status == 0 && length(remote_result$stdout) > 0 &&
+                  nzchar(trimws(remote_result$stdout[1]))) {
+                remote_path <- trimws(remote_result$stdout[1])
+                local_path <- file.path(tempdir(), basename(remote_path))
+                dl <- scp_download(cfg, remote_path, local_path)
+                if (dl$status == 0 && file.exists(local_path)) {
+                  export_gene_map <- tryCatch(read.delim(local_path, stringsAsFactors = FALSE), error = function(e) NULL)
+                  message("[Explorer Export] Downloaded gene map via SSH: ", nrow(export_gene_map), " entries")
+                }
+              }
+            }, error = function(e) message("[Explorer Export] SSH gene map download failed: ", e$message))
+          }
+
+          # Deduplicate
+          if (!is.null(export_gene_map) && nrow(export_gene_map) > 0 && "gene_symbol" %in% colnames(export_gene_map)) {
+            export_gene_map <- export_gene_map[!duplicated(export_gene_map$accession), ]
+          } else {
+            export_gene_map <- NULL
+          }
+        }
+
+        # Helper: resolve gene label using gene_map.tsv (NCBI) or explorer_gene_label (UniProt)
+        resolve_gene <- function(protein_id) {
+          if (!is.null(export_gene_map)) {
+            acc <- sub(";.*", "", protein_id)  # first accession from semicolon group
+            acc <- sub("^Cont_", "", acc)
+            idx <- match(acc, export_gene_map$accession)
+            if (!is.na(idx)) {
+              gs <- export_gene_map$gene_symbol[idx]
+              if (!is.na(gs) && nzchar(gs)) return(gs)
+            }
+          }
+          explorer_gene_label(protein_id, genes_df)
+        }
+
         # --- 1. Expression matrix CSV ---
         incProgress(0.1, detail = "Expression matrix...")
         expr_df <- as.data.frame(mat)
         # Add gene symbols
         expr_df$Protein.Group <- rownames(mat)
-        expr_df$Gene <- vapply(rownames(mat), function(pid) explorer_gene_label(pid, genes_df), character(1))
+        expr_df$Gene <- vapply(rownames(mat), resolve_gene, character(1))
+        # Count how many NCBI proteins were successfully mapped via gene_map.tsv
+        if (!is.null(export_gene_map)) {
+          non_contam_genes <- expr_df$Gene[!grepl("^Cont_", expr_df$Protein.Group)]
+          non_contam_pids <- expr_df$Protein.Group[!grepl("^Cont_", expr_df$Protein.Group)]
+          n_gene_mapped <- sum(non_contam_genes != non_contam_pids &
+            non_contam_genes != substr(non_contam_pids, 1, 15))
+        }
         if (!is.null(genes_df) && "Protein.Names" %in% colnames(genes_df)) {
           name_idx <- match(rownames(mat), rownames(genes_df))
           expr_df$Protein.Name <- ifelse(is.na(name_idx), "", genes_df$Protein.Names[name_idx])
@@ -1778,7 +1854,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
         quartile_df <- data.frame(
           Protein.Group = rownames(mat),
-          Gene = vapply(rownames(mat), function(pid) explorer_gene_label(pid, genes_df), character(1)),
+          Gene = vapply(rownames(mat), resolve_gene, character(1)),
           stringsAsFactors = FALSE
         )
         if (!is.null(genes_df) && "Protein.Names" %in% colnames(genes_df)) {
@@ -1838,7 +1914,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           contam_mat <- mat[contam_mask, , drop = FALSE]
           contam_summary <- data.frame(
             Protein.Group = rownames(contam_mat),
-            Gene = vapply(rownames(contam_mat), function(pid) explorer_gene_label(pid, genes_df), character(1)),
+            Gene = vapply(rownames(contam_mat), resolve_gene, character(1)),
             Avg_Intensity = round(rowMeans(contam_mat, na.rm = TRUE), 2),
             stringsAsFactors = FALSE
           )
@@ -2032,6 +2108,15 @@ Based on all the data, propose 3-5 testable biological hypotheses that could be 
 - Quartile assignments are computed independently per sample (a protein can be Q1 in one sample and Q3 in another)
 - Variable proteins are candidates, not statistically validated -- they need replicated experiments for confirmation
 - Contaminant proteins are prefixed with "Cont_"
+',
+        if (!is.null(export_gene_map) && n_gene_mapped > 0) {
+          paste0('- **Gene symbols mapped from NCBI RefSeq accessions** using gene_map.tsv (', n_gene_mapped, ' of ',
+            length(non_contam_ids), ' non-contaminant proteins mapped to gene symbols via NCBI E-utilities lookup). ',
+            'Unmapped proteins retain their accession IDs in the Gene column.\n')
+        } else if (is_ncbi_export && is.null(export_gene_map)) {
+          '- **WARNING: NCBI RefSeq accessions detected but gene_map.tsv not found.** Gene column contains truncated protein descriptions, not proper gene symbols. For accurate gene symbols, ensure gene_map.tsv is available in the FASTA directory.\n'
+        } else { '' },
+'
 ')
 
         prompt_file <- file.path(tmp_dir, "PROMPT.md")
