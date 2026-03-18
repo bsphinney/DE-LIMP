@@ -564,41 +564,9 @@ server_search <- function(input, output, session, values, add_to_log,
     values$ssh_connected <- result$success
     values$ssh_sbatch_path <- result$sbatch_path
 
-    # Trigger immediate cluster resource check + auto-select on successful connect
-    if (result$success) {
-      tryCatch({
-        res <- check_cluster_resources(
-          ssh_config = cfg, account = "genome-center-grp",
-          partition = "high", sbatch_path = result$sbatch_path
-        )
-        values$cluster_resources <- res
-      }, error = function(e) {
-        values$cluster_resources <- list(success = FALSE, error = e$message)
-      })
-      tryCatch({
-        pub_res <- check_cluster_resources(
-          ssh_config = cfg, account = "publicgrp",
-          partition = "low", sbatch_path = result$sbatch_path
-        )
-        values$public_resources <- pub_res
-      }, error = function(e) NULL)
-
-      # Auto-select best partition immediately
-      best <- select_best_partition(values$cluster_resources, values$public_resources, 64)
-      values$auto_partition <- best
-      if (!isTRUE(isolate(input$partition_override))) {
-        updateTextInput(session, "diann_account", value = best$account)
-        updateTextInput(session, "diann_partition", value = best$partition)
-      }
-      # Per-user resource snapshot (both accounts)
-      tryCatch({
-        members <- get_lab_members(cfg$user)
-        lab_df <- check_per_user_resources(cfg, "genome-center-grp", "high", result$sbatch_path, members)
-        pub_df <- check_per_user_resources(cfg, "publicgrp", "low", result$sbatch_path, members)
-        user_df <- rbind(lab_df, pub_df)
-        if (nrow(user_df) > 0) values$per_user_resources <- user_df
-      }, error = function(e) NULL)
-    } else {
+    # Cluster resource check runs in the periodic observer (every 60s)
+    # to avoid blocking the UI for 30-60 seconds on connect
+    if (!result$success) {
       values$cluster_resources <- NULL
       values$public_resources <- NULL
     }
