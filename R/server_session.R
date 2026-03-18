@@ -1212,6 +1212,34 @@ server_session <- function(input, output, session, values, add_to_log) {
   })
 
   # ============================================================================
+  #      DIA-NN Output Path Display
+  # ============================================================================
+
+  output$diann_output_path_display <- renderUI({
+    ss <- values$diann_search_settings
+    if (is.null(ss) || is.null(ss$output_dir) || !nzchar(ss$output_dir)) {
+      return(div(style = "color: #999; font-style: italic;",
+        "No DIA-NN search output available. Run a search or load results first."))
+    }
+
+    od <- ss$output_dir
+    hpc_path <- translate_storage_path(od, to = "hpc")
+
+    div(
+      tags$code(style = "display: block; background: #e9ecef; padding: 10px; border-radius: 4px; font-size: 0.9em; word-break: break-all;",
+        hpc_path),
+      div(style = "margin-top: 8px; font-size: 0.85em; color: #6c757d;",
+        icon("info-circle"),
+        " Access via SSH: ",
+        tags$code(paste0("scp -r brettsp@hive.hpc.ucdavis.edu:", hpc_path, " .")),
+        tags$br(),
+        icon("folder-open"),
+        " Or use the SSH file browser in the New Search tab to navigate to this directory."
+      )
+    )
+  })
+
+  # ============================================================================
   #      Export Complete Analysis ZIP
   # ============================================================================
 

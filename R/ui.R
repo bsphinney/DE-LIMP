@@ -2029,6 +2029,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             ),
             downloadButton("download_consistent_csv_output", tagList(icon("download"), " Export CV Analysis CSV"),
               class = "btn-info mt-2")
+          ),
+
+          # --- DIA-NN Output Location ---
+          div(style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #6c757d;",
+            tags$h4(icon("server"), " Full DIA-NN Output"),
+            tags$p(class = "text-muted",
+              "The complete DIA-NN search output (report.parquet, precursor matrices, spectral libraries, logs) ",
+              "is stored on the HPC cluster. These files can be large (100 MB+) and are not included in the analysis export."
+            ),
+            uiOutput("diann_output_path_display")
           )
         )
       ),
