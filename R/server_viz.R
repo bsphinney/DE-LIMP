@@ -1882,6 +1882,48 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           }
         }, error = function(e) message("[Export] pg_matrix.tsv not available: ", e$message))
 
+        # --- 1d. Data quality summary (per-sample protein counts + missingness) ---
+        tryCatch({
+          # Use pg_matrix if we downloaded it, otherwise derive from raw_data
+          pg_file_path <- file.path(tmp_dir, "diann_pg_matrix.tsv")
+          if (file.exists(pg_file_path)) {
+            pg <- read.delim(pg_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+            # Intensity columns are after the annotation columns
+            annot_cols <- c("Protein.Group", "Protein.Names", "Genes",
+                            "First.Protein.Description", "N.Sequences", "N.Proteotypic.Sequences")
+            int_cols <- setdiff(colnames(pg), annot_cols)
+
+            if (length(int_cols) > 0) {
+              pg_mat <- as.matrix(pg[, int_cols])
+              # 0 = not detected in DIA-NN pg_matrix
+              detected <- colSums(pg_mat > 0, na.rm = TRUE)
+              total_pg <- nrow(pg_mat)
+              contam_count <- sum(grepl("^Cont_", pg$Protein.Group))
+
+              quality_df <- data.frame(
+                Sample = int_cols,
+                Proteins_Detected = detected,
+                Total_Protein_Groups = total_pg,
+                Pct_Detected = round(100 * detected / total_pg, 1),
+                Missing = total_pg - detected,
+                Pct_Missing = round(100 * (total_pg - detected) / total_pg, 1),
+                Contaminant_Proteins = contam_count,
+                stringsAsFactors = FALSE
+              )
+              # Add short sample labels from metadata
+              if (!is.null(values$metadata)) {
+                quality_df$Group <- values$metadata$Group[match(quality_df$Sample,
+                  values$metadata$File.Name)]
+                quality_df$Sample_ID <- paste0("S", values$metadata$ID[match(quality_df$Sample,
+                  values$metadata$File.Name)])
+              }
+              quality_file <- file.path(tmp_dir, "data_quality_summary.csv")
+              write.csv(quality_df, quality_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, quality_file)
+            }
+          }
+        }, error = function(e) message("[Export] data quality summary failed: ", e$message))
+
         # --- 2. Quartile profiles CSV (recompute without contaminant exclusion) ---
         incProgress(0.2, detail = "Quartile profiles...")
         avg_intensity <- rowMeans(mat, na.rm = TRUE)
@@ -2146,6 +2188,7 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 |------|-------------|-------------|
 | `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
 | `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). This is BEFORE maxLFQ — use this to see which proteins were directly quantified vs inferred. Compare with expression_matrix.csv to understand data completeness. | Protein.Group, Genes, sample intensity columns (0 = missing) |
+| `data_quality_summary.csv` | Per-sample data quality: proteins detected, % missing, contaminant counts. Use this to assess sample quality and compare completeness across runs | Sample, Proteins_Detected, Pct_Missing, Group |
 | `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE maxLFQ). Shows how many precursors were directly detected per sample — use this to assess data completeness | **Gene**, Total_Precursors, Detected_SampleN columns |
 | `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
 | `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
