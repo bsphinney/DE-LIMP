@@ -1825,6 +1825,34 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         write.csv(expr_df, expr_file, row.names = FALSE)
         files_to_zip <- c(files_to_zip, expr_file)
 
+        # --- 1b. Detection matrix from raw precursor data (shows real missing values) ---
+        if (!is.null(values$raw_data) && !is.null(values$raw_data$E)) {
+          tryCatch({
+            raw_mat <- values$raw_data$E
+            raw_genes <- values$raw_data$genes
+            if (!is.null(raw_genes) && "Protein.Group" %in% colnames(raw_genes)) {
+              # Per protein group: count detected precursors per sample
+              pg <- raw_genes$Protein.Group
+              det_counts <- do.call(rbind, lapply(unique(pg), function(p) {
+                rows <- which(pg == p)
+                sub_mat <- raw_mat[rows, , drop = FALSE]
+                detected <- colSums(!is.na(sub_mat) & is.finite(sub_mat))
+                total_prec <- nrow(sub_mat)
+                c(Protein.Group = p, Total_Precursors = total_prec,
+                  setNames(as.list(detected), paste0("Detected_", colnames(raw_mat))))
+              }))
+              det_df <- as.data.frame(det_counts, stringsAsFactors = FALSE)
+              # Add gene symbols
+              det_df$Gene <- vapply(det_df$Protein.Group, function(pid) resolve_gene(pid), character(1))
+              det_df <- det_df[, c("Protein.Group", "Gene", "Total_Precursors",
+                grep("^Detected_", colnames(det_df), value = TRUE))]
+              det_file <- file.path(tmp_dir, "detection_matrix.csv")
+              write.csv(det_df, det_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, det_file)
+            }
+          }, error = function(e) message("[Export] Detection matrix failed: ", e$message))
+        }
+
         # --- 2. Quartile profiles CSV (recompute without contaminant exclusion) ---
         incProgress(0.2, detail = "Quartile profiles...")
         avg_intensity <- rowMeans(mat, na.rm = TRUE)
@@ -2064,6 +2092,7 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 | File | Description | Key Columns |
 |------|-------------|-------------|
 | `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
+| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE maxLFQ). Shows how many precursors were directly detected per sample — use this to assess data completeness | **Gene**, Total_Precursors, Detected_SampleN columns |
 | `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
 | `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
 | `sample_metadata.csv` | Sample groups and identifiers | |
