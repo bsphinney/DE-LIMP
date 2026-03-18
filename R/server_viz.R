@@ -2058,14 +2058,19 @@ This is a proteomics dataset analyzed with DE-LIMP v', values$app_version, '. Th
 You are a proteomics bioinformatics expert. Analyze this dataset and provide biological insights WITHOUT relying on statistical significance (there are no p-values or fold changes).
 
 ## Data Files
-- `expression_matrix.csv` -- Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples)
-- `quartile_profiles.csv` -- Each protein\'s intensity quartile (Q1=highest 25%, Q4=lowest 25%) computed per-sample
-- `variable_proteins.csv` -- ', n_variable, ' proteins that shift 2+ quartiles across samples (biologically interesting candidates)
-- `sample_metadata.csv` -- Sample groups and identifiers
-- `contaminant_summary.csv` -- Contaminant protein statistics
-- `session.rds` -- Full DE-LIMP session state (reload via DE-LIMP > Load Session)
-- `methods.txt` -- Pipeline parameters, normalization, app version
-- `reproducibility_log.R` -- R code log recording every analysis step
+
+**IMPORTANT**: All CSV files use the **Gene** column for gene symbols (not Protein.Group, which contains raw database accessions like XP_ or UniProt IDs). Always use the Gene column for biological interpretation.
+
+| File | Description | Key Columns |
+|------|-------------|-------------|
+| `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
+| `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
+| `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
+| `sample_metadata.csv` | Sample groups and identifiers | |
+| `contaminant_summary.csv` | Contaminant protein statistics | |
+| `session.rds` | Full DE-LIMP session state (reload via DE-LIMP > Load Session) | |
+| `methods.txt` | Pipeline parameters, normalization, app version | |
+| `reproducibility_log.R` | R code log recording every analysis step | |
 
 ## Analysis Requested
 
