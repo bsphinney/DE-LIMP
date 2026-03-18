@@ -2108,10 +2108,12 @@ Based on all the data, propose 3-5 testable biological hypotheses that could be 
 ## Sample Groups
 ', group_info, '
 
-## Important Notes
-- All intensity values are log2-transformed
+## Important Notes — Read Before Analysis
+- All intensity values are **log2-transformed**
+- The expression matrix is **complete** (no missing values). This is NOT from imputation — it is a mathematical property of the **maxLFQ algorithm** (via limpa DPC-Quant), which computes protein-level quantities from pairwise precursor ratios. Do NOT describe this as "MBR imputation" or "gap-filling" — maxLFQ produces valid quantitative estimates for all proteins across all samples.
+- **DIA-NN MBR** (Match Between Runs) transfers peptide IDs across runs at the precursor level, but the complete protein matrix comes from maxLFQ aggregation, not MBR.
 - Quartile assignments are computed independently per sample (a protein can be Q1 in one sample and Q3 in another)
-- Variable proteins are candidates, not statistically validated -- they need replicated experiments for confirmation
+- Variable proteins are candidates, not statistically validated — they need replicated experiments for confirmation
 - Contaminant proteins are prefixed with "Cont_"
 ',
         if (!is.null(export_gene_map) && n_gene_mapped > 0) {
