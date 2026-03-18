@@ -1212,6 +1212,265 @@ server_session <- function(input, output, session, values, add_to_log) {
   })
 
   # ============================================================================
+  #      Export Complete Analysis ZIP
+  # ============================================================================
+
+  output$export_complete_analysis <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_Complete_Analysis_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip")
+    },
+    content = function(file) {
+      req(values$y_protein)
+
+      tryCatch({
+      withProgress(message = "Building complete analysis export...", value = 0, {
+        tmp_dir <- file.path(tempdir(), paste0("complete_analysis_", format(Sys.time(), "%Y%m%d%H%M%S")))
+        dir.create(tmp_dir, recursive = TRUE, showWarnings = FALSE)
+        files_to_zip <- character(0)
+
+        mat <- values$y_protein$E
+        genes_df <- values$y_protein$genes
+
+        # SSH config helper (reused for remote file downloads)
+        ssh_cfg <- if (isTRUE(values$ssh_connected) && nzchar(input$ssh_host %||% ""))
+          list(host = input$ssh_host, user = input$ssh_user,
+               port = input$ssh_port %||% 22L, key_path = input$ssh_key_path) else NULL
+
+        # Gene symbol resolver (from genes_df Genes column or sp|ACC|GENE format)
+        resolve_gene <- function(protein_id) {
+          if (!is.null(genes_df) && "Genes" %in% colnames(genes_df)) {
+            idx <- match(protein_id, rownames(genes_df))
+            if (!is.na(idx)) {
+              g <- genes_df$Genes[idx]
+              if (!is.na(g) && nzchar(g) && !grepl("^[A-Z][0-9][A-Z0-9]{3}[0-9]", g)) return(g)
+            }
+          }
+          # Try sp|ACC|GENE format
+          if (grepl("\\|", protein_id)) {
+            parts <- strsplit(protein_id, "\\|")[[1]]
+            if (length(parts) >= 3) return(sub("_.*", "", parts[3]))
+          }
+          protein_id
+        }
+
+        # === 1. Expression matrix with gene symbols ===
+        incProgress(0.05, detail = "Expression matrix...")
+        expr_df <- as.data.frame(mat)
+        expr_df$Protein.Group <- rownames(mat)
+        expr_df$Gene <- vapply(rownames(mat), resolve_gene, character(1))
+        if (!is.null(genes_df) && "Protein.Names" %in% colnames(genes_df)) {
+          name_idx <- match(rownames(mat), rownames(genes_df))
+          expr_df$Protein.Name <- ifelse(is.na(name_idx), "", genes_df$Protein.Names[name_idx])
+        } else {
+          expr_df$Protein.Name <- ""
+        }
+        id_cols <- c("Protein.Group", "Gene", "Protein.Name")
+        expr_df <- expr_df[, c(id_cols, setdiff(colnames(expr_df), id_cols))]
+        expr_file <- file.path(tmp_dir, "expression_matrix.csv")
+        write.csv(expr_df, expr_file, row.names = FALSE)
+        files_to_zip <- c(files_to_zip, expr_file)
+
+        # === 2. Sample metadata ===
+        incProgress(0.10, detail = "Sample metadata...")
+        if (!is.null(values$metadata)) {
+          meta_file <- file.path(tmp_dir, "sample_metadata.csv")
+          write.csv(values$metadata, meta_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, meta_file)
+        }
+
+        # === 3. Session RDS ===
+        incProgress(0.15, detail = "Session state...")
+        tryCatch({
+          session_data <- list(
+            raw_data = values$raw_data, metadata = values$metadata,
+            fit = values$fit, y_protein = values$y_protein,
+            dpc_fit = values$dpc_fit, design = values$design,
+            qc_stats = values$qc_stats, repro_log = values$repro_log,
+            instrument_metadata = values$instrument_metadata,
+            diann_search_settings = values$diann_search_settings,
+            gsea_results = values$gsea_results,
+            gsea_results_cache = values$gsea_results_cache,
+            phospho_detected = values$phospho_detected,
+            phospho_fit = values$phospho_fit,
+            comparator_results = values$comparator_results,
+            comparator_run_a = values$comparator_run_a,
+            comparator_run_b = values$comparator_run_b,
+            comparator_mode = values$comparator_mode,
+            saved_at = Sys.time(),
+            app_version = paste0("DE-LIMP v", values$app_version)
+          )
+          rds_file <- file.path(tmp_dir, "session.rds")
+          saveRDS(session_data, rds_file)
+          files_to_zip <- c(files_to_zip, rds_file)
+        }, error = function(e) message("[Complete Export] Session RDS failed: ", e$message))
+
+        # === 4. Methods text ===
+        incProgress(0.20, detail = "Methods...")
+        tryCatch({
+          methods_text <- build_methodology_text()
+          methods_file <- file.path(tmp_dir, "methods.txt")
+          writeLines(methods_text, methods_file)
+          files_to_zip <- c(files_to_zip, methods_file)
+        }, error = function(e) message("[Complete Export] Methods text failed: ", e$message))
+
+        # === 5. Reproducibility log ===
+        incProgress(0.25, detail = "Reproducibility log...")
+        if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
+          repro_file <- file.path(tmp_dir, "reproducibility_log.R")
+          log_content <- paste(values$repro_log, collapse = "\n")
+          session_info_text <- paste(capture.output(sessionInfo()), collapse = "\n")
+          footer <- c("", "# --- Session Info (Package Versions) ---", session_info_text)
+          writeLines(paste(c(log_content, footer), collapse = "\n"), repro_file)
+          files_to_zip <- c(files_to_zip, repro_file)
+        }
+
+        # === DIA-NN output files (local first, SSH fallback) ===
+        ss <- values$diann_search_settings
+        output_dir_local <- if (!is.null(ss) && !is.null(ss$output_dir)) ss$output_dir else NULL
+        output_dir_remote <- if (!is.null(output_dir_local))
+          translate_storage_path(output_dir_local, to = "hpc") else NULL
+
+        # Helper: try to fetch a file from local or remote
+        fetch_diann_file <- function(filename, dest_name = filename) {
+          tryCatch({
+            dest <- file.path(tmp_dir, dest_name)
+            # Try local first
+            if (!is.null(output_dir_local)) {
+              local_path <- file.path(output_dir_local, filename)
+              if (file.exists(local_path)) {
+                file.copy(local_path, dest)
+                if (file.exists(dest)) return(dest)
+              }
+            }
+            # Try SSH
+            if (!is.null(ssh_cfg) && !is.null(output_dir_remote)) {
+              remote_path <- file.path(output_dir_remote, filename)
+              dl <- scp_download(ssh_cfg, remote_path, dest)
+              if (dl$status == 0 && file.exists(dest)) return(dest)
+            }
+            NULL
+          }, error = function(e) {
+            message("[Complete Export] Could not fetch ", filename, ": ", e$message)
+            NULL
+          })
+        }
+
+        # === 6. search_info.md ===
+        incProgress(0.30, detail = "DIA-NN search info...")
+        si <- fetch_diann_file("search_info.md")
+        if (!is.null(si)) files_to_zip <- c(files_to_zip, si)
+
+        # === 7-11. DIA-NN matrix files ===
+        incProgress(0.40, detail = "DIA-NN output matrices...")
+        # Only include small DIA-NN files (pg_matrix ~200KB, stats ~5KB)
+        # Precursor matrix (pr_matrix) can be 50MB+ — too large for sharing
+        diann_files <- c(
+          "report.pg_matrix.tsv",
+          "report.stats.tsv"
+        )
+        for (df_name in diann_files) {
+          f <- fetch_diann_file(df_name)
+          if (!is.null(f)) files_to_zip <- c(files_to_zip, f)
+        }
+
+        # === 12. Data quality summary (from pg_matrix if available) ===
+        incProgress(0.60, detail = "Data quality summary...")
+        tryCatch({
+          pg_file_path <- file.path(tmp_dir, "report.pg_matrix.tsv")
+          if (file.exists(pg_file_path)) {
+            pg <- read.delim(pg_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+            annot_cols <- c("Protein.Group", "Protein.Names", "Genes",
+                            "First.Protein.Description", "N.Sequences", "N.Proteotypic.Sequences")
+            int_cols <- setdiff(colnames(pg), annot_cols)
+
+            if (length(int_cols) > 0) {
+              pg_mat <- as.matrix(pg[, int_cols])
+              detected <- colSums(pg_mat > 0, na.rm = TRUE)
+              total_pg <- nrow(pg_mat)
+              contam_count <- sum(grepl("^Cont_", pg$Protein.Group))
+
+              quality_df <- data.frame(
+                Sample = int_cols,
+                Proteins_Detected = detected,
+                Total_Protein_Groups = total_pg,
+                Pct_Detected = round(100 * detected / total_pg, 1),
+                Missing = total_pg - detected,
+                Pct_Missing = round(100 * (total_pg - detected) / total_pg, 1),
+                Contaminant_Proteins = contam_count,
+                stringsAsFactors = FALSE
+              )
+              if (!is.null(values$metadata)) {
+                quality_df$Group <- values$metadata$Group[match(quality_df$Sample,
+                  values$metadata$File.Name)]
+              }
+              quality_file <- file.path(tmp_dir, "data_quality_summary.csv")
+              write.csv(quality_df, quality_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, quality_file)
+            }
+          }
+        }, error = function(e) message("[Complete Export] Data quality summary failed: ", e$message))
+
+        # === 13. Contaminant summary ===
+        incProgress(0.75, detail = "Contaminant summary...")
+        tryCatch({
+          protein_ids <- rownames(mat)
+          is_contam <- grepl("^Cont_", protein_ids)
+          if (sum(is_contam) > 0) {
+            linear_mat <- 2^mat
+            contam_mat <- linear_mat[is_contam, , drop = FALSE]
+
+            # Per-contaminant breakdown
+            contam_df <- data.frame(
+              Protein.Group = rownames(contam_mat),
+              Gene = vapply(rownames(contam_mat), resolve_gene, character(1)),
+              Avg_Log2_Intensity = round(rowMeans(mat[is_contam, , drop = FALSE], na.rm = TRUE), 2),
+              Avg_Linear_Intensity = round(rowMeans(contam_mat, na.rm = TRUE), 0),
+              stringsAsFactors = FALSE
+            )
+
+            # Per-sample contaminant intensities
+            for (j in seq_len(ncol(contam_mat))) {
+              contam_df[[colnames(contam_mat)[j]]] <- round(contam_mat[, j], 0)
+            }
+
+            # Per-sample contaminant percentage summary
+            total_linear <- colSums(linear_mat, na.rm = TRUE)
+            contam_linear <- colSums(contam_mat, na.rm = TRUE)
+            contam_pct <- round(100 * contam_linear / total_linear, 2)
+
+            summary_row <- c("--- TOTALS ---", "", "", "",
+              as.character(round(contam_linear, 0)))
+            pct_row <- c("--- % of Total ---", "", "", "",
+              as.character(contam_pct))
+            contam_df <- rbind(
+              contam_df[order(-contam_df$Avg_Linear_Intensity), ],
+              setNames(as.list(summary_row), colnames(contam_df)),
+              setNames(as.list(pct_row), colnames(contam_df))
+            )
+
+            contam_file <- file.path(tmp_dir, "contaminant_summary.csv")
+            write.csv(contam_df, contam_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, contam_file)
+          }
+        }, error = function(e) message("[Complete Export] Contaminant summary failed: ", e$message))
+
+        # === Create ZIP ===
+        incProgress(0.90, detail = "Creating ZIP...")
+        old_wd <- setwd(tmp_dir)
+        on.exit(setwd(old_wd), add = TRUE)
+        zip(file, basename(files_to_zip))
+
+        message("[DE-LIMP] Complete analysis export: ", length(files_to_zip), " files")
+      })
+      }, error = function(e) {
+        message("[DE-LIMP] Complete analysis export FAILED: ", e$message)
+        showNotification(paste("Export error:", e$message), type = "error", duration = 15)
+      })
+    },
+    contentType = "application/zip"
+  )
+
+  # ============================================================================
   #      Template Import / Export
   # ============================================================================
 
