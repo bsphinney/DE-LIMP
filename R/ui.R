@@ -1976,24 +1976,59 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     # ==========================================================================
     nav_menu("Output", icon = icon("file-export"),
       nav_panel("Export Data", icon = icon("download"),
-        div(style = "max-width: 700px; margin: 30px auto; padding: 20px;",
-          div(style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #28a745;",
-            tags$h4(icon("file-csv"), " Export Complete Dataset"),
+        div(style = "max-width: 800px; margin: 30px auto; padding: 20px;",
+
+          # --- Complete Analysis ZIP ---
+          div(style = "background-color: #f0f7ff; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #6f42c1;",
+            tags$h4(icon("file-archive"), " Export Complete Analysis"),
             tags$p(class = "text-muted",
-              "Download the full results table for the selected comparison, including DE statistics ",
-              "(logFC, P.Value, adj.P.Val) and normalized expression values for all samples."
+              "Download everything needed to reproduce and share this analysis. ",
+              "Includes all data files, DIA-NN search parameters, and session state."
+            ),
+            tags$details(
+              tags$summary(style = "cursor: pointer; color: #6f42c1; font-weight: 500;",
+                "What's included (click to expand)"),
+              tags$ul(style = "font-size: 0.88em; color: #555; margin-top: 8px;",
+                tags$li(tags$strong("expression_matrix.csv"), " -- Normalized protein intensities (maxLFQ, complete, no missing values)"),
+                tags$li(tags$strong("diann_pg_matrix.tsv"), " -- DIA-NN protein-level matrix with real missing values (0 = not detected, ~200 KB)"),
+                tags$li(tags$strong("data_quality_summary.csv"), " -- Per-sample protein counts, % detected, contaminant counts"),
+                tags$li(tags$strong("detection_matrix.csv"), " -- Per-protein precursor detection counts per sample"),
+                tags$li(tags$strong("quartile_profiles.csv"), " -- Intensity quartile assignments per sample"),
+                tags$li(tags$strong("variable_proteins.csv"), " -- Proteins with inconsistent abundance across samples"),
+                tags$li(tags$strong("sample_metadata.csv"), " -- Sample groups and identifiers"),
+                tags$li(tags$strong("contaminant_summary.csv"), " -- Contaminant protein statistics"),
+                tags$li(tags$strong("search_info.md"), " -- Full DIA-NN search parameters and job metadata"),
+                tags$li(tags$strong("session.rds"), " -- Complete session state (reload in DE-LIMP)"),
+                tags$li(tags$strong("methods.txt"), " -- Pipeline parameters, normalization, app version"),
+                tags$li(tags$strong("reproducibility_log.R"), " -- R code log to reproduce every step"),
+                tags$li(tags$strong("PROMPT.md"), " -- AI analysis prompt with biological questions")
+              )
+            ),
+            downloadButton("export_complete_analysis", tagList(icon("download"), " Export Complete Analysis ZIP"),
+              class = "btn-primary btn-lg mt-2")
+          ),
+
+          # --- DE Results CSV ---
+          div(style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #28a745;",
+            tags$h4(icon("file-csv"), " DE Results Table"),
+            tags$p(class = "text-muted",
+              "Quick export of the DE results for the selected comparison. ",
+              "Includes gene symbols, logFC, P.Value, adj.P.Val, and per-sample expression values. ",
+              "One CSV file — no search parameters or session data."
             ),
             downloadButton("download_result_csv_output", tagList(icon("download"), " Export Results CSV"),
-              class = "btn-success btn-lg mt-2")
+              class = "btn-success mt-2")
           ),
+
+          # --- CV Analysis CSV ---
           div(style = "background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #17a2b8;",
-            tags$h4(icon("chart-bar"), " Export CV Analysis"),
+            tags$h4(icon("chart-bar"), " CV Analysis"),
             tags$p(class = "text-muted",
-              "Download CV analysis for significant proteins, including per-group coefficient of ",
-              "variation and average CV values."
+              "Coefficient of variation for significant proteins. ",
+              "Includes per-group CV and average CV values. One CSV file."
             ),
             downloadButton("download_consistent_csv_output", tagList(icon("download"), " Export CV Analysis CSV"),
-              class = "btn-info btn-lg mt-2")
+              class = "btn-info mt-2")
           )
         )
       ),
