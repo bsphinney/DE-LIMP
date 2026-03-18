@@ -2187,9 +2187,9 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 | File | Description | Key Columns |
 |------|-------------|-------------|
 | `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
-| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). This is BEFORE maxLFQ — use this to see which proteins were directly quantified vs inferred. Compare with expression_matrix.csv to understand data completeness. | Protein.Group, Genes, sample intensity columns (0 = missing) |
+| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). This is BEFORE limpa DPC-Quant — use this to see which proteins were directly quantified vs probabilistically estimated. Compare with expression_matrix.csv to understand data completeness. | Protein.Group, Genes, sample intensity columns (0 = missing) |
 | `data_quality_summary.csv` | Per-sample data quality: proteins detected, % missing, contaminant counts. Use this to assess sample quality and compare completeness across runs | Sample, Proteins_Detected, Pct_Missing, Group |
-| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE maxLFQ). Shows how many precursors were directly detected per sample — use this to assess data completeness | **Gene**, Total_Precursors, Detected_SampleN columns |
+| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE DPC-Quant). Shows how many precursors were directly detected per sample — proteins with fewer detections have lower precision weights | **Gene**, Total_Precursors, Detected_SampleN columns |
 | `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
 | `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
 | `sample_metadata.csv` | Sample groups and identifiers | |
@@ -2236,8 +2236,9 @@ Based on all the data, propose 3-5 testable biological hypotheses that could be 
 
 ## Important Notes — Read Before Analysis
 - All intensity values are **log2-transformed**
-- The expression matrix is **complete** (no missing values). This is NOT from imputation — it is a mathematical property of the **maxLFQ algorithm** (via limpa DPC-Quant), which computes protein-level quantities from pairwise precursor ratios. Do NOT describe this as "MBR imputation" or "gap-filling" — maxLFQ produces valid quantitative estimates for all proteins across all samples.
-- **DIA-NN MBR** (Match Between Runs) transfers peptide IDs across runs at the precursor level, but the complete protein matrix comes from maxLFQ aggregation, not MBR.
+- The expression matrix is **complete** (no missing values). This is NOT from imputation — it uses **limpa DPC-Quant** (Detection Probability Curve Quantification), which models missing values probabilistically rather than imputing them. Missing precursors contribute to the protein quantity estimate through their detection probability, not as imputed values. Do NOT describe this as "imputation" or "gap-filling."
+- Proteins with fewer detected precursors receive **lower precision weights** in downstream statistical analysis (limma). This means limpa automatically downweights unreliable estimates — but the expression values themselves are still present for all proteins.
+- **DIA-NN MBR** (Match Between Runs) transfers peptide IDs across runs at the precursor level, but the complete protein matrix comes from DPC-Quant, not MBR.
 - Quartile assignments are computed independently per sample (a protein can be Q1 in one sample and Q3 in another)
 - Variable proteins are candidates, not statistically validated — they need replicated experiments for confirmation
 - Contaminant proteins are prefixed with "Cont_"
