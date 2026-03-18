@@ -2064,6 +2064,30 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           files_to_zip <- c(files_to_zip, methods_file)
         }, error = function(e) message("[DE-LIMP] Explorer export: methods error: ", e$message))
 
+        # --- 7b. search_info.md (DIA-NN search parameters and metadata) ---
+        tryCatch({
+          ss <- values$diann_search_settings
+          if (!is.null(ss) && !is.null(ss$output_dir)) {
+            od <- translate_storage_path(ss$output_dir, to = "hpc")
+            si_remote <- file.path(od, "search_info.md")
+            si_local <- file.path(ss$output_dir, "search_info.md")
+            si_file <- file.path(tmp_dir, "search_info.md")
+
+            if (file.exists(si_local)) {
+              file.copy(si_local, si_file)
+              files_to_zip <- c(files_to_zip, si_file)
+            } else if (isTRUE(values$ssh_connected)) {
+              cfg <- list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                          port = isolate(input$ssh_port) %||% 22L,
+                          key_path = isolate(input$ssh_key_path))
+              dl <- scp_download(cfg, si_remote, si_file)
+              if (dl$status == 0 && file.exists(si_file)) {
+                files_to_zip <- c(files_to_zip, si_file)
+              }
+            }
+          }
+        }, error = function(e) message("[Export] search_info.md not available: ", e$message))
+
         # --- 8. Reproducibility log ---
         incProgress(0.6, detail = "Reproducibility log...")
         if (!is.null(values$repro_log) && length(values$repro_log) > 0) {

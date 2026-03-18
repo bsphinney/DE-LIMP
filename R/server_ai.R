@@ -560,6 +560,31 @@ server_ai <- function(input, output, session, values) {
           repro_note <- "\n- **`Reproducibility_Code.R`** — R code log recording every analysis step with timestamps (can reproduce the full analysis)\n"
         }
 
+        # --- 7b. search_info.md and DIA-NN pg_matrix.tsv ---
+        tryCatch({
+          ss <- values$diann_search_settings
+          if (!is.null(ss) && !is.null(ss$output_dir)) {
+            od <- translate_storage_path(ss$output_dir, to = "hpc")
+            cfg <- if (isTRUE(values$ssh_connected))
+              list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                   port = isolate(input$ssh_port) %||% 22L, key_path = isolate(input$ssh_key_path))
+            else NULL
+
+            for (fname in c("search_info.md", "report.pg_matrix.tsv")) {
+              local_path <- file.path(ss$output_dir, fname)
+              dest <- file.path(tmp_dir, fname)
+              if (file.exists(local_path)) {
+                file.copy(local_path, dest)
+                files_to_zip <- c(files_to_zip, dest)
+              } else if (!is.null(cfg)) {
+                dl <- scp_download(cfg, file.path(od, fname), dest)
+                if (dl$status == 0 && file.exists(dest))
+                  files_to_zip <- c(files_to_zip, dest)
+              }
+            }
+          }
+        }, error = function(e) message("[Export] search_info/pg_matrix: ", e$message))
+
         # --- 8. Build the prompt .md ---
         incProgress(0.7, detail = "Assembling prompt...")
 
