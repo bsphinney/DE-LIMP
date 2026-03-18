@@ -4580,6 +4580,138 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             files_to_zip <- c(files_to_zip, excl_file)
           }
 
+          # Initialize provenance tracking (used by sections 5c-7c below)
+          provenance_notes <- character(0)
+
+          # 5c. search_info.md (DIA-NN search parameters from output_dir)
+          tryCatch({
+            ss <- values$diann_search_settings
+            if (!is.null(ss) && !is.null(ss$output_dir)) {
+              od <- translate_storage_path(ss$output_dir, to = "hpc")
+              cfg <- if (isTRUE(values$ssh_connected) && nzchar(isolate(input$ssh_host) %||% ""))
+                list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                     port = isolate(input$ssh_port) %||% 22L, key_path = isolate(input$ssh_key_path))
+              else NULL
+
+              si_local <- file.path(ss$output_dir, "search_info.md")
+              si_dest <- file.path(tmp_dir, "search_info.md")
+              if (file.exists(si_local)) {
+                file.copy(si_local, si_dest)
+                files_to_zip <- c(files_to_zip, si_dest)
+                provenance_notes <- c(provenance_notes, "- `search_info.md` - DIA-NN search metadata")
+              } else if (!is.null(cfg)) {
+                dl <- scp_download(cfg, file.path(od, "search_info.md"), si_dest)
+                if (dl$status == 0 && file.exists(si_dest)) {
+                  files_to_zip <- c(files_to_zip, si_dest)
+                  provenance_notes <- c(provenance_notes, "- `search_info.md` - DIA-NN search metadata (via SSH)")
+                }
+              }
+            }
+          }, error = function(e) message("[Export] search_info.md: ", e$message))
+
+          # 5d. DIA-NN protein group matrix (with real missing values)
+          tryCatch({
+            ss <- values$diann_search_settings
+            if (!is.null(ss) && !is.null(ss$output_dir)) {
+              od <- translate_storage_path(ss$output_dir, to = "hpc")
+              cfg <- if (isTRUE(values$ssh_connected) && nzchar(isolate(input$ssh_host) %||% ""))
+                list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                     port = isolate(input$ssh_port) %||% 22L, key_path = isolate(input$ssh_key_path))
+              else NULL
+
+              pg_local <- file.path(ss$output_dir, "report.pg_matrix.tsv")
+              pg_dest <- file.path(tmp_dir, "diann_pg_matrix.tsv")
+              if (file.exists(pg_local)) {
+                file.copy(pg_local, pg_dest)
+                files_to_zip <- c(files_to_zip, pg_dest)
+                provenance_notes <- c(provenance_notes, "- `diann_pg_matrix.tsv` - DIA-NN protein group matrix (0 = not detected)")
+              } else if (!is.null(cfg)) {
+                dl <- scp_download(cfg, file.path(od, "report.pg_matrix.tsv"), pg_dest)
+                if (dl$status == 0 && file.exists(pg_dest)) {
+                  files_to_zip <- c(files_to_zip, pg_dest)
+                  provenance_notes <- c(provenance_notes, "- `diann_pg_matrix.tsv` - DIA-NN protein group matrix via SSH (0 = not detected)")
+                }
+              }
+            }
+          }, error = function(e) message("[Export] pg_matrix: ", e$message))
+
+          # 5e. Data quality summary (per-sample protein counts + missingness from pg_matrix)
+          tryCatch({
+            pg_file_path <- file.path(tmp_dir, "diann_pg_matrix.tsv")
+            if (file.exists(pg_file_path)) {
+              pg <- read.delim(pg_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+              annot_cols <- c("Protein.Group", "Protein.Names", "Genes",
+                              "First.Protein.Description", "N.Sequences", "N.Proteotypic.Sequences")
+              int_cols <- setdiff(colnames(pg), annot_cols)
+
+              if (length(int_cols) > 0) {
+                pg_mat <- as.matrix(pg[, int_cols])
+                detected <- colSums(pg_mat > 0, na.rm = TRUE)
+                total_pg <- nrow(pg_mat)
+                contam_count <- sum(grepl("^Cont_", pg$Protein.Group))
+
+                quality_df <- data.frame(
+                  Sample = int_cols,
+                  Proteins_Detected = detected,
+                  Total_Protein_Groups = total_pg,
+                  Pct_Detected = round(100 * detected / total_pg, 1),
+                  Missing = total_pg - detected,
+                  Pct_Missing = round(100 * (total_pg - detected) / total_pg, 1),
+                  Contaminant_Proteins = contam_count,
+                  stringsAsFactors = FALSE
+                )
+                if (!is.null(values$metadata)) {
+                  quality_df$Group <- values$metadata$Group[match(quality_df$Sample,
+                    values$metadata$File.Name)]
+                }
+                quality_file <- file.path(tmp_dir, "data_quality_summary.csv")
+                write.csv(quality_df, quality_file, row.names = FALSE)
+                files_to_zip <- c(files_to_zip, quality_file)
+                provenance_notes <- c(provenance_notes,
+                  paste0("- `data_quality_summary.csv` - Per-sample quality metrics (", length(int_cols), " samples)"))
+              }
+            }
+          }, error = function(e) message("[Export] data_quality_summary: ", e$message))
+
+          # 5f. Protein confidence (DPC-Quant n.observations + standard.error)
+          tryCatch({
+            n_obs <- values$y_protein$other$n.observations
+            se_mat <- values$y_protein$other$standard.error
+            if (!is.null(n_obs) && !is.null(se_mat)) {
+              conf_df <- data.frame(Protein.Group = rownames(n_obs), stringsAsFactors = FALSE)
+              for (j in seq_len(ncol(n_obs)))
+                conf_df[[paste0("nObs_", colnames(n_obs)[j])]] <- n_obs[, j]
+              for (j in seq_len(ncol(se_mat)))
+                conf_df[[paste0("SE_", colnames(se_mat)[j])]] <- round(se_mat[, j], 4)
+              conf_file <- file.path(tmp_dir, "protein_confidence.csv")
+              write.csv(conf_df, conf_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, conf_file)
+              provenance_notes <- c(provenance_notes,
+                paste0("- `protein_confidence.csv` - DPC-Quant precision for ", nrow(conf_df), " proteins"))
+            }
+          }, error = function(e) message("[Export] protein_confidence: ", e$message))
+
+          # 5g. Session RDS (full reproducibility state)
+          tryCatch({
+            session_data <- list(
+              raw_data = values$raw_data, metadata = values$metadata,
+              fit = values$fit, y_protein = values$y_protein,
+              dpc_fit = values$dpc_fit, design = values$design,
+              instrument_metadata = values$instrument_metadata,
+              diann_search_settings = values$diann_search_settings,
+              comparator_results = values$comparator_results,
+              comparator_run_a = values$comparator_run_a,
+              comparator_run_b = values$comparator_run_b,
+              comparator_mode = values$comparator_mode,
+              saved_at = Sys.time(),
+              app_version = paste0("DE-LIMP v", values$app_version)
+            )
+            rds_file <- file.path(tmp_dir, "session.rds")
+            saveRDS(session_data, rds_file)
+            files_to_zip <- c(files_to_zip, rds_file)
+            provenance_notes <- c(provenance_notes, "- `session.rds` - Full session state for reproducibility")
+          }, error = function(e) message("[Export] session.rds: ", e$message))
+
           # 6. Claude prompt
           setProgress(0.8, detail = "Building prompt...")
           prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative, values$instrument_metadata)
@@ -4589,7 +4721,6 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
           # 7. DIA-NN search provenance (graceful — skip if unavailable)
           setProgress(0.85, detail = "Extracting search provenance...")
-          provenance_notes <- character(0)  # track what was/wasn't available
 
           # 7a. Search params from session
           tryCatch({
@@ -4755,6 +4886,11 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             "- `de_results_combined.csv` - Full DE stats from both runs (if available)",
             "- `discordant_proteins.csv` - Disagreements with per-protein diagnostics (if available)",
             "- `diann_params_run_a.txt` / `diann_params_run_b.txt` - Parsed DIA-NN log parameters (if uploaded)",
+            "- `search_info.md` - DIA-NN search parameters and metadata (if available)",
+            "- `diann_pg_matrix.tsv` - DIA-NN protein group matrix with real missing values (0 = not detected)",
+            "- `data_quality_summary.csv` - Per-sample protein counts, % missing, contaminants",
+            "- `protein_confidence.csv` - DPC-Quant n.observations + standard.error per protein per sample",
+            "- `session.rds` - Full session state for reproducibility (loadable in DE-LIMP)",
             "",
             "## Search Provenance",
             provenance_notes
