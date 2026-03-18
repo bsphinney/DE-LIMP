@@ -1526,7 +1526,28 @@ ssh_control_path <- function(ssh_config) {
 ssh_mux_args <- function(ssh_config) {
   c("-o", sprintf("ControlPath=%s", ssh_control_path(ssh_config)),
     "-o", "ControlMaster=auto",
-    "-o", "ControlPersist=300")
+    "-o", "ControlPersist=60")  # 60s (was 300s) — reduces zombie mux risk
+}
+
+#' Clean up stale SSH ControlMaster sockets from previous sessions.
+#' Call on app startup to prevent zombie mux processes from blocking connections.
+ssh_cleanup_stale_sockets <- function() {
+  stale <- Sys.glob("/tmp/.delimp_*")
+  for (sock in stale) {
+    # Try graceful shutdown first, then force kill
+    tryCatch({
+      system2("ssh", c("-O", "exit", "-o", sprintf("ControlPath=%s", sock),
+                       "dummy"), stdout = FALSE, stderr = FALSE, timeout = 3)
+    }, error = function(e) NULL)
+    if (file.exists(sock)) unlink(sock)
+  }
+  # Kill any orphaned ssh mux processes
+  tryCatch({
+    pids <- system2("pgrep", c("-f", "ssh.*delimp.*mux"), stdout = TRUE, stderr = FALSE)
+    if (length(pids) > 0) {
+      system2("kill", c("-9", pids), stdout = FALSE, stderr = FALSE)
+    }
+  }, error = function(e) NULL)
 }
 
 ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
