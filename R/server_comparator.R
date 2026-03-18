@@ -2006,7 +2006,7 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
             "Run B: FragPipe + FragPipe-Analyst (MSFragger -> IonQuant MaxLFQ rollup -> limma DE).",
             "Key structural differences:",
             "- Search engine: DIA-NN (DIA-optimized) vs MSFragger (DDA/DIA)",
-            "- Protein rollup: DPC-Quant empirical Bayes vs MaxLFQ consensus ratios",
+            "- Protein rollup: DPC-Quant (detection probability modelling) vs MaxLFQ (pairwise ratios)",
             "- Normalization: DIA-NN RT-dependent vs IonQuant (optional VSN)",
             "- Missingness: DIA-NN MBR vs IonQuant MBR (different implementations)",
             "- Missing values: DPC-Quant probabilistic modelling (not imputation) vs Perseus-style imputation (FP-Analyst default)",
