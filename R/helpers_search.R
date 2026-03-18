@@ -261,6 +261,20 @@ download_uniprot_fasta_rest_fallback <- function(proteome_id, output_path) {
   })
 }
 
+#' Translate local mount paths to HPC paths and vice versa
+#' Handles: /Volumes/proteomics-grp/ <-> /quobyte/proteomics-grp/
+#' @param path Character path to translate
+#' @param to Character: "hpc" or "local"
+#' @return Translated path
+translate_storage_path <- function(path, to = "hpc") {
+  if (to == "hpc") {
+    path <- gsub("^/Volumes/proteomics-grp/", "/quobyte/proteomics-grp/", path)
+  } else {
+    path <- gsub("^/quobyte/proteomics-grp/", "/Volumes/proteomics-grp/", path)
+  }
+  path
+}
+
 #' Get path to a bundled contaminant FASTA file
 #' @param library_name Character — one of: "universal", "cell_culture", etc.
 #' @param app_dir Character — app root directory (where contaminants/ lives)

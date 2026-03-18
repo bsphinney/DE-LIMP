@@ -6559,12 +6559,13 @@ server_search <- function(input, output, session, values, add_to_log,
 
               showNotification("Locating report on remote...", type = "message", duration = 3, id = "load_progress")
 
-              # Find the report.parquet file on remote
-              remote_report <- file.path(job$output_dir, "report.parquet")
+              # Translate local mount paths to HPC paths (e.g., /Volumes/ → /quobyte/)
+              remote_dir <- translate_storage_path(job$output_dir, to = "hpc")
+              remote_report <- file.path(remote_dir, "report.parquet")
               find_result <- ssh_exec(cfg, paste("ls", shQuote(remote_report), "2>/dev/null"))
               if (find_result$status != 0) {
                 find_result <- ssh_exec(cfg, sprintf(
-                  "ls %s/report*.parquet 2>/dev/null | head -1", shQuote(job$output_dir)))
+                  "ls %s/report*.parquet 2>/dev/null | head -1", shQuote(remote_dir)))
                 if (find_result$status != 0 || length(find_result$stdout) == 0 ||
                     !nzchar(trimws(find_result$stdout[1]))) {
                   showNotification("No report.parquet found on remote.", type = "error", duration = 8)
