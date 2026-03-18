@@ -251,7 +251,20 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
       identification_fdr = "0.01 (DIA-NN default)",
       lfc_threshold   = session_obj$lfc_threshold %||% "0.6",
       min_peptides    = session_obj$min_peptides %||% "unknown",
-      normalization   = "DIA-NN RT-dependent (Precursor.Normalised)",
+      normalization   = {
+        # Read actual normalization from search settings or diann_norm_detected
+        norm_detected <- session_obj$diann_norm_detected %||% "unknown"
+        norm_setting <- if (!is.null(session_obj$search_settings))
+          session_obj$search_settings$normalization %||% norm_detected
+        else norm_detected
+        if (identical(norm_setting, "off") || identical(norm_setting, "Off") || identical(norm_setting, "none")) {
+          "Off (no normalization applied)"
+        } else if (identical(norm_setting, "unknown")) {
+          "DIA-NN RT-dependent (assumed default)"
+        } else {
+          paste0("DIA-NN: ", norm_setting)
+        }
+      },
       rollup_method   = "DPC-Quant (empirical Bayes precursor aggregation)",
       de_engine       = "limma moderated t-test",
       covariates      = paste(session_obj$covariates %||% "none", collapse = ", "),
@@ -1374,6 +1387,13 @@ build_settings_diff <- function(run_a, run_b) {
     ifelse(result$Run_A == result$Run_B, "match", "differs")
   )
   result$note <- ""
+
+  # Normalization mismatch is SEVERE — one of the most impactful settings
+  norm_idx <- which(result$Parameter == "Normalization")
+  if (length(norm_idx) > 0 && result$match[norm_idx] == "differs") {
+    result$match[norm_idx] <- "severe"
+    result$note[norm_idx] <- "CRITICAL: Normalization mismatch will cause systematic intensity shifts between runs, affecting ALL fold changes and DE results."
+  }
 
   # --- Spectronaut-specific rows (Mode B) ---
   if (identical(run_b$source, "spectronaut")) {
