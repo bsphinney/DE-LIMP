@@ -3556,6 +3556,15 @@ server_search <- function(input, output, session, values, add_to_log,
 
       if (speclib_exists && age_status != "expired") {
         values$diann_speclib <- entry$speclib_path
+        # Populate fasta_info from library catalog so search_info.md captures it
+        values$fasta_info <- list(
+          n_sequences = entry$protein_count %||% NA,
+          library_precursors = entry$precursor_count %||% NA,
+          library_proteins = entry$library_proteins %||% entry$protein_count %||% NA,
+          library_genes = entry$library_genes %||% NA,
+          source = "prebuilt_library",
+          library_name = entry$name
+        )
         showNotification(
           sprintf("Database loaded: %s\nPredicted speclib available — Step 1 will be skipped.\nLibrary settings locked.",
             entry$name),
