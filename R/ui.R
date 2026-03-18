@@ -834,7 +834,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
                     div(style = "flex: 1; min-width: 100px;",
                       textInput("ssh_user", "Username",
-                        value = Sys.getenv("DELIMP_SSH_USER", Sys.getenv("USER", "")))
+                        value = Sys.getenv("DELIMP_SSH_USER", ""))
                     ),
                     div(style = "flex: 1; min-width: 80px;",
                       numericInput("ssh_port", "Port", value = 22, min = 1, max = 65535)

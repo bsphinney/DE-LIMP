@@ -2036,7 +2036,11 @@ server_search <- function(input, output, session, values, add_to_log,
   # ============================================================================
 
   session$onFlushed(function() {
-    # Auto-connect if SSH key exists and we're in SSH mode
+    # Auto-connect ONLY when DELIMP_SSH_USER is explicitly set (Docker launcher)
+    # On native Mac/Linux, $USER may differ from HPC username — don't auto-connect
+    explicit_user <- Sys.getenv("DELIMP_SSH_USER", "")
+    if (!nzchar(explicit_user)) return()
+
     key_path <- isolate(input$ssh_key_path)
     host <- isolate(input$ssh_host)
     user <- isolate(input$ssh_user)
