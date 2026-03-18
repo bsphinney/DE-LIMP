@@ -1708,4 +1708,351 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       )
   })
 
+  # ==============================================================================
+  #  DATA EXPLORER — Export for Claude
+  # ==============================================================================
+
+  output$export_explorer_claude <- downloadHandler(
+    filename = function() {
+      paste0("DE-LIMP_Explorer_Claude_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
+    },
+    content = function(file) {
+      req(values$y_protein)
+
+      tryCatch({
+      withProgress(message = "Building explorer export...", value = 0, {
+        tmp_dir <- file.path(tempdir(), paste0("explorer_claude_", format(Sys.time(), "%Y%m%d%H%M%S")))
+        dir.create(tmp_dir, recursive = TRUE, showWarnings = FALSE)
+        files_to_zip <- character(0)
+
+        mat <- values$y_protein$E
+        genes_df <- values$y_protein$genes
+        n_proteins <- nrow(mat)
+        n_samples <- ncol(mat)
+
+        # --- 1. Expression matrix CSV ---
+        incProgress(0.1, detail = "Expression matrix...")
+        expr_df <- as.data.frame(mat)
+        # Add gene symbols
+        expr_df$Protein.Group <- rownames(mat)
+        expr_df$Gene <- vapply(rownames(mat), function(pid) explorer_gene_label(pid, genes_df), character(1))
+        if (!is.null(genes_df) && "Protein.Names" %in% colnames(genes_df)) {
+          name_idx <- match(rownames(mat), rownames(genes_df))
+          expr_df$Protein.Name <- ifelse(is.na(name_idx), "", genes_df$Protein.Names[name_idx])
+        } else {
+          expr_df$Protein.Name <- ""
+        }
+        # Reorder: ID columns first, then samples
+        id_cols <- c("Protein.Group", "Gene", "Protein.Name")
+        expr_df <- expr_df[, c(id_cols, setdiff(colnames(expr_df), id_cols))]
+        expr_file <- file.path(tmp_dir, "expression_matrix.csv")
+        write.csv(expr_df, expr_file, row.names = FALSE)
+        files_to_zip <- c(files_to_zip, expr_file)
+
+        # --- 2. Quartile profiles CSV (recompute without contaminant exclusion) ---
+        incProgress(0.2, detail = "Quartile profiles...")
+        avg_intensity <- rowMeans(mat, na.rm = TRUE)
+        ranks <- rank(-avg_intensity, ties.method = "first")
+        n <- length(ranks)
+        avg_quartile <- ifelse(ranks <= n/4, "Q1",
+          ifelse(ranks <= n/2, "Q2",
+            ifelse(ranks <= 3*n/4, "Q3", "Q4")))
+        names(avg_quartile) <- names(avg_intensity)
+
+        # Per-sample quartile assignment for ALL proteins
+        all_sample_q <- matrix(NA_integer_, nrow = nrow(mat), ncol = ncol(mat))
+        rownames(all_sample_q) <- rownames(mat)
+        colnames(all_sample_q) <- colnames(mat)
+        for (j in seq_len(ncol(mat))) {
+          col_vals <- mat[, j]
+          col_ranks <- rank(-col_vals, ties.method = "first")
+          col_n <- length(col_ranks)
+          all_sample_q[, j] <- ifelse(col_ranks <= col_n/4, 1L,
+            ifelse(col_ranks <= col_n/2, 2L,
+              ifelse(col_ranks <= 3*col_n/4, 3L, 4L)))
+        }
+
+        min_q <- apply(all_sample_q, 1, min, na.rm = TRUE)
+        max_q <- apply(all_sample_q, 1, max, na.rm = TRUE)
+        q_range <- max_q - min_q
+
+        quartile_df <- data.frame(
+          Protein.Group = rownames(mat),
+          Gene = vapply(rownames(mat), function(pid) explorer_gene_label(pid, genes_df), character(1)),
+          stringsAsFactors = FALSE
+        )
+        if (!is.null(genes_df) && "Protein.Names" %in% colnames(genes_df)) {
+          name_idx <- match(rownames(mat), rownames(genes_df))
+          quartile_df$Protein.Name <- ifelse(is.na(name_idx), "", genes_df$Protein.Names[name_idx])
+        } else {
+          quartile_df$Protein.Name <- ""
+        }
+        quartile_df$Avg_Intensity <- round(avg_intensity, 2)
+        quartile_df$Avg_Quartile <- avg_quartile
+
+        # Per-sample quartile columns
+        for (j in seq_len(ncol(mat))) {
+          col_name <- paste0("Q_", colnames(mat)[j])
+          quartile_df[[col_name]] <- paste0("Q", all_sample_q[, j])
+        }
+        quartile_df$Quartile_Range <- q_range
+        quartile_df$Is_Contaminant <- grepl("^Cont_", rownames(mat))
+
+        quartile_df <- quartile_df[order(-quartile_df$Avg_Intensity), ]
+        quartile_file <- file.path(tmp_dir, "quartile_profiles.csv")
+        write.csv(quartile_df, quartile_file, row.names = FALSE)
+        files_to_zip <- c(files_to_zip, quartile_file)
+
+        # --- 3. Variable proteins CSV ---
+        incProgress(0.3, detail = "Variable proteins...")
+        variable_idx <- which(q_range >= 2)
+        n_variable <- length(variable_idx)
+        if (n_variable > 0) {
+          var_df <- quartile_df[quartile_df$Protein.Group %in% rownames(mat)[variable_idx], ]
+          var_df <- var_df[order(-var_df$Quartile_Range, -var_df$Avg_Intensity), ]
+          var_file <- file.path(tmp_dir, "variable_proteins.csv")
+          write.csv(var_df, var_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, var_file)
+        } else {
+          n_variable <- 0
+          # Write empty CSV with header
+          var_file <- file.path(tmp_dir, "variable_proteins.csv")
+          write.csv(quartile_df[0, ], var_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, var_file)
+        }
+
+        # --- 4. Sample metadata CSV ---
+        incProgress(0.4, detail = "Sample metadata...")
+        if (!is.null(values$metadata)) {
+          meta_file <- file.path(tmp_dir, "sample_metadata.csv")
+          write.csv(values$metadata, meta_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, meta_file)
+        }
+
+        # --- 5. Contaminant summary CSV ---
+        incProgress(0.45, detail = "Contaminant summary...")
+        contam_mask <- grepl("^Cont_", rownames(mat))
+        n_contam <- sum(contam_mask)
+        contam_note <- "No contaminant proteins detected in this dataset."
+        if (n_contam > 0) {
+          contam_mat <- mat[contam_mask, , drop = FALSE]
+          contam_summary <- data.frame(
+            Protein.Group = rownames(contam_mat),
+            Gene = vapply(rownames(contam_mat), function(pid) explorer_gene_label(pid, genes_df), character(1)),
+            Avg_Intensity = round(rowMeans(contam_mat, na.rm = TRUE), 2),
+            stringsAsFactors = FALSE
+          )
+          # Per-sample intensities
+          for (j in seq_len(ncol(contam_mat))) {
+            contam_summary[[colnames(contam_mat)[j]]] <- round(contam_mat[, j], 2)
+          }
+          contam_summary <- contam_summary[order(-contam_summary$Avg_Intensity), ]
+          contam_file <- file.path(tmp_dir, "contaminant_summary.csv")
+          write.csv(contam_summary, contam_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, contam_file)
+          contam_note <- paste0(n_contam, " contaminant proteins detected (",
+            round(n_contam / n_proteins * 100, 1), "% of total).")
+        }
+
+        # --- 6. Session RDS ---
+        incProgress(0.5, detail = "Saving session state...")
+        tryCatch({
+          session_data <- list(
+            raw_data = values$raw_data, metadata = values$metadata,
+            y_protein = values$y_protein, design = values$design,
+            qc_stats = values$qc_stats,
+            repro_log = values$repro_log,
+            instrument_metadata = values$instrument_metadata,
+            diann_search_settings = values$diann_search_settings,
+            saved_at = Sys.time(),
+            app_version = paste0("DE-LIMP v", values$app_version)
+          )
+          rds_file <- file.path(tmp_dir, "session.rds")
+          saveRDS(session_data, rds_file)
+          files_to_zip <- c(files_to_zip, rds_file)
+        }, error = function(e) message("[DE-LIMP] Explorer export: RDS save error: ", e$message))
+
+        # --- 7. Methods text ---
+        incProgress(0.55, detail = "Methods...")
+        tryCatch({
+          params <- c(
+            "DE-LIMP Data Explorer Export",
+            paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
+            paste0("App version: DE-LIMP v", values$app_version),
+            paste0("R version: ", R.version.string),
+            "",
+            "MODE: Exploratory analysis (no differential expression)",
+            paste0("Total proteins: ", n_proteins),
+            paste0("Total samples: ", n_samples),
+            paste0("Variable proteins (quartile range >= 2): ", n_variable),
+            paste0("Contaminant proteins: ", n_contam),
+            ""
+          )
+          # Groups
+          if (!is.null(values$metadata)) {
+            grp_counts <- table(values$metadata$Group[values$metadata$Group != ""])
+            if (length(grp_counts) > 0) {
+              params <- c(params, "GROUPS:",
+                paste0("  ", names(grp_counts), ": n=", grp_counts), "")
+            }
+          }
+          # DIA-NN search settings
+          ss <- values$diann_search_settings
+          if (!is.null(ss) && is.list(ss)) {
+            sp <- ss$search_params
+            params <- c(params, "DIA-NN SEARCH SETTINGS:",
+              if (!is.null(ss$diann_version) && nzchar(ss$diann_version))
+                paste0("  DIA-NN version: ", ss$diann_version) else NULL,
+              paste0("  FASTA: ", paste(basename(ss$fasta_files), collapse = ", ")),
+              paste0("  Enzyme: ", sp$enzyme),
+              paste0("  MBR: ", if (isTRUE(sp$mbr)) "enabled" else "disabled"),
+              if (!is.null(sp$mass_acc) && !is.na(sp$mass_acc))
+                paste0("  Mass accuracy (MS2): ", sp$mass_acc, " ppm") else NULL,
+              if (!is.null(ss$normalization) && nzchar(ss$normalization))
+                paste0("  Normalization: ", ss$normalization) else NULL,
+              "")
+          }
+          # Instrument metadata
+          if (!is.null(values$instrument_metadata)) {
+            meta <- values$instrument_metadata
+            params <- c(params, "INSTRUMENT:",
+              if (!is.null(meta$instrument_model)) paste0("  Model: ", meta$instrument_model) else NULL,
+              if (!is.null(meta$lc_method_name)) paste0("  LC method: ", meta$lc_method_name) else NULL,
+              if (!is.null(meta$gradient_length_min)) paste0("  Gradient: ", meta$gradient_length_min, " min") else NULL,
+              "")
+          }
+          # Package versions
+          params <- c(params, "PACKAGE VERSIONS:",
+            paste0("  limpa: ", tryCatch(as.character(packageVersion("limpa")), error = function(e) "unknown")),
+            paste0("  DE-LIMP: v", values$app_version %||% "unknown"))
+
+          methods_file <- file.path(tmp_dir, "methods.txt")
+          writeLines(params, methods_file)
+          files_to_zip <- c(files_to_zip, methods_file)
+        }, error = function(e) message("[DE-LIMP] Explorer export: methods error: ", e$message))
+
+        # --- 8. Reproducibility log ---
+        incProgress(0.6, detail = "Reproducibility log...")
+        if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
+          repro_file <- file.path(tmp_dir, "reproducibility_log.R")
+          log_content <- paste(values$repro_log, collapse = "\n")
+          writeLines(log_content, repro_file)
+          files_to_zip <- c(files_to_zip, repro_file)
+        }
+
+        # --- 9. PROMPT.md ---
+        incProgress(0.7, detail = "Building prompt...")
+
+        # Detect organism
+        organism_info <- tryCatch({
+          org_db <- detect_organism_db(rownames(mat))
+          org_map <- c("org.Hs.eg.db" = "Human (Homo sapiens)",
+            "org.Mm.eg.db" = "Mouse (Mus musculus)",
+            "org.Rn.eg.db" = "Rat (Rattus norvegicus)",
+            "org.Bt.eg.db" = "Bovine (Bos taurus)",
+            "org.Cf.eg.db" = "Dog (Canis lupus familiaris)",
+            "org.Gg.eg.db" = "Chicken (Gallus gallus)",
+            "org.Dm.eg.db" = "Fruit fly (Drosophila melanogaster)",
+            "org.Ce.eg.db" = "C. elegans",
+            "org.Dr.eg.db" = "Zebrafish (Danio rerio)",
+            "org.Sc.sgd.db" = "Yeast (Saccharomyces cerevisiae)",
+            "org.At.tair.db" = "Arabidopsis thaliana",
+            "org.Ss.eg.db" = "Pig (Sus scrofa)")
+          paste0("Organism: ", org_map[org_db] %||% "Unknown", " (OrgDb: ", org_db, ")")
+        }, error = function(e) "Organism: Unknown (detection failed)")
+
+        # Group info
+        group_info <- "No group assignments available."
+        if (!is.null(values$metadata)) {
+          grp_counts <- table(values$metadata$Group[values$metadata$Group != ""])
+          if (length(grp_counts) > 0) {
+            group_lines <- paste0("- ", names(grp_counts), ": n=", grp_counts)
+            group_info <- paste(group_lines, collapse = "\n")
+          }
+        }
+
+        prompt_text <- paste0(
+'# DE-LIMP Data Exploration Analysis
+
+## Context
+This is a proteomics dataset analyzed with DE-LIMP v', values$app_version, '. The dataset has ', format(n_proteins, big.mark = ","),
+' proteins quantified across ', n_samples, ' samples. **No differential expression analysis was performed** (either because there are no replicates, or the user chose exploratory analysis only).
+
+## Your Task
+You are a proteomics bioinformatics expert. Analyze this dataset and provide biological insights WITHOUT relying on statistical significance (there are no p-values or fold changes).
+
+## Data Files
+- `expression_matrix.csv` -- Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples)
+- `quartile_profiles.csv` -- Each protein\'s intensity quartile (Q1=highest 25%, Q4=lowest 25%) computed per-sample
+- `variable_proteins.csv` -- ', n_variable, ' proteins that shift 2+ quartiles across samples (biologically interesting candidates)
+- `sample_metadata.csv` -- Sample groups and identifiers
+- `contaminant_summary.csv` -- Contaminant protein statistics
+- `session.rds` -- Full DE-LIMP session state (reload via DE-LIMP > Load Session)
+- `methods.txt` -- Pipeline parameters, normalization, app version
+- `reproducibility_log.R` -- R code log recording every analysis step
+
+## Analysis Requested
+
+### 1. Quartile-Based Biological Insights
+For each intensity quartile (Q1 through Q4), analyze the top proteins:
+- **Q1 (Most Abundant)**: What biological processes dominate? Are these expected housekeeping/structural proteins? Any surprises?
+- **Q2-Q3 (Mid-Range)**: What functional categories are enriched? Are signaling/regulatory proteins concentrated here?
+- **Q4 (Low Abundance)**: Are there transcription factors, kinases, or other low-abundance regulators? What biological signals might be hiding in this quartile?
+
+### 2. Variable Protein Analysis
+The `variable_proteins.csv` contains ', n_variable, ' proteins whose intensity rank shifts dramatically across samples (e.g., top 25% in one sample, bottom 50% in another). For these proteins:
+- What biological processes do they represent?
+- Are any known biomarkers or disease-associated proteins?
+- Do the variable proteins cluster into functional groups (e.g., immune response, metabolism, stress response)?
+- Which variable proteins would you prioritize for follow-up experiments?
+
+### 3. Sample Comparison
+Compare the protein profiles across samples:
+- Which samples are most similar/different based on protein abundance patterns?
+- Are there sample-specific protein signatures?
+- Do any samples show signs of technical issues (unusual contaminant levels, missing proteins)?
+
+### 4. Contaminant Assessment
+Review the contaminant data:
+- ', contam_note, '
+- Are there sample-specific contamination patterns suggesting prep issues?
+- Are keratin levels consistent or variable across samples?
+
+### 5. Biological Hypotheses
+Based on all the data, propose 3-5 testable biological hypotheses that could be validated with follow-up experiments (e.g., with replicates for proper statistical testing).
+
+## Organism & Database
+', organism_info, '
+
+## Sample Groups
+', group_info, '
+
+## Important Notes
+- All intensity values are log2-transformed
+- Quartile assignments are computed independently per sample (a protein can be Q1 in one sample and Q3 in another)
+- Variable proteins are candidates, not statistically validated -- they need replicated experiments for confirmation
+- Contaminant proteins are prefixed with "Cont_"
+')
+
+        prompt_file <- file.path(tmp_dir, "PROMPT.md")
+        writeLines(prompt_text, prompt_file)
+        files_to_zip <- c(files_to_zip, prompt_file)
+
+        # --- Create ZIP ---
+        incProgress(0.9, detail = "Creating ZIP...")
+        # Use basename so zip doesn't include full tmp path
+        old_wd <- setwd(tmp_dir)
+        on.exit(setwd(old_wd), add = TRUE)
+        zip(file, basename(files_to_zip))
+
+        message("[DE-LIMP] Explorer Claude export complete: ", length(files_to_zip), " files")
+      })
+      }, error = function(e) {
+        message("[DE-LIMP] Explorer Claude export FAILED: ", e$message)
+        showNotification(paste("Export error:", e$message), type = "error", duration = 15)
+      })
+    },
+    contentType = "application/zip"
+  )
+
 }

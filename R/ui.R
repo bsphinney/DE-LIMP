@@ -1411,7 +1411,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;",
                         tags$h4(icon("search-plus"), " Data Explorer", style = "margin: 0; font-weight: 600;"),
                         actionButton("data_explorer_info_btn", icon("question-circle"),
-                          class = "btn-outline-info btn-sm", title = "About Data Explorer")
+                          class = "btn-outline-info btn-sm", title = "About Data Explorer"),
+                        downloadButton("export_explorer_claude", "Export for Claude",
+                          class = "btn-outline-primary btn-sm", icon = icon("download"))
                       ),
 
                       # --- Panel 1: Abundance Profiles ---
