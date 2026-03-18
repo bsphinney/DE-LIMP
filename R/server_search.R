@@ -718,15 +718,23 @@ server_search <- function(input, output, session, values, add_to_log,
         if (identical(new_status, "completed") && !isTRUE(jobs[[i]]$loaded)) {
           out_dir <- jobs[[i]]$output_dir
           if (!is.null(out_dir) && nzchar(out_dir)) {
+            # Check for both report.parquet and no_norm_report.parquet
             report_check <- ssh_exec(cfg,
-              sprintf("test -f %s && echo EXISTS || echo MISSING",
-                shQuote(file.path(out_dir, "report.parquet"))))
+              sprintf("test -f %s -o -f %s && echo EXISTS || echo MISSING",
+                shQuote(file.path(out_dir, "report.parquet")),
+                shQuote(file.path(out_dir, "no_norm_report.parquet"))))
             if (report_check$status == 0 &&
                 any(grepl("MISSING", report_check$stdout))) {
-              message(sprintf("[DE-LIMP] Job %s: SLURM says completed but no report.parquet — marking failed",
-                jobs[[i]]$job_id))
-              new_status <- "failed"
-              jobs[[i]]$failure_reason <- "DIA-NN completed without producing report.parquet (check logs)"
+              # Also check via ls as fallback (handles other naming patterns)
+              ls_check <- ssh_exec(cfg,
+                sprintf("ls %s/*report*.parquet 2>/dev/null | head -1", shQuote(out_dir)))
+              if (ls_check$status != 0 || length(ls_check$stdout) == 0 ||
+                  !nzchar(trimws(ls_check$stdout[1]))) {
+                message(sprintf("[DE-LIMP] Job %s: SLURM says completed but no report parquet found — marking failed",
+                  jobs[[i]]$job_id))
+                new_status <- "failed"
+                jobs[[i]]$failure_reason <- "DIA-NN completed without producing report.parquet (check logs)"
+              }
             }
           }
         }
@@ -5687,7 +5695,10 @@ server_search <- function(input, output, session, values, add_to_log,
           if (isTRUE(jobs[[i]]$qc_run) && !isTRUE(jobs[[i]]$qc_ingested) &&
               is_core_facility && !is.null(cf_config)) {
             tryCatch({
-              remote_report <- file.path(jobs[[i]]$output_dir, "report.parquet")
+              # Check for both report.parquet and no_norm_report.parquet
+              rname <- if (isTRUE(jobs[[i]]$no_norm) || grepl("no_norm", jobs[[i]]$name, ignore.case = TRUE))
+                "no_norm_report.parquet" else "report.parquet"
+              remote_report <- file.path(jobs[[i]]$output_dir, rname)
               local_report <- file.path(tempdir(),
                 paste0(jobs[[i]]$name, "_report.parquet"))
 
