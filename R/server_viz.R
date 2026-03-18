@@ -1853,6 +1853,35 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           }, error = function(e) message("[Export] Detection matrix failed: ", e$message))
         }
 
+        # --- 1c. DIA-NN protein group matrix (with real missing values) ---
+        # Try to include pg_matrix.tsv from the search output directory
+        tryCatch({
+          ss <- values$diann_search_settings
+          if (!is.null(ss) && !is.null(ss$output_dir)) {
+            od <- translate_storage_path(ss$output_dir, to = "hpc")
+            pg_matrix_remote <- file.path(od, "report.pg_matrix.tsv")
+
+            # Check locally first, then via SSH
+            pg_local <- file.path(ss$output_dir, "report.pg_matrix.tsv")
+            if (file.exists(pg_local)) {
+              pg_file <- file.path(tmp_dir, "diann_pg_matrix.tsv")
+              file.copy(pg_local, pg_file)
+              files_to_zip <- c(files_to_zip, pg_file)
+              message("[Export] Included local pg_matrix.tsv")
+            } else if (isTRUE(values$ssh_connected)) {
+              cfg <- list(host = isolate(input$ssh_host), user = isolate(input$ssh_user),
+                          port = isolate(input$ssh_port) %||% 22L,
+                          key_path = isolate(input$ssh_key_path))
+              pg_file <- file.path(tmp_dir, "diann_pg_matrix.tsv")
+              dl <- scp_download(cfg, pg_matrix_remote, pg_file)
+              if (dl$status == 0 && file.exists(pg_file)) {
+                files_to_zip <- c(files_to_zip, pg_file)
+                message("[Export] Downloaded pg_matrix.tsv via SSH")
+              }
+            }
+          }
+        }, error = function(e) message("[Export] pg_matrix.tsv not available: ", e$message))
+
         # --- 2. Quartile profiles CSV (recompute without contaminant exclusion) ---
         incProgress(0.2, detail = "Quartile profiles...")
         avg_intensity <- rowMeans(mat, na.rm = TRUE)
@@ -2092,6 +2121,7 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 | File | Description | Key Columns |
 |------|-------------|-------------|
 | `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
+| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). This is BEFORE maxLFQ — use this to see which proteins were directly quantified vs inferred. Compare with expression_matrix.csv to understand data completeness. | Protein.Group, Genes, sample intensity columns (0 = missing) |
 | `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE maxLFQ). Shows how many precursors were directly detected per sample — use this to assess data completeness | **Gene**, Total_Precursors, Detected_SampleN columns |
 | `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
 | `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
