@@ -585,6 +585,60 @@ server_ai <- function(input, output, session, values) {
           }
         }, error = function(e) message("[Export] search_info/pg_matrix: ", e$message))
 
+        # --- 7c. Data quality summary (per-sample protein counts + missingness) ---
+        tryCatch({
+          pg_file_path <- file.path(tmp_dir, "report.pg_matrix.tsv")
+          if (file.exists(pg_file_path)) {
+            pg <- read.delim(pg_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+            annot_cols <- c("Protein.Group", "Protein.Names", "Genes",
+                            "First.Protein.Description", "N.Sequences", "N.Proteotypic.Sequences")
+            int_cols <- setdiff(colnames(pg), annot_cols)
+            if (length(int_cols) > 0) {
+              pg_mat <- as.matrix(pg[, int_cols])
+              detected <- colSums(pg_mat > 0, na.rm = TRUE)
+              total_pg <- nrow(pg_mat)
+              quality_df <- data.frame(
+                Sample = int_cols,
+                Proteins_Detected = detected,
+                Total_Protein_Groups = total_pg,
+                Pct_Detected = round(100 * detected / total_pg, 1),
+                Missing = total_pg - detected,
+                Pct_Missing = round(100 * (total_pg - detected) / total_pg, 1),
+                Contaminant_Proteins = sum(grepl("^Cont_", pg$Protein.Group)),
+                stringsAsFactors = FALSE
+              )
+              if (!is.null(values$metadata)) {
+                quality_df$Group <- values$metadata$Group[match(quality_df$Sample, values$metadata$File.Name)]
+              }
+              quality_file <- file.path(tmp_dir, "data_quality_summary.csv")
+              write.csv(quality_df, quality_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, quality_file)
+            }
+          }
+        }, error = function(e) message("[Export] data quality summary: ", e$message))
+
+        # --- 7d. Detection matrix (per-protein precursor counts) ---
+        tryCatch({
+          if (!is.null(values$raw_data) && !is.null(values$raw_data$E)) {
+            raw_mat <- values$raw_data$E
+            raw_genes <- values$raw_data$genes
+            if (!is.null(raw_genes) && "Protein.Group" %in% colnames(raw_genes)) {
+              pg <- raw_genes$Protein.Group
+              det_counts <- do.call(rbind, lapply(unique(pg), function(p) {
+                rows <- which(pg == p)
+                sub_mat <- raw_mat[rows, , drop = FALSE]
+                detected <- colSums(!is.na(sub_mat) & is.finite(sub_mat))
+                c(Protein.Group = p, Total_Precursors = nrow(sub_mat),
+                  setNames(as.list(detected), paste0("Detected_", colnames(raw_mat))))
+              }))
+              det_df <- as.data.frame(det_counts, stringsAsFactors = FALSE)
+              det_file <- file.path(tmp_dir, "detection_matrix.csv")
+              write.csv(det_df, det_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, det_file)
+            }
+          }
+        }, error = function(e) message("[Export] detection matrix: ", e$message))
+
         # --- 8. Build the prompt .md ---
         incProgress(0.7, detail = "Assembling prompt...")
 
