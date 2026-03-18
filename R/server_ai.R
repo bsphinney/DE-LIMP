@@ -585,6 +585,24 @@ server_ai <- function(input, output, session, values) {
           }
         }, error = function(e) message("[Export] search_info/pg_matrix: ", e$message))
 
+        # --- 7b2. Protein confidence (DPC-Quant n.observations + standard.error) ---
+        tryCatch({
+          n_obs <- values$y_protein$other$n.observations
+          se_mat <- values$y_protein$other$standard.error
+          if (!is.null(n_obs) && !is.null(se_mat)) {
+            conf_df <- data.frame(Protein.Group = rownames(n_obs), stringsAsFactors = FALSE)
+            for (j in seq_len(ncol(n_obs))) {
+              conf_df[[paste0("nObs_", colnames(n_obs)[j])]] <- n_obs[, j]
+            }
+            for (j in seq_len(ncol(se_mat))) {
+              conf_df[[paste0("SE_", colnames(se_mat)[j])]] <- round(se_mat[, j], 4)
+            }
+            conf_file <- file.path(tmp_dir, "protein_confidence.csv")
+            write.csv(conf_df, conf_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, conf_file)
+          }
+        }, error = function(e) message("[Export] protein_confidence: ", e$message))
+
         # --- 7c. Data quality summary (per-sample protein counts + missingness) ---
         tryCatch({
           pg_file_path <- file.path(tmp_dir, "report.pg_matrix.tsv")

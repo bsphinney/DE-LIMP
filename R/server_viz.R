@@ -1825,6 +1825,37 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         write.csv(expr_df, expr_file, row.names = FALSE)
         files_to_zip <- c(files_to_zip, expr_file)
 
+        # --- 1a2. Protein confidence (DPC-Quant n.observations + standard.error) ---
+        tryCatch({
+          n_obs <- values$y_protein$other$n.observations
+          se_mat <- values$y_protein$other$standard.error
+          if (!is.null(n_obs) && !is.null(se_mat)) {
+            conf_df <- data.frame(
+              Protein.Group = rownames(n_obs),
+              Gene = vapply(rownames(n_obs), function(pid) resolve_gene(pid), character(1)),
+              stringsAsFactors = FALSE
+            )
+            # Add n.observations columns (prefixed nObs_)
+            for (j in seq_len(ncol(n_obs))) {
+              col_label <- if (!is.null(values$metadata)) {
+                paste0("nObs_S", values$metadata$ID[match(colnames(n_obs)[j], values$metadata$File.Name)])
+              } else paste0("nObs_", colnames(n_obs)[j])
+              conf_df[[col_label]] <- n_obs[, j]
+            }
+            # Add standard.error columns (prefixed SE_)
+            for (j in seq_len(ncol(se_mat))) {
+              col_label <- if (!is.null(values$metadata)) {
+                paste0("SE_S", values$metadata$ID[match(colnames(se_mat)[j], values$metadata$File.Name)])
+              } else paste0("SE_", colnames(se_mat)[j])
+              conf_df[[col_label]] <- round(se_mat[, j], 4)
+            }
+            conf_file <- file.path(tmp_dir, "protein_confidence.csv")
+            write.csv(conf_df, conf_file, row.names = FALSE)
+            files_to_zip <- c(files_to_zip, conf_file)
+            message("[Export] Protein confidence: ", nrow(conf_df), " proteins with n.observations + SE")
+          }
+        }, error = function(e) message("[Export] protein_confidence failed: ", e$message))
+
         # --- 1b. Detection matrix from raw precursor data (shows real missing values) ---
         if (!is.null(values$raw_data) && !is.null(values$raw_data$E)) {
           tryCatch({
@@ -2187,6 +2218,7 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 | File | Description | Key Columns |
 |------|-------------|-------------|
 | `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
+| `protein_confidence.csv` | Per-protein per-sample confidence from limpa DPC-Quant. **nObs** = number of precursors detected (more = more reliable). **SE** = posterior standard error (lower = more precise). Proteins with high SE and low nObs were estimated from sparse evidence. | **Gene**, nObs_S1..N, SE_S1..N |
 | `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). This is BEFORE limpa DPC-Quant — use this to see which proteins were directly quantified vs probabilistically estimated. Compare with expression_matrix.csv to understand data completeness. | Protein.Group, Genes, sample intensity columns (0 = missing) |
 | `data_quality_summary.csv` | Per-sample data quality: proteins detected, % missing, contaminant counts. Use this to assess sample quality and compare completeness across runs | Sample, Proteins_Detected, Pct_Missing, Group |
 | `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE DPC-Quant). Shows how many precursors were directly detected per sample — proteins with fewer detections have lower precision weights | **Gene**, Total_Precursors, Detected_SampleN columns |
