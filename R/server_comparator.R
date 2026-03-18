@@ -1844,7 +1844,7 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
   # Rule 3: Same FC, divergent p-value
   if (same_dir && logfc_diff < 0.3 && p_diff_large) {
     engine_note <- if (source_b == "fragpipe_analyst") {
-      " Both use limma, so this likely reflects imputation differences: FragPipe-Analyst uses Perseus-style; DE-LIMP uses DPC-CN modelling."
+      " Both use limma, so this likely reflects missing-value handling differences: FragPipe-Analyst uses Perseus-style imputation; DE-LIMP uses DPC-Quant probabilistic modelling (not imputation)."
     } else if (source_b == "spectronaut") {
       if (isTRUE(row$.use_all_ms_true)) {
         " Spectronaut used 'Use All MS-Level Quantities' (Quant3 method), which combines MS1 and MS2 observations to double effective sample size in its t-test. This is the most likely cause of the p-value divergence."
@@ -1993,7 +1993,7 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
         "Run B applies a Log2 Ratio Candidate Filter (", coalesce_setting(run_b$settings$lfc_threshold, "unknown"), " log2) ",
         "BEFORE statistical testing — proteins with insufficient fold-change evidence are excluded from DE testing entirely (NaN ratios). ",
         "Run B also uses ", coalesce_setting(run_b$settings$imputation, "unknown"), " imputation. ",
-        "Run A (limpa) applies tail-based imputation for missing values and tests all quantified proteins.\n",
+        "Run A (limpa) uses DPC-Quant, which models missing values probabilistically via a detection probability curve (not imputation), and tests all quantified proteins.\n",
         "\nNORMALIZATION DIFFERENCE:\n",
         "Run A: DIA-NN RT-dependent normalization + DPC-CN cyclic loess. ",
         "Run B: ", coalesce_setting(run_b$settings$normalization, "local regression"), ". ",
@@ -2009,7 +2009,7 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
             "- Protein rollup: DPC-Quant empirical Bayes vs MaxLFQ consensus ratios",
             "- Normalization: DIA-NN RT-dependent vs IonQuant (optional VSN)",
             "- Missingness: DIA-NN MBR vs IonQuant MBR (different implementations)",
-            "- Imputation: DPC-CN modelling vs Perseus-style (FP-Analyst default)",
+            "- Missing values: DPC-Quant probabilistic modelling (not imputation) vs Perseus-style imputation (FP-Analyst default)",
             "Both use limma for DE, so p-value calibration should be broadly comparable."),
     "fragpipe_raw" =
       "Run A: DE-LIMP (DIA-NN). Run B: raw FragPipe output (no DE stats). Only quantification differences can be assessed.",

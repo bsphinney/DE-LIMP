@@ -435,7 +435,7 @@ DE-LIMP automatically logs every analysis step for complete reproducibility.
 **Methodology Summary:**
 * View detailed methodology in the **Output > Methods & Code > Methods Summary** tab
 * Includes citations for limpa, limma, and DIA-NN
-* Explains normalization (DPC-CN), quantification (maxLFQ), and statistics (empirical Bayes)
+* Explains normalization (DPC-CN), quantification (DPC-Quant), and statistics (empirical Bayes)
 
 ### 📋 Export Data
 The **Export Data** tab (under the Output dropdown) provides one-click access to download your results:
@@ -1130,7 +1130,7 @@ You have multiple options to access DE-LIMP:
 | **DDA** | Data-Dependent Acquisition -- an older MS method that selects the most abundant ions for fragmentation; DE-LIMP does not support DDA data |
 | **DIA-NN** | A software tool (by Vadim Demichev) that processes DIA raw files to identify and quantify peptides and proteins |
 | **Parquet** | A columnar file format used by DIA-NN for its output (`report.parquet`). More compact and faster to read than TSV |
-| **limpa** | A Bioconductor R package for DIA proteomics data processing. Handles data import from DIA-NN, normalization (DPC-CN), and protein quantification (DPC-Quant, a modified maxLFQ algorithm). limpa reads the raw DIA-NN output; limma then performs the statistical testing |
+| **limpa** | A Bioconductor R package for DIA proteomics data processing. Handles data import from DIA-NN, normalization (DPC-CN), and protein quantification (DPC-Quant). DPC-Quant models missing values probabilistically via a detection probability curve, rather than imputing them. limpa reads the raw DIA-NN output; limma then performs the statistical testing |
 | **limma** | A Bioconductor R package for linear modeling and differential expression analysis. Uses empirical Bayes moderation (see below) to produce reliable statistics even with small sample sizes. Originally designed for microarrays, now widely used in proteomics |
 | **DPC-CN** | Data Point Correspondence - Cyclic Normalization -- a normalization method designed for DIA proteomics that adjusts for systematic intensity differences between runs (e.g., differences in sample loading or instrument performance) so that fold-change comparisons reflect biology, not technical variation. Applied by limpa on top of DIA-NN's built-in RT-dependent normalization |
 | **Empirical Bayes moderation** | A statistical technique used by limma that borrows information across all ~3,000+ proteins to produce more stable variance estimates for each individual protein. This is especially helpful with few replicates (n=3-4): rather than relying on noisy per-protein variance from just your replicates, limma combines each protein's variance with a prior estimated from the full dataset |
@@ -1148,7 +1148,8 @@ You have multiple options to access DE-LIMP:
 | **MOFA2** | Multi-Omics Factor Analysis -- an unsupervised method that finds latent factors (mathematical patterns) shared across multiple data types (e.g., proteomics + phospho). Factors require biological interpretation -- they may capture genuine biology, batch effects, or technical variation |
 | **FASTA** | A text file format containing protein or nucleotide sequences, used as the reference database for peptide identification |
 | **Precursor** | A peptide ion at a specific charge state as measured by the mass spectrometer. The same peptide can appear at different charge states (e.g., +2 and +3), creating multiple precursor entries. This is why a dataset may show 40,000 precursors but only 4,000 protein groups |
-| **maxLFQ** | A label-free quantification algorithm (Cox et al., 2014) that estimates protein-level abundance from pairwise precursor/peptide ratios, robust to missing values. limpa uses a modified version called DPC-Quant |
+| **maxLFQ** | A label-free quantification algorithm (Cox et al., 2014) that estimates protein-level abundance from pairwise precursor/peptide ratios, robust to missing values. Used by MaxQuant, Spectronaut, and FragPipe. Note: limpa does NOT use maxLFQ -- it uses DPC-Quant, which is fundamentally different (see DPC-Quant entry) |
+| **DPC-Quant** | Detection Probability Curve Quantification -- limpa's protein quantification method (`limpa::dpcQuant()`). Unlike maxLFQ (which uses pairwise peptide ratios), DPC-Quant models missing values probabilistically via a logistic detection probability curve. Missing precursors contribute to the protein quantity estimate through their detection probability, not as imputed values. Proteins with fewer detections receive lower precision weights in downstream analysis |
 | **MBR** | Match Between Runs -- a DIA-NN feature that transfers peptide identifications from runs where a peptide was confidently identified to runs where it was not, increasing data completeness. Can add 10-30% more identifications but introduces more imputed values |
 | **TIC** | Total Ion Current -- the summed intensity of all ions detected at each time point during a mass spectrometry run. TIC traces show the chromatographic profile of each injection |
 | **MAD** | Median Absolute Deviation -- a robust measure of spread, similar to standard deviation but less sensitive to outliers. "3 MAD from median" means the value is far from the group center |

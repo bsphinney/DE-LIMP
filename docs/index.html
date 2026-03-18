@@ -812,7 +812,7 @@ bash build_diann_docker.sh
                 </li>
                 <li>
                     <h3>Protein Quantification</h3>
-                    <p>The mass spectrometer measures individual peptide fragments (precursors). This step combines those measurements into a single abundance value for each protein using DPC-Quant (a modified maxLFQ algorithm) that accurately estimates protein quantities from peptide data.</p>
+                    <p>The mass spectrometer measures individual peptide fragments (precursors). This step combines those measurements into a single abundance value for each protein using DPC-Quant (Detection Probability Curve Quantification), which models missing values probabilistically rather than imputing them, accurately estimating protein quantities from peptide data.</p>
                 </li>
                 <li>
                     <h3>Differential Expression</h3>

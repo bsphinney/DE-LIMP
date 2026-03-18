@@ -478,7 +478,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Initial Release
 - Interactive differential expression analysis for DIA-NN proteomics data
-- Limpa pipeline integration (DPC normalization, maxLFQ quantification, limma statistics)
+- Limpa pipeline integration (DPC-CN normalization, DPC-Quant protein quantification, limma statistics)
 - Google Gemini AI chat integration
 - Session save/load functionality
 - GSEA integration (GO Biological Process)

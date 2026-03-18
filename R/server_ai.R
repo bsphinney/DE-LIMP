@@ -813,7 +813,7 @@ server_ai <- function(input, output, session, values) {
           excluded_inline <- paste0("\n\n", paste(exc_lines, collapse = "\n"))
         }
 
-        # Missingness summary (pre vs post imputation)
+        # Missingness summary (pre vs post DPC-Quant protein quantification)
         missingness_inline <- ""
         tryCatch({
           if (!is.null(values$raw_data) && !is.null(values$y_protein) && !is.null(values$metadata)) {
@@ -1009,7 +1009,7 @@ server_ai <- function(input, output, session, values) {
             "Missingness data is provided below. Comment on:\n",
             "- Overall data completeness and whether missingness varies across groups\n",
             "- Whether group-specific missingness could introduce bias\n",
-            "- The effectiveness of imputation (compare pre vs post-pipeline missingness)\n\n"
+            "- The effectiveness of DPC-Quant quantification (compare pre vs post-pipeline missingness — note: limpa uses probabilistic modelling, not imputation)\n\n"
           ) else "",
           "## Biological Interpretation\n",
           "Suggest what biological processes or pathways may be affected based on the protein lists. ",

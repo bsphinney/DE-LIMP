@@ -335,7 +335,7 @@ Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussi
 ## No-Replicates Mode (v3.7)
 
 - **Detection**: After group assignment, if any group has <2 samples, DE analysis is skipped.
-- **What works**: Data import, normalization (DPC-CN), protein quantification (DPC-Quant/maxLFQ), Expression Grid, Signal Distribution, PCA, Dataset Summary, Data Explorer, Contaminant Analysis.
+- **What works**: Data import, normalization (DPC-CN), protein quantification (DPC-Quant), Expression Grid, Signal Distribution, PCA, Dataset Summary, Data Explorer, Contaminant Analysis.
 - **What's skipped**: limma model fitting (`values$fit` stays NULL), volcano plot, DE results table, GSEA, CV Analysis. User sees informational message.
 - **Expression Grid fallback**: When `values$fit` is NULL, grid renders from `y_protein$E` with a dummy `P.Value = 1` column so the table structure is consistent.
 - **PCA without fit**: PCA tab checks for `y_protein` (quantified expression) not `values$fit`. Visible as soon as quantification completes.

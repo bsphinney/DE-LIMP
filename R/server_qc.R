@@ -1004,8 +1004,147 @@ server_qc <- function(input, output, session, values) {
   })
 
   # Helper: build TIC plot
-  build_tic_plot <- function(view_mode, traces, metrics) {
+  build_tic_plot <- function(view_mode, traces, metrics, facet_mode = "run", metadata = NULL) {
     status_colors <- c(pass = "#28a745", warn = "#ffc107", fail = "#dc3545")
+
+    if (view_mode == "faceted" && facet_mode == "group" && !is.null(metadata)) {
+      # ── Facet by Group mode ──
+      # Map trace names to groups
+      run_names <- names(traces)
+      group_map <- setNames(rep(NA_character_, length(run_names)), run_names)
+      for (nm in run_names) {
+        # Try exact match first, then partial match (basename without .d)
+        idx <- match(nm, metadata$File.Name)
+        if (is.na(idx)) {
+          nm_base <- sub("\\.d$", "", basename(nm))
+          idx <- which(sapply(metadata$File.Name, function(fn) {
+            sub("\\.d$", "", basename(fn)) == nm_base
+          }))[1]
+        }
+        if (!is.na(idx) && nzchar(metadata$Group[idx])) {
+          group_map[nm] <- metadata$Group[idx]
+        }
+      }
+      # Runs without group assignment go to "Unassigned"
+      group_map[is.na(group_map)] <- "Unassigned"
+      groups <- unique(group_map)
+      n_groups <- length(groups)
+
+      if (n_groups < 2 || all(groups == "Unassigned")) {
+        # Fall back to By Run if no groups assigned
+        facet_mode <- "run"
+      } else {
+        # Build one subplot per group with overlaid runs + group median
+        # Color palette for individual runs within each group
+        run_palette <- c(
+          "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+          "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+          "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+          "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5"
+        )
+
+        # Truncate long filenames
+        truncate_label <- function(nm, max_chars = 25) {
+          label <- sub("\\.d$", "", nm)
+          if (nchar(label) > max_chars) {
+            paste0("...", substr(label, nchar(label) - max_chars + 4, nchar(label)))
+          } else label
+        }
+
+        # Adaptive layout
+        ncol <- if (n_groups <= 4) 2L else if (n_groups <= 9) 3L else 4L
+        nrow_grid <- ceiling(n_groups / ncol)
+
+        subplots <- lapply(seq_along(groups), function(gi) {
+          grp <- groups[gi]
+          grp_runs <- names(group_map[group_map == grp])
+          n_runs_in_grp <- length(grp_runs)
+
+          # Compute group median trace
+          grid_rt <- seq(
+            max(sapply(traces[grp_runs], function(x) min(x$rt_min))),
+            min(sapply(traces[grp_runs], function(x) max(x$rt_min))),
+            length.out = 300
+          )
+          interp_matrix <- sapply(traces[grp_runs], function(x) {
+            stats::approx(x$rt_min, x$tic, xout = grid_rt, rule = 2)$y
+          })
+          median_trace <- if (is.matrix(interp_matrix)) {
+            apply(interp_matrix, 1, median)
+          } else {
+            interp_matrix
+          }
+
+          p <- plotly::plot_ly()
+          for (ri in seq_along(grp_runs)) {
+            nm <- grp_runs[ri]
+            df <- traces[[nm]]
+            line_col <- run_palette[((ri - 1) %% length(run_palette)) + 1]
+            run_label <- truncate_label(nm)
+            full_label <- sub("\\.d$", "", nm)
+            run_status <- metrics$status[metrics$run == nm]
+            status_txt <- if (length(run_status) > 0) run_status else "unknown"
+
+            p <- p %>%
+              plotly::add_lines(
+                x = df$rt_min, y = df$tic / 1e6,
+                line = list(color = line_col, width = 1.2),
+                name = run_label, legendgroup = full_label,
+                showlegend = (gi == 1),
+                hoverinfo = "text",
+                text = sprintf("%s [%s]<br>Group: %s<br>RT: %.1f min<br>TIC: %.1fM",
+                               full_label, status_txt, grp, df$rt_min, df$tic / 1e6)
+              )
+          }
+
+          # Add group median as thick dashed black line
+          p <- p %>%
+            plotly::add_lines(
+              x = grid_rt, y = median_trace / 1e6,
+              line = list(color = "#333333", width = 2.5, dash = "dash"),
+              name = paste0(grp, " median"), legendgroup = "median",
+              showlegend = (gi == 1),
+              hoverinfo = "text",
+              text = sprintf("Median (%s)<br>RT: %.1f min<br>TIC: %.1fM",
+                             grp, grid_rt, median_trace / 1e6)
+            )
+
+          p <- p %>% plotly::layout(
+            annotations = list(list(
+              text = sprintf("%s (n=%d)", grp, n_runs_in_grp),
+              x = 0.5, y = 1.05, xref = "paper", yref = "paper",
+              showarrow = FALSE, font = list(size = 11, color = "white"),
+              bgcolor = "#2c3e50", borderpad = 3, xanchor = "center"
+            )),
+            xaxis = list(title = if (gi > length(groups) - ncol) "RT (min)" else "",
+                          showgrid = TRUE, gridcolor = "#eee"),
+            yaxis = list(title = if ((gi - 1) %% ncol == 0) "TIC (M)" else "",
+                          showgrid = TRUE, gridcolor = "#eee")
+          )
+          p
+        })
+
+        row_height <- if (n_groups <= 6) 300L else 250L
+        plot_height <- max(450, nrow_grid * row_height)
+
+        subtitle_text <- sprintf("%d groups, %d total runs \u2014 dashed = group median",
+                                  n_groups, length(run_names))
+
+        return(
+          plotly::subplot(subplots, nrows = nrow_grid, shareX = TRUE, titleX = TRUE, titleY = TRUE) %>%
+            plotly::layout(
+              title = list(text = paste0("TIC Traces by Group<br><sup style='color:gray'>",
+                                          subtitle_text, "</sup>"),
+                            font = list(size = 14),
+                            y = 0.99, yanchor = "top"),
+              margin = list(t = 80),
+              showlegend = TRUE,
+              legend = list(orientation = "h", x = 0, y = -0.05, font = list(size = 9)),
+              height = plot_height
+            )
+        )
+      }
+    }
 
     if (view_mode == "faceted") {
       run_names <- names(traces)
@@ -1199,8 +1338,37 @@ server_qc <- function(input, output, session, values) {
   output$tic_qc_plot_container <- renderUI({
     req(values$tic_traces, values$tic_metrics)
     view_mode <- input$tic_view_mode %||% "faceted"
+    facet_mode <- input$tic_facet_mode %||% "run"
 
-    if (view_mode == "faceted") {
+    # If group mode but no metadata, fall back to run mode
+    if (view_mode == "faceted" && facet_mode == "group" && is.null(values$metadata)) {
+      facet_mode <- "run"
+    }
+    if (view_mode == "faceted" && facet_mode == "group" && !is.null(values$metadata)) {
+      # Group facet: height based on number of groups
+      run_names <- names(values$tic_traces)
+      grp_map <- sapply(run_names, function(nm) {
+        idx <- match(nm, values$metadata$File.Name)
+        if (is.na(idx)) {
+          nm_base <- sub("\\.d$", "", basename(nm))
+          idx <- which(sapply(values$metadata$File.Name, function(fn) {
+            sub("\\.d$", "", basename(fn)) == nm_base
+          }))[1]
+        }
+        if (!is.na(idx) && nzchar(values$metadata$Group[idx])) values$metadata$Group[idx]
+        else "Unassigned"
+      })
+      n_groups <- length(unique(grp_map))
+      if (n_groups >= 2 && !all(grp_map == "Unassigned")) {
+        ncol_f <- if (n_groups <= 4) 2L else if (n_groups <= 9) 3L else 4L
+        row_h <- if (n_groups <= 6) 300L else 250L
+        h <- max(450, ceiling(n_groups / ncol_f) * row_h)
+      } else {
+        # Fallback to by-run sizing
+        facet_mode <- "run"
+      }
+    }
+    if (view_mode == "faceted" && facet_mode == "run") {
       n_runs <- length(values$tic_traces)
       metrics <- values$tic_metrics
       n_fail <- sum(metrics$status == "fail")
@@ -1212,7 +1380,7 @@ server_qc <- function(input, output, session, values) {
       ncol_f <- if (n_show <= 8) 2L else if (n_show <= 20) 3L else if (n_show <= 60) 4L else 6L
       row_h <- if (n_show <= 24) 250L else if (n_show <= 60) 200L else 160L
       h <- max(400, ceiling(n_show / ncol_f) * row_h)
-    } else {
+    } else if (view_mode != "faceted") {
       h <- 500
     }
     plotly::plotlyOutput("tic_qc_main_plot", height = paste0(h, "px"))
@@ -1222,7 +1390,9 @@ server_qc <- function(input, output, session, values) {
   output$tic_qc_main_plot <- plotly::renderPlotly({
     req(values$tic_traces, values$tic_metrics)
     view_mode <- input$tic_view_mode %||% "faceted"
-    build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
+    facet_mode <- input$tic_facet_mode %||% "run"
+    build_tic_plot(view_mode, values$tic_traces, values$tic_metrics,
+                   facet_mode = facet_mode, metadata = values$metadata)
   })
 
   # Metrics DT table
@@ -1324,7 +1494,8 @@ server_qc <- function(input, output, session, values) {
         "Comparing TIC shapes across runs reveals injection failures, loading anomalies, RT drift, and carryover."),
       tags$h5("Views"),
       tags$ul(
-        tags$li(tags$b("Faceted:"), " Each run in its own panel with median trace overlay (blue dashed). Color indicates QC status."),
+        tags$li(tags$b("Faceted (By Run):"), " Each run in its own panel with median trace overlay (blue dashed). Color indicates QC status."),
+        tags$li(tags$b("Faceted (By Group):"), " One panel per experimental group with all runs overlaid. Each run is a distinct color; thick dashed line shows group median. Requires group assignments from the Data Overview tab."),
         tags$li(tags$b("Overlay:"), " All runs on one axis, normalized 0-1. Quickly spot outlier shapes."),
         tags$li(tags$b("Metrics:"), " Bar chart of total AUC per run with metrics table below.")
       ),
@@ -1345,7 +1516,9 @@ server_qc <- function(input, output, session, values) {
   observeEvent(input$tic_qc_fullscreen_btn, {
     req(values$tic_traces, values$tic_metrics)
     view_mode <- input$tic_view_mode %||% "faceted"
-    p <- build_tic_plot(view_mode, values$tic_traces, values$tic_metrics)
+    facet_mode <- input$tic_facet_mode %||% "run"
+    p <- build_tic_plot(view_mode, values$tic_traces, values$tic_metrics,
+                        facet_mode = facet_mode, metadata = values$metadata)
 
     # Scale modal plot height to match build_tic_plot
     n_show <- length(values$tic_traces)
@@ -1502,6 +1675,398 @@ server_qc <- function(input, output, session, values) {
     showNotification(
       sprintf("TIC extracted: %d pass, %d warn, %d fail", n_pass, n_warn, n_fail),
       type = if (n_fail > 0) "warning" else "message", duration = 6)
+  })
+
+  # ============================================================================
+  #  DATA COMPLETENESS — Detected vs Inferred Protein Analysis
+  # ============================================================================
+
+  # Shared reactive: compute detection matrix (protein group x sample)
+  completeness_data <- reactive({
+    req(values$raw_data, values$y_protein)
+    raw_mat <- values$raw_data$E
+    pg <- values$raw_data$genes$Protein.Group
+    protein_names <- rownames(values$y_protein$E)
+    sample_names <- colnames(values$y_protein$E)
+
+    # For each protein group, check if ANY precursor was detected per sample
+    unique_pg <- unique(pg)
+    detected_mat <- do.call(rbind, lapply(unique_pg, function(p) {
+      rows <- which(pg == p)
+      colSums(!is.na(raw_mat[rows, , drop = FALSE])) > 0
+    }))
+    rownames(detected_mat) <- unique_pg
+
+    # Align to y_protein proteins and samples
+    shared_pg <- intersect(protein_names, rownames(detected_mat))
+    shared_samples <- intersect(sample_names, colnames(detected_mat))
+    det <- detected_mat[shared_pg, shared_samples, drop = FALSE]
+
+    total_proteins <- length(protein_names)
+    detected_count <- colSums(det)
+    inferred_count <- total_proteins - detected_count
+    detection_rate <- detected_count / total_proteins * 100
+
+    # Precursor count per protein per sample
+    precursor_count_mat <- do.call(rbind, lapply(unique_pg, function(p) {
+      rows <- which(pg == p)
+      colSums(!is.na(raw_mat[rows, , drop = FALSE]))
+    }))
+    rownames(precursor_count_mat) <- unique_pg
+    prec_mat <- precursor_count_mat[shared_pg, shared_samples, drop = FALSE]
+
+    list(
+      detected_mat = det,
+      precursor_count_mat = prec_mat,
+      detected_count = detected_count,
+      inferred_count = inferred_count,
+      detection_rate = detection_rate,
+      total_proteins = total_proteins,
+      shared_pg = shared_pg,
+      shared_samples = shared_samples
+    )
+  })
+
+  # -- Info modal --
+  observeEvent(input$completeness_info_btn, {
+    showModal(modalDialog(
+      title = "Data Completeness \u2014 Detected vs Inferred",
+      tags$p("limpa's DPC-Quant algorithm produces a ",
+             tags$strong("complete"), " protein expression matrix (no missing values). ",
+             "But this masks an important distinction:"),
+      tags$ul(
+        tags$li(tags$strong("Detected"), " (green): the protein had at least one precursor ",
+                "directly measured in that sample."),
+        tags$li(tags$strong("Inferred"), " (orange): the protein appears in the final matrix, ",
+                "but had ", tags$em("zero"), " precursors detected in that sample. Its quantity ",
+                "was estimated by DPC-Quant using detection probability modelling across other samples.")
+      ),
+      tags$p("High inferred rates (>30%) suggest lower measurement confidence. ",
+             "This is not necessarily wrong \u2014 DPC-Quant estimation is statistically valid \u2014 ",
+             "but downstream users should know which proteins are directly supported."),
+      tags$hr(),
+      tags$p(tags$strong("Plots:")),
+      tags$ul(
+        tags$li(tags$strong("Stacked Bar:"), " Per-sample breakdown of detected vs inferred proteins."),
+        tags$li(tags$strong("Evidence Heatmap:"), " Top 50 most variably detected proteins \u2014 shows which samples lack precursor support."),
+        tags$li(tags$strong("Cumulative Curve:"), " How many proteins are detected in at least N samples. Core proteome vs sample-specific."),
+        tags$li(tags$strong("Dendrogram:"), " Clusters samples by detection pattern (Jaccard distance), independent of intensity."),
+        tags$li(tags$strong("Precursor Violin:"), " Distribution of precursor counts per protein in each sample.")
+      ),
+      easyClose = TRUE, size = "l",
+      footer = modalButton("Close")
+    ))
+  })
+
+  # -- Warning banner --
+  output$completeness_warning_banner <- renderUI({
+    cd <- completeness_data()
+    if (is.null(cd)) return(NULL)
+    worst_rate <- min(cd$detection_rate)
+    worst_sample <- names(which.min(cd$detection_rate))
+    if (worst_rate < 70) {
+      div(class = "alert alert-warning", style = "margin-bottom: 12px;",
+        icon("exclamation-triangle"),
+        sprintf(" Warning: %s has only %.0f%% directly detected proteins (%.0f%% inferred). ",
+                worst_sample, worst_rate, 100 - worst_rate),
+        "Proteins without precursor evidence are estimated by DPC-Quant via detection probability modelling."
+      )
+    }
+  })
+
+  # -- Summary cards --
+  output$completeness_summary_cards <- renderUI({
+    cd <- tryCatch(completeness_data(), error = function(e) NULL)
+    if (is.null(cd)) {
+      return(div(class = "alert alert-info", style = "margin: 20px 0;",
+        icon("info-circle"),
+        " Detection analysis requires precursor-level data from DIA-NN."
+      ))
+    }
+    median_rate <- median(cd$detection_rate)
+    worst_sample <- names(which.min(cd$detection_rate))
+    worst_rate <- min(cd$detection_rate)
+
+    div(style = "display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap;",
+      div(style = "flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #0072B2;",
+        tags$small(style = "color: #6c757d;", "Total Proteins"),
+        tags$div(style = "font-size: 1.5em; font-weight: 600; color: #2d3748;",
+          format(cd$total_proteins, big.mark = ","))
+      ),
+      div(style = "flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #009E73;",
+        tags$small(style = "color: #6c757d;", "Median Detection Rate"),
+        tags$div(style = "font-size: 1.5em; font-weight: 600; color: #2d3748;",
+          sprintf("%.1f%%", median_rate))
+      ),
+      div(style = paste0("flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid ",
+                         if (worst_rate < 70) "#D55E00" else "#E69F00", ";"),
+        tags$small(style = "color: #6c757d;", "Worst Sample"),
+        tags$div(style = "font-size: 1.1em; font-weight: 600; color: #2d3748;",
+          sprintf("%s (%.0f%%)", worst_sample, worst_rate))
+      )
+    )
+  })
+
+  # -- 1. Detected vs Inferred Stacked Bar --
+  output$completeness_stacked_bar <- renderPlotly({
+    cd <- completeness_data()
+    req(cd)
+
+    df <- data.frame(
+      Sample = names(cd$detected_count),
+      Detected = as.numeric(cd$detected_count),
+      Inferred = as.numeric(cd$inferred_count),
+      Rate = cd$detection_rate,
+      stringsAsFactors = FALSE
+    )
+    if (!is.null(values$metadata)) {
+      meta <- values$metadata
+      df$Group <- meta$Group[match(df$Sample, meta$File.Name)]
+    } else {
+      df$Group <- "All"
+    }
+    df <- df[order(df$Rate), ]
+    df$Sample <- factor(df$Sample, levels = df$Sample)
+
+    det_pct <- round(df$Detected / (df$Detected + df$Inferred) * 100, 1)
+    inf_pct <- round(df$Inferred / (df$Detected + df$Inferred) * 100, 1)
+
+    plot_ly(df, y = ~Sample) %>%
+      add_bars(x = ~Detected, name = "Detected",
+               marker = list(color = "#009E73"),
+               text = ~paste0(Detected, " (", det_pct, "%)"),
+               textposition = "inside", textfont = list(color = "white", size = 11),
+               hovertemplate = ~paste0("<b>", Sample, "</b><br>",
+                                      "Detected: ", Detected, " (", det_pct, "%)<br>",
+                                      "Group: ", Group, "<extra></extra>")) %>%
+      add_bars(x = ~Inferred, name = "Inferred",
+               marker = list(color = "#E69F00"),
+               text = ~paste0(Inferred, " (", inf_pct, "%)"),
+               textposition = "inside", textfont = list(color = "white", size = 11),
+               hovertemplate = ~paste0("<b>", Sample, "</b><br>",
+                                      "Inferred: ", Inferred, " (", inf_pct, "%)<br>",
+                                      "Group: ", Group, "<extra></extra>")) %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Number of Proteins"),
+        yaxis = list(title = "", tickfont = list(size = 10)),
+        legend = list(orientation = "h", x = 0.3, y = 1.08),
+        margin = list(l = 120)
+      )
+  })
+
+  # -- 2. Precursor Evidence Heatmap --
+  output$completeness_evidence_heatmap <- renderPlotly({
+    cd <- completeness_data()
+    req(cd)
+
+    prec_mat <- cd$precursor_count_mat
+    # Top 50 most variable proteins by detection pattern
+    row_var <- apply(prec_mat > 0, 1, function(x) var(as.numeric(x)))
+    top_idx <- head(order(row_var, decreasing = TRUE), 50)
+    sub_mat <- prec_mat[top_idx, , drop = FALSE]
+
+    # Shorten rownames for display
+    rn <- rownames(sub_mat)
+    rn_short <- ifelse(nchar(rn) > 20, paste0(substr(rn, 1, 17), "..."), rn)
+
+    plot_ly(
+      z = sub_mat,
+      x = colnames(sub_mat),
+      y = rn_short,
+      type = "heatmap",
+      colorscale = list(
+        list(0, "#f0f0f0"),
+        list(0.01, "#f0f0f0"),
+        list(0.05, "#c6dbef"),
+        list(0.2, "#6baed6"),
+        list(0.5, "#2171b5"),
+        list(1, "#08306b")
+      ),
+      hovertemplate = paste0("<b>Protein:</b> %{y}<br>",
+                             "<b>Sample:</b> %{x}<br>",
+                             "<b>Precursors:</b> %{z}<extra></extra>"),
+      colorbar = list(title = "Precursors\nDetected")
+    ) %>%
+      layout(
+        xaxis = list(title = "", tickangle = -45, tickfont = list(size = 9)),
+        yaxis = list(title = "", tickfont = list(size = 8), autorange = "reversed"),
+        margin = list(b = 100, l = 150)
+      )
+  })
+
+  # -- 3. Cumulative Detection Curve --
+  output$completeness_cumulative_curve <- renderPlotly({
+    cd <- completeness_data()
+    req(cd)
+
+    det_mat <- cd$detected_mat
+    n_samples <- ncol(det_mat)
+    samples_detected <- rowSums(det_mat)
+
+    thresholds <- 1:n_samples
+    cum_counts <- sapply(thresholds, function(n) sum(samples_detected >= n))
+
+    df <- data.frame(
+      MinSamples = thresholds,
+      Proteins = cum_counts,
+      stringsAsFactors = FALSE
+    )
+
+    n_core <- sum(samples_detected == n_samples)
+    n_variable <- sum(samples_detected <= 2 & samples_detected >= 1)
+
+    plot_ly(df, x = ~MinSamples, y = ~Proteins, type = "scatter", mode = "lines+markers",
+            line = list(color = "#0072B2", width = 2.5),
+            marker = list(color = "#0072B2", size = 6),
+            hovertemplate = paste0("Detected in >= %{x} samples<br>",
+                                   "%{y} proteins<extra></extra>")) %>%
+      add_annotations(
+        x = n_samples, y = n_core,
+        text = sprintf("Core: %d proteins\n(all %d samples)", n_core, n_samples),
+        showarrow = TRUE, arrowhead = 2, ax = -60, ay = -30,
+        font = list(size = 11, color = "#009E73")
+      ) %>%
+      add_annotations(
+        x = 1, y = cum_counts[1],
+        text = sprintf("%d total proteins\n(%d in 1-2 samples only)", cum_counts[1], n_variable),
+        showarrow = TRUE, arrowhead = 2, ax = 60, ay = -30,
+        font = list(size = 11, color = "#D55E00")
+      ) %>%
+      layout(
+        xaxis = list(title = "Detected in at Least N Samples", dtick = 1),
+        yaxis = list(title = "Number of Protein Groups"),
+        showlegend = FALSE
+      )
+  })
+
+  # -- 4. Sample Clustering by Detection Pattern (Jaccard Distance) --
+  output$completeness_dendrogram <- renderPlotly({
+    cd <- completeness_data()
+    req(cd, length(cd$shared_samples) >= 3)
+
+    det_mat <- cd$detected_mat * 1  # logical to numeric
+
+    # Jaccard distance between samples (columns)
+    n <- ncol(det_mat)
+    jac_dist <- matrix(0, n, n, dimnames = list(colnames(det_mat), colnames(det_mat)))
+    for (i in 1:(n - 1)) {
+      for (j in (i + 1):n) {
+        a <- det_mat[, i]
+        b <- det_mat[, j]
+        intersection <- sum(a == 1 & b == 1)
+        union_ab <- sum(a == 1 | b == 1)
+        jac <- if (union_ab > 0) 1 - intersection / union_ab else 0
+        jac_dist[i, j] <- jac
+        jac_dist[j, i] <- jac
+      }
+    }
+
+    hc <- hclust(as.dist(jac_dist), method = "ward.D2")
+    dend <- as.dendrogram(hc)
+
+    if (requireNamespace("ggdendro", quietly = TRUE)) {
+      ddata <- ggdendro::dendro_data(dend, type = "rectangle")
+      segs <- ggdendro::segment(ddata)
+      labs <- ggdendro::label(ddata)
+
+      palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+                   "#D55E00", "#CC79A7", "#999999", "#000000", "#66A61E")
+      leaf_colors <- rep("#2d3748", nrow(labs))
+      if (!is.null(values$metadata)) {
+        meta <- values$metadata
+        leaf_groups <- meta$Group[match(labs$label, meta$File.Name)]
+        unique_groups <- unique(na.omit(leaf_groups))
+        group_pal <- setNames(palette[seq_along(unique_groups)], unique_groups)
+        leaf_colors <- ifelse(is.na(leaf_groups), "#999999",
+                              group_pal[leaf_groups])
+      }
+
+      p <- plot_ly()
+      for (i in seq_len(nrow(segs))) {
+        p <- p %>% add_segments(
+          x = segs$x[i], xend = segs$xend[i],
+          y = segs$y[i], yend = segs$yend[i],
+          line = list(color = "#555555", width = 1.2),
+          showlegend = FALSE, hoverinfo = "none"
+        )
+      }
+      p <- p %>% add_annotations(
+        x = labs$x, y = rep(-max(segs$y) * 0.05, nrow(labs)),
+        text = labs$label,
+        showarrow = FALSE,
+        textangle = -45,
+        font = list(size = 9, color = leaf_colors),
+        xanchor = "right"
+      )
+      if (!is.null(values$metadata) && length(unique_groups) > 0) {
+        for (g in unique_groups) {
+          p <- p %>% add_markers(
+            x = -999, y = -999,
+            marker = list(color = group_pal[g], size = 10),
+            name = g, showlegend = TRUE, hoverinfo = "none"
+          )
+        }
+      }
+      p %>% layout(
+        xaxis = list(title = "", showticklabels = FALSE, zeroline = FALSE, showgrid = FALSE,
+                     range = list(min(labs$x) - 1, max(labs$x) + 1)),
+        yaxis = list(title = "Jaccard Distance (Ward.D2)", zeroline = FALSE),
+        legend = list(orientation = "h", x = 0.3, y = 1.08),
+        margin = list(b = 120)
+      )
+    } else {
+      plot_ly() %>% add_annotations(
+        x = 0.5, y = 0.5, text = "Install ggdendro package for dendrogram visualization",
+        showarrow = FALSE, xref = "paper", yref = "paper"
+      )
+    }
+  })
+
+  # -- 5. Precursor Evidence Distribution (Violin) --
+  output$completeness_precursor_violin <- renderPlotly({
+    cd <- completeness_data()
+    req(cd)
+
+    prec_mat <- cd$precursor_count_mat
+
+    df_list <- lapply(colnames(prec_mat), function(s) {
+      data.frame(
+        Sample = s,
+        Precursors = as.numeric(prec_mat[, s]),
+        stringsAsFactors = FALSE
+      )
+    })
+    df <- do.call(rbind, df_list)
+
+    if (!is.null(values$metadata)) {
+      meta <- values$metadata
+      df$Group <- meta$Group[match(df$Sample, meta$File.Name)]
+    } else {
+      df$Group <- "All"
+    }
+
+    df$Sample_Short <- ifelse(nchar(df$Sample) > 25,
+                              paste0(substr(df$Sample, 1, 22), "..."),
+                              df$Sample)
+
+    palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+                 "#D55E00", "#CC79A7", "#999999", "#000000", "#66A61E")
+    groups <- unique(df$Group)
+    group_pal <- setNames(palette[seq_along(groups)], groups)
+
+    plot_ly(df, y = ~Precursors, x = ~Sample_Short, color = ~Group,
+            colors = group_pal[groups],
+            type = "violin",
+            box = list(visible = TRUE),
+            meanline = list(visible = TRUE),
+            hoverinfo = "y") %>%
+      layout(
+        xaxis = list(title = "", tickangle = -45, tickfont = list(size = 9)),
+        yaxis = list(title = "Precursors per Protein"),
+        legend = list(orientation = "h", x = 0.3, y = 1.08),
+        margin = list(b = 120)
+      )
   })
 
 }

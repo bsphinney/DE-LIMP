@@ -588,7 +588,7 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         values$dpc_fit <- dpcfit
         gc(verbose = FALSE)
 
-        incProgress(0.5, detail = "Protein quantification (maxLFQ)...")
+        incProgress(0.5, detail = "Protein quantification (DPC-Quant)...")
         values$y_protein <- tryCatch({
           result <- limpa::dpcQuant(dat, "Protein.Group", dpc=dpcfit)
           gc(verbose = FALSE)

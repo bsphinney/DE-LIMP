@@ -916,10 +916,12 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       "3. PROTEIN QUANTIFICATION\n",
       "Normalized precursor-level data were aggregated to protein-level quantification using\n",
-      "dpcQuant(). This function employs a modified version of the maxLFQ algorithm, which:\n",
+      "dpcQuant(). This function uses DPC-Quant (Detection Probability Curve Quantification), which:\n",
       "  \u2022 Identifies peptides/precursors unique to each protein group\n",
-      "  \u2022 Uses pairwise ratios to estimate relative protein abundance\n",
-      "  \u2022 Maximizes information from all available peptides while handling missing values\n",
+      "  \u2022 Models missing values probabilistically via a logistic detection probability curve\n",
+      "  \u2022 Missing precursors contribute to the likelihood through their detection probability,\n",
+      "    not as imputed values — this is fundamentally different from imputation\n",
+      "  \u2022 Proteins with fewer detected precursors receive lower precision weights\n",
       "  \u2022 Produces log2-transformed protein intensities for downstream analysis\n\n",
 
       "4. DIFFERENTIAL EXPRESSION ANALYSIS\n",

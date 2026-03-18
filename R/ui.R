@@ -1024,6 +1024,41 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               navset_card_tab(
                 id = "qc_merged_tabs",
 
+                # ── Data Completeness (Detected vs Inferred proteins) ──
+                nav_panel("Data Completeness",
+                  icon = icon("eye"),
+                  div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                    # Warning banner (conditional)
+                    uiOutput("completeness_warning_banner"),
+                    # Summary cards
+                    uiOutput("completeness_summary_cards"),
+                    # Info button row
+                    div(style = "display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;",
+                      actionButton("completeness_info_btn", icon("question-circle"),
+                        title = "About Data Completeness", class = "btn-outline-info btn-sm")
+                    ),
+                    # 1. Detected vs Inferred stacked bar
+                    tags$h5("Detected vs Inferred Proteins per Sample", style = "margin-top: 8px;"),
+                    plotlyOutput("completeness_stacked_bar", height = "400px"),
+                    tags$hr(),
+                    # 2. Precursor Evidence Heatmap
+                    tags$h5("Precursor Evidence Heatmap (Top 50 Most Variable)", style = "margin-top: 12px;"),
+                    plotlyOutput("completeness_evidence_heatmap", height = "500px"),
+                    tags$hr(),
+                    # 3. Cumulative Detection Curve
+                    tags$h5("Cumulative Detection Curve", style = "margin-top: 12px;"),
+                    plotlyOutput("completeness_cumulative_curve", height = "350px"),
+                    tags$hr(),
+                    # 4. Sample Clustering by Detection Pattern
+                    tags$h5("Sample Clustering by Detection Pattern (Jaccard Distance)", style = "margin-top: 12px;"),
+                    plotlyOutput("completeness_dendrogram", height = "400px"),
+                    tags$hr(),
+                    # 5. Precursor Evidence Distribution
+                    tags$h5("Precursor Count per Protein (per Sample)", style = "margin-top: 12px;"),
+                    plotlyOutput("completeness_precursor_violin", height = "400px")
+                  )
+                ),
+
                 # ── Sample Metrics (faceted: Precursors, Proteins, MS1 Signal) ──
                 nav_panel("Sample Metrics",
                   icon = icon("chart-line"),
@@ -1044,9 +1079,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       condition = "typeof output.tic_qc_has_data !== 'undefined' && output.tic_qc_has_data",
                       uiOutput("tic_qc_status_badges"),
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin: 8px 0;",
-                        radioButtons("tic_view_mode", NULL,
-                          choices = c("Faceted" = "faceted", "Overlay" = "overlay", "Metrics" = "metrics"),
-                          inline = TRUE
+                        div(style = "display: flex; gap: 15px; align-items: center;",
+                          radioButtons("tic_view_mode", NULL,
+                            choices = c("Faceted" = "faceted", "Overlay" = "overlay", "Metrics" = "metrics"),
+                            inline = TRUE
+                          ),
+                          conditionalPanel(
+                            condition = "input.tic_view_mode == 'faceted'",
+                            radioButtons("tic_facet_mode", NULL,
+                              choices = c("By Run" = "run", "By Group" = "group"),
+                              selected = "run", inline = TRUE)
+                          )
                         ),
                         div(style = "display: flex; gap: 5px;",
                           actionButton("tic_qc_info_btn", icon("question-circle"),
@@ -1989,7 +2032,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               tags$summary(style = "cursor: pointer; color: #6f42c1; font-weight: 500;",
                 "What's included (click to expand)"),
               tags$ul(style = "font-size: 0.88em; color: #555; margin-top: 8px;",
-                tags$li(tags$strong("expression_matrix.csv"), " -- Normalized protein intensities (maxLFQ, complete, no missing values)"),
+                tags$li(tags$strong("expression_matrix.csv"), " -- Normalized protein intensities (DPC-Quant, complete, no missing values)"),
                 tags$li(tags$strong("diann_pg_matrix.tsv"), " -- DIA-NN protein-level matrix with real missing values (0 = not detected, ~200 KB)"),
                 tags$li(tags$strong("data_quality_summary.csv"), " -- Per-sample protein counts, % detected, contaminant counts"),
                 tags$li(tags$strong("detection_matrix.csv"), " -- Per-protein precursor detection counts per sample"),

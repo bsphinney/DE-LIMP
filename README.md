@@ -172,7 +172,7 @@ All dependencies install automatically on first run:
 ## Usage
 
 1. **Load Data** -- Upload a DIA-NN `report.parquet` output file, or click "Load Example Data" for a demo HeLa dataset
-2. **Assign Groups & Run** -- Auto-guess groups from filenames or manually assign; optionally add covariates (batch, etc.); click "Run Pipeline" to execute DPC-CN normalization, maxLFQ quantification, and limma DE
+2. **Assign Groups & Run** -- Auto-guess groups from filenames or manually assign; optionally add covariates (batch, etc.); click "Run Pipeline" to execute DPC-CN normalization, DPC-Quant protein quantification, and limma DE
 3. **Explore Results** -- Data Overview, QC, DE Dashboard (Volcano/Table/PCA/CV Analysis), Phospho, GSEA, MOFA2, AI Analysis, XIC Viewer (local/HPC)
 4. **Export** -- Download reproducibility log (.R), save session (.rds), export tables and plots
 
@@ -183,7 +183,7 @@ All dependencies install automatically on first run:
 | Step | Method |
 |------|--------|
 | **Normalization** | Data Point Correspondence - Cyclic Normalization (DPC-CN) via `limpa::dpcCN()` |
-| **Quantification** | Modified maxLFQ (DPC-Quant: precursor-to-protein rollup with pairwise ratio estimation) via `limpa::dpcQuant()` |
+| **Quantification** | DPC-Quant (Detection Probability Curve Quantification): precursor-to-protein rollup via probabilistic missing-value modelling, via `limpa::dpcQuant()` |
 | **DE model** | Linear model fit via `limpa::dpcDE()` + `limma::contrasts.fit()` |
 | **Moderation** | Empirical Bayes moderated *t*-statistics via `limma::eBayes()` |
 | **FDR** | Benjamini-Hochberg adjusted *p*-values |

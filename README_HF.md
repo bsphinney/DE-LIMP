@@ -74,7 +74,7 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 ## 🔬 Methodology
 
 - **Normalization**: Data Point Correspondence (DPC-CN)
-- **Quantification**: maxLFQ algorithm
+- **Quantification**: DPC-Quant (Detection Probability Curve Quantification)
 - **Statistics**: limma empirical Bayes moderation
 - **FDR Correction**: Benjamini-Hochberg
 
