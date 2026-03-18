@@ -2271,27 +2271,60 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
                                   job_ids = NULL, parallel = FALSE,
                                   resources = list(), partition = "", account = "",
                                   cached_speclib = NULL, custom_fasta_sequences = NULL,
-                                  instrument_metadata = NULL) {
+                                  instrument_metadata = NULL,
+                                  speclib_path = NULL) {
 
   timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
 
-  # Job IDs section
+  # Determine effective search mode for display
+  has_prebuilt_lib <- !is.null(speclib_path) && nzchar(speclib_path)
+  effective_search_mode <- if (!is.null(cached_speclib) && has_prebuilt_lib) {
+    "library (cached from previous search)"
+  } else if (has_prebuilt_lib) {
+    "library (prebuilt)"
+  } else {
+    search_mode
+  }
+
+  # Prebuilt spectral library section
+  speclib_section <- if (has_prebuilt_lib) {
+    paste(c(
+      "### Spectral Library",
+      sprintf("- **Library path**: `%s`", speclib_path),
+      "- **Step 1 (Library Prediction)**: Skipped (prebuilt library provided)"
+    ), collapse = "\n")
+  } else ""
+
+  # Job IDs section — exclude step1 if it was skipped (prebuilt library)
   if (parallel && is.list(job_ids)) {
     step_labels <- c(step1 = "Library Prediction", step2 = "First-pass Quant (array)",
                      step3 = "Empirical Library Assembly", step4 = "Final-pass Quant (array)",
                      step5 = "Cross-run Report")
-    job_lines <- vapply(names(job_ids), function(s) {
+    # Filter out step1 if prebuilt library was used (step1 not in job_ids or explicitly NULL)
+    display_steps <- if (has_prebuilt_lib || is.null(job_ids[["step1"]])) {
+      setdiff(names(job_ids), "step1")
+    } else {
+      names(job_ids)
+    }
+    job_lines <- vapply(display_steps, function(s) {
       sprintf("- **%s** (%s): `%s`", step_labels[s] %||% s, s, job_ids[[s]])
     }, character(1))
-    job_section <- paste(c("### Job IDs (5-Step Parallel)", job_lines), collapse = "\n")
+    header <- if (has_prebuilt_lib || is.null(job_ids[["step1"]])) {
+      "### Job IDs (4-Step Parallel \u2014 Step 1 skipped)"
+    } else {
+      "### Job IDs (5-Step Parallel)"
+    }
+    job_section <- paste(c(header, job_lines), collapse = "\n")
   } else {
     job_section <- sprintf("### Job ID\n- `%s`", as.character(job_ids)[1])
   }
 
-  # Resources section
+  # Resources section — exclude Step 1 resources if prebuilt library
   res_lines <- character()
   if (length(resources) > 0) {
     for (nm in names(resources)) {
+      # Skip Step 1 resources when using prebuilt library
+      if (has_prebuilt_lib && grepl("Step 1|Library Prediction", nm, ignore.case = TRUE)) next
       r <- resources[[nm]]
       res_lines <- c(res_lines, sprintf("- **%s**: %d CPUs, %dG memory, %dh walltime",
         nm, r$cpus %||% 0, r$mem %||% 0, r$time %||% 0))
@@ -2315,9 +2348,10 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
     file_lines <- c(file_lines[1:50], sprintf("- ... and %d more files", length(file_lines) - 50))
   }
 
-  # FASTA files
-  fasta_lines <- if (length(fasta_files) > 0 && any(nzchar(fasta_files))) {
-    sprintf("- `%s`", fasta_files[nzchar(fasta_files)])
+  # FASTA files — deduplicate (contaminant FASTA may appear twice if already in list)
+  unique_fasta <- unique(fasta_files[nzchar(fasta_files)])
+  fasta_lines <- if (length(unique_fasta) > 0) {
+    sprintf("- `%s`", unique_fasta)
   } else "- (none)"
 
   # Cached spectral library section
@@ -2369,12 +2403,13 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
     sprintf("**Submitted**: %s", timestamp),
     sprintf("**Output directory**: `%s`", output_dir),
     sprintf("**Log files**: `%s/logs/`", output_dir),
-    sprintf("**Search mode**: %s", search_mode),
+    sprintf("**Search mode**: %s", effective_search_mode),
     sprintf("**Normalization**: %s", normalization),
     sprintf("**DIA-NN container**: `%s`", sif_path),
     sprintf("**Partition**: %s | **Account**: %s", partition, account),
     "",
     if (nzchar(inst_section)) c(inst_section, ""),
+    if (nzchar(speclib_section)) c(speclib_section, ""),
     job_section,
     "",
     res_section,
@@ -2385,7 +2420,7 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
     sprintf("### Raw Files (%d)", length(raw_files)),
     file_lines,
     "",
-    "### FASTA Files",
+    sprintf("### FASTA Files (%d)", length(unique_fasta)),
     fasta_lines,
     if (nzchar(cache_section)) c("", cache_section),
     if (nzchar(custom_fasta_section)) c("", custom_fasta_section)

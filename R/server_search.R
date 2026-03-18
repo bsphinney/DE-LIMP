@@ -4614,7 +4614,9 @@ server_search <- function(input, output, session, values, add_to_log,
         account = input$diann_account,
         cached_speclib = cached_entry,
         custom_fasta_sequences = custom_fasta_text,
-        instrument_metadata = values$instrument_metadata
+        instrument_metadata = values$instrument_metadata,
+        speclib_path = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+          values$diann_speclib else NULL
       )
       writeLines(search_info, file.path(upload_dir, "search_info.md"))
 
@@ -4883,7 +4885,9 @@ server_search <- function(input, output, session, values, add_to_log,
           account = input$diann_account,
           cached_speclib = cached_entry,
           custom_fasta_sequences = custom_fasta_text,
-          instrument_metadata = values$instrument_metadata
+          instrument_metadata = values$instrument_metadata,
+          speclib_path = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            values$diann_speclib else NULL
         )
         local_info <- tempfile(fileext = ".md")
         writeLines(updated_info, local_info)
@@ -5056,7 +5060,9 @@ server_search <- function(input, output, session, values, add_to_log,
           account = input$diann_account,
           cached_speclib = cached_entry,
           custom_fasta_sequences = custom_fasta_text,
-          instrument_metadata = values$instrument_metadata
+          instrument_metadata = values$instrument_metadata,
+          speclib_path = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            values$diann_speclib else NULL
         )
         local_info <- tempfile(fileext = ".md")
         writeLines(search_info, local_info)
@@ -6245,8 +6251,15 @@ server_search <- function(input, output, session, values, add_to_log,
             }
           }
 
+          # Show "Skipped (prebuilt library)" for step1 when skipped
+          label_text <- if (sn == "step1" && ss == "skipped") {
+            paste0(step_labels[si], " \u2014 Skipped (prebuilt library)")
+          } else {
+            paste0(step_labels[si], progress_text)
+          }
+
           div(style = "display: flex; align-items: center; gap: 4px; font-size: 0.78em; padding: 1px 0;",
-            step_icon, span(paste0(step_labels[si], progress_text)))
+            step_icon, span(label_text))
         })
 
         div(style = "margin-top: 4px; border-top: 1px dashed #dee2e6; padding-top: 4px;",
