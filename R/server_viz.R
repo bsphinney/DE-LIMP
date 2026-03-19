@@ -611,11 +611,9 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     if (length(selected_idx) > 0) {
       gdata <- grid_react_df(); selected_id <- gdata$data$Original.ID[selected_idx]; values$grid_selected_protein <- selected_id
       xic_btn <- if (!is_hf_space) actionButton("show_xic_from_grid", "\U0001F4C8 XICs", class="btn-info") else NULL
-      showModal(modalDialog(title = paste("Expression Plot:", selected_id), size = "xl", plotOutput("violin_plot_grid", height = "600px"), footer = tagList(xic_btn, actionButton("back_to_grid", "Back to Grid", class="btn-info"), modalButton("Close")), easyClose = TRUE))
+      showModal(modalDialog(title = paste("Expression Plot:", selected_id), size = "xl", plotOutput("violin_plot_grid", height = "600px"), footer = tagList(xic_btn, modalButton("Close")), easyClose = TRUE))
     }
   })
-
-  observeEvent(input$back_to_grid, { click("show_grid_view") })
 
   output$violin_plot_grid <- renderPlot({
     req(values$y_protein, values$grid_selected_protein, values$metadata)
