@@ -362,9 +362,41 @@ parse_spectronaut_run_summaries <- function(run_summary_paths) {
   rows <- lapply(run_summary_paths, function(p) {
     tryCatch({
       df <- data.table::fread(p, data.table = FALSE)
-      # RunSummary files are typically key-value pairs or single-row tables
-      # Try single-row table first (most common Spectronaut export)
-      if (nrow(df) >= 1 && ncol(df) > 3) {
+
+      # Helper: extract leading integer from strings like "39,342 of 45,138 (56,802)"
+      extract_leading_int <- function(x) {
+        if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_integer_)
+        num_str <- regmatches(x, regexpr("^[0-9,]+", x))
+        if (length(num_str) == 0) return(NA_integer_)
+        suppressWarnings(as.integer(gsub(",", "", num_str)))
+      }
+
+      # Format A: key-value pairs (Parameter / Value columns) — Spectronaut 20+
+      if (ncol(df) == 2 && any(grepl("Parameter|Key", names(df), ignore.case = TRUE))) {
+        kv <- setNames(as.character(df[[2]]), as.character(df[[1]]))
+        find_kv <- function(patterns) {
+          for (pat in patterns) {
+            m <- grep(pat, names(kv), ignore.case = TRUE, value = TRUE)
+            if (length(m) > 0) return(kv[[m[1]]])
+          }
+          NA_character_
+        }
+        data.frame(
+          file_name       = basename(tools::file_path_sans_ext(p)),
+          precursors      = extract_leading_int(find_kv(c("^Precursors$"))),
+          peptides        = extract_leading_int(find_kv(c("^Peptides$", "^Modified Peptides$"))),
+          protein_groups  = extract_leading_int(find_kv(c("^Protein Groups$"))),
+          avg_pep_per_pg  = suppressWarnings(as.numeric(find_kv(c("AVG Peptides per Protein")))),
+          ms1_ppm         = suppressWarnings(as.numeric(find_kv(c("MS1 Average Delta")))),
+          ms2_ppm         = suppressWarnings(as.numeric(find_kv(c("MS2 Average Delta")))),
+          instrument      = as.character(find_kv(c("Instrument Name", "Instrument Model")) %||% NA),
+          raw_file        = as.character(find_kv(c("Raw File Name")) %||% NA),
+          gradient_min    = suppressWarnings(as.numeric(find_kv(c("Gradient Length")))),
+          stringsAsFactors = FALSE
+        )
+      }
+      # Format B: single-row wide table (older Spectronaut exports)
+      else if (nrow(df) >= 1 && ncol(df) > 3) {
         find_col <- function(patterns) {
           for (pat in patterns) {
             m <- grep(pat, names(df), ignore.case = TRUE, value = TRUE)
