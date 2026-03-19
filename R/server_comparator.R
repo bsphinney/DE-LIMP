@@ -4501,9 +4501,13 @@ server_comparator <- function(input, output, session, values, add_to_log) {
               files_to_zip <- c(files_to_zip, qc_file)
             }
             if (!is.null(run_b_data$library_info)) {
+              # Collapse any vector/list entries to single strings before building data.frame
+              li_vals <- vapply(run_b_data$library_info, function(x) {
+                paste(as.character(x), collapse = "; ")
+              }, character(1))
               li_df <- data.frame(
-                field = names(run_b_data$library_info),
-                value = as.character(unlist(run_b_data$library_info)),
+                field = names(li_vals),
+                value = li_vals,
                 stringsAsFactors = FALSE
               )
               li_file <- file.path(tmp_dir, "spectronaut_library_info.csv")
