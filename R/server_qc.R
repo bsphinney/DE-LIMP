@@ -1700,34 +1700,30 @@ server_qc <- function(input, output, session, values) {
     }))
     rownames(detected_mat) <- unique_pg
 
-    # Align to y_protein proteins and samples — try direct match first,
-    # then basename match (HF/Docker parquet paths may differ from limpa names)
-    shared_samples <- intersect(sample_names, colnames(detected_mat))
-    if (length(shared_samples) == 0) {
+    # Align using numeric indices — character subsetting fails on some platforms
+    # when rownames contain empty strings or special characters
+    row_idx <- match(protein_names, unique_pg)
+    valid_rows <- !is.na(row_idx)
+    row_idx <- row_idx[valid_rows]
+    matched_proteins <- protein_names[valid_rows]
+
+    col_idx <- match(sample_names, colnames(detected_mat))
+    if (all(is.na(col_idx))) {
+      # Basename fallback for HF/Docker path differences
       raw_basenames <- tools::file_path_sans_ext(basename(colnames(detected_mat)))
       prot_basenames <- tools::file_path_sans_ext(basename(sample_names))
-      name_map <- match(prot_basenames, raw_basenames)
-      valid <- !is.na(name_map)
-      if (any(valid)) {
-        # Rename raw_mat columns to match y_protein names for the matched set
-        colnames(detected_mat)[name_map[valid]] <- sample_names[valid]
-        shared_samples <- sample_names[valid]
-      }
+      col_idx <- match(prot_basenames, raw_basenames)
     }
+    valid_cols <- !is.na(col_idx)
+    col_idx <- col_idx[valid_cols]
+    matched_samples <- sample_names[valid_cols]
 
-    shared_pg <- intersect(protein_names, rownames(detected_mat))
-    message("[DE-LIMP] Completeness debug: ",
-            "raw_mat dim=", nrow(raw_mat), "x", ncol(raw_mat),
-            " | detected_mat dim=", nrow(detected_mat), "x", ncol(detected_mat),
-            " | shared_pg=", length(shared_pg), " shared_samples=", length(shared_samples),
-            " | raw colnames[1:2]=", paste(head(colnames(raw_mat), 2), collapse=", "),
-            " | prot colnames[1:2]=", paste(head(sample_names, 2), collapse=", "),
-            " | prot rownames[1:2]=", paste(head(protein_names, 2), collapse=", "),
-            " | det rownames[1:2]=", paste(head(rownames(detected_mat), 2), collapse=", "))
-    req(length(shared_pg) > 0, length(shared_samples) > 0)
-    det <- detected_mat[shared_pg, shared_samples, drop = FALSE]
+    req(length(row_idx) > 0, length(col_idx) > 0)
+    det <- detected_mat[row_idx, col_idx, drop = FALSE]
+    rownames(det) <- matched_proteins
+    colnames(det) <- matched_samples
 
-    total_proteins <- length(protein_names)
+    total_proteins <- length(matched_proteins)
     detected_count <- colSums(det)
     inferred_count <- total_proteins - detected_count
     detection_rate <- detected_count / total_proteins * 100
@@ -1738,10 +1734,9 @@ server_qc <- function(input, output, session, values) {
       colSums(!is.na(raw_mat[rows, , drop = FALSE]))
     }))
     rownames(precursor_count_mat) <- unique_pg
-    # Apply same column rename if basename matching was used
-    if (!is.null(colnames(detected_mat)))
-      colnames(precursor_count_mat) <- colnames(detected_mat)
-    prec_mat <- precursor_count_mat[shared_pg, shared_samples, drop = FALSE]
+    prec_mat <- precursor_count_mat[row_idx, col_idx, drop = FALSE]
+    rownames(prec_mat) <- matched_proteins
+    colnames(prec_mat) <- matched_samples
 
     list(
       detected_mat = det,
@@ -1750,8 +1745,8 @@ server_qc <- function(input, output, session, values) {
       inferred_count = inferred_count,
       detection_rate = detection_rate,
       total_proteins = total_proteins,
-      shared_pg = shared_pg,
-      shared_samples = shared_samples
+      shared_pg = matched_proteins,
+      shared_samples = matched_samples
     )
   })
 
