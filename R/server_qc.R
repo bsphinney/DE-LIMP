@@ -1991,29 +1991,26 @@ server_qc <- function(input, output, session, values) {
           showlegend = FALSE, hoverinfo = "none"
         )
       }
-      p <- p %>% add_annotations(
-        x = labs$x, y = rep(-max(segs$y) * 0.05, nrow(labs)),
-        text = labs$label,
-        showarrow = FALSE,
-        textangle = -45,
-        font = list(size = 9, color = leaf_colors),
-        xanchor = "right"
-      )
+      # Add leaf labels as x-axis tick labels (not annotations)
       if (!is.null(values$metadata) && length(unique_groups) > 0) {
         for (g in unique_groups) {
+          # Invisible trace for legend only — within visible range
           p <- p %>% add_markers(
-            x = -999, y = -999,
+            x = NA, y = NA,
             marker = list(color = group_pal[g], size = 10),
             name = g, showlegend = TRUE, hoverinfo = "none"
           )
         }
       }
+      y_max <- max(segs$y, na.rm = TRUE) * 1.1
       p %>% layout(
-        xaxis = list(title = "", showticklabels = FALSE, zeroline = FALSE, showgrid = FALSE,
-                     range = list(min(labs$x) - 1, max(labs$x) + 1)),
-        yaxis = list(title = "Jaccard Distance (Ward.D2)", zeroline = FALSE),
+        xaxis = list(title = "", zeroline = FALSE, showgrid = FALSE,
+                     tickmode = "array", tickvals = labs$x, ticktext = labs$label,
+                     tickangle = -45, tickfont = list(size = 9, color = leaf_colors)),
+        yaxis = list(title = "Jaccard Distance (Ward.D2)", zeroline = FALSE,
+                     range = list(0, y_max)),
         legend = list(orientation = "h", x = 0.3, y = 1.08),
-        margin = list(b = 120)
+        margin = list(b = 150)
       )
     } else {
       plot_ly() %>% add_annotations(
