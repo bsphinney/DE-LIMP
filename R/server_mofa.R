@@ -1351,6 +1351,10 @@ server_mofa <- function(input, output, session, values, add_to_log) {
 
         incProgress(0.8, detail = "Configuring views...")
 
+        # Clear all existing views before loading example
+        values$mofa_views <- list()
+        values$mofa_view_configs <- list()
+
         # Store as MOFA views
         values$mofa_views[["Global Proteomics"]] <- prot_mat
         values$mofa_views[["Phosphoproteomics"]] <- phospho_mat
@@ -1470,6 +1474,10 @@ server_mofa <- function(input, output, session, values, add_to_log) {
         }
 
         incProgress(0.85, detail = "Configuring views...")
+
+        # Clear all existing views before loading example
+        values$mofa_views <- list()
+        values$mofa_view_configs <- list()
 
         # Store as MOFA views
         values$mofa_views[["mRNA"]] <- mrna_mat
