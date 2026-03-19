@@ -1689,6 +1689,9 @@ server_qc <- function(input, output, session, values) {
     protein_names <- rownames(values$y_protein$E)
     sample_names <- colnames(values$y_protein$E)
 
+    # Guard: need valid matrix dimensions and matching lengths
+    req(is.matrix(raw_mat), length(pg) == nrow(raw_mat), ncol(raw_mat) > 0)
+
     # For each protein group, check if ANY precursor was detected per sample
     unique_pg <- unique(pg)
     detected_mat <- do.call(rbind, lapply(unique_pg, function(p) {
@@ -1697,9 +1700,23 @@ server_qc <- function(input, output, session, values) {
     }))
     rownames(detected_mat) <- unique_pg
 
-    # Align to y_protein proteins and samples
-    shared_pg <- intersect(protein_names, rownames(detected_mat))
+    # Align to y_protein proteins and samples — try direct match first,
+    # then basename match (HF/Docker parquet paths may differ from limpa names)
     shared_samples <- intersect(sample_names, colnames(detected_mat))
+    if (length(shared_samples) == 0) {
+      raw_basenames <- tools::file_path_sans_ext(basename(colnames(detected_mat)))
+      prot_basenames <- tools::file_path_sans_ext(basename(sample_names))
+      name_map <- match(prot_basenames, raw_basenames)
+      valid <- !is.na(name_map)
+      if (any(valid)) {
+        # Rename raw_mat columns to match y_protein names for the matched set
+        colnames(detected_mat)[name_map[valid]] <- sample_names[valid]
+        shared_samples <- sample_names[valid]
+      }
+    }
+
+    shared_pg <- intersect(protein_names, rownames(detected_mat))
+    req(length(shared_pg) > 0, length(shared_samples) > 0)
     det <- detected_mat[shared_pg, shared_samples, drop = FALSE]
 
     total_proteins <- length(protein_names)
@@ -1713,6 +1730,9 @@ server_qc <- function(input, output, session, values) {
       colSums(!is.na(raw_mat[rows, , drop = FALSE]))
     }))
     rownames(precursor_count_mat) <- unique_pg
+    # Apply same column rename if basename matching was used
+    if (!is.null(colnames(detected_mat)))
+      colnames(precursor_count_mat) <- colnames(detected_mat)
     prec_mat <- precursor_count_mat[shared_pg, shared_samples, drop = FALSE]
 
     list(

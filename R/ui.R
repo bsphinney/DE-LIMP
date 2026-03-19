@@ -248,7 +248,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
       accordion_panel("Upload Data", icon = icon("file-arrow-up"),
         fileInput("report_file", "DIA-NN Report (.parquet)", accept = c(".parquet")),
-        conditionalPanel("output.ssh_connected_flag == true",
+        if (!is_hf_space) conditionalPanel("output.ssh_connected_flag == true",
           actionButton("load_from_hpc_btn", "Load from HPC",
             icon = icon("server"), class = "btn-outline-info btn-sm w-100",
             style = "margin-bottom: 5px;")
