@@ -920,7 +920,8 @@ server_session <- function(input, output, session, values, add_to_log) {
       "  \u2022 Identifies peptides/precursors unique to each protein group\n",
       "  \u2022 Models missing values probabilistically via a logistic detection probability curve\n",
       "  \u2022 Missing precursors contribute to the likelihood through their detection probability,\n",
-      "    not as imputed values — this is fundamentally different from imputation\n",
+      "    not as imputed values — this is fundamentally different from traditional imputation\n",
+      "    (no values are 'filled in'; instead, missing precursors inform the probability model)\n",
       "  \u2022 Proteins with fewer detected precursors receive lower precision weights\n",
       "  \u2022 Produces log2-transformed protein intensities for downstream analysis\n\n",
 

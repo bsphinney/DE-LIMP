@@ -2579,7 +2579,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
         tags$dt(style = "color: #7f8c8d;", "Borderline"),
         tags$dd("The protein sits ", tags$b("near the significance threshold in both runs"), ". ",
-                "Small stochastic differences (noise, imputation, FDR correction) push it above the ",
+                "Small stochastic differences (noise, missing-value handling, FDR correction) push it above the ",
                 "cutoff in one run and below in the other. This is expected and not actionable ",
                 "\u2014 neither result is wrong.")
       ),
