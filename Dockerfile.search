@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y \
 ENV LIBARROW_MINIMAL=false
 RUN R -e "install.packages(c('bslib', 'readr', 'tibble', 'dplyr', 'tidyr', 'ggplot2', 'httr2', 'rhandsontable', 'DT', 'arrow', 'shinyjs', 'plotly', 'stringr', 'ggrepel', 'remotes', 'BiocManager', 'markdown', 'shinyFiles', 'jsonlite', 'processx', 'callr'), repos='https://cloud.r-project.org/')"
 
-RUN R -e "install.packages(c('KSEAapp', 'ggseqlogo'), repos='https://cloud.r-project.org/')"
+RUN R -e "install.packages(c('KSEAapp', 'ggseqlogo', 'ggdendro'), repos='https://cloud.r-project.org/')"
 RUN R -e "install.packages(c('systemfonts', 'gdtools', 'Rcpp'), repos='https://cloud.r-project.org/')"
 RUN R -e "install.packages(c('ggraph', 'graphlayouts', 'tidygraph', 'scatterpie', 'shadowtext', 'ggforce'), repos='https://cloud.r-project.org/')"
 
