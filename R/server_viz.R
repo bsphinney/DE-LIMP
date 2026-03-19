@@ -575,7 +575,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       row_cb <- NULL
     }
 
-    dt_options <- list(dom = 'frtip', pageLength = 15, scrollX = TRUE, columnDefs = list(
+    dt_options <- list(dom = 'frtip', pageLength = 50, scrollX = TRUE, scrollY = "calc(100vh - 450px)", columnDefs = list(
       list(className = 'dt-center', targets = (length(fixed_cols)):(length(fixed_cols) + n_expr - 1)),
       list(visible = FALSE, targets = hidden_targets)
     ))
