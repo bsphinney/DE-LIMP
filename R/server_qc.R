@@ -1716,6 +1716,14 @@ server_qc <- function(input, output, session, values) {
     }
 
     shared_pg <- intersect(protein_names, rownames(detected_mat))
+    message("[DE-LIMP] Completeness debug: ",
+            "raw_mat dim=", nrow(raw_mat), "x", ncol(raw_mat),
+            " | detected_mat dim=", nrow(detected_mat), "x", ncol(detected_mat),
+            " | shared_pg=", length(shared_pg), " shared_samples=", length(shared_samples),
+            " | raw colnames[1:2]=", paste(head(colnames(raw_mat), 2), collapse=", "),
+            " | prot colnames[1:2]=", paste(head(sample_names, 2), collapse=", "),
+            " | prot rownames[1:2]=", paste(head(protein_names, 2), collapse=", "),
+            " | det rownames[1:2]=", paste(head(rownames(detected_mat), 2), collapse=", "))
     req(length(shared_pg) > 0, length(shared_samples) > 0)
     det <- detected_mat[shared_pg, shared_samples, drop = FALSE]
 
