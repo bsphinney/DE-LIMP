@@ -2235,6 +2235,22 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
     instrument_line,
     "COMPARISON TYPE: ", tool_label, "\n",
     "EXPERIMENT: ", stats$contrast, " contrast, ", stats$n_samples, " samples.\n\n",
+    "METHODOLOGY NOTE:\n",
+    "DE-LIMP uses DPC-Quant (Detection Probability-based Combined Quantification) from the limpa R package. ",
+    "DPC-Quant does NOT leave missing values, and it is NOT traditional imputation. Instead, it uses an ",
+    "empirical Bayes model that jointly estimates protein abundance and detection probability across all ",
+    "precursors. Proteins with zero detected precursors in a sample still receive abundance estimates ",
+    "informed by the detection probability model — these are statistically valid but less precise (higher SE). ",
+    "The missing_pct columns in the export reflect the RAW precursor-level missingness BEFORE DPC-Quant, ",
+    "not the final protein matrix (which is always complete). ",
+    "DE testing uses limma moderated t-tests with empirical Bayes variance shrinkage.\n",
+    if (source_b == "spectronaut") {
+      paste0(
+        "Spectronaut uses MaxLFQ on TopN peptides with a standard (Welch) t-test. ",
+        "The moderated t-test is substantially more conservative for small sample sizes, ",
+        "which is a key structural difference when interpreting discordant DE calls.\n")
+    } else "",
+    "\n",
     "KEY FINDING: Of ", stats$n_shared, " shared proteins, ",
     stats$n_discordant, " are discordant",
     " (", stats$n_a_only_de, " DE in Run A only, ", stats$n_b_only_de, " DE in Run B only).\n",
