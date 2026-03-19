@@ -38,6 +38,14 @@
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 - [ ] **Thermo .raw TIC extraction**: Extend chromatography QC to Thermo files
 
+## DPC-Quant Confidence Overlay
+- [ ] **Evidence Score**: Combine n.observations + standard.error into 0-100 confidence score per protein per sample
+- [ ] **Expression Grid confidence**: Toggle to color cells by evidence (green=many precursors, red=0 precursors)
+- [ ] **Filterable high-confidence subset**: "Show only proteins with evidence score > 50 in all samples"
+- [ ] **Export Evidence_Class column**: High (nObs>=5 all), Medium (nObs>=1 all), Low (nObs=0 any) in all CSV exports
+- [ ] **Volcano plot integration**: Color/size points by evidence score — significant + low evidence = flag
+- [ ] **Violin plot overlay**: Mark points by nObs, hollow circles for 0-precursor estimates
+
 ## Contaminant Tracking & Benchmarking
 - [ ] **Contamination level database**: Record per-sample contaminant % in activity log on every pipeline run. Build reference distribution across all analyses (percentiles).
 - [ ] **Benchmarking badge**: After pipeline, show "Your contaminant level (2.1%) is in the 35th percentile of all samples processed" — green/yellow/red badge.
