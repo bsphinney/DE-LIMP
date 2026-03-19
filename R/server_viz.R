@@ -481,13 +481,48 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       paste0("https://www.uniprot.org/uniprotkb/", gsub("^Cont_", "", acc), "/entry")
     )
     df_display$Protein.Group <- paste0("<a href='", link_urls, "' target='_blank'>", df_display$Protein.Group, "</a>")
-    df_display <- df_display %>% dplyr::select(-Original.ID)
+
     fixed_cols <- gdata$fixed_cols; expr_cols <- gdata$expr_cols
     valid_cols_map <- gdata$valid_cols_map; meta_sorted <- gdata$meta_sorted; group_colors <- gdata$group_colors
 
+    # --- DPC-Quant tooltip data: nObs and SE hidden columns ---
+    n_obs_mat <- values$y_protein$other$n.observations
+    se_mat <- values$y_protein$other$standard.error
+    has_dpc <- !is.null(n_obs_mat) && !is.null(se_mat)
+
+    # Build tooltip strings per expression cell (nObs/SE/CI) stored in hidden columns
+    nobs_cols <- character(0)
+    se_cols <- character(0)
+    if (has_dpc) {
+      original_ids <- df_display$Original.ID
+      for (k in seq_along(valid_cols_map)) {
+        fname <- valid_cols_map[k]
+        nobs_col_name <- paste0(".nObs_", k)
+        se_col_name <- paste0(".SE_", k)
+        # Match rows by Original.ID to n_obs_mat/se_mat rownames
+        row_idx <- match(original_ids, rownames(n_obs_mat))
+        col_idx <- match(fname, colnames(n_obs_mat))
+        if (!is.na(col_idx)) {
+          df_display[[nobs_col_name]] <- ifelse(is.na(row_idx), NA_real_, n_obs_mat[row_idx, col_idx])
+          se_col_idx <- match(fname, colnames(se_mat))
+          df_display[[se_col_name]] <- ifelse(is.na(row_idx) | is.na(se_col_idx), NA_real_,
+            round(se_mat[row_idx, se_col_idx], 4))
+        } else {
+          df_display[[nobs_col_name]] <- NA_real_
+          df_display[[se_col_name]] <- NA_real_
+        }
+        nobs_cols <- c(nobs_cols, nobs_col_name)
+        se_cols <- c(se_cols, se_col_name)
+      }
+    }
+
+    df_display <- df_display %>% dplyr::select(-Original.ID)
+
     header_html <- tags$table(class = "display", tags$thead(tags$tr(lapply(seq_along(colnames(df_display)), function(i) {
       col_name <- colnames(df_display)[i]
-      if (i > length(fixed_cols)) {
+      if (col_name %in% c(nobs_cols, se_cols)) {
+        tags$th(col_name, style = "display:none;")
+      } else if (i > length(fixed_cols) && i <= length(fixed_cols) + length(expr_cols)) {
         original_name <- valid_cols_map[i - length(fixed_cols)]; grp <- meta_sorted$Group[meta_sorted$File.Name == original_name]; bg_color <- group_colors[grp]
         tags$th(title = paste("File:", original_name, "\nGroup:", grp), col_name, style = paste0("background-color: ", bg_color, "; color: white; text-align: center;"))
       } else { tags$th(col_name) }
@@ -496,11 +531,58 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     expression_matrix <- as.matrix(df_display[, expr_cols]); brks <- quantile(expression_matrix, probs = seq(.05, .95, .05), na.rm = TRUE); clrs <- colorRampPalette(c("#4575b4", "white", "#d73027"))(length(brks) + 1)
     # Find Type column index (0-based for JS)
     type_col_idx <- which(colnames(df_display) == "Type") - 1
+    # Hidden column indices for nObs/SE (0-based)
+    nobs_col_indices <- which(colnames(df_display) %in% nobs_cols) - 1
+    se_col_indices <- which(colnames(df_display) %in% se_cols) - 1
+    hidden_targets <- c(type_col_idx, nobs_col_indices, se_col_indices)
 
-    datatable(df_display, container = header_html, selection = 'single', escape = FALSE, options = list(dom = 'frtip', pageLength = 15, scrollX = TRUE, columnDefs = list(
-      list(className = 'dt-center', targets = (length(fixed_cols)):(ncol(df_display)-1)),
-      list(visible = FALSE, targets = type_col_idx)  # hide Type column but keep for styling
-    )), rownames = FALSE) %>%
+    # JS rowCallback to add tooltips on expression cells from hidden nObs/SE columns
+    n_fixed <- length(fixed_cols)
+    n_expr <- length(expr_cols)
+    if (has_dpc && length(nobs_col_indices) == n_expr) {
+      # Build JS arrays of column indices (0-based)
+      expr_js_indices <- (n_fixed):(n_fixed + n_expr - 1)
+      nobs_js_indices <- nobs_col_indices
+      se_js_indices <- se_col_indices
+      row_cb <- DT::JS(sprintf(
+        "function(row, data, displayNum, displayIndex, dataIndex) {
+          var exprCols = [%s];
+          var nobsCols = [%s];
+          var seCols = [%s];
+          for (var i = 0; i < exprCols.length; i++) {
+            var val = parseFloat(data[exprCols[i]]);
+            var nobs = data[nobsCols[i]];
+            var se = parseFloat(data[seCols[i]]);
+            if (!isNaN(val) && nobs !== null && nobs !== '' && !isNaN(se)) {
+              var ci_lo = (val - 1.96 * se).toFixed(2);
+              var ci_hi = (val + 1.96 * se).toFixed(2);
+              var tip = 'nObs: ' + nobs + ' precursors detected\\nSE: ' + se.toFixed(4) + '\\n95%% CI: [' + ci_lo + ', ' + ci_hi + ']';
+              if (parseInt(nobs) === 0) {
+                tip = 'INFERRED (no precursors detected)\\n' + tip;
+              }
+              $('td', row).eq(exprCols[i]).attr('title', tip);
+              if (parseInt(nobs) === 0) {
+                $('td', row).eq(exprCols[i]).css('font-style', 'italic');
+              }
+            }
+          }
+        }",
+        paste(expr_js_indices, collapse = ","),
+        paste(nobs_js_indices, collapse = ","),
+        paste(se_js_indices, collapse = ",")
+      ))
+    } else {
+      row_cb <- NULL
+    }
+
+    dt_options <- list(dom = 'frtip', pageLength = 15, scrollX = TRUE, columnDefs = list(
+      list(className = 'dt-center', targets = (length(fixed_cols)):(length(fixed_cols) + n_expr - 1)),
+      list(visible = FALSE, targets = hidden_targets)
+    ))
+    if (!is.null(row_cb)) dt_options$rowCallback <- row_cb
+
+    datatable(df_display, container = header_html, selection = 'single', escape = FALSE,
+      options = dt_options, rownames = FALSE) %>%
       formatStyle(expr_cols, backgroundColor = styleInterval(brks, clrs)) %>%
       formatStyle("Protein.Group", "Type",
         backgroundColor = styleEqual("Contaminant", "#fff0f0"),
@@ -542,10 +624,65 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     long_df <- as.data.frame(exprs_mat) %>% rownames_to_column("Protein") %>% pivot_longer(-Protein, names_to = "File.Name", values_to = "LogIntensity")
     long_df <- left_join(long_df, values$metadata, by="File.Name")
 
-    ggplot(long_df, aes(x = Group, y = LogIntensity, fill = Group)) +
-      geom_violin(alpha = 0.5, trim = FALSE) + geom_jitter(width = 0.2, size = 2, alpha = 0.8) +
-      facet_wrap(~Protein, scales = "free_y") + theme_bw() +
-      labs(title = paste("Protein:", prot_id), y = "Log2 Intensity") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    # DPC-Quant detection status: nObs and SE per sample
+    n_obs_mat <- values$y_protein$other$n.observations
+    se_mat <- values$y_protein$other$standard.error
+    has_dpc <- !is.null(n_obs_mat) && !is.null(se_mat) && prot_id %in% rownames(n_obs_mat)
+
+    if (has_dpc) {
+      nobs_vec <- n_obs_mat[prot_id, ]
+      se_vec <- se_mat[prot_id, ]
+      dpc_df <- data.frame(
+        File.Name = names(nobs_vec),
+        nObs = as.numeric(nobs_vec),
+        SE = as.numeric(se_vec),
+        stringsAsFactors = FALSE
+      )
+      long_df <- left_join(long_df, dpc_df, by = "File.Name")
+      long_df$Detected <- ifelse(!is.na(long_df$nObs) & long_df$nObs > 0, "Detected", "Inferred")
+      long_df$PointLabel <- ifelse(long_df$Detected == "Inferred",
+        paste0("Inferred (nObs=0, SE=", round(long_df$SE, 3), ")"), "")
+    } else {
+      long_df$Detected <- "Detected"
+      long_df$nObs <- NA_real_
+      long_df$SE <- NA_real_
+      long_df$PointLabel <- ""
+    }
+
+    n_inferred <- sum(long_df$Detected == "Inferred")
+    subtitle_text <- if (has_dpc && n_inferred > 0) {
+      paste0(n_inferred, " of ", nrow(long_df), " values inferred by DPC-Quant (hollow circles)")
+    } else if (has_dpc) {
+      "All values directly detected"
+    } else {
+      NULL
+    }
+
+    p <- ggplot(long_df, aes(x = Group, y = LogIntensity, fill = Group)) +
+      geom_violin(alpha = 0.5, trim = FALSE)
+
+    if (has_dpc) {
+      # Separate detected and inferred points for different shapes
+      detected_df <- long_df[long_df$Detected == "Detected", ]
+      inferred_df <- long_df[long_df$Detected == "Inferred", ]
+      if (nrow(detected_df) > 0) {
+        p <- p + geom_jitter(data = detected_df, width = 0.2, size = 3, alpha = 0.8,
+          shape = 16)  # filled circle
+      }
+      if (nrow(inferred_df) > 0) {
+        p <- p + geom_jitter(data = inferred_df, width = 0.2, size = 3, alpha = 0.8,
+          shape = 21, fill = "white", stroke = 1.2)  # hollow circle
+      }
+    } else {
+      p <- p + geom_jitter(width = 0.2, size = 2, alpha = 0.8)
+    }
+
+    p <- p + facet_wrap(~Protein, scales = "free_y") + theme_bw() +
+      labs(title = paste("Protein:", prot_id), subtitle = subtitle_text,
+           y = "Log2 Intensity") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            plot.subtitle = element_text(color = "#666666", size = 10))
+    p
   }, height = 600) # FIXED HEIGHT
 
   # --- SIGNAL DISTRIBUTION (lines 1193-1242) ---
@@ -1818,8 +1955,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         } else {
           expr_df$Protein.Name <- ""
         }
-        # Reorder: ID columns first, then samples
-        id_cols <- c("Protein.Group", "Gene", "Protein.Name")
+        # Add Detection_Class column (DPC-Quant transparency)
+        n_obs_export <- values$y_protein$other$n.observations
+        expr_df$Detection_Class <- compute_detection_class(n_obs_export, rownames(mat))
+        # Reorder: ID columns first (with Detection_Class after Gene), then samples
+        id_cols <- c("Protein.Group", "Gene", "Detection_Class", "Protein.Name")
+        id_cols <- intersect(id_cols, colnames(expr_df))
         expr_df <- expr_df[, c(id_cols, setdiff(colnames(expr_df), id_cols))]
         expr_file <- file.path(tmp_dir, "expression_matrix.csv")
         write.csv(expr_df, expr_file, row.names = FALSE)

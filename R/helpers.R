@@ -43,6 +43,26 @@ get_diann_stats_r <- function(file_path) {
 # --- Z-Score Utility ---
 cal_z_score <- function(x) { (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE) }
 
+# --- DPC-Quant Detection Class ---
+# Classifies each protein based on n.observations across all samples.
+# Returns a character vector: "Detected_All", "Detected_Partial", or "Inferred_All".
+# n_obs_mat: matrix with proteins as rows, samples as columns (from y_protein$other$n.observations)
+# protein_ids: character vector of protein IDs to classify (must match rownames of n_obs_mat)
+compute_detection_class <- function(n_obs_mat, protein_ids) {
+  if (is.null(n_obs_mat)) return(rep(NA_character_, length(protein_ids)))
+  vapply(protein_ids, function(pid) {
+    if (!pid %in% rownames(n_obs_mat)) return(NA_character_)
+    obs <- n_obs_mat[pid, ]
+    if (all(obs > 0)) {
+      "Detected_All"
+    } else if (all(obs == 0)) {
+      "Inferred_All"
+    } else {
+      "Detected_Partial"
+    }
+  }, character(1))
+}
+
 # --- Auto-detect Organism ---
 detect_organism_db <- function(protein_ids) {
   ORGANISM_DB_MAP <- list(

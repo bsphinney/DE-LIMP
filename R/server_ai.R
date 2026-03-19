@@ -307,6 +307,14 @@ server_ai <- function(input, output, session, values) {
         incProgress(0.5, detail = "Exporting expression matrix...")
         expr_mat <- values$y_protein$E
         expr_df <- as.data.frame(expr_mat) %>% rownames_to_column("Protein.Group")
+        # Add Detection_Class column (DPC-Quant transparency)
+        n_obs_export <- values$y_protein$other$n.observations
+        expr_df$Detection_Class <- compute_detection_class(n_obs_export, rownames(expr_mat))
+        # Reorder: Protein.Group, Detection_Class, then samples
+        if ("Detection_Class" %in% colnames(expr_df)) {
+          id_cols_ai <- c("Protein.Group", "Detection_Class")
+          expr_df <- expr_df[, c(id_cols_ai, setdiff(colnames(expr_df), id_cols_ai))]
+        }
         expr_file <- file.path(tmp_dir, "Expression_Matrix.csv")
         write.csv(expr_df, expr_file, row.names = FALSE)
         files_to_zip <- c(files_to_zip, expr_file)

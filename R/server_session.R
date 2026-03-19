@@ -1295,7 +1295,11 @@ server_session <- function(input, output, session, values, add_to_log) {
         } else {
           expr_df$Protein.Name <- ""
         }
-        id_cols <- c("Protein.Group", "Gene", "Protein.Name")
+        # Add Detection_Class column (DPC-Quant transparency)
+        n_obs_export <- values$y_protein$other$n.observations
+        expr_df$Detection_Class <- compute_detection_class(n_obs_export, rownames(mat))
+        id_cols <- c("Protein.Group", "Gene", "Detection_Class", "Protein.Name")
+        id_cols <- intersect(id_cols, colnames(expr_df))
         expr_df <- expr_df[, c(id_cols, setdiff(colnames(expr_df), id_cols))]
         expr_file <- file.path(tmp_dir, "expression_matrix.csv")
         write.csv(expr_df, expr_file, row.names = FALSE)
