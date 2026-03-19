@@ -40,13 +40,16 @@
 - [ ] **XIC viewer over SSH**: Currently requires local file access. Need SCP download of `_xic/*.xic.parquet` files from HPC. Large files (100+ MB/sample) — consider streaming or on-demand per-protein download.
 
 ## DPC-Quant Detection Transparency (per statistician review)
-- [ ] **Expression Grid tooltips**: Hover shows nObs, SE, 95% CI per cell (zero risk, high value)
-- [ ] **Detection_Class export column**: Complete/Partial/Sparse/Inferred based on nObs across samples
+- [x] **Expression Grid tooltips**: Hover shows nObs, SE, 95% CI per cell via JS rowCallback with hidden columns (v3.7)
+- [x] **Detection_Class export column**: Detected_All/Detected_Partial/Inferred_All based on nObs across samples. `compute_detection_class()` in helpers.R, used in Expression Grid CSV, session export, and AI export (v3.7)
 - [ ] **Expression Grid saturation overlay**: Toggle (off by default) — opacity scales with nObs/maxNobs. NOT red/green (implies "bad"). Neutral visual: saturation/opacity only.
 - [ ] **Volcano "detection-driven DE" markers**: Triangle shape for proteins with nObs=0 in all samples of one condition. These are DE calls driven by the detection probability model — scientifically interesting.
-- [ ] **Violin plot hollow markers**: Open circles for nObs=0 estimates with tooltip "inferred from detection pattern"
+- [x] **Violin plot hollow markers**: Open circles (shape 21) for nObs=0 inferred estimates, filled circles for detected. Subtitle shows count of inferred values (v3.7)
 - ~~Evidence Score 0-100~~: REJECTED — double-counts info (SE already incorporates nObs). Use SE directly if single number needed.
 - ~~Filterable high-confidence subset~~: REJECTED — contradicts DPC-Quant's design. At most export-only option with warning.
+
+## Run Comparator
+- [x] **Spectronaut 20+ RunOverview format**: Key-value pair format (Parameter/Value columns) now auto-detected alongside older wide-table format in `parse_spectronaut_run_summaries()` (v3.7)
 
 ## Contaminant Tracking & Benchmarking
 - [ ] **Contamination level database**: Record per-sample contaminant % in activity log on every pipeline run. Build reference distribution across all analyses (percentiles).

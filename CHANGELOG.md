@@ -5,6 +5,34 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Post-3.7.0 Development
+
+### Added
+- **DPC-Quant Detection Transparency**: Expression Grid tooltips show nObs, SE, and 95% CI per cell. Violin plots mark inferred estimates (nObs=0) with hollow markers. New `Detection_Class` column (Complete/Partial/Sparse/Inferred) in exported data. `protein_confidence.csv` included in all exports (session, Claude ZIP).
+- **Run Comparator Claude Export Enhancements**: All new data files (protein_confidence.csv, comparator context, library info, run QC) included in Claude ZIP export. DPC-Quant methodology note added to comparator prompt.
+- **Normalization Mismatch Detection**: Run Comparator detects when two runs used different normalization strategies and flags it in settings diff.
+
+### Fixed
+- **Hugging Face subscript error**: Data Completeness visualization crashed on HF due to column subsetting with string names on a matrix. Switched to numeric index subsetting.
+- **Load from HPC visible on HF**: "Load from HPC" button now hidden when running on Hugging Face (no SSH available).
+- **Violin modal broken "Back to Grid" button**: Removed non-functional back button from Expression Grid violin modal.
+- **Jaccard dendrogram rendering**: Fixed y-axis range clipping and invisible legend markers in Data Completeness dendrogram plot. Added `ggdendro` to Dockerfile.
+- **Comparator maxLFQ reference**: Corrected incorrect maxLFQ terminology in comparator output.
+- **FASTA info for prebuilt speclib**: Populated `fasta_info` from library catalog when using a prebuilt spectral library (was showing blank).
+- **Comparator Claude export row mismatch**: Collapsed nested `library_info` list entries that caused extra rows in exported CSV.
+- **Spectronaut 20+ RunOverview format**: Parser now handles Spectronaut 20+ key-value format in RunOverview (changed from tabular to key-value layout).
+- **'Imputation' terminology**: Replaced incorrect "imputation" with "probabilistic estimation" throughout, matching limpa's DPC-Quant methodology.
+
+### Performance
+- **SSH connection test**: Uses 10-second timeouts and tries fast probes first, reducing initial connection time from 30s to ~5s.
+- **SSH file browser**: Starts browsing at specific subdirectories (raw data, FASTA) instead of filesystem root.
+- **Expression Grid pagination**: Shows 50 rows with vertical scroll instead of rendering all rows at once.
+- **Async cluster resource check**: Cluster CPU/memory check on SSH connect no longer blocks the Shiny event loop.
+
+### Documentation
+- Added SSH XIC viewer and DPC-Quant confidence overlay plans to TODO.
+- Revised confidence overlay design per statistician review (saturation/opacity, not red/green).
+
 ## [3.7.0] - 2026-03-17
 
 ### Added

@@ -39,14 +39,14 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/ui.R` | `page_navbar` layout, accordion sidebar, all tab definitions, SSH file browser modals, environment badge |
 | `R/server_data.R` | Data upload, example load, group assignment, pipeline execution, contaminant analysis, no-replicates mode |
 | `R/server_de.R` | Volcano, DE table, heatmap, CV analysis, selection sync |
-| `R/server_qc.R` | QC sample metrics (faceted trend plot), diagnostic plots, p-value distribution |
+| `R/server_qc.R` | QC sample metrics (faceted trend plot), diagnostic plots, p-value distribution, data completeness |
 | `R/server_viz.R` | Expression grid (contaminant highlighting), signal distribution (contaminant overlay), PCA |
 | `R/server_gsea.R` | GSEA analysis, multi-DB (BP/MF/CC/KEGG), organism detection |
 | `R/server_ai.R` | AI Summary (all contrasts), Data Chat, Gemini integration, HTML report export |
 | `R/server_search.R` | Docker/HPC dual backend, SSH, DIA-NN search, job queue, SSH file browser, NCBI download, SLURM proxy, Load from HPC |
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
-| `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview), contrast mismatch detection, instrument context in AI prompts, MOFA2 decomposition |
+| `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview, Spectronaut 20+ key-value RunOverview), contrast mismatch detection, instrument context in AI prompts, DPC-Quant methodology note in Claude export, MOFA2 decomposition |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes, remote history |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt/NCBI search, unified activity log, SSH file browser helpers, SLURM proxy |
@@ -65,7 +65,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 
 **Progressive reveal**: `nav_hide()`/`nav_show()` on `"main_tabs"`. Hidden on startup via `session$onFlushed(once=TRUE)`:
 - **Always visible**: New Search (if `search_enabled`), Analysis > Data Overview, About, Education, Facility (if `is_core_facility`)
-- **QC**: shown when `values$raw_data` not NULL OR `values$tic_traces` not NULL
+- **QC**: shown when `values$raw_data` not NULL OR `values$tic_traces` not NULL. Sub-tabs: TIC traces (faceted/overlay/metrics), Data Completeness (detection vs inferred analysis, Jaccard dendrogram).
 - **DE Dashboard, GSEA, MOFA2, Run Comparator, AI Analysis, Output**: shown when `values$fit` not NULL (Comparator also shown when `values$comparator_results` exists). PCA and Expression Grid also work without `values$fit` when quantification is complete (no-replicates mode).
 - **Phosphoproteomics**: shown when `values$phospho_detected$detected` is TRUE
 
@@ -73,7 +73,7 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 `"QC"`, `"DE Dashboard"`, `"Gene Set Enrichment"`, `"mofa_tab"`, `"comparator_tab"`, `"AI Analysis"`, `"Output"`, `"Phosphoproteomics"`, `"Data Overview"`, `"data_overview_tabs"`, `"Assign Groups & Run"`, `"about_tab"`, `"history_tab"`
 
 #### Analysis dropdown
-- **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Contaminant Analysis, Expression Grid, Data Explorer, AI Summary
+- **Data Overview** — `navset_card_tab(id = "data_overview_tabs")`: Assign Groups & Run, Signal Distribution, Dataset Summary, Replicate Consistency, Contaminant Analysis, Expression Grid, Data Explorer, Data Completeness, AI Summary
 - **DE Dashboard** — `navset_card_tab(id = "de_dashboard_subtabs")`: Volcano (+heatmap), Results Table, PCA, CV Analysis. Comparison selector banner above sub-tabs.
 - **Phosphoproteomics** — conditional on phospho detection
 - **Gene Set Enrichment** — BP/MF/CC/KEGG with per-ontology caching
@@ -219,6 +219,10 @@ On each version release, do ALL of these:
 | SLURM proxy inside Apptainer | SLURM commands not available inside container. Proxy process outside relays commands via temp files. All 9 SLURM command paths covered. |
 | SSH file browser Unix socket path | File browser modal creates SSH connections. Same ControlMaster socket path length constraint applies. |
 | Docker SSH key permissions | Windows Docker bind mounts lose Unix permissions. `Launch_DE-LIMP_Docker.bat` copies keys to container-internal volume with `chmod 600`. |
+| Spectronaut 20+ RunOverview key-value format | Spectronaut 20+ writes RunOverview as 2-column key-value pairs, not wide table. `parse_spectronaut_run_overview()` handles both formats via `ncol()` check. |
+| `unlist()` on nested lists causes row mismatch | Nested list elements expand to multiple rows in `data.frame()`. Use `vapply(x, function(v) paste(v, collapse="; "), character(1))` instead. |
+| Character matrix subsetting fails on Linux | Empty string rownames cause `mat[protein_ids, ]` subscript errors on Linux (works on macOS). Use numeric indices via `match(protein_ids, rownames(mat))`. |
+| Load from HPC needs build-time guard | `conditionalPanel` alone insufficient on HF — button renders briefly before JS hides it. Wrap in `if (!is_hf_space)` in `build_ui()`. |
 
 ## Version History
 
