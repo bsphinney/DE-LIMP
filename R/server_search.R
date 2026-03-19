@@ -1319,9 +1319,9 @@ server_search <- function(input, output, session, values, add_to_log,
 
   # Default starting paths per target
   browse_defaults <- list(
-    raw = "/quobyte/proteomics-grp/",
-    fasta = "/quobyte/proteomics-grp/",
-    parquet = "/quobyte/proteomics-grp/"
+    raw = "/quobyte/proteomics-grp/service/",
+    fasta = "/quobyte/proteomics-grp/de-limp/fasta/",
+    parquet = "/quobyte/proteomics-grp/service/"
   )
 
   # Selected file path for parquet browse mode (file selection, not directory)
@@ -1389,7 +1389,11 @@ server_search <- function(input, output, session, values, add_to_log,
     browse_target("parquet")
     browse_selected_file(NULL)
 
-    start_path <- browse_defaults$parquet
+    # Start at the last search output dir if available, otherwise default
+    ss <- values$diann_search_settings
+    start_path <- if (!is.null(ss) && !is.null(ss$output_dir)) {
+      translate_storage_path(dirname(ss$output_dir), to = "hpc")
+    } else browse_defaults$parquet
     browse_navigate(start_path)
     showModal(ssh_browse_modal())
   })
