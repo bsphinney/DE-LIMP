@@ -1687,8 +1687,8 @@ test_ssh_connection <- function(ssh_config) {
                 sbatch_path = NULL))
   }
 
-  # Step 1: Test basic SSH connectivity (no login shell wrapper)
-  result <- ssh_exec(ssh_config, "echo SSH_OK", login_shell = FALSE)
+  # Step 1: Test basic SSH connectivity (no login shell — fast, 10s timeout)
+  result <- ssh_exec(ssh_config, "echo SSH_OK", login_shell = FALSE, timeout = 10)
   if (!any(grepl("SSH_OK", result$stdout))) {
     msg <- paste(result$stdout, collapse = " ")
     if (!nzchar(msg)) msg <- paste("Exit code", result$status)
@@ -1697,29 +1697,36 @@ test_ssh_connection <- function(ssh_config) {
                 sbatch_path = NULL))
   }
 
-  # Step 2: Probe for sbatch — try multiple approaches
+  # Step 2: Probe for sbatch — try fast approaches first, login shell last
   sbatch_path <- NULL
 
-  # Try 1: login shell with modules
-  result2 <- ssh_exec(ssh_config, "which sbatch 2>/dev/null",
-                       login_shell = TRUE)
+  # Try 1: common HPC paths (fast, no login shell needed)
+  result2 <- ssh_exec(ssh_config,
+    paste("for p in",
+      "/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sbatch",
+      "/usr/bin/sbatch /usr/local/bin/sbatch /opt/slurm/bin/sbatch",
+      "/cm/shared/apps/slurm/current/bin/sbatch;",
+      "do [ -x \"$p\" ] && echo \"$p\" && break; done"),
+    login_shell = FALSE, timeout = 10)
   sbatch_line <- grep("^/", result2$stdout, value = TRUE)
   if (length(sbatch_line) > 0) sbatch_path <- sbatch_line[1]
 
-  # Try 2: common HPC paths
+  # Try 2: command -v (fast, no login shell)
   if (is.null(sbatch_path)) {
     result3 <- ssh_exec(ssh_config,
-      "for p in /usr/bin/sbatch /usr/local/bin/sbatch /opt/slurm/bin/sbatch /cm/shared/apps/slurm/current/bin/sbatch; do [ -x \"$p\" ] && echo \"$p\" && break; done",
-      login_shell = FALSE)
+      "command -v sbatch 2>/dev/null || type -P sbatch 2>/dev/null",
+      login_shell = FALSE, timeout = 10)
     sbatch_line <- grep("^/", result3$stdout, value = TRUE)
     if (length(sbatch_line) > 0) sbatch_path <- sbatch_line[1]
   }
 
-  # Try 3: use locate or find
+  # Try 3: login shell (SLOW — only if fast probes failed, short timeout)
   if (is.null(sbatch_path)) {
-    result4 <- ssh_exec(ssh_config,
-      "command -v sbatch 2>/dev/null || type -P sbatch 2>/dev/null",
-      login_shell = FALSE)
+    result4 <- tryCatch(
+      ssh_exec(ssh_config, "which sbatch 2>/dev/null",
+               login_shell = TRUE, timeout = 10),
+      error = function(e) list(status = 1, stdout = character())
+    )
     sbatch_line <- grep("^/", result4$stdout, value = TRUE)
     if (length(sbatch_line) > 0) sbatch_path <- sbatch_line[1]
   }
