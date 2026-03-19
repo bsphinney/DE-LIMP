@@ -37,6 +37,7 @@
 - [x] **No-replicates mode**: Quantification completes, DE skipped gracefully (v3.7)
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 - [ ] **Thermo .raw TIC extraction**: Extend chromatography QC to Thermo files
+- [ ] **XIC viewer over SSH**: Currently requires local file access. Need SCP download of `_xic/*.xic.parquet` files from HPC. Large files (100+ MB/sample) — consider streaming or on-demand per-protein download.
 
 ## DPC-Quant Detection Transparency (per statistician review)
 - [ ] **Expression Grid tooltips**: Hover shows nObs, SE, 95% CI per cell (zero risk, high value)
