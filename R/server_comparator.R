@@ -4452,11 +4452,14 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
           # 1. Settings diff CSV
           setProgress(0.2, detail = "Writing settings...")
+          message("[Export] Step 1: settings_diff — ", nrow(res$settings_diff), " rows, ",
+                  ncol(res$settings_diff), " cols: ", paste(names(res$settings_diff), collapse=", "))
           settings_file <- file.path(tmp_dir, "settings_diff.csv")
           write.csv(res$settings_diff, settings_file, row.names = FALSE)
           files_to_zip <- c(files_to_zip, settings_file)
 
           # 2. Protein universe CSV
+          message("[Export] Step 2: protein_universe")
           setProgress(0.3, detail = "Writing protein universe...")
           universe_file <- file.path(tmp_dir, "protein_universe.csv")
           write.csv(res$protein_universe, universe_file, row.names = FALSE)
@@ -4464,6 +4467,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
           # 3. DE results combined (if available)
           if (!is.null(res$de_concordance)) {
+            message("[Export] Step 3: DE results — merged has ", nrow(res$de_concordance$merged), " rows")
             setProgress(0.4, detail = "Writing DE results...")
 
             merged_file <- file.path(tmp_dir, "de_results_combined.csv")
@@ -4483,6 +4487,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
                 "missing_pct_A", "missing_pct_B", "hypothesis", "hypothesis_category", "confidence"),
               names(disc_export)
             )
+            message("[Export] Step 4: discordant — ", nrow(disc_export), " rows, cols: ", paste(export_cols, collapse=", "))
             write.csv(disc_export[, export_cols], disc_file, row.names = FALSE)
             files_to_zip <- c(files_to_zip, disc_file)
           }
@@ -4508,6 +4513,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           }
 
           # 5. Comparison context
+          message("[Export] Step 5: context")
           setProgress(0.6, detail = "Writing context...")
           context_lines <- c(
             "# Run Comparison Context",
@@ -4573,6 +4579,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           writeLines(context_lines, context_file)
           files_to_zip <- c(files_to_zip, context_file)
 
+          message("[Export] Step 5b: excluded files")
           # 5b. Excluded files (if any)
           if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
             excl_file <- file.path(tmp_dir, "excluded_files.csv")
@@ -4635,6 +4642,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             }
           }, error = function(e) message("[Export] pg_matrix: ", e$message))
 
+          message("[Export] Step 5e: data quality summary")
           # 5e. Data quality summary (per-sample protein counts + missingness from pg_matrix)
           tryCatch({
             pg_file_path <- file.path(tmp_dir, "diann_pg_matrix.tsv")
@@ -4673,6 +4681,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             }
           }, error = function(e) message("[Export] data_quality_summary: ", e$message))
 
+          message("[Export] Step 5f: protein confidence")
           # 5f. Protein confidence (DPC-Quant n.observations + standard.error)
           tryCatch({
             n_obs <- values$y_protein$other$n.observations
@@ -4691,6 +4700,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             }
           }, error = function(e) message("[Export] protein_confidence: ", e$message))
 
+          message("[Export] Step 5g: session RDS")
           # 5g. Session RDS (full reproducibility state)
           tryCatch({
             session_data <- list(
@@ -4712,6 +4722,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             provenance_notes <- c(provenance_notes, "- `session.rds` - Full session state for reproducibility")
           }, error = function(e) message("[Export] session.rds: ", e$message))
 
+          message("[Export] Step 6: Claude prompt")
           # 6. Claude prompt
           setProgress(0.8, detail = "Building prompt...")
           prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative, values$instrument_metadata)
@@ -4719,6 +4730,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           writeLines(prompt, prompt_file)
           files_to_zip <- c(files_to_zip, prompt_file)
 
+          message("[Export] Step 7: search provenance")
           # 7. DIA-NN search provenance (graceful — skip if unavailable)
           setProgress(0.85, detail = "Extracting search provenance...")
 
