@@ -50,9 +50,11 @@ cal_z_score <- function(x) { (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE) }
 # protein_ids: character vector of protein IDs to classify (must match rownames of n_obs_mat)
 compute_detection_class <- function(n_obs_mat, protein_ids) {
   if (is.null(n_obs_mat)) return(rep(NA_character_, length(protein_ids)))
+  rn <- rownames(n_obs_mat)
   vapply(protein_ids, function(pid) {
-    if (!pid %in% rownames(n_obs_mat)) return(NA_character_)
-    obs <- n_obs_mat[pid, ]
+    idx <- match(pid, rn)
+    if (is.na(idx)) return(NA_character_)
+    obs <- n_obs_mat[idx, ]
     if (all(obs > 0)) {
       "Detected_All"
     } else if (all(obs == 0)) {
