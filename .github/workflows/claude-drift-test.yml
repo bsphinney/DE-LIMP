@@ -6,7 +6,7 @@ name: Claude Analysis Drift Test
 
 on:
   schedule:
-    - cron: '0 10 * * 1'  # Every Monday at 10:00 UTC (3 AM Pacific)
+    - cron: '0 10 * * *'  # Every day at 10:00 UTC (3 AM Pacific)
   workflow_dispatch:       # Manual trigger
 
 permissions:
