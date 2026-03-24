@@ -1530,7 +1530,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         ),
                         shinyjs::hidden(
                           downloadButton("download_ai_summary_html",
-                            tagList(icon("download"), " Download as HTML"),
+                            tagList(icon("download"), " Download as Markdown"),
                             class = "btn-success btn-lg",
                             style = "padding: 12px 30px; font-size: 1.1em;"
                           )
