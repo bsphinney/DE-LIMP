@@ -654,8 +654,10 @@ server_ai <- function(input, output, session, values) {
                 rows <- which(pg == p)
                 sub_mat <- raw_mat[rows, , drop = FALSE]
                 detected <- colSums(!is.na(sub_mat) & is.finite(sub_mat))
-                c(Protein.Group = p, Total_Precursors = nrow(sub_mat),
-                  setNames(as.list(detected), paste0("Detected_", colnames(raw_mat))))
+                det_list <- as.list(detected)
+                names(det_list) <- paste0("Detected_", colnames(raw_mat))
+                data.frame(Protein.Group = p, Total_Precursors = nrow(sub_mat),
+                  det_list, stringsAsFactors = FALSE, check.names = FALSE)
               }))
               det_df <- as.data.frame(det_counts, stringsAsFactors = FALSE)
               det_file <- file.path(tmp_dir, "detection_matrix.csv")
@@ -1250,7 +1252,9 @@ server_ai <- function(input, output, session, values) {
         # For large datasets (>100 samples), send group-level summary stats
         # instead of per-sample expression to stay within token limits
         if (n_samples > 100 && !is.null(values$metadata)) {
-          exprs_mat <- values$y_protein$E[rownames(df_de), , drop = FALSE]
+          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
+          row_idx <- row_idx[!is.na(row_idx)]
+          exprs_mat <- values$y_protein$E[row_idx, , drop = FALSE]
           meta <- values$metadata[values$metadata$Group != "", ]
           group_stats <- do.call(cbind, lapply(unique(meta$Group), function(g) {
             cols <- intersect(meta$File.Name[meta$Group == g], colnames(exprs_mat))
@@ -1264,7 +1268,9 @@ server_ai <- function(input, output, session, values) {
           }))
           df_full <- cbind(Protein = rownames(df_de), df_de, group_stats)
         } else {
-          df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ])
+          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
+          row_idx <- row_idx[!is.na(row_idx)]
+          df_exprs <- as.data.frame(values$y_protein$E[row_idx, ])
           df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
         }
 
@@ -1297,7 +1303,9 @@ server_ai <- function(input, output, session, values) {
         if (!is.null(values$plot_selected_proteins)) { missing_ids <- setdiff(values$plot_selected_proteins, rownames(df_de)); if (length(missing_ids) > 0) { valid_missing <- intersect(missing_ids, rownames(values$fit$coefficients)); if(length(valid_missing) > 0) { df_extra <- topTable(values$fit, coef=input$contrast_selector, number=Inf)[valid_missing, ]; df_de <- rbind(df_de, df_extra) } } }
         # For large datasets (>100 samples), send group-level summary stats
         if (n_samples > 100 && !is.null(values$metadata)) {
-          exprs_mat <- values$y_protein$E[rownames(df_de), , drop = FALSE]
+          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
+          row_idx <- row_idx[!is.na(row_idx)]
+          exprs_mat <- values$y_protein$E[row_idx, , drop = FALSE]
           meta <- values$metadata[values$metadata$Group != "", ]
           group_stats <- do.call(cbind, lapply(unique(meta$Group), function(g) {
             cols <- intersect(meta$File.Name[meta$Group == g], colnames(exprs_mat))
@@ -1311,7 +1319,9 @@ server_ai <- function(input, output, session, values) {
           }))
           df_full <- cbind(Protein = rownames(df_de), df_de, group_stats)
         } else {
-          df_exprs <- as.data.frame(values$y_protein$E[rownames(df_de), ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
+          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
+          row_idx <- row_idx[!is.na(row_idx)]
+          df_exprs <- as.data.frame(values$y_protein$E[row_idx, ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
         }
         incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
         qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }

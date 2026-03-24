@@ -628,8 +628,14 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     has_dpc <- !is.null(n_obs_mat) && !is.null(se_mat) && prot_id %in% rownames(n_obs_mat)
 
     if (has_dpc) {
-      nobs_vec <- n_obs_mat[prot_id, ]
-      se_vec <- se_mat[prot_id, ]
+      idx <- match(prot_id, rownames(n_obs_mat))
+      if (is.na(idx)) has_dpc <- FALSE
+    }
+
+    if (has_dpc) {
+      nobs_vec <- n_obs_mat[idx, ]
+      se_idx <- match(prot_id, rownames(se_mat))
+      se_vec <- se_mat[if (!is.na(se_idx)) se_idx else idx, ]
       dpc_df <- data.frame(
         File.Name = names(nobs_vec),
         nObs = as.numeric(nobs_vec),
@@ -1977,14 +1983,16 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
             # Add n.observations columns (prefixed nObs_)
             for (j in seq_len(ncol(n_obs))) {
               col_label <- if (!is.null(values$metadata)) {
-                paste0("nObs_S", values$metadata$ID[match(colnames(n_obs)[j], values$metadata$File.Name)])
+                mid <- match(colnames(n_obs)[j], values$metadata$File.Name)
+                paste0("nObs_S", if (!is.na(mid)) values$metadata$ID[mid] else colnames(n_obs)[j])
               } else paste0("nObs_", colnames(n_obs)[j])
               conf_df[[col_label]] <- n_obs[, j]
             }
             # Add standard.error columns (prefixed SE_)
             for (j in seq_len(ncol(se_mat))) {
               col_label <- if (!is.null(values$metadata)) {
-                paste0("SE_S", values$metadata$ID[match(colnames(se_mat)[j], values$metadata$File.Name)])
+                mid <- match(colnames(se_mat)[j], values$metadata$File.Name)
+                paste0("SE_S", if (!is.na(mid)) values$metadata$ID[mid] else colnames(se_mat)[j])
               } else paste0("SE_", colnames(se_mat)[j])
               conf_df[[col_label]] <- round(se_mat[, j], 4)
             }

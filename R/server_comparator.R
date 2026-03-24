@@ -1815,6 +1815,7 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
     discordant$.imputation_b <- NULL
     conf_order <- c("High" = 1, "Medium" = 2, "Low" = 3)
     discordant$conf_rank <- conf_order[discordant$confidence]
+    discordant$conf_rank[is.na(discordant$conf_rank)] <- 4  # unknown confidence sorts last
     discordant <- discordant[order(discordant$conf_rank,
                                    -abs(discordant$logFC_A - discordant$logFC_B)), ]
     discordant$conf_rank <- NULL
