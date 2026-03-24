@@ -2,7 +2,8 @@
 # Claude Analysis Drift Report
 #
 # Reads all golden baseline .rds files and produces a summary table
-# showing how Claude's analysis has changed over time.
+# showing how Claude's analysis has changed over time, with trend
+# assessment and gene stability analysis.
 #
 # Usage:
 #   Rscript tests/drift_report.R
@@ -54,6 +55,16 @@ rows <- lapply(seq_along(all_findings), function(i) {
     overlap_str <- "(baseline)"
   }
 
+  # Gene overlap with baseline (first run)
+  if (i > 1) {
+    baseline_overlap <- intersect(f$genes_mentioned, all_findings[[1]]$genes_mentioned)
+    baseline_pct <- round(length(baseline_overlap) / max(length(all_findings[[1]]$genes_mentioned), 1) * 100)
+    baseline_str <- paste0(baseline_pct, "%")
+  } else {
+    baseline_pct <- NA
+    baseline_str <- "(baseline)"
+  }
+
   # Key proteins found
   n_key <- if (!is.null(f$n_key_found)) f$n_key_found else sum(f$key_proteins_found)
   missing_key <- KEY_PROTEINS[!f$key_proteins_found]
@@ -75,14 +86,18 @@ rows <- lapply(seq_along(all_findings), function(i) {
     Words = f$word_count,
     Up = f$n_up_mentions,
     Down = f$n_down_mentions,
-    Overlap = overlap_str,
+    Overlap_Prev = overlap_str,
+    Overlap_Base = baseline_str,
     stringsAsFactors = FALSE
   )
 })
 
 report <- do.call(rbind, rows)
 
-# Print report
+# ============================================================================
+#   PRINT REPORT
+# ============================================================================
+
 cat("\n")
 cat("=== Claude Analysis Drift Report ===\n")
 cat(sprintf("Golden baselines: %d (from %s to %s)\n",
@@ -92,7 +107,10 @@ cat("\n")
 # Print table
 print(report, row.names = FALSE, right = FALSE)
 
-# Print alerts
+# ============================================================================
+#   ALERTS
+# ============================================================================
+
 cat("\n--- Alerts ---\n")
 alerts <- 0
 
@@ -107,10 +125,20 @@ for (i in seq_len(nrow(report))) {
 # Check for overlap drops below 50%
 if (nrow(report) >= 2) {
   for (i in 2:nrow(report)) {
-    pct <- as.numeric(sub("%", "", report$Overlap[i]))
+    pct <- as.numeric(sub("%", "", report$Overlap_Prev[i]))
     if (!is.na(pct) && pct < 50) {
-      cat(sprintf("  [!] %s: Gene overlap dropped to %s (threshold: 50%%)\n",
-        report$Date[i], report$Overlap[i]))
+      cat(sprintf("  [!] %s: Gene overlap dropped to %s vs previous (threshold: 50%%)\n",
+        report$Date[i], report$Overlap_Prev[i]))
+      alerts <- alerts + 1
+    }
+  }
+
+  # Check for baseline drift below 40%
+  for (i in 2:nrow(report)) {
+    pct <- as.numeric(sub("%", "", report$Overlap_Base[i]))
+    if (!is.na(pct) && pct < 40) {
+      cat(sprintf("  [!] %s: Gene overlap vs BASELINE dropped to %s (threshold: 40%%)\n",
+        report$Date[i], report$Overlap_Base[i]))
       alerts <- alerts + 1
     }
   }
@@ -128,28 +156,188 @@ if (nrow(report) >= 2) {
       alerts <- alerts + 1
     }
   }
+
+  # Check for sudden gene count changes (>50% swing)
+  for (i in 2:nrow(report)) {
+    prev_genes <- report$Genes[i - 1]
+    curr_genes <- report$Genes[i]
+    if (prev_genes > 0 && abs(curr_genes - prev_genes) / prev_genes > 0.5) {
+      cat(sprintf("  [!] %s: Gene count changed from %d to %d (>50%% swing)\n",
+        report$Date[i], prev_genes, curr_genes))
+      alerts <- alerts + 1
+    }
+  }
 }
 
 if (alerts == 0) cat("  None — all runs within normal range.\n")
 
-# Trend summary
+# ============================================================================
+#   GENE STABILITY ANALYSIS
+# ============================================================================
+
+if (length(all_findings) >= 2) {
+  cat("\n--- Gene Stability ---\n")
+
+  # Core genes: mentioned in ALL runs
+  all_gene_sets <- lapply(all_findings, `[[`, "genes_mentioned")
+  core_genes <- Reduce(intersect, all_gene_sets)
+  cat(sprintf("  Core genes (in every run): %d", length(core_genes)))
+  if (length(core_genes) > 0 && length(core_genes) <= 20) {
+    cat(sprintf(" — %s", paste(sort(core_genes), collapse = ", ")))
+  }
+  cat("\n")
+
+  # Frequent genes: mentioned in >= 75% of runs
+  gene_freq <- table(unlist(all_gene_sets))
+  threshold_75 <- ceiling(length(all_findings) * 0.75)
+  frequent_genes <- sort(names(gene_freq[gene_freq >= threshold_75]))
+  if (length(frequent_genes) > length(core_genes)) {
+    near_core <- setdiff(frequent_genes, core_genes)
+    cat(sprintf("  Frequent genes (>=75%% of runs): %d", length(frequent_genes)))
+    if (length(near_core) > 0 && length(near_core) <= 15) {
+      cat(sprintf(" — additional: %s", paste(near_core, collapse = ", ")))
+    }
+    cat("\n")
+  }
+
+  # Volatile genes: mentioned in exactly 1 run
+  one_off_genes <- names(gene_freq[gene_freq == 1])
+  cat(sprintf("  One-off genes (single run only): %d\n", length(one_off_genes)))
+
+  # All unique genes ever mentioned
+  all_unique <- unique(unlist(all_gene_sets))
+  cat(sprintf("  Total unique genes across all runs: %d\n", length(all_unique)))
+
+  # Key protein consistency
+  key_found_per_run <- sapply(all_findings, function(f) {
+    if (!is.null(f$n_key_found)) f$n_key_found else sum(f$key_proteins_found)
+  })
+  if (all(key_found_per_run == length(KEY_PROTEINS))) {
+    cat(sprintf("  Key protein recall: PERFECT (%d/%d in every run)\n",
+      length(KEY_PROTEINS), length(KEY_PROTEINS)))
+  } else {
+    cat(sprintf("  Key protein recall: %s (across %d runs)\n",
+      paste(sprintf("%d/%d", key_found_per_run, length(KEY_PROTEINS)), collapse = ", "),
+      length(all_findings)))
+  }
+}
+
+# ============================================================================
+#   TREND ASSESSMENT (requires 4+ data points)
+# ============================================================================
+
 if (nrow(report) >= 3) {
   cat("\n--- Trends ---\n")
-  overlaps <- as.numeric(sub("%", "", report$Overlap[-1]))
-  overlaps <- overlaps[!is.na(overlaps)]
-  if (length(overlaps) >= 2) {
-    cat(sprintf("  Gene overlap: mean %.0f%%, range %.0f%%–%.0f%%\n",
-      mean(overlaps), min(overlaps), max(overlaps)))
+
+  # Overlap trend (vs previous run)
+  overlaps_prev <- as.numeric(sub("%", "", report$Overlap_Prev[-1]))
+  overlaps_prev <- overlaps_prev[!is.na(overlaps_prev)]
+
+  if (length(overlaps_prev) >= 2) {
+    cat(sprintf("  Gene overlap (vs prev): mean %.0f%%, range %.0f%%–%.0f%%",
+      mean(overlaps_prev), min(overlaps_prev), max(overlaps_prev)))
+
+    if (length(overlaps_prev) >= 3) {
+      # Simple linear trend: positive = improving, negative = degrading
+      trend_coef <- coef(lm(overlaps_prev ~ seq_along(overlaps_prev)))[2]
+      if (abs(trend_coef) < 2) {
+        cat(" → STABLE")
+      } else if (trend_coef > 0) {
+        cat(sprintf(" → IMPROVING (+%.1f%%/run)", trend_coef))
+      } else {
+        cat(sprintf(" → DEGRADING (%.1f%%/run)", trend_coef))
+      }
+    }
+    cat("\n")
   }
-  cat(sprintf("  Word count: mean %d, range %d–%d\n",
+
+  # Overlap trend (vs baseline)
+  overlaps_base <- as.numeric(sub("%", "", report$Overlap_Base[-1]))
+  overlaps_base <- overlaps_base[!is.na(overlaps_base)]
+  if (length(overlaps_base) >= 2) {
+    cat(sprintf("  Gene overlap (vs baseline): mean %.0f%%, range %.0f%%–%.0f%%",
+      mean(overlaps_base), min(overlaps_base), max(overlaps_base)))
+    if (length(overlaps_base) >= 3) {
+      trend_coef <- coef(lm(overlaps_base ~ seq_along(overlaps_base)))[2]
+      if (abs(trend_coef) < 2) {
+        cat(" → STABLE")
+      } else if (trend_coef > 0) {
+        cat(sprintf(" → CONVERGING (+%.1f%%/run)", trend_coef))
+      } else {
+        cat(sprintf(" → DRIFTING (%.1f%%/run)", trend_coef))
+      }
+    }
+    cat("\n")
+  }
+
+  # Word count trend
+  cat(sprintf("  Word count: mean %d, range %d–%d",
     round(mean(report$Words)), min(report$Words), max(report$Words)))
-  cat(sprintf("  Genes mentioned: mean %d, range %d–%d\n",
+  if (nrow(report) >= 4) {
+    wc_coef <- coef(lm(report$Words ~ seq_len(nrow(report))))[2]
+    if (abs(wc_coef) < 20) {
+      cat(" → STABLE")
+    } else if (wc_coef > 0) {
+      cat(sprintf(" → GROWING (+%.0f words/run)", wc_coef))
+    } else {
+      cat(sprintf(" → SHRINKING (%.0f words/run)", wc_coef))
+    }
+  }
+  cat("\n")
+
+  # Gene count trend
+  cat(sprintf("  Genes mentioned: mean %d, range %d–%d",
     round(mean(report$Genes)), min(report$Genes), max(report$Genes)))
+  if (nrow(report) >= 4) {
+    gc_coef <- coef(lm(report$Genes ~ seq_len(nrow(report))))[2]
+    if (abs(gc_coef) < 1) {
+      cat(" → STABLE")
+    } else if (gc_coef > 0) {
+      cat(sprintf(" → EXPANDING (+%.1f genes/run)", gc_coef))
+    } else {
+      cat(sprintf(" → CONTRACTING (%.1f genes/run)", gc_coef))
+    }
+  }
+  cat("\n")
+}
+
+# ============================================================================
+#   OVERALL VERDICT (requires 4+ data points)
+# ============================================================================
+
+if (nrow(report) >= 4) {
+  cat("\n--- Overall Verdict ---\n")
+
+  overlaps <- as.numeric(sub("%", "", report$Overlap_Prev[-1]))
+  overlaps <- overlaps[!is.na(overlaps)]
+  key_recall <- sapply(all_findings, function(f) {
+    if (!is.null(f$n_key_found)) f$n_key_found else sum(f$key_proteins_found)
+  })
+
+  issues <- character(0)
+  if (any(overlaps < 50)) issues <- c(issues, "overlap below 50%")
+  if (any(key_recall < length(KEY_PROTEINS))) issues <- c(issues, "missing key proteins")
+  if (sd(report$Words) / mean(report$Words) > 0.3) issues <- c(issues, "high word count variance")
+
+  mean_overlap <- mean(overlaps)
+  if (length(issues) == 0 && mean_overlap >= 65) {
+    cat("  ✓ HEALTHY — Claude's analysis is consistent and complete.\n")
+    cat(sprintf("    Mean overlap: %.0f%%, Key recall: %d/%d in all runs\n",
+      mean_overlap, length(KEY_PROTEINS), length(KEY_PROTEINS)))
+  } else if (length(issues) == 0) {
+    cat("  ~ ACCEPTABLE — No critical issues, but overlap could be higher.\n")
+    cat(sprintf("    Mean overlap: %.0f%% (target: >65%%)\n", mean_overlap))
+  } else {
+    cat(sprintf("  ⚠ ATTENTION NEEDED — %s\n", paste(issues, collapse = "; ")))
+  }
 }
 
 cat("\n")
 
-# Save CSV if requested
+# ============================================================================
+#   SAVE CSV
+# ============================================================================
+
 if (save_csv) {
   csv_path <- file.path(golden_dir, "drift_report.csv")
   write.csv(report, csv_path, row.names = FALSE)
