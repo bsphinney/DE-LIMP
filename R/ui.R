@@ -280,7 +280,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
         ),
         actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
         br(), br(),
-        textInput("model_name", "Model Name", value = "gemini-3-flash-preview", placeholder = "gemini-3-flash-preview")
+        textInput("model_name", "Model Name", value = "gemini-2.5-flash", placeholder = "gemini-2.5-flash")
       )
     ),
 
