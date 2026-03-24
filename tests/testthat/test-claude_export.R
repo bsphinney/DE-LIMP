@@ -66,6 +66,7 @@ call_claude_api <- function(prompt_text, de_csv_head, api_key) {
     max_tokens = 4096,
     messages = list(list(role = "user", content = user_content))
   )
+  start_time <- Sys.time()
   resp <- httr2::request("https://api.anthropic.com/v1/messages") |>
     httr2::req_headers(
       `x-api-key` = api_key,
@@ -75,13 +76,15 @@ call_claude_api <- function(prompt_text, de_csv_head, api_key) {
     httr2::req_body_json(body) |>
     httr2::req_timeout(120) |>
     httr2::req_perform()
+  elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
   result <- httr2::resp_body_json(resp)
   # Return both text and model metadata
   list(
     text = result$content[[1]]$text,
     model = result$model %||% body$model,
     input_tokens = result$usage$input_tokens %||% NA,
-    output_tokens = result$usage$output_tokens %||% NA
+    output_tokens = result$usage$output_tokens %||% NA,
+    response_time_sec = round(elapsed_sec, 1)
   )
 }
 
@@ -124,13 +127,95 @@ extract_findings <- function(response_text) {
   n_foldchanges <- length(gregexpr("fold[- ]?change|log.?fc|logfc", text_lower)[[1]])
   n_numbers <- length(gregexpr("\\b\\d+\\.\\d+\\b", response_text)[[1]])  # decimal numbers
 
-  # Hedging language (scientific caution)
-  n_hedges <- length(gregexpr("suggest|may|could|potential|appears|likely|possible",
-    text_lower)[[1]])
+  # Hedging language (scientific caution) — extract example sentences
+  hedge_patterns <- "suggest|may|could|potential|appears|likely|possible"
+  n_hedges <- length(gregexpr(hedge_patterns, text_lower)[[1]])
 
-  # Confidence language (definitive statements)
-  n_confident <- length(gregexpr("clearly|strongly|significantly|definitively|robust",
-    text_lower)[[1]])
+  confident_patterns <- "clearly|strongly|significantly|definitively|robust"
+  n_confident <- length(gregexpr(confident_patterns, text_lower)[[1]])
+
+  # Split into sentences — handle markdown line breaks too
+  sentences <- strsplit(response_text, "(?<=[.!?\\n])\\s*(?=[A-Z*#-])", perl = TRUE)[[1]]
+  sentences <- trimws(sentences)
+  sentences <- sentences[nzchar(sentences) & nchar(sentences) > 10]  # drop fragments
+  sentences_lower <- tolower(sentences)
+  hedge_examples <- head(sentences[grepl(hedge_patterns, sentences_lower) &
+                                    nchar(sentences) < 300], 5)
+  confident_examples <- head(sentences[grepl(confident_patterns, sentences_lower) &
+                                        nchar(sentences) < 300], 5)
+
+  # --- Per-key-protein analysis ---
+  # Split response into lines for tighter FC extraction (avoid paragraph-wide grabs)
+  lines <- strsplit(response_text, "\n")[[1]]
+
+  key_protein_details <- lapply(KEY_PROTEINS, function(gene) {
+    # Find sentences mentioning this gene
+    gene_sentences <- sentences[grepl(gene, sentences, fixed = TRUE)]
+
+    # Find LINES mentioning this gene (tighter context for FC extraction)
+    gene_lines <- lines[grepl(gene, lines, fixed = TRUE)]
+
+    # Extract fold changes only from lines that mention THIS gene
+    fc_values <- numeric(0)
+    for (s in gene_lines) {
+      # "logFC = -1.32", "logFC: 1.32", "-2.23 logFC" on the same line
+      # Pattern A: logFC before number
+      fc_match <- regmatches(s, gregexpr("log2?[- ]?[Ff][Cc]\\s*[=:]?\\s*[+]?[-]?[0-9]+\\.?[0-9]*", s))[[1]]
+      if (length(fc_match) > 0) {
+        nums <- as.numeric(regmatches(fc_match, regexpr("[+]?[-]?[0-9]+\\.?[0-9]*$", fc_match)))
+        fc_values <- c(fc_values, nums[!is.na(nums)])
+      }
+      # Pattern B: number before logFC (e.g., "-2.23 logFC")
+      fc_match_b <- regmatches(s, gregexpr("[+]?[-]?[0-9]+\\.?[0-9]*\\s*log2?[Ff][Cc]", s))[[1]]
+      if (length(fc_match_b) > 0) {
+        nums_b <- as.numeric(regmatches(fc_match_b, regexpr("[+]?[-]?[0-9]+\\.?[0-9]*", fc_match_b)))
+        fc_values <- c(fc_values, nums_b[!is.na(nums_b)])
+      }
+      # Pattern C: "X.XX to Y.YY logFC" range
+      fc_range <- regmatches(s, gregexpr("[+]?[-]?[0-9]+\\.?[0-9]*\\s+to\\s+[+]?[-]?[0-9]+\\.?[0-9]*\\s*log", s))[[1]]
+      if (length(fc_range) > 0) {
+        range_nums <- as.numeric(regmatches(fc_range, gregexpr("[+]?[-]?[0-9]+\\.?[0-9]*", fc_range))[[1]])
+        fc_values <- c(fc_values, range_nums[!is.na(range_nums)])
+      }
+      # Pattern D: "GENE (-2.29)" — parenthetical FC right after gene name
+      gene_paren <- regmatches(s, gregexpr(paste0(gene, "\\s*\\([+]?[-]?[0-9]+\\.?[0-9]*\\)"), s))[[1]]
+      if (length(gene_paren) > 0) {
+        nums_d <- as.numeric(regmatches(gene_paren, regexpr("[+]?[-]?[0-9]+\\.?[0-9]*", gene_paren)))
+        fc_values <- c(fc_values, nums_d[!is.na(nums_d)])
+      }
+      # "N.N-fold" patterns
+      fc_match2 <- regmatches(s, gregexpr("[+]?[-]?[0-9]+\\.?[0-9]*[- ]?fold", s))[[1]]
+      if (length(fc_match2) > 0) {
+        nums2 <- as.numeric(regmatches(fc_match2, regexpr("[+]?[-]?[0-9]+\\.?[0-9]*", fc_match2)))
+        fc_values <- c(fc_values, nums2[!is.na(nums2)])
+      }
+    }
+    fc_values <- unique(fc_values)
+
+    # Direction: up, down, or unclear
+    direction <- if (length(gene_lines) == 0) "not mentioned"
+      else if (any(grepl("upregulated|up-regulated|increased|elevated|\\+[0-9]", tolower(gene_lines)))) "up"
+      else if (any(grepl("downregulated|down-regulated|decreased|reduced|\\-[0-9]", tolower(gene_lines)))) "down"
+      else "mentioned (no direction)"
+
+    # Best example: prefer a line with FC, else first mention, truncated
+    best_line <- if (any(grepl("logFC|fold", gene_lines, ignore.case = TRUE)))
+      gene_lines[grepl("logFC|fold", gene_lines, ignore.case = TRUE)][1]
+    else if (length(gene_lines) > 0) gene_lines[1]
+    else NA_character_
+    if (!is.na(best_line) && nchar(best_line) > 200)
+      best_line <- paste0(substr(best_line, 1, 197), "...")
+
+    list(
+      gene = gene,
+      found = any(grepl(gene, response_text, fixed = TRUE)),
+      n_mentions = length(gene_lines),
+      direction = direction,
+      fold_changes = fc_values,
+      example_sentence = best_line
+    )
+  })
+  names(key_protein_details) <- KEY_PROTEINS
 
   list(
     sections_found = sections_found,
@@ -147,6 +232,9 @@ extract_findings <- function(response_text) {
     n_decimal_numbers = n_numbers,
     n_hedges = n_hedges,
     n_confident = n_confident,
+    hedge_examples = hedge_examples,
+    confident_examples = confident_examples,
+    key_protein_details = key_protein_details,
     word_count = length(strsplit(response_text, "\\s+")[[1]]),
     timestamp = Sys.time()
   )
@@ -285,6 +373,7 @@ test_that("Claude analysis mentions key proteins and has all sections", {
   findings$model <- api_result$model
   findings$input_tokens <- api_result$input_tokens
   findings$output_tokens <- api_result$output_tokens
+  findings$response_time_sec <- api_result$response_time_sec
 
   # --- Save for golden comparison ---
   golden_dir <- file.path(project_root, "tests", "golden")

@@ -94,6 +94,9 @@ rows <- lapply(seq_along(all_findings), function(i) {
     Down = f$n_down_mentions,
     Tokens_In = f$input_tokens %||% NA_integer_,
     Tokens_Out = f$output_tokens %||% NA_integer_,
+    Resp_Sec = f$response_time_sec %||% NA_real_,
+    Hedges = f$n_hedges %||% NA_integer_,
+    Confident = f$n_confident %||% NA_integer_,
     Overlap_Prev = overlap_str,
     Overlap_Base = baseline_str,
     stringsAsFactors = FALSE
@@ -246,6 +249,61 @@ if (length(all_findings) >= 2) {
     cat(sprintf("  Key protein recall: %s (across %d runs)\n",
       paste(sprintf("%d/%d", key_found_per_run, length(KEY_PROTEINS)), collapse = ", "),
       length(all_findings)))
+  }
+
+  # Genes gained/lost between consecutive runs
+  if (length(all_findings) >= 2) {
+    cat("\n  Run-to-run gene changes:\n")
+    for (i in 2:length(all_findings)) {
+      prev_genes <- all_findings[[i - 1]]$genes_mentioned
+      curr_genes <- all_findings[[i]]$genes_mentioned
+      gained <- setdiff(curr_genes, prev_genes)
+      lost <- setdiff(prev_genes, curr_genes)
+      date_i <- report$Date[i]
+      if (length(gained) > 0)
+        cat(sprintf("    %s gained: %s\n", date_i, paste(gained, collapse = ", ")))
+      if (length(lost) > 0)
+        cat(sprintf("    %s lost:   %s\n", date_i, paste(lost, collapse = ", ")))
+    }
+  }
+
+  # Per-key-protein detail (fold changes, direction, example quotes)
+  has_details <- any(sapply(all_findings, function(f) !is.null(f$key_protein_details)))
+  if (has_details) {
+    cat("\n--- Key Protein Details ---\n")
+    for (gene in KEY_PROTEINS) {
+      cat(sprintf("\n  %s:\n", gene))
+      for (i in seq_along(all_findings)) {
+        f <- all_findings[[i]]
+        if (is.null(f$key_protein_details) || is.null(f$key_protein_details[[gene]])) {
+          cat(sprintf("    %s: (no detail recorded)\n", report$Date[i]))
+          next
+        }
+        d <- f$key_protein_details[[gene]]
+        fc_str <- if (length(d$fold_changes) > 0) paste(d$fold_changes, collapse = ", ") else "none cited"
+        cat(sprintf("    %s: %s | FC: %s | mentions: %d\n",
+          report$Date[i], d$direction, fc_str, d$n_mentions))
+        if (!is.na(d$example_sentence) && nchar(d$example_sentence) < 200)
+          cat(sprintf("      \"%s\"\n", d$example_sentence))
+      }
+    }
+  }
+
+  # Hedging/confident example quotes
+  has_examples <- any(sapply(all_findings, function(f) length(f$hedge_examples %||% character()) > 0))
+  if (has_examples) {
+    cat("\n--- Language Examples (latest run) ---\n")
+    latest <- all_findings[[length(all_findings)]]
+    if (length(latest$hedge_examples %||% character()) > 0) {
+      cat("  Hedging:\n")
+      for (ex in head(latest$hedge_examples, 3))
+        cat(sprintf("    \"%s\"\n", substr(ex, 1, 150)))
+    }
+    if (length(latest$confident_examples %||% character()) > 0) {
+      cat("  Confident:\n")
+      for (ex in head(latest$confident_examples, 3))
+        cat(sprintf("    \"%s\"\n", substr(ex, 1, 150)))
+    }
   }
 }
 
