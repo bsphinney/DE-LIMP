@@ -27,6 +27,13 @@ From Claude's free-text response, we extract quantitative metrics:
 | **Gene Overlap (vs baseline)** | Long-term drift from first run | Same metric but compared to the very first golden baseline |
 | **Word Count** | Response verbosity | Total words in response |
 | **Up/Down Mentions** | Directional language balance | Count of "upregulated/increased" vs "downregulated/decreased" |
+| **P-value References** | Statistical rigor | Count of "p-value", "FDR", "q-value" mentions |
+| **Fold Change References** | Quantitative specificity | Count of "fold change", "logFC" mentions |
+| **Decimal Numbers** | Data citation density | Count of specific numbers (e.g., "0.05", "1.32") |
+| **Hedging Language** | Scientific caution | Count of "suggest", "may", "could", "potential", "appears" |
+| **Confident Language** | Definitive statements | Count of "clearly", "strongly", "significantly", "robust" |
+| **Model ID** | Which Claude model was used | Captured from API response (e.g., `claude-sonnet-4-20250514`) |
+| **Input/Output Tokens** | API usage and response size | Token counts from API response metadata |
 
 ### 3. Ground Truth
 

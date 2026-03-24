@@ -76,7 +76,13 @@ call_claude_api <- function(prompt_text, de_csv_head, api_key) {
     httr2::req_timeout(120) |>
     httr2::req_perform()
   result <- httr2::resp_body_json(resp)
-  result$content[[1]]$text
+  # Return both text and model metadata
+  list(
+    text = result$content[[1]]$text,
+    model = result$model %||% body$model,
+    input_tokens = result$usage$input_tokens %||% NA,
+    output_tokens = result$usage$output_tokens %||% NA
+  )
 }
 
 extract_findings <- function(response_text) {
@@ -113,6 +119,19 @@ extract_findings <- function(response_text) {
   n_down <- max(0L, length(gregexpr("downregulated|down-regulated|decreased|reduced",
     text_lower)[[1]]))
 
+  # Statistical rigor: does Claude cite specific numbers?
+  n_pvalues <- length(gregexpr("p[- ]?value|adj\\.?p|fdr|q[- ]?value", text_lower)[[1]])
+  n_foldchanges <- length(gregexpr("fold[- ]?change|log.?fc|logfc", text_lower)[[1]])
+  n_numbers <- length(gregexpr("\\b\\d+\\.\\d+\\b", response_text)[[1]])  # decimal numbers
+
+  # Hedging language (scientific caution)
+  n_hedges <- length(gregexpr("suggest|may|could|potential|appears|likely|possible",
+    text_lower)[[1]])
+
+  # Confidence language (definitive statements)
+  n_confident <- length(gregexpr("clearly|strongly|significantly|definitively|robust",
+    text_lower)[[1]])
+
   list(
     sections_found = sections_found,
     genes_mentioned = genes_mentioned,
@@ -123,6 +142,11 @@ extract_findings <- function(response_text) {
     n_stable_found = sum(stable_found),
     n_up_mentions = n_up,
     n_down_mentions = n_down,
+    n_pvalue_refs = n_pvalues,
+    n_fc_refs = n_foldchanges,
+    n_decimal_numbers = n_numbers,
+    n_hedges = n_hedges,
+    n_confident = n_confident,
     word_count = length(strsplit(response_text, "\\s+")[[1]]),
     timestamp = Sys.time()
   )
@@ -253,8 +277,14 @@ test_that("Claude analysis mentions key proteins and has all sections", {
     collapse = "\n")
 
   # Call Claude API
-  response <- call_claude_api(prompt_text, de_head, api_key)
+  api_result <- call_claude_api(prompt_text, de_head, api_key)
+  response <- api_result$text
   findings <- extract_findings(response)
+
+  # Store model metadata in findings for drift tracking
+  findings$model <- api_result$model
+  findings$input_tokens <- api_result$input_tokens
+  findings$output_tokens <- api_result$output_tokens
 
   # --- Save for golden comparison ---
   golden_dir <- file.path(project_root, "tests", "golden")

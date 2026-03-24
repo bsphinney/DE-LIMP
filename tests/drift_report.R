@@ -76,8 +76,14 @@ rows <- lapply(seq_along(all_findings), function(i) {
   n_sections <- sum(f$sections_found)
   total_sections <- length(f$sections_found)
 
+  # Model info (added in later versions — may be NULL in older baselines)
+  model_id <- f$model %||% "unknown"
+  # Shorten model ID for display: "claude-sonnet-4-20250514" -> "sonnet-4"
+  model_short <- sub("^claude-", "", sub("-\\d{8}$", "", model_id))
+
   data.frame(
     Date = date_display,
+    Model = model_short,
     Key_Proteins = sprintf("%d/%d", n_key, length(KEY_PROTEINS)),
     Missing = if (length(missing_key) > 0) paste(missing_key, collapse = ", ") else "",
     Stable = sprintf("%d/%d", n_stable, length(STABLE_MARKERS)),
@@ -86,6 +92,8 @@ rows <- lapply(seq_along(all_findings), function(i) {
     Words = f$word_count,
     Up = f$n_up_mentions,
     Down = f$n_down_mentions,
+    Tokens_In = f$input_tokens %||% NA_integer_,
+    Tokens_Out = f$output_tokens %||% NA_integer_,
     Overlap_Prev = overlap_str,
     Overlap_Base = baseline_str,
     stringsAsFactors = FALSE
@@ -113,6 +121,17 @@ print(report, row.names = FALSE, right = FALSE)
 
 cat("\n--- Alerts ---\n")
 alerts <- 0
+
+# Check for model changes
+if (nrow(report) >= 2) {
+  for (i in 2:nrow(report)) {
+    if (report$Model[i] != report$Model[i - 1]) {
+      cat(sprintf("  [*] %s: MODEL CHANGED: %s -> %s\n",
+        report$Date[i], report$Model[i - 1], report$Model[i]))
+      alerts <- alerts + 1
+    }
+  }
+}
 
 # Check for key protein drops
 for (i in seq_len(nrow(report))) {
@@ -176,6 +195,14 @@ if (alerts == 0) cat("  None — all runs within normal range.\n")
 # ============================================================================
 
 if (length(all_findings) >= 2) {
+  cat("\n--- Model History ---\n")
+  model_runs <- table(report$Model)
+  for (m in names(model_runs)) {
+    cat(sprintf("  %s: %d runs\n", m, model_runs[m]))
+  }
+  n_changes <- sum(report$Model[-1] != report$Model[-nrow(report)])
+  cat(sprintf("  Model changes detected: %d\n", n_changes))
+
   cat("\n--- Gene Stability ---\n")
 
   # Core genes: mentioned in ALL runs
