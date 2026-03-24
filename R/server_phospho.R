@@ -1372,6 +1372,20 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
     site_info <- values$phospho_site_info
 
+    # Limit to top 500 DE sites (by adj.P.Val) if DE results are available
+    if (!is.null(values$phospho_fit) && !is.null(input$phospho_contrast_selector)) {
+      de_top <- tryCatch({
+        tt <- limma::topTable(values$phospho_fit,
+                              coef = input$phospho_contrast_selector,
+                              number = 500, sort.by = "p")
+        rownames(tt)
+      }, error = function(e) NULL)
+      if (!is.null(de_top)) {
+        site_info <- site_info[site_info$SiteID %in% de_top |
+                               rownames(site_info) %in% de_top, ]
+      }
+    }
+
     # Extract unique accessions (first accession from Protein.Group)
     accessions <- unique(vapply(
       strsplit(site_info$Protein.Group, "[;]"),
@@ -1381,7 +1395,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     accessions <- accessions[!is.na(accessions) & nzchar(accessions)]
 
     withProgress(message = "Annotating phosphosites...", {
-      incProgress(0.05, detail = sprintf("Querying UniProt for %d proteins...", length(accessions)))
+      incProgress(0.05, detail = sprintf("Querying UniProt for %d proteins (top 500 DE sites)...", length(accessions)))
 
       # --- Query UniProt ---
       uniprot_sites <- tryCatch(
@@ -1436,7 +1450,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       )
 
       add_to_log("Phosphosite Annotation", c(
-        sprintf("# Queried %d unique accessions against UniProt REST API", length(accessions)),
+        sprintf("# Queried %d unique accessions (top 500 DE sites) against UniProt REST API", length(accessions)),
         sprintf("# UniProt: %d known phosphosites found", nrow(uniprot_sites)),
         sprintf("# PhosphoSitePlus (KSEAapp): %d substrate sites in database", nrow(psp_sites)),
         sprintf("# Result: %d known / %d total sites", n_known, n_total)
