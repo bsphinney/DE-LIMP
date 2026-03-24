@@ -30,10 +30,35 @@ From Claude's free-text response, we extract quantitative metrics:
 | **P-value References** | Statistical rigor | Count of "p-value", "FDR", "q-value" mentions |
 | **Fold Change References** | Quantitative specificity | Count of "fold change", "logFC" mentions |
 | **Decimal Numbers** | Data citation density | Count of specific numbers (e.g., "0.05", "1.32") |
-| **Hedging Language** | Scientific caution | Count of "suggest", "may", "could", "potential", "appears" |
-| **Confident Language** | Definitive statements | Count of "clearly", "strongly", "significantly", "robust" |
+| **Hedging Language** | Scientific caution | Count of "suggest", "may", "could", "potential", "appears", "likely", "possible" |
+| **Confident Language** | Definitive statements | Count of "clearly", "strongly", "significantly", "definitively", "robust" |
 | **Model ID** | Which Claude model was used | Captured from API response (e.g., `claude-sonnet-4-20250514`) |
 | **Input/Output Tokens** | API usage and response size | Token counts from API response metadata |
+
+### Hedging vs Confident Language — Why We Track This
+
+In scientific writing, **hedging** is the use of cautious, tentative language to qualify claims:
+- *"These results **suggest** that NAMPT **may** play a role..."*
+- *"ALDH3A1 **could** be a **potential** biomarker..."*
+- *"The data **appears** to indicate..."*
+
+**Confident language** makes stronger, more definitive assertions:
+- *"NAMPT is **clearly** upregulated..."*
+- *"The results **strongly** support..."*
+- *"This protein is **significantly** enriched..."*
+
+**Why it matters for drift detection:**
+- A good scientific analysis should **hedge more than it asserts** — proteomics data with 3 replicates per group warrants caution
+- If the hedge/confident ratio shifts dramatically between model versions, the model's "personality" may have changed
+- Too little hedging = overconfident claims that could mislead researchers
+- Too much hedging = vague analysis that isn't actionable
+- Our March 24 baseline: 18 hedges vs 2 confident statements (9:1 ratio) — appropriately cautious
+
+**Tracked keywords:**
+| Type | Keywords |
+|------|----------|
+| Hedging | suggest, may, could, potential, appears, likely, possible |
+| Confident | clearly, strongly, significantly, definitively, robust |
 
 ### 3. Ground Truth
 
