@@ -221,7 +221,43 @@ server_gsea <- function(input, output, session, values, add_to_log) {
         }
         library(org_db_name, character.only = TRUE)
 
-        # --- ID mapping (UNIPROT → ENTREZID, fallback to SYMBOL) ---
+        # --- ID mapping (UNIPROT → ENTREZID, with NCBI RefSeq + SYMBOL fallbacks) ---
+
+        # For NCBI RefSeq accessions (XP_, NP_, WP_): convert to gene symbols first
+        is_ncbi <- any(grepl("^[XNW]P_", head(clean_ids, 20)))
+        if (is_ncbi) {
+          message("[DE-LIMP GSEA] NCBI RefSeq accessions detected — converting to gene symbols via gene map")
+          gm <- values$ncbi_gene_map
+          if (is.null(gm)) {
+            search_dirs <- c(tempdir(), "/data/fasta", "/quobyte/proteomics-grp/de-limp/fasta")
+            if (!is.null(values$diann_fasta_files))
+              search_dirs <- c(dirname(values$diann_fasta_files), search_dirs)
+            for (d in unique(search_dirs)) {
+              if (!dir.exists(d)) next
+              gmaps <- list.files(d, pattern = "gene_map\\.tsv$", full.names = TRUE)
+              if (length(gmaps) > 0) {
+                gm <- tryCatch(read.delim(gmaps[1], stringsAsFactors = FALSE), error = function(e) NULL)
+                if (!is.null(gm) && nrow(gm) > 0) {
+                  values$ncbi_gene_map <- gm
+                  message("[DE-LIMP GSEA] Loaded gene map: ", gmaps[1])
+                  break
+                }
+              }
+            }
+          }
+          if (!is.null(gm) && nrow(gm) > 0 && "gene_symbol" %in% colnames(gm)) {
+            gm_dedup <- gm[!duplicated(gm$accession), ]
+            acc_match <- match(clean_ids, gm_dedup$accession)
+            mapped_symbols <- gm_dedup$gene_symbol[acc_match]
+            has_symbol <- !is.na(mapped_symbols) & nzchar(mapped_symbols)
+            # Replace accessions with gene symbols in de_results
+            de_results$Accession[has_symbol] <- mapped_symbols[has_symbol]
+            clean_ids <- de_results$Accession
+            message(sprintf("[DE-LIMP GSEA] Converted %d / %d accessions to gene symbols",
+                            sum(has_symbol), length(has_symbol)))
+          }
+        }
+
         id_map <- tryCatch({
           result <- bitr(clean_ids, fromType = "UNIPROT", toType = "ENTREZID",
                          OrgDb = get(org_db_name))
@@ -244,7 +280,8 @@ server_gsea <- function(input, output, session, values, add_to_log) {
             "Could not map protein IDs to Entrez Gene IDs.\n",
             "Sample IDs: ", paste(head(clean_ids, 5), collapse = ", "), "\n",
             "Organism DB: ", org_db_name, "\n",
-            "Please ensure your data uses standard UniProt accessions or gene symbols."
+            "Please ensure your data uses standard UniProt accessions or gene symbols, ",
+            "or provide a gene_map.tsv alongside your NCBI FASTA."
           ))
         }
 
