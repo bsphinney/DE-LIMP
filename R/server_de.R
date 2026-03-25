@@ -5,6 +5,41 @@
 
 server_de <- function(input, output, session, values, add_to_log) {
 
+  # Helper: apply NCBI gene map to a data.frame with Accession/Gene/Protein.Name columns
+  apply_ncbi_gene_map <- function(df) {
+    if (!any(grepl("^[XNW]P_", head(df$Gene, 50)))) return(df)
+    gm <- values$ncbi_gene_map
+    if (is.null(gm)) {
+      search_dirs <- c(tempdir(), "/data/fasta", "/quobyte/proteomics-grp/de-limp/fasta")
+      if (!is.null(values$diann_fasta_files))
+        search_dirs <- c(dirname(values$diann_fasta_files), search_dirs)
+      for (d in unique(search_dirs)) {
+        if (!dir.exists(d)) next
+        gmaps <- list.files(d, pattern = "gene_map\\.tsv$", full.names = TRUE)
+        if (length(gmaps) > 0) {
+          gm <- tryCatch(read.delim(gmaps[1], stringsAsFactors = FALSE), error = function(e) NULL)
+          if (!is.null(gm) && nrow(gm) > 0) {
+            values$ncbi_gene_map <- gm
+            message("[DE] Loaded NCBI gene map: ", gmaps[1], " (", nrow(gm), " entries)")
+            break
+          }
+        }
+      }
+    }
+    if (!is.null(gm) && nrow(gm) > 0 && "gene_symbol" %in% colnames(gm)) {
+      gm_dedup <- gm[!duplicated(gm$accession), ]
+      acc_match <- match(df$Accession, gm_dedup$accession)
+      has_match <- !is.na(acc_match)
+      df$Gene[has_match] <- gm_dedup$gene_symbol[acc_match[has_match]]
+      if ("protein_name" %in% colnames(gm_dedup)) {
+        pn <- gm_dedup$protein_name[acc_match[has_match]]
+        df$Protein.Name[has_match] <- ifelse(nzchar(pn), pn, df$Protein.Name[has_match])
+      }
+      df$Gene[is.na(df$Gene) | !nzchar(df$Gene)] <- df$Accession[is.na(df$Gene) | !nzchar(df$Gene)]
+    }
+    df
+  }
+
   # --- volcano_data() reactive (app.R lines 805-830) ---
   volcano_data <- reactive({
     req(values$fit, input$contrast_selector)
@@ -35,6 +70,10 @@ server_de <- function(input, output, session, values, add_to_log) {
     } else {
       df$Gene <- df$Accession; df$Protein.Name <- df$Protein.Group
     }
+
+    # NCBI RefSeq fallback: if genes still look like accessions (XP_, NP_),
+    # apply gene_map.tsv from NCBI E-utilities (same map used by Expression Grid)
+    df <- apply_ncbi_gene_map(df)
 
     df$Significance <- "Not Sig"; df$Significance[df$adj.P.Val < 0.05] <- "Significant"
     df$Selected <- "No"; if (!is.null(values$plot_selected_proteins)) { df$Selected[df$Protein.Group %in% values$plot_selected_proteins] <- "Yes" }
@@ -165,6 +204,9 @@ server_de <- function(input, output, session, values, add_to_log) {
       df_full$Gene <- df_full$Accession
       df_full$Protein.Name <- df_full$Protein.Group
     }
+
+    # NCBI RefSeq fallback
+    df_full <- apply_ncbi_gene_map(df_full)
 
     df_full$Significance <- "Not Sig"
     df_full$Significance[df_full$adj.P.Val < 0.05] <- "Significant"
