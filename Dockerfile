@@ -3,8 +3,9 @@
 # Base image: Dockerfile.base (rebuild only when dependencies change)
 FROM brettphinney/delimp-base:v3.1
 
-# Install clusterProfiler + enrichplot if missing from base image
-RUN R -e "if (!requireNamespace('clusterProfiler', quietly=TRUE)) BiocManager::install(c('clusterProfiler','enrichplot'), ask=FALSE, update=FALSE)" 2>/dev/null || true
+# Install clusterProfiler + enrichplot + org.Hs.eg.db (required for GSEA)
+# Cache-bust: v2
+RUN R -e "options(repos = BiocManager::repositories()); install.packages(c('clusterProfiler','enrichplot','org.Hs.eg.db'), quiet=TRUE)" 2>&1 | tail -5 || true
 
 # Install ggdendro for Data Completeness dendrogram visualization
 RUN R -e "if (!requireNamespace('ggdendro', quietly=TRUE)) install.packages('ggdendro', repos='https://cloud.r-project.org/')" 2>/dev/null || true
