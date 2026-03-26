@@ -10,7 +10,10 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install clusterProfiler + enrichplot + org.Hs.eg.db (required for GSEA)
-RUN R -e "options(repos = BiocManager::repositories()); BiocManager::install(c('clusterProfiler','enrichplot','org.Hs.eg.db'), ask=FALSE, update=FALSE, quiet=TRUE)" 2>&1 | tail -10 || true
+# Cache-bust: v4 — enrichplot needs ggtangle from Bioc devel/GitHub
+RUN R -e "options(repos = BiocManager::repositories()); \
+  if (!requireNamespace('ggtangle', quietly=TRUE)) BiocManager::install('ggtangle', ask=FALSE, update=FALSE, quiet=TRUE); \
+  BiocManager::install(c('enrichplot','clusterProfiler'), ask=FALSE, update=FALSE, quiet=TRUE)" 2>&1 | tail -15 || true
 
 # Install ggdendro for Data Completeness dendrogram visualization
 RUN R -e "if (!requireNamespace('ggdendro', quietly=TRUE)) install.packages('ggdendro', repos='https://cloud.r-project.org/')" 2>/dev/null || true
