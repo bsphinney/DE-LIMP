@@ -9,12 +9,18 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     libmagick++-dev libharfbuzz-dev libfribidi-dev 2>/dev/null && \
     rm -rf /var/lib/apt/lists/*
 
-# Install clusterProfiler + enrichplot + org.Hs.eg.db (required for GSEA)
-# Cache-bust: v5 — ggtangle not in Bioc 3.22, install from GitHub first
-RUN R -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', repos='https://cloud.r-project.org/'); \
-  if (!requireNamespace('ggtangle', quietly=TRUE)) remotes::install_github('YuLab-SMU/ggtangle', upgrade='never', quiet=TRUE); \
+# Install clusterProfiler + enrichplot (required for GSEA)
+# Cache-bust: v6
+RUN R -e " \
+  cat('=== Installing ggtangle from GitHub ===\n'); \
+  if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', repos='https://cloud.r-project.org/'); \
+  remotes::install_github('YuLab-SMU/ggtangle', upgrade='never', force=TRUE); \
+  cat('ggtangle installed:', requireNamespace('ggtangle', quietly=TRUE), '\n'); \
+  cat('=== Installing enrichplot + clusterProfiler ===\n'); \
   options(repos = BiocManager::repositories()); \
-  BiocManager::install(c('enrichplot','clusterProfiler'), ask=FALSE, update=FALSE, quiet=TRUE)" 2>&1 | tail -15 || true
+  BiocManager::install(c('enrichplot','clusterProfiler'), ask=FALSE, update=FALSE); \
+  cat('enrichplot installed:', requireNamespace('enrichplot', quietly=TRUE), '\n'); \
+  cat('clusterProfiler installed:', requireNamespace('clusterProfiler', quietly=TRUE), '\n')" 2>&1 || true
 
 # Install ggdendro for Data Completeness dendrogram visualization
 RUN R -e "if (!requireNamespace('ggdendro', quietly=TRUE)) install.packages('ggdendro', repos='https://cloud.r-project.org/')" 2>/dev/null || true
