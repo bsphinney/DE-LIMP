@@ -3,9 +3,14 @@
 # Base image: Dockerfile.base (rebuild only when dependencies change)
 FROM brettphinney/delimp-base:v3.1
 
+# Install system deps for enrichplot (needs libmagick for magick R package)
+# Cache-bust: v3
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    libmagick++-dev libharfbuzz-dev libfribidi-dev 2>/dev/null && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install clusterProfiler + enrichplot + org.Hs.eg.db (required for GSEA)
-# Cache-bust: v2
-RUN R -e "options(repos = BiocManager::repositories()); install.packages(c('clusterProfiler','enrichplot','org.Hs.eg.db'), quiet=TRUE)" 2>&1 | tail -5 || true
+RUN R -e "options(repos = BiocManager::repositories()); BiocManager::install(c('clusterProfiler','enrichplot','org.Hs.eg.db'), ask=FALSE, update=FALSE, quiet=TRUE)" 2>&1 | tail -10 || true
 
 # Install ggdendro for Data Completeness dendrogram visualization
 RUN R -e "if (!requireNamespace('ggdendro', quietly=TRUE)) install.packages('ggdendro', repos='https://cloud.r-project.org/')" 2>/dev/null || true
