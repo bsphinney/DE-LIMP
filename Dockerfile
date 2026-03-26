@@ -10,9 +10,10 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install clusterProfiler + enrichplot + org.Hs.eg.db (required for GSEA)
-# Cache-bust: v4 — enrichplot needs ggtangle from Bioc devel/GitHub
-RUN R -e "options(repos = BiocManager::repositories()); \
-  if (!requireNamespace('ggtangle', quietly=TRUE)) BiocManager::install('ggtangle', ask=FALSE, update=FALSE, quiet=TRUE); \
+# Cache-bust: v5 — ggtangle not in Bioc 3.22, install from GitHub first
+RUN R -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', repos='https://cloud.r-project.org/'); \
+  if (!requireNamespace('ggtangle', quietly=TRUE)) remotes::install_github('YuLab-SMU/ggtangle', upgrade='never', quiet=TRUE); \
+  options(repos = BiocManager::repositories()); \
   BiocManager::install(c('enrichplot','clusterProfiler'), ask=FALSE, update=FALSE, quiet=TRUE)" 2>&1 | tail -15 || true
 
 # Install ggdendro for Data Completeness dendrogram visualization
