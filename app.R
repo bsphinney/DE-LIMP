@@ -349,10 +349,26 @@ code_snapshot <- tryCatch({
   sum(file.mtime(all_files[file.exists(all_files)]), na.rm = TRUE)
 }, error = function(e) 0)
 
-# Load community stats (generated daily by GitHub Actions)
+# Load community stats — static JSON first, then overlay live GitHub API data
 community_stats <- tryCatch({
+  # Start with static JSON (has traffic trends + discussions from Actions workflow)
   stats_file <- file.path(getwd(), "stats", "community_stats.json")
-  if (file.exists(stats_file)) jsonlite::fromJSON(stats_file) else NULL
+  stats <- if (file.exists(stats_file)) jsonlite::fromJSON(stats_file) else list()
+
+  # Overlay live stats from GitHub API (public, no auth needed)
+  live <- tryCatch({
+    repo_data <- jsonlite::fromJSON("https://api.github.com/repos/bsphinney/DE-LIMP")
+    list(stars = repo_data$stargazers_count, forks = repo_data$forks_count)
+  }, error = function(e) NULL)
+
+  if (!is.null(live)) {
+    if (is.null(stats$github)) stats$github <- list()
+    stats$github$stars <- live$stars
+    stats$github$forks <- live$forks
+    stats$updated_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
+  }
+
+  stats
 }, error = function(e) NULL)
 
 # Source R/ modules explicitly — ensures they load whether called via
