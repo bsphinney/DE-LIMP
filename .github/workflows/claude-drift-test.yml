@@ -59,8 +59,9 @@ jobs:
       - name: Commit golden baseline
         if: always()
         run: |
-          if [ -d tests/golden ] && [ "$(git status tests/golden --porcelain)" != "" ]; then
-            git add tests/golden/
+          # Force-add because *.rds is in .gitignore (negation may not work with git add)
+          git add -f tests/golden/*.rds tests/golden/*.md tests/golden/*.csv 2>/dev/null || true
+          if [ "$(git status tests/golden --porcelain)" != "" ]; then
             git commit -m "chore: Update Claude drift test golden baseline ($(date +%Y-%m-%d))"
             git pull --rebase origin main || true
             git push
