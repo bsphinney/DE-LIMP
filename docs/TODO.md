@@ -87,9 +87,38 @@
 - [x] Add DE protein count annotation ("78 DE proteins (X up, Y down)")
 - [x] Default logFC cutoff changed from 1.0 (2FC) to 0.6 (~1.5FC)
 
+## Publication Export (per biological researcher & proteomics expert review)
+- [ ] **Vector figure export (SVG/PDF)**: All plots (Volcano, Heatmap, PCA, CV, GSEA) need SVG/PDF export for publication-quality figures. PNG is raster and blurry at journal scale.
+- [ ] **Excel workbook export (.xlsx)**: Single workbook with multiple sheets (DE, CV, GSEA, Contaminant, Metadata) for researcher convenience
+- [ ] **Customizable figure sizing**: User-specified dimensions for journal column widths
+
+## Documentation & Education (per biological researcher review)
+- [ ] **Glossary tab**: In-app definitions for logFC, adj.P.Val, CV, FDR, DPC-Quant, mass accuracy, ppm. Link to external resources.
+- [ ] **DPC-Quant methodology documentation**: Explain distributional assumptions, when imputation kicks in, interaction with limma eBayes. Link to limpa vignette.
+- [ ] **Volcano P.Value vs adj.P.Val explanation**: Info modal clarifying y-axis uses raw P.Value for spread, coloring uses FDR-adjusted threshold
+- [ ] **GSEA mapping efficiency display**: Show "Mapped X/Y proteins (Z%)" after bitr(), warn if <80% mapped
+- [ ] **Power calculation**: Post-hoc display: "With n=3, minimum detectable FC = X at 80% power"
+
+## Biology Features (per biological researcher review)
+- [ ] **Protein-protein interaction networks**: Query STRING/BioGRID for top DE proteins, visualize with igraph
+- [ ] **Subcellular localization overlay**: Fetch UniProt compartment annotations, add to results table
+- [ ] **Multi-contrast biomarker panel**: Find proteins consistently DE across multiple contrasts
+- [ ] **Batch effect warning**: Auto-detect when all samples of one group ran on same date, flag with warning
+
+## Core Facility Enhancements (per proteomics expert review)
+- [ ] **Real-time QC dashboard**: 30-day rolling plots (proteins, signal per instrument) with outlier detection
+- [ ] **Search parameters in reports**: Add enzyme, mass_acc, normalization, DIA-NN version to report metadata
+- [ ] **Instrument-specific QC baselines**: Rolling 30-day median per instrument, flag outliers
+- [ ] **GSEA contrast-specific visualization**: Lollipop plot of top pathways per contrast with NES comparison
+
+## Statistical Transparency (per statistician review)
+- [ ] **Uncertainty quantification in Expression Grid**: Add SE and 95% CI columns (from DPC-Quant posterior)
+- [ ] **No-replicates warning banner**: Show "No statistical inference possible" on Expression Grid when in no-replicates mode
+- [ ] **Comparator Rule 3 (Quant3) quantitative threshold**: Add explicit statement about t-statistic inflation factor
+- [ ] **Comparator Rule 4 (Variance) threshold**: Define what SD ratio constitutes "mismatch"
+
 ## General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
-- [ ] Publication-quality plot exports (SVG/PNG/TIFF with size controls)
 - [x] Sample correlation heatmap (Replicate Consistency tab)
 - [x] Venn diagram of significant proteins across comparisons (→ Run Comparator protein universe)
 - [ ] Sample CV distribution plots

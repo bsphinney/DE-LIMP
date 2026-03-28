@@ -138,7 +138,8 @@ server_de <- function(input, output, session, values, add_to_log) {
                xref = "paper", yref = "paper", fillcolor = "white", opacity = 0.85,
                line = list(color = "#333333", width = 1))
         )
-      )
+      ) %>%
+      config(toImageButtonOptions = list(format = "svg", filename = "de_limp_volcano_fullscreen", scale = 2))
   })
 
   # --- Fullscreen Heatmap (app.R lines 2408-2430) ---
@@ -365,7 +366,8 @@ server_de <- function(input, output, session, values, add_to_log) {
       layout(
         legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15),
         margin = list(b = 60)
-      )
+      ) %>%
+      config(toImageButtonOptions = list(format = "svg", filename = "de_limp_cv_scatter", scale = 2))
   })
 
   # --- Fullscreen CV Scatter Plot ---
@@ -418,7 +420,8 @@ server_de <- function(input, output, session, values, add_to_log) {
             panel.grid.minor = element_blank())
 
     pl <- ggplotly(p, tooltip = "text", height = 650, width = 950) %>%
-      layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.12))
+      layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.12)) %>%
+      config(toImageButtonOptions = list(format = "svg", filename = "de_limp_cv_scatter_fullscreen", scale = 2))
 
     showModal(modalDialog(
       title = "logFC vs CV - Fullscreen View",
@@ -622,7 +625,8 @@ server_de <- function(input, output, session, values, add_to_log) {
                xref = "paper", yref = "paper", fillcolor = "white", opacity = 0.85,
                line = list(color = "#333333", width = 1))
         )
-      )
+      ) %>%
+      config(toImageButtonOptions = list(format = "svg", filename = "de_limp_volcano", scale = 2))
   })
 
   # --- Selection Sync: plotly_selected, plotly_click, clear (app.R lines 3207-3209) ---

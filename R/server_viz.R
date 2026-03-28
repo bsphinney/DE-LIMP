@@ -1022,7 +1022,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     req(pca_result())
     p <- build_pca_plot("main")
     ggplotly(p, tooltip = "text") %>%
-      layout(legend = list(orientation = "v"))
+      layout(legend = list(orientation = "v")) %>%
+      config(toImageButtonOptions = list(format = "svg", filename = "de_limp_pca", scale = 2))
   })
 
   # Fullscreen handler
@@ -1037,7 +1038,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     req(pca_result())
     p <- build_pca_plot("fullscreen")
     ggplotly(p, tooltip = "text") %>%
-      layout(legend = list(orientation = "v"))
+      layout(legend = list(orientation = "v")) %>%
+      config(toImageButtonOptions = list(format = "svg", filename = "de_limp_pca_fullscreen", scale = 2))
   })
 
   # PNG export
