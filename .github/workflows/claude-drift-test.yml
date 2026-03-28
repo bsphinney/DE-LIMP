@@ -1,8 +1,8 @@
 name: Claude Analysis Drift Test
 
-# Runs weekly to detect if Claude's interpretation of the example dataset
+# Runs daily to detect if Claude's interpretation of the example dataset
 # has drifted. Saves each response as a golden baseline for comparison.
-# Also runs on manual trigger for ad-hoc testing.
+# GitHub sends email notifications on failure — no silent failures allowed.
 
 on:
   schedule:
@@ -41,6 +41,21 @@ jobs:
             install.packages(c("testthat", "httr2"), repos = "https://cloud.r-project.org")
           '
 
+      - name: Verify API key is set
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set"
+            exit 1
+          fi
+          echo "API key is configured (${#ANTHROPIC_API_KEY} chars)"
+
+      - name: Count existing baselines
+        id: pre_count
+        run: |
+          COUNT=$(ls tests/golden/claude_findings_*.rds 2>/dev/null | wc -l)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Existing baselines: $COUNT"
+
       - name: Run Claude drift test
         run: |
           Rscript -e '
@@ -48,23 +63,42 @@ jobs:
               "tests/testthat/test-claude_export.R",
               reporter = testthat::SummaryReporter$new()
             )
-            if (any(as.data.frame(results)$failed > 0)) quit(status = 1)
+            df <- as.data.frame(results)
+            cat(sprintf("Tests: %d passed, %d failed, %d skipped\n",
+                sum(df$passed), sum(df$failed), sum(df$skipped)))
+            if (any(df$failed > 0)) {
+              cat("::error::Drift test had failures\n")
+              quit(status = 1)
+            }
           '
 
-      - name: Generate drift report
-        if: always()
+      - name: Verify new baseline was created
         run: |
-          Rscript tests/drift_report.R --csv 2>&1 || true
+          NEW_COUNT=$(ls tests/golden/claude_findings_*.rds 2>/dev/null | wc -l)
+          OLD_COUNT=${{ steps.pre_count.outputs.count }}
+          echo "Baselines: $OLD_COUNT before, $NEW_COUNT after"
+          if [ "$NEW_COUNT" -le "$OLD_COUNT" ]; then
+            echo "::error::No new golden baseline was created — test may have silently failed"
+            exit 1
+          fi
+          LATEST=$(ls -t tests/golden/claude_findings_*.rds | head -1)
+          echo "Latest baseline: $LATEST"
+
+      - name: Generate drift report
+        run: |
+          Rscript tests/drift_report.R --csv 2>&1
 
       - name: Commit golden baseline
-        if: always()
         run: |
-          # Force-add because *.rds is in .gitignore (negation may not work with git add)
+          # Force-add because *.rds is in .gitignore
           git add -f tests/golden/*.rds tests/golden/*.md tests/golden/*.csv 2>/dev/null || true
           if [ "$(git status tests/golden --porcelain)" != "" ]; then
             git commit -m "chore: Update Claude drift test golden baseline ($(date +%Y-%m-%d))"
             git pull --rebase origin main || true
             git push
+            echo "Golden baseline committed and pushed"
+          else
+            echo "::warning::No new files to commit (git add -f may have failed)"
           fi
 
       - name: Upload response as artifact
