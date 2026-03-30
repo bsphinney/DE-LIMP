@@ -481,6 +481,17 @@ server <- function(input, output, session) {
     comparator_diann_log_a      = NULL,
     comparator_diann_log_b      = NULL,
     per_user_resources          = NULL,
+    # Cascadia De Novo Integration
+    denovo_ssl_paths       = NULL,
+    denovo_data            = NULL,
+    denovo_classified      = NULL,
+    denovo_protein_summary = NULL,
+    denovo_novel_blast     = NULL,
+    denovo_score_threshold = 0.8,
+    denovo_job_id          = NULL,
+    denovo_job_status      = "none",
+    cascadia_model_ckpt    = NULL,
+    ncbi_gene_map          = NULL,
     # App metadata
     app_version = app_version,
     community_stats = community_stats
@@ -510,6 +521,7 @@ server <- function(input, output, session) {
   server_comparator(input, output, session, values, add_to_log)
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
+  server_denovo(input, output, session, values, add_to_log)
   server_session(input, output, session, values, add_to_log)
 
   # --- Home directory quota check (HPC systems often have small quotas) ---

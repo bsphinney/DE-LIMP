@@ -258,6 +258,14 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
         actionButton("load_example_phospho", "Load Example Phospho Data",
           class = "btn-outline-info btn-sm w-100", icon = icon("flask"),
           style = "margin-bottom: 10px;"),
+        tags$details(
+          tags$summary(icon("dna"), " De Novo Sequencing (Cascadia)"),
+          fileInput("ssl_files", "Cascadia SSL Files (.ssl)",
+            multiple = TRUE, accept = ".ssl"),
+          sliderInput("denovo_score_threshold", "Min. Confidence",
+            min = 0.5, max = 1.0, value = 0.8, step = 0.05),
+          checkboxInput("denovo_enable", "Enable Cascadia integration", value = FALSE)
+        ),
         numericInput("q_cutoff", "Q-Value Cutoff", value = 0.01, min = 0, max = 0.1, step = 0.01)
       ),
 
@@ -1667,6 +1675,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         ),
                         plotOutput("cv_histogram", height = "450px")
                       )
+                    )
+                  ),
+
+                  nav_panel("De Novo", icon = icon("dna"),
+                    uiOutput("denovo_summary_cards"),
+                    navset_card_tab(
+                      nav_panel("Confirmed", DT::DTOutput("denovo_confirmed_table")),
+                      nav_panel("Novel", DT::DTOutput("denovo_novel_table")),
+                      nav_panel("DIAMOND",
+                        actionButton("run_diamond", "Run DIAMOND BLAST", icon = icon("search"), class = "btn-info"),
+                        DT::DTOutput("denovo_blast_table"))
                     )
                   )
                 )
