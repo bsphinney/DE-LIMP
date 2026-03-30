@@ -611,7 +611,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     if (length(selected_idx) > 0) {
       gdata <- grid_react_df(); selected_id <- gdata$data$Original.ID[selected_idx]; values$grid_selected_protein <- selected_id
       xic_btn <- if (!is_hf_space) actionButton("show_xic_from_grid", "\U0001F4C8 XICs", class="btn-info") else NULL
-      showModal(modalDialog(title = paste("Expression Plot:", selected_id), size = "xl", plotOutput("violin_plot_grid", height = "600px"), footer = tagList(xic_btn, modalButton("Close")), easyClose = TRUE))
+      svg_btn <- downloadButton("download_violin_svg", tagList(icon("download"), " SVG"), class = "btn-outline-secondary btn-sm")
+      showModal(modalDialog(title = paste("Expression Plot:", selected_id), size = "xl", plotOutput("violin_plot_grid", height = "600px"), footer = tagList(svg_btn, xic_btn, modalButton("Close")), easyClose = TRUE))
     }
   })
 
@@ -688,6 +689,57 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
             plot.subtitle = element_text(color = "#666666", size = 10))
     p
   }, height = 600) # FIXED HEIGHT
+
+  # --- Violin SVG Export ---
+  output$download_violin_svg <- downloadHandler(
+    filename = function() {
+      prot <- values$grid_selected_protein %||% "protein"
+      paste0("Violin_", make.names(prot), ".svg")
+    },
+    content = function(file) {
+      req(values$y_protein, values$grid_selected_protein, values$metadata)
+      prot_id <- values$grid_selected_protein
+      exprs_mat <- values$y_protein$E[prot_id, , drop = FALSE]
+      long_df <- as.data.frame(exprs_mat) %>% rownames_to_column("Protein") %>%
+        pivot_longer(-Protein, names_to = "File.Name", values_to = "LogIntensity")
+      long_df <- left_join(long_df, values$metadata, by = "File.Name")
+
+      n_obs_mat <- values$y_protein$other$n.observations
+      se_mat <- values$y_protein$other$standard.error
+      has_dpc <- !is.null(n_obs_mat) && !is.null(se_mat) && prot_id %in% rownames(n_obs_mat)
+      if (has_dpc) {
+        idx <- match(prot_id, rownames(n_obs_mat))
+        if (is.na(idx)) has_dpc <- FALSE
+      }
+      if (has_dpc) {
+        nobs_vec <- n_obs_mat[idx, ]
+        se_idx <- match(prot_id, rownames(se_mat))
+        se_vec <- se_mat[if (!is.na(se_idx)) se_idx else idx, ]
+        dpc_df <- data.frame(File.Name = names(nobs_vec), nObs = as.numeric(nobs_vec),
+                             SE = as.numeric(se_vec), stringsAsFactors = FALSE)
+        long_df <- left_join(long_df, dpc_df, by = "File.Name")
+        long_df$Detected <- ifelse(!is.na(long_df$nObs) & long_df$nObs > 0, "Detected", "Inferred")
+      } else {
+        long_df$Detected <- "Detected"
+      }
+
+      p <- ggplot(long_df, aes(x = Group, y = LogIntensity, fill = Group)) +
+        geom_violin(alpha = 0.5, trim = FALSE)
+      if (has_dpc) {
+        det_df <- long_df[long_df$Detected == "Detected", ]
+        inf_df <- long_df[long_df$Detected == "Inferred", ]
+        if (nrow(det_df) > 0) p <- p + geom_jitter(data = det_df, width = 0.2, size = 3, alpha = 0.8, shape = 16)
+        if (nrow(inf_df) > 0) p <- p + geom_jitter(data = inf_df, width = 0.2, size = 3, alpha = 0.8, shape = 21, fill = "white", stroke = 1.2)
+      } else {
+        p <- p + geom_jitter(width = 0.2, size = 2, alpha = 0.8)
+      }
+      p <- p + facet_wrap(~Protein, scales = "free_y") + theme_bw() +
+        labs(title = paste("Protein:", prot_id), y = "Log2 Intensity") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+      ggplot2::ggsave(file, plot = p, device = "svg", width = 8, height = 6)
+    }
+  )
 
   # --- SIGNAL DISTRIBUTION (lines 1193-1242) ---
   output$protein_signal_plot <- renderPlot({

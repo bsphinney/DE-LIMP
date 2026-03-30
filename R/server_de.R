@@ -733,6 +733,36 @@ server_de <- function(input, output, session, values, add_to_log) {
     }
   )
 
+  # --- Heatmap SVG Export ---
+  output$download_heatmap_svg <- downloadHandler(
+    filename = function() {
+      paste0("Heatmap_", make.names(input$contrast_selector), ".svg")
+    },
+    content = function(file) {
+      req(values$fit, values$y_protein, input$contrast_selector)
+      df_volc <- volcano_data(); prot_ids <- NULL
+      if (!is.null(input$de_table_rows_selected)) {
+        current_table_data <- df_volc
+        if (!is.null(values$plot_selected_proteins)) current_table_data <- current_table_data %>% filter(Protein.Group %in% values$plot_selected_proteins)
+        prot_ids <- current_table_data$Protein.Group[input$de_table_rows_selected]
+      } else if (!is.null(values$plot_selected_proteins)) {
+        prot_ids <- values$plot_selected_proteins; if (length(prot_ids) > 50) prot_ids <- head(prot_ids, 50)
+      } else {
+        top_prots <- topTable(values$fit, coef = input$contrast_selector, number = 20); prot_ids <- rownames(top_prots)
+      }
+      valid_ids <- intersect(prot_ids, rownames(values$y_protein$E))
+      if (length(valid_ids) == 0) return(NULL)
+      mat <- values$y_protein$E[valid_ids, , drop = FALSE]; mat_z <- t(apply(mat, 1, cal_z_score))
+      meta <- values$metadata[match(colnames(mat), values$metadata$File.Name), ]; groups <- factor(meta$Group)
+      ha <- HeatmapAnnotation(Group = groups, col = list(Group = setNames(rainbow(length(levels(groups))), levels(groups))))
+
+      svg(file, width = 10, height = 8)
+      ComplexHeatmap::draw(Heatmap(mat_z, name = "Z-score", top_annotation = ha,
+        cluster_rows = TRUE, cluster_columns = TRUE, show_column_names = FALSE))
+      dev.off()
+    }
+  )
+
   # --- CV Histogram PNG Export ---
   output$download_cv_hist_png <- downloadHandler(
     filename = function() {

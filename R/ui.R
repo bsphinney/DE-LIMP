@@ -1592,6 +1592,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                           div(style = "display: flex; gap: 8px;",
                             downloadButton("download_heatmap_png", tagList(icon("image"), " PNG"),
                               class = "btn-outline-secondary btn-sm"),
+                            downloadButton("download_heatmap_svg", tagList(icon("download"), " SVG"),
+                              class = "btn-outline-secondary btn-sm"),
                             actionButton("fullscreen_heatmap", "\U0001F50D Fullscreen", class="btn-outline-secondary btn-sm")
                           )
                         ),
