@@ -2628,7 +2628,7 @@ generate_parallel_scripts <- function(
       '    echo "$RAW_FILE" >> "$EXCLUDED_FILE"\n',
       '    MISSING=$((MISSING + 1))\n',
       '  fi\n',
-      sprintf('done < "%s/file_list.txt"\n', output_dir)
+      sprintf('done < "%s/file_list.txt"\n', output_dir),
       'if [ $MISSING -gt 0 ]; then\n',
       sprintf('  MAX_MISSING=$(( TOTAL * %d / 100 ))\n', max_missing_pct),
       '  if [ $MAX_MISSING -lt 3 ]; then MAX_MISSING=3; fi\n',
