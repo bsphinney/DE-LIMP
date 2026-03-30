@@ -3128,8 +3128,10 @@ slurm_move_job <- function(job_id, new_account, new_partition,
 
   # QOS must match account/partition — pattern: {account}-{partition}-qos
   new_qos <- sprintf("%s-%s-qos", new_account, new_partition)
-  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s QOS=%s',
-    scontrol_cmd, job_id, new_account, new_partition, new_qos)
+  # Enable requeue on preemptible (low) partitions so preempted tasks auto-restart
+  requeue_flag <- if (tolower(new_partition) == "low") " Requeue=1" else ""
+  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s QOS=%s%s',
+    scontrol_cmd, job_id, new_account, new_partition, new_qos, requeue_flag)
 
   res <- if (!is.null(ssh_config)) {
     ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 15)
