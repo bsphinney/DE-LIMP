@@ -5273,13 +5273,20 @@ server_search <- function(input, output, session, values, add_to_log,
         jobs[[i]]$parallel_current_step <- current_step
 
         # Fetch pending_reason for parallel jobs (needed for auto-switch InvalidQOS detection)
-        # Query squeue on the first pending step to get the reason
+        # Query squeue on the first QUEUED step (not just first non-completed, which may be running)
+        queued_sn <- NULL
+        for (sn in step_names) {
+          ss <- step_status[[sn]] %||% "queued"
+          if (ss == "queued" && !is.null(steps[[sn]])) {
+            queued_sn <- sn
+            break
+          }
+        }
         current_sn <- step_names[current_step]
         current_ss <- step_status[[current_sn]] %||% "queued"
-        current_sid <- steps[[current_sn]]
-        if (current_ss == "queued" && !is.null(current_sid)) {
+        if (!is.null(queued_sn)) {
           sinfo <- tryCatch(
-            get_slurm_start_time(current_sid, ssh_config = job_cfg,
+            get_slurm_start_time(steps[[queued_sn]], ssh_config = job_cfg,
                                   sbatch_path = slurm_path),
             error = function(e) list(est_start = NULL, priority = NULL, reason = NULL))
           if (!identical(sinfo$reason, jobs[[i]]$pending_reason)) {
@@ -5779,7 +5786,8 @@ server_search <- function(input, output, session, values, add_to_log,
           # Otherwise, only move array steps (2, 4) — assembly steps (1, 3, 5) stay put.
           job_ids_to_move <- character(0)
           movable_steps <- character(0)
-          force_move_all <- identical(jobs[[i]]$pending_reason, "InvalidQOS")
+          force_move_all <- identical(jobs[[i]]$pending_reason, "InvalidQOS") ||
+                            grepl("QOSMax|AssocMax", jobs[[i]]$pending_reason %||% "")
 
           if (isTRUE(jobs[[i]]$parallel)) {
             ss <- jobs[[i]]$parallel_step_status %||% list()
@@ -5831,6 +5839,9 @@ server_search <- function(input, output, session, values, add_to_log,
             if (!isTRUE(jobs[[i]]$parallel) || force_move_all || length(movable_steps) == 5) {
               jobs[[i]]$slurm_account <- "publicgrp"
               jobs[[i]]$slurm_partition <- "low"
+            } else {
+              # Partial move: some steps on publicgrp, others still on original partition
+              jobs[[i]]$partially_on_public <- TRUE
             }
             jobs[[i]]$queue_switched_at <- Sys.time()
             jobs[[i]]$steps_moved_to_public <- movable_steps
@@ -5863,8 +5874,8 @@ server_search <- function(input, output, session, values, add_to_log,
           if (isTRUE(jobs[[i]]$removed)) next
           if (jobs[[i]]$backend != "hpc") next
           if (jobs[[i]]$status != "queued") next
-          # Only move jobs currently on publicgrp
-          if (!identical(jobs[[i]]$slurm_account, "publicgrp")) next
+          # Only move jobs currently on publicgrp (fully or partially moved)
+          if (!identical(jobs[[i]]$slurm_account, "publicgrp") && !isTRUE(jobs[[i]]$partially_on_public)) next
 
           # Use queue_switched_at if job was previously moved, otherwise submitted_at
           ref_time <- jobs[[i]]$queue_switched_at %||% jobs[[i]]$submitted_at
@@ -5902,6 +5913,7 @@ server_search <- function(input, output, session, values, add_to_log,
           if (n_moved > 0) {
             jobs[[i]]$slurm_account <- "genome-center-grp"
             jobs[[i]]$slurm_partition <- "high"
+            jobs[[i]]$partially_on_public <- FALSE
             jobs[[i]]$queue_switched_at <- Sys.time()
             changed <- TRUE
             showNotification(

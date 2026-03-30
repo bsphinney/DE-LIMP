@@ -2047,6 +2047,9 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   if (length(states) == 0) return("unknown")
 
   # Check states — order matters: FAILED before COMPLETED
+  # PREEMPTED jobs may be requeued (if --requeue was set), treat as queued unless also failed
+  if (any(grepl("PREEMPTED|REQUEUED", states)) && !any(grepl("FAILED|TIMEOUT", states))) return("queued")
+  if (any(grepl("NODE_FAIL|BOOT_FAIL", states))) return("failed")
   if (any(grepl("FAILED|TIMEOUT|OUT_OF_ME", states))) return("failed")
   if (any(grepl("CANCELLED", states))) return("cancelled")
   if (any(grepl("RUNNING", states))) return("running")
