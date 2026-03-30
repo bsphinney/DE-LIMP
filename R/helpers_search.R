@@ -3126,8 +3126,10 @@ slurm_move_job <- function(job_id, new_account, new_partition,
     file.path(dirname(sbatch_path), "scontrol")
   } else "scontrol"
 
-  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s',
-    scontrol_cmd, job_id, new_account, new_partition)
+  # QOS must match account/partition — pattern: {account}-{partition}-qos
+  new_qos <- sprintf("%s-%s-qos", new_account, new_partition)
+  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s QOS=%s',
+    scontrol_cmd, job_id, new_account, new_partition, new_qos)
 
   res <- if (!is.null(ssh_config)) {
     ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 15)
