@@ -4523,17 +4523,19 @@ server_search <- function(input, output, session, values, add_to_log,
 
       # Build launcher script that chains sbatch submissions with dependencies
       launcher_lines <- c("#!/bin/bash", "set -e", "")
+      # Quote all paths to handle spaces in directory names
+      q <- function(p) paste0('"', p, '"')
       if (has_step1) {
         launcher_lines <- c(launcher_lines,
-          sprintf('JOB1=$(%s %s 2>&1)', sbatch_bin, step_script_paths[1]),
+          sprintf('JOB1=$(%s %s 2>&1)', sbatch_bin, q(step_script_paths[1])),
           'JOB1_ID=$(echo "$JOB1" | grep -oP "[0-9]+$")',
           'echo "STEP1:$JOB1_ID"',
           sprintf('JOB2=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB1_ID %s 2>&1)',
-                  sbatch_bin, step_script_paths[2])
+                  sbatch_bin, q(step_script_paths[2]))
         )
       } else {
         launcher_lines <- c(launcher_lines,
-          sprintf('JOB2=$(%s %s 2>&1)', sbatch_bin, step_script_paths[2]),
+          sprintf('JOB2=$(%s %s 2>&1)', sbatch_bin, q(step_script_paths[2])),
           'echo "STEP1:skipped"'
         )
       }
@@ -4544,18 +4546,18 @@ server_search <- function(input, output, session, values, add_to_log,
         # The quant verify block in Step 3 auto-excludes a small number of missing
         # files (<5%) so the pipeline continues without manual intervention.
         sprintf('JOB3=$(%s --kill-on-invalid-dep=yes --dependency=afterany:$JOB2_ID %s 2>&1)',
-                sbatch_bin, step_script_paths[3]),
+                sbatch_bin, q(step_script_paths[3])),
         'JOB3_ID=$(echo "$JOB3" | grep -oP "[0-9]+$")',
         'echo "STEP3:$JOB3_ID"', "",
         sprintf('JOB4=$(%s --kill-on-invalid-dep=yes --dependency=afterok:$JOB3_ID %s 2>&1)',
-                sbatch_bin, step_script_paths[4]),
+                sbatch_bin, q(step_script_paths[4])),
         'JOB4_ID=$(echo "$JOB4" | grep -oP "[0-9]+$")',
         'echo "STEP4:$JOB4_ID"', "",
         # afterany (not afterok): Step 5 runs even if some Step 4 tasks failed.
         # The quant verify block in Step 5 auto-excludes a small number of missing
         # files (<5%) so the pipeline continues without manual intervention.
         sprintf('JOB5=$(%s --kill-on-invalid-dep=yes --dependency=afterany:$JOB4_ID %s 2>&1)',
-                sbatch_bin, step_script_paths[5]),
+                sbatch_bin, q(step_script_paths[5])),
         'JOB5_ID=$(echo "$JOB5" | grep -oP "[0-9]+$")',
         'echo "STEP5:$JOB5_ID"'
       )
@@ -4661,7 +4663,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
         # Execute launcher: one SSH call submits all 5 sbatch jobs
         launcher_remote <- file.path(output_dir, "submit_all.sh")
-        result <- ssh_exec(cfg, paste("bash", launcher_remote),
+        result <- ssh_exec(cfg, paste0('bash "', launcher_remote, '"'),
                            login_shell = use_login_shell, timeout = 120)
         message("[DE-LIMP] Launcher status=", result$status,
                 " stdout=", paste(result$stdout, collapse = " | "))
