@@ -5854,6 +5854,19 @@ server_search <- function(input, output, session, values, add_to_log,
               type = "message", duration = 10)
             message(sprintf("[DE-LIMP] Auto-switched '%s' %s to publicgrp/low after %.0f min pending",
               jobs[[i]]$name, step_info, pending_min))
+
+            # Log queue switch to search_info.md
+            tryCatch({
+              switch_note <- sprintf(
+                "\n\n---\n## Queue Switch (%s)\n\n- **Action**: Moved to publicgrp/low\n- **Steps moved**: %s\n- **Wait time**: %.0f min\n- **Reason**: %s\n",
+                format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                if (nzchar(step_info)) step_info else "all",
+                pending_min,
+                jobs[[i]]$pending_reason %||% "waited too long on genome-center-grp/high")
+              si_remote <- file.path(jobs[[i]]$output_dir, "search_info.md")
+              ssh_exec(cfg, sprintf('echo %s >> %s',
+                shQuote(switch_note), shQuote(si_remote)), timeout = 10)
+            }, error = function(e) NULL)
           }
         }
       }
@@ -6918,6 +6931,26 @@ server_search <- function(input, output, session, values, add_to_log,
             }
 
             values$diann_jobs <- c(values$diann_jobs, list(new_entry))
+
+            # Append retry/resume event to search_info.md
+            tryCatch({
+              retry_note <- sprintf(
+                "\n\n---\n## Resume/Retry Event (%s)\n\n- **Resumed from**: Step %d\n- **Reason**: %s\n- **New job IDs**: %s\n",
+                format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                resume_from,
+                if (isTRUE(partial_retry))
+                  sprintf("Partial retry — %d of %d tasks failed (%s). Retried with %d GB (was %d GB). Tasks: [%s]",
+                    failed_info$n_failed, n_files,
+                    paste(unique(failed_info$reasons), collapse = "/"),
+                    retry_mem, orig_mem, array_spec)
+                else sprintf("Step %d failed — full resume from step %d", resume_from, resume_from),
+                paste(sapply(names(new_step_ids), function(k)
+                  sprintf("%s: %s", k, new_step_ids[[k]])), collapse = ", ")
+              )
+              si_remote <- file.path(output_dir, "search_info.md")
+              ssh_exec(cfg, sprintf('echo %s >> %s',
+                shQuote(retry_note), shQuote(si_remote)), timeout = 10)
+            }, error = function(e) message("[DE-LIMP] Could not append retry info to search_info.md: ", e$message))
 
             skipped_msg <- if (resume_from > 1) {
               sprintf(" (skipped Steps 1-%d, reusing existing results)", resume_from - 1)
