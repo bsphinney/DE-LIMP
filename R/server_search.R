@@ -5734,12 +5734,21 @@ server_search <- function(input, output, session, values, add_to_log,
     # --- Auto-switch pending HPC jobs from genome-center-grp to publicgrp/low ---
     if (isTRUE(input$auto_queue_switch)) {
       wait_min <- input$queue_wait_minutes %||% 5
-      pub_res <- values$public_resources
 
-      # Only attempt if publicgrp has available CPUs
-      pub_available <- if (!is.null(pub_res) && isTRUE(pub_res$success))
-        pub_res$user_available %||% 0 else 0
-      if (is.na(pub_available)) pub_available <- 0
+      # Query public partition idle CPUs directly via sinfo (fast, reliable)
+      sinfo_bin <- file.path(dirname(values$ssh_sbatch_path %||% "sbatch"), "sinfo")
+      pub_available <- tryCatch({
+        sinfo_res <- ssh_exec(cfg,
+          sprintf('%s -p low -o "%%C" --noheader', sinfo_bin),
+          login_shell = FALSE, timeout = 10)
+        if (sinfo_res$status == 0 && length(sinfo_res$stdout) > 0) {
+          parts <- strsplit(trimws(sinfo_res$stdout[1]), "/")[[1]]
+          if (length(parts) == 4) as.integer(parts[2]) else 0L
+        } else 0L
+      }, error = function(e) 0L)
+      if (is.na(pub_available)) pub_available <- 0L
+
+      message(sprintf("[Auto-queue] pub_idle=%d CPUs, wait_min=%d", pub_available, wait_min))
 
       if (pub_available > 0) {
         for (i in seq_along(jobs)) {
