@@ -1062,7 +1062,7 @@ generate_sbatch_script <- function(
 
   # Build DIA-NN command for apptainer
   diann_cmd_parts <- c(
-    sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux \\", bind_mount, diann_sif),
+    sprintf('apptainer exec --bind "%s" %s /diann-2.3.0/diann-linux \\', bind_mount, diann_sif),
     paste0(run_flags, " \\"),
     if (!is.null(fasta_flags)) paste0(fasta_flags, " \\"),
     sprintf("    --out /work/out/%s \\", report_name),
@@ -1089,8 +1089,8 @@ generate_sbatch_script <- function(
     sprintf('#SBATCH --job-name=diann_%s\n', analysis_name),
     sprintf('#SBATCH --cpus-per-task=%d\n', cpus),
     sprintf('#SBATCH --mem=%dG\n', mem_gb),
-    sprintf('#SBATCH -o %s/logs/diann_%%j.out\n', output_dir),
-    sprintf('#SBATCH -e %s/logs/diann_%%j.err\n', output_dir),
+    sprintf('#SBATCH -o "%s/logs/diann_%%j.out"\n', output_dir),
+    sprintf('#SBATCH -e "%s/logs/diann_%%j.err"\n', output_dir),
     sprintf('#SBATCH --account=%s\n', account),
     sprintf('#SBATCH --time=%d:00:00\n', time_hours),
     sprintf('#SBATCH --partition=%s\n', partition),
@@ -2584,8 +2584,8 @@ generate_parallel_scripts <- function(
       sprintf('#SBATCH --job-name=diann_%s_%s', analysis_name, job_suffix),
       sprintf('#SBATCH --cpus-per-task=%d', cpus),
       sprintf('#SBATCH --mem=%dG', mem_gb),
-      sprintf('#SBATCH -o %s/logs/diann_%s_%%j.out', output_dir, job_suffix),
-      sprintf('#SBATCH -e %s/logs/diann_%s_%%j.err', output_dir, job_suffix),
+      sprintf('#SBATCH -o "%s/logs/diann_%s_%%j.out"', output_dir, job_suffix),
+      sprintf('#SBATCH -e "%s/logs/diann_%s_%%j.err"', output_dir, job_suffix),
       sprintf('#SBATCH --account=%s', step_account),
       sprintf('#SBATCH --time=%d:00:00', time_hours),
       sprintf('#SBATCH --partition=%s', step_partition)
@@ -2601,7 +2601,7 @@ generate_parallel_scripts <- function(
 
   # --- Apptainer exec prefix ---
   apptainer_cmd <- function(bind_mount) {
-    sprintf("apptainer exec --bind %s %s /diann-2.3.0/diann-linux", bind_mount, diann_sif)
+    sprintf('apptainer exec --bind "%s" %s /diann-2.3.0/diann-linux', bind_mount, diann_sif)
   }
 
   # --- Quant file verification block (bash) ---
@@ -2628,7 +2628,7 @@ generate_parallel_scripts <- function(
       '    echo "$RAW_FILE" >> "$EXCLUDED_FILE"\n',
       '    MISSING=$((MISSING + 1))\n',
       '  fi\n',
-      sprintf('done < "%s/file_list.txt"\n', output_dir),
+      sprintf('done < "%s/file_list.txt"\n', output_dir)
       'if [ $MISSING -gt 0 ]; then\n',
       sprintf('  MAX_MISSING=$(( TOTAL * %d / 100 ))\n', max_missing_pct),
       '  if [ $MAX_MISSING -lt 3 ]; then MAX_MISSING=3; fi\n',
@@ -2751,7 +2751,7 @@ generate_parallel_scripts <- function(
     # (same --temp dir + --quant-ori-names = same filenames). Backup enables
     # smart resume from Step 3 without re-running Step 2.
     sprintf('echo "Backing up Step 2 quant files..."\n'),
-    sprintf('cp -r %s/quant_step2 %s/quant_step2_orig\n', output_dir, output_dir),
+    sprintf('cp -r "%s/quant_step2" "%s/quant_step2_orig"\n', output_dir, output_dir),
     sprintf('echo "Backup saved to %s/quant_step2_orig/"\n\n', output_dir),
     sprintf('%s \\\n', apptainer_cmd(full_bind_mount)),
     paste0(all_f_flags, " \\\n"),
