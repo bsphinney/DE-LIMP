@@ -365,7 +365,7 @@ server_denovo <- function(input, output, session, values, add_to_log) {
     }
 
     # Determine FASTA path
-    fasta_path <- values$diann_fasta_path %||% input$diamond_fasta_path
+    fasta_path <- values$diann_fasta_files[1] %||% values$diann_fasta_path %||% input$diamond_fasta_path
     if (is.null(fasta_path) || !nzchar(fasta_path)) {
       showNotification(
         "No FASTA file specified. Set the reference FASTA for DIAMOND BLAST.",
@@ -398,20 +398,26 @@ server_denovo <- function(input, output, session, values, add_to_log) {
           setProgress(0.3, detail = "Uploaded query FASTA")
 
           # Build DIAMOND DB if not cached
+          diamond_bin <- "/cvmfs/hpc.ucdavis.edu/sw/spack/environments/main/view/generic/diamond-2.1.7/bin/diamond"
           diamond_db_remote <- file.path(denovo_dir, "ref_diamond.dmnd")
-          db_build_cmd <- paste(
-            "diamond makedb",
-            "--in", shQuote(fasta_path),
-            "--db", shQuote(diamond_db_remote),
-            "--threads 4 --quiet"
-          )
-          ssh_exec(cfg, db_build_cmd, timeout = 300)
-          setProgress(0.5, detail = "Built DIAMOND database")
+
+          # Check if DB already exists (skip rebuild)
+          db_check <- ssh_exec(cfg, paste("test -f", shQuote(diamond_db_remote), "&& echo EXISTS"), timeout = 10)
+          if (!any(grepl("EXISTS", db_check$stdout))) {
+            db_build_cmd <- paste(
+              diamond_bin, "makedb",
+              "--in", shQuote(fasta_path),
+              "--db", shQuote(diamond_db_remote),
+              "--threads 4 --quiet"
+            )
+            ssh_exec(cfg, db_build_cmd, timeout = 300)
+          }
+          setProgress(0.5, detail = "DIAMOND database ready")
 
           # Run DIAMOND blastp
           blast_out_remote <- file.path(denovo_dir, "novel_denovo_blast.tsv")
           blast_cmd <- paste(
-            "diamond blastp",
+            diamond_bin, "blastp",
             "--query", shQuote(query_fasta_remote),
             "--db", shQuote(diamond_db_remote),
             "--out", shQuote(blast_out_remote),
