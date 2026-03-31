@@ -118,6 +118,9 @@
 - [ ] **Comparator Rule 3 (Quant3) quantitative threshold**: Add explicit statement about t-statistic inflation factor
 - [ ] **Comparator Rule 4 (Variance) threshold**: Define what SD ratio constitutes "mismatch"
 
+## Automation
+- [ ] **Nightly documentation GitHub Action**: Auto-generate daily changelog summary from git commits. Runs at 9 PM Pacific, updates CHANGELOG.md if new commits exist, commits and pushes. Replaces session-only Claude Code cron which dies on terminal close.
+
 ## General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
 - [x] Sample correlation heatmap (Replicate Consistency tab)
