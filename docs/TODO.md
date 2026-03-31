@@ -131,6 +131,10 @@
 ## Automation
 - [ ] **Nightly documentation GitHub Action**: Auto-generate daily changelog summary from git commits. Runs at 9 PM Pacific, updates CHANGELOG.md if new commits exist, commits and pushes. Replaces session-only Claude Code cron which dies on terminal close.
 
+## Data Tracking
+- [ ] **Organism column in activity log**: Add `organism` field to activity_log.csv (column 34). Auto-detect from FASTA filename (UniProt suffix `_HUMAN`, `_BOVIN`, `_PIG`, `_MOUSE`; NCBI accession → taxonomy via E-utilities). Store as common name + taxonomy ID. Useful for AI training dataset curation, cross-species analysis, and core facility reporting.
+- [ ] **Instrument column in activity log**: Add `instrument` field from `values$instrument_metadata$instrument_model`. Track which instrument produced each dataset for instrument-specific QC baselines.
+
 ## Search Performance
 - [ ] **Adaptive CPUs on public queue**: When auto-switching step 2/4 to publicgrp/low, increase CPUs from 16 to 64 (public nodes have 128 CPUs). Faster per-file completion reduces preemption risk. Use scontrol update NumCPUs=64 alongside the partition move.
 - [ ] **DIA-NN 8-CPU mode**: Test 8 CPUs × 8 concurrent (instead of 16 × 4) on genome-center-grp/high. Could improve total throughput ~30% if DIA-NN scaling is sublinear. Need benchmarks on real data.
