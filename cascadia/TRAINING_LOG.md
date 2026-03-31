@@ -26,15 +26,49 @@
 - **Validation**: ~10% (~16 files) — held-out subset of each species
 - **Test**: ~10% (~15 files) — completely held out, never seen during training
 
-### Data Preparation Steps
+### How Training Data Preparation Works
 
-1. For each dataset with report.parquet:
-   - Extract high-confidence peptide-spectrum matches (q-value < 0.01)
-   - Match peptides to DIA-NN precursor IDs
-   - Augment .d files to ASF format (using our native bruker_augment or mzML path)
-   - Label ASF entries with matched peptide sequences
+The goal: teach Cascadia "when you see THIS fragment pattern → predict THIS sequence."
 
-2. Combine all labeled ASF files into train/val/test splits
+**Step 1: Get ground truth labels from DIA-NN**
+- Read `report.parquet` — contains all peptide identifications with sequences, precursor m/z, RT, confidence
+- Filter to q-value < 0.01 (1% FDR) — only high-confidence identifications as labels
+
+**Step 2: Match labels to raw spectra**
+- Read each `.d` file with timsrust_pyo3 (native Bruker reader)
+- For each DIA-NN peptide, find the MS2 spectrum that matches its precursor m/z and RT
+- Also grab nearby MS1 spectra for precursor mass context
+
+**Step 3: Write labeled ASF (Augmented Spectrum File)**
+```
+BEGIN IONS
+PEPMASS=524.2841
+CHARGE=2
+RT=1523.5
+SEQ=VGAHAGEYGAEALER    ← DIA-NN identification (the "answer")
+234.1092  450  0.0  2   ← fragment m/z, intensity, delta_RT, MS_level
+345.2183  1200  0.0  2  ← these are the actual fragment ions (the "question")
+456.3274  890  0.0  2
+523.8901  200  0.1  1   ← MS1 peak near precursor (level=1)
+END IONS
+```
+
+During inference, `SEQ=` is a dummy placeholder. During training, it's the real peptide — the model learns to predict it from the fragment pattern.
+
+**Step 4: Combine and split**
+- Combine all labeled ASFs into train/val files
+- Use different organisms for validation (tests generalization)
+
+### Data Preparation Script
+`cascadia/prepare_training_data.py` — reads DIA-NN report + raw .d files, writes labeled ASF.
+
+```bash
+python prepare_training_data.py \
+    --report /path/to/report.parquet \
+    --raw-dir /path/to/raw_files/ \
+    --output /path/to/train.asf \
+    --q-threshold 0.01
+```
 
 ### Training Parameters
 ```
