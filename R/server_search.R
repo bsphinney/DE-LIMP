@@ -6909,6 +6909,38 @@ server_search <- function(input, output, session, values, add_to_log,
               return()
             }
 
+            # Update downstream step dependency to wait for retry job
+            # Step 2 retry → update Step 3 dependency; Step 4 retry → update Step 5 dependency
+            if (isTRUE(partial_retry)) {
+              retry_step_key <- paste0("step", resume_from)
+              downstream_step_key <- paste0("step", resume_from + 1L)
+              retry_job_id <- new_step_ids[[retry_step_key]]
+              orig_downstream_id <- job$parallel_steps[[downstream_step_key]]
+
+              if (!is.null(retry_job_id) && retry_job_id != "skipped" &&
+                  !is.null(orig_downstream_id)) {
+                scontrol_bin <- file.path(
+                  dirname(values$ssh_sbatch_path %||% "sbatch"), "scontrol")
+                dep_cmd <- sprintf('%s update jobid=%s Dependency=afterany:%s',
+                                   scontrol_bin, orig_downstream_id, retry_job_id)
+                dep_result <- ssh_exec(cfg, dep_cmd, timeout = 15)
+                if (dep_result$status == 0) {
+                  message(sprintf(
+                    "[DE-LIMP] Updated Step %d (%s) dependency to wait for retry Step %d (%s)",
+                    resume_from + 1L, orig_downstream_id, resume_from, retry_job_id))
+                } else {
+                  message(sprintf(
+                    "[DE-LIMP] WARNING: Could not update Step %d dependency: %s",
+                    resume_from + 1L,
+                    paste(c(dep_result$stdout, dep_result$stderr), collapse = " ")))
+                  showNotification(
+                    sprintf("Warning: Step %d may start before retry completes. Monitor manually.",
+                            resume_from + 1L),
+                    type = "warning", duration = 10)
+                }
+              }
+            }
+
             # Create new job entry
             new_entry <- job
             # Use the last submitted step's ID as the main job_id
