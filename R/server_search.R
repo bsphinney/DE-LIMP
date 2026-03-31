@@ -5069,6 +5069,53 @@ server_search <- function(input, output, session, values, add_to_log,
     # --- Shared: add to queue & notify ---
     values$diann_jobs <- c(values$diann_jobs, list(job_entry))
 
+    # --- Submit Cascadia de novo alongside DIA-NN (if checked) ---
+    if (isTRUE(input$add_cascadia_denovo) && backend == "hpc") {
+      tryCatch({
+        cascadia_script <- generate_cascadia_sbatch(
+          analysis_name = analysis_name,
+          raw_files = values$diann_raw_files$full_path,
+          output_dir = output_dir,
+          cascadia_env = "/quobyte/proteomics-grp/envs/cascadia5",
+          model_ckpt = "/quobyte/proteomics-grp/de-limp/cascadia/models/cascadia.ckpt",
+          gpu_partition = "gpu-a100",
+          gpu_account = "genome-center-grp",
+          gpu_qos = "genome-center-grp-gpu-a100-qos",
+          min_score = 0.5
+        )
+        # Write and upload sbatch script
+        local_script <- tempfile("cascadia_", fileext = ".sbatch")
+        writeLines(cascadia_script, local_script)
+        on.exit(unlink(local_script), add = TRUE)
+        remote_script <- file.path(output_dir, "run_cascadia.sbatch")
+        scp_upload(cfg, local_script, remote_script)
+
+        # Submit
+        cascadia_result <- ssh_exec(cfg,
+          paste(values$ssh_sbatch_path %||% "sbatch", shQuote(remote_script)),
+          login_shell = is.null(values$ssh_sbatch_path), timeout = 30)
+        if (cascadia_result$status == 0) {
+          cascadia_job_id <- trimws(regmatches(
+            paste(cascadia_result$stdout, collapse = " "),
+            regexpr("[0-9]+$", paste(cascadia_result$stdout, collapse = " "))))
+          values$denovo_job_id <- cascadia_job_id
+          values$denovo_job_status <- "queued"
+          message(sprintf("[DE-LIMP] Cascadia de novo job submitted: %s (parallel with DIA-NN)", cascadia_job_id))
+          showNotification(
+            sprintf("Cascadia de novo job %s submitted (GPU, parallel with DIA-NN)", cascadia_job_id),
+            type = "message", duration = 8)
+        } else {
+          showNotification("Cascadia submission failed — DIA-NN search continues without de novo.",
+                           type = "warning", duration = 10)
+          message("[DE-LIMP] Cascadia submit failed: ", paste(cascadia_result$stdout, collapse = " "))
+        }
+      }, error = function(e) {
+        showNotification(paste("Cascadia error:", e$message, "— DIA-NN search continues."),
+                         type = "warning", duration = 10)
+        message("[DE-LIMP] Cascadia error: ", e$message)
+      })
+    }
+
     # Record in SQLite if core facility mode is active
     if (is_core_facility && !is.null(cf_config)) {
       tryCatch({

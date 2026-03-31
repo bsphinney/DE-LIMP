@@ -977,6 +977,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             hr(),
             uiOutput("time_estimate_ui"),
 
+            conditionalPanel("output.ssh_connected_flag == true",
+              checkboxInput("add_cascadia_denovo",
+                tagList(icon("dna"), " Add de novo sequencing (Cascadia)"),
+                value = FALSE),
+              conditionalPanel("input.add_cascadia_denovo",
+                tags$small(class = "text-muted", style = "display: block; margin: -8px 0 8px 25px;",
+                  "Runs Cascadia on GPU in parallel with DIA-NN. Results appear in the De Novo dropdown.")
+              )
+            ),
+
             actionButton("submit_diann", "Submit DIA-NN Search",
               class = "btn-success btn-lg w-100",
               icon = icon("rocket"),
