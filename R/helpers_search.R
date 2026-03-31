@@ -2047,6 +2047,9 @@ check_slurm_status <- function(job_id, ssh_config = NULL, sbatch_path = NULL) {
   if (length(states) == 0) return("unknown")
 
   # Check states — order matters: FAILED before COMPLETED
+  # PREEMPTED jobs may be requeued (if --requeue was set), treat as queued unless also failed
+  if (any(grepl("PREEMPTED|REQUEUED", states)) && !any(grepl("FAILED|TIMEOUT", states))) return("queued")
+  if (any(grepl("NODE_FAIL|BOOT_FAIL", states))) return("failed")
   if (any(grepl("FAILED|TIMEOUT|OUT_OF_ME", states))) return("failed")
   if (any(grepl("CANCELLED", states))) return("cancelled")
   if (any(grepl("RUNNING", states))) return("running")
@@ -3128,8 +3131,10 @@ slurm_move_job <- function(job_id, new_account, new_partition,
 
   # QOS must match account/partition — pattern: {account}-{partition}-qos
   new_qos <- sprintf("%s-%s-qos", new_account, new_partition)
-  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s QOS=%s',
-    scontrol_cmd, job_id, new_account, new_partition, new_qos)
+  # Enable requeue on preemptible (low) partitions so preempted tasks auto-restart
+  requeue_flag <- if (tolower(new_partition) == "low") " Requeue=1" else ""
+  cmd <- sprintf('%s update jobid=%s Account=%s Partition=%s QOS=%s%s',
+    scontrol_cmd, job_id, new_account, new_partition, new_qos, requeue_flag)
 
   res <- if (!is.null(ssh_config)) {
     ssh_exec(ssh_config, cmd, login_shell = is.null(sbatch_path), timeout = 15)

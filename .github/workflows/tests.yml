@@ -37,7 +37,8 @@ jobs:
       - name: Install test dependencies
         run: |
           Rscript -e '
-            install.packages(c("testthat", "glue", "data.table", "filelock"),
+            install.packages(c("testthat", "glue", "data.table", "filelock",
+                                "processx", "stringr", "dplyr", "httr2"),
                              repos = "https://cloud.r-project.org")
           '
 

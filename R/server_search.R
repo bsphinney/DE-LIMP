@@ -5273,13 +5273,20 @@ server_search <- function(input, output, session, values, add_to_log,
         jobs[[i]]$parallel_current_step <- current_step
 
         # Fetch pending_reason for parallel jobs (needed for auto-switch InvalidQOS detection)
-        # Query squeue on the first pending step to get the reason
+        # Query squeue on the first QUEUED step (not just first non-completed, which may be running)
+        queued_sn <- NULL
+        for (sn in step_names) {
+          ss <- step_status[[sn]] %||% "queued"
+          if (ss == "queued" && !is.null(steps[[sn]])) {
+            queued_sn <- sn
+            break
+          }
+        }
         current_sn <- step_names[current_step]
         current_ss <- step_status[[current_sn]] %||% "queued"
-        current_sid <- steps[[current_sn]]
-        if (current_ss == "queued" && !is.null(current_sid)) {
+        if (!is.null(queued_sn)) {
           sinfo <- tryCatch(
-            get_slurm_start_time(current_sid, ssh_config = job_cfg,
+            get_slurm_start_time(steps[[queued_sn]], ssh_config = job_cfg,
                                   sbatch_path = slurm_path),
             error = function(e) list(est_start = NULL, priority = NULL, reason = NULL))
           if (!identical(sinfo$reason, jobs[[i]]$pending_reason)) {
@@ -5779,7 +5786,8 @@ server_search <- function(input, output, session, values, add_to_log,
           # Otherwise, only move array steps (2, 4) — assembly steps (1, 3, 5) stay put.
           job_ids_to_move <- character(0)
           movable_steps <- character(0)
-          force_move_all <- identical(jobs[[i]]$pending_reason, "InvalidQOS")
+          force_move_all <- identical(jobs[[i]]$pending_reason, "InvalidQOS") ||
+                            grepl("QOSMax|AssocMax", jobs[[i]]$pending_reason %||% "")
 
           if (isTRUE(jobs[[i]]$parallel)) {
             ss <- jobs[[i]]$parallel_step_status %||% list()
@@ -5831,6 +5839,9 @@ server_search <- function(input, output, session, values, add_to_log,
             if (!isTRUE(jobs[[i]]$parallel) || force_move_all || length(movable_steps) == 5) {
               jobs[[i]]$slurm_account <- "publicgrp"
               jobs[[i]]$slurm_partition <- "low"
+            } else {
+              # Partial move: some steps on publicgrp, others still on original partition
+              jobs[[i]]$partially_on_public <- TRUE
             }
             jobs[[i]]$queue_switched_at <- Sys.time()
             jobs[[i]]$steps_moved_to_public <- movable_steps
@@ -5843,6 +5854,19 @@ server_search <- function(input, output, session, values, add_to_log,
               type = "message", duration = 10)
             message(sprintf("[DE-LIMP] Auto-switched '%s' %s to publicgrp/low after %.0f min pending",
               jobs[[i]]$name, step_info, pending_min))
+
+            # Log queue switch to search_info.md
+            tryCatch({
+              switch_note <- sprintf(
+                "\n\n---\n## Queue Switch (%s)\n\n- **Action**: Moved to publicgrp/low\n- **Steps moved**: %s\n- **Wait time**: %.0f min\n- **Reason**: %s\n",
+                format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                if (nzchar(step_info)) step_info else "all",
+                pending_min,
+                jobs[[i]]$pending_reason %||% "waited too long on genome-center-grp/high")
+              si_remote <- file.path(jobs[[i]]$output_dir, "search_info.md")
+              ssh_exec(cfg, sprintf('echo %s >> %s',
+                shQuote(switch_note), shQuote(si_remote)), timeout = 10)
+            }, error = function(e) NULL)
           }
         }
       }
@@ -5863,8 +5887,8 @@ server_search <- function(input, output, session, values, add_to_log,
           if (isTRUE(jobs[[i]]$removed)) next
           if (jobs[[i]]$backend != "hpc") next
           if (jobs[[i]]$status != "queued") next
-          # Only move jobs currently on publicgrp
-          if (!identical(jobs[[i]]$slurm_account, "publicgrp")) next
+          # Only move jobs currently on publicgrp (fully or partially moved)
+          if (!identical(jobs[[i]]$slurm_account, "publicgrp") && !isTRUE(jobs[[i]]$partially_on_public)) next
 
           # Use queue_switched_at if job was previously moved, otherwise submitted_at
           ref_time <- jobs[[i]]$queue_switched_at %||% jobs[[i]]$submitted_at
@@ -5902,6 +5926,7 @@ server_search <- function(input, output, session, values, add_to_log,
           if (n_moved > 0) {
             jobs[[i]]$slurm_account <- "genome-center-grp"
             jobs[[i]]$slurm_partition <- "high"
+            jobs[[i]]$partially_on_public <- FALSE
             jobs[[i]]$queue_switched_at <- Sys.time()
             changed <- TRUE
             showNotification(
@@ -6166,7 +6191,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
   output$search_queue_ui <- renderUI({
     jobs <- values$diann_jobs
-    active_jobs <- Filter(function(j) !isTRUE(j$removed), jobs)
+    active_jobs <- Filter(function(j) !isTRUE(j$removed) && !isTRUE(j$superseded), jobs)
     if (length(active_jobs) == 0) {
       return(div(style = "color: #999; font-size: 0.85em; text-align: center; padding: 10px;",
         "No jobs submitted yet."
@@ -6174,11 +6199,12 @@ server_search <- function(input, output, session, values, add_to_log,
     }
 
     # Refresh all button at top
-    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && identical(j$status, "unknown"), logical(1)))
+    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && !isTRUE(j$superseded) && identical(j$status, "unknown"), logical(1)))
 
     job_rows <- lapply(seq_along(jobs), function(i) {
       job <- sanitize_job(jobs[[i]])
       if (isTRUE(job$removed)) return(NULL)
+      if (isTRUE(job$superseded)) return(NULL)  # Hide jobs superseded by retry/resume
 
       status_badge <- switch(job$status %||% "unknown",
         "queued"    = {
@@ -6249,8 +6275,16 @@ server_search <- function(input, output, session, values, add_to_log,
           if (sn %in% c("step2", "step4") && ss == "running") {
             prog <- job[[paste0(sn, "_progress")]]
             if (!is.null(prog)) {
-              pct <- if (n_files > 0) round(prog$completed / n_files * 100) else 0
-              progress_text <- sprintf(" (%d/%d, %d%%)", prog$completed, n_files, pct)
+              # For partial retries, add previously completed tasks to the count
+              prior_completed <- if (isTRUE(job$partial_retry)) {
+                job$original_completed_tasks %||% 0L
+              } else 0L
+              total <- if (isTRUE(job$partial_retry)) {
+                job$total_files %||% n_files
+              } else n_files
+              effective_completed <- prog$completed + prior_completed
+              pct <- if (total > 0) round(effective_completed / total * 100) else 0
+              progress_text <- sprintf(" (%d/%d, %d%%)", effective_completed, total, pct)
             }
           }
 
@@ -6339,11 +6373,11 @@ server_search <- function(input, output, session, values, add_to_log,
       )
     })
 
-    # Count terminal and failed jobs for action buttons
+    # Count terminal and failed jobs for action buttons (exclude superseded)
     n_terminal <- sum(vapply(jobs, function(j)
-      !isTRUE(j$removed) && (j$status %||% "unknown") %in% c("completed", "failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && !isTRUE(j$superseded) && (j$status %||% "unknown") %in% c("completed", "failed", "cancelled"), logical(1)))
     n_failed <- sum(vapply(jobs, function(j)
-      !isTRUE(j$removed) && (j$status %||% "unknown") %in% c("failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && !isTRUE(j$superseded) && (j$status %||% "unknown") %in% c("failed", "cancelled"), logical(1)))
 
     tagList(
       div(style = "display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px;",
@@ -6884,6 +6918,38 @@ server_search <- function(input, output, session, values, add_to_log,
               return()
             }
 
+            # Update downstream step dependency to wait for retry job
+            # Step 2 retry → update Step 3 dependency; Step 4 retry → update Step 5 dependency
+            if (isTRUE(partial_retry)) {
+              retry_step_key <- paste0("step", resume_from)
+              downstream_step_key <- paste0("step", resume_from + 1L)
+              retry_job_id <- new_step_ids[[retry_step_key]]
+              orig_downstream_id <- job$parallel_steps[[downstream_step_key]]
+
+              if (!is.null(retry_job_id) && retry_job_id != "skipped" &&
+                  !is.null(orig_downstream_id)) {
+                scontrol_bin <- file.path(
+                  dirname(values$ssh_sbatch_path %||% "sbatch"), "scontrol")
+                dep_cmd <- sprintf('%s update jobid=%s Dependency=afterany:%s',
+                                   scontrol_bin, orig_downstream_id, retry_job_id)
+                dep_result <- ssh_exec(cfg, dep_cmd, timeout = 15)
+                if (dep_result$status == 0) {
+                  message(sprintf(
+                    "[DE-LIMP] Updated Step %d (%s) dependency to wait for retry Step %d (%s)",
+                    resume_from + 1L, orig_downstream_id, resume_from, retry_job_id))
+                } else {
+                  message(sprintf(
+                    "[DE-LIMP] WARNING: Could not update Step %d dependency: %s",
+                    resume_from + 1L,
+                    paste(c(dep_result$stdout, dep_result$stderr), collapse = " ")))
+                  showNotification(
+                    sprintf("Warning: Step %d may start before retry completes. Monitor manually.",
+                            resume_from + 1L),
+                    type = "warning", duration = 10)
+                }
+              }
+            }
+
             # Create new job entry
             new_entry <- job
             # Use the last submitted step's ID as the main job_id
@@ -6903,9 +6969,40 @@ server_search <- function(input, output, session, values, add_to_log,
               new_entry$partial_retry <- TRUE
               new_entry$retry_tasks <- failed_info$failed_tasks
               new_entry$retry_mem_gb <- retry_mem
+              new_entry$original_completed_tasks <- n_files - failed_info$n_failed
+              new_entry$total_files <- n_files
+            }
+
+            # Mark the original job as superseded
+            for (j in seq_along(values$diann_jobs)) {
+              if (identical(values$diann_jobs[[j]]$output_dir, new_entry$output_dir) &&
+                  !isTRUE(values$diann_jobs[[j]]$superseded)) {
+                values$diann_jobs[[j]]$superseded <- TRUE
+                values$diann_jobs[[j]]$superseded_by <- new_entry$job_id
+              }
             }
 
             values$diann_jobs <- c(values$diann_jobs, list(new_entry))
+
+            # Append retry/resume event to search_info.md
+            tryCatch({
+              retry_note <- sprintf(
+                "\n\n---\n## Resume/Retry Event (%s)\n\n- **Resumed from**: Step %d\n- **Reason**: %s\n- **New job IDs**: %s\n",
+                format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                resume_from,
+                if (isTRUE(partial_retry))
+                  sprintf("Partial retry — %d of %d tasks failed (%s). Retried with %d GB (was %d GB). Tasks: [%s]",
+                    failed_info$n_failed, n_files,
+                    paste(unique(failed_info$reasons), collapse = "/"),
+                    retry_mem, orig_mem, array_spec)
+                else sprintf("Step %d failed — full resume from step %d", resume_from, resume_from),
+                paste(sapply(names(new_step_ids), function(k)
+                  sprintf("%s: %s", k, new_step_ids[[k]])), collapse = ", ")
+              )
+              si_remote <- file.path(output_dir, "search_info.md")
+              ssh_exec(cfg, sprintf('echo %s >> %s',
+                shQuote(retry_note), shQuote(si_remote)), timeout = 10)
+            }, error = function(e) message("[DE-LIMP] Could not append retry info to search_info.md: ", e$message))
 
             skipped_msg <- if (resume_from > 1) {
               sprintf(" (skipped Steps 1-%d, reusing existing results)", resume_from - 1)
@@ -7018,6 +7115,15 @@ server_search <- function(input, output, session, values, add_to_log,
             new_entry$completed_at <- NULL
             new_entry$log_content <- ""
             new_entry$loaded <- FALSE
+
+            # Mark the original job as superseded
+            for (j in seq_along(values$diann_jobs)) {
+              if (identical(values$diann_jobs[[j]]$output_dir, new_entry$output_dir) &&
+                  !isTRUE(values$diann_jobs[[j]]$superseded)) {
+                values$diann_jobs[[j]]$superseded <- TRUE
+                values$diann_jobs[[j]]$superseded_by <- new_entry$job_id
+              }
+            }
 
             values$diann_jobs <- c(values$diann_jobs, list(new_entry))
             showNotification(sprintf("Resubmitted as job %s", new_job_id),

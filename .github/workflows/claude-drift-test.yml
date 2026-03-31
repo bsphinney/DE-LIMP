@@ -38,7 +38,9 @@ jobs:
       - name: Install R dependencies
         run: |
           Rscript -e '
-            install.packages(c("testthat", "httr2"), repos = "https://cloud.r-project.org")
+            install.packages(c("testthat", "httr2", "data.table", "stringr",
+                                "processx", "filelock", "dplyr"),
+                             repos = "https://cloud.r-project.org")
           '
 
       - name: Verify API key is set

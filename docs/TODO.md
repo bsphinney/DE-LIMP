@@ -35,6 +35,7 @@
 - [x] **SSH file browser**: Visual directory browser for remote mode (v3.7)
 - [x] **Load from HPC**: One-click download and load of completed search results (v3.7)
 - [x] **No-replicates mode**: Quantification completes, DE skipped gracefully (v3.7)
+- [ ] **Job queue GUI accuracy after retries**: When parallel jobs are retried/resumed, the step progress display shows "0/54, 0%" because it tracks the new job entry (which has no completed tasks) instead of aggregating original + retry. Old failed jobs should be hidden or marked "superseded". The progress counter should sum completed tasks from both original and retry runs.
 - [ ] **End-to-end Docker testing**: Test full Docker submit → monitor → auto-load flow with real data
 - [ ] **Thermo .raw TIC extraction**: Extend chromatography QC to Thermo files
 - [ ] **XIC viewer over SSH**: Currently requires local file access. Need SCP download of `_xic/*.xic.parquet` files from HPC. Large files (100+ MB/sample) — consider streaming or on-demand per-protein download.
@@ -116,6 +117,9 @@
 - [ ] **No-replicates warning banner**: Show "No statistical inference possible" on Expression Grid when in no-replicates mode
 - [ ] **Comparator Rule 3 (Quant3) quantitative threshold**: Add explicit statement about t-statistic inflation factor
 - [ ] **Comparator Rule 4 (Variance) threshold**: Define what SD ratio constitutes "mismatch"
+
+## Automation
+- [ ] **Nightly documentation GitHub Action**: Auto-generate daily changelog summary from git commits. Runs at 9 PM Pacific, updates CHANGELOG.md if new commits exist, commits and pushes. Replaces session-only Claude Code cron which dies on terminal close.
 
 ## General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
