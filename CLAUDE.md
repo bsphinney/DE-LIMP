@@ -4,6 +4,7 @@
 - **Update this file** when new patterns, gotchas, or architectural decisions emerge
 - For detailed change history, update `CHANGELOG.md` (not this file)
 - **Document as you go**: When the user says "wrap up", "good night", "that's it for now", or asks for a summary — update CLAUDE.md and CHANGELOG.md with all changes from the current work before responding
+- **NEVER run heavy computation on HPC login nodes** — always submit via `sbatch` or request an interactive node with `srun`. Login nodes are shared and running CPU/memory-intensive tasks can get the user flagged.
 
 ## Review Agents (spawn before major releases)
 After significant changes, spawn these 5 review agents in parallel:
