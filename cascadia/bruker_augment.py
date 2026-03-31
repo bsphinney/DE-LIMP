@@ -103,8 +103,8 @@ def _read_bruker_spectra(d_folder: str) -> tuple:
     t0 = time.time()
 
     try:
-        reader = timsrust.FileReader(str(path))
-        all_spectra = reader.read_all_spectra()
+        # timsrust_pyo3 v0.4+: use module-level read_all_spectra()
+        all_spectra = timsrust.read_all_spectra(str(path))
     except Exception as e:
         raise RuntimeError(
             f"timsrust_pyo3 failed to read {path.name}: {e}"
