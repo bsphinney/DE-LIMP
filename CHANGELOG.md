@@ -29,9 +29,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Expression Grid pagination**: Shows 50 rows with vertical scroll instead of rendering all rows at once.
 - **Async cluster resource check**: Cluster CPU/memory check on SSH connect no longer blocks the Shiny event loop.
 
+### SLURM Queue Switching (March 30)
+- **Auto-queue switch fixed**: Now queries `sinfo -p low` directly each monitoring cycle instead of stale snapshot from SSH test.
+- **QOS set on partition move**: `slurm_move_job()` sets `{account}-{partition}-qos` alongside Account/Partition. Fixes `InvalidQOS` on moved jobs.
+- **Requeue on low partition**: Moved jobs get `Requeue=1` so preempted tasks auto-restart.
+- **PREEMPTED state handling**: `check_slurm_status()` maps PREEMPTED/REQUEUED → "queued", NODE_FAIL → "failed".
+- **QOSMaxCpuPerUserLimit detection**: Per-user CPU limits now trigger auto-switch (not just InvalidQOS).
+- **Partial move tracking**: Split-partition jobs (steps 2/4 on low, 1/3/5 on high) can now move back when capacity returns.
+- **pending_reason for queued step**: Fetches reason for first queued step, not first non-completed (running) step.
+- **Retry dependency chain**: After partial step 2 retry, updates Step 3's SLURM dependency via `scontrol update` to wait for retry completion.
+- **Retry/queue events logged to search_info.md**: Timestamp, reason, new job IDs, failed tasks, memory changes recorded.
+- **Job queue GUI accuracy**: Old failed jobs hidden when retry creates new entry. Progress counter aggregates original + retry completed tasks.
+
+### Spaces in Paths (March 30)
+- **Launcher script**: Quoted all sbatch script paths in `submit_all.sh` for directories with spaces.
+- **sbatch scripts**: Quoted paths in `#SBATCH -o/-e` directives and `apptainer exec --bind` arguments.
+- **SSH launcher execution**: Quoted remote path in `bash` command.
+
+### Publication & Export (March 27-30)
+- **SVG vector export**: Camera icon on Volcano, PCA, CV scatter (plotly). SVG download buttons on Heatmap and Violin plots (ggplot2/ComplexHeatmap).
+- **AI Summary export**: Changed from HTML to Markdown format.
+- **NCBI gene symbols in DE table**: DE Results Table and Volcano now use gene_map.tsv fallback for NCBI RefSeq accessions.
+- **GSEA with NCBI data**: Converts RefSeq accessions to gene symbols via gene_map before SYMBOL→ENTREZID mapping.
+- **Default Gemini model**: Changed to `gemini-2.5-flash` (production, was preview).
+- **Live GitHub stats on HF**: Stars/forks fetched from GitHub API at startup (always fresh).
+- **GSEA on HF**: Installed clusterProfiler/enrichplot/ggtangle/org.Hs.eg.db in Dockerfile.
+
+### Drift Test Enhancements (March 24-30)
+- **Daily runs**: Changed from weekly to daily for ASMS poster data collection.
+- **Model tracking**: Captures model ID, input/output tokens, response time from API.
+- **Per-protein fold changes**: Extracts FC values from 4 patterns (logFC=N, N logFC, range, parenthetical).
+- **Language analysis**: Hedging vs confident language counts + example quotes.
+- **Gene stability**: Core/frequent/one-off gene tracking, genes gained/lost between runs.
+- **Trend assessment**: Linear regression on overlap, word count, gene count (4+ runs).
+- **Overall verdict**: HEALTHY/ACCEPTABLE/ATTENTION NEEDED (4+ runs).
+- **Fail loudly**: API key check, baseline creation check, no silent `|| true`.
+- **Golden baselines committed**: `git add -f` bypasses .gitignore for .rds files.
+
 ### Documentation
 - Added SSH XIC viewer and DPC-Quant confidence overlay plans to TODO.
 - Revised confidence overlay design per statistician review (saturation/opacity, not red/green).
+- **QUEUE_SWITCHING.md**: Comprehensive documentation of auto-queue logic, known issues, state mapping.
+- **DRIFT_TEST_METHODOLOGY.md**: Full methodology for ASMS poster — metrics, ground truth, trend assessment.
+- **TODO from expert reviews**: 20 items from biologist, proteomics expert, statistician reviews.
+- **CI workflows fixed**: Added missing R packages (processx, stringr, dplyr) to drift test and unit test workflows.
 
 ## [3.7.0] - 2026-03-17
 
