@@ -47,6 +47,7 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_phospho.R` | Phospho site-level DE, volcano, site table |
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview, Spectronaut 20+ key-value RunOverview), contrast mismatch detection, instrument context in AI prompts, DPC-Quant methodology note in Claude export, MOFA2 decomposition |
+| `R/helpers_denovo.R` | Cascadia de novo: SSL parsing, peptide classification, DIAMOND BLAST, sbatch generation (feature branch) |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes, remote history |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt/NCBI search, unified activity log, SSH file browser helpers, SLURM proxy |
@@ -86,16 +87,10 @@ Navbar: **New Search** (conditional) | **QC** | **Analysis** dropdown | **Output
 - **History** (`value = "history_tab"`) — Unified activity log (replaces Search History + Analysis History). Single DT table with expandable detail rows, project/status filters, Load/Settings/Notes/Project buttons. Notes modal on search completion.
 
 ### Unified Activity Log (v3.6.0)
-- **Single CSV**: `activity_log_path()` → shared HPC storage (`/quobyte/proteomics-grp/de-limp/activity_log.csv`) or local `~/.delimp_activity_log.csv`. Remote log readable via SSH for Docker users. 33 columns. Append-only with file locking; updates via `update_activity()` (read-modify-write by `output_dir`) or `update_activity_by_id()`.
-- **Replaces**: search_history.csv + analysis_history.csv + projects.json (old files migrated to `.bak` on first load).
-- **Event types**: `search_submitted`, `search_completed`, `search_failed`, `analysis_completed`, `data_loaded`, `session_restored`.
-- **Record points**: Job submission (`server_search.R`), job completion/failure (monitoring observer), pipeline completion (`server_data.R`), auto-load (`server_search.R`), session upload (`server_session.R`).
-- **Projects as column**: `project` field in CSV, not a separate JSON file. `get_projects()` reads unique values; `set_project()` updates all rows for an `output_dir`.
-- **Notes feature**: Modal pops on search completion (`values$pending_notes_od` trigger). Editable anytime via pen icon in history table. Stored in `notes` column.
-- **Deterministic RDS**: Auto-saved as `{output_dir}/session.rds` (not timestamped). Overwritten on re-analysis.
-- **Single "Load" button**: Tries `session.rds` first (full state restore), falls back to `report.parquet` (raw data only).
-- **DT expandable rows**: Click row to show FASTA, enzyme, mass acc, output dir, notes. Action buttons: Log, Load, Settings, Notes, Project.
-- **Migration**: `migrate_to_activity_log()` runs once on startup if activity_log.csv doesn't exist. Merges old CSVs + projects.json, renames to `.bak`.
+- **Single CSV**: `activity_log_path()` → shared HPC storage or local `~/.delimp_activity_log.csv`. 33 columns, append-only with file locking. Updates via `update_activity()` (by `output_dir`) or `update_activity_by_id()`. Replaces old search_history.csv + analysis_history.csv + projects.json (migrated to `.bak` on first load).
+- **Event types**: `search_submitted`, `search_completed`, `search_failed`, `analysis_completed`, `data_loaded`, `session_restored`. Record points: job submission/completion (`server_search.R`), pipeline completion (`server_data.R`), session upload (`server_session.R`).
+- **Projects & Notes**: `project` field in CSV (not separate JSON). Notes modal on search completion; editable anytime via pen icon. Deterministic RDS at `{output_dir}/session.rds`.
+- **History UI**: DT expandable rows with Log/Load/Settings/Notes/Project buttons. "Load" tries `session.rds` first, falls back to `report.parquet`.
 - **n_proteins**: Use `length(unique(raw_data$genes$Protein.Group))` not `nrow(raw_data$E)` — the latter counts precursors (~40k), not protein groups (~3k).
 
 ### Comparison Selector Sync
@@ -157,6 +152,7 @@ On each version release, do ALL of these:
 - **Info modal pattern**: `actionButton("[id]_info_btn", icon("question-circle"), class="btn-outline-info btn-sm")` + `observeEvent(...)`.
 - **Plotly annotations**: Use `layout(annotations = ...)` with paper coordinates, not ggplot `annotate()`. For summary stats, prefer ggplot subtitles over plotly annotation cards (more robust in bslib sub-tabs).
 - **Scrollable tab content**: Wrap dense sub-tab content in `div(style = "overflow-y: auto; max-height: calc(100vh - 200px);")` with `min-height` on key widgets to prevent bslib compression.
+- **SVG vector export**: Plotly plots have camera icon for SVG download via `config(toImageButtonOptions = list(format = "svg", scale = 2))`. ggplot/ComplexHeatmap plots use `downloadButton` with `ggsave(device = "svg")` or `svg()` device.
 - Plot heights use viewport-relative units (`vh`, `calc()`) — no fixed pixel heights.
 
 ## Key Gotchas
@@ -223,9 +219,16 @@ On each version release, do ALL of these:
 | `unlist()` on nested lists causes row mismatch | Nested list elements expand to multiple rows in `data.frame()`. Use `vapply(x, function(v) paste(v, collapse="; "), character(1))` instead. |
 | Character matrix subsetting fails on Linux | Empty string rownames cause `mat[protein_ids, ]` subscript errors on Linux (works on macOS). Use numeric indices via `match(protein_ids, rownames(mat))`. |
 | Load from HPC needs build-time guard | `conditionalPanel` alone insufficient on HF — button renders briefly before JS hides it. Wrap in `if (!is_hf_space)` in `build_ui()`. |
+| Paths with spaces in SLURM scripts | Quote all paths in sbatch: `#SBATCH -o "path"`, `--bind "path":/work`. Launcher uses `q()` helper. |
+| Partial retry dependency chain | After retrying failed step 2 tasks, must `scontrol update` step 3's dependency to wait for retry job ID. Otherwise step 3 starts before retries complete. |
+
+### Queue Switching
+Auto-switches parallel jobs between `genome-center-grp/high` and `publicgrp/low` partitions. Steps 2/4 (array) move to low (preemptible); steps 1/3/5 (assembly) stay on high. See @docs/QUEUE_SWITCHING.md for full logic, known issues, and SLURM state mapping.
 
 ## Version History
 
 Current version: **v3.7.0** — defined in `VERSION` file. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 Key decisions: Modularization (v2.3) | XIC Viewer (v2.1) | Phospho Phase 1 (v2.4) | GSEA multi-DB (v2.5) | SSH job submission (v2.5) | Docker backend (v3.0) | MOFA2 (v3.0) | Core Facility (v3.1) | **UI overhaul to page_navbar** (v3.1) | Volcano/CV fixes + Export panel (v3.1.1) | **About tab, community stats, docs overhaul** (v3.2.0) | **Search history, log parser, Claude export enhancements, sacct fixes** (v3.2.1) | **Chromatography QC** (v3.3.0) | **Run Comparator** (v3.4.0) | **Run Comparator enhancements, Search/Analysis History, smart partitions, FASTA library fixes** (v3.5.0) | **Spectronaut parsing fixes, TopN scatter fix, sub-tab help modals** (v3.5.1) | **Unified activity log, cluster monitoring, Spectronaut NaN/rescue fixes** (v3.6.0/v3.6.1) | **Docker launcher, NCBI integration, contaminant analysis, SSH file browser, Load from HPC, no-replicates mode** (v3.7.0)
+
+Unreleased (post-v3.7.0): Data Completeness visualization, SVG vector export, NCBI gene symbols in DE/GSEA, auto-queue switching fixes, drift test infrastructure, Cascadia de novo integration (feature branch).
