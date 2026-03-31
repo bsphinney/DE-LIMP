@@ -1676,18 +1676,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         plotOutput("cv_histogram", height = "450px")
                       )
                     )
-                  ),
-
-                  nav_panel("De Novo", icon = icon("dna"),
-                    uiOutput("denovo_summary_cards"),
-                    navset_card_tab(
-                      nav_panel("Confirmed", DT::DTOutput("denovo_confirmed_table")),
-                      nav_panel("Novel", DT::DTOutput("denovo_novel_table")),
-                      nav_panel("DIAMOND",
-                        actionButton("run_diamond", "Run DIAMOND BLAST", icon = icon("search"), class = "btn-info"),
-                        DT::DTOutput("denovo_blast_table"))
-                    )
                   )
+
                 )
       ),
 
@@ -2032,6 +2022,37 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     p("Note: QC Stats (with Groups) + Top 800 Expression Data are sent to AI.", style="font-size: 0.8em; color: green; font-weight: bold; margin-top: 5px;")
                   )
                 )
+      )
+    ),
+
+    # ==========================================================================
+    # DE NOVO dropdown — Cascadia de novo sequencing
+    # ==========================================================================
+    nav_menu("De Novo", icon = icon("dna"),
+      nav_panel("Cascadia", value = "cascadia_tab", icon = icon("dna"),
+        div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+          uiOutput("denovo_summary_cards"),
+          navset_card_tab(
+            nav_panel("Confirmed Peptides",
+              DT::DTOutput("denovo_confirmed_table")),
+            nav_panel("Novel Peptides",
+              DT::DTOutput("denovo_novel_table")),
+            nav_panel("DIAMOND BLAST",
+              div(style = "margin-bottom: 15px;",
+                actionButton("run_diamond", "Run DIAMOND BLAST",
+                  icon = icon("search"), class = "btn-info btn-sm")),
+              DT::DTOutput("denovo_blast_table")),
+            nav_panel("Score Distribution",
+              plotlyOutput("denovo_score_dist", height = "400px"))
+          )
+        )
+      ),
+      nav_panel("Submit Cascadia Job", value = "cascadia_submit_tab", icon = icon("rocket"),
+        div(style = "max-width: 800px; margin: 0 auto; padding: 20px;",
+          tags$h4("Submit Cascadia De Novo Sequencing"),
+          tags$p("Run Cascadia on the same raw files alongside DIA-NN for orthogonal validation."),
+          uiOutput("cascadia_submit_ui")
+        )
       )
     ),
 

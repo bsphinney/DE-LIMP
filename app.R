@@ -586,6 +586,7 @@ server <- function(input, output, session) {
     nav_hide("main_tabs", "AI Analysis")
     nav_hide("main_tabs", "Output")
     nav_hide("main_tabs", "Phosphoproteomics")
+    nav_hide("main_tabs", "De Novo")
   })
 
   observe({
@@ -622,6 +623,14 @@ server <- function(input, output, session) {
       nav_show("main_tabs", "Phosphoproteomics")
     } else {
       nav_hide("main_tabs", "Phosphoproteomics")
+    }
+  })
+
+  observe({
+    if (!is.null(values$denovo_data) || isTRUE(values$ssh_connected)) {
+      nav_show("main_tabs", "De Novo")
+    } else {
+      nav_hide("main_tabs", "De Novo")
     }
   })
 }
