@@ -280,7 +280,9 @@ generate_cascadia_sbatch <- function(
   model_ckpt,
   gpu_partition = "gpu",
   gpu_account = "genome-center-grp",
+  gpu_qos = NULL,
   min_score = 0.8,
+  batch_size = 64,
   cpus = 8,
   mem_gb = 32,
   time_hours = 4,
@@ -317,10 +319,11 @@ generate_cascadia_sbatch <- function(
         '    --input "%s" \\\n',
         '    --model "%s" \\\n',
         '    --output "%s/%s.ssl" \\\n',
+        '    --batch-size %d \\\n',
         '    --min-score %s'
       ),
       basename(f), f, model_ckpt,
-      denovo_dir, sample_name, min_score
+      denovo_dir, sample_name, batch_size, min_score
     )
   }, character(1))
 
@@ -332,6 +335,7 @@ generate_cascadia_sbatch <- function(
     sprintf('#SBATCH --job-name=cascadia_%s\n', safe_name),
     sprintf('#SBATCH --partition=%s\n', gpu_partition),
     sprintf('#SBATCH --account=%s\n', gpu_account),
+    if (!is.null(gpu_qos) && nzchar(gpu_qos)) sprintf('#SBATCH --qos=%s\n', gpu_qos) else '',
     sprintf('#SBATCH --gres=%s\n', gres),
     sprintf('#SBATCH --cpus-per-task=%d\n', cpus),
     sprintf('#SBATCH --mem=%dG\n', mem_gb),

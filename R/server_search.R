@@ -5081,7 +5081,8 @@ server_search <- function(input, output, session, values, add_to_log,
           gpu_partition = "gpu-a100",
           gpu_account = "genome-center-grp",
           gpu_qos = "genome-center-grp-gpu-a100-qos",
-          min_score = 0.5
+          min_score = 0.5,
+          batch_size = 64
         )
         # Write and upload sbatch script
         local_script <- tempfile("cascadia_", fileext = ".sbatch")
@@ -5881,6 +5882,24 @@ server_search <- function(input, output, session, values, add_to_log,
             if (isTRUE(result$success)) n_moved <- n_moved + 1
           }
 
+          # Boost CPUs on public queue for array steps (reduce preemption risk)
+          if (n_moved > 0 && isTRUE(jobs[[i]]$parallel)) {
+            scontrol_bin <- file.path(dirname(slurm_path), "scontrol")
+            array_steps <- intersect(movable_steps, c("step2", "step4"))
+            steps <- jobs[[i]]$parallel_steps %||% list()
+            for (sn in array_steps) {
+              jid <- steps[[sn]]
+              if (!is.null(jid)) {
+                cpu_boost_cmd <- sprintf('%s update jobid=%s NumCPUs=64 MinMemoryNode=128G',
+                                         scontrol_bin, jid)
+                tryCatch(
+                  ssh_exec(cfg, cpu_boost_cmd, timeout = 10),
+                  error = function(e) message("[DE-LIMP] CPU boost failed for ", jid, ": ", e$message)
+                )
+              }
+            }
+          }
+
           if (n_moved > 0) {
             # Mark fully switched if all steps were moved (non-parallel, force-move-all, or all 5 steps)
             if (!isTRUE(jobs[[i]]$parallel) || force_move_all || length(movable_steps) == 5) {
@@ -5968,6 +5987,25 @@ server_search <- function(input, output, session, values, add_to_log,
                 ssh_config = job_cfg, sbatch_path = slurm_path),
               error = function(e) list(success = FALSE, message = e$message))
             if (isTRUE(result$success)) n_moved <- n_moved + 1
+          }
+
+          # Restore original CPUs when moving back to high
+          if (n_moved > 0 && isTRUE(jobs[[i]]$parallel)) {
+            scontrol_bin <- file.path(dirname(slurm_path), "scontrol")
+            moved_public <- jobs[[i]]$steps_moved_to_public %||% character(0)
+            array_steps <- intersect(moved_public, c("step2", "step4"))
+            steps <- jobs[[i]]$parallel_steps %||% list()
+            for (sn in array_steps) {
+              jid <- steps[[sn]]
+              if (!is.null(jid)) {
+                cpu_restore_cmd <- sprintf('%s update jobid=%s NumCPUs=16 MinMemoryNode=64G',
+                                           scontrol_bin, jid)
+                tryCatch(
+                  ssh_exec(cfg, cpu_restore_cmd, timeout = 10),
+                  error = function(e) NULL
+                )
+              }
+            }
           }
 
           if (n_moved > 0) {
