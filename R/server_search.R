@@ -6191,7 +6191,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
   output$search_queue_ui <- renderUI({
     jobs <- values$diann_jobs
-    active_jobs <- Filter(function(j) !isTRUE(j$removed), jobs)
+    active_jobs <- Filter(function(j) !isTRUE(j$removed) && !isTRUE(j$superseded), jobs)
     if (length(active_jobs) == 0) {
       return(div(style = "color: #999; font-size: 0.85em; text-align: center; padding: 10px;",
         "No jobs submitted yet."
@@ -6199,11 +6199,12 @@ server_search <- function(input, output, session, values, add_to_log,
     }
 
     # Refresh all button at top
-    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && identical(j$status, "unknown"), logical(1)))
+    has_unknown <- any(vapply(jobs, function(j) !isTRUE(j$removed) && !isTRUE(j$superseded) && identical(j$status, "unknown"), logical(1)))
 
     job_rows <- lapply(seq_along(jobs), function(i) {
       job <- sanitize_job(jobs[[i]])
       if (isTRUE(job$removed)) return(NULL)
+      if (isTRUE(job$superseded)) return(NULL)  # Hide jobs superseded by retry/resume
 
       status_badge <- switch(job$status %||% "unknown",
         "queued"    = {
@@ -6274,8 +6275,16 @@ server_search <- function(input, output, session, values, add_to_log,
           if (sn %in% c("step2", "step4") && ss == "running") {
             prog <- job[[paste0(sn, "_progress")]]
             if (!is.null(prog)) {
-              pct <- if (n_files > 0) round(prog$completed / n_files * 100) else 0
-              progress_text <- sprintf(" (%d/%d, %d%%)", prog$completed, n_files, pct)
+              # For partial retries, add previously completed tasks to the count
+              prior_completed <- if (isTRUE(job$partial_retry)) {
+                job$original_completed_tasks %||% 0L
+              } else 0L
+              total <- if (isTRUE(job$partial_retry)) {
+                job$total_files %||% n_files
+              } else n_files
+              effective_completed <- prog$completed + prior_completed
+              pct <- if (total > 0) round(effective_completed / total * 100) else 0
+              progress_text <- sprintf(" (%d/%d, %d%%)", effective_completed, total, pct)
             }
           }
 
@@ -6364,11 +6373,11 @@ server_search <- function(input, output, session, values, add_to_log,
       )
     })
 
-    # Count terminal and failed jobs for action buttons
+    # Count terminal and failed jobs for action buttons (exclude superseded)
     n_terminal <- sum(vapply(jobs, function(j)
-      !isTRUE(j$removed) && (j$status %||% "unknown") %in% c("completed", "failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && !isTRUE(j$superseded) && (j$status %||% "unknown") %in% c("completed", "failed", "cancelled"), logical(1)))
     n_failed <- sum(vapply(jobs, function(j)
-      !isTRUE(j$removed) && (j$status %||% "unknown") %in% c("failed", "cancelled"), logical(1)))
+      !isTRUE(j$removed) && !isTRUE(j$superseded) && (j$status %||% "unknown") %in% c("failed", "cancelled"), logical(1)))
 
     tagList(
       div(style = "display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px;",
@@ -6960,6 +6969,17 @@ server_search <- function(input, output, session, values, add_to_log,
               new_entry$partial_retry <- TRUE
               new_entry$retry_tasks <- failed_info$failed_tasks
               new_entry$retry_mem_gb <- retry_mem
+              new_entry$original_completed_tasks <- n_files - failed_info$n_failed
+              new_entry$total_files <- n_files
+            }
+
+            # Mark the original job as superseded
+            for (j in seq_along(values$diann_jobs)) {
+              if (identical(values$diann_jobs[[j]]$output_dir, new_entry$output_dir) &&
+                  !isTRUE(values$diann_jobs[[j]]$superseded)) {
+                values$diann_jobs[[j]]$superseded <- TRUE
+                values$diann_jobs[[j]]$superseded_by <- new_entry$job_id
+              }
             }
 
             values$diann_jobs <- c(values$diann_jobs, list(new_entry))
@@ -7095,6 +7115,15 @@ server_search <- function(input, output, session, values, add_to_log,
             new_entry$completed_at <- NULL
             new_entry$log_content <- ""
             new_entry$loaded <- FALSE
+
+            # Mark the original job as superseded
+            for (j in seq_along(values$diann_jobs)) {
+              if (identical(values$diann_jobs[[j]]$output_dir, new_entry$output_dir) &&
+                  !isTRUE(values$diann_jobs[[j]]$superseded)) {
+                values$diann_jobs[[j]]$superseded <- TRUE
+                values$diann_jobs[[j]]$superseded_by <- new_entry$job_id
+              }
+            }
 
             values$diann_jobs <- c(values$diann_jobs, list(new_entry))
             showNotification(sprintf("Resubmitted as job %s", new_job_id),
