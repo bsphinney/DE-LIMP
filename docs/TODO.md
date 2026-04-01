@@ -134,6 +134,8 @@
 ## Data Tracking
 - [ ] **Organism column in activity log**: Add `organism` field to activity_log.csv (column 34). Auto-detect from FASTA filename (UniProt suffix `_HUMAN`, `_BOVIN`, `_PIG`, `_MOUSE`; NCBI accession → taxonomy via E-utilities). Store as common name + taxonomy ID. Useful for AI training dataset curation, cross-species analysis, and core facility reporting.
 - [ ] **Instrument column in activity log**: Add `instrument` field from `values$instrument_metadata$instrument_model`. Track which instrument produced each dataset for instrument-specific QC baselines.
+- [ ] **Species-matched contaminant handling**: When searching bovine sample against bovine FASTA + Universal Contaminants, bovine proteins in the contaminant DB (serum albumin, keratins, trypsin) get `Cont_` prefix but are real endogenous proteins. Options: (a) auto-detect species overlap and strip `Cont_` prefix, (b) add checkbox "Organism matches contaminant species — treat Cont_ as endogenous", (c) warn user in the Contaminant Analysis tab.
+- [ ] **Parse search_info.md on Load from HPC**: When loading report.parquet from HPC, also download and parse search_info.md to restore instrument metadata (instrument model, LC system, gradient) and search parameters. Currently Methods text is missing LC/MS info when loading from report.parquet instead of session.rds.
 - [ ] **Excluded files in search_info.md**: `values$excluded_files` is tracked in-app and exported in Claude/Comparator ZIPs as `excluded_files.csv`, but NOT written to search_info.md on the HPC. Anyone looking at the output directory can't see why 54/60 files were searched. Add an "Excluded Files" section to `generate_search_info()` listing filenames and reasons.
 
 ## Search Performance

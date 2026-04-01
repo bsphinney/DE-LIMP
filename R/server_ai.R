@@ -933,6 +933,29 @@ server_ai <- function(input, output, session, values) {
 
         n_total <- nrow(topTable(values$fit, coef = all_contrasts[1], number = Inf))
 
+        # Ensure all inline/note variables are character strings (not NULL/list)
+        safe_str <- function(x) if (is.null(x) || length(x) == 0) "" else paste(as.character(x), collapse = "")
+        design_section <- safe_str(design_section)
+        qc_inline <- safe_str(qc_inline)
+        search_settings_inline <- safe_str(search_settings_inline)
+        instrument_inline <- safe_str(instrument_inline)
+        tic_inline <- safe_str(tic_inline)
+        excluded_inline <- safe_str(excluded_inline)
+        missingness_inline <- safe_str(missingness_inline)
+        dynamic_range_inline <- safe_str(dynamic_range_inline)
+        mofa_inline <- safe_str(mofa_inline)
+        phospho_inline <- safe_str(phospho_inline)
+        gsea_note <- safe_str(gsea_note)
+        phospho_note <- safe_str(phospho_note)
+        instrument_note <- safe_str(instrument_note)
+        tic_note <- safe_str(tic_note)
+        excluded_note <- safe_str(excluded_note)
+        methods_note <- safe_str(methods_note)
+        repro_note <- safe_str(repro_note)
+        rds_note <- safe_str(rds_note)
+        groups_note <- safe_str(groups_note)
+        params_note <- safe_str(params_note)
+
         prompt <- paste0(
           "# Proteomics Differential Expression Analysis\n\n",
           "You are a senior proteomics and systems biology consultant. ",
@@ -1101,6 +1124,9 @@ server_ai <- function(input, output, session, values) {
         )
 
         prompt_file <- file.path(tmp_dir, "PROMPT.md")
+        # Ensure prompt is a single character string (not a list)
+        if (is.list(prompt)) prompt <- paste(unlist(prompt), collapse = "")
+        if (!is.character(prompt)) prompt <- as.character(prompt)
         writeLines(prompt, prompt_file)
         files_to_zip <- c(files_to_zip, prompt_file)
 
