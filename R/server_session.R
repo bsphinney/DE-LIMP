@@ -528,6 +528,8 @@ server_session <- function(input, output, session, values, add_to_log) {
         comparator_mode             = values$comparator_mode,
         comparator_gemini_narrative = values$comparator_gemini_narrative,
         comparator_mofa             = values$comparator_mofa,
+        # Acquisition mode
+        acquisition_mode = values$acquisition_mode,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -632,6 +634,13 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$comparator_mode             <- session_data$comparator_mode
         values$comparator_gemini_narrative <- session_data$comparator_gemini_narrative
         values$comparator_mofa             <- session_data$comparator_mofa
+      }
+
+      # Restore acquisition mode
+      if (!is.null(session_data$acquisition_mode)) {
+        values$acquisition_mode <- session_data$acquisition_mode
+        updateRadioButtons(session, "acquisition_mode",
+          selected = session_data$acquisition_mode)
       }
 
       # Restore repro log and append load event
