@@ -528,6 +528,8 @@ server <- function(input, output, session) {
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_denovo(input, output, session, values, add_to_log)
+  server_dda(input, output, session, values, add_to_log)
+  server_xlms(input, output, session, values, add_to_log)
   server_session(input, output, session, values, add_to_log)
 
   # --- Home directory quota check (HPC systems often have small quotas) ---
