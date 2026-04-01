@@ -219,7 +219,14 @@ server_gsea <- function(input, output, session, values, add_to_log) {
         # Suppress Bioconductor online version validation (fails without internet)
         options(BIOCONDUCTOR_ONLINE_VERSION_DIAGNOSIS = FALSE)
         if (!requireNamespace(org_db_name, quietly = TRUE)) {
+          showNotification(paste("Installing", org_db_name, "— this may take a minute..."),
+                           type = "message", duration = NULL, id = "gsea_install")
           BiocManager::install(org_db_name, ask = FALSE, update = FALSE, quiet = TRUE)
+          removeNotification("gsea_install")
+          if (!requireNamespace(org_db_name, quietly = TRUE)) {
+            stop("Failed to install ", org_db_name,
+                 ". Please install manually: BiocManager::install('", org_db_name, "')")
+          }
         }
         library(org_db_name, character.only = TRUE)
 

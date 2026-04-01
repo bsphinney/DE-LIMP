@@ -734,6 +734,7 @@ server_ai <- function(input, output, session, values) {
             files_to_zip <- c(files_to_zip, fig_files)
             figures_note <- paste0(
               "\n- **`figures/`** — Publication-quality SVG figures: volcano plot, heatmap (top 20 DE), PCA, violin plots (top 10 up/down)\n")
+            files_to_zip <- c(files_to_zip, fig_files)
             message("[DE-LIMP] Claude export: ", length(fig_files), " SVG figures generated")
           }
         }, error = function(e) message("[Export] SVG figures section: ", e$message))
@@ -1246,10 +1247,12 @@ server_ai <- function(input, output, session, values) {
         files_to_zip <- c(files_to_zip, prompt_file)
 
         incProgress(0.9, detail = "Creating zip...")
-        # zip expects relative paths from tmp_dir (supports figures/ subdirectory)
+        # zip from tmp_dir so figures/ subdirectory is preserved in ZIP
         old_wd <- setwd(tmp_dir)
         on.exit(setwd(old_wd), add = TRUE)
-        rel_paths <- sub(paste0("^", gsub("([.\\\\|()\\[\\]{}^$*+?])", "\\\\\\1", tmp_dir), "/?"), "", files_to_zip)
+        # Convert absolute paths to relative (strip tmp_dir prefix)
+        prefix <- paste0(tmp_dir, "/")
+        rel_paths <- sub(prefix, "", files_to_zip, fixed = TRUE)
         zip(file, rel_paths)
 
         message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars", length(files_to_zip), nchar(prompt)))
