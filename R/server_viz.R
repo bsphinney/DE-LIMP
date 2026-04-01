@@ -997,7 +997,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
   })
 
   # Observer: dynamically populate PCA color selector (same pattern as MDS in server_qc.R)
-  observeEvent(values$metadata, {
+  # Also re-fires when covariate names change so dropdown labels stay current
+  observeEvent(list(values$metadata, values$cov1_name, values$cov2_name), ignoreInit = TRUE, {
     req(values$metadata)
     meta <- values$metadata
     color_choices <- "Group"
