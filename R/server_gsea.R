@@ -216,6 +216,8 @@ server_gsea <- function(input, output, session, values, add_to_log) {
 
         message(sprintf("[DE-LIMP GSEA] Using organism database: %s", org_db_name))
 
+        # Suppress Bioconductor online version validation (fails without internet)
+        options(BIOCONDUCTOR_ONLINE_VERSION_DIAGNOSIS = FALSE)
         if (!requireNamespace(org_db_name, quietly = TRUE)) {
           BiocManager::install(org_db_name, ask = FALSE, update = FALSE, quiet = TRUE)
         }
