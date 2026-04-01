@@ -8,7 +8,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      local_sbatch = FALSE, local_diann = FALSE,
                      delimp_data_dir = "",
                      is_core_facility = FALSE, cf_config = NULL,
-                     deploy_env = "Local") {
+                     deploy_env = "Local",
+                     config = list(), is_hive = FALSE) {
 
   # Environment badge colors
   env_colors <- list(
@@ -242,6 +243,49 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       tags$a(href="https://github.com/bsphinney/DE-LIMP", target="_blank", class="btn btn-secondary w-50", icon("github"), "Code", style="color:white; font-weight:bold;")
     ),
 
+    # --- Acquisition Mode Switcher (DIA / DDA / XL-MS) ---
+    # Gated by config.yml feature flags + HPC availability
+    {
+      mode_choices <- c("DIA" = "dia")
+      if (is_hive && isTRUE(config$features$enable_dda)) {
+        mode_choices <- c(mode_choices, "DDA" = "dda")
+      }
+      if (is_hive && isTRUE(config$features$enable_xlms)) {
+        mode_choices <- c(mode_choices, "XL-MS" = "xlms")
+      }
+      if (length(mode_choices) > 1) {
+        div(
+          class = "acquisition-mode-switcher",
+          style = paste(
+            "display: flex; align-items: center; gap: 12px;",
+            "padding: 10px 16px; border-radius: 8px;",
+            "background: linear-gradient(135deg, #f8fafc 0%, #e8f4fd 100%);",
+            "border: 1px solid #c8dff0; margin-bottom: 16px;"
+          ),
+          div(
+            style = paste(
+              "font-size: 11px; font-weight: 600; color: #6c757d;",
+              "letter-spacing: 0.05em; text-transform: uppercase;"
+            ),
+            "Mode"
+          ),
+          radioButtons(
+            inputId  = "acquisition_mode",
+            label    = NULL,
+            choices  = mode_choices,
+            selected = "dia",
+            inline   = TRUE
+          ),
+          uiOutput("mode_context_label")
+        )
+      } else {
+        # Single mode (DIA only) — hidden input so conditionalPanel works
+        div(style = "display:none;",
+          radioButtons("acquisition_mode", NULL, choices = c("DIA" = "dia"), selected = "dia")
+        )
+      }
+    },
+
     # --- Main accordion ---
     accordion(
       id = "sidebar_sections", multiple = TRUE, open = "Upload Data",
@@ -411,6 +455,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     # SEARCH (standalone, conditional) — visible when Docker or HPC backend available
     # ==========================================================================
     if (search_enabled) nav_panel("New Search", icon = icon("rocket"),
+
+      # --- DIA panel (existing — shown when acquisition_mode === 'dia') ---
+      conditionalPanel(
+        condition = "input.acquisition_mode === 'dia'",
+
       # Three-panel wizard layout
       layout_column_wrap(
         width = 1/3,
@@ -1013,6 +1062,69 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           )
         )
       )
+      ), # end conditionalPanel DIA
+
+      # --- DDA panel (stub — shown when acquisition_mode === 'dda') ---
+      conditionalPanel(
+        condition = "input.acquisition_mode === 'dda'",
+        div(
+          style = "padding: 40px; max-width: 800px; margin: 0 auto;",
+          div(class = "alert alert-info", role = "alert",
+            icon("flask"), " ",
+            tags$strong("DDA Workflow"),
+            " powered by ",
+            tags$strong("Sage"), " (database search) + ",
+            tags$strong("Casanovo"), " (de novo, optional). ",
+            "Requires Hive HPC. timsTOF ddaPASEF .d files only."
+          ),
+          div(
+            style = paste(
+              "text-align: center; padding: 60px 20px;",
+              "background: #f8f9fa; border-radius: 12px;",
+              "border: 2px dashed #dee2e6;"
+            ),
+            icon("list-ul", style = "font-size: 48px; color: #6c757d; margin-bottom: 16px;"),
+            tags$h4("DDA Search Coming Soon", style = "color: #495057;"),
+            tags$p(
+              style = "color: #6c757d; max-width: 500px; margin: 0 auto;",
+              "The Sage + Casanovo DDA pipeline will appear here. ",
+              "Database search, PSM scoring, protein inference, and quantification ",
+              "with optional de novo sequencing overlay."
+            )
+          )
+        )
+      ),
+
+      # --- XL-MS panel (stub — shown when acquisition_mode === 'xlms') ---
+      conditionalPanel(
+        condition = "input.acquisition_mode === 'xlms'",
+        div(
+          style = "padding: 40px; max-width: 800px; margin: 0 auto;",
+          div(class = "alert alert-info", role = "alert",
+            icon("diagram-project"), " ",
+            tags$strong("Cross-Linking Mass Spectrometry"),
+            " powered by ",
+            tags$strong("MeroX"), " + ",
+            tags$strong("xiSearch"), " for protein-protein interaction mapping."
+          ),
+          div(
+            style = paste(
+              "text-align: center; padding: 60px 20px;",
+              "background: #f8f9fa; border-radius: 12px;",
+              "border: 2px dashed #dee2e6;"
+            ),
+            icon("link", style = "font-size: 48px; color: #6f42c1; margin-bottom: 16px;"),
+            tags$h4("XL-MS Pipeline Coming Soon", style = "color: #495057;"),
+            tags$p(
+              style = "color: #6c757d; max-width: 500px; margin: 0 auto;",
+              "The MeroX + xiSearch cross-linking pipeline will appear here. ",
+              "Crosslink identification, FDR control, and protein-protein ",
+              "interaction network visualization."
+            )
+          )
+        )
+      )
+
     ),
 
     # ==========================================================================

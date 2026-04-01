@@ -398,7 +398,8 @@ tryCatch(ssh_cleanup_stale_sockets(), error = function(e) NULL)
 
 ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch,
                local_diann, delimp_data_dir,
-               is_core_facility, cf_config, deploy_env)
+               is_core_facility, cf_config, deploy_env,
+               config, is_hive)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules
