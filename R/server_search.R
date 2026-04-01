@@ -17,6 +17,102 @@ server_search <- function(input, output, session, values, add_to_log,
   if (!search_enabled) return(invisible())
 
   # ============================================================================
+  #    Parse search_info.md — extract instrument metadata & search settings
+  # ============================================================================
+
+  parse_search_info_md <- function(text) {
+    lines <- strsplit(text, "\n")[[1]]
+
+    # Helper: extract value from "- **Key**: Value" pattern
+    extract_field <- function(key) {
+      pattern <- sprintf("^\\s*-\\s*\\*\\*%s\\*\\*:\\s*(.+)$", key)
+      idx <- grep(pattern, lines, ignore.case = TRUE)
+      if (length(idx) == 0) return(NULL)
+      val <- trimws(sub(pattern, "\\1", lines[idx[1]], ignore.case = TRUE))
+      # Strip backticks
+      val <- gsub("^`|`$", "", val)
+      if (!nzchar(val) || val == "unknown") return(NULL)
+      val
+    }
+
+    # Instrument metadata
+    instrument_metadata <- list(
+      instrument_model  = extract_field("Instrument"),
+      serial            = extract_field("Serial"),
+      acquisition_mode  = extract_field("Acquisition mode"),
+      lc_system         = extract_field("LC system"),
+      lc_method         = extract_field("LC method"),
+      dia_windows       = NULL,
+      mz_range          = NULL,
+      mz_range_low      = NULL,
+      mz_range_high     = NULL
+    )
+
+    # Parse DIA windows as integer
+    dw <- extract_field("DIA windows")
+    if (!is.null(dw)) instrument_metadata$dia_windows <- suppressWarnings(as.integer(dw))
+
+    # Parse m/z range "100-1700" into low/high
+    mz <- extract_field("m/z range")
+    if (!is.null(mz)) {
+      instrument_metadata$mz_range <- mz
+      parts <- strsplit(mz, "\\s*-\\s*")[[1]]
+      if (length(parts) == 2) {
+        instrument_metadata$mz_range_low  <- suppressWarnings(as.numeric(parts[1]))
+        instrument_metadata$mz_range_high <- suppressWarnings(as.numeric(parts[2]))
+      }
+    }
+
+    # Remove NULLs
+    instrument_metadata <- instrument_metadata[!vapply(instrument_metadata, is.null, logical(1))]
+
+    # Search parameters
+    search_params <- list(
+      enzyme        = extract_field("Enzyme"),
+      mass_acc      = extract_field("Mass accuracy"),
+      mass_acc_ms1  = extract_field("Mass accuracy MS1"),
+      normalization = extract_field("Normalization"),
+      scan_window   = extract_field("Scan window"),
+      mbr           = extract_field("MBR"),
+      min_pr_mz     = extract_field("Min precursor m/z"),
+      max_pr_mz     = extract_field("Max precursor m/z"),
+      min_fr_mz     = extract_field("Min fragment m/z"),
+      max_fr_mz     = extract_field("Max fragment m/z"),
+      min_pr_charge = extract_field("Min precursor charge"),
+      max_pr_charge = extract_field("Max precursor charge")
+    )
+
+    # Top-level fields (outside ### sections)
+    search_mode   <- extract_field("Search mode")
+    normalization <- extract_field("Normalization")
+    if (!is.null(search_mode))   search_params$search_mode   <- search_mode
+    if (!is.null(normalization))  search_params$normalization <- normalization
+
+    # Extract FASTA file paths from ### FASTA Files section
+    fasta_start <- grep("^###\\s*FASTA Files", lines)
+    if (length(fasta_start) > 0) {
+      fasta_files <- character()
+      for (i in (fasta_start[1] + 1):length(lines)) {
+        ln <- trimws(lines[i])
+        if (grepl("^###", ln) || (!nzchar(ln) && length(fasta_files) > 0)) break
+        if (grepl("^-\\s*`", ln)) {
+          fp <- gsub("^-\\s*`|`$", "", ln)
+          fasta_files <- c(fasta_files, fp)
+        }
+      }
+      if (length(fasta_files) > 0) search_params$fasta_files <- fasta_files
+    }
+
+    # Remove NULLs
+    search_params <- search_params[!vapply(search_params, is.null, logical(1))]
+
+    list(
+      instrument_metadata = instrument_metadata,
+      search_params       = search_params
+    )
+  }
+
+  # ============================================================================
   #    SSH Config Reactive (HPC backend only)
   # ============================================================================
 
@@ -1794,6 +1890,34 @@ server_search <- function(input, output, session, values, add_to_log,
               message("[DE-LIMP] Restored ", nrow(values$excluded_files), " excluded files from HPC")
             }
           }, error = function(e) NULL)
+
+          # Restore instrument metadata & search settings from search_info.md
+          tryCatch({
+            info_remote <- file.path(remote_dir, "search_info.md")
+            info_local <- tempfile(fileext = ".md")
+            dl_info <- scp_download(cfg, info_remote, info_local)
+            if (dl_info$status == 0 && file.exists(info_local) && file.size(info_local) > 0) {
+              info_text <- paste(readLines(info_local, warn = FALSE), collapse = "\n")
+              parsed <- parse_search_info_md(info_text)
+
+              # Populate instrument metadata (only if we got meaningful fields)
+              if (length(parsed$instrument_metadata) > 0) {
+                values$instrument_metadata <- parsed$instrument_metadata
+                message("[DE-LIMP] Restored instrument metadata from search_info.md: ",
+                        parsed$instrument_metadata$instrument_model %||% "unknown instrument")
+              }
+
+              # Merge search params into existing diann_search_settings
+              if (length(parsed$search_params) > 0) {
+                existing <- values$diann_search_settings %||% list()
+                values$diann_search_settings <- c(existing, parsed$search_params)
+                message("[DE-LIMP] Restored search settings from search_info.md (",
+                        length(parsed$search_params), " parameters)")
+              }
+            }
+          }, error = function(e) {
+            message("[DE-LIMP] Could not restore search_info.md: ", e$message)
+          })
 
           gc(verbose = FALSE)
 
