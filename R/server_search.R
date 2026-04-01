@@ -1784,6 +1784,17 @@ server_search <- function(input, output, session, values, add_to_log,
             report_file = selected
           )
 
+          # Restore excluded files from output directory (if saved during search)
+          tryCatch({
+            excl_remote <- file.path(remote_dir, "excluded_files.csv")
+            excl_local <- tempfile(fileext = ".csv")
+            dl <- scp_download(cfg, excl_remote, excl_local)
+            if (dl$status == 0 && file.exists(excl_local) && file.size(excl_local) > 0) {
+              values$excluded_files <- read.csv(excl_local, stringsAsFactors = FALSE)
+              message("[DE-LIMP] Restored ", nrow(values$excluded_files), " excluded files from HPC")
+            }
+          }, error = function(e) NULL)
+
           gc(verbose = FALSE)
 
           incProgress(0.3, detail = "Done!")
@@ -4575,6 +4586,13 @@ server_search <- function(input, output, session, values, add_to_log,
         }
       }
       file.copy(file_list_local, file.path(upload_dir, "file_list.txt"))
+
+      # Write excluded_files.csv alongside file_list.txt (persists across sessions)
+      if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+        excl_csv <- file.path(upload_dir, "excluded_files.csv")
+        write.csv(values$excluded_files, excl_csv, row.names = FALSE)
+      }
+
       writeLines(paste(launcher_lines, collapse = "\n"),
                  file.path(upload_dir, "submit_all.sh"))
 

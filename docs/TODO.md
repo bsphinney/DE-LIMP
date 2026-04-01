@@ -134,6 +134,7 @@
 ## Data Tracking
 - [ ] **Organism column in activity log**: Add `organism` field to activity_log.csv (column 34). Auto-detect from FASTA filename (UniProt suffix `_HUMAN`, `_BOVIN`, `_PIG`, `_MOUSE`; NCBI accession → taxonomy via E-utilities). Store as common name + taxonomy ID. Useful for AI training dataset curation, cross-species analysis, and core facility reporting.
 - [ ] **Instrument column in activity log**: Add `instrument` field from `values$instrument_metadata$instrument_model`. Track which instrument produced each dataset for instrument-specific QC baselines.
+- [ ] **Excluded files in search_info.md**: `values$excluded_files` is tracked in-app and exported in Claude/Comparator ZIPs as `excluded_files.csv`, but NOT written to search_info.md on the HPC. Anyone looking at the output directory can't see why 54/60 files were searched. Add an "Excluded Files" section to `generate_search_info()` listing filenames and reasons.
 
 ## Search Performance
 - [ ] **Adaptive CPUs on public queue**: When auto-switching step 2/4 to publicgrp/low, increase CPUs from 16 to 64 (public nodes have 128 CPUs). Faster per-file completion reduces preemption risk. Use scontrol update NumCPUs=64 alongside the partition move.
