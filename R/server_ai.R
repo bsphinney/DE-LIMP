@@ -649,16 +649,18 @@ server_ai <- function(input, output, session, values) {
             if (!"Protein.Group" %in% colnames(df_volc)) df_volc <- df_volc %>% rownames_to_column("Protein.Group")
             df_volc$Significance <- ifelse(df_volc$adj.P.Val < 0.05, "Significant", "Not Sig")
 
-            p_volcano <- ggplot(df_volc, aes(x = logFC, y = -log10(P.Value), color = Significance)) +
-              geom_point(alpha = 0.5, size = 1) +
-              scale_color_manual(values = c("Significant" = "#E74C3C", "Not Sig" = "#BDC3C7")) +
-              geom_vline(xintercept = c(-0.6, 0.6), linetype = "dashed", color = "orange") +
-              labs(title = paste("Volcano:", all_contrasts[1]), x = "logFC", y = "-log10(P-Value)") +
-              theme_bw()
-            ggsave(file.path(fig_dir, "volcano.svg"), p_volcano, width = 8, height = 6, device = "svg")
+            p_volcano <- ggplot2::ggplot(df_volc, ggplot2::aes(x = logFC, y = -log10(P.Value), color = Significance)) +
+              ggplot2::geom_point(alpha = 0.5, size = 1) +
+              ggplot2::scale_color_manual(values = c("Significant" = "#E74C3C", "Not Sig" = "#BDC3C7")) +
+              ggplot2::geom_vline(xintercept = c(-0.6, 0.6), linetype = "dashed", color = "orange") +
+              ggplot2::labs(title = paste("Volcano:", all_contrasts[1]), x = "logFC", y = "-log10(P-Value)") +
+              ggplot2::theme_bw()
+            svg(file.path(fig_dir, "volcano.svg"), width = 8, height = 6)
+            print(p_volcano)
+            dev.off()
             fig_files <- c(fig_files, file.path(fig_dir, "volcano.svg"))
             message("[DE-LIMP] Claude export: volcano SVG OK")
-          }, error = function(e) message("[Export] Volcano SVG: ", e$message))
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Volcano SVG: ", e$message) })
 
           # Heatmap SVG (top 20 DE proteins)
           tryCatch({
@@ -705,8 +707,9 @@ server_ai <- function(input, output, session, values) {
                      y = "Log2 Intensity") +
                 theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-              ggsave(file.path(fig_dir, paste0("violin_top10_", direction, ".svg")), p,
-                     width = 14, height = 6, device = "svg")
+              svg(file.path(fig_dir, paste0("violin_top10_", direction, ".svg")), width = 14, height = 6)
+              print(p)
+              dev.off()
               fig_files <- c(fig_files, file.path(fig_dir, paste0("violin_top10_", direction, ".svg")))
             }
             message("[DE-LIMP] Claude export: violin SVGs OK")
@@ -725,16 +728,17 @@ server_ai <- function(input, output, session, values) {
               stat_ellipse(level = 0.95, linetype = "dashed") +
               labs(title = "PCA", x = paste0("PC1 (", var_exp[1], "%)"), y = paste0("PC2 (", var_exp[2], "%)")) +
               theme_bw()
-            ggsave(file.path(fig_dir, "pca.svg"), p_pca, width = 8, height = 6, device = "svg")
+            svg(file.path(fig_dir, "pca.svg"), width = 8, height = 6)
+            print(p_pca)
+            dev.off()
             fig_files <- c(fig_files, file.path(fig_dir, "pca.svg"))
             message("[DE-LIMP] Claude export: PCA SVG OK")
-          }, error = function(e) message("[Export] PCA SVG: ", e$message))
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] PCA SVG: ", e$message) })
 
           if (length(fig_files) > 0) {
             files_to_zip <- c(files_to_zip, fig_files)
             figures_note <- paste0(
               "\n- **`figures/`** — Publication-quality SVG figures: volcano plot, heatmap (top 20 DE), PCA, violin plots (top 10 up/down)\n")
-            files_to_zip <- c(files_to_zip, fig_files)
             message("[DE-LIMP] Claude export: ", length(fig_files), " SVG figures generated")
           }
         }, error = function(e) message("[Export] SVG figures section: ", e$message))
@@ -1250,9 +1254,12 @@ server_ai <- function(input, output, session, values) {
         # zip from tmp_dir so figures/ subdirectory is preserved in ZIP
         old_wd <- setwd(tmp_dir)
         on.exit(setwd(old_wd), add = TRUE)
-        # Convert absolute paths to relative (strip tmp_dir prefix)
-        prefix <- paste0(tmp_dir, "/")
-        rel_paths <- sub(prefix, "", files_to_zip, fixed = TRUE)
+        # Convert absolute paths to relative (strip tmp_dir prefix, handle trailing /)
+        norm_tmp <- normalizePath(tmp_dir, mustWork = FALSE)
+        rel_paths <- vapply(files_to_zip, function(fp) {
+          nfp <- normalizePath(fp, mustWork = FALSE)
+          sub(paste0(norm_tmp, "/"), "", nfp, fixed = TRUE)
+        }, character(1), USE.NAMES = FALSE)
         zip(file, rel_paths)
 
         message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars", length(files_to_zip), nchar(prompt)))
