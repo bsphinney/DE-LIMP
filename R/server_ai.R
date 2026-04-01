@@ -636,6 +636,108 @@ server_ai <- function(input, output, session, values) {
           }
         }, error = function(e) message("[Export] detection matrix: ", e$message))
 
+        # --- 7e. SVG Figures ---
+        figures_note <- ""
+        tryCatch({
+          fig_dir <- file.path(tmp_dir, "figures")
+          dir.create(fig_dir, showWarnings = FALSE)
+          fig_files <- character(0)
+
+          # Volcano plot SVG (first contrast)
+          tryCatch({
+            df_volc <- topTable(values$fit, coef = all_contrasts[1], number = Inf) %>% as.data.frame()
+            if (!"Protein.Group" %in% colnames(df_volc)) df_volc <- df_volc %>% rownames_to_column("Protein.Group")
+            df_volc$Significance <- ifelse(df_volc$adj.P.Val < 0.05, "Significant", "Not Sig")
+
+            p_volcano <- ggplot(df_volc, aes(x = logFC, y = -log10(P.Value), color = Significance)) +
+              geom_point(alpha = 0.5, size = 1) +
+              scale_color_manual(values = c("Significant" = "#E74C3C", "Not Sig" = "#BDC3C7")) +
+              geom_vline(xintercept = c(-0.6, 0.6), linetype = "dashed", color = "orange") +
+              labs(title = paste("Volcano:", all_contrasts[1]), x = "logFC", y = "-log10(P-Value)") +
+              theme_bw()
+            ggsave(file.path(fig_dir, "volcano.svg"), p_volcano, width = 8, height = 6, device = "svg")
+            fig_files <- c(fig_files, file.path(fig_dir, "volcano.svg"))
+            message("[DE-LIMP] Claude export: volcano SVG OK")
+          }, error = function(e) message("[Export] Volcano SVG: ", e$message))
+
+          # Heatmap SVG (top 20 DE proteins)
+          tryCatch({
+            df_volc_ht <- topTable(values$fit, coef = all_contrasts[1], number = Inf) %>% as.data.frame()
+            top20 <- head(df_volc_ht[order(df_volc_ht$adj.P.Val), ], 20)
+            mat <- values$y_protein$E[rownames(top20), , drop = FALSE]
+            mat_z <- t(apply(mat, 1, function(x) (x - mean(x)) / sd(x)))
+
+            svg(file.path(fig_dir, "heatmap_top20.svg"), width = 10, height = 8)
+            meta_ht <- values$metadata[match(colnames(mat), values$metadata$File.Name), ]
+            ha <- ComplexHeatmap::HeatmapAnnotation(Group = factor(meta_ht$Group))
+            ComplexHeatmap::draw(ComplexHeatmap::Heatmap(mat_z, name = "Z-score", top_annotation = ha,
+              cluster_rows = TRUE, cluster_columns = TRUE, show_column_names = FALSE))
+            dev.off()
+            fig_files <- c(fig_files, file.path(fig_dir, "heatmap_top20.svg"))
+            message("[DE-LIMP] Claude export: heatmap SVG OK")
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Heatmap SVG: ", e$message) })
+
+          # Violin plots SVG (top 10 up and top 10 down)
+          tryCatch({
+            df_volc_vln <- topTable(values$fit, coef = all_contrasts[1], number = Inf) %>% as.data.frame()
+            if (!"Protein.Group" %in% colnames(df_volc_vln)) df_volc_vln <- df_volc_vln %>% rownames_to_column("Protein.Group")
+            sig_prots <- df_volc_vln[df_volc_vln$adj.P.Val < 0.05, ]
+
+            for (direction in c("up", "down")) {
+              prot_ids <- if (direction == "up") {
+                head(sig_prots[order(-sig_prots$logFC), "Protein.Group"], 10)
+              } else {
+                head(sig_prots[order(sig_prots$logFC), "Protein.Group"], 10)
+              }
+              if (length(prot_ids) == 0) next
+              mat_vln <- values$y_protein$E[prot_ids, , drop = FALSE]
+              long <- as.data.frame(mat_vln) %>%
+                tibble::rownames_to_column("Protein") %>%
+                tidyr::pivot_longer(-Protein, names_to = "File.Name", values_to = "LogIntensity")
+              long <- dplyr::left_join(long, values$metadata, by = "File.Name")
+
+              p <- ggplot(long, aes(x = Group, y = LogIntensity, fill = Group)) +
+                geom_violin(alpha = 0.5, trim = FALSE) +
+                geom_jitter(width = 0.2, size = 1, alpha = 0.6) +
+                facet_wrap(~Protein, scales = "free_y", ncol = 5) +
+                theme_bw() +
+                labs(title = paste("Top 10", if (direction == "up") "Upregulated" else "Downregulated", "Proteins"),
+                     y = "Log2 Intensity") +
+                theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+              ggsave(file.path(fig_dir, paste0("violin_top10_", direction, ".svg")), p,
+                     width = 14, height = 6, device = "svg")
+              fig_files <- c(fig_files, file.path(fig_dir, paste0("violin_top10_", direction, ".svg")))
+            }
+            message("[DE-LIMP] Claude export: violin SVGs OK")
+          }, error = function(e) message("[Export] Violin SVGs: ", e$message))
+
+          # PCA plot SVG
+          tryCatch({
+            pca_res <- prcomp(t(values$y_protein$E), scale. = TRUE)
+            pca_df <- data.frame(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2],
+                                  File.Name = rownames(pca_res$x))
+            pca_df <- dplyr::left_join(pca_df, values$metadata, by = "File.Name")
+            var_exp <- round(100 * summary(pca_res)$importance[2, 1:2], 1)
+
+            p_pca <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+              geom_point(size = 3) +
+              stat_ellipse(level = 0.95, linetype = "dashed") +
+              labs(title = "PCA", x = paste0("PC1 (", var_exp[1], "%)"), y = paste0("PC2 (", var_exp[2], "%)")) +
+              theme_bw()
+            ggsave(file.path(fig_dir, "pca.svg"), p_pca, width = 8, height = 6, device = "svg")
+            fig_files <- c(fig_files, file.path(fig_dir, "pca.svg"))
+            message("[DE-LIMP] Claude export: PCA SVG OK")
+          }, error = function(e) message("[Export] PCA SVG: ", e$message))
+
+          if (length(fig_files) > 0) {
+            files_to_zip <- c(files_to_zip, fig_files)
+            figures_note <- paste0(
+              "\n- **`figures/`** — Publication-quality SVG figures: volcano plot, heatmap (top 20 DE), PCA, violin plots (top 10 up/down)\n")
+            message("[DE-LIMP] Claude export: ", length(fig_files), " SVG figures generated")
+          }
+        }, error = function(e) message("[Export] SVG figures section: ", e$message))
+
         # --- 8. Build the prompt .md ---
         incProgress(0.7, detail = "Assembling prompt...")
 
@@ -955,6 +1057,7 @@ server_ai <- function(input, output, session, values) {
         rds_note <- safe_str(rds_note)
         groups_note <- safe_str(groups_note)
         params_note <- safe_str(params_note)
+        figures_note <- safe_str(figures_note)
 
         prompt <- paste0(
           "# Proteomics Differential Expression Analysis\n\n",
@@ -975,7 +1078,8 @@ server_ai <- function(input, output, session, values) {
           repro_note,
           rds_note,
           groups_note,
-          params_note, "\n\n",
+          params_note,
+          figures_note, "\n\n",
           "## OUTPUT FORMAT\n\n",
           "Generate a publication-quality report suitable for sharing with collaborators. ",
           "The report should be professional, well-structured, and written in a scientific but accessible tone. ",
@@ -985,6 +1089,8 @@ server_ai <- function(input, output, session, values) {
           "Format the output as a structured document with numbered sections. ",
           "For tables, use markdown table syntax. For key warnings or critical findings, use bold text. ",
           "The report should stand alone — a reader should understand the experiment, methods, findings, and recommendations without additional context.\n\n",
+          "Include references to the attached figures in your analysis (e.g., 'As shown in the volcano plot (figures/volcano.svg)...'). ",
+          "When discussing top DE proteins, reference the violin plots showing their expression distributions across groups.\n\n",
           "Please provide a comprehensive analysis with these sections:\n\n",
           "## Overview\n",
           "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
@@ -1140,10 +1246,11 @@ server_ai <- function(input, output, session, values) {
         files_to_zip <- c(files_to_zip, prompt_file)
 
         incProgress(0.9, detail = "Creating zip...")
-        # zip expects relative paths — use basenames
+        # zip expects relative paths from tmp_dir (supports figures/ subdirectory)
         old_wd <- setwd(tmp_dir)
         on.exit(setwd(old_wd), add = TRUE)
-        zip(file, basename(files_to_zip))
+        rel_paths <- sub(paste0("^", gsub("([.\\\\|()\\[\\]{}^$*+?])", "\\\\\\1", tmp_dir), "/?"), "", files_to_zip)
+        zip(file, rel_paths)
 
         message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars", length(files_to_zip), nchar(prompt)))
       })
