@@ -1,0 +1,8 @@
+features:
+  enable_dda:  true
+  enable_xlms: true
+
+slurm:
+  account:     "genome-center-grp"
+  partition:   "high"
+  java_module: "openjdk"

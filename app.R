@@ -189,6 +189,11 @@ library(AnnotationDbi)
 library(ggrepel)
 library(markdown) # Needed for AI formatting
 
+# Load app configuration (feature flags, SLURM defaults, tool paths)
+if (!requireNamespace("yaml", quietly = TRUE)) install.packages("yaml")
+config  <- yaml::read_yaml("config.yml")
+is_hive <- nzchar(Sys.which("sbatch"))
+
 # Optional packages — load if available, features degrade gracefully
 gsea_available <- requireNamespace("clusterProfiler", quietly = TRUE) &&
                   requireNamespace("enrichplot", quietly = TRUE)
