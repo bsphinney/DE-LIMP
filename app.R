@@ -499,6 +499,18 @@ server <- function(input, output, session) {
     denovo_job_status      = "none",
     cascadia_model_ckpt    = NULL,
     ncbi_gene_map          = NULL,
+    # DDA Search (Sage pipeline)
+    dda_job_id          = NULL,     # SLURM job ID
+    dda_output_dir      = NULL,     # HPC output path
+    dda_status          = "idle",   # "idle" | "running" | "done" | "error"
+    dda_sage_psms       = NULL,     # data.table: filtered PSMs
+    dda_lfq_wide        = NULL,     # protein x sample log2 matrix
+    dda_protein_meta    = NULL,     # protein metadata (NPeptides, NSpectra)
+    dda_elist           = NULL,     # limma EList for DE pipeline
+    dda_sage_report     = NULL,     # sage_report.json summary
+    dda_search_params   = list(),   # config snapshot for methods text
+    dda_n_proteins_prefilter  = NULL,
+    dda_n_proteins_postfilter = NULL,
     # App metadata
     app_version = app_version,
     community_stats = community_stats

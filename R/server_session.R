@@ -530,6 +530,16 @@ server_session <- function(input, output, session, values, add_to_log) {
         comparator_mofa             = values$comparator_mofa,
         # Acquisition mode
         acquisition_mode = values$acquisition_mode,
+        # DDA Search state (Sage pipeline)
+        dda_sage_psms           = values$dda_sage_psms,
+        dda_lfq_wide            = values$dda_lfq_wide,
+        dda_protein_meta        = values$dda_protein_meta,
+        dda_elist               = values$dda_elist,
+        dda_sage_report         = values$dda_sage_report,
+        dda_search_params       = values$dda_search_params,
+        dda_qc_metrics          = values$dda_qc_metrics,
+        dda_n_proteins_prefilter  = values$dda_n_proteins_prefilter,
+        dda_n_proteins_postfilter = values$dda_n_proteins_postfilter,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -641,6 +651,22 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$acquisition_mode <- session_data$acquisition_mode
         updateRadioButtons(session, "acquisition_mode",
           selected = session_data$acquisition_mode)
+      }
+
+      # Restore DDA Search state
+      if (!is.null(session_data$dda_elist)) {
+        values$dda_sage_psms            <- session_data$dda_sage_psms
+        values$dda_lfq_wide             <- session_data$dda_lfq_wide
+        values$dda_protein_meta         <- session_data$dda_protein_meta
+        values$dda_elist                <- session_data$dda_elist
+        values$dda_sage_report          <- session_data$dda_sage_report
+        values$dda_search_params        <- session_data$dda_search_params %||% list()
+        values$dda_qc_metrics           <- session_data$dda_qc_metrics
+        values$dda_n_proteins_prefilter <- session_data$dda_n_proteins_prefilter
+        values$dda_n_proteins_postfilter <- session_data$dda_n_proteins_postfilter
+        values$dda_status               <- "done"
+        message("[Session] Restored DDA state: ",
+                nrow(session_data$dda_elist$E), " proteins")
       }
 
       # Restore repro log and append load event

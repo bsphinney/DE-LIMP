@@ -1064,34 +1064,191 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       )
       ), # end conditionalPanel DIA
 
-      # --- DDA panel (stub — shown when acquisition_mode === 'dda') ---
+      # --- DDA panel (shown when acquisition_mode === 'dda') ---
       conditionalPanel(
         condition = "input.acquisition_mode === 'dda'",
         div(
-          style = "padding: 40px; max-width: 800px; margin: 0 auto;",
+          style = "padding: 20px; max-width: 900px; margin: 0 auto;",
+
+          # Info banner
           div(class = "alert alert-info", role = "alert",
             icon("flask"), " ",
             tags$strong("DDA Workflow"),
             " powered by ",
             tags$strong("Sage"), " (database search) + ",
             tags$strong("Casanovo"), " (de novo, optional). ",
-            "Requires Hive HPC. timsTOF ddaPASEF .d files only."
+            "Requires Hive HPC connection. timsTOF ddaPASEF .d files only."
           ),
-          div(
-            style = paste(
-              "text-align: center; padding: 60px 20px;",
-              "background: #f8f9fa; border-radius: 12px;",
-              "border: 2px dashed #dee2e6;"
-            ),
-            icon("list-ul", style = "font-size: 48px; color: #6c757d; margin-bottom: 16px;"),
-            tags$h4("DDA Search Coming Soon", style = "color: #495057;"),
-            tags$p(
-              style = "color: #6c757d; max-width: 500px; margin: 0 auto;",
-              "The Sage + Casanovo DDA pipeline will appear here. ",
-              "Database search, PSM scoring, protein inference, and quantification ",
-              "with optional de novo sequencing overlay."
+
+          # SSH required warning
+          conditionalPanel(
+            condition = "!output.ssh_connected_flag",
+            div(class = "alert alert-warning", role = "alert",
+              icon("exclamation-triangle"),
+              " Connect to Hive via SSH (in the DIA Search tab) before submitting a DDA search."
             )
-          )
+          ),
+
+          # --- Raw Files ---
+          div(
+            style = "background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px;",
+            tags$h6(icon("folder-open"), " Raw Files", style = "margin-bottom: 12px;"),
+            div(style = "display: flex; gap: 8px; align-items: flex-end;",
+              div(style = "flex: 1;",
+                textInput("dda_raw_dir", "Raw file directory (Hive path)",
+                  placeholder = "/quobyte/proteomics-grp/to-hive/mass-spec-archive/...",
+                  width = "100%")
+              ),
+              actionButton("dda_scan_files", "Scan",
+                icon = icon("search"), class = "btn-outline-primary btn-sm",
+                style = "margin-bottom: 15px;")
+            ),
+            uiOutput("dda_file_list_preview")
+          ),
+
+          # --- Database ---
+          div(
+            style = "background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px;",
+            tags$h6(icon("database"), " Database", style = "margin-bottom: 12px;"),
+            textInput("dda_fasta_path", "FASTA path (Hive)",
+              placeholder = "/quobyte/proteomics-grp/brett/data/uniprotkb_proteome_UP000005640_2026_01_14.fasta",
+              width = "100%"),
+            tags$small(style = "color: #6c757d;",
+              "Recommended: one-protein-per-gene (OPG) FASTA for cleaner protein inference.")
+          ),
+
+          # --- Search Parameters ---
+          div(
+            style = "background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px;",
+            tags$h6(icon("sliders"), " Search Parameters", style = "margin-bottom: 12px;"),
+            div(style = "display: flex; gap: 16px; flex-wrap: wrap;",
+              div(style = "min-width: 180px;",
+                textInput("dda_experiment_name", "Experiment name",
+                  value = "dda_search", width = "100%")
+              ),
+              div(style = "min-width: 150px;",
+                selectInput("dda_preset", "Preset",
+                  choices = c("Standard" = "standard",
+                              "Phosphoproteomics" = "phospho",
+                              "TMT Labeling" = "tmt"),
+                  selected = "standard", width = "100%")
+              )
+            ),
+            div(style = "display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px;",
+              div(style = "min-width: 130px;",
+                numericInput("dda_missed_cleavages", "Missed cleavages",
+                  value = 2, min = 0, max = 4, step = 1, width = "100%")
+              ),
+              div(style = "min-width: 130px;",
+                numericInput("dda_precursor_tol", "Precursor tol. (ppm)",
+                  value = 20, min = 1, max = 100, step = 1, width = "100%")
+              ),
+              div(style = "min-width: 130px;",
+                numericInput("dda_fragment_tol", "Fragment tol. (Da)",
+                  value = 0.05, min = 0.01, max = 0.5, step = 0.01, width = "100%")
+              )
+            ),
+            # Advanced SLURM controls (collapsed)
+            tags$details(
+              style = "margin-top: 12px;",
+              tags$summary(style = "cursor: pointer; color: #6c757d; font-size: 13px;",
+                icon("gear"), " Advanced SLURM settings"),
+              div(style = "display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px;",
+                div(style = "min-width: 100px;",
+                  numericInput("dda_cpus", "CPUs", value = 32, min = 4, max = 128, step = 4, width = "100%")
+                ),
+                div(style = "min-width: 100px;",
+                  numericInput("dda_mem", "Memory (GB)", value = 64, min = 8, max = 512, step = 8, width = "100%")
+                ),
+                div(style = "min-width: 120px;",
+                  textInput("dda_time_limit", "Time limit", value = "02:00:00", width = "100%")
+                )
+              )
+            )
+          ),
+
+          # --- Normalization & Imputation ---
+          div(
+            style = "background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px;",
+            tags$h6(icon("chart-line"), " Normalization & Imputation", style = "margin-bottom: 12px;"),
+            div(style = "display: flex; gap: 16px; flex-wrap: wrap;",
+              div(style = "min-width: 180px;",
+                selectInput("dda_norm_method", "Normalization",
+                  choices = c("Cyclic Loess" = "cyclicloess",
+                              "Median centering" = "median",
+                              "Quantile" = "quantile",
+                              "None" = "none"),
+                  selected = "cyclicloess", width = "100%")
+              ),
+              div(style = "min-width: 180px;",
+                selectInput("dda_impute_method", "Imputation",
+                  choices = c("Perseus (MNAR)" = "perseus",
+                              "MinProb (MNAR)" = "minprob",
+                              "MinDet (deterministic)" = "mindet",
+                              "None" = "none"),
+                  selected = "perseus", width = "100%")
+              ),
+              div(style = "min-width: 130px;",
+                sliderInput("dda_min_valid", "Min. valid fraction",
+                  min = 0.3, max = 1.0, value = 0.5, step = 0.1, width = "100%")
+              )
+            ),
+            # Perseus parameters (conditional)
+            conditionalPanel(
+              condition = "input.dda_impute_method === 'perseus' || input.dda_impute_method === 'minprob'",
+              div(style = "display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px;",
+                div(style = "min-width: 130px;",
+                  numericInput("dda_perseus_width", "Width", value = 0.3, min = 0.1, max = 1.0, step = 0.1, width = "100%")
+                ),
+                div(style = "min-width: 130px;",
+                  numericInput("dda_perseus_shift", "Shift (SD)", value = 1.8, min = 0.5, max = 3.0, step = 0.1, width = "100%")
+                )
+              )
+            )
+          ),
+
+          # --- Casanovo (disabled) ---
+          div(
+            style = "background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px; opacity: 0.7;",
+            tags$h6(icon("wand-magic-sparkles"), " De Novo Sequencing (Casanovo)", style = "margin-bottom: 12px; color: #6c757d;"),
+            div(
+              style = "display: flex; align-items: center; gap: 8px;",
+              tags$input(type = "checkbox", disabled = "disabled",
+                style = "width: 16px; height: 16px;"),
+              tags$span(style = "color: #6c757d;", "Run Casanovo de novo sequencing"),
+              tags$span(
+                class = "badge bg-secondary",
+                style = "font-size: 10px; margin-left: 8px;",
+                "Coming soon"
+              )
+            ),
+            tags$small(style = "color: #adb5bd; display: block; margin-top: 8px;",
+              "Casanovo GPU-accelerated de novo sequencing will be available in a future update.")
+          ),
+
+          # --- Submit ---
+          conditionalPanel(
+            condition = "output.ssh_connected_flag",
+            div(
+              style = "padding: 8px 0;",
+              actionButton("run_dda_search", "Submit Sage Search",
+                icon  = icon("rocket"),
+                class = "btn-primary btn-lg",
+                width = "100%"
+              )
+            )
+          ),
+
+          # --- Status + Results ---
+          uiOutput("dda_job_status_ui"),
+
+          # --- Group Assignment + Pipeline (shown after results loaded) ---
+          uiOutput("dda_group_assignment_ui"),
+
+          uiOutput("dda_results_summary_ui"),
+
+          # --- QC Summary Card ---
+          uiOutput("dda_qc_summary_card")
         )
       ),
 
@@ -1131,6 +1288,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     # QC (standalone, merged from QC Trends + QC Plots)
     # ==========================================================================
     nav_panel("QC", icon = icon("chart-bar"),
+              # DDA QC Summary Card (shown when in DDA mode)
+              uiOutput("dda_qc_summary_card"),
               # Global sort order control (from QC Trends)
               div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 15px;",
                 div(style = "display: flex; align-items: center; justify-content: space-between;",
