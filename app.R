@@ -407,6 +407,7 @@ server <- function(input, output, session) {
 
   # --- Shared reactive state ---
   values <- reactiveValues(
+    acquisition_mode = "dia",
     raw_data = NULL, metadata = NULL, fit = NULL, y_protein = NULL,
     dpc_fit = NULL, status = "Waiting...", design = NULL, qc_stats = NULL,
     plot_selected_proteins = NULL, chat_history = list(),
