@@ -53,6 +53,16 @@
 - [x] **R integration (Phases 2-4)**: SSL parsing, peptide classification, DIAMOND BLAST, sbatch generation, server module, UI (feature/cascadia-denovo branch)
 - [x] **Bruker native loader**: `bruker_augment.py` using timsrust_pyo3 for native `.d` file reading (~2-5 min vs 45-90 min mzML conversion)
 - [x] **Own navbar dropdown**: Moved from DE Dashboard sub-tab to top-level "De Novo" dropdown
+- [x] **bruker_patch.py MS1 frame reading**: Correct TOF-to-m/z conversion using Sage formula from timsrust `src/converters.rs`. Reads calibration from GlobalMetadata SQLite table. (April 2026)
+- [x] **DIA window matching fix**: Use `SpectrumReader.new_with_span_step()` for 174k spectra (7.7x expansion from 21k raw) with correct `precursor_mz` and `isolation_width` per DIA window. (April 2026)
+- [x] **b/y ion quality filter**: 10% relative intensity threshold for timsTOF training data. Removes noise peaks while retaining real fragment ions. (April 2026)
+- [x] **IM model architecture**: 4th embedding channel for ion mobility (1/K0), zero-init trick for backward compatibility with pre-trained checkpoint. 5-column ASF format. (April 2026)
+- [x] **IM ASF pipeline verified**: `new_with_span_step()` produces 174k spectra from single .d file with IM values. All 5 unit tests pass (creation, forward, zero-init match, IM sensitivity, mixed batch). (April 2026)
+- [x] **Native .d validation**: 738 peptides from native .d path vs 44 from mzML (16.8x improvement). bruker_patch v3 working. (April 2026)
+- [ ] **Run IM-enhanced training**: Submit IM training (5-column ASF) after baseline job 11508667 completes. Compare IM vs baseline on Zhao validation set.
+- [ ] **Compare baseline vs IM model on test data**: Use held-out Zhao dataset (43 .d files). Metrics: peptide count, sequence accuracy, score distribution.
+- [ ] **Download and process ddaPASEF pre-training data**: PXD014777 (Prianichnikov 2020, HeLa) and PXD010012 (Meier 2018, HeLa). Clean isolated precursor spectra for timsTOF-specific pre-training.
+- [ ] **Propose Noble Lab collaboration**: Working prototype with 738 peptides (16.8x mzML), IM integration, ddaPASEF training pipeline. Demonstrate value of native Bruker support.
 - [ ] **Per-residue amino acid coloring**: Color each amino acid in the sequence column by its confidence probability. Requires modifying Cascadia's output to export per-residue softmax probabilities from the transformer beam search (not in SSL format currently).
 - [ ] **Submit Cascadia from GUI**: Wire up the "Submit Cascadia Job" tab with SSH job submission, conda env path, model checkpoint path, GPU partition selection
 - [ ] **Cascadia routing patch**: Apply the 6-line routing change to Cascadia's `cascadia.py` on HIVE to auto-detect `.d` files and use `bruker_augment.py`
@@ -142,6 +152,18 @@
 - [ ] **Adaptive CPUs on public queue**: When auto-switching step 2/4 to publicgrp/low, increase CPUs from 16 to 64 (public nodes have 128 CPUs). Faster per-file completion reduces preemption risk. Use scontrol update NumCPUs=64 alongside the partition move.
 - [ ] **DIA-NN 8-CPU mode**: Test 8 CPUs × 8 concurrent (instead of 16 × 4) on genome-center-grp/high. Could improve total throughput ~30% if DIA-NN scaling is sublinear. Need benchmarks on real data.
 - [ ] **Cascadia batch_size=64**: Increase from 32 to 64 on A100 (80GB VRAM). Could halve inference time.
+
+## DDA/DIA Pipeline Refactor
+- [ ] **Extract shared UI components**: Create reusable helper functions (`fasta_selector_ui()`, `group_assignment_ui()`, `slurm_status_ui()`) that both DIA and DDA pipelines call. Currently FASTA selection, SSH file browser, SLURM polling, group assignment, and limma DE are partially duplicated between server_search.R/server_data.R (DIA) and server_dda.R (DDA).
+- [ ] **Shared FASTA management module**: Single FASTA selector with UniProt/NCBI download, contaminant append, SSH file browser — used by both DIA and DDA search tabs.
+- [ ] **Thermo .raw support for Casanovo**: Add ThermoRawFileParser or msconvert pre-conversion step in the Casanovo sbatch. Sage already reads .raw natively, but Casanovo needs MGF input.
+- [ ] **IM-aware Casanovo**: Same 5th embedding channel as Cascadia IM model — add ion mobility to Casanovo for DDA de novo on timsTOF data.
+- [ ] **Mobility-filtered extraction for Cascadia**: Mode B mobilogram peak detection from CASCADIA_MOBILITY_FILTER_ADDENDUM.md — produces cleaner pseudo-DDA spectra from diaPASEF windows. Expected 2-3x improvement in de novo calls.
+
+## Claude Code Configuration
+- [ ] **Restructure CLAUDE.md into `.claude/rules/`**: Move verbose reference material (gotchas table, UI patterns, SSH patterns, Spectronaut parsing, DIA-NN flags, comparator details) into scoped rule files under `.claude/rules/`. Keep CLAUDE.md under ~150 lines with just project overview, architecture, working preferences, key commands. Do on a branch, test by verifying gotcha knowledge in fresh conversation. Per expert consensus: short CLAUDE.md + modular rules > monolithic file.
+- [ ] **Add post-edit hook**: Auto-format R files on save (e.g., `styler::style_file`)
+- [ ] **Claude export education section**: Ensure the education section is always included in reports generated from Claude export ZIPs. Currently it's in the PROMPT.md template but was missed in the standalone muscle report.
 
 ## General
 - [ ] Grid View: Open violin plot on protein click with bar plot toggle
