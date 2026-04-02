@@ -774,10 +774,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
             timeout = 15)
 
           # Upload bruker_to_mgf.py converter to HPC
-          local_converter <- system.file("python/bruker_to_mgf.py", package = "")
-          if (!nzchar(local_converter) || !file.exists(local_converter)) {
-            local_converter <- file.path(getwd(), "python", "bruker_to_mgf.py")
-          }
+          local_converter <- file.path(getwd(), "python", "bruker_to_mgf.py")
           if (file.exists(local_converter)) {
             scp_upload(ssh_cfg, local_converter, casanovo_converter)
           }
