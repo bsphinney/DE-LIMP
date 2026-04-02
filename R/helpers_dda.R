@@ -456,8 +456,10 @@ fi
 # Collect .d directories and .raw files (Sage reads both natively)
 D_FILES=$(find "$RAW_DIR" -maxdepth 1 -name "*.d" -type d 2>/dev/null | sort)
 RAW_FILES=$(find "$RAW_DIR" -maxdepth 1 -name "*.raw" -type f 2>/dev/null | sort)
-N_D=$(echo "$D_FILES" | grep -c "." 2>/dev/null || echo 0)
-N_RAW=$(echo "$RAW_FILES" | grep -c "." 2>/dev/null || echo 0)
+N_D=$(echo "$D_FILES" | grep -c "." 2>/dev/null || true)
+N_D=${N_D:-0}
+N_RAW=$(echo "$RAW_FILES" | grep -c "." 2>/dev/null || true)
+N_RAW=${N_RAW:-0}
 N_FILES=$((N_D + N_RAW))
 echo "[DE-LIMP Sage] Found $N_D .d files and $N_RAW .raw files in $RAW_DIR"
 
