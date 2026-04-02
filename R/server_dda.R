@@ -2255,7 +2255,8 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Peptide-Species heatmap ---
   output$dda_blast_heatmap <- plotly::renderPlotly({
-    blast <- blast_with_species()
+    blast <- tryCatch(blast_with_species(), error = function(e) NULL)
+    req(!is.null(blast), nrow(blast) > 1)
 
     # Best hit per peptide-species combination
     blast_best <- blast[order(blast$pident, decreasing = TRUE), ]
@@ -2311,16 +2312,20 @@ echo "[DIAMOND] Done: $(date)"
   output$dda_denovo_blast_table <- DT::renderDT({
     blast <- blast_with_species()
 
+    # Parse protein name from SwissProt subject: sp|ACC|PROT_SPECIES -> PROT
+    blast$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+
     display_df <- data.frame(
       Peptide     = blast$peptide,
       Hit         = blast$subject,
-      Protein     = blast$protein,
+      Protein     = blast$protein_name,
       Species     = blast$species,
       Category    = blast$category,
       Identity    = round(blast$pident, 1),
       Length      = blast$length,
       E_Value     = formatC(blast$evalue, format = "e", digits = 2),
       Bitscore    = round(blast$bitscore, 1),
+      Contaminant = ifelse(blast$is_contaminant, "Yes", ""),
       stringsAsFactors = FALSE
     )
 
