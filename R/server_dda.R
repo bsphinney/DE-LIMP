@@ -2231,7 +2231,361 @@ echo "[DIAMOND] Done: $(date)"
       )
   })
 
-  # --- Peptide-Species heatmap ---
+  # --- Species common name mapping ---
+  species_common_names <- c(
+    CHICK = "Chicken", HUMAN = "Human", MOUSE = "Mouse", BOVIN = "Bovine",
+    COLLI = "Columba livia (Pigeon)", ANAPL = "Anas platyrhynchos (Mallard)",
+    CATAU = "Cathartes aura (Vulture)", MYCAM = "Mycteria americana (Stork)",
+    SHEEP = "Sheep", RAT = "Rat", PIG = "Pig", HORSE = "Horse",
+    RABIT = "Rabbit", CANFA = "Dog", FELCA = "Cat", DANRE = "Zebrafish",
+    DROME = "Fruit fly", CAEEL = "C. elegans", YEAST = "Yeast",
+    ECOLI = "E. coli", ARATH = "Arabidopsis"
+  )
+
+  get_common_name <- function(sp) {
+    cn <- species_common_names[sp]
+    ifelse(is.na(cn), sp, cn)
+  }
+
+  # --- Compute species resolution data (shared by bar chart + diagnostic table) ---
+  blast_species_resolution <- reactive({
+    blast <- tryCatch(blast_filtered(), error = function(e) NULL)
+    req(!is.null(blast), nrow(blast) > 1)
+
+    # For each peptide, rank hits by bitscore
+    blast <- blast[order(blast$peptide, -blast$bitscore), ]
+
+    peptides <- unique(blast$peptide)
+    resolution <- do.call(rbind, lapply(peptides, function(pep) {
+      hits <- blast[blast$peptide == pep, ]
+      if (nrow(hits) == 0) return(NULL)
+
+      best <- hits[1, ]
+      best_sp <- best$species
+      best_id <- best$pident
+      best_prot <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", best$subject))
+      best_acc <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", best$subject)
+
+      # Find second-best hit from a DIFFERENT species
+      other_sp <- hits[hits$species != best_sp, ]
+      if (nrow(other_sp) > 0) {
+        second <- other_sp[1, ]
+        second_sp <- second$species
+        second_id <- second$pident
+      } else {
+        second_sp <- NA_character_
+        second_id <- NA_real_
+      }
+
+      delta <- if (!is.na(second_id)) best_id - second_id else best_id
+
+      data.frame(
+        peptide = pep,
+        best_species = best_sp,
+        best_identity = best_id,
+        second_species = second_sp,
+        second_identity = second_id,
+        delta_identity = delta,
+        protein_name = best_prot,
+        accession = best_acc,
+        stringsAsFactors = FALSE
+      )
+    }))
+    resolution
+  })
+
+  # --- Feature 2: Top Diagnostic Peptides Summary Card (shown first) ---
+  output$dda_blast_diagnostic_card <- renderUI({
+    res <- tryCatch(blast_species_resolution(), error = function(e) NULL)
+    req(!is.null(res), nrow(res) > 0)
+
+    # Top peptides by delta_identity
+    res <- res[order(-res$delta_identity), ]
+    top_n <- min(10, nrow(res))
+    top <- res[seq_len(top_n), ]
+
+    # Count diagnostic peptides (delta > 15%)
+    n_diagnostic <- sum(res$delta_identity > 15, na.rm = TRUE)
+    diagnostic_species <- if (n_diagnostic > 0) {
+      diag_rows <- res[res$delta_identity > 15, ]
+      sp_tab <- sort(table(diag_rows$best_species), decreasing = TRUE)
+      paste(paste0(get_common_name(names(sp_tab)), " (", sp_tab, ")"), collapse = ", ")
+    } else {
+      "none"
+    }
+
+    # Identify dominant protein families among diagnostic peptides
+    protein_summary <- ""
+    if (n_diagnostic > 0) {
+      diag_rows <- res[res$delta_identity > 15, ]
+      prot_tab <- sort(table(diag_rows$protein_name), decreasing = TRUE)
+      top_prots <- names(prot_tab)[seq_len(min(3, length(prot_tab)))]
+      protein_summary <- paste(top_prots, collapse = ", ")
+    }
+
+    # Build table rows
+    table_rows <- lapply(seq_len(nrow(top)), function(i) {
+      r <- top[i, ]
+      pep_display <- if (nchar(r$peptide) > 20) paste0(substr(r$peptide, 1, 17), "...") else r$peptide
+      second_sp <- if (is.na(r$second_species)) "-" else get_common_name(r$second_species)
+      second_id <- if (is.na(r$second_identity)) "-" else paste0(round(r$second_identity, 1), "%")
+      delta_color <- if (r$delta_identity > 15) "#2e7d32" else if (r$delta_identity > 5) "#f57c00" else "#757575"
+      uniprot_link <- paste0('<a href="https://www.uniprot.org/uniprot/', r$accession,
+        '" target="_blank">', r$protein_name, '</a>')
+
+      tags$tr(
+        tags$td(style = "font-family: monospace; font-size: 0.85em;", pep_display),
+        tags$td(get_common_name(r$best_species)),
+        tags$td(paste0(round(r$best_identity, 1), "%")),
+        tags$td(second_sp),
+        tags$td(second_id),
+        tags$td(style = paste0("font-weight: bold; color: ", delta_color, ";"),
+          paste0(round(r$delta_identity, 1), "%")),
+        tags$td(HTML(uniprot_link))
+      )
+    })
+
+    # Summary sentence
+    summary_text <- if (n_diagnostic > 0) {
+      base <- paste0(n_diagnostic, " peptide", if (n_diagnostic > 1) "s" else "",
+        " are species-diagnostic (delta > 15%): ", diagnostic_species, ".")
+      if (nzchar(protein_summary)) {
+        paste0(base, " Primarily from ", protein_summary, " proteins.")
+      } else {
+        base
+      }
+    } else {
+      "No peptides exceed the 15% delta threshold for species-diagnostic classification."
+    }
+
+    tagList(
+      div(style = "background: linear-gradient(135deg, #e3f2fd, #f3e5f5); border-radius: 8px; padding: 16px; margin-bottom: 16px; border: 1px solid #90caf9;",
+        tags$h5(icon("crosshairs"), " Top Diagnostic Peptides",
+          style = "margin-top: 0; margin-bottom: 8px; color: #1565c0;"),
+        tags$p(style = "color: #37474f; font-size: 0.92em; margin-bottom: 12px;",
+          "Peptides with the largest identity gap between their best and second-best species hit. ",
+          "High delta values indicate species-specific sequences useful for taxonomic identification."),
+        div(style = "overflow-x: auto;",
+          tags$table(class = "table table-sm table-hover", style = "font-size: 0.88em; margin-bottom: 8px;",
+            tags$thead(tags$tr(
+              tags$th("Sequence"), tags$th("Best Species"), tags$th("% Identity"),
+              tags$th("2nd Species"), tags$th("2nd %"), tags$th("Delta"),
+              tags$th("Source Protein")
+            )),
+            tags$tbody(table_rows)
+          )
+        ),
+        tags$p(style = "margin-bottom: 0; font-size: 0.9em; color: #1b5e20; font-style: italic;",
+          icon("info-circle"), " ", summary_text)
+      )
+    )
+  })
+
+  # --- Feature 1: Species Resolution Bar Chart ---
+  output$dda_blast_species_resolution <- plotly::renderPlotly({
+    res <- tryCatch(blast_species_resolution(), error = function(e) NULL)
+    req(!is.null(res), nrow(res) > 0)
+
+    # Top 30 by delta_identity
+    res <- res[order(-res$delta_identity), ]
+    top_n <- min(30, nrow(res))
+    res <- res[seq_len(top_n), ]
+
+    # Truncate peptide labels
+    res$pep_label <- ifelse(nchar(res$peptide) > 18,
+      paste0(substr(res$peptide, 1, 15), "..."), res$peptide)
+    # Make labels unique for factor ordering
+    res$pep_label <- make.unique(res$pep_label, sep = " ")
+
+    # Sort ascending (bottom to top in horizontal bar)
+    res <- res[order(res$delta_identity), ]
+    res$pep_label <- factor(res$pep_label, levels = res$pep_label)
+
+    # Color by best species
+    res$species_label <- get_common_name(res$best_species)
+
+    # Build hover text
+    res$hover <- vapply(seq_len(nrow(res)), function(i) {
+      r <- res[i, ]
+      second_sp <- if (is.na(r$second_species)) "No other species" else get_common_name(r$second_species)
+      second_id <- if (is.na(r$second_identity)) "-" else paste0(round(r$second_identity, 1), "%")
+      paste0(
+        "<b>", r$peptide, "</b>",
+        "<br>Best: ", get_common_name(r$best_species), " (", round(r$best_identity, 1), "%)",
+        "<br>2nd: ", second_sp, " (", second_id, ")",
+        "<br>Delta: ", round(r$delta_identity, 1), "%",
+        "<br>Protein: ", r$protein_name
+      )
+    }, character(1))
+
+    # Diagnostic threshold line
+    diagnostic_threshold <- 15
+
+    p <- plotly::plot_ly(res,
+      y = ~pep_label, x = ~delta_identity, color = ~species_label,
+      type = "bar", orientation = "h",
+      hoverinfo = "text", text = ~hover
+    ) %>%
+      plotly::layout(
+        title = list(text = "Species Resolution: Identity Gap Between Best and Second-Best Species",
+          font = list(size = 14)),
+        xaxis = list(title = "Delta Identity (%)", zeroline = FALSE),
+        yaxis = list(title = "", tickfont = list(size = 9)),
+        showlegend = TRUE,
+        legend = list(title = list(text = "Best Species"), x = 0.7, y = 0.15),
+        margin = list(l = 160),
+        height = max(400, top_n * 22),
+        shapes = list(
+          list(type = "line", x0 = diagnostic_threshold, x1 = diagnostic_threshold,
+            y0 = -0.5, y1 = top_n - 0.5,
+            line = list(color = "#2e7d32", width = 2, dash = "dash"))
+        ),
+        annotations = list(
+          list(x = diagnostic_threshold, y = top_n - 0.5,
+            text = "Species-diagnostic", showarrow = FALSE,
+            font = list(color = "#2e7d32", size = 11),
+            xanchor = "left", xshift = 5)
+        )
+      )
+    p
+  })
+
+  # --- Feature 3: Taxonomic Coverage Dot Plot ---
+  output$dda_blast_taxonomic_coverage <- plotly::renderPlotly({
+    blast <- tryCatch(blast_filtered(), error = function(e) NULL)
+    req(!is.null(blast), nrow(blast) > 1)
+
+    # Best hit per peptide-species combination
+    blast_best <- blast[order(blast$pident, decreasing = TRUE), ]
+    blast_best <- blast_best[!duplicated(paste(blast_best$peptide, blast_best$species)), ]
+
+    # Parse protein name for grouping
+    blast_best$prot_group <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast_best$subject))
+
+    # Top 5 species by frequency of best hits
+    best_per_pep <- blast_best[!duplicated(blast_best$peptide), ]
+    sp_counts <- sort(table(best_per_pep$species), decreasing = TRUE)
+    top_species <- names(sp_counts)[seq_len(min(5, length(sp_counts)))]
+
+    # Subset to top species and get peptides that appear in at least 2 species
+    sub <- blast_best[blast_best$species %in% top_species, ]
+    pep_sp_count <- tapply(sub$species, sub$peptide, function(x) length(unique(x)))
+    multi_sp_peps <- names(pep_sp_count[pep_sp_count >= 2])
+
+    if (length(multi_sp_peps) == 0) {
+      # Fallback: use all peptides with top species
+      multi_sp_peps <- unique(sub$peptide)
+    }
+
+    # Limit to top 40 peptides by average identity for readability
+    sub <- sub[sub$peptide %in% multi_sp_peps, ]
+    pep_avg <- tapply(sub$pident, sub$peptide, mean, na.rm = TRUE)
+    pep_avg <- sort(pep_avg, decreasing = TRUE)
+    top_peps <- names(pep_avg)[seq_len(min(40, length(pep_avg)))]
+    sub <- sub[sub$peptide %in% top_peps, ]
+
+    # Assign protein group per peptide (from best hit overall)
+    pep_prot <- blast_best[!duplicated(blast_best$peptide), c("peptide", "prot_group")]
+    sub <- merge(sub, pep_prot[, c("peptide", "prot_group")],
+      by = "peptide", all.x = TRUE, suffixes = c("", ".best"))
+    sub$prot_group <- sub$prot_group.best
+    sub$prot_group.best <- NULL
+
+    # Sort peptides by protein group then identity for visual grouping
+    pep_order <- unique(sub[order(sub$prot_group, -sub$pident), "peptide"])
+    sub$peptide_label <- ifelse(nchar(sub$peptide) > 12,
+      paste0(substr(sub$peptide, 1, 9), "..."), sub$peptide)
+    # Maintain order
+    label_map <- setNames(sub$peptide_label, sub$peptide)
+    label_map <- label_map[!duplicated(names(label_map))]
+    ordered_labels <- label_map[pep_order]
+    # Make unique for factoring
+    ordered_labels <- make.unique(ordered_labels, sep = " ")
+    sub$peptide_label <- make.unique(sub$peptide_label, sep = " ")
+    sub$peptide_label <- factor(sub$peptide_label, levels = ordered_labels)
+
+    # Species label
+    sub$species_label <- get_common_name(sub$species)
+
+    # Hover text
+    sub$hover <- paste0(
+      "<b>", sub$peptide, "</b>",
+      "<br>Species: ", sub$species_label,
+      "<br>Identity: ", round(sub$pident, 1), "%",
+      "<br>Protein: ", sub$prot_group
+    )
+
+    # Color by protein group (up to 10 colors)
+    unique_prots <- unique(sub$prot_group)
+    prot_colors <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+      "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf")
+    prot_color_map <- setNames(
+      prot_colors[seq_len(min(length(unique_prots), length(prot_colors)))],
+      unique_prots[seq_len(min(length(unique_prots), length(prot_colors)))]
+    )
+
+    n_species <- length(top_species)
+    n_peps <- length(top_peps)
+    plot_height <- max(400, n_peps * 16 + 100)
+
+    p <- plotly::plot_ly()
+
+    for (sp in top_species) {
+      sp_data <- sub[sub$species == sp, ]
+      if (nrow(sp_data) == 0) next
+
+      sp_label <- get_common_name(sp)
+
+      # Add lines connecting dots within same protein
+      for (prot in unique(sp_data$prot_group)) {
+        prot_data <- sp_data[sp_data$prot_group == prot, ]
+        if (nrow(prot_data) > 1) {
+          prot_data <- prot_data[order(prot_data$peptide_label), ]
+          p <- p %>% plotly::add_trace(
+            data = prot_data,
+            x = ~pident, y = ~peptide_label,
+            type = "scatter", mode = "lines",
+            line = list(color = prot_color_map[prot] %||% "#999999", width = 1, dash = "dot"),
+            showlegend = FALSE, hoverinfo = "skip",
+            legendgroup = sp_label
+          )
+        }
+      }
+
+      # Add dots
+      sp_data$dot_color <- vapply(sp_data$prot_group, function(pg) {
+        prot_color_map[pg] %||% "#999999"
+      }, character(1))
+
+      p <- p %>% plotly::add_trace(
+        data = sp_data,
+        x = ~pident, y = ~peptide_label,
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, color = sp_data$dot_color, opacity = 0.85,
+          line = list(width = 1, color = "#333")),
+        name = sp_label,
+        hoverinfo = "text", text = ~hover,
+        legendgroup = sp_label
+      )
+    }
+
+    # Add facet-like annotations for species
+    p %>% plotly::layout(
+      title = list(
+        text = paste0("Taxonomic Coverage: % Identity Across Top ", n_species, " Species"),
+        font = list(size = 14)
+      ),
+      xaxis = list(title = "% Identity", range = c(
+        max(40, min(sub$pident, na.rm = TRUE) - 5), 105)),
+      yaxis = list(title = "", tickfont = list(size = 8)),
+      showlegend = TRUE,
+      legend = list(title = list(text = "Species"), x = 1.02, y = 1),
+      margin = list(l = 120, r = 120),
+      height = plot_height
+    )
+  })
+
+  # --- Peptide-Species heatmap (legacy, collapsible) ---
   output$dda_blast_heatmap <- plotly::renderPlotly({
     blast <- tryCatch(blast_filtered(), error = function(e) NULL)
     req(!is.null(blast), nrow(blast) > 1)

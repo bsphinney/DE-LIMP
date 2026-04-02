@@ -2502,6 +2502,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     )
                   )
                 ),
+                # Feature 2: Top Diagnostic Peptides Summary Card (first thing users see)
+                uiOutput("dda_blast_diagnostic_card"),
                 # Summary cards
                 uiOutput("dda_blast_summary_cards"),
                 # Taxonomy + Identity side by side
@@ -2516,11 +2518,31 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 # Species bar + summary text
                 uiOutput("dda_blast_species_summary"),
                 plotlyOutput("dda_blast_species_bar", height = "300px"),
+                # Feature 1: Species Resolution Bar Chart
+                tags$h5(icon("chart-bar"), " Species Resolution",
+                  style = "margin-top: 16px; color: #333;"),
+                tags$p(style = "color: #666; font-size: 0.88em; margin-bottom: 8px;",
+                  "Identity gap between best and second-best species hit per peptide. ",
+                  "Large deltas indicate species-specific sequences."),
+                plotlyOutput("dda_blast_species_resolution", height = "700px"),
                 # Top proteins by peptide count
                 tags$h5("Top Proteins by De Novo Peptide Count", style = "margin-top: 16px;"),
                 plotlyOutput("dda_blast_top_proteins", height = "800px"),
-                # Peptide-Species heatmap
-                plotlyOutput("dda_blast_heatmap", height = "500px"),
+                # Feature 3: Taxonomic Coverage Dot Plot
+                tags$h5(icon("dna"), " Taxonomic Coverage",
+                  style = "margin-top: 16px; color: #333;"),
+                tags$p(style = "color: #666; font-size: 0.88em; margin-bottom: 8px;",
+                  "Identity of each peptide across the top species, grouped by source protein. ",
+                  "Reveals patterns like conserved vs species-specific protein regions."),
+                plotlyOutput("dda_blast_taxonomic_coverage", height = "600px"),
+                # Peptide-Species heatmap (collapsible legacy view)
+                tags$details(style = "margin-top: 16px;",
+                  tags$summary(style = "cursor: pointer; color: #1565c0; font-weight: 500;",
+                    icon("th"), " Show full peptide-species identity matrix"),
+                  div(style = "margin-top: 8px;",
+                    plotlyOutput("dda_blast_heatmap", height = "500px")
+                  )
+                ),
                 # Filter buttons + enhanced table
                 div(style = "margin-top: 20px; margin-bottom: 10px;",
                   div(style = "display: inline-flex; gap: 6px;",
