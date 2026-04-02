@@ -226,7 +226,12 @@ server_ai <- function(input, output, session, values) {
   # --- Export Prompt for Claude (downloads .zip with prompt + full data CSVs) ---
   # Shared content function for both download buttons (AI Summary tab + AI Chat tab)
   claude_export_content <- function(file) {
-      req(values$fit, values$y_protein)
+      is_dda_mode <- isTRUE(values$acquisition_mode == "dda")
+      if (is_dda_mode) {
+        req(values$dda_sage_psms)
+      } else {
+        req(values$fit, values$y_protein)
+      }
 
       tryCatch({
       withProgress(message = "Building export...", value = 0, {
@@ -234,29 +239,39 @@ server_ai <- function(input, output, session, values) {
         timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
         files_to_zip <- character(0)
 
-        message("[DE-LIMP] Claude export: starting...")
+        message("[DE-LIMP] Claude export: starting (mode=", if (is_dda_mode) "DDA" else "DIA", ")...")
         incProgress(0.1, detail = "Gathering DE data...")
-        ctx <- tryCatch(build_ai_data_context(), error = function(e) {
-          message("[DE-LIMP] Claude export: build_ai_data_context FAILED: ", e$message)
-          list(n_contrasts = length(colnames(values$fit$contrasts)),
-               contrast_text = "(Error building DE summary)",
-               cross_text = "(Error)", stable_prots_text = "(Error)")
-        })
+        ctx <- if (is_dda_mode) {
+          # DDA mode: no limma fit, build summary from Sage/Casanovo
+          list(n_contrasts = 0,
+               contrast_text = "(DDA mode — see Sage PSM and Casanovo results)",
+               cross_text = "(DDA mode)", stable_prots_text = "(DDA mode)")
+        } else {
+          tryCatch(build_ai_data_context(), error = function(e) {
+            message("[DE-LIMP] Claude export: build_ai_data_context FAILED: ", e$message)
+            list(n_contrasts = length(colnames(values$fit$contrasts)),
+                 contrast_text = "(Error building DE summary)",
+                 cross_text = "(Error)", stable_prots_text = "(Error)")
+          })
+        }
         message("[DE-LIMP] Claude export: ctx OK")
 
-        # --- 1. Full DE results CSV (all proteins, all contrasts) ---
-        incProgress(0.3, detail = "Exporting full DE results...")
-        all_contrasts <- colnames(values$fit$contrasts)
-        full_results <- do.call(rbind, lapply(all_contrasts, function(cname) {
-          tt <- topTable(values$fit, coef = cname, number = Inf) %>% as.data.frame()
-          if (!"Protein.Group" %in% colnames(tt)) tt <- tt %>% rownames_to_column("Protein.Group")
-          tt$Contrast <- cname
-          tt
-        }))
-        results_file <- file.path(tmp_dir, "DE_Results_Full.csv")
-        write.csv(full_results, results_file, row.names = FALSE)
-        files_to_zip <- c(files_to_zip, results_file)
-        message("[DE-LIMP] Claude export: DE results OK (", nrow(full_results), " rows)")
+        # --- 1. Full DE results CSV (all proteins, all contrasts) — DIA only ---
+        all_contrasts <- character(0)
+        if (!is_dda_mode) {
+          incProgress(0.3, detail = "Exporting full DE results...")
+          all_contrasts <- colnames(values$fit$contrasts)
+          full_results <- do.call(rbind, lapply(all_contrasts, function(cname) {
+            tt <- topTable(values$fit, coef = cname, number = Inf) %>% as.data.frame()
+            if (!"Protein.Group" %in% colnames(tt)) tt <- tt %>% rownames_to_column("Protein.Group")
+            tt$Contrast <- cname
+            tt
+          }))
+          results_file <- file.path(tmp_dir, "DE_Results_Full.csv")
+          write.csv(full_results, results_file, row.names = FALSE)
+          files_to_zip <- c(files_to_zip, results_file)
+          message("[DE-LIMP] Claude export: DE results OK (", nrow(full_results), " rows)")
+        }
 
         # --- 2. QC stats CSV ---
         if (!is.null(values$qc_stats) && is.data.frame(values$qc_stats) && !is.null(values$metadata)) {
@@ -272,7 +287,8 @@ server_ai <- function(input, output, session, values) {
           message("[DE-LIMP] Claude export: QC stats skipped (NULL or not data.frame)")
         }
 
-        # --- 3. Expression matrix CSV ---
+        # --- 3. Expression matrix CSV (DIA only — DDA uses Sage LFQ) ---
+        if (!is.null(values$y_protein)) {
         incProgress(0.5, detail = "Exporting expression matrix...")
         expr_mat <- values$y_protein$E
         expr_df <- as.data.frame(expr_mat) %>% rownames_to_column("Protein.Group")
@@ -288,6 +304,7 @@ server_ai <- function(input, output, session, values) {
         write.csv(expr_df, expr_file, row.names = FALSE)
         files_to_zip <- c(files_to_zip, expr_file)
         message("[DE-LIMP] Claude export: expression matrix OK")
+        } # end y_protein check
 
         # --- 4. Phospho results CSV (if available) ---
         phospho_note <- ""
@@ -330,6 +347,16 @@ server_ai <- function(input, output, session, values) {
             mofa_variance_explained = values$mofa_variance_explained,
             mofa_last_run_params = values$mofa_last_run_params,
             diann_search_settings = values$diann_search_settings,
+            # DDA / de novo state
+            acquisition_mode = values$acquisition_mode,
+            dda_sage_psms = values$dda_sage_psms,
+            dda_elist = values$dda_elist,
+            dda_casanovo_psms = values$dda_casanovo_psms,
+            dda_casanovo_classification = values$dda_casanovo_classification,
+            dda_casanovo_status = values$dda_casanovo_status,
+            dda_search_params = values$dda_search_params,
+            dda_qc_metrics = values$dda_qc_metrics,
+            denovo_novel_blast = values$denovo_novel_blast,
             saved_at = Sys.time(),
             app_version = paste0("DE-LIMP v", values$app_version)
           )
@@ -526,6 +553,208 @@ server_ai <- function(input, output, session, values) {
           }, error = function(e) NULL)
         }
 
+        # --- 6e. DDA / De Novo Sequencing data (when in DDA mode) ---
+        dda_note <- ""
+        dda_inline <- ""
+        if (is_dda_mode) {
+          incProgress(0.55, detail = "Exporting DDA/de novo data...")
+
+          # Sage PSM Summary
+          sage_psms <- values$dda_sage_psms
+          sage_summary_note <- ""
+          if (!is.null(sage_psms) && nrow(sage_psms) > 0) {
+            tryCatch({
+              n_psms <- nrow(sage_psms)
+              n_peptides <- length(unique(sage_psms$peptide))
+              n_proteins <- length(unique(sage_psms$proteins))
+              sage_df <- data.frame(
+                Metric = c("Total PSMs (1% FDR)", "Unique Peptides", "Protein Groups",
+                           "Median PSM Score", "Median Spectrum Q-value"),
+                Value = c(format(n_psms, big.mark = ","),
+                          format(n_peptides, big.mark = ","),
+                          format(n_proteins, big.mark = ","),
+                          round(median(sage_psms$hyperscore, na.rm = TRUE), 2),
+                          formatC(median(sage_psms$spectrum_q, na.rm = TRUE), format = "e", digits = 2)),
+                stringsAsFactors = FALSE
+              )
+              sage_file <- file.path(tmp_dir, "Sage_PSM_Summary.csv")
+              write.csv(sage_df, sage_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, sage_file)
+              sage_summary_note <- sprintf(
+                "\n- **`Sage_PSM_Summary.csv`** — Sage database search summary: %s PSMs, %s peptides, %s proteins at 1%% FDR\n",
+                format(n_psms, big.mark = ","), format(n_peptides, big.mark = ","), format(n_proteins, big.mark = ","))
+              message("[DE-LIMP] Claude export: Sage PSM summary OK")
+            }, error = function(e) message("[Export] Sage PSM summary: ", e$message))
+          }
+
+          # DDA LFQ expression matrix (equivalent of Expression_Matrix.csv for DIA)
+          dda_expr_note <- ""
+          if (!is.null(values$dda_elist) && !is.null(values$dda_elist$E)) {
+            tryCatch({
+              dda_mat <- values$dda_elist$E
+              dda_expr_df <- as.data.frame(dda_mat) %>% tibble::rownames_to_column("ProteinID")
+              dda_expr_file <- file.path(tmp_dir, "Expression_Matrix.csv")
+              write.csv(dda_expr_df, dda_expr_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, dda_expr_file)
+              dda_expr_note <- sprintf(
+                "\n- **`Expression_Matrix.csv`** — Log2 LFQ protein intensities (%d proteins x %d samples)\n",
+                nrow(dda_mat), ncol(dda_mat))
+              message("[DE-LIMP] Claude export: DDA expression matrix OK")
+            }, error = function(e) message("[Export] DDA expression matrix: ", e$message))
+          }
+
+          # Casanovo Novel Peptides
+          casanovo_novel_note <- ""
+          casanovo_confirmed_note <- ""
+          cls <- values$dda_casanovo_classification
+          casanovo_psms <- values$dda_casanovo_psms
+          if (!is.null(cls)) {
+            # Novel peptides
+            tryCatch({
+              if (!is.null(cls$novel) && nrow(cls$novel) > 0) {
+                novel_df <- cls$novel[, intersect(
+                  c("sequence", "seq_stripped", "score", "mean_aa_score", "aa_scores",
+                    "charge", "exp_mz", "source_file"),
+                  colnames(cls$novel)), drop = FALSE]
+                novel_df <- novel_df[order(-novel_df$score), ]
+                novel_file <- file.path(tmp_dir, "Casanovo_Novel_Peptides.csv")
+                write.csv(novel_df, novel_file, row.names = FALSE)
+                files_to_zip <- c(files_to_zip, novel_file)
+                n_high_conf <- sum(novel_df$score > 0.9, na.rm = TRUE)
+                casanovo_novel_note <- sprintf(
+                  "\n- **`Casanovo_Novel_Peptides.csv`** — %d novel peptides not in database (%d with score > 0.9). Columns: sequence, score, per-residue AA confidence scores\n",
+                  nrow(novel_df), n_high_conf)
+                message("[DE-LIMP] Claude export: Casanovo novel peptides OK (", nrow(novel_df), ")")
+              }
+            }, error = function(e) message("[Export] Casanovo novel: ", e$message))
+
+            # Confirmed peptides
+            tryCatch({
+              if (!is.null(cls$confirmed) && nrow(cls$confirmed) > 0) {
+                confirmed_df <- cls$confirmed[, intersect(
+                  c("sequence", "seq_stripped", "score", "mean_aa_score",
+                    "proteins", "charge", "exp_mz", "source_file"),
+                  colnames(cls$confirmed)), drop = FALSE]
+                confirmed_df <- confirmed_df[order(-confirmed_df$score), ]
+                confirmed_file <- file.path(tmp_dir, "Casanovo_Confirmed_Peptides.csv")
+                write.csv(confirmed_df, confirmed_file, row.names = FALSE)
+                files_to_zip <- c(files_to_zip, confirmed_file)
+                casanovo_confirmed_note <- sprintf(
+                  "\n- **`Casanovo_Confirmed_Peptides.csv`** — %d confirmed peptides (matched Sage database search, with protein mapping)\n",
+                  nrow(confirmed_df))
+                message("[DE-LIMP] Claude export: Casanovo confirmed peptides OK (", nrow(confirmed_df), ")")
+              }
+            }, error = function(e) message("[Export] Casanovo confirmed: ", e$message))
+          }
+
+          # DIAMOND BLAST Results
+          blast_note <- ""
+          blast_results <- values$denovo_novel_blast
+          if (!is.null(blast_results) && is.data.frame(blast_results) && nrow(blast_results) > 0) {
+            tryCatch({
+              blast_cols <- intersect(
+                c("peptide_sequence", "protein", "identity", "length", "qlen",
+                  "slen", "evalue", "bitscore"),
+                colnames(blast_results))
+              blast_export <- blast_results[, blast_cols, drop = FALSE]
+              blast_export <- blast_export[order(-blast_export$bitscore), ]
+              blast_file <- file.path(tmp_dir, "DIAMOND_BLAST_Results.csv")
+              write.csv(blast_export, blast_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, blast_file)
+              n_pep_hits <- length(unique(blast_export$peptide_sequence))
+              blast_note <- sprintf(
+                "\n- **`DIAMOND_BLAST_Results.csv`** — DIAMOND BLAST results: %d hits for %d novel peptides (best hit protein, %% identity, e-value, bitscore)\n",
+                nrow(blast_export), n_pep_hits)
+              message("[DE-LIMP] Claude export: BLAST results OK (", nrow(blast_export), " hits)")
+            }, error = function(e) message("[Export] BLAST results: ", e$message))
+          }
+
+          # DDA Search Parameters
+          dda_params_note <- ""
+          sp <- values$dda_search_params
+          if (!is.null(sp) && is.list(sp)) {
+            tryCatch({
+              params_lines <- c(
+                "DDA Search Parameters (Sage)",
+                paste0("Date: ", format(sp$submitted_at %||% Sys.time(), "%Y-%m-%d %H:%M")),
+                "",
+                paste0("Preset: ", sp$preset %||% "standard"),
+                paste0("FASTA: ", basename(sp$fasta_path %||% "unknown")),
+                paste0("Raw files: ", sp$n_files %||% "unknown"),
+                paste0("Missed cleavages: ", sp$missed_cleavages %||% 2),
+                paste0("Precursor tolerance: ", sp$precursor_tol %||% 20, " ppm"),
+                paste0("Fragment tolerance: ", sp$fragment_tol %||% 0.05, " Da"),
+                paste0("Normalization: ", sp$normalization %||% "cyclicloess"),
+                paste0("Imputation: ", sp$imputation %||% "perseus"),
+                paste0("Min valid fraction: ", sp$min_valid %||% 0.5),
+                paste0("Contaminant library: ", basename(sp$contaminant_library %||% "none")),
+                paste0("Casanovo de novo: ", if (isTRUE(sp$casanovo_enabled)) "enabled" else "disabled")
+              )
+              dda_params_file <- file.path(tmp_dir, "DDA_Search_Parameters.txt")
+              writeLines(params_lines, dda_params_file)
+              files_to_zip <- c(files_to_zip, dda_params_file)
+              dda_params_note <- "\n- **`DDA_Search_Parameters.txt`** — Sage search configuration, tolerances, FASTA database, normalization settings\n"
+              message("[DE-LIMP] Claude export: DDA search params OK")
+            }, error = function(e) message("[Export] DDA search params: ", e$message))
+          }
+
+          # DDA QC Metrics
+          dda_qc_note <- ""
+          dda_qc <- values$dda_qc_metrics
+          if (!is.null(dda_qc) && is.list(dda_qc)) {
+            tryCatch({
+              qc_df <- data.frame(
+                Metric = names(dda_qc),
+                Value = vapply(dda_qc, function(x) {
+                  if (is.numeric(x)) round(x, 4) else as.character(x)
+                }, character(1)),
+                stringsAsFactors = FALSE
+              )
+              dda_qc_file <- file.path(tmp_dir, "DDA_QC_Metrics.csv")
+              write.csv(qc_df, dda_qc_file, row.names = FALSE)
+              files_to_zip <- c(files_to_zip, dda_qc_file)
+              dda_qc_note <- "\n- **`DDA_QC_Metrics.csv`** — DDA search quality metrics (ID rates, score distributions, completeness)\n"
+              message("[DE-LIMP] Claude export: DDA QC metrics OK")
+            }, error = function(e) message("[Export] DDA QC metrics: ", e$message))
+          }
+
+          # Combine DDA file notes
+          dda_note <- paste0(sage_summary_note, dda_expr_note, casanovo_novel_note,
+                             casanovo_confirmed_note, blast_note, dda_params_note, dda_qc_note)
+
+          # Build DDA inline context for prompt
+          dda_inline_lines <- c("--- DDA / DE NOVO SEQUENCING RESULTS ---")
+          # Sage summary
+          if (!is.null(sage_psms) && nrow(sage_psms) > 0) {
+            dda_inline_lines <- c(dda_inline_lines,
+              sprintf("Sage database search: %s PSMs, %s unique peptides, %s proteins at 1%% FDR",
+                format(nrow(sage_psms), big.mark = ","),
+                format(length(unique(sage_psms$peptide)), big.mark = ","),
+                format(length(unique(sage_psms$proteins)), big.mark = ",")))
+          }
+          # Casanovo summary
+          if (!is.null(cls) && !is.null(cls$summary_stats)) {
+            ss <- cls$summary_stats
+            dda_inline_lines <- c(dda_inline_lines,
+              sprintf("Casanovo de novo: %d total peptides, %d confirmed (%.1f%%), %d novel (%.1f%%)",
+                ss$n_total, ss$n_confirmed, ss$pct_confirmed, ss$n_novel, ss$pct_novel),
+              sprintf("  High-confidence novel (score > 0.9): %d",
+                sum(cls$novel$score > 0.9, na.rm = TRUE)))
+          } else if (!is.null(casanovo_psms) && nrow(casanovo_psms) > 0) {
+            dda_inline_lines <- c(dda_inline_lines,
+              sprintf("Casanovo de novo: %d total PSMs (not yet classified)", nrow(casanovo_psms)))
+          }
+          # BLAST summary
+          if (!is.null(blast_results) && is.data.frame(blast_results) && nrow(blast_results) > 0) {
+            dda_inline_lines <- c(dda_inline_lines,
+              sprintf("DIAMOND BLAST: %d hits across %d novel peptides, median identity %.1f%%",
+                nrow(blast_results),
+                length(unique(blast_results$peptide_sequence)),
+                median(blast_results$identity, na.rm = TRUE)))
+          }
+          dda_inline <- paste0("\n\n", paste(dda_inline_lines, collapse = "\n"))
+        }
+
         # --- 7. Reproducibility R code log ---
         repro_note <- ""
         if (!is.null(values$repro_log) && length(values$repro_log) > 0) {
@@ -655,11 +884,14 @@ server_ai <- function(input, output, session, values) {
               ggplot2::geom_vline(xintercept = c(-0.6, 0.6), linetype = "dashed", color = "orange") +
               ggplot2::labs(title = paste("Volcano:", all_contrasts[1]), x = "logFC", y = "-log10(P-Value)") +
               ggplot2::theme_bw()
-            svg(file.path(fig_dir, "volcano.svg"), width = 8, height = 6)
+            vol_path <- file.path(fig_dir, "volcano.svg")
+            svg(vol_path, width = 8, height = 6)
             print(p_volcano)
             dev.off()
-            fig_files <- c(fig_files, file.path(fig_dir, "volcano.svg"))
-            message("[DE-LIMP] Claude export: volcano SVG OK")
+            if (file.exists(vol_path) && file.info(vol_path)$size > 0) {
+              fig_files <- c(fig_files, vol_path)
+              message("[DE-LIMP] Claude export: volcano SVG OK")
+            } else message("[Export] Volcano SVG: file not created (cairo unavailable?)")
           }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Volcano SVG: ", e$message) })
 
           # Heatmap SVG (top 20 DE proteins)
@@ -675,8 +907,11 @@ server_ai <- function(input, output, session, values) {
             ComplexHeatmap::draw(ComplexHeatmap::Heatmap(mat_z, name = "Z-score", top_annotation = ha,
               cluster_rows = TRUE, cluster_columns = TRUE, show_column_names = FALSE))
             dev.off()
-            fig_files <- c(fig_files, file.path(fig_dir, "heatmap_top20.svg"))
-            message("[DE-LIMP] Claude export: heatmap SVG OK")
+            ht_path <- file.path(fig_dir, "heatmap_top20.svg")
+            if (file.exists(ht_path) && file.info(ht_path)$size > 0) {
+              fig_files <- c(fig_files, ht_path)
+              message("[DE-LIMP] Claude export: heatmap SVG OK")
+            } else message("[Export] Heatmap SVG: file not created (cairo unavailable?)")
           }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Heatmap SVG: ", e$message) })
 
           # Violin plots SVG (top 10 up and top 10 down)
@@ -707,10 +942,13 @@ server_ai <- function(input, output, session, values) {
                      y = "Log2 Intensity") +
                 theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-              svg(file.path(fig_dir, paste0("violin_top10_", direction, ".svg")), width = 14, height = 6)
+              vln_path <- file.path(fig_dir, paste0("violin_top10_", direction, ".svg"))
+              svg(vln_path, width = 14, height = 6)
               print(p)
               dev.off()
-              fig_files <- c(fig_files, file.path(fig_dir, paste0("violin_top10_", direction, ".svg")))
+              if (file.exists(vln_path) && file.info(vln_path)$size > 0) {
+                fig_files <- c(fig_files, vln_path)
+              }
             }
             message("[DE-LIMP] Claude export: violin SVGs OK")
           }, error = function(e) message("[Export] Violin SVGs: ", e$message))
@@ -728,17 +966,215 @@ server_ai <- function(input, output, session, values) {
               stat_ellipse(level = 0.95, linetype = "dashed") +
               labs(title = "PCA", x = paste0("PC1 (", var_exp[1], "%)"), y = paste0("PC2 (", var_exp[2], "%)")) +
               theme_bw()
-            svg(file.path(fig_dir, "pca.svg"), width = 8, height = 6)
+            pca_path <- file.path(fig_dir, "pca.svg")
+            svg(pca_path, width = 8, height = 6)
             print(p_pca)
             dev.off()
-            fig_files <- c(fig_files, file.path(fig_dir, "pca.svg"))
-            message("[DE-LIMP] Claude export: PCA SVG OK")
+            if (file.exists(pca_path) && file.info(pca_path)$size > 0) {
+              fig_files <- c(fig_files, pca_path)
+              message("[DE-LIMP] Claude export: PCA SVG OK")
+            } else message("[Export] PCA SVG: file not created (cairo unavailable?)")
           }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] PCA SVG: ", e$message) })
+
+          # --- QC SVG Figures ---
+
+          # QC Group Distribution violin (Proteins per sample)
+          tryCatch({
+            if (!is.null(values$raw_data) && !is.null(values$metadata)) {
+              qc_df <- data.frame(
+                Sample = colnames(values$raw_data$E),
+                Proteins = colSums(!is.na(values$raw_data$E) & is.finite(values$raw_data$E)),
+                stringsAsFactors = FALSE
+              )
+              qc_df$Group <- values$metadata$Group[match(qc_df$Sample, values$metadata$File.Name)]
+              qc_df <- qc_df[!is.na(qc_df$Group), ]
+              if (nrow(qc_df) > 2) {
+                p_qc <- ggplot2::ggplot(qc_df, ggplot2::aes(x = Group, y = Proteins, fill = Group)) +
+                  ggplot2::geom_violin(alpha = 0.5, trim = FALSE, scale = "width") +
+                  ggplot2::geom_jitter(width = 0.15, size = 1.5, alpha = 0.6) +
+                  ggplot2::theme_bw() +
+                  ggplot2::labs(title = "Precursor Identifications per Sample", y = "Precursors Detected", x = "") +
+                  ggplot2::theme(legend.position = "none")
+                qc_path <- file.path(fig_dir, "qc_group_distribution.svg")
+                svg(qc_path, width = 8, height = 5)
+                print(p_qc)
+                dev.off()
+                if (file.exists(qc_path) && file.info(qc_path)$size > 0) {
+                  fig_files <- c(fig_files, qc_path)
+                  message("[DE-LIMP] Claude export: QC group distribution SVG OK")
+                }
+              }
+            }
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] QC group dist SVG: ", e$message) })
+
+          # Normalization density overlay
+          tryCatch({
+            if (!is.null(values$y_protein) && !is.null(values$y_protein$E) && !is.null(values$metadata)) {
+              sample_cols <- colnames(values$y_protein$E)
+              density_list <- lapply(sample_cols, function(s) {
+                vals <- values$y_protein$E[, s]
+                vals <- vals[is.finite(vals) & !is.na(vals)]
+                if (length(vals) < 10) return(NULL)
+                d <- density(vals, n = 256)
+                grp <- values$metadata$Group[match(s, values$metadata$File.Name)]
+                data.frame(Sample = s, x = d$x, y = d$y, Group = grp, stringsAsFactors = FALSE)
+              })
+              dens_df <- do.call(rbind, density_list)
+              if (!is.null(dens_df) && nrow(dens_df) > 0) {
+                p_norm <- ggplot2::ggplot(dens_df, ggplot2::aes(x = x, y = y, group = Sample, color = Group)) +
+                  ggplot2::geom_line(alpha = 0.4, linewidth = 0.5) +
+                  ggplot2::theme_bw() +
+                  ggplot2::labs(x = "Log2 Intensity", y = "Density", title = "Post-Normalization Signal Distribution") +
+                  ggplot2::theme(legend.position = "bottom")
+                norm_path <- file.path(fig_dir, "normalization_density.svg")
+                svg(norm_path, width = 10, height = 6)
+                print(p_norm)
+                dev.off()
+                if (file.exists(norm_path) && file.info(norm_path)$size > 0) {
+                  fig_files <- c(fig_files, norm_path)
+                  message("[DE-LIMP] Claude export: normalization density SVG OK")
+                }
+              }
+            }
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Normalization density SVG: ", e$message) })
+
+          # Data completeness bar chart
+          tryCatch({
+            if (!is.null(values$raw_data) && !is.null(values$metadata)) {
+              total_prec <- nrow(values$raw_data$E)
+              comp_df <- data.frame(
+                Sample = colnames(values$raw_data$E),
+                Detected_Pct = 100 * colSums(!is.na(values$raw_data$E) & is.finite(values$raw_data$E)) / total_prec,
+                stringsAsFactors = FALSE
+              )
+              comp_df$Group <- values$metadata$Group[match(comp_df$Sample, values$metadata$File.Name)]
+              comp_df <- comp_df[!is.na(comp_df$Group), ]
+              comp_df <- comp_df[order(comp_df$Group, comp_df$Detected_Pct), ]
+              comp_df$Order <- seq_len(nrow(comp_df))
+              p_comp <- ggplot2::ggplot(comp_df, ggplot2::aes(x = reorder(Sample, Order), y = Detected_Pct, fill = Group)) +
+                ggplot2::geom_col(width = 0.8) +
+                ggplot2::geom_hline(yintercept = 50, linetype = "dashed", color = "grey40") +
+                ggplot2::theme_bw() +
+                ggplot2::labs(x = "", y = "Precursors Detected (%)", title = "Per-Sample Data Completeness") +
+                ggplot2::theme(axis.text.x = ggplot2::element_blank(), axis.ticks.x = ggplot2::element_blank(), legend.position = "bottom")
+              comp_path <- file.path(fig_dir, "data_completeness.svg")
+              svg(comp_path, width = 10, height = 5)
+              print(p_comp)
+              dev.off()
+              if (file.exists(comp_path) && file.info(comp_path)$size > 0) {
+                fig_files <- c(fig_files, comp_path)
+                message("[DE-LIMP] Claude export: data completeness SVG OK")
+              }
+            }
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Data completeness SVG: ", e$message) })
+
+          # Sample correlation heatmap
+          tryCatch({
+            if (!is.null(values$y_protein) && !is.null(values$y_protein$E) && !is.null(values$metadata)) {
+              e_mat <- values$y_protein$E
+              e_clean <- e_mat[complete.cases(e_mat), , drop = FALSE]
+              if (nrow(e_clean) > 100) {
+                v <- apply(e_clean, 1, var, na.rm = TRUE)
+                top_v <- names(sort(v, decreasing = TRUE))[1:min(2000, length(v))]
+                cor_mat <- cor(e_clean[top_v, ], use = "pairwise.complete.obs")
+                grp_order <- c(
+                  values$metadata$File.Name[values$metadata$Group == sort(unique(values$metadata$Group))[1]],
+                  values$metadata$File.Name[values$metadata$Group == sort(unique(values$metadata$Group))[2]]
+                )
+                grp_order <- grp_order[grp_order %in% colnames(cor_mat)]
+                if (length(grp_order) == ncol(cor_mat)) cor_mat <- cor_mat[grp_order, grp_order]
+                cor_long <- reshape2::melt(cor_mat)
+                colnames(cor_long) <- c("S1", "S2", "r")
+                p_cor <- ggplot2::ggplot(cor_long, ggplot2::aes(x = S1, y = S2, fill = r)) +
+                  ggplot2::geom_tile() +
+                  ggplot2::scale_fill_gradient2(low = "#2166AC", mid = "#F7F7F7", high = "#B2182B", midpoint = 0.85, limits = c(0.6, 1)) +
+                  ggplot2::theme_minimal() +
+                  ggplot2::labs(title = "Sample Correlation Heatmap") +
+                  ggplot2::theme(axis.text = ggplot2::element_blank(), axis.ticks = ggplot2::element_blank(), axis.title = ggplot2::element_blank())
+                cor_path <- file.path(fig_dir, "sample_correlation.svg")
+                svg(cor_path, width = 8, height = 7)
+                print(p_cor)
+                dev.off()
+                if (file.exists(cor_path) && file.info(cor_path)$size > 0) {
+                  fig_files <- c(fig_files, cor_path)
+                  message("[DE-LIMP] Claude export: sample correlation SVG OK")
+                }
+              }
+            }
+          }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Sample correlation SVG: ", e$message) })
+
+          # DDA-specific SVG figures (Casanovo score distribution + confirmed/novel bar chart)
+          if (is_dda_mode && !is.null(values$dda_casanovo_psms) && nrow(values$dda_casanovo_psms) > 0) {
+            # Casanovo score distribution histogram
+            tryCatch({
+              cas_psms <- values$dda_casanovo_psms
+              p_score <- ggplot2::ggplot(
+                data.frame(score = cas_psms$score),
+                ggplot2::aes(x = score)) +
+                ggplot2::geom_histogram(bins = 50, fill = "#3498DB", color = "white", alpha = 0.8) +
+                ggplot2::geom_vline(xintercept = 0.9, linetype = "dashed", color = "#E74C3C", linewidth = 0.8) +
+                ggplot2::annotate("text", x = 0.9, y = Inf, label = "0.9 threshold",
+                  vjust = 2, hjust = -0.1, color = "#E74C3C", size = 3.5) +
+                ggplot2::labs(title = "Casanovo De Novo Sequencing Score Distribution",
+                  x = "Casanovo Score", y = "Count",
+                  subtitle = sprintf("%s PSMs | Median: %.3f | >0.9: %d (%.1f%%)",
+                    format(nrow(cas_psms), big.mark = ","),
+                    median(cas_psms$score, na.rm = TRUE),
+                    sum(cas_psms$score > 0.9, na.rm = TRUE),
+                    100 * mean(cas_psms$score > 0.9, na.rm = TRUE))) +
+                ggplot2::theme_bw()
+              score_path <- file.path(fig_dir, "casanovo_score_distribution.svg")
+              svg(score_path, width = 8, height = 5)
+              print(p_score)
+              dev.off()
+              if (file.exists(score_path) && file.info(score_path)$size > 0) {
+                fig_files <- c(fig_files, score_path)
+                message("[DE-LIMP] Claude export: Casanovo score distribution SVG OK")
+              }
+            }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Casanovo score SVG: ", e$message) })
+
+            # Confirmed vs Novel bar chart
+            cls <- values$dda_casanovo_classification
+            if (!is.null(cls) && !is.null(cls$summary_stats)) {
+              tryCatch({
+                bar_df <- data.frame(
+                  Category = c("Confirmed\n(in database)", "Novel\n(not in database)"),
+                  Count = c(cls$summary_stats$n_confirmed, cls$summary_stats$n_novel),
+                  stringsAsFactors = FALSE
+                )
+                bar_df$Category <- factor(bar_df$Category, levels = bar_df$Category)
+                p_bar <- ggplot2::ggplot(bar_df, ggplot2::aes(x = Category, y = Count, fill = Category)) +
+                  ggplot2::geom_col(width = 0.6, show.legend = FALSE) +
+                  ggplot2::scale_fill_manual(values = c("#2ECC71", "#E74C3C")) +
+                  ggplot2::geom_text(ggplot2::aes(label = format(Count, big.mark = ",")),
+                    vjust = -0.5, size = 4.5, fontface = "bold") +
+                  ggplot2::labs(title = "Casanovo Peptide Classification",
+                    y = "Unique Peptides", x = "",
+                    subtitle = sprintf("%.1f%% confirmed by Sage database search",
+                      cls$summary_stats$pct_confirmed)) +
+                  ggplot2::theme_bw() +
+                  ggplot2::theme(axis.text.x = ggplot2::element_text(size = 11))
+                bar_path <- file.path(fig_dir, "casanovo_classification.svg")
+                svg(bar_path, width = 6, height = 5)
+                print(p_bar)
+                dev.off()
+                if (file.exists(bar_path) && file.info(bar_path)$size > 0) {
+                  fig_files <- c(fig_files, bar_path)
+                  message("[DE-LIMP] Claude export: Casanovo classification bar SVG OK")
+                }
+              }, error = function(e) { try(dev.off(), silent = TRUE); message("[Export] Casanovo classification SVG: ", e$message) })
+            }
+          }
 
           if (length(fig_files) > 0) {
             files_to_zip <- c(files_to_zip, fig_files)
+            fig_list <- if (is_dda_mode) {
+              "Casanovo score distribution, peptide classification"
+            } else {
+              "volcano, heatmap, PCA, violin plots, QC group distribution, normalization density, data completeness, sample correlation"
+            }
             figures_note <- paste0(
-              "\n- **`figures/`** — Publication-quality SVG figures: volcano plot, heatmap (top 20 DE), PCA, violin plots (top 10 up/down)\n")
+              "\n- **`figures/`** — Publication-quality SVG figures: ", fig_list, "\n")
             message("[DE-LIMP] Claude export: ", length(fig_files), " SVG figures generated")
           }
         }, error = function(e) message("[Export] SVG figures section: ", e$message))
@@ -1038,7 +1474,9 @@ server_ai <- function(input, output, session, values) {
           }
         }, error = function(e) NULL)
 
-        n_total <- nrow(topTable(values$fit, coef = all_contrasts[1], number = Inf))
+        n_total <- if (!is_dda_mode && length(all_contrasts) > 0) {
+          nrow(topTable(values$fit, coef = all_contrasts[1], number = Inf))
+        } else 0
 
         # Ensure all inline/note variables are character strings (not NULL/list)
         safe_str <- function(x) if (is.null(x) || length(x) == 0) "" else paste(as.character(x), collapse = "")
@@ -1052,6 +1490,8 @@ server_ai <- function(input, output, session, values) {
         dynamic_range_inline <- safe_str(dynamic_range_inline)
         mofa_inline <- safe_str(mofa_inline)
         phospho_inline <- safe_str(phospho_inline)
+        dda_note <- safe_str(dda_note)
+        dda_inline <- safe_str(dda_inline)
         gsea_note <- safe_str(gsea_note)
         phospho_note <- safe_str(phospho_note)
         instrument_note <- safe_str(instrument_note)
@@ -1064,184 +1504,351 @@ server_ai <- function(input, output, session, values) {
         params_note <- safe_str(params_note)
         figures_note <- safe_str(figures_note)
 
-        prompt <- paste0(
-          "# Proteomics Differential Expression Analysis\n\n",
-          "You are a senior proteomics and systems biology consultant. ",
-          "Analyze the following differential expression results from a DIA-NN / limma pipeline. ",
-          "The data was processed by DE-LIMP (Differential Expression - LIMPA Pipeline).\n\n",
-          "## Attached Data Files\n\n",
-          "- **`DE_Results_Full.csv`** — Complete DE statistics for all ", n_total, " proteins across ",
-          ctx$n_contrasts, " comparison(s). Columns: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val, B, Contrast\n",
-          "- **`Expression_Matrix.csv`** — Log2 expression values for all proteins across all samples\n",
-          if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics (precursor/protein counts, MS1 signal)\n" else "",
-          gsea_note,
-          phospho_note,
-          instrument_note,
-          tic_note,
-          excluded_note,
-          methods_note,
-          repro_note,
-          rds_note,
-          groups_note,
-          params_note,
-          figures_note, "\n\n",
-          "## OUTPUT FORMAT\n\n",
-          "Generate a publication-quality report suitable for sharing with collaborators. ",
-          "The report should be professional, well-structured, and written in a scientific but accessible tone. ",
-          "Use clear section headers, bullet points for key findings, and data tables where appropriate. ",
-          "Include specific protein names, fold changes, and p-values to support all claims. ",
-          "Write it as if preparing a formal analysis report for a PI — not a casual summary.\n\n",
-          "Format the output as a structured document with numbered sections. ",
-          "For tables, use markdown table syntax. For key warnings or critical findings, use bold text. ",
-          "The report should stand alone — a reader should understand the experiment, methods, findings, and recommendations without additional context.\n\n",
-          "Include references to the attached figures in your analysis (e.g., 'As shown in the volcano plot (figures/volcano.svg)...'). ",
-          "When discussing top DE proteins, reference the violin plots showing their expression distributions across groups.\n\n",
-          "Please provide a comprehensive analysis with these sections:\n\n",
-          "## Overview\n",
-          "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
-          "Overall assessment of the experiment's quality and scope.\n\n",
-          "## QC Assessment\n",
-          "Evaluate the technical quality of the experiment based on the QC metrics. ",
-          "Comment on consistency of precursor/protein identifications across replicates and groups, ",
-          "and flag any outlier samples or systematic biases.\n\n",
-          "## Key Findings Per Comparison\n",
-          "For each comparison: highlight the top upregulated and downregulated proteins by fold-change ",
-          "(use gene names). Note any comparison with unusually few or many significant hits.\n\n",
-          "## Cross-Comparison Biomarkers\n",
-          "Proteins significant in multiple comparisons are highest-confidence candidates. ",
-          "Discuss consistency of direction (always up, always down, or mixed across comparisons).\n\n",
-          "## High-Confidence Biomarker Insights\n",
-          "For the most stable proteins (lowest coefficient of variation): discuss their known biological functions, ",
-          "pathway involvement, and disease associations. ",
-          "Assess their potential as reliable biomarkers based on the combination of low CV, ",
-          "significant p-value, and meaningful fold-change.\n\n",
-          if (nzchar(gsea_note)) paste0(
-            "## Pathway & Gene Set Enrichment Analysis\n",
-            "GSEA results are in `GSEA_Results.csv`. Summarize the top enriched pathways by ontology. ",
-            "Highlight pathways with the highest normalized enrichment scores (NES). ",
-            "Connect enriched pathways to the DE protein findings above.\n\n"
-          ) else "",
-          if (nzchar(mofa_inline)) paste0(
-            "## Multi-Omics Integration (MOFA2)\n",
-            "MOFA2 variance explained data is provided below. Discuss:\n",
-            "- Which factors capture the most variance and in which views\n",
-            "- Whether the multi-omics integration reveals structure not visible in single-view analysis\n",
-            "- How the MOFA factors relate to the experimental groups and DE findings\n\n"
-          ) else "",
-          if (nzchar(phospho_inline)) paste0(
-            "## Phosphoproteomics\n",
-            "Phosphosite-level DE results are provided below and in `Phospho_DE_Results.csv`. Discuss:\n",
-            "- Number and direction of significant phosphosites per comparison\n",
-            "- Top regulated phosphosites and their known regulatory roles\n",
-            "- Whether phospho changes are concordant or discordant with protein-level changes\n",
-            "- Any kinase activity implications from the regulated sites\n\n"
-          ) else "",
-          if (nzchar(excluded_inline)) paste0(
-            "## Excluded Files Assessment\n",
-            "Files were excluded from analysis (details below and in `Excluded_Files.csv`). Assess:\n",
-            "- Whether exclusions are biased toward specific experimental groups (could introduce bias)\n",
-            "- Whether the QC reasons (TIC diagnostics) suggest technical failures vs potential biological effects\n",
-            "- Impact on statistical power given the remaining sample sizes per group\n",
-            "- Any recommendations for re-inclusion or follow-up experiments\n\n"
-          ) else "",
-          if (nzchar(missingness_inline)) paste0(
-            "## Data Completeness\n",
-            "Missingness data is provided below. Comment on:\n",
-            "- Overall data completeness and whether missingness varies across groups\n",
-            "- Whether group-specific missingness could introduce bias\n",
-            "- The effectiveness of DPC-Quant quantification (compare pre vs post-pipeline missingness — note: limpa uses probabilistic modelling, not imputation)\n\n"
-          ) else "",
-          "## Biological Interpretation\n",
-          "Suggest what biological processes or pathways may be affected based on the protein lists. ",
-          "Note any well-known protein families, complexes, or signaling cascades represented. ",
-          "If the data suggests a clear biological narrative, describe it.\n\n",
-          "## How This Analysis Works\n",
-          "Write an educational background section that a PhD student or biologist with no mass spectrometry ",
-          "or bioinformatics background can understand. Cover each stage of the pipeline in plain language, ",
-          "using analogies where helpful. Include these topics:\n\n",
-          "### Liquid Chromatography–Mass Spectrometry (LC-MS/MS)\n",
-          "Explain what LC-MS/MS does at a high level: proteins are digested into peptides, separated by ",
-          "liquid chromatography (like sorting by stickiness), then ionized and measured by mass. ",
-          "Explain that the mass spectrometer measures both the mass of intact peptides (MS1) and breaks them ",
-          "into fragments to identify the sequence (MS2). Keep it intuitive.\n\n",
-          "### Data-Independent Acquisition (DIA)\n",
-          "Explain the difference between DDA (picks the loudest signals one at a time) and DIA (systematically ",
-          "scans all peptides in windows across the full mass range). Explain why DIA gives more complete, ",
-          "reproducible quantification — every peptide gets measured every time, not just the most abundant ones. ",
-          "Mention that DIA produces more complex data that requires specialized software to deconvolve.\n\n",
-          "### DIA-NN Software\n",
-          "Explain that DIA-NN is the software that takes the raw mass spectrometry data and figures out which ",
-          "peptides (and therefore which proteins) are present and how abundant they are. Mention that it uses ",
-          "neural networks to score peptide identifications and that it performs library-free search (predicting ",
-          "what peptides should look like rather than requiring a pre-built library). Explain that it outputs a ",
-          "report with protein quantities per sample.\n\n",
-          "### LIMPA / limma Statistical Framework\n",
-          "Explain that once we have protein quantities, we need statistics to determine which proteins are truly ",
-          "different between groups vs. random noise. Explain limma's key innovation in plain terms: it borrows ",
-          "information across all proteins to get better variance estimates, which is especially powerful when you ",
-          "have few replicates (common in proteomics). Mention empirical Bayes moderation — the idea that a protein's ",
-          "variance estimate is improved by considering how variable all the other proteins are. Explain that LIMPA ",
-          "is an R package that wraps limma with proteomics-specific preprocessing (normalization, filtering).\n\n",
-          "### Key Statistical Concepts\n",
-          "Define these terms in plain language with brief examples from this dataset:\n",
-          "- **log2 Fold Change (logFC)**: How much a protein goes up or down between groups (logFC of 1 = doubled, -1 = halved)\n",
-          "- **P-value**: The probability of seeing this difference by chance alone\n",
-          "- **Adjusted P-value (FDR)**: P-values corrected for testing thousands of proteins at once (Benjamini-Hochberg). ",
-          "Explain the multiple testing problem with an intuitive example (e.g., flipping coins)\n",
-          "- **Volcano plot**: Why it's shaped like a volcano and how to read it (x = effect size, y = significance)\n",
-          "- **Coefficient of Variation (CV)**: A measure of measurement reproducibility — lower is more reliable\n",
-          "- **Normalization**: Why raw intensities need correction (loading differences between samples) and how DPC-CN (Data Point Correspondence - Cyclic Normalization) works conceptually\n\n",
-          "Keep the tone approachable and encouraging. Avoid jargon where possible, and define it when unavoidable.\n\n",
-          if (nzchar(search_settings_inline)) paste0(
-            "## DIA-NN Search Methods\n",
-            "DIA-NN search parameters are provided below under 'DIA-NN SEARCH SETTINGS'. ",
-            "Write a publication-ready Methods subsection describing the database search. Include:\n",
-            "- The FASTA database used (name, number of sequences if available)\n",
-            "- DIA-NN version and search mode (library-free vs spectral library)\n",
-            "- Enzyme specificity and missed cleavages\n",
-            "- Mass accuracy settings (MS1 and MS2) and whether they were auto-optimized or manually set\n",
-            "- Variable modifications (e.g., methionine oxidation, N-terminal acetylation)\n",
-            "- FDR threshold and match-between-runs status\n",
-            "- Any other relevant search parameters (scan window, normalization, extra flags)\n",
-            "Write this in third person past tense, suitable for a journal Methods section. ",
-            "Cite DIA-NN (Demichev et al., Nature Methods, 2020) appropriately.\n\n"
-          ) else "",
-          if (nzchar(instrument_inline)) paste0(
-            "## Instrument & Acquisition\n",
-            "Instrument metadata was extracted from the raw files. Use this to write a complete ",
-            "Sample Preparation & Data Acquisition section for the Methods. Include the instrument model, ",
-            "m/z scan range, gradient length, and ion mobility range (if timsTOF). ",
-            "Write in third person past tense.\n\n"
-          ) else "",
-          if (nzchar(methods_note)) paste0(
-            "## Methodology & Reproducibility\n",
-            "A detailed methodology is in `Methods_and_References.txt`. ",
-            "Summarize the key steps of the analysis pipeline (normalization, statistical testing, ",
-            "multiple testing correction) in a concise Methods section suitable for a publication. ",
-            "Include the R code log (`Reproducibility_Code.R`) as context — cite the specific ",
-            "parameters and software versions used. Include proper literature citations from the ",
-            "methods file.\n\n"
-          ) else "",
-          "Use markdown formatting with headers. Be scientific but accessible.\n",
-          "Reference specific proteins from the CSV files to support your analysis.\n",
-          design_section,
-          qc_inline,
-          search_settings_inline,
-          instrument_inline,
-          tic_inline,
-          excluded_inline,
-          missingness_inline,
-          dynamic_range_inline,
-          mofa_inline,
-          phospho_inline,
-          "\n\n--- TOP DE PROTEINS (summary — full data in CSV) ---\n\n",
-          "Number of comparisons: ", ctx$n_contrasts, "\n\n",
-          ctx$contrast_text, "\n\n",
-          "--- CROSS-COMPARISON PROTEINS (significant in >= 2 comparisons) ---\n",
-          ctx$cross_text, "\n\n",
-          "--- MOST STABLE SIGNIFICANT PROTEINS (lowest CV across replicates) ---\n",
-          ctx$stable_prots_text
-        )
+        if (is_dda_mode) {
+          # --- DDA MODE PROMPT ---
+          sage_psms <- values$dda_sage_psms
+          cls <- values$dda_casanovo_classification
+          blast_results <- values$denovo_novel_blast
+
+          # Build Sage summary stats
+          n_psms <- if (!is.null(sage_psms)) nrow(sage_psms) else 0
+          n_peptides <- if (!is.null(sage_psms)) length(unique(sage_psms$peptide)) else 0
+          n_proteins <- if (!is.null(sage_psms)) length(unique(sage_psms$proteins)) else 0
+
+          # Build Casanovo summary
+          casanovo_section <- ""
+          if (!is.null(cls) && !is.null(cls$summary_stats)) {
+            ss_cas <- cls$summary_stats
+            n_high_conf <- sum(cls$novel$score > 0.9, na.rm = TRUE)
+            casanovo_section <- paste0(
+              "\n## De Novo Sequencing Results\n",
+              "This dataset was analyzed with both database search (Sage) and de novo sequencing (Casanovo).\n\n",
+              "- **Sage database search**: ", format(n_psms, big.mark = ","), " PSMs, ",
+              format(n_peptides, big.mark = ","), " unique peptides, ",
+              format(n_proteins, big.mark = ","), " proteins at 1% FDR\n",
+              "- **Casanovo de novo**: ", ss_cas$n_total, " total peptides, ",
+              ss_cas$n_confirmed, " confirmed by database search (",
+              round(ss_cas$pct_confirmed, 1), "%), ",
+              ss_cas$n_novel, " novel (not in database, ",
+              round(ss_cas$pct_novel, 1), "%)\n",
+              "- **High-confidence novel** (score > 0.9): ", n_high_conf, " peptides\n\n",
+              "The novel peptides are of particular interest — they represent sequences not found in the reference database. ",
+              "This could indicate:\n",
+              "- Species-specific sequence variants\n",
+              "- Post-translational modifications not in the search\n",
+              "- Novel protein isoforms\n",
+              "- Contamination from unexpected organisms\n\n")
+          } else if (!is.null(values$dda_casanovo_psms) && nrow(values$dda_casanovo_psms) > 0) {
+            casanovo_section <- paste0(
+              "\n## De Novo Sequencing Results\n",
+              "Casanovo de novo sequencing produced ", nrow(values$dda_casanovo_psms),
+              " PSMs (not yet classified against database search).\n\n")
+          }
+
+          # BLAST section
+          blast_prompt_section <- ""
+          if (!is.null(blast_results) && is.data.frame(blast_results) && nrow(blast_results) > 0) {
+            blast_prompt_section <- paste0(
+              "### DIAMOND BLAST Results\n",
+              "BLAST was run on novel peptides against a reference database. ",
+              format(nrow(blast_results), big.mark = ","), " hits found for ",
+              length(unique(blast_results$peptide_sequence)), " peptides. ",
+              "Median identity: ", round(median(blast_results$identity, na.rm = TRUE), 1), "%. ",
+              "See `DIAMOND_BLAST_Results.csv` for full results.\n\n")
+          }
+
+          # DDA analysis instructions
+          denovo_analysis_instructions <- ""
+          if (nzchar(casanovo_section)) {
+            denovo_analysis_instructions <- paste0(
+              "## Novel Peptide Analysis\n",
+              "Please analyze the novel peptides and BLAST results (if available) to identify:\n",
+              "1. Which novel peptides have high confidence (score > 0.9)?\n",
+              "2. Do the BLAST results suggest a specific organism of origin?\n",
+              "3. Are there patterns in the novel sequences (e.g., specific amino acid compositions, length distributions)?\n",
+              "4. Which novel peptides could be species-specific markers?\n",
+              "5. How does the confirmation rate compare to typical de novo sequencing experiments?\n\n",
+              "Reference the Casanovo score distribution figure (figures/casanovo_score_distribution.svg) ",
+              "and the classification bar chart (figures/casanovo_classification.svg) if available.\n\n")
+          }
+
+          prompt <- paste0(
+            "# Proteomics DDA + De Novo Sequencing Analysis\n\n",
+            "You are a senior proteomics and systems biology consultant. ",
+            "Analyze the following data-dependent acquisition (DDA) proteomics results from a combined ",
+            "database search (Sage) and de novo sequencing (Casanovo) pipeline. ",
+            "The data was processed by DE-LIMP (Differential Expression - LIMPA Pipeline).\n\n",
+            "## Attached Data Files\n\n",
+            "- **`Sage_PSM_Summary.csv`** — Sage database search summary statistics\n",
+            "- **`Expression_Matrix.csv`** — Log2 LFQ protein intensities across all samples\n",
+            if (!is.null(cls) && !is.null(cls$novel) && nrow(cls$novel) > 0)
+              "- **`Casanovo_Novel_Peptides.csv`** — Novel peptide sequences with confidence scores and per-residue AA scores\n" else "",
+            if (!is.null(cls) && !is.null(cls$confirmed) && nrow(cls$confirmed) > 0)
+              "- **`Casanovo_Confirmed_Peptides.csv`** — Confirmed peptides matching database search with protein mapping\n" else "",
+            if (!is.null(blast_results) && is.data.frame(blast_results) && nrow(blast_results) > 0)
+              "- **`DIAMOND_BLAST_Results.csv`** — BLAST results for novel peptides (protein hits, identity, e-value)\n" else "",
+            "- **`DDA_Search_Parameters.txt`** — Sage search configuration and parameters\n",
+            if (!is.null(values$dda_qc_metrics))
+              "- **`DDA_QC_Metrics.csv`** — DDA search quality metrics\n" else "",
+            if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics\n" else "",
+            instrument_note,
+            tic_note,
+            excluded_note,
+            methods_note,
+            repro_note,
+            rds_note,
+            groups_note,
+            figures_note, "\n\n",
+            "## OUTPUT FORMAT\n\n",
+            "Generate a publication-quality report suitable for sharing with collaborators. ",
+            "The report should be professional, well-structured, and written in a scientific but accessible tone. ",
+            "Use clear section headers, bullet points for key findings, and data tables where appropriate. ",
+            "Write it as if preparing a formal analysis report for a PI — not a casual summary.\n\n",
+            "Format the output as a structured document with numbered sections. ",
+            "For tables, use markdown table syntax. For key warnings or critical findings, use bold text.\n\n",
+            "Please provide a comprehensive analysis with these sections:\n\n",
+            "## Overview\n",
+            "Summary of the DDA database search results (PSMs, peptides, proteins identified). ",
+            "If de novo sequencing was performed, summarize the confirmation rate and number of novel peptides. ",
+            "Overall assessment of the experiment's quality.\n\n",
+            "## Database Search Assessment\n",
+            "Evaluate the Sage search results: identification rates, score distributions, ",
+            "protein coverage. Comment on the FASTA database used and FDR control.\n\n",
+            casanovo_section,
+            blast_prompt_section,
+            denovo_analysis_instructions,
+            "## Protein Identification & Quantification\n",
+            "Summarize the protein-level results from LFQ quantification. ",
+            "Comment on data completeness, dynamic range, and any sample outliers visible in the expression matrix.\n\n",
+            "## Biological Interpretation\n",
+            "Based on the identified proteins (and novel peptides if available), suggest what biological ",
+            "processes or pathways may be represented. If novel peptides suggest unexpected organisms or ",
+            "sequence variants, discuss the biological implications.\n\n",
+            "## How This Analysis Works\n",
+            "Write an educational background section that a PhD student or biologist with no mass spectrometry ",
+            "or bioinformatics background can understand. Cover:\n\n",
+            "### Liquid Chromatography-Mass Spectrometry (LC-MS/MS)\n",
+            "Explain what LC-MS/MS does at a high level.\n\n",
+            "### Data-Dependent Acquisition (DDA)\n",
+            "Explain DDA acquisition: the mass spectrometer picks the most intense precursor ions for fragmentation. ",
+            "Contrast with DIA. Explain why DDA is still widely used (simpler data, well-established tools, ",
+            "better for discovery/de novo sequencing).\n\n",
+            "### Database Search (Sage)\n",
+            "Explain that Sage takes MS/MS spectra and matches them against a protein database (FASTA) to identify ",
+            "peptides and proteins. Mention FDR control via target-decoy approach. Sage is a modern, fast, ",
+            "open-source search engine written in Rust.\n\n",
+            "### De Novo Sequencing (Casanovo)\n",
+            "Explain that de novo sequencing reads the peptide sequence directly from the fragmentation spectrum, ",
+            "without needing a database. Casanovo uses a deep learning transformer model to predict amino acid ",
+            "sequences from spectra. Explain why this is powerful: it can find peptides not in any database, ",
+            "including novel variants, unexpected organisms, or modified peptides.\n\n",
+            "### Confirmed vs Novel Peptides\n",
+            "Explain the cross-referencing approach: peptides found by both Sage (database) and Casanovo (de novo) ",
+            "are 'confirmed' — this validates both methods. 'Novel' peptides are those found only by de novo, ",
+            "representing sequences absent from the searched database.\n\n",
+            "Keep the tone approachable and encouraging. Avoid jargon where possible, and define it when unavoidable.\n\n",
+            if (nzchar(instrument_inline)) paste0(
+              "## Instrument & Acquisition\n",
+              "Instrument metadata was extracted from the raw files. Write a Methods subsection. ",
+              "Write in third person past tense.\n\n"
+            ) else "",
+            if (nzchar(methods_note)) paste0(
+              "## Methodology & Reproducibility\n",
+              "A detailed methodology is in `Methods_and_References.txt`.\n\n"
+            ) else "",
+            "Use markdown formatting with headers. Be scientific but accessible.\n",
+            design_section,
+            qc_inline,
+            instrument_inline,
+            tic_inline,
+            excluded_inline,
+            dda_inline
+          )
+        } else {
+          # --- DIA MODE PROMPT (existing) ---
+          prompt <- paste0(
+            "# Proteomics Differential Expression Analysis\n\n",
+            "You are a senior proteomics and systems biology consultant. ",
+            "Analyze the following differential expression results from a DIA-NN / limma pipeline. ",
+            "The data was processed by DE-LIMP (Differential Expression - LIMPA Pipeline).\n\n",
+            "## Attached Data Files\n\n",
+            "- **`DE_Results_Full.csv`** — Complete DE statistics for all ", n_total, " proteins across ",
+            ctx$n_contrasts, " comparison(s). Columns: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val, B, Contrast\n",
+            "- **`Expression_Matrix.csv`** — Log2 expression values for all proteins across all samples\n",
+            if (!is.null(values$qc_stats)) "- **`QC_Metrics.csv`** — Per-sample QC metrics (precursor/protein counts, MS1 signal)\n" else "",
+            gsea_note,
+            phospho_note,
+            instrument_note,
+            tic_note,
+            excluded_note,
+            methods_note,
+            repro_note,
+            rds_note,
+            groups_note,
+            params_note,
+            figures_note, "\n\n",
+            "## OUTPUT FORMAT\n\n",
+            "Generate a publication-quality report suitable for sharing with collaborators. ",
+            "The report should be professional, well-structured, and written in a scientific but accessible tone. ",
+            "Use clear section headers, bullet points for key findings, and data tables where appropriate. ",
+            "Include specific protein names, fold changes, and p-values to support all claims. ",
+            "Write it as if preparing a formal analysis report for a PI — not a casual summary.\n\n",
+            "Format the output as a structured document with numbered sections. ",
+            "For tables, use markdown table syntax. For key warnings or critical findings, use bold text. ",
+            "The report should stand alone — a reader should understand the experiment, methods, findings, and recommendations without additional context.\n\n",
+            "Include references to the attached figures in your analysis (e.g., 'As shown in the volcano plot (figures/volcano.svg)...'). ",
+            "When discussing top DE proteins, reference the violin plots showing their expression distributions across groups.\n\n",
+            "Please provide a comprehensive analysis with these sections:\n\n",
+            "## Overview\n",
+            "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
+            "Overall assessment of the experiment's quality and scope.\n\n",
+            "## QC Assessment\n",
+            "Evaluate the technical quality of the experiment based on the QC metrics. ",
+            "Comment on consistency of precursor/protein identifications across replicates and groups, ",
+            "and flag any outlier samples or systematic biases. ",
+            "Reference the QC figures if available: group distribution violin (figures/qc_group_distribution.svg), ",
+            "normalization density overlay (figures/normalization_density.svg), ",
+            "data completeness bar chart (figures/data_completeness.svg), ",
+            "and sample correlation heatmap (figures/sample_correlation.svg).\n\n",
+            "## Key Findings Per Comparison\n",
+            "For each comparison: highlight the top upregulated and downregulated proteins by fold-change ",
+            "(use gene names). Note any comparison with unusually few or many significant hits.\n\n",
+            "## Cross-Comparison Biomarkers\n",
+            "Proteins significant in multiple comparisons are highest-confidence candidates. ",
+            "Discuss consistency of direction (always up, always down, or mixed across comparisons).\n\n",
+            "## High-Confidence Biomarker Insights\n",
+            "For the most stable proteins (lowest coefficient of variation): discuss their known biological functions, ",
+            "pathway involvement, and disease associations. ",
+            "Assess their potential as reliable biomarkers based on the combination of low CV, ",
+            "significant p-value, and meaningful fold-change.\n\n",
+            if (nzchar(gsea_note)) paste0(
+              "## Pathway & Gene Set Enrichment Analysis\n",
+              "GSEA results are in `GSEA_Results.csv`. Summarize the top enriched pathways by ontology. ",
+              "Highlight pathways with the highest normalized enrichment scores (NES). ",
+              "Connect enriched pathways to the DE protein findings above.\n\n"
+            ) else "",
+            if (nzchar(mofa_inline)) paste0(
+              "## Multi-Omics Integration (MOFA2)\n",
+              "MOFA2 variance explained data is provided below. Discuss:\n",
+              "- Which factors capture the most variance and in which views\n",
+              "- Whether the multi-omics integration reveals structure not visible in single-view analysis\n",
+              "- How the MOFA factors relate to the experimental groups and DE findings\n\n"
+            ) else "",
+            if (nzchar(phospho_inline)) paste0(
+              "## Phosphoproteomics\n",
+              "Phosphosite-level DE results are provided below and in `Phospho_DE_Results.csv`. Discuss:\n",
+              "- Number and direction of significant phosphosites per comparison\n",
+              "- Top regulated phosphosites and their known regulatory roles\n",
+              "- Whether phospho changes are concordant or discordant with protein-level changes\n",
+              "- Any kinase activity implications from the regulated sites\n\n"
+            ) else "",
+            if (nzchar(excluded_inline)) paste0(
+              "## Excluded Files Assessment\n",
+              "Files were excluded from analysis (details below and in `Excluded_Files.csv`). Assess:\n",
+              "- Whether exclusions are biased toward specific experimental groups (could introduce bias)\n",
+              "- Whether the QC reasons (TIC diagnostics) suggest technical failures vs potential biological effects\n",
+              "- Impact on statistical power given the remaining sample sizes per group\n",
+              "- Any recommendations for re-inclusion or follow-up experiments\n\n"
+            ) else "",
+            if (nzchar(missingness_inline)) paste0(
+              "## Data Completeness\n",
+              "Missingness data is provided below. Comment on:\n",
+              "- Overall data completeness and whether missingness varies across groups\n",
+              "- Whether group-specific missingness could introduce bias\n",
+              "- The effectiveness of DPC-Quant quantification (compare pre vs post-pipeline missingness — note: limpa uses probabilistic modelling, not imputation)\n\n"
+            ) else "",
+            "## Biological Interpretation\n",
+            "Suggest what biological processes or pathways may be affected based on the protein lists. ",
+            "Note any well-known protein families, complexes, or signaling cascades represented. ",
+            "If the data suggests a clear biological narrative, describe it.\n\n",
+            "## How This Analysis Works\n",
+            "Write an educational background section that a PhD student or biologist with no mass spectrometry ",
+            "or bioinformatics background can understand. Cover each stage of the pipeline in plain language, ",
+            "using analogies where helpful. Include these topics:\n\n",
+            "### Liquid Chromatography-Mass Spectrometry (LC-MS/MS)\n",
+            "Explain what LC-MS/MS does at a high level: proteins are digested into peptides, separated by ",
+            "liquid chromatography (like sorting by stickiness), then ionized and measured by mass. ",
+            "Explain that the mass spectrometer measures both the mass of intact peptides (MS1) and breaks them ",
+            "into fragments to identify the sequence (MS2). Keep it intuitive.\n\n",
+            "### Data-Independent Acquisition (DIA)\n",
+            "Explain the difference between DDA (picks the loudest signals one at a time) and DIA (systematically ",
+            "scans all peptides in windows across the full mass range). Explain why DIA gives more complete, ",
+            "reproducible quantification — every peptide gets measured every time, not just the most abundant ones. ",
+            "Mention that DIA produces more complex data that requires specialized software to deconvolve.\n\n",
+            "### DIA-NN Software\n",
+            "Explain that DIA-NN is the software that takes the raw mass spectrometry data and figures out which ",
+            "peptides (and therefore which proteins) are present and how abundant they are. Mention that it uses ",
+            "neural networks to score peptide identifications and that it performs library-free search (predicting ",
+            "what peptides should look like rather than requiring a pre-built library). Explain that it outputs a ",
+            "report with protein quantities per sample.\n\n",
+            "### LIMPA / limma Statistical Framework\n",
+            "Explain that once we have protein quantities, we need statistics to determine which proteins are truly ",
+            "different between groups vs. random noise. Explain limma's key innovation in plain terms: it borrows ",
+            "information across all proteins to get better variance estimates, which is especially powerful when you ",
+            "have few replicates (common in proteomics). Mention empirical Bayes moderation — the idea that a protein's ",
+            "variance estimate is improved by considering how variable all the other proteins are. Explain that LIMPA ",
+            "is an R package that wraps limma with proteomics-specific preprocessing (normalization, filtering).\n\n",
+            "### Key Statistical Concepts\n",
+            "Define these terms in plain language with brief examples from this dataset:\n",
+            "- **log2 Fold Change (logFC)**: How much a protein goes up or down between groups (logFC of 1 = doubled, -1 = halved)\n",
+            "- **P-value**: The probability of seeing this difference by chance alone\n",
+            "- **Adjusted P-value (FDR)**: P-values corrected for testing thousands of proteins at once (Benjamini-Hochberg). ",
+            "Explain the multiple testing problem with an intuitive example (e.g., flipping coins)\n",
+            "- **Volcano plot**: Why it's shaped like a volcano and how to read it (x = effect size, y = significance)\n",
+            "- **Coefficient of Variation (CV)**: A measure of measurement reproducibility — lower is more reliable\n",
+            "- **Normalization**: Why raw intensities need correction (loading differences between samples) and how DPC-CN (Data Point Correspondence - Cyclic Normalization) works conceptually\n\n",
+            "Keep the tone approachable and encouraging. Avoid jargon where possible, and define it when unavoidable.\n\n",
+            if (nzchar(search_settings_inline)) paste0(
+              "## DIA-NN Search Methods\n",
+              "DIA-NN search parameters are provided below under 'DIA-NN SEARCH SETTINGS'. ",
+              "Write a publication-ready Methods subsection describing the database search. Include:\n",
+              "- The FASTA database used (name, number of sequences if available)\n",
+              "- DIA-NN version and search mode (library-free vs spectral library)\n",
+              "- Enzyme specificity and missed cleavages\n",
+              "- Mass accuracy settings (MS1 and MS2) and whether they were auto-optimized or manually set\n",
+              "- Variable modifications (e.g., methionine oxidation, N-terminal acetylation)\n",
+              "- FDR threshold and match-between-runs status\n",
+              "- Any other relevant search parameters (scan window, normalization, extra flags)\n",
+              "Write this in third person past tense, suitable for a journal Methods section. ",
+              "Cite DIA-NN (Demichev et al., Nature Methods, 2020) appropriately.\n\n"
+            ) else "",
+            if (nzchar(instrument_inline)) paste0(
+              "## Instrument & Acquisition\n",
+              "Instrument metadata was extracted from the raw files. Use this to write a complete ",
+              "Sample Preparation & Data Acquisition section for the Methods. Include the instrument model, ",
+              "m/z scan range, gradient length, and ion mobility range (if timsTOF). ",
+              "Write in third person past tense.\n\n"
+            ) else "",
+            if (nzchar(methods_note)) paste0(
+              "## Methodology & Reproducibility\n",
+              "A detailed methodology is in `Methods_and_References.txt`. ",
+              "Summarize the key steps of the analysis pipeline (normalization, statistical testing, ",
+              "multiple testing correction) in a concise Methods section suitable for a publication. ",
+              "Include the R code log (`Reproducibility_Code.R`) as context — cite the specific ",
+              "parameters and software versions used. Include proper literature citations from the ",
+              "methods file.\n\n"
+            ) else "",
+            "Use markdown formatting with headers. Be scientific but accessible.\n",
+            "Reference specific proteins from the CSV files to support your analysis.\n",
+            design_section,
+            qc_inline,
+            search_settings_inline,
+            instrument_inline,
+            tic_inline,
+            excluded_inline,
+            missingness_inline,
+            dynamic_range_inline,
+            mofa_inline,
+            phospho_inline,
+            "\n\n--- TOP DE PROTEINS (summary — full data in CSV) ---\n\n",
+            "Number of comparisons: ", ctx$n_contrasts, "\n\n",
+            ctx$contrast_text, "\n\n",
+            "--- CROSS-COMPARISON PROTEINS (significant in >= 2 comparisons) ---\n",
+            ctx$cross_text, "\n\n",
+            "--- MOST STABLE SIGNIFICANT PROTEINS (lowest CV across replicates) ---\n",
+            ctx$stable_prots_text
+          )
+        } # end DIA/DDA prompt split
 
         prompt_file <- file.path(tmp_dir, "PROMPT.md")
         # Ensure prompt is a single character string (not a list)
@@ -1254,11 +1861,11 @@ server_ai <- function(input, output, session, values) {
         # zip from tmp_dir so figures/ subdirectory is preserved in ZIP
         old_wd <- setwd(tmp_dir)
         on.exit(setwd(old_wd), add = TRUE)
-        # Convert absolute paths to relative (strip tmp_dir prefix, handle trailing /)
-        norm_tmp <- normalizePath(tmp_dir, mustWork = FALSE)
+        # Convert absolute paths to relative (strip tmp_dir prefix)
+        # Use raw tmp_dir (not normalizePath) to avoid macOS /var vs /private/var mismatch
+        tmp_prefix <- paste0(sub("/*$", "", tmp_dir), "/")
         rel_paths <- vapply(files_to_zip, function(fp) {
-          nfp <- normalizePath(fp, mustWork = FALSE)
-          sub(paste0(norm_tmp, "/"), "", nfp, fixed = TRUE)
+          sub(tmp_prefix, "", fp, fixed = TRUE)
         }, character(1), USE.NAMES = FALSE)
         zip(file, rel_paths)
 
