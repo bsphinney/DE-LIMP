@@ -1323,10 +1323,15 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             condition = "output.ssh_connected_flag",
             div(
               style = "padding: 8px 0;",
-              actionButton("run_dda_search", "Submit DDA Search",
-                icon  = icon("rocket"),
-                class = "btn-primary btn-lg",
-                width = "100%"
+              div(class = "d-flex gap-2",
+                actionButton("run_dda_search", "Submit DDA Search",
+                  icon  = icon("rocket"),
+                  class = "btn-primary btn-lg flex-grow-1"
+                ),
+                actionButton("load_dda_results", "Load Results",
+                  icon  = icon("folder-open"),
+                  class = "btn-outline-secondary btn-lg"
+                )
               ),
               tags$small(
                 style = "color: #6c757d; display: block; margin-top: 4px; text-align: center;",

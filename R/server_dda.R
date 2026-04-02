@@ -529,6 +529,137 @@ server_dda <- function(input, output, session, values, add_to_log) {
   })
 
   # ============================================================================
+  #    Load existing DDA results from HPC
+  # ============================================================================
+
+  observeEvent(input$load_dda_results, {
+    showModal(modalDialog(
+      title = "Load DDA Results from HPC",
+      textInput("dda_load_path", "Output directory on HPC",
+        placeholder = "/quobyte/proteomics-grp/de-limp/brettsp/dda_output/dda_search"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("dda_load_confirm", "Load", class = "btn-primary", icon = icon("download"))
+      )
+    ))
+  })
+
+  observeEvent(input$dda_load_confirm, {
+    req(nzchar(input$dda_load_path))
+    ssh_cfg <- dda_ssh_config()
+    remote_dir <- trimws(input$dda_load_path)
+
+    withProgress(message = "Loading DDA results...", value = 0.1, {
+      tryCatch({
+        # Download results.sage.tsv
+        local_tmp <- file.path(tempdir(), "dda_load")
+        dir.create(local_tmp, showWarnings = FALSE, recursive = TRUE)
+
+        results_remote <- file.path(remote_dir, "results.sage.tsv")
+        results_local <- file.path(local_tmp, "results.sage.tsv")
+        scp_download(ssh_cfg, results_remote, results_local)
+
+        if (!file.exists(results_local) || file.info(results_local)$size < 100) {
+          showNotification("results.sage.tsv not found or empty.", type = "error")
+          return()
+        }
+        setProgress(0.3, detail = "Parsing Sage results...")
+
+        # Check for lfq.tsv
+        lfq_remote <- file.path(remote_dir, "lfq.tsv")
+        lfq_local <- file.path(local_tmp, "lfq.tsv")
+        tryCatch(scp_download(ssh_cfg, lfq_remote, lfq_local), error = function(e) NULL)
+
+        # Parse
+        parsed <- parse_sage_results(
+          results_local,
+          if (file.exists(lfq_local)) lfq_local else NULL
+        )
+        values$dda_sage_psms    <- parsed$psms
+        values$dda_lfq_wide     <- parsed$lfq_wide
+        values$dda_protein_meta <- parsed$protein_meta
+        values$dda_output_dir   <- remote_dir
+        values$dda_status       <- "loaded"
+
+        setProgress(0.5, detail = "Checking for Casanovo results...")
+
+        # Check for Casanovo mztab files
+        mztab_check <- ssh_exec(ssh_cfg,
+          paste0("ls ", shQuote(file.path(remote_dir, "casanovo", "mztab")), "/*.mztab 2>/dev/null"),
+          timeout = 10)
+        if (mztab_check$status == 0 && length(mztab_check$stdout) > 0) {
+          mztab_remote <- trimws(mztab_check$stdout)
+          mztab_remote <- mztab_remote[nzchar(mztab_remote)]
+          if (length(mztab_remote) > 0) {
+            mztab_local_dir <- file.path(local_tmp, "mztab")
+            dir.create(mztab_local_dir, showWarnings = FALSE)
+            for (mt in mztab_remote) {
+              tryCatch(scp_download(ssh_cfg, mt, file.path(mztab_local_dir, basename(mt))),
+                error = function(e) NULL)
+            }
+            mztab_local <- list.files(mztab_local_dir, pattern = "\\.mztab$", full.names = TRUE)
+            if (length(mztab_local) > 0) {
+              casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = 0.5)
+              if (nrow(casanovo_psms) > 0) {
+                classified <- classify_dda_denovo(casanovo_psms, parsed$psms)
+                values$dda_casanovo_psms <- casanovo_psms
+                values$dda_casanovo_classification <- classified
+                values$dda_casanovo_status <- "done"
+              }
+            }
+          }
+        }
+
+        # Also load existing MGF-based Casanovo results from raw directory
+        setProgress(0.7, detail = "Checking for existing mztab files...")
+        raw_dir <- trimws(input$dda_raw_dir %||% "")
+        if (nzchar(raw_dir)) {
+          mztab_raw_check <- ssh_exec(ssh_cfg,
+            paste0("ls ", shQuote(raw_dir), "/*.mztab 2>/dev/null"),
+            timeout = 10)
+          if (mztab_raw_check$status == 0 && length(mztab_raw_check$stdout) > 0 &&
+              is.null(values$dda_casanovo_psms)) {
+            mztab_raw <- trimws(mztab_raw_check$stdout)
+            mztab_raw <- mztab_raw[nzchar(mztab_raw)]
+            if (length(mztab_raw) > 0) {
+              mztab_dl_dir <- file.path(local_tmp, "mztab_raw")
+              dir.create(mztab_dl_dir, showWarnings = FALSE)
+              for (mt in mztab_raw) {
+                tryCatch(scp_download(ssh_cfg, mt, file.path(mztab_dl_dir, basename(mt))),
+                  error = function(e) NULL)
+              }
+              mztab_dl <- list.files(mztab_dl_dir, pattern = "\\.mztab$", full.names = TRUE)
+              if (length(mztab_dl) > 0) {
+                casanovo_psms <- parse_casanovo_mztab(mztab_dl, score_threshold = 0.5)
+                if (nrow(casanovo_psms) > 0) {
+                  classified <- classify_dda_denovo(casanovo_psms, parsed$psms)
+                  values$dda_casanovo_psms <- casanovo_psms
+                  values$dda_casanovo_classification <- classified
+                  values$dda_casanovo_status <- "done"
+                }
+              }
+            }
+          }
+        }
+
+        setProgress(0.9, detail = "Done!")
+
+        n_psms <- nrow(parsed$psms)
+        n_casanovo <- if (!is.null(values$dda_casanovo_psms)) nrow(values$dda_casanovo_psms) else 0
+        removeModal()
+        showNotification(
+          sprintf("Loaded: %s Sage PSMs%s",
+            format(n_psms, big.mark = ","),
+            if (n_casanovo > 0) sprintf(", %s Casanovo PSMs", format(n_casanovo, big.mark = ",")) else ""),
+          type = "message", duration = 10)
+
+      }, error = function(e) {
+        showNotification(paste("Load failed:", e$message), type = "error", duration = 15)
+      })
+    })
+  })
+
+  # ============================================================================
   #    Submit Sage search
   # ============================================================================
   observeEvent(input$run_dda_search, {
