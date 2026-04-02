@@ -2449,15 +2449,42 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             nav_panel("Novel Peptides",
               DT::DTOutput("dda_denovo_novel_table")),
             nav_panel("DIAMOND BLAST",
-              div(style = "margin-bottom: 15px;",
-                div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
-                  actionButton("dda_run_diamond_blast", "Run DIAMOND BLAST",
-                    icon = icon("search"), class = "btn-info btn-sm"),
-                  tags$small(style = "color: #6c757d;",
-                    "BLASTs novel Casanovo peptides against the DDA reference FASTA on HPC.")
-                )
-              ),
-              DT::DTOutput("dda_denovo_blast_table")),
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                # Action bar
+                div(style = "margin-bottom: 15px;",
+                  div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
+                    actionButton("dda_run_diamond_blast", "Run DIAMOND BLAST",
+                      icon = icon("search"), class = "btn-info btn-sm"),
+                    tags$small(style = "color: #6c757d;",
+                      "BLASTs novel peptides against UniProt SwissProt (572k reviewed proteins) on HPC.")
+                  )
+                ),
+                # Summary cards
+                uiOutput("dda_blast_summary_cards"),
+                # Taxonomy + Identity side by side
+                div(class = "row",
+                  div(class = "col-md-5",
+                    plotlyOutput("dda_blast_species_donut", height = "350px")
+                  ),
+                  div(class = "col-md-7",
+                    plotlyOutput("dda_blast_identity_hist", height = "350px")
+                  )
+                ),
+                # Species bar + summary text
+                uiOutput("dda_blast_species_summary"),
+                plotlyOutput("dda_blast_species_bar", height = "300px"),
+                # Peptide-Species heatmap
+                plotlyOutput("dda_blast_heatmap", height = "500px"),
+                # Filter buttons + enhanced table
+                div(style = "margin-top: 20px; margin-bottom: 10px;",
+                  div(style = "display: inline-flex; gap: 6px;",
+                    radioButtons("dda_blast_filter", NULL,
+                      choices = c("All", "Conserved", "Near-match", "Distant"),
+                      selected = "All", inline = TRUE)
+                  )
+                ),
+                DT::DTOutput("dda_denovo_blast_table")
+              )),
             nav_panel("Score Distribution",
               plotlyOutput("dda_denovo_score_dist", height = "400px"))
           )

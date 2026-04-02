@@ -22,6 +22,12 @@ server_dda <- function(input, output, session, values, add_to_log) {
   casanovo_gpu_partition <- config$slurm$gpu_partition %||% "gpu-a100"
   casanovo_gpu_qos       <- config$slurm$gpu_qos %||% "genome-center-grp-gpu-a100-qos"
 
+  # DIAMOND BLAST database paths (pre-built SwissProt/TrEMBL on shared storage)
+  swissprot_dmnd <- config$blast$swissprot_dmnd %||%
+    "/quobyte/proteomics-grp/bioinformatics_programs/blast_dbs/uniprot_sprot"
+  trembl_dmnd    <- config$blast$trembl_dmnd %||%
+    "/quobyte/proteomics-grp/bioinformatics_programs/blast_dbs/uniprot_trembl"
+
   # --- Mode observer: sync input to reactive values ---
   observeEvent(input$acquisition_mode, {
     values$acquisition_mode <- input$acquisition_mode
@@ -610,14 +616,15 @@ server_dda <- function(input, output, session, values, add_to_log) {
           }
         }
 
-        # Auto-submit DIAMOND BLAST SLURM job on novel peptides
+        # Auto-submit DIAMOND BLAST SLURM job on novel peptides (SwissProt DB)
         if (!is.null(values$dda_casanovo_classification) &&
-            nrow(values$dda_casanovo_classification$novel) > 0 &&
-            !is.null(values$dda_fasta_path) && nzchar(values$dda_fasta_path %||% "")) {
+            nrow(values$dda_casanovo_classification$novel) > 0) {
           tryCatch({
             setProgress(0.6, detail = "Submitting DIAMOND BLAST job...")
             novel <- values$dda_casanovo_classification$novel
-            unique_seqs <- unique(novel$seq_stripped)
+            # Strip modification masses from sequences — keep only amino acid letters
+            clean_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(novel$seq_stripped))
+            unique_seqs <- unique(clean_seqs[nzchar(clean_seqs)])
             message("[DDA] Submitting BLAST: ", length(unique_seqs), " novel peptides")
 
             # Write FASTA of novel peptides
@@ -632,9 +639,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
             ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(remote_denovo_dir)), timeout = 10)
             scp_upload(ssh_cfg, local_fasta, file.path(remote_denovo_dir, "novel_peptides.fasta"))
 
-            # Write sbatch for DIAMOND
-            fasta_remote <- values$dda_fasta_path
-            dmnd_base <- file.path(remote_denovo_dir, "ref_diamond")
+            # Write sbatch for DIAMOND — uses pre-built SwissProt DB
             blast_out <- file.path(remote_denovo_dir, "blast_results.tsv")
             logs_dir <- file.path(remote_dir, "logs")
 
@@ -654,19 +659,13 @@ module load diamond
 
 echo "[DIAMOND] Start: $(date)"
 echo "[DIAMOND] Novel peptides: ', length(unique_seqs), '"
-echo "[DIAMOND] Reference FASTA: ', basename(fasta_remote), '"
+echo "[DIAMOND] Database: UniProt SwissProt"
 
-# Build DIAMOND DB if needed
-if [ ! -f "', dmnd_base, '.dmnd" ]; then
-  echo "[DIAMOND] Building database..."
-  diamond makedb --in "', fasta_remote, '" --db "', dmnd_base, '"
-fi
-
-# Run BLAST
-echo "[DIAMOND] Running blastp..."
+# Run BLAST against pre-built SwissProt DB
+echo "[DIAMOND] Running blastp against SwissProt..."
 diamond blastp \\
   --query "', file.path(remote_denovo_dir, "novel_peptides.fasta"), '" \\
-  --db "', dmnd_base, '" \\
+  --db "', swissprot_dmnd, '" \\
   --out "', blast_out, '" \\
   --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore \\
   --sensitive --id 50 --max-target-seqs 5 \\
@@ -1294,14 +1293,14 @@ echo "[DIAMOND] Done: $(date)"
 
       # Auto-submit DIAMOND BLAST on novel peptides (score >= 0.8)
       if (!is.null(values$dda_casanovo_classification) &&
-          nrow(values$dda_casanovo_classification$novel) > 0 &&
-          !is.null(values$dda_fasta_path) && nzchar(values$dda_fasta_path %||% "")) {
+          nrow(values$dda_casanovo_classification$novel) > 0) {
         tryCatch({
           setProgress(0.9, detail = "Submitting DIAMOND BLAST...")
           novel <- values$dda_casanovo_classification$novel
-          # Filter to score >= 0.8 for BLAST
+          # Filter to score >= 0.8 for BLAST, strip to pure amino acid letters
           novel_hc <- novel[novel$score >= 0.8, ]
-          unique_seqs <- unique(novel_hc$seq_stripped)
+          clean_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(novel_hc$seq_stripped))
+          unique_seqs <- unique(clean_seqs[nzchar(clean_seqs)])
           message("[DDA] Submitting BLAST: ", length(unique_seqs), " novel peptides (score >= 0.8)")
 
           local_fasta <- file.path(tempdir(), "novel_peptides.fasta")
@@ -1314,8 +1313,6 @@ echo "[DIAMOND] Done: $(date)"
           ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(remote_denovo_dir)), timeout = 10)
           scp_upload(ssh_cfg, local_fasta, file.path(remote_denovo_dir, "novel_peptides.fasta"))
 
-          fasta_remote <- values$dda_fasta_path
-          dmnd_base <- file.path(remote_denovo_dir, "ref_diamond")
           blast_out <- file.path(remote_denovo_dir, "blast_results.tsv")
           logs_dir <- file.path(values$dda_output_dir, "logs")
 
@@ -1334,14 +1331,12 @@ set -euo pipefail
 module load diamond
 echo "[DIAMOND] Start: $(date)"
 echo "[DIAMOND] Novel peptides (score>=0.8): ', length(unique_seqs), '"
+echo "[DIAMOND] Database: UniProt SwissProt"
 
-if [ ! -f "', dmnd_base, '.dmnd" ]; then
-  diamond makedb --in "', fasta_remote, '" --db "', dmnd_base, '"
-fi
-
+# Run BLAST against pre-built SwissProt DB
 diamond blastp \\
   --query "', file.path(remote_denovo_dir, "novel_peptides.fasta"), '" \\
-  --db "', dmnd_base, '" \\
+  --db "', swissprot_dmnd, '" \\
   --out "', blast_out, '" \\
   --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore \\
   --sensitive --id 50 --max-target-seqs 5 --threads 8
@@ -2022,23 +2017,273 @@ echo "[DIAMOND] Done: $(date)"
     )
   })
 
-  # --- DIAMOND BLAST results table (DDA) ---
-  output$dda_denovo_blast_table <- DT::renderDT({
+  # ==========================================================================
+  #    BLAST Results Visualization (comprehensive SwissProt BLAST view)
+  # ==========================================================================
+
+  # Helper: ensure species + category columns exist on blast data
+  blast_with_species <- reactive({
     req(values$dda_casanovo_blast)
     blast <- values$dda_casanovo_blast
     req(nrow(blast) > 0)
+    # Parse species from SwissProt IDs if not already done
+    if (!"species" %in% names(blast)) {
+      blast$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+    }
+    if (!"category" %in% names(blast)) {
+      blast$category <- ifelse(
+        blast$identity >= 100, "Conserved",
+        ifelse(blast$identity >= 90, "Near-match", "Distant")
+      )
+    }
+    blast
+  })
+
+  # --- Summary cards ---
+  output$dda_blast_summary_cards <- renderUI({
+    blast <- blast_with_species()
+    req(nrow(blast) > 0)
+    novel <- values$dda_casanovo_classification$novel
+    n_novel <- length(unique(novel$seq_stripped))
+    n_with_hits <- length(unique(blast$peptide_sequence))
+    n_no_hits <- n_novel - n_with_hits
+    pct_hits <- round(100 * n_with_hits / max(n_novel, 1), 1)
+
+    # Top species by best-hit count (deduplicate to best hit per peptide)
+    best_hits <- blast[!duplicated(blast$peptide_sequence), ]
+    top_sp <- names(sort(table(best_hits$species), decreasing = TRUE))[1]
+    mean_id <- round(mean(blast$identity, na.rm = TRUE), 1)
+
+    div(class = "row", style = "margin-bottom: 15px;",
+      div(class = "col-md-2",
+        div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; text-align: center;",
+          tags$h4(style = "margin: 0; color: #2e7d32;", n_novel),
+          tags$small("Novel peptides")
+        )
+      ),
+      div(class = "col-md-2",
+        div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; text-align: center;",
+          tags$h4(style = "margin: 0; color: #1565c0;", paste0(n_with_hits, " (", pct_hits, "%)")),
+          tags$small("With hits")
+        )
+      ),
+      div(class = "col-md-2",
+        div(style = "background: #fff3e0; padding: 12px; border-radius: 8px; text-align: center;",
+          tags$h4(style = "margin: 0; color: #e65100;", n_no_hits),
+          tags$small("No hits (truly novel)")
+        )
+      ),
+      div(class = "col-md-3",
+        div(style = "background: #f3e5f5; padding: 12px; border-radius: 8px; text-align: center;",
+          tags$h4(style = "margin: 0; color: #7b1fa2;", top_sp %||% "N/A"),
+          tags$small("Top species")
+        )
+      ),
+      div(class = "col-md-3",
+        div(style = "background: #fce4ec; padding: 12px; border-radius: 8px; text-align: center;",
+          tags$h4(style = "margin: 0; color: #c62828;", paste0(mean_id, "%")),
+          tags$small("Mean identity")
+        )
+      )
+    )
+  })
+
+  # --- Taxonomic breakdown: donut chart ---
+  output$dda_blast_species_donut <- plotly::renderPlotly({
+    blast <- blast_with_species()
+    # Best hit per peptide for species assignment
+    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+
+    sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
+    top_n <- min(10, length(sp_counts))
+    top_sp <- sp_counts[seq_len(top_n)]
+    if (length(sp_counts) > top_n) {
+      top_sp <- c(top_sp, "Other" = sum(sp_counts[(top_n + 1):length(sp_counts)]))
+    }
+
+    plotly::plot_ly(
+      labels = names(top_sp),
+      values = as.numeric(top_sp),
+      type = "pie",
+      hole = 0.4,
+      textinfo = "label+percent",
+      textposition = "auto",
+      marker = list(colors = grDevices::rainbow(length(top_sp), s = 0.6, v = 0.9))
+    ) %>%
+      plotly::layout(
+        title = list(text = "Species Distribution (best hit per peptide)", font = list(size = 14)),
+        showlegend = TRUE,
+        legend = list(orientation = "v", x = 1.02, y = 0.5)
+      )
+  })
+
+  # --- Taxonomic breakdown: bar chart ---
+  output$dda_blast_species_bar <- plotly::renderPlotly({
+    blast <- blast_with_species()
+    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+
+    sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
+    top_n <- min(15, length(sp_counts))
+    top_sp <- sp_counts[seq_len(top_n)]
+
+    sp_df <- data.frame(
+      species = factor(names(top_sp), levels = rev(names(top_sp))),
+      count   = as.numeric(top_sp),
+      stringsAsFactors = FALSE
+    )
+
+    plotly::plot_ly(
+      data = sp_df,
+      x = ~count, y = ~species,
+      type = "bar", orientation = "h",
+      marker = list(color = "#5c6bc0")
+    ) %>%
+      plotly::layout(
+        title = list(text = "Species Hit Counts", font = list(size = 14)),
+        xaxis = list(title = "Number of novel peptides"),
+        yaxis = list(title = ""),
+        margin = list(l = 120)
+      )
+  })
+
+  # --- Species summary text ---
+  output$dda_blast_species_summary <- renderUI({
+    blast <- blast_with_species()
+    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+
+    sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
+    total <- sum(sp_counts)
+    top_lines <- vapply(seq_len(min(5, length(sp_counts))), function(i) {
+      pct <- round(100 * sp_counts[i] / total, 1)
+      paste0(pct, "% ", names(sp_counts)[i])
+    }, character(1))
+
+    tags$p(style = "color: #555; font-size: 0.95em; margin-top: 10px;",
+      paste("Species breakdown:", paste(top_lines, collapse = ", "),
+        if (length(sp_counts) > 5) paste0(", + ", length(sp_counts) - 5, " more") else "")
+    )
+  })
+
+  # --- Identity distribution histogram (colored by species) ---
+  output$dda_blast_identity_hist <- plotly::renderPlotly({
+    blast <- blast_with_species()
+    # Best hit per peptide
+    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+
+    # Top 5 species, rest as "Other"
+    sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
+    top5 <- names(sp_counts)[seq_len(min(5, length(sp_counts)))]
+    best_hits$sp_group <- ifelse(best_hits$species %in% top5, best_hits$species, "Other")
+    best_hits$sp_group <- factor(best_hits$sp_group, levels = c(top5, "Other"))
+
+    colors <- c(
+      grDevices::rainbow(length(top5), s = 0.5, v = 0.85),
+      "#cccccc"
+    )
+    names(colors) <- c(top5, "Other")
+
+    p <- ggplot2::ggplot(best_hits, ggplot2::aes(x = identity, fill = sp_group)) +
+      ggplot2::geom_histogram(bins = 30, alpha = 0.85, position = "stack") +
+      ggplot2::scale_fill_manual(values = colors) +
+      ggplot2::geom_vline(xintercept = 90, linetype = "dashed", color = "#e65100", alpha = 0.7) +
+      ggplot2::geom_vline(xintercept = 100, linetype = "dashed", color = "#2e7d32", alpha = 0.7) +
+      ggplot2::annotate("text", x = 91, y = Inf, label = "Near-match", vjust = 1.5,
+        hjust = 0, color = "#e65100", size = 3) +
+      ggplot2::annotate("text", x = 99, y = Inf, label = "Identical", vjust = 1.5,
+        hjust = 1, color = "#2e7d32", size = 3) +
+      ggplot2::labs(
+        x = "% Identity to SwissProt",
+        y = "Number of peptides",
+        fill = "Species",
+        subtitle = "100% = identical to reference; 90-99% = likely variants; <80% = distant homologs"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "top")
+
+    plotly::ggplotly(p) %>%
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+  })
+
+  # --- Peptide-Species heatmap ---
+  output$dda_blast_heatmap <- plotly::renderPlotly({
+    blast <- blast_with_species()
+
+    # Best hit per peptide-species combination
+    blast_best <- blast[order(blast$identity, decreasing = TRUE), ]
+    blast_best <- blast_best[!duplicated(paste(blast_best$peptide_sequence, blast_best$species)), ]
+
+    # Top 10 species by frequency
+    sp_counts <- sort(table(blast_best$species), decreasing = TRUE)
+    top_species <- names(sp_counts)[seq_len(min(10, length(sp_counts)))]
+
+    # Top 50 peptides by average identity
+    pep_avg <- tapply(blast_best$identity, blast_best$peptide_sequence, mean, na.rm = TRUE)
+    pep_avg <- sort(pep_avg, decreasing = TRUE)
+    top_peptides <- names(pep_avg)[seq_len(min(50, length(pep_avg)))]
+
+    # Build matrix
+    mat <- matrix(NA_real_, nrow = length(top_peptides), ncol = length(top_species),
+      dimnames = list(top_peptides, top_species))
+
+    sub <- blast_best[blast_best$peptide_sequence %in% top_peptides &
+                      blast_best$species %in% top_species, ]
+    for (i in seq_len(nrow(sub))) {
+      mat[sub$peptide_sequence[i], sub$species[i]] <- sub$identity[i]
+    }
+
+    # Truncate long peptide labels
+    row_labels <- ifelse(nchar(top_peptides) > 15,
+      paste0(substr(top_peptides, 1, 12), "..."), top_peptides)
+
+    plotly::plot_ly(
+      z = mat,
+      x = colnames(mat),
+      y = row_labels,
+      type = "heatmap",
+      colorscale = list(
+        list(0, "#ffffff"),
+        list(0.5, "#ffcc80"),
+        list(0.9, "#ef6c00"),
+        list(1, "#b71c1c")
+      ),
+      zmin = 50, zmax = 100,
+      hovertemplate = "Peptide: %{y}<br>Species: %{x}<br>Identity: %{z:.1f}%<extra></extra>",
+      colorbar = list(title = "% Identity")
+    ) %>%
+      plotly::layout(
+        title = list(text = "Peptide-Species Identity Matrix (top 50 x top 10)", font = list(size = 14)),
+        xaxis = list(title = "", tickangle = -45),
+        yaxis = list(title = "", tickfont = list(size = 9)),
+        margin = list(l = 120, b = 80)
+      )
+  })
+
+  # --- Enhanced BLAST results table ---
+  output$dda_denovo_blast_table <- DT::renderDT({
+    blast <- blast_with_species()
 
     display_df <- data.frame(
       Peptide     = blast$peptide_sequence,
       Hit         = blast$subject,
       Protein     = blast$protein,
+      Species     = blast$species,
+      Category    = blast$category,
       Identity    = round(blast$identity, 1),
       Length      = blast$length,
-      Query_Len   = blast$qlen,
       E_Value     = formatC(blast$evalue, format = "e", digits = 2),
       Bitscore    = round(blast$bitscore, 1),
       stringsAsFactors = FALSE
     )
+
+    # Apply filter if set
+    filt <- input$dda_blast_filter %||% "All"
+    if (filt == "Conserved") display_df <- display_df[display_df$Category == "Conserved", ]
+    if (filt == "Near-match") display_df <- display_df[display_df$Category == "Near-match", ]
+    if (filt == "Distant") display_df <- display_df[display_df$Category == "Distant", ]
 
     DT::datatable(
       display_df,
@@ -2048,13 +2293,22 @@ echo "[DIAMOND] Done: $(date)"
       options  = list(
         pageLength = 25,
         scrollX    = TRUE,
-        order      = list(list(3, "desc")),
+        order      = list(list(5, "desc")),
         dom        = "Bfrtip",
         buttons    = list("csv", "excel")
       ),
       extensions = "Buttons",
-      caption = "DIAMOND BLAST hits for novel Casanovo peptides against reference proteome"
-    )
+      caption = htmltools::tags$caption(
+        style = "caption-side: top; font-weight: bold; color: #1565c0;",
+        "DIAMOND BLAST hits for novel peptides against UniProt SwissProt (572k reviewed proteins)"
+      )
+    ) %>%
+      DT::formatStyle("Category",
+        backgroundColor = DT::styleEqual(
+          c("Conserved", "Near-match", "Distant"),
+          c("#e8f5e9", "#fff3e0", "#fce4ec")
+        )
+      )
   })
 
   # --- Score distribution plot (DDA Casanovo) ---
@@ -2106,20 +2360,12 @@ echo "[DIAMOND] Done: $(date)"
     novel <- values$dda_casanovo_classification$novel
     req(nrow(novel) > 0)
 
-    novel_peptides <- unique(novel$seq_stripped)
+    # Strip modification masses — keep only amino acid letters
+    clean_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(novel$seq_stripped))
+    novel_peptides <- unique(clean_seqs[nzchar(clean_seqs)])
 
     if (length(novel_peptides) == 0) {
       showNotification("No novel peptides to BLAST.", type = "warning")
-      return()
-    }
-
-    # Get FASTA path — use DDA FASTA that was used for the Sage search
-    fasta_path <- values$dda_fasta_path
-    if (is.null(fasta_path) || !nzchar(fasta_path)) {
-      showNotification(
-        "No reference FASTA available. The DDA search FASTA path is needed for DIAMOND BLAST.",
-        type = "error"
-      )
       return()
     }
 
@@ -2151,47 +2397,20 @@ echo "[DIAMOND] Done: $(date)"
         scp_upload(ssh_cfg, query_fasta_local, query_fasta_remote)
         setProgress(0.3, detail = "Uploaded query FASTA")
 
-        # Build DIAMOND DB if not cached
+        # Run DIAMOND blastp against pre-built SwissProt DB
         diamond_bin <- "diamond"
-        diamond_db_remote <- file.path(denovo_dir, "ref_diamond.dmnd")
+        setProgress(0.5, detail = "Running BLAST against SwissProt...")
 
-        # Try module load diamond first, then check if DB exists
-        db_check <- ssh_exec(
-          ssh_cfg,
-          paste0("module load diamond 2>/dev/null; test -f ", shQuote(diamond_db_remote), " && echo EXISTS"),
-          timeout = 15
-        )
-
-        if (!any(grepl("EXISTS", db_check$stdout))) {
-          db_build_cmd <- paste0(
-            "module load diamond 2>/dev/null && ",
-            diamond_bin, " makedb",
-            " --in ", shQuote(fasta_path),
-            " --db ", shQuote(diamond_db_remote),
-            " --threads 4 --quiet"
-          )
-          build_res <- ssh_exec(ssh_cfg, db_build_cmd, login_shell = TRUE, timeout = 300)
-          if ((build_res$status %||% 0L) != 0L) {
-            showNotification(
-              paste("DIAMOND makedb failed:", paste(build_res$stderr, collapse = "\n")),
-              type = "error"
-            )
-            return()
-          }
-        }
-        setProgress(0.5, detail = "DIAMOND database ready")
-
-        # Run DIAMOND blastp
         blast_out_remote <- file.path(denovo_dir, "novel_casanovo_blast.tsv")
         blast_cmd <- paste0(
           "module load diamond 2>/dev/null && ",
           diamond_bin, " blastp",
           " --query ", shQuote(query_fasta_remote),
-          " --db ", shQuote(diamond_db_remote),
+          " --db ", shQuote(swissprot_dmnd),
           " --out ", shQuote(blast_out_remote),
           " --outfmt 6 qseqid sseqid pident length qlen slen evalue bitscore",
-          " --id 90",
-          " --threads 4 --sensitive --quiet"
+          " --sensitive --id 50 --max-target-seqs 5",
+          " --threads 4 --quiet"
         )
         blast_res <- ssh_exec(ssh_cfg, blast_cmd, login_shell = TRUE, timeout = 600)
         if ((blast_res$status %||% 0L) != 0L) {
@@ -2222,6 +2441,14 @@ echo "[DIAMOND] Done: $(date)"
           if (any(no_match)) {
             hits$protein[no_match] <- hits$subject[no_match]
           }
+
+          # Extract species from SwissProt ID: sp|P12345|PROT_SPECIES -> SPECIES
+          hits$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", hits$subject))
+          # Classify by identity
+          hits$category <- ifelse(
+            hits$identity >= 100, "Conserved",
+            ifelse(hits$identity >= 90, "Near-match", "Distant")
+          )
 
           values$dda_casanovo_blast <- as.data.frame(hits)
           n_hits <- length(unique(hits$peptide_sequence))
