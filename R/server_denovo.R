@@ -390,7 +390,7 @@ server_denovo <- function(input, output, session, values, add_to_log) {
 
           # Write query FASTA locally, then SCP upload
           query_fasta_local <- tempfile(fileext = ".fasta")
-          query_lines <- paste0(">denovo_", seq_along(novel_peptides), "\n", novel_peptides)
+          query_lines <- paste0(">", novel_peptides, "\n", novel_peptides)
           writeLines(query_lines, query_fasta_local)
 
           query_fasta_remote <- file.path(denovo_dir, "novel_denovo_queries.fasta")
@@ -434,12 +434,11 @@ server_denovo <- function(input, output, session, values, add_to_log) {
 
           if (file.exists(blast_out_local) && file.size(blast_out_local) > 0) {
             hits <- data.table::fread(blast_out_local, header = FALSE)
-            names(hits) <- c("query_idx", "subject", "identity", "length",
+            names(hits) <- c("query", "subject", "identity", "length",
                              "qlen", "slen", "evalue", "bitscore")
 
-            # Extract numeric index from query name (denovo_1, denovo_2, ...)
-            hit_idx <- as.integer(gsub("denovo_", "", hits$query_idx))
-            hits$peptide_sequence <- novel_peptides[hit_idx]
+            # Query column IS the peptide sequence (FASTA header = sequence)
+            hits$peptide_sequence <- hits$query
 
             # Extract protein accession
             hits$protein <- stringr::str_extract(hits$subject, "(?<=\\|)[^|]+(?=\\|)")

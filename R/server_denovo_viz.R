@@ -431,9 +431,9 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
         ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(fdr_dir)), timeout = 15)
         setProgress(0.2, detail = "Created remote directory")
 
-        # Write forward query FASTA
+        # Write forward query FASTA (header = sequence for clean BLAST output)
         fwd_fasta_local <- tempfile(fileext = ".fasta")
-        fwd_lines <- paste0(">fwd_", seq_along(novel_seqs), " ", novel_seqs, "\n", novel_seqs)
+        fwd_lines <- paste0(">", novel_seqs, "\n", novel_seqs)
         writeLines(fwd_lines, fwd_fasta_local)
 
         # Write reversed (decoy) query FASTA
@@ -441,7 +441,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
           paste0(rev(strsplit(s, "")[[1]]), collapse = "")
         }, character(1))
         rev_fasta_local <- tempfile(fileext = ".fasta")
-        rev_lines <- paste0(">rev_", seq_along(rev_seqs), " ", rev_seqs, "\n", rev_seqs)
+        rev_lines <- paste0(">", rev_seqs, "\n", rev_seqs)
         writeLines(rev_lines, rev_fasta_local)
 
         # Upload both FASTAs

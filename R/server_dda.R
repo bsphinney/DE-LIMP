@@ -629,8 +629,8 @@ server_dda <- function(input, output, session, values, add_to_log) {
 
             # Write FASTA of novel peptides
             local_fasta <- file.path(local_tmp, "novel_peptides.fasta")
-            fasta_lines <- unlist(lapply(seq_along(unique_seqs), function(i) {
-              c(paste0(">denovo_", i, " ", unique_seqs[i]), unique_seqs[i])
+            fasta_lines <- unlist(lapply(unique_seqs, function(s) {
+              c(paste0(">", s), s)
             }))
             writeLines(fasta_lines, local_fasta)
 
@@ -742,19 +742,27 @@ echo "[DIAMOND] Done: $(date)"
                 "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore")
               # Parse species from SwissProt IDs: sp|ACC|PROT_SPECIES
               blast_df$species <- sub(".*_", "", blast_df$subject)
-              # Map denovo IDs back to peptide sequences from FASTA headers
-              fasta_remote <- file.path(remote_dir, "denovo", "novel_peptides.fasta")
-              fasta_local <- file.path(local_tmp, "novel_peptides.fasta")
-              tryCatch(scp_download(ssh_cfg, fasta_remote, fasta_local), error = function(e) NULL)
-              if (file.exists(fasta_local)) {
-                fasta_lines <- readLines(fasta_local, warn = FALSE)
-                header_lines <- grep("^>", fasta_lines, value = TRUE)
-                id_to_seq <- setNames(
-                  sub("^>\\S+\\s+", "", header_lines),
-                  sub("^>(\\S+).*", "\\1", header_lines)
-                )
-                blast_df$peptide <- unname(id_to_seq[blast_df$query])
-                blast_df$peptide[is.na(blast_df$peptide)] <- blast_df$query[is.na(blast_df$peptide)]
+              # Query column IS the peptide sequence (new format: FASTA header = sequence)
+              # Backward compat: old FASTAs used >denovo_N SEQUENCE headers
+              if (any(grepl("^denovo_", blast_df$query))) {
+                # Old format — try to map from FASTA file
+                fasta_remote <- file.path(remote_dir, "denovo", "novel_peptides.fasta")
+                fasta_local <- file.path(local_tmp, "novel_peptides.fasta")
+                tryCatch(scp_download(ssh_cfg, fasta_remote, fasta_local), error = function(e) NULL)
+                if (file.exists(fasta_local)) {
+                  fasta_lines <- readLines(fasta_local, warn = FALSE)
+                  header_lines <- grep("^>", fasta_lines, value = TRUE)
+                  id_to_seq <- setNames(
+                    sub("^>\\S+\\s+", "", header_lines),
+                    sub("^>(\\S+).*", "\\1", header_lines)
+                  )
+                  blast_df$peptide <- unname(id_to_seq[blast_df$query])
+                  blast_df$peptide[is.na(blast_df$peptide)] <- blast_df$query[is.na(blast_df$peptide)]
+                } else {
+                  # Last resort: strip denovo_ prefix (header had "denovo_N SEQUENCE" format)
+                  blast_df$peptide <- sub("^denovo_\\d+\\s*", "", blast_df$query)
+                  blast_df$peptide[!nzchar(blast_df$peptide)] <- blast_df$query[!nzchar(blast_df$peptide)]
+                }
               } else {
                 blast_df$peptide <- blast_df$query
               }
@@ -1346,8 +1354,8 @@ echo "[DIAMOND] Done: $(date)"
           message("[DDA] Submitting BLAST: ", length(unique_seqs), " novel peptides (score >= 0.8)")
 
           local_fasta <- file.path(tempdir(), "novel_peptides.fasta")
-          fasta_lines <- unlist(lapply(seq_along(unique_seqs), function(i) {
-            c(paste0(">denovo_", i, " ", unique_seqs[i]), unique_seqs[i])
+          fasta_lines <- unlist(lapply(unique_seqs, function(s) {
+            c(paste0(">", s), s)
           }))
           writeLines(fasta_lines, local_fasta)
 
@@ -1921,23 +1929,27 @@ echo "[DIAMOND] Done: $(date)"
       blast$pident <- blast$identity
     }
 
-    # Fix denovo_ IDs in peptide column — map back to actual sequences
-    if (any(grepl("^denovo_", blast$peptide))) {
-      # Try to get sequences from novel peptide classification
+    # Fix legacy denovo_/casanovo_ IDs in peptide column — map back to sequences
+    if (any(grepl("^(denovo|casanovo)_", blast$peptide))) {
       if (!is.null(values$dda_casanovo_classification)) {
         novel <- values$dda_casanovo_classification$novel
         if (!is.null(novel) && nrow(novel) > 0) {
-          # The FASTA was written with >denovo_N SEQUENCE format
-          # Map denovo IDs to stripped sequences
-          novel_seqs <- unique(novel$seq_stripped)
+          # Build map from denovo_N -> sequence (matching original FASTA order)
+          novel_seqs <- unique(gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(novel$seq_stripped)))
           id_to_seq <- setNames(novel_seqs, paste0("denovo_", seq_along(novel_seqs)))
+          # Also map casanovo_N format
+          casanovo_map <- setNames(novel_seqs, paste0("casanovo_", seq_along(novel_seqs)))
+          id_to_seq <- c(id_to_seq, casanovo_map)
           mapped <- id_to_seq[blast$peptide]
           blast$peptide[!is.na(mapped)] <- mapped[!is.na(mapped)]
         }
       }
-      # Strip any remaining denovo_ prefixes
-      blast$peptide <- sub("^denovo_\\d+\\s*", "", blast$peptide)
-      blast$peptide[!nzchar(blast$peptide)] <- blast$query[!nzchar(blast$peptide)]
+      # Strip any remaining prefixes; fall back to query column
+      blast$peptide <- sub("^(denovo|casanovo)_\\d+\\s*", "", blast$peptide)
+      if ("query" %in% names(blast)) {
+        empty <- !nzchar(blast$peptide)
+        blast$peptide[empty] <- sub("^(denovo|casanovo)_\\d+\\s*", "", blast$query[empty])
+      }
     }
 
     # Parse species from SwissProt IDs if not already done
@@ -3185,7 +3197,7 @@ echo "[DIAMOND] Done: $(date)"
 
         # Write query FASTA locally, then SCP upload
         query_fasta_local <- tempfile(fileext = ".fasta")
-        query_lines <- paste0(">casanovo_", seq_along(novel_peptides), "\n", novel_peptides)
+        query_lines <- paste0(">", novel_peptides, "\n", novel_peptides)
         writeLines(query_lines, query_fasta_local)
 
         query_fasta_remote <- file.path(denovo_dir, "novel_casanovo_queries.fasta")
@@ -3223,12 +3235,11 @@ echo "[DIAMOND] Done: $(date)"
 
         if (file.exists(blast_out_local) && file.size(blast_out_local) > 0) {
           hits <- data.table::fread(blast_out_local, header = FALSE)
-          names(hits) <- c("query_idx", "subject", "identity", "length",
+          names(hits) <- c("query", "subject", "identity", "length",
                            "qlen", "slen", "evalue", "bitscore")
 
-          # Extract numeric index from query name (casanovo_1, casanovo_2, ...)
-          hit_idx <- as.integer(gsub("casanovo_", "", hits$query_idx))
-          hits$peptide <- novel_peptides[hit_idx]
+          # Query column IS the peptide sequence (FASTA header = sequence)
+          hits$peptide <- hits$query
 
           # Extract protein accession (handles sp|ACC|NAME format)
           hits$protein <- stringr::str_extract(hits$subject, "(?<=\\|)[^|]+(?=\\|)")
