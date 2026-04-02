@@ -2312,13 +2312,18 @@ echo "[DIAMOND] Done: $(date)"
   output$dda_denovo_blast_table <- DT::renderDT({
     blast <- blast_with_species()
 
-    # Parse protein name from SwissProt subject: sp|ACC|PROT_SPECIES -> PROT
+    # Parse protein name and accession from SwissProt subject: sp|ACC|PROT_SPECIES
+    blast$accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", blast$subject)
     blast$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+    # Create clickable UniProt link
+    blast$protein_link <- paste0(
+      '<a href="https://www.uniprot.org/uniprot/', blast$accession,
+      '" target="_blank">', blast$protein_name, '</a>')
 
     display_df <- data.frame(
       Peptide     = blast$peptide,
-      Hit         = blast$subject,
-      Protein     = blast$protein_name,
+      Accession   = blast$accession,
+      Protein     = blast$protein_link,
       Species     = blast$species,
       Category    = blast$category,
       Identity    = round(blast$pident, 1),
@@ -2340,6 +2345,7 @@ echo "[DIAMOND] Done: $(date)"
       rownames = FALSE,
       filter   = "top",
       selection = "none",
+      escape   = FALSE,
       options  = list(
         pageLength = 25,
         scrollX    = TRUE,
