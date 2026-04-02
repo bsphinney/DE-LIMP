@@ -641,6 +641,12 @@ server <- function(input, output, session) {
       nav_show("main_tabs", "Output")
       nav_hide("main_tabs", "Gene Set Enrichment")
       nav_hide("main_tabs", "AI Analysis")
+    } else if (isTRUE(values$acquisition_mode == "dda") && !is.null(values$dda_sage_psms)) {
+      # DDA mode with Sage results loaded — show Output for Claude export
+      nav_show("main_tabs", "Output")
+      nav_hide("main_tabs", "DE Dashboard")
+      nav_hide("main_tabs", "Gene Set Enrichment")
+      nav_hide("main_tabs", "AI Analysis")
     } else {
       nav_hide("main_tabs", "DE Dashboard")
       nav_hide("main_tabs", "Gene Set Enrichment")
