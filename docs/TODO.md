@@ -67,7 +67,30 @@
 - [ ] **Submit Cascadia from GUI**: Wire up the "Submit Cascadia Job" tab with SSH job submission, conda env path, model checkpoint path, GPU partition selection
 - [ ] **Cascadia routing patch**: Apply the 6-line routing change to Cascadia's `cascadia.py` on HIVE to auto-detect `.d` files and use `bruker_augment.py`
 - [ ] **End-to-end test**: Run Cascadia on the same `.d` files as a DIA-NN search, load both results, verify cross-referencing works
-- [ ] **DIAMOND BLAST integration**: Wire up the Run DIAMOND button with `module load diamond` on HIVE
+- [x] **DIAMOND BLAST integration**: Wire up the Run DIAMOND button with `module load diamond` on HIVE. Auto-BLASTs against SwissProt after Casanovo completion. (April 2026)
+- [x] **Sage DDA pipeline (Phase 2)**: Full Sage search pipeline — helpers_dda.R, server_dda.R, SLURM submission, polling, result loading. (April 2026)
+- [x] **Casanovo integration (Phase 3)**: Casanovo de novo GPU job, mztab parsing, confirmed/novel classification, DIAMOND BLAST. (April 2026)
+- [x] **Casanovo IM architecture**: Precursor-level IM encoding for DDA, zero-init from checkpoint, all 7 tests pass. (April 2026)
+- [x] **Mobility-filtered extraction (Mode B)**: Mobilogram peak detection from diaPASEF frames, 5x more spectra with real 1/K0 values. (April 2026)
+
+## De Novo Visualization (from biologist + proteomics expert reviews)
+- [ ] **Interactive confidence slider**: Draggable threshold (0.5-1.0) that updates all de novo tables, charts, and counts in real time. Biologist #1 priority.
+- [ ] **Contaminant filtering before species charts**: Separate 100% identity human keratins (definite contaminants) from 85-95% identity hits (avian keratins with no closer SwissProt match). Toggle to exclude contaminants from species donut/bar. Both experts agree.
+- [ ] **Per-residue confidence heatmap**: Click peptide row → colored sequence bar (green >0.95, yellow 0.7-0.95, red <0.7). Cross-reference low-confidence positions with BLAST substitutions. Proteomics expert #1 priority.
+- [ ] **Peptide length/charge distribution QC**: Side-by-side confirmed vs novel histograms. Flag peptides <7 aa or >25 aa, charge 1+. Cheapest FDR proxy. Both experts agree.
+- [ ] **Cross-species comparison table**: Protein × sample matrix showing shared vs species-specific peptides. Core figure for comparative feather proteomics papers. Biologist #2 priority.
+- [ ] **Protein family grouping**: Classify BLAST hits by protein family (alpha-keratin, beta-keratin, corneous, collagen, histone). Stacked bar chart per sample. Biologist #3 priority.
+- [ ] **BLAST alignment view for near-matches**: Show WHERE the amino acid substitution is. Cross-reference with per-residue confidence — high confidence + substitution = genuine variant, low confidence = sequencing error. Proteomics expert #4 priority.
+- [ ] **Target-decoy BLAST FDR**: Generate reversed peptides, BLAST both forward+reversed against SwissProt, plot FDR vs identity threshold. Proteomics expert #5 priority.
+- [ ] **Modification tracking (deamidation)**: Parse modification masses from Casanovo sequences. Track deamidation rate (N+0.984), oxidation (M+15.995). N-deamidation vs Q-deamidation ratio is paleoproteomics authenticity marker. Proteomics expert #6.
+- [ ] **Protein sequence coverage maps**: Horizontal bar showing where de novo peptides map onto the full protein sequence. Green=confirmed, orange=novel BLAST hit. Both experts want this.
+- [ ] **Manuscript summary statistics card (Table 1)**: Per-sample breakdown — total spectra, PSMs, confirmed, novel, BLAST hits, proteins, contaminant %, median confidence. CSV download. Biologist #7.
+- [ ] **GO/pathway annotation**: Bar chart of enriched GO terms for identified proteins. Highlight keratinization pathway for feather data. Biologist #8.
+- [ ] **Sage vs Casanovo disagreement analysis**: Match by scan number, find spectra where both tools gave different confident sequences. Classify: I/L swap (benign), single AA substitution (variant?), completely different (chimeric). Proteomics expert #10.
+- [ ] **Novel peptide clustering**: Cluster similar novel peptides by sequence similarity. 3+ clustered peptides with same BLAST protein family = candidate novel protein variant. Biologist #5.
+- [ ] **FASTA/mzTab export**: Download novel peptides as FASTA (for BLAST2GO, InterProScan), mzTab format for PRIDE/ProteomeXchange deposition. Proteomics expert #9.
+- [ ] **Quality flags column**: Traffic light (green/yellow/red) per peptide combining: score, length, BLAST hit, mass error. Biologist #10.
+- [ ] **BLAST database selector**: Let user choose SwissProt (~2min) / TrEMBL (~30min) / Custom FASTA with estimated run times.
 
 ## Run Comparator
 - [x] **Spectronaut 20+ RunOverview format**: Key-value pair format (Parameter/Value columns) now auto-detected alongside older wide-table format in `parse_spectronaut_run_summaries()` (v3.7)
