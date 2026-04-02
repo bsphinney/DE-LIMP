@@ -599,7 +599,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
             }
             mztab_local <- list.files(mztab_local_dir, pattern = "\\.mztab$", full.names = TRUE)
             if (length(mztab_local) > 0) {
-              casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = 0.5)
+              casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = 0.9)
               if (nrow(casanovo_psms) > 0) {
                 classified <- classify_dda_denovo(casanovo_psms, parsed$psms)
                 values$dda_casanovo_psms <- casanovo_psms
@@ -630,7 +630,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
               }
               mztab_dl <- list.files(mztab_dl_dir, pattern = "\\.mztab$", full.names = TRUE)
               if (length(mztab_dl) > 0) {
-                casanovo_psms <- parse_casanovo_mztab(mztab_dl, score_threshold = 0.5)
+                casanovo_psms <- parse_casanovo_mztab(mztab_dl, score_threshold = 0.9)
                 if (nrow(casanovo_psms) > 0) {
                   classified <- classify_dda_denovo(casanovo_psms, parsed$psms)
                   values$dda_casanovo_psms <- casanovo_psms
