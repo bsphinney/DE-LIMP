@@ -742,7 +742,22 @@ echo "[DIAMOND] Done: $(date)"
                 "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore")
               # Parse species from SwissProt IDs: sp|ACC|PROT_SPECIES
               blast_df$species <- sub(".*_", "", blast_df$subject)
-              blast_df$peptide <- sub("^denovo_\\d+\\s*", "", blast_df$query)
+              # Map denovo IDs back to peptide sequences from FASTA headers
+              fasta_remote <- file.path(remote_dir, "denovo", "novel_peptides.fasta")
+              fasta_local <- file.path(local_tmp, "novel_peptides.fasta")
+              tryCatch(scp_download(ssh_cfg, fasta_remote, fasta_local), error = function(e) NULL)
+              if (file.exists(fasta_local)) {
+                fasta_lines <- readLines(fasta_local, warn = FALSE)
+                header_lines <- grep("^>", fasta_lines, value = TRUE)
+                id_to_seq <- setNames(
+                  sub("^>\\S+\\s+", "", header_lines),
+                  sub("^>(\\S+).*", "\\1", header_lines)
+                )
+                blast_df$peptide <- unname(id_to_seq[blast_df$query])
+                blast_df$peptide[is.na(blast_df$peptide)] <- blast_df$query[is.na(blast_df$peptide)]
+              } else {
+                blast_df$peptide <- blast_df$query
+              }
               # Category
               blast_df$category <- ifelse(blast_df$pident == 100, "Conserved",
                 ifelse(blast_df$pident >= 90, "Near-match", "Distant"))
