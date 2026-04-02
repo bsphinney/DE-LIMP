@@ -544,6 +544,9 @@ server_session <- function(input, output, session, values, add_to_log) {
         dda_casanovo_psms           = values$dda_casanovo_psms,
         dda_casanovo_classification  = values$dda_casanovo_classification,
         dda_casanovo_status          = values$dda_casanovo_status,
+        dda_casanovo_blast           = values$dda_casanovo_blast,
+        dda_fasta_path               = values$dda_fasta_path,
+        dda_output_dir               = values$dda_output_dir,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -680,6 +683,14 @@ server_session <- function(input, output, session, values, add_to_log) {
           message("[Session] Restored Casanovo state: ",
                   nrow(session_data$dda_casanovo_psms), " de novo PSMs")
         }
+        # Restore BLAST results
+        if (!is.null(session_data$dda_casanovo_blast)) {
+          values$dda_casanovo_blast <- session_data$dda_casanovo_blast
+          message("[Session] Restored BLAST results: ",
+                  nrow(session_data$dda_casanovo_blast), " hits")
+        }
+        values$dda_fasta_path  <- session_data$dda_fasta_path
+        values$dda_output_dir  <- session_data$dda_output_dir
       }
 
       # Restore repro log and append load event
