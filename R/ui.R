@@ -1115,7 +1115,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
             selectInput("dda_fasta_source", NULL,
               choices = c("Download from UniProt" = "uniprot",
-                          "Browse / enter path"  = "browse"),
+                          "Download from NCBI"    = "ncbi",
+                          "Database Library"      = "library",
+                          "Browse / enter path"   = "browse"),
               width = "100%"),
 
             # --- UniProt source ---
@@ -1123,6 +1125,18 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               actionButton("dda_open_uniprot_modal", "Search UniProt",
                 class = "btn-info btn-sm w-100", icon = icon("search")),
               uiOutput("dda_fasta_selected_info")
+            ),
+
+            # --- NCBI source ---
+            conditionalPanel("input.dda_fasta_source == 'ncbi'",
+              actionButton("dda_open_ncbi_modal", "Search NCBI",
+                class = "btn-success btn-sm w-100", icon = icon("search")),
+              uiOutput("dda_ncbi_fasta_selected_info")
+            ),
+
+            # --- Database Library ---
+            conditionalPanel("input.dda_fasta_source == 'library'",
+              uiOutput("dda_fasta_library_ui")
             ),
 
             # --- Browse / path source ---
@@ -1414,24 +1428,29 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       actionButton("completeness_info_btn", icon("question-circle"),
                         title = "About Data Completeness", class = "btn-outline-info btn-sm")
                     ),
-                    # 1. Detected vs Inferred stacked bar
-                    tags$h5("Detected vs Inferred Proteins per Sample", style = "margin-top: 8px;"),
+                    # 1. Detected vs Inferred stacked bar (DIA) / Present vs Missing (DDA)
+                    tags$div(id = "completeness_h5_1",
+                      tags$h5("Detected vs Inferred Proteins per Sample", style = "margin-top: 8px;")),
                     plotlyOutput("completeness_stacked_bar", height = "400px"),
                     tags$hr(),
-                    # 2. Precursor Evidence Heatmap
-                    tags$h5("Precursor Evidence Heatmap (Top 50 Most Variable)", style = "margin-top: 12px;"),
+                    # 2. Precursor Evidence Heatmap (DIA) / Missingness Heatmap (DDA)
+                    tags$div(id = "completeness_h5_2",
+                      tags$h5("Precursor Evidence Heatmap (Top 50 Most Variable)", style = "margin-top: 12px;")),
                     plotlyOutput("completeness_evidence_heatmap", height = "500px"),
                     tags$hr(),
                     # 3. Cumulative Detection Curve
-                    tags$h5("Cumulative Detection Curve", style = "margin-top: 12px;"),
+                    tags$div(id = "completeness_h5_3",
+                      tags$h5("Cumulative Detection Curve", style = "margin-top: 12px;")),
                     plotlyOutput("completeness_cumulative_curve", height = "350px"),
                     tags$hr(),
                     # 4. Sample Clustering by Detection Pattern
-                    tags$h5("Sample Clustering by Detection Pattern (Jaccard Distance)", style = "margin-top: 12px;"),
+                    tags$div(id = "completeness_h5_4",
+                      tags$h5("Sample Clustering by Detection Pattern (Jaccard Distance)", style = "margin-top: 12px;")),
                     plotlyOutput("completeness_dendrogram", height = "400px"),
                     tags$hr(),
-                    # 5. Precursor Evidence Distribution
-                    tags$h5("Precursor Count per Protein (per Sample)", style = "margin-top: 12px;"),
+                    # 5. Precursor Evidence Distribution (DIA) / Missingness Distribution (DDA)
+                    tags$div(id = "completeness_h5_5",
+                      tags$h5("Precursor Count per Protein (per Sample)", style = "margin-top: 12px;")),
                     plotlyOutput("completeness_precursor_violin", height = "400px")
                   )
                 ),

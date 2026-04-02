@@ -9,6 +9,84 @@ server_qc <- function(input, output, session, values) {
   #  1. QC Trend Plots (Precursors, Proteins, MS1 Signal)
   # ============================================================================
 
+  # ── Mode-aware labels ──
+  pipeline_label <- reactive({
+    if (isTRUE(values$acquisition_mode == "dda")) "Sage" else "DIA-NN"
+  })
+  quant_label <- reactive({
+    if (isTRUE(values$acquisition_mode == "dda")) "MaxLFQ" else "DPC-Quant"
+  })
+  norm_label <- reactive({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      sp <- values$dda_search_params
+      method <- if (!is.null(sp)) sp$normalization %||% "cyclicloess" else "cyclicloess"
+      switch(method,
+        cyclicloess = "Cyclic Loess",
+        quantile    = "Quantile",
+        none        = "None",
+        method  # fallback
+      )
+    } else {
+      "DPC-CN"
+    }
+  })
+
+  # ── DDA per-sample stats reactive ──
+
+  dda_per_sample_stats <- reactive({
+    req(values$acquisition_mode == "dda", values$dda_sage_psms)
+    psms <- values$dda_sage_psms
+
+    # Detect the filename column (Sage uses 'filename')
+    fn_col <- intersect(c("filename", "Filename", "Run"), colnames(psms))
+    req(length(fn_col) > 0)
+    fn_col <- fn_col[1]
+
+    # Per-sample PSMs, peptides, proteins
+    per_sample <- psms[, .(
+      PSMs     = .N,
+      Peptides = data.table::uniqueN(peptide),
+      Proteins = data.table::uniqueN(proteins)
+    ), by = fn_col]
+    setnames(per_sample, fn_col, "Run")
+
+    # Clean up sample names (strip path and .d extension, matching DIA convention)
+    per_sample[, Run := gsub("\\.d$", "", basename(Run))]
+
+    # Mass error per sample
+    ppm_col <- intersect(c("expmass_ppm", "ppm_difference", "delta_mass_ppm"), colnames(psms))
+    if (length(ppm_col) > 0) {
+      mass_err <- psms[, .(MassError_ppm = median(abs(get(ppm_col[1])), na.rm = TRUE)), by = fn_col]
+      setnames(mass_err, fn_col, "Run")
+      mass_err[, Run := gsub("\\.d$", "", basename(Run))]
+      per_sample <- merge(per_sample, mass_err, by = "Run", all.x = TRUE)
+    } else {
+      per_sample[, MassError_ppm := NA_real_]
+    }
+
+    # Missed cleavage % per sample
+    mc_pattern <- "[KR][^P]"
+    mc_stats <- psms[, .(
+      MissedCleav_pct = 100 * sum(grepl(mc_pattern, peptide)) / max(.N, 1)
+    ), by = fn_col]
+    setnames(mc_stats, fn_col, "Run")
+    mc_stats[, Run := gsub("\\.d$", "", basename(Run))]
+    per_sample <- merge(per_sample, mc_stats, by = "Run", all.x = TRUE)
+
+    # MaxLFQ non-NA count per sample (if pipeline has run)
+    if (!is.null(values$y_protein)) {
+      mat <- values$y_protein$E
+      non_na <- colSums(!is.na(mat))
+      per_sample$MaxLFQ_Proteins <- non_na[match(per_sample$Run, names(non_na))]
+    } else if (!is.null(values$dda_lfq_wide)) {
+      mat <- values$dda_lfq_wide
+      non_na <- colSums(!is.na(mat))
+      per_sample$MaxLFQ_Proteins <- non_na[match(per_sample$Run, names(non_na))]
+    }
+
+    as.data.frame(per_sample)
+  })
+
   # Shared reactive: faceted QC metrics data (Precursors, Proteins, MS1 Signal, Data Completeness)
   qc_metrics_data <- reactive({
     req(values$qc_stats, values$metadata)
@@ -66,6 +144,56 @@ server_qc <- function(input, output, session, values) {
     list(long = long, group_stats = group_stats)
   })
 
+  # ── DDA faceted metrics data (PSMs, Peptides, Proteins per sample) ──
+  dda_metrics_data <- reactive({
+    req(values$acquisition_mode == "dda")
+    per_sample <- dda_per_sample_stats()
+    req(nrow(per_sample) > 0, values$metadata)
+
+    df <- per_sample
+    df <- left_join(df, values$metadata, by = c("Run" = "File.Name"))
+    # Fallback: match by SampleID if File.Name didn't match
+    if (all(is.na(df$Group))) {
+      df$Group <- NULL
+      df <- left_join(per_sample, values$metadata, by = c("Run" = "SampleID"))
+    }
+    df$Run_Number <- as.numeric(str_extract(df$Run, "\\d+$"))
+
+    if (input$qc_sort_order == "Group") {
+      df <- df %>% arrange(Group, Run_Number)
+    } else {
+      df <- df %>% arrange(Run_Number)
+    }
+    df$Sort_Index <- 1:nrow(df)
+
+    pivot_cols <- c("PSMs", "Peptides", "Proteins")
+    metric_levels <- c("PSMs", "Peptides", "Proteins")
+    metric_labels <- c("PSMs", "Peptides", "Proteins")
+
+    long <- df %>%
+      pivot_longer(
+        cols = all_of(pivot_cols),
+        names_to = "Metric",
+        values_to = "Value"
+      ) %>%
+      mutate(
+        Metric = factor(Metric, levels = metric_levels, labels = metric_labels),
+        Tooltip = paste0("<b>File:</b> ", Run, "<br><b>Group:</b> ", Group,
+                         "<br><b>", Metric, ":</b> ", format(round(Value), big.mark = ","))
+      )
+
+    group_stats <- long %>%
+      group_by(Group, Metric) %>%
+      summarise(
+        mean_value = mean(Value, na.rm = TRUE),
+        x_min = min(Sort_Index),
+        x_max = max(Sort_Index),
+        .groups = "drop"
+      )
+
+    list(long = long, group_stats = group_stats)
+  })
+
   # Build faceted trend plot from prepared data
   build_qc_metrics_plot <- function(data) {
     long <- data$long
@@ -110,9 +238,13 @@ server_qc <- function(input, output, session, values) {
     ggplotly(p, tooltip = "text") %>% config(displayModeBar = TRUE)
   }
 
-  # Main faceted trend plot
+  # Main faceted trend plot (DIA or DDA)
   output$qc_metrics_trend <- renderPlotly({
-    build_qc_metrics_plot(qc_metrics_data())
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      build_qc_metrics_plot(dda_metrics_data())
+    } else {
+      build_qc_metrics_plot(qc_metrics_data())
+    }
   })
 
   # Fullscreen modal
@@ -127,76 +259,158 @@ server_qc <- function(input, output, session, values) {
   })
 
   output$qc_metrics_trend_fs <- renderPlotly({
-    build_qc_metrics_plot(qc_metrics_data())
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      build_qc_metrics_plot(dda_metrics_data())
+    } else {
+      build_qc_metrics_plot(qc_metrics_data())
+    }
   })
 
   # ============================================================================
   #  2. QC Stats Table
   # ============================================================================
 
-  output$r_qc_table <- renderDT({ req(values$qc_stats); df_display <- values$qc_stats %>% arrange(Run) %>% mutate(ID = 1:n()) %>% dplyr::select(ID, Run, everything()); datatable(df_display, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE) })
+  output$r_qc_table <- renderDT({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      per_sample <- dda_per_sample_stats()
+      req(nrow(per_sample) > 0)
+      df_display <- per_sample %>%
+        arrange(Run) %>%
+        mutate(ID = 1:n()) %>%
+        dplyr::select(ID, Run, PSMs, Peptides, Proteins,
+                      `Missed Cleav. %` = MissedCleav_pct,
+                      `Mass Error (ppm)` = MassError_ppm,
+                      any_of(c("MaxLFQ_Proteins")))
+      datatable(df_display,
+        options = list(pageLength = 10, scrollX = TRUE),
+        rownames = FALSE,
+        caption = "Per-sample Sage DDA search statistics"
+      ) %>%
+        formatRound(columns = c("Mass Error (ppm)", "Missed Cleav. %"), digits = 2)
+    } else {
+      req(values$qc_stats)
+      df_display <- values$qc_stats %>%
+        arrange(Run) %>%
+        mutate(ID = 1:n()) %>%
+        dplyr::select(ID, Run, everything())
+      datatable(df_display, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
+    }
+  })
 
   # QC Stats CSV export
   output$download_qc_stats_csv <- downloadHandler(
     filename = function() {
-      paste0("QC_Stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+      prefix <- if (isTRUE(values$acquisition_mode == "dda")) "DDA_QC_Stats" else "QC_Stats"
+      paste0(prefix, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
     },
     content = function(file) {
-      req(values$qc_stats)
-      write.csv(values$qc_stats %>% arrange(Run), file, row.names = FALSE)
+      if (isTRUE(values$acquisition_mode == "dda")) {
+        per_sample <- dda_per_sample_stats()
+        write.csv(per_sample %>% arrange(Run), file, row.names = FALSE)
+      } else {
+        req(values$qc_stats)
+        write.csv(values$qc_stats %>% arrange(Run), file, row.names = FALSE)
+      }
     }
   )
 
   # QC Stats info modal
   observeEvent(input$qc_stats_info_btn, {
-    showModal(modalDialog(
-      title = tagList(icon("question-circle"), " QC Statistics Table"),
-      size = "l", easyClose = TRUE, footer = modalButton("Close"),
-      div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("Per-run QC statistics extracted from your DIA-NN report: precursor counts, protein counts, and MS1 signal intensity."),
-        p("Use this table to identify outlier runs with unusually low precursor/protein counts or signal intensity. ",
-          "Export to CSV for external QC tracking or reporting.")
-      )
-    ))
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      showModal(modalDialog(
+        title = tagList(icon("question-circle"), " DDA QC Statistics Table"),
+        size = "l", easyClose = TRUE, footer = modalButton("Close"),
+        div(style = "font-size: 0.9em; line-height: 1.7;",
+          p("Per-sample QC statistics from your Sage DDA search results."),
+          tags$ul(
+            tags$li(strong("PSMs: "), "Peptide-spectrum matches passing FDR threshold."),
+            tags$li(strong("Peptides: "), "Unique peptide sequences identified."),
+            tags$li(strong("Proteins: "), "Unique protein groups identified."),
+            tags$li(strong("Missed Cleav. %: "), "Percentage of PSMs with missed tryptic cleavage sites."),
+            tags$li(strong("Mass Error (ppm): "), "Median absolute precursor mass error in parts per million."),
+            tags$li(strong("MaxLFQ Proteins: "), "Proteins with non-missing MaxLFQ values (shown after pipeline).")
+          ),
+          p("Use this table to identify outlier runs with unusually low IDs or high mass error. ",
+            "Export to CSV for external QC tracking or reporting.")
+        )
+      ))
+    } else {
+      showModal(modalDialog(
+        title = tagList(icon("question-circle"), " QC Statistics Table"),
+        size = "l", easyClose = TRUE, footer = modalButton("Close"),
+        div(style = "font-size: 0.9em; line-height: 1.7;",
+          p("Per-run QC statistics extracted from your DIA-NN report: precursor counts, protein counts, and MS1 signal intensity."),
+          p("Use this table to identify outlier runs with unusually low precursor/protein counts or signal intensity. ",
+            "Export to CSV for external QC tracking or reporting.")
+        )
+      ))
+    }
   })
 
   # Sample Metrics info modal (combined)
   observeEvent(input$qc_metrics_info_btn, {
-    showModal(modalDialog(
-      title = tagList(icon("question-circle"), " Sample Metrics"),
-      size = "l", easyClose = TRUE, footer = modalButton("Close"),
-      div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("This faceted plot shows key quality metrics for every run in your experiment, ",
-          "stacked vertically so you can spot correlated trends at a glance."),
-        tags$h6("The metrics"),
-        tags$ul(
-          tags$li(strong("Precursors: "), "Number of peptide precursors identified at your Q-value cutoff. ",
-            "Higher counts indicate better instrument sensitivity and sample quality."),
-          tags$li(strong("Proteins: "), "Number of protein groups quantified per run. ",
-            "Should be relatively stable across runs; lower counts may indicate sample quality issues."),
-          tags$li(strong("MS1 Signal: "), "Overall MS1 intensity per run. ",
-            "Consistent signal indicates stable instrument performance and uniform sample loading."),
-          tags$li(strong("Data Completeness (%): "), "Percentage of precursors detected (non-missing) per sample ",
-            "in the raw expression matrix. Samples with low completeness had many missed detections, ",
-            "which may indicate injection failures or low sample loading.")
-        ),
-        tags$h6("Reading the plot"),
-        tags$ul(
-          tags$li(strong("Bars: "), "Per-run values, colored by experimental group."),
-          tags$li(strong("Dashed lines: "), "Group averages \u2014 compare groups at a glance."),
-          tags$li(strong("Black trend line (LOESS): "), "Smoothed trend across all runs. ",
-            "A flat line means stable performance; a downward slope suggests instrument drift ",
-            "(e.g., column degradation, source contamination).")
-        ),
-        tags$h6("What to look for"),
-        tags$ul(
-          tags$li("Sudden drops in a single sample flag potential injection failures or outliers"),
-          tags$li("Gradual downward trends across all metrics suggest instrument degradation"),
-          tags$li("Use ", strong("Sort Order: Run Order"), " to see acquisition-time drift; ",
-            strong("Group"), " to compare conditions side by side")
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      showModal(modalDialog(
+        title = tagList(icon("question-circle"), " DDA Sample Metrics"),
+        size = "l", easyClose = TRUE, footer = modalButton("Close"),
+        div(style = "font-size: 0.9em; line-height: 1.7;",
+          p("This faceted plot shows key quality metrics from your Sage DDA search for every sample, ",
+            "stacked vertically so you can spot correlated trends at a glance."),
+          tags$h6("The metrics"),
+          tags$ul(
+            tags$li(strong("PSMs: "), "Peptide-spectrum matches passing FDR threshold. ",
+              "Higher counts indicate better instrument sensitivity and sample quality."),
+            tags$li(strong("Peptides: "), "Unique peptide sequences identified per sample. ",
+              "Should be proportional to PSM count."),
+            tags$li(strong("Proteins: "), "Unique protein groups identified per sample. ",
+              "Should be relatively stable across runs; lower counts may indicate sample quality issues.")
+          ),
+          tags$h6("Reading the plot"),
+          tags$ul(
+            tags$li(strong("Bars: "), "Per-run values, colored by experimental group."),
+            tags$li(strong("Dashed lines: "), "Group averages \u2014 compare groups at a glance."),
+            tags$li(strong("Black trend line (LOESS): "), "Smoothed trend across all runs. ",
+              "A flat line means stable performance; a downward slope suggests instrument drift.")
+          )
         )
-      )
-    ))
+      ))
+    } else {
+      showModal(modalDialog(
+        title = tagList(icon("question-circle"), " Sample Metrics"),
+        size = "l", easyClose = TRUE, footer = modalButton("Close"),
+        div(style = "font-size: 0.9em; line-height: 1.7;",
+          p("This faceted plot shows key quality metrics for every run in your experiment, ",
+            "stacked vertically so you can spot correlated trends at a glance."),
+          tags$h6("The metrics"),
+          tags$ul(
+            tags$li(strong("Precursors: "), "Number of peptide precursors identified at your Q-value cutoff. ",
+              "Higher counts indicate better instrument sensitivity and sample quality."),
+            tags$li(strong("Proteins: "), "Number of protein groups quantified per run. ",
+              "Should be relatively stable across runs; lower counts may indicate sample quality issues."),
+            tags$li(strong("MS1 Signal: "), "Overall MS1 intensity per run. ",
+              "Consistent signal indicates stable instrument performance and uniform sample loading."),
+            tags$li(strong("Data Completeness (%): "), "Percentage of precursors detected (non-missing) per sample ",
+              "in the raw expression matrix. Samples with low completeness had many missed detections, ",
+              "which may indicate injection failures or low sample loading.")
+          ),
+          tags$h6("Reading the plot"),
+          tags$ul(
+            tags$li(strong("Bars: "), "Per-run values, colored by experimental group."),
+            tags$li(strong("Dashed lines: "), "Group averages \u2014 compare groups at a glance."),
+            tags$li(strong("Black trend line (LOESS): "), "Smoothed trend across all runs. ",
+              "A flat line means stable performance; a downward slope suggests instrument drift ",
+              "(e.g., column degradation, source contamination).")
+          ),
+          tags$h6("What to look for"),
+          tags$ul(
+            tags$li("Sudden drops in a single sample flag potential injection failures or outliers"),
+            tags$li("Gradual downward trends across all metrics suggest instrument degradation"),
+            tags$li("Use ", strong("Sort Order: Run Order"), " to see acquisition-time drift; ",
+              strong("Group"), " to compare conditions side by side")
+          )
+        )
+      ))
+    }
   })
 
   # ============================================================================
@@ -204,11 +418,39 @@ server_qc <- function(input, output, session, values) {
   # ============================================================================
 
   output$qc_group_violin <- renderPlotly({
-    req(values$qc_stats, values$metadata, input$qc_violin_metric)
-    df <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")); metric <- input$qc_violin_metric
-    df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Val:</b> ", round(df[[metric]], 2))
-    p <- ggplot(df, aes(x = Group, y = .data[[metric]], fill = Group)) + geom_violin(alpha = 0.5, trim = FALSE) + geom_jitter(aes(text = Tooltip), width = 0.2, size = 2, alpha = 0.8, color = "black") + theme_bw() + labs(title = paste("Distribution of", metric), x = "Group", y = metric) + theme(legend.position = "none")
-    ggplotly(p, tooltip = "text")
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      # DDA mode: use per-sample stats from Sage
+      per_sample <- dda_per_sample_stats()
+      req(nrow(per_sample) > 0, values$metadata)
+      metric <- input$qc_violin_metric
+      # Map DDA metric names
+      dda_metric_map <- c(Proteins = "Proteins", PSMs = "PSMs", Peptides = "Peptides")
+      col_name <- dda_metric_map[metric]
+      if (is.na(col_name) || !col_name %in% colnames(per_sample)) col_name <- "Proteins"
+
+      df <- per_sample
+      df$Group <- values$metadata$Group[match(df$Run, values$metadata$File.Name)]
+      if (all(is.na(df$Group))) {
+        df$Group <- values$metadata$Group[match(df$Run, values$metadata$SampleID)]
+      }
+      df$Group[is.na(df$Group)] <- "Unassigned"
+      df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Val:</b> ", round(df[[col_name]], 2))
+      p <- ggplot(df, aes(x = Group, y = .data[[col_name]], fill = Group)) +
+        geom_violin(alpha = 0.5, trim = FALSE) +
+        geom_jitter(aes(text = Tooltip), width = 0.2, size = 2, alpha = 0.8, color = "black") +
+        theme_bw() +
+        labs(title = paste("Distribution of", col_name, "(Sage)"),
+             x = "Group", y = paste(col_name, "Identified")) +
+        theme(legend.position = "none")
+      ggplotly(p, tooltip = "text")
+    } else {
+      # DIA mode: existing code
+      req(values$qc_stats, values$metadata, input$qc_violin_metric)
+      df <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")); metric <- input$qc_violin_metric
+      df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Val:</b> ", round(df[[metric]], 2))
+      p <- ggplot(df, aes(x = Group, y = .data[[metric]], fill = Group)) + geom_violin(alpha = 0.5, trim = FALSE) + geom_jitter(aes(text = Tooltip), width = 0.2, size = 2, alpha = 0.8, color = "black") + theme_bw() + labs(title = paste("Distribution of", metric), x = "Group", y = metric) + theme(legend.position = "none")
+      ggplotly(p, tooltip = "text")
+    }
   })
 
   # ============================================================================
@@ -273,24 +515,44 @@ server_qc <- function(input, output, session, values) {
   #  6. Normalization Diagnostic
   # ============================================================================
 
-  # DIA-NN normalization status badge
+  # Normalization status badge (DIA-NN or DDA)
   output$diann_norm_status_badge <- renderUI({
-    status <- values$diann_norm_detected
-    if (status == "on") {
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      nl <- norm_label()
       span(class = "badge bg-info", style = "margin-right: 10px;",
-        icon("check-circle"), " DIA-NN normalization: ON (RT-dependent)")
-    } else if (status == "off") {
-      span(class = "badge bg-warning", style = "margin-right: 10px;",
-        icon("exclamation-triangle"), " DIA-NN normalization: OFF")
+        icon("check-circle"), paste0(" DDA normalization: ", nl))
     } else {
-      span(class = "badge bg-secondary", style = "margin-right: 10px;",
-        icon("question-circle"), " DIA-NN normalization: unknown")
+      status <- values$diann_norm_detected
+      if (status == "on") {
+        span(class = "badge bg-info", style = "margin-right: 10px;",
+          icon("check-circle"), " DIA-NN normalization: ON (RT-dependent)")
+      } else if (status == "off") {
+        span(class = "badge bg-warning", style = "margin-right: 10px;",
+          icon("exclamation-triangle"), " DIA-NN normalization: OFF")
+      } else {
+        span(class = "badge bg-secondary", style = "margin-right: 10px;",
+          icon("question-circle"), " DIA-NN normalization: unknown")
+      }
     }
   })
 
   # Health assessment reactive
   assess_distribution_health <- reactive({
-    req(values$raw_data, values$y_protein)
+    req(values$y_protein)
+    # DDA mode doesn't have raw_data — skip pre-normalization assessment
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      post_mat <- values$y_protein$E
+      post_medians <- apply(post_mat, 2, median, na.rm = TRUE)
+      post_cv <- sd(post_medians) / abs(mean(post_medians))
+      post_outliers <- which(abs(post_medians - mean(post_medians)) > 2 * sd(post_medians))
+      return(list(
+        pre_cv = post_cv, post_cv = post_cv,
+        pre_outlier_samples = character(0),
+        post_outlier_samples = names(post_outliers),
+        status = if (post_cv > 0.05) "warning" else if (length(post_outliers) > 0) "caution" else "good"
+      ))
+    }
+    req(values$raw_data)
     pre_mat <- values$raw_data$E
     post_mat <- values$y_protein$E
     pre_medians <- apply(pre_mat, 2, median, na.rm = TRUE)
@@ -309,6 +571,36 @@ server_qc <- function(input, output, session, values) {
 
   # Contextual guidance banners
   output$norm_diag_guidance <- renderUI({
+    # DDA mode: simplified guidance
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      req(values$y_protein)
+      nl <- norm_label()
+      sp <- values$dda_search_params
+      impute_method <- if (!is.null(sp)) sp$imputation %||% "perseus" else "perseus"
+
+      # Check distribution alignment
+      post_mat <- values$y_protein$E
+      post_medians <- apply(post_mat, 2, median, na.rm = TRUE)
+      post_cv <- sd(post_medians) / abs(mean(post_medians))
+
+      if (post_cv > 0.05) {
+        return(div(class = "alert alert-warning", role = "alert",
+          icon("exclamation-triangle"),
+          strong(" Sample distributions show some misalignment. "),
+          sprintf("Normalization method: %s, Imputation: %s. ", nl, impute_method),
+          "If distributions look uneven, consider using a different normalization method ",
+          "or checking for outlier samples in the MDS plot."
+        ))
+      } else {
+        return(div(class = "alert alert-success", role = "alert",
+          icon("check-circle"),
+          strong(" Distributions look good. "),
+          sprintf("Normalization: %s | Imputation: %s. ", nl, impute_method),
+          "Per-sample intensity distributions are well-aligned."
+        ))
+      }
+    }
+
     req(values$raw_data, values$y_protein)
     health <- assess_distribution_health()
     diann_status <- values$diann_norm_detected
@@ -407,11 +699,132 @@ server_qc <- function(input, output, session, values) {
 
   # Shared reactive for the diagnostic plot (regular + fullscreen)
   generate_norm_diagnostic_plot <- reactive({
-    req(values$raw_data, values$y_protein, values$metadata)
+    req(values$y_protein, values$metadata)
+    meta <- values$metadata
+
+    # ── DDA mode: show pre/post normalization using MaxLFQ matrix ──
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      post_mat <- values$y_protein$E
+      nl <- norm_label()
+      ql <- quant_label()
+
+      # Pre-normalization: use raw MaxLFQ (dda_lfq_wide) if available
+      has_pre <- !is.null(values$dda_lfq_wide)
+      if (has_pre) {
+        pre_mat <- values$dda_lfq_wide
+        # Align columns
+        shared_cols <- intersect(colnames(pre_mat), colnames(post_mat))
+        if (length(shared_cols) == 0) {
+          # Try matching by SampleID
+          shared_cols <- intersect(colnames(pre_mat), meta$SampleID)
+          if (length(shared_cols) == 0) has_pre <- FALSE
+        }
+      }
+
+      if (has_pre && input$norm_diag_type == "boxplot") {
+        pre_sub <- pre_mat[, shared_cols, drop = FALSE]
+        post_sub <- post_mat[, shared_cols, drop = FALSE]
+
+        pre_long <- as.data.frame(pre_sub) %>%
+          pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
+          mutate(Stage = "Raw MaxLFQ\n(before normalization)") %>%
+          filter(!is.na(Log2Intensity))
+        post_long <- as.data.frame(post_sub) %>%
+          pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
+          mutate(Stage = paste0("Normalized\n(", nl, ")")) %>%
+          filter(!is.na(Log2Intensity))
+
+        pre_long$Group <- meta$Group[match(pre_long$Sample, meta$File.Name)]
+        if (all(is.na(pre_long$Group))) pre_long$Group <- meta$Group[match(pre_long$Sample, meta$SampleID)]
+        post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
+        if (all(is.na(post_long$Group))) post_long$Group <- meta$Group[match(post_long$Sample, meta$SampleID)]
+
+        combined <- bind_rows(pre_long, post_long)
+        combined$Stage <- factor(combined$Stage,
+          levels = c("Raw MaxLFQ\n(before normalization)", paste0("Normalized\n(", nl, ")")))
+
+        # Sample order
+        sample_ids <- meta$SampleID[match(shared_cols, meta$SampleID)]
+        if (all(is.na(sample_ids))) sample_ids <- shared_cols
+        combined$SampleID <- combined$Sample
+
+        p <- ggplot(combined, aes(x = SampleID, y = Log2Intensity, fill = Group)) +
+          geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.3) +
+          facet_wrap(~Stage, scales = "free_y", ncol = 2) +
+          theme_minimal() +
+          labs(
+            title = paste0("DDA Pipeline Diagnostic: Raw \u2192 ", nl, " Normalized"),
+            subtitle = paste0("Left: raw MaxLFQ intensities | Right: after ", nl, " normalization"),
+            x = "Sample", y = "Log2 Intensity"
+          ) +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+        return(ggplotly(p, tooltip = c("x", "y")) %>% layout(boxmode = "group"))
+
+      } else if (has_pre && input$norm_diag_type == "density") {
+        pre_sub <- pre_mat[, shared_cols, drop = FALSE]
+        post_sub <- post_mat[, shared_cols, drop = FALSE]
+
+        pre_long <- as.data.frame(pre_sub) %>%
+          pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
+          mutate(Stage = "Raw MaxLFQ") %>%
+          filter(!is.na(Log2Intensity))
+        post_long <- as.data.frame(post_sub) %>%
+          pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
+          mutate(Stage = paste0("After ", nl)) %>%
+          filter(!is.na(Log2Intensity))
+
+        pre_long$Group <- meta$Group[match(pre_long$Sample, meta$File.Name)]
+        if (all(is.na(pre_long$Group))) pre_long$Group <- meta$Group[match(pre_long$Sample, meta$SampleID)]
+        post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
+        if (all(is.na(post_long$Group))) post_long$Group <- meta$Group[match(post_long$Sample, meta$SampleID)]
+
+        combined <- bind_rows(pre_long, post_long)
+        combined$Stage <- factor(combined$Stage,
+          levels = c("Raw MaxLFQ", paste0("After ", nl)))
+
+        p <- ggplot(combined, aes(x = Log2Intensity, color = Group, group = Sample)) +
+          geom_density(alpha = 0.3, linewidth = 0.4) +
+          facet_wrap(~Stage, ncol = 2) +
+          theme_minimal() +
+          labs(
+            title = "DDA Pipeline Diagnostic: Per-Sample Density Curves",
+            subtitle = paste0("Raw MaxLFQ (left) vs ", nl, " normalized (right)"),
+            x = "Log2 Intensity", y = "Density"
+          )
+        return(ggplotly(p))
+
+      } else {
+        # No pre-normalization data — show post only
+        post_long <- as.data.frame(post_mat) %>%
+          pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
+          filter(!is.na(Log2Intensity))
+        post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
+        if (all(is.na(post_long$Group))) post_long$Group <- meta$Group[match(post_long$Sample, meta$SampleID)]
+
+        if (input$norm_diag_type == "boxplot") {
+          p <- ggplot(post_long, aes(x = Sample, y = Log2Intensity, fill = Group)) +
+            geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.3) +
+            theme_minimal() +
+            labs(title = paste0(ql, " Protein Intensities (", nl, " normalized)"),
+                 x = "Sample", y = "Log2 Intensity") +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+          return(ggplotly(p, tooltip = c("x", "y")) %>% layout(boxmode = "group"))
+        } else {
+          p <- ggplot(post_long, aes(x = Log2Intensity, color = Group, group = Sample)) +
+            geom_density(alpha = 0.3, linewidth = 0.4) +
+            theme_minimal() +
+            labs(title = paste0("Per-Sample Density (", nl, " normalized)"),
+                 x = "Log2 Intensity", y = "Density")
+          return(ggplotly(p))
+        }
+      }
+    }
+
+    # ── DIA mode (existing code) ──
+    req(values$raw_data)
 
     pre_mat <- values$raw_data$E   # precursor-level, log2, NAs present
     post_mat <- values$y_protein$E # protein-level, log2, no NAs
-    meta <- values$metadata
 
     if (input$norm_diag_type == "boxplot") {
       # === BOX PLOT VIEW ===
@@ -666,16 +1079,37 @@ server_qc <- function(input, output, session, values) {
     ))
   })
   output$qc_group_violin_fs <- renderPlotly({
-    req(values$qc_stats, values$metadata, input$qc_violin_metric)
-    df <- left_join(values$qc_stats, values$metadata, by = c("Run" = "File.Name"))
-    metric <- input$qc_violin_metric
-    df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Val:</b> ", round(df[[metric]], 2))
-    p <- ggplot(df, aes(x = Group, y = .data[[metric]], fill = Group)) +
-      geom_violin(alpha = 0.5, trim = FALSE) +
-      geom_jitter(aes(text = Tooltip), width = 0.2, size = 2, alpha = 0.8, color = "black") +
-      theme_bw() + labs(title = paste("Distribution of", metric), x = "Group", y = metric) +
-      theme(legend.position = "none")
-    ggplotly(p, tooltip = "text")
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      per_sample <- dda_per_sample_stats()
+      req(nrow(per_sample) > 0, values$metadata)
+      metric <- input$qc_violin_metric
+      dda_metric_map <- c(Proteins = "Proteins", PSMs = "PSMs", Peptides = "Peptides")
+      col_name <- dda_metric_map[metric]
+      if (is.na(col_name) || !col_name %in% colnames(per_sample)) col_name <- "Proteins"
+      df <- per_sample
+      df$Group <- values$metadata$Group[match(df$Run, values$metadata$File.Name)]
+      if (all(is.na(df$Group))) df$Group <- values$metadata$Group[match(df$Run, values$metadata$SampleID)]
+      df$Group[is.na(df$Group)] <- "Unassigned"
+      df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Val:</b> ", round(df[[col_name]], 2))
+      p <- ggplot(df, aes(x = Group, y = .data[[col_name]], fill = Group)) +
+        geom_violin(alpha = 0.5, trim = FALSE) +
+        geom_jitter(aes(text = Tooltip), width = 0.2, size = 2, alpha = 0.8, color = "black") +
+        theme_bw() + labs(title = paste("Distribution of", col_name, "(Sage)"),
+                          x = "Group", y = paste(col_name, "Identified")) +
+        theme(legend.position = "none")
+      ggplotly(p, tooltip = "text")
+    } else {
+      req(values$qc_stats, values$metadata, input$qc_violin_metric)
+      df <- left_join(values$qc_stats, values$metadata, by = c("Run" = "File.Name"))
+      metric <- input$qc_violin_metric
+      df$Tooltip <- paste0("<b>File:</b> ", df$Run, "<br><b>Val:</b> ", round(df[[metric]], 2))
+      p <- ggplot(df, aes(x = Group, y = .data[[metric]], fill = Group)) +
+        geom_violin(alpha = 0.5, trim = FALSE) +
+        geom_jitter(aes(text = Tooltip), width = 0.2, size = 2, alpha = 0.8, color = "black") +
+        theme_bw() + labs(title = paste("Distribution of", metric), x = "Group", y = metric) +
+        theme(legend.position = "none")
+      ggplotly(p, tooltip = "text")
+    }
   })
 
   # ============================================================================
@@ -1753,37 +2187,80 @@ server_qc <- function(input, output, session, values) {
 
   # -- Info modal --
   observeEvent(input$completeness_info_btn, {
-    showModal(modalDialog(
-      title = "Data Completeness \u2014 Detected vs Inferred",
-      tags$p("limpa's DPC-Quant algorithm produces a ",
-             tags$strong("complete"), " protein expression matrix (no missing values). ",
-             "But this masks an important distinction:"),
-      tags$ul(
-        tags$li(tags$strong("Detected"), " (green): the protein had at least one precursor ",
-                "directly measured in that sample."),
-        tags$li(tags$strong("Inferred"), " (orange): the protein appears in the final matrix, ",
-                "but had ", tags$em("zero"), " precursors detected in that sample. Its quantity ",
-                "was estimated by DPC-Quant using detection probability modelling across other samples.")
-      ),
-      tags$p("High inferred rates (>30%) suggest lower measurement confidence. ",
-             "This is not necessarily wrong \u2014 DPC-Quant estimation is statistically valid \u2014 ",
-             "but downstream users should know which proteins are directly supported."),
-      tags$hr(),
-      tags$p(tags$strong("Plots:")),
-      tags$ul(
-        tags$li(tags$strong("Stacked Bar:"), " Per-sample breakdown of detected vs inferred proteins."),
-        tags$li(tags$strong("Evidence Heatmap:"), " Top 50 most variably detected proteins \u2014 shows which samples lack precursor support."),
-        tags$li(tags$strong("Cumulative Curve:"), " How many proteins are detected in at least N samples. Core proteome vs sample-specific."),
-        tags$li(tags$strong("Dendrogram:"), " Clusters samples by detection pattern (Jaccard distance), independent of intensity."),
-        tags$li(tags$strong("Precursor Violin:"), " Distribution of precursor counts per protein in each sample.")
-      ),
-      easyClose = TRUE, size = "l",
-      footer = modalButton("Close")
-    ))
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      showModal(modalDialog(
+        title = "Data Completeness \u2014 MaxLFQ Missingness",
+        tags$p("DDA MaxLFQ quantification produces a protein matrix that may contain missing values (NAs) ",
+               "where a protein was not confidently quantified in a sample."),
+        tags$ul(
+          tags$li(tags$strong("Present"), " (green): the protein has a MaxLFQ intensity value."),
+          tags$li(tags$strong("Missing"), " (orange/red): the protein was not quantified in that sample. ",
+                  "These values are imputed before differential expression analysis.")
+        ),
+        tags$p("High missingness rates suggest lower data quality or biological variation. ",
+               "The imputation method (e.g., Perseus) fills missing values with low-intensity estimates."),
+        tags$hr(),
+        tags$p(tags$strong("Plots:")),
+        tags$ul(
+          tags$li(tags$strong("Stacked Bar:"), " Per-sample breakdown of quantified vs missing proteins."),
+          tags$li(tags$strong("Missingness Heatmap:"), " Top 50 most variably present proteins across samples."),
+          tags$li(tags$strong("Cumulative Curve:"), " How many proteins are present in at least N samples."),
+          tags$li(tags$strong("Dendrogram:"), " Clusters samples by presence/absence pattern (Jaccard distance)."),
+          tags$li(tags$strong("Missingness Violin:"), " Per-group distribution of protein missingness rates.")
+        ),
+        easyClose = TRUE, size = "l",
+        footer = modalButton("Close")
+      ))
+    } else {
+      showModal(modalDialog(
+        title = "Data Completeness \u2014 Detected vs Inferred",
+        tags$p("limpa's DPC-Quant algorithm produces a ",
+               tags$strong("complete"), " protein expression matrix (no missing values). ",
+               "But this masks an important distinction:"),
+        tags$ul(
+          tags$li(tags$strong("Detected"), " (green): the protein had at least one precursor ",
+                  "directly measured in that sample."),
+          tags$li(tags$strong("Inferred"), " (orange): the protein appears in the final matrix, ",
+                  "but had ", tags$em("zero"), " precursors detected in that sample. Its quantity ",
+                  "was estimated by DPC-Quant using detection probability modelling across other samples.")
+        ),
+        tags$p("High inferred rates (>30%) suggest lower measurement confidence. ",
+               "This is not necessarily wrong \u2014 DPC-Quant estimation is statistically valid \u2014 ",
+               "but downstream users should know which proteins are directly supported."),
+        tags$hr(),
+        tags$p(tags$strong("Plots:")),
+        tags$ul(
+          tags$li(tags$strong("Stacked Bar:"), " Per-sample breakdown of detected vs inferred proteins."),
+          tags$li(tags$strong("Evidence Heatmap:"), " Top 50 most variably detected proteins \u2014 shows which samples lack precursor support."),
+          tags$li(tags$strong("Cumulative Curve:"), " How many proteins are detected in at least N samples. Core proteome vs sample-specific."),
+          tags$li(tags$strong("Dendrogram:"), " Clusters samples by detection pattern (Jaccard distance), independent of intensity."),
+          tags$li(tags$strong("Precursor Violin:"), " Distribution of precursor counts per protein in each sample.")
+        ),
+        easyClose = TRUE, size = "l",
+        footer = modalButton("Close")
+      ))
+    }
   })
 
   # -- Warning banner --
   output$completeness_warning_banner <- renderUI({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      # DDA mode: show missingness from MaxLFQ matrix
+      mat <- values$dda_lfq_wide
+      if (is.null(mat)) return(NULL)
+      na_pct <- colMeans(is.na(mat)) * 100
+      worst_sample <- names(which.max(na_pct))
+      worst_pct <- max(na_pct)
+      if (worst_pct > 30) {
+        return(div(class = "alert alert-warning", style = "margin-bottom: 12px;",
+          icon("exclamation-triangle"),
+          sprintf(" Warning: %s has %.0f%% missing values in the MaxLFQ matrix. ", worst_sample, worst_pct),
+          "Missing values are imputed before differential expression analysis."
+        ))
+      }
+      return(NULL)
+    }
+
     cd <- completeness_data()
     if (is.null(cd)) return(NULL)
     worst_rate <- min(cd$detection_rate)
@@ -1800,6 +2277,52 @@ server_qc <- function(input, output, session, values) {
 
   # -- Summary cards --
   output$completeness_summary_cards <- renderUI({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      mat <- values$dda_lfq_wide
+      if (is.null(mat)) {
+        return(div(class = "alert alert-info", style = "margin: 20px 0;",
+          icon("info-circle"),
+          " Completeness analysis requires MaxLFQ data from Sage."
+        ))
+      }
+      n_proteins <- nrow(mat)
+      na_pct <- colMeans(is.na(mat)) * 100
+      median_completeness <- 100 - median(na_pct)
+      worst_sample <- names(which.max(na_pct))
+      worst_completeness <- 100 - max(na_pct)
+
+      # Imputation stats
+      sp <- values$dda_search_params
+      impute_method <- if (!is.null(sp)) sp$imputation %||% "perseus" else "perseus"
+      n_imputed <- sum(is.na(mat))
+      n_total <- length(mat)
+      pct_imputed <- 100 * n_imputed / max(n_total, 1)
+
+      return(div(style = "display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap;",
+        div(style = "flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #0072B2;",
+          tags$small(style = "color: #6c757d;", "Total Proteins"),
+          tags$div(style = "font-size: 1.5em; font-weight: 600; color: #2d3748;",
+            format(n_proteins, big.mark = ","))
+        ),
+        div(style = "flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #009E73;",
+          tags$small(style = "color: #6c757d;", "Median Completeness"),
+          tags$div(style = "font-size: 1.5em; font-weight: 600; color: #2d3748;",
+            sprintf("%.1f%%", median_completeness))
+        ),
+        div(style = paste0("flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid ",
+                           if (worst_completeness < 70) "#D55E00" else "#E69F00", ";"),
+          tags$small(style = "color: #6c757d;", "Worst Sample"),
+          tags$div(style = "font-size: 1.1em; font-weight: 600; color: #2d3748;",
+            sprintf("%s (%.0f%%)", worst_sample, worst_completeness))
+        ),
+        div(style = "flex: 1; min-width: 160px; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #CC79A7;",
+          tags$small(style = "color: #6c757d;", "Imputation"),
+          tags$div(style = "font-size: 1.1em; font-weight: 600; color: #2d3748;",
+            sprintf("%.1f%% (%s)", pct_imputed, impute_method))
+        )
+      ))
+    }
+
     cd <- tryCatch(completeness_data(), error = function(e) NULL)
     if (is.null(cd)) {
       return(div(class = "alert alert-info", style = "margin: 20px 0;",
@@ -1831,8 +2354,64 @@ server_qc <- function(input, output, session, values) {
     )
   })
 
-  # -- 1. Detected vs Inferred Stacked Bar --
+  # -- 1. Detected vs Inferred Stacked Bar (DIA) / Present vs Missing (DDA) --
   output$completeness_stacked_bar <- renderPlotly({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      mat <- values$dda_lfq_wide
+      req(!is.null(mat))
+      n_proteins <- nrow(mat)
+      present_count <- colSums(!is.na(mat))
+      missing_count <- n_proteins - present_count
+
+      df <- data.frame(
+        Sample = names(present_count),
+        Present = as.numeric(present_count),
+        Missing = as.numeric(missing_count),
+        Rate = as.numeric(present_count) / n_proteins * 100,
+        stringsAsFactors = FALSE
+      )
+      if (!is.null(values$metadata)) {
+        df$Group <- values$metadata$Group[match(df$Sample, values$metadata$File.Name)]
+        if (all(is.na(df$Group))) {
+          df$Group <- values$metadata$Group[match(df$Sample, values$metadata$SampleID)]
+        }
+      } else {
+        df$Group <- "All"
+      }
+      df$Group[is.na(df$Group)] <- "Unassigned"
+      df <- df[order(df$Rate), ]
+      df$Sample <- factor(df$Sample, levels = df$Sample)
+
+      pres_pct <- round(df$Present / n_proteins * 100, 1)
+      miss_pct <- round(df$Missing / n_proteins * 100, 1)
+
+      return(
+        plot_ly(df, y = ~Sample) %>%
+          add_bars(x = ~Present, name = "Quantified",
+                   marker = list(color = "#009E73"),
+                   text = ~paste0(Present, " (", pres_pct, "%)"),
+                   textposition = "inside", textfont = list(color = "white", size = 11),
+                   hovertemplate = ~paste0("<b>", Sample, "</b><br>",
+                                          "Quantified: ", Present, " (", pres_pct, "%)<br>",
+                                          "Group: ", Group, "<extra></extra>")) %>%
+          add_bars(x = ~Missing, name = "Missing (NA)",
+                   marker = list(color = "#D55E00"),
+                   text = ~paste0(Missing, " (", miss_pct, "%)"),
+                   textposition = "inside", textfont = list(color = "white", size = 11),
+                   hovertemplate = ~paste0("<b>", Sample, "</b><br>",
+                                          "Missing: ", Missing, " (", miss_pct, "%)<br>",
+                                          "Group: ", Group, "<extra></extra>")) %>%
+          layout(
+            barmode = "stack",
+            title = list(text = "Protein Completeness per Sample (MaxLFQ)", font = list(size = 14)),
+            xaxis = list(title = "Number of Proteins"),
+            yaxis = list(title = "", tickfont = list(size = 10)),
+            legend = list(orientation = "h", x = 0.3, y = 1.08),
+            margin = list(l = 120)
+          )
+      )
+    }
+
     cd <- completeness_data()
     req(cd)
 
@@ -1879,8 +2458,38 @@ server_qc <- function(input, output, session, values) {
       )
   })
 
-  # -- 2. Precursor Evidence Heatmap --
+  # -- 2. Precursor Evidence Heatmap (DIA) / Missingness Heatmap (DDA) --
   output$completeness_evidence_heatmap <- renderPlotly({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      mat <- values$dda_lfq_wide
+      req(!is.null(mat))
+      # Binary: 1 = present, 0 = missing
+      bin_mat <- ifelse(is.na(mat), 0, 1)
+      # Top 50 most variable by missingness pattern
+      row_var <- apply(bin_mat, 1, var)
+      top_idx <- head(order(row_var, decreasing = TRUE), 50)
+      sub_mat <- bin_mat[top_idx, , drop = FALSE]
+
+      rn <- rownames(sub_mat)
+      rn_short <- ifelse(nchar(rn) > 20, paste0(substr(rn, 1, 17), "..."), rn)
+
+      return(
+        plot_ly(
+          z = sub_mat, x = colnames(sub_mat), y = rn_short,
+          type = "heatmap",
+          colorscale = list(list(0, "#D55E00"), list(1, "#009E73")),
+          hovertemplate = "Protein: %{y}<br>Sample: %{x}<br>Status: %{z}<extra></extra>",
+          colorbar = list(title = "", tickvals = c(0, 1), ticktext = c("Missing", "Present"))
+        ) %>%
+          layout(
+            title = list(text = "Missingness Heatmap (Top 50 Most Variable)", font = list(size = 14)),
+            xaxis = list(title = "", tickangle = -45, tickfont = list(size = 9)),
+            yaxis = list(title = "", tickfont = list(size = 8)),
+            margin = list(l = 140, b = 100)
+          )
+      )
+    }
+
     cd <- completeness_data()
     req(cd)
 
@@ -1921,6 +2530,46 @@ server_qc <- function(input, output, session, values) {
 
   # -- 3. Cumulative Detection Curve --
   output$completeness_cumulative_curve <- renderPlotly({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      mat <- values$dda_lfq_wide
+      req(!is.null(mat))
+      bin_mat <- !is.na(mat)  # TRUE = present
+      n_samples <- ncol(bin_mat)
+      samples_present <- rowSums(bin_mat)
+
+      thresholds <- 1:n_samples
+      cum_counts <- sapply(thresholds, function(n) sum(samples_present >= n))
+      df <- data.frame(MinSamples = thresholds, Proteins = cum_counts, stringsAsFactors = FALSE)
+      n_core <- sum(samples_present == n_samples)
+      n_variable <- sum(samples_present <= 2 & samples_present >= 1)
+
+      return(
+        plot_ly(df, x = ~MinSamples, y = ~Proteins, type = "scatter", mode = "lines+markers",
+                line = list(color = "#0072B2", width = 2.5),
+                marker = list(color = "#0072B2", size = 6),
+                hovertemplate = paste0("Present in >= %{x} samples<br>",
+                                      "%{y} proteins<extra></extra>")) %>%
+          add_annotations(
+            x = n_samples, y = n_core,
+            text = sprintf("Core: %d proteins\n(all %d samples)", n_core, n_samples),
+            showarrow = TRUE, arrowhead = 2, ax = -60, ay = -30,
+            font = list(size = 11, color = "#009E73")
+          ) %>%
+          add_annotations(
+            x = 1, y = cum_counts[1],
+            text = sprintf("%d total proteins\n(%d in 1-2 samples only)", cum_counts[1], n_variable),
+            showarrow = TRUE, arrowhead = 2, ax = 60, ay = -30,
+            font = list(size = 11, color = "#D55E00")
+          ) %>%
+          layout(
+            title = list(text = "Cumulative Presence Curve (MaxLFQ)", font = list(size = 14)),
+            xaxis = list(title = "Present in at Least N Samples", dtick = 1),
+            yaxis = list(title = "Number of Proteins"),
+            showlegend = FALSE
+          )
+      )
+    }
+
     cd <- completeness_data()
     req(cd)
 
@@ -1966,6 +2615,55 @@ server_qc <- function(input, output, session, values) {
 
   # -- 4. Sample Clustering by Detection Pattern (Jaccard Distance) --
   output$completeness_dendrogram <- renderPlotly({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      mat <- values$dda_lfq_wide
+      req(!is.null(mat), ncol(mat) >= 3)
+      bin_mat <- (!is.na(mat)) * 1  # numeric 0/1
+      n <- ncol(bin_mat)
+      jac_dist <- matrix(0, n, n, dimnames = list(colnames(bin_mat), colnames(bin_mat)))
+      for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+          a <- bin_mat[, i]; b <- bin_mat[, j]
+          intersection <- sum(a == 1 & b == 1)
+          union_ab <- sum(a == 1 | b == 1)
+          jac <- if (union_ab == 0) 0 else 1 - intersection / union_ab
+          jac_dist[i, j] <- jac; jac_dist[j, i] <- jac
+        }
+      }
+      hc <- hclust(as.dist(jac_dist), method = "average")
+      dend <- as.dendrogram(hc)
+      ddata <- ggdendro::dendro_data(dend, type = "rectangle")
+      segs <- ggdendro::segment(ddata)
+      labs <- ggdendro::label(ddata)
+
+      # Add group coloring
+      if (!is.null(values$metadata)) {
+        labs$Group <- values$metadata$Group[match(labs$label, values$metadata$File.Name)]
+        if (all(is.na(labs$Group))) labs$Group <- values$metadata$Group[match(labs$label, values$metadata$SampleID)]
+      } else {
+        labs$Group <- "All"
+      }
+      labs$Group[is.na(labs$Group)] <- "Unassigned"
+
+      palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+                   "#D55E00", "#CC79A7", "#999999", "#000000", "#66A61E")
+      groups <- unique(labs$Group)
+      group_pal <- setNames(palette[seq_along(groups)], groups)
+
+      p <- ggplot() +
+        geom_segment(data = segs, aes(x = x, y = y, xend = xend, yend = yend), color = "grey50") +
+        geom_point(data = labs, aes(x = x, y = y, color = Group), size = 3) +
+        geom_text(data = labs, aes(x = x, y = y - max(segs$y) * 0.04, label = label),
+                  angle = 90, hjust = 1, size = 2.5) +
+        scale_color_manual(values = group_pal) +
+        theme_minimal() +
+        labs(title = "Sample Clustering by Presence/Absence (Jaccard Distance)",
+             x = "", y = "Jaccard Distance") +
+        theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+              panel.grid.major.x = element_blank())
+      return(ggplotly(p, tooltip = c("label", "Group")))
+    }
+
     cd <- completeness_data()
     req(cd, length(cd$shared_samples) >= 3)
 
@@ -2046,6 +2744,53 @@ server_qc <- function(input, output, session, values) {
 
   # -- 5. Precursor Evidence Distribution (Violin) --
   output$completeness_precursor_violin <- renderPlotly({
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      # DDA mode: show per-group missingness distribution (% missing per protein)
+      mat <- values$dda_lfq_wide
+      req(!is.null(mat), !is.null(values$metadata))
+      meta <- values$metadata
+
+      # Group assignment for samples
+      group_vec <- meta$Group[match(colnames(mat), meta$File.Name)]
+      if (all(is.na(group_vec))) group_vec <- meta$Group[match(colnames(mat), meta$SampleID)]
+      group_vec[is.na(group_vec)] <- "Unassigned"
+      groups <- unique(group_vec)
+
+      # Per-group missingness: for each protein, fraction missing per group
+      df_list <- lapply(groups, function(g) {
+        cols <- which(group_vec == g)
+        if (length(cols) == 0) return(NULL)
+        pct_missing <- rowMeans(is.na(mat[, cols, drop = FALSE])) * 100
+        data.frame(
+          Group = g,
+          PctMissing = pct_missing,
+          stringsAsFactors = FALSE
+        )
+      })
+      df <- do.call(rbind, df_list)
+      df <- df[!is.na(df$PctMissing), ]
+
+      palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+                   "#D55E00", "#CC79A7", "#999999", "#000000", "#66A61E")
+      group_pal <- setNames(palette[seq_along(groups)], groups)
+
+      return(
+        plot_ly(df, y = ~PctMissing, x = ~Group, color = ~Group,
+                colors = group_pal[groups],
+                type = "violin",
+                box = list(visible = TRUE),
+                meanline = list(visible = TRUE),
+                hoverinfo = "y") %>%
+          layout(
+            title = list(text = "Per-Protein Missingness by Group", font = list(size = 14)),
+            xaxis = list(title = ""),
+            yaxis = list(title = "% Missing Values per Protein"),
+            legend = list(orientation = "h", x = 0.3, y = 1.08),
+            margin = list(b = 80)
+          )
+      )
+    }
+
     cd <- completeness_data()
     req(cd)
 
@@ -2089,5 +2834,37 @@ server_qc <- function(input, output, session, values) {
         margin = list(b = 120)
       )
   })
+
+  # ── Update completeness headings for DDA mode ──
+  observeEvent(values$acquisition_mode, {
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      shinyjs::html("completeness_h5_1", '<h5 style="margin-top: 8px;">Protein Completeness per Sample (MaxLFQ)</h5>')
+      shinyjs::html("completeness_h5_2", '<h5 style="margin-top: 12px;">Missingness Heatmap (Top 50 Most Variable)</h5>')
+      shinyjs::html("completeness_h5_3", '<h5 style="margin-top: 12px;">Cumulative Presence Curve</h5>')
+      shinyjs::html("completeness_h5_4", '<h5 style="margin-top: 12px;">Sample Clustering by Presence/Absence (Jaccard Distance)</h5>')
+      shinyjs::html("completeness_h5_5", '<h5 style="margin-top: 12px;">Per-Protein Missingness by Group</h5>')
+    } else {
+      shinyjs::html("completeness_h5_1", '<h5 style="margin-top: 8px;">Detected vs Inferred Proteins per Sample</h5>')
+      shinyjs::html("completeness_h5_2", '<h5 style="margin-top: 12px;">Precursor Evidence Heatmap (Top 50 Most Variable)</h5>')
+      shinyjs::html("completeness_h5_3", '<h5 style="margin-top: 12px;">Cumulative Detection Curve</h5>')
+      shinyjs::html("completeness_h5_4", '<h5 style="margin-top: 12px;">Sample Clustering by Detection Pattern (Jaccard Distance)</h5>')
+      shinyjs::html("completeness_h5_5", '<h5 style="margin-top: 12px;">Precursor Count per Protein (per Sample)</h5>')
+    }
+  }, ignoreInit = TRUE)
+
+  # ── Update Group Distribution metric choices when acquisition mode changes ──
+  observeEvent(values$acquisition_mode, {
+    if (isTRUE(values$acquisition_mode == "dda")) {
+      updateSelectInput(session, "qc_violin_metric",
+        choices = c("Proteins", "PSMs", "Peptides"),
+        selected = "Proteins"
+      )
+    } else {
+      updateSelectInput(session, "qc_violin_metric",
+        choices = c("Precursors", "Proteins", "MS1_Signal"),
+        selected = "Precursors"
+      )
+    }
+  }, ignoreInit = TRUE)
 
 }
