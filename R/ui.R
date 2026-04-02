@@ -1207,23 +1207,53 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             )
           ),
 
-          # --- Casanovo (disabled) ---
+          # --- Casanovo de novo (optional GPU overlay) ---
           div(
-            style = "background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px; opacity: 0.7;",
-            tags$h6(icon("wand-magic-sparkles"), " De Novo Sequencing (Casanovo)", style = "margin-bottom: 12px; color: #6c757d;"),
-            div(
-              style = "display: flex; align-items: center; gap: 8px;",
-              tags$input(type = "checkbox", disabled = "disabled",
-                style = "width: 16px; height: 16px;"),
-              tags$span(style = "color: #6c757d;", "Run Casanovo de novo sequencing"),
-              tags$span(
-                class = "badge bg-secondary",
-                style = "font-size: 10px; margin-left: 8px;",
-                "Coming soon"
+            style = "background: linear-gradient(135deg, #f8f5ff 0%, #f0e8ff 100%); border: 1px solid #d4c5f0; border-radius: 8px; padding: 16px; margin-bottom: 16px;",
+            tags$h6(icon("wand-magic-sparkles"), " De Novo Sequencing (Casanovo)",
+              style = "margin-bottom: 12px; color: #6f42c1;"),
+            checkboxInput("dda_run_casanovo",
+              label = tags$span(
+                "Run Casanovo de novo sequencing",
+                tags$span(
+                  class = "badge bg-info",
+                  style = "font-size: 10px; margin-left: 8px;",
+                  "GPU"
+                )
+              ),
+              value = FALSE
+            ),
+            conditionalPanel(
+              condition = "input.dda_run_casanovo",
+              div(
+                style = "margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.5); border-radius: 6px;",
+                tags$small(
+                  style = "color: #495057; display: block; margin-bottom: 8px;",
+                  icon("info-circle"),
+                  " Casanovo v4.3 GPU-accelerated de novo sequencing. ",
+                  "Runs in parallel with Sage on the gpu-a100 partition. ",
+                  "Identifies novel peptides and validates Sage database hits."
+                ),
+                div(
+                  style = "display: flex; gap: 12px; flex-wrap: wrap;",
+                  div(style = "min-width: 200px;",
+                    textInput("dda_casanovo_model", "Model checkpoint",
+                      value = "casanovo_v4_2_0",
+                      width = "100%",
+                      placeholder = "casanovo_v4_2_0"
+                    )
+                  ),
+                  div(style = "min-width: 120px;",
+                    numericInput("dda_casanovo_score_threshold",
+                      "Min. score", value = -0.5,
+                      min = -2, max = 1, step = 0.1, width = "100%"
+                    )
+                  )
+                )
               )
             ),
-            tags$small(style = "color: #adb5bd; display: block; margin-top: 8px;",
-              "Casanovo GPU-accelerated de novo sequencing will be available in a future update.")
+            tags$small(style = "color: #7c6fa0; display: block; margin-top: 4px;",
+              "Optional. Sage search runs independently even if Casanovo fails.")
           ),
 
           # --- Submit ---
@@ -1231,16 +1261,26 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             condition = "output.ssh_connected_flag",
             div(
               style = "padding: 8px 0;",
-              actionButton("run_dda_search", "Submit Sage Search",
+              actionButton("run_dda_search", "Submit DDA Search",
                 icon  = icon("rocket"),
                 class = "btn-primary btn-lg",
                 width = "100%"
+              ),
+              tags$small(
+                style = "color: #6c757d; display: block; margin-top: 4px; text-align: center;",
+                "Submits Sage (CPU)",
+                conditionalPanel(
+                  condition = "input.dda_run_casanovo",
+                  style = "display: inline;",
+                  " + Casanovo (GPU)"
+                )
               )
             )
           ),
 
           # --- Status + Results ---
           uiOutput("dda_job_status_ui"),
+          uiOutput("dda_casanovo_status_ui"),
 
           # --- Group Assignment + Pipeline (shown after results loaded) ---
           uiOutput("dda_group_assignment_ui"),

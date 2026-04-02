@@ -12,6 +12,16 @@ server_dda <- function(input, output, session, values, add_to_log) {
   slurm_account   <- config$slurm$account   %||% "genome-center-grp"
   slurm_partition <- config$slurm$partition  %||% "high"
 
+  # Casanovo config defaults
+  casanovo_conda_env   <- config$tools$casanovo_conda_env %||%
+    "/quobyte/proteomics-grp/conda_envs/cassonovo_env"
+  casanovo_model_ckpt  <- config$tools$casanovo_model_ckpt %||%
+    "/quobyte/proteomics-grp/bioinformatics_programs/casanovo_modles/casanovo_v4_2_0.ckpt"
+  casanovo_converter   <- config$tools$casanovo_converter %||%
+    "/quobyte/proteomics-grp/de-limp/python/bruker_to_mgf.py"
+  casanovo_gpu_partition <- config$slurm$gpu_partition %||% "gpu-a100"
+  casanovo_gpu_qos       <- config$slurm$gpu_qos %||% "genome-center-grp-gpu-a100-qos"
+
   # --- Mode observer: sync input to reactive values ---
   observeEvent(input$acquisition_mode, {
     values$acquisition_mode <- input$acquisition_mode
@@ -216,6 +226,8 @@ server_dda <- function(input, output, session, values, add_to_log) {
       values$dda_job_id     <- job_id
       values$dda_output_dir <- output_dir
       values$dda_status     <- "running"
+
+      run_casanovo <- isTRUE(input$dda_run_casanovo)
       values$dda_search_params <- list(
         preset           = input$dda_preset %||% "standard",
         fasta_path       = fasta_path,
@@ -228,13 +240,115 @@ server_dda <- function(input, output, session, values, add_to_log) {
         imputation       = input$dda_impute_method %||% "perseus",
         min_valid        = input$dda_min_valid %||% 0.5,
         submitted_at     = Sys.time(),
-        sage_bin         = sage_bin
+        sage_bin         = sage_bin,
+        casanovo_enabled = run_casanovo
       )
 
-      setProgress(1.0, detail = "Job submitted!")
-      showNotification(
-        paste("Sage search submitted! Job ID:", job_id),
-        type = "message", duration = 10)
+      # --- Casanovo submission (optional, GPU) ---
+      if (run_casanovo) {
+        setProgress(0.7, detail = "Submitting Casanovo de novo...")
+
+        tryCatch({
+          casanovo_scripts <- generate_casanovo_sbatch(
+            raw_dir          = raw_dir,
+            output_dir       = output_dir,
+            experiment_name  = exp_name,
+            conda_env_path   = casanovo_conda_env,
+            model_ckpt       = casanovo_model_ckpt,
+            converter_script = casanovo_converter,
+            n_files          = length(raw_paths),
+            account          = slurm_account,
+            gpu_partition    = casanovo_gpu_partition,
+            gpu_qos          = casanovo_gpu_qos
+          )
+
+          # Create casanovo subdirs on HPC
+          ssh_exec(ssh_cfg,
+            paste0("mkdir -p ",
+              shQuote(casanovo_scripts$mgf_dir), " ",
+              shQuote(casanovo_scripts$mztab_dir)),
+            timeout = 15)
+
+          # Upload bruker_to_mgf.py converter to HPC
+          local_converter <- system.file("python/bruker_to_mgf.py", package = "")
+          if (!nzchar(local_converter) || !file.exists(local_converter)) {
+            local_converter <- file.path(getwd(), "python", "bruker_to_mgf.py")
+          }
+          if (file.exists(local_converter)) {
+            scp_upload(ssh_cfg, local_converter, casanovo_converter)
+          }
+
+          # Write and upload sbatch scripts
+          local_convert_sbatch <- file.path(local_tmp, "casanovo_convert.sbatch")
+          writeLines(casanovo_scripts$convert_script, local_convert_sbatch)
+          remote_convert_sbatch <- file.path(output_dir, "casanovo_convert.sbatch")
+          scp_upload(ssh_cfg, local_convert_sbatch, remote_convert_sbatch)
+
+          local_casanovo_sbatch <- file.path(local_tmp, "casanovo_sequence.sbatch")
+          writeLines(casanovo_scripts$casanovo_script, local_casanovo_sbatch)
+          remote_casanovo_sbatch <- file.path(output_dir, "casanovo_sequence.sbatch")
+          scp_upload(ssh_cfg, local_casanovo_sbatch, remote_casanovo_sbatch)
+
+          # Write and upload launcher script
+          launcher_content <- generate_casanovo_launcher(
+            remote_convert_sbatch, remote_casanovo_sbatch)
+          local_launcher <- file.path(local_tmp, "casanovo_submit.sh")
+          writeLines(launcher_content, local_launcher)
+          remote_launcher <- file.path(output_dir, "casanovo_submit.sh")
+          scp_upload(ssh_cfg, local_launcher, remote_launcher)
+
+          # Submit Casanovo pipeline
+          setProgress(0.85, detail = "Submitting Casanovo to GPU queue...")
+          casanovo_submit <- ssh_exec(ssh_cfg,
+            paste("bash", shQuote(remote_launcher)),
+            timeout = 30)
+
+          if (casanovo_submit$status == 0) {
+            # Parse job IDs from launcher output
+            convert_line <- grep("^CONVERT:", casanovo_submit$stdout, value = TRUE)
+            casanovo_line <- grep("^CASANOVO:", casanovo_submit$stdout, value = TRUE)
+
+            convert_jid <- if (length(convert_line) > 0)
+              trimws(sub("^CONVERT:", "", convert_line[1])) else NULL
+            casanovo_jid <- if (length(casanovo_line) > 0)
+              trimws(sub("^CASANOVO:", "", casanovo_line[1])) else NULL
+
+            values$dda_casanovo_convert_job_id <- convert_jid
+            values$dda_casanovo_job_id  <- casanovo_jid
+            values$dda_casanovo_status  <- "running"
+            values$dda_casanovo_mztab_dir <- casanovo_scripts$mztab_dir
+
+            message("[DDA] Casanovo MGF convert job: ", convert_jid,
+                    ", Casanovo sequence job: ", casanovo_jid)
+            showNotification(
+              paste("Casanovo submitted! Convert:", convert_jid,
+                    "| Sequence:", casanovo_jid),
+              type = "message", duration = 10)
+          } else {
+            message("[DDA] Casanovo submission failed: ",
+                    paste(casanovo_submit$stdout, collapse = " "))
+            showNotification(
+              "Casanovo submission failed. Sage search continues.",
+              type = "warning", duration = 10)
+            values$dda_casanovo_status <- "error"
+          }
+        }, error = function(e) {
+          message("[DDA] Casanovo submission error: ", e$message)
+          showNotification(
+            paste("Casanovo error:", e$message, "- Sage search continues."),
+            type = "warning", duration = 10)
+          values$dda_casanovo_status <- "error"
+        })
+      } else {
+        values$dda_casanovo_status <- "disabled"
+      }
+
+      setProgress(1.0, detail = "Job(s) submitted!")
+      msg <- paste("Sage search submitted! Job ID:", job_id)
+      if (run_casanovo && !is.null(values$dda_casanovo_job_id)) {
+        msg <- paste(msg, "| Casanovo:", values$dda_casanovo_job_id)
+      }
+      showNotification(msg, type = "message", duration = 10)
     })
   })
 
@@ -285,6 +399,187 @@ server_dda <- function(input, output, session, values, add_to_log) {
     }
     # PENDING, RUNNING, COMPLETING -> keep polling
   })
+
+  # ============================================================================
+  #    Casanovo job polling (every 15 seconds when running)
+  # ============================================================================
+  observe({
+    req(values$dda_casanovo_status == "running",
+        values$dda_casanovo_job_id,
+        values$ssh_connected)
+    invalidateLater(15000)
+
+    ssh_cfg      <- isolate(dda_ssh_config())
+    casanovo_jid <- isolate(values$dda_casanovo_job_id)
+
+    # Check the array job status
+    result <- tryCatch(
+      ssh_exec(ssh_cfg,
+        paste0("sacct -j ", casanovo_jid,
+               " --format=JobID,State --noheader --parsable2"),
+        timeout = 15),
+      error = function(e) list(status = 1, stdout = character(0))
+    )
+
+    if (result$status != 0 || length(result$stdout) == 0) return()
+
+    lines <- trimws(result$stdout)
+    lines <- lines[nzchar(lines)]
+    # For array jobs: filter to task lines (contain _) but not substeps (contain .)
+    task_lines <- lines[grepl("_", lines) & !grepl("\\.", lines)]
+    if (length(task_lines) == 0) {
+      # Not an array yet or single job — check main line
+      main_lines <- lines[!grepl("[_.]", lines)]
+      if (length(main_lines) == 0) return()
+      parts <- strsplit(main_lines[1], "\\|")[[1]]
+      if (length(parts) < 2) return()
+      state <- trimws(parts[2])
+
+      if (state %in% c("PENDING")) return()  # still queued
+      if (state %in% c("FAILED", "TIMEOUT", "OUT_OF_MEMORY", "CANCELLED", "NODE_FAIL")) {
+        message("[DDA] Casanovo job failed: ", casanovo_jid, " (", state, ")")
+        values$dda_casanovo_status <- "error"
+        showNotification(
+          paste("Casanovo failed:", state, "- Sage results still available."),
+          type = "warning", duration = 10)
+        return()
+      }
+      return()  # RUNNING
+    }
+
+    # Parse array task states
+    task_states <- vapply(task_lines, function(l) {
+      parts <- strsplit(l, "\\|")[[1]]
+      if (length(parts) >= 2) trimws(parts[2]) else "UNKNOWN"
+    }, character(1))
+
+    n_completed <- sum(task_states == "COMPLETED")
+    n_failed    <- sum(task_states %in% c("FAILED", "TIMEOUT", "OUT_OF_MEMORY"))
+    n_total     <- length(task_states)
+    n_pending   <- sum(task_states %in% c("PENDING", "RUNNING", "COMPLETING"))
+
+    # Update progress message
+    message(sprintf("[DDA] Casanovo progress: %d/%d completed, %d failed, %d pending",
+      n_completed, n_total, n_failed, n_pending))
+
+    if (n_pending == 0) {
+      # All tasks finished
+      if (n_completed > 0) {
+        message("[DDA] Casanovo completed: ", n_completed, "/", n_total, " tasks")
+        values$dda_casanovo_status <- "loading"
+        showNotification(
+          paste("Casanovo completed!", n_completed, "/", n_total, "files"),
+          type = "message", duration = 8)
+        # Trigger Casanovo result loading
+        load_casanovo_results_from_hpc()
+      } else {
+        values$dda_casanovo_status <- "error"
+        showNotification("All Casanovo tasks failed.", type = "warning")
+      }
+    }
+  })
+
+  # ============================================================================
+  #    Load Casanovo results from HPC
+  # ============================================================================
+  load_casanovo_results_from_hpc <- function() {
+    ssh_cfg   <- dda_ssh_config()
+    mztab_dir <- values$dda_casanovo_mztab_dir
+
+    if (is.null(mztab_dir)) {
+      values$dda_casanovo_status <- "error"
+      return()
+    }
+
+    withProgress(message = "Loading Casanovo results...", value = 0.1, {
+      # List mztab files on HPC
+      list_result <- ssh_exec(ssh_cfg,
+        paste0("ls -1 ", shQuote(mztab_dir), "/*.mztab 2>/dev/null"),
+        timeout = 15)
+
+      if (list_result$status != 0 || length(list_result$stdout) == 0) {
+        showNotification("No Casanovo .mztab files found.", type = "warning")
+        values$dda_casanovo_status <- "error"
+        return()
+      }
+
+      remote_mztabs <- trimws(list_result$stdout)
+      remote_mztabs <- remote_mztabs[nzchar(remote_mztabs)]
+      message("[DDA] Found ", length(remote_mztabs), " Casanovo .mztab files")
+
+      setProgress(0.3, detail = paste("Downloading", length(remote_mztabs), "files..."))
+
+      # Download all mztab files
+      local_mztab_dir <- file.path(tempdir(), "casanovo_mztab")
+      dir.create(local_mztab_dir, recursive = TRUE, showWarnings = FALSE)
+
+      local_paths <- character(0)
+      for (remote_path in remote_mztabs) {
+        local_path <- file.path(local_mztab_dir, basename(remote_path))
+        dl <- tryCatch(
+          scp_download(ssh_cfg, remote_path, local_path),
+          error = function(e) list(status = 1)
+        )
+        if (dl$status == 0) {
+          local_paths <- c(local_paths, local_path)
+        }
+      }
+
+      if (length(local_paths) == 0) {
+        showNotification("Failed to download Casanovo results.", type = "error")
+        values$dda_casanovo_status <- "error"
+        return()
+      }
+
+      setProgress(0.6, detail = "Parsing mzTab files...")
+
+      # Parse mzTab files
+      casanovo_psms <- tryCatch(
+        parse_casanovo_mztab(local_paths),
+        error = function(e) {
+          message("[DDA] Casanovo parse error: ", e$message)
+          showNotification(paste("Casanovo parse error:", e$message), type = "error")
+          NULL
+        }
+      )
+
+      if (is.null(casanovo_psms) || nrow(casanovo_psms) == 0) {
+        values$dda_casanovo_status <- "error"
+        return()
+      }
+
+      setProgress(0.8, detail = "Cross-referencing with Sage...")
+
+      # Store raw Casanovo results
+      values$dda_casanovo_psms <- casanovo_psms
+
+      # Cross-reference with Sage if available
+      if (!is.null(values$dda_sage_psms)) {
+        classification <- tryCatch(
+          classify_dda_denovo(casanovo_psms, values$dda_sage_psms),
+          error = function(e) {
+            message("[DDA] Classification error: ", e$message)
+            NULL
+          }
+        )
+
+        if (!is.null(classification)) {
+          values$dda_casanovo_classification <- classification
+          message(sprintf(
+            "[DDA] Casanovo classification: %d confirmed, %d novel",
+            classification$summary_stats$n_confirmed,
+            classification$summary_stats$n_novel
+          ))
+        }
+      }
+
+      setProgress(1.0, detail = "Done!")
+      values$dda_casanovo_status <- "done"
+      showNotification(
+        paste("Casanovo loaded:", nrow(casanovo_psms), "de novo sequences"),
+        type = "message", duration = 10)
+    })
+  }
 
   # ============================================================================
   #    Load results from HPC
@@ -477,6 +772,52 @@ server_dda <- function(input, output, session, values, add_to_log) {
   })
 
   # ============================================================================
+  #    Annotate y_protein with Casanovo de novo confirmation columns
+  #    Fires when both DDA pipeline and Casanovo classification are available
+  # ============================================================================
+  observe({
+    req(values$y_protein, values$dda_casanovo_classification)
+
+    cls <- values$dda_casanovo_classification
+    prot_summary <- cls$protein_summary
+
+    if (is.null(prot_summary) || nrow(prot_summary) == 0) return()
+
+    genes_df <- values$y_protein$genes
+    if ("DeNovo_Confirmed" %in% colnames(genes_df)) return()  # already annotated
+
+    # Match protein IDs (Sage uses semicolon-separated protein groups)
+    protein_ids <- genes_df$Protein.Group
+
+    genes_df$DeNovo_Confirmed <- vapply(protein_ids, function(pid) {
+      # Check if any protein in a semicolon-separated group has Casanovo confirmation
+      ids <- trimws(strsplit(pid, ";")[[1]])
+      match_idx <- which(prot_summary$proteins %in% ids)
+      if (length(match_idx) > 0) sum(prot_summary$n_casanovo_confirmed[match_idx]) else 0L
+    }, integer(1))
+
+    genes_df$DeNovo_MaxScore <- vapply(protein_ids, function(pid) {
+      ids <- trimws(strsplit(pid, ";")[[1]])
+      match_idx <- which(prot_summary$proteins %in% ids)
+      if (length(match_idx) > 0) max(prot_summary$casanovo_max_score[match_idx], na.rm = TRUE) else NA_real_
+    }, numeric(1))
+
+    genes_df$DeNovo_AvgAAScore <- vapply(protein_ids, function(pid) {
+      ids <- trimws(strsplit(pid, ";")[[1]])
+      match_idx <- which(prot_summary$proteins %in% ids)
+      if (length(match_idx) > 0) {
+        scores <- prot_summary$casanovo_mean_aa_score[match_idx]
+        scores <- scores[!is.na(scores)]
+        if (length(scores) > 0) mean(scores) else NA_real_
+      } else NA_real_
+    }, numeric(1))
+
+    values$y_protein$genes <- genes_df
+    message("[DDA] Added Casanovo annotation columns to y_protein$genes: ",
+            sum(genes_df$DeNovo_Confirmed > 0), " proteins with de novo confirmation")
+  })
+
+  # ============================================================================
   #    Group assignment for DDA samples
   # ============================================================================
   output$dda_group_assignment_ui <- renderUI({
@@ -585,6 +926,64 @@ server_dda <- function(input, output, session, values, add_to_log) {
             tags$small(style = "display: block; margin-top: 4px;",
               paste("Log dir:", file.path(values$dda_output_dir, "logs/")))
           }
+        )
+      }
+    )
+  })
+
+  # ============================================================================
+  #    Casanovo Status UI
+  # ============================================================================
+  output$dda_casanovo_status_ui <- renderUI({
+    status <- values$dda_casanovo_status %||% "disabled"
+
+    switch(status,
+      "disabled" = NULL,
+      "running" = {
+        jid <- values$dda_casanovo_job_id %||% "?"
+        convert_jid <- values$dda_casanovo_convert_job_id %||% "?"
+        div(
+          class = "alert alert-info",
+          style = "margin-top: 8px; border-left: 4px solid #6f42c1;",
+          icon("wand-magic-sparkles"),
+          paste(" Casanovo de novo running... Array job:", jid),
+          tags$br(),
+          tags$small(paste("MGF convert:", convert_jid, "| GPU array:", jid))
+        )
+      },
+      "loading" = {
+        div(
+          class = "alert alert-info",
+          style = "margin-top: 8px; border-left: 4px solid #6f42c1;",
+          icon("spinner", class = "fa-spin"),
+          " Loading Casanovo results..."
+        )
+      },
+      "done" = {
+        cls <- values$dda_casanovo_classification
+        n_psms <- if (!is.null(values$dda_casanovo_psms)) nrow(values$dda_casanovo_psms) else 0
+        div(
+          class = "alert alert-success",
+          style = "margin-top: 8px; border-left: 4px solid #6f42c1;",
+          icon("wand-magic-sparkles"),
+          paste(" Casanovo complete!", format(n_psms, big.mark = ","), "de novo sequences"),
+          if (!is.null(cls)) {
+            tags$div(
+              style = "margin-top: 4px; font-size: 12px;",
+              tags$strong(cls$summary_stats$n_confirmed), " confirmed (",
+              cls$summary_stats$pct_confirmed, "%) | ",
+              tags$strong(cls$summary_stats$n_novel), " novel (",
+              cls$summary_stats$pct_novel, "%)"
+            )
+          }
+        )
+      },
+      "error" = {
+        div(
+          class = "alert alert-warning",
+          style = "margin-top: 8px; border-left: 4px solid #6f42c1;",
+          icon("exclamation-triangle"),
+          " Casanovo failed. Sage results are unaffected."
         )
       }
     )

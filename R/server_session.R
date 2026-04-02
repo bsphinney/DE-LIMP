@@ -540,6 +540,10 @@ server_session <- function(input, output, session, values, add_to_log) {
         dda_qc_metrics          = values$dda_qc_metrics,
         dda_n_proteins_prefilter  = values$dda_n_proteins_prefilter,
         dda_n_proteins_postfilter = values$dda_n_proteins_postfilter,
+        # Casanovo de novo state
+        dda_casanovo_psms           = values$dda_casanovo_psms,
+        dda_casanovo_classification  = values$dda_casanovo_classification,
+        dda_casanovo_status          = values$dda_casanovo_status,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -667,6 +671,15 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$dda_status               <- "done"
         message("[Session] Restored DDA state: ",
                 nrow(session_data$dda_elist$E), " proteins")
+
+        # Restore Casanovo state
+        if (!is.null(session_data$dda_casanovo_psms)) {
+          values$dda_casanovo_psms           <- session_data$dda_casanovo_psms
+          values$dda_casanovo_classification <- session_data$dda_casanovo_classification
+          values$dda_casanovo_status         <- session_data$dda_casanovo_status %||% "done"
+          message("[Session] Restored Casanovo state: ",
+                  nrow(session_data$dda_casanovo_psms), " de novo PSMs")
+        }
       }
 
       # Restore repro log and append load event

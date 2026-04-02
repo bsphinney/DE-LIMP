@@ -543,3 +543,405 @@ compute_dda_qc_metrics <- function(psms, lfq_wide) {
     mass_error_ppm      = round(mass_error_median, 2)
   )
 }
+
+
+# ==============================================================================
+#  Casanovo de novo sequencing helpers
+# ==============================================================================
+
+#' Generate sbatch script for Casanovo de novo sequencing (GPU)
+#'
+#' Creates a two-phase sbatch: (1) convert .d to MGF via bruker_to_mgf.py,
+#' (2) run Casanovo sequence on each MGF file as an array job.
+#'
+#' @param raw_dir Directory containing .d files on HPC
+#' @param output_dir Output directory on HPC (casanovo/ subdir created)
+#' @param experiment_name Name for SLURM job
+#' @param conda_env_path Path to Casanovo conda environment
+#' @param model_ckpt Path to Casanovo model checkpoint
+#' @param converter_script Path to bruker_to_mgf.py on HPC
+#' @param n_files Number of .d files (for array job sizing)
+#' @param account SLURM account
+#' @param gpu_partition GPU partition name
+#' @param gpu_qos GPU QOS name
+#' @return List with $convert_script (MGF conversion sbatch) and $casanovo_script (sequencing sbatch)
+generate_casanovo_sbatch <- function(
+  raw_dir,
+  output_dir,
+  experiment_name  = "casanovo",
+  conda_env_path   = "/quobyte/proteomics-grp/conda_envs/cassonovo_env",
+  model_ckpt       = "/quobyte/proteomics-grp/bioinformatics_programs/casanovo_modles/casanovo_v4_2_0.ckpt",
+  converter_script = "/quobyte/proteomics-grp/de-limp/python/bruker_to_mgf.py",
+  n_files          = 1,
+  account          = "genome-center-grp",
+  gpu_partition    = "gpu-a100",
+  gpu_qos          = "genome-center-grp-gpu-a100-qos"
+) {
+  safe_name <- gsub("[^a-zA-Z0-9_.-]", "_", experiment_name)
+  casanovo_dir <- file.path(output_dir, "casanovo")
+  mgf_dir      <- file.path(casanovo_dir, "mgf")
+  mztab_dir    <- file.path(casanovo_dir, "mztab")
+  logs_dir     <- file.path(output_dir, "logs")
+
+  # ---- Step 1: MGF conversion (CPU, no GPU needed) ----
+  convert_script <- paste0(
+'#!/bin/bash
+#SBATCH --job-name=delimp_mgf_', safe_name, '
+#SBATCH --partition=high
+#SBATCH --account=', account, '
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=01:00:00
+#SBATCH --output="', logs_dir, '/mgf_convert_%j.out"
+#SBATCH --error="', logs_dir, '/mgf_convert_%j.err"
+
+set -euo pipefail
+echo "[DE-LIMP MGF] Start: $(date)"
+echo "[DE-LIMP MGF] Node: $(hostname)"
+
+CONDA_ENV="', conda_env_path, '"
+RAW_DIR="', raw_dir, '"
+MGF_DIR="', mgf_dir, '"
+
+mkdir -p "$MGF_DIR"
+
+# Activate conda environment for timsrust_pyo3
+export PATH="$CONDA_ENV/bin:$PATH"
+
+# Convert all .d files to MGF
+python "', converter_script, '" "$RAW_DIR" "$MGF_DIR" --batch --min-peaks 6 -v
+
+# List generated MGF files for the array job
+ls -1 "$MGF_DIR"/*.mgf > "', casanovo_dir, '/mgf_file_list.txt"
+N_MGF=$(wc -l < "', casanovo_dir, '/mgf_file_list.txt")
+echo "[DE-LIMP MGF] Converted $N_MGF files to MGF"
+echo "[DE-LIMP MGF] Done: $(date)"
+')
+
+  # ---- Step 2: Casanovo sequencing (GPU array job, 1 per file) ----
+  casanovo_script <- paste0(
+'#!/bin/bash
+#SBATCH --job-name=delimp_casanovo_', safe_name, '
+#SBATCH --partition=', gpu_partition, '
+#SBATCH --account=', account, '
+#SBATCH --qos=', gpu_qos, '
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --gres=gpu:1
+#SBATCH --time=01:30:00
+#SBATCH --array=1-', n_files, '
+#SBATCH --output="', logs_dir, '/casanovo_%A_%a.out"
+#SBATCH --error="', logs_dir, '/casanovo_%A_%a.err"
+
+set -euo pipefail
+echo "[DE-LIMP Casanovo] Task ${SLURM_ARRAY_TASK_ID} start: $(date)"
+echo "[DE-LIMP Casanovo] Node: $(hostname)"
+echo "[DE-LIMP Casanovo] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo unknown)"
+
+CONDA_ENV="', conda_env_path, '"
+MODEL="', model_ckpt, '"
+MGF_DIR="', mgf_dir, '"
+MZTAB_DIR="', mztab_dir, '"
+
+mkdir -p "$MZTAB_DIR"
+
+# Activate conda environment
+export PATH="$CONDA_ENV/bin:$PATH"
+
+# Get the MGF file for this array task
+MGF_FILE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "', casanovo_dir, '/mgf_file_list.txt")
+if [ -z "$MGF_FILE" ]; then
+  echo "[ERROR] No MGF file for task ${SLURM_ARRAY_TASK_ID}"
+  exit 1
+fi
+
+BASENAME=$(basename "$MGF_FILE" .mgf)
+OUTPUT_FILE="$MZTAB_DIR/${BASENAME}_sequence.mztab"
+
+echo "[DE-LIMP Casanovo] Processing: $MGF_FILE"
+echo "[DE-LIMP Casanovo] Output: $OUTPUT_FILE"
+
+# Run Casanovo de novo sequencing
+casanovo sequence --model "$MODEL" --output "$OUTPUT_FILE" "$MGF_FILE"
+
+echo "[DE-LIMP Casanovo] Task ${SLURM_ARRAY_TASK_ID} done: $(date)"
+')
+
+  list(
+    convert_script  = convert_script,
+    casanovo_script = casanovo_script,
+    casanovo_dir    = casanovo_dir,
+    mgf_dir         = mgf_dir,
+    mztab_dir       = mztab_dir
+  )
+}
+
+
+#' Parse Casanovo mzTab output files
+#'
+#' Extracts PSM rows from mzTab format. Each row has a de novo predicted
+#' peptide sequence with confidence score and per-residue amino acid scores.
+#'
+#' @param mztab_paths Character vector of .mztab file paths
+#' @param score_threshold Minimum confidence score (default -0.5, Casanovo uses negative log-prob)
+#' @return data.table with columns: sequence, seq_stripped, seq_norm, score,
+#'   aa_scores, charge, exp_mz, calc_mz, source_file, psm_id
+parse_casanovo_mztab <- function(mztab_paths, score_threshold = -Inf) {
+  results <- lapply(mztab_paths, function(path) {
+    if (!file.exists(path)) {
+      message("[Casanovo] File not found: ", path)
+      return(NULL)
+    }
+
+    lines <- readLines(path, warn = FALSE)
+
+    # Find PSH (header) line
+    psh_idx <- which(startsWith(lines, "PSH"))
+    if (length(psh_idx) == 0) {
+      message("[Casanovo] No PSH header in: ", basename(path))
+      return(NULL)
+    }
+
+    # Parse header
+    header <- strsplit(lines[psh_idx[1]], "\t")[[1]]
+
+    # Find PSM rows
+    psm_idx <- which(startsWith(lines, "PSM"))
+    if (length(psm_idx) == 0) {
+      message("[Casanovo] No PSM rows in: ", basename(path))
+      return(NULL)
+    }
+
+    # Parse PSM rows
+    psm_data <- do.call(rbind, lapply(psm_idx, function(i) {
+      strsplit(lines[i], "\t")[[1]]
+    }))
+    colnames(psm_data) <- header
+
+    df <- as.data.frame(psm_data, stringsAsFactors = FALSE)
+
+    # Extract key columns (column names from mzTab spec)
+    # sequence, PSM_ID, search_engine_score[1], charge, exp_mass_to_charge,
+    # calc_mass_to_charge, opt_ms_run[1]_aa_scores
+    out <- data.frame(
+      sequence     = df$sequence,
+      psm_id       = as.integer(df$PSM_ID),
+      score        = as.numeric(df[["search_engine_score[1]"]]),
+      charge       = as.integer(df$charge),
+      exp_mz       = as.numeric(df$exp_mass_to_charge),
+      calc_mz      = as.numeric(df$calc_mass_to_charge),
+      source_file  = basename(tools::file_path_sans_ext(path)),
+      stringsAsFactors = FALSE
+    )
+
+    # Per-residue AA scores (if present)
+    aa_col <- grep("aa_scores", names(df), value = TRUE)
+    if (length(aa_col) > 0) {
+      out$aa_scores <- df[[aa_col[1]]]
+    } else {
+      out$aa_scores <- NA_character_
+    }
+
+    out
+  })
+
+  # Combine all files
+  combined <- do.call(rbind, results[!vapply(results, is.null, logical(1))])
+
+  if (is.null(combined) || nrow(combined) == 0) {
+    message("[Casanovo] No PSMs parsed from any file")
+    return(data.table::data.table(
+      sequence = character(0), psm_id = integer(0), score = numeric(0),
+      charge = integer(0), exp_mz = numeric(0), calc_mz = numeric(0),
+      source_file = character(0), aa_scores = character(0),
+      seq_stripped = character(0), seq_norm = character(0),
+      mean_aa_score = numeric(0)
+    ))
+  }
+
+  dt <- data.table::as.data.table(combined)
+
+  # Filter by score threshold
+  if (is.finite(score_threshold)) {
+    dt <- dt[score >= score_threshold]
+  }
+
+  # Strip modifications: PEPTIDE[+15.995] -> PEPTIDE, M+15.995FLLK -> MFLLK
+  dt$seq_stripped <- gsub("\\+[0-9.]+", "", dt$sequence)
+  dt$seq_stripped <- gsub("\\[|\\]", "", dt$seq_stripped)
+
+  # I/L normalization for cross-reference (leucine = isoleucine in MS)
+  dt$seq_norm <- gsub("I", "L", dt$seq_stripped)
+
+  # Compute mean per-residue AA score
+  dt$mean_aa_score <- vapply(dt$aa_scores, function(s) {
+    if (is.na(s) || !nzchar(s) || s == "null") return(NA_real_)
+    vals <- as.numeric(strsplit(s, ",")[[1]])
+    if (length(vals) == 0 || all(is.na(vals))) return(NA_real_)
+    mean(vals, na.rm = TRUE)
+  }, numeric(1))
+
+  message("[Casanovo] Parsed ", nrow(dt), " PSMs from ", length(mztab_paths), " files")
+  dt
+}
+
+
+#' Cross-reference Casanovo de novo results against Sage database search PSMs
+#'
+#' Classifies each Casanovo sequence as:
+#'   - "confirmed": exact match to a Sage FDR-passing peptide (I/L normalized)
+#'   - "novel": no match in Sage results (potential novel peptide)
+#'
+#' @param casanovo_dt data.table from parse_casanovo_mztab()
+#' @param sage_psms Filtered PSM data.table from parse_sage_results()$psms
+#' @return List with:
+#'   $classified: full casanovo_dt with match_type column
+#'   $confirmed: confirmed-only rows with protein mapping
+#'   $novel: novel-only rows
+#'   $protein_summary: per-protein Casanovo confirmation stats
+#'   $summary_stats: overall classification counts
+classify_dda_denovo <- function(casanovo_dt, sage_psms) {
+  if (is.null(casanovo_dt) || nrow(casanovo_dt) == 0) {
+    return(list(
+      classified     = casanovo_dt,
+      confirmed      = casanovo_dt[0, ],
+      novel          = casanovo_dt[0, ],
+      protein_summary = data.frame(
+        proteins = character(0),
+        n_casanovo_confirmed = integer(0),
+        casanovo_max_score = numeric(0),
+        casanovo_mean_aa_score = numeric(0),
+        stringsAsFactors = FALSE
+      ),
+      summary_stats  = list(
+        n_total = 0L, n_confirmed = 0L, n_novel = 0L,
+        pct_confirmed = 0, pct_novel = 0
+      )
+    ))
+  }
+
+  # Normalize Sage peptides for I/L matching
+  sage_peps_norm <- unique(gsub("I", "L", sage_psms$peptide))
+
+  # Classify each Casanovo sequence
+  casanovo_dt$match_type <- ifelse(
+    casanovo_dt$seq_norm %in% sage_peps_norm, "confirmed", "novel"
+  )
+
+  # Map confirmed sequences back to Sage protein groups
+  pep_to_protein <- unique(
+    data.frame(
+      peptide  = sage_psms$peptide,
+      proteins = sage_psms$proteins,
+      stringsAsFactors = FALSE
+    )
+  )
+  pep_to_protein$seq_norm <- gsub("I", "L", pep_to_protein$peptide)
+
+  confirmed <- merge(
+    casanovo_dt[casanovo_dt$match_type == "confirmed", ],
+    pep_to_protein[, c("seq_norm", "proteins")],
+    by = "seq_norm", all.x = TRUE
+  )
+
+  novel <- casanovo_dt[casanovo_dt$match_type == "novel", ]
+
+  # Per-protein summary
+  if (nrow(confirmed) > 0 && any(!is.na(confirmed$proteins))) {
+    confirmed_mapped <- confirmed[!is.na(confirmed$proteins), ]
+
+    protein_summary <- data.frame(
+      proteins = unique(confirmed_mapped$proteins),
+      stringsAsFactors = FALSE
+    )
+    protein_summary$n_casanovo_confirmed <- vapply(
+      protein_summary$proteins,
+      function(p) length(unique(confirmed_mapped$seq_norm[confirmed_mapped$proteins == p])),
+      integer(1)
+    )
+    protein_summary$casanovo_max_score <- vapply(
+      protein_summary$proteins,
+      function(p) max(confirmed_mapped$score[confirmed_mapped$proteins == p], na.rm = TRUE),
+      numeric(1)
+    )
+    protein_summary$casanovo_mean_aa_score <- vapply(
+      protein_summary$proteins,
+      function(p) {
+        scores <- confirmed_mapped$mean_aa_score[confirmed_mapped$proteins == p]
+        scores <- scores[!is.na(scores)]
+        if (length(scores) == 0) return(NA_real_)
+        mean(scores)
+      },
+      numeric(1)
+    )
+  } else {
+    protein_summary <- data.frame(
+      proteins = character(0),
+      n_casanovo_confirmed = integer(0),
+      casanovo_max_score = numeric(0),
+      casanovo_mean_aa_score = numeric(0),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  # Summary stats
+  n_total     <- nrow(casanovo_dt)
+  n_confirmed <- sum(casanovo_dt$match_type == "confirmed")
+  n_novel     <- sum(casanovo_dt$match_type == "novel")
+
+  summary_stats <- list(
+    n_total       = n_total,
+    n_confirmed   = n_confirmed,
+    n_novel       = n_novel,
+    pct_confirmed = round(100 * n_confirmed / max(n_total, 1), 1),
+    pct_novel     = round(100 * n_novel / max(n_total, 1), 1),
+    n_proteins_with_denovo = nrow(protein_summary)
+  )
+
+  message(sprintf(
+    "[Casanovo] Classification: %d total, %d confirmed (%.1f%%), %d novel (%.1f%%)",
+    n_total, n_confirmed, summary_stats$pct_confirmed,
+    n_novel, summary_stats$pct_novel
+  ))
+
+  list(
+    classified      = casanovo_dt,
+    confirmed       = confirmed,
+    novel           = novel,
+    protein_summary = protein_summary,
+    summary_stats   = summary_stats
+  )
+}
+
+
+#' Generate Casanovo submit_all.sh launcher script
+#'
+#' Creates a shell script that submits MGF conversion first, then Casanovo
+#' array job with dependency on conversion completing.
+#'
+#' @param convert_sbatch_path Remote path to MGF conversion sbatch
+#' @param casanovo_sbatch_path Remote path to Casanovo sbatch
+#' @return Character string: launcher script content
+generate_casanovo_launcher <- function(convert_sbatch_path, casanovo_sbatch_path) {
+  paste0(
+'#!/bin/bash
+set -euo pipefail
+
+# Step 1: Submit MGF conversion
+CONVERT_OUT=$(sbatch "', convert_sbatch_path, '")
+CONVERT_ID=$(echo "$CONVERT_OUT" | grep -oP "[0-9]+$")
+echo "CONVERT:${CONVERT_ID}"
+
+# Step 2: Submit Casanovo with dependency on conversion
+CASANOVO_OUT=$(sbatch --dependency=afterok:${CONVERT_ID} "', casanovo_sbatch_path, '")
+CASANOVO_ID=$(echo "$CASANOVO_OUT" | grep -oP "[0-9]+$")
+echo "CASANOVO:${CASANOVO_ID}"
+
+echo "MGF conversion job: ${CONVERT_ID}"
+echo "Casanovo sequencing job: ${CASANOVO_ID} (depends on ${CONVERT_ID})"
+')
+}

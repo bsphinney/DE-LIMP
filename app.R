@@ -511,6 +511,14 @@ server <- function(input, output, session) {
     dda_search_params   = list(),   # config snapshot for methods text
     dda_n_proteins_prefilter  = NULL,
     dda_n_proteins_postfilter = NULL,
+    dda_qc_metrics            = NULL,     # DDA QC metrics
+    # Casanovo de novo sequencing
+    dda_casanovo_job_id        = NULL,    # SLURM array job ID
+    dda_casanovo_convert_job_id = NULL,   # MGF conversion job ID
+    dda_casanovo_status        = "disabled",  # "disabled"|"running"|"loading"|"done"|"error"
+    dda_casanovo_mztab_dir     = NULL,    # Remote path to mztab output dir
+    dda_casanovo_psms          = NULL,    # data.table: parsed de novo PSMs
+    dda_casanovo_classification = NULL,   # List from classify_dda_denovo()
     # App metadata
     app_version = app_version,
     community_stats = community_stats
