@@ -2442,21 +2442,60 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       ),
       nav_panel("Casanovo", value = "casanovo_denovo_tab", icon = icon("wand-magic-sparkles"),
         div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+
+          # --- Confidence threshold slider ---
+          div(style = "background: linear-gradient(135deg, #f0f4ff 0%, #e8eeff 100%); border: 1px solid #c5cfe8; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;",
+            div(style = "display: flex; align-items: center; gap: 16px; flex-wrap: wrap;",
+              div(style = "flex: 0 0 340px;",
+                sliderInput("dda_denovo_score_threshold",
+                  label = tags$span(icon("sliders-h"), " Confidence Threshold"),
+                  min = 0.5, max = 1.0, value = 0.9, step = 0.01, width = "100%")
+              ),
+              div(style = "flex: 1; min-width: 200px;",
+                uiOutput("dda_denovo_threshold_count")
+              )
+            )
+          ),
+
+          # --- Manuscript summary statistics (collapsible, Priority 5) ---
+          tags$details(
+            style = "margin-bottom: 12px; border: 1px solid #d4e5d4; border-radius: 8px; background: #f8fdf8;",
+            tags$summary(
+              style = "padding: 10px 16px; cursor: pointer; font-weight: 600; color: #2d6a2d;",
+              icon("table"), " Manuscript Summary Statistics (Table 1)"
+            ),
+            div(style = "padding: 12px 16px;",
+              DT::DTOutput("dda_manuscript_summary")
+            )
+          ),
+
           uiOutput("dda_denovo_summary_cards"),
           navset_card_tab(
             nav_panel("Confirmed Peptides",
-              DT::DTOutput("dda_denovo_confirmed_table")),
+              DT::DTOutput("dda_denovo_confirmed_table"),
+              # Per-residue confidence visualization (Priority 2)
+              tags$div(id = "dda_confirmed_residue_viz",
+                style = "min-height: 20px;")
+            ),
             nav_panel("Novel Peptides",
-              DT::DTOutput("dda_denovo_novel_table")),
+              DT::DTOutput("dda_denovo_novel_table"),
+              # Per-residue confidence visualization (Priority 2)
+              tags$div(id = "dda_novel_residue_viz",
+                style = "min-height: 20px;")
+            ),
             nav_panel("DIAMOND BLAST",
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
-                # Action bar
+                # Action bar + contaminant exclusion checkbox (Priority 1)
                 div(style = "margin-bottom: 15px;",
                   div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
                     actionButton("dda_run_diamond_blast", "Run DIAMOND BLAST",
                       icon = icon("search"), class = "btn-info btn-sm"),
                     tags$small(style = "color: #6c757d;",
-                      "BLASTs novel peptides against UniProt SwissProt (572k reviewed proteins) on HPC.")
+                      "BLASTs novel peptides against UniProt SwissProt (572k reviewed proteins) on HPC."),
+                    div(style = "margin-left: auto;",
+                      checkboxInput("dda_exclude_contaminants",
+                        "Exclude contaminant proteins", value = TRUE, width = "auto")
+                    )
                   )
                 ),
                 # Summary cards
@@ -2489,7 +2528,132 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 DT::DTOutput("dda_denovo_blast_table")
               )),
             nav_panel("Score Distribution",
-              plotlyOutput("dda_denovo_score_dist", height = "400px"))
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                plotlyOutput("dda_denovo_score_dist", height = "400px"),
+                # Priority 3: Length and Charge QC
+                tags$h5(icon("ruler"), " Peptide Length Distribution",
+                  style = "margin-top: 20px; color: #333;"),
+                plotlyOutput("dda_denovo_length_charge_qc", height = "350px"),
+                tags$h5(icon("bolt"), " Charge State Distribution",
+                  style = "margin-top: 16px; color: #333;"),
+                plotlyOutput("dda_denovo_charge_dist", height = "300px"),
+                uiOutput("dda_denovo_qc_summary")
+              )
+            ),
+            nav_panel("Modifications",
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                tags$h5(icon("flask"), " Post-Translational Modifications",
+                  style = "margin-bottom: 12px; color: #333;"),
+                tags$p(style = "color: #666; font-size: 0.9em; margin-bottom: 12px;",
+                  "Modification analysis from de novo sequences. ",
+                  "In paleoproteomics, high N-deamidation with low Q-deamidation ",
+                  "indicates genuine ancient protein (time-dependent asparagine degradation)."),
+                uiOutput("dda_denovo_modifications"),
+                plotlyOutput("dda_denovo_mod_bar", height = "350px")
+              )
+            ),
+            nav_panel("GO/Functional",
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                uiOutput("dda_denovo_go_summary"),
+                plotlyOutput("dda_denovo_go_bar", height = "400px"),
+                DT::DTOutput("dda_denovo_go_table")
+              )),
+            nav_panel("Disagreements",
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                uiOutput("dda_denovo_disagree_summary"),
+                DT::DTOutput("dda_denovo_disagree_table")
+              )),
+            # ---- Advanced Analysis sub-tabs (server_denovo_viz.R) ----
+            nav_panel("BLAST Alignment", icon = icon("align-left"),
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
+                  tags$p(style = "margin: 0; color: #1565c0;",
+                    icon("info-circle"),
+                    " Click ", tags$strong("Align"), " on any near-match peptide (90-99% identity) ",
+                    "in the DIAMOND BLAST table to see the alignment with per-residue confidence scoring. ",
+                    "Green = genuine variant (AA score > 0.95), Red = possible sequencing error (AA score < 0.70)."
+                  )
+                ),
+                tags$p(style = "color: #666; font-size: 13px;",
+                  "This view cross-references BLAST mismatches with Casanovo's per-residue amino acid ",
+                  "confidence scores to distinguish species-specific markers from sequencing artifacts.")
+              )),
+            nav_panel("Target-Decoy FDR", icon = icon("chart-line"),
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "margin-bottom: 15px;",
+                  div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
+                    actionButton("denovo_viz_calc_fdr", "Calculate FDR",
+                      icon = icon("chart-line"), class = "btn-warning btn-sm"),
+                    tags$small(style = "color: #6c757d;",
+                      "Submits reversed peptide BLAST to estimate de novo FDR (requires SSH)."),
+                    uiOutput("denovo_fdr_status")
+                  )
+                ),
+                div(style = "background: #fff3e0; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
+                  tags$p(style = "margin: 0; color: #e65100; font-size: 13px;",
+                    icon("info-circle"),
+                    " Target-decoy approach: reversed peptide sequences are BLASTed against the same ",
+                    "SwissProt database. At each identity threshold, FDR = reversed_hits / forward_hits. ",
+                    "This is the best available FDR proxy for de novo sequencing without a database."
+                  )
+                ),
+                plotlyOutput("denovo_fdr_curve", height = "400px"),
+                plotlyOutput("denovo_fdr_hits", height = "300px")
+              )),
+            nav_panel("Cross-Species", icon = icon("globe"),
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "background: #f3e5f5; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
+                  tags$p(style = "margin: 0; color: #6a1b9a; font-size: 13px;",
+                    icon("globe"),
+                    " Cross-species comparison of de novo peptides. Requires BLAST results ",
+                    "from multiple samples (e.g., feather samples from different bird species)."
+                  )
+                ),
+                div(class = "row", style = "margin-bottom: 12px;",
+                  div(class = "col-md-4",
+                    selectInput("denovo_venn_sample1", "Sample 1:", choices = NULL, width = "100%")
+                  ),
+                  div(class = "col-md-4",
+                    selectInput("denovo_venn_sample2", "Sample 2:", choices = NULL, width = "100%")
+                  )
+                ),
+                div(class = "row",
+                  div(class = "col-md-5",
+                    plotlyOutput("denovo_species_venn", height = "400px")),
+                  div(class = "col-md-7",
+                    plotlyOutput("denovo_species_heatmap", height = "400px"))
+                ),
+                tags$h5(icon("table"), " Per-Protein Cross-Sample Comparison",
+                  style = "margin-top: 16px;"),
+                DT::DTOutput("denovo_protein_comparison")
+              )),
+            nav_panel("Protein Families", icon = icon("sitemap"),
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
+                  tags$p(style = "margin: 0; color: #2e7d32; font-size: 13px;",
+                    icon("sitemap"),
+                    " Protein family classification of BLAST hits. Groups proteins into ",
+                    "biological families (keratins, collagens, histones, etc.) for interpretation."
+                  )
+                ),
+                plotlyOutput("denovo_family_bar", height = "400px"),
+                plotlyOutput("denovo_family_treemap", height = "500px")
+              )),
+            nav_panel("Sequence Coverage", icon = icon("ruler-horizontal"),
+              div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "background: #e0f2f1; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
+                  tags$p(style = "margin: 0; color: #00695c; font-size: 13px;",
+                    icon("ruler-horizontal"),
+                    " Protein sequence coverage maps for top 20 proteins by peptide count. ",
+                    "Green = confirmed (100% identity), Orange = near-match (90-99%), ",
+                    "Red = distant (<90%)."
+                  )
+                ),
+                plotlyOutput("denovo_coverage_plot", height = "600px"),
+                tags$h5(icon("list"), " Peptide-Protein Mapping Details",
+                  style = "margin-top: 16px;"),
+                DT::DTOutput("denovo_coverage_detail")
+              ))
           )
         )
       ),

@@ -1987,7 +1987,7 @@ echo "[DIAMOND] Done: $(date)"
       display_df,
       rownames = FALSE,
       filter   = "top",
-      selection = "multiple",
+      selection = "single",
       options  = list(
         pageLength = 25,
         scrollX    = TRUE,
@@ -1996,7 +1996,11 @@ echo "[DIAMOND] Done: $(date)"
         buttons    = list("csv", "excel")
       ),
       extensions = "Buttons",
-      caption = "Confirmed: Casanovo de novo peptides matching Sage database search results (I/L normalized)"
+      caption = htmltools::tags$caption(
+        style = "caption-side: top;",
+        "Confirmed: Casanovo de novo peptides matching Sage database search results (I/L normalized). ",
+        tags$em(style = "color: #6c757d;", "Click a row to see per-residue confidence coloring.")
+      )
     )
   })
 
@@ -2023,6 +2027,10 @@ echo "[DIAMOND] Done: $(date)"
     # Append DIAMOND BLAST results if available
     blast <- values$dda_casanovo_blast
     if (!is.null(blast) && nrow(blast) > 0) {
+      # Normalize identity column name
+      if ("identity" %in% names(blast) && !"pident" %in% names(blast)) {
+        blast$pident <- blast$identity
+      }
       blast_dedup <- blast[!duplicated(blast$peptide), ]
       blast_map    <- stats::setNames(blast_dedup$subject, blast_dedup$peptide)
       identity_map <- stats::setNames(blast_dedup$pident, blast_dedup$peptide)
@@ -2037,7 +2045,7 @@ echo "[DIAMOND] Done: $(date)"
       display_df,
       rownames = FALSE,
       filter   = "top",
-      selection = "multiple",
+      selection = "single",
       options  = list(
         pageLength = 25,
         scrollX    = TRUE,
@@ -2048,7 +2056,8 @@ echo "[DIAMOND] Done: $(date)"
       extensions = "Buttons",
       caption = htmltools::tags$caption(
         style = "caption-side: top; color: #e67e22; font-weight: bold;",
-        "Novel: Casanovo de novo peptides NOT found in Sage results.",
+        "Novel: Casanovo de novo peptides NOT found in Sage results. ",
+        tags$em(style = "color: #6c757d; font-weight: normal;", "Click a row to see per-residue confidence."),
         tags$br(),
         tags$small(
           style = "color: #666; font-weight: normal;",
@@ -2063,11 +2072,17 @@ echo "[DIAMOND] Done: $(date)"
   #    BLAST Results Visualization (comprehensive SwissProt BLAST view)
   # ==========================================================================
 
-  # Helper: ensure species + category columns exist on blast data
+  # Helper: ensure species + category + contaminant_type columns exist on blast data
   blast_with_species <- reactive({
     req(values$dda_casanovo_blast)
     blast <- values$dda_casanovo_blast
     req(nrow(blast) > 0)
+
+    # Normalize identity column name (HPC load path uses "pident", DIAMOND path uses "identity")
+    if ("identity" %in% names(blast) && !"pident" %in% names(blast)) {
+      blast$pident <- blast$identity
+    }
+
     # Parse species from SwissProt IDs if not already done
     if (!"species" %in% names(blast)) {
       blast$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
@@ -2078,16 +2093,61 @@ echo "[DIAMOND] Done: $(date)"
         ifelse(blast$pident >= 90, "Near-match", "Distant")
       )
     }
-    # Flag known contaminant proteins (keratins, trypsin, BSA, etc.)
-    contam_patterns <- "^Cont_|KRT\\d|K1C\\d|K2C\\d|K22|TRYP_|ALBU_BOVIN|CASA|TRFE_BOVIN|CAS[12]_BOVIN"
-    blast$is_contaminant <- grepl(contam_patterns, blast$subject, ignore.case = TRUE)
+
+    # --- Contaminant classification (paleoproteomics-aware) ---
+    # Parse protein name from SwissProt ID: sp|ACC|PROT_SPECIES -> PROT
+    blast$protein_name_raw <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+
+    # Known human keratins (definite contaminant at 100% identity)
+    human_keratin_pattern <- "^(KRT[0-9]|K1C[0-9]|K2C[0-9]|K22[EO]|KR[0-9])"
+    # Common lab contaminant proteins
+    lab_contam_pattern <- "TRYP_|TRYL_|ALBU_BOVIN|CAS[12]_BOVIN|CASA[12]_BOVIN|TRFE_BOVIN|ACTB_|TBB5_|ACTG_"
+    # Common contaminant species
+    contam_species <- c("HUMAN", "MOUSE", "BOVIN", "SHEEP", "RAT", "PIG")
+
+    blast$contaminant_type <- vapply(seq_len(nrow(blast)), function(i) {
+      sp <- blast$species[i]
+      prot <- blast$protein_name_raw[i]
+      pid <- blast$pident[i]
+
+      is_keratin <- grepl(human_keratin_pattern, prot, ignore.case = TRUE)
+      is_lab_contam <- grepl(lab_contam_pattern, blast$subject[i], ignore.case = TRUE)
+
+      if (pid >= 99.5 && (is_keratin || is_lab_contam)) {
+        # 100% identity to known contaminant proteins = definite contaminant
+        return("Definite")
+      }
+      if (pid >= 85 && pid < 99.5 && sp == "HUMAN" && is_keratin) {
+        # 85-95% to human keratin = likely avian keratin with no closer reference (NOT contaminant)
+        return("Sample")
+      }
+      if (pid >= 99.5 && sp %in% contam_species) {
+        # 100% identity to common contaminant species (non-keratin) = possible contaminant
+        return("Possible")
+      }
+      "Sample"
+    }, character(1))
+
+    # Legacy flag for backward compat
+    blast$is_contaminant <- blast$contaminant_type %in% c("Definite", "Possible")
+    blast
+  })
+
+  # Filtered blast reactive (respects contaminant exclusion checkbox)
+  blast_filtered <- reactive({
+    blast <- blast_with_species()
+    exclude <- input$dda_exclude_contaminants %||% TRUE
+    if (isTRUE(exclude)) {
+      blast <- blast[blast$contaminant_type != "Definite", ]
+    }
     blast
   })
 
   # --- Summary cards ---
   output$dda_blast_summary_cards <- renderUI({
-    blast <- blast_with_species()
-    req(nrow(blast) > 0)
+    blast_all <- blast_with_species()
+    blast <- blast_filtered()
+    req(nrow(blast_all) > 0)
     novel <- values$dda_casanovo_classification$novel
     n_novel <- length(unique(novel$seq_stripped))
     n_with_hits <- length(unique(blast$peptide))
@@ -2099,35 +2159,49 @@ echo "[DIAMOND] Done: $(date)"
     top_sp <- names(sort(table(best_hits$species), decreasing = TRUE))[1]
     mean_id <- round(mean(blast$pident, na.rm = TRUE), 1)
 
-    div(class = "row", style = "margin-bottom: 15px;",
-      div(class = "col-md-2",
-        div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; text-align: center;",
-          tags$h4(style = "margin: 0; color: #2e7d32;", n_novel),
-          tags$small("Novel peptides")
-        )
-      ),
-      div(class = "col-md-2",
-        div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; text-align: center;",
-          tags$h4(style = "margin: 0; color: #1565c0;", paste0(n_with_hits, " (", pct_hits, "%)")),
-          tags$small("With hits")
-        )
-      ),
-      div(class = "col-md-2",
-        div(style = "background: #fff3e0; padding: 12px; border-radius: 8px; text-align: center;",
-          tags$h4(style = "margin: 0; color: #e65100;", n_no_hits),
-          tags$small("No hits (truly novel)")
-        )
-      ),
-      div(class = "col-md-3",
-        div(style = "background: #f3e5f5; padding: 12px; border-radius: 8px; text-align: center;",
-          tags$h4(style = "margin: 0; color: #7b1fa2;", top_sp %||% "N/A"),
-          tags$small("Top species")
-        )
-      ),
-      div(class = "col-md-3",
-        div(style = "background: #fce4ec; padding: 12px; border-radius: 8px; text-align: center;",
-          tags$h4(style = "margin: 0; color: #c62828;", paste0(mean_id, "%")),
-          tags$small("Mean identity")
+    # Contaminant stats
+    n_definite <- sum(blast_all$contaminant_type == "Definite")
+    n_possible <- sum(blast_all$contaminant_type == "Possible")
+    contam_text <- paste0(n_definite, " definite")
+    if (n_possible > 0) contam_text <- paste0(contam_text, " + ", n_possible, " possible")
+
+    tagList(
+      div(class = "row", style = "margin-bottom: 15px;",
+        div(class = "col-md-2",
+          div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #2e7d32;", n_novel),
+            tags$small("Novel peptides")
+          )
+        ),
+        div(class = "col-md-2",
+          div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #1565c0;", paste0(n_with_hits, " (", pct_hits, "%)")),
+            tags$small("With hits")
+          )
+        ),
+        div(class = "col-md-2",
+          div(style = "background: #fff3e0; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #e65100;", n_no_hits),
+            tags$small("No hits (truly novel)")
+          )
+        ),
+        div(class = "col-md-2",
+          div(style = "background: #f3e5f5; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #7b1fa2;", top_sp %||% "N/A"),
+            tags$small("Top species")
+          )
+        ),
+        div(class = "col-md-2",
+          div(style = "background: #fce4ec; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #c62828;", paste0(mean_id, "%")),
+            tags$small("Mean identity")
+          )
+        ),
+        div(class = "col-md-2",
+          div(style = "background: #fff8e1; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #f57f17;", contam_text),
+            tags$small("Contaminants")
+          )
         )
       )
     )
@@ -2135,7 +2209,8 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Taxonomic breakdown: donut chart ---
   output$dda_blast_species_donut <- plotly::renderPlotly({
-    blast <- blast_with_species()
+    blast <- blast_filtered()
+    req(nrow(blast) > 0)
     # Best hit per peptide for species assignment
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide), ]
@@ -2165,7 +2240,8 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Taxonomic breakdown: bar chart ---
   output$dda_blast_species_bar <- plotly::renderPlotly({
-    blast <- blast_with_species()
+    blast <- blast_filtered()
+    req(nrow(blast) > 0)
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide), ]
 
@@ -2195,7 +2271,8 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Species summary text ---
   output$dda_blast_species_summary <- renderUI({
-    blast <- blast_with_species()
+    blast <- blast_filtered()
+    req(nrow(blast) > 0)
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide), ]
 
@@ -2214,7 +2291,8 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Identity distribution histogram (colored by species) ---
   output$dda_blast_identity_hist <- plotly::renderPlotly({
-    blast <- blast_with_species()
+    blast <- blast_filtered()
+    req(nrow(blast) > 0)
     # Best hit per peptide
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide), ]
@@ -2231,7 +2309,7 @@ echo "[DIAMOND] Done: $(date)"
     )
     names(colors) <- c(top5, "Other")
 
-    p <- ggplot2::ggplot(best_hits, ggplot2::aes(x = identity, fill = sp_group)) +
+    p <- ggplot2::ggplot(best_hits, ggplot2::aes(x = pident, fill = sp_group)) +
       ggplot2::geom_histogram(bins = 30, alpha = 0.85, position = "stack") +
       ggplot2::scale_fill_manual(values = colors) +
       ggplot2::geom_vline(xintercept = 90, linetype = "dashed", color = "#e65100", alpha = 0.7) +
@@ -2255,7 +2333,7 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Top proteins by peptide count ---
   output$dda_blast_top_proteins <- plotly::renderPlotly({
-    blast <- tryCatch(blast_with_species(), error = function(e) NULL)
+    blast <- tryCatch(blast_filtered(), error = function(e) NULL)
     req(!is.null(blast), nrow(blast) > 1)
 
     # Parse protein name + species for display
@@ -2298,7 +2376,7 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Peptide-Species heatmap ---
   output$dda_blast_heatmap <- plotly::renderPlotly({
-    blast <- tryCatch(blast_with_species(), error = function(e) NULL)
+    blast <- tryCatch(blast_filtered(), error = function(e) NULL)
     req(!is.null(blast), nrow(blast) > 1)
 
     # Best hit per peptide-species combination
@@ -2373,7 +2451,8 @@ echo "[DIAMOND] Done: $(date)"
       Length      = blast$length,
       E_Value     = formatC(blast$evalue, format = "e", digits = 2),
       Bitscore    = round(blast$bitscore, 1),
-      Contaminant = ifelse(blast$is_contaminant, "Yes", ""),
+      Contaminant = ifelse(blast$contaminant_type == "Sample", "",
+                     blast$contaminant_type),
       stringsAsFactors = FALSE
     )
 
@@ -2406,6 +2485,16 @@ echo "[DIAMOND] Done: $(date)"
         backgroundColor = DT::styleEqual(
           c("Conserved", "Near-match", "Distant"),
           c("#e8f5e9", "#fff3e0", "#fce4ec")
+        )
+      ) %>%
+      DT::formatStyle("Contaminant",
+        backgroundColor = DT::styleEqual(
+          c("Definite", "Possible"),
+          c("#ffcdd2", "#fff9c4")
+        ),
+        fontWeight = DT::styleEqual(
+          c("Definite", "Possible"),
+          c("bold", "normal")
         )
       )
   })
@@ -2447,6 +2536,554 @@ echo "[DIAMOND] Done: $(date)"
     plotly::ggplotly(p) %>%
       plotly::layout(
         legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)
+      )
+  })
+
+  # ==========================================================================
+  #    PRIORITY 2: Per-Residue Confidence Visualization
+  # ==========================================================================
+
+  # Click handler for confirmed peptide table
+  observeEvent(input$dda_denovo_confirmed_table_rows_selected, {
+    sel <- input$dda_denovo_confirmed_table_rows_selected
+    req(length(sel) > 0)
+    sel_row <- sel[length(sel)]  # Use last selected row
+
+    confirmed <- values$dda_casanovo_classification$confirmed
+    req(nrow(confirmed) >= sel_row)
+
+    row <- confirmed[sel_row, ]
+    html <- build_residue_confidence_html(row, values$dda_casanovo_blast)
+    shinyjs::html("dda_confirmed_residue_viz", html)
+  })
+
+  # Click handler for novel peptide table
+  observeEvent(input$dda_denovo_novel_table_rows_selected, {
+    sel <- input$dda_denovo_novel_table_rows_selected
+    req(length(sel) > 0)
+    sel_row <- sel[length(sel)]
+
+    novel <- values$dda_casanovo_classification$novel
+    req(nrow(novel) >= sel_row)
+
+    row <- novel[sel_row, ]
+    html <- build_residue_confidence_html(row, values$dda_casanovo_blast)
+    shinyjs::html("dda_novel_residue_viz", html)
+  })
+
+  # Helper: build per-residue colored HTML for a PSM row
+  build_residue_confidence_html <- function(row, blast_data = NULL) {
+    seq <- row$seq_stripped
+    aa_str <- row$aa_scores
+    score <- round(row$score, 3)
+    charge <- row$charge
+    mean_aa <- if (!is.null(row$mean_aa_score) && !is.na(row$mean_aa_score)) {
+      round(row$mean_aa_score, 3)
+    } else {
+      NA
+    }
+
+    # Parse per-residue scores
+    residues <- strsplit(seq, "")[[1]]
+    aa_vals <- if (!is.na(aa_str) && nzchar(aa_str) && aa_str != "null") {
+      as.numeric(strsplit(aa_str, ",")[[1]])
+    } else {
+      NULL
+    }
+
+    # Build colored sequence HTML
+    if (!is.null(aa_vals) && length(aa_vals) == length(residues)) {
+      colored_spans <- vapply(seq_along(residues), function(i) {
+        v <- aa_vals[i]
+        color <- if (is.na(v)) {
+          "#999999"
+        } else if (v >= 0.95) {
+          "#2e7d32"  # green
+        } else if (v >= 0.7) {
+          "#f9a825"  # yellow/amber
+        } else {
+          "#c62828"  # red
+        }
+        bg <- if (!is.na(v) && v < 0.7) {
+          "background: #fce4ec;"
+        } else {
+          ""
+        }
+        sprintf(
+          '<span style="color: %s; font-weight: bold; font-family: monospace; font-size: 1.3em; %s" title="%.3f">%s</span>',
+          color, bg, if (is.na(v)) 0 else v, residues[i]
+        )
+      }, character(1))
+      seq_html <- paste(colored_spans, collapse = "")
+    } else {
+      seq_html <- paste0(
+        '<span style="font-family: monospace; font-size: 1.3em; color: #555;">',
+        seq, '</span>')
+    }
+
+    # BLAST hit info if available
+    blast_html <- ""
+    if (!is.null(blast_data) && nrow(blast_data) > 0) {
+      clean_seq <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(seq))
+      hit <- blast_data[blast_data$peptide == clean_seq, ]
+      if (nrow(hit) > 0) {
+        hit <- hit[which.max(hit$bitscore), ]
+        prot_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", hit$subject))
+        acc <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", hit$subject)
+        blast_html <- sprintf(
+          '<div style="margin-top: 8px; padding: 8px; background: #e3f2fd; border-radius: 6px; font-size: 0.9em;">
+            <strong>BLAST Hit:</strong>
+            <a href="https://www.uniprot.org/uniprot/%s" target="_blank">%s</a>
+            (%s) | Identity: %.1f%% | E-value: %s
+          </div>',
+          acc, prot_name, hit$species,
+          hit$pident %||% hit$identity,
+          formatC(hit$evalue, format = "e", digits = 2)
+        )
+      }
+    }
+
+    # Legend
+    legend_html <- paste0(
+      '<div style="margin-top: 6px; font-size: 0.8em; color: #666;">',
+      '<span style="color: #2e7d32; font-weight: bold;">Green</span> >= 0.95 | ',
+      '<span style="color: #f9a825; font-weight: bold;">Yellow</span> 0.70-0.95 | ',
+      '<span style="color: #c62828; font-weight: bold;">Red</span> < 0.70 (potential error)',
+      '</div>'
+    )
+
+    # Stats line
+    stats_parts <- c(paste0("Score: ", score), paste0("Charge: ", charge, "+"))
+    if (!is.na(mean_aa)) stats_parts <- c(stats_parts, paste0("Mean AA: ", mean_aa))
+    if (!is.null(aa_vals)) {
+      n_high <- sum(aa_vals >= 0.95, na.rm = TRUE)
+      n_low <- sum(aa_vals < 0.7, na.rm = TRUE)
+      stats_parts <- c(stats_parts,
+        paste0(n_high, "/", length(aa_vals), " high-conf"),
+        if (n_low > 0) paste0(n_low, " low-conf") else NULL
+      )
+    }
+    stats_html <- paste0(
+      '<div style="margin-top: 4px; font-size: 0.85em; color: #444;">',
+      paste(stats_parts, collapse = " | "),
+      '</div>'
+    )
+
+    paste0(
+      '<div style="padding: 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; margin-top: 10px;">',
+      '<div style="margin-bottom: 6px; font-weight: 600; color: #333;">Per-Residue Confidence</div>',
+      seq_html, stats_html, legend_html, blast_html,
+      '</div>'
+    )
+  }
+
+  # ==========================================================================
+  #    PRIORITY 3: Length and Charge Distribution QC
+  # ==========================================================================
+
+  output$dda_denovo_length_charge_qc <- plotly::renderPlotly({
+    req(values$dda_casanovo_classification)
+    cls <- values$dda_casanovo_classification
+
+    confirmed <- cls$confirmed
+    novel <- cls$novel
+    req(nrow(confirmed) > 0 || nrow(novel) > 0)
+
+    # Compute peptide lengths
+    conf_lengths <- nchar(confirmed$seq_stripped)
+    novel_lengths <- nchar(novel$seq_stripped)
+
+    plot_df <- data.frame(
+      length = c(conf_lengths, novel_lengths),
+      type   = c(rep("Confirmed", length(conf_lengths)), rep("Novel", length(novel_lengths))),
+      stringsAsFactors = FALSE
+    )
+
+    colors <- c("Confirmed" = "#2ecc71", "Novel" = "#e67e22")
+
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = length, fill = type)) +
+      ggplot2::geom_histogram(bins = 30, alpha = 0.75, position = "dodge") +
+      ggplot2::scale_fill_manual(values = colors) +
+      ggplot2::geom_vline(xintercept = c(7, 25), linetype = "dashed", color = "#c62828", alpha = 0.5) +
+      ggplot2::annotate("rect", xmin = 7, xmax = 25, ymin = -Inf, ymax = Inf,
+        fill = "#e8f5e9", alpha = 0.15) +
+      ggplot2::annotate("text", x = 16, y = Inf, label = "Expected tryptic range (7-25)",
+        vjust = 1.5, color = "#2e7d32", size = 3.5) +
+      ggplot2::labs(
+        x = "Peptide Length (amino acids)",
+        y = "Count",
+        fill = "Type",
+        subtitle = sprintf("Confirmed: median %d aa | Novel: median %d aa",
+          as.integer(median(conf_lengths)), as.integer(median(novel_lengths)))
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "top")
+
+    plotly::ggplotly(p) %>%
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+  })
+
+  output$dda_denovo_charge_dist <- plotly::renderPlotly({
+    req(values$dda_casanovo_classification)
+    cls <- values$dda_casanovo_classification
+    confirmed <- cls$confirmed
+    novel <- cls$novel
+
+    plot_df <- data.frame(
+      charge = c(confirmed$charge, novel$charge),
+      type   = c(rep("Confirmed", nrow(confirmed)), rep("Novel", nrow(novel))),
+      stringsAsFactors = FALSE
+    )
+    plot_df$charge <- factor(plot_df$charge)
+
+    colors <- c("Confirmed" = "#2ecc71", "Novel" = "#e67e22")
+
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = charge, fill = type)) +
+      ggplot2::geom_bar(position = "dodge", alpha = 0.8) +
+      ggplot2::scale_fill_manual(values = colors) +
+      ggplot2::labs(
+        x = "Charge State",
+        y = "Count",
+        fill = "Type",
+        subtitle = "Expected: 2+ and 3+ dominant for tryptic peptides"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "top")
+
+    plotly::ggplotly(p) %>%
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+  })
+
+  output$dda_denovo_qc_summary <- renderUI({
+    req(values$dda_casanovo_classification)
+    cls <- values$dda_casanovo_classification
+    novel <- cls$novel
+    confirmed <- cls$confirmed
+
+    novel_lengths <- nchar(novel$seq_stripped)
+    novel_charges <- novel$charge
+    conf_lengths <- nchar(confirmed$seq_stripped)
+    conf_charges <- confirmed$charge
+
+    # Tryptic quality: length 7-25 and charge 2-3
+    novel_tryptic <- sum(novel_lengths >= 7 & novel_lengths <= 25 &
+                         novel_charges >= 2 & novel_charges <= 3)
+    novel_pct <- round(100 * novel_tryptic / max(nrow(novel), 1), 1)
+
+    conf_tryptic <- sum(conf_lengths >= 7 & conf_lengths <= 25 &
+                        conf_charges >= 2 & conf_charges <= 3)
+    conf_pct <- round(100 * conf_tryptic / max(nrow(confirmed), 1), 1)
+
+    # Flags
+    n_short <- sum(novel_lengths < 7)
+    n_long <- sum(novel_lengths > 25)
+    n_charge1 <- sum(novel_charges == 1)
+
+    flags <- character(0)
+    if (n_short > 0) flags <- c(flags, sprintf("%d novel peptides < 7 aa (unreliable)", n_short))
+    if (n_long > 0) flags <- c(flags, sprintf("%d novel peptides > 25 aa (unusual)", n_long))
+    if (n_charge1 > 0) flags <- c(flags, sprintf("%d novel peptides at 1+ charge (suspicious)", n_charge1))
+
+    tagList(
+      div(style = "padding: 12px; background: #f0f7ff; border-radius: 8px; margin-top: 10px;",
+        tags$p(style = "margin: 0; font-size: 0.95em;",
+          sprintf("%.1f%% of novel peptides have tryptic characteristics (length 7-25, charge 2-3+).", novel_pct),
+          sprintf(" Confirmed peptides: %.1f%%.", conf_pct)
+        ),
+        if (length(flags) > 0) {
+          tags$div(style = "margin-top: 8px;",
+            lapply(flags, function(f) {
+              tags$p(style = "margin: 2px 0; color: #c62828; font-size: 0.9em;",
+                icon("triangle-exclamation"), " ", f)
+            })
+          )
+        }
+      )
+    )
+  })
+
+  # ==========================================================================
+  #    PRIORITY 4: Modification Tracking (Deamidation as Authenticity Marker)
+  # ==========================================================================
+
+  output$dda_denovo_modifications <- renderUI({
+    req(values$dda_casanovo_psms)
+    psms <- values$dda_casanovo_psms
+    req(nrow(psms) > 0)
+
+    seqs <- psms$sequence
+
+    # Parse modification masses from sequences
+    # Patterns: N+0.984 (deamidation N), Q+0.984 (deamidation Q), M+15.995 (oxidation M)
+    # Also: [+mass] format
+
+    # Count residues and modifications
+    n_total_psms <- nrow(psms)
+
+    # Count N residues and N-deamidation (+0.984 after N)
+    n_N_residues <- sum(vapply(seqs, function(s) {
+      stripped <- gsub("\\+[0-9.]+", "", gsub("\\[|\\]", "", s))
+      nchar(gsub("[^N]", "", stripped))
+    }, integer(1)))
+
+    n_N_deamid <- sum(grepl("N[+]0\\.98[0-9]|N\\[\\+0\\.98[0-9]", seqs))
+
+    # Count Q residues and Q-deamidation
+    n_Q_residues <- sum(vapply(seqs, function(s) {
+      stripped <- gsub("\\+[0-9.]+", "", gsub("\\[|\\]", "", s))
+      nchar(gsub("[^Q]", "", stripped))
+    }, integer(1)))
+
+    n_Q_deamid <- sum(grepl("Q[+]0\\.98[0-9]|Q\\[\\+0\\.98[0-9]", seqs))
+
+    # Count M residues and oxidation (+15.995)
+    n_M_residues <- sum(vapply(seqs, function(s) {
+      stripped <- gsub("\\+[0-9.]+", "", gsub("\\[|\\]", "", s))
+      nchar(gsub("[^M]", "", stripped))
+    }, integer(1)))
+
+    n_M_oxidized <- sum(grepl("M[+]15\\.99[0-9]|M\\[\\+15\\.99[0-9]", seqs))
+
+    # Any PSM with any modification
+    n_modified_psms <- sum(grepl("[+][0-9]", seqs))
+
+    # Rates
+    n_deamid_rate <- if (n_N_residues > 0) round(100 * n_N_deamid / n_N_residues, 2) else 0
+    q_deamid_rate <- if (n_Q_residues > 0) round(100 * n_Q_deamid / n_Q_residues, 2) else 0
+    m_oxid_rate <- if (n_M_residues > 0) round(100 * n_M_oxidized / n_M_residues, 2) else 0
+    nq_ratio <- if (n_Q_deamid > 0) round(n_N_deamid / n_Q_deamid, 1) else
+      if (n_N_deamid > 0) "Inf" else "N/A"
+
+    # Authenticity assessment
+    authenticity_html <- ""
+    if (n_N_deamid > 0 || n_Q_deamid > 0) {
+      if (is.numeric(nq_ratio) && nq_ratio > 3) {
+        authenticity_html <- paste0(
+          '<div style="margin-top: 10px; padding: 10px; background: #e8f5e9; border-radius: 6px; border-left: 4px solid #2e7d32;">',
+          '<strong style="color: #2e7d32;">Authenticity signal detected:</strong> ',
+          'N/Q deamidation ratio = ', nq_ratio, '. ',
+          'High N-deamidation with low Q-deamidation is characteristic of genuine ancient proteins ',
+          '(spontaneous asparagine deamidation accumulates over time, while glutamine deamidation is more random).',
+          '</div>'
+        )
+      } else if (is.numeric(nq_ratio) && nq_ratio < 1.5) {
+        authenticity_html <- paste0(
+          '<div style="margin-top: 10px; padding: 10px; background: #fff3e0; border-radius: 6px; border-left: 4px solid #e65100;">',
+          '<strong style="color: #e65100;">Low authenticity signal:</strong> ',
+          'N/Q deamidation ratio = ', nq_ratio, '. ',
+          'Similar N and Q deamidation rates may indicate sample preparation artifacts ',
+          'rather than time-dependent degradation.',
+          '</div>'
+        )
+      }
+    }
+
+    tagList(
+      div(class = "row", style = "margin-bottom: 12px;",
+        div(class = "col-md-3",
+          div(style = "background: #f3e5f5; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #7b1fa2;",
+              paste0(n_modified_psms, "/", n_total_psms)),
+            tags$small("Modified PSMs")
+          )
+        ),
+        div(class = "col-md-3",
+          div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #2e7d32;",
+              paste0(n_deamid_rate, "%")),
+            tags$small(paste0("N-Deamidation (", n_N_deamid, "/", n_N_residues, " N)"))
+          )
+        ),
+        div(class = "col-md-3",
+          div(style = "background: #fff3e0; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #e65100;",
+              paste0(q_deamid_rate, "%")),
+            tags$small(paste0("Q-Deamidation (", n_Q_deamid, "/", n_Q_residues, " Q)"))
+          )
+        ),
+        div(class = "col-md-3",
+          div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; text-align: center;",
+            tags$h4(style = "margin: 0; color: #1565c0;",
+              paste0(m_oxid_rate, "%")),
+            tags$small(paste0("M-Oxidation (", n_M_oxidized, "/", n_M_residues, " M)"))
+          )
+        )
+      ),
+      HTML(authenticity_html)
+    )
+  })
+
+  # Modification types bar chart
+  output$dda_denovo_mod_bar <- plotly::renderPlotly({
+    req(values$dda_casanovo_psms)
+    psms <- values$dda_casanovo_psms
+    req(nrow(psms) > 0)
+
+    seqs <- psms$sequence
+
+    # Extract all modification masses
+    mod_masses <- unlist(regmatches(seqs, gregexpr("[A-Z][+][0-9.]+", seqs)))
+
+    if (length(mod_masses) == 0) {
+      return(plotly::plot_ly() %>% plotly::layout(
+        title = list(text = "No modifications detected", font = list(size = 14))))
+    }
+
+    # Classify modifications
+    mod_type <- vapply(mod_masses, function(m) {
+      mass <- as.numeric(sub("^[A-Z][+]", "", m))
+      aa <- substr(m, 1, 1)
+      if (abs(mass - 0.984) < 0.01 && aa == "N") return("N-Deamidation")
+      if (abs(mass - 0.984) < 0.01 && aa == "Q") return("Q-Deamidation")
+      if (abs(mass - 15.995) < 0.01) return("Oxidation (M)")
+      if (abs(mass - 57.021) < 0.01) return("Carbamidomethyl (C)")
+      if (abs(mass - 42.011) < 0.01) return("Acetylation")
+      paste0(aa, "+", round(mass, 3))
+    }, character(1))
+
+    mod_counts <- sort(table(mod_type), decreasing = TRUE)
+    top_n <- min(15, length(mod_counts))
+    mod_df <- data.frame(
+      Modification = factor(names(mod_counts)[seq_len(top_n)],
+        levels = rev(names(mod_counts)[seq_len(top_n)])),
+      Count = as.numeric(mod_counts[seq_len(top_n)]),
+      stringsAsFactors = FALSE
+    )
+
+    # Color deamidation types specially
+    mod_df$color <- ifelse(grepl("Deamid", mod_df$Modification), "#2e7d32",
+      ifelse(grepl("Oxid", mod_df$Modification), "#1565c0", "#7b1fa2"))
+
+    plotly::plot_ly(mod_df,
+      y = ~Modification, x = ~Count,
+      type = "bar", orientation = "h",
+      marker = list(color = mod_df$color)
+    ) %>%
+      plotly::layout(
+        title = list(text = "Modification Types", font = list(size = 14)),
+        xaxis = list(title = "PSM Count"),
+        yaxis = list(title = ""),
+        margin = list(l = 160)
+      )
+  })
+
+  # ==========================================================================
+  #    PRIORITY 5: Manuscript Summary Statistics Card
+  # ==========================================================================
+
+  output$dda_manuscript_summary <- DT::renderDT({
+    req(values$dda_casanovo_psms, values$dda_casanovo_classification)
+    psms <- values$dda_casanovo_psms
+    cls <- values$dda_casanovo_classification
+
+    confirmed <- cls$confirmed
+    novel <- cls$novel
+    blast <- values$dda_casanovo_blast
+
+    # Build per-source-file summary
+    source_files <- unique(psms$source_file)
+
+    summary_rows <- lapply(source_files, function(sf) {
+      sf_psms <- psms[psms$source_file == sf, ]
+      sf_conf <- confirmed[confirmed$source_file == sf, ]
+      sf_novel <- novel[novel$source_file == sf, ]
+
+      n_psms <- nrow(sf_psms)
+      n_conf <- nrow(sf_conf)
+      n_novel <- nrow(sf_novel)
+
+      # BLAST hits for this file's novel peptides
+      n_blast_hits <- 0
+      n_unique_proteins <- 0
+      if (!is.null(blast) && nrow(blast) > 0) {
+        novel_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(sf_novel$seq_stripped))
+        file_blast <- blast[blast$peptide %in% novel_seqs, ]
+        n_blast_hits <- length(unique(file_blast$peptide))
+        n_unique_proteins <- length(unique(file_blast$protein))
+      }
+
+      # Contaminant % from BLAST
+      contam_pct <- 0
+      if (!is.null(blast) && "contaminant_type" %in% names(blast)) {
+        all_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(c(sf_conf$seq_stripped, sf_novel$seq_stripped)))
+        file_hits <- blast[blast$peptide %in% all_seqs, ]
+        if (nrow(file_hits) > 0) {
+          best <- file_hits[!duplicated(file_hits$peptide), ]
+          contam_pct <- round(100 * sum(best$contaminant_type == "Definite") / max(nrow(best), 1), 1)
+        }
+      }
+
+      # Median confidence
+      median_conf <- round(median(sf_psms$score, na.rm = TRUE), 3)
+      median_aa <- if ("mean_aa_score" %in% names(sf_psms)) {
+        round(median(sf_psms$mean_aa_score, na.rm = TRUE), 3)
+      } else {
+        NA
+      }
+
+      data.frame(
+        Sample = sf,
+        Total_PSMs = n_psms,
+        Confirmed = n_conf,
+        Novel = n_novel,
+        BLAST_Hits = n_blast_hits,
+        Unique_Proteins = n_unique_proteins,
+        Contaminant_Pct = contam_pct,
+        Median_Score = median_conf,
+        Median_AA_Conf = median_aa,
+        stringsAsFactors = FALSE
+      )
+    })
+
+    summary_df <- do.call(rbind, summary_rows)
+
+    # Add totals row
+    totals <- data.frame(
+      Sample = "TOTAL",
+      Total_PSMs = sum(summary_df$Total_PSMs),
+      Confirmed = sum(summary_df$Confirmed),
+      Novel = sum(summary_df$Novel),
+      BLAST_Hits = sum(summary_df$BLAST_Hits),
+      Unique_Proteins = if (!is.null(blast) && nrow(blast) > 0) {
+        length(unique(blast$protein))
+      } else { 0 },
+      Contaminant_Pct = if (!is.null(blast) && "contaminant_type" %in% names(blast)) {
+        best <- blast[!duplicated(blast$peptide), ]
+        round(100 * sum(best$contaminant_type == "Definite") / max(nrow(best), 1), 1)
+      } else { 0 },
+      Median_Score = round(median(psms$score, na.rm = TRUE), 3),
+      Median_AA_Conf = if ("mean_aa_score" %in% names(psms)) {
+        round(median(psms$mean_aa_score, na.rm = TRUE), 3)
+      } else { NA },
+      stringsAsFactors = FALSE
+    )
+    summary_df <- rbind(summary_df, totals)
+
+    DT::datatable(
+      summary_df,
+      rownames = FALSE,
+      selection = "none",
+      options  = list(
+        pageLength = 50,
+        scrollX = TRUE,
+        dom = "Bt",
+        buttons = list(
+          list(extend = "csv", title = "denovo_manuscript_summary"),
+          list(extend = "excel", title = "denovo_manuscript_summary")
+        ),
+        columnDefs = list(
+          list(className = "dt-right", targets = 1:8)
+        )
+      ),
+      extensions = "Buttons",
+      caption = htmltools::tags$caption(
+        style = "caption-side: top; font-weight: bold; color: #1565c0;",
+        "Table 1: De Novo Sequencing Summary Statistics (per sample)"
+      )
+    ) %>%
+      DT::formatStyle("Sample",
+        fontWeight = DT::styleEqual("TOTAL", "bold"),
+        backgroundColor = DT::styleEqual("TOTAL", "#e3f2fd")
       )
   })
 
