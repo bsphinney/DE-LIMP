@@ -728,7 +728,34 @@ echo "[DIAMOND] Done: $(date)"
           }
         }
 
-        setProgress(0.9, detail = "Done!")
+        # Load existing DIAMOND BLAST results if present
+        setProgress(0.85, detail = "Checking for BLAST results...")
+        tryCatch({
+          blast_remote <- file.path(remote_dir, "denovo", "blast_results.tsv")
+          blast_check <- ssh_exec(ssh_cfg, paste("test -s", shQuote(blast_remote), "&& echo YES || echo NO"), timeout = 10)
+          if (grepl("YES", paste(blast_check$stdout, collapse = ""))) {
+            blast_local <- file.path(local_tmp, "blast_results.tsv")
+            scp_download(ssh_cfg, blast_remote, blast_local)
+            if (file.exists(blast_local) && file.info(blast_local)$size > 0) {
+              blast_df <- read.delim(blast_local, header = FALSE, stringsAsFactors = FALSE)
+              colnames(blast_df) <- c("query", "subject", "pident", "length", "mismatch",
+                "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore")
+              # Parse species from SwissProt IDs: sp|ACC|PROT_SPECIES
+              blast_df$species <- sub(".*_", "", blast_df$subject)
+              blast_df$peptide <- sub("^denovo_\\d+\\s*", "", blast_df$query)
+              # Category
+              blast_df$category <- ifelse(blast_df$pident == 100, "Conserved",
+                ifelse(blast_df$pident >= 90, "Near-match", "Distant"))
+              # Best hit per peptide
+              blast_best <- blast_df[order(-blast_df$bitscore), ]
+              blast_best <- blast_best[!duplicated(blast_best$peptide), ]
+              values$dda_casanovo_blast <- blast_best
+              message("[DDA] Loaded BLAST results: ", nrow(blast_best), " peptides with hits")
+            }
+          }
+        }, error = function(e) message("[DDA] BLAST load: ", e$message))
+
+        setProgress(0.95, detail = "Done!")
 
         n_psms <- nrow(parsed$psms)
         n_casanovo <- if (!is.null(values$dda_casanovo_psms)) nrow(values$dda_casanovo_psms) else 0
