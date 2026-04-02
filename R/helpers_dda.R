@@ -610,13 +610,41 @@ mkdir -p "$MGF_DIR"
 # Activate conda environment for timsrust_pyo3
 export PATH="$CONDA_ENV/bin:$PATH"
 
-# Convert all .d files to MGF
-python "', converter_script, '" "$RAW_DIR" "$MGF_DIR" --batch --min-peaks 6 -v
+# Check for existing MGF files first (may already exist from previous runs)
+EXISTING_MGF=$(ls -1 "$RAW_DIR"/*.mgf 2>/dev/null | wc -l)
+if [ "$EXISTING_MGF" -gt 0 ]; then
+  echo "[DE-LIMP MGF] Found $EXISTING_MGF existing MGF files — copying"
+  cp "$RAW_DIR"/*.mgf "$MGF_DIR/" 2>/dev/null || true
+fi
 
-# List generated MGF files for the array job
-ls -1 "$MGF_DIR"/*.mgf > "', casanovo_dir, '/mgf_file_list.txt"
-N_MGF=$(wc -l < "', casanovo_dir, '/mgf_file_list.txt")
-echo "[DE-LIMP MGF] Converted $N_MGF files to MGF"
+# Convert .d files to MGF (timsTOF)
+N_D=$(ls -1d "$RAW_DIR"/*.d 2>/dev/null | wc -l)
+if [ "$N_D" -gt 0 ]; then
+  echo "[DE-LIMP MGF] Converting $N_D .d files to MGF"
+  python "', converter_script, '" "$RAW_DIR" "$MGF_DIR" --batch --min-peaks 6 -v
+fi
+
+# Convert .raw files to MGF (Thermo) via msconvert container if available
+N_RAW=$(ls -1 "$RAW_DIR"/*.raw 2>/dev/null | wc -l)
+MSCONVERT_SIF="/quobyte/proteomics-grp/apptainers/pwiz-skyline-i-agree-to-the-vendor-licenses_latest.sif"
+if [ "$N_RAW" -gt 0 ] && [ -f "$MSCONVERT_SIF" ]; then
+  echo "[DE-LIMP MGF] Converting $N_RAW .raw files via msconvert container"
+  for RAW_FILE in "$RAW_DIR"/*.raw; do
+    BASENAME=$(basename "$RAW_FILE" .raw)
+    if [ ! -f "$MGF_DIR/${BASENAME}.mgf" ]; then
+      apptainer exec "$MSCONVERT_SIF" wine msconvert "$RAW_FILE" --mgf -o "$MGF_DIR/" 2>/dev/null || \
+        echo "[DE-LIMP MGF] WARNING: msconvert failed for $BASENAME — check container"
+    fi
+  done
+elif [ "$N_RAW" -gt 0 ]; then
+  echo "[DE-LIMP MGF] WARNING: $N_RAW .raw files found but no msconvert container"
+  echo "[DE-LIMP MGF] Pre-convert .raw to .mgf and place in raw directory"
+fi
+
+# List all MGF files for the array job
+ls -1 "$MGF_DIR"/*.mgf > "', casanovo_dir, '/mgf_file_list.txt" 2>/dev/null
+N_MGF=$(wc -l < "', casanovo_dir, '/mgf_file_list.txt" 2>/dev/null || echo 0)
+echo "[DE-LIMP MGF] Total MGF files: $N_MGF"
 echo "[DE-LIMP MGF] Done: $(date)"
 ')
 
