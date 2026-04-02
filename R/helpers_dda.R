@@ -453,13 +453,16 @@ if [ ! -x "$SAGE_BIN" ]; then
   exit 1
 fi
 
-# Collect .d directories
-D_FILES=$(find "$RAW_DIR" -maxdepth 1 -name "*.d" -type d | sort)
-N_FILES=$(echo "$D_FILES" | grep -c "." || true)
-echo "[DE-LIMP Sage] Found $N_FILES .d files in $RAW_DIR"
+# Collect .d directories and .raw files (Sage reads both natively)
+D_FILES=$(find "$RAW_DIR" -maxdepth 1 -name "*.d" -type d 2>/dev/null | sort)
+RAW_FILES=$(find "$RAW_DIR" -maxdepth 1 -name "*.raw" -type f 2>/dev/null | sort)
+N_D=$(echo "$D_FILES" | grep -c "." 2>/dev/null || echo 0)
+N_RAW=$(echo "$RAW_FILES" | grep -c "." 2>/dev/null || echo 0)
+N_FILES=$((N_D + N_RAW))
+echo "[DE-LIMP Sage] Found $N_D .d files and $N_RAW .raw files in $RAW_DIR"
 
 if [ "$N_FILES" -eq 0 ]; then
-  echo "[ERROR] No .d directories found in $RAW_DIR"
+  echo "[ERROR] No .d or .raw files found in $RAW_DIR"
   exit 1
 fi
 
