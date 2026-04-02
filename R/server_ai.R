@@ -356,7 +356,7 @@ server_ai <- function(input, output, session, values) {
             dda_casanovo_status = values$dda_casanovo_status,
             dda_search_params = values$dda_search_params,
             dda_qc_metrics = values$dda_qc_metrics,
-            denovo_novel_blast = values$denovo_novel_blast,
+            denovo_novel_blast = values$denovo_novel_blast, dda_casanovo_blast = values$dda_casanovo_blast,
             saved_at = Sys.time(),
             app_version = paste0("DE-LIMP v", values$app_version)
           )
@@ -649,7 +649,7 @@ server_ai <- function(input, output, session, values) {
 
           # DIAMOND BLAST Results
           blast_note <- ""
-          blast_results <- values$denovo_novel_blast
+          blast_results <- if (is_dda_mode) values$dda_casanovo_blast else values$denovo_novel_blast
           if (!is.null(blast_results) && is.data.frame(blast_results) && nrow(blast_results) > 0) {
             tryCatch({
               blast_cols <- intersect(
@@ -1508,7 +1508,7 @@ server_ai <- function(input, output, session, values) {
           # --- DDA MODE PROMPT ---
           sage_psms <- values$dda_sage_psms
           cls <- values$dda_casanovo_classification
-          blast_results <- values$denovo_novel_blast
+          blast_results <- if (is_dda_mode) values$dda_casanovo_blast else values$denovo_novel_blast
 
           # Build Sage summary stats
           n_psms <- if (!is.null(sage_psms)) nrow(sage_psms) else 0

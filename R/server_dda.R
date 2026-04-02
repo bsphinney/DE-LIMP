@@ -252,6 +252,71 @@ server_dda <- function(input, output, session, values, add_to_log) {
     if (!is.null(p) && nzchar(p)) values$dda_fasta_path <- p
   })
 
+  # --- NCBI modal (reuse DIA pattern) ---
+  observeEvent(input$dda_open_ncbi_modal, {
+    showModal(modalDialog(
+      title = "Download FASTA from NCBI",
+      textInput("dda_ncbi_organism", "Organism name", placeholder = "e.g., Gallus gallus"),
+      actionButton("dda_ncbi_search_btn", "Search NCBI", class = "btn-success btn-sm", icon = icon("search")),
+      uiOutput("dda_ncbi_results_ui"),
+      footer = modalButton("Close"),
+      size = "l"
+    ))
+  })
+
+  observeEvent(input$dda_ncbi_search_btn, {
+    req(nzchar(input$dda_ncbi_organism))
+    tryCatch({
+      out_dir <- file.path(tempdir(), "ncbi_fasta")
+      dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+      fasta_path <- ncbi_download_proteome(input$dda_ncbi_organism, output_dir = out_dir)
+      if (!is.null(fasta_path) && file.exists(fasta_path)) {
+        n_seq <- length(grep("^>", readLines(fasta_path, warn = FALSE)))
+        # Upload to HPC
+        ssh_cfg <- dda_ssh_config()
+        remote_dir <- "/quobyte/proteomics-grp/de-limp/fasta"
+        ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(remote_dir)), timeout = 10)
+        remote_path <- file.path(remote_dir, basename(fasta_path))
+        scp_upload(ssh_cfg, fasta_path, remote_path)
+        dda_fasta_resolved(remote_path)
+        output$dda_ncbi_fasta_selected_info <- renderUI({
+          div(class = "alert alert-success small py-1 mt-1",
+            icon("check"), sprintf(" %s (%d sequences)", basename(remote_path), n_seq))
+        })
+        removeModal()
+        showNotification(sprintf("NCBI FASTA uploaded: %s", basename(remote_path)), type = "message")
+      } else {
+        showNotification("NCBI download returned no FASTA. Try a different organism name or accession.", type = "warning")
+      }
+    }, error = function(e) {
+      showNotification(paste("NCBI download failed:", e$message), type = "error")
+    })
+  })
+
+  # --- Database Library ---
+  output$dda_fasta_library_ui <- renderUI({
+    req(values$ssh_connected)
+    ssh_cfg <- dda_ssh_config()
+    lib_path <- "/quobyte/proteomics-grp/dia-nn/fasta_library"
+    result <- ssh_exec(ssh_cfg, paste("ls", shQuote(lib_path), "2>/dev/null"), timeout = 10)
+    fastas <- grep("\\.(fasta|fa|faa)$", trimws(result$stdout), value = TRUE)
+    if (length(fastas) == 0) {
+      div(class = "text-muted small", "No FASTA files found in library")
+    } else {
+      tagList(
+        selectInput("dda_library_fasta", "Select database",
+          choices = setNames(file.path(lib_path, fastas), fastas)),
+        actionButton("dda_select_library_fasta", "Use selected", class = "btn-sm btn-outline-primary")
+      )
+    }
+  })
+
+  observeEvent(input$dda_select_library_fasta, {
+    req(input$dda_library_fasta)
+    dda_fasta_resolved(input$dda_library_fasta)
+    showNotification(sprintf("Using: %s", basename(input$dda_library_fasta)), type = "message")
+  })
+
   # --- SSH file browser for FASTA ---
   observeEvent(input$dda_ssh_browse_fasta_btn, {
     req(values$ssh_connected)

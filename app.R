@@ -315,6 +315,7 @@ if (search_enabled) {
   }
   library(shinyFiles)
   library(jsonlite)
+  library(data.table)
   # Migrate user-local speclib cache to shared volume if available
   tryCatch(speclib_cache_migrate(), error = function(e) NULL)
 }
