@@ -712,6 +712,42 @@ server_dda <- function(input, output, session, values, add_to_log) {
         casanovo_enabled    = run_casanovo
       )
 
+      # --- Write search_info.md to output directory ---
+      tryCatch({
+        sp <- values$dda_search_params
+        search_info <- paste0(
+          "# DDA Search Info\n\n",
+          "**Pipeline**: Sage + Casanovo (DE-LIMP DDA mode)\n",
+          "**Submitted**: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n",
+          "**App version**: DE-LIMP v", values$app_version %||% "unknown", "\n\n",
+          "## Search Parameters\n\n",
+          "- **Search engine**: Sage v0.14.6\n",
+          "- **Preset**: ", sp$preset, "\n",
+          "- **FASTA**: `", basename(sp$fasta_path), "`\n",
+          "- **Contaminant library**: ", sp$contaminant_library, "\n",
+          "- **Enzyme**: Trypsin/P, ", sp$missed_cleavages, " missed cleavages\n",
+          "- **Precursor tolerance**: ±", sp$precursor_tol, " ppm\n",
+          "- **Fragment tolerance**: ±", sp$fragment_tol, " Da\n",
+          "- **Casanovo enabled**: ", sp$casanovo_enabled, "\n\n",
+          "## Files\n\n",
+          "- **Raw files**: ", sp$n_files, " files in `", sp$raw_dir, "`\n",
+          "- **Output**: `", output_dir, "`\n",
+          "- **Sage job ID**: ", job_id, "\n",
+          if (run_casanovo) paste0("- **Casanovo job ID**: (pending)\n") else "",
+          "\n## File List\n\n",
+          paste0("- `", basename(raw_paths), "`\n", collapse = ""),
+          "\n## Quantification Settings\n\n",
+          "- **Normalization**: ", sp$normalization, "\n",
+          "- **Imputation**: ", sp$imputation, "\n",
+          "- **Min valid fraction**: ", sp$min_valid, "\n",
+          "\n**Log files**: `", output_dir, "/logs/`\n"
+        )
+        local_info <- file.path(tempdir(), "search_info.md")
+        writeLines(search_info, local_info)
+        scp_upload(ssh_cfg, local_info, file.path(output_dir, "search_info.md"))
+        message("[DDA] search_info.md written to ", output_dir)
+      }, error = function(e) message("[DDA] search_info.md write failed: ", e$message))
+
       # --- Casanovo submission (optional, GPU) ---
       if (run_casanovo) {
         setProgress(0.7, detail = "Submitting Casanovo de novo...")

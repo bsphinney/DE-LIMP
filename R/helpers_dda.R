@@ -106,8 +106,10 @@ generate_sage_config <- function(
     )
   }
 
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  config_path <- file.path(output_dir, "sage.json")
+  # Write config to temp dir — caller SCPs to HPC output_dir
+  local_dir <- file.path(tempdir(), "sage_config")
+  dir.create(local_dir, recursive = TRUE, showWarnings = FALSE)
+  config_path <- file.path(local_dir, "sage.json")
   jsonlite::write_json(config, config_path, auto_unbox = FALSE, pretty = TRUE, null = "null")
   message("[DDA] Sage config written to: ", config_path)
   config_path
