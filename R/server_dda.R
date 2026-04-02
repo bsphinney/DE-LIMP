@@ -2078,6 +2078,9 @@ echo "[DIAMOND] Done: $(date)"
         ifelse(blast$pident >= 90, "Near-match", "Distant")
       )
     }
+    # Flag known contaminant proteins (keratins, trypsin, BSA, etc.)
+    contam_patterns <- "^Cont_|KRT\\d|K1C\\d|K2C\\d|K22|TRYP_|ALBU_BOVIN|CASA|TRFE_BOVIN|CAS[12]_BOVIN"
+    blast$is_contaminant <- grepl(contam_patterns, blast$subject, ignore.case = TRUE)
     blast
   })
 
@@ -2135,7 +2138,7 @@ echo "[DIAMOND] Done: $(date)"
     blast <- blast_with_species()
     # Best hit per peptide for species assignment
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
-    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide), ]
 
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
     top_n <- min(10, length(sp_counts))
@@ -2164,7 +2167,7 @@ echo "[DIAMOND] Done: $(date)"
   output$dda_blast_species_bar <- plotly::renderPlotly({
     blast <- blast_with_species()
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
-    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide), ]
 
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
     top_n <- min(15, length(sp_counts))
@@ -2194,7 +2197,7 @@ echo "[DIAMOND] Done: $(date)"
   output$dda_blast_species_summary <- renderUI({
     blast <- blast_with_species()
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
-    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide), ]
 
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
     total <- sum(sp_counts)
@@ -2214,7 +2217,7 @@ echo "[DIAMOND] Done: $(date)"
     blast <- blast_with_species()
     # Best hit per peptide
     best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
-    best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide), ]
 
     # Top 5 species, rest as "Other"
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
@@ -2256,14 +2259,14 @@ echo "[DIAMOND] Done: $(date)"
 
     # Best hit per peptide-species combination
     blast_best <- blast[order(blast$pident, decreasing = TRUE), ]
-    blast_best <- blast_best[!duplicated(paste(blast_best$peptide_sequence, blast_best$species)), ]
+    blast_best <- blast_best[!duplicated(paste(blast_best$peptide, blast_best$species)), ]
 
     # Top 10 species by frequency
     sp_counts <- sort(table(blast_best$species), decreasing = TRUE)
     top_species <- names(sp_counts)[seq_len(min(10, length(sp_counts)))]
 
     # Top 50 peptides by average identity
-    pep_avg <- tapply(blast_best$identity, blast_best$peptide_sequence, mean, na.rm = TRUE)
+    pep_avg <- tapply(blast_best$pident, blast_best$peptide, mean, na.rm = TRUE)
     pep_avg <- sort(pep_avg, decreasing = TRUE)
     top_peptides <- names(pep_avg)[seq_len(min(50, length(pep_avg)))]
 
@@ -2271,10 +2274,10 @@ echo "[DIAMOND] Done: $(date)"
     mat <- matrix(NA_real_, nrow = length(top_peptides), ncol = length(top_species),
       dimnames = list(top_peptides, top_species))
 
-    sub <- blast_best[blast_best$peptide_sequence %in% top_peptides &
+    sub <- blast_best[blast_best$peptide %in% top_peptides &
                       blast_best$species %in% top_species, ]
     for (i in seq_len(nrow(sub))) {
-      mat[sub$peptide_sequence[i], sub$species[i]] <- sub$identity[i]
+      mat[sub$peptide[i], sub$species[i]] <- sub$pident[i]
     }
 
     # Truncate long peptide labels
@@ -2475,7 +2478,7 @@ echo "[DIAMOND] Done: $(date)"
 
           # Extract numeric index from query name (casanovo_1, casanovo_2, ...)
           hit_idx <- as.integer(gsub("casanovo_", "", hits$query_idx))
-          hits$peptide_sequence <- novel_peptides[hit_idx]
+          hits$peptide <- novel_peptides[hit_idx]
 
           # Extract protein accession (handles sp|ACC|NAME format)
           hits$protein <- stringr::str_extract(hits$subject, "(?<=\\|)[^|]+(?=\\|)")
@@ -2493,7 +2496,7 @@ echo "[DIAMOND] Done: $(date)"
           )
 
           values$dda_casanovo_blast <- as.data.frame(hits)
-          n_hits <- length(unique(hits$peptide_sequence))
+          n_hits <- length(unique(hits$peptide))
           n_proteins <- length(unique(hits$protein))
           showNotification(
             sprintf("DIAMOND BLAST: %d novel peptides mapped to %d protein hits.",
