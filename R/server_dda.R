@@ -2008,10 +2008,10 @@ echo "[DIAMOND] Done: $(date)"
     # Append DIAMOND BLAST results if available
     blast <- values$dda_casanovo_blast
     if (!is.null(blast) && nrow(blast) > 0) {
-      blast_dedup <- blast[!duplicated(blast$peptide_sequence), ]
-      blast_map    <- stats::setNames(blast_dedup$subject, blast_dedup$peptide_sequence)
-      identity_map <- stats::setNames(blast_dedup$identity, blast_dedup$peptide_sequence)
-      evalue_map   <- stats::setNames(blast_dedup$evalue, blast_dedup$peptide_sequence)
+      blast_dedup <- blast[!duplicated(blast$peptide), ]
+      blast_map    <- stats::setNames(blast_dedup$subject, blast_dedup$peptide)
+      identity_map <- stats::setNames(blast_dedup$pident, blast_dedup$peptide)
+      evalue_map   <- stats::setNames(blast_dedup$evalue, blast_dedup$peptide)
 
       display_df$BLAST_Hit    <- blast_map[novel$seq_stripped]
       display_df$Identity_Pct <- round(identity_map[novel$seq_stripped], 1)
@@ -2059,8 +2059,8 @@ echo "[DIAMOND] Done: $(date)"
     }
     if (!"category" %in% names(blast)) {
       blast$category <- ifelse(
-        blast$identity >= 100, "Conserved",
-        ifelse(blast$identity >= 90, "Near-match", "Distant")
+        blast$pident >= 100, "Conserved",
+        ifelse(blast$pident >= 90, "Near-match", "Distant")
       )
     }
     blast
@@ -2072,14 +2072,14 @@ echo "[DIAMOND] Done: $(date)"
     req(nrow(blast) > 0)
     novel <- values$dda_casanovo_classification$novel
     n_novel <- length(unique(novel$seq_stripped))
-    n_with_hits <- length(unique(blast$peptide_sequence))
+    n_with_hits <- length(unique(blast$peptide))
     n_no_hits <- n_novel - n_with_hits
     pct_hits <- round(100 * n_with_hits / max(n_novel, 1), 1)
 
     # Top species by best-hit count (deduplicate to best hit per peptide)
-    best_hits <- blast[!duplicated(blast$peptide_sequence), ]
+    best_hits <- blast[!duplicated(blast$peptide), ]
     top_sp <- names(sort(table(best_hits$species), decreasing = TRUE))[1]
-    mean_id <- round(mean(blast$identity, na.rm = TRUE), 1)
+    mean_id <- round(mean(blast$pident, na.rm = TRUE), 1)
 
     div(class = "row", style = "margin-bottom: 15px;",
       div(class = "col-md-2",
@@ -2119,7 +2119,7 @@ echo "[DIAMOND] Done: $(date)"
   output$dda_blast_species_donut <- plotly::renderPlotly({
     blast <- blast_with_species()
     # Best hit per peptide for species assignment
-    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
 
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
@@ -2148,7 +2148,7 @@ echo "[DIAMOND] Done: $(date)"
   # --- Taxonomic breakdown: bar chart ---
   output$dda_blast_species_bar <- plotly::renderPlotly({
     blast <- blast_with_species()
-    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
 
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
@@ -2178,7 +2178,7 @@ echo "[DIAMOND] Done: $(date)"
   # --- Species summary text ---
   output$dda_blast_species_summary <- renderUI({
     blast <- blast_with_species()
-    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
 
     sp_counts <- sort(table(best_hits$species), decreasing = TRUE)
@@ -2198,7 +2198,7 @@ echo "[DIAMOND] Done: $(date)"
   output$dda_blast_identity_hist <- plotly::renderPlotly({
     blast <- blast_with_species()
     # Best hit per peptide
-    best_hits <- blast[order(blast$identity, decreasing = TRUE), ]
+    best_hits <- blast[order(blast$pident, decreasing = TRUE), ]
     best_hits <- best_hits[!duplicated(best_hits$peptide_sequence), ]
 
     # Top 5 species, rest as "Other"
@@ -2240,7 +2240,7 @@ echo "[DIAMOND] Done: $(date)"
     blast <- blast_with_species()
 
     # Best hit per peptide-species combination
-    blast_best <- blast[order(blast$identity, decreasing = TRUE), ]
+    blast_best <- blast[order(blast$pident, decreasing = TRUE), ]
     blast_best <- blast_best[!duplicated(paste(blast_best$peptide_sequence, blast_best$species)), ]
 
     # Top 10 species by frequency
@@ -2294,12 +2294,12 @@ echo "[DIAMOND] Done: $(date)"
     blast <- blast_with_species()
 
     display_df <- data.frame(
-      Peptide     = blast$peptide_sequence,
+      Peptide     = blast$peptide,
       Hit         = blast$subject,
       Protein     = blast$protein,
       Species     = blast$species,
       Category    = blast$category,
-      Identity    = round(blast$identity, 1),
+      Identity    = round(blast$pident, 1),
       Length      = blast$length,
       E_Value     = formatC(blast$evalue, format = "e", digits = 2),
       Bitscore    = round(blast$bitscore, 1),
