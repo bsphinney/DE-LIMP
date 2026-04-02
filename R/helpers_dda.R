@@ -963,12 +963,12 @@ set -euo pipefail
 
 # Step 1: Submit MGF conversion
 CONVERT_OUT=$(sbatch "', convert_sbatch_path, '")
-CONVERT_ID=$(echo "$CONVERT_OUT" | grep -oP "[0-9]+$")
+CONVERT_ID=$(echo "$CONVERT_OUT" | grep -o "[0-9]*$" | tail -1)
 echo "CONVERT:${CONVERT_ID}"
 
 # Step 2: Submit Casanovo with dependency on conversion
 CASANOVO_OUT=$(sbatch --dependency=afterok:${CONVERT_ID} "', casanovo_sbatch_path, '")
-CASANOVO_ID=$(echo "$CASANOVO_OUT" | grep -oP "[0-9]+$")
+CASANOVO_ID=$(echo "$CASANOVO_OUT" | grep -o "[0-9]*$" | tail -1)
 echo "CASANOVO:${CASANOVO_ID}"
 
 echo "MGF conversion job: ${CONVERT_ID}"

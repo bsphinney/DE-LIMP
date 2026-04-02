@@ -801,7 +801,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
           # Submit Casanovo pipeline
           setProgress(0.85, detail = "Submitting Casanovo to GPU queue...")
           casanovo_submit <- ssh_exec(ssh_cfg,
-            paste("bash", shQuote(remote_launcher)),
+            paste("bash -l", shQuote(remote_launcher)),
             timeout = 30)
 
           if (casanovo_submit$status == 0) {
