@@ -2569,12 +2569,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
                   tags$p(style = "margin: 0; color: #1565c0;",
                     icon("info-circle"),
-                    " Click ", tags$strong("Align"), " on any near-match peptide (90-99% identity) ",
-                    "in the DIAMOND BLAST table to see the alignment with per-residue confidence scoring. ",
+                    " Select a near-match peptide from the table below, then click ",
+                    tags$strong("Show Alignment"), " to visualize mismatches with per-residue confidence. ",
                     "Green = genuine variant (AA score > 0.95), Red = possible sequencing error (AA score < 0.70)."
                   )
                 ),
-                tags$p(style = "color: #666; font-size: 13px;",
+                div(style = "margin-bottom: 12px;",
+                  actionButton("denovo_viz_show_alignment", "Show Alignment",
+                    icon = icon("align-left"), class = "btn-info btn-sm")
+                ),
+                DT::DTOutput("denovo_viz_blast_align_table"),
+                tags$p(style = "color: #666; font-size: 13px; margin-top: 12px;",
                   "This view cross-references BLAST mismatches with Casanovo's per-residue amino acid ",
                   "confidence scores to distinguish species-specific markers from sequencing artifacts.")
               )),

@@ -521,6 +521,7 @@ server <- function(input, output, session) {
     dda_casanovo_psms          = NULL,    # data.table: parsed de novo PSMs
     dda_casanovo_classification = NULL,   # List from classify_dda_denovo()
     dda_casanovo_blast         = NULL,    # data.frame: DIAMOND BLAST results for DDA novel peptides
+    dda_filtered_classification = NULL,  # List from classify_dda_denovo() — filtered by confidence slider
     dda_fasta_path             = NULL,    # Remote FASTA path used for DDA search (for DIAMOND)
     # App metadata
     app_version = app_version,
@@ -552,7 +553,9 @@ server <- function(input, output, session) {
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_denovo(input, output, session, values, add_to_log)
+  server_denovo_viz(input, output, session, values, add_to_log)
   server_dda(input, output, session, values, add_to_log)
+  server_denovo_controls(input, output, session, values)
   server_xlms(input, output, session, values, add_to_log)
   server_session(input, output, session, values, add_to_log)
 
