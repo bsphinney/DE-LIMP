@@ -26,34 +26,21 @@ generate_sage_config <- function(
   min_peaks         = 6
 ) {
   # Preset-based modification definitions
-  static_mods <- list("C" = 57.0215)  # carbamidomethyl always fixed
+  static_mods <- list("C" = jsonlite::unbox(57.0215))  # carbamidomethyl always fixed
 
+  # Sage variable_mods format: {"residue": [mass1, mass2, ...]}
   variable_mods <- switch(preset,
-    "standard" = list(
-      list(
-        sites    = list("M"),
-        mass     = 15.9949,
-        position = jsonlite::unbox(NA)
-      )
-    ),
-    "phospho" = list(
-      list(sites = list("M"), mass = 15.9949, position = jsonlite::unbox(NA)),
-      list(sites = list("S", "T", "Y"), mass = 79.9663, position = jsonlite::unbox(NA))
-    ),
-    "tmt" = list(
-      list(sites = list("K"), mass = 229.1629, position = jsonlite::unbox(NA)),
-      list(sites = list("^"), mass = 229.1629, position = jsonlite::unbox(NA)),
-      list(sites = list("M"), mass = 15.9949, position = jsonlite::unbox(NA))
-    ),
+    "standard" = list("M" = c(15.9949), "^" = c(42.0106)),
+    "phospho"  = list("M" = c(15.9949), "S" = c(79.9663), "T" = c(79.9663), "Y" = c(79.9663), "^" = c(42.0106)),
+    "tmt"      = list("M" = c(15.9949)),
     # default
-    list(
-      list(sites = list("M"), mass = 15.9949, position = jsonlite::unbox(NA))
-    )
+    list("M" = c(15.9949), "^" = c(42.0106))
   )
 
-  # TMT static mods: add TMT to n-term as static
+  # TMT static mods: add TMT to n-term and K as static
   if (preset == "tmt") {
-    static_mods[["^"]] <- 229.1629
+    static_mods[["^"]] <- jsonlite::unbox(229.1629)
+    static_mods[["K"]] <- jsonlite::unbox(229.1629)
   }
 
   config <- list(
@@ -130,7 +117,10 @@ parse_sage_results <- function(
   protein_fdr_threshold = 0.01
 ) {
   if (!file.exists(results_path)) stop("Sage results file not found: ", results_path)
-  if (!file.exists(lfq_path)) stop("Sage LFQ file not found: ", lfq_path)
+  if (is.null(lfq_path) || !file.exists(lfq_path)) {
+    message("[DDA] No LFQ file provided — quantification will be PSM-based")
+    lfq_path <- NULL
+  }
 
   # PSM table
   psms <- data.table::fread(results_path)
@@ -148,18 +138,29 @@ parse_sage_results <- function(
   ), by = proteins]
 
   # LFQ matrix: long -> wide
-  lfq <- data.table::fread(lfq_path)
-  lfq_wide <- data.table::dcast(lfq, proteins ~ filename, value.var = "intensity")
-  rownames_col <- lfq_wide$proteins
-  lfq_mat <- as.matrix(lfq_wide[, -"proteins", with = FALSE])
-  rownames(lfq_mat) <- rownames_col
+  if (!is.null(lfq_path)) {
+    lfq <- data.table::fread(lfq_path)
+    lfq_wide <- data.table::dcast(lfq, proteins ~ filename, value.var = "intensity")
+    rownames_col <- lfq_wide$proteins
+    lfq_mat <- as.matrix(lfq_wide[, -"proteins", with = FALSE])
+    rownames(lfq_mat) <- rownames_col
 
-  # Log2 transform (Sage outputs raw intensities)
-  lfq_mat_log2 <- log2(lfq_mat)
-  lfq_mat_log2[!is.finite(lfq_mat_log2)] <- NA
+    # Log2 transform (Sage outputs raw intensities)
+    lfq_mat_log2 <- log2(lfq_mat)
+    lfq_mat_log2[!is.finite(lfq_mat_log2)] <- NA
 
-  # Strip path and .d extension from sample names
-  colnames(lfq_mat_log2) <- gsub("\\.d$", "", basename(colnames(lfq_mat_log2)))
+    # Strip path and .d/.mzML extension from sample names
+    colnames(lfq_mat_log2) <- gsub("\\.(d|mzML)$", "", basename(colnames(lfq_mat_log2)))
+  } else {
+    # Build a simple spectral count matrix from PSMs as fallback
+    sc <- psms_filtered[, .N, by = .(proteins, filename)]
+    sc_wide <- data.table::dcast(sc, proteins ~ filename, value.var = "N", fill = 0)
+    rownames_col <- sc_wide$proteins
+    lfq_mat_log2 <- log2(as.matrix(sc_wide[, -"proteins", with = FALSE]) + 1)
+    rownames(lfq_mat_log2) <- rownames_col
+    colnames(lfq_mat_log2) <- gsub("\\.(d|mzML)$", "", basename(colnames(lfq_mat_log2)))
+    message("[DDA] Using spectral count matrix (no LFQ available)")
+  }
 
   # Protein meta (genes-equivalent in EList)
   protein_meta <- merge(
