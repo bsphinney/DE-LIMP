@@ -2473,6 +2473,9 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 # Species bar + summary text
                 uiOutput("dda_blast_species_summary"),
                 plotlyOutput("dda_blast_species_bar", height = "300px"),
+                # Top proteins by peptide count
+                tags$h5("Top Proteins by De Novo Peptide Count", style = "margin-top: 16px;"),
+                plotlyOutput("dda_blast_top_proteins", height = "800px"),
                 # Peptide-Species heatmap
                 plotlyOutput("dda_blast_heatmap", height = "500px"),
                 # Filter buttons + enhanced table

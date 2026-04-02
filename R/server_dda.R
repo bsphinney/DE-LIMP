@@ -2253,6 +2253,49 @@ echo "[DIAMOND] Done: $(date)"
       plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
   })
 
+  # --- Top proteins by peptide count ---
+  output$dda_blast_top_proteins <- plotly::renderPlotly({
+    blast <- tryCatch(blast_with_species(), error = function(e) NULL)
+    req(!is.null(blast), nrow(blast) > 1)
+
+    # Parse protein name + species for display
+    blast$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+    blast$protein_label <- paste0(blast$protein_name, " (", blast$species, ")")
+
+    # Count unique peptides per protein (best hit per peptide)
+    best_hits <- blast[order(-blast$bitscore), ]
+    best_hits <- best_hits[!duplicated(best_hits$peptide), ]
+
+    prot_counts <- as.data.frame(table(best_hits$protein_label), stringsAsFactors = FALSE)
+    colnames(prot_counts) <- c("Protein", "Peptides")
+    prot_counts <- prot_counts[order(-prot_counts$Peptides), ]
+    top_n <- min(50, nrow(prot_counts))
+    prot_counts <- prot_counts[seq_len(top_n), ]
+    prot_counts$Protein <- factor(prot_counts$Protein, levels = rev(prot_counts$Protein))
+
+    # Color by contaminant status
+    contam_prots <- grepl("KRT\\d|K1C\\d|K2C\\d|TRYP_|ALBU_BOVIN|CASA|_HUMAN|_MOUSE|_BOVIN|_SHEEP|_RAT",
+      prot_counts$Protein)
+    prot_counts$Type <- ifelse(contam_prots, "Contaminant", "Sample")
+
+    plotly::plot_ly(prot_counts,
+      y = ~Protein, x = ~Peptides, color = ~Type,
+      colors = c("Sample" = "#2196F3", "Contaminant" = "#FF9800"),
+      type = "bar", orientation = "h",
+      hoverinfo = "text",
+      text = ~paste(Protein, "<br>", Peptides, "peptides")
+    ) %>%
+      plotly::layout(
+        title = list(text = "Top Proteins by De Novo Peptide Count", font = list(size = 14)),
+        xaxis = list(title = "Unique Peptides"),
+        yaxis = list(title = "", tickfont = list(size = 9)),
+        showlegend = TRUE,
+        legend = list(x = 0.7, y = 0.1),
+        margin = list(l = 200),
+        height = max(400, top_n * 18)
+      )
+  })
+
   # --- Peptide-Species heatmap ---
   output$dda_blast_heatmap <- plotly::renderPlotly({
     blast <- tryCatch(blast_with_species(), error = function(e) NULL)
