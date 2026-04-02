@@ -1900,173 +1900,11 @@ echo "[DIAMOND] Done: $(date)"
   #    Renders in the De Novo > Casanovo nav_panel (ui.R)
   # ============================================================================
 
-  # --- Summary cards for DDA Casanovo de novo results ---
-  output$dda_denovo_summary_cards <- renderUI({
-    req(values$dda_casanovo_classification)
-    cls <- values$dda_casanovo_classification
+  # --- Summary cards: MOVED to server_denovo_controls.R (confidence-filtered) ---
 
-    n_total     <- cls$summary_stats$n_total
-    n_confirmed <- cls$summary_stats$n_confirmed
-    n_novel     <- cls$summary_stats$n_novel
-    pct_conf    <- cls$summary_stats$pct_confirmed
+  # --- Confirmed peptides table: MOVED to server_denovo_controls.R (confidence-filtered) ---
 
-    n_proteins  <- if (!is.null(cls$protein_summary)) nrow(cls$protein_summary) else 0
-
-    tags$div(
-      class = "row",
-      style = "margin-bottom: 15px;",
-
-      tags$div(
-        class = "col-md-3",
-        tags$div(
-          class = "card text-center",
-          style = "background: #f8f9fa; border-left: 4px solid #3498db; padding: 15px;",
-          tags$h4(format(n_total, big.mark = ","), style = "margin: 0; color: #3498db;"),
-          tags$small("Total De Novo PSMs")
-        )
-      ),
-
-      tags$div(
-        class = "col-md-3",
-        tags$div(
-          class = "card text-center",
-          style = "background: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px;",
-          tags$h4(format(n_confirmed, big.mark = ","), style = "margin: 0; color: #2ecc71;"),
-          tags$small("Confirmed (in Sage)")
-        )
-      ),
-
-      tags$div(
-        class = "col-md-3",
-        tags$div(
-          class = "card text-center",
-          style = "background: #f8f9fa; border-left: 4px solid #e67e22; padding: 15px;",
-          tags$h4(format(n_novel, big.mark = ","), style = "margin: 0; color: #e67e22;"),
-          tags$small("Novel Peptides")
-        )
-      ),
-
-      tags$div(
-        class = "col-md-3",
-        tags$div(
-          class = "card text-center",
-          style = "background: #f8f9fa; border-left: 4px solid #9b59b6; padding: 15px;",
-          tags$h4(paste0(pct_conf, "%"), style = "margin: 0; color: #9b59b6;"),
-          tags$small(paste0("Confirmation Rate (", n_proteins, " proteins)"))
-        )
-      )
-    )
-  })
-
-  # --- Confirmed peptides table (DDA Casanovo) ---
-  output$dda_denovo_confirmed_table <- DT::renderDT({
-    req(values$dda_casanovo_classification)
-    confirmed <- values$dda_casanovo_classification$confirmed
-    req(nrow(confirmed) > 0)
-
-    display_df <- data.frame(
-      Sequence    = confirmed$sequence,
-      Stripped    = confirmed$seq_stripped,
-      Score       = round(confirmed$score, 3),
-      Charge      = confirmed$charge,
-      AA_Scores   = if ("mean_aa_score" %in% names(confirmed)) {
-        round(confirmed$mean_aa_score, 3)
-      } else {
-        NA_real_
-      },
-      Protein     = if ("proteins" %in% names(confirmed)) {
-        confirmed$proteins
-      } else {
-        NA_character_
-      },
-      Source_File  = confirmed$source_file,
-      stringsAsFactors = FALSE
-    )
-
-    DT::datatable(
-      display_df,
-      rownames = FALSE,
-      filter   = "top",
-      selection = "single",
-      options  = list(
-        pageLength = 25,
-        scrollX    = TRUE,
-        order      = list(list(2, "desc")),
-        dom        = "Bfrtip",
-        buttons    = list("csv", "excel")
-      ),
-      extensions = "Buttons",
-      caption = htmltools::tags$caption(
-        style = "caption-side: top;",
-        "Confirmed: Casanovo de novo peptides matching Sage database search results (I/L normalized). ",
-        tags$em(style = "color: #6c757d;", "Click a row to see per-residue confidence coloring.")
-      )
-    )
-  })
-
-  # --- Novel peptides table (DDA Casanovo) ---
-  output$dda_denovo_novel_table <- DT::renderDT({
-    req(values$dda_casanovo_classification)
-    novel <- values$dda_casanovo_classification$novel
-    req(nrow(novel) > 0)
-
-    display_df <- data.frame(
-      Sequence    = novel$sequence,
-      Stripped    = novel$seq_stripped,
-      Score       = round(novel$score, 3),
-      Charge      = novel$charge,
-      AA_Scores   = if ("mean_aa_score" %in% names(novel)) {
-        round(novel$mean_aa_score, 3)
-      } else {
-        NA_real_
-      },
-      Source_File  = novel$source_file,
-      stringsAsFactors = FALSE
-    )
-
-    # Append DIAMOND BLAST results if available
-    blast <- values$dda_casanovo_blast
-    if (!is.null(blast) && nrow(blast) > 0) {
-      # Normalize identity column name
-      if ("identity" %in% names(blast) && !"pident" %in% names(blast)) {
-        blast$pident <- blast$identity
-      }
-      blast_dedup <- blast[!duplicated(blast$peptide), ]
-      blast_map    <- stats::setNames(blast_dedup$subject, blast_dedup$peptide)
-      identity_map <- stats::setNames(blast_dedup$pident, blast_dedup$peptide)
-      evalue_map   <- stats::setNames(blast_dedup$evalue, blast_dedup$peptide)
-
-      display_df$BLAST_Hit    <- blast_map[novel$seq_stripped]
-      display_df$Identity_Pct <- round(identity_map[novel$seq_stripped], 1)
-      display_df$E_Value      <- evalue_map[novel$seq_stripped]
-    }
-
-    DT::datatable(
-      display_df,
-      rownames = FALSE,
-      filter   = "top",
-      selection = "single",
-      options  = list(
-        pageLength = 25,
-        scrollX    = TRUE,
-        order      = list(list(2, "desc")),
-        dom        = "Bfrtip",
-        buttons    = list("csv", "excel")
-      ),
-      extensions = "Buttons",
-      caption = htmltools::tags$caption(
-        style = "caption-side: top; color: #e67e22; font-weight: bold;",
-        "Novel: Casanovo de novo peptides NOT found in Sage results. ",
-        tags$em(style = "color: #6c757d; font-weight: normal;", "Click a row to see per-residue confidence."),
-        tags$br(),
-        tags$small(
-          style = "color: #666; font-weight: normal;",
-          "These may represent sequence variants, unexpected organisms, or proteins absent from your reference FASTA. ",
-          "Use DIAMOND BLAST to map them to known proteins."
-        )
-      )
-    )
-  })
+  # --- Novel peptides table: MOVED to server_denovo_controls.R (confidence-filtered) ---
 
   # ==========================================================================
   #    BLAST Results Visualization (comprehensive SwissProt BLAST view)
@@ -2499,57 +2337,21 @@ echo "[DIAMOND] Done: $(date)"
       )
   })
 
-  # --- Score distribution plot (DDA Casanovo) ---
-  output$dda_denovo_score_dist <- plotly::renderPlotly({
-    req(values$dda_casanovo_psms)
-    req(nrow(values$dda_casanovo_psms) > 0)
-
-    df <- values$dda_casanovo_psms
-    cls <- values$dda_casanovo_classification
-
-    match_type <- if (!is.null(cls)) {
-      confirmed_seqs <- cls$confirmed$seq_norm
-      ifelse(df$seq_norm %in% confirmed_seqs, "Confirmed", "Novel")
-    } else {
-      rep("Unclassified", nrow(df))
-    }
-
-    plot_df <- data.frame(
-      score = df$score,
-      type  = match_type,
-      stringsAsFactors = FALSE
-    )
-
-    colors <- c("Confirmed" = "#2ecc71", "Novel" = "#e67e22", "Unclassified" = "#95a5a6")
-
-    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = score, fill = type)) +
-      ggplot2::geom_histogram(bins = 50, alpha = 0.8, position = "stack") +
-      ggplot2::scale_fill_manual(values = colors) +
-      ggplot2::labs(
-        x = "Casanovo Confidence Score",
-        y = "Count",
-        fill = "Classification"
-      ) +
-      ggplot2::theme_minimal() +
-      ggplot2::theme(legend.position = "top")
-
-    plotly::ggplotly(p) %>%
-      plotly::layout(
-        legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)
-      )
-  })
+  # --- Score distribution: MOVED to server_denovo_controls.R (with threshold line) ---
 
   # ==========================================================================
   #    PRIORITY 2: Per-Residue Confidence Visualization
   # ==========================================================================
 
-  # Click handler for confirmed peptide table
+  # Click handler for confirmed peptide table (uses filtered classification from server_denovo_controls.R)
   observeEvent(input$dda_denovo_confirmed_table_rows_selected, {
     sel <- input$dda_denovo_confirmed_table_rows_selected
     req(length(sel) > 0)
     sel_row <- sel[length(sel)]  # Use last selected row
 
-    confirmed <- values$dda_casanovo_classification$confirmed
+    cls <- values$dda_filtered_classification %||% values$dda_casanovo_classification
+    req(cls)
+    confirmed <- cls$confirmed
     req(nrow(confirmed) >= sel_row)
 
     row <- confirmed[sel_row, ]
@@ -2557,13 +2359,15 @@ echo "[DIAMOND] Done: $(date)"
     shinyjs::html("dda_confirmed_residue_viz", html)
   })
 
-  # Click handler for novel peptide table
+  # Click handler for novel peptide table (uses filtered classification from server_denovo_controls.R)
   observeEvent(input$dda_denovo_novel_table_rows_selected, {
     sel <- input$dda_denovo_novel_table_rows_selected
     req(length(sel) > 0)
     sel_row <- sel[length(sel)]
 
-    novel <- values$dda_casanovo_classification$novel
+    cls <- values$dda_filtered_classification %||% values$dda_casanovo_classification
+    req(cls)
+    novel <- cls$novel
     req(nrow(novel) >= sel_row)
 
     row <- novel[sel_row, ]
@@ -2967,125 +2771,7 @@ echo "[DIAMOND] Done: $(date)"
       )
   })
 
-  # ==========================================================================
-  #    PRIORITY 5: Manuscript Summary Statistics Card
-  # ==========================================================================
-
-  output$dda_manuscript_summary <- DT::renderDT({
-    req(values$dda_casanovo_psms, values$dda_casanovo_classification)
-    psms <- values$dda_casanovo_psms
-    cls <- values$dda_casanovo_classification
-
-    confirmed <- cls$confirmed
-    novel <- cls$novel
-    blast <- values$dda_casanovo_blast
-
-    # Build per-source-file summary
-    source_files <- unique(psms$source_file)
-
-    summary_rows <- lapply(source_files, function(sf) {
-      sf_psms <- psms[psms$source_file == sf, ]
-      sf_conf <- confirmed[confirmed$source_file == sf, ]
-      sf_novel <- novel[novel$source_file == sf, ]
-
-      n_psms <- nrow(sf_psms)
-      n_conf <- nrow(sf_conf)
-      n_novel <- nrow(sf_novel)
-
-      # BLAST hits for this file's novel peptides
-      n_blast_hits <- 0
-      n_unique_proteins <- 0
-      if (!is.null(blast) && nrow(blast) > 0) {
-        novel_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(sf_novel$seq_stripped))
-        file_blast <- blast[blast$peptide %in% novel_seqs, ]
-        n_blast_hits <- length(unique(file_blast$peptide))
-        n_unique_proteins <- length(unique(file_blast$protein))
-      }
-
-      # Contaminant % from BLAST
-      contam_pct <- 0
-      if (!is.null(blast) && "contaminant_type" %in% names(blast)) {
-        all_seqs <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(c(sf_conf$seq_stripped, sf_novel$seq_stripped)))
-        file_hits <- blast[blast$peptide %in% all_seqs, ]
-        if (nrow(file_hits) > 0) {
-          best <- file_hits[!duplicated(file_hits$peptide), ]
-          contam_pct <- round(100 * sum(best$contaminant_type == "Definite") / max(nrow(best), 1), 1)
-        }
-      }
-
-      # Median confidence
-      median_conf <- round(median(sf_psms$score, na.rm = TRUE), 3)
-      median_aa <- if ("mean_aa_score" %in% names(sf_psms)) {
-        round(median(sf_psms$mean_aa_score, na.rm = TRUE), 3)
-      } else {
-        NA
-      }
-
-      data.frame(
-        Sample = sf,
-        Total_PSMs = n_psms,
-        Confirmed = n_conf,
-        Novel = n_novel,
-        BLAST_Hits = n_blast_hits,
-        Unique_Proteins = n_unique_proteins,
-        Contaminant_Pct = contam_pct,
-        Median_Score = median_conf,
-        Median_AA_Conf = median_aa,
-        stringsAsFactors = FALSE
-      )
-    })
-
-    summary_df <- do.call(rbind, summary_rows)
-
-    # Add totals row
-    totals <- data.frame(
-      Sample = "TOTAL",
-      Total_PSMs = sum(summary_df$Total_PSMs),
-      Confirmed = sum(summary_df$Confirmed),
-      Novel = sum(summary_df$Novel),
-      BLAST_Hits = sum(summary_df$BLAST_Hits),
-      Unique_Proteins = if (!is.null(blast) && nrow(blast) > 0) {
-        length(unique(blast$protein))
-      } else { 0 },
-      Contaminant_Pct = if (!is.null(blast) && "contaminant_type" %in% names(blast)) {
-        best <- blast[!duplicated(blast$peptide), ]
-        round(100 * sum(best$contaminant_type == "Definite") / max(nrow(best), 1), 1)
-      } else { 0 },
-      Median_Score = round(median(psms$score, na.rm = TRUE), 3),
-      Median_AA_Conf = if ("mean_aa_score" %in% names(psms)) {
-        round(median(psms$mean_aa_score, na.rm = TRUE), 3)
-      } else { NA },
-      stringsAsFactors = FALSE
-    )
-    summary_df <- rbind(summary_df, totals)
-
-    DT::datatable(
-      summary_df,
-      rownames = FALSE,
-      selection = "none",
-      options  = list(
-        pageLength = 50,
-        scrollX = TRUE,
-        dom = "Bt",
-        buttons = list(
-          list(extend = "csv", title = "denovo_manuscript_summary"),
-          list(extend = "excel", title = "denovo_manuscript_summary")
-        ),
-        columnDefs = list(
-          list(className = "dt-right", targets = 1:8)
-        )
-      ),
-      extensions = "Buttons",
-      caption = htmltools::tags$caption(
-        style = "caption-side: top; font-weight: bold; color: #1565c0;",
-        "Table 1: De Novo Sequencing Summary Statistics (per sample)"
-      )
-    ) %>%
-      DT::formatStyle("Sample",
-        fontWeight = DT::styleEqual("TOTAL", "bold"),
-        backgroundColor = DT::styleEqual("TOTAL", "#e3f2fd")
-      )
-  })
+  # --- Manuscript summary: MOVED to server_denovo_controls.R (confidence-filtered) ---
 
   # ============================================================================
   #    DIAMOND BLAST for DDA Novel Peptides

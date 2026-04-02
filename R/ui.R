@@ -2465,7 +2465,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               icon("table"), " Manuscript Summary Statistics (Table 1)"
             ),
             div(style = "padding: 12px 16px;",
-              DT::DTOutput("dda_manuscript_summary")
+              DT::DTOutput("dda_manuscript_summary"),
+              div(style = "margin-top: 8px;",
+                downloadButton("dda_denovo_manuscript_csv", "Download CSV",
+                  class = "btn-outline-success btn-sm")
+              )
             )
           ),
 
