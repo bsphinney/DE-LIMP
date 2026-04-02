@@ -610,6 +610,93 @@ server_dda <- function(input, output, session, values, add_to_log) {
           }
         }
 
+        # Auto-submit DIAMOND BLAST SLURM job on novel peptides
+        if (!is.null(values$dda_casanovo_classification) &&
+            nrow(values$dda_casanovo_classification$novel) > 0 &&
+            !is.null(values$dda_fasta_path) && nzchar(values$dda_fasta_path %||% "")) {
+          tryCatch({
+            setProgress(0.6, detail = "Submitting DIAMOND BLAST job...")
+            novel <- values$dda_casanovo_classification$novel
+            unique_seqs <- unique(novel$seq_stripped)
+            message("[DDA] Submitting BLAST: ", length(unique_seqs), " novel peptides")
+
+            # Write FASTA of novel peptides
+            local_fasta <- file.path(local_tmp, "novel_peptides.fasta")
+            fasta_lines <- unlist(lapply(seq_along(unique_seqs), function(i) {
+              c(paste0(">denovo_", i, " ", unique_seqs[i]), unique_seqs[i])
+            }))
+            writeLines(fasta_lines, local_fasta)
+
+            # Upload to HPC
+            remote_denovo_dir <- file.path(remote_dir, "denovo")
+            ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(remote_denovo_dir)), timeout = 10)
+            scp_upload(ssh_cfg, local_fasta, file.path(remote_denovo_dir, "novel_peptides.fasta"))
+
+            # Write sbatch for DIAMOND
+            fasta_remote <- values$dda_fasta_path
+            dmnd_base <- file.path(remote_denovo_dir, "ref_diamond")
+            blast_out <- file.path(remote_denovo_dir, "blast_results.tsv")
+            logs_dir <- file.path(remote_dir, "logs")
+
+            blast_sbatch <- paste0(
+'#!/bin/bash
+#SBATCH --job-name=delimp_diamond_blast
+#SBATCH --partition=high
+#SBATCH --account=', slurm_account, '
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=00:30:00
+#SBATCH --output="', logs_dir, '/diamond_%j.out"
+#SBATCH --error="', logs_dir, '/diamond_%j.err"
+
+set -euo pipefail
+module load diamond
+
+echo "[DIAMOND] Start: $(date)"
+echo "[DIAMOND] Novel peptides: ', length(unique_seqs), '"
+echo "[DIAMOND] Reference FASTA: ', basename(fasta_remote), '"
+
+# Build DIAMOND DB if needed
+if [ ! -f "', dmnd_base, '.dmnd" ]; then
+  echo "[DIAMOND] Building database..."
+  diamond makedb --in "', fasta_remote, '" --db "', dmnd_base, '"
+fi
+
+# Run BLAST
+echo "[DIAMOND] Running blastp..."
+diamond blastp \\
+  --query "', file.path(remote_denovo_dir, "novel_peptides.fasta"), '" \\
+  --db "', dmnd_base, '" \\
+  --out "', blast_out, '" \\
+  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore \\
+  --sensitive --id 50 --max-target-seqs 5 \\
+  --threads 8
+
+echo "[DIAMOND] Results: $(wc -l < "', blast_out, '") hits"
+echo "[DIAMOND] Done: $(date)"
+')
+            local_sbatch <- file.path(local_tmp, "diamond_blast.sbatch")
+            writeLines(blast_sbatch, local_sbatch)
+            scp_upload(ssh_cfg, local_sbatch, file.path(remote_denovo_dir, "diamond_blast.sbatch"))
+
+            # Submit
+            sbatch_path <- values$ssh_sbatch_path %||% "sbatch"
+            submit_result <- ssh_exec(ssh_cfg,
+              paste(sbatch_path, shQuote(file.path(remote_denovo_dir, "diamond_blast.sbatch"))),
+              timeout = 15)
+
+            if (submit_result$status == 0) {
+              blast_jid <- trimws(sub(".*Submitted batch job\\s+", "",
+                grep("Submitted batch job", submit_result$stdout, value = TRUE)[1]))
+              values$dda_blast_job_id <- blast_jid
+              message("[DDA] DIAMOND BLAST submitted: job ", blast_jid)
+              showNotification(
+                paste("DIAMOND BLAST submitted (job", blast_jid, ")— results will load when complete."),
+                type = "message", duration = 8)
+            }
+          }, error = function(e) message("[DDA] Auto-BLAST submission failed: ", e$message))
+        }
+
         # Also load existing MGF-based Casanovo results from raw directory
         setProgress(0.7, detail = "Checking for existing mztab files...")
         raw_dir <- trimws(input$dda_raw_dir %||% "")
