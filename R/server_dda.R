@@ -1921,6 +1921,25 @@ echo "[DIAMOND] Done: $(date)"
       blast$pident <- blast$identity
     }
 
+    # Fix denovo_ IDs in peptide column — map back to actual sequences
+    if (any(grepl("^denovo_", blast$peptide))) {
+      # Try to get sequences from novel peptide classification
+      if (!is.null(values$dda_casanovo_classification)) {
+        novel <- values$dda_casanovo_classification$novel
+        if (!is.null(novel) && nrow(novel) > 0) {
+          # The FASTA was written with >denovo_N SEQUENCE format
+          # Map denovo IDs to stripped sequences
+          novel_seqs <- unique(novel$seq_stripped)
+          id_to_seq <- setNames(novel_seqs, paste0("denovo_", seq_along(novel_seqs)))
+          mapped <- id_to_seq[blast$peptide]
+          blast$peptide[!is.na(mapped)] <- mapped[!is.na(mapped)]
+        }
+      }
+      # Strip any remaining denovo_ prefixes
+      blast$peptide <- sub("^denovo_\\d+\\s*", "", blast$peptide)
+      blast$peptide[!nzchar(blast$peptide)] <- blast$query[!nzchar(blast$peptide)]
+    }
+
     # Parse species from SwissProt IDs if not already done
     if (!"species" %in% names(blast)) {
       blast$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
