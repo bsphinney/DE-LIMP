@@ -64,6 +64,354 @@ server_dda <- function(input, output, session, values, add_to_log) {
   })
 
   # ============================================================================
+  #    FASTA Database — UniProt download, SSH browse, contaminant append
+  # ============================================================================
+
+  # Track the resolved DDA FASTA path (from any source)
+  dda_fasta_resolved <- reactiveVal(NULL)
+
+  # --- UniProt modal ---
+  observeEvent(input$dda_open_uniprot_modal, {
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " UniProt FASTA Database Search (DDA)"),
+      size = "l",
+      easyClose = TRUE,
+      div(style = "display: flex; gap: 8px; margin-bottom: 12px;",
+        div(style = "flex: 1;",
+          textInput("dda_uniprot_search_query", NULL,
+            placeholder = "e.g., human, mouse, E. coli", width = "100%")
+        ),
+        actionButton("dda_search_uniprot", "Search",
+          class = "btn-info", style = "margin-top: 0;")
+      ),
+      DTOutput("dda_uniprot_results_table"),
+      hr(),
+      div(style = "display: flex; gap: 12px; align-items: flex-end;",
+        div(style = "flex: 1;",
+          selectInput("dda_fasta_content_type", "Content:",
+            choices = c(
+              "One per gene (recommended)" = "one_per_gene",
+              "Swiss-Prot reviewed" = "reviewed",
+              "Swiss-Prot + isoforms" = "reviewed_isoforms",
+              "Full proteome" = "full",
+              "Full + isoforms" = "full_isoforms"
+            ), selected = "one_per_gene", width = "100%")
+        ),
+        div(style = "flex: 1;",
+          uiOutput("dda_fasta_filename_preview_modal")
+        )
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("dda_download_fasta_btn", "Download FASTA",
+          class = "btn-success", icon = icon("download"))
+      )
+    ))
+  })
+
+  # UniProt search
+  observeEvent(input$dda_search_uniprot, {
+    req(nzchar(input$dda_uniprot_search_query))
+    withProgress(message = "Searching UniProt...", {
+      results <- search_uniprot_proteomes(input$dda_uniprot_search_query)
+      values$dda_uniprot_results <- results
+    })
+    if (nrow(values$dda_uniprot_results) == 0) {
+      showNotification("No proteomes found. Try a different search term.", type = "warning")
+    }
+  })
+
+  # UniProt results table
+  output$dda_uniprot_results_table <- DT::renderDT({
+    req(values$dda_uniprot_results, nrow(values$dda_uniprot_results) > 0)
+    display_df <- values$dda_uniprot_results[, c("upid", "organism", "common_name", "protein_count")]
+    colnames(display_df) <- c("ID", "Organism", "Common Name", "Proteins")
+    DT::datatable(display_df,
+      selection = "single",
+      options = list(pageLength = 10, dom = "tip", scrollY = "300px",
+        columnDefs = list(list(width = "90px", targets = 0))),
+      rownames = FALSE, class = "compact stripe")
+  })
+
+  # Filename preview in modal
+  output$dda_fasta_filename_preview_modal <- renderUI({
+    req(values$dda_uniprot_results, nrow(values$dda_uniprot_results) > 0)
+    sel <- input$dda_uniprot_results_table_rows_selected
+    req(length(sel) > 0)
+    row <- values$dda_uniprot_results[sel, ]
+    fname <- generate_fasta_filename(row$upid, row$organism, input$dda_fasta_content_type)
+    div(style = "font-size: 0.85em; color: #6c757d; padding-top: 28px;",
+      icon("file"), " ", fname)
+  })
+
+  # Download FASTA from UniProt
+  observeEvent(input$dda_download_fasta_btn, {
+    req(values$dda_uniprot_results, nrow(values$dda_uniprot_results) > 0)
+    sel <- input$dda_uniprot_results_table_rows_selected
+    if (length(sel) == 0) {
+      showNotification("Please select a proteome from the table first.", type = "warning")
+      return()
+    }
+
+    row <- values$dda_uniprot_results[sel, ]
+    fname <- generate_fasta_filename(row$upid, row$organism, input$dda_fasta_content_type)
+
+    # Download locally first
+    fasta_dir <- getOption("delimp.fasta_dir",
+      default = "/quobyte/proteomics-grp/de-limp/fasta")
+    if (!dir.exists(fasta_dir)) dir.create(fasta_dir, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(fasta_dir)) fasta_dir <- tempdir()
+    output_path <- file.path(fasta_dir, fname)
+
+    withProgress(message = sprintf("Downloading %s from UniProt...", row$upid), {
+      result <- download_uniprot_fasta(
+        proteome_id  = row$upid,
+        content_type = input$dda_fasta_content_type,
+        output_path  = output_path
+      )
+    })
+
+    if (!result$success) {
+      showNotification(paste("Download failed:", result$error), type = "error")
+      return()
+    }
+    if (!is.null(result$warning)) {
+      showNotification(result$warning, type = "warning", duration = 12)
+    }
+
+    removeModal()
+
+    # Upload to HPC if SSH connected
+    ssh_cfg <- tryCatch(dda_ssh_config(), error = function(e) NULL)
+    if (!is.null(ssh_cfg)) {
+      remote_fasta_dir <- file.path(
+        "/quobyte/proteomics-grp/de-limp", ssh_cfg$user, "databases")
+      remote_path <- file.path(remote_fasta_dir, fname)
+
+      # Check if already exists with same sequence count
+      needs_upload <- TRUE
+      exists_check <- ssh_exec(ssh_cfg,
+        paste("test -f", shQuote(remote_path), "&& grep -c '^>'", shQuote(remote_path)))
+      remote_count <- suppressWarnings(
+        as.integer(trimws(paste(exists_check$stdout, collapse = ""))))
+      if (!is.na(remote_count) && remote_count == result$n_sequences) {
+        needs_upload <- FALSE
+      }
+      if (needs_upload) {
+        ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(remote_fasta_dir)))
+        withProgress(message = "Uploading FASTA to HPC...", {
+          scp_upload(ssh_cfg, output_path, remote_path)
+        })
+      }
+      dda_fasta_resolved(remote_path)
+      showNotification(
+        sprintf("FASTA ready on HPC: %s (%s sequences)",
+          basename(remote_path), format(result$n_sequences, big.mark = ",")),
+        type = "message", duration = 8)
+    } else {
+      # No SSH — use local path (won't work for HPC submit but shown for reference)
+      dda_fasta_resolved(output_path)
+      showNotification(
+        sprintf("FASTA downloaded: %s (%s sequences). Connect SSH to upload to HPC.",
+          basename(output_path), format(result$n_sequences, big.mark = ",")),
+        type = "warning", duration = 10)
+    }
+
+    values$dda_fasta_info <- list(
+      organism = row$common_name,
+      n_sequences = result$n_sequences,
+      filename = fname
+    )
+  })
+
+  # Show selected FASTA info
+  output$dda_fasta_selected_info <- renderUI({
+    fpath <- dda_fasta_resolved()
+    info  <- values$dda_fasta_info
+    if (!is.null(fpath) && nzchar(fpath)) {
+      div(style = "font-size: 0.85em; margin-top: 8px; padding: 8px; background: #e8f5e9; border-radius: 6px;",
+        icon("check-circle", style = "color: #28a745;"), " ",
+        tags$strong(basename(fpath)),
+        if (!is.null(info$n_sequences))
+          paste0(" (", format(info$n_sequences, big.mark = ","), " sequences)"),
+        if (!is.null(info$organism))
+          paste0(" -- ", info$organism)
+      )
+    }
+  })
+
+  # Keep dda_fasta_path synced when user types in the browse/path textInput
+  observeEvent(input$dda_fasta_path, {
+    p <- trimws(input$dda_fasta_path %||% "")
+    if (nzchar(p)) dda_fasta_resolved(p)
+  }, ignoreInit = TRUE)
+
+  # --- SSH file browser for FASTA ---
+  observeEvent(input$dda_ssh_browse_fasta_btn, {
+    req(values$ssh_connected)
+    # Reuse the SSH file browser infrastructure from server_search.R
+    # Open file browser modal with FASTA filter
+    ssh_cfg <- dda_ssh_config()
+    start_dir <- "/quobyte/proteomics-grp/dia-nn/fasta_library"
+
+    # Check if the fasta library dir exists, fall back to user home
+    dir_check <- ssh_exec(ssh_cfg,
+      paste("test -d", shQuote(start_dir), "&& echo EXISTS"), timeout = 10)
+    if (!any(grepl("EXISTS", dir_check$stdout))) {
+      start_dir <- paste0("/quobyte/proteomics-grp/de-limp/", ssh_cfg$user)
+    }
+
+    # List .fasta files in the directory
+    ls_result <- ssh_exec(ssh_cfg,
+      paste0("ls -1 ", shQuote(start_dir), "/*.fasta ", shQuote(start_dir), "/*.fa 2>/dev/null | head -100"),
+      timeout = 15)
+
+    fasta_files <- character(0)
+    if (ls_result$status == 0 && length(ls_result$stdout) > 0) {
+      fasta_files <- trimws(ls_result$stdout)
+      fasta_files <- fasta_files[nzchar(fasta_files)]
+    }
+
+    # Also list subdirectories
+    ls_dirs <- ssh_exec(ssh_cfg,
+      paste0("ls -1d ", shQuote(start_dir), "/*/ 2>/dev/null | head -50"),
+      timeout = 15)
+    subdirs <- character(0)
+    if (ls_dirs$status == 0 && length(ls_dirs$stdout) > 0) {
+      subdirs <- trimws(ls_dirs$stdout)
+      subdirs <- subdirs[nzchar(subdirs)]
+    }
+
+    values$dda_fasta_browser_dir <- start_dir
+
+    showModal(modalDialog(
+      title = tagList(icon("folder-open"), " Browse FASTA Files on HPC"),
+      size = "l", easyClose = TRUE,
+      div(style = "margin-bottom: 12px;",
+        div(style = "display: flex; gap: 8px; align-items: flex-end;",
+          div(style = "flex: 1;",
+            textInput("dda_fasta_browse_dir", "Directory:",
+              value = start_dir, width = "100%")
+          ),
+          actionButton("dda_fasta_browse_go", "Go",
+            class = "btn-outline-primary btn-sm", style = "margin-bottom: 15px;")
+        )
+      ),
+      uiOutput("dda_fasta_browser_content"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("dda_fasta_browser_select", "Select",
+          class = "btn-success", icon = icon("check"))
+      )
+    ))
+  })
+
+  # Navigate within FASTA browser
+  observeEvent(input$dda_fasta_browse_go, {
+    req(values$ssh_connected)
+    browse_dir <- trimws(input$dda_fasta_browse_dir %||% "")
+    req(nzchar(browse_dir))
+    values$dda_fasta_browser_dir <- browse_dir
+  })
+
+  # Click on a directory in the browser
+  observeEvent(input$dda_fasta_browser_click_dir, {
+    req(nzchar(input$dda_fasta_browser_click_dir))
+    values$dda_fasta_browser_dir <- input$dda_fasta_browser_click_dir
+    updateTextInput(session, "dda_fasta_browse_dir", value = input$dda_fasta_browser_click_dir)
+  })
+
+  # Click on a file in the browser to select it
+  observeEvent(input$dda_fasta_browser_click_file, {
+    req(nzchar(input$dda_fasta_browser_click_file))
+    values$dda_fasta_browser_selected <- input$dda_fasta_browser_click_file
+  })
+
+  # Render the file browser content
+  output$dda_fasta_browser_content <- renderUI({
+    browse_dir <- values$dda_fasta_browser_dir
+    req(nzchar(browse_dir))
+    ssh_cfg <- dda_ssh_config()
+
+    # List directory contents
+    ls_result <- ssh_exec(ssh_cfg,
+      paste0("ls -1ap ", shQuote(browse_dir), " 2>/dev/null | head -200"),
+      timeout = 15)
+
+    if (ls_result$status != 0) {
+      return(div(class = "alert alert-warning", "Could not read directory: ", browse_dir))
+    }
+
+    items <- trimws(ls_result$stdout)
+    items <- items[nzchar(items) & items != "./" & items != "../"]
+
+    # Separate dirs and files
+    dirs  <- items[grepl("/$", items)]
+    files <- items[!grepl("/$", items)]
+    # Filter to FASTA files only
+    files <- files[grepl("\\.(fasta|fa|faa)$", files, ignore.case = TRUE)]
+
+    selected <- values$dda_fasta_browser_selected
+
+    dir_items <- lapply(dirs, function(d) {
+      full_path <- file.path(browse_dir, sub("/$", "", d))
+      tags$div(
+        style = "padding: 4px 8px; cursor: pointer; border-bottom: 1px solid #eee;",
+        onclick = sprintf("Shiny.setInputValue('dda_fasta_browser_click_dir', '%s', {priority: 'event'})", full_path),
+        icon("folder", style = "color: #0d6efd; margin-right: 8px;"),
+        tags$span(d, style = "font-weight: 500;")
+      )
+    })
+
+    file_items <- lapply(files, function(f) {
+      full_path <- file.path(browse_dir, f)
+      is_selected <- identical(full_path, selected)
+      bg <- if (is_selected) "background: #d4edda;" else ""
+      tags$div(
+        style = paste0("padding: 4px 8px; cursor: pointer; border-bottom: 1px solid #eee; ", bg),
+        onclick = sprintf("Shiny.setInputValue('dda_fasta_browser_click_file', '%s', {priority: 'event'})", full_path),
+        icon("file-alt", style = "color: #28a745; margin-right: 8px;"),
+        tags$span(f)
+      )
+    })
+
+    # Parent directory link
+    parent <- dirname(browse_dir)
+    parent_link <- if (parent != browse_dir) {
+      tags$div(
+        style = "padding: 4px 8px; cursor: pointer; border-bottom: 1px solid #eee;",
+        onclick = sprintf("Shiny.setInputValue('dda_fasta_browser_click_dir', '%s', {priority: 'event'})", parent),
+        icon("level-up-alt", style = "color: #6c757d; margin-right: 8px;"),
+        tags$span(".. (parent directory)", style = "color: #6c757d;")
+      )
+    }
+
+    div(style = "max-height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 6px;",
+      parent_link,
+      dir_items,
+      if (length(file_items) == 0 && length(dir_items) == 0)
+        div(style = "padding: 16px; color: #6c757d; text-align: center;",
+          "No FASTA files found in this directory.")
+      else
+        file_items
+    )
+  })
+
+  # Select button in browser modal
+  observeEvent(input$dda_fasta_browser_select, {
+    selected <- values$dda_fasta_browser_selected
+    if (is.null(selected) || !nzchar(selected)) {
+      showNotification("Click a FASTA file to select it first.", type = "warning")
+      return()
+    }
+    dda_fasta_resolved(selected)
+    updateTextInput(session, "dda_fasta_path", value = selected)
+    values$dda_fasta_info <- list(filename = basename(selected))
+    removeModal()
+    showNotification(paste("Selected:", basename(selected)), type = "message")
+  })
+
+  # ============================================================================
   #    File scan: list .d files in remote directory
   # ============================================================================
   observeEvent(input$dda_scan_files, {
@@ -76,12 +424,12 @@ server_dda <- function(input, output, session, values, add_to_log) {
 
     ssh_cfg <- dda_ssh_config()
     result <- ssh_exec(ssh_cfg,
-      paste0("ls -1d ", shQuote(raw_dir), "/*.d 2>/dev/null | head -200"),
+      paste0("{ ls -1d ", shQuote(raw_dir), "/*.d 2>/dev/null; ls -1 ", shQuote(raw_dir), "/*.raw 2>/dev/null; } | head -200"),
       timeout = 15)
 
     if (result$status != 0 || length(result$stdout) == 0 ||
         all(!nzchar(trimws(result$stdout)))) {
-      showNotification("No .d directories found in the specified path.", type = "warning")
+      showNotification("No .d or .raw files found in the specified path.", type = "warning")
       values$dda_raw_files <- character(0)
       return()
     }
@@ -116,8 +464,15 @@ server_dda <- function(input, output, session, values, add_to_log) {
     req(values$ssh_connected)
 
     raw_dir    <- trimws(input$dda_raw_dir %||% "")
-    fasta_path <- trimws(input$dda_fasta_path %||% "")
     exp_name   <- trimws(input$dda_experiment_name %||% "dda_search")
+
+    # Resolve FASTA path from whichever source was used
+    fasta_source <- input$dda_fasta_source %||% "browse"
+    if (fasta_source == "uniprot") {
+      fasta_path <- dda_fasta_resolved() %||% ""
+    } else {
+      fasta_path <- trimws(input$dda_fasta_path %||% "")
+    }
 
     # Validation
     if (!nzchar(raw_dir)) {
@@ -125,7 +480,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
       return()
     }
     if (!nzchar(fasta_path)) {
-      showNotification("Please enter a FASTA file path.", type = "error")
+      showNotification("Please select or enter a FASTA file path.", type = "error")
       return()
     }
     if (is.null(values$dda_raw_files) || length(values$dda_raw_files) == 0) {
@@ -152,7 +507,48 @@ server_dda <- function(input, output, session, values, add_to_log) {
         showNotification("Failed to create output directory on HPC.", type = "error")
         return()
       }
-      setProgress(0.2, detail = "Generating Sage config...")
+      setProgress(0.2, detail = "Preparing FASTA database...")
+
+      # Handle contaminant library — append to FASTA on HPC
+      contam_lib <- input$dda_contaminant_library %||% "none"
+      if (contam_lib != "none") {
+        contam_result <- get_contaminant_fasta(contam_lib)
+        if (contam_result$success) {
+          # Upload contaminant FASTA to HPC
+          remote_contam_dir <- file.path(output_dir, "databases")
+          remote_contam_path <- file.path(remote_contam_dir, basename(contam_result$path))
+
+          exists_check <- ssh_exec(ssh_cfg,
+            paste("test -f", shQuote(remote_contam_path), "&& echo EXISTS"))
+          if (!any(grepl("EXISTS", exists_check$stdout))) {
+            ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(remote_contam_dir)))
+            scp_upload(ssh_cfg, contam_result$path, remote_contam_path)
+          }
+
+          # Concatenate proteome + contaminant into combined FASTA on HPC
+          # Sage takes a single FASTA path, unlike DIA-NN which accepts multiple --fasta args
+          combined_fasta <- file.path(output_dir, "databases",
+            paste0("combined_", basename(fasta_path)))
+          ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(dirname(combined_fasta))))
+          cat_result <- ssh_exec(ssh_cfg,
+            paste("cat", shQuote(fasta_path), shQuote(remote_contam_path),
+              ">", shQuote(combined_fasta)),
+            timeout = 30)
+          if (cat_result$status == 0) {
+            message("[DDA] Combined FASTA: ", combined_fasta,
+              " (proteome + ", contam_lib, " contaminants)")
+            fasta_path <- combined_fasta
+          } else {
+            showNotification("Warning: Could not append contaminant library. Using proteome only.",
+              type = "warning")
+          }
+        } else {
+          showNotification(paste("Warning: Contaminant library not found:", contam_result$error),
+            type = "warning")
+        }
+      }
+
+      setProgress(0.3, detail = "Generating Sage config...")
 
       # Generate sage.json locally, then upload
       local_tmp <- tempdir()
@@ -229,19 +625,20 @@ server_dda <- function(input, output, session, values, add_to_log) {
 
       run_casanovo <- isTRUE(input$dda_run_casanovo)
       values$dda_search_params <- list(
-        preset           = input$dda_preset %||% "standard",
-        fasta_path       = fasta_path,
-        raw_dir          = raw_dir,
-        n_files          = length(raw_paths),
-        missed_cleavages = input$dda_missed_cleavages %||% 2,
-        precursor_tol    = input$dda_precursor_tol %||% 20,
-        fragment_tol     = input$dda_fragment_tol %||% 0.05,
-        normalization    = input$dda_norm_method %||% "cyclicloess",
-        imputation       = input$dda_impute_method %||% "perseus",
-        min_valid        = input$dda_min_valid %||% 0.5,
-        submitted_at     = Sys.time(),
-        sage_bin         = sage_bin,
-        casanovo_enabled = run_casanovo
+        preset              = input$dda_preset %||% "standard",
+        fasta_path          = fasta_path,
+        raw_dir             = raw_dir,
+        n_files             = length(raw_paths),
+        missed_cleavages    = input$dda_missed_cleavages %||% 2,
+        precursor_tol       = input$dda_precursor_tol %||% 20,
+        fragment_tol        = input$dda_fragment_tol %||% 0.05,
+        normalization       = input$dda_norm_method %||% "cyclicloess",
+        imputation          = input$dda_impute_method %||% "perseus",
+        min_valid           = input$dda_min_valid %||% 0.5,
+        contaminant_library = contam_lib,
+        submitted_at        = Sys.time(),
+        sage_bin            = sage_bin,
+        casanovo_enabled    = run_casanovo
       )
 
       # --- Casanovo submission (optional, GPU) ---

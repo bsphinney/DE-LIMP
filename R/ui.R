@@ -247,10 +247,12 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     # Gated by config.yml feature flags + HPC availability
     {
       mode_choices <- c("DIA" = "dia")
-      if (is_hive && isTRUE(config$features$enable_dda)) {
+      # Show DDA/XL-MS when on HPC OR when SSH is available (Docker/local with SSH)
+      can_search <- is_hive || isTRUE(search_enabled)
+      if (can_search && isTRUE(config$features$enable_dda)) {
         mode_choices <- c(mode_choices, "DDA" = "dda")
       }
-      if (is_hive && isTRUE(config$features$enable_xlms)) {
+      if (can_search && isTRUE(config$features$enable_xlms)) {
         mode_choices <- c(mode_choices, "XL-MS" = "xlms")
       }
       if (length(mode_choices) > 1) {
@@ -1077,7 +1079,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             " powered by ",
             tags$strong("Sage"), " (database search) + ",
             tags$strong("Casanovo"), " (de novo, optional). ",
-            "Requires Hive HPC connection. timsTOF ddaPASEF .d files only."
+            "Requires Hive HPC connection. Supports timsTOF .d and Thermo .raw files."
           ),
 
           # SSH required warning
@@ -1109,11 +1111,57 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           # --- Database ---
           div(
             style = "background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px; margin-bottom: 16px;",
-            tags$h6(icon("database"), " Database", style = "margin-bottom: 12px;"),
-            textInput("dda_fasta_path", "FASTA path (Hive)",
-              placeholder = "/quobyte/proteomics-grp/brett/data/uniprotkb_proteome_UP000005640_2026_01_14.fasta",
+            tags$h6(icon("database"), " FASTA Database", style = "margin-bottom: 12px;"),
+
+            selectInput("dda_fasta_source", NULL,
+              choices = c("Download from UniProt" = "uniprot",
+                          "Browse / enter path"  = "browse"),
               width = "100%"),
-            tags$small(style = "color: #6c757d;",
+
+            # --- UniProt source ---
+            conditionalPanel("input.dda_fasta_source == 'uniprot'",
+              actionButton("dda_open_uniprot_modal", "Search UniProt",
+                class = "btn-info btn-sm w-100", icon = icon("search")),
+              uiOutput("dda_fasta_selected_info")
+            ),
+
+            # --- Browse / path source ---
+            conditionalPanel("input.dda_fasta_source == 'browse'",
+              div(style = "display: flex; gap: 5px; align-items: flex-end;",
+                div(style = "flex: 1;",
+                  textInput("dda_fasta_path", "FASTA path (Hive)",
+                    placeholder = "/quobyte/proteomics-grp/.../proteome.fasta",
+                    width = "100%")
+                ),
+                conditionalPanel(
+                  "output.ssh_connected_flag",
+                  actionButton("dda_ssh_browse_fasta_btn", NULL, icon = icon("folder-open"),
+                    class = "btn-outline-primary btn-sm",
+                    style = "margin-bottom: 15px;", title = "Browse remote directories")
+                )
+              )
+            ),
+
+            # Contaminant library (shared with DIA)
+            div(style = "margin-top: 10px;",
+              selectInput("dda_contaminant_library", "Add Contaminant Library:",
+                choices = c(
+                  "None" = "none",
+                  "Universal (Recommended)" = "universal",
+                  "Cell Culture" = "cell_culture",
+                  "Mouse Tissue" = "mouse_tissue",
+                  "Rat Tissue" = "rat_tissue",
+                  "Neuron Culture" = "neuron_culture",
+                  "Stem Cell Culture" = "stem_cell_culture"
+                ),
+                selected = "universal", width = "100%"),
+              tags$small(class = "text-muted",
+                "Contaminant libraries from ",
+                tags$a(href = "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+                       "HaoGroup-ProtContLib", target = "_blank"))
+            ),
+
+            tags$small(style = "color: #6c757d; display: block; margin-top: 8px;",
               "Recommended: one-protein-per-gene (OPG) FASTA for cleaner protein inference.")
           ),
 
