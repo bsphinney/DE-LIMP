@@ -2416,6 +2416,29 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           )
         )
       ),
+      nav_panel("Casanovo", value = "casanovo_denovo_tab", icon = icon("wand-magic-sparkles"),
+        div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+          uiOutput("dda_denovo_summary_cards"),
+          navset_card_tab(
+            nav_panel("Confirmed Peptides",
+              DT::DTOutput("dda_denovo_confirmed_table")),
+            nav_panel("Novel Peptides",
+              DT::DTOutput("dda_denovo_novel_table")),
+            nav_panel("DIAMOND BLAST",
+              div(style = "margin-bottom: 15px;",
+                div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
+                  actionButton("dda_run_diamond_blast", "Run DIAMOND BLAST",
+                    icon = icon("search"), class = "btn-info btn-sm"),
+                  tags$small(style = "color: #6c757d;",
+                    "BLASTs novel Casanovo peptides against the DDA reference FASTA on HPC.")
+                )
+              ),
+              DT::DTOutput("dda_denovo_blast_table")),
+            nav_panel("Score Distribution",
+              plotlyOutput("dda_denovo_score_dist", height = "400px"))
+          )
+        )
+      ),
       nav_panel("Submit Cascadia Job", value = "cascadia_submit_tab", icon = icon("rocket"),
         div(style = "max-width: 800px; margin: 0 auto; padding: 20px;",
           tags$h4("Submit Cascadia De Novo Sequencing"),

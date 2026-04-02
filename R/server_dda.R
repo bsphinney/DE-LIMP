@@ -246,6 +246,12 @@ server_dda <- function(input, output, session, values, add_to_log) {
     if (nzchar(p)) dda_fasta_resolved(p)
   }, ignoreInit = TRUE)
 
+  # Sync resolved FASTA path to values for cross-module access (DIAMOND BLAST)
+  observe({
+    p <- dda_fasta_resolved()
+    if (!is.null(p) && nzchar(p)) values$dda_fasta_path <- p
+  })
+
   # --- SSH file browser for FASTA ---
   observeEvent(input$dda_ssh_browse_fasta_btn, {
     req(values$ssh_connected)
@@ -1460,6 +1466,401 @@ server_dda <- function(input, output, session, values, add_to_log) {
         )
       )
     )
+  })
+
+  # ============================================================================
+  #    DDA De Novo Tab — Summary Cards, Tables, DIAMOND BLAST
+  #    Renders in the De Novo > Casanovo nav_panel (ui.R)
+  # ============================================================================
+
+  # --- Summary cards for DDA Casanovo de novo results ---
+  output$dda_denovo_summary_cards <- renderUI({
+    req(values$dda_casanovo_classification)
+    cls <- values$dda_casanovo_classification
+
+    n_total     <- cls$summary_stats$n_total
+    n_confirmed <- cls$summary_stats$n_confirmed
+    n_novel     <- cls$summary_stats$n_novel
+    pct_conf    <- cls$summary_stats$pct_confirmed
+
+    n_proteins  <- if (!is.null(cls$protein_summary)) nrow(cls$protein_summary) else 0
+
+    tags$div(
+      class = "row",
+      style = "margin-bottom: 15px;",
+
+      tags$div(
+        class = "col-md-3",
+        tags$div(
+          class = "card text-center",
+          style = "background: #f8f9fa; border-left: 4px solid #3498db; padding: 15px;",
+          tags$h4(format(n_total, big.mark = ","), style = "margin: 0; color: #3498db;"),
+          tags$small("Total De Novo PSMs")
+        )
+      ),
+
+      tags$div(
+        class = "col-md-3",
+        tags$div(
+          class = "card text-center",
+          style = "background: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px;",
+          tags$h4(format(n_confirmed, big.mark = ","), style = "margin: 0; color: #2ecc71;"),
+          tags$small("Confirmed (in Sage)")
+        )
+      ),
+
+      tags$div(
+        class = "col-md-3",
+        tags$div(
+          class = "card text-center",
+          style = "background: #f8f9fa; border-left: 4px solid #e67e22; padding: 15px;",
+          tags$h4(format(n_novel, big.mark = ","), style = "margin: 0; color: #e67e22;"),
+          tags$small("Novel Peptides")
+        )
+      ),
+
+      tags$div(
+        class = "col-md-3",
+        tags$div(
+          class = "card text-center",
+          style = "background: #f8f9fa; border-left: 4px solid #9b59b6; padding: 15px;",
+          tags$h4(paste0(pct_conf, "%"), style = "margin: 0; color: #9b59b6;"),
+          tags$small(paste0("Confirmation Rate (", n_proteins, " proteins)"))
+        )
+      )
+    )
+  })
+
+  # --- Confirmed peptides table (DDA Casanovo) ---
+  output$dda_denovo_confirmed_table <- DT::renderDT({
+    req(values$dda_casanovo_classification)
+    confirmed <- values$dda_casanovo_classification$confirmed
+    req(nrow(confirmed) > 0)
+
+    display_df <- data.frame(
+      Sequence    = confirmed$sequence,
+      Stripped    = confirmed$seq_stripped,
+      Score       = round(confirmed$score, 3),
+      Charge      = confirmed$charge,
+      AA_Scores   = if ("mean_aa_score" %in% names(confirmed)) {
+        round(confirmed$mean_aa_score, 3)
+      } else {
+        NA_real_
+      },
+      Protein     = if ("proteins" %in% names(confirmed)) {
+        confirmed$proteins
+      } else {
+        NA_character_
+      },
+      Source_File  = confirmed$source_file,
+      stringsAsFactors = FALSE
+    )
+
+    DT::datatable(
+      display_df,
+      rownames = FALSE,
+      filter   = "top",
+      selection = "multiple",
+      options  = list(
+        pageLength = 25,
+        scrollX    = TRUE,
+        order      = list(list(2, "desc")),
+        dom        = "Bfrtip",
+        buttons    = list("csv", "excel")
+      ),
+      extensions = "Buttons",
+      caption = "Confirmed: Casanovo de novo peptides matching Sage database search results (I/L normalized)"
+    )
+  })
+
+  # --- Novel peptides table (DDA Casanovo) ---
+  output$dda_denovo_novel_table <- DT::renderDT({
+    req(values$dda_casanovo_classification)
+    novel <- values$dda_casanovo_classification$novel
+    req(nrow(novel) > 0)
+
+    display_df <- data.frame(
+      Sequence    = novel$sequence,
+      Stripped    = novel$seq_stripped,
+      Score       = round(novel$score, 3),
+      Charge      = novel$charge,
+      AA_Scores   = if ("mean_aa_score" %in% names(novel)) {
+        round(novel$mean_aa_score, 3)
+      } else {
+        NA_real_
+      },
+      Source_File  = novel$source_file,
+      stringsAsFactors = FALSE
+    )
+
+    # Append DIAMOND BLAST results if available
+    blast <- values$dda_casanovo_blast
+    if (!is.null(blast) && nrow(blast) > 0) {
+      blast_dedup <- blast[!duplicated(blast$peptide_sequence), ]
+      blast_map    <- stats::setNames(blast_dedup$subject, blast_dedup$peptide_sequence)
+      identity_map <- stats::setNames(blast_dedup$identity, blast_dedup$peptide_sequence)
+      evalue_map   <- stats::setNames(blast_dedup$evalue, blast_dedup$peptide_sequence)
+
+      display_df$BLAST_Hit    <- blast_map[novel$seq_stripped]
+      display_df$Identity_Pct <- round(identity_map[novel$seq_stripped], 1)
+      display_df$E_Value      <- evalue_map[novel$seq_stripped]
+    }
+
+    DT::datatable(
+      display_df,
+      rownames = FALSE,
+      filter   = "top",
+      selection = "multiple",
+      options  = list(
+        pageLength = 25,
+        scrollX    = TRUE,
+        order      = list(list(2, "desc")),
+        dom        = "Bfrtip",
+        buttons    = list("csv", "excel")
+      ),
+      extensions = "Buttons",
+      caption = htmltools::tags$caption(
+        style = "caption-side: top; color: #e67e22; font-weight: bold;",
+        "Novel: Casanovo de novo peptides NOT found in Sage results.",
+        tags$br(),
+        tags$small(
+          style = "color: #666; font-weight: normal;",
+          "These may represent sequence variants, unexpected organisms, or proteins absent from your reference FASTA. ",
+          "Use DIAMOND BLAST to map them to known proteins."
+        )
+      )
+    )
+  })
+
+  # --- DIAMOND BLAST results table (DDA) ---
+  output$dda_denovo_blast_table <- DT::renderDT({
+    req(values$dda_casanovo_blast)
+    blast <- values$dda_casanovo_blast
+    req(nrow(blast) > 0)
+
+    display_df <- data.frame(
+      Peptide     = blast$peptide_sequence,
+      Hit         = blast$subject,
+      Protein     = blast$protein,
+      Identity    = round(blast$identity, 1),
+      Length      = blast$length,
+      Query_Len   = blast$qlen,
+      E_Value     = formatC(blast$evalue, format = "e", digits = 2),
+      Bitscore    = round(blast$bitscore, 1),
+      stringsAsFactors = FALSE
+    )
+
+    DT::datatable(
+      display_df,
+      rownames = FALSE,
+      filter   = "top",
+      selection = "none",
+      options  = list(
+        pageLength = 25,
+        scrollX    = TRUE,
+        order      = list(list(3, "desc")),
+        dom        = "Bfrtip",
+        buttons    = list("csv", "excel")
+      ),
+      extensions = "Buttons",
+      caption = "DIAMOND BLAST hits for novel Casanovo peptides against reference proteome"
+    )
+  })
+
+  # --- Score distribution plot (DDA Casanovo) ---
+  output$dda_denovo_score_dist <- plotly::renderPlotly({
+    req(values$dda_casanovo_psms)
+    req(nrow(values$dda_casanovo_psms) > 0)
+
+    df <- values$dda_casanovo_psms
+    cls <- values$dda_casanovo_classification
+
+    match_type <- if (!is.null(cls)) {
+      confirmed_seqs <- cls$confirmed$seq_norm
+      ifelse(df$seq_norm %in% confirmed_seqs, "Confirmed", "Novel")
+    } else {
+      rep("Unclassified", nrow(df))
+    }
+
+    plot_df <- data.frame(
+      score = df$score,
+      type  = match_type,
+      stringsAsFactors = FALSE
+    )
+
+    colors <- c("Confirmed" = "#2ecc71", "Novel" = "#e67e22", "Unclassified" = "#95a5a6")
+
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = score, fill = type)) +
+      ggplot2::geom_histogram(bins = 50, alpha = 0.8, position = "stack") +
+      ggplot2::scale_fill_manual(values = colors) +
+      ggplot2::labs(
+        x = "Casanovo Confidence Score",
+        y = "Count",
+        fill = "Classification"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(legend.position = "top")
+
+    plotly::ggplotly(p) %>%
+      plotly::layout(
+        legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)
+      )
+  })
+
+  # ============================================================================
+  #    DIAMOND BLAST for DDA Novel Peptides
+  # ============================================================================
+
+  observeEvent(input$dda_run_diamond_blast, {
+    req(values$dda_casanovo_classification)
+    novel <- values$dda_casanovo_classification$novel
+    req(nrow(novel) > 0)
+
+    novel_peptides <- unique(novel$seq_stripped)
+
+    if (length(novel_peptides) == 0) {
+      showNotification("No novel peptides to BLAST.", type = "warning")
+      return()
+    }
+
+    # Get FASTA path — use DDA FASTA that was used for the Sage search
+    fasta_path <- values$dda_fasta_path
+    if (is.null(fasta_path) || !nzchar(fasta_path)) {
+      showNotification(
+        "No reference FASTA available. The DDA search FASTA path is needed for DIAMOND BLAST.",
+        type = "error"
+      )
+      return()
+    }
+
+    ssh_cfg <- tryCatch(dda_ssh_config(), error = function(e) NULL)
+    if (is.null(ssh_cfg) || !isTRUE(values$ssh_connected)) {
+      showNotification(
+        "SSH connection required. DIAMOND BLAST runs on HPC via SSH.",
+        type = "error"
+      )
+      return()
+    }
+
+    tryCatch({
+      withProgress(message = "Running DIAMOND BLAST on HPC...", value = 0.1, {
+
+        output_dir <- values$dda_output_dir %||% paste0("/tmp/delimp_dda_denovo_", Sys.getpid())
+        denovo_dir <- file.path(output_dir, "denovo")
+
+        # Create remote directory
+        ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(denovo_dir)), timeout = 15)
+        setProgress(0.2, detail = "Created remote directory")
+
+        # Write query FASTA locally, then SCP upload
+        query_fasta_local <- tempfile(fileext = ".fasta")
+        query_lines <- paste0(">casanovo_", seq_along(novel_peptides), "\n", novel_peptides)
+        writeLines(query_lines, query_fasta_local)
+
+        query_fasta_remote <- file.path(denovo_dir, "novel_casanovo_queries.fasta")
+        scp_upload(ssh_cfg, query_fasta_local, query_fasta_remote)
+        setProgress(0.3, detail = "Uploaded query FASTA")
+
+        # Build DIAMOND DB if not cached
+        diamond_bin <- "diamond"
+        diamond_db_remote <- file.path(denovo_dir, "ref_diamond.dmnd")
+
+        # Try module load diamond first, then check if DB exists
+        db_check <- ssh_exec(
+          ssh_cfg,
+          paste0("module load diamond 2>/dev/null; test -f ", shQuote(diamond_db_remote), " && echo EXISTS"),
+          timeout = 15
+        )
+
+        if (!any(grepl("EXISTS", db_check$stdout))) {
+          db_build_cmd <- paste0(
+            "module load diamond 2>/dev/null && ",
+            diamond_bin, " makedb",
+            " --in ", shQuote(fasta_path),
+            " --db ", shQuote(diamond_db_remote),
+            " --threads 4 --quiet"
+          )
+          build_res <- ssh_exec(ssh_cfg, db_build_cmd, login_shell = TRUE, timeout = 300)
+          if ((build_res$status %||% 0L) != 0L) {
+            showNotification(
+              paste("DIAMOND makedb failed:", paste(build_res$stderr, collapse = "\n")),
+              type = "error"
+            )
+            return()
+          }
+        }
+        setProgress(0.5, detail = "DIAMOND database ready")
+
+        # Run DIAMOND blastp
+        blast_out_remote <- file.path(denovo_dir, "novel_casanovo_blast.tsv")
+        blast_cmd <- paste0(
+          "module load diamond 2>/dev/null && ",
+          diamond_bin, " blastp",
+          " --query ", shQuote(query_fasta_remote),
+          " --db ", shQuote(diamond_db_remote),
+          " --out ", shQuote(blast_out_remote),
+          " --outfmt 6 qseqid sseqid pident length qlen slen evalue bitscore",
+          " --id 90",
+          " --threads 4 --sensitive --quiet"
+        )
+        blast_res <- ssh_exec(ssh_cfg, blast_cmd, login_shell = TRUE, timeout = 600)
+        if ((blast_res$status %||% 0L) != 0L) {
+          showNotification(
+            paste("DIAMOND blastp failed:", paste(blast_res$stderr, collapse = "\n")),
+            type = "error"
+          )
+          return()
+        }
+        setProgress(0.8, detail = "BLAST complete, downloading results")
+
+        # Download results
+        blast_out_local <- tempfile(fileext = ".tsv")
+        scp_download(ssh_cfg, blast_out_remote, blast_out_local)
+
+        if (file.exists(blast_out_local) && file.size(blast_out_local) > 0) {
+          hits <- data.table::fread(blast_out_local, header = FALSE)
+          names(hits) <- c("query_idx", "subject", "identity", "length",
+                           "qlen", "slen", "evalue", "bitscore")
+
+          # Extract numeric index from query name (casanovo_1, casanovo_2, ...)
+          hit_idx <- as.integer(gsub("casanovo_", "", hits$query_idx))
+          hits$peptide_sequence <- novel_peptides[hit_idx]
+
+          # Extract protein accession (handles sp|ACC|NAME format)
+          hits$protein <- stringr::str_extract(hits$subject, "(?<=\\|)[^|]+(?=\\|)")
+          no_match <- is.na(hits$protein)
+          if (any(no_match)) {
+            hits$protein[no_match] <- hits$subject[no_match]
+          }
+
+          values$dda_casanovo_blast <- as.data.frame(hits)
+          n_hits <- length(unique(hits$peptide_sequence))
+          n_proteins <- length(unique(hits$protein))
+          showNotification(
+            sprintf("DIAMOND BLAST: %d novel peptides mapped to %d protein hits.",
+                    n_hits, n_proteins),
+            type = "message"
+          )
+          add_to_log(
+            sprintf("DDA DIAMOND BLAST: %d peptides -> %d hits", n_hits, nrow(hits)),
+            "denovo"
+          )
+        } else {
+          values$dda_casanovo_blast <- data.frame()
+          showNotification("No DIAMOND BLAST hits found.", type = "warning")
+          add_to_log("DDA DIAMOND BLAST: no hits found", "denovo")
+        }
+
+        setProgress(1.0, detail = "Done")
+      })
+
+    }, error = function(e) {
+      showNotification(
+        paste("DIAMOND BLAST error:", conditionMessage(e)),
+        type = "error"
+      )
+      add_to_log(paste("DDA DIAMOND BLAST error:", conditionMessage(e)), "error")
+    })
   })
 
 }

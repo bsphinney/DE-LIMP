@@ -519,6 +519,8 @@ server <- function(input, output, session) {
     dda_casanovo_mztab_dir     = NULL,    # Remote path to mztab output dir
     dda_casanovo_psms          = NULL,    # data.table: parsed de novo PSMs
     dda_casanovo_classification = NULL,   # List from classify_dda_denovo()
+    dda_casanovo_blast         = NULL,    # data.frame: DIAMOND BLAST results for DDA novel peptides
+    dda_fasta_path             = NULL,    # Remote FASTA path used for DDA search (for DIAMOND)
     # App metadata
     app_version = app_version,
     community_stats = community_stats
@@ -656,7 +658,8 @@ server <- function(input, output, session) {
   })
 
   observe({
-    if (!is.null(values$denovo_data) || isTRUE(values$ssh_connected)) {
+    if (!is.null(values$denovo_data) || isTRUE(values$ssh_connected) ||
+        !is.null(values$dda_casanovo_classification)) {
       nav_show("main_tabs", "De Novo")
     } else {
       nav_hide("main_tabs", "De Novo")
