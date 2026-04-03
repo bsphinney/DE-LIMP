@@ -59,7 +59,8 @@
 - [x] **IM model architecture**: 4th embedding channel for ion mobility (1/K0), zero-init trick for backward compatibility with pre-trained checkpoint. 5-column ASF format. (April 2026)
 - [x] **IM ASF pipeline verified**: `new_with_span_step()` produces 174k spectra from single .d file with IM values. All 5 unit tests pass (creation, forward, zero-init match, IM sensitivity, mixed batch). (April 2026)
 - [x] **Native .d validation**: 738 peptides from native .d path vs 44 from mzML (16.8x improvement). bruker_patch v3 working. (April 2026)
-- [ ] **Run IM-enhanced training**: Submit IM training (5-column ASF) after baseline job 11508667 completes. Compare IM vs baseline on Zhao validation set.
+- [x] **Training pipeline audit**: Verified all hyperparameters against Cascadia source. Key findings: (1) Cascadia does NOT use peak filtering — `max_num_peaks=200` is a depthcharge default, not what the pretrained model expects; (2) `configure_optimizers()` has hidden CosineWarmupScheduler that must be overridden for fine-tuning; (3) batch_size=1 + grad_accum=16 needed for full unfiltered spectra (median 9,558 peaks, max 113k). (April 2026)
+- [ ] **Run IM-enhanced training**: Submit IM training (5-column ASF) after baseline fine-tuning validates. Compare IM vs baseline on Zhao validation set.
 - [ ] **Compare baseline vs IM model on test data**: Use held-out Zhao dataset (43 .d files). Metrics: peptide count, sequence accuracy, score distribution.
 - [ ] **Download and process ddaPASEF pre-training data**: PXD014777 (Prianichnikov 2020, HeLa) and PXD010012 (Meier 2018, HeLa). Clean isolated precursor spectra for timsTOF-specific pre-training.
 - [ ] **Propose Noble Lab collaboration**: Working prototype with 738 peptides (16.8x mzML), IM integration, ddaPASEF training pipeline. Demonstrate value of native Bruker support.
@@ -74,19 +75,24 @@
 - [x] **Mobility-filtered extraction (Mode B)**: Mobilogram peak detection from diaPASEF frames, 5x more spectra with real 1/K0 values. (April 2026)
 
 ## De Novo Visualization (from biologist + proteomics expert reviews)
-- [ ] **Interactive confidence slider**: Draggable threshold (0.5-1.0) that updates all de novo tables, charts, and counts in real time. Biologist #1 priority.
-- [ ] **Contaminant filtering before species charts**: Separate 100% identity human keratins (definite contaminants) from 85-95% identity hits (avian keratins with no closer SwissProt match). Toggle to exclude contaminants from species donut/bar. Both experts agree.
-- [ ] **Per-residue confidence heatmap**: Click peptide row → colored sequence bar (green >0.95, yellow 0.7-0.95, red <0.7). Cross-reference low-confidence positions with BLAST substitutions. Proteomics expert #1 priority.
-- [ ] **Peptide length/charge distribution QC**: Side-by-side confirmed vs novel histograms. Flag peptides <7 aa or >25 aa, charge 1+. Cheapest FDR proxy. Both experts agree.
-- [ ] **Cross-species comparison table**: Protein × sample matrix showing shared vs species-specific peptides. Core figure for comparative feather proteomics papers. Biologist #2 priority.
-- [ ] **Protein family grouping**: Classify BLAST hits by protein family (alpha-keratin, beta-keratin, corneous, collagen, histone). Stacked bar chart per sample. Biologist #3 priority.
-- [ ] **BLAST alignment view for near-matches**: Show WHERE the amino acid substitution is. Cross-reference with per-residue confidence — high confidence + substitution = genuine variant, low confidence = sequencing error. Proteomics expert #4 priority.
-- [ ] **Target-decoy BLAST FDR**: Generate reversed peptides, BLAST both forward+reversed against SwissProt, plot FDR vs identity threshold. Proteomics expert #5 priority.
-- [ ] **Modification tracking (deamidation)**: Parse modification masses from Casanovo sequences. Track deamidation rate (N+0.984), oxidation (M+15.995). N-deamidation vs Q-deamidation ratio is paleoproteomics authenticity marker. Proteomics expert #6.
-- [ ] **Protein sequence coverage maps**: Horizontal bar showing where de novo peptides map onto the full protein sequence. Green=confirmed, orange=novel BLAST hit. Both experts want this.
-- [ ] **Manuscript summary statistics card (Table 1)**: Per-sample breakdown — total spectra, PSMs, confirmed, novel, BLAST hits, proteins, contaminant %, median confidence. CSV download. Biologist #7.
-- [ ] **GO/pathway annotation**: Bar chart of enriched GO terms for identified proteins. Highlight keratinization pathway for feather data. Biologist #8.
-- [ ] **Sage vs Casanovo disagreement analysis**: Match by scan number, find spectra where both tools gave different confident sequences. Classify: I/L swap (benign), single AA substitution (variant?), completely different (chimeric). Proteomics expert #10.
+- [x] **Interactive confidence slider**: Draggable threshold (0.5-1.0) that updates all de novo tables, charts, and counts in real time. (April 2026)
+- [x] **Contaminant filtering before species charts**: Checkbox to exclude contaminant proteins from species donut/bar. (April 2026)
+- [x] **Per-residue confidence heatmap**: Click peptide row → colored sequence bar (green >0.95, yellow 0.7-0.95, red <0.7). Cross-reference with BLAST substitutions. (April 2026)
+- [x] **Peptide length/charge distribution QC**: Side-by-side confirmed vs novel histograms. Flag peptides <7 aa or >25 aa, charge 1+. (April 2026)
+- [x] **Cross-species comparison table**: Protein × sample matrix with Venn diagram and species heatmap. (April 2026)
+- [x] **Protein family grouping**: 16 families (keratins, collagens, histones, etc.). Stacked bar + treemap. (April 2026)
+- [x] **BLAST alignment view for near-matches**: Color-coded alignment with per-residue confidence cross-reference. Green=variant, Red=error. (April 2026)
+- [x] **Target-decoy BLAST FDR**: Reversed peptide BLAST as SLURM job. FDR curve + hit count plots. (April 2026)
+- [x] **Modification tracking (deamidation)**: Parse modification masses from Casanovo sequences. N/Q deamidation ratio for paleoproteomics authenticity. (April 2026)
+- [x] **Protein sequence coverage maps**: Top 20 proteins, color-coded by identity (green=100%, orange=90-99%, red=<90%). (April 2026)
+- [x] **Manuscript summary statistics card (Table 1)**: Per-sample breakdown with CSV download. (April 2026)
+- [x] **GO/pathway annotation**: 11 functional categories from protein name patterns. Bar chart + table. (April 2026)
+- [x] **Sage vs Casanovo disagreement analysis**: Match by scan, classify I/L swap, single/multiple substitutions, completely different. (April 2026)
+- [x] **Species resolution bar chart**: Identity gap (delta) between best and 2nd-best species per peptide. (April 2026)
+- [x] **Taxonomic coverage dot plot**: Peptide identity across species, grouped by protein. (April 2026)
+- [x] **Top diagnostic peptides card**: Highest species-resolution peptides for species identification. (April 2026)
+- [x] **Info (?) buttons on all sub-tabs**: 12 detailed help modals covering every de novo visualization. (April 2026)
+- [x] **SVG export on all plots**: Camera icon for publication-quality SVG download on every plotly chart. (April 2026)
 - [ ] **Novel peptide clustering**: Cluster similar novel peptides by sequence similarity. 3+ clustered peptides with same BLAST protein family = candidate novel protein variant. Biologist #5.
 - [ ] **FASTA/mzTab export**: Download novel peptides as FASTA (for BLAST2GO, InterProScan), mzTab format for PRIDE/ProteomeXchange deposition. Proteomics expert #9.
 - [ ] **Quality flags column**: Traffic light (green/yellow/red) per peptide combining: score, length, BLAST hit, mass error. Biologist #10.

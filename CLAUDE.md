@@ -51,6 +51,10 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview, Spectronaut 20+ key-value RunOverview), contrast mismatch detection, instrument context in AI prompts, DPC-Quant methodology note in Claude export, MOFA2 decomposition |
 | `R/helpers_denovo.R` | Cascadia de novo: SSL parsing, peptide classification, DIAMOND BLAST, sbatch generation (feature branch) |
+| `R/helpers_dda.R` | DDA pipeline: Sage config, result parsing, Casanovo mztab, classify_dda_denovo, sbatch generation (feature branch) |
+| `R/server_dda.R` | DDA search module: Sage SLURM, Casanovo GPU, DIAMOND BLAST, species viz, contaminant filtering, info modals (feature branch) |
+| `R/server_denovo_viz.R` | Advanced de novo viz: BLAST alignment, target-decoy FDR, cross-species, protein families, coverage maps (feature branch) |
+| `R/server_denovo_controls.R` | De novo controls: confidence slider, manuscript stats, GO annotation, disagreement analysis (feature branch) |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes, remote history |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt/NCBI search, unified activity log, SSH file browser helpers, SLURM proxy |
@@ -224,6 +228,11 @@ On each version release, do ALL of these:
 | Load from HPC needs build-time guard | `conditionalPanel` alone insufficient on HF — button renders briefly before JS hides it. Wrap in `if (!is_hf_space)` in `build_ui()`. |
 | Paths with spaces in SLURM scripts | Quote all paths in sbatch: `#SBATCH -o "path"`, `--bind "path":/work`. Launcher uses `q()` helper. |
 | Partial retry dependency chain | After retrying failed step 2 tasks, must `scontrol update` step 3's dependency to wait for retry job ID. Otherwise step 3 starts before retries complete. |
+| Cascadia `preprocessing_fn` override | Passing ANY `preprocessing_fn` list to `AnnotatedSpectrumDataset` REPLACES defaults (not appends). Cascadia's `train()` uses `[scale_intensity("root"), scale_to_unit_norm]` only — NO `filter_intensity(max_num_peaks=200)`. That 200-peak cap is a depthcharge default, not what Cascadia was trained with. |
+| Cascadia hidden LR scheduler | `AugmentedSpec2Pep.configure_optimizers()` returns `CosineWarmupScheduler(warmup=10000, max_iters=100000)` — LR starts at 0, ramps up, then decays to 0. Must override for fine-tuning with flat LR. |
+| Cascadia OOM with full spectra | Augmented spectra have median 9,558 peaks (max 113k). Self-attention is O(n^2). batch_size=1 + gradient accumulation=16 required on A100 80GB. |
+| PyTorch Lightning precision string | Old PL (1.x) wants `precision=16` (int), not `"16-mixed"` (string from PL 2.x). |
+| Python stdout buffered in SLURM | SLURM redirects stdout to file, which is fully buffered. Training appears frozen until buffer flushes. Fix: `sys.stdout.reconfigure(line_buffering=True)`. |
 
 ### Queue Switching
 Auto-switches parallel jobs between `genome-center-grp/high` and `publicgrp/low` partitions. Steps 2/4 (array) move to low (preemptible); steps 1/3/5 (assembly) stay on high. See @docs/QUEUE_SWITCHING.md for full logic, known issues, and SLURM state mapping.

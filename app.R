@@ -523,6 +523,12 @@ server <- function(input, output, session) {
     dda_casanovo_blast         = NULL,    # data.frame: DIAMOND BLAST results for DDA novel peptides
     dda_filtered_classification = NULL,  # List from classify_dda_denovo() — filtered by confidence slider
     dda_fasta_path             = NULL,    # Remote FASTA path used for DDA search (for DIAMOND)
+    # Unified de novo reactives (populated by either Cascadia or Casanovo adapter)
+    denovo_psms = NULL,
+    denovo_classification = NULL,
+    denovo_blast = NULL,
+    denovo_engine = NULL,
+    denovo_reference = NULL,
     # App metadata
     app_version = app_version,
     community_stats = community_stats
@@ -668,8 +674,8 @@ server <- function(input, output, session) {
   })
 
   observe({
-    if (!is.null(values$denovo_data) || isTRUE(values$ssh_connected) ||
-        !is.null(values$dda_casanovo_classification)) {
+    if (!is.null(values$denovo_classification) || !is.null(values$denovo_data) ||
+        isTRUE(values$ssh_connected) || !is.null(values$dda_casanovo_classification)) {
       nav_show("main_tabs", "De Novo")
     } else {
       nav_hide("main_tabs", "De Novo")

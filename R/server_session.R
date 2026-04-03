@@ -547,6 +547,9 @@ server_session <- function(input, output, session, values, add_to_log) {
         dda_casanovo_blast           = values$dda_casanovo_blast,
         dda_fasta_path               = values$dda_fasta_path,
         dda_output_dir               = values$dda_output_dir,
+        # Unified de novo state (works on HF without engine-specific data)
+        denovo_engine                = values$denovo_engine,
+        denovo_reference             = values$denovo_reference,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -691,6 +694,9 @@ server_session <- function(input, output, session, values, add_to_log) {
         }
         values$dda_fasta_path  <- session_data$dda_fasta_path
         values$dda_output_dir  <- session_data$dda_output_dir
+        # Restore unified de novo metadata
+        values$denovo_engine    <- session_data$denovo_engine
+        values$denovo_reference <- session_data$denovo_reference
       }
 
       # Restore repro log and append load event

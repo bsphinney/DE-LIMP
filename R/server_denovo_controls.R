@@ -17,12 +17,13 @@ server_denovo_controls <- function(input, output, session, values) {
   # Core filtered reactive — ALL downstream renders should use this
 
   filtered_casanovo_psms <- reactive({
-    req(values$dda_casanovo_psms)
-    req(nrow(values$dda_casanovo_psms) > 0)
+    # Use unified reactive (works for both Casanovo and Cascadia)
+    psms <- values$denovo_psms %||% values$dda_casanovo_psms
+    req(psms)
+    req(nrow(psms) > 0)
 
     threshold <- input$dda_denovo_score_threshold %||% 0.9
-    df <- values$dda_casanovo_psms
-    df[df$score >= threshold, ]
+    psms[psms$score >= threshold, ]
   })
 
 
@@ -31,6 +32,12 @@ server_denovo_controls <- function(input, output, session, values) {
     psms <- filtered_casanovo_psms()
     req(nrow(psms) > 0)
 
+    # For Cascadia mode, use the pre-computed classification from the adapter
+    if (isTRUE(values$denovo_engine == "cascadia") && !is.null(values$denovo_classification)) {
+      return(values$denovo_classification)
+    }
+
+    # For Casanovo mode, re-classify with the threshold-filtered PSMs
     sage_psms <- values$dda_sage_psms
     if (is.null(sage_psms) || nrow(sage_psms) == 0) {
       # No Sage data — everything is unclassified
@@ -111,7 +118,7 @@ server_denovo_controls <- function(input, output, session, values) {
     n_proteins  <- if (!is.null(cls$protein_summary)) nrow(cls$protein_summary) else 0
 
     # BLAST stats (use full blast data, filtered to peptides above threshold)
-    blast <- values$dda_casanovo_blast
+    blast <- values$denovo_blast %||% values$dda_casanovo_blast
     n_blast <- 0L
     if (!is.null(blast) && nrow(blast) > 0) {
       novel_seqs <- cls$novel$seq_stripped
@@ -240,7 +247,7 @@ server_denovo_controls <- function(input, output, session, values) {
     )
 
     # Append DIAMOND BLAST results if available
-    blast <- values$dda_casanovo_blast
+    blast <- values$denovo_blast %||% values$dda_casanovo_blast
     if (!is.null(blast) && nrow(blast) > 0) {
       blast_dedup <- blast[!duplicated(blast$peptide), ]
       blast_map    <- stats::setNames(blast_dedup$subject, blast_dedup$peptide)
@@ -319,7 +326,8 @@ server_denovo_controls <- function(input, output, session, values) {
     plotly::ggplotly(p) %>%
       plotly::layout(
         legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)
-      )
+      ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
 
@@ -333,7 +341,7 @@ server_denovo_controls <- function(input, output, session, values) {
 
     cls <- filtered_classification()
     sage_psms <- values$dda_sage_psms
-    blast <- values$dda_casanovo_blast
+    blast <- values$denovo_blast %||% values$dda_casanovo_blast
 
     # Get per-source_file breakdown
     source_files <- unique(psms$source_file)
@@ -475,7 +483,7 @@ server_denovo_controls <- function(input, output, session, values) {
 
   # Classify proteins into functional categories from SwissProt names
   functional_categories <- reactive({
-    blast <- values$dda_casanovo_blast
+    blast <- values$denovo_blast %||% values$dda_casanovo_blast
     req(blast, nrow(blast) > 0)
 
     cls <- filtered_classification()
@@ -651,7 +659,8 @@ server_denovo_controls <- function(input, output, session, values) {
         margin = list(b = 120)
       )
 
-    p
+    p %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
 
@@ -796,6 +805,16 @@ server_denovo_controls <- function(input, output, session, values) {
 
 
   output$dda_denovo_disagree_summary <- renderUI({
+    # Disagreement analysis only works in DDA mode (Sage vs Casanovo)
+    if (isTRUE(values$denovo_engine == "cascadia")) {
+      return(tags$div(
+        style = "padding: 20px; text-align: center; color: #6c757d;",
+        icon("info-circle"),
+        " Disagreement analysis compares database search vs de novo sequencing on the same spectra. ",
+        "This requires DDA mode (Sage + Casanovo). Not available for DIA/Cascadia data."
+      ))
+    }
+
     cas_psms <- filtered_casanovo_psms()
     sage_psms <- values$dda_sage_psms
 
@@ -927,6 +946,101 @@ server_denovo_controls <- function(input, output, session, values) {
           c("#fff3e0", "#ffe0b2", "#ffccbc", "#ffcdd2")
         )
       )
+  })
+
+  # --- Source engine badge ---
+  output$denovo_source_badge <- renderUI({
+    engine <- values$denovo_engine
+    if (is.null(engine)) return(NULL)
+
+    label <- if (engine == "casanovo") "Casanovo (DDA)" else "Cascadia (DIA)"
+    ref <- if (engine == "casanovo") "Sage" else "DIA-NN"
+    color <- if (engine == "casanovo") "#6a1b9a" else "#1565c0"
+    ico <- if (engine == "casanovo") "wand-magic-sparkles" else "dna"
+
+    div(style = "margin-bottom: 8px;",
+      tags$span(
+        style = paste0("display: inline-block; padding: 4px 12px; border-radius: 12px; ",
+                       "background: ", color, "; color: white; font-size: 12px; font-weight: 600;"),
+        icon(ico), paste0(" De novo: ", label, " vs ", ref, " database search")
+      )
+    )
+  })
+
+  # ============================================================================
+  #  INFO MODALS — De Novo Controls Sub-tabs
+  # ============================================================================
+
+  observeEvent(input$denovo_score_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Score Distribution & QC"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Quality metrics for de novo peptide predictions from Casanovo."),
+        tags$h6("Score Distribution"),
+        tags$ul(
+          tags$li(strong("Confidence Score (0-1): "), "Casanovo's overall peptide-level score. ",
+            "Products of per-residue softmax probabilities. Higher = more confident."),
+          tags$li(strong("Score Threshold: "), "Use the slider above to filter peptides by minimum confidence. ",
+            "Default 0.9 retains high-quality predictions; lower to 0.7-0.8 for exploratory analysis.")
+        ),
+        tags$h6("Peptide Length Distribution"),
+        p("Most tryptic peptides are 7-25 amino acids. Very short (<6 AA) or very long (>30 AA) peptides ",
+          "may indicate non-specific cleavage or sequencing artifacts."),
+        tags$h6("Charge State Distribution"),
+        p("Expected: mostly 2+ and 3+ for tryptic peptides. A high proportion of 4+ or 5+ may indicate ",
+          "incomplete digestion or unusual peptide properties."),
+        tags$hr(),
+        tags$p(style = "color: #666; font-size: 0.85em;",
+          icon("camera"), " Click the camera icon on any plot to download as SVG for publication figures.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_go_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " GO/Functional Annotation"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Functional annotation of BLAST-matched proteins based on protein name patterns."),
+        tags$h6("Categories"),
+        tags$ul(
+          tags$li(strong("Keratin: "), "Hair, feather, and skin structural proteins (keratins, corneous proteins)."),
+          tags$li(strong("Collagen: "), "Connective tissue structural proteins."),
+          tags$li(strong("Histone: "), "Chromatin packaging proteins — highly conserved across species."),
+          tags$li(strong("Hemoglobin: "), "Oxygen transport proteins — indicates blood contamination in tissue samples."),
+          tags$li(strong("Ribosomal: "), "Translation machinery — ubiquitous, often contaminants."),
+          tags$li(strong("Metabolic: "), "Enzymes in metabolic pathways."),
+          tags$li(strong("Cytoskeletal: "), "Actin, tubulin, intermediate filaments.")
+        ),
+        p("This is a name-based heuristic, not a formal Gene Ontology analysis. ",
+          "For full GO enrichment, use the GSEA tab after database search.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_disagree_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Sage vs Casanovo Disagreements"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Spectra where Sage (database search) and Casanovo (de novo) assigned different sequences."),
+        tags$h6("Disagreement Types"),
+        tags$ul(
+          tags$li(strong("Single AA substitution: "), "One amino acid differs. Common for I/L ambiguity ",
+            "(isoleucine and leucine are isobaric — indistinguishable by mass)."),
+          tags$li(strong("Two AA substitutions: "), "Two positions differ. May indicate a genuine variant."),
+          tags$li(strong("Multiple substitutions: "), "Three or more differences. Review per-residue scores."),
+          tags$li(strong("Completely different: "), "Entirely different sequences. One tool is likely wrong.")
+        ),
+        tags$h6("Interpretation"),
+        p("Disagreements are expected — they highlight where de novo and database approaches diverge. ",
+          "Use per-residue confidence scores to judge which assignment is more reliable. ",
+          "I/L substitutions (highlighted amber) are mass-equivalent and should be ignored."),
+        tags$p(style = "color: #888; font-size: 0.85em;",
+          "Note: Disagreement analysis requires both Sage AND Casanovo results for the same raw files.")
+      )
+    ))
   })
 
 }

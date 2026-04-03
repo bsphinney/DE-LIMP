@@ -1920,8 +1920,9 @@ echo "[DIAMOND] Done: $(date)"
 
   # Helper: ensure species + category + contaminant_type columns exist on blast data
   blast_with_species <- reactive({
-    req(values$dda_casanovo_blast)
-    blast <- values$dda_casanovo_blast
+    blast_data <- values$denovo_blast %||% values$dda_casanovo_blast
+    req(blast_data)
+    blast <- blast_data
     req(nrow(blast) > 0)
 
     # Normalize identity column name (HPC load path uses "pident", DIAMOND path uses "identity")
@@ -2104,7 +2105,8 @@ echo "[DIAMOND] Done: $(date)"
         title = list(text = "Species Distribution (best hit per peptide)", font = list(size = 14)),
         showlegend = TRUE,
         legend = list(orientation = "v", x = 1.02, y = 0.5)
-      )
+      ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Taxonomic breakdown: bar chart ---
@@ -2135,7 +2137,8 @@ echo "[DIAMOND] Done: $(date)"
         xaxis = list(title = "Number of novel peptides"),
         yaxis = list(title = ""),
         margin = list(l = 120)
-      )
+      ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Species summary text ---
@@ -2197,7 +2200,8 @@ echo "[DIAMOND] Done: $(date)"
       ggplot2::theme(legend.position = "top")
 
     plotly::ggplotly(p) %>%
-      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Top proteins by peptide count ---
@@ -2240,7 +2244,8 @@ echo "[DIAMOND] Done: $(date)"
         legend = list(x = 0.7, y = 0.1),
         margin = list(l = 200),
         height = max(400, top_n * 18)
-      )
+      ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Species common name mapping ---
@@ -2459,7 +2464,8 @@ echo "[DIAMOND] Done: $(date)"
             xanchor = "left", xshift = 5)
         )
       )
-    p
+    p %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Feature 3: Taxonomic Coverage Dot Plot ---
@@ -2594,7 +2600,8 @@ echo "[DIAMOND] Done: $(date)"
       legend = list(title = list(text = "Species"), x = 1.02, y = 1),
       margin = list(l = 120, r = 120),
       height = plot_height
-    )
+    ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Peptide-Species heatmap (legacy, collapsible) ---
@@ -2649,7 +2656,8 @@ echo "[DIAMOND] Done: $(date)"
         xaxis = list(title = "", tickangle = -45),
         yaxis = list(title = "", tickfont = list(size = 9)),
         margin = list(l = 120, b = 80)
-      )
+      ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Enhanced BLAST results table ---
@@ -2740,7 +2748,7 @@ echo "[DIAMOND] Done: $(date)"
     req(nrow(confirmed) >= sel_row)
 
     row <- confirmed[sel_row, ]
-    html <- build_residue_confidence_html(row, values$dda_casanovo_blast)
+    html <- build_residue_confidence_html(row, values$denovo_blast %||% values$dda_casanovo_blast)
     shinyjs::html("dda_confirmed_residue_viz", html)
   })
 
@@ -2750,13 +2758,13 @@ echo "[DIAMOND] Done: $(date)"
     req(length(sel) > 0)
     sel_row <- sel[length(sel)]
 
-    cls <- values$dda_filtered_classification %||% values$dda_casanovo_classification
+    cls <- values$denovo_classification %||% values$dda_filtered_classification %||% values$dda_casanovo_classification
     req(cls)
     novel <- cls$novel
     req(nrow(novel) >= sel_row)
 
     row <- novel[sel_row, ]
-    html <- build_residue_confidence_html(row, values$dda_casanovo_blast)
+    html <- build_residue_confidence_html(row, values$denovo_blast %||% values$dda_casanovo_blast)
     shinyjs::html("dda_novel_residue_viz", html)
   })
 
@@ -2909,7 +2917,8 @@ echo "[DIAMOND] Done: $(date)"
       ggplot2::theme(legend.position = "top")
 
     plotly::ggplotly(p) %>%
-      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   output$dda_denovo_charge_dist <- plotly::renderPlotly({
@@ -2940,7 +2949,8 @@ echo "[DIAMOND] Done: $(date)"
       ggplot2::theme(legend.position = "top")
 
     plotly::ggplotly(p) %>%
-      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   output$dda_denovo_qc_summary <- renderUI({
@@ -3153,7 +3163,8 @@ echo "[DIAMOND] Done: $(date)"
         xaxis = list(title = "PSM Count"),
         yaxis = list(title = ""),
         margin = list(l = 160)
-      )
+      ) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
   # --- Manuscript summary: MOVED to server_denovo_controls.R (confidence-filtered) ---
@@ -3163,8 +3174,9 @@ echo "[DIAMOND] Done: $(date)"
   # ============================================================================
 
   observeEvent(input$dda_run_diamond_blast, {
-    req(values$dda_casanovo_classification)
-    novel <- values$dda_casanovo_classification$novel
+    cls <- values$denovo_classification %||% values$dda_casanovo_classification
+    req(cls)
+    novel <- cls$novel
     req(nrow(novel) > 0)
 
     # Strip modification masses — keep only amino acid letters
@@ -3284,6 +3296,127 @@ echo "[DIAMOND] Done: $(date)"
       )
       add_to_log(paste("DDA DIAMOND BLAST error:", conditionMessage(e)), "error")
     })
+  })
+
+  # ============================================================================
+  #  ADAPTER: Populate unified de novo reactives from Casanovo data
+  # ============================================================================
+
+  observe({
+    req(values$dda_casanovo_classification)
+    values$denovo_classification <- values$dda_casanovo_classification
+    values$denovo_psms <- values$dda_casanovo_psms
+    values$denovo_engine <- "casanovo"
+    values$denovo_reference <- "Sage"
+  })
+
+  observe({
+    req(values$dda_casanovo_blast)
+    values$denovo_blast <- values$dda_casanovo_blast
+  })
+
+  # ============================================================================
+  #  INFO MODALS — De Novo Sub-tabs
+  # ============================================================================
+
+  observeEvent(input$denovo_confirmed_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Confirmed Peptides"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Peptides sequenced de novo by Casanovo that were also identified by database search (Sage)."),
+        tags$ul(
+          tags$li(strong("Sequence: "), "The amino acid sequence predicted by Casanovo."),
+          tags$li(strong("Score: "), "Casanovo's confidence score (0-1). Higher = more reliable."),
+          tags$li(strong("AA Scores: "), "Per-residue confidence. Each position gets its own probability."),
+          tags$li(strong("Charge: "), "Precursor charge state from the spectrum."),
+          tags$li(strong("Matched Protein: "), "Sage's database match for the same spectrum.")
+        ),
+        p("Confirmed peptides validate the de novo algorithm — these sequences match known proteins. ",
+          "The confirmation rate (confirmed / total) indicates de novo sequencing accuracy."),
+        tags$hr(),
+        tags$p(style = "color: #666; font-size: 0.85em;",
+          icon("camera"), " Click the camera icon on any plot to download as SVG for publication figures.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_novel_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Novel Peptides"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Peptides sequenced de novo by Casanovo that were ", strong("not"), " found by database search."),
+        p("These are the most scientifically interesting sequences — they may represent:"),
+        tags$ul(
+          tags$li("Species-specific proteins not in the search database"),
+          tags$li("Post-translationally modified peptides missed by database search"),
+          tags$li("Degraded/ancient peptides (in paleoproteomics)"),
+          tags$li("Sequencing errors (check per-residue AA scores)")
+        ),
+        p("Use the ", strong("DIAMOND BLAST"), " tab to search these against UniProt SwissProt ",
+          "and identify the closest known proteins."),
+        tags$hr(),
+        tags$p(style = "color: #666; font-size: 0.85em;",
+          "Click a row to see per-residue confidence coloring below the table. ",
+          "Green = high confidence, Red = potential error.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_blast_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " DIAMOND BLAST Analysis"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("DIAMOND BLAST searches novel de novo peptides against UniProt SwissProt (572k reviewed proteins) ",
+          "to identify the closest known homologs."),
+        tags$h6("Key Visualizations"),
+        tags$ul(
+          tags$li(strong("Species Donut: "), "Distribution of best-hit species per peptide. Reveals sample composition."),
+          tags$li(strong("Identity Histogram: "), "Distribution of BLAST identity scores. ",
+            "100% = exact match, 90-99% = near-match (potential variant), <90% = distant homolog."),
+          tags$li(strong("Top Proteins: "), "Proteins ranked by number of matching de novo peptides."),
+          tags$li(strong("Species Resolution: "), "Identity gap between best and 2nd-best species per peptide. ",
+            "Large gaps = species-diagnostic sequences."),
+          tags$li(strong("Taxonomic Coverage: "), "Dot plot showing peptide identity across species, grouped by protein.")
+        ),
+        tags$h6("Interpretation"),
+        tags$ul(
+          tags$li(strong("Conserved (100%): "), "Identical to known protein — high confidence."),
+          tags$li(strong("Near-match (90-99%): "), "1-2 AA differences — potential species variant or PTM artifact."),
+          tags$li(strong("Distant (<90%): "), "Low homology — novel protein family or sequencing error.")
+        ),
+        tags$h6("Contaminant Filtering"),
+        p("When 'Exclude contaminant proteins' is checked, common lab contaminants (keratins, trypsin, BSA) ",
+          "are removed. Feather keratins are NOT contaminants — they're real sample proteins."),
+        tags$hr(),
+        tags$p(style = "color: #666; font-size: 0.85em;",
+          icon("camera"), " Click the camera icon on any plot to download as SVG.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_mods_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Modification Analysis"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Post-translational modifications detected in de novo peptide sequences."),
+        tags$h6("Key Modifications"),
+        tags$ul(
+          tags$li(strong("Oxidation (M, +15.995): "), "Methionine oxidation — common artifact from sample handling."),
+          tags$li(strong("Deamidation (N, +0.984): "), "Asparagine deamidation — in paleoproteomics, indicates authentic ancient protein. ",
+            "Time-dependent process; higher rates = older protein."),
+          tags$li(strong("Deamidation (Q, +0.984): "), "Glutamine deamidation — less time-dependent than N-deamidation. ",
+            "High Q-deamidation suggests contamination or sample handling artifact."),
+          tags$li(strong("Carbamidomethyl (C, +57.021): "), "Cysteine alkylation — expected from sample preparation.")
+        ),
+        tags$h6("Paleoproteomics Authenticity"),
+        p("High N-deamidation + Low Q-deamidation = authentic ancient protein (genuine endogenous). ",
+          "High Q-deamidation or very low N-deamidation = possible contamination or modern protein.")
+      )
+    ))
   })
 
 }

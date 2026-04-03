@@ -428,7 +428,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
           paste0("/tmp/delimp_fdr_", Sys.getpid())
         fdr_dir <- file.path(output_dir, "denovo", "fdr")
 
-        ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(fdr_dir)), timeout = 15)
+        ssh_exec(ssh_cfg, paste("mkdir -p", shQuote(fdr_dir), shQuote(file.path(output_dir, "logs"))), timeout = 15)
         setProgress(0.2, detail = "Created remote directory")
 
         # Write forward query FASTA (header = sequence for clean BLAST output)
@@ -458,12 +458,14 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
         slurm_account <- config$slurm$account %||% "genome-center-grp"
         slurm_partition <- config$slurm$partition %||% "high"
+        slurm_qos <- paste0(slurm_account, "-", slurm_partition, "-qos")
 
         sbatch_content <- paste0(
           '#!/bin/bash\n',
           '#SBATCH --job-name=denovo_fdr\n',
           '#SBATCH --partition=', slurm_partition, '\n',
           '#SBATCH --account=', slurm_account, '\n',
+          '#SBATCH --qos=', slurm_qos, '\n',
           '#SBATCH --cpus-per-task=8\n',
           '#SBATCH --mem=16G\n',
           '#SBATCH --time=00:30:00\n',
@@ -770,7 +772,8 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
       ggplot2::theme(legend.position = "top")
 
     plotly::ggplotly(p) %>%
-      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05))
+      plotly::layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.05)) %>%
+      plotly::config(toImageButtonOptions = list(format = "svg", scale = 2))
   })
 
 
@@ -1482,6 +1485,138 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
       updateSelectInput(session, "denovo_venn_sample1", choices = samples, selected = samples[1])
       updateSelectInput(session, "denovo_venn_sample2", choices = samples, selected = samples[2])
     }
+  })
+
+  # ============================================================================
+  #  INFO MODALS — Advanced Visualization Sub-tabs
+  # ============================================================================
+
+  observeEvent(input$denovo_alignment_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " BLAST Alignment View"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Visual alignment of de novo peptides against their closest BLAST hits, annotated with ",
+          "per-residue confidence scores from Casanovo."),
+        tags$h6("How to Use"),
+        tags$ol(
+          tags$li("Select a near-match peptide from the table (90-99% identity)."),
+          tags$li("Click ", strong("Show Alignment"), " to visualize the mismatch."),
+          tags$li("Review the color-coded alignment:")
+        ),
+        tags$ul(
+          tags$li(tags$span(style = "color: #2e7d32; font-weight: bold;", "Green"), " mismatch (AA score > 0.95): ",
+            "High-confidence variant — likely a genuine species-specific substitution."),
+          tags$li(tags$span(style = "color: #c62828; font-weight: bold;", "Red"), " mismatch (AA score < 0.70): ",
+            "Low-confidence — likely a de novo sequencing error."),
+          tags$li(tags$span(style = "color: #e65100; font-weight: bold;", "Orange"), " mismatch (0.70-0.95): ",
+            "Ambiguous — could be either a real variant or an error.")
+        ),
+        tags$h6("Applications"),
+        p("In paleoproteomics: species-specific amino acid substitutions (SAPs) in conserved proteins ",
+          "(collagens, keratins) are used for phylogenetic placement. High-confidence mismatches ",
+          "at known SAP positions are the strongest evidence for species identification.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_fdr_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Target-Decoy FDR Estimation"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Estimates the false discovery rate (FDR) of de novo BLAST identifications using a ",
+          "target-decoy strategy."),
+        tags$h6("Method"),
+        tags$ol(
+          tags$li(strong("Forward (target): "), "BLAST the actual de novo peptide sequences against SwissProt."),
+          tags$li(strong("Reversed (decoy): "), "BLAST the same sequences reversed (scrambled) against SwissProt."),
+          tags$li(strong("FDR = "), "reversed hits / forward hits at each identity threshold.")
+        ),
+        tags$h6("Interpretation"),
+        tags$ul(
+          tags$li(strong("FDR curve: "), "Shows estimated FDR as a function of BLAST identity threshold. ",
+            "Lower FDR = more reliable identifications."),
+          tags$li(strong("1% FDR line: "), "Standard target for proteomics. Identifications above this threshold ",
+            "are considered high-confidence."),
+          tags$li(strong("5% FDR line: "), "More permissive threshold. Acceptable for exploratory analysis.")
+        ),
+        p("This is an approximation — reversed peptides are not a perfect null model for short sequences. ",
+          "Use in conjunction with per-residue scores and biological context.")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_crossspecies_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Cross-Species Comparison"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Compares de novo peptide identifications across samples to find species-specific and ",
+          "shared protein coverage."),
+        tags$h6("Visualizations"),
+        tags$ul(
+          tags$li(strong("Venn Diagram: "), "Overlap of identified proteins between two selected samples. ",
+            "Large overlap suggests similar species; little overlap may indicate different species."),
+          tags$li(strong("Species Heatmap: "), "Identity matrix showing how similar each sample's de novo ",
+            "peptides are to different species in SwissProt."),
+          tags$li(strong("Per-Protein Table: "), "For each protein, shows peptide counts and best identity ",
+            "per sample. Useful for finding proteins present in one sample but not another.")
+        ),
+        p("Requires BLAST results from multiple samples. Most useful for multi-species studies ",
+          "(e.g., comparing feathers from different bird species).")
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_families_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Protein Family Classification"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Groups BLAST-matched proteins into biological families for high-level functional interpretation."),
+        tags$h6("Protein Families"),
+        tags$ul(
+          tags$li(strong("Keratins: "), "Alpha and beta keratins, corneous proteins. Major component of feathers, hair, nails."),
+          tags$li(strong("Collagens: "), "Structural proteins in connective tissue. Important in paleoproteomics for phylogenetics."),
+          tags$li(strong("Histones: "), "Highly conserved chromatin proteins (H1, H2A, H2B, H3, H4)."),
+          tags$li(strong("Hemoglobin: "), "Blood oxygen transport proteins. May indicate tissue contamination."),
+          tags$li(strong("Heat Shock Proteins: "), "Stress response chaperones (HSP70, HSP90)."),
+          tags$li(strong("Ribosomal: "), "Translation machinery — ubiquitous, low diagnostic value.")
+        ),
+        tags$h6("Visualizations"),
+        tags$ul(
+          tags$li(strong("Stacked Bar: "), "Family distribution across the dataset."),
+          tags$li(strong("Treemap: "), "Proportional area chart showing relative abundance of each protein family.")
+        )
+      )
+    ))
+  })
+
+  observeEvent(input$denovo_coverage_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Protein Sequence Coverage"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Maps de novo peptides onto their matched reference proteins to show sequence coverage."),
+        tags$h6("Color Key"),
+        tags$ul(
+          tags$li(tags$span(style = "color: #2e7d32; font-weight: bold;", "Green"), " (100% identity): ",
+            "Exact match to reference — confirmed sequence."),
+          tags$li(tags$span(style = "color: #e65100; font-weight: bold;", "Orange"), " (90-99% identity): ",
+            "Near-match — 1-2 amino acid substitutions."),
+          tags$li(tags$span(style = "color: #c62828; font-weight: bold;", "Red"), " (<90% identity): ",
+            "Distant match — significant sequence divergence.")
+        ),
+        tags$h6("Interpretation"),
+        p("High coverage with mostly green segments = well-characterized protein. ",
+          "Gaps in coverage may indicate regions not amenable to tryptic digestion ",
+          "or low-ionization peptides. Near-match segments at known phylogenetically ",
+          "informative positions are valuable for species identification."),
+        p("Shows top 20 proteins by peptide count. Each row is a protein with peptides ",
+          "mapped to their alignment positions (qstart-qend).")
+      )
+    ))
   })
 
 }

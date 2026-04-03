@@ -923,4 +923,21 @@ server_denovo <- function(input, output, session, values, add_to_log) {
     }
   )
 
+  # ============================================================================
+  #  ADAPTER: Populate unified de novo reactives from Cascadia data
+  # ============================================================================
+
+  observe({
+    req(values$denovo_classified)
+    values$denovo_classification <- normalize_cascadia_classification(values$denovo_classified)
+    values$denovo_psms <- values$denovo_data
+    values$denovo_engine <- "cascadia"
+    values$denovo_reference <- "DIA-NN"
+  })
+
+  observe({
+    req(values$denovo_novel_blast)
+    values$denovo_blast <- normalize_cascadia_blast(values$denovo_novel_blast)
+  })
+
 }

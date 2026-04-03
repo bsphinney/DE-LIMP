@@ -384,3 +384,76 @@ generate_cascadia_sbatch <- function(
 
   script
 }
+
+# ==============================================================================
+#  Adapter functions: normalize Cascadia data to unified de novo schema
+#  (Casanovo data is already in the correct schema)
+# ==============================================================================
+
+normalize_cascadia_classification <- function(cls) {
+  if (is.null(cls)) return(NULL)
+
+  confirmed <- cls$confirmed
+  novel <- cls$novel
+
+  # Rename columns to match Casanovo schema
+  if (!is.null(confirmed) && "Protein.Group" %in% names(confirmed)) {
+    names(confirmed)[names(confirmed) == "Protein.Group"] <- "proteins"
+  }
+
+  # Build protein_summary with Casanovo-compatible column names
+  protein_summary <- cls$protein_summary
+  if (!is.null(protein_summary)) {
+    if ("n_denovo_confirmed" %in% names(protein_summary))
+      names(protein_summary)[names(protein_summary) == "n_denovo_confirmed"] <- "n_casanovo_confirmed"
+    if ("denovo_max_score" %in% names(protein_summary))
+      names(protein_summary)[names(protein_summary) == "denovo_max_score"] <- "casanovo_max_score"
+    if (!"casanovo_mean_aa_score" %in% names(protein_summary))
+      protein_summary$casanovo_mean_aa_score <- NA_real_
+  }
+
+  # Build unified classification list
+  n_confirmed <- if (!is.null(confirmed)) nrow(confirmed) else 0L
+  n_novel <- if (!is.null(novel)) nrow(novel) else 0L
+  n_total <- n_confirmed + n_novel
+
+  list(
+    classified = if (!is.null(confirmed) && !is.null(novel)) rbind(confirmed, novel)
+                 else confirmed %||% novel,
+    confirmed = confirmed,
+    novel = novel,
+    protein_summary = protein_summary,
+    summary_stats = list(
+      n_total = n_total,
+      n_confirmed = n_confirmed,
+      n_novel = n_novel,
+      pct_confirmed = if (n_total > 0) round(100 * n_confirmed / n_total, 1) else 0,
+      pct_novel = if (n_total > 0) round(100 * n_novel / n_total, 1) else 0
+    )
+  )
+}
+
+normalize_cascadia_blast <- function(blast_df) {
+  if (is.null(blast_df) || nrow(blast_df) == 0) return(blast_df)
+
+  df <- blast_df
+
+  # Rename columns to match Casanovo BLAST schema
+  if ("identity" %in% names(df) && !"pident" %in% names(df))
+    names(df)[names(df) == "identity"] <- "pident"
+  if ("peptide_sequence" %in% names(df) && !"peptide" %in% names(df))
+    names(df)[names(df) == "peptide_sequence"] <- "peptide"
+
+  # Add species if missing (parse from SwissProt subject ID like sp|P78385|KRT83_HUMAN)
+  if (!"species" %in% names(df) && "subject" %in% names(df)) {
+    df$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|[^_]+_", "", df$subject))
+  }
+
+  # Add category if missing
+  if (!"category" %in% names(df) && "pident" %in% names(df)) {
+    df$category <- ifelse(df$pident >= 100, "Conserved",
+                   ifelse(df$pident >= 90, "Near-match", "Distant"))
+  }
+
+  df
+}

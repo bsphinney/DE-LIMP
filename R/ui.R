@@ -2422,26 +2422,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
     # DE NOVO dropdown — Cascadia de novo sequencing
     # ==========================================================================
     nav_menu("De Novo", icon = icon("dna"),
-      nav_panel("Cascadia", value = "cascadia_tab", icon = icon("dna"),
+      nav_panel("Results", value = "denovo_results_tab", icon = icon("dna"),
         div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
-          uiOutput("denovo_summary_cards"),
-          navset_card_tab(
-            nav_panel("Confirmed Peptides",
-              DT::DTOutput("denovo_confirmed_table")),
-            nav_panel("Novel Peptides",
-              DT::DTOutput("denovo_novel_table")),
-            nav_panel("DIAMOND BLAST",
-              div(style = "margin-bottom: 15px;",
-                actionButton("run_diamond_blast", "Run DIAMOND BLAST",
-                  icon = icon("search"), class = "btn-info btn-sm")),
-              DT::DTOutput("denovo_blast_table")),
-            nav_panel("Score Distribution",
-              plotlyOutput("denovo_score_dist", height = "400px"))
-          )
-        )
-      ),
-      nav_panel("Casanovo", value = "casanovo_denovo_tab", icon = icon("wand-magic-sparkles"),
-        div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
+
+          # Source engine badge
+          uiOutput("denovo_source_badge"),
 
           # --- Confidence threshold slider ---
           div(style = "background: linear-gradient(135deg, #f0f4ff 0%, #e8eeff 100%); border: 1px solid #c5cfe8; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;",
@@ -2476,12 +2461,20 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           uiOutput("dda_denovo_summary_cards"),
           navset_card_tab(
             nav_panel("Confirmed Peptides",
+              div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                actionButton("denovo_confirmed_info_btn", icon("question-circle"),
+                  title = "What are Confirmed Peptides?", class = "btn-outline-info btn-sm")
+              ),
               DT::DTOutput("dda_denovo_confirmed_table"),
               # Per-residue confidence visualization (Priority 2)
               tags$div(id = "dda_confirmed_residue_viz",
                 style = "min-height: 20px;")
             ),
             nav_panel("Novel Peptides",
+              div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                actionButton("denovo_novel_info_btn", icon("question-circle"),
+                  title = "What are Novel Peptides?", class = "btn-outline-info btn-sm")
+              ),
               DT::DTOutput("dda_denovo_novel_table"),
               # Per-residue confidence visualization (Priority 2)
               tags$div(id = "dda_novel_residue_viz",
@@ -2494,6 +2487,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
                     actionButton("dda_run_diamond_blast", "Run DIAMOND BLAST",
                       icon = icon("search"), class = "btn-info btn-sm"),
+                    actionButton("denovo_blast_info_btn", icon("question-circle"),
+                      title = "What is DIAMOND BLAST?", class = "btn-outline-info btn-sm"),
                     tags$small(style = "color: #6c757d;",
                       "BLASTs novel peptides against UniProt SwissProt (572k reviewed proteins) on HPC."),
                     div(style = "margin-left: auto;",
@@ -2555,6 +2550,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )),
             nav_panel("Score Distribution",
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_score_info_btn", icon("question-circle"),
+                    title = "What is this?", class = "btn-outline-info btn-sm")
+                ),
                 plotlyOutput("dda_denovo_score_dist", height = "400px"),
                 # Priority 3: Length and Charge QC
                 tags$h5(icon("ruler"), " Peptide Length Distribution",
@@ -2568,8 +2567,12 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             ),
             nav_panel("Modifications",
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
-                tags$h5(icon("flask"), " Post-Translational Modifications",
-                  style = "margin-bottom: 12px; color: #333;"),
+                div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
+                  tags$h5(icon("flask"), " Post-Translational Modifications",
+                    style = "margin: 0; color: #333;"),
+                  actionButton("denovo_mods_info_btn", icon("question-circle"),
+                    title = "What are modifications?", class = "btn-outline-info btn-sm")
+                ),
                 tags$p(style = "color: #666; font-size: 0.9em; margin-bottom: 12px;",
                   "Modification analysis from de novo sequences. ",
                   "In paleoproteomics, high N-deamidation with low Q-deamidation ",
@@ -2580,18 +2583,30 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             ),
             nav_panel("GO/Functional",
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_go_info_btn", icon("question-circle"),
+                    title = "What is GO/Functional annotation?", class = "btn-outline-info btn-sm")
+                ),
                 uiOutput("dda_denovo_go_summary"),
                 plotlyOutput("dda_denovo_go_bar", height = "400px"),
                 DT::DTOutput("dda_denovo_go_table")
               )),
             nav_panel("Disagreements",
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_disagree_info_btn", icon("question-circle"),
+                    title = "What are disagreements?", class = "btn-outline-info btn-sm")
+                ),
                 uiOutput("dda_denovo_disagree_summary"),
                 DT::DTOutput("dda_denovo_disagree_table")
               )),
             # ---- Advanced Analysis sub-tabs (server_denovo_viz.R) ----
             nav_panel("BLAST Alignment", icon = icon("align-left"),
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_alignment_info_btn", icon("question-circle"),
+                    title = "What is BLAST Alignment?", class = "btn-outline-info btn-sm")
+                ),
                 div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
                   tags$p(style = "margin: 0; color: #1565c0;",
                     icon("info-circle"),
@@ -2615,6 +2630,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   div(style = "display: flex; gap: 12px; align-items: center; flex-wrap: wrap;",
                     actionButton("denovo_viz_calc_fdr", "Calculate FDR",
                       icon = icon("chart-line"), class = "btn-warning btn-sm"),
+                    actionButton("denovo_fdr_info_btn", icon("question-circle"),
+                      title = "What is Target-Decoy FDR?", class = "btn-outline-info btn-sm"),
                     tags$small(style = "color: #6c757d;",
                       "Submits reversed peptide BLAST to estimate de novo FDR (requires SSH)."),
                     uiOutput("denovo_fdr_status")
@@ -2633,6 +2650,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )),
             nav_panel("Cross-Species", icon = icon("globe"),
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_crossspecies_info_btn", icon("question-circle"),
+                    title = "What is Cross-Species comparison?", class = "btn-outline-info btn-sm")
+                ),
                 div(style = "background: #f3e5f5; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
                   tags$p(style = "margin: 0; color: #6a1b9a; font-size: 13px;",
                     icon("globe"),
@@ -2660,6 +2681,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )),
             nav_panel("Protein Families", icon = icon("sitemap"),
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_families_info_btn", icon("question-circle"),
+                    title = "What are Protein Families?", class = "btn-outline-info btn-sm")
+                ),
                 div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
                   tags$p(style = "margin: 0; color: #2e7d32; font-size: 13px;",
                     icon("sitemap"),
@@ -2672,6 +2697,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               )),
             nav_panel("Sequence Coverage", icon = icon("ruler-horizontal"),
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",
+                div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
+                  actionButton("denovo_coverage_info_btn", icon("question-circle"),
+                    title = "What is Sequence Coverage?", class = "btn-outline-info btn-sm")
+                ),
                 div(style = "background: #e0f2f1; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
                   tags$p(style = "margin: 0; color: #00695c; font-size: 13px;",
                     icon("ruler-horizontal"),
@@ -2688,11 +2717,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           )
         )
       ),
-      nav_panel("Submit Cascadia Job", value = "cascadia_submit_tab", icon = icon("rocket"),
+      nav_panel("Submit Job", value = "denovo_submit_tab", icon = icon("rocket"),
         div(style = "max-width: 800px; margin: 0 auto; padding: 20px;",
-          tags$h4("Submit Cascadia De Novo Sequencing"),
-          tags$p("Run Cascadia on the same raw files alongside DIA-NN for orthogonal validation."),
-          uiOutput("cascadia_submit_ui")
+          tags$h4("Submit De Novo Sequencing Job"),
+          tags$p("Run de novo sequencing on raw files. Cascadia for DIA data, Casanovo for DDA data."),
+          uiOutput("denovo_submit_ui")
         )
       )
     ),
