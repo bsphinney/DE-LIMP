@@ -5,7 +5,7 @@
 - For detailed change history, update `CHANGELOG.md` (not this file)
 - **Document as you go**: When the user says "wrap up", "good night", "that's it for now", or asks for a summary — update CLAUDE.md and CHANGELOG.md with all changes from the current work before responding
 - **NEVER run heavy computation on HPC login nodes** — always submit via `sbatch` or request an interactive node with `srun`. Login nodes are shared and running CPU/memory-intensive tasks can get the user flagged.
-- **Check working implementations before guessing** — When implementing algorithms, formulas, file format conversions, or protocol-level details, ALWAYS look at known working open source implementations first (e.g., timsrust, Sage, DIA-NN, OpenMS, pyteomics). Fetch the actual source code from GitHub rather than deriving formulas from first principles or approximating. Getting an algorithm "close enough" can introduce subtle bugs that are hard to detect (e.g., a tof-to-mz formula that's off by 155 Da in the mid-range but correct at the endpoints).
+- **Check primary sources before guessing — NEVER guess anything verifiable** — This applies to EVERYTHING: algorithms, formulas, file paths, container locations, module names, binary paths, HPC configurations, API formats, config parameters. If it can be checked, check it FIRST. SSH to the cluster and run `find`/`which`/`ls` for paths. Fetch source code from GitHub for algorithms. Read config files for parameters. Do NOT answer from memory or approximation. Examples of past failures: (1) tof-to-mz formula guessed from first principles was off by 155 Da — correct formula was in timsrust source; (2) said `module load diann` when DIA-NN actually runs as an Apptainer container at `/quobyte/proteomics-grp/apptainers/diann2.3.0.sif`; (3) used depthcharge's default peak filtering thinking it was Cascadia's — Cascadia's actual `train()` function uses different preprocessing.
 
 ## Review Agents (spawn before major releases)
 After significant changes, spawn these 5 review agents in parallel:
@@ -164,75 +164,15 @@ On each version release, do ALL of these:
 
 ## Key Gotchas
 
-| Problem | Solution |
-|---------|----------|
-| Navbar text invisible on dark bg | Flatly theme needs CSS override: `.navbar .nav-link { color: rgba(255,255,255,0.75) !important; }` |
-| Hidden tabs show letter fragments | `.navbar .nav-item[style*='display: none'] { width: 0 !important; overflow: hidden !important; }` |
-| `page_navbar(bg=...)` deprecation | Use `navbar_options = navbar_options(bg = ...)` (bslib 0.9.0+) |
-| `source()` doesn't start app | Use `shiny::runApp()` instead |
-| Selections disappear after clicking | Reactive loop — table must not depend on selection-derived reactives |
-| bslib `card()` doesn't render | Use plain `div()` for top-level nav_panel content |
-| `uiOutput` vanishes in `navset_card_tab` | Use static HTML + `shinyjs::html("div_id", content)` for dynamic injection. `plotlyOutput` with `req()` is safe. |
-| DIA-NN `Genes` column has accessions | Not gene symbols. Validate with length/pattern check. Real genes from `bitr()` UNIPROT → SYMBOL. |
-| MOFA2 views need same sample names | Subset to matched pairs, assign common labels (`Sample_1`, `Sample_2`, ...) |
-| Volcano P.Value vs adj.P.Val mismatch | Y-axis uses raw P.Value for spread; dashed line at `max(P.Value)` among adj.P.Val < 0.05 proteins |
-| `arrow::select` masks `dplyr::select` | Use `dplyr::select()` explicitly |
-| Shiny hidden input not registered by JS | Use `div(style="display:none;", radioButtons(...))` for `conditionalPanel` |
-| `readDIANN` data.table column error | Must pass `format="parquet"` for .parquet files |
-| `return()` inside `withProgress` | Exits `withProgress` not enclosing function. Use flat `tryCatch`. |
-| Quarto `output_file` path error | Pass filename only, then `file.rename()` to target dir |
-| y_protein `colSums` error | It's limma `EList`. Extract `$E` for expression matrix. |
-| SQLite `Parameter N does not have length 1` | Use `NA_character_` instead of `NULL` |
-| SSH output encoding crash | `iconv(..., sub="")` in `ssh_exec`/`scp_download`/`scp_upload` |
-| R regex `\\s` invalid | Use `[:space:]` in base R regex (POSIX ERE) |
-| `<<-` inside `withProgress` fails | `withProgress` uses `eval(substitute(expr), env)` — `<<-` can't find parent vars. Use `new.env()` + `<-` instead. |
-| SSH rapid connections rejected (255) | HPC `MaxStartups` throttling. Batch operations into fewer SSH calls; use ControlMaster multiplexing. |
-| macOS SSH ControlPath too long | Unix domain sockets limited to 104 bytes on macOS. R's `tempdir()` paths are ~105 chars. Use `/tmp/.delimp_<user>_<host>`. |
-| `parse_sbatch_output` returns dirty ID | SSH stdout may have trailing `\r`/whitespace. Always `trimws()` parsed job IDs. |
-| DIA-NN empirical lib is `.parquet` not `.speclib` | DIA-NN 2.0+ saves empirical libraries in parquet format. Use `empirical.parquet` in `--lib` and `--out-lib`. Predicted libs remain `.predicted.speclib`. |
-| DIA-NN `--quant-ori-names` required on ALL steps | Per Vadim (DIA-NN dev): preserves original filenames in `.quant` files. Without it, container bind mount path differences cause naming mismatches between steps. |
-| DIA-NN `--fasta-search`/`--predictor` Step 1 only | Including in Steps 2-5 causes full FASTA re-digest. `generate_parallel_scripts()` strips these from `step_flags`. |
-| DIA-NN auto mass acc + `--use-quant` | Produces different results. `generate_parallel_scripts()` forces `mass_acc_mode = "manual"`. See @docs/PATTERNS.md for full flag reference. |
-| `nrow(raw_data$E)` counts precursors not proteins | Use `length(unique(raw_data$genes$Protein.Group))` for protein group count. `y_protein$E` rows are protein groups (post-pipeline). |
-| `sacct` `.extern` step falsely reports COMPLETED | `sacct` includes `.extern`/`.batch` substeps that COMPLETE even when the main job is PENDING/FAILED. `check_slurm_status()` now requests `JobID,State` format and filters out substep lines (those containing `.`). |
-| Log import ignores `fr_mz`/`pr_charge` | `parse_diann_log` previously put `--max-fr-mz`, `--min-fr-mz`, `--min-pr-charge`, `--max-pr-charge` into `extra_cli_flags` instead of `params`. Now parsed via `value_map` so they flow properly into `search_params` and `build_diann_flags`. |
-| Array progress sacct inflated counts | `sacct -j ARRAY_ID` returns parent job + `.extern`/`.batch` substeps for each task. Filter to only `JOBID_N` format entries: `grepl("_", jid) && !grepl("\\.", jid)`. |
-| Docker container name rejected | `analysis_name` with spaces/special chars fails Docker naming rules `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. Sanitize with `gsub("[^a-zA-Z0-9_.-]", "_", name)`. |
-| `max_pr_mz` default was 1200 not 1800 | DIA-NN default for `--max-pr-mz` is 1800. UI and all fallbacks were incorrectly set to 1200, causing FASTA library entries and searches to use wrong range when Advanced Options wasn't opened. |
-| Parallel search OOM on timsTOF | Default `mem_per_file` was 32 GB, insufficient for timsTOF DIA-PASEF. Now 64 GB. |
-| TIC extraction auto-triggered | `observeEvent(list(btn, trigger))` fires when button first renders (NULL→0). Use separate `reactiveVal` trigger pattern instead. |
-| Older TDF missing `SummedIntensities` | `extract_tic_timstof()` auto-detects intensity column: `SummedIntensities` → `AccumulatedIntensity` → `MaxIntensity` → any `*ntensit*`. |
-| FASTA library `remote_dir` stored local paths | `fasta_library_file_paths()` validates remote paths; auto-uploads via SCP if local-only. Blocks HPC submission with local-only FASTA paths. |
-| SLURM limits on QOS not associations | `sacctmgr show assoc` returns empty limits. Use `sacctmgr show qos where name={account}-{partition}-qos` to get `GrpTRES` and `MaxTRESPU`. |
-| Per-user CPU limit (not account) is binding | `MaxTRESPU` (e.g., 64 CPUs) constrains individual users. `GrpTRES` (e.g., 616 CPUs) is shared across all lab members. `select_best_partition()` uses per-user limit. |
-| Spectronaut trailing dots in sample names | Spectronaut appends `.` to labels ending in digits (e.g., "AD12." → "AD12"). `match_samples()` strips with `gsub("\\.$", "", x)`. |
-| Spectronaut `PG.UniProtIds` fallback | Some Spectronaut exports lack `PG.ProteinGroups`. Protein column regex includes `UniProtIds` as fallback. Q-value regex includes `Q.Value` variant. |
-| Spectronaut Quant3 inflates significance | "Use All MS-Level Quantities" doubles observation count (21v20 → 42v40 in t-test). Detected via `parse_spectronaut_search_settings()`, shown as red "severe" row in settings diff. |
-| Spectronaut `Group` not `ProteinGroup` | Candidates.tsv uses `Group` for protein accessions. Regex must include `^Group$`. |
-| Spectronaut `Comparison (group1/group2)` format | Comparison column has parenthetical suffix. Regex `^Comparison$` fails — remove `$` anchor. |
-| Spectronaut 0-ratio proteins have NaN | Proteins with 0 `# of Ratios` have NaN logFC/Pvalue/Qvalue. `classify_de()` uses `is.finite()`, `assign_hypothesis()` coerces to safe defaults (0 for logFC, 1 for adjP). |
-| Spectronaut `AnalyisOverview.txt` typo | Filename may be misspelled by Spectronaut. Regex detector handles both spellings: `analy.?is.?overview`. |
-| History tab slow with network CSV | Multiple `activity_log_read()` calls per render cycle. Use `cached_activity_log()` reactive to read once per invalidation. |
-| **NEVER use mounted drives for app state** | SMB mounts (`/Volumes/proteomics-grp/`) may be absent, slow, or disappear. All app state files (activity log, cluster usage, lab members) MUST use local paths (`~/.delimp_*`). Cross-user sharing via SSH/SCP sync when connected. |
-| **Derived data stays with source data** | Cached/computed data (TIC cache, session.rds, search_info.md) belongs in the raw data or output directory — NOT in a user's home directory. This ensures: (1) any lab member scanning the same directory gets cached results, (2) data is portable (copy dir = copy everything), (3) lifecycle is tied to the dataset (delete data = delete cache). Use SCP for remote directories. Pattern: `.delimp_tic_cache.rds` in raw data dir, `session.rds` in output dir. Only app-level config (activity log, lab members, cluster usage) belongs in `~/.delimp_*`. |
-| SSH auto-connect blocks event loop | SSH connection test on startup can take 10-30s. Run via `later::later()` or ensure fast-fail with short timeout. Stale ControlMaster sockets detected with `ssh -O check`. |
-| NCBI RefSeq accessions need gene mapping | DIA-NN `Genes` column is empty/accession-only for NCBI FASTA. Use batch E-utilities (`esummary` on protein UIDs) to get gene symbols. Gene map TSV cached alongside FASTA. |
-| Contaminant proteins have `Cont_` prefix | After `--fasta` contaminant library, DIA-NN prefixes protein IDs with `Cont_`. Detect via `grepl("^Cont_", Protein.Group)`. Link to NCBI Protein (not UniProt) for these. |
-| No-replicates mode skips DE | Groups with <2 replicates get quantification only. `values$fit` remains NULL. Expression Grid, PCA, Signal Distribution still work. Volcano/DE table/GSEA require replicates. |
-| SLURM proxy inside Apptainer | SLURM commands not available inside container. Proxy process outside relays commands via temp files. All 9 SLURM command paths covered. |
-| SSH file browser Unix socket path | File browser modal creates SSH connections. Same ControlMaster socket path length constraint applies. |
-| Docker SSH key permissions | Windows Docker bind mounts lose Unix permissions. `Launch_DE-LIMP_Docker.bat` copies keys to container-internal volume with `chmod 600`. |
-| Spectronaut 20+ RunOverview key-value format | Spectronaut 20+ writes RunOverview as 2-column key-value pairs, not wide table. `parse_spectronaut_run_overview()` handles both formats via `ncol()` check. |
-| `unlist()` on nested lists causes row mismatch | Nested list elements expand to multiple rows in `data.frame()`. Use `vapply(x, function(v) paste(v, collapse="; "), character(1))` instead. |
-| Character matrix subsetting fails on Linux | Empty string rownames cause `mat[protein_ids, ]` subscript errors on Linux (works on macOS). Use numeric indices via `match(protein_ids, rownames(mat))`. |
-| Load from HPC needs build-time guard | `conditionalPanel` alone insufficient on HF — button renders briefly before JS hides it. Wrap in `if (!is_hf_space)` in `build_ui()`. |
-| Paths with spaces in SLURM scripts | Quote all paths in sbatch: `#SBATCH -o "path"`, `--bind "path":/work`. Launcher uses `q()` helper. |
-| Partial retry dependency chain | After retrying failed step 2 tasks, must `scontrol update` step 3's dependency to wait for retry job ID. Otherwise step 3 starts before retries complete. |
-| Cascadia `preprocessing_fn` override | Passing ANY `preprocessing_fn` list to `AnnotatedSpectrumDataset` REPLACES defaults (not appends). Cascadia's `train()` uses `[scale_intensity("root"), scale_to_unit_norm]` only — NO `filter_intensity(max_num_peaks=200)`. That 200-peak cap is a depthcharge default, not what Cascadia was trained with. |
-| Cascadia hidden LR scheduler | `AugmentedSpec2Pep.configure_optimizers()` returns `CosineWarmupScheduler(warmup=10000, max_iters=100000)` — LR starts at 0, ramps up, then decays to 0. Must override for fine-tuning with flat LR. |
-| Cascadia OOM with full spectra | Augmented spectra have median 9,558 peaks (max 113k). Self-attention is O(n^2). batch_size=1 + gradient accumulation=16 required on A100 80GB. |
-| PyTorch Lightning precision string | Old PL (1.x) wants `precision=16` (int), not `"16-mixed"` (string from PL 2.x). |
-| Python stdout buffered in SLURM | SLURM redirects stdout to file, which is fully buffered. Training appears frozen until buffer flushes. Fix: `sys.stdout.reconfigure(line_buffering=True)`. |
+Full gotchas table: @docs/GOTCHAS.md (70+ items organized by category)
+HPC paths & containers: @docs/HPC_PATHS.md
+
+**Most critical gotchas** (ones that waste the most time):
+- **Two DIA-NN containers**: `/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif` has .NET (reads .raw). `/apptainers/diann2.3.0.sif` does NOT — .raw files silently skipped.
+- **`uiOutput` vanishes in bslib sub-tabs**: Use `plotlyOutput`/`renderPlotly` only. See @docs/PATTERNS.md.
+- **NEVER use mounted drives for app state**: All app state in `~/.delimp_*`. Shared data via SSH/SCP.
+- **Derived data stays with source data**: session.rds, TIC cache in output dir, not home dir.
+- **DIA-NN binary inside container**: `/diann-2.3.0/diann-linux` (NOT just `diann`)
 
 ### Queue Switching
 Auto-switches parallel jobs between `genome-center-grp/high` and `publicgrp/low` partitions. Steps 2/4 (array) move to low (preemptible); steps 1/3/5 (assembly) stay on high. See @docs/QUEUE_SWITCHING.md for full logic, known issues, and SLURM state mapping.

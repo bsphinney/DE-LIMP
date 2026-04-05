@@ -191,7 +191,11 @@ library(markdown) # Needed for AI formatting
 
 # Load app configuration (feature flags, SLURM defaults, tool paths)
 if (!requireNamespace("yaml", quietly = TRUE)) install.packages("yaml")
-config  <- yaml::read_yaml("config.yml")
+config  <- tryCatch(yaml::read_yaml("config.yml"), error = function(e) {
+  message("[app.R] config.yml not found — using defaults")
+  list(features = list(enable_dda = FALSE, enable_xlms = FALSE),
+       tools = list(), blast = list(), slurm = list())
+})
 is_hive <- nzchar(Sys.which("sbatch"))
 
 # Optional packages — load if available, features degrade gracefully
