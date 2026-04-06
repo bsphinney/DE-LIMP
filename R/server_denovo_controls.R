@@ -32,8 +32,9 @@ server_denovo_controls <- function(input, output, session, values) {
     psms <- filtered_casanovo_psms()
     req(nrow(psms) > 0)
 
-    # For Cascadia mode, use the pre-computed classification from the adapter
-    if (isTRUE(values$denovo_engine == "cascadia") && !is.null(values$denovo_classification)) {
+    # Use pre-computed classification from the adapter when available
+    # (works for both Cascadia and Casanovo after session restore or initial load)
+    if (!is.null(values$denovo_classification)) {
       return(values$denovo_classification)
     }
 
