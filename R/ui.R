@@ -1082,6 +1082,20 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             "Requires Hive HPC connection. Supports timsTOF .d and Thermo .raw files."
           ),
 
+          # Load existing results (prominent, at top)
+          div(style = "background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;",
+            div(style = "display: flex; align-items: center; gap: 12px; flex-wrap: wrap;",
+              div(
+                icon("folder-open", style = "color: #2e7d32; font-size: 1.3em;"),
+                tags$span(style = "color: #2e7d32; font-weight: 600;", " Already have results?")
+              ),
+              actionButton("load_dda_results_top2", "Load Results from HPC",
+                icon = icon("download"), class = "btn-success btn-sm"),
+              tags$small(style = "color: #666;",
+                "Load Sage + Casanovo + BLAST results from an existing search output directory")
+            )
+          ),
+
           # SSH required warning
           conditionalPanel(
             condition = "!output.ssh_connected_flag",
@@ -2425,8 +2439,20 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       nav_panel("Results", value = "denovo_results_tab", icon = icon("dna"),
         div(style = "overflow-y: auto; max-height: calc(100vh - 200px);",
 
-          # Source engine badge
+          # Load Results button (prominent, at top)
+          conditionalPanel(
+            condition = "!output.denovo_has_data",
+            div(style = "background: #f0f7ff; border: 1px solid #b8d4f0; border-radius: 8px; padding: 16px; margin-bottom: 12px; text-align: center;",
+              tags$p(style = "margin: 0 0 8px 0; color: #1565c0;",
+                icon("folder-open"), " Load existing DDA/de novo results from HPC"),
+              actionButton("load_dda_results_top", "Load Results",
+                icon = icon("download"), class = "btn-primary")
+            )
+          ),
+
+          # Source engine badge + BLAST job status
           uiOutput("denovo_source_badge"),
+          uiOutput("denovo_blast_job_status"),
 
           # --- Confidence threshold slider ---
           div(style = "background: linear-gradient(135deg, #f0f4ff 0%, #e8eeff 100%); border: 1px solid #c5cfe8; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;",
@@ -2517,8 +2543,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 tags$h5(icon("chart-bar"), " Species Resolution",
                   style = "margin-top: 16px; color: #333;"),
                 tags$p(style = "color: #666; font-size: 0.88em; margin-bottom: 8px;",
-                  "Identity gap between best and second-best species hit per peptide. ",
-                  "Large deltas indicate species-specific sequences."),
+                  "Delta = (best species identity %) minus (second-best species identity %). ",
+                  "Peptides right of the dashed line (delta > 15%) are species-diagnostic ",
+                  "and can be used for species identification. ",
+                  "Peptides left of the line are conserved across species."),
                 plotlyOutput("dda_blast_species_resolution", height = "700px"),
                 # Top proteins by peptide count
                 tags$h5("Top Proteins by De Novo Peptide Count", style = "margin-top: 16px;"),

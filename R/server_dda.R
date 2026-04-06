@@ -538,7 +538,8 @@ server_dda <- function(input, output, session, values, add_to_log) {
   #    Load existing DDA results from HPC
   # ============================================================================
 
-  observeEvent(input$load_dda_results, {
+  # Load Results modal — triggered from DDA search panel OR De Novo tab top button
+  load_results_modal <- function() {
     showModal(modalDialog(
       title = "Load DDA Results from HPC",
       textInput("dda_load_path", "Output directory on HPC",
@@ -548,7 +549,17 @@ server_dda <- function(input, output, session, values, add_to_log) {
         actionButton("dda_load_confirm", "Load", class = "btn-primary", icon = icon("download"))
       )
     ))
+  }
+
+  observeEvent(input$load_dda_results, load_results_modal())
+  observeEvent(input$load_dda_results_top, load_results_modal())
+  observeEvent(input$load_dda_results_top2, load_results_modal())
+
+  # Flag for conditional panel — hide Load button when data exists
+  output$denovo_has_data <- reactive({
+    !is.null(values$denovo_classification) || !is.null(values$dda_casanovo_classification)
   })
+  outputOptions(output, "denovo_has_data", suspendWhenHidden = FALSE)
 
   observeEvent(input$dda_load_confirm, {
     req(nzchar(input$dda_load_path))
@@ -561,63 +572,155 @@ server_dda <- function(input, output, session, values, add_to_log) {
         local_tmp <- file.path(tempdir(), "dda_load")
         dir.create(local_tmp, showWarnings = FALSE, recursive = TRUE)
 
+        # Try to load Sage results (optional — may only have Casanovo mztabs)
         results_remote <- file.path(remote_dir, "results.sage.tsv")
         results_local <- file.path(local_tmp, "results.sage.tsv")
-        scp_download(ssh_cfg, results_remote, results_local)
+        tryCatch(scp_download(ssh_cfg, results_remote, results_local), error = function(e) NULL)
 
-        if (!file.exists(results_local) || file.info(results_local)$size < 100) {
-          showNotification("results.sage.tsv not found or empty.", type = "error")
-          return()
+        parsed <- NULL
+        if (file.exists(results_local) && file.info(results_local)$size > 100) {
+          setProgress(0.3, detail = "Parsing Sage results...")
+
+          # Check for lfq.tsv
+          lfq_remote <- file.path(remote_dir, "lfq.tsv")
+          lfq_local <- file.path(local_tmp, "lfq.tsv")
+          tryCatch(scp_download(ssh_cfg, lfq_remote, lfq_local), error = function(e) NULL)
+
+          # Parse
+          parsed <- parse_sage_results(
+            results_local,
+            if (file.exists(lfq_local)) lfq_local else NULL
+          )
+          values$dda_sage_psms    <- parsed$psms
+          values$dda_lfq_wide     <- parsed$lfq_wide
+          values$dda_protein_meta <- parsed$protein_meta
+          message("[DDA Load] Loaded ", nrow(parsed$psms), " Sage PSMs")
+        } else {
+          message("[DDA Load] No Sage results found — loading Casanovo/BLAST only")
         }
-        setProgress(0.3, detail = "Parsing Sage results...")
-
-        # Check for lfq.tsv
-        lfq_remote <- file.path(remote_dir, "lfq.tsv")
-        lfq_local <- file.path(local_tmp, "lfq.tsv")
-        tryCatch(scp_download(ssh_cfg, lfq_remote, lfq_local), error = function(e) NULL)
-
-        # Parse
-        parsed <- parse_sage_results(
-          results_local,
-          if (file.exists(lfq_local)) lfq_local else NULL
-        )
-        values$dda_sage_psms    <- parsed$psms
-        values$dda_lfq_wide     <- parsed$lfq_wide
-        values$dda_protein_meta <- parsed$protein_meta
         values$dda_output_dir   <- remote_dir
         values$dda_status       <- "loaded"
 
         setProgress(0.5, detail = "Checking for Casanovo results...")
 
-        # Check for Casanovo mztab files
-        mztab_check <- ssh_exec(ssh_cfg,
-          paste0("ls ", shQuote(file.path(remote_dir, "casanovo", "mztab")), "/*.mztab 2>/dev/null"),
-          timeout = 10)
-        if (mztab_check$status == 0 && length(mztab_check$stdout) > 0) {
-          mztab_remote <- trimws(mztab_check$stdout)
-          mztab_remote <- mztab_remote[nzchar(mztab_remote)]
-          if (length(mztab_remote) > 0) {
-            mztab_local_dir <- file.path(local_tmp, "mztab")
-            dir.create(mztab_local_dir, showWarnings = FALSE)
-            for (mt in mztab_remote) {
-              tryCatch(scp_download(ssh_cfg, mt, file.path(mztab_local_dir, basename(mt))),
-                error = function(e) NULL)
+        # Check for Casanovo mztab files in multiple locations:
+        # 1. {output_dir}/casanovo/mztab/*.mztab (DE-LIMP generated)
+        # 2. {raw_data_dir}/*.mztab (pre-existing, e.g. Glendon's feather data)
+        mztab_remote <- character(0)
+        for (mztab_search_dir in c(
+          file.path(remote_dir, "casanovo", "mztab"),
+          file.path(remote_dir, "casanovo"),
+          file.path(remote_dir, "denovo")
+        )) {
+          check <- ssh_exec(ssh_cfg,
+            paste0("ls ", shQuote(mztab_search_dir), "/*.mztab 2>/dev/null"),
+            timeout = 10)
+          if (check$status == 0 && length(check$stdout) > 0) {
+            found <- trimws(check$stdout)
+            found <- found[nzchar(found)]
+            if (length(found) > 0) {
+              mztab_remote <- found
+              message("[DDA Load] Found ", length(found), " mztab files in ", mztab_search_dir)
+              break
             }
-            mztab_local <- list.files(mztab_local_dir, pattern = "\\.mztab$", full.names = TRUE)
-            if (length(mztab_local) > 0) {
-              casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = 0.9)
-              if (nrow(casanovo_psms) > 0) {
-                classified <- classify_dda_denovo(casanovo_psms, parsed$psms)
-                values$dda_casanovo_psms <- casanovo_psms
-                values$dda_casanovo_classification <- classified
-                values$dda_casanovo_status <- "done"
+          }
+        }
+
+        # Also check if raw data dir has mztabs (common for pre-existing Casanovo runs)
+        if (length(mztab_remote) == 0) {
+          # Try to find the raw data directory from search_info.md or sage config
+          raw_dir_check <- ssh_exec(ssh_cfg,
+            paste0("grep -r 'mztab\\|raw_data' ", shQuote(file.path(remote_dir, "search_info.md")),
+                   " 2>/dev/null | head -1"),
+            timeout = 10)
+
+          # Also try parent directory and common locations
+          for (search_path in c(
+            dirname(remote_dir),
+            "/quobyte/proteomics-grp/brett/glendon/glendon_feathers"
+          )) {
+            check <- ssh_exec(ssh_cfg,
+              paste0("ls ", shQuote(search_path), "/*.mztab 2>/dev/null"),
+              timeout = 10)
+            if (check$status == 0 && length(check$stdout) > 0) {
+              found <- trimws(check$stdout)
+              found <- found[nzchar(found)]
+              if (length(found) > 0) {
+                mztab_remote <- found
+                message("[DDA Load] Found ", length(found), " mztab files in ", search_path)
+                break
               }
             }
           }
         }
 
-        # Auto-submit DIAMOND BLAST SLURM job on novel peptides (SwissProt DB)
-        if (!is.null(values$dda_casanovo_classification) &&
+        if (length(mztab_remote) > 0) {
+          mztab_local_dir <- file.path(local_tmp, "mztab")
+          dir.create(mztab_local_dir, showWarnings = FALSE)
+          for (mt in mztab_remote) {
+            tryCatch(scp_download(ssh_cfg, mt, file.path(mztab_local_dir, basename(mt))),
+              error = function(e) NULL)
+          }
+          mztab_local <- list.files(mztab_local_dir, pattern = "\\.mztab$", full.names = TRUE)
+          if (length(mztab_local) > 0) {
+            casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = 0.9)
+            if (nrow(casanovo_psms) > 0) {
+              sage_psms <- if (!is.null(parsed)) parsed$psms else NULL
+              classified <- classify_dda_denovo(casanovo_psms, sage_psms)
+              values$dda_casanovo_psms <- casanovo_psms
+              values$dda_casanovo_classification <- classified
+              values$dda_casanovo_status <- "done"
+              message("[DDA Load] Loaded ", nrow(casanovo_psms), " Casanovo PSMs, ",
+                      nrow(classified$confirmed), " confirmed, ",
+                      nrow(classified$novel), " novel")
+            }
+          }
+        }
+
+        setProgress(0.6, detail = "Checking for BLAST results...")
+
+        # Load existing BLAST results if available (skip re-running BLAST)
+        blast_remote <- file.path(remote_dir, "denovo", "blast_results.tsv")
+        blast_local <- file.path(local_tmp, "blast_results.tsv")
+        blast_loaded <- FALSE
+        tryCatch({
+          # Check file exists on remote first
+          check <- ssh_exec(ssh_cfg,
+            paste("test -s", shQuote(blast_remote), "&& echo YES || echo NO"),
+            timeout = 10)
+          if (grepl("YES", paste(check$stdout, collapse = ""))) {
+            scp_download(ssh_cfg, blast_remote, blast_local)
+            if (file.exists(blast_local) && file.info(blast_local)$size > 100) {
+              blast_df <- data.table::fread(blast_local, header = FALSE)
+              if (nrow(blast_df) > 0) {
+                col_names <- c("peptide", "subject", "pident", "length", "mismatch",
+                               "gapopen", "qstart", "qend", "sstart", "send",
+                               "evalue", "bitscore")
+                if (ncol(blast_df) >= length(col_names)) {
+                  names(blast_df)[seq_along(col_names)] <- col_names
+                }
+                # Add species + category columns
+                blast_df$species <- sub(".*_", "", blast_df$subject)
+                blast_df$category <- ifelse(blast_df$pident >= 100, "Conserved",
+                  ifelse(blast_df$pident >= 90, "Near-match", "Distant"))
+                # Best hit per peptide
+                blast_df <- blast_df[order(-blast_df$bitscore), ]
+                blast_df <- blast_df[!duplicated(blast_df$peptide), ]
+                values$dda_casanovo_blast <- as.data.frame(blast_df)
+                blast_loaded <- TRUE
+                message("[DDA Load] Loaded ", nrow(blast_df), " BLAST hits")
+              }
+            }
+          } else {
+            message("[DDA Load] No BLAST results file at ", blast_remote)
+          }
+        }, error = function(e) {
+          message("[DDA Load] BLAST load error: ", e$message)
+        })
+
+        # Only submit new BLAST if no results loaded AND we have novel peptides
+        if (!blast_loaded &&
+            !is.null(values$dda_casanovo_classification) &&
             nrow(values$dda_casanovo_classification$novel) > 0) {
           tryCatch({
             setProgress(0.6, detail = "Submitting DIAMOND BLAST job...")
@@ -696,97 +799,19 @@ echo "[DIAMOND] Done: $(date)"
           }, error = function(e) message("[DDA] Auto-BLAST submission failed: ", e$message))
         }
 
-        # Also load existing MGF-based Casanovo results from raw directory
-        setProgress(0.7, detail = "Checking for existing mztab files...")
-        raw_dir <- trimws(input$dda_raw_dir %||% "")
-        if (nzchar(raw_dir)) {
-          mztab_raw_check <- ssh_exec(ssh_cfg,
-            paste0("ls ", shQuote(raw_dir), "/*.mztab 2>/dev/null"),
-            timeout = 10)
-          if (mztab_raw_check$status == 0 && length(mztab_raw_check$stdout) > 0 &&
-              is.null(values$dda_casanovo_psms)) {
-            mztab_raw <- trimws(mztab_raw_check$stdout)
-            mztab_raw <- mztab_raw[nzchar(mztab_raw)]
-            if (length(mztab_raw) > 0) {
-              mztab_dl_dir <- file.path(local_tmp, "mztab_raw")
-              dir.create(mztab_dl_dir, showWarnings = FALSE)
-              for (mt in mztab_raw) {
-                tryCatch(scp_download(ssh_cfg, mt, file.path(mztab_dl_dir, basename(mt))),
-                  error = function(e) NULL)
-              }
-              mztab_dl <- list.files(mztab_dl_dir, pattern = "\\.mztab$", full.names = TRUE)
-              if (length(mztab_dl) > 0) {
-                casanovo_psms <- parse_casanovo_mztab(mztab_dl, score_threshold = 0.9)
-                if (nrow(casanovo_psms) > 0) {
-                  classified <- classify_dda_denovo(casanovo_psms, parsed$psms)
-                  values$dda_casanovo_psms <- casanovo_psms
-                  values$dda_casanovo_classification <- classified
-                  values$dda_casanovo_status <- "done"
-                }
-              }
-            }
-          }
-        }
-
-        # Load existing DIAMOND BLAST results if present
-        setProgress(0.85, detail = "Checking for BLAST results...")
-        tryCatch({
-          blast_remote <- file.path(remote_dir, "denovo", "blast_results.tsv")
-          blast_check <- ssh_exec(ssh_cfg, paste("test -s", shQuote(blast_remote), "&& echo YES || echo NO"), timeout = 10)
-          if (grepl("YES", paste(blast_check$stdout, collapse = ""))) {
-            blast_local <- file.path(local_tmp, "blast_results.tsv")
-            scp_download(ssh_cfg, blast_remote, blast_local)
-            if (file.exists(blast_local) && file.info(blast_local)$size > 0) {
-              blast_df <- read.delim(blast_local, header = FALSE, stringsAsFactors = FALSE)
-              colnames(blast_df) <- c("query", "subject", "pident", "length", "mismatch",
-                "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore")
-              # Parse species from SwissProt IDs: sp|ACC|PROT_SPECIES
-              blast_df$species <- sub(".*_", "", blast_df$subject)
-              # Query column IS the peptide sequence (new format: FASTA header = sequence)
-              # Backward compat: old FASTAs used >denovo_N SEQUENCE headers
-              if (any(grepl("^denovo_", blast_df$query))) {
-                # Old format — try to map from FASTA file
-                fasta_remote <- file.path(remote_dir, "denovo", "novel_peptides.fasta")
-                fasta_local <- file.path(local_tmp, "novel_peptides.fasta")
-                tryCatch(scp_download(ssh_cfg, fasta_remote, fasta_local), error = function(e) NULL)
-                if (file.exists(fasta_local)) {
-                  fasta_lines <- readLines(fasta_local, warn = FALSE)
-                  header_lines <- grep("^>", fasta_lines, value = TRUE)
-                  id_to_seq <- setNames(
-                    sub("^>\\S+\\s+", "", header_lines),
-                    sub("^>(\\S+).*", "\\1", header_lines)
-                  )
-                  blast_df$peptide <- unname(id_to_seq[blast_df$query])
-                  blast_df$peptide[is.na(blast_df$peptide)] <- blast_df$query[is.na(blast_df$peptide)]
-                } else {
-                  # Last resort: strip denovo_ prefix (header had "denovo_N SEQUENCE" format)
-                  blast_df$peptide <- sub("^denovo_\\d+\\s*", "", blast_df$query)
-                  blast_df$peptide[!nzchar(blast_df$peptide)] <- blast_df$query[!nzchar(blast_df$peptide)]
-                }
-              } else {
-                blast_df$peptide <- blast_df$query
-              }
-              # Category
-              blast_df$category <- ifelse(blast_df$pident == 100, "Conserved",
-                ifelse(blast_df$pident >= 90, "Near-match", "Distant"))
-              # Best hit per peptide
-              blast_best <- blast_df[order(-blast_df$bitscore), ]
-              blast_best <- blast_best[!duplicated(blast_best$peptide), ]
-              values$dda_casanovo_blast <- blast_best
-              message("[DDA] Loaded BLAST results: ", nrow(blast_best), " peptides with hits")
-            }
-          }
-        }, error = function(e) message("[DDA] BLAST load: ", e$message))
+        # (mztab and BLAST loading handled above)
 
         setProgress(0.95, detail = "Done!")
 
         n_psms <- nrow(parsed$psms)
         n_casanovo <- if (!is.null(values$dda_casanovo_psms)) nrow(values$dda_casanovo_psms) else 0
+        n_blast <- if (!is.null(values$dda_casanovo_blast)) nrow(values$dda_casanovo_blast) else 0
         removeModal()
+        parts <- c(sprintf("%s Sage PSMs", format(n_psms, big.mark = ",")))
+        if (n_casanovo > 0) parts <- c(parts, sprintf("%s Casanovo PSMs", format(n_casanovo, big.mark = ",")))
+        if (n_blast > 0) parts <- c(parts, sprintf("%s BLAST hits", format(n_blast, big.mark = ",")))
         showNotification(
-          sprintf("Loaded: %s Sage PSMs%s",
-            format(n_psms, big.mark = ","),
-            if (n_casanovo > 0) sprintf(", %s Casanovo PSMs", format(n_casanovo, big.mark = ",")) else ""),
+          paste("Loaded:", paste(parts, collapse = ", ")),
           type = "message", duration = 10)
 
       }, error = function(e) {
@@ -3377,8 +3402,14 @@ echo "[DIAMOND] Done: $(date)"
           tags$li(strong("Identity Histogram: "), "Distribution of BLAST identity scores. ",
             "100% = exact match, 90-99% = near-match (potential variant), <90% = distant homolog."),
           tags$li(strong("Top Proteins: "), "Proteins ranked by number of matching de novo peptides."),
-          tags$li(strong("Species Resolution: "), "Identity gap between best and 2nd-best species per peptide. ",
-            "Large gaps = species-diagnostic sequences."),
+          tags$li(strong("Species Resolution: "), "For each peptide, computes the identity gap (delta) between the ",
+            "best-matching species and the second-best species. ",
+            "Example: 95% identity to chicken, 70% to pigeon = delta of 25%. ",
+            "The vertical dashed line at delta = 15% separates: ",
+            tags$ul(
+              tags$li("Right of line (delta > 15%): ", strong("Species-diagnostic"), " — this peptide is specific to one species. Strong evidence for species ID."),
+              tags$li("Left of line (delta < 15%): ", strong("Conserved"), " — similar identity to multiple species. Less useful for distinguishing species.")
+            )),
           tags$li(strong("Taxonomic Coverage: "), "Dot plot showing peptide identity across species, grouped by protein.")
         ),
         tags$h6("Interpretation"),

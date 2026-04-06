@@ -967,6 +967,25 @@ server_denovo_controls <- function(input, output, session, values) {
     )
   })
 
+  # --- BLAST job status badge ---
+  output$denovo_blast_job_status <- renderUI({
+    blast_jid <- values$dda_blast_job_id
+    if (is.null(blast_jid) || is.null(values$dda_casanovo_classification)) return(NULL)
+    # Don't show if BLAST results already loaded
+    if (!is.null(values$dda_casanovo_blast) && nrow(values$dda_casanovo_blast) > 0) return(NULL)
+
+    div(style = "background: #fff3e0; border: 1px solid #ffcc02; border-radius: 8px; padding: 10px 16px; margin-bottom: 12px;",
+      div(style = "display: flex; align-items: center; gap: 10px;",
+        tags$span(class = "spinner-border spinner-border-sm", role = "status",
+          style = "color: #e65100;"),
+        tags$span(style = "color: #e65100; font-weight: 600;",
+          paste0("DIAMOND BLAST running (Job ", blast_jid, ")")),
+        tags$small(style = "color: #888;",
+          "Species identification results will appear automatically when complete.")
+      )
+    )
+  })
+
   # ============================================================================
   #  INFO MODALS — De Novo Controls Sub-tabs
   # ============================================================================

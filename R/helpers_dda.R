@@ -860,8 +860,36 @@ classify_dda_denovo <- function(casanovo_dt, sage_psms) {
     ))
   }
 
-  # Normalize Sage peptides for I/L matching
-  sage_peps_norm <- unique(gsub("I", "L", sage_psms$peptide))
+  # Handle case where Sage results are not available (mztab-only load)
+  if (is.null(sage_psms) || nrow(sage_psms) == 0) {
+    casanovo_dt$match_type <- "novel"
+    novel <- casanovo_dt
+    confirmed <- casanovo_dt[0, ]
+    confirmed$proteins <- character(0)
+
+    n_total <- nrow(casanovo_dt)
+    return(list(
+      classified      = casanovo_dt,
+      confirmed       = confirmed,
+      novel           = novel,
+      protein_summary = data.frame(
+        proteins = character(0),
+        n_casanovo_confirmed = integer(0),
+        casanovo_max_score = numeric(0),
+        casanovo_mean_aa_score = numeric(0),
+        stringsAsFactors = FALSE
+      ),
+      summary_stats = list(
+        n_total = n_total, n_confirmed = 0L, n_novel = n_total,
+        pct_confirmed = 0, pct_novel = 100
+      )
+    ))
+  }
+
+  # Normalize Sage peptides: strip modifications + I/L matching
+  sage_stripped <- gsub("\\+[0-9.]+", "", sage_psms$peptide)
+  sage_stripped <- gsub("\\[|\\]", "", sage_stripped)
+  sage_peps_norm <- unique(gsub("I", "L", sage_stripped))
 
   # Classify each Casanovo sequence
   casanovo_dt$match_type <- ifelse(
@@ -876,7 +904,9 @@ classify_dda_denovo <- function(casanovo_dt, sage_psms) {
       stringsAsFactors = FALSE
     )
   )
-  pep_to_protein$seq_norm <- gsub("I", "L", pep_to_protein$peptide)
+  pep_stripped <- gsub("\\+[0-9.]+", "", pep_to_protein$peptide)
+  pep_stripped <- gsub("\\[|\\]", "", pep_stripped)
+  pep_to_protein$seq_norm <- gsub("I", "L", pep_stripped)
 
   confirmed <- merge(
     casanovo_dt[casanovo_dt$match_type == "confirmed", ],
