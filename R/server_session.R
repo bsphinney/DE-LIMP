@@ -733,10 +733,32 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       values$status <- "Session loaded successfully"
       removeModal()
-      showNotification(
-        paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
-        type = "message", duration = 5
-      )
+
+      # Auto-navigate to the most relevant tab
+      if (!is.null(session_data$dda_casanovo_classification) ||
+          !is.null(session_data$denovo_engine)) {
+        # DDA/de novo session — go to De Novo results
+        nav_show("main_tabs", "De Novo")
+        nav_select("main_tabs", "De Novo")
+        showNotification(
+          sprintf("Session loaded! %s Casanovo PSMs, %s BLAST hits. Showing De Novo results.",
+            format(nrow(session_data$dda_casanovo_psms %||% data.frame()), big.mark = ","),
+            format(nrow(session_data$dda_casanovo_blast %||% data.frame()), big.mark = ",")),
+          type = "message", duration = 8
+        )
+      } else if (!is.null(values$fit)) {
+        # DIA session — go to DE Dashboard
+        nav_select("main_tabs", "DE Dashboard")
+        showNotification(
+          paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
+          type = "message", duration = 5
+        )
+      } else {
+        showNotification(
+          paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
+          type = "message", duration = 5
+        )
+      }
 
       # Record to activity log
       tryCatch({
