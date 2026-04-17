@@ -38,6 +38,13 @@ section "1. Container identity"
 id
 echo "cat /etc/os-release:"; cat /etc/os-release 2>/dev/null | head -5
 echo "uname -a:"; uname -a
+echo ""
+echo "Image build metadata (if /.image-build-info exists):"
+[ -f /.image-build-info ] && cat /.image-build-info || echo "  (not labeled — image built before build-info metadata was added)"
+echo ""
+echo "DE-LIMP app version:"
+cat /srv/shiny-server/VERSION 2>/dev/null || echo "  (VERSION file not found)"
+echo ""
 echo "Env vars of interest:"
 env | grep -E 'DELIMP|SSH|DOCKER|PATH|HOME|USER' | sort
 
@@ -54,6 +61,29 @@ du -sh /data/* 2>/dev/null | head -15
 echo ""
 echo "Disk free:"
 df -h /data 2>&1 | head -3
+echo ""
+echo "Write test on /data/output (used by DIA-NN for predicted library):"
+TEST_DIR="/data/output/.delimp_write_test_$$"
+if mkdir -p "$TEST_DIR" 2>/dev/null; then
+    if echo "test" > "$TEST_DIR/probe.txt" 2>/dev/null && [ -f "$TEST_DIR/probe.txt" ]; then
+        echo "  /data/output write: OK"
+    else
+        echo "  /data/output write: FAILED — DIA-NN speclib save will fail. Check Windows folder permissions + antivirus."
+    fi
+    rm -rf "$TEST_DIR" 2>/dev/null
+else
+    echo "  /data/output mkdir: FAILED — parent dir not writable. Check docker-compose volume + Windows permissions."
+fi
+echo ""
+echo "Mount performance hint (9p msize):"
+if mount 2>/dev/null | grep -q '/data .*msize='; then
+    MSIZE=$(mount 2>/dev/null | grep '/data ' | grep -oE 'msize=[0-9]+' | head -1)
+    MSIZE_NUM=$(echo "$MSIZE" | grep -oE '[0-9]+')
+    echo "  $MSIZE"
+    if [ -n "$MSIZE_NUM" ] && [ "$MSIZE_NUM" -lt 262144 ]; then
+        echo "  WARNING: msize < 262144 — 9p bulk I/O will be very slow (~10x slowdown on large spectra files). Consider Docker Desktop WSL2 settings."
+    fi
+fi
 
 section "4. SSH setup"
 echo "data/ssh contents:"
@@ -65,11 +95,27 @@ echo ""
 echo "DELIMP_SSH_KEY=$DELIMP_SSH_KEY"
 echo "DELIMP_SSH_USER=$DELIMP_SSH_USER"
 echo ""
-echo "Key file type (if present):"
+echo "Key file type + line endings (if present):"
 for k in /tmp/.ssh/*; do
     [ -f "$k" ] || continue
-    echo "  $k: $(file -b "$k" 2>/dev/null)"
-    echo "  perms: $(stat -c '%a %U:%G' "$k" 2>/dev/null)"
+    echo "  $k:"
+    echo "    file type: $(file -b "$k" 2>/dev/null)"
+    echo "    perms: $(stat -c '%a %U:%G' "$k" 2>/dev/null)"
+    echo "    size: $(stat -c '%s' "$k" 2>/dev/null) bytes"
+    # Detect CRLF line endings (Windows corruption that breaks libcrypto)
+    if head -c 10000 "$k" 2>/dev/null | grep -q $'\r'; then
+        echo "    LINE ENDINGS: CRLF detected (BROKEN). Fix on Windows with:"
+        echo "      \$c = [IO.File]::ReadAllText(\"\$PWD\\data\\ssh\\$(basename $k)\") -replace \"\`r\`n\", \"\`n\""
+        echo "      [IO.File]::WriteAllText(\"\$PWD\\data\\ssh\\$(basename $k)\", \$c)"
+    else
+        echo "    LINE ENDINGS: LF (correct)"
+    fi
+    # First line sanity check
+    FIRSTLINE=$(head -1 "$k" 2>/dev/null | tr -d '\r')
+    echo "    first line: $FIRSTLINE"
+    if [ "$FIRSTLINE" != "-----BEGIN OPENSSH PRIVATE KEY-----" ] && [ "$FIRSTLINE" != "-----BEGIN RSA PRIVATE KEY-----" ] && [ "$FIRSTLINE" != "-----BEGIN EC PRIVATE KEY-----" ]; then
+        echo "    WARNING: header doesn't look like a private key. Did you accidentally copy the .pub file?"
+    fi
 done
 
 section "5. SSH connectivity test to HIVE"
@@ -157,6 +203,104 @@ find /srv/shiny-server/logs -type f -name '*.log' -mtime -1 2>/dev/null | head -
     echo "--- $f ---"
     tail -30 "$f" 2>/dev/null
 done
+
+section "11. Auto-diagnosis — likely issues + fixes"
+# Pattern-match the collected log for common failure signatures and emit
+# specific fix suggestions. This is the "what do I do now" summary.
+echo "Scanning for known failure patterns..."
+ISSUES_FOUND=0
+
+# Check 1: CRLF on SSH key
+for k in /tmp/.ssh/*; do
+    [ -f "$k" ] || continue
+    if head -c 10000 "$k" 2>/dev/null | grep -q $'\r'; then
+        echo ""
+        echo "  [FOUND] SSH key has Windows CRLF line endings — breaks libcrypto."
+        echo "     Fix (PowerShell on Windows host):"
+        echo "       \$f = \"\$PWD\\data\\ssh\\$(basename $k)\""
+        echo "       \$c = [IO.File]::ReadAllText(\$f) -replace \"\`r\`n\", \"\`n\""
+        echo "       [IO.File]::WriteAllText(\$f, \$c)"
+        echo "       docker compose down; docker compose up -d"
+        ISSUES_FOUND=$((ISSUES_FOUND + 1))
+    fi
+done
+
+# Check 2: SSH permission denied
+if grep -q 'Permission denied (publickey' "$OUT" 2>/dev/null; then
+    echo ""
+    echo "  [FOUND] SSH rejected the key."
+    echo "     Check order: (1) public half not on HIVE's ~/.ssh/authorized_keys"
+    echo "                 (2) key name in data/ssh/ doesn't match HIVE username"
+    echo "                 (3) key passphrase-protected (DE-LIMP can't handle those)"
+    echo "     To register the public half on HIVE from Windows PowerShell:"
+    echo "       type \$env:USERPROFILE\\.ssh\\<your_key>.pub | ssh brettsp@hive.hpc.ucdavis.edu 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'"
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+fi
+
+# Check 3: DIA-NN binary not found
+if ! [ -x "$(which diann 2>/dev/null)" ] && ! [ -x "$(which diann-linux 2>/dev/null)" ]; then
+    echo ""
+    echo "  [FOUND] DIA-NN binary missing from container."
+    echo "     Fix: rebuild on Windows:"
+    echo "       .\\build_diann_docker.ps1"
+    echo "       docker compose down; docker compose up -d --build"
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+fi
+
+# Check 4: /data/output not writable
+TEST_W="/data/output/.w_$$"
+if ! mkdir -p "/data/output" 2>/dev/null || ! echo t > "$TEST_W" 2>/dev/null; then
+    echo ""
+    echo "  [FOUND] /data/output not writable — DIA-NN outputs and predicted library saves will fail."
+    echo "     Check: Windows folder permissions on <DE-LIMP>/data/, and whether antivirus is blocking container writes."
+    echo "     Verify from PowerShell: echo test > \"\$PWD\\data\\output\\test.txt\""
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+fi
+rm -f "$TEST_W" 2>/dev/null
+
+# Check 5: Port 22 unreachable
+if ! timeout 3 bash -c '</dev/tcp/hive.hpc.ucdavis.edu/22' 2>/dev/null; then
+    echo ""
+    echo "  [FOUND] Cannot reach hive.hpc.ucdavis.edu on port 22."
+    echo "     Your network (corporate firewall, VPN) is blocking outbound SSH."
+    echo "     Options:"
+    echo "       (1) Connect to UC Davis VPN"
+    echo "       (2) Ask IT to allow outbound 22 to hive.hpc.ucdavis.edu (169.237.253.41)"
+    echo "       (3) Use Local DIA-NN backend instead — doesn't need HPC connection"
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+fi
+
+# Check 6: Low 9p msize (performance, not correctness)
+if mount 2>/dev/null | grep -q '/data .*msize='; then
+    MSIZE_NUM=$(mount 2>/dev/null | grep '/data ' | grep -oE 'msize=[0-9]+' | head -1 | grep -oE '[0-9]+')
+    if [ -n "$MSIZE_NUM" ] && [ "$MSIZE_NUM" -lt 262144 ]; then
+        echo ""
+        echo "  [INFO] 9p msize=$MSIZE_NUM is small — large file I/O will be slow."
+        echo "     Not a correctness issue, but DIA-NN speclib writes and raw file reads will be ~10x slower than they could be."
+        echo "     Fix: set /etc/wsl.conf in your WSL2 distro (needs WSL restart):"
+        echo "       [automount]"
+        echo "       options = \"metadata,msize=262144,cache=mmap\""
+        ISSUES_FOUND=$((ISSUES_FOUND + 1))
+    fi
+fi
+
+# Check 7: SSH key missing / empty
+if [ -z "$(ls /tmp/.ssh/ 2>/dev/null | grep -v gitkeep)" ]; then
+    echo ""
+    echo "  [FOUND] No SSH key in container. HPC submission will not work."
+    echo "     Fix:"
+    echo "       1. Place your HIVE private key at <DE-LIMP>\\data\\ssh\\<hive_username>"
+    echo "       2. docker compose down; docker compose up -d"
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+fi
+
+if [ "$ISSUES_FOUND" -eq 0 ]; then
+    echo ""
+    echo "  No known failure patterns detected. If the app still misbehaves, share this full log."
+else
+    echo ""
+    echo "  → $ISSUES_FOUND issue(s) flagged above. Work through the fixes in order, then rerun this diagnostic."
+fi
 
 echo ""
 echo "============================================================"
