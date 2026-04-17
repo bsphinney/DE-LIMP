@@ -1362,16 +1362,30 @@ run_local_diann <- function(raw_files, fasta_files, output_dir,
     args <- c(args, parts)
   }
 
-  # Ensure output directory exists
+  # Ensure output directory AND log file's parent dir exist. processx can't
+  # redirect stdout/stderr to a path whose parent doesn't exist — the native
+  # exec call fails with "Native call to processx_exec failed".
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  log_dir <- dirname(log_file)
+  if (!dir.exists(log_dir)) dir.create(log_dir, recursive = TRUE)
 
   # Launch as background process
-  proc <- processx::process$new(
-    command = diann_bin,
-    args = args,
-    stdout = log_file,
-    stderr = log_file,
-    cleanup_tree = TRUE
+  proc <- tryCatch(
+    processx::process$new(
+      command = diann_bin,
+      args = args,
+      stdout = log_file,
+      stderr = log_file,
+      cleanup_tree = TRUE
+    ),
+    error = function(e) {
+      # Surface a more actionable error than the raw processx message
+      stop(sprintf(
+        "Failed to launch DIA-NN: %s\n  binary: %s\n  log_file: %s\n  log_dir exists: %s, writable: %s",
+        e$message, diann_bin, log_file,
+        dir.exists(log_dir), file.access(log_dir, mode = 2) == 0
+      ))
+    }
   )
 
   list(process = proc, pid = proc$get_pid(), log_file = log_file)
