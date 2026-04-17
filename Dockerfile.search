@@ -78,6 +78,9 @@ COPY R/ /srv/shiny-server/R/
 COPY contaminants/ /srv/shiny-server/contaminants/
 COPY VERSION /srv/shiny-server/VERSION
 COPY stats/ /srv/shiny-server/stats/
+# Diagnostic script for Windows Docker install troubleshooting
+COPY delimp_diag.sh /srv/shiny-server/delimp_diag.sh
+RUN chmod +x /srv/shiny-server/delimp_diag.sh
 
 # 7. Create data mount point with subdirectories
 RUN mkdir -p /data/raw /data/fasta /data/output
