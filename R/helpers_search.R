@@ -597,7 +597,8 @@ scan_prestaged_databases <- function(fasta_dir) {
 #' @param speclib_mount Character or NULL: container-internal path to spectral library
 #' @return Character vector of DIA-NN CLI flags
 build_diann_flags <- function(search_params = list(), search_mode = "libfree",
-                              normalization = "on", speclib_mount = NULL) {
+                              normalization = "on", speclib_mount = NULL,
+                              out_lib_path = "/work/out/report-lib.parquet") {
   # Defaults for search params
   sp <- list(
     qvalue = 0.01, max_var_mods = 1, scan_window = 6,
@@ -627,9 +628,12 @@ build_diann_flags <- function(search_params = list(), search_mode = "libfree",
     }
   }
 
-  # Core shared flags
+  # Core shared flags. Default out_lib_path is the Docker/Apptainer bind
+  # mount path (/work/out/); Local backend overrides with a real container
+  # path like /data/output/<analysis>/report-lib.parquet so DIA-NN can
+  # actually save the predicted library.
   flags <- c(flags,
-    "--out-lib /work/out/report-lib.parquet",
+    sprintf("--out-lib %s", out_lib_path),
     "--matrices",
     "--gen-spec-lib",
     sprintf("--qvalue %s", sp$qvalue),

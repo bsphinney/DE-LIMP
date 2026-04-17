@@ -4327,8 +4327,14 @@ server_search <- function(input, output, session, values, add_to_log,
       speclib_path <- if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib)) {
         values$diann_speclib
       } else NULL
+      # Local backend: use a REAL container path for --out-lib so DIA-NN
+      # can actually save the predicted library. Default /work/out/ only
+      # exists inside the Docker-backend container, not in the DE-LIMP
+      # container where Local backend runs DIA-NN via processx.
+      local_out_lib <- file.path(output_dir, "report-lib.parquet")
       diann_flags <- build_diann_flags(search_params, input$search_mode,
-                                        input$diann_normalization, speclib_path)
+                                        input$diann_normalization, speclib_path,
+                                        out_lib_path = local_out_lib)
 
       log_file <- file.path(output_dir, "logs", paste0("diann_", analysis_name, ".log"))
 
