@@ -119,8 +119,26 @@ for k in /tmp/.ssh/*; do
 done
 
 section "5. SSH connectivity test to HIVE"
-SSH_USER="${DELIMP_SSH_USER:-brettsp}"
-SSH_KEY="${DELIMP_SSH_KEY:-/tmp/.ssh/id_ed25519}"
+# Auto-detect the key if DELIMP_SSH_KEY isn't set in the env (which happens when
+# diag runs via `docker compose exec` — entrypoint CMD that sets DELIMP_SSH_KEY
+# only runs on container start, not on subsequent exec calls).
+SSH_KEY="${DELIMP_SSH_KEY:-}"
+if [ -z "$SSH_KEY" ] || [ ! -f "$SSH_KEY" ]; then
+    SSH_KEY=$(ls /tmp/.ssh/* 2>/dev/null | grep -v gitkeep | grep -v '\.pub$' | grep -v known_hosts | head -1)
+fi
+# Infer user from key filename if DELIMP_SSH_USER not set (key is usually named
+# after the HIVE username per DE-LIMP convention).
+SSH_USER="${DELIMP_SSH_USER:-}"
+if [ -z "$SSH_USER" ]; then
+    KEY_BASE=$(basename "$SSH_KEY" 2>/dev/null)
+    # If the key name looks like a username (not id_ed25519/id_rsa), use it.
+    case "$KEY_BASE" in
+        id_*|"") SSH_USER="brettsp" ;;
+        *) SSH_USER="$KEY_BASE" ;;
+    esac
+fi
+echo "Auto-detected key: $SSH_KEY"
+echo "Auto-detected user: $SSH_USER"
 echo "Testing: ssh -i $SSH_KEY ${SSH_USER}@hive.hpc.ucdavis.edu ..."
 echo ""
 echo "--- verbose output ---"
