@@ -107,28 +107,23 @@ DIANN_DIR=$(dirname "$DIANN_BIN")
 echo "Found DIA-NN binary at: $DIANN_BIN"
 
 # Write Dockerfile
+# Base: Microsoft's official .NET 8 runtime image (Debian bookworm-slim +
+# .NET 8 already installed). Avoids the fragile network download from
+# dot.net which fails behind many corporate proxies/firewalls.
 cat > Dockerfile << 'DOCKERFILE_EOF'
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
 
 # System dependencies for DIA-NN
 # libgomp1: OpenMP (parallel processing)
 # libstdc++6: C++ standard library
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    ca-certificates \
     libgomp1 \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install .NET SDK 8.0 (required for Thermo .raw file reading)
-RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
-    chmod +x /tmp/dotnet-install.sh && \
-    /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
-    ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet && \
-    rm /tmp/dotnet-install.sh
-
+# .NET 8 runtime is pre-installed in this base image at /usr/share/dotnet
+# with the `dotnet` symlink already on PATH. Used by DIA-NN for Thermo .raw.
 ENV DOTNET_ROOT=/usr/share/dotnet
-ENV PATH="$PATH:/usr/share/dotnet"
 
 # Copy DIA-NN binaries and shared libraries
 COPY diann-bin/ /opt/diann/

@@ -57,18 +57,18 @@ RUN R -e "BiocManager::install(c('MOFA2', 'basilisk'), ask=FALSE, update=FALSE)"
 # Pre-initialize basilisk env so first MOFA run doesn't need to download Python
 RUN R -e "library(MOFA2); basilisk::basiliskStart(MOFA2:::mofa_env) |> basilisk::basiliskStop()" 2>/dev/null || true
 
-# 4. Copy DIA-NN binaries + shared libraries from Stage 1
+# 4. Copy DIA-NN binaries AND .NET runtime from Stage 1.
+# The diann:2.0 image (built by build_diann_docker.sh) uses
+# mcr.microsoft.com/dotnet/runtime:8.0 as its base, so .NET is already
+# installed at /usr/share/dotnet in that image. Copying it here avoids
+# downloading .NET again during the DE-LIMP build — eliminates a fragile
+# outbound network dependency that can fail behind corporate proxies.
 COPY --from=diann /opt/diann/ /opt/diann/
+COPY --from=diann /usr/share/dotnet/ /usr/share/dotnet/
 RUN chmod +x /opt/diann/diann-linux 2>/dev/null || true && \
-    ln -sf /opt/diann/diann-linux /usr/local/bin/diann
+    ln -sf /opt/diann/diann-linux /usr/local/bin/diann && \
+    ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet
 ENV LD_LIBRARY_PATH="/opt/diann:${LD_LIBRARY_PATH}"
-
-# 5. Install .NET SDK 8.0 (DIA-NN needs this for Thermo .raw file reading)
-RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
-    chmod +x /tmp/dotnet-install.sh && \
-    /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
-    ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet && \
-    rm /tmp/dotnet-install.sh
 ENV DOTNET_ROOT=/usr/share/dotnet
 ENV PATH="$PATH:/usr/share/dotnet"
 

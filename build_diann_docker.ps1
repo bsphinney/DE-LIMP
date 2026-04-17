@@ -111,23 +111,18 @@ try {
 
     # Write Dockerfile
     @"
-FROM --platform=linux/amd64 debian:bookworm-slim
+# Base: Microsoft's official .NET 8 runtime image. Avoids downloading
+# .NET from dot.net at build time, which fails behind many corporate
+# proxies/firewalls on Windows networks.
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    ca-certificates \
     libgomp1 \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
-    chmod +x /tmp/dotnet-install.sh && \
-    /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
-    ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet && \
-    rm /tmp/dotnet-install.sh
-
+# .NET 8 runtime is pre-installed at /usr/share/dotnet with `dotnet` on PATH.
 ENV DOTNET_ROOT=/usr/share/dotnet
-ENV PATH="`$PATH:/usr/share/dotnet"
 
 COPY diann-bin/ /opt/diann/
 
