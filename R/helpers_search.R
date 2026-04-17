@@ -1362,16 +1362,26 @@ run_local_diann <- function(raw_files, fasta_files, output_dir,
     args <- c(args, parts)
   }
 
-  # Ensure output directory exists
+  # Ensure output directory and log file directory exist
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  log_dir <- dirname(log_file)
+  if (nzchar(log_dir) && !dir.exists(log_dir)) dir.create(log_dir, recursive = TRUE)
 
   # Launch as background process
-  proc <- processx::process$new(
-    command = diann_bin,
-    args = args,
-    stdout = log_file,
-    stderr = log_file,
-    cleanup_tree = TRUE
+  proc <- tryCatch(
+    processx::process$new(
+      command = diann_bin,
+      args = args,
+      stdout = log_file,
+      stderr = log_file,
+      cleanup_tree = TRUE
+    ),
+    error = function(e) {
+      stop(sprintf(
+        "Failed to launch DIA-NN (binary: %s, log: %s): %s",
+        diann_bin, log_file, conditionMessage(e)
+      ), call. = FALSE)
+    }
   )
 
   list(process = proc, pid = proc$get_pid(), log_file = log_file)
