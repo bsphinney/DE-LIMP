@@ -7,7 +7,9 @@ Run DE-LIMP natively on Windows **without Docker**, using Windows Subsystem for 
 - You want faster startup (~30s vs Docker's ~3 minutes)
 - You already use WSL for other work
 
-**Trade-off**: DIA-NN search is **HPC/SSH only** in this mode. If you want local DIA-NN searches on your Windows machine, use the Docker install ([WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md)) — the DIA-NN binary needs .NET and a Linux container, which the Docker install bundles but WSL doesn't.
+**DIA-NN support**: Local searches work. The installer downloads the official DIA-NN Linux binary and .NET 8 runtime into WSL. Thermo `.raw`, Bruker `.d`, and mzML all supported — same as the Docker install. HPC/SSH submit mode also works if you prefer offloading heavy runs.
+
+On first install you're asked to accept the DIA-NN academic license. Decline it if you only want HPC submission or don't need local searches — the rest of the app still works, and you can run `bash ~/delimp_wsl_setup.sh diann` later to change your mind.
 
 ---
 
@@ -126,8 +128,8 @@ The apt-installed R stays — uninstall via `sudo apt remove r-base r-base-dev` 
 
 | Install path | When it fits | Install time | DIA-NN search |
 |---|---|---|---|
-| **Docker + SSH** (Windows) | You want local DIA-NN searches on Windows | ~45 min first run | Local + HPC |
-| **WSL** (Windows) | No Docker, HPC-only searches | ~30 min first run | HPC only |
+| **Docker + SSH** (Windows) | You already use Docker, want isolation | ~45 min first run | Local + HPC |
+| **WSL** (Windows) | No Docker, lighter-weight, faster | ~30 min first run | Local + HPC |
 | **HPC Apptainer** | You work mostly on HIVE directly | ~15 min | HPC only |
 | **Hugging Face Spaces** | Zero install, analysis-only (have a report.parquet already) | 0 | None |
 
