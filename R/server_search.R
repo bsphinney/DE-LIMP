@@ -4397,6 +4397,34 @@ server_search <- function(input, output, session, values, add_to_log,
         is_ssh = FALSE
       )
 
+      # Write search_info.md for the local (Docker-embedded processx) backend.
+      # Uses generate_search_info() with sif_path=NULL and no SLURM fields; the
+      # helper handles missing HPC context gracefully.
+      tryCatch({
+        search_info <- generate_search_info(
+          analysis_name = analysis_name,
+          output_dir = output_dir,
+          raw_files = values$diann_raw_files$full_path,
+          fasta_files = fasta_files,
+          search_params = search_params,
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          sif_path = NULL,
+          job_ids = job_id,
+          parallel = FALSE,
+          resources = list("Local" = list(cpus = threads, mem = NA, time = NA)),
+          partition = "local",
+          account = "local",
+          cached_speclib = NULL,
+          custom_fasta_sequences = NULL,
+          instrument_metadata = values$instrument_metadata,
+          speclib_path = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            values$diann_speclib else NULL
+        )
+        if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+        writeLines(search_info, file.path(output_dir, "search_info.md"))
+      }, error = function(e) message("[DE-LIMP] Could not write search_info.md (local): ", e$message))
+
     } else if (backend == "docker") {
       # --- Docker submission ---
       img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
@@ -4486,6 +4514,33 @@ server_search <- function(input, output, session, values, add_to_log,
         loaded = FALSE,
         is_ssh = FALSE
       )
+
+      # Write search_info.md for the Docker backend too, so job entries can
+      # show settings via the View Info button.
+      tryCatch({
+        search_info <- generate_search_info(
+          analysis_name = analysis_name,
+          output_dir = output_dir,
+          raw_files = values$diann_raw_files$full_path,
+          fasta_files = fasta_files,
+          search_params = search_params,
+          search_mode = input$search_mode,
+          normalization = input$diann_normalization,
+          sif_path = NULL,
+          job_ids = container_name,
+          parallel = FALSE,
+          resources = list("Docker" = list(cpus = cpus, mem = mem_gb, time = NA)),
+          partition = "docker",
+          account = "docker",
+          cached_speclib = NULL,
+          custom_fasta_sequences = NULL,
+          instrument_metadata = values$instrument_metadata,
+          speclib_path = if (!is.null(values$diann_speclib) && nzchar(values$diann_speclib))
+            values$diann_speclib else NULL
+        )
+        if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+        writeLines(search_info, file.path(output_dir, "search_info.md"))
+      }, error = function(e) message("[DE-LIMP] Could not write search_info.md (docker): ", e$message))
 
     } else if (isTRUE(input$parallel_search)) {
       # --- HPC Parallel (5-step SLURM array) submission ---
