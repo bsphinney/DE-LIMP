@@ -31,10 +31,11 @@ DATA_DIR="${DELIMP_DATA_DIR:-${DELIMP_BASE}/data}"
 PORT="${DELIMP_PORT:-3838}"
 REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
 # DIA-NN version. All 2.x releases live under the same GitHub tag ("2.0"),
-# but the filename embeds the actual version. Leave DIANN_VERSION unset to
-# auto-pick the newest stable (non-Preview) Linux release; set it explicitly
-# to pin a known-good version (e.g. DIANN_VERSION=2.3.2).
-DIANN_VERSION="${DIANN_VERSION:-}"
+# but the filename embeds the actual version. Default is pinned to 2.3.2
+# (community-validated, matches what's installed on HIVE). Opt in to the
+# latest release with DIANN_VERSION=latest, or pin an explicit version
+# like DIANN_VERSION=2.5.0.
+DIANN_VERSION="${DIANN_VERSION:-2.3.2}"
 DIANN_RELEASE_TAG="2.0"   # Static tag used by all 2.x DIA-NN releases
 
 # --- Colors ---
@@ -138,22 +139,22 @@ install_diann() {
         fi
     fi
 
-    # Resolve the version to download. If DIANN_VERSION was not pinned by the
-    # caller, query the GitHub API and pick the newest non-Preview Linux zip
-    # from the 2.0 release. Fall back to a known-good version if the API is
-    # unreachable (corporate firewall, no internet, etc.).
-    if [ -z "${DIANN_VERSION}" ]; then
+    # Resolve the version to download. "latest" triggers an API lookup for the
+    # newest non-Preview Linux zip; anything else is treated as an explicit
+    # pin (e.g. "2.3.2", "2.5.0").
+    if [ "${DIANN_VERSION}" = "latest" ]; then
         log "Querying GitHub for latest DIA-NN Linux release..."
-        DIANN_VERSION="$(curl -s --max-time 15 \
+        local resolved="$(curl -s --max-time 15 \
             "https://api.github.com/repos/vdemichev/DiaNN/releases/tags/${DIANN_RELEASE_TAG}" \
             | grep -oE '"name": "DIA-NN-[0-9.]+-Academia-Linux\.zip"' \
             | grep -v -i 'preview' \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
             | sort -V | tail -1)"
-        if [ -z "${DIANN_VERSION}" ]; then
+        if [ -z "${resolved}" ]; then
             warn "GitHub API unreachable — falling back to pinned version 2.3.2"
             DIANN_VERSION="2.3.2"
         else
+            DIANN_VERSION="${resolved}"
             log "Newest DIA-NN stable release: ${DIANN_VERSION}"
         fi
     fi
