@@ -30,7 +30,12 @@ DIANN_LICENSE_FLAG="${DELIMP_BASE}/.diann_license_accepted"
 DATA_DIR="${DELIMP_DATA_DIR:-${DELIMP_BASE}/data}"
 PORT="${DELIMP_PORT:-3838}"
 REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
-DIANN_VERSION="${DIANN_VERSION:-2.0}"
+# DIA-NN version. All 2.x releases live under the same GitHub tag ("2.0"),
+# but the filename embeds the actual version. Leave DIANN_VERSION unset to
+# auto-pick the newest stable (non-Preview) Linux release; set it explicitly
+# to pin a known-good version (e.g. DIANN_VERSION=2.3.2).
+DIANN_VERSION="${DIANN_VERSION:-}"
+DIANN_RELEASE_TAG="2.0"   # Static tag used by all 2.x DIA-NN releases
 
 # --- Colors ---
 GREEN='\033[0;32m'
@@ -74,7 +79,7 @@ install_system_deps() {
         libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
         libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev \
         libcairo2-dev libxt-dev \
-        openssh-client git unzip \
+        openssh-client git unzip curl \
         python3 python3-pip python3-venv
 
     local rver=$(R --version 2>/dev/null | head -1)
@@ -133,12 +138,32 @@ install_diann() {
         fi
     fi
 
+    # Resolve the version to download. If DIANN_VERSION was not pinned by the
+    # caller, query the GitHub API and pick the newest non-Preview Linux zip
+    # from the 2.0 release. Fall back to a known-good version if the API is
+    # unreachable (corporate firewall, no internet, etc.).
+    if [ -z "${DIANN_VERSION}" ]; then
+        log "Querying GitHub for latest DIA-NN Linux release..."
+        DIANN_VERSION="$(curl -s --max-time 15 \
+            "https://api.github.com/repos/vdemichev/DiaNN/releases/tags/${DIANN_RELEASE_TAG}" \
+            | grep -oE '"name": "DIA-NN-[0-9.]+-Academia-Linux\.zip"' \
+            | grep -v -i 'preview' \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+            | sort -V | tail -1)"
+        if [ -z "${DIANN_VERSION}" ]; then
+            warn "GitHub API unreachable — falling back to pinned version 2.3.2"
+            DIANN_VERSION="2.3.2"
+        else
+            log "Newest DIA-NN stable release: ${DIANN_VERSION}"
+        fi
+    fi
+
     # DIA-NN binary — download once, skip if already present
     if [ ! -x "${DIANN_DIR}/diann-linux" ]; then
         log "Downloading DIA-NN ${DIANN_VERSION} (~500 MB)..."
         mkdir -p "${DIANN_DIR}"
         local zipfile="${DIANN_DIR}/diann.zip"
-        local url="https://github.com/vdemichev/DiaNN/releases/download/${DIANN_VERSION}/DIA-NN-${DIANN_VERSION}-Academia-Linux.zip"
+        local url="https://github.com/vdemichev/DiaNN/releases/download/${DIANN_RELEASE_TAG}/DIA-NN-${DIANN_VERSION}-Academia-Linux.zip"
         wget --progress=bar -O "${zipfile}" "${url}"
         if [ ! -s "${zipfile}" ]; then
             err "DIA-NN download failed. Check version ${DIANN_VERSION} exists at https://github.com/vdemichev/DiaNN/releases"
