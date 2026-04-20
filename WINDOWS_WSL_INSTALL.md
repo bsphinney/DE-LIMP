@@ -163,7 +163,13 @@ In any of those you'll see a prompt like `protcore@DESKTOP:~$`. You're in Linux.
    ```
    You'll type your HPC password once; after that SSH uses the key. If your cluster disables password logins entirely, email your cluster admin the public key contents (`cat ~/.ssh/id_ed25519.pub`) and ask them to add it to your `~/.ssh/authorized_keys` on the cluster.
 
-3. **In the DE-LIMP SSH panel** (the app UI), point to `~/.ssh/id_ed25519` and enter your HPC username. Click Test Connection — should succeed without any further setup.
+3. **In the DE-LIMP SSH panel** (the app UI), the key path field should pre-fill with `~/.ssh/id_ed25519`. Enter your HPC username, click Test Connection.
+
+   **If the key path field is empty or points somewhere else**, type it in directly:
+   ```
+   ~/.ssh/id_ed25519
+   ```
+   (or the full path: `/home/<your-linux-user>/.ssh/id_ed25519`). The "Browse" button only lists your data drive + `~/.ssh/` if that directory already existed when the app started — if you made your key *after* launching the app, Browse won't see it until you restart. Typing the path directly always works.
 
 No chmod, no line-ending fixes, no container restart needed — WSL treats this exactly like a real Linux box.
 
@@ -241,6 +247,20 @@ chmod 600 ~/.ssh/id_ed25519
 ```
 
 Then retry the SSH or Test Connection in the app.
+
+### The "Browse" button on the SSH panel can't see my key
+
+The Browse dialog only shows paths that existed *when the app started*. If you generated or copied your key into `~/.ssh/` after launching DE-LIMP, Browse won't know about it yet.
+
+Two fixes:
+
+- **Easiest**: just type the path directly into the SSH key path field instead of using Browse:
+  ```
+  ~/.ssh/id_ed25519
+  ```
+- **Or**: stop the app (Ctrl+C in the WSL terminal) and re-run `Launch_DE-LIMP_WSL.bat`. After restart, Browse will include `~/.ssh/` as a root labeled "SSH Keys".
+
+The launcher also auto-sets the `DELIMP_SSH_KEY` env var to `~/.ssh/id_ed25519` when it exists, so the field should pre-fill correctly on the first run after a fresh key is created.
 
 ### SSH fails with `Permission denied (publickey,password)`
 

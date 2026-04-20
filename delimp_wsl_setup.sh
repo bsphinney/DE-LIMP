@@ -485,6 +485,21 @@ run_app() {
     export R_LIBS_USER="${R_LIB}"
     export DELIMP_DATA_DIR="${DATA_DIR}"
 
+    # Auto-wire DELIMP_SSH_KEY so the SSH panel in the app pre-fills with
+    # the user's actual key instead of a non-existent path. Priority:
+    #   1. Already-set env var (user explicitly chose)
+    #   2. ~/.ssh/id_ed25519 (standard WSL key location)
+    #   3. ~/.ssh/id_rsa (older keys)
+    # No fallback to $DATA_DIR/ssh/ — that path on /mnt/* can't hold a
+    # valid SSH key (9p strips 0600 perms).
+    if [ -z "${DELIMP_SSH_KEY:-}" ]; then
+        if [ -f "${HOME}/.ssh/id_ed25519" ]; then
+            export DELIMP_SSH_KEY="${HOME}/.ssh/id_ed25519"
+        elif [ -f "${HOME}/.ssh/id_rsa" ]; then
+            export DELIMP_SSH_KEY="${HOME}/.ssh/id_rsa"
+        fi
+    fi
+
     # Source DIA-NN PATH/LD_LIBRARY_PATH if installed
     [ -f "${DELIMP_BASE}/env.sh" ] && . "${DELIMP_BASE}/env.sh"
 
