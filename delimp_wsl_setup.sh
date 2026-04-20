@@ -27,7 +27,18 @@ REPO_DIR="${DELIMP_BASE}/DE-LIMP"
 R_LIB="${DELIMP_BASE}/R-lib"
 DIANN_DIR="${DELIMP_BASE}/diann"
 DIANN_LICENSE_FLAG="${DELIMP_BASE}/.diann_license_accepted"
-DATA_DIR="${DELIMP_DATA_DIR:-${DELIMP_BASE}/data}"
+DATA_DIR_CONFIG="${DELIMP_BASE}/data_dir"
+# DATA_DIR resolution order:
+#   1. DELIMP_DATA_DIR env var (explicit override)
+#   2. ~/.delimp/data_dir file (set by prompt_data_dir during install)
+#   3. ~/.delimp/data (fallback — WSL-internal VHDX, fills up on large data)
+if [ -n "${DELIMP_DATA_DIR:-}" ]; then
+    DATA_DIR="${DELIMP_DATA_DIR}"
+elif [ -f "${DATA_DIR_CONFIG}" ]; then
+    DATA_DIR="$(cat "${DATA_DIR_CONFIG}")"
+else
+    DATA_DIR="${DELIMP_BASE}/data"
+fi
 PORT="${DELIMP_PORT:-3838}"
 REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
 # DIA-NN version. All 2.x releases live under the same GitHub tag ("2.0"),
@@ -49,6 +60,73 @@ log()  { echo -e "${BLUE}[delimp]${NC} $*"; }
 warn() { echo -e "${YELLOW}[delimp]${NC} $*"; }
 err()  { echo -e "${RED}[delimp]${NC} $*" >&2; }
 ok()   { echo -e "${GREEN}[delimp]${NC} $*"; }
+
+# -----------------------------------------------------------------------------
+# 0a. Data directory prompt (on install only)
+# -----------------------------------------------------------------------------
+# Raw mass-spec files are enormous — a 30-file .d experiment is easily 200 GB.
+# Default DATA_DIR lives in WSL's VHDX (~/.delimp/data), which is slow to grow
+# and painful to reclaim. Better default: ask the user for a Windows path
+# (e.g. D:\proteomics) and store it in ~/.delimp/data_dir. Skippable.
+prompt_data_dir() {
+    # Skip silently if already configured or forced via env var
+    if [ -f "${DATA_DIR_CONFIG}" ] || [ -n "${DELIMP_DATA_DIR:-}" ]; then
+        log "Using data directory: ${DATA_DIR}"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${BLUE}======================== Data Directory ========================${NC}"
+    echo "  Where should DE-LIMP store raw files, FASTA, and search output?"
+    echo ""
+    echo "  Raw mass-spec files can be 5-10 GB each. You probably want this"
+    echo "  on a Windows drive — ideally an internal SSD with plenty of space"
+    echo "  (D:, E:, etc.) so File Explorer can see the output and your WSL"
+    echo "  virtual disk doesn't balloon."
+    echo ""
+    echo "  Enter a Windows path like:   D:\\proteomics\\delimp-data"
+    echo "  Or leave blank to use:       ~/.delimp/data  (inside WSL)"
+    echo -e "${BLUE}================================================================${NC}"
+    echo ""
+    read -p "Data directory [leave blank for WSL-internal default]: " user_path
+
+    # Blank — use WSL-internal default
+    if [ -z "${user_path}" ]; then
+        mkdir -p "${DELIMP_BASE}/data"
+        echo "${DELIMP_BASE}/data" > "${DATA_DIR_CONFIG}"
+        DATA_DIR="${DELIMP_BASE}/data"
+        log "Using WSL-internal data dir: ${DATA_DIR}"
+        return 0
+    fi
+
+    # Convert Windows path to WSL path
+    # Accept: D:\foo\bar  or  D:/foo/bar  or  /mnt/d/foo/bar
+    local wsl_path
+    if [[ "${user_path}" =~ ^[A-Za-z]:[\\/] ]]; then
+        # Windows path — use wslpath
+        wsl_path="$(wslpath -u "${user_path}" 2>/dev/null || true)"
+        if [ -z "${wsl_path}" ]; then
+            err "Could not convert '${user_path}' to a WSL path."
+            return 1
+        fi
+    else
+        # Already a Linux/WSL path
+        wsl_path="${user_path}"
+    fi
+
+    # Try to create the directory on the Windows side
+    if ! mkdir -p "${wsl_path}" 2>/dev/null; then
+        err "Cannot create ${wsl_path}. Is the drive mounted? Does the parent path exist on Windows?"
+        return 1
+    fi
+
+    # Save the choice
+    echo "${wsl_path}" > "${DATA_DIR_CONFIG}"
+    DATA_DIR="${wsl_path}"
+    ok "Data directory set to: ${DATA_DIR}"
+    log "  (Windows path: ${user_path})"
+    log "  You can change it later by editing ${DATA_DIR_CONFIG}"
+}
 
 # -----------------------------------------------------------------------------
 # 0. Disk space check
@@ -365,6 +443,7 @@ CMD="${1:-auto}"
 case "${CMD}" in
     install)
         check_disk_space
+        prompt_data_dir
         install_system_deps
         sync_repo
         install_r_packages
@@ -383,10 +462,16 @@ case "${CMD}" in
         # Install DIA-NN only (e.g., after declining license on first run)
         install_diann
         ;;
+    config-data-dir)
+        # Reset and re-prompt for the data directory
+        rm -f "${DATA_DIR_CONFIG}"
+        prompt_data_dir
+        ;;
     auto)
         # Install only if missing, then run
         if ! command -v R >/dev/null 2>&1; then
             check_disk_space
+            prompt_data_dir
             install_system_deps
         fi
         if [ ! -d "${REPO_DIR}/.git" ]; then
@@ -401,11 +486,12 @@ case "${CMD}" in
         run_app
         ;;
     *)
-        echo "Usage: bash $0 [install|update|run|diann]"
-        echo "  install — install system deps, R packages, and DIA-NN"
-        echo "  update  — git pull + refresh R packages"
-        echo "  run     — launch the Shiny app on localhost:\${DELIMP_PORT:-3838}"
-        echo "  diann   — install DIA-NN only (accepts license on first run)"
+        echo "Usage: bash $0 [install|update|run|diann|config-data-dir]"
+        echo "  install          — install system deps, R packages, and DIA-NN"
+        echo "  update           — git pull + refresh R packages"
+        echo "  run              — launch the Shiny app on localhost:\${DELIMP_PORT:-3838}"
+        echo "  diann            — install DIA-NN only (accepts license on first run)"
+        echo "  config-data-dir  — re-prompt for where to store raw/fasta/output"
         exit 1
         ;;
 esac
