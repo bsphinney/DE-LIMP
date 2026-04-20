@@ -391,6 +391,16 @@ install_r_packages() {
     mkdir -p "${R_LIB}"
     export R_LIBS_USER="${R_LIB}"
 
+    # Remove any stale install-in-progress locks from previous killed runs.
+    # R creates 00LOCK-<pkg>/ dirs while compiling; if the process dies they
+    # block all future installs in that lib with "failed to lock directory".
+    local stale_locks
+    stale_locks=$(find "${R_LIB}" -maxdepth 1 -type d -name '00LOCK-*' 2>/dev/null | wc -l)
+    if [ "${stale_locks}" -gt 0 ]; then
+        warn "Found ${stale_locks} stale R install locks — clearing them."
+        find "${R_LIB}" -maxdepth 1 -type d -name '00LOCK-*' -exec rm -rf {} + 2>/dev/null || true
+    fi
+
     log "Installing R packages into ${R_LIB} (first run: 20-30 min)..."
 
     R --no-save <<EOF
@@ -521,28 +531,33 @@ case "${CMD}" in
         prompt_data_dir
         ;;
     auto)
-        # Each step is idempotent — run each regardless of whether earlier
-        # ones completed. This handles the case where a previous install
-        # succeeded partially (e.g., R installed but shiny failed; R
-        # installed but data-dir prompt was never reached).
+        # Each step is idempotent — run regardless of previous state.
+        # This handles partial installs (R on PATH but shiny broken, apt
+        # package list updated after R was installed, data-dir not set).
 
         # Disk check only matters when we're about to install something big
-        if ! command -v R >/dev/null 2>&1 || [ ! -x "${DIANN_DIR}/diann-linux" ]; then
+        if ! command -v R >/dev/null 2>&1 \
+           || [ ! -x "${DIANN_DIR}/diann-linux" ] \
+           || [ ! -d "${R_LIB}/shiny" ]; then
             check_disk_space
         fi
 
-        # Always check the data-dir config, independent of R install state.
-        # prompt_data_dir() is idempotent: skips if config file exists.
-        prompt_data_dir
+        prompt_data_dir  # idempotent
 
-        if ! command -v R >/dev/null 2>&1; then
-            install_system_deps
-        fi
+        # Always run apt install — it's cheap when everything's already
+        # present (~2s "newest version already installed" checks), and it
+        # catches the case where the script added new apt packages in a
+        # later release while the user's R was installed from an earlier
+        # one. Example: libuv1-dev was added in a later commit; users on
+        # an older R install would otherwise never get it.
+        install_system_deps
+
         if [ ! -d "${REPO_DIR}/.git" ]; then
             sync_repo
         fi
-        # Re-run R package install if limpa OR shiny is missing (catches
-        # partial installs where some CRAN/Bioc pkgs failed to compile).
+        # Re-run R package install if key markers are missing. limpa is the
+        # most fragile (source compile, Bioc); shiny is the quickest-to-fail
+        # marker for missing system libs (libuv).
         if [ ! -d "${R_LIB}/limpa" ] || [ ! -d "${R_LIB}/shiny" ]; then
             install_r_packages
         fi
