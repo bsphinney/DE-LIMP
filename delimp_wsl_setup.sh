@@ -88,44 +88,55 @@ prompt_data_dir() {
     echo "  Or leave blank to use:       ~/.delimp/data  (inside WSL)"
     echo -e "${BLUE}================================================================${NC}"
     echo ""
-    read -p "Data directory [leave blank for WSL-internal default]: " user_path
 
-    # Blank — use WSL-internal default
-    if [ -z "${user_path}" ]; then
-        mkdir -p "${DELIMP_BASE}/data"
-        echo "${DELIMP_BASE}/data" > "${DATA_DIR_CONFIG}"
-        DATA_DIR="${DELIMP_BASE}/data"
-        log "Using WSL-internal data dir: ${DATA_DIR}"
-        return 0
-    fi
+    # Loop: re-prompt on bad input until we get something that works or the
+    # user gives up with a blank entry. Critically, we do NOT return non-zero
+    # from this function — `set -e` at the top of the script would abort the
+    # whole installer if we did.
+    local user_path wsl_path
+    while true; do
+        read -p "Data directory [leave blank for WSL-internal default]: " user_path
 
-    # Convert Windows path to WSL path
-    # Accept: D:\foo\bar  or  D:/foo/bar  or  /mnt/d/foo/bar
-    local wsl_path
-    if [[ "${user_path}" =~ ^[A-Za-z]:[\\/] ]]; then
-        # Windows path — use wslpath
-        wsl_path="$(wslpath -u "${user_path}" 2>/dev/null || true)"
-        if [ -z "${wsl_path}" ]; then
-            err "Could not convert '${user_path}' to a WSL path."
-            return 1
+        # Blank — use WSL-internal default
+        if [ -z "${user_path}" ]; then
+            mkdir -p "${DELIMP_BASE}/data"
+            echo "${DELIMP_BASE}/data" > "${DATA_DIR_CONFIG}"
+            DATA_DIR="${DELIMP_BASE}/data"
+            log "Using WSL-internal data dir: ${DATA_DIR}"
+            return 0
         fi
-    else
-        # Already a Linux/WSL path
-        wsl_path="${user_path}"
-    fi
 
-    # Try to create the directory on the Windows side
-    if ! mkdir -p "${wsl_path}" 2>/dev/null; then
-        err "Cannot create ${wsl_path}. Is the drive mounted? Does the parent path exist on Windows?"
-        return 1
-    fi
+        # Tilde expansion — bash's read doesn't expand ~ for us
+        user_path="${user_path/#\~/$HOME}"
 
-    # Save the choice
-    echo "${wsl_path}" > "${DATA_DIR_CONFIG}"
-    DATA_DIR="${wsl_path}"
-    ok "Data directory set to: ${DATA_DIR}"
-    log "  (Windows path: ${user_path})"
-    log "  You can change it later by editing ${DATA_DIR_CONFIG}"
+        # Convert Windows path to WSL path.
+        # Accept: D:\foo\bar, D:/foo/bar, /mnt/d/foo/bar, plain Linux paths
+        if [[ "${user_path}" =~ ^[A-Za-z]:[\\/].* ]]; then
+            wsl_path="$(wslpath -u "${user_path}" 2>/dev/null || true)"
+            if [ -z "${wsl_path}" ]; then
+                warn "Could not convert '${user_path}' to a WSL path. Try again, or blank to use the default."
+                continue
+            fi
+        else
+            wsl_path="${user_path}"
+        fi
+
+        # Try to create the directory on the target side
+        if ! mkdir -p "${wsl_path}" 2>/dev/null; then
+            warn "Cannot create '${wsl_path}'."
+            warn "  Is the drive mounted in WSL? Try: ls /mnt/"
+            warn "  Does the parent path exist on Windows?"
+            warn "  Try a different path, or blank to use the default."
+            continue
+        fi
+
+        # Save the choice
+        echo "${wsl_path}" > "${DATA_DIR_CONFIG}"
+        DATA_DIR="${wsl_path}"
+        ok "Data directory set to: ${DATA_DIR}"
+        log "  You can change it later with: bash delimp_wsl_setup.sh config-data-dir"
+        return 0
+    done
 }
 
 # -----------------------------------------------------------------------------
