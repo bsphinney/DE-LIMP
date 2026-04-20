@@ -48,7 +48,11 @@ You do **not** need R, RStudio, or any Bioconductor packages installed on Window
    >
    > `Ubuntu install triggered. After it finishes setting up, re-run this launcher.`
    >
-   > Complete the Ubuntu first-time setup in the separate window that pops up (create a Linux username/password — these are **WSL-only** credentials, unrelated to your Windows account or HPC login). Close that Ubuntu window when done, then **double-click the launcher again** to start the real install.
+   > Complete the Ubuntu first-time setup in the separate window that pops up (create a Linux username/password — these are **WSL-only** credentials, unrelated to your Windows account or HPC login).
+   >
+   > **⚠️ Write down the Ubuntu password.** The second run of the launcher will prompt for it when installing system packages (`sudo apt-get`). There's no way to recover it if you forget — you'd have to wipe the WSL distro and start over. Ubuntu does **not** echo the password as you type it, which is normal — just type it and press Enter.
+   >
+   > Close the Ubuntu window when setup is done, then **double-click the launcher again** to start the real install.
 
    On that second run the installer begins — takes 20–30 minutes to compile R + Bioconductor packages inside WSL. Watch the console for progress. When you see `Listening on http://0.0.0.0:3838`, your browser opens automatically.
 
