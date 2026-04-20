@@ -112,6 +112,35 @@ All accessible from Windows File Explorer at `\\wsl.localhost\Ubuntu\home\<you>\
 
 SSH in WSL is much simpler than in Docker — WSL Ubuntu has full-fat SSH with normal Unix permissions.
 
+You have two options: generate a fresh key inside WSL, or reuse an existing key (e.g., from your Mac, an old machine, or a shared lab account) — both need to end up in WSL's `~/.ssh/` with 0600 permissions.
+
+### Option A — Reuse an existing SSH key
+
+If you already have a working key on another machine (Mac, old Windows box, network drive backup), drop it into WSL's `~/.ssh/` and fix the permissions:
+
+```bash
+# Open an Ubuntu shell (Start menu → Ubuntu, or 'wsl -d Ubuntu' from PowerShell)
+
+# Copy from wherever your key lives. Examples:
+# From a Windows folder:
+cp /mnt/c/Users/<you>/Downloads/id_ed25519 ~/.ssh/id_ed25519
+cp /mnt/c/Users/<you>/Downloads/id_ed25519.pub ~/.ssh/id_ed25519.pub
+
+# From a network drive mapped as Z: on Windows:
+cp /mnt/z/ssh-backup/id_ed25519 ~/.ssh/id_ed25519
+
+# CRITICAL: fix permissions — SMB/CIFS network drives strip Unix perms,
+# and files dropped in from Windows always come in as 0644, which SSH refuses
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_ed25519
+```
+
+If you skip the `chmod 600` step you'll hit `WARNING: UNPROTECTED PRIVATE KEY FILE!` and auth will fail. Windows and SMB filesystems can't express Unix 0600 so this step is always required after a cross-OS copy.
+
+The public half of your existing key is presumably already registered on your HPC cluster — skip to step 3 below to test the connection.
+
+### Option B — Generate a fresh key inside WSL
+
 You need to run these commands from inside an Ubuntu shell (not PowerShell, not Git Bash — the key's file permissions only get set correctly when it's created inside the WSL filesystem).
 
 **Opening an Ubuntu terminal — pick whichever is easiest:**
@@ -200,6 +229,26 @@ sudo apt install --only-upgrade r-base r-base-dev
 ### Browser opens before app is ready
 
 The launcher waits 90 seconds before opening the browser. If the app isn't up yet, just refresh `http://localhost:3838`.
+
+### SSH fails with `WARNING: UNPROTECTED PRIVATE KEY FILE! Permissions 0644 ... are too open`
+
+Your key has permissions 0644 (world-readable). SSH refuses any private key more permissive than 0600. Typically happens when you copy a key from a Windows folder or a network drive (SMB/CIFS strips Unix permissions).
+
+Fix in the Ubuntu shell:
+```bash
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_ed25519
+```
+
+Then retry the SSH or Test Connection in the app.
+
+### SSH fails with `Permission denied (publickey,password)`
+
+Either the public half of your key isn't registered on the HPC cluster, or it's registered under the wrong user account. Get your public key text:
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+Paste that line into `~/.ssh/authorized_keys` on the cluster (email your cluster admin if password logins are disabled and `ssh-copy-id` won't work).
 
 ### App port 3838 already in use
 
