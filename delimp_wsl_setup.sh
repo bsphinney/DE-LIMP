@@ -51,6 +51,56 @@ err()  { echo -e "${RED}[delimp]${NC} $*" >&2; }
 ok()   { echo -e "${GREEN}[delimp]${NC} $*"; }
 
 # -----------------------------------------------------------------------------
+# 0. Disk space check
+# -----------------------------------------------------------------------------
+# Full install lands in ~ (WSL user home) and uses roughly:
+#   - apt packages:         ~2 GB
+#   - R base + dev:         ~500 MB
+#   - R packages (compiled): ~5 GB (CRAN + Bioconductor + basilisk Python env)
+#   - DIA-NN binary + libs: ~500 MB
+#   - Build tmp during compile: ~2 GB peak (freed after)
+# Hard floor: need ~8 GB free to finish. Recommend 12 GB for headroom.
+check_disk_space() {
+    local required_gb=8
+    local recommended_gb=12
+
+    mkdir -p "${HOME}"
+    # df -BG prints in GiB with a G suffix; strip it to get an integer
+    local avail_gb
+    avail_gb=$(df -BG "${HOME}" 2>/dev/null | awk 'NR==2 {gsub("G",""); print $4}')
+
+    if [ -z "${avail_gb}" ]; then
+        warn "Could not determine free space on ${HOME} — skipping check."
+        return 0
+    fi
+
+    log "Disk space on ${HOME}: ${avail_gb} GB free"
+
+    if [ "${avail_gb}" -lt "${required_gb}" ]; then
+        err "Not enough disk space. Have ${avail_gb} GB, need at least ${required_gb} GB."
+        echo ""
+        echo "  WSL2 stores your Linux filesystem in a virtual disk (VHDX) at"
+        echo "  %USERPROFILE%\\AppData\\Local\\Packages\\CanonicalGroupLimited.*\\LocalState\\ext4.vhdx"
+        echo ""
+        echo "  How to fix:"
+        echo "  1. Free space in your WSL home — e.g. 'sudo apt clean' clears the apt cache."
+        echo "  2. If the Windows drive holding the VHDX is full, free Windows disk space first."
+        echo "  3. For more headroom, expand the WSL2 disk size limit:"
+        echo "     - Edit C:\\Users\\<you>\\.wslconfig, add [wsl2] section:"
+        echo "         memory=8GB"
+        echo "         processors=4"
+        echo "     - In PowerShell (admin): wsl --shutdown, then restart."
+        echo ""
+        exit 1
+    fi
+
+    if [ "${avail_gb}" -lt "${recommended_gb}" ]; then
+        warn "Only ${avail_gb} GB free — install will probably fit but leaves little headroom."
+        warn "Recommended: ${recommended_gb} GB+ for comfortable operation + raw file storage."
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # 1. System dependencies (apt)
 # -----------------------------------------------------------------------------
 # Ubuntu 22.04 ships R 4.1, 24.04 ships R 4.3 — both too old for Bioc 3.22
@@ -314,6 +364,7 @@ run_app() {
 CMD="${1:-auto}"
 case "${CMD}" in
     install)
+        check_disk_space
         install_system_deps
         sync_repo
         install_r_packages
@@ -335,6 +386,7 @@ case "${CMD}" in
     auto)
         # Install only if missing, then run
         if ! command -v R >/dev/null 2>&1; then
+            check_disk_space
             install_system_deps
         fi
         if [ ! -d "${REPO_DIR}/.git" ]; then
