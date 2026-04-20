@@ -30,7 +30,7 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 **Load from HPC** -- One-click button to download and analyze completed search results from the cluster via the SSH file browser.
 
-**Docker Launcher for Windows** -- One-click batch file (`Launch_DE-LIMP_Docker.bat`) handles SSH key detection, shared PC accounts, container startup, and browser launch. Docker + SSH to HPC is now the recommended Windows deployment.
+**WSL2 Launcher for Windows (recommended)** -- One-click batch file (`Launch_DE-LIMP_WSL.bat`) installs R, Bioconductor, DIA-NN 2.3.2 natively inside WSL Ubuntu. Faster than Docker, no SSH key chmod gymnastics, no .NET download blocked by corporate firewalls. Docker launcher still available as an alternative.
 
 **No-Replicates Mode** -- Quantification completes normally with n=1 per group (normalization, protein aggregation, PCA, Expression Grid). DE analysis is gracefully skipped with an informational message.
 
@@ -104,7 +104,8 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 - **Smart partition selection** -- Detects per-user SLURM CPU limits, auto-switches to public queue when at capacity
 - **FASTA database library** -- Shared catalog with auto-upload to HPC, fragment m/z range tracking, path validation
 - **Cluster resource indicator** -- Real-time HPC CPU usage monitoring with traffic-light display (green/yellow/red)
-- **Windows Docker launcher** -- One-click `.bat` file runs DE-LIMP + DIA-NN with zero R installation, shared PC support ([guide](WINDOWS_DOCKER_INSTALL.md))
+- **Windows WSL launcher (recommended)** -- One-click `.bat` runs DE-LIMP + DIA-NN natively in WSL2 Ubuntu, zero R install on Windows ([guide](WINDOWS_WSL_INSTALL.md))
+- **Windows Docker launcher (alternative)** -- One-click `.bat` for users who already run Docker Desktop ([guide](WINDOWS_DOCKER_INSTALL.md))
 - **Non-blocking job queue** -- Submit multiple searches, results auto-load on completion
 - **Phospho mode** -- Auto-configures DIA-NN for phospho analysis (STY modification, `--phospho-output`)
 - **Organized search logs** -- SLURM `.out`/`.err` and local `.log` files written to `{output_dir}/logs/`
@@ -137,9 +138,12 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 | Platform | Method | DIA-NN Search? | Guide |
 |----------|--------|----------------|-------|
 | **Any (just exploring)** | Web browser | No | [Hugging Face](https://huggingface.co/spaces/brettsp/de-limp-proteomics) |
-| **Windows** | Docker + SSH to HPC | Yes (via HPC) | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
-| **Mac / Linux** | R/RStudio (native) | Via HPC or Docker | See [Installation](#installation) below |
+| **Windows (recommended)** | **WSL2 + native Linux R** | Yes (local + HPC) | **[WINDOWS_WSL_INSTALL.md](WINDOWS_WSL_INSTALL.md)** |
+| **Windows (alternative)** | Docker + SSH to HPC | Yes (local + HPC) | [WINDOWS_DOCKER_INSTALL.md](WINDOWS_DOCKER_INSTALL.md) |
+| **Mac / Linux** | R/RStudio (native) | Via HPC | See [Installation](#installation) below |
 | **HPC cluster** | Apptainer/Singularity | Via SLURM | [HPC_DEPLOYMENT.md](HPC_DEPLOYMENT.md) |
+
+> **Why WSL over Docker on Windows?** WSL2 runs a real Ubuntu environment natively in Windows 10/11. R and Bioconductor packages compile cleanly, SSH keys use normal Unix permissions (no CRLF / 0600 / missing-newline gymnastics), no 9p filesystem perf tax, and no .NET download blocked by corporate firewalls. The Docker path still works and is kept for users who already depend on it, but new installs should start with WSL.
 
 ---
 
