@@ -201,6 +201,8 @@ install_system_deps() {
         sudo apt-get update
     fi
 
+    # System libraries needed by R packages used by DE-LIMP.
+    # Grouped + commented so future maintainers know which R pkg needs which dep.
     sudo apt-get install -y \
         r-base r-base-dev \
         build-essential cmake pkg-config \
@@ -208,8 +210,23 @@ install_system_deps() {
         libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
         libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev \
         libcairo2-dev libxt-dev \
+        libuv1-dev \
+        libsodium-dev \
+        libhdf5-dev \
+        libgmp-dev libmpfr-dev \
+        libsqlite3-dev \
+        libbz2-dev liblzma-dev zlib1g-dev \
+        libicu-dev \
         openssh-client git unzip curl \
         python3 python3-pip python3-venv
+    #   ^^^^^^^^^^^^ why:
+    #   libuv1-dev   — httpuv (Shiny's HTTP backend)
+    #   libsodium-dev — sodium (auth helpers used by some Shiny modules)
+    #   libhdf5-dev  — MOFA2 / rhdf5 / HDF5Array (multi-omics integration)
+    #   libgmp-dev libmpfr-dev — gmp, Rmpfr (optional stats pkg deps)
+    #   libsqlite3-dev — RSQLite system build fallback (core facility mode)
+    #   libbz2-dev liblzma-dev zlib1g-dev — compression libs pulled by Bioc
+    #   libicu-dev — stringi (stringr's backend, lots of Bioc pkgs pull this)
 
     local rver=$(R --version 2>/dev/null | head -1)
     ok "System dependencies installed. R: ${rver}"
@@ -398,13 +415,30 @@ if (length(missing_bioc)) {
   BiocManager::install(missing_bioc, lib = r_lib, ask = FALSE, update = FALSE)
 }
 
-# Verify limpa loaded — most likely failure point
-if (!requireNamespace("limpa", quietly = TRUE))
-  stop("limpa failed to install. Check build logs above.")
+# Final verification — fail loud if anything is still missing.
+# install.packages() and BiocManager::install() don't stop on compile
+# failures; they just warn. Without this check we'd discover missing
+# packages at runtime (like shiny not loading in runApp()).
+all_pkgs <- c(cran, bioc)
+still_missing <- all_pkgs[!vapply(all_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(still_missing)) {
+  cat("[delimp] ERROR: packages failed to install:\n")
+  for (p in still_missing) cat("  -", p, "\n")
+  cat("\n[delimp] Check the build log above for the actual error.\n")
+  cat("[delimp] Common causes:\n")
+  cat("  - Missing system library (-dev package). Run 'sudo apt-get install -y <libname>-dev'\n")
+  cat("  - Out of disk space — check 'df -h ~'\n")
+  cat("  - Network failure during download — re-run the installer\n")
+  quit(status = 1, save = "no")
+}
 
-cat("[delimp] All R packages OK.\n")
+cat("[delimp] All R packages verified (",length(all_pkgs),"total).\n")
 EOF
 
+    if [ $? -ne 0 ]; then
+        err "R package installation failed. See errors above. Aborting."
+        exit 1
+    fi
     ok "R packages installed."
 }
 
