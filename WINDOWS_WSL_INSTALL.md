@@ -44,9 +44,15 @@ You do **not** need R, RStudio, or any Bioconductor packages installed on Window
 
 2. **Double-click `Launch_DE-LIMP_WSL.bat`** (or run `.\Launch_DE-LIMP_WSL.bat` from PowerShell to see live output).
 
-   On first run this takes 20–30 minutes to install R + Bioconductor packages inside WSL. Watch the console for progress. When you see `Listening on http://0.0.0.0:3838`, your browser opens automatically.
+   > **You may need to click it twice the first time.** If WSL/Ubuntu wasn't fully set up yet, the launcher triggers Ubuntu install and then exits with the message:
+   >
+   > `Ubuntu install triggered. After it finishes setting up, re-run this launcher.`
+   >
+   > Complete the Ubuntu first-time setup in the separate window that pops up (create a Linux username/password — these are **WSL-only** credentials, unrelated to your Windows account or HPC login). Close that Ubuntu window when done, then **double-click the launcher again** to start the real install.
 
-3. **Subsequent runs**: double-click the launcher again. Takes ~30 seconds.
+   On that second run the installer begins — takes 20–30 minutes to compile R + Bioconductor packages inside WSL. Watch the console for progress. When you see `Listening on http://0.0.0.0:3838`, your browser opens automatically.
+
+3. **Subsequent runs**: double-click the launcher once. Takes ~30 seconds to start.
 
 ---
 
