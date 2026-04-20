@@ -521,16 +521,29 @@ case "${CMD}" in
         prompt_data_dir
         ;;
     auto)
-        # Install only if missing, then run
-        if ! command -v R >/dev/null 2>&1; then
+        # Each step is idempotent — run each regardless of whether earlier
+        # ones completed. This handles the case where a previous install
+        # succeeded partially (e.g., R installed but shiny failed; R
+        # installed but data-dir prompt was never reached).
+
+        # Disk check only matters when we're about to install something big
+        if ! command -v R >/dev/null 2>&1 || [ ! -x "${DIANN_DIR}/diann-linux" ]; then
             check_disk_space
-            prompt_data_dir
+        fi
+
+        # Always check the data-dir config, independent of R install state.
+        # prompt_data_dir() is idempotent: skips if config file exists.
+        prompt_data_dir
+
+        if ! command -v R >/dev/null 2>&1; then
             install_system_deps
         fi
         if [ ! -d "${REPO_DIR}/.git" ]; then
             sync_repo
         fi
-        if [ ! -d "${R_LIB}/limpa" ]; then
+        # Re-run R package install if limpa OR shiny is missing (catches
+        # partial installs where some CRAN/Bioc pkgs failed to compile).
+        if [ ! -d "${R_LIB}/limpa" ] || [ ! -d "${R_LIB}/shiny" ]; then
             install_r_packages
         fi
         if [ ! -x "${DIANN_DIR}/diann-linux" ] && [ ! -f "${DIANN_LICENSE_FLAG}" ]; then
