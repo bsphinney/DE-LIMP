@@ -140,6 +140,38 @@ No chmod, no line-ending fixes, no container restart needed — WSL treats this 
 
 **To get back to PowerShell** when you're done in the Ubuntu shell, type `exit` and press Enter.
 
+### Finding your SSH key on the Windows side
+
+The key lives in WSL's Linux filesystem, but Windows File Explorer can see it through a special network path. Paste this into File Explorer's address bar:
+
+```
+\\wsl.localhost\Ubuntu\home\<your-linux-username>\.ssh
+```
+
+Replace `<your-linux-username>` with whatever username you created when setting up Ubuntu. If you don't remember it, run `whoami` in the Ubuntu shell.
+
+You'll see two files:
+
+- `id_ed25519` — **private key** (keep secret, never share)
+- `id_ed25519.pub` — **public key** (safe to share — this is what goes on your HPC cluster, GitHub, etc.)
+
+**If you just want the public key text to copy-paste** into a web form or email:
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+Prints a single line like `ssh-ed25519 AAAAC3... your_email@example.com`. Select and copy it from the terminal.
+
+**If you want a Windows-side backup copy** (e.g. to share with PuTTY or OpenSSH for Windows):
+
+```bash
+cp ~/.ssh/id_ed25519 /mnt/c/Users/<you>/Documents/id_ed25519
+cp ~/.ssh/id_ed25519.pub /mnt/c/Users/<you>/Documents/id_ed25519.pub
+```
+
+> **Caution:** The copy on the Windows side won't carry Unix 0600 permissions. If you ever try to use it *from* WSL again, SSH will reject it with "bad permissions." The canonical working copy should always stay in `~/.ssh/` inside WSL — the Windows copy is for backup or use by other tools.
+
 ---
 
 ## Troubleshooting
