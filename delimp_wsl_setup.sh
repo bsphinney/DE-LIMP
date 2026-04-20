@@ -95,7 +95,15 @@ prompt_data_dir() {
     # whole installer if we did.
     local user_path wsl_path
     while true; do
-        read -p "Data directory [leave blank for WSL-internal default]: " user_path
+        # read -r so backslashes in Windows paths (F:\DE-LIMP\) aren't eaten
+        # as line-continuation escapes.
+        read -r -p "Data directory [leave blank for WSL-internal default]: " user_path
+
+        # Strip trailing backslashes and slashes — mkdir/wslpath don't care
+        # but users often include them reflexively (e.g. "F:\DE-LIMP\").
+        while [[ -n "${user_path}" && "${user_path: -1}" =~ [\\/] ]]; do
+            user_path="${user_path%?}"
+        done
 
         # Blank — use WSL-internal default
         if [ -z "${user_path}" ]; then
