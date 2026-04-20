@@ -13,26 +13,40 @@ On first install you're asked to accept the DIA-NN academic license. Decline it 
 
 ---
 
+## Prerequisites
+
+You need two things installed on Windows **before** running the launcher:
+
+1. **Git for Windows** — needed to `git clone` the repo and pull updates.
+   - Download: https://git-scm.com/download/win
+   - Install with default options. This gives you the `git` command in PowerShell.
+   - Verify: open PowerShell, run `git --version`. Should print something like `git version 2.44.0.windows.1`.
+
+2. **WSL2 with Ubuntu** — the launcher needs this to create the Linux environment.
+   - Open PowerShell **as Administrator** and run:
+     ```powershell
+     wsl --install
+     ```
+   - Restart Windows when prompted. On first login to Ubuntu you'll be asked to create a username and password — these are **WSL-only credentials**, unrelated to your Windows account or any HPC login.
+
+You do **not** need R, RStudio, or any Bioconductor packages installed on Windows itself — everything lives inside the WSL Ubuntu distro that the launcher sets up.
+
+---
+
 ## Quick Start
 
-1. **Install WSL2** (once per Windows machine, Admin PowerShell):
-   ```powershell
-   wsl --install
-   ```
-   Restart Windows when prompted.
-
-2. **Clone DE-LIMP**:
+1. **Clone DE-LIMP** (PowerShell — not admin):
    ```powershell
    cd $env:USERPROFILE
    git clone https://github.com/bsphinney/DE-LIMP.git
    cd DE-LIMP
    ```
 
-3. **Double-click `Launch_DE-LIMP_WSL.bat`.**
+2. **Double-click `Launch_DE-LIMP_WSL.bat`** (or run `.\Launch_DE-LIMP_WSL.bat` from PowerShell to see live output).
 
    On first run this takes 20–30 minutes to install R + Bioconductor packages inside WSL. Watch the console for progress. When you see `Listening on http://0.0.0.0:3838`, your browser opens automatically.
 
-4. **Subsequent runs**: double-click the launcher again. Takes ~30 seconds.
+3. **Subsequent runs**: double-click the launcher again. Takes ~30 seconds.
 
 ---
 
