@@ -112,20 +112,33 @@ All accessible from Windows File Explorer at `\\wsl.localhost\Ubuntu\home\<you>\
 
 SSH in WSL is much simpler than in Docker — WSL Ubuntu has full-fat SSH with normal Unix permissions.
 
-1. **Generate a key inside WSL** if you don't have one:
+You need to run these commands from inside an Ubuntu shell (not PowerShell, not Git Bash — the key's file permissions only get set correctly when it's created inside the WSL filesystem).
+
+**Opening an Ubuntu terminal — pick whichever is easiest:**
+
+- **From the Start menu:** click Start, type `Ubuntu`, press Enter. A black Ubuntu terminal window opens at your home directory.
+- **From Windows Terminal** (preinstalled on Win11, free on Win10): click the `▾` next to the tab and pick `Ubuntu` from the dropdown.
+- **From any PowerShell window:** run `wsl -d Ubuntu` — that drops the current PowerShell session into the Ubuntu shell.
+
+In any of those you'll see a prompt like `protcore@DESKTOP:~$`. You're in Linux. Now:
+
+1. **Generate a key** if you don't have one:
    ```bash
-   wsl -d Ubuntu
    ssh-keygen -t ed25519 -C "your_email@example.com"
    ```
+   Press Enter at each prompt to accept the defaults (saves to `~/.ssh/id_ed25519`, no passphrase — DE-LIMP can't unlock passphrase-protected keys automatically).
 
-2. **Copy the public key to your HPC cluster**:
+2. **Copy the public key to your HPC cluster:**
    ```bash
    ssh-copy-id your-hpc-username@hive.hpc.ucdavis.edu
    ```
+   You'll type your HPC password once; after that SSH uses the key. If your cluster disables password logins entirely, email your cluster admin the public key contents (`cat ~/.ssh/id_ed25519.pub`) and ask them to add it to your `~/.ssh/authorized_keys` on the cluster.
 
-3. **In the DE-LIMP SSH panel**, point to `~/.ssh/id_ed25519` (or whatever your key is named).
+3. **In the DE-LIMP SSH panel** (the app UI), point to `~/.ssh/id_ed25519` and enter your HPC username. Click Test Connection — should succeed without any further setup.
 
-No chmod, no line-ending fixes, no container restart needed.
+No chmod, no line-ending fixes, no container restart needed — WSL treats this exactly like a real Linux box.
+
+**To get back to PowerShell** when you're done in the Ubuntu shell, type `exit` and press Enter.
 
 ---
 
