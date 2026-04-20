@@ -62,14 +62,49 @@ You do **not** need R, RStudio, or any Bioconductor packages installed on Window
 
 ## Where Your Files Go
 
-- **Code & R libraries**: `~/.delimp/` inside WSL (not visible in Windows File Explorer directly — access via `\\wsl.localhost\Ubuntu\home\<you>\.delimp\`)
-- **Raw data, FASTA, output, SSH keys**: `~/.delimp/data/` inside WSL by default
+During the first install the script pauses and asks:
 
-**To share `data/` with Windows File Explorer**, set the env var before launching. In the `.bat` you can add (edit and re-run):
 ```
-set DELIMP_DATA_DIR=/mnt/c/Users/%USERNAME%/DE-LIMP/data
+======================== Data Directory ========================
+  Where should DE-LIMP store raw files, FASTA, and search output?
+
+  Raw mass-spec files can be 5-10 GB each. You probably want this
+  on a Windows drive — ideally an internal SSD with plenty of space
+  (D:, E:, etc.) so File Explorer can see the output and your WSL
+  virtual disk doesn't balloon.
+
+  Enter a Windows path like:   D:\proteomics\delimp-data
+  Or leave blank to use:       ~/.delimp/data  (inside WSL)
+================================================================
+
+Data directory [leave blank for WSL-internal default]:
 ```
-Then files in `C:\Users\<you>\DE-LIMP\data\raw\` are visible to the app. Note: 9p-mounted files (under `/mnt/c/`) are slower than WSL-native files — fine for small FASTAs, OK for `.raw`, sluggish for very large `.d` directories.
+
+**Recommended: type a Windows path.** A 30-file experiment is easily 200 GB, and the WSL virtual disk is painful to grow back down if it fills. Keeping data on a real Windows drive also lets you drag-and-drop results back to File Explorer.
+
+**Accepted input forms:**
+- Windows path: `F:\DE-LIMP` or `D:\proteomics\delimp-data`
+- Linux-style WSL path: `/mnt/f/DE-LIMP`
+- Blank (just press Enter): falls back to `~/.delimp/data` inside the WSL virtual disk
+
+Trailing backslashes are stripped automatically, so `F:\DE-LIMP\` and `F:\DE-LIMP` work the same. If you type an invalid path (drive not mounted, parent folder missing) the prompt loops — it won't close the installer.
+
+Your choice is saved to `~/.delimp/data_dir` and reused on every future launch. Three subfolders — `raw/`, `fasta/`, `output/` — are created automatically inside whatever directory you chose.
+
+**To change it later:**
+```powershell
+wsl -d Ubuntu -e bash ~/delimp_wsl_setup.sh config-data-dir
+```
+
+**Performance note on Windows drives**: files under `/mnt/c/`, `/mnt/d/`, etc. are accessed via WSL's 9p bridge — slightly slower than WSL-native paths. In practice this is fine for `.raw` and `.fasta` files (sequential reads), but scanning very large `.d` directories is noticeably slower than doing the same on `/quobyte/` on HPC. If you hit this, the fallback is to keep data inside WSL (blank prompt) but you'll need to manage WSL disk size yourself.
+
+**Where other things live** (inside WSL, not user-configurable):
+- Code repo: `~/.delimp/DE-LIMP/`
+- R packages: `~/.delimp/R-lib/`
+- DIA-NN binary + libs: `~/.delimp/diann/`
+- SSH keys: `~/.ssh/` (WSL home — full-fat Unix permissions)
+
+All accessible from Windows File Explorer at `\\wsl.localhost\Ubuntu\home\<you>\` if you need to poke at them.
 
 ---
 
