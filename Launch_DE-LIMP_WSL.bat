@@ -44,10 +44,15 @@ if errorlevel 1 (
 
 :: ----------------------------------------------------------------------------
 :: 2. Check that an Ubuntu distro is installed
+::
+::    `wsl --list --quiet` on Windows 11 outputs UTF-16, which findstr can't
+::    read — it would always report "not found." Instead we just try to run
+::    a trivial command inside Ubuntu. If it succeeds, the distro exists and
+::    is ready. If it fails, we trigger an install.
 :: ----------------------------------------------------------------------------
-wsl --list --quiet 2>nul | findstr /I "Ubuntu" >nul
+wsl -d Ubuntu -e true >nul 2>&1
 if errorlevel 1 (
-    echo  No Ubuntu distro found in WSL. Installing Ubuntu now...
+    echo  No working Ubuntu distro in WSL. Installing Ubuntu now...
     echo  ^(This opens a separate window — follow the prompts, then close it and re-run this launcher.^)
     echo.
     wsl --install -d Ubuntu
