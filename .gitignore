@@ -88,3 +88,6 @@ Screenshot *.png
 !HPC_DEPLOYMENT.md
 !CORE_FACILITY_PHASE2_SPEC.md
 !contaminants/*.fasta
+
+# Private ops docs — kept in ~/Documents/claude_private/ only, never committed
+HIVE_CLAUDE_GUIDE.md
