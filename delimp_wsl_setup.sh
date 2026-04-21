@@ -108,6 +108,7 @@ prompt_data_dir() {
         # Blank — use WSL-internal default
         if [ -z "${user_path}" ]; then
             mkdir -p "${DELIMP_BASE}/data"
+            # mkdir -p of DELIMP_BASE/data also created DELIMP_BASE
             echo "${DELIMP_BASE}/data" > "${DATA_DIR_CONFIG}"
             DATA_DIR="${DELIMP_BASE}/data"
             log "Using WSL-internal data dir: ${DATA_DIR}"
@@ -138,7 +139,11 @@ prompt_data_dir() {
             continue
         fi
 
-        # Save the choice
+        # Save the choice. Ensure DELIMP_BASE exists first — it's created
+        # by install_diann / install_r_packages later, but prompt_data_dir
+        # runs BEFORE those so we have to mkdir it here or the redirect
+        # fails with 'No such file or directory' and set -e aborts.
+        mkdir -p "${DELIMP_BASE}"
         echo "${wsl_path}" > "${DATA_DIR_CONFIG}"
         DATA_DIR="${wsl_path}"
         ok "Data directory set to: ${DATA_DIR}"
