@@ -1,23 +1,15 @@
 {
-  "updated_at": "2026-04-29T08:24:54+00:00",
+  "updated_at": "2026-04-30T08:27:43+00:00",
   "github": {
-    "clones_14d": 1277,
-    "unique_users_14d": 422,
-    "views_14d": 177,
-    "unique_visitors_14d": 45,
+    "clones_14d": 1276,
+    "unique_users_14d": 417,
+    "views_14d": 168,
+    "unique_visitors_14d": 41,
     "stars": 7,
     "forks": 0
   },
   "trends": {
     "clones": [
-  {
-    "date": "2026-04-14",
-    "count": 14
-  },
-  {
-    "date": "2026-04-15",
-    "count": 9
-  },
   {
     "date": "2026-04-16",
     "count": 7
@@ -65,17 +57,17 @@
   {
     "date": "2026-04-27",
     "count": 11
+  },
+  {
+    "date": "2026-04-28",
+    "count": 11
+  },
+  {
+    "date": "2026-04-29",
+    "count": 9
   }
 ],
     "views": [
-  {
-    "date": "2026-04-14",
-    "count": 3
-  },
-  {
-    "date": "2026-04-15",
-    "count": 4
-  },
   {
     "date": "2026-04-16",
     "count": 4
@@ -123,11 +115,19 @@
   {
     "date": "2026-04-27",
     "count": 8
+  },
+  {
+    "date": "2026-04-28",
+    "count": 3
+  },
+  {
+    "date": "2026-04-29",
+    "count": 2
   }
 ]
   },
   "discussions": {
-    "total": 2,
+    "total": 3,
     "recent": [
   {
     "title": "Installation problems.",
@@ -135,8 +135,17 @@
     "author": "mpadula",
     "comments": 2,
     "created": "2026-03-30",
-    "updated": "2026-04-21",
+    "updated": "2026-04-30",
     "url": "https://github.com/bsphinney/DE-LIMP/discussions/2"
+  },
+  {
+    "title": "Which Q-value?",
+    "category": "Q&A",
+    "author": "mpadula",
+    "comments": 0,
+    "created": "2026-04-30",
+    "updated": "2026-04-30",
+    "url": "https://github.com/bsphinney/DE-LIMP/discussions/4"
   },
   {
     "title": "Welcome to DE-LIMP Discussions!",
