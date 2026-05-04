@@ -2,6 +2,89 @@
 #  HELPER FUNCTIONS — General utilities
 # ==============================================================================
 
+# --- QuantUMS Score Pre-Filter ----------------------------------------------
+#
+# Filter a DIA-NN report.parquet by QuantUMS quality scores BEFORE handing
+# the file to limpa::readDIANN(). limpa drops the QuantUMS columns during
+# read, so any filtering on Empirical.Quality / PG.MaxLFQ.Quality must
+# happen at the parquet stage.
+#
+# Reference: Moschem et al., J. Proteome Res. 2025, 24, 3860–3873
+# (DOI: 10.1021/acs.jproteome.5c00009). Recommended cutoffs ≥ 0.75 for
+# eQ (Empirical.Quality) and pgQ (PG.MaxLFQ.Quality); the qQ
+# (Quantity.Quality) score is intentionally not exposed because the paper
+# shows it has negligible impact.
+#
+# Behaviour:
+#  - If both cutoffs are <= 0, returns `parquet_path` unchanged (no work).
+#  - Otherwise reads the parquet via arrow, drops rows where the named
+#    column is below the cutoff, writes the survivors to a temp parquet,
+#    and returns the temp path.
+#  - If a column is missing (older DIA-NN that predates QuantUMS), the
+#    corresponding cutoff is silently skipped and a message is emitted.
+#
+# Returns: list(path = <parquet path to use>, n_in = <input rows>,
+#               n_out = <surviving rows>, applied = <character vec of
+#               filters that ran>)
+filter_quantums_parquet <- function(parquet_path, eq_cutoff = 0, pgq_cutoff = 0) {
+  if ((is.null(eq_cutoff)  || is.na(eq_cutoff)  || eq_cutoff  <= 0) &&
+      (is.null(pgq_cutoff) || is.na(pgq_cutoff) || pgq_cutoff <= 0)) {
+    return(list(path = parquet_path, n_in = NA_integer_, n_out = NA_integer_,
+                applied = character(0)))
+  }
+  if (!requireNamespace("arrow", quietly = TRUE)) {
+    message("[QuantUMS filter] arrow package missing — skipping filter.")
+    return(list(path = parquet_path, n_in = NA_integer_, n_out = NA_integer_,
+                applied = character(0)))
+  }
+
+  ds <- arrow::open_dataset(parquet_path, format = "parquet")
+  cols <- names(ds$schema)
+  applied <- character(0)
+  flt <- ds
+
+  if (!is.null(eq_cutoff) && !is.na(eq_cutoff) && eq_cutoff > 0) {
+    if ("Empirical.Quality" %in% cols) {
+      flt <- dplyr::filter(flt, Empirical.Quality >= !!eq_cutoff)
+      applied <- c(applied, sprintf("Empirical.Quality >= %.2f", eq_cutoff))
+    } else {
+      message("[QuantUMS filter] Empirical.Quality column absent — eQ filter skipped (DIA-NN < 1.8.2 β39?)")
+    }
+  }
+  if (!is.null(pgq_cutoff) && !is.na(pgq_cutoff) && pgq_cutoff > 0) {
+    if ("PG.MaxLFQ.Quality" %in% cols) {
+      flt <- dplyr::filter(flt, PG.MaxLFQ.Quality >= !!pgq_cutoff)
+      applied <- c(applied, sprintf("PG.MaxLFQ.Quality >= %.2f", pgq_cutoff))
+    } else {
+      message("[QuantUMS filter] PG.MaxLFQ.Quality column absent — pgQ filter skipped.")
+    }
+  }
+
+  if (length(applied) == 0) {
+    return(list(path = parquet_path, n_in = NA_integer_, n_out = NA_integer_,
+                applied = character(0)))
+  }
+
+  n_in <- tryCatch(as.integer(ds %>% dplyr::summarise(n = dplyr::n()) %>% dplyr::collect() %>% .$n),
+                   error = function(e) NA_integer_)
+
+  out_path <- tempfile(pattern = "quantums_filtered_", fileext = ".parquet")
+  arrow::write_parquet(dplyr::collect(flt), out_path)
+
+  n_out <- tryCatch(as.integer(arrow::open_dataset(out_path, format = "parquet") %>%
+                               dplyr::summarise(n = dplyr::n()) %>%
+                               dplyr::collect() %>% .$n),
+                    error = function(e) NA_integer_)
+
+  message(sprintf("[QuantUMS filter] %s — kept %s / %s precursors (%.1f%%)",
+                  paste(applied, collapse = " AND "),
+                  format(n_out, big.mark = ","),
+                  format(n_in,  big.mark = ","),
+                  100 * n_out / max(n_in, 1)))
+
+  list(path = out_path, n_in = n_in, n_out = n_out, applied = applied)
+}
+
 # --- QC Stats Calculation ---
 # Memory-optimized: reads only needed columns via Arrow col_select,
 # then aggregates before collecting into R memory.

@@ -5,7 +5,73 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Post-3.7.0 Development
+## [3.8.1] — 2026-05-04
+
+### Added
+- **Navbar version badge**: A pill-shaped `vX.Y.Z` badge sits at the far right of the navbar, just before the gear icon. It's visible on every screen — useful for HF / WSL / Docker users so they can confirm at a glance which release they're running. Clicking the badge opens the GitHub CHANGELOG in a new tab. Reads directly from the `VERSION` file at UI-build time (no reactive plumbing needed).
+
+## [3.8.0] — 2026-05-04
+
+### Added
+- **QuantUMS quality filters (eQ + pgQ) on parquet load**: Optional precursor pre-filter that drops rows below user-set cutoffs on DIA-NN's `Empirical.Quality` and `PG.MaxLFQ.Quality` columns *before* `limpa::readDIANN()` ingests the file. Implements the recommendations of Moschem et al. *J. Proteome Res.* 2025, 24:3860 ([10.1021/acs.jproteome.5c00009](https://doi.org/10.1021/acs.jproteome.5c00009)). The qQ score is intentionally not exposed — the paper demonstrates it has negligible impact.
+  - New helper `filter_quantums_parquet()` in `R/helpers.R` reads the parquet via Arrow, drops sub-threshold rows, writes survivors to a temp parquet. No-ops when both cutoffs are 0 (the default), so existing behaviour is unchanged.
+  - Two new sidebar inputs under the new **QuantUMS quality filters** collapsible panel: `eq_cutoff` (Empirical Quality ≥) and `pgq_cutoff` (PG.MaxLFQ Quality ≥), both defaulting to 0.
+  - New `?` info modal explains the paper, recommended thresholds (0.75 / 0.75 = best ROC AUC; 0.9 = too aggressive), the difference between QuantUMS and the existing identification Q-value, and the caveat that pgQ is MaxLFQ-derived while DE-LIMP uses DPC-Quant for rollup.
+  - Wired into all three load paths: example data, local upload, and Load from HPC. Console logs how many precursors survive, e.g. `[QuantUMS filter] Empirical.Quality >= 0.75 — kept 89,432 / 114,166 precursors (78.3%)`.
+  - Filter description (e.g. `c("Empirical.Quality >= 0.75")`) is stored in `values$quantums_filter_applied` for downstream display in Methods text and AI export.
+
+### Documentation / clarification (no code change in 3.8.0)
+- Confirmed DE-LIMP's existing identification Q-value filtering is correctly handed to limpa: `q.cutoffs = input$q_cutoff` (default 0.01) is applied to `c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")` at the precursor row level before protein rollup — the same 1% FDR strategy Moschem et al. use, with the small column-choice difference that limpa filters per-run *precursor* FDR (`Q.Value`) while the paper filters per-run *protein-group* FDR (`PG.Q.Value`); both anchor 1% FDR and neither is wrong.
+
+## [3.7.9] — 2026-05-04
+
+### Changed
+- **Covariate panel UX overhaul** on the *Assign Groups & Run* sub-tab: the previous compact strip put two unlabelled checkboxes next to a “Covariates:” heading and three rename text inputs that wrapped onto separate lines, so it was unclear which checkbox controlled which column or what either control actually did. Replaced with a labelled 2-column grid: an `In model` column header sits above three checkboxes (each tooltipped “Add this covariate to the DE design matrix”), a `Column name (click to rename)` header sits above three uniformly-sized text inputs (each tooltipped to clarify they only rename, not include). A new `?` info button next to the panel title opens a modal explaining covariate semantics: tick = added to design matrix; text box = column rename; when to include batch/biological covariates; and the R/limma equivalent (`design <- model.matrix(~ 0 + Group + Year)`). One-line tip below the grid summarises both controls so casual users don’t have to open the modal.
+
+## [3.7.8] — 2026-05-04
+
+### Fixed
+- **Batch covariate label rename didn't update the metadata table column header**: Renaming "Covariate1" / "Covariate2" via the sidebar text inputs propagated to the rhandsontable column headers, but renaming "Batch" (e.g. to "Year") did not — `colnames(display_df)` and the `hot_col(...)` calls hardcoded the literal string `"Batch"` while cov1/cov2 used the dynamic display strings. The `input$batch_label` value is now read alongside `cov1_label`/`cov2_label`, stored in `values$batch_name`, and used as the displayed column header. Internal column name in the metadata data.frame stays `Batch` (the round-trip in `colnames(tbl) <-` already normalises it back), so downstream code referencing `meta$Batch` is unaffected.
+
+## [3.7.7] — 2026-05-04
+
+### Fixed
+- **`limpa::readDIANN()` failed with "nanoparquet required but not installed"**: limpa lists `nanoparquet` in `Suggests` rather than `Imports`, so the direct-repo limpa install (Path 2 fallback added in v3.7.2) didn't pull it in, and the first parquet read on a fresh install errored. Added `nanoparquet` to `core_pkgs` so it's installed automatically alongside the rest of the stack.
+
+## [3.7.6] — 2026-05-04
+
+### Fixed
+- **Load from HPC appeared frozen for large reports**: With a 1.4 GB / 231-sample `report.parquet`, the post-download phase (`get_diann_stats_r`, `limpa::readDIANN`, normalization detect, phospho detect) is genuinely synchronous and CPU-bound, so Shiny's progress bar can't tick while it runs. The console also had only a single message at the end of the SCP, making it impossible to tell whether the load was hung or just slow. Added per-phase tick lines (`[DE-LIMP] <phase> ... [HH:MM:SS]` then `↳ <phase> done in N.Ns`) for QC stats, expression-matrix read, normalization detect, and phospho detect, with `flush.console()` so each line appears immediately even while the next phase is blocking. Now you see live heartbeats in the RStudio console rather than silence.
+
+## [3.7.5] — 2026-05-04
+
+### Fixed
+- **`Load from HPC` failed silently on large `report.parquet` files**: `scp_download()` and `scp_upload()` had a hard-coded 60-second `processx` timeout, which killed any transfer larger than what fit in 60 seconds — for example the 1.4 GB short-course `report.parquet`. The on-screen "SCP download failed:" message was also blank because the caller printed `dl_result$stderr` while the helper returns `stdout` (stderr is folded into it). Now: (a) default timeout raised to 1800 s (30 min), with an optional `timeout` argument so callers can tune; (b) timeouts surface a real message ("Transfer exceeded N s timeout — increase the timeout argument") instead of an empty string; (c) the Load-from-HPC notification reads the correct `stdout` field, so future transfer errors show the actual reason. Toast duration bumped to 15 s so the message is readable.
+
+## [3.7.4] — 2026-05-04
+
+### Documentation
+- **Beginner-friendly Mac install walkthrough in README_GITHUB.md**: Replaced the lean two-command install with a four-step guide for first-time users — install R (with arm64 vs x86_64 guidance), install RStudio, install Git via Xcode CLT, then `git clone` + `shiny::runApp`. Added a "Troubleshooting first launch" subsection covering the BiocManager-stale failure mode (now self-healing as of v3.7.3), R-too-old, permission-denied, and port-in-use. Power-user single-command path retained below the walkthrough.
+
+## [3.7.3] — 2026-05-04
+
+### Fixed
+- **Stale-BiocManager fallback now also covers core/optional Bioc packages**: v3.7.2 added a direct-repo install path for limpa, but the next install block (`ComplexHeatmap`, `AnnotationDbi`, `ggridges`, `clusterProfiler`, `enrichplot`, `org.Hs.eg.db`, `org.Mm.eg.db`, `MOFA2`, …) still went through `BiocManager::install()` only. On R 4.6 with stale BiocManager that block silently failed and the app died on "Missing required packages". The R↔Bioc mapping and direct-repo helper are now hoisted to module scope and reused: missing-packages install runs Path 1 (BiocManager) → Path 2 (direct Bioc repo URL) before checking what's still missing. Should self-heal for everyone after a fresh R release.
+
+## [3.7.2] — 2026-05-04
+
+### Fixed
+- **limpa install on freshly released R versions**: When R is newer than BiocManager's hardcoded R↔Bioc map (common right after a major R release — e.g. R 4.6 / Bioc 3.23), `BiocManager::version()` returns an unresolved value and the install branch silently fell through, then printed a misleading "R upgrade needed" message. The install branch now (1) correctly probes BiocManager's resolved-vs-unresolved state, (2) falls back to a direct-repo `install.packages("limpa", repos = ".../packages/<bioc>/bioc")` install bypassing BiocManager, and (3) when it does fail, the error message names the real cause (R-too-old vs BiocManager-stale vs network) and prints a copy-pasteable fix command sized to the user's R version.
+
+## [3.7.1] — 2026-05-04
+
+### Added
+- **Startup version banner**: `app.R` now prints `DE-LIMP vX.Y.Z | R x.y.z | timestamp` to the console before any package work, so the running version is visible at a glance in the RStudio console.
+
+### Fixed
+- **Misleading "R upgrade needed" message**: When `BiocManager::version()` couldn't reach Bioconductor's online validator, the limpa install branch fell through and printed a generic R-version-too-old notice. Network/validator hiccups are now no longer conflated with version mismatches (see follow-up: refine the failure-message branching).
+
+## [Unreleased] — Post-3.7.1 Development
 
 ### Added
 - **DPC-Quant Detection Transparency**: Expression Grid tooltips show nObs, SE, and 95% CI per cell. Violin plots mark inferred estimates (nObs=0) with hollow markers. New `Detection_Class` column (Complete/Partial/Sparse/Inferred) in exported data. `protein_confidence.csv` included in all exports (session, Claude ZIP).

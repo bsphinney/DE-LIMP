@@ -120,6 +120,95 @@ server_session <- function(input, output, session, values, add_to_log) {
   #      Info Modals (Contextual Help)
   # ============================================================================
 
+  # --- QuantUMS quality filter info modal (sidebar) ---
+  observeEvent(input$quantums_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("filter"), " QuantUMS quality filters"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.92em; line-height: 1.6;",
+        p(strong("What it does."),
+          " DIA-NN's QuantUMS algorithm (≥ 1.8.2 β39) emits three per-row quality scores in ",
+          code("report.parquet"), ":"),
+        tags$ul(
+          tags$li(strong("eQ"), " (", code("Empirical.Quality"), ") — peptide-level."),
+          tags$li(strong("qQ"), " (", code("Quantity.Quality"), ") — peptide-level."),
+          tags$li(strong("pgQ"), " (", code("PG.MaxLFQ.Quality"), ") — protein-group-level.")
+        ),
+        p("DE-LIMP's existing ", strong("Q-Value cutoff"),
+          " controls identification FDR (Q.Value / Lib.Q.Value / Lib.PG.Q.Value at 1% by default). ",
+          "These QuantUMS cutoffs are different — they filter on quantification quality, not on identification. ",
+          "Tightening them aims to improve logFC reliability and cross-instrument comparability."),
+        tags$h6("How DE-LIMP applies them"),
+        p("Both cutoffs default to 0 (off) — existing behaviour is unchanged. When > 0, DE-LIMP reads the parquet via Arrow, ",
+          "drops precursor rows where ", code("Empirical.Quality"), " or ", code("PG.MaxLFQ.Quality"),
+          " are below the threshold, writes the survivors to a temporary parquet, and hands ", em("that"),
+          " to ", code("limpa::readDIANN()"), ". You'll see a console line like ",
+          code("[QuantUMS filter] Empirical.Quality >= 0.75 — kept N / M precursors")),
+        tags$h6("Recommended thresholds"),
+        p("From Moschem et al. (J. Proteome Res. 2025, 24:3860, ",
+          tags$a("DOI 10.1021/acs.jproteome.5c00009",
+                 href = "https://doi.org/10.1021/acs.jproteome.5c00009",
+                 target = "_blank", rel = "noopener noreferrer"),
+          "):"),
+        tags$ul(
+          tags$li(strong("0 (default)"), " — keep all precursors. Use this until you have a reason to filter."),
+          tags$li(strong("eQ ≥ 0.75 + pgQ ≥ 0.75"), " — paper's ROC-best combination. Best AUC for differential abundance, recommended for challenging samples with high missingness."),
+          tags$li(strong("pgQ ≥ 0.75 alone"), " — paper's general recommendation as a starting point if you don't want to lose too many precursors."),
+          tags$li(strong("eQ ≥ 0.9"), " — too aggressive. The paper warns this 'sacrifices a large number of proteins'."),
+          tags$li("The qQ score is intentionally not exposed — the paper shows it removes negligible precursors and has near-zero impact.")
+        ),
+        tags$h6("When this is most useful"),
+        p("Comparing logFC across instruments / acquisition modes (different isolation windows, Astral vs Exploris vs timsTOF), ",
+          "or any time you suspect a small set of low-quality precursors is dragging the protein-level estimate."),
+        tags$h6("Caveat"),
+        p("The pgQ score is computed by DIA-NN's MaxLFQ algorithm. DE-LIMP uses ", strong("DPC-Quant"),
+          " (limpa) for protein roll-up, not MaxLFQ. Filtering precursors by their parent PG's pgQ score still works as a feature-selection signal, but it is not strictly the same as the paper's MaxLFQ-based downstream.")
+      )
+    ))
+  })
+
+  # --- Covariates Info Modal (Assign Groups & Run sub-tab) ---
+  observeEvent(input$covariate_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Covariates: what they do"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.92em; line-height: 1.6;",
+        p("Covariates are extra factors -- beyond the experimental ", strong("Group"),
+          " -- that the differential-expression model can adjust for. ",
+          "Common examples: batch (run date, plate, instrument), sex, age, BMI, run order, operator."),
+        tags$h6("The two controls explained"),
+        tags$ul(
+          tags$li(tags$b("Tick “In model” "),
+                  "to add this covariate to the DE design matrix. limpa/limma will fit it ",
+                  "alongside Group, so the reported logFC values are adjusted for that factor. ",
+                  "Untick to ignore the column entirely."),
+          tags$li(tags$b("The text box "),
+                  "renames the column header in the metadata table below ",
+                  "(e.g. rename ", code("Batch"), " → ", code("Year"),
+                  ", ", code("Covariate1"), " → ", code("Student"), "). ",
+                  "Naming is just for clarity — it does ", em("not"),
+                  " on its own include the covariate in the model.")
+        ),
+        tags$h6("Typical workflow"),
+        tags$ol(
+          tags$li("Rename the column to whatever makes sense for your study (e.g. “Year”)."),
+          tags$li("Fill in the values per sample in the metadata table below."),
+          tags$li("Tick “In model” only if you want DE adjusted for that factor."),
+          tags$li("Click ", strong("Run Pipeline"), ".")
+        ),
+        tags$h6("When should I include a covariate?"),
+        tags$ul(
+          tags$li("Include ", strong("batch"), " factors (year, plate, instrument run) when samples were processed in distinct batches — batch effects are a leading cause of false-positive DE."),
+          tags$li("Include ", strong("biological"), " covariates (sex, age) when they are unbalanced across your Group comparison and could confound the result."),
+          tags$li("Don’t include covariates that are perfectly correlated with Group — the design matrix becomes singular and limma will refuse to fit.")
+        ),
+        tags$h6("R equivalent"),
+        p("Including “Year” ticks the equivalent of ", code("design <- model.matrix(~ 0 + Group + Year)"),
+          " in limma. Without ticking, the design is just ", code("~ 0 + Group"), ".")
+      )
+    ))
+  })
+
   # --- DE Dashboard Info Modal ---
   observeEvent(input$de_dashboard_info_btn, {
     showModal(modalDialog(

@@ -1717,8 +1717,8 @@ server_search <- function(input, output, session, values, add_to_log,
         if (dl_result$status != 0) {
           showNotification(
             sprintf("SCP download failed: %s",
-              paste(dl_result$stderr, collapse = " ")),
-            type = "error", duration = 10)
+              paste(dl_result$stdout, collapse = " ")),
+            type = "error", duration = 15)
           return()
         }
 
@@ -1730,17 +1730,41 @@ server_search <- function(input, output, session, values, add_to_log,
         file_mb <- round(file.size(local_report) / 1e6, 1)
         message(sprintf("[DE-LIMP] Downloaded %s from HPC (%.1f MB)", basename(selected), file_mb))
 
+        # Phase tick helpers — emit a flushed console message at each phase so the
+        # user sees a live heartbeat during the long synchronous post-download work.
+        phase_tick <- function(label) {
+          message(sprintf("[DE-LIMP] %s ... [%s]", label, format(Sys.time(), "%H:%M:%S")))
+          flush.console()
+        }
+        phase_done <- function(label, t0) {
+          message(sprintf("[DE-LIMP]   ↳ %s done in %.1fs", label,
+                          as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+          flush.console()
+        }
+
         incProgress(0.2, detail = "Calculating QC stats...")
+        phase_tick("QC stats (get_diann_stats_r)")
+        t0 <- Sys.time()
         tryCatch({
           values$qc_stats <- get_diann_stats_r(local_report)
+          phase_done("QC stats", t0)
         }, error = function(e) {
           message("[DE-LIMP] QC stats extraction failed: ", e$message)
         })
 
-        incProgress(0.3, detail = "Reading expression matrix...")
+        incProgress(0.3, detail = "Reading expression matrix (this can take several minutes)...")
+        # QuantUMS pre-filter (Moschem et al. 2025) — opt-in via sidebar inputs
+        .qf <- filter_quantums_parquet(local_report,
+                                       eq_cutoff  = input$eq_cutoff,
+                                       pgq_cutoff = input$pgq_cutoff)
+        values$quantums_filter_applied <- .qf$applied
+        phase_tick(sprintf("Reading expression matrix via limpa::readDIANN (file is %.0f MB; allow several minutes)",
+                           file_mb))
+        t0 <- Sys.time()
         tryCatch({
           raw_data <- suppressMessages(suppressWarnings(
-            limpa::readDIANN(local_report, format = "parquet", q.cutoffs = input$q_cutoff)))
+            limpa::readDIANN(.qf$path, format = "parquet", q.cutoffs = input$q_cutoff)))
+          phase_done("limpa::readDIANN", t0)
 
           values$raw_data <- raw_data
           values$uploaded_report_path <- local_report

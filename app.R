@@ -1,9 +1,21 @@
 # ==============================================================================
 #  DE-LIMP: Differential Expression & Limpa Proteomics App
+#  Version: 3.8.1   (canonical source: ./VERSION — bump both together)
 #  (Formerly LIMP-D)
 #  Status: Production Ready (Hugging Face Compatible v1.2)
-
 # ==============================================================================
+
+# Print version banner immediately so it's visible in the RStudio console
+# before any package loading or installation messages.
+local({
+  v_file <- file.path(dirname(sys.frame(1)$ofile %||% getwd()), "VERSION")
+  if (!file.exists(v_file)) v_file <- "VERSION"
+  v <- if (file.exists(v_file)) trimws(readLines(v_file, warn = FALSE)[1]) else "unknown"
+  bar <- strrep("=", 60)
+  message("\n", bar, "\n  DE-LIMP v", v, "  |  R ", getRversion(),
+          "  |  ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          "\n", bar, "\n")
+})
 
 # Set CRAN mirror to avoid interactive popup (especially in VS Code)
 options(repos = c(CRAN = "https://cloud.r-project.org"))
@@ -25,25 +37,74 @@ if (!is_container && !requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager", quiet = TRUE)
 }
 
+# ── Bioconductor install helpers (used by both the limpa block and the
+#    missing-packages block below) ──────────────────────────────────────
+# Map R version → Bioc version explicitly so we don't depend on BiocManager's
+# hardcoded R↔Bioc table, which lags fresh R releases by weeks.
+delimp_r_version <- getRversion()
+delimp_bioc_for_r <- {
+  if (delimp_r_version >= "4.6.0") "3.23"
+  else if (delimp_r_version >= "4.5.0") "3.21"
+  else NA_character_
+}
+
+# Probe BiocManager: it may return a real version, throw, or emit a warning
+# and a malformed string when its R↔Bioc map doesn't know the running R.
+delimp_bioc_unresolved <- TRUE
+delimp_bioc_version <- NA_character_
+if (requireNamespace("BiocManager", quietly = TRUE)) {
+  delimp_bioc_warn_seen <- FALSE
+  delimp_bioc_probe <- tryCatch(
+    withCallingHandlers(
+      BiocManager::version(),
+      warning = function(w) { delimp_bioc_warn_seen <<- TRUE; invokeRestart("muffleWarning") }
+    ),
+    error = function(e) NULL
+  )
+  if (!is.null(delimp_bioc_probe) && !delimp_bioc_warn_seen) {
+    delimp_bioc_version <- as.character(delimp_bioc_probe)
+    delimp_bioc_unresolved <- FALSE
+  }
+}
+
+# Install one or more Bioconductor packages by hitting the Bioc repo URL
+# directly. Bypasses BiocManager entirely.
+delimp_install_via_direct_repo <- function(pkgs, target_bioc = delimp_bioc_for_r) {
+  if (is.na(target_bioc)) return(FALSE)
+  repos <- c(
+    BioCsoft = paste0("https://bioconductor.org/packages/", target_bioc, "/bioc"),
+    BioCann  = paste0("https://bioconductor.org/packages/", target_bioc, "/data/annotation"),
+    BioCexp  = paste0("https://bioconductor.org/packages/", target_bioc, "/data/experiment"),
+    CRAN     = "https://cloud.r-project.org"
+  )
+  suppressWarnings(install.packages(pkgs, repos = repos, quiet = TRUE))
+  all(vapply(pkgs, requireNamespace, logical(1), quietly = TRUE))
+}
+
 # Check for limpa and install if needed (skip in containers — already installed)
 if (!is_container && !requireNamespace("limpa", quietly = TRUE)) {
   message("Package 'limpa' is missing. Attempting installation...")
+  message(paste0("R version: ", delimp_r_version,
+                 ", Bioconductor version: ",
+                 if (delimp_bioc_unresolved) "could not be resolved by BiocManager" else delimp_bioc_version))
 
-  r_version <- getRversion()
-  bioc_version <- as.character(BiocManager::version())
-  message(paste0("R version: ", r_version, ", Bioconductor version: ", bioc_version))
-
-  # Try installing from Bioconductor (may require devel version)
+  # Path 1: BiocManager (works when its R↔Bioc table is current)
   limpa_installed <- tryCatch({
-    suppressWarnings({
-      BiocManager::install("limpa", ask = FALSE, update = FALSE, quiet = TRUE)
-    })
+    suppressWarnings(BiocManager::install("limpa", ask = FALSE, update = FALSE, quiet = TRUE))
     requireNamespace("limpa", quietly = TRUE)
   }, error = function(e) FALSE)
 
-  # If standard Bioconductor failed, try development version
+  # Path 2: direct Bioconductor repo URL (works when BiocManager is stale for fresh R)
+  if (!limpa_installed && !is.na(delimp_bioc_for_r)) {
+    message("BiocManager couldn't install limpa. Falling back to direct Bioconductor repo for Bioc ",
+            delimp_bioc_for_r, "...")
+    limpa_installed <- tryCatch(delimp_install_via_direct_repo("limpa"),
+                                error = function(e) FALSE)
+  }
+
+  # Path 3: BiocManager devel as last resort
   if (!limpa_installed) {
-    message("limpa not found in release version. Trying Bioconductor devel...")
+    message("Direct repo install failed. Trying BiocManager devel branch...")
     limpa_installed <- tryCatch({
       suppressWarnings({
         BiocManager::install(version = "devel", ask = FALSE, update = FALSE)
@@ -53,43 +114,29 @@ if (!is_container && !requireNamespace("limpa", quietly = TRUE)) {
     }, error = function(e) FALSE)
   }
 
-  # Final check
   if (!limpa_installed) {
-
-    # Detect platform for specific instructions
-    os_type <- Sys.info()["sysname"]
-    download_url <- if (os_type == "Darwin") {
-      "https://cloud.r-project.org/bin/macosx/"
-    } else if (os_type == "Windows") {
-      "https://cloud.r-project.org/bin/windows/base/"
+    root_cause <- if (delimp_r_version < "4.5.0") {
+      paste0("Your R is ", delimp_r_version, ", which is too old. limpa needs R 4.5+.")
+    } else if (delimp_bioc_unresolved && !is.na(delimp_bioc_for_r)) {
+      paste0("BiocManager (v", utils::packageVersion("BiocManager"),
+             ") doesn't yet know that R ", delimp_r_version, " maps to Bioconductor ",
+             delimp_bioc_for_r,
+             ". This is normal right after a major R release — BiocManager's table just lags.")
     } else {
-      "https://cloud.r-project.org/bin/linux/"
+      "limpa could not be installed (network, mirror, or repo issue)."
     }
 
     stop(paste0(
       "\n\n╔════════════════════════════════════════════════════════════════╗\n",
-      "║          LIMPA INSTALLATION FAILED - R UPGRADE NEEDED          ║\n",
+      "║                 LIMPA INSTALLATION FAILED                      ║\n",
       "╚════════════════════════════════════════════════════════════════╝\n\n",
-      "Current setup:\n",
-      "  • R version: ", r_version, " (NEED: 4.5+)\n",
-      "  • Bioconductor: ", bioc_version, " (NEED: 3.22+)\n",
-      "  • Platform: ", os_type, "\n\n",
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
-      "UPGRADE INSTRUCTIONS:\n",
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n",
-      "1. Download R 4.5+ for your platform:\n",
-      "   ", download_url, "\n\n",
-      if (os_type == "Darwin") {
-        "2. Install the .pkg file (R will be upgraded in-place)\n"
-      } else if (os_type == "Windows") {
-        "2. Run the installer .exe file\n"
-      } else {
-        "2. Follow platform-specific installation instructions\n"
-      },
-      "\n3. Restart VSCode/RStudio completely\n",
-      "\n4. Verify upgrade by running: R.version.string\n",
-      "\n5. Rerun this script - limpa will install automatically\n\n",
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n",
+      "Diagnosis: ", root_cause, "\n\n",
+      "  • R version:     ", delimp_r_version, "\n",
+      "  • BiocManager:   v", utils::packageVersion("BiocManager"),
+      if (delimp_bioc_unresolved) "  (R↔Bioc map does not include this R)" else "", "\n",
+      "  • Bioconductor:  ",
+      if (delimp_bioc_unresolved) "(unresolved)" else delimp_bioc_version, "\n",
+      "  • Platform:      ", Sys.info()["sysname"], "\n\n",
       "More info: https://bioconductor.org/packages/limpa/\n\n"
     ))
   } else {
@@ -103,7 +150,10 @@ core_pkgs <- c("shiny", "bslib", "readr", "tibble", "dplyr", "tidyr",
                "ggplot2", "httr2", "rhandsontable", "DT", "arrow",
                "ComplexHeatmap", "shinyjs", "plotly", "stringr", "limma",
                "AnnotationDbi", "ggridges", "ggrepel", "markdown", "curl",
-               "glue", "data.table")
+               "glue", "data.table",
+               # nanoparquet is a runtime Suggests-not-Imports of limpa::readDIANN.
+               # If it's missing, readDIANN errors at first parquet load; pin it as core.
+               "nanoparquet")
 
 # Optional packages: app runs without them (features disabled gracefully)
 optional_pkgs <- c("clusterProfiler", "enrichplot", "org.Hs.eg.db", "org.Mm.eg.db",
@@ -119,12 +169,22 @@ for (pkg in c(core_pkgs, optional_pkgs)) {
 
 if (length(missing_pkgs) > 0) {
   message(paste0("Installing missing packages: ", paste(missing_pkgs, collapse = ", ")))
+  # Path 1: BiocManager (works when its R↔Bioc table is current)
   tryCatch(
-    BiocManager::install(missing_pkgs, ask = FALSE, update = FALSE, quiet = TRUE),
+    suppressWarnings(BiocManager::install(missing_pkgs, ask = FALSE, update = FALSE, quiet = TRUE)),
     error = function(e) {
-      message("Note: Could not install packages (no internet?). Checking core dependencies...")
+      message("BiocManager install failed: ", conditionMessage(e))
     }
   )
+  # Recompute what's still missing after Path 1
+  still_missing <- missing_pkgs[!vapply(missing_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+  # Path 2: direct Bioconductor repo URL — bypasses a stale BiocManager
+  if (length(still_missing) > 0 && !is.na(delimp_bioc_for_r)) {
+    message("Falling back to direct Bioconductor repo (Bioc ", delimp_bioc_for_r,
+            ") for: ", paste(still_missing, collapse = ", "))
+    tryCatch(delimp_install_via_direct_repo(still_missing),
+             error = function(e) message("Direct repo install failed: ", conditionMessage(e)))
+  }
   # Verify core packages are available — these are required
   still_missing_core <- character(0)
   for (pkg in core_pkgs) {

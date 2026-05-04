@@ -23,7 +23,11 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         values$qc_stats <- get_diann_stats_r(temp_file)
 
         incProgress(0.7, detail = "Reading Matrix...")
-        values$raw_data <- limpa::readDIANN(temp_file, format="parquet", q.cutoffs=input$q_cutoff)
+        .qf <- filter_quantums_parquet(temp_file,
+                                       eq_cutoff  = input$eq_cutoff,
+                                       pgq_cutoff = input$pgq_cutoff)
+        values$raw_data <- limpa::readDIANN(.qf$path, format="parquet", q.cutoffs=input$q_cutoff)
+        values$quantums_filter_applied <- .qf$applied
         fnames <- sort(colnames(values$raw_data$E))
         values$metadata <- data.frame(
           ID = 1:length(fnames),
@@ -109,7 +113,11 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
       incProgress(0.4, detail = "Reading expression matrix (this may take a while for large files)...")
       message(sprintf("[DE-LIMP] Memory before readDIANN: %.0f MB used", sum(gc()[,2])))
       tryCatch({
-        values$raw_data <- limpa::readDIANN(input$report_file$datapath, format="parquet", q.cutoffs=input$q_cutoff)
+        .qf <- filter_quantums_parquet(input$report_file$datapath,
+                                       eq_cutoff  = input$eq_cutoff,
+                                       pgq_cutoff = input$pgq_cutoff)
+        values$raw_data <- limpa::readDIANN(.qf$path, format="parquet", q.cutoffs=input$q_cutoff)
+        values$quantums_filter_applied <- .qf$applied
         gc(verbose = FALSE)  # free readDIANN intermediates
         message(sprintf("[DE-LIMP] Memory after readDIANN: %.0f MB used", sum(gc()[,2])))
         fnames <- sort(colnames(values$raw_data$E))
@@ -205,13 +213,15 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
     message(sprintf("[DE-LIMP] Rendering metadata table: %d rows x %d cols",
                     nrow(values$metadata), ncol(values$metadata)))
 
-    # Get custom covariate names
-    cov1_display <- if(!is.null(input$cov1_label) && input$cov1_label != "") input$cov1_label else "Covariate1"
-    cov2_display <- if(!is.null(input$cov2_label) && input$cov2_label != "") input$cov2_label else "Covariate2"
+    # Get custom covariate names (Batch column also renamable)
+    batch_display <- if (!is.null(input$batch_label) && input$batch_label != "") input$batch_label else "Batch"
+    cov1_display  <- if (!is.null(input$cov1_label)  && input$cov1_label  != "") input$cov1_label  else "Covariate1"
+    cov2_display  <- if (!is.null(input$cov2_label)  && input$cov2_label  != "") input$cov2_label  else "Covariate2"
 
     # Store for later use
-    values$cov1_name <- cov1_display
-    values$cov2_name <- cov2_display
+    values$batch_name <- batch_display
+    values$cov1_name  <- cov1_display
+    values$cov2_name  <- cov2_display
 
     # Append excluded files as read-only rows with "Excluded" status
     display_df <- values$metadata
@@ -233,7 +243,7 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
       excluded_rows <- seq(n_active + 1, nrow(display_df))
     }
 
-    colnames(display_df) <- c("ID", "File.Name", "Group", "Batch", cov1_display, cov2_display)
+    colnames(display_df) <- c("ID", "File.Name", "Group", batch_display, cov1_display, cov2_display)
 
     # Add Status column to mark excluded rows
     display_df$Status <- ""
@@ -261,7 +271,7 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         hot_col("ID", readOnly=TRUE, width=50, renderer = excluded_renderer) %>%
         hot_col("File.Name", readOnly=TRUE, renderer = excluded_renderer) %>%
         hot_col("Group", type="text", renderer = excluded_renderer) %>%
-        hot_col("Batch", type="text", width=100, renderer = excluded_renderer) %>%
+        hot_col(batch_display, type="text", width=100, renderer = excluded_renderer) %>%
         hot_col(cov1_display, type="text", width=100, renderer = excluded_renderer) %>%
         hot_col(cov2_display, type="text", width=100, renderer = excluded_renderer) %>%
         hot_col("Status", readOnly=TRUE, width=70, renderer = excluded_renderer)
@@ -270,7 +280,7 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         hot_col("ID", readOnly=TRUE, width=50) %>%
         hot_col("File.Name", readOnly=TRUE) %>%
         hot_col("Group", type="text") %>%
-        hot_col("Batch", type="text", width=100) %>%
+        hot_col(batch_display, type="text", width=100) %>%
         hot_col(cov1_display, type="text", width=100) %>%
         hot_col(cov2_display, type="text", width=100) %>%
         hot_col("Status", readOnly=TRUE, width=70)

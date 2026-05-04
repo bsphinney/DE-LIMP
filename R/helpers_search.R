@@ -1627,7 +1627,7 @@ ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
 #' @param remote_path Character — full path on remote
 #' @param local_path Character — full path on local machine
 #' @return list(status, stdout)
-scp_download <- function(ssh_config, remote_path, local_path) {
+scp_download <- function(ssh_config, remote_path, local_path, timeout = 1800) {
   args <- c(
     "-i", ssh_config$key_path,
     "-P", as.character(ssh_config$port %||% 22),
@@ -1640,7 +1640,7 @@ scp_download <- function(ssh_config, remote_path, local_path) {
   )
   stdout <- tryCatch({
     if (requireNamespace("processx", quietly = TRUE)) {
-      res <- processx::run("scp", args = args, timeout = 60,
+      res <- processx::run("scp", args = args, timeout = timeout,
                            error_on_status = FALSE,
                            env = c("current", MallocStackLogging = ""))
       out <- paste0(res$stdout, res$stderr)
@@ -1650,7 +1650,12 @@ scp_download <- function(ssh_config, remote_path, local_path) {
       system2("scp", args = args, stdout = TRUE, stderr = TRUE)
     }
   }, error = function(e) {
-    structure(conditionMessage(e), status = 1L)
+    msg <- conditionMessage(e)
+    if (grepl("timeout|Timeout|killed", msg, ignore.case = TRUE)) {
+      msg <- sprintf("Transfer exceeded %ds timeout (%s). Increase the timeout argument for very large files.",
+                     timeout, msg)
+    }
+    structure(msg, status = 1L)
   })
   status <- attr(stdout, "status") %||% 0L
   stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")
@@ -1662,7 +1667,7 @@ scp_download <- function(ssh_config, remote_path, local_path) {
 #' @param local_path Character — full path on local machine
 #' @param remote_path Character — full path on remote
 #' @return list(status, stdout)
-scp_upload <- function(ssh_config, local_path, remote_path) {
+scp_upload <- function(ssh_config, local_path, remote_path, timeout = 1800) {
   args <- c(
     "-i", ssh_config$key_path,
     "-P", as.character(ssh_config$port %||% 22),
@@ -1675,7 +1680,7 @@ scp_upload <- function(ssh_config, local_path, remote_path) {
   )
   stdout <- tryCatch({
     if (requireNamespace("processx", quietly = TRUE)) {
-      res <- processx::run("scp", args = args, timeout = 60,
+      res <- processx::run("scp", args = args, timeout = timeout,
                            error_on_status = FALSE,
                            env = c("current", MallocStackLogging = ""))
       out <- paste0(res$stdout, res$stderr)
@@ -1685,7 +1690,12 @@ scp_upload <- function(ssh_config, local_path, remote_path) {
       system2("scp", args = args, stdout = TRUE, stderr = TRUE)
     }
   }, error = function(e) {
-    structure(conditionMessage(e), status = 1L)
+    msg <- conditionMessage(e)
+    if (grepl("timeout|Timeout|killed", msg, ignore.case = TRUE)) {
+      msg <- sprintf("Transfer exceeded %ds timeout (%s). Increase the timeout argument for very large files.",
+                     timeout, msg)
+    }
+    structure(msg, status = 1L)
   })
   status <- attr(stdout, "status") %||% 0L
   stdout <- iconv(stdout, from = "", to = "UTF-8", sub = "")

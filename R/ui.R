@@ -10,6 +10,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      is_core_facility = FALSE, cf_config = NULL,
                      deploy_env = "Local") {
 
+  # Read app version directly so the navbar shows it without needing
+  # values$app_version to round-trip through reactivity.
+  app_version <- tryCatch(trimws(readLines("VERSION", warn = FALSE)[1]),
+                          error = function(e) "")
+
   # Environment badge colors
   env_colors <- list(
     Docker = "#e74c3c",       # red
@@ -258,7 +263,21 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
         actionButton("load_example_phospho", "Load Example Phospho Data",
           class = "btn-outline-info btn-sm w-100", icon = icon("flask"),
           style = "margin-bottom: 10px;"),
-        numericInput("q_cutoff", "Q-Value Cutoff", value = 0.01, min = 0, max = 0.1, step = 0.01)
+        numericInput("q_cutoff", "Q-Value Cutoff", value = 0.01, min = 0, max = 0.1, step = 0.01),
+        # QuantUMS pre-filter (Moschem et al. 2025) — opt-in, defaults off.
+        tags$details(
+          tags$summary(icon("filter"), " QuantUMS quality filters",
+            actionButton("quantums_info_btn", NULL, icon = icon("question-circle"),
+              class = "btn-link btn-sm",
+              style = "padding: 0 4px; line-height: 1; color: #6c757d;",
+              title = "What are these filters?")),
+          div(style = "font-size: 0.8em; color: #6c757d; margin: 4px 0 6px 0;",
+              "Optional precursor pre-filter. Default 0 = off. Paper recommends 0.75."),
+          numericInput("eq_cutoff",  "Empirical Quality (eQ) ≥",
+                       value = 0, min = 0, max = 1, step = 0.05),
+          numericInput("pgq_cutoff", "PG.MaxLFQ Quality (pgQ) ≥",
+                       value = 0, min = 0, max = 1, step = 0.05)
+        )
       ),
 
       accordion_panel("Pipeline Settings", icon = icon("sliders"),
@@ -1280,25 +1299,70 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         )
                       ),
 
-                      # Covariates (compact single-row)
-                      div(style="flex: 1; min-width: 250px;",
-                        strong("Covariates:", style="font-size: 0.85em; display: block; margin-bottom: 4px;"),
-                        div(class="covariate-row", style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;",
-                          div(style="display: flex; align-items: center; gap: 4px;",
-                            checkboxInput("include_batch", NULL, value = FALSE),
-                            div(style="margin-top: -15px; width: 80px;",
-                              textInput("batch_label", NULL, value = "Batch", placeholder = "Batch"))
+                      # Covariates panel — three rename slots, each with a clear
+                      # "include in DE model" toggle and a tooltip explaining what
+                      # the checkbox vs. the text box do.
+                      div(class = "covariate-panel",
+                          style = "flex: 1; min-width: 320px;",
+                        div(style = "display: flex; align-items: center; gap: 6px; margin-bottom: 4px;",
+                          strong("Optional covariates",
+                                 style = "font-size: 0.85em; line-height: 1;"),
+                          actionButton("covariate_info_btn", NULL,
+                            icon = icon("question-circle"),
+                            class = "btn-link btn-sm",
+                            style = "padding: 0 4px; line-height: 1; color: #6c757d;",
+                            title = "Click for help on covariates and the DE model")
+                        ),
+                        # Header row — matches the three slot rows
+                        div(style = "display: grid; grid-template-columns: 56px 1fr; gap: 4px 8px; align-items: center; font-size: 0.72em; color: #6c757d; margin-bottom: 2px;",
+                          span("In model", style = "text-align: center;"),
+                          span("Column name (click to rename)")
+                        ),
+                        # Three uniform slot rows — each: [checkbox]  [textInput]
+                        # Using Shiny checkboxInput (not raw <input>) so reactive
+                        # bindings to input$include_batch / cov1 / cov2 keep working.
+                        div(class = "covariate-grid",
+                            style = "display: grid; grid-template-columns: 56px 1fr; gap: 2px 8px; align-items: center;",
+                          div(style = "display: flex; justify-content: center;",
+                            div(title = "Add this covariate to the DE design matrix",
+                              checkboxInput("include_batch", NULL, value = FALSE)
+                            )
                           ),
-                          div(style="display: flex; align-items: center; gap: 4px;",
-                            checkboxInput("include_cov1", NULL, value = FALSE),
-                            div(style="margin-top: -15px; width: 110px;",
-                              textInput("cov1_label", NULL, value = "Covariate1", placeholder = "e.g., Sex"))
+                          div(title = "Rename — changes the column header in the metadata table below",
+                            textInput("batch_label", NULL, value = "Batch",
+                                      placeholder = "Batch", width = "100%")
                           ),
-                          div(style="display: flex; align-items: center; gap: 4px;",
-                            checkboxInput("include_cov2", NULL, value = FALSE),
-                            div(style="margin-top: -15px; width: 110px;",
-                              textInput("cov2_label", NULL, value = "Covariate2", placeholder = "e.g., Age"))
+                          div(style = "display: flex; justify-content: center;",
+                            div(title = "Add this covariate to the DE design matrix",
+                              checkboxInput("include_cov1", NULL, value = FALSE)
+                            )
+                          ),
+                          div(title = "Rename — changes the column header in the metadata table below",
+                            textInput("cov1_label", NULL, value = "Covariate1",
+                                      placeholder = "e.g., Sex", width = "100%")
+                          ),
+                          div(style = "display: flex; justify-content: center;",
+                            div(title = "Add this covariate to the DE design matrix",
+                              checkboxInput("include_cov2", NULL, value = FALSE)
+                            )
+                          ),
+                          div(title = "Rename — changes the column header in the metadata table below",
+                            textInput("cov2_label", NULL, value = "Covariate2",
+                                      placeholder = "e.g., Age", width = "100%")
                           )
+                        ),
+                        # Tame Shiny's default checkbox margin so it sits centered in the grid cell
+                        tags$style(HTML(
+                          ".covariate-grid .form-group { margin-bottom: 0; }
+                           .covariate-grid .checkbox { margin-top: 0; margin-bottom: 0; }
+                           .covariate-grid .checkbox label { padding-left: 0; }
+                           .covariate-grid input[type='checkbox'] { margin: 0; transform: scale(1.15); }"
+                        )),
+                        # Inline tip line (small, grey)
+                        div(style = "font-size: 0.72em; color: #6c757d; margin-top: 4px; line-height: 1.3;",
+                          icon("info-circle"),
+                          " Tick “In model” to adjust DE for that factor (e.g., batch effects). ",
+                          "The text box renames the column — fill values for each sample in the table below."
                         )
                       ),
 
@@ -2315,6 +2379,24 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
 
     # Gear icon pushed to far-right of navbar
     nav_spacer(),
+    # Version badge — visible at-a-glance so users on HF / WSL / Docker can confirm
+    # which release they're running. Reads directly from the VERSION file at
+    # UI-build time. Click opens the GitHub CHANGELOG in a new tab.
+    nav_item(
+      tags$a(
+        href = "https://github.com/bsphinney/DE-LIMP/blob/main/CHANGELOG.md",
+        target = "_blank", rel = "noopener noreferrer",
+        title = paste0("DE-LIMP v", app_version, " — click for changelog"),
+        style = paste0(
+          "display: inline-flex; align-items: center; gap: 4px; ",
+          "padding: 3px 9px; margin: 6px 4px; border-radius: 12px; ",
+          "background: rgba(255,255,255,0.18); color: #fff !important; ",
+          "font-size: 0.78em; font-weight: 600; letter-spacing: 0.02em; ",
+          "text-decoration: none; border: 1px solid rgba(255,255,255,0.25);"
+        ),
+        tags$span("v", app_version)
+      )
+    ),
     nav_item(actionLink("open_settings", label = NULL, icon = icon("gear"), title = "Settings"))
   )
 }

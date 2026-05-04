@@ -149,7 +149,62 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 ## Installation
 
-**Requirements:** R 4.5+ (for limpa), Bioconductor 3.22+ (auto-configured with R 4.5+)
+**Requirements:** R 4.5 or newer (for limpa). Everything else is installed automatically the first time you launch the app.
+
+### Mac -- step-by-step (first-time users)
+
+If this is your first time running an R/Shiny app, do these four steps in order. Skip ahead to **Already have R, RStudio, and Git?** below if you don't need the walkthrough.
+
+**1. Install R**
+
+Download the right installer for your Mac from CRAN: <https://cloud.r-project.org/bin/macosx/>
+
+- Apple Silicon (M1, M2, M3, M4): pick the **`-arm64.pkg`** file.
+- Intel Mac: pick the **`-x86_64.pkg`** file (also labelled "older Macs").
+
+Open the `.pkg` file and follow the prompts. Not sure which chip you have? Click the Apple menu → "About This Mac". "Apple M*x*" = arm64; anything starting with "Intel" = x86_64.
+
+**2. Install RStudio (recommended)**
+
+Download from <https://posit.co/download/rstudio-desktop/> and drag RStudio to `/Applications`. RStudio is the friendliest way to run R on a Mac. (VS Code with the R extension also works if you prefer it.)
+
+**3. Install Git**
+
+The simplest way: open the **Terminal** app (Cmd-Space, type "Terminal", Enter) and run:
+
+```bash
+git --version
+```
+
+If Git is missing, macOS will pop up a dialog asking to install the Xcode Command Line Tools -- click "Install" and wait. That installs Git, no Apple Developer account needed.
+
+**4. Download DE-LIMP and launch it**
+
+Still in Terminal:
+
+```bash
+cd ~/Documents
+git clone https://github.com/bsphinney/DE-LIMP.git
+```
+
+This creates `~/Documents/DE-LIMP/`. Now open RStudio. In the R console (the bottom-left pane), paste:
+
+```r
+shiny::runApp('~/Documents/DE-LIMP', port = 3838, launch.browser = TRUE)
+```
+
+The first launch takes 5--15 minutes -- DE-LIMP installs ~30 R packages from CRAN and Bioconductor automatically. Subsequent launches start in seconds. When it's done, your browser opens to the DE-LIMP app.
+
+**Updating later:**
+
+```bash
+cd ~/Documents/DE-LIMP
+git pull
+```
+
+Then re-launch from RStudio. Updating the app code never needs you to reinstall R or RStudio.
+
+### Already have R, RStudio, and Git?
 
 ```bash
 git clone https://github.com/bsphinney/DE-LIMP.git
@@ -157,19 +212,21 @@ cd DE-LIMP
 ```
 
 ```r
-shiny::runApp('.', port=3838, launch.browser=TRUE)
+shiny::runApp('.', port = 3838, launch.browser = TRUE)
 ```
 
 All dependencies install automatically on first run:
-```r
-# Core: shiny, bslib, plotly, DT, rhandsontable, shinyjs
-# Data: dplyr, tidyr, stringr, readr, arrow
-# Stats: limpa, limma, ComplexHeatmap, clusterProfiler
-#        org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi
-#        KSEAapp, ggseqlogo, MOFA2, basilisk, callr
-# Viz:  ggplot2, ggrepel, ggridges, enrichplot
-# AI:   httr2, curl
-```
+
+- **Core:** shiny, bslib, plotly, DT, rhandsontable, shinyjs, dplyr, tidyr, stringr, readr, arrow, ggplot2, ggrepel, ggridges
+- **Stats:** limpa, limma, ComplexHeatmap, clusterProfiler, org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi, enrichplot, KSEAapp, ggseqlogo, MOFA2, basilisk, callr
+- **AI / network:** httr2, curl
+
+### Troubleshooting first launch
+
+- **"Package 'limpa' is missing" or "Missing required packages"** -- DE-LIMP installs missing packages automatically, but right after a brand-new R release (e.g. you just installed R 4.6) the BiocManager helper can lag a few weeks behind in knowing which Bioconductor branch pairs with the new R. DE-LIMP v3.7.3+ falls back to a direct Bioconductor download in that case, so just rerun the launch command once and the install finishes. Make sure Wi-Fi is on; the first run needs internet.
+- **"R version: 4.x.y (NEED: 4.5+)"** -- you have an older R. Upgrade from <https://cloud.r-project.org/bin/macosx/> and rerun.
+- **Permission denied when installing packages** -- you're trying to install into the system library. Either run RStudio normally (it sets up a personal library automatically) or, in a Terminal R session, type `dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)` once.
+- **Port 3838 already in use** -- another R session is already serving the app. In RStudio, click "Session → Restart R", then relaunch. Or change the port: `shiny::runApp(..., port = 3839)`.
 
 ---
 

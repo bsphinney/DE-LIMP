@@ -4,6 +4,7 @@
 - **Update this file** when new patterns, gotchas, or architectural decisions emerge
 - For detailed change history, update `CHANGELOG.md` (not this file)
 - **Document as you go**: When the user says "wrap up", "good night", "that's it for now", or asks for a summary — update CLAUDE.md and CHANGELOG.md with all changes from the current work before responding
+- **Bump the patch version after every user-visible fix**: After every fix or small feature, bump (a) the `VERSION` file, (b) the `# Version:` line in the `app.R` header comment, and (c) add a CHANGELOG entry under that new version section. (a) drives the runtime banner in the RStudio console; (b) is what the user sees by just opening `app.R` in the editor without running it. Keep them in sync.
 
 ## Review Agents (spawn before major releases)
 After significant changes, spawn these 5 review agents in parallel:
