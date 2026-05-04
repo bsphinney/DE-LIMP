@@ -617,48 +617,70 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         meta$Group <- make.names(meta$Group)
         groups <- factor(meta$Group)
 
-        # Build design formula with selected covariates
+        # Build design formula with selected covariates.
+        # Each covariate is auto-coerced to numeric (continuous) when the
+        # column looks like a numeric identifier (Run order, age, etc.) so
+        # users can't accidentally turn a per-sample number into a 200-level
+        # factor and blow up the design matrix rank.
         covariates_to_include <- character(0)
         covariate_messages <- character(0)
+        design_df <- data.frame(groups = groups)
+        warnings_out <- character(0)
 
-        # Check each covariate
-        if (isTRUE(input$include_batch) && length(unique(meta$Batch[meta$Batch != ""])) > 1) {
-          meta$Batch <- make.names(meta$Batch)
-          covariates_to_include <- c(covariates_to_include, "batch")
-          covariate_messages <- c(covariate_messages, "Batch")
+        add_covariate <- function(slot_name, raw_values, label) {
+          info <- coerce_covariate_column(raw_values)
+          if (info$kind == "numeric") {
+            design_df[[slot_name]] <<- info$values
+            covariates_to_include <<- c(covariates_to_include, slot_name)
+            covariate_messages <<- c(covariate_messages,
+                                     sprintf("%s (numeric)", label))
+            message(sprintf("[DE-LIMP] Covariate '%s' treated as numeric (%d distinct values).",
+                            label, info$n_levels))
+          } else {
+            if (info$n_levels < 2) {
+              warnings_out <<- c(warnings_out,
+                sprintf("Covariate '%s' has fewer than 2 levels — skipped.", label))
+              return(invisible(NULL))
+            }
+            if (info$has_singletons) {
+              n_sing <- length(info$singleton_levels)
+              warnings_out <<- c(warnings_out, sprintf(
+                "Covariate '%s' has %d level(s) that occur in only one sample (%s) — these break the model. Either drop those rows or merge them into another level.",
+                label, n_sing,
+                if (n_sing > 5) paste0(paste(head(info$singleton_levels, 5), collapse = ", "), ", …")
+                else paste(info$singleton_levels, collapse = ", ")))
+              return(invisible(NULL))
+            }
+            design_df[[slot_name]] <<- info$values
+            covariates_to_include <<- c(covariates_to_include, slot_name)
+            covariate_messages <<- c(covariate_messages,
+                                     sprintf("%s (factor, %d levels)", label, info$n_levels))
+            message(sprintf("[DE-LIMP] Covariate '%s' treated as factor (%d levels).",
+                            label, info$n_levels))
+          }
         }
 
-        if (isTRUE(input$include_cov1) && length(unique(meta$Covariate1[meta$Covariate1 != ""])) > 1) {
-          meta$Covariate1 <- make.names(meta$Covariate1)
-          cov1_var <- tolower(gsub(" ", "_", values$cov1_name %||% "covariate1"))
-          covariates_to_include <- c(covariates_to_include, cov1_var)
-          covariate_messages <- c(covariate_messages, values$cov1_name %||% "Covariate1")
+        if (isTRUE(input$include_batch)) {
+          add_covariate("batch", meta$Batch, values$batch_name %||% "Batch")
+        }
+        if (isTRUE(input$include_cov1)) {
+          slot1 <- tolower(gsub(" ", "_", values$cov1_name %||% "covariate1"))
+          add_covariate(slot1, meta$Covariate1, values$cov1_name %||% "Covariate1")
+        }
+        if (isTRUE(input$include_cov2)) {
+          slot2 <- tolower(gsub(" ", "_", values$cov2_name %||% "covariate2"))
+          add_covariate(slot2, meta$Covariate2, values$cov2_name %||% "Covariate2")
         }
 
-        if (isTRUE(input$include_cov2) && length(unique(meta$Covariate2[meta$Covariate2 != ""])) > 1) {
-          meta$Covariate2 <- make.names(meta$Covariate2)
-          cov2_var <- tolower(gsub(" ", "_", values$cov2_name %||% "covariate2"))
-          covariates_to_include <- c(covariates_to_include, cov2_var)
-          covariate_messages <- c(covariate_messages, values$cov2_name %||% "Covariate2")
+        if (length(warnings_out) > 0) {
+          for (w in warnings_out) message("[DE-LIMP] Covariate warning: ", w)
+          showNotification(paste(warnings_out, collapse = "  "),
+                           type = "warning", duration = 15)
         }
 
         # Build design matrix
         if (length(covariates_to_include) > 0) {
-          # Create formula dynamically
           formula_str <- paste0("~ 0 + groups + ", paste(covariates_to_include, collapse = " + "))
-
-          # Build data frame for design matrix
-          design_df <- data.frame(groups = groups)
-          if("batch" %in% covariates_to_include) design_df$batch <- factor(meta$Batch)
-          if(isTRUE(input$include_cov1) && length(unique(meta$Covariate1[meta$Covariate1 != ""])) > 1) {
-            cov1_var <- tolower(gsub(" ", "_", values$cov1_name %||% "covariate1"))
-            design_df[[cov1_var]] <- factor(meta$Covariate1)
-          }
-          if(isTRUE(input$include_cov2) && length(unique(meta$Covariate2[meta$Covariate2 != ""])) > 1) {
-            cov2_var <- tolower(gsub(" ", "_", values$cov2_name %||% "covariate2"))
-            design_df[[cov2_var]] <- factor(meta$Covariate2)
-          }
-
           design <- model.matrix(as.formula(formula_str), data = design_df)
           colnames(design) <- gsub("groups", "", colnames(design))
 
@@ -670,6 +692,21 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
           # Standard design without covariates
           design <- model.matrix(~ 0 + groups)
           colnames(design) <- levels(groups)
+        }
+
+        # Pre-flight: refuse a rank-deficient design before limma blows up
+        # with the cryptic "NA/NaN/Inf in 'y'" error.
+        rank_problem <- diagnose_design_rank(design)
+        if (!is.null(rank_problem)) {
+          message("[DE-LIMP] ", rank_problem)
+          showNotification(
+            paste0("Differential expression skipped — ", rank_problem,
+                   ". Untick the offending covariate(s) in the sidebar (often Run order, ",
+                   "or a covariate with a level that appears in only one sample) and click Run Pipeline again. ",
+                   "QC, Expression Grid, and PCA are still available."),
+            type = "error", duration = NULL)
+          values$status <- "⚠ DE skipped (rank-deficient design)"
+          return(invisible(NULL))
         }
 
         combs <- combn(levels(groups), 2)

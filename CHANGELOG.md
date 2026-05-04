@@ -5,6 +5,16 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.4] — 2026-05-04
+
+### Fixed
+- **Cryptic "NA/NaN/Inf in 'y'" when a covariate caused a rank-deficient design**: A user ticked "In model" for a `Run order` covariate (per-sample numeric IDs like 707, 708, 813, 16437…) and `Student` (with one level appearing in only one sample). The old design builder factor-expanded every covariate, producing a 200+-column rank-deficient design matrix; limma then printed "Coefficients not estimable" for nearly all of them, generated NaN coefficients, and `eBayes()` died with `NA/NaN/Inf in 'y'`. The user-facing error said only "Differential expression failed" with no clue which covariate to fix.
+
+### Added
+- **Auto-detect numeric vs categorical covariates** (`coerce_covariate_column()` in `R/helpers.R`). When a covariate column parses cleanly as numeric AND has ≥ 5 distinct values, DE-LIMP now enters it into the design matrix as a single continuous coefficient instead of factor-expanding it. So `Run order = 707, 708, 813, …` becomes one coefficient (a linear drift term) rather than 230 columns. Console message: `[DE-LIMP] Covariate 'Run order' treated as numeric (228 distinct values).`
+- **Singleton-level detection** for factor covariates. If any level of a factor covariate appears in only one sample (e.g. `Student = A` for a single row), DE-LIMP now skips that covariate with a named warning instead of letting it silently break the design: `Covariate 'Student' has 1 level(s) that occur in only one sample (A) — these break the model. Either drop those rows or merge them into another level.`
+- **Pre-flight design-rank check** (`diagnose_design_rank()` in `R/helpers.R`) runs immediately before `limpa::dpcDE()`. If the design is rank-deficient, DE-LIMP refuses to fit and surfaces a notification that names the offending coefficients, suggests the fix (untick the covariate, drop singleton-level rows), and notes that QC / Expression Grid / PCA still work.
+
 ## [3.8.3] — 2026-05-04
 
 ### Added

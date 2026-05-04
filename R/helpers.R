@@ -2,6 +2,72 @@
 #  HELPER FUNCTIONS — General utilities
 # ==============================================================================
 
+# --- Covariate coercion for the DE design matrix ---------------------------
+#
+# Decide whether a metadata column should enter the design matrix as a
+# numeric (continuous) covariate or a factor (categorical). The point is to
+# stop users from accidentally turning per-sample identifiers (e.g. Run order
+# 707, 708, 813, …) into a factor with ~N levels, which makes the design
+# matrix rank-deficient and breaks limma's lmFit with "NA/NaN/Inf in 'y'".
+#
+# Heuristics, in order:
+#   1. If every non-empty value parses cleanly as a finite number AND there
+#      are at least, say, 5 distinct values, treat it as numeric.
+#   2. Otherwise treat it as a factor.
+#
+# Returns: list(values = <numeric or factor vector>, kind = "numeric"|"factor",
+#                n_levels = <int>, has_singletons = <logical>, singleton_levels = <chr>)
+coerce_covariate_column <- function(x) {
+  raw <- as.character(x)
+  raw[is.na(raw)] <- ""
+  nonempty <- raw[nzchar(raw)]
+  if (length(nonempty) == 0) {
+    return(list(values = factor(raw), kind = "factor", n_levels = 0,
+                has_singletons = FALSE, singleton_levels = character(0)))
+  }
+  # Numeric heuristic: every non-empty value parses; ≥ 5 distinct numeric values
+  numeric_try <- suppressWarnings(as.numeric(nonempty))
+  all_numeric <- all(is.finite(numeric_try))
+  enough_unique_numeric <- length(unique(numeric_try)) >= 5
+  if (all_numeric && enough_unique_numeric) {
+    out <- suppressWarnings(as.numeric(raw))
+    # leave NAs in place; lmFit + limma handle row-level NAs OK as long as
+    # the design column itself isn't all NA
+    return(list(values = out, kind = "numeric",
+                n_levels = length(unique(numeric_try)),
+                has_singletons = FALSE, singleton_levels = character(0)))
+  }
+  # Factor path
+  fac <- factor(raw)
+  tab <- table(fac[nzchar(as.character(fac))])
+  singletons <- names(tab)[tab == 1]
+  list(values = fac, kind = "factor", n_levels = length(levels(fac)),
+       has_singletons = length(singletons) > 0,
+       singleton_levels = singletons)
+}
+
+# --- Diagnose a rank-deficient design matrix --------------------------------
+#
+# Run before lmFit / dpcDE. Returns NULL if the design is full-rank;
+# otherwise returns a single string naming the columns that are not
+# estimable so the caller can build a helpful user-facing error.
+diagnose_design_rank <- function(design) {
+  qr_d <- qr(design)
+  if (qr_d$rank == ncol(design)) return(NULL)
+  estimable <- qr_d$pivot[seq_len(qr_d$rank)]
+  not_estimable <- setdiff(seq_len(ncol(design)), estimable)
+  bad_cols <- colnames(design)[not_estimable]
+  if (length(bad_cols) == 0) bad_cols <- as.character(not_estimable)
+  preview <- if (length(bad_cols) > 6) {
+    paste0(paste(head(bad_cols, 6), collapse = ", "),
+           " (+", length(bad_cols) - 6, " more)")
+  } else {
+    paste(bad_cols, collapse = ", ")
+  }
+  sprintf("Design matrix is rank-deficient (rank %d of %d). %d coefficient(s) are not estimable: %s",
+          qr_d$rank, ncol(design), length(not_estimable), preview)
+}
+
 # --- QuantUMS Score Pre-Filter ----------------------------------------------
 #
 # Filter a DIA-NN report.parquet by QuantUMS quality scores BEFORE handing
