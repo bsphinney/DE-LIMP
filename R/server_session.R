@@ -1636,8 +1636,25 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$metadata
       }
 
-      # Export with current custom covariate names
-      write.csv(template_data, file, row.names = FALSE)
+      # Round-trip safety: write CANONICAL column names (Batch / Covariate1 / Covariate2)
+      # in row 1 of the CSV regardless of the user's display renames, so re-import
+      # works without surprises. The display-renamed names from the UI are written
+      # as a second header row prefixed with "#" so they're preserved as a hint
+      # but ignored by read.csv.
+      if (ncol(template_data) >= 6) {
+        display_headers <- colnames(template_data)[seq_len(6)]
+        canonical <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")
+        colnames(template_data)[seq_len(6)] <- canonical
+        # Write canonical header + a commented hint row preserving the user's labels
+        comment_line <- paste0("# Display labels: ",
+                               paste(display_headers, collapse = ", "), "\n")
+        cat(comment_line, file = file)
+        suppressWarnings(write.table(template_data, file, sep = ",",
+                                     row.names = FALSE, append = TRUE,
+                                     quote = TRUE, qmethod = "double"))
+      } else {
+        write.csv(template_data, file, row.names = FALSE)
+      }
       showNotification("Template exported successfully!", type = "message", duration = 3)
     }
   )
@@ -1659,15 +1676,52 @@ server_session <- function(input, output, session, values, add_to_log) {
     req(input$template_file)
 
     tryCatch({
-      imported_data <- read.csv(input$template_file$datapath, stringsAsFactors = FALSE)
+      # Skip leading "#" comment lines (the export writes a "# Display labels: ..." hint)
+      imported_data <- read.csv(input$template_file$datapath,
+                                stringsAsFactors = FALSE, comment.char = "#")
 
-      # Validate columns
-      required_cols <- c("ID", "File.Name", "Group", "Batch", "Covariate1", "Covariate2")
-      if (!all(required_cols %in% colnames(imported_data))) {
-        showNotification("Error: Template must have columns: ID, File.Name, Group, Batch, Covariate1, Covariate2",
-                        type = "error", duration = 10)
+      # Required identity columns — these must be canonical, since they're what
+      # the metadata table is keyed on.
+      key_cols <- c("ID", "File.Name", "Group")
+      if (!all(key_cols %in% colnames(imported_data))) {
+        showNotification(paste0("Error: Template must contain columns ", paste(key_cols, collapse = ", "),
+                                ". Got: ", paste(colnames(imported_data), collapse = ", ")),
+                        type = "error", duration = 12)
         return()
       }
+
+      # Covariate columns: be tolerant about names. Accept canonical
+      # (Batch / Covariate1 / Covariate2), the user's current display names
+      # (e.g. Year / Student / Run order), or just position 4/5/6 in the file.
+      cov_canonical <- c("Batch", "Covariate1", "Covariate2")
+      cov_renamed   <- c(values$batch_name %||% "Batch",
+                         values$cov1_name  %||% "Covariate1",
+                         values$cov2_name  %||% "Covariate2")
+      cn <- colnames(imported_data)
+
+      for (i in seq_len(3)) {
+        target <- cov_canonical[i]
+        if (target %in% cn) next
+        # try the user's current display rename
+        if (cov_renamed[i] %in% cn) {
+          colnames(imported_data)[match(cov_renamed[i], cn)] <- target
+          cn <- colnames(imported_data)
+          next
+        }
+        # positional fallback: first non-key column gets Batch, then Cov1, Cov2
+        non_key_cols <- setdiff(cn, c(key_cols, cov_canonical))
+        if (length(non_key_cols) >= 1) {
+          colnames(imported_data)[match(non_key_cols[1], cn)] <- target
+          cn <- colnames(imported_data)
+          next
+        }
+        # missing entirely — fill with empties so downstream code is happy
+        imported_data[[target]] <- ""
+        cn <- colnames(imported_data)
+      }
+
+      # Reorder so the metadata data.frame matches the canonical layout exactly
+      imported_data <- imported_data[, c(key_cols, cov_canonical), drop = FALSE]
 
       # Validate File.Name matches
       if (!all(imported_data$File.Name %in% values$metadata$File.Name)) {
@@ -1675,11 +1729,10 @@ server_session <- function(input, output, session, values, add_to_log) {
                         type = "warning", duration = 8)
       }
 
-      # Update metadata with imported data (match by File.Name)
       values$metadata <- imported_data
 
       showNotification("Template imported successfully!", type = "message", duration = 3)
-      removeModal()  # Close import dialog
+      removeModal()
 
       # Navigate to Assign Groups sub-tab to show imported data
       nav_select("main_tabs", "Data Overview")

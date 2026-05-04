@@ -5,6 +5,12 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.5] — 2026-05-04
+
+### Fixed
+- **Template Import broken when covariate columns had been renamed**: Exporting the template after renaming Batch → Year (etc.) wrote the renamed column headers into the CSV, but the import handler hard-required the canonical names (`Batch`, `Covariate1`, `Covariate2`), so the round-trip failed with "Template must have columns: ID, File.Name, Group, Batch, Covariate1, Covariate2". Now: (a) export writes **canonical** column headers regardless of the user's display rename and prefixes a `# Display labels: …` hint comment for human readability; (b) import is tolerant — accepts canonical names, the user's current display-rename names, OR positional fallback (columns 4/5/6 mapped to Batch/Cov1/Cov2). The error message now also lists the actual columns it found, so when the import does fail the user can see why.
+- **Covariate panel layout broken on some browsers (CSS grid alignment)**: Three checkboxes were rendering in the wrong rows or below their text inputs, leaving Batch with no visible checkbox. Replaced the CSS-grid layout with explicit per-row flexbox containers (`.cov-row`) plus a tighter Bootstrap-checkbox CSS reset (`margin: 0 !important; padding: 0 !important; min-height: 0 !important;` on `.form-group`, `.checkbox`, and the wrapping `label`). Renders consistently on Safari / Chrome / Firefox now.
+
 ## [3.8.4] — 2026-05-04
 
 ### Fixed

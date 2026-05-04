@@ -1302,7 +1302,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       # Covariates panel — three rename slots, each with a clear
                       # "include in DE model" toggle and a tooltip explaining what
                       # the checkbox vs. the text box do.
-                      div(class = "covariate-panel",
+                      div(class = "cov-panel",
                           style = "flex: 1; min-width: 320px;",
                         div(style = "display: flex; align-items: center; gap: 6px; margin-bottom: 4px;",
                           strong("Optional covariates",
@@ -1313,51 +1313,47 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                             style = "padding: 0 4px; line-height: 1; color: #6c757d;",
                             title = "Click for help on covariates and the DE model")
                         ),
-                        # Header row — matches the three slot rows
-                        div(style = "display: grid; grid-template-columns: 56px 1fr; gap: 4px 8px; align-items: center; font-size: 0.72em; color: #6c757d; margin-bottom: 2px;",
-                          span("In model", style = "text-align: center;"),
-                          span("Column name (click to rename)")
+                        # Header row — fixed-width "In model" cell, then "Column name"
+                        div(style = "display: flex; align-items: center; font-size: 0.72em; color: #6c757d; margin-bottom: 2px;",
+                          div(style = "width: 60px; text-align: center;", "In model"),
+                          div(style = "flex: 1;", "Column name (click to rename)")
                         ),
-                        # Three uniform slot rows — each: [checkbox]  [textInput]
-                        # Using Shiny checkboxInput (not raw <input>) so reactive
-                        # bindings to input$include_batch / cov1 / cov2 keep working.
-                        div(class = "covariate-grid",
-                            style = "display: grid; grid-template-columns: 56px 1fr; gap: 2px 8px; align-items: center;",
-                          div(style = "display: flex; justify-content: center;",
-                            div(title = "Add this covariate to the DE design matrix",
-                              checkboxInput("include_batch", NULL, value = FALSE)
+                        # Three uniform slot rows — each is a flex container so checkbox
+                        # and text input always stay on the same row, regardless of
+                        # browser-specific Bootstrap quirks that broke the grid layout.
+                        # Using Shiny checkboxInput preserves input$include_batch / cov1 / cov2.
+                        local({
+                          row <- function(checkbox_id, text_id, default_label, placeholder) {
+                            div(class = "cov-row",
+                                style = "display: flex; align-items: center; gap: 8px; margin-bottom: 2px;",
+                              div(style = "width: 60px; display: flex; justify-content: center;",
+                                  title = "Add this covariate to the DE design matrix",
+                                checkboxInput(checkbox_id, NULL, value = FALSE)
+                              ),
+                              div(style = "flex: 1; min-width: 0;",
+                                  title = "Rename — changes the column header in the metadata table below",
+                                textInput(text_id, NULL, value = default_label,
+                                          placeholder = placeholder, width = "100%")
+                              )
                             )
-                          ),
-                          div(title = "Rename — changes the column header in the metadata table below",
-                            textInput("batch_label", NULL, value = "Batch",
-                                      placeholder = "Batch", width = "100%")
-                          ),
-                          div(style = "display: flex; justify-content: center;",
-                            div(title = "Add this covariate to the DE design matrix",
-                              checkboxInput("include_cov1", NULL, value = FALSE)
-                            )
-                          ),
-                          div(title = "Rename — changes the column header in the metadata table below",
-                            textInput("cov1_label", NULL, value = "Covariate1",
-                                      placeholder = "e.g., Sex", width = "100%")
-                          ),
-                          div(style = "display: flex; justify-content: center;",
-                            div(title = "Add this covariate to the DE design matrix",
-                              checkboxInput("include_cov2", NULL, value = FALSE)
-                            )
-                          ),
-                          div(title = "Rename — changes the column header in the metadata table below",
-                            textInput("cov2_label", NULL, value = "Covariate2",
-                                      placeholder = "e.g., Age", width = "100%")
+                          }
+                          tagList(
+                            row("include_batch", "batch_label", "Batch", "Batch"),
+                            row("include_cov1",  "cov1_label",  "Covariate1", "e.g., Sex"),
+                            row("include_cov2",  "cov2_label",  "Covariate2", "e.g., Age")
                           )
-                        ),
-                        # Tame Shiny's default checkbox margin so it sits centered in the grid cell
-                        tags$style(HTML(
-                          ".covariate-grid .form-group { margin-bottom: 0; }
-                           .covariate-grid .checkbox { margin-top: 0; margin-bottom: 0; }
-                           .covariate-grid .checkbox label { padding-left: 0; }
-                           .covariate-grid input[type='checkbox'] { margin: 0; transform: scale(1.15); }"
-                        )),
+                        }),
+                        # Hard CSS reset for Shiny's default checkbox wrapper, scoped to this block.
+                        # Without these, Bootstrap 3 .checkbox / .form-group add ~20px of padding/margin
+                        # that pushes the checkbox out of vertical alignment with the textInput.
+                        tags$style(HTML(paste(
+                          ".cov-row .form-group { margin: 0 !important; padding: 0 !important; }",
+                          ".cov-row .checkbox { margin: 0 !important; padding: 0 !important; min-height: 0 !important; display: flex; align-items: center; }",
+                          ".cov-row .checkbox label { margin: 0 !important; padding-left: 0 !important; min-height: 0 !important; line-height: 1 !important; display: flex; align-items: center; }",
+                          ".cov-row input[type='checkbox'] { margin: 0 !important; transform: scale(1.15); }",
+                          ".cov-row .form-control { height: 32px; padding: 4px 8px; font-size: 0.9em; }",
+                          sep = "\n"
+                        ))),
                         # Inline tip line (small, grey)
                         div(style = "font-size: 0.72em; color: #6c757d; margin-top: 4px; line-height: 1.3;",
                           icon("info-circle"),
