@@ -1286,7 +1286,9 @@ server_session <- function(input, output, session, values, add_to_log) {
       "If you use this analysis in your research, please cite:\n",
       "\u2022 The limpa package (Bioconductor)\n",
       "\u2022 The limma package: Ritchie ME, et al. (2015) Nucleic Acids Research\n",
-      "\u2022 DIA-NN: Demichev V, et al. (2020) Nature Methods 17:41-44",
+      "\u2022 DIA-NN: Demichev V, et al. (2020) Nature Methods 17:41-44\n\n",
+      "If DE-LIMP helped your work, a star on GitHub helps other proteomics labs find it:\n",
+      "https://github.com/bsphinney/DE-LIMP",
 
       sep = ""
     )
