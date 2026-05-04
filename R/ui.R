@@ -2202,6 +2202,20 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           # Stats cards row
           uiOutput("community_stats_cards"),
 
+          # Soft "star us" nudge — small, single line, no popup, no timer.
+          # Sits below the GitHub-stats cards (which already show star count),
+          # so the ask is contextual rather than out-of-the-blue.
+          div(style = paste0(
+                "text-align: center; margin: 16px auto 22px auto; max-width: 640px; ",
+                "padding: 10px 16px; border: 1px solid #e2e8f0; border-radius: 8px; ",
+                "background: #fafbfc; font-size: 0.88em; color: #4a5568;"),
+            "If DE-LIMP helped your work, a star on GitHub helps other proteomics labs find it. ",
+            tags$a(href = "https://github.com/bsphinney/DE-LIMP",
+                   target = "_blank", rel = "noopener noreferrer",
+                   style = "font-weight: 600; color: #2c5282; text-decoration: none; white-space: nowrap;",
+                   icon("star"), " Star DE-LIMP →")
+          ),
+
           # Trend sparklines row
           uiOutput("community_trend_plots"),
 

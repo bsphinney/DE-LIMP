@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.2] — 2026-05-04
+
+### Added
+- **Soft "star DE-LIMP on GitHub" nudge** in the About → Community tab. One small line under the existing GitHub-stats cards, no popup, no timer, no nagging — just a contextual link sitting next to the data it relates to. Wording: "If DE-LIMP helped your work, a star on GitHub helps other proteomics labs find it. ★ Star DE-LIMP →".
+
 ## [3.8.1] — 2026-05-04
 
 ### Added
