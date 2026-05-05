@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.8] — 2026-05-05
+
+### Fixed
+- **CI test workflow had been silently failing since pre-v3.9.2**: `install.packages(testthat, ...)` was writing to a per-step library that the next step's `Rscript` couldn't see — so every CI run errored with `Error in loadNamespace: there is no package called 'testthat'` and was reported as a test failure even though no actual test was run. Replaced the manual install step with `r-lib/actions/setup-r-dependencies@v2` which coordinates `.libPaths()` between steps and caches dependencies. None of v3.9.2 → v3.9.7 actually had test regressions; the failures were all this CI plumbing bug.
+
 ## [3.9.7] — 2026-05-05
 
 ### Fixed

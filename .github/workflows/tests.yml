@@ -35,12 +35,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
 
       - name: Install test dependencies
-        run: |
-          Rscript -e '
-            install.packages(c("testthat", "glue", "data.table", "filelock",
-                                "processx", "stringr", "dplyr", "httr2"),
-                             repos = "https://cloud.r-project.org")
-          '
+        # r-lib/actions/setup-r-dependencies handles the library path so the
+        # install step and the test step see the same .libPaths() — the old
+        # `install.packages` then `Rscript` two-step would silently install
+        # into a different lib and fail with "no package called 'testthat'".
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::testthat
+            any::glue
+            any::data.table
+            any::filelock
+            any::processx
+            any::stringr
+            any::dplyr
+            any::httr2
 
       - name: Run all unit tests
         run: |
