@@ -406,10 +406,25 @@ server_qc <- function(input, output, session, values) {
 
   # Shared reactive for the diagnostic plot (regular + fullscreen)
   generate_norm_diagnostic_plot <- reactive({
-    req(values$raw_data, values$y_protein, values$metadata)
+    req(values$y_protein, values$metadata)
 
-    pre_mat <- values$raw_data$E   # precursor-level, log2, NAs present
-    post_mat <- values$y_protein$E # protein-level, log2, no NAs
+    # MaxLFQ pipeline: compare pre-quantile-norm log2(PG.MaxLFQ) vs post-norm matrix.
+    # DPC-Quant pipeline: keep the historical view (DIA-NN precursor input vs DPC-Quant output).
+    is_maxlfq <- isTRUE(values$pipeline_mode_used == "maxlfq")
+    if (is_maxlfq) {
+      pre_mat  <- values$y_protein$other$E_log2_raw
+      post_mat <- values$y_protein$E
+      pre_label  <- "Pre-norm log2(PG.MaxLFQ)"
+      post_label <- "Post-quantile-norm"
+      subtitle_text <- "MaxLFQ + limma pipeline (Moschem 2025) — quantile normalization"
+    } else {
+      req(values$raw_data)
+      pre_mat  <- values$raw_data$E
+      post_mat <- values$y_protein$E
+      pre_label  <- "Precursor Input\n(DIA-NN normalized)"
+      post_label <- "Protein Output\n(DPC-Quant)"
+      subtitle_text <- "Left: DIA-NN normalized precursors | Right: DPC-Quant protein estimates"
+    }
     meta <- values$metadata
 
     if (input$norm_diag_type == "boxplot") {
@@ -424,19 +439,19 @@ server_qc <- function(input, output, session, values) {
 
       pre_long <- as.data.frame(pre_mat_plot) %>%
         pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-        mutate(Stage = "Precursor Input\n(DIA-NN normalized)") %>%
+        mutate(Stage = pre_label) %>%
         filter(!is.na(Log2Intensity))
 
       post_long <- as.data.frame(post_mat) %>%
         pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-        mutate(Stage = "Protein Output\n(DPC-Quant)")
+        mutate(Stage = post_label) %>%
+        filter(!is.na(Log2Intensity))
 
       pre_long$Group <- meta$Group[match(pre_long$Sample, meta$File.Name)]
       post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
 
       combined <- bind_rows(pre_long, post_long)
-      combined$Stage <- factor(combined$Stage,
-        levels = c("Precursor Input\n(DIA-NN normalized)", "Protein Output\n(DPC-Quant)"))
+      combined$Stage <- factor(combined$Stage, levels = c(pre_label, post_label))
 
       sample_order <- meta %>% arrange(Group, File.Name) %>% pull(File.Name)
       combined$Sample <- factor(combined$Sample, levels = sample_order)
@@ -447,8 +462,8 @@ server_qc <- function(input, output, session, values) {
         facet_wrap(~Stage, scales = "free_y", ncol = 2) +
         theme_minimal() +
         labs(
-          title = "Pipeline Diagnostic: Precursor Input \u2192 Protein Output",
-          subtitle = "Left: DIA-NN normalized precursors | Right: DPC-Quant protein estimates",
+          title = "Pipeline Diagnostic: Pre-norm \u2192 Post-norm",
+          subtitle = subtitle_text,
           x = "Sample ID", y = "Log2 Intensity"
         ) +
         theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
@@ -459,19 +474,19 @@ server_qc <- function(input, output, session, values) {
       # === DENSITY OVERLAY VIEW ===
       pre_long <- as.data.frame(pre_mat) %>%
         pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-        mutate(Stage = "Precursor Input (DIA-NN)") %>%
+        mutate(Stage = pre_label) %>%
         filter(!is.na(Log2Intensity))
 
       post_long <- as.data.frame(post_mat) %>%
         pivot_longer(everything(), names_to = "Sample", values_to = "Log2Intensity") %>%
-        mutate(Stage = "Protein Output (DPC-Quant)")
+        mutate(Stage = post_label) %>%
+        filter(!is.na(Log2Intensity))
 
       pre_long$Group <- meta$Group[match(pre_long$Sample, meta$File.Name)]
       post_long$Group <- meta$Group[match(post_long$Sample, meta$File.Name)]
 
       combined <- bind_rows(pre_long, post_long)
-      combined$Stage <- factor(combined$Stage,
-        levels = c("Precursor Input (DIA-NN)", "Protein Output (DPC-Quant)"))
+      combined$Stage <- factor(combined$Stage, levels = c(pre_label, post_label))
 
       p <- ggplot(combined, aes(x = Log2Intensity, color = Group, group = Sample)) +
         geom_density(alpha = 0.3, linewidth = 0.4) +
@@ -479,7 +494,7 @@ server_qc <- function(input, output, session, values) {
         theme_minimal() +
         labs(
           title = "Pipeline Diagnostic: Per-Sample Density Curves",
-          subtitle = "Well-aligned input distributions should remain aligned after quantification",
+          subtitle = subtitle_text,
           x = "Log2 Intensity", y = "Density"
         )
 

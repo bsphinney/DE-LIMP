@@ -236,12 +236,23 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
 
   # log2 transform (NaN/Inf -> NA)
   E[E <= 0 | !is.finite(E)] <- NA_real_
-  E <- log2(E)
+  E_pre <- log2(E)
 
-  # Median-normalize across samples (per-run intensity centering)
-  col_med <- apply(E, 2, function(x) stats::median(x, na.rm = TRUE))
-  global_med <- stats::median(col_med, na.rm = TRUE)
-  E <- sweep(E, 2, col_med - global_med, FUN = "-")
+  # Quantile-normalize across samples — standard practice for DIA matrices
+  # before limma. Median-centering alone leaves between-sample variance
+  # differences leaking into eBayes and crushes statistical power.
+  # Use limma::normalizeBetweenArrays(method = "quantile"), the same
+  # default used by FragPipe-Analyst, Spectronaut/MSstats, and DIA-NN's
+  # own analyzer for cross-sample alignment.
+  if (requireNamespace("limma", quietly = TRUE)) {
+    E <- limma::normalizeBetweenArrays(E_pre, method = "quantile")
+  } else {
+    # Fallback: median-center
+    col_med <- apply(E_pre, 2, function(x) stats::median(x, na.rm = TRUE))
+    global_med <- stats::median(col_med, na.rm = TRUE)
+    E <- sweep(E_pre, 2, col_med - global_med, FUN = "-")
+  }
+  rownames(E) <- prot_ids
 
   # Detection (1 if not NA, 0 otherwise) — used by downstream nObs logic
   n_obs <- ifelse(is.na(E), 0L, 1L)
@@ -273,7 +284,9 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
       n_proteins_in_matrix = nrow(E),
       n_runs = ncol(E),
       n_cells_total = length(E),
-      n_cells_missing = sum(is.na(E))
+      n_cells_missing = sum(is.na(E)),
+      # Pre-normalization log2 matrix retained for Norm QC visualization
+      E_log2_raw = E_pre
     )
   )
 }

@@ -5,6 +5,12 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.1] — 2026-05-05
+
+### Fixed
+- **MaxLFQ pipeline was under-normalized**: v3.9.0 only median-centered the log2(PG.MaxLFQ) matrix before handing it to limma. Median-centering aligns medians but lets between-sample variance differences leak through, and that crushed eBayes power — users reported only a handful of DE proteins on a 230-sample dataset where dozens-to-hundreds were expected. Switched to **`limma::normalizeBetweenArrays(method = "quantile")`**, which is the standard cross-sample normalization used by FragPipe-Analyst, Spectronaut/MSstats, and DIA-NN's own analyzer. The pre-normalization matrix is preserved as `y_protein$other$E_log2_raw` so the Norm QC tab can show before/after.
+- **Norm QC tab showed stale DPC-Quant output under MaxLFQ pipeline**: the pipeline diagnostic (`generate_norm_diagnostic_plot`) was hard-wired to `values$raw_data$E` (precursor input) vs `values$y_protein$E` (DPC-Quant output) regardless of which pipeline ran. Now branches on `values$pipeline_mode_used`: under MaxLFQ it shows pre-quantile-norm log2(PG.MaxLFQ) vs post-quantile-norm matrix; under DPC-Quant it shows the original DIA-NN→DPC-Quant view. Subtitle adapts to indicate which pipeline produced the plot.
+
 ## [3.9.0] — 2026-05-04
 
 ### Added
