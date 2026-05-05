@@ -802,6 +802,55 @@ server_session <- function(input, output, session, values, add_to_log) {
   build_methodology_text <- function() {
     req(values$fit %||% values$phospho_fit)
 
+    # v3.9.2+ — emit a paper-faithful MaxLFQ + limma methods paragraph when
+    # the MaxLFQ pipeline ran. Falls through to the DPC-Quant text otherwise.
+    if (isTRUE(values$pipeline_mode_used == "maxlfq")) {
+      filters_line <- if (!is.null(values$y_protein$other$filters_applied) &&
+                          length(values$y_protein$other$filters_applied) > 0) {
+        paste0("with QuantUMS quality cutoffs: ",
+               paste(values$y_protein$other$filters_applied, collapse = "; "), ". ")
+      } else "with no QuantUMS quality cutoffs. "
+      cov_pct <- 100 * (input$coverage_min_frac %||% 0.5)
+      return(paste(
+        "METHODOLOGY",
+        "===========",
+        "Data Processing and Statistical Analysis Pipeline",
+        "---------------------------------------------------",
+        "",
+        "1. DATA INPUT",
+        "Raw DIA-NN output (report.parquet) was imported via the arrow R package.",
+        "",
+        "2. PROTEIN QUANTIFICATION (MaxLFQ + limma — Moschem 2025)",
+        paste0("Precursor rows were filtered at 1% FDR (Q.Value, Lib.Q.Value, Lib.PG.Q.Value <= 0.01) ",
+               filters_line,
+               "Surviving precursors were aggregated to a Protein.Group x Run matrix using ",
+               "DIA-NN's PG.MaxLFQ values. The matrix was log2-transformed and quantile-normalized ",
+               "across samples via limma::normalizeBetweenArrays(method = \"quantile\")."),
+        "",
+        "3. COVERAGE FILTERING",
+        sprintf("Proteins with fewer than %.0f%% non-missing values across samples were dropped from the limma fit but retained in the On/Off Proteins panel as presence/absence calls (UC Davis Bioinformatics Core limma-proteomics tutorial).", cov_pct),
+        "",
+        "4. DIFFERENTIAL EXPRESSION ANALYSIS",
+        "Linear models fit via limma::lmFit + contrasts.fit + eBayes. Missing values were left in",
+        "place; limma drops them per row at fit time. Proteins entirely missing in one condition",
+        "produce no finite logFC and are listed in the On/Off Proteins panel.",
+        "Multiple-testing adjustment: Benjamini-Hochberg FDR.",
+        "",
+        "REFERENCES",
+        "----------",
+        "* Moschem JCM, Campitelli BCS, Serrano SMT, Chaves AFA. Decoding the Impact of",
+        "  Isolation Window Selection and QuantUMS Filtering in DIA-NN for DIA Quantification",
+        "  of Peptides and Proteins. J Proteome Res 2025; 24:3860-3873.",
+        "  doi:10.1021/acs.jproteome.5c00009.",
+        "* limma: Ritchie ME, et al. (2015) Nucleic Acids Research 43(7):e47.",
+        "* DIA-NN: Demichev V, et al. (2020) Nature Methods 17:41-44.",
+        "",
+        "If DE-LIMP helped your work, a star on GitHub helps other proteomics labs find it:",
+        "https://github.com/bsphinney/DE-LIMP",
+        sep = "\n"
+      ))
+    }
+
     ss <- values$diann_search_settings
 
     # Instrument & acquisition section (conditional)

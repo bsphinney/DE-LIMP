@@ -317,6 +317,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
         # Experimental override — only visible when MaxLFQ chosen.
         conditionalPanel(
           condition = "input.pipeline_mode == 'maxlfq'",
+          # Coverage filter (UC Davis Bioinformatics Core's tutorial recommendation
+          # + Moschem 2025 reviewer guidance). Drops proteins with too few
+          # non-NA values before lmFit; their on/off pattern is still surfaced
+          # in the On/Off Proteins panel.
+          sliderInput("coverage_min_frac",
+            "Coverage filter — drop proteins with < X% non-NA samples:",
+            min = 0, max = 0.9, value = 0.5, step = 0.05),
+          div(style = "font-size: 0.78em; color: #6c757d; margin: -6px 0 8px 0; line-height: 1.3;",
+              icon("info-circle"),
+              " 0.5 = the UC Davis tutorial / Moschem-paper recommendation. Set 0 to disable. ",
+              "Dropped proteins still show up in the On/Off Proteins sub-tab."),
           checkboxInput("use_limpa_with_filter",
             "Run filtered precursors through limpa anyway (experimental)",
             value = FALSE),

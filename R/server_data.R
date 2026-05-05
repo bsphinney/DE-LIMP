@@ -607,11 +607,15 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
                              type = "error", duration = NULL)
             return(invisible(NULL))
           }
+          # Honour the user's excluded_files set: pass meta$File.Name as the
+          # keep-list so the MaxLFQ matrix matches the metadata table exactly.
+          keep_runs_maxlfq <- meta$File.Name
           values$y_protein <- tryCatch({
             res <- build_maxlfq_pipeline(parquet_path,
                      q_cutoff   = input$q_cutoff   %||% 0.01,
                      eq_cutoff  = input$eq_cutoff  %||% 0,
-                     pgq_cutoff = input$pgq_cutoff %||% 0)
+                     pgq_cutoff = input$pgq_cutoff %||% 0,
+                     keep_runs  = keep_runs_maxlfq)
             gc(verbose = FALSE)
             message(sprintf("[DE-LIMP] MaxLFQ pipeline: %d proteins x %d runs, %d cells missing (%.1f%%). Filters: %s",
                             res$other$n_proteins_in_matrix, res$other$n_runs,
@@ -657,7 +661,27 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         req(values$y_protein)
 
         rownames(meta) <- meta$File.Name
-        meta <- meta[colnames(dat$E), ]
+        # Align metadata to the SAMPLE matrix actually produced by the chosen
+        # pipeline. Under DPC-Quant the matrix is `dat$E`; under MaxLFQ it's
+        # `values$y_protein$E`. limma::lmFit matches by column position, so
+        # this row order MUST match the matrix column order exactly.
+        sample_cols_used <- if (isTRUE(values$pipeline_mode_used == "maxlfq")) {
+          colnames(values$y_protein$E)
+        } else {
+          colnames(dat$E)
+        }
+        missing_meta <- setdiff(sample_cols_used, meta$File.Name)
+        if (length(missing_meta) > 0) {
+          showNotification(paste0("Pipeline aborted: ", length(missing_meta),
+            " sample(s) in the matrix have no metadata row (",
+            paste(head(missing_meta, 5), collapse = ", "),
+            if (length(missing_meta) > 5) ", ..." else "",
+            "). This usually means the parquet contains runs that were excluded ",
+            "in the metadata table — re-load the report after fixing exclusions."),
+            type = "error", duration = NULL)
+          return(invisible(NULL))
+        }
+        meta <- meta[sample_cols_used, , drop = FALSE]
         meta$Group <- make.names(meta$Group)
         groups <- factor(meta$Group)
 
@@ -771,13 +795,27 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         } else {
           tryCatch({
             if (isTRUE(values$pipeline_mode_used == "maxlfq")) {
-              # Paper-faithful MaxLFQ + limma path. limma's per-row NA
-              # handling does the work: proteins fully missing in either
-              # contrast group end up with NA logFC and silently drop out
-              # of topTable — those are surfaced separately in the On/Off
-              # Proteins panel below.
+              # Paper-faithful MaxLFQ + limma path. Apply coverage filter
+              # (UC Davis Bioinformatics Core's recommendation, also reviewer
+              # request HIGH #4) so eBayes isn't moderating against rows with
+              # only 1-2 finite values. Default 50% of samples non-NA.
+              cov_frac <- input$coverage_min_frac %||% 0.5
+              n_samples <- ncol(values$y_protein$E)
+              min_obs <- max(2, ceiling(cov_frac * n_samples))
+              n_obs_per_row <- rowSums(!is.na(values$y_protein$E))
+              keep <- n_obs_per_row >= min_obs
+              n_dropped <- sum(!keep)
+              message(sprintf("[DE-LIMP] MaxLFQ coverage filter: keep proteins with ≥ %d / %d non-NA (%.0f%%). Kept %d, dropped %d to On/Off panel only.",
+                              min_obs, n_samples, 100 * cov_frac,
+                              sum(keep), n_dropped))
+              if (sum(keep) < 10) {
+                stop(sprintf("Coverage filter left only %d testable proteins (threshold: ≥ %d non-NA). Loosen the QuantUMS cutoffs or the coverage filter.",
+                             sum(keep), min_obs))
+              }
+              E_for_fit <- values$y_protein$E[keep, , drop = FALSE]
+              values$maxlfq_dropped_for_coverage <- n_dropped
               message("[DE-LIMP] Running plain limma::lmFit on MaxLFQ matrix (paper-faithful, no DPC-Quant).")
-              fit <- limma::lmFit(values$y_protein$E, design)
+              fit <- limma::lmFit(E_for_fit, design)
             } else {
               fit <- limpa::dpcDE(values$y_protein, design, plot=FALSE)
             }
@@ -793,12 +831,15 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
                   setNames(values$y_protein$genes$Genes,
                            values$y_protein$genes$Protein.Group)
                 } else NULL
-                contrasts_list <- lapply(forms, function(f) {
-                  parts <- trimws(strsplit(f, "-", fixed = TRUE)[[1]])
-                  parts
-                })
+                # Pass the contrast matrix directly so we don't depend on
+                # parsing "X - Y" strings — Blocker #3 in v3.9.1 review.
+                # `forms` was built as paste(x[2], "-", x[1]), so the limma
+                # contrast is g2 - g1. Flip rows of `combs` so the on/off
+                # function sees (g2, g1) and emits Contrast = "g2 - g1"
+                # matching limma's convention.
+                combs_flipped <- combs[c(2L, 1L), , drop = FALSE]
                 compute_onoff_proteins(values$y_protein$E, groups,
-                                       contrasts_list = contrasts_list,
+                                       contrasts_list = combs_flipped,
                                        n_min = input$onoff_min_n %||% 2,
                                        gene_lookup = gene_lookup)
               } else NULL

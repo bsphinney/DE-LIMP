@@ -5,6 +5,20 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.2] — 2026-05-05
+
+### Fixed (BLOCKERS)
+- **MaxLFQ branch ignored `values$excluded_files`**: pivoted across every Run in the parquet, so users who excluded samples in the metadata table silently got those samples back, with the unwanted runs flowing through quantile normalization and lmFit. Fixed: `build_maxlfq_pipeline()` accepts a `keep_runs =` argument; the run_pipeline observer passes `meta$File.Name` so the matrix matches the metadata exactly.
+- **Sample-to-group misalignment under MaxLFQ**: `meta <- meta[colnames(dat$E), ]` ran unconditionally, but under MaxLFQ `dat` is the wrong matrix. With `lmFit` matching by column position, this could silently assign samples to wrong groups. Now branches on `values$pipeline_mode_used`: under MaxLFQ uses `colnames(values$y_protein$E)`. Hard fail-fast notification if any matrix sample lacks a metadata row.
+- **`compute_onoff_proteins()` contrast-string fragility**: was reconstructed by splitting `forms` on `" - "`, which could break if any group level contained that substring. Now accepts the `combs` matrix from `combn(levels(groups), 2)` directly. Rows of `combs` are flipped before passing so the on/off Contrast string matches limma's `g2 - g1` convention.
+
+### Added (statistician's recommendation + reviewer HIGH #4)
+- **Coverage filter for the MaxLFQ pipeline**: new sidebar slider `coverage_min_frac` (default 0.5 = 50% of samples must have a non-NA value, matching the UC Davis Bioinformatics Core's limma-proteomics tutorial). Proteins below the threshold are dropped from the limma fit (so eBayes isn't moderating against rows with 1-2 finite values) but still appear in the On/Off Proteins sub-tab as presence/absence calls. Console logs the kept/dropped counts. Set to 0 to disable.
+
+### Changed
+- **Methods text branches on the pipeline that actually ran** (reviewer HIGH #6). Under MaxLFQ + limma, the methodology paragraph now describes the Moschem 2025 pipeline accurately (filter → PG.MaxLFQ pivot → log2 → quantile-norm → lmFit + eBayes; coverage filter percentage; on/off panel for fully-missing proteins) and cites the paper explicitly. Under DPC-Quant the existing limpa methodology stands.
+- **`compute_onoff_proteins()` accepts both list-of-pairs and matrix-of-contrasts** for caller convenience.
+
 ## [3.9.1] — 2026-05-05
 
 ### Fixed

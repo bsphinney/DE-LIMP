@@ -167,7 +167,8 @@ filter_quantums_parquet <- function(parquet_path, eq_cutoff = 0, pgq_cutoff = 0)
 #   $other$pipeline — "maxlfq"  (used by downstream code to branch)
 #   $other$filters_applied — character vector of filters used (for Methods)
 build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
-                                   eq_cutoff = 0, pgq_cutoff = 0) {
+                                   eq_cutoff = 0, pgq_cutoff = 0,
+                                   keep_runs = NULL) {
   if (!requireNamespace("arrow", quietly = TRUE))
     stop("arrow package required for the MaxLFQ pipeline.")
 
@@ -210,6 +211,11 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
     flt <- flt %>% dplyr::filter(PG.MaxLFQ.Quality >= !!pgq_cutoff)
     filters_applied <- c(filters_applied,
       sprintf("PG.MaxLFQ.Quality >= %.2f", pgq_cutoff))
+  }
+
+  # Restrict to the user's kept runs (excluded_files honoured) before pivot
+  if (!is.null(keep_runs) && length(keep_runs) > 0) {
+    flt <- flt %>% dplyr::filter(Run %in% !!keep_runs)
   }
 
   rows <- flt %>% dplyr::collect()
@@ -300,6 +306,12 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
 # total_in_group1, total_in_group2.
 compute_onoff_proteins <- function(E, group_factor, contrasts_list = NULL,
                                     n_min = 2, gene_lookup = NULL) {
+  # contrasts_list can be a list of c(g1, g2) character pairs OR a 2-row matrix
+  # where each column is a contrast. Normalize to list-of-pairs at function entry.
+  if (is.matrix(contrasts_list)) {
+    contrasts_list <- lapply(seq_len(ncol(contrasts_list)),
+                              function(i) as.character(contrasts_list[, i]))
+  }
   stopifnot(ncol(E) == length(group_factor))
   groups <- as.character(group_factor)
   unique_groups <- unique(groups[!is.na(groups) & nzchar(groups)])
