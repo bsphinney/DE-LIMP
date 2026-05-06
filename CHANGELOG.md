@@ -5,6 +5,22 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.4] — 2026-05-06
+
+### Changed
+- **Export Complete Analysis is now a true superset of "Export for Claude"**: previously the Output > Export Complete Analysis ZIP advertised PROMPT.md + detection_matrix.csv + quartile_profiles.csv + variable_proteins.csv but the handler never wrote them — the description in `R/ui.R` was aspirational. The handler in `R/server_session.R` now writes:
+  - All previous files (expression_matrix, sample_metadata, methods.txt, reproducibility_log.R + sessionInfo, search_info.md, report.pg_matrix.tsv, report.stats.tsv, protein_confidence.csv, data_quality_summary.csv, contaminant_summary.csv, session.rds)
+  - **Plus**: detection_matrix.csv, quartile_profiles.csv, variable_proteins.csv, group_assignments.csv, parameters.txt, **PROMPT.md** (DE-aware — adapts wording for DE vs exploratory), **MANIFEST.txt** (per-section [OK]/[SKIPPED] log), **DE_Results_Full.csv** (when `values$fit` exists), **QC_Metrics.csv** (when QC stats exist), **Phospho_DE_Results.csv** (when phospho ran).
+  - Pipeline-aware throughout: PROMPT.md and parameters.txt use `pipeline_label(values$y_protein)` and `is_maxlfq()` instead of hardcoded "DPC-Quant" strings (CLAUDE.md Architectural Rule #1).
+  - Every section uses `safe_section()` from `R/helpers.R` so a single failure no longer silently drops files (Architectural Rule #4) — MANIFEST.txt records what was included vs skipped and why.
+- **Three redundant "Export for Claude" buttons hidden** (kept handlers behind them — no orphan-removal): Data Explorer header, AI Summary tab, AI Chat tab. Output > Export Complete Analysis is now the single export entry point. Anyone landing on the AI tab who expected an LLM bundle will instead see the consolidated export linked from Output.
+
+### Fixed
+- **FASTA browse / SSH-scan was silently selecting every `.fasta` in the directory.** In shared dirs like `/quobyte/proteomics-grp/de-limp/fasta` (which holds many species-specific FASTAs side-by-side), hitting "Scan" combined all of them into one DIA-NN search — almost always wrong. Now: 1 file → use directly; ≥2 files → modal with `checkboxGroupInput` so the user explicitly picks one (or several to combine intentionally). Same fix applied to both `fasta_browse_dir` (local shinyFiles) and `ssh_scan_fasta_btn` (remote SSH) handlers in `R/server_search.R`.
+
+### Renamed
+- **On/Off Proteins panel column rename** for clarity: `n_in_group1` / `n_in_group2` → **`detected_g1` / `detected_g2`** (the count of samples in each group where the protein was detected). `total_in_group1` / `total_in_group2` → **`total_g1` / `total_g2`** (group sizes — these are properties of group assignment, not of any individual protein, so they're constant across all rows of a given contrast). Header comment in `compute_onoff_proteins()` and the column-order vector in the DT renderer (`R/server_de.R`) updated to match.
+
 ## [3.10.3] — 2026-05-06
 
 ### Fixed

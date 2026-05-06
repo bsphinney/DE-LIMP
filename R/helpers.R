@@ -436,8 +436,8 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
 # Surface proteins detected in ≥ n_min samples of one condition AND in 0
 # samples of the other — these get NA logFC from limma so they're invisible
 # in the volcano. Returns a data.frame: Protein.Group, Gene, Contrast,
-# Direction (one of "Group1_only" / "Group2_only"), n_in_group1, n_in_group2,
-# total_in_group1, total_in_group2.
+# Direction (one of "Group1_only" / "Group2_only"), detected_g1, detected_g2,
+# total_g1, total_g2 (sample counts for each group).
 compute_onoff_proteins <- function(E, group_factor, contrasts_list = NULL,
                                     n_min = 2, gene_lookup = NULL) {
   # contrasts_list can be a list of c(g1, g2) character pairs OR a 2-row matrix
@@ -478,10 +478,10 @@ compute_onoff_proteins <- function(E, group_factor, contrasts_list = NULL,
         Protein.Group = rownames(E)[g1_only],
         Contrast = paste0(g1, " - ", g2),
         Direction = paste0(g1, "_only"),
-        n_in_group1 = n1[g1_only],
-        n_in_group2 = n2[g1_only],
-        total_in_group1 = length(cols_g1),
-        total_in_group2 = length(cols_g2),
+        detected_g1 = n1[g1_only],
+        detected_g2 = n2[g1_only],
+        total_g1 = length(cols_g1),
+        total_g2 = length(cols_g2),
         stringsAsFactors = FALSE
       )
       out[[length(out) + 1]] <- df
@@ -491,10 +491,10 @@ compute_onoff_proteins <- function(E, group_factor, contrasts_list = NULL,
         Protein.Group = rownames(E)[g2_only],
         Contrast = paste0(g1, " - ", g2),
         Direction = paste0(g2, "_only"),
-        n_in_group1 = n1[g2_only],
-        n_in_group2 = n2[g2_only],
-        total_in_group1 = length(cols_g1),
-        total_in_group2 = length(cols_g2),
+        detected_g1 = n1[g2_only],
+        detected_g2 = n2[g2_only],
+        total_g1 = length(cols_g1),
+        total_g2 = length(cols_g2),
         stringsAsFactors = FALSE
       )
       out[[length(out) + 1]] <- df

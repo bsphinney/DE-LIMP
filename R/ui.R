@@ -1575,8 +1575,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                         tags$h4(icon("search-plus"), " Data Explorer", style = "margin: 0; font-weight: 600;"),
                         actionButton("data_explorer_info_btn", icon("question-circle"),
                           class = "btn-outline-info btn-sm", title = "About Data Explorer"),
-                        downloadButton("export_explorer_claude", "Export for Claude",
-                          class = "btn-outline-primary btn-sm", icon = icon("download"))
+                        # v3.10.4 — superseded by Output > Export Complete Analysis (true superset)
+                        shinyjs::hidden(
+                          downloadButton("export_explorer_claude", "Export for Claude",
+                            class = "btn-outline-primary btn-sm", icon = icon("download"))
+                        )
                       ),
 
                       # --- Panel 1: Abundance Profiles ---
@@ -1655,10 +1658,13 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                             style = "padding: 12px 30px; font-size: 1.1em;"
                           )
                         ),
-                        downloadButton("download_claude_prompt",
-                          tagList(icon("download"), " Export for Claude"),
-                          class = "btn-outline-secondary btn-lg",
-                          style = "padding: 12px 30px; font-size: 1.1em;"
+                        # v3.10.4 — superseded by Output > Export Complete Analysis (true superset)
+                        shinyjs::hidden(
+                          downloadButton("download_claude_prompt",
+                            tagList(icon("download"), " Export for Claude"),
+                            class = "btn-outline-secondary btn-lg",
+                            style = "padding: 12px 30px; font-size: 1.1em;"
+                          )
                         )
                       ),
 
@@ -2147,8 +2153,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       actionButton("data_chat_info_btn", icon("question-circle"), title = "About Data Chat",
                         class = "btn-outline-info btn-sm"),
                       downloadButton("download_chat_txt", "\U0001F4BE Save Chat", class="btn-secondary btn-sm"),
-                      downloadButton("download_claude_prompt_chat", tagList(icon("download"), " Export for Claude"),
-                        class = "btn-outline-secondary btn-sm")
+                      # v3.10.4 — superseded by Output > Export Complete Analysis (true superset)
+                      shinyjs::hidden(
+                        downloadButton("download_claude_prompt_chat", tagList(icon("download"), " Export for Claude"),
+                          class = "btn-outline-secondary btn-sm")
+                      )
                     )
                   )),
                   card_body(
@@ -2183,19 +2192,23 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               tags$summary(style = "cursor: pointer; color: #6f42c1; font-weight: 500;",
                 "What's included (click to expand)"),
               tags$ul(style = "font-size: 0.88em; color: #555; margin-top: 8px;",
-                tags$li(tags$strong("expression_matrix.csv"), " -- Normalized protein intensities (DPC-Quant, complete, no missing values)"),
+                tags$li(tags$strong("expression_matrix.csv"), " -- Normalized protein intensities (pipeline-aware: DPC-Quant complete, or MaxLFQ with NAs)"),
+                tags$li(tags$strong("DE_Results_Full.csv"), " -- All contrasts × all proteins with logFC, P.Value, adj.P.Val ", tags$em("(when DE was run)")),
+                tags$li(tags$strong("QC_Metrics.csv"), " -- Per-sample QC metrics + group labels ", tags$em("(when QC stats exist)")),
+                tags$li(tags$strong("Phospho_DE_Results.csv"), " -- Site-level phospho DE ", tags$em("(when phosphoproteomics was run)")),
                 tags$li(tags$strong("diann_pg_matrix.tsv"), " -- DIA-NN protein-level matrix with real missing values (0 = not detected, ~200 KB)"),
                 tags$li(tags$strong("data_quality_summary.csv"), " -- Per-sample protein counts, % detected, contaminant counts"),
                 tags$li(tags$strong("detection_matrix.csv"), " -- Per-protein precursor detection counts per sample"),
                 tags$li(tags$strong("quartile_profiles.csv"), " -- Intensity quartile assignments per sample"),
                 tags$li(tags$strong("variable_proteins.csv"), " -- Proteins with inconsistent abundance across samples"),
-                tags$li(tags$strong("sample_metadata.csv"), " -- Sample groups and identifiers"),
+                tags$li(tags$strong("sample_metadata.csv"), " / ", tags$strong("group_assignments.csv"), " -- Sample groups and identifiers"),
                 tags$li(tags$strong("contaminant_summary.csv"), " -- Contaminant protein statistics"),
                 tags$li(tags$strong("search_info.md"), " -- Full DIA-NN search parameters and job metadata"),
                 tags$li(tags$strong("session.rds"), " -- Complete session state (reload in DE-LIMP)"),
-                tags$li(tags$strong("methods.txt"), " -- Pipeline parameters, normalization, app version"),
-                tags$li(tags$strong("reproducibility_log.R"), " -- R code log to reproduce every step"),
-                tags$li(tags$strong("PROMPT.md"), " -- AI analysis prompt with biological questions")
+                tags$li(tags$strong("methods.txt"), " / ", tags$strong("parameters.txt"), " -- Pipeline parameters, normalization, app version"),
+                tags$li(tags$strong("reproducibility_log.R"), " -- R code log + sessionInfo() to reproduce every step"),
+                tags$li(tags$strong("PROMPT.md"), " -- AI analysis prompt with biological questions (DE-aware)"),
+                tags$li(tags$strong("MANIFEST.txt"), " -- Per-section export status (any skipped files explained here)")
               )
             ),
             downloadButton("export_complete_analysis", tagList(icon("download"), " Export Complete Analysis ZIP"),

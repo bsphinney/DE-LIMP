@@ -1954,18 +1954,42 @@ server_search <- function(input, output, session, values, add_to_log,
       fasta_files <- ssh_scan_fasta_files(cfg, input$ssh_fasta_browse_dir)
     })
 
-    values$diann_fasta_files <- as.character(fasta_files)
+    if (length(fasta_files) == 0) {
+      showNotification("No FASTA files found in remote directory.", type = "warning")
+      return()
+    }
 
-    output$browsed_fasta_info <- renderUI({
-      if (length(fasta_files) == 0) {
-        div(class = "text-muted small mt-2", "No FASTA files found in remote directory.")
-      } else {
-        div(class = "alert alert-success py-1 px-2 mt-2",
-          style = "font-size: 0.82em;",
-          sprintf("%d FASTA file(s): %s", length(fasta_files),
-                  paste(names(fasta_files), collapse = ", ")))
-      }
-    })
+    # v3.10.4 — single FASTA = use directly; multiple = picker modal
+    # (was silently combining all FASTAs in shared dirs like
+    # /quobyte/proteomics-grp/de-limp/fasta).
+    if (length(fasta_files) == 1) {
+      values$diann_fasta_files <- as.character(fasta_files)
+    } else {
+      labels <- if (!is.null(names(fasta_files))) names(fasta_files) else basename(fasta_files)
+      showModal(modalDialog(
+        title = "Select FASTA file(s) on HPC",
+        tags$p(sprintf("Found %d FASTA files in %s. Pick one (or several to combine).",
+          length(fasta_files), input$ssh_fasta_browse_dir)),
+        checkboxGroupInput("ssh_fasta_browse_picked", label = NULL,
+          choices = setNames(as.character(fasta_files), labels),
+          selected = as.character(fasta_files)[1]),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton("ssh_fasta_browse_confirm", "Use selected", class = "btn-primary")
+        ),
+        size = "m", easyClose = TRUE
+      ))
+    }
+  })
+
+  observeEvent(input$ssh_fasta_browse_confirm, {
+    picked <- input$ssh_fasta_browse_picked
+    if (length(picked) == 0) {
+      showNotification("Pick at least one FASTA.", type = "warning")
+      return()
+    }
+    values$diann_fasta_files <- as.character(picked)
+    removeModal()
   })
 
   # ============================================================================
@@ -3970,8 +3994,36 @@ server_search <- function(input, output, session, values, add_to_log,
       return()
     }
 
-    # Use all FASTA files found (DIA-NN can take multiple)
-    values$diann_fasta_files <- fasta_files
+    # v3.10.4 — single FASTA = use it directly. Multiple FASTAs = show
+    # a picker modal (was silently selecting all of them, which is wrong
+    # in shared dirs like /quobyte/proteomics-grp/de-limp/fasta).
+    if (length(fasta_files) == 1) {
+      values$diann_fasta_files <- fasta_files
+      return()
+    }
+    showModal(modalDialog(
+      title = "Select FASTA file(s)",
+      tags$p(sprintf("Found %d FASTA files in %s. Pick one (or several to combine).",
+        length(fasta_files), dir_path)),
+      checkboxGroupInput("fasta_browse_picked", label = NULL,
+        choices = setNames(fasta_files, basename(fasta_files)),
+        selected = fasta_files[1]),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("fasta_browse_confirm", "Use selected", class = "btn-primary")
+      ),
+      size = "m", easyClose = TRUE
+    ))
+  })
+
+  observeEvent(input$fasta_browse_confirm, {
+    picked <- input$fasta_browse_picked
+    if (length(picked) == 0) {
+      showNotification("Pick at least one FASTA.", type = "warning")
+      return()
+    }
+    values$diann_fasta_files <- as.character(picked)
+    removeModal()
   })
 
   output$browsed_fasta_info <- renderUI({

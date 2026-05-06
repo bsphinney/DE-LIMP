@@ -860,8 +860,8 @@ server_de <- function(input, output, session, values, add_to_log) {
         rownames = FALSE))
     }
     cols <- c("Protein.Group", if ("Gene" %in% names(df)) "Gene",
-              "Contrast", "Direction", "n_in_group1", "total_in_group1",
-              "n_in_group2", "total_in_group2")
+              "Contrast", "Direction", "detected_g1", "total_g1",
+              "detected_g2", "total_g2")
     cols <- intersect(cols, names(df))
     df_show <- df[, cols, drop = FALSE]
     # Force simple atomic columns — strip names/attrs that confuse DT

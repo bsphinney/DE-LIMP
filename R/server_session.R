@@ -1394,6 +1394,11 @@ server_session <- function(input, output, session, values, add_to_log) {
   #      Export Complete Analysis ZIP
   # ============================================================================
 
+  # v3.10.4 — Complete Analysis is now a true superset of the old "Export for
+  # Claude" buttons. Includes everything needed to share, reproduce, or feed
+  # an LLM (PROMPT.md). Pipeline-aware (DPC-Quant vs MaxLFQ + limma) per
+  # CLAUDE.md Architectural Rule #1. Every section uses safe_section() so a
+  # single failure no longer silently drops files (Rule #4).
   output$export_complete_analysis <- downloadHandler(
     filename = function() {
       paste0("DE-LIMP_Complete_Analysis_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip")
@@ -1406,9 +1411,14 @@ server_session <- function(input, output, session, values, add_to_log) {
         tmp_dir <- file.path(tempdir(), paste0("complete_analysis_", format(Sys.time(), "%Y%m%d%H%M%S")))
         dir.create(tmp_dir, recursive = TRUE, showWarnings = FALSE)
         files_to_zip <- character(0)
+        manifest <- new.env(parent = emptyenv())
+        manifest$lines <- character(0)
 
         mat <- values$y_protein$E
         genes_df <- values$y_protein$genes
+        n_proteins <- nrow(mat)
+        n_samples <- ncol(mat)
+        is_ma <- is_maxlfq(values$y_protein)
 
         # SSH config helper (reused for remote file downloads)
         ssh_cfg <- if (isTRUE(values$ssh_connected) && nzchar(input$ssh_host %||% ""))
@@ -1655,6 +1665,332 @@ server_session <- function(input, output, session, values, add_to_log) {
             files_to_zip <- c(files_to_zip, contam_file)
           }
         }, error = function(e) message("[Complete Export] Contaminant summary failed: ", e$message))
+
+        # === 14. Detection matrix (precursor counts per sample, BEFORE pipeline) ===
+        incProgress(0.78, detail = "Detection matrix...")
+        safe_section(manifest, "detection_matrix.csv", {
+          stopifnot(!is.null(values$raw_data) && !is.null(values$raw_data$E))
+          raw_mat <- values$raw_data$E
+          raw_genes <- values$raw_data$genes
+          stopifnot(!is.null(raw_genes), "Protein.Group" %in% colnames(raw_genes))
+          pg <- raw_genes$Protein.Group
+          det_counts <- do.call(rbind, lapply(unique(pg), function(p) {
+            rows <- which(pg == p)
+            sub_mat <- raw_mat[rows, , drop = FALSE]
+            detected <- colSums(!is.na(sub_mat) & is.finite(sub_mat))
+            total_prec <- nrow(sub_mat)
+            c(Protein.Group = p, Total_Precursors = total_prec,
+              setNames(as.list(detected), paste0("Detected_", colnames(raw_mat))))
+          }))
+          det_df <- as.data.frame(det_counts, stringsAsFactors = FALSE)
+          det_df$Gene <- vapply(det_df$Protein.Group, resolve_gene, character(1))
+          det_df <- det_df[, c("Protein.Group", "Gene", "Total_Precursors",
+            grep("^Detected_", colnames(det_df), value = TRUE))]
+          det_file <- file.path(tmp_dir, "detection_matrix.csv")
+          write.csv(det_df, det_file, row.names = FALSE)
+          files_to_zip <<- c(files_to_zip, det_file)
+        })
+
+        # === 15. Quartile profiles + variable proteins ===
+        incProgress(0.80, detail = "Quartile profiles...")
+        # Compute quartiles outside safe_section so variable_proteins can reuse
+        quartile_df <- NULL
+        n_variable <- 0
+        safe_section(manifest, "quartile_profiles.csv", {
+          avg_intensity <- rowMeans(mat, na.rm = TRUE)
+          ranks <- rank(-avg_intensity, ties.method = "first")
+          n <- length(ranks)
+          avg_quartile <- ifelse(ranks <= n/4, "Q1",
+            ifelse(ranks <= n/2, "Q2",
+              ifelse(ranks <= 3*n/4, "Q3", "Q4")))
+          all_sample_q <- matrix(NA_integer_, nrow = nrow(mat), ncol = ncol(mat),
+            dimnames = list(rownames(mat), colnames(mat)))
+          for (j in seq_len(ncol(mat))) {
+            col_ranks <- rank(-mat[, j], ties.method = "first")
+            cn <- length(col_ranks)
+            all_sample_q[, j] <- ifelse(col_ranks <= cn/4, 1L,
+              ifelse(col_ranks <= cn/2, 2L,
+                ifelse(col_ranks <= 3*cn/4, 3L, 4L)))
+          }
+          q_range <- apply(all_sample_q, 1, max, na.rm = TRUE) -
+                     apply(all_sample_q, 1, min, na.rm = TRUE)
+          qdf <- data.frame(
+            Protein.Group = rownames(mat),
+            Gene = vapply(rownames(mat), resolve_gene, character(1)),
+            Avg_Intensity = round(avg_intensity, 2),
+            Avg_Quartile = avg_quartile,
+            stringsAsFactors = FALSE
+          )
+          for (j in seq_len(ncol(mat))) {
+            qdf[[paste0("Q_", colnames(mat)[j])]] <- paste0("Q", all_sample_q[, j])
+          }
+          qdf$Quartile_Range <- q_range
+          qdf$Is_Contaminant <- grepl("^Cont_", rownames(mat))
+          qdf <- qdf[order(-qdf$Avg_Intensity), ]
+          q_file <- file.path(tmp_dir, "quartile_profiles.csv")
+          write.csv(qdf, q_file, row.names = FALSE)
+          files_to_zip <<- c(files_to_zip, q_file)
+          quartile_df <<- qdf
+        })
+
+        safe_section(manifest, "variable_proteins.csv", {
+          stopifnot(!is.null(quartile_df))
+          var_df <- quartile_df[quartile_df$Quartile_Range >= 2, ]
+          var_df <- var_df[order(-var_df$Quartile_Range, -var_df$Avg_Intensity), ]
+          n_variable <<- nrow(var_df)
+          var_file <- file.path(tmp_dir, "variable_proteins.csv")
+          write.csv(var_df, var_file, row.names = FALSE)
+          files_to_zip <<- c(files_to_zip, var_file)
+        })
+
+        # === 16. DE results (all contrasts) — only when DE was run ===
+        incProgress(0.82, detail = "DE results...")
+        has_de <- !is.null(values$fit) && !is.null(values$fit$contrasts)
+        if (has_de) {
+          safe_section(manifest, "DE_Results_Full.csv", {
+            all_contrasts <- colnames(values$fit$contrasts)
+            full_results <- do.call(rbind, lapply(all_contrasts, function(cname) {
+              tt <- limma::topTable(values$fit, coef = cname, number = Inf) |>
+                as.data.frame()
+              if (!"Protein.Group" %in% colnames(tt)) {
+                tt$Protein.Group <- rownames(tt)
+              }
+              tt$Gene <- vapply(tt$Protein.Group, resolve_gene, character(1))
+              tt$Contrast <- cname
+              tt
+            }))
+            de_file <- file.path(tmp_dir, "DE_Results_Full.csv")
+            write.csv(full_results, de_file, row.names = FALSE)
+            files_to_zip <<- c(files_to_zip, de_file)
+          })
+        } else {
+          manifest$lines <- c(manifest$lines,
+            sprintf("[SKIPPED] %-50s -- no DE fit (no-replicates / exploratory mode)",
+              "DE_Results_Full.csv"))
+        }
+
+        # === 17. QC metrics CSV ===
+        if (!is.null(values$qc_stats) && is.data.frame(values$qc_stats)) {
+          safe_section(manifest, "QC_Metrics.csv", {
+            qc_df <- values$qc_stats
+            if (!is.null(values$metadata) && "Run" %in% colnames(qc_df) &&
+                "File.Name" %in% colnames(values$metadata)) {
+              qc_df <- merge(qc_df, values$metadata, by.x = "Run", by.y = "File.Name",
+                all.x = TRUE)
+            }
+            qc_file <- file.path(tmp_dir, "QC_Metrics.csv")
+            write.csv(qc_df, qc_file, row.names = FALSE)
+            files_to_zip <<- c(files_to_zip, qc_file)
+          })
+        }
+
+        # === 18. Phospho DE results (when phosphoproteomics was run) ===
+        if (!is.null(values$phospho_fit) && !is.null(values$phospho_fit$contrasts)) {
+          safe_section(manifest, "Phospho_DE_Results.csv", {
+            ph_contrasts <- colnames(values$phospho_fit$contrasts)
+            ph_results <- do.call(rbind, lapply(ph_contrasts, function(cname) {
+              tt <- limma::topTable(values$phospho_fit, coef = cname, number = Inf) |>
+                as.data.frame()
+              tt$SiteID <- rownames(tt)
+              tt$Contrast <- cname
+              tt
+            }))
+            ph_file <- file.path(tmp_dir, "Phospho_DE_Results.csv")
+            write.csv(ph_results, ph_file, row.names = FALSE)
+            files_to_zip <<- c(files_to_zip, ph_file)
+          })
+        }
+
+        # === 19. Group assignments (compact, just File.Name + Group) ===
+        if (!is.null(values$metadata) && "Group" %in% colnames(values$metadata)) {
+          safe_section(manifest, "group_assignments.csv", {
+            ga <- values$metadata[, c("File.Name", "Group")]
+            ga <- ga[nzchar(ga$Group %||% "") & !is.na(ga$Group), ]
+            ga_file <- file.path(tmp_dir, "group_assignments.csv")
+            write.csv(ga, ga_file, row.names = FALSE)
+            files_to_zip <<- c(files_to_zip, ga_file)
+          })
+        }
+
+        # === 20. Parameters dump (full pipeline + DIA-NN settings) ===
+        safe_section(manifest, "parameters.txt", {
+          params <- c(
+            "DE-LIMP Analysis Parameters",
+            paste0("Export date: ", format(Sys.time(), "%Y-%m-%d %H:%M %Z")),
+            paste0("App version: DE-LIMP v", values$app_version %||% "unknown"),
+            paste0("R version: ", R.version.string),
+            paste0("Pipeline: ", pipeline_label(values$y_protein)),
+            ""
+          )
+          if (has_de) {
+            params <- c(params, "CONTRASTS:",
+              paste0("  ", colnames(values$fit$contrasts)), "")
+          } else {
+            params <- c(params, "DE: not run (no-replicates or exploratory mode)", "")
+          }
+          if (!is.null(values$metadata)) {
+            grp_counts <- table(values$metadata$Group[nzchar(values$metadata$Group %||% "")])
+            params <- c(params, "GROUPS:",
+              paste0("  ", names(grp_counts), ": n=", grp_counts), "")
+          }
+          if (!is.null(values$cov1_name) && nzchar(values$cov1_name))
+            params <- c(params, paste0("Covariate 1: ", values$cov1_name))
+          if (!is.null(values$cov2_name) && nzchar(values$cov2_name))
+            params <- c(params, paste0("Covariate 2: ", values$cov2_name))
+          ss <- values$diann_search_settings
+          if (!is.null(ss) && is.list(ss)) {
+            sp <- ss$search_params
+            params <- c(params, "", "DIA-NN SEARCH SETTINGS:",
+              if (!is.null(ss$diann_version) && nzchar(ss$diann_version))
+                paste0("  DIA-NN version: ", ss$diann_version) else NULL,
+              paste0("  FASTA: ", paste(basename(ss$fasta_files %||% ""), collapse = ", ")),
+              paste0("  Enzyme: ", sp$enzyme %||% "(unset)"),
+              paste0("  MBR: ", if (isTRUE(sp$mbr)) "enabled" else "disabled"),
+              if (!is.null(sp$mass_acc) && !is.na(sp$mass_acc))
+                paste0("  Mass accuracy (MS2): ", sp$mass_acc, " ppm") else NULL,
+              if (!is.null(ss$normalization) && nzchar(ss$normalization))
+                paste0("  DIA-NN normalization: ", ss$normalization) else NULL)
+          }
+          params <- c(params, "", "PACKAGE VERSIONS:",
+            paste0("  limpa: ", tryCatch(as.character(packageVersion("limpa")),
+              error = function(e) "not installed")),
+            paste0("  limma: ", as.character(packageVersion("limma"))),
+            paste0("  R: ", R.version.string))
+          p_file <- file.path(tmp_dir, "parameters.txt")
+          writeLines(params, p_file)
+          files_to_zip <<- c(files_to_zip, p_file)
+        })
+
+        # === 21. PROMPT.md (LLM analysis prompt — DE-aware) ===
+        incProgress(0.85, detail = "AI prompt...")
+        safe_section(manifest, "PROMPT.md", {
+          organism_info <- tryCatch({
+            org_db <- detect_organism_db(rownames(mat))
+            org_map <- c("org.Hs.eg.db" = "Human", "org.Mm.eg.db" = "Mouse",
+              "org.Rn.eg.db" = "Rat", "org.Bt.eg.db" = "Bovine",
+              "org.Cf.eg.db" = "Dog", "org.Gg.eg.db" = "Chicken",
+              "org.Dm.eg.db" = "Fruit fly", "org.Ce.eg.db" = "C. elegans",
+              "org.Dr.eg.db" = "Zebrafish", "org.Sc.sgd.db" = "Yeast",
+              "org.At.tair.db" = "Arabidopsis", "org.Ss.eg.db" = "Pig")
+            paste0(org_map[org_db] %||% "Unknown", " (OrgDb: ", org_db, ")")
+          }, error = function(e) "Unknown")
+
+          group_info <- "No group assignments available."
+          if (!is.null(values$metadata)) {
+            grp_counts <- table(values$metadata$Group[nzchar(values$metadata$Group %||% "")])
+            if (length(grp_counts) > 0) {
+              group_info <- paste(paste0("- ", names(grp_counts), ": n=", grp_counts),
+                collapse = "\n")
+            }
+          }
+
+          contrast_info <- if (has_de) {
+            paste("- ", colnames(values$fit$contrasts), collapse = "\n")
+          } else "(none — exploratory analysis only)"
+
+          n_de_files <- sum(c(has_de, !is.null(values$qc_stats),
+            !is.null(values$phospho_fit)))
+
+          de_or_explore <- if (has_de) {
+            paste0("Differential expression analysis WAS performed using ",
+              pipeline_label(values$y_protein),
+              ". Use `DE_Results_Full.csv` (all contrasts, all proteins) as the ",
+              "primary statistics file.")
+          } else {
+            "**No differential expression analysis was performed** — this is an exploratory dataset (no-replicates or DE skipped). Do NOT cite p-values or fold changes; focus on quartile profiles, variable proteins, and contaminant patterns."
+          }
+
+          expr_note <- if (is_ma) {
+            "May contain NA values where the protein had no precursors passing the QuantUMS / FDR filter for that sample (MaxLFQ + limma pipeline)."
+          } else {
+            "Always complete (no NAs); DPC-Quant fills missing values via the detection-probability model."
+          }
+
+          de_file_row <- if (has_de) {
+            paste0("| `DE_Results_Full.csv` | All contrasts × all proteins. Columns: Gene, Protein.Group, logFC, P.Value, adj.P.Val, B, Contrast | logFC, adj.P.Val, Contrast |\n")
+          } else ""
+          qc_file_row <- if (!is.null(values$qc_stats)) {
+            "| `QC_Metrics.csv` | Per-sample QC metrics joined with sample metadata | precursors, proteins, Group |\n"
+          } else ""
+          phospho_file_row <- if (!is.null(values$phospho_fit)) {
+            "| `Phospho_DE_Results.csv` | Site-level phosphoproteomics DE results | SiteID, logFC, adj.P.Val |\n"
+          } else ""
+
+          prompt_text <- paste0(
+"# DE-LIMP Complete Analysis
+
+## Context
+Proteomics dataset analyzed with DE-LIMP v", values$app_version, " using the **",
+pipeline_label(values$y_protein), "** pipeline.
+- ", format(n_proteins, big.mark = ","), " proteins × ", n_samples, " samples
+- Organism: ", organism_info, "
+
+", de_or_explore, "
+
+## Your Task
+You are a proteomics bioinformatics expert. Provide biological insights from this dataset, paying attention to which files are statistically validated vs exploratory.
+
+## Files in this archive
+
+**IMPORTANT**: Use the **Gene** column (not Protein.Group) for biological interpretation.
+
+| File | Description | Key columns |
+|------|-------------|-------------|
+", de_file_row, qc_file_row, phospho_file_row,
+"| `expression_matrix.csv` | Log2 protein intensities. ", expr_note, " | Gene, Detection_Class, sample columns |
+| `detection_matrix.csv` | Precursor detection counts per protein per sample (BEFORE pipeline) | Gene, Total_Precursors, Detected_* |
+| `diann_pg_matrix.tsv` | DIA-NN protein matrix with raw missing values (0 = not detected) | Genes, sample columns |
+| `data_quality_summary.csv` | Per-sample protein counts + % missing | Sample, Proteins_Detected, Pct_Missing |
+| `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top, Q4=bottom) | Gene, Avg_Quartile, Q_*, Quartile_Range |
+| `variable_proteins.csv` | ", n_variable, " proteins shifting ≥2 quartiles across samples | Gene, Quartile_Range |
+| `contaminant_summary.csv` | Per-contaminant intensity table (Cont_-prefixed proteins) | Gene, Avg_Linear_Intensity |
+| `sample_metadata.csv` / `group_assignments.csv` | Sample-to-group mapping | File.Name, Group |
+| `methods.txt` / `parameters.txt` | Pipeline and DIA-NN parameters | |
+| `reproducibility_log.R` | R code log + sessionInfo() to reproduce every step | |
+| `search_info.md` | Full DIA-NN search parameters and job metadata | |
+| `session.rds` | Complete DE-LIMP session state (reload via Output > Load Session) | |
+| `MANIFEST.txt` | Per-section export status (any [SKIPPED] entries explain what's missing and why) | |
+
+## Sample groups
+", group_info, "
+
+## Contrasts
+", contrast_info, "
+
+## Analysis requested
+
+1. **High-confidence biology** ", if (has_de) "(from DE_Results_Full.csv at adj.P.Val < 0.05): which biological processes/pathways are over-represented in each direction? Which proteins would you prioritize for orthogonal validation?" else "(from variable_proteins.csv): which functional categories dominate the proteins shifting across samples? Are any known biomarkers? Propose 3-5 testable hypotheses.", "
+2. **Quartile-based insights**: For each abundance quartile (Q1–Q4), what biological themes dominate? Any surprises (e.g., low-abundance regulators in Q4)?
+3. **Sample QC**: From data_quality_summary.csv + contaminant_summary.csv, flag any samples with technical issues.
+4. **Exploratory hypotheses**: 3-5 testable biological hypotheses that could be validated experimentally.
+
+## Important notes
+- Intensity values are **log2-transformed**.
+- ", if (is_ma) "Pipeline: **MaxLFQ + limma** (Moschem et al. 2025). Missing values are real — DO NOT call this 'imputed'." else "Pipeline: **limpa DPC-Quant** (Detection Probability Curve Quantification) — the expression matrix is complete by design, NOT through imputation. Missing precursors contribute via the detection probability model. Do NOT describe this as 'imputation' or 'gap-filling.'", "
+- Quartile assignments are computed **per-sample** (a protein can be Q1 in one sample, Q3 in another).
+- Variable proteins are candidates, not statistically validated.
+- Contaminant proteins are prefixed with `Cont_`.
+- Read `MANIFEST.txt` first to see if any sections were skipped.
+")
+          prompt_file <- file.path(tmp_dir, "PROMPT.md")
+          writeLines(prompt_text, prompt_file)
+          files_to_zip <<- c(files_to_zip, prompt_file)
+        })
+
+        # === 22. MANIFEST.txt — record what was included / skipped ===
+        manifest_file <- file.path(tmp_dir, "MANIFEST.txt")
+        manifest_lines <- c(
+          "DE-LIMP Complete Analysis Export",
+          paste0("Generated: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+          paste0("App version: DE-LIMP v", values$app_version %||% "unknown"),
+          paste0("Pipeline: ", pipeline_label(values$y_protein)),
+          "",
+          "Per-section status (any [SKIPPED] lines indicate missing files and why):",
+          "",
+          manifest$lines
+        )
+        writeLines(manifest_lines, manifest_file)
+        files_to_zip <- c(files_to_zip, manifest_file)
 
         # === Create ZIP ===
         incProgress(0.90, detail = "Creating ZIP...")
