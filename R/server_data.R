@@ -517,10 +517,19 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         ""
       )
     } else {
+      qc_dpc <- input$q_cutoff %||% 0.01
+      report_path_dpc <- values$uploaded_report_path %||% "report.parquet"
       pipeline_code <- c(
-        "# Normalization & Quantification (DPC-Quant via limpa)",
-        "dpcfit <- dpcCN(dat)",
-        "y_protein <- dpcQuant(dat, 'Protein.Group', dpc=dpcfit)",
+        "# ─── DPC-Quant pipeline (limpa, default DE-LIMP path) ───",
+        "library(limpa); library(limma)",
+        "",
+        "# 1. Read DIA-NN report.parquet, applying identification FDR cutoffs",
+        sprintf("dat <- limpa::readDIANN('%s', format = 'parquet', q.cutoffs = %.3f)",
+                report_path_dpc, qc_dpc),
+        "",
+        "# 2. Normalize + quantify proteins via DPC-CN + DPC-Quant",
+        "dpcfit <- limpa::dpcCN(dat)",
+        "y_protein <- limpa::dpcQuant(dat, 'Protein.Group', dpc = dpcfit)",
         ""
       )
     }
@@ -927,10 +936,56 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
               sprintf("# Available contrasts: %s", paste(forms, collapse=", ")),
               "combs <- combn(levels(groups), 2)",
               "forms <- apply(combs, 2, function(x) paste(x[2], '-', x[1]))",
-              "fit <- contrasts.fit(fit, makeContrasts(contrasts=forms, levels=design))",
-              "fit <- eBayes(fit)"
+              "fit <- contrasts.fit(fit, makeContrasts(contrasts = forms, levels = design))",
+              "fit <- eBayes(fit)",
+              "",
+              "# Per-contrast DE tables",
+              "for (cname in colnames(fit$contrasts)) {",
+              "  tt <- limma::topTable(fit, coef = cname, number = Inf, adjust.method = 'BH')",
+              "  write.csv(tt, paste0('DE_', make.names(cname), '.csv'), row.names = TRUE)",
+              "}"
             )
             add_to_log("Contrast Fitting", contrast_code)
+
+            # === Provenance block (v3.9.13) ===
+            # End-of-pipeline record: parquet MD5, R sessionInfo, DE-LIMP version,
+            # timestamp. Anyone re-running the script can confirm they have the
+            # exact same input and R environment as the original analysis.
+            tryCatch({
+              report_path_prov <- values$uploaded_report_path %||% NA_character_
+              parquet_md5 <- if (!is.na(report_path_prov) && file.exists(report_path_prov)) {
+                tryCatch(unname(tools::md5sum(report_path_prov)),
+                         error = function(e) NA_character_)
+              } else NA_character_
+              parquet_size <- if (!is.na(report_path_prov) && file.exists(report_path_prov))
+                file.info(report_path_prov)$size else NA_integer_
+              sess_lines <- tryCatch(
+                capture.output(print(utils::sessionInfo())),
+                error = function(e) c("(sessionInfo capture failed: ", e$message, ")")
+              )
+              prov_lines <- c(
+                "# ─── Provenance ───────────────────────────────────────────────",
+                sprintf("# DE-LIMP version    : %s", values$app_version %||% "unknown"),
+                sprintf("# Pipeline used      : %s",
+                        values$pipeline_mode_used %||% "dpc"),
+                sprintf("# Timestamp          : %s",
+                        format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+                sprintf("# Input parquet path : %s",
+                        if (is.na(report_path_prov)) "(not recorded)" else report_path_prov),
+                sprintf("# Input parquet MD5  : %s",
+                        if (is.na(parquet_md5)) "(not computed)" else parquet_md5),
+                sprintf("# Input parquet size : %s bytes",
+                        if (is.na(parquet_size)) "(unknown)" else format(parquet_size, big.mark = ",")),
+                "# To verify the input file matches:",
+                "#   tools::md5sum('report.parquet')",
+                "",
+                "# R sessionInfo() at the time of the run:",
+                paste("#  ", sess_lines)
+              )
+              add_to_log("Provenance", prov_lines)
+            }, error = function(e) {
+              message("[DE-LIMP] Provenance block could not be written: ", e$message)
+            })
           }, error = function(e) {
             message("[DE-LIMP] DE fitting failed: ", e$message)
             showNotification(

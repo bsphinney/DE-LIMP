@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.13] — 2026-05-05
+
+### Added
+- **Reproducibility log now includes a Provenance block** (v3.9.13) with: DE-LIMP version, pipeline used (`dpc` / `maxlfq` / `dpc_with_filter_experimental`), timestamp, input parquet absolute path, input parquet MD5 hash, input parquet size in bytes, and the full `sessionInfo()` printed as comments. So a reviewer running the script in a clean R session can confirm they have the **exact same input file** (`tools::md5sum('report.parquet')` should match) and same R/package versions as the original analysis.
+
+### Fixed
+- **DPC-Quant log now includes the upstream `readDIANN()` call** with the user's actual `q.cutoffs` value substituted in, plus `library(limpa); library(limma)`. Previously the log started at `dpcfit <- dpcCN(dat)` assuming `dat` already existed — breaking reproducibility for anyone running the script in a clean R session.
+- **Contrast log now also emits the per-contrast `topTable()` + `write.csv()` loop**, so the script produces the same `DE_<contrast>.csv` files DE-LIMP exports.
+
 ## [3.9.12] — 2026-05-05
 
 ### Fixed
