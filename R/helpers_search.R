@@ -1447,7 +1447,10 @@ recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back 
     "date -v-", days_back, "d +%Y-%m-%d)",
     " --format=JobID%20,JobName%50,State%20,Elapsed%15,WorkDir%120,StdOut%300",
     " --parsable2 --noheader",
-    " 2>/dev/null | grep -i diann | grep -v '\\.' "
+    # v3.10.6 — filter substep rows (.batch, .extern) by checking the JobID
+    # FIELD, not the whole line. The old `grep -v '\\.'` killed every line
+    # because StdOut paths always contain a dot (e.g. ".out").
+    " 2>/dev/null | grep -i diann | grep -v '^[^|]*[.][^|]*|'"
   )
 
   result <- if (!is.null(ssh_config)) {

@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.6] — 2026-05-06
+
+### Fixed
+- **HOTFIX: "Recover" button never recovered any DIA-NN jobs**. `recover_slurm_jobs()` in `R/helpers_search.R` queries `sacct` for diann-named jobs over the last 14 days, then ran `grep -v '\\.'` to filter out `.batch` / `.extern` substep rows. But the sacct format includes the StdOut path (`/path/.../diann_*_%j.out`), and **every** line has a dot somewhere — so the filter dropped all 23+ matching rows, leaving zero jobs to recover. Verified against the live HIVE cluster: with the broken filter `wc -l` returned 0; the parent diann jobs were obviously present. Replaced with `grep -v '^[^|]*[.][^|]*|'` which only checks for a dot in the JobID field (field 1, before the first `|`) — so `13828146.batch` is filtered, but `13828146` plus its `/path/diann_*.out` StdOut field passes through. Caught by Brett — clicked Recover after the Gemma_set2 search completed and nothing appeared in the queue.
+
 ## [3.10.5] — 2026-05-06
 
 ### Fixed
