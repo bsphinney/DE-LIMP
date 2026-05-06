@@ -827,7 +827,14 @@ server_de <- function(input, output, session, values, add_to_log) {
   onoff_data <- reactive({
     req(values$y_protein, values$metadata)
     if (!any(is.na(values$y_protein$E))) return(NULL)
-    grp <- values$metadata$Group
+    # Align metadata rows to the matrix columns by File.Name. Excluded-files
+    # tracking can leave extra display rows in metadata that aren't in the
+    # matrix — direct length(values$metadata$Group) lookup mismatches ncol(E).
+    matrix_cols <- colnames(values$y_protein$E)
+    if (is.null(matrix_cols) || ncol(values$y_protein$E) == 0) return(NULL)
+    if (!"File.Name" %in% colnames(values$metadata)) return(NULL)
+    idx <- match(matrix_cols, values$metadata$File.Name)
+    grp <- values$metadata$Group[idx]
     grp[is.na(grp) | !nzchar(grp)] <- NA
     if (length(unique(stats::na.omit(grp))) < 2) return(NULL)
     gene_lookup <- if (!is.null(values$y_protein$genes$Genes)) {

@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.3] — 2026-05-06
+
+### Fixed
+- **On/Off Proteins panel crashed with `ncol(E) == length(group_factor) is not TRUE`** when the metadata table had extra rows from excluded-files tracking (which renders excluded files as additional display rows). The reactive read `values$metadata$Group` directly, picking up the excluded rows that aren't in `values$y_protein$E`. Fixed by aligning metadata to matrix columns via `match(colnames(E), values$metadata$File.Name)` before passing to `compute_onoff_proteins()`. The on/off panel now ignores excluded files (they were already excluded from the analysis upstream) and computes against the active sample set only.
+
 ## [3.10.2] — 2026-05-06
 
 ### Fixed
