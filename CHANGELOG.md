@@ -5,6 +5,14 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.17] — 2026-05-06
+
+### Added (v3.10.0 prep — single source of truth for pipeline metadata)
+- **Pipeline descriptor objects** in `R/helpers.R` (`dpc_pipeline_descriptor()`, `maxlfq_pipeline_descriptor()`, `pipeline_descriptor(y_protein)`, `is_maxlfq(y_protein)`, `pipeline_label(y_protein)`). Each pipeline now carries its own self-describing record (id, display label, rollup method, normalization, DE engine, missing-value policy, citation) attached to `y_protein$other$descriptor` at quantification time. Downstream code can read `is_maxlfq(values$y_protein)` instead of consulting the volatile `values$pipeline_mode_used` reactiveVal in 7 different files.
+- **Both pipelines now populate `$other$descriptor`**: `build_maxlfq_pipeline()` attaches `maxlfq_pipeline_descriptor()`; the post-`dpcQuant` block in `server_data.R` attaches `dpc_pipeline_descriptor()`. Legacy `y_protein` objects (from older session.rds files) gracefully fall back to the DPC descriptor.
+
+This commit only adds the helpers and the wiring; existing `values$pipeline_mode_used` checks still work (back-compat). Subsequent v3.9.18+ commits will sweep call sites file-by-file to use the canonical accessors.
+
 ## [3.9.16] — 2026-05-06
 
 ### Fixed

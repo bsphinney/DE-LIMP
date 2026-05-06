@@ -724,6 +724,11 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
             gc(verbose = FALSE)
             message(sprintf("[DE-LIMP] Quantification done — %d proteins, memory: %.0f MB",
                             nrow(result$E), sum(gc(verbose = FALSE)[,2])))
+            # Attach canonical pipeline descriptor (v3.9.17+) so downstream
+            # code reads `is_maxlfq(y_protein)` / `pipeline_label(y_protein)`
+            # instead of the volatile `values$pipeline_mode_used` reactiveVal.
+            result$other$descriptor <- dpc_pipeline_descriptor()
+            result$other$pipeline   <- "dpc"
             result
           }, error = function(e) {
             showNotification(paste("Protein quantification failed:", e$message), type = "error", duration = NULL)

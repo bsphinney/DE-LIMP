@@ -2,6 +2,77 @@
 #  HELPER FUNCTIONS — General utilities
 # ==============================================================================
 
+# --- Pipeline descriptors — single source of truth for "what pipeline ran"
+#
+# Built to retire the `values$pipeline_mode_used` reactiveVal and the
+# scattered `if (isTRUE(values$pipeline_mode_used == "maxlfq"))` guards that
+# proliferated through 7 files in v3.9.x. Each pipeline puts a descriptor on
+# its returned y_protein object; downstream code reads from there. Adding a
+# third pipeline (e.g. DDA) requires zero edits to downstream files.
+#
+# Schema (every pipeline must populate all fields):
+#   pipeline_id        — short slug, e.g. "dpc", "maxlfq"
+#   display_label      — human label, e.g. "MaxLFQ + limma (Moschem 2025)"
+#   rollup_method      — short string for tables, e.g. "DIA-NN PG.MaxLFQ"
+#   normalization      — short string, e.g. "quantile (limma::normalizeBetweenArrays)"
+#   de_engine          — short string, e.g. "limma::lmFit + eBayes"
+#   missing_value_policy — "imputed via DPC detection model" / "kept as NA, dropped per row by limma"
+#   citation           — for methods text, e.g. "Moschem et al., J. Proteome Res. 2025; 24:3860"
+
+# Default descriptor for the historical limpa DPC-Quant pipeline. Attached to
+# y_protein after dpcQuant() runs (server_data.R does this).
+dpc_pipeline_descriptor <- function() {
+  list(
+    pipeline_id        = "dpc",
+    display_label      = "DPC-Quant + limma (limpa)",
+    rollup_method      = "DPC-Quant (Detection Probability Curve Quantification)",
+    normalization      = "DPC-CN (Data Point Correspondence cyclic loess)",
+    de_engine          = "limpa::dpcDE → contrasts.fit → eBayes",
+    missing_value_policy = "Missing precursors contribute via the detection probability model — not imputed, not filled in",
+    citation           = "Law CW, Smyth GK (limpa, Bioconductor)"
+  )
+}
+
+# Descriptor for the MaxLFQ + limma pipeline. Attached inside
+# build_maxlfq_pipeline() at quantification time.
+maxlfq_pipeline_descriptor <- function() {
+  list(
+    pipeline_id        = "maxlfq",
+    display_label      = "MaxLFQ + limma (Moschem 2025)",
+    rollup_method      = "DIA-NN PG.MaxLFQ",
+    normalization      = "quantile normalization (limma::normalizeBetweenArrays)",
+    de_engine          = "limma::lmFit → contrasts.fit → eBayes (NA-tolerant per-row)",
+    missing_value_policy = "NAs left in place; limma drops them per row at fit time. Proteins entirely missing in one condition surface in the On/Off Proteins panel.",
+    citation           = "Moschem et al., J. Proteome Res. 2025; 24:3860 (DOI: 10.1021/acs.jproteome.5c00009)"
+  )
+}
+
+# Read the descriptor off a y_protein. Falls back to the DPC descriptor for
+# legacy y_protein objects (saved in older session.rds files) that didn't
+# carry one. NULL when y_protein itself is NULL.
+pipeline_descriptor <- function(y_protein) {
+  if (is.null(y_protein)) return(NULL)
+  d <- y_protein$other$descriptor
+  if (!is.null(d)) return(d)
+  # Legacy: read $other$pipeline if present (set by build_maxlfq_pipeline pre-v3.9.17)
+  legacy_id <- y_protein$other$pipeline %||% NA_character_
+  if (!is.na(legacy_id) && legacy_id == "maxlfq") return(maxlfq_pipeline_descriptor())
+  # Default: legacy session predates descriptors → assume DPC-Quant
+  dpc_pipeline_descriptor()
+}
+
+# Convenience wrappers — the canonical accessors used by every downstream file.
+# Replace `if (isTRUE(values$pipeline_mode_used == "maxlfq"))` with `is_maxlfq(values$y_protein)`.
+is_maxlfq <- function(y_protein) {
+  d <- pipeline_descriptor(y_protein)
+  !is.null(d) && identical(d$pipeline_id, "maxlfq")
+}
+
+pipeline_label <- function(y_protein) {
+  d <- pipeline_descriptor(y_protein)
+  if (is.null(d)) "(no pipeline ran)" else d$display_label
+}
+
 # --- safe_section: wraps an export sub-step so silent failures become visible
 # Replaces the dozens of `tryCatch(error = function(e) NULL)` blocks scattered
 # through claude_export_content / Complete export. Each safe_section call
@@ -345,7 +416,8 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
     targets = data.frame(File.Name = colnames(E), stringsAsFactors = FALSE),
     other = list(
       n.observations = n_obs,
-      pipeline = "maxlfq",
+      pipeline = "maxlfq",                       # legacy slug — retained for compat
+      descriptor = maxlfq_pipeline_descriptor(), # canonical (v3.9.17+)
       filters_applied = filters_applied,
       n_proteins_in_matrix = nrow(E),
       n_runs = ncol(E),
