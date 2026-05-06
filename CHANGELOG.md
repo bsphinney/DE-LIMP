@@ -5,6 +5,14 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.10] — 2026-05-05
+
+### Fixed
+- **Last 4 stale unit tests**:
+  - `test-helpers_search.R:61` — `ControlPersist` value was lowered from 300 → 60 (zombie-mux risk reduction); test now asserts on the option name, not the literal value.
+  - `test-resume_launcher.R:74–75` — current launcher inserts `--kill-on-invalid-dep=yes` between the dependency and the script path, and uses `afterany` for the 4→5 transition. Test now matches the actual format.
+  - `test-search_history.R:120` — the unified activity log doesn't have a `completed_at` column; completion is signalled via `event_type = "search_completed"`. Test now asserts on event_type instead of the missing field.
+
 ## [3.9.9] — 2026-05-05
 
 ### Fixed

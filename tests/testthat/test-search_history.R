@@ -120,7 +120,10 @@ test_that("update_search_status modifies correct row by output_dir", {
   result <- search_history_read(tmp)
   expect_equal(nrow(result), 1)
   expect_equal(result$status, "completed")
-  expect_equal(result$completed_at, "2024-06-15 12:30:00")
+  # The unified activity log doesn't have a separate `completed_at` column;
+  # completion is signalled by event_type = "search_completed". The
+  # update_search_status() shim flips event_type accordingly.
+  expect_equal(result$event_type, "search_completed")
   expect_equal(result$duration_min, 150.5)
 })
 

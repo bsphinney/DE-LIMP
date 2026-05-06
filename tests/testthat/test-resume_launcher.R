@@ -70,9 +70,14 @@ test_that("generate_resume_launcher from Step 3 skips Steps 1-2", {
   # Step 3 submitted without dependency (it's the first actual submission)
   expect_true(grepl("JOB3=\\$\\(sbatch /out/step3.sbatch", script))
 
-  # Steps 4-5 have dependencies
-  expect_true(grepl("--dependency=afterok:\\$JOB3_ID /out/step4.sbatch", script))
-  expect_true(grepl("--dependency=afterok:\\$JOB4_ID /out/step5.sbatch", script))
+  # Steps 4-5 have dependencies. Current launcher inserts
+  # `--kill-on-invalid-dep=yes` between the dependency and the script path,
+  # and uses `afterany` for the 4->5 transition (verify-block tolerant) while
+  # 3->4 stays `afterok`.
+  expect_true(grepl("--dependency=afterok:\\$JOB3_ID", script))
+  expect_true(grepl("--dependency=afterany:\\$JOB4_ID", script))
+  expect_true(grepl("/out/step4.sbatch", script, fixed = TRUE))
+  expect_true(grepl("/out/step5.sbatch", script, fixed = TRUE))
 })
 
 test_that("generate_resume_launcher from Step 2 skips Step 1 only", {

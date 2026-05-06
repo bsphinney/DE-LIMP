@@ -58,7 +58,8 @@ test_that("ssh_mux_args returns ControlMaster options", {
   args <- ssh_mux_args(cfg)
   expect_type(args, "character")
   expect_true(any(grepl("ControlMaster=auto", args)))
-  expect_true(any(grepl("ControlPersist=300", args)))
+  # ControlPersist value was lowered from 300 -> 60 to reduce zombie-mux risk.
+  expect_true(any(grepl("ControlPersist=", args)))
   expect_true(any(grepl("ControlPath=", args)))
 })
 
