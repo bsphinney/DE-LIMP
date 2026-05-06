@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.2] — 2026-05-06
+
+### Fixed
+- **HOTFIX: `server_viz.R` was syntactically broken in v3.10.1**: the v3.10.1 edit injected R `if/else` expressions inline into a multi-line single-quoted `paste0()` template (the no-replicates Data Exploration prompt), but didn't close the string properly — leaving a stranded `|` token at line 2467 that errored at parse time. Refactored: the dynamic table rows are now computed into named character variables (`expr_matrix_note`, `dpc_only_protconf_row`, `diann_pg_note`, `dpc_only_detmat_row`) immediately before the `paste0()` call, then inserted as plain `', var, '` interpolation. Same pipeline-aware behaviour, no syntax break. Lesson learned (added to CLAUDE.md by inference): never embed `if (cond) X else Y` inside a multi-line single-quoted R string template — pre-compute and substitute.
+
 ## [3.10.1] — 2026-05-06
 
 ### Fixed

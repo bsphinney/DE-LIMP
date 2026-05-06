@@ -2442,6 +2442,26 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           }
         }
 
+        # v3.10.1+ — pipeline-aware Methods README rows (avoids embedding R
+        # `if/else` inside the multi-line single-quoted prompt template).
+        is_ma_export <- is_maxlfq(values$y_protein)
+        expr_matrix_note <- if (is_ma_export) {
+          "May contain NA values where the protein had no precursors passing the QuantUMS / FDR filter for that sample."
+        } else {
+          "Always complete (no NAs); DPC-Quant fills missing values via the detection-probability model."
+        }
+        dpc_only_protconf_row <- if (!is_ma_export) {
+          "| `protein_confidence.csv` | Per-protein per-sample confidence from limpa DPC-Quant. **nObs** = number of precursors detected (more = more reliable). **SE** = posterior standard error (lower = more precise). Proteins with high SE and low nObs were estimated from sparse evidence. | **Gene**, nObs_S1..N, SE_S1..N |\n"
+        } else ""
+        diann_pg_note <- if (is_ma_export) {
+          "Use this to see DIA-NN's raw protein quantification before any DE-LIMP processing."
+        } else {
+          "This is BEFORE limpa DPC-Quant — use this to see which proteins were directly quantified vs probabilistically estimated. Compare with expression_matrix.csv to understand data completeness."
+        }
+        dpc_only_detmat_row <- if (!is_ma_export) {
+          "| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE DPC-Quant). Shows how many precursors were directly detected per sample — proteins with fewer detections have lower precision weights | **Gene**, Total_Precursors, Detected_SampleN columns |\n"
+        } else ""
+
         prompt_text <- paste0(
 '# DE-LIMP Data Exploration Analysis
 
@@ -2458,13 +2478,10 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 
 | File | Description | Key Columns |
 |------|-------------|-------------|
-| `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples). ', if (is_maxlfq(values$y_protein)) "May contain NA values where the protein had no precursors passing the QuantUMS / FDR filter for that sample." else "Always complete (no NAs); DPC-Quant fills missing values via the detection-probability model.", ' | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
-', if (!is_maxlfq(values$y_protein)) '| `protein_confidence.csv` | Per-protein per-sample confidence from limpa DPC-Quant. **nObs** = number of precursors detected (more = more reliable). **SE** = posterior standard error (lower = more precise). Proteins with high SE and low nObs were estimated from sparse evidence. | **Gene**, nObs_S1..N, SE_S1..N |
-' else '', '| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). ', if (is_maxlfq(values$y_protein)) "Use this to see DIA-NN's raw protein quantification before any DE-LIMP processing." else "This is BEFORE limpa DPC-Quant — use this to see which proteins were directly quantified vs probabilistically estimated. Compare with expression_matrix.csv to understand data completeness.", ' | Protein.Group, Genes, sample intensity columns (0 = missing) |
+| `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples). ', expr_matrix_note, ' | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
+', dpc_only_protconf_row, '| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). ', diann_pg_note, ' | Protein.Group, Genes, sample intensity columns (0 = missing) |
 | `data_quality_summary.csv` | Per-sample data quality: proteins detected, % missing, contaminant counts. Use this to assess sample quality and compare completeness across runs | Sample, Proteins_Detected, Pct_Missing, Group |
-', if (!is_maxlfq(values$y_protein)) '| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE DPC-Quant). Shows how many precursors were directly detected per sample — proteins with fewer detections have lower precision weights | **Gene**, Total_Precursors, Detected_SampleN columns |
-' else '',
-| `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
+', dpc_only_detmat_row, '| `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
 | `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
 | `sample_metadata.csv` | Sample groups and identifiers | |
 | `contaminant_summary.csv` | Contaminant protein statistics | |
