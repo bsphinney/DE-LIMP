@@ -2348,6 +2348,33 @@ When discussing top DE proteins, reference the violin plots. When discussing bat
 - Variable proteins are candidates, not statistically validated.
 - Contaminant proteins are prefixed with `Cont_`.
 - Read `MANIFEST.txt` first to see if any sections were skipped.
+
+## Appendix A: How This Analysis Works
+
+Write an educational background section that a PhD student or biologist with no mass spectrometry or bioinformatics background can understand. Cover each stage of the pipeline in plain language, using analogies where helpful. Include these topics:
+
+### Liquid Chromatography-Mass Spectrometry (LC-MS/MS)
+Explain what LC-MS/MS does at a high level: proteins are digested into peptides, separated by liquid chromatography (like sorting by stickiness), then ionized and measured by mass. Explain that the mass spectrometer measures both the mass of intact peptides (MS1) and breaks them into fragments to identify the sequence (MS2). Keep it intuitive.
+
+### Data-Independent Acquisition (DIA)
+Explain the difference between DDA (picks the loudest signals one at a time) and DIA (systematically scans all peptides in windows across the full mass range). Explain why DIA gives more complete, reproducible quantification — every peptide gets measured every time, not just the most abundant ones. Mention that DIA produces more complex data that requires specialized software to deconvolve.
+
+### DIA-NN Software
+Explain that DIA-NN is the software that takes the raw mass spectrometry data and figures out which peptides (and therefore which proteins) are present and how abundant they are. Mention that it uses neural networks to score peptide identifications and that it performs library-free search (predicting what peptides should look like rather than requiring a pre-built library). Explain that it outputs a report with protein quantities per sample.
+
+### ", if (is_ma) "MaxLFQ + limma Pipeline (Moschem 2025)" else "LIMPA / limma Statistical Framework", "
+", if (is_ma) "Explain MaxLFQ (Cox et al., Mol Cell Proteomics, 2014) in plain terms: protein-level quantification is computed from pairwise peptide ratios across runs — robust to missing values without imputing them. Then explain that limma applies empirical Bayes-moderated linear models to test for differential expression. limma's key innovation is borrowing information across all proteins to stabilize variance estimates, which is especially powerful with few replicates. Mention that this DE-LIMP pipeline follows Moschem et al. (J. Proteome Res., 2025) — a paper-faithful implementation that runs DIA-NN's MaxLFQ output through quantile normalization and limma::eBayes. Missing values stay as NA — limma drops them per row at fit time." else "Explain that once we have protein quantities, we need statistics to determine which proteins are truly different between groups vs. random noise. Explain limma's key innovation in plain terms: it borrows information across all proteins to get better variance estimates, which is especially powerful when you have few replicates (common in proteomics). Mention empirical Bayes moderation — the idea that a protein's variance estimate is improved by considering how variable all the other proteins are. Explain that LIMPA is an R package that wraps limma with proteomics-specific preprocessing — the key innovation is **DPC-Quant** (Detection Probability Curve Quantification), which models the probability that a peptide is detected at a given intensity. Instead of imputing missing values, it weights protein quantity estimates by how confidently each contributing peptide was detected. The result is a complete protein matrix where lower-evidence proteins receive lower precision weights downstream.", "
+
+### Key Statistical Concepts
+Define these terms in plain language with brief examples from this dataset:
+- **log2 Fold Change (logFC)**: How much a protein goes up or down between groups (logFC of 1 = doubled, -1 = halved)
+- **P-value**: The probability of seeing this difference by chance alone
+- **Adjusted P-value (FDR)**: P-values corrected for testing thousands of proteins at once (Benjamini-Hochberg). Explain the multiple testing problem with an intuitive example (e.g., flipping coins)
+- **Volcano plot**: Why it's shaped like a volcano and how to read it (x = effect size, y = significance)
+- **Coefficient of Variation (CV)**: A measure of measurement reproducibility — lower is more reliable
+- **Normalization**: Why raw intensities need correction (loading differences between samples). ", if (is_ma) "This pipeline uses **quantile normalization** — every sample's intensity distribution is forced to match a common reference, eliminating systematic differences in loading or instrument response." else "DE-LIMP uses **DPC-CN** (Data Point Correspondence - Cyclic Normalization), which iteratively aligns peptide intensities across runs while preserving real biological differences.", "
+
+Keep the tone approachable and encouraging. Avoid jargon where possible, and define it when unavoidable.
 ")
           prompt_file <- file.path(tmp_dir, "PROMPT.md")
           writeLines(prompt_text, prompt_file)
