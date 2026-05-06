@@ -18,25 +18,27 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## What's New in v3.7.0
+## What's New in v3.10.4
 
-**NCBI Proteome Download** -- Search and download RefSeq protein FASTA databases from NCBI Datasets, with automatic gene symbol mapping via E-utilities. Supports all organisms with NCBI reference proteomes, complementing the existing UniProt download for non-model organisms.
+**Two analysis pipelines, one app** -- Choose between **DPC-Quant + limma** (limpa's detection-probability model, default) and **MaxLFQ + limma** (paper-faithful Moschem et al. 2025 implementation). The pipeline you pick is recorded in the dataset itself; methods text, AI prompts, exports, and the Reproducibility log all describe whichever pipeline actually ran -- no hardcoded "DPC-Quant" strings anywhere.
 
-**Contaminant Analysis** -- New subtab in Data Overview with summary cards (contaminant count, % of total, median intensity ratio, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and contaminant heatmap. Signal Distribution and Expression Grid also highlight contaminants.
+**QuantUMS quality filters** -- Optional pre-filtering of DIA-NN precursors by `eQ`, `qQ`, and `pgQ` quality scores (Moschem 2025). Applied at pipeline run-time on the parquet, with a waterfall showing how many precursors and proteins survived each filter. Defaults to off; opt-in checkbox lets you feed filtered data through limpa's DPC-Quant if you want to test the combination.
 
-**Data Explorer** -- Quartile-based abundance profiles and sample-sample scatter plots for exploring data without requiring DE analysis. Variable proteins that shift 2+ quartiles across samples are flagged. Works with no-replicates mode.
+**On/Off Proteins panel** -- New sub-tab in DE Dashboard surfaces proteins detected in ≥N samples of one condition AND zero samples of the other. limma assigns these `NA` logFC, so they're invisible in the volcano -- the new panel makes them findable.
 
-**SSH File Browser** -- Visual directory browser for remote HPC navigation. Clickable breadcrumbs, color-coded entries, file type filtering. Replaces manual path entry for raw data and FASTA directories.
+**Coverage filter** -- Drop proteins with fewer than X non-NA samples before limma fits the model (UC Davis Bioinformatics Core convention). Live waterfall shows protein retention. Available in MaxLFQ + limma mode.
 
-**Load from HPC** -- One-click button to download and analyze completed search results from the cluster via the SSH file browser.
+**Run Comparator pipeline-aware** -- Cross-tool DE comparison (DE-LIMP vs DE-LIMP / Spectronaut / FragPipe) now reads the pipeline descriptor on both sides. Hypothesis-engine rules (rollup, normalization, peptide rules) emit the correct contrast based on whether each side used MaxLFQ or DPC-Quant.
 
-**WSL2 Launcher for Windows (recommended)** -- One-click batch file (`Launch_DE-LIMP_WSL.bat`) installs R, Bioconductor, DIA-NN 2.3.2 natively inside WSL Ubuntu. Faster than Docker, no SSH key chmod gymnastics, no .NET download blocked by corporate firewalls. Docker launcher still available as an alternative.
+**Export Complete Analysis is now a true superset** -- Single ZIP at Output > Export Complete Analysis includes DE results, QC metrics, phospho results (when present), expression matrix, detection matrix, quartile profiles, variable proteins, contaminant summary, search_info.md, methods.txt, parameters.txt, reproducibility_log.R + sessionInfo, session.rds, and a DE-aware **PROMPT.md** for LLM analysis. Every section is wrapped in `safe_section()` and a **MANIFEST.txt** records what was included vs skipped and why. The three redundant "Export for Claude" buttons (Data Explorer, AI Summary, AI Chat) are now consolidated into this single download.
 
-**No-Replicates Mode** -- Quantification completes normally with n=1 per group (normalization, protein aggregation, PCA, Expression Grid). DE analysis is gracefully skipped with an informational message.
+**FASTA picker** -- Scanning a shared FASTA directory (e.g. `/quobyte/proteomics-grp/de-limp/fasta`) used to silently combine every `.fasta` it found. Now: 1 file → use directly; ≥2 files → checkbox modal so you pick exactly which one(s) to use. Local browse and SSH scan both fixed.
 
-**SSH Auto-Connect & Environment Badge** -- Auto-connects to HPC on startup when an SSH key is detected. Colored navbar badge shows deployment mode (Docker/HPC/Local/HF).
+**Provenance block** -- Exports include parquet MD5, full sessionInfo, app version, and pipeline label so reanalysis is bit-reproducible.
 
-**Previous highlights:** v3.5 Run Comparator, Search & Analysis History, Chromatography QC, smart HPC partitions. v3.1 UI overhaul, Core Facility Mode. v3.0 MOFA2, Docker search, phosphoproteomics, GSEA.
+**Previous highlights** (v3.7): NCBI Proteome Download with gene mapping, Contaminant Analysis with keratin flagging, Data Explorer (quartile + scatter), SSH File Browser, Load from HPC, WSL2 Launcher for Windows, No-Replicates Mode, SSH Auto-Connect, Environment Badge.
+
+**Earlier highlights** (v3.5): Run Comparator, Search & Analysis History, Chromatography QC, smart HPC partitions. (v3.1): UI overhaul, Core Facility Mode. (v3.0): MOFA2, Docker search, phosphoproteomics, GSEA.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

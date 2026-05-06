@@ -22,18 +22,18 @@ tags:
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with **Google Gemini AI** integration.
 
-## ✨ What's New in v3.7.0
+## ✨ What's New in v3.10.4
 
-- 🧪 **Contaminant Analysis**: Summary cards, per-sample bar chart, keratin flagging, contaminant heatmap. Signal Distribution and Expression Grid also highlight contaminants.
-- 🔬 **Data Explorer**: Quartile-based abundance profiles and sample-sample scatter plots -- explore data without requiring DE analysis
-- 🌐 **NCBI Proteome Download**: Search NCBI Datasets by organism, download RefSeq FASTA with automatic gene symbol mapping (local/HPC only)
-- 📂 **SSH File Browser**: Visual directory browser for remote HPC navigation with clickable breadcrumbs and color-coded entries (local/HPC only)
-- 🔄 **No-Replicates Mode**: Quantification completes normally with n=1 per group; DE is skipped gracefully
-- 🏷️ **Environment Badge**: Colored badge showing deployment mode (Docker/HPC/Local/HF)
+- 🧬 **Two analysis pipelines, one app**: Choose **DPC-Quant + limma** (limpa default) or **MaxLFQ + limma** (paper-faithful Moschem 2025). Methods text, AI prompts, and exports describe whichever pipeline actually ran — nothing hardcoded.
+- 🎚️ **QuantUMS quality filters** (Moschem 2025): Optional precursor pre-filtering by `eQ` / `qQ` / `pgQ` quality scores with a survival waterfall.
+- 🔘 **On/Off Proteins panel**: New DE Dashboard sub-tab surfaces proteins missing entirely from one condition (which limma drops with NA logFC, so they're invisible in the volcano).
+- 🪞 **Run Comparator pipeline-aware**: Cross-tool DE comparison (DE-LIMP vs DE-LIMP / Spectronaut / FragPipe) reads the pipeline descriptor and adjusts hypothesis-engine rules accordingly.
+- 📦 **Export Complete Analysis** consolidated as a true superset: DE results, QC, phospho, expression matrix, detection matrix, quartile profiles, variable proteins, methods, parameters, sessionInfo, session.rds, and a DE-aware **PROMPT.md** in one ZIP. **MANIFEST.txt** records what was included vs skipped (no more silent failures).
+- 🧪 **Provenance block in exports**: parquet MD5, sessionInfo, app version, pipeline label.
 
-**Previous highlights** (v3.5): Run Comparator (cross-tool DE comparison), Search & Analysis History, Chromatography QC, smart HPC partitions
+**Previous highlights** (v3.7): Contaminant Analysis (keratin flagging + heatmap), Data Explorer (quartile profiles + sample scatter), NCBI Proteome Download with gene mapping, SSH File Browser, No-Replicates Mode, Environment Badge.
 
-**Earlier** (v3.1): UI overhaul (dark navbar, accordion sidebar, DE Dashboard sub-tabs). (v3.0): Multi-Omics MOFA2 | Phosphoproteomics (site-level DE, KSEA, motifs) | GSEA 4-database | AI Summary | XIC Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
+**Earlier** (v3.5): Run Comparator, Search & Analysis History, Chromatography QC. (v3.1): UI overhaul, accordion sidebar, DE Dashboard sub-tabs. (v3.0): Multi-Omics MOFA2 | Phosphoproteomics (site-level DE, KSEA, motifs) | GSEA 4-database | AI Summary | XIC Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
 
 ## 🚀 Features
 
