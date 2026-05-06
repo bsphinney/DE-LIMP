@@ -1674,18 +1674,29 @@ server_session <- function(input, output, session, values, add_to_log) {
           raw_genes <- values$raw_data$genes
           stopifnot(!is.null(raw_genes), "Protein.Group" %in% colnames(raw_genes))
           pg <- raw_genes$Protein.Group
-          det_counts <- do.call(rbind, lapply(unique(pg), function(p) {
+          unique_pgs <- unique(pg)
+          # v3.10.7 — build the per-protein detection counts as a proper
+          # numeric matrix (not list-of-lists). The previous
+          # do.call(rbind, lapply(...)) approach with c(... as.list(detected))
+          # left every cell as a length-1 list, which `write.csv()` rejects
+          # with "unimplemented type 'list' in 'EncodeElement'". CLAUDE.md
+          # gotcha: nested lists in data.frame() = silent breakage.
+          det_mat <- t(vapply(unique_pgs, function(p) {
             rows <- which(pg == p)
-            sub_mat <- raw_mat[rows, , drop = FALSE]
-            detected <- colSums(!is.na(sub_mat) & is.finite(sub_mat))
-            total_prec <- nrow(sub_mat)
-            c(Protein.Group = p, Total_Precursors = total_prec,
-              setNames(as.list(detected), paste0("Detected_", colnames(raw_mat))))
-          }))
-          det_df <- as.data.frame(det_counts, stringsAsFactors = FALSE)
-          det_df$Gene <- vapply(det_df$Protein.Group, resolve_gene, character(1))
-          det_df <- det_df[, c("Protein.Group", "Gene", "Total_Precursors",
-            grep("^Detected_", colnames(det_df), value = TRUE))]
+            colSums(!is.na(raw_mat[rows, , drop = FALSE]) &
+                    is.finite(raw_mat[rows, , drop = FALSE]))
+          }, numeric(ncol(raw_mat))))
+          colnames(det_mat) <- paste0("Detected_", colnames(raw_mat))
+          total_prec <- as.integer(table(pg)[unique_pgs])
+          det_df <- data.frame(
+            Protein.Group = unique_pgs,
+            Gene = vapply(unique_pgs, resolve_gene, character(1)),
+            Total_Precursors = total_prec,
+            stringsAsFactors = FALSE
+          )
+          for (j in seq_len(ncol(det_mat))) {
+            det_df[[colnames(det_mat)[j]]] <- as.integer(det_mat[, j])
+          }
           det_file <- file.path(tmp_dir, "detection_matrix.csv")
           write.csv(det_df, det_file, row.names = FALSE)
           files_to_zip <- c(files_to_zip, det_file)
@@ -1833,9 +1844,21 @@ server_session <- function(input, output, session, values, add_to_log) {
             params <- c(params, "GROUPS:",
               paste0("  ", names(grp_counts), ": n=", grp_counts), "")
           }
-          if (!is.null(values$cov1_name) && nzchar(values$cov1_name))
+          # v3.10.7 — only emit covariate lines that ACTUALLY made it into
+          # the design matrix. `values$cov1_name` / `cov2_name` persist
+          # from prior analyses and may name covariates that the current
+          # pipeline didn't include (the include-checkbox was off, or the
+          # column had <2 unique values). Read the truth from
+          # `values$design` colnames.
+          design_cols <- if (!is.null(values$design)) colnames(values$design) else character(0)
+          covariate_in_design <- function(name) {
+            if (is.null(name) || !nzchar(name)) return(FALSE)
+            any(grepl(paste0("^", gsub("([][.\\?*+(){}^$|])", "\\\\\\1", name)),
+                      design_cols))
+          }
+          if (covariate_in_design(values$cov1_name))
             params <- c(params, paste0("Covariate 1: ", values$cov1_name))
-          if (!is.null(values$cov2_name) && nzchar(values$cov2_name))
+          if (covariate_in_design(values$cov2_name))
             params <- c(params, paste0("Covariate 2: ", values$cov2_name))
           ss <- values$diann_search_settings
           if (!is.null(ss) && is.list(ss)) {
@@ -1864,16 +1887,45 @@ server_session <- function(input, output, session, values, add_to_log) {
         # === 21. PROMPT.md (LLM analysis prompt — DE-aware) ===
         incProgress(0.85, detail = "AI prompt...")
         safe_section(manifest, "PROMPT.md", {
+          # v3.10.7 — detect_organism_db() falls back to human silently
+          # when the protein IDs have no `_HUMAN`/`_MOUSE`/etc. suffix
+          # (e.g. NCBI RefSeq XP_/NP_/WP_, or any non-UniProt-SP format).
+          # Tag uncertainty so the LLM doesn't proceed with org.Hs.eg.db
+          # for a Peromyscus dataset (CLAUDE.md Architectural Rule #2 —
+          # never silently substitute a default into user-facing text).
           organism_info <- tryCatch({
-            org_db <- detect_organism_db(rownames(mat))
+            ids <- rownames(mat)
+            uniprot_suffixes <- c("_HUMAN","_MOUSE","_RAT","_BOVIN","_CANLF",
+              "_CHICK","_DROME","_CAEEL","_DANRE","_YEAST","_ARATH","_PIG")
+            has_suffix <- any(vapply(uniprot_suffixes,
+              function(s) any(grepl(s, ids, ignore.case = TRUE)),
+              logical(1)))
+            looks_ncbi <- any(grepl("^[XNW]P_", ids))
+            org_db <- detect_organism_db(ids)
             org_map <- c("org.Hs.eg.db" = "Human", "org.Mm.eg.db" = "Mouse",
               "org.Rn.eg.db" = "Rat", "org.Bt.eg.db" = "Bovine",
               "org.Cf.eg.db" = "Dog", "org.Gg.eg.db" = "Chicken",
               "org.Dm.eg.db" = "Fruit fly", "org.Ce.eg.db" = "C. elegans",
               "org.Dr.eg.db" = "Zebrafish", "org.Sc.sgd.db" = "Yeast",
               "org.At.tair.db" = "Arabidopsis", "org.Ss.eg.db" = "Pig")
-            paste0(org_map[org_db] %||% "Unknown", " (OrgDb: ", org_db, ")")
-          }, error = function(e) "Unknown")
+            base <- paste0(org_map[org_db] %||% "Unknown", " (OrgDb: ", org_db, ")")
+            fasta_hint <- ""
+            ss <- values$diann_search_settings
+            if (!is.null(ss$fasta_files) && length(ss$fasta_files) > 0) {
+              fasta_hint <- paste0(" — FASTA: ",
+                paste(basename(ss$fasta_files), collapse = ", "))
+            }
+            if (!has_suffix) {
+              warn <- if (looks_ncbi) {
+                "**WARNING — auto-detection FELL BACK to human default.** Protein IDs are NCBI RefSeq (XP_/NP_/WP_), which don't carry organism suffixes. Verify the actual organism from the FASTA name and override the OrgDb before any GSEA/KEGG/GO work — using `org.Hs.eg.db` on a non-human dataset will silently mis-map pathway IDs."
+              } else {
+                "**WARNING — auto-detection used the default (human).** The protein IDs do not have UniProt SwissProt organism suffixes (`_HUMAN`/`_MOUSE`/etc.), so detection fell through to the default. Verify from the FASTA name and override the OrgDb before any GSEA/KEGG/GO work."
+              }
+              paste0(base, fasta_hint, "\n  ", warn)
+            } else {
+              paste0(base, fasta_hint)
+            }
+          }, error = function(e) "Unknown (auto-detection failed — verify before any GSEA/KEGG/GO work)")
 
           group_info <- "No group assignments available."
           if (!is.null(values$metadata)) {

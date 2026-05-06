@@ -5,6 +5,13 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.7] — 2026-05-06
+
+### Fixed (Complete Analysis export — three issues from real downstream review)
+- **`parameters.txt` listed stale covariates from a previous analysis.** The export read `values$cov1_name` / `values$cov2_name` unconditionally, but those reactiveValues persist across pipeline runs even when the user un-checked the "include in model" boxes for the current analysis. Brett's Gemma export listed `Covariate 1: Student` and `Covariate 2: RunOrder` from an earlier session that wasn't using the current sample groups. Now we only emit a covariate line if the covariate name actually appears in `colnames(values$design)` — the canonical "what was used" source. CLAUDE.md Architectural Rule #2 (tagged %||% defaults) and Rule #3 (single source of truth for covariate name).
+- **`detection_matrix.csv` skipped with `unimplemented type 'list' in 'EncodeElement'`.** The per-protein detection-count construction used `do.call(rbind, lapply(..., c(... as.list(detected))))`, which produced a row matrix where every cell was a length-1 list. `as.data.frame()` preserved the list-columns and `write.csv()` rejected them. Rewrote the section to build a proper numeric matrix via `vapply(..., numeric(ncol(raw_mat)))`, attach `Detected_*` integer columns one at a time, and write a clean atomic data.frame. CLAUDE.md gotcha: "nested lists in data.frame() = silent breakage."
+- **`PROMPT.md` confidently stated organism = Human even when detection had silently fallen back to the default.** `detect_organism_db()` matches UniProt SwissProt suffixes (`_HUMAN`/`_MOUSE`/etc.); when the IDs are NCBI RefSeq (XP_/NP_/WP_) or any non-suffixed format, it falls through to `org.Hs.eg.db`. The PROMPT then asserted "Organism: Human" with no caveat — Brett's Peromyscus californicus (mouse-mapped) export read as a human dataset and the downstream LLM almost did GSEA against `org.Hs.eg.db`. Per CLAUDE.md Architectural Rule #2, fallback values that hit user-facing text must be tagged. The PROMPT.md organism line now: (a) prints the FASTA filename inline as a hint, (b) checks whether any UniProt organism suffix is present in the IDs, (c) when no suffix found, replaces the confident "Organism: X" line with a `**WARNING — auto-detection FELL BACK to human default**` block telling the downstream LLM to verify from the FASTA name before any GSEA/KEGG/GO work, with a stronger NCBI-specific message when the IDs are XP_/NP_/WP_.
+
 ## [3.10.6] — 2026-05-06
 
 ### Fixed
