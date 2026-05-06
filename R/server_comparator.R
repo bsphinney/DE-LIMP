@@ -265,8 +265,15 @@ parse_delimp_session <- function(rds_path = NULL, values = NULL) {
           paste0("DIA-NN: ", norm_setting)
         }
       },
-      rollup_method   = "DPC-Quant (empirical Bayes precursor aggregation)",
-      de_engine       = "limma moderated t-test",
+      # v3.10.0+ — derive rollup / DE-engine descriptions from the pipeline
+      # descriptor stored on y_protein (set by build_maxlfq_pipeline or by
+      # the post-dpcQuant attachment in server_data.R). Falls back to the
+      # historical DPC-Quant strings for legacy sessions without descriptors.
+      rollup_method   = pipeline_descriptor(session_obj$y_protein)$rollup_method,
+      de_engine       = paste0("limma moderated t-test (",
+                               pipeline_descriptor(session_obj$y_protein)$de_engine, ")"),
+      pipeline_id     = pipeline_descriptor(session_obj$y_protein)$pipeline_id,
+      pipeline_label  = pipeline_descriptor(session_obj$y_protein)$display_label,
       covariates      = paste(session_obj$covariates %||% "none", collapse = ", "),
       contrast_string = session_obj$contrast_string %||% "unknown",
       # Search & data stats
@@ -1988,6 +1995,33 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
   top_disc <- head(comp_results$de_concordance$discordant_table, 10)
   source_b <- stats$source_b
 
+  # Run-A pipeline strings (v3.10.0+) — read from the descriptor stored on
+  # the parsed run object so the prompt accurately describes whichever pipeline
+  # actually produced Run A, instead of always claiming DPC-Quant.
+  run_a               <- comp_results$run_a %||% list(settings = list())
+  run_a_id            <- run_a$settings$pipeline_id %||% "dpc"
+  run_a_pipeline_label <- run_a$settings$pipeline_label %||%
+                          run_a$settings$software %||% "DE-LIMP"
+  run_a_rollup_short  <- run_a$settings$rollup_method %||% "DPC-Quant"
+  run_a_rollup_text   <- if (run_a_id == "maxlfq") {
+    "DIA-NN PG.MaxLFQ pivot to a Protein.Group x Run matrix, log2 + quantile-normalized cross-sample, then plain limma::lmFit (NA-tolerant per row)."
+  } else {
+    "DPC-Quant aggregates all detected precursors with empirical Bayes weighting."
+  }
+  run_a_de_engine_text <- if (run_a_id == "maxlfq")
+    "limma::lmFit -> contrasts.fit -> eBayes (no DPC-Quant detection model)."
+    else "limpa::dpcDE (limma adapted for DIA proteomics) -> contrasts.fit -> eBayes."
+  run_a_missing_text  <- if (run_a_id == "maxlfq") {
+    paste0("NAs left in place; limma drops them per row at fit time. ",
+           "Proteins entirely missing in one condition produce NA logFC and ",
+           "are surfaced separately as on/off calls (no imputation).")
+  } else {
+    "DPC-Quant models missing values probabilistically via a detection probability curve (not imputation), and tests all quantified proteins."
+  }
+  run_a_norm_short    <- if (run_a_id == "maxlfq")
+    "quantile (limma::normalizeBetweenArrays)" else "DPC-CN cyclic loess"
+  run_a_norm_text     <- run_a_norm_short
+
   tool_context <- switch(source_b,
     "delimp" =
       "Both runs used DE-LIMP (DIA-NN -> limpa/limma pipeline). The comparison isolates the effect of search or analysis parameter differences on the same raw data.",
@@ -2030,14 +2064,16 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
 
       paste0(
         "TOOL COMPARISON CONTEXT:\n",
-        "Run A: DE-LIMP -- DIA-NN search -> DPC-Quant protein rollup (all precursors, empirical Bayes weighting) -> limma moderated t-test (variance stabilization across proteins).\n",
+        "Run A: ", run_a_pipeline_label, ". ", run_a_rollup_text, " ", run_a_de_engine_text, "\n",
         "Run B: Spectronaut ", coalesce_setting(run_b$settings$version, ""), " -- directDIA+ search -> MaxLFQ (TopN=", topn_val, ", uses ", topn_val, " most intense peptides per protein) -> ", de_test, ".\n",
         "\nQUANTIFICATION APPROACH DIFFERENCE:\n",
         "Spectronaut: TopN=", topn_val, " peptide selection for protein quantification. ",
         "The TopN cap applied to ~", pct_limited, "% of proteins (average ", mean_pep, " peptides detected). ",
-        "DE-LIMP: DPC-Quant aggregates all detected precursors with empirical Bayes weighting. ",
-        "Both approaches have trade-offs: TopN may be more robust to noisy peptides; all-precursor uses more data but may include low-quality signals.\n",
-        "\nSTATISTICAL MODEL DIFFERENCE:\n",
+        "Run A: ", run_a_rollup_text, " ",
+        "Both approaches have trade-offs: TopN may be more robust to noisy peptides; ",
+        if (run_a_id == "maxlfq") "DIA-NN's PG.MaxLFQ is also a paired-ratio aggregator, but operates over the full pre-filtered precursor set."
+        else "all-precursor empirical Bayes uses more data but may include low-quality signals.",
+        "\n\nSTATISTICAL MODEL DIFFERENCE:\n",
         "Run A (limma): moderated t-test with empirical Bayes variance shrinkage — called ", stats$n_sig_a, " proteins significant. ",
         "Run B (", de_test, "): called ", n_sig_spec, " significant at q<=0.05 (", pct_sig_spec, "% of ", n_total_b, " total). ",
         "Median |logFC| among Run B significant proteins: ", median_lfc_sig, " log2. ",
@@ -2046,23 +2082,23 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
         "Run B applies a Log2 Ratio Candidate Filter (", coalesce_setting(run_b$settings$lfc_threshold, "unknown"), " log2) ",
         "BEFORE statistical testing — proteins with insufficient fold-change evidence are excluded from DE testing entirely (NaN ratios). ",
         "Run B also uses ", coalesce_setting(run_b$settings$imputation, "unknown"), " imputation. ",
-        "Run A (limpa) uses DPC-Quant, which models missing values probabilistically via a detection probability curve (not imputation), and tests all quantified proteins.\n",
+        "Run A: ", run_a_missing_text, "\n",
         "\nNORMALIZATION DIFFERENCE:\n",
-        "Run A: DIA-NN RT-dependent normalization + DPC-CN cyclic loess. ",
+        "Run A: DIA-NN RT-dependent normalization upstream + ", run_a_norm_text, ". ",
         "Run B: ", coalesce_setting(run_b$settings$normalization, "local regression"), ". ",
         "Different normalization strategies can introduce a global intensity offset.",
         quant3_note
       )
     },
     "fragpipe_analyst" =
-      paste("Run A: DE-LIMP (DIA-NN search -> DPC-Quant rollup -> limma DE).",
+      paste(sprintf("Run A: DE-LIMP — %s.", run_a_pipeline_label),
             "Run B: FragPipe + FragPipe-Analyst (MSFragger -> IonQuant MaxLFQ rollup -> limma DE).",
             "Key structural differences:",
             "- Search engine: DIA-NN (DIA-optimized) vs MSFragger (DDA/DIA)",
-            "- Protein rollup: DPC-Quant (detection probability modelling) vs MaxLFQ (pairwise ratios)",
-            "- Normalization: DIA-NN RT-dependent vs IonQuant (optional VSN)",
+            sprintf("- Protein rollup: %s vs MaxLFQ (pairwise ratios)", run_a_rollup_short),
+            sprintf("- Normalization: %s vs IonQuant (optional VSN)", run_a_norm_short),
             "- Missingness: DIA-NN MBR vs IonQuant MBR (different implementations)",
-            "- Missing values: DPC-Quant probabilistic modelling (not imputation) vs Perseus-style imputation (FP-Analyst default)",
+            sprintf("- Missing values: %s vs Perseus-style imputation (FP-Analyst default)", run_a_missing_text),
             "Both use limma for DE, so p-value calibration should be broadly comparable."),
     "fragpipe_raw" =
       "Run A: DE-LIMP (DIA-NN). Run B: raw FragPipe output (no DE stats). Only quantification differences can be assessed.",
@@ -2226,11 +2262,17 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
   stats    <- comp_results$summary_stats
   source_b <- stats$source_b
 
+  # v3.10.0+ — Run A label comes from the parsed run's pipeline descriptor,
+  # not a hardcoded "DPC-Quant" string. Falls back gracefully for legacy runs.
+  run_a <- comp_results$run_a %||% list(settings = list())
+  run_a_id <- run_a$settings$pipeline_id %||% "dpc"
+  run_a_short <- if (run_a_id == "maxlfq") "DIA-NN/MaxLFQ/limma" else "DIA-NN/DPC-Quant/limma"
+
   tool_label <- switch(source_b,
     "delimp"           = "two DE-LIMP sessions (same pipeline, different settings)",
-    "spectronaut"      = "DE-LIMP (DIA-NN/DPC-Quant/limma) vs Spectronaut",
-    "fragpipe_analyst" = "DE-LIMP (DIA-NN/DPC-Quant/limma) vs FragPipe+FragPipe-Analyst (MSFragger/MaxLFQ/limma)",
-    "fragpipe_raw"     = "DE-LIMP (DIA-NN) vs FragPipe raw output (no DE stats)",
+    "spectronaut"      = sprintf("DE-LIMP (%s) vs Spectronaut", run_a_short),
+    "fragpipe_analyst" = sprintf("DE-LIMP (%s) vs FragPipe+FragPipe-Analyst (MSFragger/MaxLFQ/limma)", run_a_short),
+    "fragpipe_raw"     = sprintf("DE-LIMP (%s) vs FragPipe raw output (no DE stats)", run_a_short),
     "unknown comparison"
   )
 
@@ -2269,14 +2311,25 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
     "COMPARISON TYPE: ", tool_label, "\n",
     "EXPERIMENT: ", stats$contrast, " contrast, ", stats$n_samples, " samples.\n\n",
     "METHODOLOGY NOTE:\n",
-    "DE-LIMP uses DPC-Quant (Detection Probability-based Combined Quantification) from the limpa R package. ",
-    "DPC-Quant does NOT leave missing values, and it is NOT traditional imputation. Instead, it uses an ",
-    "empirical Bayes model that jointly estimates protein abundance and detection probability across all ",
-    "precursors. Proteins with zero detected precursors in a sample still receive abundance estimates ",
-    "informed by the detection probability model — these are statistically valid but less precise (higher SE). ",
-    "The missing_pct columns in the export reflect the RAW precursor-level missingness BEFORE DPC-Quant, ",
-    "not the final protein matrix (which is always complete). ",
-    "DE testing uses limma moderated t-tests with empirical Bayes variance shrinkage.\n",
+    if (run_a_id == "maxlfq") paste0(
+      "DE-LIMP processed Run A through the MaxLFQ + limma pipeline (Moschem et al., J. Proteome Res. 2025; 24:3860). ",
+      "Precursor rows in the DIA-NN report were filtered at 1% FDR plus optional QuantUMS quality cutoffs (Empirical.Quality, PG.MaxLFQ.Quality), ",
+      "then aggregated to a Protein.Group x Run matrix using DIA-NN's PG.MaxLFQ values. ",
+      "log2 + quantile-normalized cross-sample (limma::normalizeBetweenArrays). ",
+      "Plain limma::lmFit + eBayes was used for DE — NAs are left in place; ",
+      "limma drops missing values per row at fit time. Proteins entirely missing in one condition produce NA logFC ",
+      "and are surfaced separately as on/off calls (no imputation, no detection-probability modelling). ",
+      "The missing_pct columns in the export reflect missingness in the FINAL MaxLFQ protein matrix.\n"
+    ) else paste0(
+      "DE-LIMP uses DPC-Quant (Detection Probability-based Combined Quantification) from the limpa R package. ",
+      "DPC-Quant does NOT leave missing values, and it is NOT traditional imputation. Instead, it uses an ",
+      "empirical Bayes model that jointly estimates protein abundance and detection probability across all ",
+      "precursors. Proteins with zero detected precursors in a sample still receive abundance estimates ",
+      "informed by the detection probability model — these are statistically valid but less precise (higher SE). ",
+      "The missing_pct columns in the export reflect the RAW precursor-level missingness BEFORE DPC-Quant, ",
+      "not the final protein matrix (which is always complete). ",
+      "DE testing uses limma moderated t-tests with empirical Bayes variance shrinkage.\n"
+    ),
     if (source_b == "spectronaut") {
       paste0(
         "Spectronaut uses MaxLFQ on TopN peptides with a standard (Welch) t-test. ",
@@ -3211,6 +3264,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
         sample_map       = sample_map,
         diann_log_a      = log_a,
         diann_log_b      = log_b,
+        run_a            = run_a,   # v3.10.0+ — pipeline-aware AI prompts read run_a$settings$pipeline_id
         run_b            = run_b
       )
 

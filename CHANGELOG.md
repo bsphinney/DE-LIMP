@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.0] — 2026-05-06
+
+### Changed (Run Comparator now pipeline-aware)
+- **Run Comparator AI prompts and Claude export now describe the actual pipeline that produced Run A**, instead of always claiming "DPC-Quant". `parse_delimp_session()` now derives `rollup_method`, `de_engine`, `pipeline_id`, and `pipeline_label` from `y_protein$other$descriptor` (the canonical pipeline descriptor added in v3.9.17). Added `run_a` to the `comp_results` payload so prompt builders can read those fields.
+- **`build_gemini_comparator_prompt()`** rebuilt: defines `run_a_pipeline_label`, `run_a_rollup_text`, `run_a_de_engine_text`, `run_a_missing_text`, `run_a_norm_text`, `run_a_norm_short` once at function entry from `comp_results$run_a$settings`, then substitutes them into the Spectronaut and FragPipe-Analyst comparison narratives. Under MaxLFQ + limma the prompt now correctly tells Gemini that Run A used PG.MaxLFQ + quantile normalization + plain `lmFit` (NAs in place) instead of falsely claiming DPC-Quant + DPC-CN + detection-probability modelling.
+- **`build_claude_comparator_prompt()`** rebuilt: `tool_label` derives `DIA-NN/MaxLFQ/limma` vs `DIA-NN/DPC-Quant/limma` from the same descriptor; the long methodology paragraph branches on the pipeline so reviewers see the right method.
+
+This is the v3.10.0 release because it eliminates the last large class of "wrong-pipeline-name in user-facing exports" surfaces. Some lower-priority hardcoded strings still exist in the rule-engine hypothesis text (e.g. "FragPipe-Analyst uses Perseus-style imputation; DE-LIMP uses DPC-Quant") and the settings-diff body — those will be cleaned up in v3.10.1.
+
 ## [3.9.18] — 2026-05-06
 
 ### Changed (v3.10.0 prep — sweep `values$pipeline_mode_used` reads to `is_maxlfq()`)
