@@ -5,6 +5,12 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.15] — 2026-05-05
+
+### Added
+- **`MANIFEST.txt` in the Claude Export ZIP**: every export sub-step (Phospho results, GSEA, instrument metadata, TIC QC, excluded files, etc.) now records `[OK] <name>` or `[SKIPPED] <name> -- <reason>` to a manifest written into the ZIP root. So reviewers and the user can see at a glance which sections succeeded, which were skipped, and why — instead of being silently shipped a partial archive. Also surfaces the DE-LIMP version + pipeline used (`dpc` / `maxlfq`) at the top of the manifest. Final console line now reads `Claude export: N files, prompt M chars, K section(s) skipped (see MANIFEST.txt)` so failures are visible during the run too.
+- **5 silent `tryCatch(error = function(e) NULL)` blocks** in `claude_export_content` (Phospho_DE_Results.csv, GSEA_Results.csv, Instrument_Metadata.csv, TIC_QC_Metrics.csv, Excluded_Files.csv) replaced with `safe_section()` calls. Pre-v3.9.15, any of these throwing dropped the section silently from the ZIP; now they're recorded with the actual exception message.
+
 ## [3.9.14] — 2026-05-05
 
 ### Added

@@ -235,6 +235,12 @@ server_ai <- function(input, output, session, values) {
         tmp_dir <- tempdir()
         timestamp <- format(Sys.time(), "%Y%m%d_%H%M")
         files_to_zip <- character(0)
+        # v3.9.15 — every export sub-step records its outcome to this manifest
+        # (success or skipped + reason). MANIFEST.txt is bundled into the ZIP
+        # root so reviewers can see what's missing instead of being silently
+        # shipped a partial export.
+        manifest <- new.env(parent = emptyenv())
+        manifest$lines <- character(0)
 
         message("[DE-LIMP] Claude export: starting...")
         incProgress(0.1, detail = "Gathering DE data...")
@@ -296,7 +302,7 @@ server_ai <- function(input, output, session, values) {
         if (!is.null(values$phospho_fit)) {
           incProgress(0.6, detail = "Exporting phospho data...")
           phospho_note <- "\n\n**Phosphoproteomics data included** — see `Phospho_DE_Results.csv` for site-level results."
-          tryCatch({
+          safe_section(manifest, "Phospho_DE_Results.csv", {
             phospho_contrasts <- colnames(values$phospho_fit$contrasts)
             phospho_results <- do.call(rbind, lapply(phospho_contrasts, function(cname) {
               tt <- limma::topTable(values$phospho_fit, coef = cname, number = Inf) %>% as.data.frame()
@@ -306,8 +312,8 @@ server_ai <- function(input, output, session, values) {
             }))
             phospho_file <- file.path(tmp_dir, "Phospho_DE_Results.csv")
             write.csv(phospho_results, phospho_file, row.names = FALSE)
-            files_to_zip <- c(files_to_zip, phospho_file)
-          }, error = function(e) NULL)
+            files_to_zip <<- c(files_to_zip, phospho_file)
+          })
         }
 
         # --- 5. Session RDS (full app state — reload into DE-LIMP) ---
@@ -448,7 +454,7 @@ server_ai <- function(input, output, session, values) {
         gsea_note <- ""
         if (!is.null(values$gsea_results_cache) && length(values$gsea_results_cache) > 0) {
           incProgress(0.65, detail = "Exporting GSEA results...")
-          tryCatch({
+          safe_section(manifest, "GSEA_Results.csv", {
             gsea_all <- do.call(rbind, lapply(names(values$gsea_results_cache), function(ont) {
               res <- values$gsea_results_cache[[ont]]
               if (!is.null(res) && nrow(as.data.frame(res)) > 0) {
@@ -460,16 +466,16 @@ server_ai <- function(input, output, session, values) {
             if (!is.null(gsea_all) && nrow(gsea_all) > 0) {
               gsea_file <- file.path(tmp_dir, "GSEA_Results.csv")
               write.csv(gsea_all, gsea_file, row.names = FALSE)
-              files_to_zip <- c(files_to_zip, gsea_file)
+              files_to_zip <<- c(files_to_zip, gsea_file)
               n_terms <- nrow(gsea_all)
               ontologies <- paste(names(values$gsea_results_cache), collapse = ", ")
-              gsea_note <- paste0(
+              gsea_note <<- paste0(
                 "\n- **`GSEA_Results.csv`** — Gene Set Enrichment Analysis results (",
                 n_terms, " terms across ", ontologies,
                 "). Columns: ID, Description, setSize, enrichmentScore, NES, pvalue, p.adjust, Ontology\n"
               )
             }
-          }, error = function(e) NULL)
+          })
         }
 
         # --- 6. Methodology text file ---
@@ -484,7 +490,7 @@ server_ai <- function(input, output, session, values) {
         # --- 6b. Instrument metadata CSV ---
         instrument_note <- ""
         if (!is.null(values$instrument_metadata)) {
-          tryCatch({
+          safe_section(manifest, "Instrument_Metadata.csv", {
             meta <- values$instrument_metadata
             meta_clean <- meta[!sapply(meta, is.null)]
             inst_df <- data.frame(
@@ -494,38 +500,38 @@ server_ai <- function(input, output, session, values) {
             )
             inst_file <- file.path(tmp_dir, "Instrument_Metadata.csv")
             write.csv(inst_df, inst_file, row.names = FALSE)
-            files_to_zip <- c(files_to_zip, inst_file)
-            instrument_note <- "\n- **`Instrument_Metadata.csv`** — Instrument model, m/z range, gradient length, and acquisition parameters extracted from raw files\n"
-          }, error = function(e) NULL)
+            files_to_zip <<- c(files_to_zip, inst_file)
+            instrument_note <<- "\n- **`Instrument_Metadata.csv`** — Instrument model, m/z range, gradient length, and acquisition parameters extracted from raw files\n"
+          })
         }
 
         # --- 6c. TIC chromatography QC CSV ---
         tic_note <- ""
         if (!is.null(values$tic_metrics) && nrow(values$tic_metrics) > 0) {
-          tryCatch({
+          safe_section(manifest, "TIC_QC_Metrics.csv", {
             tic_file <- file.path(tmp_dir, "TIC_QC_Metrics.csv")
             write.csv(values$tic_metrics, tic_file, row.names = FALSE)
-            files_to_zip <- c(files_to_zip, tic_file)
+            files_to_zip <<- c(files_to_zip, tic_file)
             n_pass <- sum(values$tic_metrics$status == "pass", na.rm = TRUE)
             n_warn <- sum(values$tic_metrics$status == "warn", na.rm = TRUE)
             n_fail <- sum(values$tic_metrics$status == "fail", na.rm = TRUE)
-            tic_note <- sprintf(
+            tic_note <<- sprintf(
               "\n- **`TIC_QC_Metrics.csv`** — Per-run chromatography QC: AUC, peak RT, gradient width, baseline ratio, late signal, shape correlation (%d pass, %d warn, %d fail)\n",
               n_pass, n_warn, n_fail)
-          }, error = function(e) NULL)
+          })
         }
 
         # --- 6d. Excluded files CSV ---
         excluded_note <- ""
         if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
-          tryCatch({
+          safe_section(manifest, "Excluded_Files.csv", {
             excl_file <- file.path(tmp_dir, "Excluded_Files.csv")
             write.csv(values$excluded_files, excl_file, row.names = FALSE)
-            files_to_zip <- c(files_to_zip, excl_file)
-            excluded_note <- sprintf(
+            files_to_zip <<- c(files_to_zip, excl_file)
+            excluded_note <<- sprintf(
               "\n- **`Excluded_Files.csv`** \u2014 %d file(s) excluded from analysis with reasons, timestamps, group assignments, and user notes\n",
               nrow(values$excluded_files))
-          }, error = function(e) NULL)
+          })
         }
 
         # --- 7. Reproducibility R code log ---
@@ -1114,13 +1120,28 @@ server_ai <- function(input, output, session, values) {
         writeLines(prompt, prompt_file)
         files_to_zip <- c(files_to_zip, prompt_file)
 
+        # Write the export manifest so reviewers can see what's in the ZIP and
+        # what was skipped + why. (v3.9.15)
+        manifest_path <- file.path(tmp_dir, "MANIFEST.txt")
+        manifest_header <- c(
+          sprintf("DE-LIMP Claude Export — %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+          sprintf("DE-LIMP version: %s", values$app_version %||% "unknown"),
+          sprintf("Pipeline used:   %s", values$y_protein$other$pipeline %||% values$pipeline_mode_used %||% "dpc"),
+          paste0(rep("=", 78), collapse = ""),
+          ""
+        )
+        writeLines(c(manifest_header, manifest$lines), manifest_path)
+        files_to_zip <- c(files_to_zip, manifest_path)
+
         incProgress(0.9, detail = "Creating zip...")
         # zip expects relative paths — use basenames
         old_wd <- setwd(tmp_dir)
         on.exit(setwd(old_wd), add = TRUE)
         zip(file, basename(files_to_zip))
 
-        message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars", length(files_to_zip), nchar(prompt)))
+        n_skipped <- sum(grepl("^\\[SKIPPED\\]", manifest$lines))
+        message(sprintf("[DE-LIMP] Claude export: %d files, prompt %d chars, %d section(s) skipped (see MANIFEST.txt)",
+                        length(files_to_zip), nchar(prompt), n_skipped))
       })
       }, error = function(e) {
         message("[DE-LIMP] Claude export FAILED: ", e$message)
