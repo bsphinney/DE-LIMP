@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.12] — 2026-05-06
+
+### Fixed
+- **Queue still showed phase-substep names like `diann_Gemma_set2_s5_report` after the v3.10.11 collapse.** Two issues remained: (1) array-task entries (`#13828143_0`) from earlier broken Recovers were never filtered from existing queues, and (2) the v3.10.11 collapse keyed on `(base_name + output_dir)` — but substep entries often have different or empty output_dirs and end up in distinct groups, so dedup was incomplete; surviving entries also kept their substep name. The startup queue cleanup now: (a) drops any entry whose `job_id` matches `^\d+_\d+$` (array tasks); (b) groups by `base_name` only, ignoring output_dir; (c) rewrites the surviving entry's `name` to the clean base name so the queue UI shows "Gemma_set2" instead of "diann_Gemma_set2_s5_report". Console message reports `dropped N array-task entries, collapsed M substep entries -> K logical searches`.
+
 ## [3.10.11] — 2026-05-06
 
 ### Fixed

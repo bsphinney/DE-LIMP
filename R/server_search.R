@@ -492,34 +492,55 @@ server_search <- function(input, output, session, values, add_to_log,
         if (is.list(saved_jobs) && length(saved_jobs) > 0) {
           # Sanitize on load — fix any corrupt/incomplete entries
           saved_jobs <- lapply(saved_jobs, sanitize_job)
-          # v3.10.11 — collapse parallel-pipeline substep entries that
-          # leaked into prior queues (the v3.10.10 lazy-regex was a no-op,
-          # so users with prior recover history have one entry per phase
-          # substep instead of one entry per logical search). Strip
-          # `diann_` prefix and `_s[1-5]_<phase>` suffix to derive the
-          # logical search name; group by (search_name, output_dir);
-          # prefer the s5 (report) entry as canonical.
-          base_names <- vapply(saved_jobs, function(j) {
-            n <- j$name %||% ""
-            n <- sub("^diann_", "", n)
-            n <- sub("_s[1-5]_[a-z]+$", "", n)
-            n
-          }, character(1))
-          out_dirs <- vapply(saved_jobs,
-            function(j) j$output_dir %||% "", character(1))
-          group_key <- paste0(base_names, "::", out_dirs)
-          is_report <- grepl("_s5_report$",
-            vapply(saved_jobs, function(j) j$name %||% "", character(1)))
-          ord <- order(group_key, -as.integer(is_report))
-          saved_jobs <- saved_jobs[ord]
-          group_key <- group_key[ord]
-          keep <- !duplicated(group_key)
-          n_collapsed <- length(saved_jobs) - sum(keep)
-          saved_jobs <- saved_jobs[keep]
-          if (n_collapsed > 0) {
+          # v3.10.12 — clean up the queue from earlier broken Recovers.
+          # Three steps:
+          #   1. Drop SLURM array-task entries (`job_id` like `13828143_0`).
+          #      These are substeps that should never have been in the
+          #      queue; the v3.10.10 grep filter blocks future ones, but
+          #      existing ones leaked in from prior recover runs.
+          #   2. Collapse phase-substep entries (`diann_<NAME>_s[1-5]_<phase>`)
+          #      into one entry per `<NAME>`. Group by base_name only,
+          #      not by `(base_name, output_dir)` — substep entries often
+          #      have different / empty output_dirs and end up uncollapsed.
+          #   3. Rewrite the surviving entry's `name` to the clean base
+          #      so the queue UI shows "Gemma_set2", not
+          #      "diann_Gemma_set2_s5_report".
+          n_before <- length(saved_jobs)
+          job_ids_v <- vapply(saved_jobs,
+            function(j) as.character(j$job_id %||% ""), character(1))
+          is_array_task <- grepl("^[0-9]+_[0-9]+$", job_ids_v)
+          saved_jobs <- saved_jobs[!is_array_task]
+          n_dropped_array <- n_before - length(saved_jobs)
+
+          n_collapsed <- 0L
+          if (length(saved_jobs) > 0) {
+            base_names <- vapply(saved_jobs, function(j) {
+              n <- j$name %||% ""
+              n <- sub("^diann_", "", n)
+              n <- sub("_s[1-5]_[a-z]+$", "", n)
+              n
+            }, character(1))
+            names_v <- vapply(saved_jobs, function(j) j$name %||% "", character(1))
+            is_substep <- grepl("_s[1-5]_[a-z]+$", names_v)
+            is_report <- grepl("_s5_report$", names_v)
+            ord <- order(base_names, -as.integer(is_report))
+            saved_jobs <- saved_jobs[ord]
+            base_names <- base_names[ord]
+            is_substep <- is_substep[ord]
+            keep <- !duplicated(base_names)
+            n_collapsed <- length(saved_jobs) - sum(keep)
+            saved_jobs <- saved_jobs[keep]
+            base_names <- base_names[keep]
+            is_substep <- is_substep[keep]
+            for (i in seq_along(saved_jobs)) {
+              if (isTRUE(is_substep[i])) saved_jobs[[i]]$name <- base_names[i]
+            }
+          }
+
+          if (n_dropped_array > 0 || n_collapsed > 0) {
             message(sprintf(
-              "[DE-LIMP] Queue startup: collapsed %d substep entries into %d logical searches",
-              n_collapsed, length(saved_jobs)))
+              "[DE-LIMP] Queue startup: dropped %d array-task entries, collapsed %d substep entries -> %d logical searches",
+              n_dropped_array, n_collapsed, length(saved_jobs)))
           }
           values$diann_jobs <- saved_jobs
           n_active <- sum(vapply(saved_jobs, function(j)
