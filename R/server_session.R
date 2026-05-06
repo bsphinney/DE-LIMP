@@ -1523,48 +1523,80 @@ server_session <- function(input, output, session, values, add_to_log) {
         output_dir_remote <- if (!is.null(output_dir_local))
           translate_storage_path(output_dir_local, to = "hpc") else NULL
 
-        # Helper: try to fetch a file from local or remote
+        # v3.10.8 — fetch helper now tries the local-translated path
+        # (e.g. /quobyte/... → /Volumes/...) before falling back to SSH.
+        # Returns a list (path/error/source) so safe_section() callers
+        # can record the actual outcome in MANIFEST instead of silently
+        # dropping the file.
+        output_dir_local_mapped <- if (!is.null(output_dir_local)) {
+          tryCatch(translate_storage_path(output_dir_local, to = "local"),
+                   error = function(e) output_dir_local)
+        } else NULL
+
         fetch_diann_file <- function(filename, dest_name = filename) {
-          tryCatch({
-            dest <- file.path(tmp_dir, dest_name)
-            # Try local first
-            if (!is.null(output_dir_local)) {
-              local_path <- file.path(output_dir_local, filename)
-              if (file.exists(local_path)) {
-                file.copy(local_path, dest)
-                if (file.exists(dest)) return(dest)
-              }
+          dest <- file.path(tmp_dir, dest_name)
+          tried <- character(0)
+
+          # Try original output_dir
+          if (!is.null(output_dir_local)) {
+            p <- file.path(output_dir_local, filename)
+            tried <- c(tried, p)
+            if (file.exists(p)) {
+              file.copy(p, dest)
+              if (file.exists(dest)) return(list(path = dest, src = "local"))
             }
-            # Try SSH
-            if (!is.null(ssh_cfg) && !is.null(output_dir_remote)) {
-              remote_path <- file.path(output_dir_remote, filename)
-              dl <- scp_download(ssh_cfg, remote_path, dest)
-              if (dl$status == 0 && file.exists(dest)) return(dest)
+          }
+          # Try translated local path (HPC → /Volumes mount)
+          if (!is.null(output_dir_local_mapped) &&
+              !identical(output_dir_local_mapped, output_dir_local)) {
+            p <- file.path(output_dir_local_mapped, filename)
+            tried <- c(tried, p)
+            if (file.exists(p)) {
+              file.copy(p, dest)
+              if (file.exists(dest)) return(list(path = dest, src = "local-mapped"))
             }
-            NULL
-          }, error = function(e) {
-            message("[Complete Export] Could not fetch ", filename, ": ", e$message)
-            NULL
-          })
+          }
+          # Try SSH
+          if (!is.null(ssh_cfg) && !is.null(output_dir_remote)) {
+            remote_path <- file.path(output_dir_remote, filename)
+            tried <- c(tried, paste0("ssh:", remote_path))
+            dl <- tryCatch(scp_download(ssh_cfg, remote_path, dest),
+                           error = function(e) list(status = 1, error = conditionMessage(e)))
+            if (isTRUE(dl$status == 0) && file.exists(dest))
+              return(list(path = dest, src = "ssh"))
+          }
+
+          err <- if (length(tried) == 0) "no output_dir known"
+                 else paste0("not found in any location (tried ",
+                             length(tried), ": ", paste(tried, collapse = "; "), ")")
+          list(path = NULL, src = NA_character_, error = err)
         }
 
         # === 6. search_info.md ===
         incProgress(0.30, detail = "DIA-NN search info...")
-        si <- fetch_diann_file("search_info.md")
-        if (!is.null(si)) files_to_zip <- c(files_to_zip, si)
+        safe_section(manifest, "search_info.md", {
+          r <- fetch_diann_file("search_info.md")
+          if (is.null(r$path)) stop(r$error %||% "fetch failed")
+          files_to_zip <- c(files_to_zip, r$path)
+        })
 
         # === 7-11. DIA-NN matrix files ===
         incProgress(0.40, detail = "DIA-NN output matrices...")
-        # Only include small DIA-NN files (pg_matrix ~200KB, stats ~5KB)
-        # Precursor matrix (pr_matrix) can be 50MB+ — too large for sharing
-        diann_files <- c(
-          "report.pg_matrix.tsv",
-          "report.stats.tsv"
-        )
-        for (df_name in diann_files) {
-          f <- fetch_diann_file(df_name)
-          if (!is.null(f)) files_to_zip <- c(files_to_zip, f)
-        }
+        # Only include small DIA-NN files (pg_matrix ~200KB, stats ~5KB).
+        # Precursor matrix (pr_matrix) can be 50MB+ — too large for sharing.
+        # Inlined (no for-loop or local() wrapper) — both would create a new
+        # env layer that breaks `files_to_zip <-` propagation back to
+        # withProgress (same trap as the v3.10.5 `<<-` issue).
+        safe_section(manifest, "report.pg_matrix.tsv", {
+          r <- fetch_diann_file("report.pg_matrix.tsv")
+          if (is.null(r$path)) stop(r$error %||% "fetch failed")
+          files_to_zip <- c(files_to_zip, r$path)
+        })
+        safe_section(manifest, "report.stats.tsv", {
+          r <- fetch_diann_file("report.stats.tsv")
+          if (is.null(r$path)) stop(r$error %||% "fetch failed")
+          files_to_zip <- c(files_to_zip, r$path)
+        })
 
         # === 11b. Protein confidence (DPC-Quant n.observations + standard.error) ===
         # Skip under MaxLFQ — there's no DPC-Quant-equivalent SE matrix.

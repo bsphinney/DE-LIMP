@@ -5,6 +5,13 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.8] — 2026-05-06
+
+### Fixed (Complete Analysis export — silently skipped DIA-NN files)
+- **`search_info.md`, `report.pg_matrix.tsv`, `report.stats.tsv` were silently skipped on Mac when the search ran on HPC.** The fetch helper checked `file.exists(file.path(output_dir_local, filename))` against the raw HPC path stored at submit time (`/quobyte/proteomics-grp/...`). On a local Mac that path doesn't exist (the share is mounted at `/Volumes/proteomics-grp/...`), so the local check returned FALSE. SSH wasn't connected at export time, so the SSH fallback also failed. The caller did `if (!is.null(f)) files_to_zip <- c(...)` — silently dropping the file with no MANIFEST entry. Two CLAUDE.md Architectural Rule violations in one section: Rule #4 (silent catch in export paths) and a missed `translate_storage_path()` call.
+- **Fix #1 (path translation)**: `fetch_diann_file()` now also tries the translated local path via `translate_storage_path(output_dir, to = "local")` (e.g. `/quobyte/...` → `/Volumes/...`) before falling back to SSH. Three lookup tiers: original `output_dir` → translated local mount → SSH SCP.
+- **Fix #2 (no more silent skips)**: the three fetch calls (`search_info.md`, `report.pg_matrix.tsv`, `report.stats.tsv`) are now wrapped in `safe_section()`. Failures get a `[SKIPPED] <filename> -- <reason>` line in MANIFEST.txt with the actual paths that were tried. Inlined (no `for`-loop or `local()` wrapper) because either would create a new env layer and break `files_to_zip <-` propagation — same trap as the v3.10.5 `<<-` issue.
+
 ## [3.10.7] — 2026-05-06
 
 ### Fixed (Complete Analysis export — three issues from real downstream review)
