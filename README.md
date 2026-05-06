@@ -18,25 +18,27 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## What's New in v3.7.0
+## What's New in v3.10.4
 
-**NCBI Proteome Download** -- Search and download RefSeq protein FASTA databases from NCBI Datasets, with automatic gene symbol mapping via E-utilities. Supports all organisms with NCBI reference proteomes, complementing the existing UniProt download for non-model organisms.
+**Two analysis pipelines, one app** -- Choose between **DPC-Quant + limma** (limpa's detection-probability model, default) and **MaxLFQ + limma** (paper-faithful Moschem et al. 2025 implementation). The pipeline you pick is recorded in the dataset itself; methods text, AI prompts, exports, and the Reproducibility log all describe whichever pipeline actually ran -- no hardcoded "DPC-Quant" strings anywhere.
 
-**Contaminant Analysis** -- New subtab in Data Overview with summary cards (contaminant count, % of total, median intensity ratio, keratin count), per-sample stacked bar chart, top contaminants table with keratin flagging, and contaminant heatmap. Signal Distribution and Expression Grid also highlight contaminants.
+**QuantUMS quality filters** -- Optional pre-filtering of DIA-NN precursors by `eQ`, `qQ`, and `pgQ` quality scores (Moschem 2025). Applied at pipeline run-time on the parquet, with a waterfall showing how many precursors and proteins survived each filter. Defaults to off; opt-in checkbox lets you feed filtered data through limpa's DPC-Quant if you want to test the combination.
 
-**Data Explorer** -- Quartile-based abundance profiles and sample-sample scatter plots for exploring data without requiring DE analysis. Variable proteins that shift 2+ quartiles across samples are flagged. Works with no-replicates mode.
+**On/Off Proteins panel** -- New sub-tab in DE Dashboard surfaces proteins detected in ≥N samples of one condition AND zero samples of the other. limma assigns these `NA` logFC, so they're invisible in the volcano -- the new panel makes them findable.
 
-**SSH File Browser** -- Visual directory browser for remote HPC navigation. Clickable breadcrumbs, color-coded entries, file type filtering. Replaces manual path entry for raw data and FASTA directories.
+**Coverage filter** -- Drop proteins with fewer than X non-NA samples before limma fits the model (UC Davis Bioinformatics Core convention). Live waterfall shows protein retention. Available in MaxLFQ + limma mode.
 
-**Load from HPC** -- One-click button to download and analyze completed search results from the cluster via the SSH file browser.
+**Run Comparator pipeline-aware** -- Cross-tool DE comparison (DE-LIMP vs DE-LIMP / Spectronaut / FragPipe) now reads the pipeline descriptor on both sides. Hypothesis-engine rules (rollup, normalization, peptide rules) emit the correct contrast based on whether each side used MaxLFQ or DPC-Quant.
 
-**WSL2 Launcher for Windows (recommended)** -- One-click batch file (`Launch_DE-LIMP_WSL.bat`) installs R, Bioconductor, DIA-NN 2.3.2 natively inside WSL Ubuntu. Faster than Docker, no SSH key chmod gymnastics, no .NET download blocked by corporate firewalls. Docker launcher still available as an alternative.
+**Export Complete Analysis is now a true superset** -- Single ZIP at Output > Export Complete Analysis includes DE results, QC metrics, phospho results (when present), expression matrix, detection matrix, quartile profiles, variable proteins, contaminant summary, search_info.md, methods.txt, parameters.txt, reproducibility_log.R + sessionInfo, session.rds, and a DE-aware **PROMPT.md** for LLM analysis. Every section is wrapped in `safe_section()` and a **MANIFEST.txt** records what was included vs skipped and why. The three redundant "Export for Claude" buttons (Data Explorer, AI Summary, AI Chat) are now consolidated into this single download.
 
-**No-Replicates Mode** -- Quantification completes normally with n=1 per group (normalization, protein aggregation, PCA, Expression Grid). DE analysis is gracefully skipped with an informational message.
+**FASTA picker** -- Scanning a shared FASTA directory (e.g. `/quobyte/proteomics-grp/de-limp/fasta`) used to silently combine every `.fasta` it found. Now: 1 file → use directly; ≥2 files → checkbox modal so you pick exactly which one(s) to use. Local browse and SSH scan both fixed.
 
-**SSH Auto-Connect & Environment Badge** -- Auto-connects to HPC on startup when an SSH key is detected. Colored navbar badge shows deployment mode (Docker/HPC/Local/HF).
+**Provenance block** -- Exports include parquet MD5, full sessionInfo, app version, and pipeline label so reanalysis is bit-reproducible.
 
-**Previous highlights:** v3.5 Run Comparator, Search & Analysis History, Chromatography QC, smart HPC partitions. v3.1 UI overhaul, Core Facility Mode. v3.0 MOFA2, Docker search, phosphoproteomics, GSEA.
+**Previous highlights** (v3.7): NCBI Proteome Download with gene mapping, Contaminant Analysis with keratin flagging, Data Explorer (quartile + scatter), SSH File Browser, Load from HPC, WSL2 Launcher for Windows, No-Replicates Mode, SSH Auto-Connect, Environment Badge.
+
+**Earlier highlights** (v3.5): Run Comparator, Search & Analysis History, Chromatography QC, smart HPC partitions. (v3.1): UI overhaul, Core Facility Mode. (v3.0): MOFA2, Docker search, phosphoproteomics, GSEA.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
@@ -149,7 +151,62 @@ See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 ## Installation
 
-**Requirements:** R 4.5+ (for limpa), Bioconductor 3.22+ (auto-configured with R 4.5+)
+**Requirements:** R 4.5 or newer (for limpa). Everything else is installed automatically the first time you launch the app.
+
+### Mac -- step-by-step (first-time users)
+
+If this is your first time running an R/Shiny app, do these four steps in order. Skip ahead to **Already have R, RStudio, and Git?** below if you don't need the walkthrough.
+
+**1. Install R**
+
+Download the right installer for your Mac from CRAN: <https://cloud.r-project.org/bin/macosx/>
+
+- Apple Silicon (M1, M2, M3, M4): pick the **`-arm64.pkg`** file.
+- Intel Mac: pick the **`-x86_64.pkg`** file (also labelled "older Macs").
+
+Open the `.pkg` file and follow the prompts. Not sure which chip you have? Click the Apple menu → "About This Mac". "Apple M*x*" = arm64; anything starting with "Intel" = x86_64.
+
+**2. Install RStudio (recommended)**
+
+Download from <https://posit.co/download/rstudio-desktop/> and drag RStudio to `/Applications`. RStudio is the friendliest way to run R on a Mac. (VS Code with the R extension also works if you prefer it.)
+
+**3. Install Git**
+
+The simplest way: open the **Terminal** app (Cmd-Space, type "Terminal", Enter) and run:
+
+```bash
+git --version
+```
+
+If Git is missing, macOS will pop up a dialog asking to install the Xcode Command Line Tools -- click "Install" and wait. That installs Git, no Apple Developer account needed.
+
+**4. Download DE-LIMP and launch it**
+
+Still in Terminal:
+
+```bash
+cd ~/Documents
+git clone https://github.com/bsphinney/DE-LIMP.git
+```
+
+This creates `~/Documents/DE-LIMP/`. Now open RStudio. In the R console (the bottom-left pane), paste:
+
+```r
+shiny::runApp('~/Documents/DE-LIMP', port = 3838, launch.browser = TRUE)
+```
+
+The first launch takes 5--15 minutes -- DE-LIMP installs ~30 R packages from CRAN and Bioconductor automatically. Subsequent launches start in seconds. When it's done, your browser opens to the DE-LIMP app.
+
+**Updating later:**
+
+```bash
+cd ~/Documents/DE-LIMP
+git pull
+```
+
+Then re-launch from RStudio. Updating the app code never needs you to reinstall R or RStudio.
+
+### Already have R, RStudio, and Git?
 
 ```bash
 git clone https://github.com/bsphinney/DE-LIMP.git
@@ -157,19 +214,21 @@ cd DE-LIMP
 ```
 
 ```r
-shiny::runApp('.', port=3838, launch.browser=TRUE)
+shiny::runApp('.', port = 3838, launch.browser = TRUE)
 ```
 
 All dependencies install automatically on first run:
-```r
-# Core: shiny, bslib, plotly, DT, rhandsontable, shinyjs
-# Data: dplyr, tidyr, stringr, readr, arrow
-# Stats: limpa, limma, ComplexHeatmap, clusterProfiler
-#        org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi
-#        KSEAapp, ggseqlogo, MOFA2, basilisk, callr
-# Viz:  ggplot2, ggrepel, ggridges, enrichplot
-# AI:   httr2, curl
-```
+
+- **Core:** shiny, bslib, plotly, DT, rhandsontable, shinyjs, dplyr, tidyr, stringr, readr, arrow, ggplot2, ggrepel, ggridges
+- **Stats:** limpa, limma, ComplexHeatmap, clusterProfiler, org.Hs.eg.db, org.Mm.eg.db, AnnotationDbi, enrichplot, KSEAapp, ggseqlogo, MOFA2, basilisk, callr
+- **AI / network:** httr2, curl
+
+### Troubleshooting first launch
+
+- **"Package 'limpa' is missing" or "Missing required packages"** -- DE-LIMP installs missing packages automatically, but right after a brand-new R release (e.g. you just installed R 4.6) the BiocManager helper can lag a few weeks behind in knowing which Bioconductor branch pairs with the new R. DE-LIMP v3.7.3+ falls back to a direct Bioconductor download in that case, so just rerun the launch command once and the install finishes. Make sure Wi-Fi is on; the first run needs internet.
+- **"R version: 4.x.y (NEED: 4.5+)"** -- you have an older R. Upgrade from <https://cloud.r-project.org/bin/macosx/> and rerun.
+- **Permission denied when installing packages** -- you're trying to install into the system library. Either run RStudio normally (it sets up a personal library automatically) or, in a Terminal R session, type `dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)` once.
+- **Port 3838 already in use** -- another R session is already serving the app. In RStudio, click "Session → Restart R", then relaunch. Or change the port: `shiny::runApp(..., port = 3839)`.
 
 ---
 

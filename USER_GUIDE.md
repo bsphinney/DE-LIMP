@@ -96,9 +96,21 @@ This is the most critical step for statistical analysis. The workflow is streaml
     * Check the boxes to include covariates in the statistical model
     * Only covariates with 2+ unique values will be used
     * **When to use covariates**: If your samples were run on different days or instruments, adding "Batch" separates batch effects from your treatment effect. If samples come from male and female animals and sex is not your research question, adding "Sex" removes sex-related variation. Only add covariates you have reason to suspect affect protein levels -- adding too many with few samples can reduce statistical power
-6.  **Run the Analysis:**
+6.  **Choose Pipeline (NEW in v3.9, sidebar > Pipeline Settings):**
+    * **DPC-Quant + limma** (default) — `limpa::dpcQuant()` builds a complete protein matrix using the Detection Probability Curve model, then `limma::eBayes()` fits the linear model. Missing precursors contribute to the protein quantity through their detection probability rather than being imputed. Best when you want every protein quantified across every sample.
+    * **MaxLFQ + limma** — paper-faithful Moschem et al. (J. Proteome Res. 2025; 24:3860) implementation. DIA-NN's MaxLFQ values feed directly into limma after quantile normalization. Missing values stay missing; limma drops them per row at fit time. Best when you want exactly the published Moschem protocol or when comparing to other tools (Spectronaut, FragPipe) that also use MaxLFQ. The Run Comparator handles either side automatically.
+    * The methods text, AI prompts, exports, and reproducibility log all describe whichever pipeline you ran — there are no hardcoded "DPC-Quant" strings. Switching pipelines and re-running gives you a completely different self-described export.
+
+7.  **QuantUMS Quality Filters (NEW in v3.9, sidebar > QuantUMS quality filters):**
+    * Optional pre-filter on DIA-NN precursor quality scores (`eQ`, `qQ`, `pgQ`) per Moschem 2025. Sliders default to off. A filter waterfall shows how many precursors and proteins survived each threshold so you can see the impact before running.
+    * By default these filters bypass limpa and feed directly into MaxLFQ + limma. There is also a "Use limpa anyway" checkbox to test the combination — note that QuantUMS pre-filtering is not validated against limpa's DPC-Quant assumptions, so the combination is experimental.
+
+8.  **Coverage Filter (NEW in v3.9, MaxLFQ + limma mode only):**
+    * Drop proteins with fewer than X non-NA samples before limma fits. Follows the UC Davis Bioinformatics Core's limma-proteomics tutorial convention. A live waterfall shows protein retention. Set to 0 to disable.
+
+9.  **Run the Analysis:**
     * Click the **"▶ Run Pipeline"** button at the top of the modal
-    * **What happens?** The app uses the `limpa` package to perform DPC normalization and the `limma` package to fit linear models for differential expression
+    * **What happens?** Depending on the pipeline you chose: DPC-Quant + limma runs `limpa::dpcQuant()` → `limma::eBayes()`; MaxLFQ + limma runs DIA-NN MaxLFQ → quantile normalization → `limma::eBayes()`.
     * The modal will automatically close and navigate to the QC Plots tab
     * Wait for the status to change to **"✅ Complete!"**
 
@@ -347,7 +359,7 @@ This is your landing page with 5 sub-tabs:
 * **Data Explorer** (NEW in v3.7) — Two panels for exploring data without requiring DE analysis:
   * **Abundance Profiles**: Proteins split into intensity quartiles (Q1=highest to Q4=lowest). Heatmap shows top 10 per quartile, colored by per-sample quartile assignment. Proteins that shift 2+ quartiles across samples are flagged as "Variable" — potentially biologically interesting even without replicates.
   * **Sample-Sample Scatter**: Pick any two samples and compare protein intensities. Identity line shows expected correlation. Outliers (>4-fold difference) are labeled with gene names. Shows Pearson correlation, protein count, and number of outliers. Contaminants shown as orange triangles.
-* **AI Summary** — Generate AI-powered analysis summaries that analyze all contrasts simultaneously (requires Gemini API key); includes **"Export Report"** for standalone HTML and **"Export for Claude"** for a comprehensive .zip archive (see [Section 8](#8--ai-powered-analysis--export))
+* **AI Summary** — Generate AI-powered analysis summaries that analyze all contrasts simultaneously (requires Gemini API key); includes **"Export Report"** for standalone HTML. The comprehensive analysis ZIP for Claude / ChatGPT / other LLMs is now at **Output > Export Complete Analysis** (see [Section 8.4](#84-export-complete-analysis-zip-for-llm-analysis-or-sharing))
 
 ### 🔬 The Grid View
 Click the green **"Open Grid View"** button to open the deep-dive table.
@@ -370,7 +382,7 @@ Click the green **"Open Grid View"** button to open the deep-dive table.
 ## 5. Visualizing Results
 
 ### 📉 DE Dashboard
-The DE Dashboard is organized into **four sub-tabs** for a cleaner workflow:
+The DE Dashboard is organized into **five sub-tabs** for a cleaner workflow (Volcano, Results Table, PCA, CV Analysis, On/Off Proteins):
 
 * **Current Comparison Display:** A prominent header banner at the top shows which comparison you're viewing (e.g., "Evosep - Affinisep"). This updates automatically when you change the comparison dropdown.
 
@@ -405,6 +417,17 @@ The **Coefficient of Variation (CV)** measures how reproducible a protein's meas
 * **CV Analysis scatter plot:** Interactive Plotly scatter plot showing logFC vs Average CV for all significant proteins, color-coded by CV category (Excellent < 10%, Good 10-20%, Moderate 20-30%, High > 30%)
 * **Summary stats subtitle:** Per-group median CV and percentage of proteins below 20% CV displayed directly in the plot subtitle
 * **CSV export:** Download the full CV analysis data for all significant proteins
+
+#### On/Off Proteins Sub-tab (NEW in v3.10)
+Some biologically interesting proteins are detected only in one condition — they have abundance in every sample of one group and zero precursors in every sample of the other. limma assigns these proteins `NA` logFC (because the fold change is undefined when one mean is missing or zero), so they're invisible in the volcano plot. The On/Off Proteins sub-tab surfaces them.
+
+* **`detected_g1` / `detected_g2`** — number of samples in each group where the protein was detected.
+* **`total_g1` / `total_g2`** — total samples in each group (the same for every row of a contrast — these are properties of group assignment, not of the protein).
+* **`Direction`** — either `<group1>_only` or `<group2>_only`.
+* **Min N input** (default 2) — require detection in at least N samples of the "on" group to filter out single-sample artifacts.
+* **CSV export** for downstream analysis.
+
+This is most useful in MaxLFQ + limma mode where missing values genuinely propagate to NAs. Under DPC-Quant the matrix is complete by design, so on/off calls are rarer (they require zero precursor evidence on one side, which DPC-Quant downweights but does not zero out).
 
 ### 📐 QC Sample Metrics & Plots
 * **Sample Metrics:** A single faceted trend plot showing four key per-run quality metrics stacked vertically:
@@ -742,7 +765,7 @@ Reports are saved to the `reports/` directory and recorded in the SQLite databas
 DE-LIMP offers two complementary AI pathways:
 
 - **In-app AI (Google Gemini):** Quick questions and summaries powered by Google Gemini, right inside the app. This includes **AI Summary** (a one-click overview of all comparisons) and **Data Chat** (interactive Q&A about your data). Requires a free Gemini API key.
-- **Export for External AI:** Download your complete analysis as a .zip to upload to Claude, ChatGPT, or other AI tools for deeper analysis, manuscript writing, or extended interpretation. No API key needed for the export itself.
+- **Export for External AI (Output > Export Complete Analysis ZIP):** Download your complete analysis as a single .zip — DE results + QC + phospho + expression matrix + detection matrix + quartile profiles + variable proteins + methods + parameters + reproducibility log + sessionInfo + a DE-aware **PROMPT.md** + **MANIFEST.txt**. Upload the .zip to Claude, ChatGPT, or any AI assistant for deeper analysis, manuscript writing, or extended interpretation. No API key needed for the export itself.
 
 ### 8.1 Setup — Google Gemini API Key
 
@@ -833,30 +856,39 @@ This is one of DE-LIMP's most powerful features -- the AI and the interactive pl
 
 Click **"Save Chat"** to download the full conversation as a plain text file. The export includes both your messages and all AI responses, with timestamps. Useful for documenting your analytical reasoning or sharing insights with collaborators.
 
-### 8.4 Export for Claude (.zip Archive)
+### 8.4 Export Complete Analysis ZIP (for LLM analysis or sharing)
 
-> **Works with any AI:** This export is optimized for Claude but works equally well with ChatGPT, Gemini, Copilot, or any AI assistant that accepts file uploads.
+> **One button, all the data.** Output > Export Complete Analysis ZIP. Works with any AI assistant (Claude, ChatGPT, Gemini, Copilot, …) and is also the right way to share or archive an analysis. Renamed from "Export for Claude" in v3.10.4 — the three older Claude-specific buttons (in Data Explorer, AI Summary, AI Chat) are now consolidated into this single Output entry.
 
-The **"Export for Claude"** button (on the **AI Summary** sub-tab under Data Overview) downloads a comprehensive multi-file package designed for deep analysis with Claude or other external AI systems. While the in-app AI features use Google Gemini, this export creates a portable dataset package optimized for extended conversation-based analysis.
+The **"Export Complete Analysis ZIP"** button on the Output > Export Data tab downloads a comprehensive multi-file archive that is a true superset of every other DE-LIMP export. Pipeline-aware throughout: PROMPT.md and Parameters.txt describe whichever pipeline you ran (DPC-Quant + limma vs MaxLFQ + limma), with no hardcoded "DPC-Quant" strings.
 
 **The .zip archive contains:**
 
 | File | Contents |
 | :--- | :--- |
-| **`PROMPT.md`** | Full context document explaining the experimental design, statistical methodology, and how to interpret each file -- serves as an instruction manual for the AI |
-| **`DE_Results_Full.csv`** | All proteins across all contrasts with logFC, P.Value, adj.P.Val, and expression values |
-| **`Expression_Matrix.csv`** | Log2 expression values (rows = proteins, columns = samples) |
-| **`QC_Metrics.csv`** | Per-sample quality control statistics (precursor counts, protein counts, MS1 signal, data completeness) |
-| **`GSEA_Results.csv`** | Gene set enrichment results across all ontologies (included if GSEA has been run) |
-| **`Phospho_DE_Results.csv`** | Site-level phospho differential expression results (included if phospho data is detected) |
-| **`Session.rds`** | Full DE-LIMP session state -- can be reloaded into DE-LIMP to restore the exact analysis. **Note:** Contains all raw and processed data, so this file can be very large |
-| **`Group_Assignments.csv`** | Sample-to-group mapping table |
-| **`Analysis_Parameters.txt`** | Pipeline settings (Q-value cutoff, covariates, normalization method) |
-| **`Methods_and_References.txt`** | Statistical methodology text suitable for a paper's Methods section, with citations |
-| **`Reproducibility_Code.R`** | Complete R code log with timestamps for every analysis step |
+| **`PROMPT.md`** | Full context document — experimental design, statistical methodology, file roadmap, and an analysis prompt that adapts to DE vs exploratory / no-replicates mode |
+| **`MANIFEST.txt`** | Per-section `[OK]` / `[SKIPPED]` log — read this first to see what was included vs left out and why (no more silent failures) |
+| **`DE_Results_Full.csv`** | All proteins × all contrasts with logFC, P.Value, adj.P.Val, B, Contrast (when DE was run) |
+| **`QC_Metrics.csv`** | Per-sample QC statistics joined with sample metadata (when QC stats exist) |
+| **`Phospho_DE_Results.csv`** | Site-level phospho DE results (when phosphoproteomics ran) |
+| **`expression_matrix.csv`** | Pipeline-aware: log2-complete under DPC-Quant; with NAs under MaxLFQ + limma |
+| **`detection_matrix.csv`** | Per-protein precursor detection counts per sample (BEFORE pipeline) |
+| **`diann_pg_matrix.tsv`** | DIA-NN's raw protein-level matrix with real missing values (0 = not detected) |
+| **`data_quality_summary.csv`** | Per-sample protein counts, % missing, contaminant counts |
+| **`quartile_profiles.csv`** | Per-sample quartile assignments with `Quartile_Range` column |
+| **`variable_proteins.csv`** | Proteins shifting ≥2 quartiles across samples |
+| **`contaminant_summary.csv`** | Per-contaminant intensity table with totals + per-sample contamination % rows |
+| **`protein_confidence.csv`** | nObs + posterior SE per protein per sample (DPC-Quant only — skipped under MaxLFQ) |
+| **`sample_metadata.csv`** / **`group_assignments.csv`** | Sample-to-group mapping |
+| **`search_info.md`** | Full DIA-NN search parameters and job metadata (fetched local-first, SSH-fallback) |
+| **`methods.txt`** / **`parameters.txt`** | Pipeline label, Q-value cutoff, covariates, normalization, DIA-NN settings |
+| **`reproducibility_log.R`** | Complete R code log + `sessionInfo()` for bit-reproducibility |
+| **`session.rds`** | Full DE-LIMP session state — reload via Output > Load Session to restore everything |
+
+Failures in any one section now write a `[SKIPPED] <name> -- <reason>` line to MANIFEST.txt instead of silently dropping the file (Architectural Rule #4 in CLAUDE.md). Reviewers reading the export downstream see exactly what's missing and why.
 
 **How to use it:**
-1. Click **"Export for Claude"** on the AI Summary sub-tab to download the .zip file
+1. Click **"Export Complete Analysis ZIP"** under Output > Export Data
 2. Go to [claude.ai](https://claude.ai) (free tier available), [chatgpt.com](https://chatgpt.com), or another AI assistant
 3. Start a new conversation and upload the .zip file (or individual files like `PROMPT.md` + the relevant CSVs)
 4. Ask questions like *"Summarize the key biological findings"*, *"Help me write a results paragraph for my paper"*, or *"What pathways are most affected?"*
@@ -867,8 +899,9 @@ The **"Export for Claude"** button (on the **AI Summary** sub-tab under Data Ove
 * Compare your results against known biology or published datasets
 * Generate publication-quality figure descriptions
 * Explore specific pathways or protein families in detail
+* **Reproducible sharing or archive**: hand the ZIP to a collaborator and they can reload session.rds into DE-LIMP for the exact same view, or read methods.txt + parameters.txt + reproducibility_log.R for full context
 
-> **Note:** The Export for Claude package is for use with external AI tools (Claude, ChatGPT, etc.). It does not connect to or require any Anthropic API key. The in-app AI features (Sections 8.2 and 8.3) use Google Gemini.
+> **Note:** The Export Complete Analysis ZIP is for use with external AI tools (Claude, ChatGPT, etc.) or for sharing / archiving an analysis. It does not connect to or require any Anthropic API key. The in-app AI features (Sections 8.2 and 8.3) use Google Gemini.
 
 ### 8.5 Other Export Features
 
