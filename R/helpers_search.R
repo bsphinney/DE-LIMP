@@ -1427,7 +1427,8 @@ check_local_diann_status <- function(proc, log_file) {
 #' @param sbatch_path Full path to sbatch binary (used to find sacct)
 #' @param days_back Integer — how many days back to search (default 7)
 #' @return data.frame with job_id, name, state, elapsed, or empty data.frame
-recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back = 7) {
+recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL,
+                               days_back = 7, user = NULL) {
   empty <- data.frame(job_id = character(), name = character(),
                       state = character(), elapsed = character(),
                       stringsAsFactors = FALSE)
@@ -1439,18 +1440,33 @@ recover_slurm_jobs <- function(ssh_config = NULL, sbatch_path = NULL, days_back 
     "sacct"
   }
 
-  # Query sacct for recent jobs with "diann" in the name
-  # Include WorkDir and StdOut so we can find log files and output
+  # v3.10.10 — scope to the SSH-authenticated user explicitly. Without `-u`,
+  # sacct's behavior depends on cluster policy and (in some configs) returns
+  # other lab members' jobs the user has visibility into. The Recover button
+  # should ONLY return jobs the connected user submitted themselves.
+  user_arg <- if (!is.null(user) && nzchar(user)) {
+    paste0(" -u ", shQuote(user))
+  } else ""
+
+  # Query sacct for recent jobs with "diann" in the name.
+  # v3.10.10 grep changes:
+  #   1. `grep -v '^[^|]*[.][^|]*|'` (kept from v3.10.6) — drop .batch/.extern
+  #      substep rows by checking the JobID field, not the whole line.
+  #   2. `grep -v '^[0-9]\+_'` — drop array task rows (JobID like
+  #      `13828143_0`). Array tasks are substeps of the parent (`13828143`)
+  #      which appears separately. Without this filter, a single 10-task
+  #      array search produces 11 queue entries — the user only wants 1.
   cmd <- paste0(
     sacct_bin,
+    user_arg,
     " --starttime=$(date -d '", days_back, " days ago' +%Y-%m-%d 2>/dev/null || ",
     "date -v-", days_back, "d +%Y-%m-%d)",
     " --format=JobID%20,JobName%50,State%20,Elapsed%15,WorkDir%120,StdOut%300",
     " --parsable2 --noheader",
-    # v3.10.6 — filter substep rows (.batch, .extern) by checking the JobID
-    # FIELD, not the whole line. The old `grep -v '\\.'` killed every line
-    # because StdOut paths always contain a dot (e.g. ".out").
-    " 2>/dev/null | grep -i diann | grep -v '^[^|]*[.][^|]*|'"
+    " 2>/dev/null",
+    " | grep -i diann",
+    " | grep -v '^[^|]*[.][^|]*|'",
+    " | grep -v '^[0-9]\\+_'"
   )
 
   result <- if (!is.null(ssh_config)) {
@@ -1605,7 +1621,7 @@ ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("ssh", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = ""))
+                           env = c("current", MallocStackLogging = NA_character_))
       out <- strsplit(res$stdout, "\n")[[1]]
       if (res$status != 0) attr(out, "status") <- res$status
       out
@@ -1645,7 +1661,7 @@ scp_download <- function(ssh_config, remote_path, local_path, timeout = 1800) {
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("scp", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = ""))
+                           env = c("current", MallocStackLogging = NA_character_))
       out <- paste0(res$stdout, res$stderr)
       if (res$status != 0) attr(out, "status") <- res$status
       out
@@ -1685,7 +1701,7 @@ scp_upload <- function(ssh_config, local_path, remote_path, timeout = 1800) {
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("scp", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = ""))
+                           env = c("current", MallocStackLogging = NA_character_))
       out <- paste0(res$stdout, res$stderr)
       if (res$status != 0) attr(out, "status") <- res$status
       out
@@ -2471,6 +2487,98 @@ generate_search_info <- function(analysis_name, output_dir, raw_files, fasta_fil
 # =============================================================================
 # Parallel DIA-NN Search (5-Step Workflow)
 # =============================================================================
+
+#' Parse a search_info.md file written by generate_search_info()
+#'
+#' Returns a list with the same shape that submit-time code populates into
+#' values$diann_search_settings, plus an instrument_metadata sublist. Used by
+#' the Recover handler and Load-from-HPC handler so jobs imported after the
+#' fact get the same settings flow as queue-submitted searches.
+#'
+#' @param md_path Path to a local search_info.md file
+#' @return list(search_params, fasta_files, normalization, search_mode,
+#'   diann_version, instrument_metadata, raw_method) or NULL on failure
+#' @export
+parse_search_info_md <- function(md_path) {
+  if (!file.exists(md_path)) return(NULL)
+  lines <- tryCatch(readLines(md_path, warn = FALSE),
+                    error = function(e) character(0))
+  if (length(lines) == 0) return(NULL)
+
+  # Extract `**Key**: value` and `- **key**: \`value\`` patterns.
+  # Strip leading bullets/whitespace, capture key + value.
+  kv <- list()
+  for (ln in lines) {
+    m <- regmatches(ln, regexec("^[\\s\\-*]*\\*\\*([^*]+)\\*\\*\\s*:\\s*`?([^`\\n]*?)`?\\s*$", ln, perl = TRUE))[[1]]
+    if (length(m) >= 3) {
+      key <- tolower(gsub("\\s+", "_", trimws(m[2])))
+      val <- trimws(m[3])
+      if (nzchar(val)) kv[[key]] <- val
+    }
+  }
+  if (length(kv) == 0) return(NULL)
+
+  num <- function(x, default = NA_real_) {
+    if (is.null(x) || !nzchar(x)) return(default)
+    suppressWarnings(as.numeric(x))
+  }
+  bool <- function(x, default = FALSE) {
+    if (is.null(x) || !nzchar(x)) return(default)
+    toupper(x) %in% c("TRUE", "T", "YES", "ON", "1")
+  }
+
+  search_params <- list(
+    qvalue           = num(kv$qvalue, 0.01),
+    mass_acc_mode    = kv$mass_acc_mode %||% "manual",
+    mass_acc         = num(kv$mass_acc, 15),
+    mass_acc_ms1     = num(kv$mass_acc_ms1, 15),
+    scan_window      = num(kv$scan_window, 6),
+    enzyme           = kv$enzyme %||% "K*,R*",
+    missed_cleavages = num(kv$missed_cleavages, 1),
+    mbr              = bool(kv$mbr, TRUE),
+    rt_profiling     = bool(kv$rt_profiling, TRUE),
+    min_pep_len      = num(kv$min_pep_len, 7),
+    max_pep_len      = num(kv$max_pep_len, 30),
+    min_pr_mz        = num(kv$min_pr_mz, 300),
+    max_pr_mz        = num(kv$max_pr_mz, 1800),
+    min_pr_charge    = num(kv$min_pr_charge, 1),
+    max_pr_charge    = num(kv$max_pr_charge, 4),
+    min_fr_mz        = num(kv$min_fr_mz, 200),
+    max_fr_mz        = num(kv$max_fr_mz, 1800),
+    max_var_mods     = num(kv$max_var_mods, 1),
+    mod_met_ox       = bool(kv$unimod35) || bool(kv$mod_met_ox),
+    mod_nterm_acetyl = bool(kv$unimod1) || bool(kv$mod_nterm_acetyl),
+    extra_var_mods   = kv$extra_var_mods %||% "",
+    extra_cli_flags  = kv$extra_cli_flags %||% ""
+  )
+
+  # Instrument metadata block — keys come from the "Instrument & Acquisition"
+  # section of search_info.md (`generate_search_info` writes them as bullets).
+  instrument_metadata <- list(
+    instrument_model  = kv$instrument %||% kv$instrument_model,
+    instrument_serial = kv$serial,
+    acquisition_mode  = kv$acquisition_mode,
+    n_dia_windows     = if (!is.null(kv$dia_windows))
+      suppressWarnings(as.integer(kv$dia_windows)) else NA_integer_,
+    mz_range          = kv[["m/z_range"]] %||% kv$mz_range,
+    raw_method        = kv$raw_method
+  )
+  instrument_metadata <- instrument_metadata[!vapply(instrument_metadata, is.null,
+    logical(1))]
+
+  list(
+    search_params       = search_params,
+    fasta_files         = if (!is.null(kv$fasta)) strsplit(kv$fasta, ",\\s*")[[1]]
+                          else character(0),
+    normalization       = kv$normalization %||% "on",
+    search_mode         = kv$search_mode %||% "libfree",
+    diann_version       = kv$diann_version %||% kv$diann_container,
+    instrument_metadata = if (length(instrument_metadata) > 0) instrument_metadata
+                          else NULL,
+    imported_from_log   = TRUE,
+    source              = "search_info.md"
+  )
+}
 
 #' Write a file_list.txt for SLURM array jobs
 #' @param raw_files Character vector of raw file paths

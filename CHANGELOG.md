@@ -5,6 +5,19 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.10] — 2026-05-06
+
+### Fixed
+- **"Recover" button now scopes to the SSH-connected user.** `recover_slurm_jobs()` previously ran `sacct` with no `-u` flag — depending on cluster policy, this could return other lab members' jobs. Now passes `-u <ssh_user>` from `cfg$user`. Per Brett's directive: "only recover jobs submitted by the person in the username box that tested the connection with HIVE."
+- **Recover no longer creates 23 queue entries per parallel-pipeline search** (5 phase substeps + 20 array-task rows). Two filters added in `recover_slurm_jobs()`:
+  1. `grep -v '^[0-9]\+_'` drops array task rows (e.g. `13828143_0`) — they're substeps of the parent.
+  2. The Recover handler now collapses the remaining `diann_<NAME>_s<N>_<phase>` substep rows into one logical search per unique base name (preferring `_s5_report` as canonical for output_dir).
+  Net: `Gemma_set2`'s 23 sacct rows → 1 queue entry.
+- **Recover no longer freezes the queue render with a 490-row sacct dump.** The handler used to `values$diann_jobs <- c(values$diann_jobs, list(job_entry))` *inside* a tight loop. With N rows: O(N²) memory churn, N reactive invalidations, N persistence writes. Brett saw "490 jobs recovered" but the queue stayed empty (render couldn't keep up). Refactored to accumulate new entries in a local list, then assign once at the end → one invalidation, one persistence write, one render pass.
+- **Dedup by `output_dir` as well as `job_id`** — re-running Recover doesn't pile up duplicate entries for the same logical search even when the original entry's `job_id` was the array parent and the recovered row has the report-step ID.
+- **Recover and Load-from-HPC now read `search_info.md`** so LC + mass spec settings flow through. Added `parse_search_info_md()` helper in `R/helpers_search.R` — parses the markdown key-value lines into the same shape that submit-time code populates into `values$diann_search_settings`, plus an `instrument_metadata` block. Both the Recover handler and the Load-from-HPC handler now SCP `search_info.md` from the search's `output_dir` and merge the parsed settings. Brett's question: "Load from HPC isn't supposed to read the search LC and mass spec settings?" — yes it is, now it does.
+- **macOS `MallocStackLogging` console noise suppressed.** `processx::run(env = c("current", MallocStackLogging = ""))` in three places set the var to empty-string, which macOS still complains about ("can't turn off malloc stack logging because it was not enabled"). Switched to `MallocStackLogging = NA_character_` which actually unsets the var — the warnings stop.
+
 ## [3.10.9] — 2026-05-06
 
 ### Added

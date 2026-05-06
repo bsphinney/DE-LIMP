@@ -1799,13 +1799,42 @@ server_search <- function(input, output, session, values, add_to_log,
           # Auto-detect phospho data
           values$phospho_detected <- detect_phospho(local_report)
 
-          # Store the remote output directory for history linking
+          # Store the remote output directory for history linking.
+          # v3.10.10 — also fetch search_info.md from the same directory so
+          # the LC + mass spec settings flow into Methods, AI prompts,
+          # exports, etc., the same way they do for queue-submitted searches.
           remote_dir <- dirname(selected)
-          values$diann_search_settings <- list(
-            output_dir = remote_dir,
-            loaded_from_hpc = TRUE,
-            report_file = selected
+          si_settings <- tryCatch({
+            si_remote <- file.path(remote_dir, "search_info.md")
+            si_tmp <- tempfile(fileext = ".md")
+            dl <- scp_download(cfg, si_remote, si_tmp, timeout = 30)
+            if (isTRUE(dl$status == 0) && file.exists(si_tmp)) {
+              parse_search_info_md(si_tmp)
+            } else NULL
+          }, error = function(e) {
+            message("[DE-LIMP] Load-from-HPC: search_info.md not fetched: ",
+                    e$message)
+            NULL
+          })
+
+          values$diann_search_settings <- modifyList(
+            list(output_dir = remote_dir, loaded_from_hpc = TRUE,
+                 report_file = selected),
+            si_settings %||% list()
           )
+
+          # Promote instrument metadata from search_info.md if present
+          if (!is.null(si_settings) && !is.null(si_settings$instrument_metadata)) {
+            values$instrument_metadata <- si_settings$instrument_metadata
+          }
+
+          if (!is.null(si_settings)) {
+            showNotification(
+              sprintf("Imported search settings from search_info.md (FASTA: %s)",
+                      paste(basename(si_settings$fasta_files %||% "?"),
+                            collapse = ", ")),
+              type = "message", duration = 6)
+          }
 
           gc(verbose = FALSE)
 
@@ -7362,14 +7391,34 @@ server_search <- function(input, output, session, values, add_to_log,
     # --- Recover HPC jobs via sacct ---
     if (hpc_available) {
       cfg <- isolate(ssh_config())
+      # v3.10.10 — only recover jobs submitted by the SSH-connected user
+      # (cfg$user). Without this scope, sacct may return lab members'
+      # jobs depending on cluster policy.
+      ssh_user <- cfg$user %||% Sys.info()[["user"]]
       withProgress(message = "Scanning SLURM for previous DIA-NN jobs...", {
         slurm_jobs <- recover_slurm_jobs(
           ssh_config = cfg,
           sbatch_path = values$ssh_sbatch_path %||%
             (if (nzchar(local_sbatch_path)) local_sbatch_path else NULL),
-          days_back = 14
+          days_back = 14,
+          user = ssh_user
         )
       })
+
+      # v3.10.10 — collapse parallel-pipeline substeps (`diann_<NAME>_s<N>_<phase>`)
+      # into ONE logical search per unique base name. Prefer the s5 (report)
+      # row as canonical since that's the final step with the full output_dir.
+      if (nrow(slurm_jobs) > 1) {
+        slurm_jobs$search_name <- sub("^diann_(.+?)(_s[1-5]_[a-z]+)?$",
+                                       "\\1", slurm_jobs$name)
+        slurm_jobs$is_report <- grepl("_s5_report$", slurm_jobs$name)
+        slurm_jobs <- slurm_jobs[order(slurm_jobs$search_name,
+                                        -as.integer(slurm_jobs$is_report)), ]
+        slurm_jobs <- slurm_jobs[!duplicated(slurm_jobs$search_name), ]
+        message(sprintf(
+          "[DE-LIMP] Recover: collapsed parallel-pipeline substeps -> %d logical searches",
+          nrow(slurm_jobs)))
+      }
 
       if (nrow(slurm_jobs) > 0) {
         existing_ids <- if (length(values$diann_jobs) > 0) {
@@ -7377,6 +7426,15 @@ server_search <- function(input, output, session, values, add_to_log,
         } else {
           character(0)
         }
+        existing_outdirs <- if (length(values$diann_jobs) > 0) {
+          vapply(values$diann_jobs, function(j) j$output_dir %||% "", character(1))
+        } else character(0)
+        # v3.10.10 — accumulate new entries locally and assign once at the
+        # end. Doing `values$diann_jobs <- c(values$diann_jobs, ...)` inside
+        # the loop is O(n²) AND triggers the persistence observer once per
+        # iteration — that's why a 490-row recover stalled the queue render.
+        new_entries <- list()
+        updated_jobs <- values$diann_jobs
 
         for (i in seq_len(nrow(slurm_jobs))) {
           row <- slurm_jobs[i, ]
@@ -7533,24 +7591,61 @@ server_search <- function(input, output, session, values, add_to_log,
               if (nzchar(output_dir)) output_dir else "(unknown)", row$job_id)
           }
 
-          # Check if job already exists in queue
+          # v3.10.10 — try to enrich with search_info.md from output_dir
+          # so recovered jobs come back with the same settings flow as
+          # queue-submitted searches (FASTA, enzyme, mass acc, instrument
+          # metadata, etc.). search_info.md fetched via SSH if available.
+          search_settings <- NULL
+          si_local <- if (nzchar(output_dir)) {
+            tryCatch(translate_storage_path(output_dir, to = "local"),
+                     error = function(e) output_dir)
+          } else NULL
+          si_remote <- if (nzchar(output_dir)) file.path(output_dir, "search_info.md")
+                       else NULL
+          if (!is.null(si_local) && file.exists(file.path(si_local, "search_info.md"))) {
+            search_settings <- tryCatch(
+              parse_search_info_md(file.path(si_local, "search_info.md")),
+              error = function(e) NULL)
+          } else if (!is.null(cfg) && !is.null(si_remote)) {
+            si_tmp <- tempfile(fileext = ".md")
+            dl <- tryCatch(scp_download(cfg, si_remote, si_tmp, timeout = 30),
+                           error = function(e) list(status = 1))
+            if (isTRUE(dl$status == 0) && file.exists(si_tmp)) {
+              search_settings <- tryCatch(parse_search_info_md(si_tmp),
+                                          error = function(e) NULL)
+            }
+          }
+
+          # v3.10.10 — dedup by output_dir as well as job_id, so re-running
+          # Recover doesn't pile up duplicate entries for the same logical
+          # search (the parallel-pipeline collapser produces one row per
+          # search, but if the user already submitted via DE-LIMP, the
+          # original entry's job_id is the array parent, not the s5 report).
           existing_idx <- match(row$job_id, existing_ids)
+          if (is.na(existing_idx) && nzchar(output_dir)) {
+            od_idx <- match(output_dir, existing_outdirs)
+            if (!is.na(od_idx)) existing_idx <- od_idx
+          }
 
           if (!is.na(existing_idx)) {
-            # Update existing entry with fresh data from cluster
-            jobs <- values$diann_jobs
-            jobs[[existing_idx]]$status <- status
-            jobs[[existing_idx]]$log_content <- log_content
-            if (nzchar(output_dir)) jobs[[existing_idx]]$output_dir <- output_dir
-            if (n_files > 0) jobs[[existing_idx]]$n_files <- n_files
+            # Update existing entry in-place in the local accumulator
+            updated_jobs[[existing_idx]]$status <- status
+            updated_jobs[[existing_idx]]$log_content <- log_content
+            if (nzchar(output_dir)) updated_jobs[[existing_idx]]$output_dir <- output_dir
+            if (n_files > 0) updated_jobs[[existing_idx]]$n_files <- n_files
             if (status %in% c("completed", "failed", "cancelled") &&
-                is.null(jobs[[existing_idx]]$completed_at)) {
-              jobs[[existing_idx]]$completed_at <- Sys.time()
+                is.null(updated_jobs[[existing_idx]]$completed_at)) {
+              updated_jobs[[existing_idx]]$completed_at <- Sys.time()
             }
-            values$diann_jobs <- jobs
+            # If we recovered settings and the existing entry didn't have
+            # them, fill them in (e.g. job came from a different session).
+            if (!is.null(search_settings) &&
+                is.null(updated_jobs[[existing_idx]]$search_settings)) {
+              updated_jobs[[existing_idx]]$search_settings <- search_settings
+            }
             updated <- updated + 1
           } else {
-            # Add new entry
+            # Add new entry to the new-entries accumulator
             job_entry <- list(
               job_id = row$job_id,
               backend = "hpc",
@@ -7559,18 +7654,25 @@ server_search <- function(input, output, session, values, add_to_log,
               output_dir = output_dir,
               submitted_at = Sys.time(),
               n_files = n_files,
-              search_mode = "unknown",
-              search_settings = NULL,
+              search_mode = search_settings$search_mode %||% "unknown",
+              search_settings = search_settings,
               auto_load = FALSE,
               log_content = log_content,
-              completed_at = if (status %in% c("completed", "failed", "cancelled")) Sys.time() else NULL,
+              completed_at = if (status %in% c("completed", "failed", "cancelled"))
+                Sys.time() else NULL,
               loaded = FALSE,
               is_ssh = !is.null(cfg)
             )
-            values$diann_jobs <- c(values$diann_jobs, list(job_entry))
+            new_entries[[length(new_entries) + 1]] <- job_entry
             recovered <- recovered + 1
           }
         }
+
+        # v3.10.10 — single batch assign at the end. One reactive
+        # invalidation, one persistence write, one render pass.
+        values$diann_jobs <- c(updated_jobs, new_entries)
+        message(sprintf("[DE-LIMP] Recover: %d new + %d updated -> queue size %d",
+          length(new_entries), updated, length(values$diann_jobs)))
       }
     }
 
