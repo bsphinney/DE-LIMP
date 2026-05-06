@@ -558,6 +558,20 @@ server_qc <- function(input, output, session, values) {
 
   # --- DPC Fit Info Modal ---
   observeEvent(input$dpc_info_btn, {
+    if (is_maxlfq(values$y_protein)) {
+      showModal(modalDialog(
+        title = tagList(icon("info-circle"), " DPC Fit not applicable under MaxLFQ"),
+        size = "m", easyClose = TRUE, footer = modalButton("Close"),
+        tags$p("The DPC Fit plot is specific to limpa's DPC-Quant pipeline. Your current run used ",
+               tags$strong("MaxLFQ + limma"),
+               ", which doesn't fit a detection-probability curve. There's nothing to display here."),
+        tags$p("For the MaxLFQ pipeline, the equivalent diagnostic is the ",
+               tags$strong("Pipeline Diagnostic"),
+               " plot (pre- vs post-quantile-normalization sample distributions), and the ",
+               tags$strong("QuantUMS / FDR filter waterfall"), " in the Data Completeness sub-tab.")
+      ))
+      return()
+    }
     showModal(modalDialog(
       title = tagList(icon("question-circle"), " What is DPC Fit?"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
@@ -1768,8 +1782,20 @@ server_qc <- function(input, output, session, values) {
 
   # -- Info modal --
   observeEvent(input$completeness_info_btn, {
-    showModal(modalDialog(
-      title = "Data Completeness \u2014 Detected vs Inferred",
+    is_ma <- is_maxlfq(values$y_protein)
+    body_top <- if (is_ma) tagList(
+      tags$p("Under the ", tags$strong("MaxLFQ + limma"), " pipeline, the protein matrix ",
+             tags$em("can"), " contain missing values \u2014 a cell is missing whenever no precursor ",
+             "passed the FDR / QuantUMS filters for that protein-group in that sample."),
+      tags$ul(
+        tags$li(tags$strong("Detected"), " (green): protein had \u2265 1 precursor passing the filter in that sample."),
+        tags$li(tags$strong("Missing"), " (orange): cell is NA in the MaxLFQ matrix. limma drops these per row at fit time, ",
+                "so the protein either still has a finite logFC (if the other group has values) or shows up in the ",
+                tags$strong("On/Off Proteins"), " sub-tab as a presence/absence call.")
+      ),
+      tags$p("High missing rates flag samples / runs where the protein quantification is incomplete. ",
+             "No imputation is applied \u2014 missing values stay missing.")
+    ) else tagList(
       tags$p("limpa's DPC-Quant algorithm produces a ",
              tags$strong("complete"), " protein expression matrix (no missing values). ",
              "But this masks an important distinction:"),
@@ -1782,7 +1808,13 @@ server_qc <- function(input, output, session, values) {
       ),
       tags$p("High inferred rates (>30%) suggest lower measurement confidence. ",
              "This is not necessarily wrong \u2014 DPC-Quant estimation is statistically valid \u2014 ",
-             "but downstream users should know which proteins are directly supported."),
+             "but downstream users should know which proteins are directly supported.")
+    )
+
+    showModal(modalDialog(
+      title = if (is_ma) "Data Completeness \u2014 Detected vs Missing"
+              else "Data Completeness \u2014 Detected vs Inferred",
+      body_top,
       tags$hr(),
       tags$p(tags$strong("Plots:")),
       tags$ul(
@@ -1804,11 +1836,16 @@ server_qc <- function(input, output, session, values) {
     worst_rate <- min(cd$detection_rate)
     worst_sample <- names(which.min(cd$detection_rate))
     if (worst_rate < 70) {
+      is_ma <- is_maxlfq(values$y_protein)
+      tail_text <- if (is_ma)
+        "Cells without precursor evidence are NA in the MaxLFQ matrix; limma drops them per row when fitting (no imputation)."
+        else "Proteins without precursor evidence are estimated by DPC-Quant via detection probability modelling."
+      label_inferred <- if (is_ma) "missing" else "inferred"
       div(class = "alert alert-warning", style = "margin-bottom: 12px;",
         icon("exclamation-triangle"),
-        sprintf(" Warning: %s has only %.0f%% directly detected proteins (%.0f%% inferred). ",
-                worst_sample, worst_rate, 100 - worst_rate),
-        "Proteins without precursor evidence are estimated by DPC-Quant via detection probability modelling."
+        sprintf(" Warning: %s has only %.0f%% directly detected proteins (%.0f%% %s). ",
+                worst_sample, worst_rate, 100 - worst_rate, label_inferred),
+        tail_text
       )
     }
   })

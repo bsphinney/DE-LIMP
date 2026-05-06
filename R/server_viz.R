@@ -650,6 +650,11 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       if (is.na(idx)) has_dpc <- FALSE
     }
 
+    # v3.10.1+ — under MaxLFQ "Inferred" really means "Missing"; n.observations
+    # is a 0/1 detection mask, not a precursor count. Rename labels accordingly.
+    is_ma <- is_maxlfq(values$y_protein)
+    second_label <- if (is_ma) "Missing" else "Inferred"
+
     if (has_dpc) {
       nobs_vec <- n_obs_mat[idx, ]
       se_idx <- match(prot_id, rownames(se_mat))
@@ -661,9 +666,10 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         stringsAsFactors = FALSE
       )
       long_df <- left_join(long_df, dpc_df, by = "File.Name")
-      long_df$Detected <- ifelse(!is.na(long_df$nObs) & long_df$nObs > 0, "Detected", "Inferred")
-      long_df$PointLabel <- ifelse(long_df$Detected == "Inferred",
-        paste0("Inferred (nObs=0, SE=", round(long_df$SE, 3), ")"), "")
+      long_df$Detected <- ifelse(!is.na(long_df$nObs) & long_df$nObs > 0, "Detected", second_label)
+      long_df$PointLabel <- ifelse(long_df$Detected == second_label,
+        if (is_ma) "Missing in MaxLFQ matrix" else paste0("Inferred (nObs=0, SE=", round(long_df$SE, 3), ")"),
+        "")
     } else {
       long_df$Detected <- "Detected"
       long_df$nObs <- NA_real_
@@ -671,9 +677,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       long_df$PointLabel <- ""
     }
 
-    n_inferred <- sum(long_df$Detected == "Inferred")
+    n_inferred <- sum(long_df$Detected == second_label)
     subtitle_text <- if (has_dpc && n_inferred > 0) {
-      paste0(n_inferred, " of ", nrow(long_df), " values inferred by DPC-Quant (hollow circles)")
+      if (is_ma)
+        paste0(n_inferred, " of ", nrow(long_df), " values missing in the MaxLFQ matrix (hollow circles)")
+      else
+        paste0(n_inferred, " of ", nrow(long_df), " values inferred by DPC-Quant (hollow circles)")
     } else if (has_dpc) {
       "All values directly detected"
     } else {
@@ -686,7 +695,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     if (has_dpc) {
       # Separate detected and inferred points for different shapes
       detected_df <- long_df[long_df$Detected == "Detected", ]
-      inferred_df <- long_df[long_df$Detected == "Inferred", ]
+      inferred_df <- long_df[long_df$Detected == second_label, ]
       if (nrow(detected_df) > 0) {
         p <- p + geom_jitter(data = detected_df, width = 0.2, size = 3, alpha = 0.8,
           shape = 16)  # filled circle
@@ -735,16 +744,19 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         dpc_df <- data.frame(File.Name = names(nobs_vec), nObs = as.numeric(nobs_vec),
                              SE = as.numeric(se_vec), stringsAsFactors = FALSE)
         long_df <- left_join(long_df, dpc_df, by = "File.Name")
-        long_df$Detected <- ifelse(!is.na(long_df$nObs) & long_df$nObs > 0, "Detected", "Inferred")
+        is_ma2 <- is_maxlfq(values$y_protein)
+        second_label2 <- if (is_ma2) "Missing" else "Inferred"
+        long_df$Detected <- ifelse(!is.na(long_df$nObs) & long_df$nObs > 0, "Detected", second_label2)
       } else {
         long_df$Detected <- "Detected"
+        second_label2 <- "Inferred"
       }
 
       p <- ggplot(long_df, aes(x = Group, y = LogIntensity, fill = Group)) +
         geom_violin(alpha = 0.5, trim = FALSE)
       if (has_dpc) {
         det_df <- long_df[long_df$Detected == "Detected", ]
-        inf_df <- long_df[long_df$Detected == "Inferred", ]
+        inf_df <- long_df[long_df$Detected == second_label2, ]
         if (nrow(det_df) > 0) p <- p + geom_jitter(data = det_df, width = 0.2, size = 3, alpha = 0.8, shape = 16)
         if (nrow(inf_df) > 0) p <- p + geom_jitter(data = inf_df, width = 0.2, size = 3, alpha = 0.8, shape = 21, fill = "white", stroke = 1.2)
       } else {
@@ -2446,11 +2458,12 @@ You are a proteomics bioinformatics expert. Analyze this dataset and provide bio
 
 | File | Description | Key Columns |
 |------|-------------|-------------|
-| `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples) | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
-| `protein_confidence.csv` | Per-protein per-sample confidence from limpa DPC-Quant. **nObs** = number of precursors detected (more = more reliable). **SE** = posterior standard error (lower = more precise). Proteins with high SE and low nObs were estimated from sparse evidence. | **Gene**, nObs_S1..N, SE_S1..N |
-| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). This is BEFORE limpa DPC-Quant — use this to see which proteins were directly quantified vs probabilistically estimated. Compare with expression_matrix.csv to understand data completeness. | Protein.Group, Genes, sample intensity columns (0 = missing) |
+| `expression_matrix.csv` | Log2 protein intensities (', format(n_proteins, big.mark = ","), ' proteins x ', n_samples, ' samples). ', if (is_maxlfq(values$y_protein)) "May contain NA values where the protein had no precursors passing the QuantUMS / FDR filter for that sample." else "Always complete (no NAs); DPC-Quant fills missing values via the detection-probability model.", ' | **Gene** (symbol), Protein.Name (description), then sample intensity columns |
+', if (!is_maxlfq(values$y_protein)) '| `protein_confidence.csv` | Per-protein per-sample confidence from limpa DPC-Quant. **nObs** = number of precursors detected (more = more reliable). **SE** = posterior standard error (lower = more precise). Proteins with high SE and low nObs were estimated from sparse evidence. | **Gene**, nObs_S1..N, SE_S1..N |
+' else '', '| `diann_pg_matrix.tsv` | DIA-NN protein group matrix with **real missing values** (0 = not detected). ', if (is_maxlfq(values$y_protein)) "Use this to see DIA-NN's raw protein quantification before any DE-LIMP processing." else "This is BEFORE limpa DPC-Quant — use this to see which proteins were directly quantified vs probabilistically estimated. Compare with expression_matrix.csv to understand data completeness.", ' | Protein.Group, Genes, sample intensity columns (0 = missing) |
 | `data_quality_summary.csv` | Per-sample data quality: proteins detected, % missing, contaminant counts. Use this to assess sample quality and compare completeness across runs | Sample, Proteins_Detected, Pct_Missing, Group |
-| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE DPC-Quant). Shows how many precursors were directly detected per sample — proteins with fewer detections have lower precision weights | **Gene**, Total_Precursors, Detected_SampleN columns |
+', if (!is_maxlfq(values$y_protein)) '| `detection_matrix.csv` | Per-protein precursor detection counts from DIA-NN (BEFORE DPC-Quant). Shows how many precursors were directly detected per sample — proteins with fewer detections have lower precision weights | **Gene**, Total_Precursors, Detected_SampleN columns |
+' else '',
 | `quartile_profiles.csv` | Per-sample quartile assignments (Q1=top 25%, Q4=bottom 25%) | **Gene**, Avg_Quartile, per-sample Q columns, Quartile_Range |
 | `variable_proteins.csv` | ', n_variable, ' proteins shifting 2+ quartiles across samples | **Gene**, Avg_Intensity, Quartile_Range |
 | `sample_metadata.csv` | Sample groups and identifiers | |

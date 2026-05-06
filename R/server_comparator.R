@@ -1453,18 +1453,28 @@ build_settings_diff <- function(run_a, run_b) {
         "Interference Correction",
         "Use All MS-Level Quantities (Quant3)"
       ),
-      Run_A = c(
-        "",
-        coalesce_setting(run_a$settings$library_source, "DIA-NN empirical library"),
-        format_or_na(run_a$settings$n_precursors_lib),
-        format_or_na(run_a$settings$n_proteins_total),
-        "ALL (DPC-Quant uses all detected precursors)",
-        "ALL",
-        "DPC-Quant: empirical Bayes precursor aggregation",
-        "limma moderated t-test (empirical Bayes variance shrinkage)",
-        "DIA-NN: integrated signal correction",
-        "N/A -- DE-LIMP uses single protein intensity per sample"
-      ),
+      Run_A = {
+        # v3.10.1+ — derive Run-A description from the pipeline descriptor
+        ra_id <- run_a$settings$pipeline_id %||% "dpc"
+        peptides_used_text <- if (ra_id == "maxlfq")
+          "ALL surviving QuantUMS / FDR filter (PG.MaxLFQ aggregation)"
+          else "ALL (DPC-Quant uses all detected precursors)"
+        rollup_text <- if (ra_id == "maxlfq")
+          "PG.MaxLFQ (DIA-NN) → quantile-norm → limma::lmFit"
+          else "DPC-Quant: empirical Bayes precursor aggregation"
+        c(
+          "",
+          coalesce_setting(run_a$settings$library_source, "DIA-NN empirical library"),
+          format_or_na(run_a$settings$n_precursors_lib),
+          format_or_na(run_a$settings$n_proteins_total),
+          peptides_used_text,
+          "ALL",
+          rollup_text,
+          "limma moderated t-test (empirical Bayes variance shrinkage)",
+          "DIA-NN: integrated signal correction",
+          "N/A -- DE-LIMP uses single protein intensity per sample"
+        )
+      },
       Run_B = c(
         "",
         coalesce_setting(run_b$settings$library_type, "directDIA+ (auto-generated)"),
@@ -1490,7 +1500,8 @@ build_settings_diff <- function(run_a, run_b) {
         "Spectronaut builds its own in-experiment library from the data",
         "Larger library = broader protein coverage",
         "",
-        "Critical: Spectronaut TopN limits quant to N peptides; DPC-Quant is unbounded",
+        sprintf("Critical: Spectronaut TopN limits quant to N peptides; %s is unbounded",
+                if ((run_a$settings$pipeline_id %||% "dpc") == "maxlfq") "PG.MaxLFQ" else "DPC-Quant"),
         "",
         "These algorithms weight evidence differently",
         "Moderated t-test is substantially more conservative",
@@ -1801,8 +1812,9 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
     discordant$.n_group_a <- n_group_a
     discordant$.n_group_b <- n_group_b
     discordant$.imputation_b <- imputation_b %||% "Unknown"
+    run_a_id_for_hyp <- run_a$settings$pipeline_id %||% "dpc"
     hyp_results <- lapply(seq_len(nrow(discordant)), function(i) {
-      assign_hypothesis(discordant[i, ], source_b, global_offset)
+      assign_hypothesis(discordant[i, ], source_b, global_offset, run_a_id_for_hyp)
     })
     discordant$hypothesis  <- sapply(hyp_results, `[[`, "hypothesis")
     discordant$confidence  <- sapply(hyp_results, `[[`, "confidence")
@@ -1840,7 +1852,14 @@ compute_de_concordance <- function(run_a, run_b, universe, contrast_a, contrast_
 }
 
 #' Assign diagnostic hypothesis for a discordant protein (8 rules + Rule 0, tool-aware)
-assign_hypothesis <- function(row, source_b, global_offset = 0) {
+assign_hypothesis <- function(row, source_b, global_offset = 0, run_a_id = "dpc") {
+  # Pipeline-aware tool-comparison strings (v3.10.1+)
+  run_a_norm_label   <- if (run_a_id == "maxlfq") "DIA-NN RT-dependent + quantile normalization (limma)"
+                                                  else "DIA-NN RT-dependent + DPC-CN cyclic loess"
+  run_a_rollup_label <- if (run_a_id == "maxlfq") "PG.MaxLFQ" else "DPC-Quant"
+  run_a_missing_label <- if (run_a_id == "maxlfq")
+    "limma drops NAs per row; on/off proteins surfaced separately (no imputation)"
+    else "DPC-Quant probabilistic modelling (not imputation)"
   lfc_a <- if (is.finite(row$logFC_A)) row$logFC_A else 0
   lfc_b <- if (is.finite(row$logFC_B)) row$logFC_B else 0
   adjp_a <- if (is.finite(row$adjP_A)) row$adjP_A else 1
@@ -1887,9 +1906,9 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
   # Rule 2: Systematic normalization offset
   if (sys_offset && same_dir && logfc_diff < 0.5) {
     tool_note <- switch(source_b,
-      "spectronaut"      = " (Spectronaut local regression vs DIA-NN RT-dependent + DPC-CN normalization)",
-      "fragpipe_analyst" = " (IonQuant normalization vs DIA-NN RT-dependent + DPC-CN normalization)",
-      "fragpipe_raw"     = " (MaxLFQ vs DPC-Quant)",
+      "spectronaut"      = sprintf(" (Spectronaut local regression vs %s)", run_a_norm_label),
+      "fragpipe_analyst" = sprintf(" (IonQuant normalization vs %s)", run_a_norm_label),
+      "fragpipe_raw"     = sprintf(" (MaxLFQ vs %s)", run_a_rollup_label),
       ""
     )
     return(list(
@@ -1904,7 +1923,8 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
   # Rule 3: Same FC, divergent p-value
   if (same_dir && logfc_diff < 0.3 && p_diff_large) {
     engine_note <- if (source_b == "fragpipe_analyst") {
-      " Both use limma, so this likely reflects missing-value handling differences: FragPipe-Analyst uses Perseus-style imputation; DE-LIMP uses DPC-Quant probabilistic modelling (not imputation)."
+      sprintf(" Both use limma, so this likely reflects missing-value handling differences: FragPipe-Analyst uses Perseus-style imputation; DE-LIMP uses %s.",
+              run_a_missing_label)
     } else if (source_b == "spectronaut") {
       if (isTRUE(row$.use_all_ms_true)) {
         " Spectronaut used 'Use All MS-Level Quantities' (Quant3 method), which combines MS1 and MS2 observations to double effective sample size in its t-test. This is the most likely cause of the p-value divergence."
@@ -1961,8 +1981,9 @@ assign_hypothesis <- function(row, source_b, global_offset = 0) {
   # Rule 5: Peptide count differs
   if (peptide_diff) {
     rollup_note <- if (source_b %in% c("fragpipe_analyst", "fragpipe_raw")) {
-      paste0(" DIA-NN and FragPipe use different rollup strategies (DPC-Quant vs MaxLFQ).",
-             " Proteins with few peptides are most sensitive to this.")
+      sprintf(" DIA-NN and FragPipe use different rollup strategies (%s vs FragPipe MaxLFQ).%s",
+              run_a_rollup_label,
+              " Proteins with few peptides are most sensitive to this.")
     } else ""
     return(list(
       hypothesis = paste0("Peptide count differs (", row$n_peptides_A, " vs ",

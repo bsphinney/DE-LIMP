@@ -5,6 +5,16 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.1] — 2026-05-06
+
+### Fixed
+- **Run Comparator hypothesis-engine text now pipeline-aware** (audit item #10): `assign_hypothesis()` accepts a new `run_a_id` arg (default `"dpc"` for back-compat). Tool-comparison strings inside Rule 2 (normalization offset), Rule 3 (variance/missing-value), Rule 5 (peptide rollup) now read whether Run A used MaxLFQ + limma vs DPC-Quant + limma and emit the correct contrast.
+- **Settings-diff body strings** now derive Run-A peptide-usage / rollup descriptions from the descriptor (`PG.MaxLFQ (DIA-NN)` vs `DPC-Quant: empirical Bayes precursor aggregation`) and the "Critical:" note text adapts. Was previously hardcoded "DPC-Quant uses all detected precursors".
+- **Violin plot Inferred → Missing under MaxLFQ** (audit item #14): label, hover text, subtitle, and the inferred-points filter all flip on `is_maxlfq()`. Under DPC-Quant the existing "Inferred (nObs=0, SE=...)" label stays.
+- **Data Completeness modal + warning banner** (audit item #13) branch on pipeline. Under MaxLFQ the modal explains "Cells without precursor evidence are NA in the MaxLFQ matrix; limma drops them per row at fit time" instead of claiming DPC-Quant inferred them. Title and warning-banner wording adapt.
+- **DPC Fit info modal** (audit item #12) shows a "not applicable under MaxLFQ" message when DPC-Quant didn't run, pointing the user to the Pipeline Diagnostic + filter waterfall instead.
+- **Methods README in Complete Export** (audit item #15) drops the `protein_confidence.csv` and `detection_matrix.csv` table rows under MaxLFQ (they aren't written), and adapts the `expression_matrix.csv` description to mention NAs honestly under MaxLFQ vs the always-complete DPC-Quant matrix.
+
 ## [3.10.0] — 2026-05-06
 
 ### Changed (Run Comparator now pipeline-aware)
