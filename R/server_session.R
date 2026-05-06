@@ -803,8 +803,13 @@ server_session <- function(input, output, session, values, add_to_log) {
     req(values$fit %||% values$phospho_fit)
 
     # v3.9.2+ — emit a paper-faithful MaxLFQ + limma methods paragraph when
-    # the MaxLFQ pipeline ran. Falls through to the DPC-Quant text otherwise.
-    if (isTRUE(values$pipeline_mode_used == "maxlfq")) {
+    # the MaxLFQ pipeline ran. The durable signal is y_protein$other$pipeline
+    # (set inside build_maxlfq_pipeline and travels with the data); the
+    # reactiveVal pipeline_mode_used can drift if the user re-ran a different
+    # pipeline after MaxLFQ. Trust either.
+    is_maxlfq <- isTRUE(values$pipeline_mode_used == "maxlfq") ||
+                 isTRUE(values$y_protein$other$pipeline == "maxlfq")
+    if (is_maxlfq) {
       filters_line <- if (!is.null(values$y_protein$other$filters_applied) &&
                           length(values$y_protein$other$filters_applied) > 0) {
         paste0("with QuantUMS quality cutoffs: ",
@@ -1556,10 +1561,13 @@ server_session <- function(input, output, session, values, add_to_log) {
         }
 
         # === 11b. Protein confidence (DPC-Quant n.observations + standard.error) ===
+        # Skip under MaxLFQ — there's no DPC-Quant-equivalent SE matrix.
+        is_maxlfq_export <- isTRUE(values$y_protein$other$pipeline == "maxlfq") ||
+                             isTRUE(values$pipeline_mode_used == "maxlfq")
         tryCatch({
           n_obs <- values$y_protein$other$n.observations
           se_mat <- values$y_protein$other$standard.error
-          if (!is.null(n_obs) && !is.null(se_mat)) {
+          if (!is_maxlfq_export && !is.null(n_obs) && !is.null(se_mat)) {
             conf_df <- data.frame(Protein.Group = rownames(n_obs), stringsAsFactors = FALSE)
             for (j in seq_len(ncol(n_obs))) {
               conf_df[[paste0("nObs_", colnames(n_obs)[j])]] <- n_obs[, j]

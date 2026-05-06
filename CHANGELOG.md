@@ -5,6 +5,12 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.11] — 2026-05-05
+
+### Fixed
+- **Methods text + Claude/AI export now branch on the durable pipeline flag**: previously these checked `values$pipeline_mode_used`, a reactiveVal that gets overwritten if the user runs a different pipeline after MaxLFQ. The more reliable signal is `values$y_protein$other$pipeline == "maxlfq"`, set inside `build_maxlfq_pipeline()` and travelling with the data matrix itself. Both signals are now consulted (OR), so the methods text always describes the pipeline that produced the matrix the user is looking at.
+- **`protein_confidence.csv` and `detection_matrix.csv` no longer included in MaxLFQ exports**: both rely on DPC-Quant artifacts (`$other$standard.error`, precursor-count `n.observations`) that don't apply under MaxLFQ — `n.observations` becomes a 0/1 detection mask, and `$standard.error` is NULL. Including them in MaxLFQ exports produced misleading data. Now skipped via `is_maxlfq_export` guard in both `Complete Export` (server_session.R) and `Claude Export` (server_ai.R).
+
 ## [3.9.10] — 2026-05-05
 
 ### Fixed
