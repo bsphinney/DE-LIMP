@@ -5,6 +5,13 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.11] — 2026-05-06
+
+### Fixed
+- **CRITICAL — v3.10.10 broke SSH connection entirely.** Changed `env = c("current", MallocStackLogging = "")` to `MallocStackLogging = NA_character_` thinking it would actually unset the var. But `processx::run()` rejects NA values in env: `is.null(env) || is_env_vector(env) is not TRUE`. Reverted to empty string. SSH works again. The MallocStackLogging console noise stays (it's harmless macOS chatter from RStudio's parent process forking children — DE-LIMP can't suppress it from R-land without breaking processx).
+- **Queue + History tabs were full of useless parallel-pipeline substep entries.** v3.10.10's "collapse phase substeps into one logical search" used a lazy regex `^diann_(.+?)(_s[1-5]_[a-z]+)?$` — but R's default `sub()` is POSIX ERE which doesn't support lazy quantifiers (`.+?` is interpreted as `.+` followed by literal `?`). The regex silently failed to match anything, so dedup was a no-op. Replaced with two simple non-lazy `sub()` calls: `sub("^diann_", "")` then `sub("_s[1-5]_[a-z]+$", "")`. Verified to actually match all five phase suffixes (`_s1_libpred`, `_s2_firstpass`, `_s3_assembly`, `_s4_finalpass`, `_s5_report`).
+- **Existing queue duplicates now get cleaned up at startup.** Users who ran v3.10.10 (or earlier) accumulated phase-substep entries in `~/.delimp_job_queue.rds`. Added a one-time collapse pass in the queue-load observer that runs the same dedup-by-(base_name + output_dir) algorithm. Console message reports how many entries were merged.
+
 ## [3.10.10] — 2026-05-06
 
 ### Fixed

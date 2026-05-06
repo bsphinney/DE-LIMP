@@ -492,6 +492,35 @@ server_search <- function(input, output, session, values, add_to_log,
         if (is.list(saved_jobs) && length(saved_jobs) > 0) {
           # Sanitize on load — fix any corrupt/incomplete entries
           saved_jobs <- lapply(saved_jobs, sanitize_job)
+          # v3.10.11 — collapse parallel-pipeline substep entries that
+          # leaked into prior queues (the v3.10.10 lazy-regex was a no-op,
+          # so users with prior recover history have one entry per phase
+          # substep instead of one entry per logical search). Strip
+          # `diann_` prefix and `_s[1-5]_<phase>` suffix to derive the
+          # logical search name; group by (search_name, output_dir);
+          # prefer the s5 (report) entry as canonical.
+          base_names <- vapply(saved_jobs, function(j) {
+            n <- j$name %||% ""
+            n <- sub("^diann_", "", n)
+            n <- sub("_s[1-5]_[a-z]+$", "", n)
+            n
+          }, character(1))
+          out_dirs <- vapply(saved_jobs,
+            function(j) j$output_dir %||% "", character(1))
+          group_key <- paste0(base_names, "::", out_dirs)
+          is_report <- grepl("_s5_report$",
+            vapply(saved_jobs, function(j) j$name %||% "", character(1)))
+          ord <- order(group_key, -as.integer(is_report))
+          saved_jobs <- saved_jobs[ord]
+          group_key <- group_key[ord]
+          keep <- !duplicated(group_key)
+          n_collapsed <- length(saved_jobs) - sum(keep)
+          saved_jobs <- saved_jobs[keep]
+          if (n_collapsed > 0) {
+            message(sprintf(
+              "[DE-LIMP] Queue startup: collapsed %d substep entries into %d logical searches",
+              n_collapsed, length(saved_jobs)))
+          }
           values$diann_jobs <- saved_jobs
           n_active <- sum(vapply(saved_jobs, function(j)
             !is.null(j$status) && length(j$status) == 1 && j$status %in% c("queued", "running"), logical(1)))
@@ -7405,12 +7434,18 @@ server_search <- function(input, output, session, values, add_to_log,
         )
       })
 
-      # v3.10.10 — collapse parallel-pipeline substeps (`diann_<NAME>_s<N>_<phase>`)
+      # v3.10.11 — collapse parallel-pipeline substeps (`diann_<NAME>_s<N>_<phase>`)
       # into ONE logical search per unique base name. Prefer the s5 (report)
-      # row as canonical since that's the final step with the full output_dir.
+      # row as canonical (that's the final step with the full output_dir).
+      # Two non-lazy `sub()`s: strip the `diann_` prefix, then the optional
+      # `_s[1-5]_<phase>` suffix. v3.10.10 used a single lazy regex
+      # (`.+?`) which doesn't work in R's default POSIX ERE — it silently
+      # failed to match, so dedup was a no-op and the queue stayed full
+      # of phase-substep entries.
       if (nrow(slurm_jobs) > 1) {
-        slurm_jobs$search_name <- sub("^diann_(.+?)(_s[1-5]_[a-z]+)?$",
-                                       "\\1", slurm_jobs$name)
+        slurm_jobs$search_name <- sub("^diann_", "", slurm_jobs$name)
+        slurm_jobs$search_name <- sub("_s[1-5]_[a-z]+$", "",
+                                       slurm_jobs$search_name)
         slurm_jobs$is_report <- grepl("_s5_report$", slurm_jobs$name)
         slurm_jobs <- slurm_jobs[order(slurm_jobs$search_name,
                                         -as.integer(slurm_jobs$is_report)), ]

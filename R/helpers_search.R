@@ -1621,7 +1621,7 @@ ssh_exec <- function(ssh_config, command, login_shell = FALSE, timeout = 60) {
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("ssh", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = NA_character_))
+                           env = c("current", MallocStackLogging = ""))
       out <- strsplit(res$stdout, "\n")[[1]]
       if (res$status != 0) attr(out, "status") <- res$status
       out
@@ -1661,7 +1661,7 @@ scp_download <- function(ssh_config, remote_path, local_path, timeout = 1800) {
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("scp", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = NA_character_))
+                           env = c("current", MallocStackLogging = ""))
       out <- paste0(res$stdout, res$stderr)
       if (res$status != 0) attr(out, "status") <- res$status
       out
@@ -1701,7 +1701,7 @@ scp_upload <- function(ssh_config, local_path, remote_path, timeout = 1800) {
     if (requireNamespace("processx", quietly = TRUE)) {
       res <- processx::run("scp", args = args, timeout = timeout,
                            error_on_status = FALSE,
-                           env = c("current", MallocStackLogging = NA_character_))
+                           env = c("current", MallocStackLogging = ""))
       out <- paste0(res$stdout, res$stderr)
       if (res$status != 0) attr(out, "status") <- res$status
       out
