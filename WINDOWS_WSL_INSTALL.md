@@ -60,6 +60,37 @@ You do **not** need R, RStudio, or any Bioconductor packages installed on Window
 
 ---
 
+## Alternative: run the setup script directly in Ubuntu
+
+The `.bat` is just a Windows-side wrapper that copies `delimp_wsl_setup.sh` into Ubuntu and runs it. You can skip the wrapper and run the script directly in the Ubuntu terminal — useful if the wrapper hangs, you want all install output in one scrollback, or you'd rather not double-click anything.
+
+Open Ubuntu (Start menu → Ubuntu, or `wsl -d Ubuntu` from PowerShell), then either:
+
+```bash
+# Option A — copy from your Windows-side clone
+cp /mnt/c/Users/<your-windows-username>/DE-LIMP/delimp_wsl_setup.sh ~/delimp_wsl_setup.sh
+chmod +x ~/delimp_wsl_setup.sh
+~/delimp_wsl_setup.sh
+```
+
+```bash
+# Option B — pull the latest from GitHub (no Windows-side clone needed)
+curl -sL https://raw.githubusercontent.com/bsphinney/DE-LIMP/main/delimp_wsl_setup.sh \
+  -o ~/delimp_wsl_setup.sh
+chmod +x ~/delimp_wsl_setup.sh
+~/delimp_wsl_setup.sh
+```
+
+Why this might be better than the `.bat`:
+- All install output stays in the **same scrollback** so you can review the full log if anything fails.
+- DIA-NN license prompt appears in the same terminal you're already using.
+- If a step fails partway through, you can retry without restarting from PowerShell.
+- Doesn't require closing/reopening windows between Ubuntu install and DE-LIMP setup.
+
+The script is **idempotent** — safe to re-run if it's already partially installed (it skips what's already done). When setup finishes, it launches the Shiny app on `0.0.0.0:3838`. Open `http://localhost:3838` in any browser on the same machine. (The `.bat` opens it for you automatically; running directly, you open it yourself once you see `Listening on http://0.0.0.0:3838`.)
+
+---
+
 ## Where Your Files Go
 
 During the first install the script pauses and asks:
