@@ -5,6 +5,12 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.25] — 2026-05-07
+
+### Fixed
+- **v3.10.24's `.NET 8 system deps` install was scoped to tier 4 only** — meaning on every subsequent run, tier 1 short-circuited (".NET 8 already installed via dotnet-install.sh") and the deps install was skipped. Brett's box still had the missing libicu/libssl3/etc., still failed the smoke test. Hoisted to a separate `install_dotnet_system_deps()` function that runs (a) inside `install_diann()` after `install_dotnet8_runtime()` succeeds and (b) on the verify-only auto-dispatch path before calling `verify_diann_runtime`. Apt is fast (~1s) when packages are already present; running it every launch is fine.
+- **Smoke test now sets runtime env (LD_LIBRARY_PATH + DOTNET_ROOT) before invoking `diann-linux --help`.** DIA-NN's bundled libs need `LD_LIBRARY_PATH=DIANN_DIR`; .NET 8 needs `DOTNET_ROOT=/usr/share/dotnet`. Both are set in `${DELIMP_BASE}/env.sh` for normal app launches but the bare smoke-test invocation didn't source any env, so the binary was crashing during library resolution before printing anything. Plus: capture exit code separately so "crashed silently with no output" is distinguishable from "exited 0 with no output", and surface the exit code + a manual-fix hint (`ldd ...| grep 'not found'`) when the binary fails so users can diagnose missing libs themselves.
+
 ## [3.10.24] — 2026-05-07
 
 ### Fixed

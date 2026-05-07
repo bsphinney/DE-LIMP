@@ -323,17 +323,6 @@ install_dotnet8_runtime() {
         # (just reads file headers), but actually executing a .NET app
         # like DIA-NN's binary fails silently with no output. Install
         # the typical runtime deps now.
-        log "Installing .NET 8 runtime system dependencies..."
-        sudo apt-get install -y --no-install-recommends \
-            libc6 libgcc-s1 libssl3 libstdc++6 libunwind8 zlib1g \
-            libgssapi-krb5-2 liblttng-ust1 2>&1 | tail -3 || true
-        # libicu version varies by Ubuntu release — try a few
-        for ic in libicu76 libicu74 libicu72 libicu70 libicu71; do
-            if apt-cache show "${ic}" >/dev/null 2>&1; then
-                sudo apt-get install -y --no-install-recommends "${ic}" 2>&1 | tail -1
-                break
-            fi
-        done
         if command -v dotnet >/dev/null 2>&1 && \
            dotnet --list-runtimes 2>/dev/null | grep -qE 'Microsoft\.NETCore\.App 8\.'; then
             log ".NET 8 runtime installed via dotnet-install.sh"
@@ -343,6 +332,26 @@ install_dotnet8_runtime() {
     err ".NET 8 runtime install FAILED at all four tiers."
     err "DIA-NN's Thermo .raw reader requires .NET 8 — searches will fail with 'No MS2 spectra: aborting'."
     return 1
+}
+
+# v3.10.25 — install .NET 8 system runtime deps unconditionally.
+# Originally tier-4-only (v3.10.24), which meant the deps were skipped on
+# every subsequent run because tier 1 short-circuits when .NET 8 is
+# already installed. Now runs every time install_dotnet8_runtime returns
+# success — apt is fast (~1s) when packages are already present.
+install_dotnet_system_deps() {
+    log "Ensuring .NET 8 runtime system dependencies are installed..."
+    sudo apt-get install -y --no-install-recommends \
+        libc6 libgcc-s1 libssl3 libstdc++6 libunwind8 zlib1g \
+        libgssapi-krb5-2 liblttng-ust1 >/dev/null 2>&1 || true
+    # libicu version varies by Ubuntu release. Try the most-recent first.
+    for ic in libicu76 libicu74 libicu72 libicu71 libicu70; do
+        if apt-cache show "${ic}" >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends "${ic}" >/dev/null 2>&1 || true
+            log "  Installed ${ic}"
+            break
+        fi
+    done
 }
 
 verify_diann_runtime() {
@@ -371,24 +380,44 @@ verify_diann_runtime() {
         log "  ✓ RawFileReader DLLs present (${n_raw_dll} files)"
     fi
     if [ "${ok}" = "1" ]; then
-        # v3.10.24 — capture stderr so we can SHOW the failure (was
-        # losing it before with `head -1` on combined output, leaving
-        # the user with only "produced no output" and no diagnostic).
+        # v3.10.25 — set runtime env for the smoke test. DIA-NN's bundled
+        # libs need LD_LIBRARY_PATH=DIANN_DIR; .NET 8 runtime needs
+        # DOTNET_ROOT. Both are set in env.sh at app launch but not for a
+        # bare invocation, so the smoke test was launching the binary
+        # without its runtime env and silently crashing during library
+        # resolution. Also capture exit code so "crashed silently" is
+        # distinguishable from "ran fine but no output" (some DIA-NN
+        # versions exit 0 with no output on bare --help).
         local smoke smoke_stderr smoke_exit
-        smoke=$("${DIANN_DIR}/diann-linux" --help 2>/tmp/diann_smoke_err </dev/null || true)
-        smoke=$(echo "${smoke}" | head -1)
-        smoke_stderr=$(head -10 /tmp/diann_smoke_err 2>/dev/null || true)
+        smoke=$(LD_LIBRARY_PATH="${DIANN_DIR}:${LD_LIBRARY_PATH:-}" \
+                DOTNET_ROOT="${DOTNET_ROOT:-/usr/share/dotnet}" \
+                "${DIANN_DIR}/diann-linux" --help 2>/tmp/diann_smoke_err </dev/null \
+                && echo "EXIT=0" || echo "EXIT=$?")
+        smoke_exit=$(echo "${smoke}" | grep -oE 'EXIT=[0-9]+' | tail -1)
+        smoke=$(echo "${smoke}" | grep -v '^EXIT=' | head -1)
+        smoke_stderr=$(head -15 /tmp/diann_smoke_err 2>/dev/null || true)
         rm -f /tmp/diann_smoke_err
-        if [ -z "${smoke}" ]; then
-            err "  ✗ diann-linux --help produced no output"
+
+        if [ "${smoke_exit}" != "EXIT=0" ] || [ -z "${smoke}" ]; then
+            err "  ✗ diann-linux --help failed (${smoke_exit:-no exit code captured})"
+            if [ -n "${smoke}" ]; then
+                err "    stdout: ${smoke}"
+            else
+                err "    stdout: (empty)"
+            fi
             if [ -n "${smoke_stderr}" ]; then
                 err "    stderr from diann-linux:"
                 while IFS= read -r line; do
                     err "      ${line}"
                 done <<< "${smoke_stderr}"
+            else
+                err "    stderr: (empty — binary likely crashed during library load)"
+                err "    Try running by hand to see the actual loader error:"
+                err "      LD_LIBRARY_PATH=${DIANN_DIR} DOTNET_ROOT=/usr/share/dotnet ${DIANN_DIR}/diann-linux --help"
+                err "      ldd ${DIANN_DIR}/diann-linux | grep 'not found'"
             fi
             err "    Common cause: .NET 8 system deps missing (libicu, libssl3, ...)."
-            err "    Try: sudo apt-get install -y libicu* libssl3 libgssapi-krb5-2 liblttng-ust1"
+            err "    Try: sudo apt-get install -y libicu* libssl3 libgssapi-krb5-2 liblttng-ust1 libstdc++6 libunwind8"
             ok=0
         else
             log "  ✓ diann-linux runs: ${smoke}"
@@ -437,6 +466,11 @@ install_diann() {
     # `diann-linux --help` can actually execute.
     log "Installing .NET 8 runtime..."
     install_dotnet8_runtime
+    # v3.10.25 — system deps install always runs, even when tier 1 short-
+    # circuited because .NET 8 was already present. Without these libs,
+    # `dotnet --list-runtimes` works (just file headers) but executing a
+    # .NET binary like DIA-NN's RawFileReader fails at library-load time.
+    install_dotnet_system_deps
 
     # Resolve the version to download. "latest" triggers an API lookup for the
     # newest non-Preview Linux zip; anything else is treated as an explicit
@@ -760,6 +794,11 @@ case "${CMD}" in
         if [ ! -x "${DIANN_DIR}/diann-linux" ]; then
             install_diann
         else
+            # v3.10.25 — make sure .NET system deps are present even on
+            # the verify-only path. Without these, `verify_diann_runtime`'s
+            # smoke test fails silently because the binary can't load .NET
+            # libraries at runtime.
+            install_dotnet_system_deps
             verify_diann_runtime || warn "DIA-NN runtime verification failed — searches may not work."
         fi
         run_app
