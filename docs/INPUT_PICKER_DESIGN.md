@@ -261,7 +261,7 @@ A `local_search_queue` reactive (or list in `values$diann_jobs` filtered to `bac
 | `running` | Active subprocess (one slot occupied) | Subprocess exits → `completed` / `failed` / `cancelled` |
 | `completed` / `failed` / `cancelled` | Terminal state | Removed from queue; next `queued` job promoted |
 
-**Concurrency setting**: configurable via `delimp_site()$local_max_concurrent_searches`, default = 1 (strict FIFO). Power users could set higher if their box has plenty of RAM.
+**Concurrency**: strict FIFO, **always 1 at a time**. Local boxes don't have the resources to run two DIA-NN searches concurrently — a single search already saturates 8-16 threads + 32-64 GB of RAM. Running two in parallel produces no speedup (resource-bound either way) and increases OOM risk. No concurrency-cap site config is exposed; if a power user with a workstation truly wants parallelism, they can run two DE-LIMP instances on different ports.
 
 **Submit flow:**
 1. User clicks Submit
