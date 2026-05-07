@@ -5,6 +5,18 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.19] — 2026-05-07
+
+### Added
+- **Post-install DIA-NN runtime verification in `delimp_wsl_setup.sh`** — catches the "No MS2 spectra: aborting" bug at install time instead of letting the user discover it 5 minutes into a search. After the .NET 8 + DIA-NN binary install, runs four checks:
+  1. `dotnet` is on PATH
+  2. `dotnet --list-runtimes` reports a `Microsoft.NETCore.App 8.x` runtime (NOT just any version)
+  3. `diann-linux` binary is at the expected path and executable
+  4. RawFileReader DLLs are bundled in the DIA-NN install dir (the Thermo .raw reader)
+  5. `diann-linux --help` returns output without crashing (smoke test that the binary + .NET marriage actually works)
+
+  Each check prints ✓ / ✗ to the install log. If any fails, the script aborts with a clear message: *"This is the bug class behind 'No MS2 spectra: aborting' errors during searches. Fix the issues above before submitting a search, or DIA-NN will fail to read Thermo .raw files."* — so users know exactly what's broken and why before they invest 1+ hour in a search that's going to fail.
+
 ## [3.10.18] — 2026-05-07
 
 ### Fixed

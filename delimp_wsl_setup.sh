@@ -368,6 +368,67 @@ install_diann() {
     log "Installing .NET 8 runtime..."
     install_dotnet8_runtime
 
+    # v3.10.19 — verify .NET 8 + DIA-NN can ACTUALLY load Thermo .raw.
+    # Without this, the install reports "Done" but a real search fails
+    # 5+ minutes in with "No MS2 spectra: aborting" — the community user's
+    # bug. We don't have a real .raw file to probe, but we can at least
+    # confirm dotnet 8.x is on PATH and DIA-NN's RawFileReader.dll is
+    # present in the install dir. Both are necessary preconditions.
+    verify_diann_runtime() {
+        local ok=1
+        # 1. dotnet 8.x present
+        if ! command -v dotnet >/dev/null 2>&1; then
+            err "  ✗ dotnet command not on PATH after install"; ok=0
+        elif ! dotnet --list-runtimes 2>/dev/null | grep -qE 'Microsoft\.NETCore\.App 8\.'; then
+            err "  ✗ dotnet on PATH but no 8.x runtime registered"
+            err "    Found: $(dotnet --list-runtimes 2>&1 | head -3)"
+            ok=0
+        else
+            log "  ✓ .NET 8 runtime on PATH"
+        fi
+        # 2. DIA-NN binary present
+        if [ ! -x "${DIANN_DIR}/diann-linux" ]; then
+            err "  ✗ diann-linux not found at ${DIANN_DIR}/diann-linux"; ok=0
+        else
+            log "  ✓ DIA-NN binary at ${DIANN_DIR}/diann-linux"
+        fi
+        # 3. RawFileReader DLLs bundled (DIA-NN needs these for Thermo .raw)
+        local n_raw_dll
+        n_raw_dll=$(find "${DIANN_DIR}" -maxdepth 2 -name '*RawFileReader*' 2>/dev/null | wc -l)
+        if [ "${n_raw_dll}" -lt 1 ]; then
+            err "  ✗ No RawFileReader DLLs in ${DIANN_DIR}"
+            err "    Thermo .raw files will fail with 'No MS2 spectra: aborting'."
+            err "    The DIA-NN extraction may have been incomplete."
+            ok=0
+        else
+            log "  ✓ RawFileReader DLLs present (${n_raw_dll} files)"
+        fi
+        # 4. Quick smoke test: DIA-NN starts without crashing
+        if [ "${ok}" = "1" ]; then
+            local smoke
+            smoke=$("${DIANN_DIR}/diann-linux" --help 2>&1 | head -1 || true)
+            if [ -z "${smoke}" ]; then
+                err "  ✗ diann-linux --help produced no output (binary or .NET broken)"
+                ok=0
+            else
+                log "  ✓ diann-linux runs: ${smoke}"
+            fi
+        fi
+        if [ "${ok}" != "1" ]; then
+            err ""
+            err "  DIA-NN runtime verification FAILED."
+            err "  This is the bug class behind 'No MS2 spectra: aborting'"
+            err "  errors during searches. Fix the issues above before submitting"
+            err "  a search, or DIA-NN will fail to read Thermo .raw files."
+            err ""
+            return 1
+        fi
+        log "DIA-NN runtime verified — Thermo .raw reading should work."
+        return 0
+    }
+
+    verify_diann_runtime
+
     # Resolve the version to download. "latest" triggers an API lookup for the
     # newest non-Preview Linux zip; anything else is treated as an explicit
     # pin (e.g. "2.3.2", "2.5.0").
