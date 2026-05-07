@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.30] — 2026-05-07
+
+### Fixed
+- **PCA crashed with "cannot rescale a constant/zero column to unit variance" under MaxLFQ + limma pipeline.** `prcomp(t(E), scale. = TRUE)` divides each column by its standard deviation; a row of `E` (= column of `t(E)`) where all samples have the same value has SD = 0, triggering the error. `complete.cases()` filtered NAs but not zero-variance rows. Hit more often under MaxLFQ + limma where some proteins have identical intensities across all samples post-normalization. Two call sites fixed:
+  1. `R/server_viz.R:1020` — DE Dashboard PCA tab (the live UI)
+  2. `R/server_session.R:2022` — `figures/pca.svg` in Complete Analysis ZIP
+  
+  Both now also drop zero-variance rows via `apply(mat, 1, var, na.rm=TRUE) > 0` after `complete.cases`, before passing to `prcomp`.
+
 ## [3.10.29] — 2026-05-07
 
 ### Fixed

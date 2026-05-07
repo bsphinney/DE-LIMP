@@ -2022,6 +2022,12 @@ server_session <- function(input, output, session, values, add_to_log) {
         safe_section(manifest, "figures/pca.svg", {
           E_pca <- values$y_protein$E
           E_pca <- E_pca[complete.cases(E_pca), , drop = FALSE]
+          # v3.10.30 — drop zero-variance rows before prcomp(scale.=TRUE)
+          # to prevent "cannot rescale a constant/zero column to unit
+          # variance" — common under MaxLFQ + limma where complete.cases
+          # leaves rows that are identical across samples.
+          row_vars <- apply(E_pca, 1, var, na.rm = TRUE)
+          E_pca <- E_pca[is.finite(row_vars) & row_vars > 0, , drop = FALSE]
           stopifnot(nrow(E_pca) >= 10, ncol(E_pca) >= 3)
           pca_res <- prcomp(t(E_pca), scale. = TRUE)
           pca_df <- data.frame(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2],

@@ -1020,7 +1020,13 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
   pca_result <- reactive({
     req(values$y_protein)
     mat <- values$y_protein$E
-    mat_complete <- mat[complete.cases(mat), ]
+    mat_complete <- mat[complete.cases(mat), , drop = FALSE]
+    # v3.10.30 — drop zero-variance rows before prcomp(scale.=TRUE).
+    # Otherwise: "cannot rescale a constant/zero column to unit variance".
+    # Hits more often under MaxLFQ + limma where complete.cases() leaves
+    # rows that happen to be identical across samples.
+    row_vars <- apply(mat_complete, 1, var, na.rm = TRUE)
+    mat_complete <- mat_complete[is.finite(row_vars) & row_vars > 0, , drop = FALSE]
     req(nrow(mat_complete) > 2, ncol(mat_complete) > 2)
     prcomp(t(mat_complete), center = TRUE, scale. = TRUE)
   })
