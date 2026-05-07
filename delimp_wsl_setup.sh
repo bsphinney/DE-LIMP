@@ -311,10 +311,16 @@ install_dotnet8_runtime() {
     local installer="/tmp/dotnet-install.sh"
     if curl -sSL https://dot.net/v1/dotnet-install.sh -o "${installer}"; then
         chmod +x "${installer}"
+        # v3.10.27 — install the .NET 8 SDK (NOT just runtime). DIA-NN 2.x
+        # explicitly requires "SDK 8.0.407 or later" for Thermo .raw
+        # reading via RawFileReader; runtime-only installs trigger the
+        # error: "cannot read .raw files, please download and install
+        # .NET Runtime .NET SDK 8.0.407 or later". Dropping --runtime
+        # makes dotnet-install.sh install the full SDK (includes runtime).
         # v3.10.23 — `--version 8.0` is wrong (it's interpreted as the
         # literal filename `dotnet-runtime-8.0-linux-x64.tar.gz`, which
         # doesn't exist). Use `--channel 8.0` for "latest 8.x release."
-        sudo "${installer}" --runtime dotnet --channel "8.0" \
+        sudo "${installer}" --channel "8.0" \
             --install-dir /usr/share/dotnet
         sudo ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
         rm -f "${installer}"
@@ -362,8 +368,16 @@ verify_diann_runtime() {
         err "  ✗ dotnet on PATH but no 8.x runtime registered"
         err "    Found: $(dotnet --list-runtimes 2>&1 | head -3)"
         ok=0
+    elif ! dotnet --list-sdks 2>/dev/null | grep -qE '^8\.'; then
+        # v3.10.27 — DIA-NN 2.x requires the .NET 8 SDK (not just runtime).
+        # The error from DIA-NN: "cannot read .raw files, please download
+        # and install .NET Runtime .NET SDK 8.0.407 or later".
+        err "  ✗ .NET 8 runtime present but NO 8.x SDK"
+        err "    DIA-NN 2.x requires the SDK to read Thermo .raw files."
+        err "    Install via: sudo /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet"
+        ok=0
     else
-        log "  ✓ .NET 8 runtime on PATH"
+        log "  ✓ .NET 8 SDK + runtime on PATH"
     fi
     if [ ! -x "${DIANN_DIR}/diann-linux" ]; then
         err "  ✗ diann-linux not found at ${DIANN_DIR}/diann-linux"; ok=0

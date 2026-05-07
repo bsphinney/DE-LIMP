@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.27] — 2026-05-07
+
+### Fixed
+- **DIA-NN 2.x requires the .NET 8 SDK, not just the runtime** — the actual root cause of the community user's "No MS2 spectra: aborting" / "cannot read .raw files" bug. From a real DIA-NN log line: *"ERROR: cannot read .raw files, please download and install .NET Runtime .NET SDK 8.0.407 or later"*. We've been installing only the runtime (`dotnet-install.sh --runtime dotnet`) since v3.10.18 — `dotnet --list-runtimes` reported `Microsoft.NETCore.App 8.0.26`, verification passed all 5 checks, but DIA-NN's runtime check looks for SDK presence and our runtime-only install fails it. Two fixes:
+  1. Tier 4 now installs the full SDK (drops `--runtime dotnet` from the `dotnet-install.sh` command — without that flag the script installs the SDK by default, which includes the runtime).
+  2. Verification block now checks `dotnet --list-sdks | grep '^8\.'` in addition to runtimes. Fails with a specific "DIA-NN 2.x requires the SDK" message if the runtime is present but no SDK is.
+
+  This is the actual fix for the bug class. Twelve install-path versions from v3.10.15 to land at the real cause.
+
 ## [3.10.26] — 2026-05-07
 
 ### Fixed
