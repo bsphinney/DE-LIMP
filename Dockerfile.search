@@ -57,10 +57,12 @@ RUN R -e "BiocManager::install(c('MOFA2', 'basilisk'), ask=FALSE, update=FALSE)"
 # Pre-initialize basilisk env so first MOFA run doesn't need to download Python
 RUN R -e "library(MOFA2); basilisk::basiliskStart(MOFA2:::mofa_env) |> basilisk::basiliskStop()" 2>/dev/null || true
 
-# 4. Copy DIA-NN binaries AND .NET runtime from Stage 1.
-# The diann:2.0 image (built by build_diann_docker.sh) uses
-# mcr.microsoft.com/dotnet/runtime:8.0 as its base, so .NET is already
-# installed at /usr/share/dotnet in that image. Copying it here avoids
+# 4. Copy DIA-NN binaries AND .NET 8 SDK from Stage 1.
+# v3.10.29 — diann:2.0 now uses mcr.microsoft.com/dotnet/sdk:8.0 (was
+# runtime:8.0). DIA-NN 2.x requires the full SDK to read Thermo .raw
+# files; runtime-only triggers "cannot read .raw files, please install
+# .NET Runtime .NET SDK 8.0.407 or later". The SDK is installed at
+# /usr/share/dotnet in the diann:2.0 image. Copying it here avoids
 # downloading .NET again during the DE-LIMP build — eliminates a fragile
 # outbound network dependency that can fail behind corporate proxies.
 COPY --from=diann /opt/diann/ /opt/diann/

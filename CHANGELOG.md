@@ -5,6 +5,14 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.29] — 2026-05-07
+
+### Fixed
+- **Docker mode also needed the .NET SDK fix.** `build_diann_docker.sh` had `FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim` — runtime only, same bug as v3.10.18-26's WSL setup. DIA-NN 2.x running inside a Docker-mode search would have hit the same "cannot read .raw files, please install .NET Runtime .NET SDK 8.0.407 or later" error. Switched to `mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim`. SDK image is bigger (~700 MB vs ~200 MB) but that's the cost of Thermo .raw support. Updated the comment in `Dockerfile.search` (which COPYs from diann:2.0) to reflect that the upstream image now provides the SDK, not the runtime — DE-LIMP search containers automatically inherit the fix once `diann:2.0` is rebuilt with `bash build_diann_docker.sh`.
+
+### Action required for Docker users
+- Existing `diann:2.0` Docker image: rebuild via `bash build_diann_docker.sh` to pull the SDK base image. Existing search containers will keep running on the old runtime-only image until rebuilt.
+
 ## [3.10.28] — 2026-05-07
 
 ### Fixed

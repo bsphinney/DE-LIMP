@@ -107,11 +107,17 @@ DIANN_DIR=$(dirname "$DIANN_BIN")
 echo "Found DIA-NN binary at: $DIANN_BIN"
 
 # Write Dockerfile
-# Base: Microsoft's official .NET 8 runtime image (Debian bookworm-slim +
-# .NET 8 already installed). Avoids the fragile network download from
-# dot.net which fails behind many corporate proxies/firewalls.
+# Base: Microsoft's official .NET 8 SDK image (Debian bookworm-slim).
+# v3.10.29 — switched from the `runtime:8.0` image to `sdk:8.0`. DIA-NN 2.x
+# requires the full .NET 8 SDK to read Thermo .raw files; the error message
+# from a runtime-only install is "cannot read .raw files, please download
+# and install .NET Runtime .NET SDK 8.0.407 or later". Same fix as the WSL
+# launcher's tier-4 install (see delimp_wsl_setup.sh v3.10.27/v3.10.28).
+# SDK image is bigger (~700 MB vs ~200 MB runtime) but that's the cost of
+# Thermo .raw support. Avoids the fragile network download from dot.net
+# which fails behind many corporate proxies/firewalls.
 cat > Dockerfile << 'DOCKERFILE_EOF'
-FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim
 
 # System dependencies for DIA-NN
 # libgomp1: OpenMP (parallel processing)
@@ -121,7 +127,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# .NET 8 runtime is pre-installed in this base image at /usr/share/dotnet
+# .NET 8 SDK is pre-installed in this base image at /usr/share/dotnet
 # with the `dotnet` symlink already on PATH. Used by DIA-NN for Thermo .raw.
 ENV DOTNET_ROOT=/usr/share/dotnet
 
