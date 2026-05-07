@@ -211,6 +211,96 @@ cp ~/.ssh/id_ed25519.pub /mnt/c/Users/<you>/Documents/id_ed25519.pub
 
 ## Troubleshooting
 
+### Launcher fails with `WSL_E_DISTRO_NOT_FOUND` or `HCS_E_HYPERV_NOT_INSTALLED`
+
+These are the two most common blockers on a fresh Windows box. Both come from WSL2 prerequisites not being set up yet.
+
+**Symptom 1 — distro missing:**
+```
+There is no distribution with the supplied name.
+Error code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND
+```
+The launcher now detects this in v3.10.16+ and triggers `wsl --install -d Ubuntu` automatically. If `wsl --install` itself then fails, see Symptom 2 below.
+
+**Symptom 2 — Hyper-V / Virtual Machine Platform missing:**
+```
+WSL2 is not supported with your current machine configuration.
+Please enable the "Virtual Machine Platform" optional component and ensure
+virtualization is enabled in the BIOS.
+Error code: Wsl/InstallDistro/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+```
+
+This means one or both of:
+1. The **Virtual Machine Platform** Windows feature isn't enabled, OR
+2. **CPU virtualization** is disabled in BIOS/UEFI firmware
+
+**Diagnose** — run in PowerShell (admin not required for any of these):
+```powershell
+# Modern WSL kernel installed?
+wsl --status
+#   Want to see: "WSL version: 2.x.x.x" and "Kernel version: ..." lines.
+#   Missing those + "WSL1 is not supported..." message = WSL kernel not installed.
+
+# CPU virtualization on in firmware?
+systeminfo | Select-String "Hyper-V Requirements" -Context 0,4
+#   Want to see: "Virtualization Enabled In Firmware: Yes"
+#   If "No" → BIOS step needed.
+
+# Windows version (must be Win10 build 19041+ or any Win11)
+[System.Environment]::OSVersion.Version
+(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").DisplayVersion
+```
+
+**Fix step 1: Enable BIOS virtualization** (only if `Virtualization Enabled In Firmware: No`):
+
+Reboot, press the BIOS key during the boot logo:
+- **Dell** — `F2` or `F12`
+- **HP** — `F10` or `Esc`
+- **Lenovo** — `F1`, `F2`, or `Enter` (then `F1`)
+- **ASUS / MSI** — `Del` or `F2`
+- **Generic / unknown** — try `Del`, `F2`, `F10`, `F12`, `Esc`
+
+Find the virtualization setting (under `Advanced` → `CPU Configuration` is the most common location):
+- Intel CPUs: `Intel Virtualization Technology` / `Intel VT-x` / `VT-x`
+- AMD CPUs: `AMD-V` / `SVM Mode` / `Secure Virtual Machine`
+
+Set to **Enabled**, save & exit (usually `F10`), let Windows boot. Verify:
+```powershell
+systeminfo | Select-String "Virtualization Enabled"
+# Now: Yes
+```
+
+**Fix step 2: Install WSL2 kernel + features** (admin PowerShell):
+```powershell
+# Right-click Start → "Windows PowerShell (Admin)" or "Terminal (Admin)"
+wsl.exe --install --no-distribution
+```
+Reboot when it finishes.
+
+**Fix step 3: Install Ubuntu** (admin PowerShell):
+```powershell
+wsl --install -d Ubuntu
+```
+You'll be prompted for a Linux username + password during setup. Then re-run `Launch_DE-LIMP_WSL.bat` and it'll proceed to the R install phase.
+
+**Detect the BIOS key for unfamiliar hardware:**
+```powershell
+(Get-CimInstance -ClassName Win32_BIOS).Manufacturer
+(Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
+(Get-CimInstance -ClassName Win32_ComputerSystem).Model
+```
+
+### "WSL1 is not supported" message — misleading, you don't need WSL1
+
+If `wsl --status` shows:
+```
+Default Version: 2
+WSL1 is not supported with your current machine configuration.
+Please enable the "Windows Subsystem for Linux" optional component to use WSL1.
+```
+
+Don't enable WSL1. The message is misleading — it's saying WSL1 isn't available because the legacy "Windows Subsystem for Linux" feature isn't enabled, but you don't need WSL1. You need the modern WSL2 stack to be installed. Run `wsl.exe --install --no-distribution` from admin PowerShell, reboot, and `wsl --status` should then show a "WSL version: 2.x.x.x" line.
+
 ### `wsl --install` says "no access"
 
 Run PowerShell as Administrator. WSL install requires admin rights on the first setup.
