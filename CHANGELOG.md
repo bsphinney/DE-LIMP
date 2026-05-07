@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.28] — 2026-05-07
+
+### Fixed
+- **v3.10.27 detected the missing SDK but never installed it.** Two reasons:
+  1. **Tier 1 of `install_dotnet8_runtime` short-circuited on runtime presence**, not SDK presence — Brett's box had the runtime from v3.10.18-26 (`Microsoft.NETCore.App 8.0.26`), so tier 1 returned early without checking whether the SDK was actually there. Fixed: tier 1 now checks `dotnet --list-sdks | grep '^8\.'` first; only returns early if SDK is present. If SDK is missing (runtime-only state), proceeds through tiers to install.
+  2. **The verify-only auto-dispatch path didn't call `install_dotnet8_runtime`** — only ran `install_dotnet_system_deps` and `verify_diann_runtime`. So even with the tier 1 fix, an existing-binary install path skipped the SDK install entirely. Added `install_dotnet8_runtime || true` to the verify path so existing installs upgrade to SDK on next launch.
+
+  Brett's box now upgrades on launch: tier 1 sees runtime-but-no-SDK, proceeds to tier 4 (`dotnet-install.sh --channel 8.0` without `--runtime`), installs the SDK, verification passes, search should work.
+
 ## [3.10.27] — 2026-05-07
 
 ### Fixed

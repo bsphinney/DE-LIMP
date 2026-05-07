@@ -274,14 +274,23 @@ install_system_deps() {
 # first install — so silent .NET drift on existing setups gets caught.
 
 install_dotnet8_runtime() {
-    # Tier 1: already installed at version 8.x?
+    # Tier 1: already installed at version 8.x — but the SDK, not just
+    # the runtime. DIA-NN 2.x explicitly requires SDK 8.0.407+ for Thermo
+    # .raw reading; runtime-only installs trigger:
+    #   "ERROR: cannot read .raw files, please download and install
+    #   .NET Runtime .NET SDK 8.0.407 or later"
     if command -v dotnet >/dev/null 2>&1; then
-        local v="$(dotnet --list-runtimes 2>/dev/null | grep -E 'Microsoft\.NETCore\.App 8\.' | head -1)"
-        if [ -n "${v}" ]; then
-            log ".NET 8 runtime already installed: ${v}"
+        local sdk="$(dotnet --list-sdks 2>/dev/null | grep -E '^8\.' | head -1)"
+        if [ -n "${sdk}" ]; then
+            log ".NET 8 SDK already installed: ${sdk}"
             return 0
         fi
-        warn "dotnet command exists but no 8.x runtime — DIA-NN's .raw reader needs 8.x. Installing..."
+        local rt="$(dotnet --list-runtimes 2>/dev/null | grep -E 'Microsoft\.NETCore\.App 8\.' | head -1)"
+        if [ -n "${rt}" ]; then
+            warn "Runtime present (${rt}) but NO 8.x SDK — DIA-NN 2.x needs the SDK. Installing..."
+        else
+            warn "dotnet command exists but no 8.x SDK or runtime — installing SDK..."
+        fi
     fi
     # Tier 2: apt with multiple package-name candidates (naming has shifted)
     for pkg in dotnet-runtime-8.0 dotnet-runtime-8 dotnet8; do
@@ -806,10 +815,12 @@ case "${CMD}" in
         if [ ! -x "${DIANN_DIR}/diann-linux" ]; then
             install_diann
         else
-            # v3.10.25 — make sure .NET system deps are present even on
-            # the verify-only path. Without these, `verify_diann_runtime`'s
-            # smoke test fails silently because the binary can't load .NET
-            # libraries at runtime.
+            # v3.10.28 — also call install_dotnet8_runtime on the verify-
+            # only path. Brett's box: existing install had .NET 8 runtime
+            # but no SDK (because v3.10.18-26 only installed runtime).
+            # Without re-running install_dotnet8_runtime here, the missing
+            # SDK was detected but never installed.
+            install_dotnet8_runtime || true
             install_dotnet_system_deps
             verify_diann_runtime || warn "DIA-NN runtime verification failed — searches may not work."
         fi
