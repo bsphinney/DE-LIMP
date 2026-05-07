@@ -5,6 +5,14 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.20] — 2026-05-07
+
+### Fixed
+- **`sync_repo()` in `delimp_wsl_setup.sh` was running stale code without telling anyone**. The launcher's WSL-side DE-LIMP clone (at `~/.delimp/DE-LIMP/`) is independent of any Windows-side clone the user's `git pull`-ing on the host. The setup script `git pull --ff-only`'d the WSL clone but on failure (shallow-clone history diverged, force-pushed tags, local edits) it just printed `git pull failed — continuing with existing code.` and ran the stale version. Brett's box `git pull`'d the Windows clone successfully, the launcher reported "running" — but the running app showed `v3.10.16` while the Windows clone was at `v3.10.19` because the WSL clone had silently stayed pinned. Two-tier fix:
+  1. If `git pull --ff-only` fails, try `git fetch --depth 1 origin main && git reset --hard origin/main` — covers the shallow-divergence case that's most common.
+  2. If even that fails, print a loud `err` block telling the user how to force a clean re-clone (`rm -rf ~/.delimp/DE-LIMP/`).
+- **Print the running version + short commit SHA after sync** so users can see at a glance which code is about to run. Was previously invisible — you'd only see the version after the app boots and prints its banner, which is too late if you wanted to verify the pull worked before sitting through a 30-min install.
+
 ## [3.10.19] — 2026-05-07
 
 ### Added

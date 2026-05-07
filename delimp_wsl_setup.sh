@@ -505,8 +505,30 @@ sync_repo() {
         git clone --depth 1 "${REPO_URL}" "${REPO_DIR}"
         ok "Repo cloned."
     else
+        # v3.10.20 — robust update.
+        # Old logic was `git pull --ff-only || warn`, which silently fell
+        # back to stale code if the pull couldn't fast-forward (e.g. shallow
+        # clone history diverged, force-pushed tags, local edits in the
+        # clone). Users would think they had the latest version when in
+        # fact they were running weeks-old code. Now: try ff-only, then
+        # try fetch + reset --hard, then loudly tell the user if even that
+        # fails.
         log "Updating DE-LIMP (git pull in ${REPO_DIR})..."
-        git -C "${REPO_DIR}" pull --ff-only || warn "git pull failed — continuing with existing code."
+        if ! git -C "${REPO_DIR}" pull --ff-only 2>/dev/null; then
+            warn "Fast-forward pull failed — trying fetch + reset --hard..."
+            if ! git -C "${REPO_DIR}" fetch --depth 1 origin main 2>&1 \
+                || ! git -C "${REPO_DIR}" reset --hard origin/main 2>&1; then
+                err "Could not sync ${REPO_DIR} to origin/main."
+                err "Running with whatever's in the local clone."
+                err "To force a clean re-clone:  rm -rf ${REPO_DIR} && re-run launcher"
+            fi
+        fi
+        # Always print the version we're about to run, so users can see
+        # at a glance whether they're on the latest code.
+        local repo_version repo_commit
+        repo_version="$(cat "${REPO_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]')"
+        repo_commit="$(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null)"
+        log "  Running: DE-LIMP v${repo_version:-unknown} (${repo_commit:-unknown}) at ${REPO_DIR}"
     fi
 }
 
