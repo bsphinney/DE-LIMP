@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.22] — 2026-05-07
+
+### Fixed
+- **Auto-dispatch silently did nothing when license-accepted-but-binary-missing.** v3.10.21's gate was `if ! -x diann-linux && ! -f license_flag` for install, `elif -x diann-linux` for verify. Brett's box had the license flag (accepted earlier) but no binary (because the v3.10.16 .NET install had aborted before reaching the download step). Both gate conditions were false → no install, no verify, no diagnostic output. Removed the license-flag check from the gate — `install_diann()` itself handles the license prompt skip internally when the flag exists. New gate: missing binary → install_diann (which now installs .NET + binary + verifies); present binary → verify_diann_runtime independently. Brett can now see why his Ubuntu 26.04 DIA-NN install never completed.
+
 ## [3.10.21] — 2026-05-07
 
 ### Fixed

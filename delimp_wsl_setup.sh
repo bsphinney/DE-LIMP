@@ -714,9 +714,19 @@ case "${CMD}" in
         # missing (the expensive download); verify_diann_runtime() runs
         # every time (cheap, ~50ms) so users get loud feedback if their
         # .NET / DIA-NN install ever drifts out of working state.
-        if [ ! -x "${DIANN_DIR}/diann-linux" ] && [ ! -f "${DIANN_LICENSE_FLAG}" ]; then
+        # v3.10.22 — gate on binary presence, not license flag.
+        # Brett's box: license accepted earlier, but the v3.10.16 .NET install
+        # aborted before downloading DIA-NN. License flag existed; binary
+        # didn't. The previous gate `if ! -x bin && ! -f license_flag`
+        # silently skipped both install and verify in that intermediate
+        # state, so the user never saw the diagnostic block.
+        # install_diann() already skips the license prompt internally when
+        # the flag exists, so the wrapper just needs:
+        #   - missing binary -> install_diann (which installs .NET + binary + verify)
+        #   - present binary -> verify_diann_runtime independently
+        if [ ! -x "${DIANN_DIR}/diann-linux" ]; then
             install_diann
-        elif [ -x "${DIANN_DIR}/diann-linux" ]; then
+        else
             verify_diann_runtime || warn "DIA-NN runtime verification failed — searches may not work."
         fi
         run_app
