@@ -318,6 +318,22 @@ install_dotnet8_runtime() {
             --install-dir /usr/share/dotnet
         sudo ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
         rm -f "${installer}"
+        # v3.10.24 — `dotnet-install.sh` warns it doesn't pull system
+        # dependencies. Without these, `dotnet --list-runtimes` works
+        # (just reads file headers), but actually executing a .NET app
+        # like DIA-NN's binary fails silently with no output. Install
+        # the typical runtime deps now.
+        log "Installing .NET 8 runtime system dependencies..."
+        sudo apt-get install -y --no-install-recommends \
+            libc6 libgcc-s1 libssl3 libstdc++6 libunwind8 zlib1g \
+            libgssapi-krb5-2 liblttng-ust1 2>&1 | tail -3 || true
+        # libicu version varies by Ubuntu release — try a few
+        for ic in libicu76 libicu74 libicu72 libicu70 libicu71; do
+            if apt-cache show "${ic}" >/dev/null 2>&1; then
+                sudo apt-get install -y --no-install-recommends "${ic}" 2>&1 | tail -1
+                break
+            fi
+        done
         if command -v dotnet >/dev/null 2>&1 && \
            dotnet --list-runtimes 2>/dev/null | grep -qE 'Microsoft\.NETCore\.App 8\.'; then
             log ".NET 8 runtime installed via dotnet-install.sh"
@@ -355,10 +371,24 @@ verify_diann_runtime() {
         log "  ✓ RawFileReader DLLs present (${n_raw_dll} files)"
     fi
     if [ "${ok}" = "1" ]; then
-        local smoke
-        smoke=$("${DIANN_DIR}/diann-linux" --help 2>&1 | head -1 || true)
+        # v3.10.24 — capture stderr so we can SHOW the failure (was
+        # losing it before with `head -1` on combined output, leaving
+        # the user with only "produced no output" and no diagnostic).
+        local smoke smoke_stderr smoke_exit
+        smoke=$("${DIANN_DIR}/diann-linux" --help 2>/tmp/diann_smoke_err </dev/null || true)
+        smoke=$(echo "${smoke}" | head -1)
+        smoke_stderr=$(head -10 /tmp/diann_smoke_err 2>/dev/null || true)
+        rm -f /tmp/diann_smoke_err
         if [ -z "${smoke}" ]; then
-            err "  ✗ diann-linux --help produced no output (binary or .NET broken)"
+            err "  ✗ diann-linux --help produced no output"
+            if [ -n "${smoke_stderr}" ]; then
+                err "    stderr from diann-linux:"
+                while IFS= read -r line; do
+                    err "      ${line}"
+                done <<< "${smoke_stderr}"
+            fi
+            err "    Common cause: .NET 8 system deps missing (libicu, libssl3, ...)."
+            err "    Try: sudo apt-get install -y libicu* libssl3 libgssapi-krb5-2 liblttng-ust1"
             ok=0
         else
             log "  ✓ diann-linux runs: ${smoke}"

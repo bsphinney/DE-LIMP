@@ -5,6 +5,14 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.24] — 2026-05-07
+
+### Fixed
+- **`dotnet-install.sh` doesn't install .NET 8 system dependencies, so DIA-NN's binary couldn't run.** Brett's box: tier 4 succeeded (`.NET 8.0.26 installed via dotnet-install.sh`), DIA-NN binary extracted, RawFileReader DLLs present. But `diann-linux --help` produced **no output** — meaning the binary started but couldn't load the .NET runtime libraries because system deps (libicu, libssl3, libgssapi-krb5-2, libstdc++6, libunwind8, liblttng-ust1, etc.) weren't pulled. The script's own warning `Note that the script does not resolve dependencies during installation` was the giveaway.
+  - Tier 4 now also runs `apt-get install` for the standard .NET 8 runtime deps after `dotnet-install.sh` succeeds.
+  - libicu version varies by Ubuntu release (libicu76 on 26.04, libicu74 on 24.04, libicu72 on 23.x, etc.) — tries each in order until one matches.
+- **Smoke test now captures and displays stderr.** Previously `2>&1 | head -1` collapsed the output, so when the binary failed silently the user just got "produced no output" with no actionable info. New smoke test redirects stderr to a tempfile, surfaces the first 10 lines if the binary failed, and adds a manual-fix hint pointing at the apt-get command. So if there's a NEW dep missing on a future Ubuntu, the user sees the actual error instead of guessing.
+
 ## [3.10.23] — 2026-05-07
 
 ### Fixed
