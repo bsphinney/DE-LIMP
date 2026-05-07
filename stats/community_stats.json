@@ -1,23 +1,15 @@
 {
-  "updated_at": "2026-05-05T08:16:55+00:00",
+  "updated_at": "2026-05-07T08:39:49+00:00",
   "github": {
-    "clones_14d": 1295,
-    "unique_users_14d": 365,
-    "views_14d": 142,
-    "unique_visitors_14d": 33,
+    "clones_14d": 1866,
+    "unique_users_14d": 455,
+    "views_14d": 164,
+    "unique_visitors_14d": 34,
     "stars": 7,
     "forks": 0
   },
   "trends": {
     "clones": [
-  {
-    "date": "2026-04-21",
-    "count": 37
-  },
-  {
-    "date": "2026-04-22",
-    "count": 16
-  },
   {
     "date": "2026-04-23",
     "count": 43
@@ -65,17 +57,17 @@
   {
     "date": "2026-05-04",
     "count": 40
+  },
+  {
+    "date": "2026-05-05",
+    "count": 64
+  },
+  {
+    "date": "2026-05-06",
+    "count": 83
   }
 ],
     "views": [
-  {
-    "date": "2026-04-21",
-    "count": 5
-  },
-  {
-    "date": "2026-04-22",
-    "count": 3
-  },
   {
     "date": "2026-04-23",
     "count": 5
@@ -123,6 +115,14 @@
   {
     "date": "2026-05-04",
     "count": 6
+  },
+  {
+    "date": "2026-05-05",
+    "count": 2
+  },
+  {
+    "date": "2026-05-06",
+    "count": 6
   }
 ]
   },
@@ -130,22 +130,22 @@
     "total": 3,
     "recent": [
   {
-    "title": "Which Q-value?",
-    "category": "Q&A",
-    "author": "mpadula",
-    "comments": 2,
-    "created": "2026-04-30",
-    "updated": "2026-05-04",
-    "url": "https://github.com/bsphinney/DE-LIMP/discussions/4"
-  },
-  {
     "title": "Installation problems.",
     "category": "Q&A",
     "author": "mpadula",
     "comments": 2,
     "created": "2026-03-30",
-    "updated": "2026-04-30",
+    "updated": "2026-05-06",
     "url": "https://github.com/bsphinney/DE-LIMP/discussions/2"
+  },
+  {
+    "title": "Which Q-value?",
+    "category": "Q&A",
+    "author": "mpadula",
+    "comments": 3,
+    "created": "2026-04-30",
+    "updated": "2026-05-06",
+    "url": "https://github.com/bsphinney/DE-LIMP/discussions/4"
   },
   {
     "title": "Welcome to DE-LIMP Discussions!",
@@ -159,6 +159,6 @@
 ]
   },
   "version": {
-    "current": "3.9.0"
+    "current": "3.10.14"
   }
 }
