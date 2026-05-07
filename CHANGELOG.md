@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.26] — 2026-05-07
+
+### Fixed
+- **Smoke test was treating `EXIT=0 + empty stdout` as failure** — but DIA-NN 2.x's `--help` apparently exits cleanly without printing anything. The "DIA-NN runtime verification FAILED" Brett saw on v3.10.25 was a false positive: the binary actually ran fine, the test was just wrong. Replaced with two cleaner checks:
+  1. `ldd "${DIANN_DIR}/diann-linux" | grep 'not found'` — direct check that all dynamic libraries resolve. If anything's missing, prints the actual library names so the user knows exactly what to apt-install.
+  2. `diann-linux --help` exit code only — if it exits non-zero, fail with stderr captured. Empty stdout is no longer treated as a problem.
+
+  This finally aligns the verification with reality: Brett's binary IS healthy on v3.10.25; we were misreporting it as broken.
+
 ## [3.10.25] — 2026-05-07
 
 ### Fixed

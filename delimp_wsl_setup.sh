@@ -380,47 +380,45 @@ verify_diann_runtime() {
         log "  ✓ RawFileReader DLLs present (${n_raw_dll} files)"
     fi
     if [ "${ok}" = "1" ]; then
-        # v3.10.25 — set runtime env for the smoke test. DIA-NN's bundled
-        # libs need LD_LIBRARY_PATH=DIANN_DIR; .NET 8 runtime needs
-        # DOTNET_ROOT. Both are set in env.sh at app launch but not for a
-        # bare invocation, so the smoke test was launching the binary
-        # without its runtime env and silently crashing during library
-        # resolution. Also capture exit code so "crashed silently" is
-        # distinguishable from "ran fine but no output" (some DIA-NN
-        # versions exit 0 with no output on bare --help).
-        local smoke smoke_stderr smoke_exit
-        smoke=$(LD_LIBRARY_PATH="${DIANN_DIR}:${LD_LIBRARY_PATH:-}" \
-                DOTNET_ROOT="${DOTNET_ROOT:-/usr/share/dotnet}" \
-                "${DIANN_DIR}/diann-linux" --help 2>/tmp/diann_smoke_err </dev/null \
-                && echo "EXIT=0" || echo "EXIT=$?")
-        smoke_exit=$(echo "${smoke}" | grep -oE 'EXIT=[0-9]+' | tail -1)
-        smoke=$(echo "${smoke}" | grep -v '^EXIT=' | head -1)
-        smoke_stderr=$(head -15 /tmp/diann_smoke_err 2>/dev/null || true)
-        rm -f /tmp/diann_smoke_err
-
-        if [ "${smoke_exit}" != "EXIT=0" ] || [ -z "${smoke}" ]; then
-            err "  ✗ diann-linux --help failed (${smoke_exit:-no exit code captured})"
-            if [ -n "${smoke}" ]; then
-                err "    stdout: ${smoke}"
-            else
-                err "    stdout: (empty)"
-            fi
-            if [ -n "${smoke_stderr}" ]; then
-                err "    stderr from diann-linux:"
-                while IFS= read -r line; do
-                    err "      ${line}"
-                done <<< "${smoke_stderr}"
-            else
-                err "    stderr: (empty — binary likely crashed during library load)"
-                err "    Try running by hand to see the actual loader error:"
-                err "      LD_LIBRARY_PATH=${DIANN_DIR} DOTNET_ROOT=/usr/share/dotnet ${DIANN_DIR}/diann-linux --help"
-                err "      ldd ${DIANN_DIR}/diann-linux | grep 'not found'"
-            fi
-            err "    Common cause: .NET 8 system deps missing (libicu, libssl3, ...)."
-            err "    Try: sudo apt-get install -y libicu* libssl3 libgssapi-krb5-2 liblttng-ust1 libstdc++6 libunwind8"
+        # v3.10.26 — corrected smoke test. v3.10.25 flagged "EXIT=0 with
+        # no output" as failure, but DIA-NN 2.x's --help apparently
+        # exits cleanly without printing — that's not a broken binary.
+        # The real questions are:
+        #   (a) Are all dynamic libraries resolvable? (`ldd | not found`)
+        #   (b) Does the binary actually run without crashing? (exit code)
+        # Both must pass.
+        local missing_libs
+        missing_libs=$(ldd "${DIANN_DIR}/diann-linux" 2>&1 | grep 'not found' || true)
+        if [ -n "${missing_libs}" ]; then
+            err "  ✗ ldd reports missing libraries:"
+            while IFS= read -r line; do
+                err "      ${line}"
+            done <<< "${missing_libs}"
+            err "    Install the missing libs via apt and re-run."
             ok=0
         else
-            log "  ✓ diann-linux runs: ${smoke}"
+            log "  ✓ All dynamic libs resolve (ldd clean)"
+        fi
+
+        # Try running with runtime env. If it exits non-zero, that's a
+        # real failure even with no stderr.
+        local smoke_exit
+        LD_LIBRARY_PATH="${DIANN_DIR}:${LD_LIBRARY_PATH:-}" \
+            DOTNET_ROOT="${DOTNET_ROOT:-/usr/share/dotnet}" \
+            "${DIANN_DIR}/diann-linux" --help </dev/null >/dev/null 2>/tmp/diann_smoke_err
+        smoke_exit=$?
+        local smoke_stderr
+        smoke_stderr=$(head -15 /tmp/diann_smoke_err 2>/dev/null || true)
+        rm -f /tmp/diann_smoke_err
+        if [ "${smoke_exit}" != "0" ]; then
+            err "  ✗ diann-linux --help exited ${smoke_exit}"
+            if [ -n "${smoke_stderr}" ]; then
+                err "    stderr:"
+                while IFS= read -r line; do err "      ${line}"; done <<< "${smoke_stderr}"
+            fi
+            ok=0
+        else
+            log "  ✓ diann-linux exits cleanly with --help"
         fi
     fi
     if [ "${ok}" != "1" ]; then
