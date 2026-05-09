@@ -31,13 +31,21 @@ DATA_DIR_CONFIG="${DELIMP_BASE}/data_dir"
 # DATA_DIR resolution order:
 #   1. DELIMP_DATA_DIR env var (explicit override)
 #   2. ~/.delimp/data_dir file (set by prompt_data_dir during install)
-#   3. ~/.delimp/data (fallback — WSL-internal VHDX, fills up on large data)
+#   3. ~/DE-LIMP (visible fallback — see v3.10.32 note below)
+#
+# v3.10.32: changed fallback from ~/.delimp/data to ~/DE-LIMP. The old
+# default was a hidden directory under our config dir; users couldn't
+# see it in `ls`, file browsers, or our shinyFiles picker (until the
+# v3.10.31 hidden=TRUE fix). Now: app state stays in ~/.delimp/ (queue,
+# cache, config — should be invisible because it's not user-facing),
+# user data goes in ~/DE-LIMP/ (visible — it's the user's stuff).
+DEFAULT_DATA_DIR="${HOME}/DE-LIMP"
 if [ -n "${DELIMP_DATA_DIR:-}" ]; then
     DATA_DIR="${DELIMP_DATA_DIR}"
 elif [ -f "${DATA_DIR_CONFIG}" ]; then
     DATA_DIR="$(cat "${DATA_DIR_CONFIG}")"
 else
-    DATA_DIR="${DELIMP_BASE}/data"
+    DATA_DIR="${DEFAULT_DATA_DIR}"
 fi
 PORT="${DELIMP_PORT:-3838}"
 REPO_URL="https://github.com/bsphinney/DE-LIMP.git"
@@ -85,7 +93,7 @@ prompt_data_dir() {
     echo "  virtual disk doesn't balloon."
     echo ""
     echo "  Enter a Windows path like:   D:\\proteomics\\delimp-data"
-    echo "  Or leave blank to use:       ~/.delimp/data  (inside WSL)"
+    echo "  Or leave blank to use:       ~/DE-LIMP  (visible folder inside WSL)"
     echo -e "${BLUE}================================================================${NC}"
     echo ""
 
@@ -105,13 +113,14 @@ prompt_data_dir() {
             user_path="${user_path%?}"
         done
 
-        # Blank — use WSL-internal default
+        # Blank — use WSL-internal default at ~/DE-LIMP (visible, not hidden)
         if [ -z "${user_path}" ]; then
-            mkdir -p "${DELIMP_BASE}/data"
-            # mkdir -p of DELIMP_BASE/data also created DELIMP_BASE
-            echo "${DELIMP_BASE}/data" > "${DATA_DIR_CONFIG}"
-            DATA_DIR="${DELIMP_BASE}/data"
-            log "Using WSL-internal data dir: ${DATA_DIR}"
+            mkdir -p "${DEFAULT_DATA_DIR}"
+            # Ensure DELIMP_BASE exists for the config file
+            mkdir -p "${DELIMP_BASE}"
+            echo "${DEFAULT_DATA_DIR}" > "${DATA_DIR_CONFIG}"
+            DATA_DIR="${DEFAULT_DATA_DIR}"
+            log "Using WSL-internal data dir: ${DATA_DIR} (visible folder, not hidden)"
             return 0
         fi
 

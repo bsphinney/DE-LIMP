@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.32] — 2026-05-08
+
+### Changed
+- **Default WSL data directory moved from `~/.delimp/data` (hidden) to `~/DE-LIMP/` (visible).** The old default lived under our config dir, which was invisible in `ls`, file browsers, and our own shinyFiles picker. Brett's friend hit this — couldn't navigate to his own data files in the DE-LIMP file browser even though they existed. Now: app state stays in `~/.delimp/` (queue, cache, config — should stay hidden because it's not user-facing), user data goes in `~/DE-LIMP/` (visible because it's the user's stuff). The setup script's data-directory prompt now offers `~/DE-LIMP` (visible folder inside WSL) as the blank-default, with the same fallback chain (env var > config file > default). Existing installs with `~/.delimp/data_dir` config file already pointing somewhere are unaffected — they keep using whatever path they have.
+
 ## [3.10.31] — 2026-05-08
 
 ### Fixed
