@@ -90,6 +90,121 @@ churn is out of scope. Add new helpers to dedicated files (`helpers_rnaseq.R`,
 
 ---
 
+## Project conventions discovered during validation (lessons #14–#17)
+
+The May 20–21, 2026 validation cycle established four project conventions
+that future Phase D/E work must follow. Full text in
+`NOTES_spec_lessons.md` on Hive (`/quobyte/proteomics-grp/de-limp/pipeline_test/NOTES_spec_lessons.md`).
+
+### Lesson #14 — Functions that write output must integrity-check inputs
+
+Any helper that writes output FASTAs and takes input FASTAs MUST snapshot
+its inputs at function entry (size + mtime + first-1KB md5) and verify
+them before return. Cheap defense (~5 ms/input) against the class of
+"function corrupted my source data" bugs invisible at code-review time.
+
+**Concrete pattern** (already implemented in `assemble_proteogenomics_fasta()`):
+
+```r
+input_snapshots <- list(
+  uniprot  = .snapshot_input(uniprot_fasta),
+  predict  = .snapshot_input(predicted_orfs_fasta),
+  ...
+)
+on.exit({
+  for (s in input_snapshots) .verify_input_unchanged(s, strict = FALSE)
+}, add = TRUE)
+# ... do work ...
+for (s in input_snapshots) .verify_input_unchanged(s, strict = TRUE)
+```
+
+`.snapshot_input`, `.verify_input_unchanged`, `.head_md5`, `.log_disk_write`
+all live in `R/helpers_proteog_assembly.R`. Reuse them in any new helper
+that writes output. Also reuse `.validate_fasta_input(path, label)` to
+catch malformed (e.g., 2-byte "0\n") inputs AT ENTRY before downstream
+tools see them.
+
+### Lesson #15 — Document the upstream source of every static asset
+
+Contaminant FASTAs, reference proteomes, and any other curated file shipped
+with DE-LIMP must carry provenance metadata: a `provenance.json` sibling in
+the same directory, OR at minimum a `# SOURCE: <url>` comment at the top
+of the file. When asked "where did this file come from?" the answer should
+be one filesystem lookup, not "I don't remember."
+
+**Concrete pattern**:
+- `contaminants/provenance.json` documents all 6 HaoGroup contaminant FASTAs
+- `/quobyte/.../fasta/UP000000589_mus_musculus_opg_2026_05.provenance.json`
+  documents the recovered UniProt OPG with download URL, md5, and notes
+- `load_asset_provenance(asset_path)` in `helpers_proteog_assembly.R` is
+  the canonical reader
+
+### Lesson #16 — Prefer R native over `system2()` shell-outs
+
+When R has a builtin that does the work (`grepl`, `readLines`, `file.size`,
+`nchar`, `Biostrings::fasta.index`), use it. Reach for `system2()` only
+when the work genuinely requires an external binary (`sbatch`, `samtools`,
+`seqkit`, etc.).
+
+When `system2()` IS necessary, every string argument that isn't a known-safe
+flag or constant must go through `shQuote()`. No exceptions.
+
+**Why this matters**: validation surfaced a serious data-corruption
+incident where `system2("grep", c("-c", "^>", f))` was parsed by bash as
+`grep -c ^> /path/to/f` — interpreting `^>` as redirect operator. Three
+production FASTAs were silently truncated to "0\n" before the calling
+function even ran. R-native equivalents (`sum(grepl("^>", readLines(f)))`)
+make this class of bug impossible.
+
+### Lesson #17 — Maintain a canonical demo dataset
+
+The "demo_mouse_reproducibility" build is the project's known-good
+reference. Any change to assemble / orchestrator / rewriter / qc gates
+should reproduce its post-recovery composition (~75,465 entries total,
+0 UNPARSED) before merge.
+
+| Field | Value |
+|---|---|
+| Raw FASTQ source | `/quobyte/proteomics-grp/de-limp/pipeline_test/sra_data/` |
+| Samples | `SRR1303776`, `SRR1303777` (mouse, ENCODE 2014) |
+| Reference | `mm39_GRCm39` (GENCODE vM38) |
+| Contaminants | `Mouse_Tissue_Contaminants.fasta` (HaoGroup) |
+| STAR tier | `significantly_relaxed` (92 bp reads) |
+| Expected final FASTA | ~75,465 entries, 0 UNPARSED, ~58 NOVEL_GENE, ~1,360 NOVEL_ISOFORM |
+| Expected wall | ~40 min on `high` partition |
+
+UNPARSED must always be 0; class counts may drift ±100 between runs but
+not orders of magnitude.
+
+### Header rewriter — gffcompare class code map (final, locked)
+
+The rewriter (`scripts/rewrite_transdecoder_headers.py`) maps gffcompare
+class codes to `source=` classes. As of Phase B.5 the map covers all 16
+gffcompare class codes observed in real mouse data — including the four
+added during validation:
+
+```python
+CLASS_CODE_MAP = {
+    "=": "REF",            "c": "REF",
+    "o": "REF",            "x": "REF",  "s": "REF",
+    "p": "REF",            "r": "REF",
+    "j": "NOVEL_ISOFORM",  "e": "NOVEL_ISOFORM",
+    "k": "NOVEL_ISOFORM",  # query CONTAINS reference (UTR extension)
+    "m": "NOVEL_ISOFORM",  # retained intron, full chain
+    "n": "NOVEL_ISOFORM",  # retained intron, partial chain
+    "y": "NOVEL_ISOFORM",  # contains reference within intron (rare)
+    "u": "NOVEL_GENE",     "i": "NOVEL_GENE",  # i = intronic (uORF/sORF candidates)
+    ".": "UNPARSED",       # gffcompare couldn't classify
+}
+```
+
+Any unmapped class code → UNPARSED → exit non-zero per Rule 4. If a future
+gffcompare run surfaces a new code, the rewriter's pre-flight check WARNS
+before classification; extend the map with documented reasoning (lesson
+#13: locked constants are conservative defaults, not immutable laws).
+
+---
+
 ## Phased implementation plan
 
 This is a substantial feature. Implement in phases and **verify each phase works
