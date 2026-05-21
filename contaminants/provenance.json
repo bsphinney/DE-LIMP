@@ -1,0 +1,56 @@
+{
+  "Cell_Culture_Contaminants.fasta": {
+    "source_repository": "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+    "source_subdir": "Sample-type specific contaminant FASTA",
+    "citation": "Frankenfield AM, Ni J, Ahmed M, Hao L. (2022). Protein Contaminants Matter: Building Universal Protein Contaminant Libraries for DDA and DIA Proteomics. J Proteome Res 21(9):2104-2113.",
+    "doi": "10.1021/acs.jproteome.2c00145",
+    "license": "unverified — check upstream",
+    "retrieved_date": "2026-02-26",
+    "intended_use": "Protein contaminant library for cell line / cell culture proteomics samples"
+  },
+  "Mouse_Tissue_Contaminants.fasta": {
+    "source_repository": "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+    "source_subdir": "Sample-type specific contaminant FASTA",
+    "citation": "Frankenfield AM, Ni J, Ahmed M, Hao L. (2022). Protein Contaminants Matter: Building Universal Protein Contaminant Libraries for DDA and DIA Proteomics. J Proteome Res 21(9):2104-2113.",
+    "doi": "10.1021/acs.jproteome.2c00145",
+    "license": "unverified — check upstream",
+    "retrieved_date": "2026-02-26",
+    "intended_use": "Protein contaminant library for mouse tissue proteomics samples"
+  },
+  "Neuron_Culture_Contaminants.fasta": {
+    "source_repository": "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+    "source_subdir": "Sample-type specific contaminant FASTA",
+    "citation": "Frankenfield AM, Ni J, Ahmed M, Hao L. (2022). Protein Contaminants Matter: Building Universal Protein Contaminant Libraries for DDA and DIA Proteomics. J Proteome Res 21(9):2104-2113.",
+    "doi": "10.1021/acs.jproteome.2c00145",
+    "license": "unverified — check upstream",
+    "retrieved_date": "2026-02-26",
+    "intended_use": "Protein contaminant library for neuronal cell culture proteomics samples"
+  },
+  "Rat_Tissue_Contaminants.fasta": {
+    "source_repository": "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+    "source_subdir": "Sample-type specific contaminant FASTA",
+    "citation": "Frankenfield AM, Ni J, Ahmed M, Hao L. (2022). Protein Contaminants Matter: Building Universal Protein Contaminant Libraries for DDA and DIA Proteomics. J Proteome Res 21(9):2104-2113.",
+    "doi": "10.1021/acs.jproteome.2c00145",
+    "license": "unverified — check upstream",
+    "retrieved_date": "2026-02-26",
+    "intended_use": "Protein contaminant library for rat tissue proteomics samples"
+  },
+  "Stem_Cell_Culture_Contaminants.fasta": {
+    "source_repository": "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+    "source_subdir": "Sample-type specific contaminant FASTA",
+    "citation": "Frankenfield AM, Ni J, Ahmed M, Hao L. (2022). Protein Contaminants Matter: Building Universal Protein Contaminant Libraries for DDA and DIA Proteomics. J Proteome Res 21(9):2104-2113.",
+    "doi": "10.1021/acs.jproteome.2c00145",
+    "license": "unverified — check upstream",
+    "retrieved_date": "2026-02-26",
+    "intended_use": "Protein contaminant library for stem cell / iPSC culture proteomics samples"
+  },
+  "Universal_Contaminants.fasta": {
+    "source_repository": "https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics",
+    "source_subdir": "Sample-type specific contaminant FASTA",
+    "citation": "Frankenfield AM, Ni J, Ahmed M, Hao L. (2022). Protein Contaminants Matter: Building Universal Protein Contaminant Libraries for DDA and DIA Proteomics. J Proteome Res 21(9):2104-2113.",
+    "doi": "10.1021/acs.jproteome.2c00145",
+    "license": "unverified — check upstream",
+    "retrieved_date": "2026-02-26",
+    "intended_use": "Universal protein contaminant library applicable across sample types; use as default when no sample-type-specific library is available"
+  }
+}

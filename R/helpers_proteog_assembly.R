@@ -22,6 +22,155 @@ if (!exists("%||%")) {
   )
 }
 
+# Resolve seqkit binary path: prefer the proteog_helpers conda env (which is
+# guaranteed to be present per Phase A), fall back to system PATH. This keeps
+# assemble_proteogenomics_fasta() working both inside DE-LIMP's apptainer
+# session and from a stock R invocation.
+.find_seqkit <- function() {
+  conda_env <- if (exists("PROTEOG_CONDA_ENV"))
+    PROTEOG_CONDA_ENV
+  else
+    "/quobyte/proteomics-grp/de-limp/envs/proteog_helpers"
+  candidate <- file.path(conda_env, "bin", "seqkit")
+  if (file.exists(candidate)) return(candidate)
+  on_path <- Sys.which("seqkit")
+  if (nzchar(on_path)) return(unname(on_path))
+  stop("assemble_proteogenomics_fasta(): seqkit not found. Tried ",
+       candidate, " and system PATH. Install via `mamba install -p ",
+       conda_env, " -c conda-forge -c bioconda seqkit`.")
+}
+
+# =============================================================================
+# Input-integrity instrumentation (project convention — see NOTES_spec_lessons #14)
+# =============================================================================
+#
+# Any helper that writes output FASTAs and takes input FASTAs MUST integrity-
+# check its inputs. The check is cheap (one md5 of the first 1 KB per file,
+# ~5ms each) and catches the entire class of "function corrupted my source
+# data" bugs invisible at code-review time. CLAUDE.md Rule 4 applies — silent
+# input mutation in an export-path helper is forbidden.
+
+#' MD5 hash of the first n bytes of a file
+#'
+#' Uses the `digest` package when available; otherwise writes the head bytes
+#' to a tempfile and uses base R's `tools::md5sum()`. The head-only hash
+#' catches the corruption pattern we observed (whole-file truncation/
+#' replacement) without paying the full-file scan cost on hundred-MB FASTAs.
+.head_md5 <- function(path, n = 1024L) {
+  if (!file.exists(path)) return(NA_character_)
+  con <- file(path, "rb")
+  on.exit(close(con), add = TRUE)
+  raw_bytes <- readBin(con, "raw", n = n)
+  if (requireNamespace("digest", quietly = TRUE)) {
+    digest::digest(raw_bytes, algo = "md5", serialize = FALSE)
+  } else {
+    tmp <- tempfile(pattern = "head_md5_")
+    on.exit(if (file.exists(tmp)) file.remove(tmp), add = TRUE)
+    writeBin(raw_bytes, tmp)
+    unname(tools::md5sum(tmp))
+  }
+}
+
+#' Snapshot one input file's identity for later integrity verification
+#'
+#' Returns a list with $path, $size, $mtime, $head_hash — or NULL if the
+#' input is NULL/missing (those are valid no-op skip cases for optional
+#' inputs like variant_fasta).
+.snapshot_input <- function(path) {
+  if (is.null(path)) return(NULL)
+  if (!file.exists(path)) return(NULL)
+  list(
+    path      = path,
+    size      = file.size(path),
+    mtime     = file.mtime(path),
+    head_hash = .head_md5(path)
+  )
+}
+
+#' Verify a snapshot against current file state
+#'
+#' @param snap snapshot from .snapshot_input(), or NULL (no-op)
+#' @param strict if TRUE, stop() on mismatch; if FALSE, message() only
+#' @return TRUE if unchanged, FALSE if changed (or stop()s when strict=TRUE)
+.verify_input_unchanged <- function(snap, strict = TRUE) {
+  if (is.null(snap)) return(TRUE)
+  fail <- function(msg) {
+    if (strict) stop(msg, call. = FALSE)
+    message("[INPUT-INTEGRITY] ", msg)
+    FALSE
+  }
+  if (!file.exists(snap$path)) {
+    return(fail(sprintf("INPUT DELETED during execution: %s", snap$path)))
+  }
+  if (file.size(snap$path) != snap$size) {
+    return(fail(sprintf(
+      "INPUT SIZE CHANGED during execution: %s was %d bytes, now %d bytes",
+      snap$path, snap$size, file.size(snap$path)
+    )))
+  }
+  if (!identical(.head_md5(snap$path), snap$head_hash)) {
+    return(fail(sprintf("INPUT CONTENT CHANGED during execution: %s", snap$path)))
+  }
+  TRUE
+}
+
+#' Log a disk-write operation to stderr
+#'
+#' Use this BEFORE every system2(..., stdout=path), file.copy(),
+#' writeLines(), cat(file=path), jsonlite::write_json(...) call in the
+#' assembly helpers. The first argument names the operation (for grep-ability
+#' in the log); the second is the destination path string evaluated at the
+#' moment of write.
+.log_disk_write <- function(operation, path) {
+  cat(sprintf("[DISK WRITE] %s -> %s\n", operation, path), file = stderr())
+}
+
+#' Validate that a file is a well-formed FASTA at function entry
+#'
+#' Companion to the integrity check: integrity catches MUTATION during the
+#' function, this catches BAD-STATE-AT-ENTRY (e.g., a previously corrupted
+#' input file). Together they cover both failure modes.
+#'
+#' Checks (cheap, ~5ms per file):
+#'   - File exists
+#'   - File size > 0
+#'   - First non-empty line starts with `>` (FASTA header marker)
+#'   - At least one `>` in the first 8 KB (basic sanity for multi-entry files)
+#'
+#' NULL/missing optional inputs are skipped (no-op return TRUE).
+#'
+#' @param path character path; NULL is OK (skip)
+#' @param label character — argument name for the error message
+#' @return TRUE on pass; stop() with clear message on fail
+.validate_fasta_input <- function(path, label) {
+  if (is.null(path) || !nzchar(path)) return(TRUE)
+  if (!file.exists(path)) {
+    stop(sprintf(
+      "assemble_proteogenomics_fasta(): input %s does not exist: %s",
+      label, path
+    ), call. = FALSE)
+  }
+  sz <- file.size(path)
+  if (is.na(sz) || sz <= 0) {
+    stop(sprintf(
+      "assemble_proteogenomics_fasta(): input %s is empty (size=%s): %s",
+      label, as.character(sz), path
+    ), call. = FALSE)
+  }
+  # Sniff first 8 KB for at least one FASTA header line.
+  con <- file(path, "rb")
+  on.exit(close(con), add = TRUE)
+  raw_bytes <- readBin(con, "raw", n = 8192L)
+  head_str <- rawToChar(raw_bytes[raw_bytes != as.raw(0)])
+  if (!grepl("^>", head_str) && !grepl("\n>", head_str, fixed = TRUE)) {
+    stop(sprintf(
+      "assemble_proteogenomics_fasta(): input %s is not a valid FASTA (no '>' header found in first 8 KB): %s. File size = %d bytes. First 64 chars: %s",
+      label, path, sz, substr(head_str, 1, 64)
+    ), call. = FALSE)
+  }
+  TRUE
+}
+
 # =============================================================================
 # Composition counting
 # =============================================================================
@@ -113,6 +262,7 @@ load_proteog_registry <- function() {
 .save_proteog_registry <- function(registry) {
   path <- .proteog_registry_path()
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  .log_disk_write("jsonlite::write_json (registry)", path)
   jsonlite::write_json(registry, path, auto_unbox = TRUE, pretty = TRUE)
   invisible(path)
 }
@@ -194,6 +344,34 @@ assemble_proteogenomics_fasta <- function(project_name,
   if (!nzchar(project_name) || !grepl("^[A-Za-z0-9_.-]+$", project_name)) {
     stop("assemble_proteogenomics_fasta(): project_name must be non-empty and contain only [A-Za-z0-9_.-]; got: ", project_name)
   }
+
+  # Structural validation: each FASTA input must be a well-formed FASTA at
+  # entry. Catches the "previously-corrupted-input" class of bug (e.g., a
+  # 2-byte "0\n" file from an upstream shell-meta accident) before any
+  # downstream tool sees it. merged_gtf is excluded — it's a GTF, not FASTA.
+  .validate_fasta_input(uniprot_fasta,        "uniprot_fasta")
+  .validate_fasta_input(predicted_orfs_fasta, "predicted_orfs_fasta")
+  .validate_fasta_input(variant_fasta,        "variant_fasta")
+  .validate_fasta_input(contaminants_fasta,   "contaminants_fasta")
+
+  # ── Input-integrity snapshot (project convention; NOTES_spec_lessons #14) ──
+  # Any code path that mutates any of these snapshotted files mid-execution
+  # is a bug. We verify both on the success path (final stop() if changed)
+  # and on the failure path (on.exit message() with no stop, so the original
+  # error still propagates).
+  input_snapshots <- list(
+    uniprot      = .snapshot_input(uniprot_fasta),
+    predicted    = .snapshot_input(predicted_orfs_fasta),
+    merged_gtf   = .snapshot_input(merged_gtf),
+    variant      = .snapshot_input(variant_fasta),
+    contaminants = .snapshot_input(contaminants_fasta)
+  )
+  on.exit({
+    for (nm in names(input_snapshots)) {
+      .verify_input_unchanged(input_snapshots[[nm]], strict = FALSE)
+    }
+  }, add = TRUE)
+
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
   out_path <- file.path(
@@ -218,6 +396,7 @@ assemble_proteogenomics_fasta <- function(project_name,
     tmp_concat <- tempfile(pattern = "proteog_concat_", fileext = ".fasta")
     on.exit(if (file.exists(tmp_concat)) file.remove(tmp_concat), add = TRUE)
 
+    .log_disk_write("system2('cat', stdout=tmp_concat)", tmp_concat)
     cat_status <- system2(
       "cat", args = shQuote(components),
       stdout = tmp_concat, stderr = FALSE
@@ -226,14 +405,17 @@ assemble_proteogenomics_fasta <- function(project_name,
       stop("assemble_proteogenomics_fasta(): cat failed concatenating components")
     }
 
+    seqkit_bin <- .find_seqkit()
+    .log_disk_write("seqkit rmdup -o out_path", out_path)
     rmdup_status <- system2(
-      "seqkit",
+      seqkit_bin,
       args = c("rmdup", "-s", "-o", shQuote(out_path), shQuote(tmp_concat))
     )
     if (rmdup_status != 0) {
       stop("assemble_proteogenomics_fasta(): seqkit rmdup failed (exit ", rmdup_status, ")")
     }
   } else {
+    .log_disk_write("system2('cat', stdout=out_path)", out_path)
     cat_status <- system2(
       "cat", args = shQuote(components),
       stdout = out_path, stderr = FALSE
@@ -248,6 +430,7 @@ assemble_proteogenomics_fasta <- function(project_name,
   # Preserve merged GTF alongside (coordinate-lookup reference) — registry
   # records the path so the Proteogenomics tab can resolve genomic coords on demand.
   gtf_dest <- sub("\\.fasta$", "_merged.gtf", out_path)
+  .log_disk_write("file.copy(merged_gtf -> gtf_dest)", gtf_dest)
   file.copy(merged_gtf, gtf_dest, overwrite = TRUE)
 
   register_proteogenomics_fasta(
@@ -257,6 +440,11 @@ assemble_proteogenomics_fasta <- function(project_name,
     composition      = composition,
     build_metadata   = build_metadata
   )
+
+  # Strict integrity check on the success path — stop() if any input changed.
+  for (nm in names(input_snapshots)) {
+    .verify_input_unchanged(input_snapshots[[nm]], strict = TRUE)
+  }
 
   list(
     pipeline_id       = "proteogenomics_v1.1",
@@ -294,6 +482,38 @@ assemble_proteogenomics_fasta <- function(project_name,
     } else "",
     if (!is.null(meta$read_length_tier)) {
       sprintf(" STAR threshold tier: %s.", meta$read_length_tier)
+    } else "",
+    if (isTRUE(meta$contaminants_used) || identical(meta$contaminants_source, "HaoGroup")) {
+      paste0(
+        " Protein contaminant sequences were obtained from the universal protein",
+        " contaminant library (Frankenfield et al. 2022,",
+        " doi:10.1021/acs.jproteome.2c00145;",
+        " https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics)."
+      )
     } else ""
   )
+}
+
+#' Load provenance metadata for a static asset (contaminant FASTA, etc.)
+#'
+#' Reads provenance.json from the same directory as the asset and returns
+#' the entry for that asset, or NULL if no provenance is found.
+#'
+#' This is the "one filesystem lookup" implementation of NOTES_spec_lessons #15.
+#' Any DE-LIMP code that needs the citation, license, or source URL for a
+#' shipped static file should call this rather than hardcoding the metadata.
+#'
+#' @param asset_path character — absolute path to the asset file
+#' @return named list with provenance fields, or NULL if not found
+load_asset_provenance <- function(asset_path) {
+  if (is.null(asset_path) || !nzchar(asset_path)) return(NULL)
+  prov_path <- file.path(dirname(asset_path), "provenance.json")
+  if (!file.exists(prov_path)) return(NULL)
+  prov <- tryCatch(
+    jsonlite::read_json(prov_path),
+    error = function(e) NULL
+  )
+  if (is.null(prov)) return(NULL)
+  entry_name <- basename(asset_path)
+  prov[[entry_name]] %||% NULL
 }
