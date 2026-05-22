@@ -47,65 +47,87 @@ if (!exists("%||%")) {
 
 #' Classify proteins in a DIA-NN result by proteogenomic source
 #'
-#' Reads the `source=` tag from the FASTA description preserved in DIA-NN's
-#' output table. Entries with no `source=` tag default to UNIPROT (canonical
-#' reference). VARIANT entries are detected by the INDEL_ENSP*/SNV_ENSP*
-#' accession prefix (optional Phase 3 output).
+#' PRIMARY signal: the Protein.Group accession structure itself. DIA-NN
+#' strips our custom `source=` / `ORF_type=` description tags during parsing,
+#' so the description column is NOT a reliable classification source (this
+#' was verified on the May 22 smoke test against an assembled proteogenomics
+#' FASTA). The accession structure is preserved unchanged and lets us tell:
+#'   - `^(INDEL|SNV)_ENSP*`                  → VARIANT (Phase 3 output)
+#'   - `MSTRG.<num>.<num>.p<num>` anywhere   → NOVEL_GENE
+#'   - `ENSMUST<num>(.<num>)?.p<num>`        → REF (may upgrade to NOVEL_ISOFORM
+#'                                             when a fasta_path is provided)
+#'   - `sp|...|...`, `tr|...|...`, `ENSP*`   → UNIPROT canonical
+#'
+#' OPTIONAL refinement: if `fasta_path` points at the proteogenomics FASTA
+#' that was searched, we parse its `>` lines to recover the original
+#' source= tag (REF vs NOVEL_ISOFORM split, ORF_type, parent_gene). Entries
+#' marked `source=NOVEL_ISOFORM` in the FASTA are upgraded from REF.
+#' Without the FASTA, ENSMUST entries are classified REF (best-effort
+#' conservative default).
+#'
+#' Group accessions like `ENSMUST00000071044.13.p1;ENSMUST00000114071.8.p1;MSTRG.19225.5.p1`
+#' are classified by their MOST PROTEOGENOMIC member (precedence:
+#' NOVEL_GENE > NOVEL_ISOFORM > REF > UNIPROT > VARIANT precedes nothing).
+#' This surfaces the discovery rather than hiding it under a canonical co-ID.
 #'
 #' Accepts EITHER a flat genes data.frame OR a limma/limpa EList-like object
 #' that has a `$genes` slot — extracts `$genes` automatically.
 #'
-#' @param diann_report data.frame OR list with `$genes` data.frame
-#' @return data.frame with columns: Protein.Group, source, orf_type, parent_gene
-classify_proteins <- function(diann_report) {
-  if (is.null(diann_report)) {
-    return(.empty_classification())
+#' @param diann_report data.frame, list with `$genes`, or character vector of
+#'   Protein.Group strings
+#' @param fasta_path optional character — assembled FASTA used in the DIA-NN
+#'   search. When provided, enables REF→NOVEL_ISOFORM upgrade + ORF_type/
+#'   parent_gene recovery for entries the FASTA has metadata for.
+#' @return data.frame: Protein.Group, source, orf_type, parent_gene
+classify_proteins <- function(diann_report, fasta_path = NULL) {
+  ids <- .extract_protein_groups(diann_report)
+  if (length(ids) == 0) return(.empty_classification())
+
+  # ── PRIMARY classification: accession-structure ────────────────────────────
+  # Each Protein.Group can be a single accession OR a `;`-joined group. We
+  # classify member-by-member and take the most proteogenomic member.
+  base_source <- vapply(ids, .classify_group_accession, character(1),
+                        USE.NAMES = FALSE)
+
+  # ── OPTIONAL refinement from FASTA ─────────────────────────────────────────
+  # Default empty maps — used as no-ops if fasta_path is NULL or unreadable.
+  fasta_map <- NULL
+  if (!is.null(fasta_path) && nzchar(fasta_path) && file.exists(fasta_path)) {
+    fasta_map <- parse_fasta_source_tags(fasta_path)
   }
 
-  tbl <- if (is.data.frame(diann_report)) {
-    diann_report
-  } else if (is.list(diann_report) && !is.null(diann_report$genes)) {
-    diann_report$genes
-  } else {
-    warning("classify_proteins(): input is neither a data.frame nor a list with $genes; returning empty classification")
-    return(.empty_classification())
-  }
-
-  if (!"Protein.Group" %in% names(tbl) || nrow(tbl) == 0) {
-    return(.empty_classification())
-  }
-
-  ids <- as.character(tbl$Protein.Group)
-  desc <- .proteog_pick_description_col(tbl)
-
-  if (is.null(desc)) {
-    # No description column → cannot read source= tags; everything defaults
-    # to UNIPROT except prefix-detected VARIANTs. Surface a warning so we
-    # don't silently produce misleading classifications (CLAUDE.md Rule 4).
-    warning("classify_proteins(): no description column found in input (tried Protein.Group.Description, First.Protein.Description, Protein.Names, Description); defaulting all non-VARIANT entries to UNIPROT class")
-    desc <- rep("", length(ids))
-  }
-
-  # Default everything to UNIPROT, then overwrite from explicit source= tags.
-  src <- rep("UNIPROT", length(ids))
-  has_src <- grepl("source=", desc, fixed = TRUE)
-  src[has_src] <- sub(".*source=([A-Z_]+).*", "\\1", desc[has_src])
-
-  # ORF_type and parent_gene only meaningful for proteogenomic-tagged entries.
+  src <- base_source
   orf <- rep(NA_character_, length(ids))
-  has_orf <- grepl("ORF_type=", desc, fixed = TRUE)
-  orf[has_orf] <- sub(".*ORF_type=([^[:space:]]+).*", "\\1", desc[has_orf])
+  pg  <- rep(NA_character_, length(ids))
 
-  pg <- rep(NA_character_, length(ids))
-  has_pg <- grepl("parent_gene=", desc, fixed = TRUE)
-  pg[has_pg] <- sub(".*parent_gene=([^[:space:]]+).*", "\\1", desc[has_pg])
+  if (!is.null(fasta_map) && nrow(fasta_map) > 0) {
+    # Build lookup tables keyed by protein_id (the bit between sp|...|)
+    src_lkp <- setNames(fasta_map$fasta_source, fasta_map$protein_id)
+    orf_lkp <- setNames(fasta_map$orf_type,     fasta_map$protein_id)
+    pg_lkp  <- setNames(fasta_map$parent_gene,  fasta_map$protein_id)
 
-  # VARIANT detection: accession prefix (Phase 3 optional output).
-  is_variant <- grepl("^(INDEL|SNV)_ENSP", ids)
-  src[is_variant] <- "VARIANT"
+    for (i in seq_along(ids)) {
+      members <- strsplit(ids[i], ";", fixed = TRUE)[[1]]
+      # For each member, normalize to the bare protein_id (strip sp|...|... wrap)
+      member_ids <- vapply(members, .strip_sp_prefix, character(1),
+                           USE.NAMES = FALSE)
+      hits <- src_lkp[member_ids]
+      hits <- hits[!is.na(hits)]
+      if (length(hits) > 0) {
+        # Upgrade REF → NOVEL_ISOFORM if any member is marked NOVEL_ISOFORM in FASTA
+        if (any(hits == "NOVEL_ISOFORM") && src[i] == "REF") {
+          src[i] <- "NOVEL_ISOFORM"
+        }
+        # Take ORF_type / parent_gene from the first matching member
+        first_hit <- which(!is.na(src_lkp[member_ids]))[1]
+        if (!is.na(first_hit)) {
+          orf[i] <- orf_lkp[member_ids[first_hit]]
+          pg[i]  <- pg_lkp[member_ids[first_hit]]
+        }
+      }
+    }
+  }
 
-  # Deduplicate to one row per unique Protein.Group (the genes table can
-  # have repeats if joined upstream)
   out <- data.frame(
     Protein.Group = ids,
     source        = src,
@@ -116,6 +138,135 @@ classify_proteins <- function(diann_report) {
   out <- out[!duplicated(out$Protein.Group), , drop = FALSE]
   rownames(out) <- NULL
   out
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Classifier internals
+# ──────────────────────────────────────────────────────────────────────────────
+
+#' Pull Protein.Group strings out of any of the accepted input shapes
+.extract_protein_groups <- function(x) {
+  if (is.null(x)) return(character(0))
+  if (is.character(x)) return(unique(x))
+  tbl <- if (is.data.frame(x)) {
+    x
+  } else if (is.list(x) && !is.null(x$genes)) {
+    x$genes
+  } else if (is.list(x) && !is.null(x$Protein.Group)) {
+    # arrow tibble or similar — coerce
+    as.data.frame(x[, "Protein.Group", drop = FALSE])
+  } else {
+    warning("classify_proteins(): input is neither a data.frame, character vector, nor list with $genes; returning empty classification")
+    return(character(0))
+  }
+  if (!"Protein.Group" %in% names(tbl) || nrow(tbl) == 0) return(character(0))
+  unique(as.character(tbl$Protein.Group))
+}
+
+#' Strip `sp|ACC|NAME` wrapping to bare ACC; leave bare accessions alone.
+.strip_sp_prefix <- function(x) {
+  if (is.na(x) || !nzchar(x)) return(NA_character_)
+  if (grepl("^(sp|tr)\\|", x)) {
+    return(sub("^(sp|tr)\\|([^|]+)\\|.*", "\\2", x))
+  }
+  x
+}
+
+#' Classify a single Protein.Group string (possibly `;`-joined) by accession
+#' structure. Precedence: VARIANT > NOVEL_GENE > NOVEL_ISOFORM > REF > UNIPROT.
+#' NOVEL_ISOFORM cannot be detected from accession alone (an `ENSMUST*.pN`
+#' looks identical whether it's REF or a novel isoform of the same gene);
+#' it's only upgraded when the FASTA refinement step finds a `source=NOVEL_ISOFORM`
+#' tag. So accession-based classification never returns NOVEL_ISOFORM directly.
+.classify_group_accession <- function(group_str) {
+  if (is.na(group_str) || !nzchar(group_str)) return("UNKNOWN")
+  members <- strsplit(group_str, ";", fixed = TRUE)[[1]]
+  member_class <- vapply(members, .classify_single_accession, character(1),
+                         USE.NAMES = FALSE)
+  # Precedence — surface the most proteogenomic class in the group.
+  for (cls in c("VARIANT", "NOVEL_GENE", "REF", "UNIPROT")) {
+    if (cls %in% member_class) return(cls)
+  }
+  "UNKNOWN"
+}
+
+#' Classify a single (un-joined) accession string by structure.
+.classify_single_accession <- function(acc) {
+  if (is.na(acc) || !nzchar(acc)) return("UNKNOWN")
+  # Strip sp|/tr| wrapping first so we look at the protein_id directly
+  bare <- .strip_sp_prefix(acc)
+  if (grepl("^(INDEL|SNV)_ENSP", acc) || grepl("^(INDEL|SNV)_ENSP", bare)) {
+    return("VARIANT")
+  }
+  if (grepl("^MSTRG\\.[0-9]+\\.[0-9]+\\.p[0-9]+$", bare) ||
+      grepl("^MSTRG\\.[0-9]+\\.[0-9]+$", bare)) {
+    return("NOVEL_GENE")
+  }
+  if (grepl("^ENSMUST[0-9]+(\\.[0-9]+)?\\.p[0-9]+$", bare) ||
+      grepl("^ENST[0-9]+(\\.[0-9]+)?\\.p[0-9]+$", bare)) {
+    return("REF")
+  }
+  if (grepl("^[A-Z][0-9][A-Z0-9]{3}[0-9]$", bare) ||                # UniProt 6-char
+      grepl("^[OPQ][0-9][A-Z0-9]{3}[0-9]$", bare) ||                # UniProt extended
+      grepl("^[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9]$", bare) ||  # 10-char (A0A...)
+      grepl("^ENSP[0-9]+", bare) ||                                  # Ensembl protein
+      grepl("^(sp|tr)\\|", acc) ||                                   # sp|/tr| wrapper
+      grepl("^Cont_", bare) || grepl("^Cont_", acc)) {               # cRAP/HaoGroup contaminants
+    return("UNIPROT")
+  }
+  "UNKNOWN"
+}
+
+#' Parse `>` headers from a proteogenomics FASTA and extract source= metadata
+#'
+#' Per lesson #16, uses R native (readLines + grepl) — NOT system2 grep
+#' (the unquoted `^>` anti-pattern that caused the May 21 corruption).
+#'
+#' @param fasta_path character
+#' @return data.frame: protein_id, fasta_source, orf_type, parent_gene
+parse_fasta_source_tags <- function(fasta_path) {
+  if (!file.exists(fasta_path)) {
+    return(data.frame(
+      protein_id   = character(0),
+      fasta_source = character(0),
+      orf_type     = character(0),
+      parent_gene  = character(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+  lines <- readLines(fasta_path, warn = FALSE)
+  headers <- lines[startsWith(lines, ">")]
+  if (length(headers) == 0) {
+    return(data.frame(
+      protein_id   = character(0),
+      fasta_source = character(0),
+      orf_type     = character(0),
+      parent_gene  = character(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+  # Extract protein_id from `>sp|ID|NAME ...` — fall back to first whitespace-token if no sp| prefix
+  pid <- ifelse(
+    grepl("^>(sp|tr)\\|", headers),
+    sub("^>(sp|tr)\\|([^|]+)\\|.*", "\\2", headers),
+    sub("^>([^[:space:]]+).*", "\\1", headers)
+  )
+  src <- ifelse(grepl("source=", headers, fixed = TRUE),
+                sub(".*source=([A-Z_]+).*", "\\1", headers),
+                NA_character_)
+  orf <- ifelse(grepl("ORF_type=", headers, fixed = TRUE),
+                sub(".*ORF_type=([^[:space:]]+).*", "\\1", headers),
+                NA_character_)
+  pg  <- ifelse(grepl("parent_gene=", headers, fixed = TRUE),
+                sub(".*parent_gene=([^[:space:]]+).*", "\\1", headers),
+                NA_character_)
+  data.frame(
+    protein_id   = pid,
+    fasta_source = src,
+    orf_type     = orf,
+    parent_gene  = pg,
+    stringsAsFactors = FALSE
+  )
 }
 
 .empty_classification <- function() {
