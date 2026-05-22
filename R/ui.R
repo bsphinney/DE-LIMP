@@ -475,9 +475,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
   # ============================================================================
 
     # ==========================================================================
-    # SEARCH (standalone, conditional) — visible when Docker or HPC backend available
+    # SEARCH dropdown — Run Search + Build Database (Phase D proteogenomics)
+    # When search_enabled, the navbar shows a "New Search" dropdown containing
+    # the existing search workflow plus, on HPC backends, a Build Database
+    # entry for the proteogenomics RNA-seq → FASTA pipeline.
     # ==========================================================================
-    if (search_enabled) nav_panel("New Search", icon = icon("rocket"),
+    if (search_enabled) nav_menu("New Search", icon = icon("rocket"),
+
+      # ------------------------------------------------------------------------
+      # Sub-panel: Run Search (existing DIA-NN workflow)
+      # ------------------------------------------------------------------------
+      nav_panel("Run Search", value = "search_tab", icon = icon("magnifying-glass"),
       # Three-panel wizard layout
       layout_column_wrap(
         width = 1/3,
@@ -1070,7 +1078,19 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           )
         )
       )
-    ),
+      ),  # close Run Search nav_panel
+
+      # ------------------------------------------------------------------------
+      # Sub-panel: Build Database 🧬 — proteogenomics RNA-seq → FASTA pipeline
+      # HPC-only (needs sbatch). On Docker-only or HF, the panel is hidden.
+      # ------------------------------------------------------------------------
+      if (hpc_available && !is_hf_space) nav_panel(
+        tags$span("Build Database ", tags$span("\U0001F9EC", style = "font-size: 0.9em;")),
+        value = "build_database_tab", icon = icon("dna"),
+        uiOutput("build_database_content")
+      )
+
+    ),  # close New Search nav_menu
 
     # ==========================================================================
     # QC (standalone, merged from QC Trends + QC Plots)
