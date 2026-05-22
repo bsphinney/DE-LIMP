@@ -217,7 +217,55 @@ server_gsea <- function(input, output, session, values, add_to_log) {
         message(sprintf("[DE-LIMP GSEA] Using organism database: %s", org_db_name))
 
         if (!requireNamespace(org_db_name, quietly = TRUE)) {
-          BiocManager::install(org_db_name, ask = FALSE, update = FALSE, quiet = TRUE)
+          # org.*.eg.db are Bioconductor ANNOTATION packages. BiocManager::install()
+          # validates the Bioconductor version online first, which throws
+          # "Bioconductor version cannot be validated; no internet connection"
+          # whenever that one HTTP check fails — even when the machine has internet
+          # (e.g. our UniProt lookup just succeeded). Install directly from the
+          # Bioconductor annotation repo instead, bypassing BiocManager validation
+          # entirely. Same approach app.R uses for limpa.
+          message(sprintf("[DE-LIMP GSEA] %s not installed — installing from Bioconductor annotation repo...", org_db_name))
+          suppressWarnings(options(BIOCONDUCTOR_ONLINE_VERSION_DIAGNOSIS = FALSE))
+
+          # Resolve the Bioconductor version: prefer BiocManager's known version,
+          # else map from the running R version (R 4.6 -> Bioc 3.23, R 4.5 -> 3.21).
+          bioc_ver <- tryCatch(as.character(BiocManager::version()), error = function(e) NA_character_)
+          if (is.na(bioc_ver) || !nzchar(bioc_ver)) {
+            rv <- getRversion()
+            bioc_ver <- if (rv >= "4.6.0") "3.23" else if (rv >= "4.5.0") "3.21" else NA_character_
+          }
+
+          installed_ok <- FALSE
+          if (!is.na(bioc_ver)) {
+            repos <- c(
+              BioCann  = paste0("https://bioconductor.org/packages/", bioc_ver, "/data/annotation"),
+              BioCsoft = paste0("https://bioconductor.org/packages/", bioc_ver, "/bioc"),
+              CRAN     = "https://cloud.r-project.org"
+            )
+            installed_ok <- tryCatch({
+              suppressWarnings(install.packages(org_db_name, repos = repos, quiet = TRUE))
+              requireNamespace(org_db_name, quietly = TRUE)
+            }, error = function(e) FALSE)
+          }
+
+          # Last resort: BiocManager with validation suppressed.
+          if (!installed_ok) {
+            installed_ok <- tryCatch({
+              suppressWarnings(BiocManager::install(org_db_name, ask = FALSE,
+                                                    update = FALSE, quiet = TRUE))
+              requireNamespace(org_db_name, quietly = TRUE)
+            }, error = function(e) FALSE)
+          }
+
+          if (!installed_ok) {
+            stop(sprintf(
+              paste0("Could not install the organism annotation package '%s' (detected organism: %s).\n",
+                     "This is usually a Bioconductor version-validation hiccup, not a real network problem.\n",
+                     "Fix: run this once in the R console, then retry GSEA:\n\n",
+                     "    install.packages('%s', repos = 'https://bioconductor.org/packages/%s/data/annotation')\n"),
+              org_db_name, org_db_name, org_db_name,
+              if (!is.na(bioc_ver)) bioc_ver else "3.23"))
+          }
         }
         library(org_db_name, character.only = TRUE)
 

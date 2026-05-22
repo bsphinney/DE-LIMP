@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.33] — 2026-05-22
+
+### Fixed
+- **GSEA failed with "Bioconductor version cannot be validated; no internet connection" when the organism's annotation package wasn't already installed.** Organism detection worked (e.g. Bos taurus → `org.Bt.eg.db`), but the install step called `BiocManager::install()`, whose online version-validation check throws that error even when the machine has internet (the UniProt organism lookup right before it had just succeeded). On R 4.6 / Bioc 3.23 this hit any non-preinstalled organism (cow, dog, chicken, pig, zebrafish, …). Fix: install `org.*.eg.db` annotation packages directly from the Bioconductor annotation repo URL (`https://bioconductor.org/packages/<bioc>/data/annotation`), bypassing BiocManager's validation entirely — the same pattern `app.R` already uses for limpa. Falls back to BiocManager (validation suppressed), then to a clear, actionable error showing the exact one-line manual install command if all else fails. Bioc version resolved from BiocManager when known, else mapped from the R version (R 4.6 → 3.23, R 4.5 → 3.21).
+
 ## [3.10.32] — 2026-05-08
 
 ### Changed
