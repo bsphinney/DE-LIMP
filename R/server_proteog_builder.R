@@ -91,45 +91,154 @@ PROTEOG_STAGE_ORDER <- c(
 #' The Phase B sbatch generators expect FASTQs at <project_dir>/rnaseq/<sample>_R{1,2}.fastq.gz.
 #' If rnaseq_dir is different (e.g., user pointed at sra_data/), we symlink the
 #' files into place. Idempotent.
-.stage_rnaseq_inputs <- function(project_dir, rnaseq_dir, sample_names) {
+.stage_rnaseq_inputs <- function(project_dir, rnaseq_dir, sample_names,
+                                  ssh_config = NULL) {
   target <- file.path(project_dir, "rnaseq")
-  dir.create(target, recursive = TRUE, showWarnings = FALSE)
+  .fs_mkdir(target, ssh_config = ssh_config)
   for (s in sample_names) {
     for (rd in c("R1", "R2")) {
       fname <- sprintf("%s_%s.fastq.gz", s, rd)
       src <- file.path(rnaseq_dir, fname)
       dst <- file.path(target, fname)
-      if (!file.exists(dst)) {
-        # Use absolute path for the symlink target
-        file.symlink(normalizePath(src, mustWork = TRUE), dst)
-      }
+      .fs_symlink(src, dst, ssh_config = ssh_config)
     }
   }
   invisible(target)
 }
 
 # =============================================================================
-# Sbatch dispatch — local shell submission via system2()
+# Filesystem helpers — local or via SSH depending on ssh_config
+# =============================================================================
+# These dispatch based on ssh_config: NULL → local (DE-LIMP-on-Hive case),
+# non-NULL → remote via ssh_exec / scp_upload (DE-LIMP-on-Mac case).
+
+#' Make a directory (with -p / recursive semantics) on local or remote host
+.fs_mkdir <- function(path, ssh_config = NULL) {
+  if (is.null(ssh_config)) {
+    dir.create(path, recursive = TRUE, showWarnings = FALSE)
+  } else {
+    res <- ssh_exec(ssh_config, sprintf("mkdir -p %s", shQuote(path)),
+                    login_shell = FALSE, timeout = 10)
+    if (!identical(res$status, 0L)) {
+      stop("ssh mkdir failed for ", path, ": ",
+           paste(res$stderr %||% character(), collapse = "; "))
+    }
+  }
+  invisible(path)
+}
+
+#' Write a text file (e.g. sbatch script, status.json) — local or remote
+.fs_write_text <- function(content, path, ssh_config = NULL, executable = FALSE) {
+  if (is.null(ssh_config)) {
+    writeLines(content, path)
+    if (executable) Sys.chmod(path, "755")
+  } else {
+    tmp <- tempfile(pattern = "proteog_write_")
+    on.exit(if (file.exists(tmp)) file.remove(tmp), add = TRUE)
+    writeLines(content, tmp)
+    scp_res <- tryCatch(scp_upload(ssh_config, tmp, path, timeout = 60),
+                        error = function(e) list(status = -1,
+                                                  stderr = conditionMessage(e)))
+    if (!identical(scp_res$status, 0L)) {
+      stop("scp_upload failed for ", path, ": ",
+           paste(scp_res$stderr %||% character(), collapse = "; "))
+    }
+    if (executable) {
+      ssh_exec(ssh_config, sprintf("chmod 755 %s", shQuote(path)),
+               login_shell = FALSE, timeout = 5)
+    }
+  }
+  invisible(path)
+}
+
+#' Symlink a remote file into a remote project directory
+.fs_symlink <- function(src, dst, ssh_config = NULL) {
+  if (is.null(ssh_config)) {
+    if (!file.exists(dst)) {
+      file.symlink(normalizePath(src, mustWork = TRUE), dst)
+    }
+  } else {
+    cmd <- sprintf("ln -sf %s %s", shQuote(src), shQuote(dst))
+    res <- ssh_exec(ssh_config, cmd, login_shell = FALSE, timeout = 10)
+    if (!identical(res$status, 0L)) {
+      stop("ssh ln failed: ", paste(res$stderr %||% character(), collapse = "; "))
+    }
+  }
+  invisible(dst)
+}
+
+#' Read a remote text file (e.g. status.json, log) — returns single string
+.fs_read_text <- function(path, ssh_config = NULL) {
+  if (is.null(ssh_config)) {
+    if (!file.exists(path)) return(NULL)
+    paste(readLines(path, warn = FALSE), collapse = "\n")
+  } else {
+    res <- ssh_exec(ssh_config, sprintf("cat %s", shQuote(path)),
+                    login_shell = FALSE, timeout = 15)
+    if (!identical(res$status, 0L) || length(res$stdout) == 0) return(NULL)
+    paste(res$stdout, collapse = "\n")
+  }
+}
+
+#' Detect median read length of the first n reads of a gzipped FASTQ
+#'
+#' Replaces the in-process detect_read_length() helper when running over SSH.
+#' Both branches return the median nchar of the first n_reads seq lines, or NA.
+.fs_detect_read_length <- function(fastq_gz, n_reads = 100L, ssh_config = NULL) {
+  if (is.null(ssh_config)) {
+    return(detect_read_length(fastq_gz, n_reads = n_reads))
+  }
+  # zcat | awk 'NR%4==2 {print length($1)}' | head -n N | sort -n | awk-median
+  cmd <- sprintf(
+    "zcat %s 2>/dev/null | awk 'NR%%4==2 {print length($1)}' | head -n %d",
+    shQuote(fastq_gz), as.integer(n_reads)
+  )
+  res <- ssh_exec(ssh_config, cmd, login_shell = FALSE, timeout = 30)
+  if (!identical(res$status, 0L) || length(res$stdout) == 0) return(NA_real_)
+  lens <- suppressWarnings(as.integer(trimws(res$stdout)))
+  lens <- lens[!is.na(lens) & lens > 0]
+  if (length(lens) == 0) return(NA_real_)
+  median(lens)
+}
+
+# =============================================================================
+# Sbatch dispatch — local shell submission via system2() or SSH-relayed
 # =============================================================================
 
 #' Run sbatch on a script file; return parsed job_id or stop on failure.
 #'
-#' Direct system2 call — R inherits PATH from its parent shell (Hive's
-#' `bash -l` loads SLURM tools at /cvmfs/.../slurm/bin via the standard
-#' login-shell environment). Spawning a new bash -l -c from R does NOT
-#' re-load modules (lmod is shell-scoped) and breaks the path resolution,
-#' so we keep this direct.
-.sbatch_submit <- function(script_path, dep_jid = NULL) {
-  args <- character()
-  if (!is.null(dep_jid) && nzchar(dep_jid)) {
-    args <- c(args, sprintf("--dependency=afterok:%s", dep_jid))
+#' Dispatches based on ssh_config: NULL → direct local system2 call (Hive
+#' apptainer case, where R inherits PATH from login shell); non-NULL →
+#' remote sbatch via ssh_exec (Mac+SSH-to-Hive case).
+.sbatch_submit <- function(script_path, dep_jid = NULL, ssh_config = NULL) {
+  dep_arg <- if (!is.null(dep_jid) && nzchar(dep_jid)) {
+    sprintf("--dependency=afterok:%s ", dep_jid)
+  } else ""
+
+  if (is.null(ssh_config)) {
+    # Local execution
+    args <- character()
+    if (nzchar(dep_arg)) args <- c(args, trimws(dep_arg))
+    args <- c(args, script_path)
+    out <- tryCatch(
+      suppressWarnings(system2("sbatch", args = args,
+                                stdout = TRUE, stderr = TRUE)),
+      error = function(e) stop("sbatch failed: ", conditionMessage(e))
+    )
+  } else {
+    # Remote execution via SSH. Use login shell so SLURM tools are on PATH.
+    cmd <- sprintf("sbatch %s%s", dep_arg, shQuote(script_path))
+    res <- tryCatch(
+      ssh_exec(ssh_config, cmd, login_shell = TRUE, timeout = 30),
+      error = function(e) stop("ssh sbatch failed: ", conditionMessage(e))
+    )
+    if (!identical(res$status, 0L)) {
+      stop("ssh sbatch returned non-zero. Output: ",
+           paste(c(res$stdout, res$stderr %||% character()), collapse = "\n"))
+    }
+    out <- res$stdout
   }
-  args <- c(args, script_path)
-  out <- tryCatch(
-    suppressWarnings(system2("sbatch", args = args,
-                              stdout = TRUE, stderr = TRUE)),
-    error = function(e) stop("sbatch failed: ", conditionMessage(e))
-  )
+
   if (!is.character(out) || !any(grepl("Submitted batch job", out))) {
     stop("sbatch did not return a job id. Output: ",
          paste(out, collapse = "\n"))
@@ -150,7 +259,7 @@ PROTEOG_STAGE_ORDER <- c(
 #' check_slurm_status() helper. Sacct works for both active and completed
 #' jobs; squeue only returns active ones, which is why the SSH-centric
 #' check_slurm_status() in helpers_search.R fails on this code path.
-.sacct_state <- function(jid) {
+.sacct_state <- function(jid, ssh_config = NULL) {
   # Defensive: jid can arrive as NULL, NA, character(0), or "" depending on
   # how the status.json was last serialized by jsonlite.
   if (is.null(jid)) return("unknown")
@@ -159,12 +268,24 @@ PROTEOG_STAGE_ORDER <- c(
   if (is.na(jid[1])) return("unknown")
   if (!nzchar(jid[1])) return("unknown")
   jid <- jid[1]
-  out <- tryCatch(
-    suppressWarnings(system2("sacct",
-      args = c("-j", jid, "-X", "-n", "-o", "State"),
-      stdout = TRUE, stderr = FALSE)),
-    error = function(e) NULL
-  )
+
+  out <- if (is.null(ssh_config)) {
+    tryCatch(
+      suppressWarnings(system2("sacct",
+        args = c("-j", jid, "-X", "-n", "-o", "State"),
+        stdout = TRUE, stderr = FALSE)),
+      error = function(e) NULL
+    )
+  } else {
+    res <- tryCatch(
+      ssh_exec(ssh_config,
+               sprintf("sacct -j %s -X -n -o State", shQuote(jid)),
+               login_shell = TRUE, timeout = 15),
+      error = function(e) NULL
+    )
+    if (is.null(res) || !identical(res$status, 0L)) NULL else res$stdout
+  }
+
   if (is.null(out) || length(out) == 0 || !nzchar(trimws(out[1]))) {
     return("unknown")
   }
@@ -184,7 +305,7 @@ PROTEOG_STAGE_ORDER <- c(
 
 .init_status_json <- function(project_dir, project_name, sample_names,
                               reference_key, tier_params, jids_by_stage,
-                              build_metadata) {
+                              build_metadata, ssh_config = NULL) {
   stages <- lapply(PROTEOG_STAGE_ORDER, function(s) {
     list(
       stage      = s,
@@ -210,7 +331,8 @@ PROTEOG_STAGE_ORDER <- c(
   )
 
   status_path <- file.path(project_dir, "status.json")
-  jsonlite::write_json(status, status_path, auto_unbox = TRUE, pretty = TRUE)
+  json_str <- jsonlite::toJSON(status, auto_unbox = TRUE, pretty = TRUE)
+  .fs_write_text(as.character(json_str), status_path, ssh_config = ssh_config)
   invisible(status_path)
 }
 
@@ -254,27 +376,35 @@ submit_proteogenomics_build <- function(
   slurm_account     = "genome-center-grp",
   slurm_partition   = "high",
   ref_registry      = NULL,
-  rnaseq_root       = PROTEOG_RNASEQ_ROOT
+  rnaseq_root       = PROTEOG_RNASEQ_ROOT,
+  ssh_config        = NULL
 ) {
   # ---- 1. Load reference registry + validate inputs --------------------------
   if (is.null(ref_registry)) {
-    ref_registry <- load_reference_registry()
+    ref_registry <- load_reference_registry(ssh_config = ssh_config)
   }
-  .validate_build_inputs(project_name, rnaseq_dir, sample_names,
-                         reference_key, library_type, strand_flag,
-                         ref_registry)
+  # NOTE: .validate_build_inputs() does file.exists() checks on the FASTQ
+  # paths — these only work locally. Skip them when SSH-mode (the scan
+  # handler already verified the directory + files exist on Hive).
+  if (is.null(ssh_config)) {
+    .validate_build_inputs(project_name, rnaseq_dir, sample_names,
+                           reference_key, library_type, strand_flag,
+                           ref_registry)
+  }
   ref <- ref_registry[[reference_key]]
 
   # ---- 2. Set up project_dir -------------------------------------------------
   project_dir <- file.path(rnaseq_root, project_name)
-  dir.create(project_dir, recursive = TRUE, showWarnings = FALSE)
-  dir.create(file.path(project_dir, "logs"), showWarnings = FALSE)
-  .stage_rnaseq_inputs(project_dir, rnaseq_dir, sample_names)
+  .fs_mkdir(project_dir, ssh_config = ssh_config)
+  .fs_mkdir(file.path(project_dir, "logs"), ssh_config = ssh_config)
+  .stage_rnaseq_inputs(project_dir, rnaseq_dir, sample_names,
+                       ssh_config = ssh_config)
 
   # ---- 3. Detect read length on first R1 -------------------------------------
   first_r1 <- file.path(project_dir, "rnaseq",
                         sprintf("%s_R1.fastq.gz", sample_names[1]))
-  read_len <- detect_read_length(first_r1, n_reads = 100L)
+  read_len <- .fs_detect_read_length(first_r1, n_reads = 100L,
+                                      ssh_config = ssh_config)
   if (is.na(read_len)) {
     stop("submit_proteogenomics_build(): could not detect read length from ", first_r1)
   }
@@ -320,12 +450,12 @@ submit_proteogenomics_build <- function(
 
   # Write each script to <project_dir>/sbatch/<stage>.sbatch
   sbatch_dir <- file.path(project_dir, "sbatch")
-  dir.create(sbatch_dir, showWarnings = FALSE)
+  .fs_mkdir(sbatch_dir, ssh_config = ssh_config)
   script_paths <- character()
   for (stage in names(scripts)) {
     p <- file.path(sbatch_dir, sprintf("%s.sbatch", stage))
-    writeLines(scripts[[stage]], p)
-    Sys.chmod(p, "755")
+    .fs_write_text(scripts[[stage]], p, ssh_config = ssh_config,
+                   executable = TRUE)
     script_paths[[stage]] <- p
   }
 
@@ -333,7 +463,8 @@ submit_proteogenomics_build <- function(
   jids_by_stage <- list()
   prev <- NULL
   for (stage in names(scripts)) {
-    jid <- .sbatch_submit(script_paths[[stage]], dep_jid = prev)
+    jid <- .sbatch_submit(script_paths[[stage]], dep_jid = prev,
+                          ssh_config = ssh_config)
     jids_by_stage[[stage]] <- jid
     prev <- jid
   }
@@ -361,7 +492,8 @@ submit_proteogenomics_build <- function(
 
   status_path <- .init_status_json(project_dir, project_name, sample_names,
                                     reference_key, tier_params,
-                                    jids_by_stage, build_metadata)
+                                    jids_by_stage, build_metadata,
+                                    ssh_config = ssh_config)
 
   list(
     pipeline_id       = PROTEOG_PIPELINE_ID,
@@ -381,14 +513,17 @@ submit_proteogenomics_build <- function(
 #' Refresh status.json by querying sacct for each stage's job_id
 #'
 #' @param project_dir character — from submit_*() result
+#' @param ssh_config NULL (local) or ssh_config list (remote via ssh_exec)
 #' @return updated status list with $current_stage and per-stage states
-poll_proteog_build_status <- function(project_dir) {
+poll_proteog_build_status <- function(project_dir, ssh_config = NULL) {
   status_path <- file.path(project_dir, "status.json")
-  if (!file.exists(status_path)) {
+  raw <- .fs_read_text(status_path, ssh_config = ssh_config)
+  if (is.null(raw)) {
     stop("poll_proteog_build_status(): status.json not found at ", status_path)
   }
-  status <- jsonlite::read_json(status_path)
-  if (is.null(status$stages)) {
+  status <- tryCatch(jsonlite::fromJSON(raw, simplifyVector = FALSE),
+                     error = function(e) NULL)
+  if (is.null(status) || is.null(status$stages)) {
     stop("poll_proteog_build_status(): status.json missing $stages")
   }
 
@@ -405,7 +540,7 @@ poll_proteog_build_status <- function(project_dir) {
   for (i in seq_along(status$stages)) {
     st <- status$stages[[i]]
     if (st$status %in% c("complete", "failed", "cancelled")) next
-    new_state <- .sacct_state(st$job_id)
+    new_state <- .sacct_state(st$job_id, ssh_config = ssh_config)
     if (new_state == "running" && !nzchar(.empty_or_str(st$started_at))) {
       status$stages[[i]]$started_at <- now
     }
@@ -428,7 +563,8 @@ poll_proteog_build_status <- function(project_dir) {
                           else "complete"
   status$last_polled_at <- now
 
-  jsonlite::write_json(status, status_path, auto_unbox = TRUE, pretty = TRUE)
+  json_str <- jsonlite::toJSON(status, auto_unbox = TRUE, pretty = TRUE)
+  .fs_write_text(as.character(json_str), status_path, ssh_config = ssh_config)
   status
 }
 
@@ -437,8 +573,8 @@ poll_proteog_build_status <- function(project_dir) {
 # =============================================================================
 
 #' Scancel every non-terminal job in the build
-cancel_proteog_build <- function(project_dir) {
-  status <- poll_proteog_build_status(project_dir)
+cancel_proteog_build <- function(project_dir, ssh_config = NULL) {
+  status <- poll_proteog_build_status(project_dir, ssh_config = ssh_config)
   to_cancel <- character()
   for (st in status$stages) {
     if (!is.null(st$job_id) && nzchar(st$job_id) &&
@@ -450,10 +586,19 @@ cancel_proteog_build <- function(project_dir) {
     return(invisible(list(cancelled = character(),
                           message = "no active jobs to cancel")))
   }
-  out <- tryCatch(
-    system2("scancel", args = to_cancel, stdout = TRUE, stderr = TRUE),
-    error = function(e) stop("scancel failed: ", conditionMessage(e))
-  )
+  out <- if (is.null(ssh_config)) {
+    tryCatch(
+      system2("scancel", args = to_cancel, stdout = TRUE, stderr = TRUE),
+      error = function(e) stop("scancel failed: ", conditionMessage(e))
+    )
+  } else {
+    cmd <- sprintf("scancel %s", paste(shQuote(to_cancel), collapse = " "))
+    res <- tryCatch(
+      ssh_exec(ssh_config, cmd, login_shell = TRUE, timeout = 30),
+      error = function(e) stop("ssh scancel failed: ", conditionMessage(e))
+    )
+    res$stdout
+  }
   invisible(list(
     cancelled = to_cancel,
     scancel_output = out
@@ -774,22 +919,71 @@ server_proteog_builder <- function(input, output, session, values) {
                          error = "Please enter a directory path."))
         return()
       }
+      sc <- proteog_ssh_config()
+
+      # ── SSH path: list FASTQs via ssh_exec ───────────────────────────────
+      if (!is.null(sc)) {
+        # 1. Verify the directory exists on Hive
+        test_cmd <- sprintf("test -d %s && echo OK", shQuote(dir_path))
+        res_dir <- tryCatch(ssh_exec(sc, test_cmd, login_shell = FALSE, timeout = 10),
+                            error = function(e) list(status = -1, stdout = character()))
+        if (!identical(res_dir$status, 0L) ||
+            !any(grepl("OK", res_dir$stdout, fixed = TRUE))) {
+          scan_result(list(success = FALSE,
+                           error = sprintf("Directory not found on Hive: %s", dir_path)))
+          return()
+        }
+        # 2. List R1/R2 files; ls -1 outputs one filename per line
+        ls_cmd <- sprintf("ls -1 %s 2>/dev/null | grep -E '_R[12]\\.fastq\\.gz$' || true",
+                          shQuote(dir_path))
+        res_ls <- tryCatch(ssh_exec(sc, ls_cmd, login_shell = FALSE, timeout = 15),
+                           error = function(e) list(status = -1, stdout = character()))
+        files <- if (identical(res_ls$status, 0L)) trimws(res_ls$stdout) else character()
+        files <- files[nzchar(files)]
+        r1_files <- files[grepl("_R1\\.fastq\\.gz$", files)]
+        r2_files <- files[grepl("_R2\\.fastq\\.gz$", files)]
+        if (length(r1_files) == 0) {
+          scan_result(list(success = FALSE,
+                           error = sprintf("No _R1.fastq.gz files in %s on Hive.",
+                                           dir_path)))
+          return()
+        }
+        sample_names <- sub("_R1\\.fastq\\.gz$", "", r1_files)
+        r2_present <- sub("_R2\\.fastq\\.gz$", "", r2_files)
+        missing_r2 <- setdiff(sample_names, r2_present)
+        if (length(missing_r2) > 0) {
+          scan_result(list(success = FALSE,
+                           error = sprintf("%d sample(s) missing R2 on Hive: %s",
+                                           length(missing_r2),
+                                           paste(head(missing_r2, 5), collapse = ", "))))
+          return()
+        }
+        scan_result(list(
+          success = TRUE,
+          mode = "local",
+          local_dir = dir_path,
+          n_samples = length(sample_names),
+          sample_names = sample_names,
+          is_paired = TRUE,
+          has_md5 = FALSE  # not bothering to check via SSH
+        ))
+        return()
+      }
+
+      # ── Local-filesystem path (DE-LIMP-on-Hive case) ─────────────────────
       if (!dir.exists(dir_path)) {
         scan_result(list(success = FALSE,
                          error = sprintf("Directory not found: %s. Check the path is accessible from the cluster.", dir_path)))
         return()
       }
-      # Look for paired FASTQs matching <sample>_R1.fastq.gz / <sample>_R2.fastq.gz
       r1_files <- list.files(dir_path, pattern = "_R1\\.fastq\\.gz$", full.names = FALSE)
       if (length(r1_files) == 0) {
         scan_result(list(success = FALSE,
                          error = sprintf(
-                           "No _R1.fastq.gz files in %s. The folder must contain paired FASTQ files named <sample>_R1.fastq.gz / <sample>_R2.fastq.gz.",
-                           dir_path)))
+                           "No _R1.fastq.gz files in %s.", dir_path)))
         return()
       }
       sample_names <- sub("_R1\\.fastq\\.gz$", "", r1_files)
-      # Verify R2 exists for each
       missing_r2 <- character()
       for (s in sample_names) {
         if (!file.exists(file.path(dir_path, sprintf("%s_R2.fastq.gz", s)))) {
@@ -799,7 +993,7 @@ server_proteog_builder <- function(input, output, session, values) {
       if (length(missing_r2) > 0) {
         scan_result(list(success = FALSE,
                          error = sprintf(
-                           "%d sample(s) missing matching _R2.fastq.gz: %s. The pipeline requires paired-end data.",
+                           "%d sample(s) missing matching _R2.fastq.gz: %s.",
                            length(missing_r2),
                            paste(head(missing_r2, 5), collapse = ", "))))
         return()
@@ -1003,7 +1197,8 @@ server_proteog_builder <- function(input, output, session, values) {
         project_tag     = input$proteog_project_tag,
         min_orf_len     = as.integer(input$proteog_min_orf_len %||% 100L),
         slurm_account   = "genome-center-grp",
-        slurm_partition = "high"
+        slurm_partition = "high",
+        ssh_config      = proteog_ssh_config()
       )
       # Track in reactiveValues so the active builds table can poll
       jobs <- values$proteog_build_jobs %||% list()
@@ -1040,7 +1235,8 @@ server_proteog_builder <- function(input, output, session, values) {
     valueFunc = function() {
       jobs <- values$proteog_build_jobs %||% list()
       lapply(jobs, function(j) {
-        tryCatch(poll_proteog_build_status(j$project_dir),
+        tryCatch(poll_proteog_build_status(j$project_dir,
+                                            ssh_config = proteog_ssh_config()),
                  error = function(e) NULL)
       })
     }
