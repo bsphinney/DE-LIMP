@@ -2590,10 +2590,23 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
         )
       ),
       nav_panel("Submit Job", value = "denovo_submit_tab", icon = icon("rocket"),
-        div(style = "max-width: 800px; margin: 0 auto; padding: 20px;",
+        div(style = "max-width: 800px; margin: 40px auto; padding: 20px;",
           tags$h4("Submit De Novo Sequencing Job"),
           tags$p("Run de novo sequencing on raw files. Cascadia for DIA data, Casanovo for DDA data."),
-          uiOutput("denovo_submit_ui")
+          div(class = "alert alert-info py-3 px-4 mt-3",
+            style = "font-size: 0.95em;",
+            icon("info-circle"), tags$strong(" Submit UI under construction."),
+            tags$p(style = "margin: 8px 0 0 0;",
+              "The interactive submit form (model picker, raw-file selector, GPU partition, ",
+              "DIAMOND BLAST options) is part of the de novo feature work currently being ",
+              "wired up from ", tags$code("feature/cascadia-denovo"), "."
+            ),
+            tags$p(style = "margin: 6px 0 0 0; color: #555;",
+              "For now, submit Cascadia / Casanovo jobs directly via ", tags$code("sbatch"),
+              " on Hive, then use ", tags$strong("De Novo → Results → Load Results"),
+              " to bring outputs back into DE-LIMP."
+            )
+          )
         )
       )
     ),
