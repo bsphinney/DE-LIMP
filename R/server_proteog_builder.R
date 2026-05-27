@@ -26,6 +26,17 @@ if (!exists("%||%")) {
   `%||%` <- function(a, b) if (!is.null(a)) a else b
 }
 
+# Robust scalar-string coercion. JSON `{}` and `null` get parsed by jsonlite
+# as list() and NULL respectively; nzchar() on those returns logical(0)/NA
+# and crashes downstream `if` branches. Coerce all degenerate forms to "".
+.empty_or_str <- function(v) {
+  if (is.null(v)) return("")
+  if (length(v) == 0) return("")
+  if (length(v) == 1 && is.na(v[[1]])) return("")
+  chr <- tryCatch(as.character(v)[1], error = function(e) "")
+  if (length(chr) == 0 || is.na(chr)) "" else chr
+}
+
 PROTEOG_PIPELINE_ID    <- "proteogenomics_v1.1"
 PROTEOG_RNASEQ_ROOT    <- "/quobyte/proteomics-grp/de-limp/rnaseq"
 PROTEOG_DATABASES_ROOT <- "/quobyte/proteomics-grp/de-limp/databases/proteogenomics"
@@ -445,7 +456,12 @@ submit_proteogenomics_build <- function(
                                                  slurm_account, slurm_partition),
     rewrite      = generate_rewrite_sbatch(project_dir, project_tag,
                                             slurm_account = slurm_account,
-                                            slurm_partition = slurm_partition)
+                                            slurm_partition = slurm_partition),
+    assemble     = generate_assemble_sbatch(
+                     project_dir, project_name,
+                     uniprot_fasta = uniprot_fasta %||% "",
+                     slurm_account = slurm_account,
+                     slurm_partition = slurm_partition)
   )
 
   # Write each script to <project_dir>/sbatch/<stage>.sbatch
@@ -507,6 +523,63 @@ submit_proteogenomics_build <- function(
 }
 
 # =============================================================================
+# Public: submit_assemble_only — run JUST the assemble step for an existing
+# build. Used by the per-row "Assemble" button in the Active Builds table
+# for legacy builds that finished the SLURM chain before auto-assemble was
+# wired up. Generates an assemble.sbatch, submits it, updates status.json.
+# =============================================================================
+submit_assemble_only <- function(project_dir,
+                                 project_name,
+                                 uniprot_fasta = "",
+                                 slurm_account   = "genome-center-grp",
+                                 slurm_partition = "high",
+                                 ssh_config = NULL) {
+  if (!nzchar(project_name)) stop("submit_assemble_only(): project_name required")
+
+  sbatch_dir <- file.path(project_dir, "sbatch")
+  .fs_mkdir(sbatch_dir, ssh_config = ssh_config)
+  .fs_mkdir(file.path(project_dir, "logs"), ssh_config = ssh_config)
+
+  script <- generate_assemble_sbatch(
+    project_dir, project_name,
+    uniprot_fasta = uniprot_fasta %||% "",
+    slurm_account = slurm_account,
+    slurm_partition = slurm_partition)
+  script_path <- file.path(sbatch_dir, "assemble.sbatch")
+  .fs_write_text(script, script_path, ssh_config = ssh_config,
+                 executable = TRUE)
+
+  jid <- .sbatch_submit(script_path, dep_jid = NULL, ssh_config = ssh_config)
+
+  # Patch status.json: find the assemble stage, set job_id + status=pending
+  status_path <- file.path(project_dir, "status.json")
+  raw <- .fs_read_text(status_path, ssh_config = ssh_config)
+  if (!is.null(raw) && nzchar(raw)) {
+    status <- tryCatch(jsonlite::fromJSON(raw, simplifyVector = FALSE),
+                       error = function(e) NULL)
+    if (!is.null(status) && is.list(status$stages)) {
+      for (i in seq_along(status$stages)) {
+        if (identical(status$stages[[i]]$stage, "assemble")) {
+          status$stages[[i]]$job_id <- jid
+          status$stages[[i]]$status <- "pending"
+          status$stages[[i]]$started_at  <- NA_character_
+          status$stages[[i]]$finished_at <- NA_character_
+          break
+        }
+      }
+      status$current_stage <- "assemble"
+      # Record the uniprot input in build_metadata for traceability
+      if (is.null(status$build_metadata)) status$build_metadata <- list()
+      status$build_metadata$uniprot_fasta <- uniprot_fasta
+      json_str <- jsonlite::toJSON(status, auto_unbox = TRUE, pretty = TRUE)
+      .fs_write_text(as.character(json_str), status_path,
+                     ssh_config = ssh_config)
+    }
+  }
+  jid
+}
+
+# =============================================================================
 # Public: poll_proteog_build_status
 # =============================================================================
 
@@ -532,15 +605,28 @@ poll_proteog_build_status <- function(project_dir, ssh_config = NULL) {
   current_stage  <- "complete"
   any_failed     <- FALSE
 
-  # nzchar() on NA returns NA, breaking the `if`. Coerce NA → "" up front.
-  .empty_or_str <- function(v) {
-    if (is.null(v) || (length(v) == 1 && is.na(v))) "" else as.character(v)
-  }
+  # See file-level .empty_or_str — re-declared here as a no-op for back-compat
+  # (older code referenced this local). Kept so existing local references work.
 
   for (i in seq_along(status$stages)) {
     st <- status$stages[[i]]
-    if (st$status %in% c("complete", "failed", "cancelled")) next
-    new_state <- .sacct_state(st$job_id, ssh_config = ssh_config)
+    cur_status <- .empty_or_str(st$status)
+    if (cur_status %in% c("complete", "failed", "cancelled")) next
+
+    jid_str <- .empty_or_str(st$job_id)
+    if (!nzchar(jid_str)) {
+      # No SLURM job submitted for this stage (e.g., assemble is an
+      # in-process consolidation step). Treat as still-pending so the
+      # build doesn't get wrongly summarized as "complete".
+      any_running <- TRUE
+      if (current_stage == "complete") {
+        current_stage <- .empty_or_str(st$stage)
+        if (!nzchar(current_stage)) current_stage <- "pending"
+      }
+      next
+    }
+
+    new_state <- .sacct_state(jid_str, ssh_config = ssh_config)
     if (new_state == "running" && !nzchar(.empty_or_str(st$started_at))) {
       status$stages[[i]]$started_at <- now
     }
@@ -551,7 +637,7 @@ poll_proteog_build_status <- function(project_dir, ssh_config = NULL) {
     status$stages[[i]]$status <- new_state
     if (new_state == "running" || new_state == "pending") {
       any_running <- TRUE
-      if (current_stage == "complete") current_stage <- st$stage
+      if (current_stage == "complete") current_stage <- .empty_or_str(st$stage)
     }
     if (new_state == "failed" || new_state == "cancelled") {
       any_failed <- TRUE
@@ -563,9 +649,133 @@ poll_proteog_build_status <- function(project_dir, ssh_config = NULL) {
                           else "complete"
   status$last_polled_at <- now
 
+  # ── Auto-register the assembled FASTA in the local FASTA library catalog ──
+  # Fires once per build, on the transition from in-progress → complete.
+  # Tracked via status$library_entry_id so we don't re-register on every poll.
+  if (identical(status$current_stage, "complete") &&
+      is.null(status$library_entry_id %||% NULL)) {
+    entry_id <- tryCatch(
+      .register_proteog_fasta_in_library(status, ssh_config = ssh_config),
+      error = function(e) {
+        message("[proteog] auto-register failed: ", conditionMessage(e))
+        NULL
+      })
+    if (!is.null(entry_id) && is_scalar_char_safe(entry_id)) {
+      status$library_entry_id <- entry_id
+    }
+  }
+
   json_str <- jsonlite::toJSON(status, auto_unbox = TRUE, pretty = TRUE)
   .fs_write_text(as.character(json_str), status_path, ssh_config = ssh_config)
   status
+}
+
+# Small scalar-char check used in poll + register helpers.
+is_scalar_char_safe <- function(x) {
+  is.character(x) && length(x) == 1 && !is.na(x) && nzchar(x)
+}
+
+#' Add the just-assembled proteogenomics FASTA to ~/.delimp_fasta_library/catalog.rds.
+#'
+#' Mirrors the schema used by the search-page FASTA library (see helpers_search.R
+#' fasta_library_save) so proteog builds show up in the same picker modal.
+#' Reads file size + sequence count from Hive via SSH so the entry is accurate.
+.register_proteog_fasta_in_library <- function(status, ssh_config = NULL) {
+  project_name <- status$project_name %||% basename(status$project_dir %||% "")
+  if (!is_scalar_char_safe(project_name)) {
+    stop("register: missing project_name")
+  }
+  date_tag <- format(Sys.Date(), "%Y_%m")
+  fasta_name <- sprintf("%s_proteogenomics_%s.fasta", project_name, date_tag)
+  fasta_path <- file.path(
+    "/quobyte/proteomics-grp/de-limp/databases/proteogenomics", fasta_name)
+
+  # File size + seq count from Hive (works for local too if path exists locally)
+  size_bytes <- NA_integer_; seq_count <- NA_integer_
+  if (is.null(ssh_config)) {
+    if (file.exists(fasta_path)) {
+      size_bytes <- as.integer(file.info(fasta_path)$size)
+      seq_count  <- as.integer(length(grep("^>",
+        readLines(fasta_path, warn = FALSE))))
+    }
+  } else {
+    cmd <- sprintf(
+      "stat -c%%s %s 2>/dev/null; echo SEP; grep -c '^>' %s 2>/dev/null",
+      shQuote(fasta_path), shQuote(fasta_path))
+    r <- tryCatch(ssh_exec(ssh_config, cmd, login_shell = FALSE, timeout = 30),
+                  error = function(e) NULL)
+    if (!is.null(r) && identical(r$status, 0L)) {
+      txt <- paste(r$stdout %||% character(), collapse = "\n")
+      parts <- strsplit(txt, "SEP", fixed = TRUE)[[1]]
+      if (length(parts) >= 2) {
+        size_bytes <- suppressWarnings(as.integer(trimws(parts[1])))
+        seq_count  <- suppressWarnings(as.integer(trimws(parts[2])))
+      }
+    }
+  }
+  if (is.na(size_bytes) || size_bytes == 0L) {
+    stop("register: FASTA not found or empty on Hive: ", fasta_path)
+  }
+
+  organism <- status$build_metadata$organism %||% NA_character_
+  if (!is_scalar_char_safe(organism)) organism <- NA_character_
+
+  entry_id <- sprintf("proteog_%s_%s",
+                      project_name,
+                      format(Sys.time(), "%Y%m%d_%H%M%S"))
+  entry <- list(
+    id                   = entry_id,
+    name                 = sprintf("Proteogenomics: %s", project_name),
+    organism             = organism,
+    organism_common      = NA_character_,
+    proteome_id          = NA_character_,
+    content_type         = "proteogenomics",
+    protein_count        = seq_count,
+    file_size_bytes      = size_bytes,
+    contaminant_library  = "None",
+    contaminant_count    = 0L,
+    custom_sequences     = NULL,
+    custom_sequence_count = 0L,
+    fasta_files          = fasta_name,
+    fasta_dir            = "proteogenomics",
+    remote_dir           = fasta_path,
+    search_settings      = NULL,
+    speclib_path         = NULL,
+    speclib_search_mode  = NULL,
+    created_at           = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+
+    # Proteogenomics-specific metadata (visible in detail panel)
+    proteog_pipeline_id        = PROTEOG_PIPELINE_ID,
+    proteog_project_name       = project_name,
+    proteog_project_dir        = status$project_dir %||% NA_character_,
+    proteog_status_path        = file.path(status$project_dir %||% "",
+                                           "status.json"),
+    proteog_methods_paragraph  = status$build_metadata$methods_paragraph %||%
+                                  NA_character_,
+    proteog_sample_names       = status$sample_names %||% list(),
+    proteog_reference_key      = status$reference_key %||% NA_character_,
+    proteog_uniprot_fasta      = status$build_metadata$uniprot_fasta %||%
+                                  NA_character_,
+    proteog_read_length_tier   = status$read_length_tier %||% NA_character_
+  )
+
+  # Load catalog, de-dup by remote_dir (so re-poll doesn't re-add), save.
+  catalog <- tryCatch(fasta_library_load(), error = function(e) list())
+  if (!is.list(catalog)) catalog <- list()
+  existing_idx <- which(vapply(catalog, function(c) {
+    rd <- c$remote_dir %||% ""
+    is_scalar_char_safe(rd) && identical(rd, fasta_path)
+  }, logical(1)))
+  if (length(existing_idx) > 0) {
+    # Update in place rather than adding a duplicate
+    catalog[[existing_idx[1]]] <- entry
+  } else {
+    catalog[[length(catalog) + 1L]] <- entry
+  }
+  fasta_library_save(catalog)
+  message(sprintf("[proteog] registered FASTA in library: %s (%d seqs, %s bytes)",
+                  fasta_name, seq_count, format(size_bytes, big.mark = ",")))
+  entry_id
 }
 
 # =============================================================================
@@ -759,7 +969,36 @@ build_database_ui <- function() {
                   placeholder = "e.g. MOUSELIVER",
                   width = "100%"),
         numericInput("proteog_min_orf_len", "Minimum ORF length (aa)",
-                     value = 100, min = 30, max = 300, step = 10, width = "50%")
+                     value = 100, min = 30, max = 300, step = 10, width = "50%"),
+        tags$div(
+          style = "border-top: 1px solid #e0e0e0; padding-top: 12px; margin-top: 12px;",
+          tags$label("UniProt FASTA ", tags$em("(optional)"),
+                     style = "font-weight: 600;"),
+          tags$p(style = "color: #666; font-size: 0.85em; margin-bottom: 6px;",
+                 "If provided, the final assemble step concatenates UniProt entries with the predicted ORFs ",
+                 "so DIA-NN sees both. Leave on \"None\" to output predicted ORFs only."),
+          selectInput("proteog_uniprot_source", label = NULL,
+                      choices = c("None — predicted ORFs only" = "none",
+                                  "Download from UniProt"      = "uniprot",
+                                  "Download from NCBI"         = "ncbi",
+                                  "Enter path on Hive"         = "path"),
+                      selected = "none", width = "100%"),
+          conditionalPanel("input.proteog_uniprot_source == 'uniprot'",
+            actionButton("proteog_open_uniprot_modal", "Search UniProt",
+                         class = "btn-info btn-sm w-100", icon = icon("search")),
+            uiOutput("proteog_uniprot_selected_summary")
+          ),
+          conditionalPanel("input.proteog_uniprot_source == 'ncbi'",
+            actionButton("proteog_open_ncbi_modal", "Search NCBI",
+                         class = "btn-success btn-sm w-100", icon = icon("search")),
+            uiOutput("proteog_ncbi_selected_summary")
+          ),
+          conditionalPanel("input.proteog_uniprot_source == 'path'",
+            textInput("proteog_uniprot_fasta_path", label = NULL,
+                      placeholder = "/quobyte/proteomics-grp/de-limp/databases/uniprot/UP000005640.fasta",
+                      width = "100%")
+          )
+        )
       )
     ),
 
@@ -787,9 +1026,16 @@ build_database_ui <- function() {
       bslib::card_header(div(
         style = "display: flex; align-items: center; justify-content: space-between;",
         div(icon("list-check"), " Active & recent builds"),
-        actionButton("proteog_builds_info_btn", icon("question-circle"),
-                     class = "btn-outline-info btn-sm",
-                     title = "What do the stage names mean?")
+        div(
+          actionButton("proteog_restore_builds_btn",
+                       label = tagList(icon("rotate"), "Restore from Hive"),
+                       class = "btn-outline-secondary btn-sm",
+                       title = "Scan Hive for in-progress builds and re-populate this list"),
+          actionButton("proteog_builds_info_btn", icon("question-circle"),
+                       class = "btn-outline-info btn-sm",
+                       title = "What do the stage names mean?",
+                       style = "margin-left: 6px;")
+        )
       )),
       bslib::card_body(uiOutput("proteog_active_builds_table"))
     )
@@ -824,6 +1070,485 @@ server_proteog_builder <- function(input, output, session, values) {
       key_path = input$ssh_key_path,
       modules  = input$ssh_modules %||% ""
     )
+  }
+
+  # ── Active-builds persistence ────────────────────────────────────────────
+  # values$proteog_build_jobs lives in reactiveValues (in-memory only).
+  # We mirror it to a local RDS so the Active Builds list survives Shiny
+  # restarts and the user can resume tracking after closing R. Per CLAUDE.md
+  # "never use mounted drives for app state" — local path only.
+  proteog_builds_path <- function() {
+    file.path(path.expand("~"), ".delimp_proteog_builds.rds")
+  }
+  proteog_save_builds <- function(jobs) {
+    tryCatch(saveRDS(jobs, proteog_builds_path()),
+             error = function(e) message("[proteog] save failed: ",
+                                         conditionMessage(e)))
+  }
+  proteog_load_builds <- function() {
+    p <- proteog_builds_path()
+    if (!file.exists(p)) return(list())
+    tryCatch(readRDS(p), error = function(e) {
+      message("[proteog] load failed: ", conditionMessage(e)); list()
+    })
+  }
+
+  # Restore on module init — only if not already populated (avoid overwriting
+  # an in-progress session restore from server_session.R). Wrap in isolate()
+  # because reactiveValues reads outside a reactive consumer throw.
+  isolate({
+    if (length(values$proteog_build_jobs %||% list()) == 0) {
+      restored <- proteog_load_builds()
+      if (length(restored) > 0) {
+        values$proteog_build_jobs <- restored
+        message(sprintf("[proteog] restored %d active build(s) from disk",
+                        length(restored)))
+      }
+    }
+  })
+
+  # Persist on every change — but never clobber the file with an empty list,
+  # which would happen on session startup before the user has submitted
+  # anything in this session. The empty-on-startup case must NOT erase
+  # builds from prior sessions.
+  observe({
+    jobs <- values$proteog_build_jobs %||% list()
+    if (length(jobs) == 0 && file.exists(proteog_builds_path())) {
+      existing <- tryCatch(readRDS(proteog_builds_path()),
+                           error = function(e) NULL)
+      if (length(existing) > 0) return()
+    }
+    proteog_save_builds(jobs)
+  })
+
+  # ── UniProt / NCBI FASTA download modals (proteog-specific) ─────────────
+  # Reuses helper functions from helpers_search.R (search_uniprot_proteomes,
+  # download_uniprot_fasta, download_ncbi_fasta) but routes results into
+  # proteog state to avoid clobbering the main Search page's values$fasta_info.
+  proteog_uniprot_state <- reactiveValues(
+    results = NULL, hive_path = NULL, summary = NULL
+  )
+  proteog_ncbi_state <- reactiveValues(
+    results = NULL, hive_path = NULL, summary = NULL
+  )
+
+  PROTEOG_UNIPROT_CACHE <- "/quobyte/proteomics-grp/de-limp/databases/uniprot"
+
+  observeEvent(input$proteog_open_uniprot_modal, {
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " UniProt — pick a proteome for the assemble step"),
+      size = "l", easyClose = TRUE,
+      div(style = "display: flex; gap: 8px; margin-bottom: 12px;",
+        div(style = "flex: 1;",
+          textInput("proteog_uniprot_query", NULL,
+                    placeholder = "e.g., human, mouse, E. coli", width = "100%")),
+        actionButton("proteog_search_uniprot_btn", "Search",
+                     class = "btn-info", style = "margin-top: 0;")),
+      DT::DTOutput("proteog_uniprot_results_table"),
+      hr(),
+      selectInput("proteog_uniprot_content_type", "Content:",
+                  choices = c("One per gene (recommended)" = "one_per_gene",
+                              "Swiss-Prot reviewed"        = "reviewed",
+                              "Swiss-Prot + isoforms"      = "reviewed_isoforms",
+                              "Full proteome"              = "full"),
+                  selected = "one_per_gene", width = "100%"),
+      footer = tagList(modalButton("Cancel"),
+        actionButton("proteog_uniprot_download_btn", "Download + upload to Hive",
+                     class = "btn-success", icon = icon("download")))))
+  })
+
+  observeEvent(input$proteog_search_uniprot_btn, {
+    req(nzchar(input$proteog_uniprot_query %||% ""))
+    withProgress(message = "Searching UniProt…", {
+      proteog_uniprot_state$results <- tryCatch(
+        search_uniprot_proteomes(input$proteog_uniprot_query),
+        error = function(e) { showNotification(
+          sprintf("UniProt search failed: %s", conditionMessage(e)),
+          type = "error", duration = 8); data.frame() })
+    })
+    if (is.null(proteog_uniprot_state$results) ||
+        nrow(proteog_uniprot_state$results) == 0) {
+      showNotification("No proteomes found.", type = "warning", duration = 5)
+    }
+  })
+
+  output$proteog_uniprot_results_table <- DT::renderDT({
+    req(proteog_uniprot_state$results, nrow(proteog_uniprot_state$results) > 0)
+    df <- proteog_uniprot_state$results[, c("upid", "organism", "common_name",
+                                             "protein_count")]
+    colnames(df) <- c("ID", "Organism", "Common Name", "Proteins")
+    DT::datatable(df, selection = "single", rownames = FALSE,
+      options = list(pageLength = 10, dom = "tip", scrollY = "300px"),
+      class = "compact stripe")
+  })
+
+  observeEvent(input$proteog_uniprot_download_btn, {
+    sel <- input$proteog_uniprot_results_table_rows_selected
+    req(length(sel) > 0, proteog_uniprot_state$results)
+    row <- proteog_uniprot_state$results[sel, ]
+    sc <- proteog_ssh_config()
+    if (is.null(sc)) {
+      showNotification("Connect to Hive first.", type = "warning", duration = 5)
+      return()
+    }
+    fname <- tryCatch(
+      generate_fasta_filename(row$upid, row$organism,
+                              input$proteog_uniprot_content_type),
+      error = function(e) sprintf("%s_%s.fasta", row$upid,
+                                  input$proteog_uniprot_content_type))
+    hive_path <- file.path(PROTEOG_UNIPROT_CACHE, fname)
+    # Reuse-if-cached: skip download when the file is already on Hive
+    cached <- tryCatch(
+      ssh_exec(sc, sprintf("test -s %s && echo OK", shQuote(hive_path)),
+               login_shell = FALSE, timeout = 10),
+      error = function(e) NULL)
+    if (!is.null(cached) && identical(cached$status, 0L) &&
+        any(grepl("OK", cached$stdout %||% character()))) {
+      proteog_uniprot_state$hive_path <- hive_path
+      proteog_uniprot_state$summary <- sprintf(
+        "%s — cached on Hive (%s)", fname, row$organism)
+      showNotification(sprintf("Already cached on Hive: %s", fname),
+                       type = "default", duration = 6)
+      removeModal()
+      .maybe_auto_assemble_after_download(hive_path)
+      return()
+    }
+    withProgress(message = "Downloading UniProt FASTA…", {
+      tmp_local <- tempfile(pattern = "proteog_uniprot_", fileext = ".fasta")
+      res <- tryCatch(download_uniprot_fasta(row$upid,
+                                              input$proteog_uniprot_content_type,
+                                              tmp_local),
+                      error = function(e) {
+                        showNotification(sprintf("Download failed: %s",
+                                                  conditionMessage(e)),
+                                          type = "error", duration = 10)
+                        NULL
+                      })
+      if (is.null(res) || !file.exists(tmp_local)) return()
+      setProgress(0.6, message = "Uploading to Hive…")
+      mk <- ssh_exec(sc, sprintf("mkdir -p %s", shQuote(PROTEOG_UNIPROT_CACHE)),
+                     login_shell = FALSE, timeout = 15)
+      if (!identical(mk$status, 0L)) {
+        showNotification("Failed to create Hive cache dir.",
+                         type = "error", duration = 8); return()
+      }
+      up <- scp_upload(sc, tmp_local, hive_path, timeout = 300)
+      if (!identical(up$status, 0L)) {
+        showNotification("SCP upload failed.", type = "error", duration = 8)
+        return()
+      }
+      proteog_uniprot_state$hive_path <- hive_path
+      proteog_uniprot_state$summary <- sprintf("%s — %s (%d proteins)",
+                                                fname, row$organism,
+                                                as.integer(row$protein_count %||% 0L))
+      file.remove(tmp_local)
+    })
+    showNotification(sprintf("Uploaded UniProt FASTA to %s", hive_path),
+                     type = "default", duration = 8)
+    removeModal()
+    .maybe_auto_assemble_after_download(hive_path)
+  })
+
+  output$proteog_uniprot_selected_summary <- renderUI({
+    if (is.null(proteog_uniprot_state$summary)) {
+      return(helpText("No UniProt proteome selected yet."))
+    }
+    div(class = "alert alert-success py-2 px-3 mt-2",
+        style = "font-size: 0.85em;",
+        icon("check"), tags$strong(" Selected: "),
+        proteog_uniprot_state$summary,
+        tags$br(),
+        tags$small(tags$code(proteog_uniprot_state$hive_path)))
+  })
+
+  # NCBI modal — same pattern, calls download_ncbi_fasta()
+  observeEvent(input$proteog_open_ncbi_modal, {
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " NCBI — pick a proteome for the assemble step"),
+      size = "l", easyClose = TRUE,
+      div(style = "display: flex; gap: 8px; margin-bottom: 12px;",
+        div(style = "flex: 1;",
+          textInput("proteog_ncbi_query", NULL,
+                    placeholder = "e.g., Peromyscus, Bos taurus", width = "100%")),
+        actionButton("proteog_search_ncbi_btn", "Search",
+                     class = "btn-success", style = "margin-top: 0;")),
+      DT::DTOutput("proteog_ncbi_results_table"),
+      footer = tagList(modalButton("Cancel"),
+        actionButton("proteog_ncbi_download_btn", "Download + upload to Hive",
+                     class = "btn-success", icon = icon("download")))))
+  })
+
+  observeEvent(input$proteog_search_ncbi_btn, {
+    req(nzchar(input$proteog_ncbi_query %||% ""))
+    withProgress(message = "Searching NCBI…", {
+      proteog_ncbi_state$results <- tryCatch(
+        ncbi_search_assemblies(input$proteog_ncbi_query),
+        error = function(e) { showNotification(
+          sprintf("NCBI search failed: %s", conditionMessage(e)),
+          type = "error", duration = 8); data.frame() })
+    })
+    if (is.null(proteog_ncbi_state$results) ||
+        nrow(proteog_ncbi_state$results) == 0) {
+      showNotification("No proteomes found.", type = "warning", duration = 5)
+    }
+  })
+
+  output$proteog_ncbi_results_table <- DT::renderDT({
+    req(proteog_ncbi_state$results, nrow(proteog_ncbi_state$results) > 0)
+    df <- proteog_ncbi_state$results
+    out <- data.frame(
+      Accession = df$accession %||% "",
+      Organism  = df$organism %||% "",
+      Level     = df$assembly_level %||% "",
+      Proteins  = format(as.integer(df$protein_count %||% 0L), big.mark = ","),
+      Category  = df$refseq_category %||% "",
+      stringsAsFactors = FALSE)
+    DT::datatable(out, selection = "single", rownames = FALSE,
+      options = list(pageLength = 10, dom = "tip", scrollY = "300px",
+                     columnDefs = list(list(width = "120px", targets = 0))),
+      class = "compact stripe")
+  })
+
+  observeEvent(input$proteog_ncbi_download_btn, {
+    sel <- input$proteog_ncbi_results_table_rows_selected
+    req(length(sel) > 0, proteog_ncbi_state$results)
+    row <- proteog_ncbi_state$results[sel, ]
+    sc <- proteog_ssh_config()
+    if (is.null(sc)) {
+      showNotification("Connect to Hive first.", type = "warning", duration = 5)
+      return()
+    }
+    acc <- row$accession
+    # ncbi_download_proteome takes a directory and generates the filename
+    # plus a {basename}_gene_map.tsv (NCBI accessions don't carry gene symbols
+    # in the FASTA header — DIA-NN's Genes column comes from this map TSV).
+    tmp_local_dir <- tempfile(pattern = "proteog_ncbi_dl_")
+    dir.create(tmp_local_dir, recursive = TRUE, showWarnings = FALSE)
+    withProgress(message = sprintf("Downloading %s from NCBI…", row$organism), {
+      local_fasta <- tryCatch(ncbi_download_proteome(acc, tmp_local_dir),
+                              error = function(e) {
+                                showNotification(sprintf("Download failed: %s",
+                                                         conditionMessage(e)),
+                                                 type = "error", duration = 10)
+                                NULL
+                              })
+      if (is.null(local_fasta) || !file.exists(local_fasta)) return()
+      # Find the gene_map.tsv generated alongside the FASTA (if any)
+      gene_map <- sub("\\.fasta$", "_gene_map.tsv", local_fasta)
+      fasta_name <- basename(local_fasta)
+      gene_map_name <- basename(gene_map)
+      hive_fasta <- file.path(PROTEOG_UNIPROT_CACHE, fasta_name)
+      hive_gene_map <- file.path(PROTEOG_UNIPROT_CACHE, gene_map_name)
+
+      setProgress(0.6, message = "Uploading FASTA + gene map to Hive…")
+      ssh_exec(sc, sprintf("mkdir -p %s", shQuote(PROTEOG_UNIPROT_CACHE)),
+               login_shell = FALSE, timeout = 15)
+      up <- scp_upload(sc, local_fasta, hive_fasta, timeout = 300)
+      if (!identical(up$status, 0L)) {
+        showNotification("FASTA SCP upload failed.", type = "error", duration = 8)
+        return()
+      }
+      if (file.exists(gene_map)) {
+        scp_upload(sc, gene_map, hive_gene_map, timeout = 60)
+      }
+      proteog_ncbi_state$hive_path <- hive_fasta
+      proteog_ncbi_state$summary <- sprintf("%s — %s (RefSeq accessions; gene map: %s)",
+        fasta_name, row$organism,
+        if (file.exists(gene_map)) "uploaded" else "missing")
+      unlink(tmp_local_dir, recursive = TRUE)
+    })
+    showNotification(sprintf("Uploaded NCBI FASTA to %s", proteog_ncbi_state$hive_path),
+                     type = "default", duration = 8)
+    removeModal()
+    .maybe_auto_assemble_after_download(proteog_ncbi_state$hive_path)
+  })
+
+  output$proteog_ncbi_selected_summary <- renderUI({
+    if (is.null(proteog_ncbi_state$summary)) {
+      return(helpText("No NCBI proteome selected yet."))
+    }
+    div(class = "alert alert-success py-2 px-3 mt-2",
+        style = "font-size: 0.85em;",
+        icon("check"), tags$strong(" Selected: "),
+        proteog_ncbi_state$summary,
+        tags$br(),
+        tags$small(tags$code(proteog_ncbi_state$hive_path)))
+  })
+
+  # When a UniProt/NCBI download finishes WHILE the user is in the per-row
+  # Assemble flow (proteog_assemble_target is set), auto-submit the assemble
+  # job with the just-downloaded FASTA instead of asking the user to click
+  # "Submit Assemble" with the path already filled in.
+  .maybe_auto_assemble_after_download <- function(hive_path) {
+    target <- proteog_assemble_target()
+    if (is.null(target)) return(invisible())  # not in assemble flow → no-op
+    if (!is_scalar_char_safe(hive_path)) return(invisible())
+    sc <- proteog_ssh_config()
+    if (is.null(sc)) return(invisible())
+    tryCatch({
+      jid <- submit_assemble_only(
+        project_dir   = target$project_dir,
+        project_name  = target$project_name,
+        uniprot_fasta = hive_path,
+        ssh_config    = sc)
+      showNotification(
+        sprintf("Auto-submitted assemble for %s with downloaded FASTA (SLURM %s)",
+                target$project_name, jid),
+        type = "default", duration = 10)
+      proteog_assemble_target(NULL)
+      removeModal()
+    }, error = function(e) {
+      showNotification(
+        sprintf("Auto-assemble failed: %s — open Assemble modal manually to retry",
+                conditionMessage(e)),
+        type = "error", duration = 15)
+    })
+  }
+
+  # Helper to resolve the chosen FASTA path based on the source dropdown.
+  resolve_proteog_uniprot_path <- function() {
+    src <- input$proteog_uniprot_source %||% "none"
+    if (identical(src, "none"))     return("")
+    if (identical(src, "path"))     return(input$proteog_uniprot_fasta_path %||% "")
+    if (identical(src, "uniprot"))  return(proteog_uniprot_state$hive_path %||% "")
+    if (identical(src, "ncbi"))     return(proteog_ncbi_state$hive_path %||% "")
+    ""
+  }
+
+  # ── Restore-from-Hive: scan PROTEOG_RNASEQ_ROOT for status.json files,
+  # read each, build a job entry, merge with current values$proteog_build_jobs.
+  observeEvent(input$proteog_restore_builds_btn, {
+    tryCatch({
+    sc <- proteog_ssh_config()
+    if (is.null(sc)) {
+      showNotification("Connect to Hive first (Run Search → Test Connection).",
+                       type = "warning", duration = 8)
+      return()
+    }
+    # 1. find all status.json under PROTEOG_RNASEQ_ROOT (one per build)
+    find_cmd <- sprintf(
+      "find %s -maxdepth 2 -name status.json -type f 2>/dev/null",
+      shQuote(PROTEOG_RNASEQ_ROOT))
+    res <- tryCatch(
+      ssh_exec(sc, find_cmd, login_shell = FALSE, timeout = 30),
+      error = function(e) list(status = 1L, stdout = character(),
+                               stderr = conditionMessage(e)))
+    if (!identical(res$status, 0L)) {
+      showNotification(sprintf("Scan failed: %s",
+                               paste(res$stderr %||% "", collapse = "; ")),
+                       type = "error", duration = 10)
+      return()
+    }
+    raw_stdout <- paste(res$stdout %||% character(), collapse = "\n")
+    paths <- trimws(unlist(strsplit(raw_stdout, "\n")))
+    paths <- paths[!is.na(paths) & nzchar(paths)]
+    if (length(paths) == 0) {
+      showNotification("No builds found on Hive.",
+                       type = "default", duration = 6)
+      return()
+    }
+    # 2. read each, parse, derive jids_by_stage from stages list
+    # Helper: TRUE iff x is a single non-NA, non-empty character.
+    is_scalar_char <- function(x) {
+      is.character(x) && length(x) == 1 && !is.na(x) && nzchar(x)
+    }
+    restored <- list()
+    message(sprintf("[proteog-restore] scanning %d path(s)", length(paths)))
+    for (i in seq_along(paths)) {
+      p <- paths[i]
+      message(sprintf("[proteog-restore] [%d/%d] %s", i, length(paths), p))
+      txt <- tryCatch(.fs_read_text(p, ssh_config = sc),
+                      error = function(e) NULL)
+      if (!is_scalar_char(txt)) { message("  skip: empty/NA txt"); next }
+      parsed <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = FALSE),
+                        error = function(e) {
+                          message("  skip: fromJSON error: ", conditionMessage(e))
+                          NULL
+                        })
+      if (is.null(parsed)) next
+      pdir <- parsed$project_dir
+      if (!is_scalar_char(pdir)) {
+        message("  skip: project_dir not scalar char (class=",
+                paste(class(pdir), collapse=","), ", len=", length(pdir), ")")
+        next
+      }
+      jids_by_stage <- list()
+      stages_in <- parsed$stages
+      if (!is.list(stages_in)) stages_in <- list()
+      for (s in stages_in) {
+        if (!is.list(s)) next
+        stage_name <- s$stage
+        if (!is_scalar_char(stage_name)) next
+        job_id_raw <- s$job_id
+        if (is.null(job_id_raw)) next
+        job_id_chr <- tryCatch(as.character(job_id_raw)[1],
+                               error = function(e) NA_character_)
+        if (!is_scalar_char(job_id_chr)) next
+        jids_by_stage[[stage_name]] <- job_id_chr
+      }
+      proj_name <- parsed$project_name
+      if (!is_scalar_char(proj_name)) proj_name <- basename(dirname(p))
+      sub_at <- parsed$submitted_at
+      if (!is_scalar_char(sub_at)) sub_at <- NA_character_
+      restored[[length(restored) + 1L]] <- list(
+        project_name      = proj_name,
+        project_dir       = pdir,
+        submitted_at      = sub_at,
+        jids_by_stage     = jids_by_stage,
+        methods_paragraph = parsed$build_metadata$methods_paragraph %||% NULL,
+        download_pending  = FALSE
+      )
+      message("  added")
+    }
+    if (length(restored) == 0) {
+      showNotification("Found status.json files but none parsed cleanly.",
+                       type = "warning", duration = 8)
+      return()
+    }
+    # 3. Merge into values$proteog_build_jobs — de-duplicate by project_dir
+    current <- values$proteog_build_jobs %||% list()
+    current_dirs <- vapply(current, function(j) {
+      v <- j$project_dir
+      if (is.null(v)) return("")
+      v1 <- tryCatch(as.character(v)[1], error = function(e) "")
+      if (length(v1) == 0 || is.na(v1) || !nzchar(v1)) "" else v1
+    }, character(1))
+    added <- 0L
+    for (r in restored) {
+      rd <- as.character(r$project_dir %||% "")
+      if (is.na(rd) || !nzchar(rd)) next
+      if (isTRUE(rd %in% current_dirs)) next
+      current[[length(current) + 1L]] <- r
+      added <- added + 1L
+    }
+    values$proteog_build_jobs <- current
+    showNotification(sprintf("Restored %d build(s) from Hive (%d scanned).",
+                             added, length(restored)),
+                     type = "default", duration = 8)
+    }, error = function(e) {
+      showNotification(sprintf("Restore failed: %s",
+                               conditionMessage(e)),
+                       type = "error", duration = 15)
+    })
+  })
+
+  # ── Skip-if-present helper: check whether the project_dir on Hive already
+  # contains FASTQ files. If yes, skip download entirely and go straight to
+  # the build submit.
+  rnaseq_data_already_present <- function(project_dir, ssh_config) {
+    if (is.null(ssh_config)) {
+      if (!dir.exists(project_dir)) return(FALSE)
+      files <- list.files(project_dir, pattern = "\\.(fastq|fq)\\.gz$",
+                          recursive = TRUE, full.names = TRUE)
+      return(length(files) > 0)
+    }
+    cmd <- sprintf(
+      "test -d %s && find %s -maxdepth 3 \\( -name '*.fastq.gz' -o -name '*.fq.gz' \\) 2>/dev/null | head -1",
+      shQuote(project_dir), shQuote(project_dir))
+    res <- tryCatch(
+      ssh_exec(ssh_config, cmd, login_shell = FALSE, timeout = 15),
+      error = function(e) list(status = 1L, stdout = character()))
+    nzchar(trimws(paste(res$stdout %||% character(), collapse = "")))
   }
 
   # ── render the Build Database body via uiOutput("build_database_content") ──
@@ -1137,22 +1862,33 @@ server_proteog_builder <- function(input, output, session, values) {
     req(nzchar(input$proteog_project_name %||% ""))
     req(nzchar(input$proteog_project_tag  %||% ""))
 
-    # Resolve the rnaseq_dir depending on source mode:
-    #   slims/sra → launch a login-node download, point at the project subdir
-    #   local     → use the user-provided directory directly, skip download
-    rnaseq_dir <- tryCatch({
-      if (identical(res$mode, "slims")) {
-        d <- launch_slims_download(res$url,
-                                   sanitize_project_name(input$proteog_project_name))
-        d$project_dir
-      } else if (identical(res$mode, "sra")) {
-        d <- launch_ena_download(res$accessions,
-                                 sanitize_project_name(input$proteog_project_name),
-                                 subsample_reads = if (isTRUE(input$proteog_subsample))
-                                                     5e6L else NULL)
-        d$project_dir
+    # Resolve the rnaseq_dir + decide whether we need a download.
+    #   local                  → use user-provided dir, no download, immediate submit
+    #   sra/slims, files there → skip download, immediate submit (reuse existing data)
+    #   sra/slims, fresh       → launch download, queue submit until status=complete
+    sc <- proteog_ssh_config()
+    pname <- sanitize_project_name(input$proteog_project_name)
+    resolution <- tryCatch({
+      if (identical(res$mode, "slims") || identical(res$mode, "sra")) {
+        target_dir <- file.path(PROTEOG_RNASEQ_ROOT, pname)
+        if (rnaseq_data_already_present(target_dir, sc)) {
+          list(rnaseq_dir = target_dir, needs_download = FALSE,
+               note = "FASTQ files already present on Hive — skipping download.")
+        } else if (identical(res$mode, "slims")) {
+          d <- launch_slims_download(res$url, pname, ssh_config = sc)
+          list(rnaseq_dir = d$project_dir, needs_download = TRUE,
+               note = "Download started — pipeline will auto-submit when files arrive.")
+        } else {
+          d <- launch_ena_download(
+            res$accessions, pname,
+            subsample_reads = if (isTRUE(input$proteog_subsample)) 5e6L else NULL,
+            ssh_config = sc)
+          list(rnaseq_dir = d$project_dir, needs_download = TRUE,
+               note = "Download started — pipeline will auto-submit when files arrive.")
+        }
       } else if (identical(res$mode, "local")) {
-        res$local_dir
+        list(rnaseq_dir = res$local_dir, needs_download = FALSE,
+             note = "Submitting pipeline against on-cluster data.")
       } else {
         stop("Unknown source mode: ", res$mode)
       }
@@ -1162,82 +1898,217 @@ server_proteog_builder <- function(input, output, session, values) {
                        type = "error", duration = 10)
       NULL
     })
-    req(rnaseq_dir)
+    req(resolution)
+    rnaseq_dir     <- resolution$rnaseq_dir
+    needs_download <- resolution$needs_download
 
-    if (identical(res$mode, "local")) {
-      showNotification(
-        tags$div(
-          tags$p(strong("Submitting pipeline against on-cluster data…")),
-          tags$p(tags$code(rnaseq_dir))),
-        type = "message", duration = 8
-      )
+    showNotification(
+      tags$div(
+        tags$p(strong(resolution$note)),
+        tags$p(tags$code(rnaseq_dir))),
+      type = "message", duration = 10
+    )
+
+    # Build-args closure: capture everything submit_proteogenomics_build() needs
+    # so we can either fire immediately (local mode) OR wait for the download
+    # to finish (sra/slims modes, via the poll-and-submit observer below).
+    build_args <- list(
+      project_name    = pname,
+      rnaseq_dir      = rnaseq_dir,
+      reference_key   = input$proteog_reference_key,
+      sample_names    = res$sample_names %||% character(0),
+      library_type    = input$proteog_library_type,
+      strand_flag     = input$proteog_strand_flag,
+      project_tag     = input$proteog_project_tag,
+      min_orf_len     = as.integer(input$proteog_min_orf_len %||% 100L),
+      uniprot_fasta   = resolve_proteog_uniprot_path(),
+      slurm_account   = "genome-center-grp",
+      slurm_partition = "high",
+      ssh_config      = proteog_ssh_config()
+    )
+
+    if (!needs_download) {
+      # Data is already on Hive — submit immediately (covers local mode
+      # AND the sra/slims-but-already-downloaded case)
+      tryCatch({
+        build <- do.call(submit_proteogenomics_build, build_args)
+        jobs <- values$proteog_build_jobs %||% list()
+        jobs[[length(jobs) + 1L]] <- list(
+          project_name = build_args$project_name,
+          project_dir  = build$project_dir,
+          submitted_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+          jids_by_stage = build$jids_by_stage,
+          methods_paragraph = build$methods_paragraph
+        )
+        values$proteog_build_jobs <- jobs
+        showNotification(sprintf("Build submitted: %s", build_args$project_name),
+                         type = "default", duration = 8)
+      }, error = function(e) {
+        showNotification(sprintf("Submit failed: %s", conditionMessage(e)),
+                         type = "error", duration = 15)
+      })
     } else {
-      showNotification(
-        tags$div(
-          tags$p(strong("Download started"),
-                 " — the SLURM pipeline will be submitted once data is present."),
-          tags$p("You can close the browser; build continues on Hive."),
-          tags$p(tags$code(rnaseq_dir))),
-        type = "message", duration = 10
+      # sra/slims: download is running. Queue the build for the poll-and-submit
+      # observer AND add a placeholder entry to proteog_build_jobs so the user
+      # sees it in Active Builds immediately. When the download finishes, the
+      # placeholder is upgraded with real SLURM job IDs (matched by project_dir).
+      pending <- pending_build_submits()
+      pending[[rnaseq_dir]] <- list(
+        rnaseq_dir = rnaseq_dir,
+        build_args = build_args,
+        queued_at  = format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
       )
-    }
+      pending_build_submits(pending)
 
-    # Stash the build request so a downstream observer can submit
-    # submit_proteogenomics_build() once the download status.json reports
-    # state=="complete". For Phase D v1, we ALSO emit the call immediately
-    # — the download poll-and-submit observer can be added in Phase E.
-    tryCatch({
-      build <- submit_proteogenomics_build(
-        project_name    = sanitize_project_name(input$proteog_project_name),
-        rnaseq_dir      = rnaseq_dir,
-        reference_key   = input$proteog_reference_key,
-        sample_names    = res$sample_names %||% character(0),
-        library_type    = input$proteog_library_type,
-        strand_flag     = input$proteog_strand_flag,
-        project_tag     = input$proteog_project_tag,
-        min_orf_len     = as.integer(input$proteog_min_orf_len %||% 100L),
-        slurm_account   = "genome-center-grp",
-        slurm_partition = "high",
-        ssh_config      = proteog_ssh_config()
-      )
-      # Track in reactiveValues so the active builds table can poll
       jobs <- values$proteog_build_jobs %||% list()
       jobs[[length(jobs) + 1L]] <- list(
-        project_name = sanitize_project_name(input$proteog_project_name),
-        project_dir  = build$project_dir,
-        submitted_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
-        jids_by_stage = build$jids_by_stage,
-        methods_paragraph = build$methods_paragraph
+        project_name      = pname,
+        project_dir       = rnaseq_dir,
+        submitted_at      = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+        jids_by_stage     = list(),
+        methods_paragraph = NULL,
+        download_pending  = TRUE
       )
       values$proteog_build_jobs <- jobs
-      showNotification(sprintf("Build submitted: %s",
-                               sanitize_project_name(input$proteog_project_name)),
-                       type = "default", duration = 8)
-    }, error = function(e) {
-      showNotification(sprintf("Submit failed: %s", conditionMessage(e)),
-                       type = "error", duration = 15)
-    })
+
+      showNotification(
+        tags$div(
+          tags$p(strong("Download running on Hive."),
+                 " Pipeline will auto-submit when files arrive."),
+          tags$p("You can close the browser; build resumes on Hive.")),
+        type = "message", duration = 10)
+    }
+  })
+
+  # ── Pending-build queue: waits for download to finish, then fires submit ──
+  pending_build_submits <- reactiveVal(list())
+
+  proteog_pending_poll <- reactivePoll(
+    intervalMillis = 15000,
+    session = session,
+    checkFunc = function() {
+      # Re-tick at least every 15 s while we have pending entries
+      paste(names(pending_build_submits()), Sys.time(), collapse = "|")
+    },
+    valueFunc = function() {
+      sc <- proteog_ssh_config()
+      lapply(pending_build_submits(), function(p) {
+        st <- tryCatch(poll_download_status(p$rnaseq_dir, ssh_config = sc),
+                       error = function(e) list(state = "error",
+                                                 message = conditionMessage(e)))
+        list(rnaseq_dir = p$rnaseq_dir, state = st$state %||% "unknown",
+             p = p)
+      })
+    }
+  )
+
+  observe({
+    entries <- proteog_pending_poll()
+    if (length(entries) == 0) return(invisible())
+    pending <- pending_build_submits()
+    changed <- FALSE
+    for (e in entries) {
+      st <- e$state
+      pname <- e$p$build_args$project_name %||% basename(e$rnaseq_dir)
+      if (identical(st, "complete")) {
+        # Download finished — fire the build and upgrade the placeholder entry
+        tryCatch({
+          build <- do.call(submit_proteogenomics_build, e$p$build_args)
+          jobs <- values$proteog_build_jobs %||% list()
+          idx <- which(vapply(jobs, function(j)
+                              identical(j$project_dir, e$rnaseq_dir),
+                              logical(1)))
+          replacement <- list(
+            project_name      = pname,
+            project_dir       = build$project_dir,
+            submitted_at      = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            jids_by_stage     = build$jids_by_stage,
+            methods_paragraph = build$methods_paragraph,
+            download_pending  = FALSE
+          )
+          if (length(idx) > 0) {
+            jobs[[idx[1]]] <- replacement
+          } else {
+            jobs[[length(jobs) + 1L]] <- replacement
+          }
+          values$proteog_build_jobs <- jobs
+          showNotification(sprintf("Download complete — build submitted: %s",
+                                   pname),
+                           type = "default", duration = 10)
+        }, error = function(err) {
+          showNotification(sprintf("Auto-submit failed for %s: %s",
+                                   pname, conditionMessage(err)),
+                           type = "error", duration = 15)
+        })
+        pending[[e$rnaseq_dir]] <- NULL; changed <- TRUE
+      } else if (st %in% c("download_failed", "md5_failed", "error")) {
+        # Mark the placeholder as failed so the user sees it; remove from queue.
+        jobs <- values$proteog_build_jobs %||% list()
+        idx <- which(vapply(jobs, function(j)
+                            identical(j$project_dir, e$rnaseq_dir),
+                            logical(1)))
+        if (length(idx) > 0) {
+          jobs[[idx[1]]]$download_pending <- FALSE
+          jobs[[idx[1]]]$download_failed  <- st
+          values$proteog_build_jobs <- jobs
+        }
+        showNotification(sprintf("Download failed for %s (%s) — build not submitted",
+                                 pname, st),
+                         type = "error", duration = 15)
+        pending[[e$rnaseq_dir]] <- NULL; changed <- TRUE
+      }
+      # "running"/"missing"/"unknown" → keep waiting
+    }
+    if (changed) pending_build_submits(pending)
   })
 
   # ── Active builds table — polls status.json every 15 s ──────────────────────
+  # Entries with download_pending=TRUE bypass the SLURM poll and render with a
+  # "Downloading" stage instead.
   proteog_status_poll <- reactivePoll(
     intervalMillis = 15000,
     session = session,
     checkFunc = function() {
-      jobs <- values$proteog_build_jobs %||% list()
-      if (length(jobs) == 0) return("")
-      paths <- vapply(jobs, function(j) file.path(j$project_dir, "status.json"),
-                       character(1))
-      paste(vapply(paths, function(p) {
-        if (file.exists(p)) as.character(file.mtime(p)) else "MISSING"
-      }, character(1)), collapse = "|")
+      # Tick on every interval regardless of file mtime — the SSH-mounted
+      # case can't reliably check remote file mtime, and we want polled
+      # refresh anyway.
+      paste(length(values$proteog_build_jobs %||% list()), Sys.time())
     },
     valueFunc = function() {
       jobs <- values$proteog_build_jobs %||% list()
       lapply(jobs, function(j) {
+        if (isTRUE(j$download_pending)) {
+          return(list(
+            project_name   = j$project_name,
+            project_dir    = j$project_dir,
+            submitted_at   = j$submitted_at,
+            current_stage  = "downloading",
+            stages         = list(),
+            placeholder    = TRUE
+          ))
+        }
+        if (!is.null(j$download_failed) && nzchar(as.character(j$download_failed))) {
+          return(list(
+            project_name   = j$project_name,
+            project_dir    = j$project_dir,
+            submitted_at   = j$submitted_at,
+            current_stage  = sprintf("dl-%s", j$download_failed),
+            stages         = list(),
+            placeholder    = TRUE
+          ))
+        }
         tryCatch(poll_proteog_build_status(j$project_dir,
                                             ssh_config = proteog_ssh_config()),
-                 error = function(e) NULL)
+                 error = function(e) {
+                   message(sprintf("[proteog-poll] %s: %s",
+                                   j$project_name %||% basename(j$project_dir %||% "?"),
+                                   conditionMessage(e)))
+                   list(project_name = j$project_name,
+                        project_dir  = j$project_dir,
+                        submitted_at = j$submitted_at,
+                        current_stage = "?", stages = list(),
+                        placeholder = TRUE)
+                 })
       })
     }
   )
@@ -1252,29 +2123,136 @@ server_proteog_builder <- function(input, output, session, values) {
       if (is.null(st)) return(NULL)
       current <- st$current_stage %||% "?"
       badge_color <- switch(current,
-        "complete" = "#27ae60",
-        "failed"   = "#c0392b",
+        "complete"    = "#27ae60",
+        "failed"      = "#c0392b",
+        "downloading" = "#3498db",
         "#f39c12")
-      done <- sum(vapply(st$stages,
-        function(s) identical(s$status, "complete"), logical(1)))
+      done <- if (length(st$stages))
+        sum(vapply(st$stages, function(s) identical(s$status, "complete"), logical(1)))
+      else 0L
       total <- length(st$stages)
+      progress_txt <- if (total == 0L && identical(current, "downloading"))
+        "downloading…"
+      else sprintf("%d / %d", done, total)
+
+      # Per-row Assemble button: shown when the assemble stage is the current
+      # one AND it has no job_id yet (i.e., legacy builds that finished the
+      # SLURM chain pre-auto-assemble).
+      assemble_btn <- NULL
+      asm_stage <- NULL
+      if (length(st$stages) > 0) {
+        # Find a stage named "assemble"
+        for (s in st$stages) {
+          if (identical(s$stage, "assemble")) { asm_stage <- s; break }
+        }
+      }
+      needs_assemble <- !is.null(asm_stage) &&
+        is_scalar_char_safe(.empty_or_str(asm_stage$status) %||% "") &&
+        identical(.empty_or_str(asm_stage$status), "unknown") &&
+        !is_scalar_char_safe(.empty_or_str(asm_stage$job_id))
+      if (needs_assemble) {
+        pdir_attr <- htmltools::htmlEscape(st$project_dir %||% "", attribute = TRUE)
+        pname_attr <- htmltools::htmlEscape(st$project_name %||% "", attribute = TRUE)
+        assemble_btn <- HTML(sprintf(
+          '<button class="btn btn-warning btn-sm" onclick="Shiny.setInputValue(\'proteog_assemble_btn\', {dir: \'%s\', name: \'%s\', _ts: Date.now()}, {priority:\'event\'})"><i class="fa fa-cubes"></i> Assemble</button>',
+          pdir_attr, pname_attr))
+      }
+
       tags$tr(
         tags$td(st$project_name %||% "?"),
         tags$td(tags$span(style = sprintf("background:%s; color:white; padding:2px 8px; border-radius:4px;",
                                            badge_color),
                           current)),
-        tags$td(sprintf("%d / %d", done, total)),
+        tags$td(progress_txt),
         tags$td(st$submitted_at %||% "?"),
-        tags$td(code(basename(st$project_dir %||% "")))
+        tags$td(code(basename(st$project_dir %||% ""))),
+        tags$td(assemble_btn)
       )
     })
     tags$table(class = "table table-sm",
                tags$thead(tags$tr(
                  tags$th("Project"), tags$th("Stage"),
                  tags$th("Progress"), tags$th("Submitted"),
-                 tags$th("Dir")
+                 tags$th("Dir"), tags$th("Action")
                )),
                tags$tbody(rows))
+  })
+
+  # ── Per-row Assemble: opens modal with the same UniProt source dropdown
+  # used in Step 4, lets user pick a UniProt path / search / NCBI, then
+  # submits just the assemble.sbatch on Hive for that specific project.
+  proteog_assemble_target <- reactiveVal(NULL)
+
+  observeEvent(input$proteog_assemble_btn, {
+    payload <- input$proteog_assemble_btn
+    if (is.null(payload) || is.null(payload$dir)) return()
+    proteog_assemble_target(list(project_dir = as.character(payload$dir),
+                                  project_name = as.character(payload$name %||%
+                                                              basename(payload$dir))))
+    showModal(modalDialog(
+      title = tagList(icon("cubes"), sprintf(" Assemble FASTA for %s",
+                                              payload$name)),
+      size = "l", easyClose = TRUE,
+      tags$p("Generate the final proteogenomics FASTA for this build. ",
+             "Pick whether to combine the predicted ORFs with a UniProt or NCBI proteome."),
+      selectInput("proteog_assemble_uniprot_source", "UniProt FASTA",
+                  choices = c("None — predicted ORFs only" = "none",
+                              "Download from UniProt"      = "uniprot",
+                              "Download from NCBI"         = "ncbi",
+                              "Enter path on Hive"         = "path"),
+                  selected = "none", width = "100%"),
+      conditionalPanel("input.proteog_assemble_uniprot_source == 'uniprot'",
+        actionButton("proteog_open_uniprot_modal", "Search UniProt",
+                     class = "btn-info btn-sm", icon = icon("search")),
+        uiOutput("proteog_uniprot_selected_summary")),
+      conditionalPanel("input.proteog_assemble_uniprot_source == 'ncbi'",
+        actionButton("proteog_open_ncbi_modal", "Search NCBI",
+                     class = "btn-success btn-sm", icon = icon("search")),
+        uiOutput("proteog_ncbi_selected_summary")),
+      conditionalPanel("input.proteog_assemble_uniprot_source == 'path'",
+        textInput("proteog_uniprot_fasta_path_modal", label = NULL,
+                  placeholder = "/quobyte/proteomics-grp/de-limp/databases/uniprot/UP000005640.fasta",
+                  width = "100%")),
+      footer = tagList(modalButton("Cancel"),
+        actionButton("proteog_submit_assemble_btn", "Submit Assemble",
+                     class = "btn-warning", icon = icon("play")))
+    ))
+  })
+
+  observeEvent(input$proteog_submit_assemble_btn, {
+    target <- proteog_assemble_target()
+    if (is.null(target)) return()
+    sc <- proteog_ssh_config()
+    if (is.null(sc)) {
+      showNotification("Connect to Hive first.", type = "warning", duration = 5)
+      return()
+    }
+    # Resolve UniProt FASTA path from the modal's dropdown
+    src <- input$proteog_assemble_uniprot_source %||% "none"
+    uniprot_path <- if (identical(src, "none")) ""
+      else if (identical(src, "path"))
+        input$proteog_uniprot_fasta_path_modal %||% ""
+      else if (identical(src, "uniprot"))
+        proteog_uniprot_state$hive_path %||% ""
+      else if (identical(src, "ncbi"))
+        proteog_ncbi_state$hive_path %||% ""
+      else ""
+
+    tryCatch({
+      jid <- submit_assemble_only(
+        project_dir   = target$project_dir,
+        project_name  = target$project_name,
+        uniprot_fasta = uniprot_path,
+        ssh_config    = sc)
+      showNotification(sprintf("Assemble job submitted: %s (SLURM %s)",
+                               target$project_name, jid),
+                       type = "default", duration = 8)
+      removeModal()
+    }, error = function(e) {
+      showNotification(sprintf("Assemble submit failed: %s",
+                               conditionMessage(e)),
+                       type = "error", duration = 12)
+    })
   })
 
   # ── Info modals ("?" buttons in each card header) ───────────────────────────

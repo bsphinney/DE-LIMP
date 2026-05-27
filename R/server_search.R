@@ -3695,6 +3695,254 @@ server_search <- function(input, output, session, values, add_to_log,
     removeModal()
   })
 
+  # =============================================================================
+  # Proteogenomics DB modal — separate browser for content_type=="proteogenomics"
+  # entries in the same ~/.delimp_fasta_library catalog. Mirrors the Database
+  # Library modal pattern but with proteog-specific columns + detail panel.
+  # =============================================================================
+  proteog_library_catalog <- reactiveVal(list())
+
+  proteog_library_filtered <- function() {
+    cat <- fasta_library_load()
+    if (!is.list(cat) || length(cat) == 0) return(list())
+    keep <- vapply(cat, function(e) identical(e$content_type, "proteogenomics"),
+                   logical(1))
+    cat[keep]
+  }
+
+  observeEvent(input$open_proteog_library_modal, {
+    proteog_library_catalog(proteog_library_filtered())
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " Proteogenomics Databases"),
+      size = "xl", easyClose = TRUE,
+      div(
+        tags$p(style = "color: #666; font-size: 0.9em;",
+               "FASTA databases built from your own RNA-seq data via the ",
+               tags$strong("Build Database"), " workflow. Each entry is ",
+               "traceable to specific samples and a reference genome."),
+        DT::DTOutput("proteog_library_table"),
+        hr(),
+        uiOutput("proteog_library_detail_panel")
+      ),
+      footer = tagList(
+        actionButton("proteog_library_discover_btn",
+                     tagList(icon("magnifying-glass"), " Discover from Hive"),
+                     class = "btn-outline-primary btn-sm",
+                     title = "Scan Hive for proteogenomics DBs built by any lab member"),
+        actionButton("proteog_library_refresh_btn", "Refresh",
+                     class = "btn-outline-secondary btn-sm", icon = icon("sync")),
+        modalButton("Cancel"),
+        actionButton("proteog_library_use_btn", "Use This Database",
+                     class = "btn-success", icon = icon("check"))
+      )
+    ))
+  })
+
+  # Scan Hive for proteogenomics builds (any user) and add their FASTAs
+  # to this user's local catalog. Same shared-FASTA / per-user-catalog
+  # model as the rest of DE-LIMP.
+  observeEvent(input$proteog_library_discover_btn, {
+    sc <- ssh_config()
+    if (is.null(sc)) {
+      showNotification("Connect to Hive first (Test Connection).",
+                       type = "warning", duration = 8)
+      return()
+    }
+    PROTEOG_RNASEQ_ROOT <- "/quobyte/proteomics-grp/de-limp/rnaseq"
+    find_cmd <- sprintf(
+      "find %s -maxdepth 2 -name status.json -type f 2>/dev/null",
+      shQuote(PROTEOG_RNASEQ_ROOT))
+    res <- tryCatch(
+      ssh_exec(sc, find_cmd, login_shell = FALSE, timeout = 30),
+      error = function(e) list(status = 1L, stderr = conditionMessage(e),
+                               stdout = character()))
+    if (!identical(res$status, 0L)) {
+      showNotification(sprintf("Discover scan failed: %s",
+                               paste(res$stderr %||% "", collapse = "; ")),
+                       type = "error", duration = 10)
+      return()
+    }
+    paths <- trimws(unlist(strsplit(paste(res$stdout %||% character(),
+                                           collapse = "\n"), "\n")))
+    paths <- paths[!is.na(paths) & nzchar(paths)]
+    if (length(paths) == 0) {
+      showNotification("No builds found on Hive.",
+                       type = "default", duration = 6)
+      return()
+    }
+    added <- 0L; skipped <- 0L; failed <- 0L
+    for (p in paths) {
+      txt <- tryCatch(.fs_read_text(p, ssh_config = sc),
+                      error = function(e) NULL)
+      if (!is.character(txt) || length(txt) != 1 || !nzchar(txt)) {
+        failed <- failed + 1L; next
+      }
+      parsed <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = FALSE),
+                         error = function(e) NULL)
+      if (is.null(parsed)) { failed <- failed + 1L; next }
+      # Only register builds whose assemble step has completed (otherwise the
+      # final FASTA on the databases dir won't exist yet).
+      asm_status <- ""
+      for (s in (parsed$stages %||% list())) {
+        if (identical(s$stage, "assemble")) {
+          asm_status <- .empty_or_str(s$status); break
+        }
+      }
+      if (!identical(asm_status, "complete")) {
+        skipped <- skipped + 1L; next
+      }
+      ok <- tryCatch({
+        .register_proteog_fasta_in_library(parsed, ssh_config = sc)
+        TRUE
+      }, error = function(e) {
+        message("[proteog-discover] register failed for ",
+                parsed$project_name %||% "?", ": ", conditionMessage(e))
+        FALSE
+      })
+      if (isTRUE(ok)) added <- added + 1L else failed <- failed + 1L
+    }
+    # Refresh modal table from the updated catalog
+    proteog_library_catalog(proteog_library_filtered())
+    showNotification(sprintf(
+      "Discover from Hive: %d added/updated, %d in-progress (skipped), %d failed.",
+      added, skipped, failed),
+      type = "default", duration = 10)
+  })
+
+  observeEvent(input$proteog_library_refresh_btn, {
+    proteog_library_catalog(proteog_library_filtered())
+  })
+
+  output$proteog_library_table <- DT::renderDT({
+    cat <- proteog_library_catalog()
+    if (length(cat) == 0) {
+      return(DT::datatable(
+        data.frame(Project = character(), Organism = character(),
+                   Samples = character(), Reference = character(),
+                   Sequences = character(), Built = character(),
+                   check.names = FALSE),
+        selection = "single",
+        options = list(dom = "t", language = list(
+          emptyTable = "No proteogenomics databases yet. Build one in New Search → Proteogenomics."
+        )),
+        rownames = FALSE, class = "compact stripe"))
+    }
+    df <- data.frame(
+      Project   = vapply(cat, function(e) e$proteog_project_name %||%
+                                          e$name %||% "?", character(1)),
+      Organism  = vapply(cat, function(e) e$organism %||% "?", character(1)),
+      Samples   = vapply(cat, function(e) {
+        sn <- e$proteog_sample_names
+        if (is.list(sn)) length(sn) else if (is.character(sn)) length(sn) else 0L
+      }, integer(1)),
+      Reference = vapply(cat, function(e) e$proteog_reference_key %||% "?",
+                         character(1)),
+      Sequences = format(vapply(cat, function(e)
+                                  as.integer(e$protein_count %||% 0L), integer(1)),
+                         big.mark = ","),
+      Built     = vapply(cat, function(e) substr(e$created_at %||% "", 1, 10),
+                         character(1)),
+      stringsAsFactors = FALSE, check.names = FALSE)
+    DT::datatable(df,
+      selection = "single", rownames = FALSE,
+      options = list(pageLength = 10, dom = "ftip", scrollY = "300px"),
+      class = "compact stripe")
+  })
+
+  output$proteog_library_detail_panel <- renderUI({
+    sel <- input$proteog_library_table_rows_selected
+    cat <- proteog_library_catalog()
+    if (is.null(sel) || length(sel) == 0 || length(cat) == 0) {
+      return(helpText("Select a row above to see build details."))
+    }
+    e <- cat[[sel]]
+    sn <- e$proteog_sample_names
+    sample_str <- if (is.list(sn) || is.character(sn))
+      paste(unlist(sn), collapse = ", ") else "?"
+    uniprot <- e$proteog_uniprot_fasta
+    uniprot_str <- if (is.character(uniprot) && nzchar(uniprot)) uniprot else
+                   "(none — predicted ORFs only)"
+    tags$div(style = "padding: 8px 4px;",
+      tags$h6(strong("Build details: "), e$name %||% "?"),
+      tags$dl(class = "row",
+        tags$dt(class = "col-sm-3", "Project dir"),
+        tags$dd(class = "col-sm-9", tags$code(e$proteog_project_dir %||% "?")),
+        tags$dt(class = "col-sm-3", "Pipeline"),
+        tags$dd(class = "col-sm-9", e$proteog_pipeline_id %||% "?"),
+        tags$dt(class = "col-sm-3", "Reference"),
+        tags$dd(class = "col-sm-9", e$proteog_reference_key %||% "?"),
+        tags$dt(class = "col-sm-3", "Read-length tier"),
+        tags$dd(class = "col-sm-9", e$proteog_read_length_tier %||% "?"),
+        tags$dt(class = "col-sm-3", "Samples"),
+        tags$dd(class = "col-sm-9",
+                tags$small(style = "font-family: monospace;", sample_str)),
+        tags$dt(class = "col-sm-3", "UniProt input"),
+        tags$dd(class = "col-sm-9", tags$small(uniprot_str)),
+        tags$dt(class = "col-sm-3", "FASTA on Hive"),
+        tags$dd(class = "col-sm-9", tags$code(e$remote_dir %||% "?")),
+        tags$dt(class = "col-sm-3", "Sequences"),
+        tags$dd(class = "col-sm-9", format(as.integer(e$protein_count %||% 0L),
+                                           big.mark = ",")),
+        tags$dt(class = "col-sm-3", "File size"),
+        tags$dd(class = "col-sm-9",
+                sprintf("%.1f MB", (e$file_size_bytes %||% 0L) / 1e6)),
+        tags$dt(class = "col-sm-3", "Created"),
+        tags$dd(class = "col-sm-9", e$created_at %||% "?")
+      ),
+      if (nzchar(e$proteog_methods_paragraph %||% "")) {
+        div(class = "alert alert-info py-2 px-3 mt-2",
+            style = "font-size: 0.85em;",
+            tags$strong("Methods: "),
+            e$proteog_methods_paragraph)
+      }
+    )
+  })
+
+  observeEvent(input$proteog_library_use_btn, {
+    sel <- input$proteog_library_table_rows_selected
+    cat <- proteog_library_catalog()
+    if (is.null(sel) || length(sel) == 0 || length(cat) == 0) {
+      showNotification("Select a database first.", type = "warning", duration = 5)
+      return()
+    }
+    e <- cat[[sel]]
+    fasta_remote <- e$remote_dir
+    if (!is.character(fasta_remote) || !nzchar(fasta_remote)) {
+      showNotification("Selected entry has no FASTA path.",
+                       type = "error", duration = 8)
+      return()
+    }
+    values$diann_fasta_files <- fasta_remote
+    values$fasta_info <- list(
+      n_sequences        = e$protein_count %||% 0L,
+      file_size          = e$file_size_bytes %||% 0L,
+      library_entry_id   = e$id,
+      library_entry_name = e$name,
+      source             = "proteogenomics",
+      proteog_project    = e$proteog_project_name %||% NA_character_
+    )
+    showNotification(sprintf("Selected proteogenomics DB: %s (%s sequences)",
+                             e$name %||% "?",
+                             format(as.integer(e$protein_count %||% 0L),
+                                    big.mark = ",")),
+                     type = "message", duration = 6)
+    removeModal()
+  })
+
+  output$proteog_library_selected_summary <- renderUI({
+    info <- values$fasta_info
+    if (is.null(info) || !identical(info$source, "proteogenomics")) {
+      return(helpText("No proteogenomics database selected yet."))
+    }
+    div(class = "alert alert-success py-2 px-3 mt-2",
+        style = "font-size: 0.85em;",
+        icon("check"), tags$strong(" Selected: "),
+        info$library_entry_name %||% "?",
+        tags$br(),
+        tags$small(format(as.integer(info$n_sequences %||% 0L), big.mark = ","),
+                   " sequences"))
+  })
+
   # Delete library entry
   # View Step 1 DIA-NN log for selected FASTA library entry
   observeEvent(input$fasta_library_view_log_btn, {

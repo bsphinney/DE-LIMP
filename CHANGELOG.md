@@ -5,6 +5,38 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.0] — 2026-05-26
+
+Proteogenomics workflow is now feature-complete and integrated end-to-end into the main DE-LIMP FASTA picker.
+
+### Added
+- **Proteogenomics DBs as a first-class FASTA source on the main search page.** New entry in the `FASTA Database` sidebar dropdown (between `Database Library` and `Pre-staged on server`) opens a dedicated modal listing only `content_type == "proteogenomics"` catalog entries with proteog-specific columns (Project, Organism, Samples, Reference, Sequences, Built). Detail panel surfaces the full self-describing build metadata: project dir, pipeline ID (`proteogenomics_v1.1`), reference key, read-length tier, sample names, UniProt input, FASTA path on Hive, sequence count, file size, and the methods paragraph. "Use This Database" wires the selection into the DIA-NN search the same way Database Library does.
+- **Auto-`assemble` SLURM stage chained to every new proteogenomics build.** `submit_proteogenomics_build()` now generates an `assemble.sbatch` after `rewrite` that concatenates the predicted ORFs with an optional UniProt FASTA, attempts `seqkit rmdup -s` if available (degrades to plain `cat` if not), and writes the final FASTA to `/quobyte/proteomics-grp/de-limp/databases/proteogenomics/<project>_proteogenomics_<YYYY_MM>.fasta`. The orchestrator no longer leaves an `"unknown"` stage 11 behind.
+- **`submit_assemble_only()` + per-row "Assemble" button** in the Active Builds table — covers legacy builds whose SLURM chain finished pre-auto-assemble. Click opens a modal with the same UniProt source dropdown; submit generates and submits only the assemble.sbatch, patches the stage's `job_id` + `status` in `status.json`, and the poller picks it up.
+- **UniProt + NCBI download integration on the proteogenomics page.** Step 4 has a new "UniProt FASTA" dropdown with options `None / Download from UniProt / Download from NCBI / Enter path on Hive`. Reuses `search_uniprot_proteomes()` / `download_uniprot_fasta()` and `ncbi_search_assemblies()` / `ncbi_download_proteome()` via proteog-prefixed observers so they don't clobber the main search page's `values$fasta_info`. Downloads land in `/quobyte/proteomics-grp/de-limp/databases/uniprot/` on Hive; subsequent picks detect the cached file and skip the redownload. NCBI downloads also upload the side-car `_gene_map.tsv` alongside the FASTA.
+- **Auto-submit assemble after a UniProt/NCBI download in the per-row Assemble flow.** When the user picks "Download from UniProt" from the Assemble modal, the assemble job fires automatically as soon as the upload to Hive completes — no second click needed.
+- **FASTA library auto-registration on assemble completion.** `poll_proteog_build_status()` detects the transition to `current_stage == "complete"` and adds a new entry to `~/.delimp_fasta_library/catalog.rds` matching the existing schema plus proteogenomics extension fields (`proteog_pipeline_id`, `proteog_project_dir`, `proteog_methods_paragraph`, `proteog_sample_names`, `proteog_reference_key`, etc.). The `library_entry_id` is stored back in `status.json` so polling doesn't re-register.
+- **"Discover from Hive" button** in the Proteogenomics Databases modal — scans `/quobyte/proteomics-grp/de-limp/rnaseq/*/status.json` over SSH, registers every `assemble == "complete"` build that isn't yet in the user's local catalog. Solves the multi-user case: catalog stays per-user (no shared-write conflicts) but every lab member can populate it from the shared FASTA storage on demand.
+- **"Restore from Hive" button** on the Build Database page's Active Builds card — same scan pattern, restores in-progress build entries to `values$proteog_build_jobs` after a Shiny restart or on a fresh machine. Defensive parsing throughout.
+- **Active builds list persistence** at `~/.delimp_proteog_builds.rds`. Persist observer is gated against overwriting a non-empty file with an empty list.
+
+### Changed
+- **`launch_slims_download()`, `launch_ena_download()`, and `poll_download_status()` are now SSH-aware.** Accept a `ssh_config = NULL` parameter; when non-NULL they `ssh_exec mkdir`, `scp_upload` the status JSON + shell script, and detach the background process on Hive via `nohup bash ... </dev/null &`. The `</dev/null` is mandatory — without it the SSH connection waits on the background process's stdin and never returns. Brett's workflow (DE-LIMP on Mac, SSH to Hive) now works end-to-end.
+- **Deferred build submit for sra/slims source modes.** The submit handler no longer calls `submit_proteogenomics_build()` immediately for downloaded sources; instead it stores the request in `pending_build_submits` + adds a placeholder row to the Active Builds list (blue "downloading" badge). A 15-second `reactivePoll` observer watches `download_status.json` and fires the build the moment the state flips to `"complete"`. Failed downloads get a `dl-<state>` badge instead of vanishing.
+- **Skip-if-present check on submit.** Before launching any download for sra/slims modes, the submit handler `find`s for `*.fastq.gz` under the target project_dir on Hive. If files are already there, it skips the download and treats the submit as local-mode.
+
+### Fixed
+- **`.empty_or_str` crashed on `status.json` fields serialized as `{}`.** `jsonlite::fromJSON()` parses empty JSON objects as `list()` (length 0); `nzchar(as.character(list()))` returns `logical(0)`, crashing the `if`. The helper now coerces every degenerate shape (`NULL`, `list()`, `character(0)`, scalar `NA`, multi-element vectors with NAs) to `""` up front. Hoisted from function-local to file scope.
+- **Stages with no job_id were wrongly summarized as "complete".** Pre-auto-assemble status.json had stage 11 (`assemble`) with `status: "unknown"` and `job_id: {}`. The poll loop called `.sacct_state("")` → garbage → `any_running` stayed FALSE → `current_stage = "complete"`. Stages with no SLURM job_id are now treated as still-pending.
+- **Restore/Discover handlers no longer crash on edge cases in `status.json`.** Every `if`, `%in%`, `nzchar()`, `is.na()` is now wrapped to handle the full set of degenerate shapes JSON can return. Failures fall back to a red toast.
+- **Reactive value access outside a reactive consumer crashed every new Shiny session.** The initial proteog-builds restore-from-disk block read `values$proteog_build_jobs` at server function entry; Shiny rejects that with "Can't access reactive value outside of reactive consumer", killing the entire `server_proteog_builder` module for that session. Wrapped in `isolate({})`.
+
+### Internal
+- `generate_assemble_sbatch()` in `helpers_rnaseq.R` — small SLURM job that does `cat predicted_orfs.fasta [uniprot.fasta] > out` plus optional `seqkit rmdup -s`.
+- File-scope `.empty_or_str()` and `is_scalar_char_safe()` helpers in `server_proteog_builder.R` for shared NA/NULL/list-coercion across orchestrator, poller, and library-register paths.
+- New reactiveVals inside `server_proteog_builder()`: `pending_build_submits`, `proteog_assemble_target`, `proteog_uniprot_state`, `proteog_ncbi_state`.
+- New protected nav tab value: `build_database_tab`.
+
 ## [3.10.33] — 2026-05-22
 
 ### Fixed

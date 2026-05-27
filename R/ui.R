@@ -557,6 +557,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               choices = c("Download from UniProt" = "uniprot",
                           "Download from NCBI" = "ncbi",
                           "Database Library" = "library",
+                          "Proteogenomics DBs" = "proteogenomics",
                           "Pre-staged on server" = "prestaged",
                           "Browse / enter path" = "browse"),
               width = "100%"),
@@ -582,6 +583,13 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               actionButton("open_fasta_library_modal", "Browse Speclib Library",
                 class = "btn-primary btn-sm w-100", icon = icon("bolt")),
               uiOutput("fasta_library_selected_summary")
+            ),
+
+            # --- Proteogenomics DB source ---
+            conditionalPanel("input.fasta_source == 'proteogenomics'",
+              actionButton("open_proteog_library_modal", "Browse Proteogenomics DBs",
+                class = "btn-primary btn-sm w-100", icon = icon("dna")),
+              uiOutput("proteog_library_selected_summary")
             ),
 
             # --- Pre-staged source ---

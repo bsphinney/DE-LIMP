@@ -617,3 +617,50 @@ generate_rewrite_sbatch <- function(project_dir,
     "grep -c '^>' \"$PROJECT_DIR/predicted_orfs.fasta\"\n"
   )
 }
+
+#' Final assembly: concatenate predicted_orfs.fasta + optional UniProt FASTA
+#' and (if available) dedupe with seqkit. Output lands in the proteogenomics
+#' databases dir as `<project>_proteogenomics_<YYYY_MM>.fasta` so DE-LIMP can
+#' pick it up from the FASTA library scanner.
+#'
+#' UniProt FASTA is optional. If empty/missing, the output is just the
+#' deduplicated predicted ORFs.
+generate_assemble_sbatch <- function(project_dir,
+                                     project_name,
+                                     uniprot_fasta = "",
+                                     databases_root = "/quobyte/proteomics-grp/de-limp/databases/proteogenomics",
+                                     slurm_account   = PROTEOG_DEFAULT_ACCOUNT,
+                                     slurm_partition = PROTEOG_DEFAULT_PARTITION) {
+  if (!nzchar(project_name)) stop("generate_assemble_sbatch(): project_name is empty")
+  logs_dir <- file.path(project_dir, "logs")
+
+  paste0(
+    slurm_header(
+      job_name = "proteog_assemble",
+      time = "30:00", mem = "4G", cpus = 2,
+      slurm_account = slurm_account, slurm_partition = slurm_partition,
+      out_dir = logs_dir
+    ),
+    "\nset -euo pipefail\n",
+    sprintf("PROJECT_DIR=%s\n",   shQuote(project_dir)),
+    sprintf("PROJECT_NAME=%s\n",  shQuote(project_name)),
+    sprintf("UNIPROT=%s\n",       shQuote(uniprot_fasta %||% "")),
+    sprintf("OUT_DIR=%s\n",       shQuote(databases_root)),
+    "DATE_TAG=$(date +%Y_%m)\n",
+    "OUT=\"$OUT_DIR/${PROJECT_NAME}_proteogenomics_${DATE_TAG}.fasta\"\n",
+    "\nmkdir -p \"$OUT_DIR\"\n",
+    "INPUTS=(\"$PROJECT_DIR/predicted_orfs.fasta\")\n",
+    "if [ -n \"$UNIPROT\" ] && [ -f \"$UNIPROT\" ]; then INPUTS+=(\"$UNIPROT\"); fi\n",
+    "echo \"Concatenating: ${INPUTS[@]} -> $OUT\"\n",
+    "cat \"${INPUTS[@]}\" > \"$OUT\"\n",
+    "\n# Optional dedupe — seqkit is not always available on Hive.\n",
+    "if command -v seqkit >/dev/null 2>&1; then\n",
+    "  seqkit rmdup -s -o \"${OUT}.dedup\" \"$OUT\" && mv \"${OUT}.dedup\" \"$OUT\"\n",
+    "  echo \"Deduplicated with seqkit rmdup -s\"\n",
+    "else\n",
+    "  echo \"seqkit not on PATH — skipping dedupe (duplicates are harmless for DIA-NN).\"\n",
+    "fi\n",
+    "\necho \"Final FASTA: $OUT\"\n",
+    "echo \"Sequence count: $(grep -c '^>' \"$OUT\")\"\n"
+  )
+}

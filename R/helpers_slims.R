@@ -311,32 +311,36 @@ sanitize_project_name <- function(name) {
 #' md5 checksums. Writes a status file the UI can poll. Runs via `nohup` so
 #' the Shiny session can return immediately.
 #'
-#' NOTE: this assumes the host running R has SLIMS reachable. On Hive that's
-#' the login node (which is where DE-LIMP runs via apptainer). If you're
-#' running DE-LIMP elsewhere and need to fetch to Hive, route via SSH.
+#' When `ssh_config` is non-NULL, the project dir is created on Hive via
+#' ssh_exec, the status JSON is written there via scp_upload, and the
+#' wget+md5 script runs on the Hive login node via ssh_exec with nohup +
+#' </dev/null detachment (which lets the SSH connection return immediately
+#' while the background bash keeps running).
 #'
 #' @param slims_url    character — URL from scan_slims_url()
 #' @param project_name character — sanitized via sanitize_project_name()
 #' @param rnaseq_root  character — base dir (default: spec'd path)
+#' @param ssh_config   NULL (local) or ssh_config list (run on Hive via SSH)
 #' @return list with $project_dir, $status_file, $download_log
 launch_slims_download <- function(slims_url,
                                   project_name,
-                                  rnaseq_root = "/quobyte/proteomics-grp/de-limp/rnaseq") {
+                                  rnaseq_root = "/quobyte/proteomics-grp/de-limp/rnaseq",
+                                  ssh_config = NULL) {
   if (!is_slims_url(slims_url)) {
     stop("launch_slims_download(): URL does not match SLIMS format")
   }
   project_name <- sanitize_project_name(project_name)
   project_dir  <- file.path(rnaseq_root, project_name)
-  dir.create(project_dir, recursive = TRUE, showWarnings = FALSE)
 
   status_file  <- file.path(project_dir, "download_status.json")
   download_log <- file.path(project_dir, "download.log")
   md5_log      <- file.path(project_dir, "md5_verify.log")
 
-  jsonlite::write_json(
-    list(state = "running", started_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+  status_json <- jsonlite::toJSON(
+    list(state = "running",
+         started_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
          mode = "slims", url = slims_url),
-    status_file, auto_unbox = TRUE, pretty = TRUE
+    auto_unbox = TRUE, pretty = TRUE
   )
 
   # Inner command — runs the wget mirror then md5 verification, then writes
@@ -358,9 +362,40 @@ launch_slims_download <- function(slims_url,
     shQuote(status_file)
   )
 
-  outer <- sprintf("nohup bash -c %s > %s 2>&1 &",
-                   shQuote(inner_cmd), shQuote(download_log))
-  system(outer)
+  if (is.null(ssh_config)) {
+    # ── Local: dir.create + jsonlite::write_json + system(nohup ...) ──────
+    dir.create(project_dir, recursive = TRUE, showWarnings = FALSE)
+    writeLines(as.character(status_json), status_file)
+    outer <- sprintf("nohup bash -c %s > %s 2>&1 &",
+                     shQuote(inner_cmd), shQuote(download_log))
+    system(outer)
+  } else {
+    # ── SSH: mkdir on Hive, scp status.json, ssh_exec nohup bash ──────────
+    res_mk <- ssh_exec(ssh_config,
+                       sprintf("mkdir -p %s", shQuote(project_dir)),
+                       login_shell = FALSE, timeout = 15)
+    if (!identical(res_mk$status, 0L)) {
+      stop("launch_slims_download (ssh): mkdir failed: ",
+           paste(res_mk$stderr %||% character(), collapse = "; "))
+    }
+    tmp <- tempfile(pattern = "slims_status_")
+    on.exit(if (file.exists(tmp)) file.remove(tmp), add = TRUE)
+    writeLines(as.character(status_json), tmp)
+    scp_res <- scp_upload(ssh_config, tmp, status_file, timeout = 60)
+    if (!identical(scp_res$status, 0L)) {
+      stop("launch_slims_download (ssh): scp status.json failed: ",
+           paste(scp_res$stderr %||% character(), collapse = "; "))
+    }
+    # `< /dev/null` is mandatory — without it the SSH stays attached
+    # to the bash stdin and won't return until the download finishes.
+    bg <- sprintf("nohup bash -c %s > %s 2>&1 < /dev/null & echo BG_PID:$!",
+                  shQuote(inner_cmd), shQuote(download_log))
+    res_bg <- ssh_exec(ssh_config, bg, login_shell = FALSE, timeout = 15)
+    if (!identical(res_bg$status, 0L)) {
+      stop("launch_slims_download (ssh): nohup launch failed: ",
+           paste(res_bg$stderr %||% character(), collapse = "; "))
+    }
+  }
 
   list(
     project_dir  = project_dir,
@@ -378,15 +413,21 @@ launch_slims_download <- function(slims_url,
 #' `head` produces when it closes upstream doesn't fail the script (validation
 #' bug — fixed in spec §4).
 #'
+#' When `ssh_config` is non-NULL, the project dir + shell script are
+#' created on Hive via ssh_exec / scp_upload, and the download runs on the
+#' Hive login node via ssh_exec with nohup detachment.
+#'
 #' @param accessions      character vector — e.g., c("SRR1303776", "SRR1303777")
 #' @param project_name    character
 #' @param subsample_reads integer or NULL — if set, stream-subsample N read pairs
 #' @param rnaseq_root     character
+#' @param ssh_config      NULL (local) or ssh_config list (remote via SSH)
 #' @return list (same shape as launch_slims_download)
 launch_ena_download <- function(accessions,
                                 project_name,
                                 subsample_reads = NULL,
-                                rnaseq_root = "/quobyte/proteomics-grp/de-limp/rnaseq") {
+                                rnaseq_root = "/quobyte/proteomics-grp/de-limp/rnaseq",
+                                ssh_config = NULL) {
   if (length(accessions) == 0) stop("launch_ena_download(): no accessions provided")
   if (length(accessions) > 24) {
     stop("launch_ena_download(): too many accessions (limit 24 per build for sanity)")
@@ -399,16 +440,16 @@ launch_ena_download <- function(accessions,
 
   project_name <- sanitize_project_name(project_name)
   project_dir  <- file.path(rnaseq_root, project_name)
-  dir.create(project_dir, recursive = TRUE, showWarnings = FALSE)
 
   status_file  <- file.path(project_dir, "download_status.json")
   download_log <- file.path(project_dir, "download.log")
 
-  jsonlite::write_json(
-    list(state = "running", started_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+  status_json <- jsonlite::toJSON(
+    list(state = "running",
+         started_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
          mode = "ena", accessions = as.list(accessions),
          subsample_reads = subsample_reads %||% NA),
-    status_file, auto_unbox = TRUE, pretty = TRUE
+    auto_unbox = TRUE, pretty = TRUE
   )
 
   # Build per-accession URL pairs. ENA FTP URL convention:
@@ -476,12 +517,60 @@ launch_ena_download <- function(accessions,
   ), collapse = "\n")
 
   script_path <- file.path(project_dir, "ena_download.sh")
-  writeLines(script, script_path)
-  Sys.chmod(script_path, "755")
 
-  outer <- sprintf("nohup bash %s > %s 2>&1 &",
-                   shQuote(script_path), shQuote(download_log))
-  system(outer)
+  if (is.null(ssh_config)) {
+    # ── Local ────────────────────────────────────────────────────────────
+    dir.create(project_dir, recursive = TRUE, showWarnings = FALSE)
+    writeLines(as.character(status_json), status_file)
+    writeLines(script, script_path)
+    Sys.chmod(script_path, "755")
+    outer <- sprintf("nohup bash %s > %s 2>&1 &",
+                     shQuote(script_path), shQuote(download_log))
+    system(outer)
+  } else {
+    # ── SSH: mkdir, scp status+script to Hive, nohup over ssh ────────────
+    res_mk <- ssh_exec(ssh_config,
+                       sprintf("mkdir -p %s", shQuote(project_dir)),
+                       login_shell = FALSE, timeout = 15)
+    if (!identical(res_mk$status, 0L)) {
+      stop("launch_ena_download (ssh): mkdir failed: ",
+           paste(res_mk$stderr %||% character(), collapse = "; "))
+    }
+    tmp_status <- tempfile(pattern = "ena_status_")
+    tmp_script <- tempfile(pattern = "ena_script_", fileext = ".sh")
+    on.exit({
+      if (file.exists(tmp_status)) file.remove(tmp_status)
+      if (file.exists(tmp_script)) file.remove(tmp_script)
+    }, add = TRUE)
+    writeLines(as.character(status_json), tmp_status)
+    writeLines(script, tmp_script)
+    up1 <- scp_upload(ssh_config, tmp_status, status_file, timeout = 60)
+    if (!identical(up1$status, 0L)) {
+      stop("launch_ena_download (ssh): scp status.json failed: ",
+           paste(up1$stderr %||% character(), collapse = "; "))
+    }
+    up2 <- scp_upload(ssh_config, tmp_script, script_path, timeout = 60)
+    if (!identical(up2$status, 0L)) {
+      stop("launch_ena_download (ssh): scp script failed: ",
+           paste(up2$stderr %||% character(), collapse = "; "))
+    }
+    res_chmod <- ssh_exec(ssh_config,
+                          sprintf("chmod 755 %s", shQuote(script_path)),
+                          login_shell = FALSE, timeout = 15)
+    if (!identical(res_chmod$status, 0L)) {
+      stop("launch_ena_download (ssh): chmod failed: ",
+           paste(res_chmod$stderr %||% character(), collapse = "; "))
+    }
+    # `< /dev/null` is mandatory — without it the SSH connection waits
+    # on the background bash's stdin and won't return.
+    bg <- sprintf("nohup bash %s > %s 2>&1 < /dev/null & echo BG_PID:$!",
+                  shQuote(script_path), shQuote(download_log))
+    res_bg <- ssh_exec(ssh_config, bg, login_shell = FALSE, timeout = 15)
+    if (!identical(res_bg$status, 0L)) {
+      stop("launch_ena_download (ssh): nohup launch failed: ",
+           paste(res_bg$stderr %||% character(), collapse = "; "))
+    }
+  }
 
   list(
     project_dir  = project_dir,
@@ -493,14 +582,34 @@ launch_ena_download <- function(accessions,
 
 #' Poll the status JSON for a download
 #'
+#' When `ssh_config` is non-NULL, fetches the JSON from Hive via ssh_exec
+#' (cat) — short file, no need to scp.
+#'
 #' @param project_dir character — from launch_*_download() return
+#' @param ssh_config  NULL (local) or ssh_config list (remote via SSH)
 #' @return list with $state ("running"|"complete"|"download_failed"|"md5_failed"|"missing"), $finished_at
-poll_download_status <- function(project_dir) {
+poll_download_status <- function(project_dir, ssh_config = NULL) {
   status_file <- file.path(project_dir, "download_status.json")
-  if (!file.exists(status_file)) {
-    return(list(state = "missing", finished_at = NA_character_))
+  raw <- NULL
+  if (is.null(ssh_config)) {
+    if (!file.exists(status_file)) {
+      return(list(state = "missing", finished_at = NA_character_))
+    }
+    raw <- tryCatch(jsonlite::read_json(status_file), error = function(e) NULL)
+  } else {
+    res <- ssh_exec(ssh_config,
+                    sprintf("cat %s 2>/dev/null || echo MISSING_STATUS",
+                            shQuote(status_file)),
+                    login_shell = FALSE, timeout = 15)
+    txt <- paste(res$stdout %||% character(), collapse = "\n")
+    if (!identical(res$status, 0L) ||
+        identical(trimws(txt), "MISSING_STATUS") ||
+        !nzchar(trimws(txt))) {
+      return(list(state = "missing", finished_at = NA_character_))
+    }
+    raw <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = FALSE),
+                    error = function(e) NULL)
   }
-  raw <- tryCatch(jsonlite::read_json(status_file), error = function(e) NULL)
   if (is.null(raw)) {
     return(list(state = "missing", finished_at = NA_character_))
   }
