@@ -174,7 +174,13 @@ The first panel configures your input files: raw data, FASTA database, and optio
   - `.wiff` files (SCIEX)
 
 #### FASTA Database
-Four sources are available:
+Five sources are available:
+
+**🧬 Proteogenomics DBs (NEW in v3.11):**
+- A new modal listing custom proteogenomics databases built from your own RNA-seq data
+- Each entry shows: project name, organism, sample count, reference genome, sequence count, and build status
+- Best for: studies where you want to map peptides to novel ORFs discovered in your own RNA-seq cohort
+- See **Proteogenomics Workflow** (below) for how to build these databases
 
 **📥 Download from UniProt:**
 1. Type an organism name (e.g., "Homo sapiens", "Mus musculus") in the search box
@@ -185,7 +191,7 @@ Four sources are available:
    - **Canonical + isoform** — includes splice variants
 4. Click **"Download"** — the FASTA is downloaded to the HPC working directory (uploaded via SCP in SSH mode)
 
-**📥 Download from NCBI (NEW in v3.7):**
+**📥 Download from NCBI (v3.7+):**
 1. Type an organism name in the search box
 2. Select a proteome from the NCBI Datasets results
 3. Click **"Download"** — downloads the RefSeq protein FASTA
@@ -343,6 +349,105 @@ A new **"0. DIA-NN DATABASE SEARCH"** section appears at the top of the methodol
 - **Log files:** Location of SLURM log files (`{output_dir}/logs/`)
 
 This section is **publication-ready** — it uses human-readable names for all parameters and follows standard methods section conventions. The same information is also logged in the **reproducibility code log** for programmatic access.
+
+---
+
+## 3.8 Proteogenomics Workflow (NEW in v3.11)
+
+**What is proteogenomics?** Proteogenomics maps MS/MS spectra to a combination of reference proteins and novel open reading frames (ORFs) discovered in your own RNA-seq data. This allows you to detect proteins encoded by unannotated genomic regions, alternative splicing events, or non-canonical start sites in your specific samples.
+
+**When should I use it?** You have matched RNA-seq and proteomics data from the same samples, and you want to:
+- Discover unannotated ORFs expressed in your samples
+- Map peptides to alternative splicing isoforms
+- Include sample-specific genetic variants in the search database
+- Combine de novo assembly with reference proteins (UniProt or NCBI) for maximum sensitivity
+
+### Building a Proteogenomics Database
+
+The **"Build Database"** button in the **New Search** dropdown opens a dedicated builder page with 11 pipeline stages.
+
+#### Stage Overview (High Level)
+1. **Download / Upload** — Acquire RNA-seq files from SRA, SLIMS, or use local fastq.gz
+2. **QC & Filtering** — Trim low-quality reads, remove rRNA contamination
+3. **Alignment** — Map reads to the reference genome (STAR)
+4. **Assembly** — Reconstruct transcripts from alignments (StringTie)
+5. **Merge & Compare** — Combine assemblies across samples, compare to reference GTF (GffCompare)
+6. **ORF Prediction** — Extract predicted protein sequences from novel transcripts (TransDecoder)
+7. **Finalization** — Rewrite ORF headers, optionally merge with UniProt/NCBI proteins, deduplicate sequences
+8. **Registration** — Auto-add to your local FASTA library for use in DIA-NN searches
+
+#### Building Step-by-Step
+
+**Step 1: Project Setup**
+- **Project Name** — A short identifier (e.g., "HeLa_2024_v1", "Bovine_Liver_RNAseq"). Names with spaces are auto-sanitized.
+- **Reference Organism** — Dropdown of supported references (Human, Mouse, Pig, Rat, Arabidopsis, with Bovine and Maize in progress). Each reference includes pre-built genome indices (STAR, bowtie2 rRNA), GTF annotation, and rRNA sequences.
+
+**Step 2: RNA-seq Input**
+Choose your input source:
+- **Local Files** — Upload `.fastq.gz` files from your machine (for small cohorts; large files may be slow)
+- **SRA (NCBI)** — Auto-download from NCBI BioProject by accession (e.g., `PRJNA123456`). The builder queries SRA Metadata API, shows matching runs, and submits a background download job.
+- **SLIMS** — Auto-download from your institution's SLIMS sample tracking system (if configured). Similar dropdown of available runs.
+
+**Step 3: Reference Genome Selection**
+The dropdown shows available references with genome build + GTF version (e.g., "Human (GRCh38, Ensembl 110)"). Each reference includes:
+- Reference FASTA
+- GTF annotation (for known transcript boundaries)
+- rRNA sequences (for contamination filtering)
+- Pre-built STAR and bowtie2 indices (speeds up alignment and QC)
+
+**Step 4: Optional UniProt / NCBI Integration**
+After the ORF prediction step completes, you can optionally merge the predicted ORFs with reference proteins:
+- **None** — Use predicted ORFs only
+- **Download from UniProt** — Fetch a UniProt proteome (one-protein-per-gene recommended) and merge with ORFs. Deduplication removes exact duplicates.
+- **Download from NCBI** — Fetch a RefSeq proteome and merge with ORFs (includes automatic gene symbol mapping).
+- **Enter path on Hive** — Manually specify a FASTA file already on the HPC cluster.
+
+If you select a download option, an auto-submit button appears: after the download completes, the final assembly step (which concatenates ORFs + reference proteins) automatically runs without requiring a second click.
+
+#### Active Builds Table
+The builder shows a live table of in-progress and completed builds:
+
+| Column | Description |
+|--------|-------------|
+| **Project** | Project name + start timestamp |
+| **Stage** | Current pipeline stage (e.g., "Alignment", "Assembly", "Complete") |
+| **Samples** | Number of RNA-seq samples included |
+| **Reference** | Genome build and GTF version used |
+| **Sequences** | Count of ORFs + UniProt proteins in the final FASTA (updated on completion) |
+| **Status** | Badge color: blue = downloading, grey = queued/running, green = complete, red = failed |
+| **Actions** | "View Details" link, "Assemble" button (if legacy build pre-auto-assemble), "Cancel" button |
+
+#### Per-Row Details Panel
+Click "View Details" to see the full build metadata:
+- **Pipeline ID** — Always `proteogenomics_v1.1`
+- **Project Directory** — `/quobyte/proteomics-grp/de-limp/rnaseq/<project_name>/`
+- **Sample Names** — All RNA-seq samples included in the build
+- **Reference Key** — Which genome/GTF was used
+- **Read Length Tier** — Detected or specified read length (affects STAR index choice and downstream parameters)
+- **UniProt Input** — Which reference proteome (if any) was merged
+- **Final FASTA Path** — `/quobyte/proteomics-grp/de-limp/databases/proteogenomics/<project>_proteogenomics_<YYYY_MM>.fasta`
+- **Sequence Count** — Total ORFs + UniProt proteins
+- **File Size** — Bytes
+- **Methods Paragraph** — Auto-generated methods text for publication (lists organism, genome build, read length, # samples, # ORFs, UniProt merge details)
+
+#### Using the Built Database in a DIA-NN Search
+
+Once a build completes, it automatically registers in your local FASTA library catalog. To use it:
+
+1. On the **New Search** tab, click the **"Proteogenomics DBs"** option in the **FASTA Database** dropdown
+2. A modal lists all your registered proteogenomics builds (showing Project, Organism, Sample Count, Reference, Sequence Count, Built date)
+3. Click **"Use This Database"** — the FASTA path auto-fills into the search form
+4. Continue with your normal DIA-NN search configuration
+5. When results load, they will include matches to both reference proteins and novel sample-specific ORFs
+
+#### Multi-User Discovery
+If you work in a lab where others have built databases:
+- Click **"Discover from Hive"** in the Proteogenomics DBs modal
+- The app scans `/quobyte/proteomics-grp/de-limp/rnaseq/*/status.json` over SSH and auto-registers any completed build that isn't yet in your local catalog
+- Your catalog stays private (no shared-write conflicts), but you can see and use any lab-member's builds
+
+#### Restore After Restart
+If you restart DE-LIMP, in-progress builds are automatically restored via the **"Restore from Hive"** button on the Build Database page's Active Builds card.
 
 ---
 

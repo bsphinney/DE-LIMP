@@ -22,16 +22,11 @@ tags:
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with **Google Gemini AI** integration.
 
-## ✨ What's New in v3.10.4
+## ✨ What's New in v3.11.0
 
-- 🧬 **Two analysis pipelines, one app**: Choose **DPC-Quant + limma** (limpa default) or **MaxLFQ + limma** (paper-faithful Moschem 2025). Methods text, AI prompts, and exports describe whichever pipeline actually ran — nothing hardcoded.
-- 🎚️ **QuantUMS quality filters** (Moschem 2025): Optional precursor pre-filtering by `eQ` / `qQ` / `pgQ` quality scores with a survival waterfall.
-- 🔘 **On/Off Proteins panel**: New DE Dashboard sub-tab surfaces proteins missing entirely from one condition (which limma drops with NA logFC, so they're invisible in the volcano).
-- 🪞 **Run Comparator pipeline-aware**: Cross-tool DE comparison (DE-LIMP vs DE-LIMP / Spectronaut / FragPipe) reads the pipeline descriptor and adjusts hypothesis-engine rules accordingly.
-- 📦 **Export Complete Analysis** consolidated as a true superset: DE results, QC, phospho, expression matrix, detection matrix, quartile profiles, variable proteins, methods, parameters, sessionInfo, session.rds, and a DE-aware **PROMPT.md** in one ZIP. **MANIFEST.txt** records what was included vs skipped (no more silent failures).
-- 🧪 **Provenance block in exports**: parquet MD5, sessionInfo, app version, pipeline label.
+- 🧬 **Proteogenomics — Build sample-specific search databases from RNA-seq**: Upload fastq files or SRA/SLIMS accessions. DE-LIMP runs a complete HPC pipeline (fastp → bowtie2 rRNA filter → STAR → stringtie → merge → gffcompare → gffread → TransDecoder) to predict novel ORFs and alternative splice variants. Final FASTA auto-assembles with UniProt or NCBI RefSeq and registers in the FASTA library as "Proteogenomics DBs" on the main search page. Supports Human, Mouse, Pig, Rat, Arabidopsis. Multi-user catalog discovery via "Restore from Hive" and "Discover from Hive" buttons.
 
-**Previous highlights** (v3.7): Contaminant Analysis (keratin flagging + heatmap), Data Explorer (quartile profiles + sample scatter), NCBI Proteome Download with gene mapping, SSH File Browser, No-Replicates Mode, Environment Badge.
+**Previous highlights** (v3.10): Two analysis pipelines (DPC-Quant or MaxLFQ), QuantUMS quality filters, On/Off proteins, Coverage filter, FASTA picker, provenance block. (v3.7): Contaminant Analysis (keratin flagging + heatmap), Data Explorer (quartile profiles + sample scatter), NCBI Proteome Download with gene mapping, SSH File Browser, No-Replicates Mode, Environment Badge.
 
 **Earlier** (v3.5): Run Comparator, Search & Analysis History, Chromatography QC. (v3.1): UI overhaul, accordion sidebar, DE Dashboard sub-tabs. (v3.0): Multi-Omics MOFA2 | Phosphoproteomics (site-level DE, KSEA, motifs) | GSEA 4-database | AI Summary | XIC Viewer ([local/HPC only](https://github.com/bsphinney/DE-LIMP))
 

@@ -350,3 +350,77 @@ Reference: [DIA-NN Discussion #1414](https://github.com/vdemichev/DiaNN/discussi
 - **Home directory quota warning**: Startup check via `df -h ~` or `quota` command. Warns if >80% used. Common on HPC where home dirs are 5-10 GB.
 - **Auto-adjust search CPUs**: When submitting a DIA-NN search, CPUs automatically capped to per-user SLURM limit (from `check_cluster_resources()`). Prevents job rejection due to QOS limits.
 - **Windows Docker SSH key handling**: `Launch_DE-LIMP_Docker.bat` copies SSH keys from `C:\Users\{username}\.ssh\` into Docker-accessible volume (`./data/ssh/`). Sets permissions via `docker exec chmod 600`. Multiple Windows users on same PC each get their own key detected.
+
+## Proteogenomics Patterns (v3.11.0)
+
+### SSH-Aware Download Launchers
+
+**Why this matters**: RNA-seq downloads (SRA, SLIMS, ENA) run on Hive HPC for users who have SSH access. The same code must work locally (no SSH) and remotely (with SSH), without coupling to either backend.
+
+- **Pattern**: `launch_slims_download()`, `launch_ena_download()`, `poll_download_status()` all accept an optional `ssh_config = NULL` parameter
+- **Local (no SSH)**: When `ssh_config = NULL`, the functions run the shell script directly in the background via `processx::run(... background = TRUE, ...)` on the user's machine
+- **Remote (SSH)**: When `ssh_config` is a list with `host`, `user`, `key` fields:
+  1. `ssh_exec mkdir` creates the target directory on Hive
+  2. `scp_upload` copies the status JSON file + shell script to Hive
+  3. `ssh_exec nohup bash ... </dev/null &` launches the script as a background process on Hive
+  4. The `</dev/null` is **mandatory** — without it, the SSH connection waits forever on the background process's stdin and never returns
+- **Status polling**: `poll_download_status()` reads the status JSON (local or SCP-downloaded from remote) every 15 seconds, looking for state transitions (`pending` → `running` → `complete`/`failed`)
+- **Why separate**: Decoupling SSH from the core download logic means every backend (local, Docker, HPC Apptainer) can trigger downloads the same way, just with different `ssh_config` values
+
+### Per-User Catalog + Shared FASTA Storage
+
+**Why this matters**: Multiple lab members build proteogenomics databases on shared HPC storage. Each person needs to discover and use others' databases, but if catalog files lived on shared storage, concurrent writes would corrupt the file.
+
+- **FASTA files**: Live on `/quobyte/proteomics-grp/de-limp/databases/proteogenomics/`, readable by everyone on the lab account
+- **Catalog entries**: Live in each user's local `~/.delimp_fasta_library/catalog.rds` (an RDS list with `content_type`, `library_entry_id`, proteogenomics extension fields)
+- **Auto-registration**: `poll_proteog_build_status()` detects the transition to `current_stage == "complete"` and writes a new catalog entry to the local file with `content_type = "proteogenomics"` + 9 extension fields (`proteog_pipeline_id`, `proteog_project_dir`, `proteog_methods_paragraph`, `proteog_sample_names`, `proteog_reference_key`, `proteog_uniprot_fasta`, `proteog_read_length_tier`, `proteog_status_path`)
+- **Shared discovery**: "Discover from Hive" button scans `PROTEOG_RNASEQ_ROOT/*/status.json` over SSH, registers every completed build that isn't already in the local catalog
+- **Why this works**: No shared-write conflicts (each user's catalog is local), full visibility to lab-mates (scan shared FASTA storage), deterministic re-registration (stored `library_entry_id` in status.json prevents re-registering the same build)
+
+### Status JSON Schema + The Empty-JSON Gotcha
+
+**Why this matters**: The proteogenomics build state lives in a JSON file (`status.json`) that gets read/written by R, bash sbatch scripts, and the polling observer. JSON's `{}` empty object parses as `list()` in R, causing type errors in downstream conditionals.
+
+**The gotcha**: Pre-auto-assemble builds had `stages[].job_id = {}` (empty JSON object). R's `jsonlite::fromJSON()` parses this as `list()`. When polling code calls:
+```r
+if (stage$job_id != "" && nzchar(stage$job_id)) {  # crashes here
+```
+The `nzchar(as.character(list()))` returns `logical(0)` (zero-length logical), failing the `if` condition with "argument of length 0" error. Additionally, stages with no SLURM job_id (e.g., assemble stage before auto-assemble was added) were wrongly summarized as "complete" because `.sacct_state("")` on an empty string returned garbage, making `any_running` stay FALSE.
+
+**The fix** (file-scope helper in `server_proteog_builder.R`):
+```r
+.empty_or_str <- function(x) {
+  if (is.null(x) || (is.list(x) && length(x) == 0)) return("")
+  if (length(x) == 0) return("")
+  if (any(is.na(x))) return("")
+  as.character(x)
+}
+```
+Applied up-front in orchestrator, poller, and library-register paths before any conditional logic. Stages with no job_id are now explicitly treated as still-pending (not complete).
+
+### Deferred Build Submit for Download-Then-Build Flows
+
+**Why this matters**: When a user selects SRA/SLIMS download mode, the builder doesn't immediately launch the 11-stage SLURM chain — the input files don't exist yet. Instead, it queues the build request and fires it when the download completes.
+
+- **Pattern**: Submit handler stores the request (project_name, reference, organism, uniprot_source) in a `pending_build_submits` reactiveVal + adds a placeholder row to Active Builds with `status = "downloading"` (blue badge)
+- **Polling**: A 15-second `reactivePoll` observer reads the download's status JSON from HPC (via SCP) every 15s. When state = "complete", it calls `submit_proteogenomics_build()` for every item in `pending_build_submits`
+- **Skip-if-present check**: Before launching any download, the submit handler `find`s for `*.fastq.gz` under the target project_dir. If files already exist (from a prior download), it skips the download step and treats the submit as local-mode (fastq files already present)
+- **Why this works**: The user sees a live placeholder ("downloading") while waiting for SRA, then the build auto-fires without a second click. Failed downloads show a `dl-<state>` badge. Users can retry without losing their build configuration.
+
+### Auto-Register-on-Poll + Graceful Edge Case Handling
+
+**Why this matters**: The proteogenomics poller runs every 60 seconds for in-progress builds. If Shiny restarts (code change, app crash), the poller needs to restore its state from disk without re-registering completed builds or crashing on malformed status.json.
+
+- **Persistence**: Active builds list is saved to `~/.delimp_proteog_builds.rds` by a `reactiveVal` observer. On app restart, `server_proteog_builder()` tries to load the RDS. If the RDS is missing or corrupted, it starts with an empty list. The save observer is gated to never overwrite a non-empty file with an empty list (so a fresh Shiny session doesn't erase prior state before Discover runs).
+- **Restore from Hive button**: Scans `PROTEOG_RNASEQ_ROOT/*/status.json` over SSH and re-populates `values$proteog_build_jobs` with any running or completed build
+- **Edge case: reactive access outside consumer**: The initial restore-from-disk block tried to access `values$proteog_build_jobs <- ...` at module entry (outside `reactive({})`), crashing with "Can't access reactive value outside of reactive consumer". Fixed by wrapping in `isolate({})`, which suppresses reactivity for initialization.
+- **Defensive JSON parsing**: Every `if`, `%in%`, `nzchar()`, `is.na()` check is wrapped to handle degenerate shapes (NULL, empty list, empty character, scalar NA, multi-element vectors with NAs). Fallback on parse failure: if a status.json is corrupted or unreadable, `try(jsonlite::fromJSON(...))` catches the error, and the poller skips that build with a toast notification instead of crashing.
+
+### Reference Registry as Append-Only Catalog
+
+**Why this matters**: New reference genomes (Pig, Rat, Arabidopsis, etc.) are built offline and must be made available to all users without manual file edits or shared-write conflicts.
+
+- **Pattern**: A pending registry lives at `/quobyte/proteomics-grp/de-limp/references/registry_pending/` with one JSON file per organism. A merge script uses `jq` to atomically combine pending entries into the main `registry.json` with backups.
+- **Build script** (`references/scripts/build_reference_genome.sh`): Downloads genome FASTA + GTF + ncRNA from Ensembl, extracts rRNA sequences by biotype, builds bowtie2 rRNA index (for QC filtering) and STAR genome index (for alignment), writes a pending JSON entry with paths to all assets
+- **Merge script** (`references/scripts/merge_registry_pending.sh`): Backups current registry, uses `jq` to merge pending entries by organism key (no duplicates), moves applied entries to `registry_pending/applied/` (audit trail), atomically renames the new registry into place (no intermediate corruption)
+- **Why this works**: Build script runs offline (Ensembl downloads can take hours). Merge is idempotent — running it twice produces the same result. Pending entries stay pending until someone explicitly runs merge, avoiding accidental stale entries in production.

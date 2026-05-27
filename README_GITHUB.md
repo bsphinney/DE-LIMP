@@ -18,7 +18,9 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## What's New in v3.10.4
+## What's New in v3.11.0
+
+**Proteogenomics — Build sample-specific FASTA databases from your matched RNA-seq** -- Upload RNA-seq fastq files or provide SRA/SLIMS accessions, and DE-LIMP runs an HPC pipeline chain (fastp → bowtie2 rRNA filter → STAR → stringtie → merge → gffcompare → gffread → TransDecoder) to predict novel ORFs and alternative splice variants. The final FASTA auto-assembles with your canonical proteome (UniProt or NCBI RefSeq), registers in the FASTA library catalog, and shows up as a "Proteogenomics DBs" option in the main search page's FASTA Database dropdown. Reference genomes: Human, Mouse, Pig, Rat, Arabidopsis (Bovine and Maize building). Multi-user catalog discovery via "Restore from Hive" and "Discover from Hive" buttons. Includes an "Explain this workflow" modal for proteomics users new to RNA-seq.
 
 **Two analysis pipelines, one app** -- Choose between **DPC-Quant + limma** (limpa's detection-probability model, default) and **MaxLFQ + limma** (paper-faithful Moschem et al. 2025 implementation). The pipeline you pick is recorded in the dataset itself; methods text, AI prompts, exports, and the Reproducibility log all describe whichever pipeline actually ran -- no hardcoded "DPC-Quant" strings anywhere.
 
@@ -36,7 +38,7 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 **Provenance block** -- Exports include parquet MD5, full sessionInfo, app version, and pipeline label so reanalysis is bit-reproducible.
 
-**Previous highlights** (v3.7): NCBI Proteome Download with gene mapping, Contaminant Analysis with keratin flagging, Data Explorer (quartile + scatter), SSH File Browser, Load from HPC, WSL2 Launcher for Windows, No-Replicates Mode, SSH Auto-Connect, Environment Badge.
+**Previous highlights** (v3.10): Two analysis pipelines, QuantUMS quality filters, On/Off proteins, Coverage filter, FASTA picker, provenance block. (v3.7): NCBI Proteome Download with gene mapping, Contaminant Analysis with keratin flagging, Data Explorer (quartile + scatter), SSH File Browser, Load from HPC, WSL2 Launcher for Windows, No-Replicates Mode, SSH Auto-Connect, Environment Badge.
 
 **Earlier highlights** (v3.5): Run Comparator, Search & Analysis History, Chromatography QC, smart HPC partitions. (v3.1): UI overhaul, Core Facility Mode. (v3.0): MOFA2, Docker search, phosphoproteomics, GSEA.
 

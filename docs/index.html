@@ -467,7 +467,7 @@
         <div class="container">
             <p class="subtitle">UC Davis Proteomics Core Facility</p>
             <h1>DE-LIMP</h1>
-            <span class="version-badge">v3.10.4</span>
+            <span class="version-badge">v3.11.0</span>
             <p class="tagline">
                 Upload your DIA-NN proteomics data and instantly identify differentially expressed proteins with interactive volcano plots, pathway enrichment, and AI-powered interpretation. Supports phosphoproteomics, multi-omics integration, and core facility management.
             </p>
@@ -675,6 +675,11 @@
                     <p>Download protein FASTA databases from NCBI for non-model organisms. Automatic gene symbol mapping via E-utilities batch lookup. Complements UniProt for species with better NCBI coverage.</p>
                 </div>
                 <div class="feature-card">
+                    <div class="feat-icon">&#x1F9EC;</div>
+                    <h3>Proteogenomics Workflow <span class="new-badge">v3.11</span></h3>
+                    <p>Convert matched RNA-seq into custom search databases containing your samples' novel ORFs alongside the canonical reference proteome. Pipeline runs on UC Davis HPC: fastp (QC) → STAR alignment → transcript assembly → TransDecoder (ORF prediction) → auto-assemble and register. Build once, use across DIA-NN searches with one-click FASTA picker.</p>
+                </div>
+                <div class="feature-card">
                     <div class="feat-icon">&#x1F50E;</div>
                     <h3>Integrated DIA-NN Search</h3>
                     <p>Run DIA-NN searches via Docker (local) or HPC (SSH/SLURM) with parallel 5-step pipelines, spectral library caching, FASTA database library, automatic queue management (detects when you've hit your CPU allocation and switches partitions), and FASTA database library.</p>
@@ -854,7 +859,7 @@ bash build_diann_docker.sh
     <div class="footer">
         <div class="container">
             <div>
-                <strong style="color:#fff;">DE-LIMP</strong> v3.10.4 &mdash; Open-source proteomics analysis.<br>
+                <strong style="color:#fff;">DE-LIMP</strong> v3.11.0 &mdash; Open-source proteomics analysis.<br>
                 Built with <a href="https://shiny.posit.co/" target="_blank" rel="noopener">Shiny</a>,
                 <a href="https://bioconductor.org/packages/limpa/" target="_blank" rel="noopener">limpa</a>,
                 <a href="https://bioconductor.org/packages/limma/" target="_blank" rel="noopener">limma</a>, and
