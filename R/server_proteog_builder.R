@@ -843,13 +843,19 @@ build_database_ui <- function() {
 
     # ── Header
     div(
-      style = "background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px;",
-      h4(icon("dna"), " Proteogenomics — Build a sample-specific search database",
-         style = "margin: 0; color: #1b5e20;"),
-      p("Convert matched RNA-seq into a custom FASTA that contains your samples' ",
-        "novel ORFs alongside the canonical reference proteome. The result appears ",
-        "in the Run Search FASTA dropdown with a \U0001F9EC tag.",
-        style = "margin: 4px 0 0 0; color: #2e7d32; font-size: 0.9em;")
+      style = "background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px;",
+      div(
+        h4(icon("dna"), " Proteogenomics — Build a sample-specific search database",
+           style = "margin: 0; color: #1b5e20;"),
+        p("Convert matched RNA-seq into a custom FASTA that contains your samples' ",
+          "novel ORFs alongside the canonical reference proteome. The result appears ",
+          "in the Run Search FASTA dropdown with a \U0001F9EC tag.",
+          style = "margin: 4px 0 0 0; color: #2e7d32; font-size: 0.9em;")
+      ),
+      actionButton("proteog_explain_workflow_btn",
+                   label = tagList(icon("circle-question"), " Explain this workflow"),
+                   class = "btn-light",
+                   style = "white-space: nowrap; border: 1px solid #1b5e20; color: #1b5e20;")
     ),
 
     # Helper: card header with a "?" info button on the right
@@ -2258,6 +2264,111 @@ server_proteog_builder <- function(input, output, session, values) {
   # ── Info modals ("?" buttons in each card header) ───────────────────────────
   # Pattern matches existing DE-LIMP info modals (CLAUDE.md):
   # actionButton(..._info_btn, icon("question-circle")) + observeEvent + showModal.
+
+  # Workflow overview — aimed at a proteomics user who doesn't know
+  # genomics / RNA-seq terminology. Long-form, sectioned.
+  observeEvent(input$proteog_explain_workflow_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("dna"), " Proteogenomics for proteomics people"),
+      size = "xl", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.92em; line-height: 1.65; max-height: 70vh; overflow-y: auto; padding-right: 8px;",
+
+        tags$h5("The 30-second pitch"),
+        tags$p("Your DIA-NN search assumes the proteome lives in a FASTA file — usually UniProt's canonical set for the organism. That's great when your sample expresses ",
+               "the same proteins everyone else does. But cancer cells, knock-outs, non-model organisms, tissue-specific splicing, and disease samples often produce ",
+               tags$strong("proteins that don't exist in UniProt"), " — alternative splice forms, intergenic transcripts, novel ORFs. Your peptides for those proteins ",
+               "land in DIA-NN as ", tags$em("unidentified"), " because the FASTA never had a matching sequence."),
+        tags$p("This tool fixes that. You give it the RNA-seq from ", tags$em("the same samples"), " you're going to run mass-spec on. It figures out what your cells are ",
+               "actually transcribing, predicts the proteins those transcripts encode, and merges them with the canonical UniProt FASTA. Now DIA-NN sees both the standard ",
+               "proteome AND your sample-specific extras."),
+
+        tags$hr(),
+        tags$h5("What is RNA-seq, in proteomics terms?"),
+        tags$p("RNA-seq is shotgun sequencing of mRNA. Think of it like bottom-up proteomics:"),
+        tags$ul(
+          tags$li(tags$strong("Sample: "), "Bulk RNA from your cells/tissue (analogous to your protein lysate)."),
+          tags$li(tags$strong("Fragmentation: "), "RNA → cDNA → short fragments (~150–300 bp; analogous to tryptic digestion to peptides)."),
+          tags$li(tags$strong("Detector: "), "Illumina sequencer reads 30M+ fragments per sample (analogous to a mass spectrometer producing MS2 spectra)."),
+          tags$li(tags$strong("Output: "), "A pair of FASTQ files per sample — ", tags$code("sample_R1.fastq.gz"), " + ", tags$code("sample_R2.fastq.gz"),
+                  " — each holding millions of 150-base reads with quality scores. (Analogous to the .raw/.d file from your instrument.)")
+        ),
+        tags$p("The expensive part is the sequencing run (~$50–200 per sample at a core facility). The compute is free once you have the FASTQs."),
+
+        tags$hr(),
+        tags$h5("What is the \"reference genome\"?"),
+        tags$p("The genome is the full DNA sequence for the organism — chromosomes 1, 2, 3, ... laid out end-to-end. A canonical \"reference\" assembly (e.g. ",
+               tags$code("GRCh38"), " for human, ", tags$code("GRCm39"), " for mouse) is the version everyone in the field agrees to use. We also need an ",
+               tags$strong("annotation file (GTF)"), " — a separate text file that says \"chromosome 1 positions 1000–2500 are a gene called ACTB; positions 1000–1500 ",
+               "are exon 1, 1700–2000 are exon 2, ...\" — basically the coordinate map of every known gene."),
+        tags$p("DE-LIMP keeps pre-built references (genome FASTA + GTF + STAR alignment index + rRNA filter index) on Hive shared storage. You pick one from the ",
+               "Reference dropdown — pick the species you're working in."),
+
+        tags$hr(),
+        tags$h5("What the pipeline does, stage by stage"),
+        tags$p("It's a SLURM dependency chain — 11 stages, each waits for the previous one. ~3–6 hours wall time for a typical 12-sample run."),
+        tags$ol(
+          tags$li(tags$strong("fastp"), " — adapter trimming + quality filter on the raw FASTQ. Removes the technical sequencing artifacts. Detects read length to ",
+                  "pick the right STAR alignment-stringency tier later (150 bp reads need stricter QC than 50 bp reads)."),
+          tags$li(tags$strong("rRNA filter (bowtie2)"), " — most RNA in a cell is ribosomal RNA (rRNA), not the messenger RNA you care about. We map every read against ",
+                  "an rRNA-only sequence library and keep ONLY the reads that don't match — those are your mRNA. (For proteomics analogy: it's like depleting albumin ",
+                  "from serum before LC-MS.)"),
+          tags$li(tags$strong("STAR"), " — spliced alignment of reads against the reference genome. mRNA reads usually span ", tags$em("exon junctions"),
+                  " (gene segments stitched together with introns removed), so the aligner has to handle non-contiguous matches. This is the heavy step: ",
+                  "~48 GB RAM, 16 cores, 10 min/sample. Output: BAM file with every read's genomic coordinates."),
+          tags$li(tags$strong("QC gate"), " — checks STAR's uniquely-mapped rate against the read-length tier threshold (25% for short reads, 60% for long). ",
+                  tags$strong("Halts the chain"), " if below — never produces a half-baked bad FASTA. If you fail QC, see the report and either re-check your library prep or relax the strand/library settings."),
+          tags$li(tags$strong("stringtie"), " — per-sample transcript assembly. From the BAM, it figures out which reads belong to which transcript ",
+                  "(\"this set of reads forms one mRNA, that set forms a different splice variant\"). Uses the reference GTF as a guide."),
+          tags$li(tags$strong("merge"), " — combines all per-sample GTFs into a unified ", tags$em("non-redundant"), " transcript catalog for the study. ",
+                  "Different samples may have caught slightly different transcripts; merge is how we agree on a single coordinate system for downstream steps."),
+          tags$li(tags$strong("gffcompare"), " — classifies every transcript in the merged GTF vs the reference annotation. This is the key step that distinguishes:",
+                  tags$ul(
+                    tags$li(tags$code("REF"), " — already in the reference (canonical UniProt protein)"),
+                    tags$li(tags$code("NOVEL_ISOFORM"), " — alternative splicing of a known gene (different exon combination, possibly different protein N/C-terminus)"),
+                    tags$li(tags$code("NOVEL_GENE"), " — transcript in an intergenic region (could be a new protein-coding gene, or a long non-coding RNA — TransDecoder decides next)")
+                  )),
+          tags$li(tags$strong("gffread"), " — extracts the actual nucleotide sequence for every merged transcript from the genome FASTA + GTF coordinates. ",
+                  "Now we have a FASTA of mRNA-like sequences, not protein sequences yet."),
+          tags$li(tags$strong("TransDecoder"), " — predicts ORFs (open reading frames). For every transcript, finds the longest ATG-to-stop run and decides whether it ",
+                  "looks like a real protein-coding region (based on length, Markov chain stats, and an optional DIAMOND BLAST hit against SwissProt). ",
+                  tags$em("This is where transcripts become proteins."),
+                  " Configurable minimum ORF length (default 100 aa)."),
+          tags$li(tags$strong("rewrite headers"), " — the predicted ORFs come out with cryptic ", tags$code("TRINITY_DN123_c0_g1_i1.p1"),
+                  "-style names. We rewrite them as ", tags$code("sp|<id>|<sym>_<TAG>"), " (mimicking UniProt's format) so DIA-NN's gene-name column works correctly. ",
+                  "The ", tags$code("<TAG>"), " (your \"project tag\", e.g. ", tags$code("MOUSELIVER"),
+                  ") tells you at a glance which proteins came from your custom FASTA vs UniProt."),
+          tags$li(tags$strong("assemble"), " — final concatenation: predicted ORFs + (optional) UniProt FASTA → single combined FASTA, written to ",
+                  tags$code("/quobyte/.../databases/proteogenomics/"), " on Hive. This is what DIA-NN searches against.")
+        ),
+
+        tags$hr(),
+        tags$h5("What you get"),
+        tags$ul(
+          tags$li("A FASTA file named ", tags$code("<your_project>_proteogenomics_<YYYY_MM>.fasta"),
+                  " on Hive, with REF / NOVEL_ISOFORM / NOVEL_GENE annotations baked into the FASTA headers."),
+          tags$li("An entry in the Run Search → ", tags$strong("Proteogenomics DBs"), " dropdown on the main DE-LIMP page, ",
+                  "with full provenance (samples, reference, methods paragraph)."),
+          tags$li("Traceability: every protein in your DIA-NN results that ends with ", tags$code("_<TAG>"), " is one we discovered in YOUR data, not from UniProt.")
+        ),
+
+        tags$hr(),
+        tags$h5("When this is worth it (and when it isn't)"),
+        tags$ul(
+          tags$li(tags$strong("Worth it: "), "cancer/disease samples with potential novel splicing; non-model organism (no good UniProt entry); ",
+                  "knock-out/knock-in cell lines; tissue with known alternative splicing (brain, testis); discovering chimeric proteins; novel ORFs from long non-coding RNAs."),
+          tags$li(tags$strong("Skip it: "), "you're running stock HEK293/HeLa with a well-curated UniProt proteome (you'll find ~5–20 novel proteins, mostly junk); ",
+                  "you don't have matched RNA-seq from the same samples (mismatched RNA + protein from different conditions = false positives); your goal is just quantification, ",
+                  "not discovery.")
+        ),
+        tags$h6("A quick reality check:"),
+        tags$ul(
+          tags$li("Cost: ~$50–200/sample sequencing + 3–6 h compute (free on Hive)."),
+          tags$li("Sample volume: only 12 samples? Pool RNA from biological reps OR sequence one rep per condition. RNA-seq is per-condition, not per-sample-injection."),
+          tags$li("False positives: NOVEL_GENE calls without DIAMOND BLAST support are statistically uncertain. Trust REF + NOVEL_ISOFORM most.")
+        )
+      )
+    ))
+  })
 
   observeEvent(input$proteog_step1_info_btn, {
     showModal(modalDialog(
