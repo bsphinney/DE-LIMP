@@ -17,6 +17,102 @@ server_search <- function(input, output, session, values, add_to_log,
   if (!search_enabled) return(invisible())
 
   # ============================================================================
+  #    Parse search_info.md — extract instrument metadata & search settings
+  # ============================================================================
+
+  parse_search_info_md <- function(text) {
+    lines <- strsplit(text, "\n")[[1]]
+
+    # Helper: extract value from "- **Key**: Value" pattern
+    extract_field <- function(key) {
+      pattern <- sprintf("^\\s*-\\s*\\*\\*%s\\*\\*:\\s*(.+)$", key)
+      idx <- grep(pattern, lines, ignore.case = TRUE)
+      if (length(idx) == 0) return(NULL)
+      val <- trimws(sub(pattern, "\\1", lines[idx[1]], ignore.case = TRUE))
+      # Strip backticks
+      val <- gsub("^`|`$", "", val)
+      if (!nzchar(val) || val == "unknown") return(NULL)
+      val
+    }
+
+    # Instrument metadata
+    instrument_metadata <- list(
+      instrument_model  = extract_field("Instrument"),
+      serial            = extract_field("Serial"),
+      acquisition_mode  = extract_field("Acquisition mode"),
+      lc_system         = extract_field("LC system"),
+      lc_method         = extract_field("LC method"),
+      dia_windows       = NULL,
+      mz_range          = NULL,
+      mz_range_low      = NULL,
+      mz_range_high     = NULL
+    )
+
+    # Parse DIA windows as integer
+    dw <- extract_field("DIA windows")
+    if (!is.null(dw)) instrument_metadata$dia_windows <- suppressWarnings(as.integer(dw))
+
+    # Parse m/z range "100-1700" into low/high
+    mz <- extract_field("m/z range")
+    if (!is.null(mz)) {
+      instrument_metadata$mz_range <- mz
+      parts <- strsplit(mz, "\\s*-\\s*")[[1]]
+      if (length(parts) == 2) {
+        instrument_metadata$mz_range_low  <- suppressWarnings(as.numeric(parts[1]))
+        instrument_metadata$mz_range_high <- suppressWarnings(as.numeric(parts[2]))
+      }
+    }
+
+    # Remove NULLs
+    instrument_metadata <- instrument_metadata[!vapply(instrument_metadata, is.null, logical(1))]
+
+    # Search parameters
+    search_params <- list(
+      enzyme        = extract_field("Enzyme"),
+      mass_acc      = extract_field("Mass accuracy"),
+      mass_acc_ms1  = extract_field("Mass accuracy MS1"),
+      normalization = extract_field("Normalization"),
+      scan_window   = extract_field("Scan window"),
+      mbr           = extract_field("MBR"),
+      min_pr_mz     = extract_field("Min precursor m/z"),
+      max_pr_mz     = extract_field("Max precursor m/z"),
+      min_fr_mz     = extract_field("Min fragment m/z"),
+      max_fr_mz     = extract_field("Max fragment m/z"),
+      min_pr_charge = extract_field("Min precursor charge"),
+      max_pr_charge = extract_field("Max precursor charge")
+    )
+
+    # Top-level fields (outside ### sections)
+    search_mode   <- extract_field("Search mode")
+    normalization <- extract_field("Normalization")
+    if (!is.null(search_mode))   search_params$search_mode   <- search_mode
+    if (!is.null(normalization))  search_params$normalization <- normalization
+
+    # Extract FASTA file paths from ### FASTA Files section
+    fasta_start <- grep("^###\\s*FASTA Files", lines)
+    if (length(fasta_start) > 0) {
+      fasta_files <- character()
+      for (i in (fasta_start[1] + 1):length(lines)) {
+        ln <- trimws(lines[i])
+        if (grepl("^###", ln) || (!nzchar(ln) && length(fasta_files) > 0)) break
+        if (grepl("^-\\s*`", ln)) {
+          fp <- gsub("^-\\s*`|`$", "", ln)
+          fasta_files <- c(fasta_files, fp)
+        }
+      }
+      if (length(fasta_files) > 0) search_params$fasta_files <- fasta_files
+    }
+
+    # Remove NULLs
+    search_params <- search_params[!vapply(search_params, is.null, logical(1))]
+
+    list(
+      instrument_metadata = instrument_metadata,
+      search_params       = search_params
+    )
+  }
+
+  # ============================================================================
   #    SSH Config Reactive (HPC backend only)
   # ============================================================================
 
@@ -1885,6 +1981,45 @@ server_search <- function(input, output, session, values, add_to_log,
                             collapse = ", ")),
               type = "message", duration = 6)
           }
+
+          # Restore excluded files from output directory (if saved during search)
+          tryCatch({
+            excl_remote <- file.path(remote_dir, "excluded_files.csv")
+            excl_local <- tempfile(fileext = ".csv")
+            dl <- scp_download(cfg, excl_remote, excl_local)
+            if (dl$status == 0 && file.exists(excl_local) && file.size(excl_local) > 0) {
+              values$excluded_files <- read.csv(excl_local, stringsAsFactors = FALSE)
+              message("[DE-LIMP] Restored ", nrow(values$excluded_files), " excluded files from HPC")
+            }
+          }, error = function(e) NULL)
+
+          # Restore instrument metadata & search settings from search_info.md
+          tryCatch({
+            info_remote <- file.path(remote_dir, "search_info.md")
+            info_local <- tempfile(fileext = ".md")
+            dl_info <- scp_download(cfg, info_remote, info_local)
+            if (dl_info$status == 0 && file.exists(info_local) && file.size(info_local) > 0) {
+              info_text <- paste(readLines(info_local, warn = FALSE), collapse = "\n")
+              parsed <- parse_search_info_md(info_text)
+
+              # Populate instrument metadata (only if we got meaningful fields)
+              if (length(parsed$instrument_metadata) > 0) {
+                values$instrument_metadata <- parsed$instrument_metadata
+                message("[DE-LIMP] Restored instrument metadata from search_info.md: ",
+                        parsed$instrument_metadata$instrument_model %||% "unknown instrument")
+              }
+
+              # Merge search params into existing diann_search_settings
+              if (length(parsed$search_params) > 0) {
+                existing <- values$diann_search_settings %||% list()
+                values$diann_search_settings <- c(existing, parsed$search_params)
+                message("[DE-LIMP] Restored search settings from search_info.md (",
+                        length(parsed$search_params), " parameters)")
+              }
+            }
+          }, error = function(e) {
+            message("[DE-LIMP] Could not restore search_info.md: ", e$message)
+          })
 
           gc(verbose = FALSE)
 
@@ -5056,6 +5191,13 @@ server_search <- function(input, output, session, values, add_to_log,
         }
       }
       file.copy(file_list_local, file.path(upload_dir, "file_list.txt"))
+
+      # Write excluded_files.csv alongside file_list.txt (persists across sessions)
+      if (!is.null(values$excluded_files) && nrow(values$excluded_files) > 0) {
+        excl_csv <- file.path(upload_dir, "excluded_files.csv")
+        write.csv(values$excluded_files, excl_csv, row.names = FALSE)
+      }
+
       writeLines(paste(launcher_lines, collapse = "\n"),
                  file.path(upload_dir, "submit_all.sh"))
 
@@ -5549,6 +5691,54 @@ server_search <- function(input, output, session, values, add_to_log,
 
     # --- Shared: add to queue & notify ---
     values$diann_jobs <- c(values$diann_jobs, list(job_entry))
+
+    # --- Submit Cascadia de novo alongside DIA-NN (if checked) ---
+    if (isTRUE(input$add_cascadia_denovo) && backend == "hpc") {
+      tryCatch({
+        cascadia_script <- generate_cascadia_sbatch(
+          analysis_name = analysis_name,
+          raw_files = values$diann_raw_files$full_path,
+          output_dir = output_dir,
+          cascadia_env = "/quobyte/proteomics-grp/envs/cascadia5",
+          model_ckpt = "/quobyte/proteomics-grp/de-limp/cascadia/models/cascadia.ckpt",
+          gpu_partition = "gpu-a100",
+          gpu_account = "genome-center-grp",
+          gpu_qos = "genome-center-grp-gpu-a100-qos",
+          min_score = 0.5,
+          batch_size = 64
+        )
+        # Write and upload sbatch script
+        local_script <- tempfile("cascadia_", fileext = ".sbatch")
+        writeLines(cascadia_script, local_script)
+        on.exit(unlink(local_script), add = TRUE)
+        remote_script <- file.path(output_dir, "run_cascadia.sbatch")
+        scp_upload(cfg, local_script, remote_script)
+
+        # Submit
+        cascadia_result <- ssh_exec(cfg,
+          paste(values$ssh_sbatch_path %||% "sbatch", shQuote(remote_script)),
+          login_shell = is.null(values$ssh_sbatch_path), timeout = 30)
+        if (cascadia_result$status == 0) {
+          cascadia_job_id <- trimws(regmatches(
+            paste(cascadia_result$stdout, collapse = " "),
+            regexpr("[0-9]+$", paste(cascadia_result$stdout, collapse = " "))))
+          values$denovo_job_id <- cascadia_job_id
+          values$denovo_job_status <- "queued"
+          message(sprintf("[DE-LIMP] Cascadia de novo job submitted: %s (parallel with DIA-NN)", cascadia_job_id))
+          showNotification(
+            sprintf("Cascadia de novo job %s submitted (GPU, parallel with DIA-NN)", cascadia_job_id),
+            type = "message", duration = 8)
+        } else {
+          showNotification("Cascadia submission failed — DIA-NN search continues without de novo.",
+                           type = "warning", duration = 10)
+          message("[DE-LIMP] Cascadia submit failed: ", paste(cascadia_result$stdout, collapse = " "))
+        }
+      }, error = function(e) {
+        showNotification(paste("Cascadia error:", e$message, "— DIA-NN search continues."),
+                         type = "warning", duration = 10)
+        message("[DE-LIMP] Cascadia error: ", e$message)
+      })
+    }
 
     # Record in SQLite if core facility mode is active
     if (is_core_facility && !is.null(cf_config)) {
@@ -6315,6 +6505,24 @@ server_search <- function(input, output, session, values, add_to_log,
             if (isTRUE(result$success)) n_moved <- n_moved + 1
           }
 
+          # Boost CPUs on public queue for array steps (reduce preemption risk)
+          if (n_moved > 0 && isTRUE(jobs[[i]]$parallel)) {
+            scontrol_bin <- file.path(dirname(slurm_path), "scontrol")
+            array_steps <- intersect(movable_steps, c("step2", "step4"))
+            steps <- jobs[[i]]$parallel_steps %||% list()
+            for (sn in array_steps) {
+              jid <- steps[[sn]]
+              if (!is.null(jid)) {
+                cpu_boost_cmd <- sprintf('%s update jobid=%s NumCPUs=64 MinMemoryNode=128G',
+                                         scontrol_bin, jid)
+                tryCatch(
+                  ssh_exec(cfg, cpu_boost_cmd, timeout = 10),
+                  error = function(e) message("[DE-LIMP] CPU boost failed for ", jid, ": ", e$message)
+                )
+              }
+            }
+          }
+
           if (n_moved > 0) {
             # Mark fully switched if all steps were moved (non-parallel, force-move-all, or all 5 steps)
             if (!isTRUE(jobs[[i]]$parallel) || force_move_all || length(movable_steps) == 5) {
@@ -6402,6 +6610,25 @@ server_search <- function(input, output, session, values, add_to_log,
                 ssh_config = job_cfg, sbatch_path = slurm_path),
               error = function(e) list(success = FALSE, message = e$message))
             if (isTRUE(result$success)) n_moved <- n_moved + 1
+          }
+
+          # Restore original CPUs when moving back to high
+          if (n_moved > 0 && isTRUE(jobs[[i]]$parallel)) {
+            scontrol_bin <- file.path(dirname(slurm_path), "scontrol")
+            moved_public <- jobs[[i]]$steps_moved_to_public %||% character(0)
+            array_steps <- intersect(moved_public, c("step2", "step4"))
+            steps <- jobs[[i]]$parallel_steps %||% list()
+            for (sn in array_steps) {
+              jid <- steps[[sn]]
+              if (!is.null(jid)) {
+                cpu_restore_cmd <- sprintf('%s update jobid=%s NumCPUs=16 MinMemoryNode=64G',
+                                           scontrol_bin, jid)
+                tryCatch(
+                  ssh_exec(cfg, cpu_restore_cmd, timeout = 10),
+                  error = function(e) NULL
+                )
+              }
+            }
           }
 
           if (n_moved > 0) {

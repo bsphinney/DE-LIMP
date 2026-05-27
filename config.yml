@@ -1,0 +1,15 @@
+features:
+  enable_dda:  true
+  enable_xlms: true
+
+tools:
+  sage_bin: "/quobyte/proteomics-grp/de-limp/cascadia/sage-v0.14.7-x86_64-unknown-linux-gnu/sage"
+
+blast:
+  swissprot_dmnd: "/quobyte/proteomics-grp/bioinformatics_programs/blast_dbs/uniprot_sprot"
+  trembl_dmnd: "/quobyte/proteomics-grp/bioinformatics_programs/blast_dbs/uniprot_trembl"
+
+slurm:
+  account:     "genome-center-grp"
+  partition:   "high"
+  java_module: "openjdk"

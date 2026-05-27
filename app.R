@@ -249,6 +249,15 @@ library(AnnotationDbi)
 library(ggrepel)
 library(markdown) # Needed for AI formatting
 
+# Load app configuration (feature flags, SLURM defaults, tool paths)
+if (!requireNamespace("yaml", quietly = TRUE)) install.packages("yaml")
+config  <- tryCatch(yaml::read_yaml("config.yml"), error = function(e) {
+  message("[app.R] config.yml not found — using defaults")
+  list(features = list(enable_dda = FALSE, enable_xlms = FALSE),
+       tools = list(), blast = list(), slurm = list())
+})
+is_hive <- nzchar(Sys.which("sbatch"))
+
 # Optional packages — load if available, features degrade gracefully
 gsea_available <- requireNamespace("clusterProfiler", quietly = TRUE) &&
                   requireNamespace("enrichplot", quietly = TRUE)
@@ -384,6 +393,7 @@ if (search_enabled) {
   }
   library(shinyFiles)
   library(jsonlite)
+  library(data.table)
   # Migrate user-local speclib cache to shared volume if available
   tryCatch(speclib_cache_migrate(), error = function(e) NULL)
 }
@@ -467,7 +477,8 @@ tryCatch(ssh_cleanup_stale_sockets(), error = function(e) NULL)
 
 ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch,
                local_diann, delimp_data_dir,
-               is_core_facility, cf_config, deploy_env)
+               is_core_facility, cf_config, deploy_env,
+               config, is_hive)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules
@@ -476,6 +487,7 @@ server <- function(input, output, session) {
 
   # --- Shared reactive state ---
   values <- reactiveValues(
+    acquisition_mode = "dia",
     raw_data = NULL, metadata = NULL, fit = NULL, y_protein = NULL,
     dpc_fit = NULL, status = "Waiting...", design = NULL, qc_stats = NULL,
     plot_selected_proteins = NULL, chat_history = list(),
@@ -560,6 +572,48 @@ server <- function(input, output, session) {
     comparator_diann_log_a      = NULL,
     comparator_diann_log_b      = NULL,
     per_user_resources          = NULL,
+    # Cascadia De Novo Integration
+    denovo_ssl_paths       = NULL,
+    denovo_data            = NULL,
+    denovo_classified      = NULL,
+    denovo_protein_summary = NULL,
+    denovo_novel_blast     = NULL,
+    denovo_score_threshold = 0.8,
+    denovo_job_id          = NULL,
+    denovo_job_status      = "none",
+    cascadia_model_ckpt    = NULL,
+    ncbi_gene_map          = NULL,
+    # DDA Search (Sage pipeline)
+    dda_job_id          = NULL,     # SLURM job ID
+    dda_output_dir      = NULL,     # HPC output path
+    dda_status          = "idle",   # "idle" | "running" | "done" | "error"
+    dda_sage_psms       = NULL,     # data.table: filtered PSMs
+    dda_lfq_wide        = NULL,     # protein x sample log2 matrix
+    dda_protein_meta    = NULL,     # protein metadata (NPeptides, NSpectra)
+    dda_elist           = NULL,     # limma EList for DE pipeline
+    dda_sage_report     = NULL,     # sage_report.json summary
+    dda_search_params   = list(),   # config snapshot for methods text
+    dda_n_proteins_prefilter  = NULL,
+    dda_n_proteins_postfilter = NULL,
+    dda_qc_metrics            = NULL,     # DDA QC metrics
+    # Casanovo de novo sequencing
+    dda_casanovo_job_id        = NULL,    # SLURM array job ID
+    dda_casanovo_convert_job_id = NULL,   # MGF conversion job ID
+    dda_casanovo_status        = "disabled",  # "disabled"|"running"|"loading"|"done"|"error"
+    dda_casanovo_mztab_dir     = NULL,    # Remote path to mztab output dir
+    dda_casanovo_psms          = NULL,    # data.table: parsed de novo PSMs
+    dda_casanovo_classification = NULL,   # List from classify_dda_denovo()
+    dda_db_engine              = "Sage", # "Sage" or "DIA-NN" — which DB search engine was used
+    dda_casanovo_blast         = NULL,    # data.frame: DIAMOND BLAST results for DDA novel peptides
+    dda_filtered_classification = NULL,  # List from classify_dda_denovo() — filtered by confidence slider
+    dda_fasta_path             = NULL,    # Remote FASTA path used for DDA search (for DIAMOND)
+    # Unified de novo reactives (populated by either Cascadia or Casanovo adapter)
+    denovo_psms = NULL,
+    denovo_classification = NULL,
+    denovo_blast = NULL,
+    denovo_engine = NULL,
+    denovo_reference = NULL,
+    denovo_session_trigger = 0L,  # Incremented after session restore to force render invalidation
     # App metadata
     app_version = app_version,
     community_stats = community_stats
@@ -589,6 +643,11 @@ server <- function(input, output, session) {
   server_comparator(input, output, session, values, add_to_log)
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
+  server_denovo(input, output, session, values, add_to_log)
+  server_denovo_viz(input, output, session, values, add_to_log)
+  server_dda(input, output, session, values, add_to_log)
+  server_denovo_controls(input, output, session, values)
+  server_xlms(input, output, session, values, add_to_log)
   server_session(input, output, session, values, add_to_log)
 
   # Proteogenomics Database Builder — only call when HPC is available
@@ -660,6 +719,7 @@ server <- function(input, output, session) {
     nav_hide("main_tabs", "AI Analysis")
     nav_hide("main_tabs", "Output")
     nav_hide("main_tabs", "Phosphoproteomics")
+    nav_hide("main_tabs", "De Novo")
   })
 
   observe({
@@ -682,6 +742,12 @@ server <- function(input, output, session) {
       nav_show("main_tabs", "Output")
       nav_hide("main_tabs", "Gene Set Enrichment")
       nav_hide("main_tabs", "AI Analysis")
+    } else if (isTRUE(values$acquisition_mode == "dda") && !is.null(values$dda_sage_psms)) {
+      # DDA mode with Sage results loaded — show Output for Claude export
+      nav_show("main_tabs", "Output")
+      nav_hide("main_tabs", "DE Dashboard")
+      nav_hide("main_tabs", "Gene Set Enrichment")
+      nav_hide("main_tabs", "AI Analysis")
     } else {
       nav_hide("main_tabs", "DE Dashboard")
       nav_hide("main_tabs", "Gene Set Enrichment")
@@ -696,6 +762,15 @@ server <- function(input, output, session) {
       nav_show("main_tabs", "Phosphoproteomics")
     } else {
       nav_hide("main_tabs", "Phosphoproteomics")
+    }
+  })
+
+  observe({
+    if (!is.null(values$denovo_classification) || !is.null(values$denovo_data) ||
+        isTRUE(values$ssh_connected) || !is.null(values$dda_casanovo_classification)) {
+      nav_show("main_tabs", "De Novo")
+    } else {
+      nav_hide("main_tabs", "De Novo")
     }
   })
 }

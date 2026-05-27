@@ -3,8 +3,9 @@
 ## Working Preferences
 - **Update this file** when new patterns, gotchas, or architectural decisions emerge
 - For detailed change history, update `CHANGELOG.md` (not this file)
-- **Document as you go**: When the user says "wrap up", "good night", "that's it for now", or asks for a summary — update CLAUDE.md and CHANGELOG.md with all changes from the current work before responding
 - **Bump the patch version after every user-visible fix**: After every fix or small feature, bump (a) the `VERSION` file, (b) the `# Version:` line in the `app.R` header comment, and (c) add a CHANGELOG entry under that new version section. (a) drives the runtime banner in the RStudio console; (b) is what the user sees by just opening `app.R` in the editor without running it. Keep them in sync.
+- **NEVER run heavy computation on HPC login nodes** — always submit via `sbatch` or request an interactive node with `srun`. Login nodes are shared and running CPU/memory-intensive tasks can get the user flagged.
+- **Check primary sources before guessing — NEVER guess anything verifiable** — This applies to EVERYTHING: algorithms, formulas, file paths, container locations, module names, binary paths, HPC configurations, API formats, config parameters. If it can be checked, check it FIRST. SSH to the cluster and run `find`/`which`/`ls` for paths. Fetch source code from GitHub for algorithms. Read config files for parameters. Do NOT answer from memory or approximation. Examples of past failures: (1) tof-to-mz formula guessed from first principles was off by 155 Da — correct formula was in timsrust source; (2) said `module load diann` when DIA-NN actually runs as an Apptainer container at `/quobyte/proteomics-grp/apptainers/diann2.3.0.sif`; (3) used depthcharge's default peak filtering thinking it was Cascadia's — Cascadia's actual `train()` function uses different preprocessing.
 
 ## Architectural rules (NEVER violate — discovered the hard way in v3.9.x)
 
@@ -68,6 +69,10 @@ R/helpers*.R (6 files):  Pure utility functions (no Shiny reactivity)
 | `R/server_mofa.R` | MOFA2 multi-view integration |
 | `R/server_comparator.R` | Run Comparator: cross-tool DE comparison (DE-LIMP vs DE-LIMP/Spectronaut/FragPipe), 4-layer diagnostics, 9-rule hypothesis engine (Rule 0: 0-ratio rescue), Spectronaut ZIP parser (TopN/Quant3/RunQC/n_ratios/AnalysisOverview, Spectronaut 20+ key-value RunOverview), contrast mismatch detection, instrument context in AI prompts, DPC-Quant methodology note in Claude export, MOFA2 decomposition |
 | `R/helpers_denovo.R` | Cascadia de novo: SSL parsing, peptide classification, DIAMOND BLAST, sbatch generation (feature branch) |
+| `R/helpers_dda.R` | DDA pipeline: Sage config, result parsing, Casanovo mztab, classify_dda_denovo, sbatch generation (feature branch) |
+| `R/server_dda.R` | DDA search module: Sage SLURM, Casanovo GPU, DIAMOND BLAST, species viz, contaminant filtering, info modals (feature branch) |
+| `R/server_denovo_viz.R` | Advanced de novo viz: BLAST alignment, target-decoy FDR, cross-species, protein families, coverage maps (feature branch) |
+| `R/server_denovo_controls.R` | De novo controls: confidence slider, manuscript stats, GO annotation, disagreement analysis (feature branch) |
 | `R/server_facility.R` | Core facility: reports, job history, QC dashboard |
 | `R/server_session.R` | Info modals, save/load session, reproducibility, About tab, unified history, notes, remote history |
 | `R/helpers_search.R` | `ssh_exec()`, `build_diann_flags()`, `generate_sbatch_script()`, `generate_parallel_scripts()`, `generate_search_info()`, `check_cluster_resources()`, UniProt/NCBI search, unified activity log, SSH file browser helpers, SLURM proxy |
@@ -265,6 +270,10 @@ On each version release, do ALL of these:
 | Ensembl Plants moved to ebi.ac.uk mirror | `ftp.ensemblgenomes.org` returns no response (DNS/connection refused). Use `ftp.ebi.ac.uk/ensemblgenomes/pub/plants/release-<N>/...` instead. The path structure under there mirrors the old layout. |
 | NCBI RefSeq accessions lack embedded gene symbols | `XP_*`, `NP_*`, `WP_*` headers have no gene names. DIA-NN's `Genes` column comes out empty/accession-only. **Fix**: `ncbi_download_proteome()` generates a side-car `<basename>_gene_map.tsv`. The proteog NCBI download flow uploads BOTH files to the Hive cache so gene-symbol resolution works at result-load time. |
 | Proteog FASTA library catalog is per-user, FASTAs are shared | `~/.delimp_fasta_library/catalog.rds` is local (per CLAUDE.md "never use mounted drives for app state"). The actual FASTAs live on shared Hive storage. **Result**: another lab member's catalog won't auto-populate from your builds. **Fix**: "Discover from Hive" button on the Proteogenomics DBs modal scans `PROTEOG_RNASEQ_ROOT/*/status.json` and registers every completed build that isn't already in their catalog. Idempotent — re-running just updates existing entries. |
+| Two DIA-NN containers, only one reads .raw | `/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif` has .NET bundled and reads Thermo `.raw` files. `/quobyte/proteomics-grp/apptainers/diann2.3.0.sif` does NOT have .NET — .raw files silently skipped. Always use the `dia-nn/` version unless you only have `.d`/`.mzML`. |
+| DIA-NN binary inside container is `/diann-2.3.0/diann-linux` | Not just `diann` on PATH. Apptainer exec needs the full path: `apptainer exec image.sif /diann-2.3.0/diann-linux ...`. |
+
+Detailed gotchas + HPC paths: @docs/GOTCHAS.md, @docs/HPC_PATHS.md (cascadia-denovo branch extras: ddaPASEF catalogs, Casanovo training, Cascadia model patches).
 
 ### Queue Switching
 Auto-switches parallel jobs between `genome-center-grp/high` and `publicgrp/low` partitions. Steps 2/4 (array) move to low (preemptible); steps 1/3/5 (assembly) stay on high. See @docs/QUEUE_SWITCHING.md for full logic, known issues, and SLURM state mapping.

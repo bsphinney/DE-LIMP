@@ -624,6 +624,28 @@ server_session <- function(input, output, session, values, add_to_log) {
         comparator_mode             = values$comparator_mode,
         comparator_gemini_narrative = values$comparator_gemini_narrative,
         comparator_mofa             = values$comparator_mofa,
+        # Acquisition mode
+        acquisition_mode = values$acquisition_mode,
+        # DDA Search state (Sage pipeline)
+        dda_sage_psms           = values$dda_sage_psms,
+        dda_lfq_wide            = values$dda_lfq_wide,
+        dda_protein_meta        = values$dda_protein_meta,
+        dda_elist               = values$dda_elist,
+        dda_sage_report         = values$dda_sage_report,
+        dda_search_params       = values$dda_search_params,
+        dda_qc_metrics          = values$dda_qc_metrics,
+        dda_n_proteins_prefilter  = values$dda_n_proteins_prefilter,
+        dda_n_proteins_postfilter = values$dda_n_proteins_postfilter,
+        # Casanovo de novo state
+        dda_casanovo_psms           = values$dda_casanovo_psms,
+        dda_casanovo_classification  = values$dda_casanovo_classification,
+        dda_casanovo_status          = values$dda_casanovo_status,
+        dda_casanovo_blast           = values$dda_casanovo_blast,
+        dda_fasta_path               = values$dda_fasta_path,
+        dda_output_dir               = values$dda_output_dir,
+        # Unified de novo state (works on HF without engine-specific data)
+        denovo_engine                = values$denovo_engine,
+        denovo_reference             = values$denovo_reference,
         # Save timestamp & version
         saved_at   = Sys.time(),
         app_version = paste0("DE-LIMP v", values$app_version)
@@ -730,6 +752,53 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$comparator_mofa             <- session_data$comparator_mofa
       }
 
+      # Restore acquisition mode
+      if (!is.null(session_data$acquisition_mode)) {
+        values$acquisition_mode <- session_data$acquisition_mode
+        updateRadioButtons(session, "acquisition_mode",
+          selected = session_data$acquisition_mode)
+      }
+
+      # Restore DDA Search state
+      if (!is.null(session_data$dda_elist)) {
+        values$dda_sage_psms            <- session_data$dda_sage_psms
+        values$dda_lfq_wide             <- session_data$dda_lfq_wide
+        values$dda_protein_meta         <- session_data$dda_protein_meta
+        values$dda_elist                <- session_data$dda_elist
+        values$dda_sage_report          <- session_data$dda_sage_report
+        values$dda_search_params        <- session_data$dda_search_params %||% list()
+        values$dda_qc_metrics           <- session_data$dda_qc_metrics
+        values$dda_n_proteins_prefilter <- session_data$dda_n_proteins_prefilter
+        values$dda_n_proteins_postfilter <- session_data$dda_n_proteins_postfilter
+        values$dda_status               <- "done"
+        message("[Session] Restored DDA state: ",
+                nrow(session_data$dda_elist$E), " proteins")
+
+        # Restore Casanovo state
+        if (!is.null(session_data$dda_casanovo_psms)) {
+          values$dda_casanovo_psms           <- session_data$dda_casanovo_psms
+          values$dda_casanovo_classification <- session_data$dda_casanovo_classification
+          values$dda_casanovo_status         <- session_data$dda_casanovo_status %||% "done"
+          # Also set unified reactives directly (don't rely on adapter observer timing)
+          values$denovo_psms           <- session_data$dda_casanovo_psms
+          values$denovo_classification <- session_data$dda_casanovo_classification
+          message("[Session] Restored Casanovo state: ",
+                  nrow(session_data$dda_casanovo_psms), " de novo PSMs")
+        }
+        # Restore BLAST results
+        if (!is.null(session_data$dda_casanovo_blast)) {
+          values$dda_casanovo_blast <- session_data$dda_casanovo_blast
+          values$denovo_blast      <- session_data$dda_casanovo_blast
+          message("[Session] Restored BLAST results: ",
+                  nrow(session_data$dda_casanovo_blast), " hits")
+        }
+        values$dda_fasta_path  <- session_data$dda_fasta_path
+        values$dda_output_dir  <- session_data$dda_output_dir
+        # Restore unified de novo metadata
+        values$denovo_engine    <- session_data$denovo_engine
+        values$denovo_reference <- session_data$denovo_reference
+      }
+
       # Restore repro log and append load event
       values$repro_log  <- session_data$repro_log %||% values$repro_log
       add_to_log("Session Loaded", c(
@@ -764,10 +833,44 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       values$status <- "Session loaded successfully"
       removeModal()
-      showNotification(
-        paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
-        type = "message", duration = 5
-      )
+
+      # Auto-navigate to the most relevant tab
+      if (!is.null(session_data$dda_casanovo_classification) ||
+          !is.null(session_data$denovo_engine)) {
+        # DDA/de novo session — go to De Novo results
+        nav_show("main_tabs", "De Novo")
+        # Delay nav_select to let bslib render the tab container first.
+        # Increment denovo_session_trigger to force all De Novo renders to
+        # re-evaluate — they depend on this trigger because outputOptions
+        # suspendWhenHidden=FALSE alone isn't sufficient for plotly/DT outputs
+        # inside navset_card_tab sub-tabs that were hidden at startup.
+        later::later(function() {
+          nav_select("main_tabs", "De Novo")
+          # Fire trigger after another flush cycle so sub-tab containers exist
+          later::later(function() {
+            values$denovo_session_trigger <- isolate(values$denovo_session_trigger) + 1L
+            message("[Session] De Novo trigger fired: ", values$denovo_session_trigger)
+          }, delay = 0.3)
+        }, delay = 0.5)
+        showNotification(
+          sprintf("Session loaded! %s Casanovo PSMs, %s BLAST hits. Showing De Novo results.",
+            format(nrow(session_data$dda_casanovo_psms %||% data.frame()), big.mark = ","),
+            format(nrow(session_data$dda_casanovo_blast %||% data.frame()), big.mark = ",")),
+          type = "message", duration = 8
+        )
+      } else if (!is.null(values$fit)) {
+        # DIA session — go to DE Dashboard
+        nav_select("main_tabs", "DE Dashboard")
+        showNotification(
+          paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
+          type = "message", duration = 5
+        )
+      } else {
+        showNotification(
+          paste0("Session loaded! (saved ", format(session_data$saved_at, "%Y-%m-%d %H:%M"), ")"),
+          type = "message", duration = 5
+        )
+      }
 
       # Record to activity log
       tryCatch({
