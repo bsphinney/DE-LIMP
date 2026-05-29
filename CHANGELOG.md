@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.12] — 2026-05-29
+
+### Added
+- **"Protein filter" dropdown on the DDA/de novo Results page** with three modes: *All proteins* (default), *Skin & hair only* (keep keratins/KRTAP/collagen/trichohyalin/filaggrin… — for paleoproteomics / hair / feather work), and *Exclude skin & hair* (treat keratins as contaminants — for normal tissue/cell projects). Applied consistently across the DIAMOND BLAST tab and the Cross-Species / Protein Families / Coverage / Alignment views via one shared helper. Opt-in (off by default) and **name-based only when the user chooses it** — keratins are never filtered automatically. New globals in `R/helpers_dda.R`: `is_skin_hair_protein()`, `dda_apply_protein_filter()`.
+
+### Changed
+- **Removed the automatic keratin/name-based contaminant heuristic from the DIAMOND BLAST filter.** For hair/feather/skin de novo work keratins are the signal, not contaminants — dropping them by name was wrong. Contaminant exclusion is now `Cont_`-tag only (the searched contaminant DB); skin/hair removal is user-controlled via the new dropdown.
+- **Sage DB hits table + count now drop `Cont_` contaminants** consistently. `filtered_classification()` in `R/server_denovo_controls.R` removes Cont_-only confirmed peptides (and recomputes the confirmed count, confirm rate, and protein list) when the contaminant toggle is on. Uses the shared `is_contaminant_protein_group()` global (Architectural Rule #3).
+
 ## [3.11.11] — 2026-05-29
 
 ### Added

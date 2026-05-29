@@ -2808,8 +2808,22 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               div(style = "display: flex; align-items: center; gap: 12px; margin-top: 8px;",
                 tags$strong("Contaminants:", style = "min-width: 140px;"),
                 checkboxInput("dda_results_exclude_contaminants",
-                  "Exclude contaminant proteins (Cont_ tagged: keratins, trypsin, albumin, etc.)",
+                  "Exclude Cont_ proteins (from the searched contaminant database)",
                   value = TRUE)
+              ),
+              div(style = "display: flex; align-items: center; gap: 12px; margin-top: 4px;",
+                tags$strong("Protein filter:", style = "min-width: 140px;"),
+                div(style = "min-width: 340px;",
+                  selectInput("dda_protein_family_filter", NULL,
+                    choices = c(
+                      "All proteins" = "all",
+                      "Skin & hair only (keratins, KRTAP, collagen, …)" = "skin_only",
+                      "Exclude skin & hair (treat keratins as contaminants)" = "skin_exclude"
+                    ),
+                    selected = "all", width = "100%")
+                ),
+                tags$small(style = "color: #6c757d;",
+                  "Skin/hair = keratin family; opt-in, off by default.")
               ),
               uiOutput("dda_file_filter_summary")
             )

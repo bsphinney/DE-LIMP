@@ -3495,7 +3495,11 @@ echo "[DIAMOND] Done: $(date)"
 
   # Filtered blast reactive — the DIAMOND BLAST tab shows NOVEL peptides only
   # (de novo BLAST is meaningful for peptides Sage's DB search missed) and
-  # respects the contaminant exclusion checkbox.
+  # applies the user-controlled "Protein filter" dropdown.
+  #
+  # NOTE: we deliberately do NOT apply a keratin/name-based contaminant
+  # heuristic here — for hair/feather/skin projects keratins are the SIGNAL.
+  # The user opts into dropping them via the "Exclude skin & hair" mode.
   blast_filtered <- reactive({
     blast <- blast_with_species()
     cls <- values$dda_casanovo_classification
@@ -3505,11 +3509,7 @@ echo "[DIAMOND] Done: $(date)"
       blast_norm <- gsub("I", "L", build_dda_canonical_peptide(blast$peptide))
       blast <- blast[blast_norm %in% novel_norm, ]
     }
-    exclude <- input$dda_exclude_contaminants %||% TRUE
-    if (isTRUE(exclude)) {
-      blast <- blast[blast$contaminant_type != "Definite", ]
-    }
-    blast
+    dda_apply_protein_filter(blast, input$dda_protein_family_filter %||% "all")
   })
 
   # --- Summary cards ---

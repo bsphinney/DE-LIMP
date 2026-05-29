@@ -34,6 +34,32 @@ server_denovo_controls <- function(input, output, session, values) {
   })
 
 
+  # Drop Cont_-tagged contaminants from a classification's confirmed set
+  # (+ recompute confirmed stats and prune protein_summary) when the Results
+  # "Exclude Cont_ proteins" toggle is on. Novel peptides have no Sage protein
+  # so they're untouched. Cont_ ONLY — never name-based (keratins are signal).
+  .drop_cont_confirmed <- function(cls) {
+    if (is.null(cls) || !isTRUE(input$dda_results_exclude_contaminants %||% TRUE)) return(cls)
+    conf <- cls$confirmed
+    if (is.null(conf) || nrow(conf) == 0 || !("proteins" %in% names(conf))) return(cls)
+    keep <- !is_contaminant_protein_group(conf$proteins)
+    if (all(keep)) return(cls)
+    cls$confirmed <- conf[keep, , drop = FALSE]
+    if (!is.null(cls$summary_stats)) {
+      n_conf <- nrow(cls$confirmed)
+      n_tot  <- cls$summary_stats$n_total %||% NA_integer_
+      cls$summary_stats$n_confirmed  <- n_conf
+      cls$summary_stats$pct_confirmed <-
+        if (!is.na(n_tot) && n_tot > 0) round(100 * n_conf / n_tot, 1) else 0
+    }
+    if (!is.null(cls$protein_summary) && nrow(cls$protein_summary) > 0 &&
+        "proteins" %in% names(cls$protein_summary)) {
+      cls$protein_summary <- cls$protein_summary[
+        !is_contaminant_protein_group(cls$protein_summary$proteins), , drop = FALSE]
+    }
+    cls
+  }
+
   # Filtered classification: re-classifies using the filtered PSMs
   filtered_classification <- reactive({
     psms <- filtered_casanovo_psms()
@@ -47,7 +73,7 @@ server_denovo_controls <- function(input, output, session, values) {
       message("[denovo_controls] Using stored classification: ",
         nrow(values$denovo_classification$confirmed), " confirmed, ",
         nrow(values$denovo_classification$novel), " novel")
-      return(values$denovo_classification)
+      return(.drop_cont_confirmed(values$denovo_classification))
     }
 
     # For Casanovo mode, re-classify with the threshold-filtered PSMs
@@ -72,13 +98,13 @@ server_denovo_controls <- function(input, output, session, values) {
       ))
     }
 
-    tryCatch(
+    .drop_cont_confirmed(tryCatch(
       classify_dda_denovo(psms, sage_psms),
       error = function(e) {
         message("[denovo_controls] Classification error: ", e$message)
         NULL
       }
-    )
+    ))
   })
 
 

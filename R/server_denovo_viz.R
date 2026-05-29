@@ -193,7 +193,9 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
   # --- BLAST Alignment table (near-matches only, for selection) ---
   blast_near_matches <- reactive({
-    blast <- values$dda_casanovo_blast %||% values$denovo_novel_blast
+    blast <- dda_apply_protein_filter(
+      values$dda_casanovo_blast %||% values$denovo_novel_blast,
+      input$dda_protein_family_filter %||% "all")
     req(blast)
     req(nrow(blast) > 0)
 
@@ -982,7 +984,9 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
   # --- 3c. Per-protein comparison table ---
   output$denovo_protein_comparison <- DT::renderDT({
     pep_data <- sample_peptide_data()
-    blast <- values$dda_casanovo_blast %||% values$denovo_novel_blast
+    blast <- dda_apply_protein_filter(
+      values$dda_casanovo_blast %||% values$denovo_novel_blast,
+      input$dda_protein_family_filter %||% "all")
     req(pep_data, blast)
     req(nrow(blast) > 0)
 
@@ -1117,7 +1121,9 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
   # Reactive: BLAST data with protein family classification
   blast_with_families <- reactive({
-    blast <- values$dda_casanovo_blast %||% values$denovo_novel_blast
+    blast <- dda_apply_protein_filter(
+      values$dda_casanovo_blast %||% values$denovo_novel_blast,
+      input$dda_protein_family_filter %||% "all")
     req(blast)
     req(nrow(blast) > 0)
 
@@ -1288,7 +1294,9 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
   # Reactive: top proteins by peptide count for coverage display
   top_coverage_proteins <- reactive({
-    blast <- values$dda_casanovo_blast %||% values$denovo_novel_blast
+    blast <- dda_apply_protein_filter(
+      values$dda_casanovo_blast %||% values$denovo_novel_blast,
+      input$dda_protein_family_filter %||% "all")
     req(blast)
     req(nrow(blast) > 0)
 

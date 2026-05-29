@@ -23,6 +23,50 @@ build_dda_canonical_peptide <- function(x) {
   toupper(gsub("[^A-Za-z]", "", x))        # drop hyphens, dots, digits, spaces
 }
 
+#' TRUE for each protein group that is ENTIRELY contaminant — every accession
+#' carries the `Cont_` tag stamped by the contaminant FASTA appended at search
+#' time. Single definition used by the Results-page PSM filter and the de novo
+#' Sage-DB-hits / classification filter. Groups with a real protein are kept.
+is_contaminant_protein_group <- function(proteins) {
+  vapply(strsplit(as.character(proteins), ";", fixed = TRUE), function(accs) {
+    accs <- accs[nzchar(accs)]
+    length(accs) > 0 && all(grepl("Cont_", accs, fixed = TRUE))
+  }, logical(1))
+}
+
+#' TRUE for each protein/accession that looks like a skin- or hair-family
+#' protein: keratins (incl. messy hair-keratin nomenclature K1H1/K2M3/KRB2A/
+#' KRA31/KT33A), keratin-associated proteins, trichohyalin, filaggrin,
+#' hornerin, loricrin, involucrin, corneodesmosin, desmoplakin/glein, collagens.
+#' Heuristic by design — keys on the matched homolog's NAME so it works across
+#' species (a non-model organism's hair keratin blasts to a named one). The
+#' user opts in via a dropdown, so false hits are recoverable. Do NOT wire this
+#' into anything that runs by default — for hair/feather projects keratins ARE
+#' the signal, not contaminants.
+is_skin_hair_protein <- function(x) {
+  x <- toupper(as.character(x))
+  grepl(paste0(
+    "KRT|KERATIN|KRTAP|\\bKAP[0-9]|KRB[0-9]|KRA[0-9]|KT[0-9]|K[0-9]H[0-9]|",
+    "K[0-9]M[0-9]|\\bK[0-9]{1,2}[A-Z]?_|TRICHOHYALIN|\\bTCHH|FILAGGRIN|\\bFLG_|",
+    "HORNERIN|\\bHRNR|LORICRIN|INVOLUCRIN|CORNEODESMOSIN|\\bCDSN|DESMOPLAKIN|",
+    "DESMOGLEIN|COLLAGEN|\\bCOL[0-9]"
+  ), x)
+}
+
+#' Apply the de novo "Protein filter" dropdown to a BLAST data frame.
+#' @param mode "all" (no-op), "skin_only" (keep skin/hair), "skin_exclude"
+#'   (drop skin/hair). Finds the first available protein/subject column.
+dda_apply_protein_filter <- function(blast, mode = "all") {
+  if (is.null(blast) || nrow(blast) == 0 || identical(mode, "all")) return(blast)
+  col <- intersect(c("subject", "Protein", "proteins", "protein", "Name", "name"),
+                   names(blast))
+  if (length(col) == 0) return(blast)
+  sh <- is_skin_hair_protein(blast[[col[1]]])
+  if (identical(mode, "skin_only"))    return(blast[sh, , drop = FALSE])
+  if (identical(mode, "skin_exclude")) return(blast[!sh, , drop = FALSE])
+  blast
+}
+
 #' Generate a Sage search config JSON
 #'
 #' @param fasta_path Path to reference FASTA
