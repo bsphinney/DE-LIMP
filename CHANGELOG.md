@@ -5,6 +5,15 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.13] — 2026-05-29
+
+### Changed
+- **Renamed "Novel Peptides" → "De novo only"** (summary card, results tab, info modal). Clearer than "novel" (which sounds like novel proteins/discoveries) — these are peptides found by Casanovo de novo sequencing but NOT by the Sage database search.
+- **DIAMOND BLAST now queries short peptides too** — lowered the de novo peptide extraction length gate from ≥7 aa to ≥5 aa in the sbatch generator (`R/server_dda.R`). 5–6mers (often the top-scoring de novo calls) were silently excluded from the BLAST query; per the "a de novo peptide with no BLAST hit is probably an incorrect call" heuristic, every peptide should be attempted. (DIAMOND's seed length means the very shortest may still return no hit — which is itself the signal.)
+
+### Notes
+- Diagnosed the "BLAST Hits: 0" report: ground-truth on disk shows **5,852 of the novel peptides DO have BLAST hits** in the fresh `blast_results.tsv` — the app was displaying STALE blast data because the post-restart reload skipped the SSH-gated blast download. Fix on the user side: reconnect SSH, then Load from HPC. (Follow-up: make the loader warn instead of silently skipping the blast download when SSH is down.)
+
 ## [3.11.12] — 2026-05-29
 
 ### Added

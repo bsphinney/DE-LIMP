@@ -2890,10 +2890,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               tags$div(id = "dda_confirmed_residue_viz",
                 style = "min-height: 20px;")
             ),
-            nav_panel("Novel Peptides",
+            nav_panel("De novo only",
               div(style = "display: flex; justify-content: flex-end; margin-bottom: 8px;",
                 actionButton("denovo_novel_info_btn", icon("question-circle"),
-                  title = "What are Novel Peptides?", class = "btn-outline-info btn-sm")
+                  title = "What are de novo only peptides?", class = "btn-outline-info btn-sm")
               ),
               DT::DTOutput("dda_denovo_novel_table"),
               # Per-residue confidence visualization (Priority 2)

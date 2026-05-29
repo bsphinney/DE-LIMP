@@ -187,7 +187,7 @@ server_denovo_controls <- function(input, output, session, values) {
         tags$div(class = "card text-center",
           style = "background: #f8f9fa; border-left: 4px solid #e67e22; padding: 15px;",
           tags$h4(format(n_novel, big.mark = ","), style = "margin: 0; color: #e67e22;"),
-          tags$small("Novel Peptides")
+          tags$small("De novo only")
         )
       ),
       tags$div(class = "col-md-2",

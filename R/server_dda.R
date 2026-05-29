@@ -2068,7 +2068,7 @@ cd "$OUT_DIR"
 # Extract unique peptide sequences from all Casanovo .mztab files.
 # mztab PSM rows start with "PSM"; sequence is column 2 (TSV).
 echo "[DIAMOND-chain] extracting peptides from $MZTAB_DIR"
-awk -F"\t" \'$1 == "PSM" { gsub(/\\[[^]]*\\]/, "", $2); gsub(/[^A-Z]/, "", $2); if (length($2) >= 7) print $2 }\' "$MZTAB_DIR"/*.mztab \
+awk -F"\t" \'$1 == "PSM" { gsub(/\\[[^]]*\\]/, "", $2); gsub(/[^A-Z]/, "", $2); if (length($2) >= 5) print $2 }\' "$MZTAB_DIR"/*.mztab \
   | sort -u > all_casanovo_peptides.txt
 N_PEP=$(wc -l < all_casanovo_peptides.txt)
 echo "[DIAMOND-chain] $N_PEP unique peptides"
@@ -4842,7 +4842,7 @@ echo "[DIAMOND] Done: $(date)"
 
   observeEvent(input$denovo_novel_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " Novel Peptides"),
+      title = tagList(icon("question-circle"), " De novo only peptides"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
         p("Peptides sequenced de novo by Casanovo that were ", strong("not"), " found by database search."),
