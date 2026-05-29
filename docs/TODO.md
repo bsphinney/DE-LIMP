@@ -204,9 +204,36 @@
 ## DDA/DIA Pipeline Refactor
 - [ ] **Extract shared UI components**: Create reusable helper functions (`fasta_selector_ui()`, `group_assignment_ui()`, `slurm_status_ui()`) that both DIA and DDA pipelines call. Currently FASTA selection, SSH file browser, SLURM polling, group assignment, and limma DE are partially duplicated between server_search.R/server_data.R (DIA) and server_dda.R (DDA).
 - [ ] **Shared FASTA management module**: Single FASTA selector with UniProt/NCBI download, contaminant append, SSH file browser — used by both DIA and DDA search tabs.
-- [ ] **Thermo .raw support for Casanovo**: Add ThermoRawFileParser or msconvert pre-conversion step in the Casanovo sbatch. Sage already reads .raw natively, but Casanovo needs MGF input.
+- [x] **Thermo .raw support for Casanovo** (v3.11.2): Sage sbatch now pre-converts .raw → mzML via msconvert apptainer; Casanovo v5 reads mzML directly, so no separate MGF conversion needed for Thermo data. Single conversion reused across both engines.
 - [ ] **IM-aware Casanovo**: Same 5th embedding channel as Cascadia IM model — add ion mobility to Casanovo for DDA de novo on timsTOF data.
 - [ ] **Mobility-filtered extraction for Cascadia**: Mode B mobilogram peak detection from CASCADIA_MOBILITY_FILTER_ADDENDUM.md — produces cleaner pseudo-DDA spectra from diaPASEF windows. Expected 2-3x improvement in de novo calls.
+
+## DDA dropdown — Peptidomics & Immunopeptidomics modes (next after ocelot ships)
+Rename current "De Novo" navbar dropdown → **"DDA"** with sub-entries for the different analysis types. All ride the same Sage + Casanovo + DIAMOND backend (both Thermo .raw and Bruker .d via the existing v3.11.2 chain — Sage's msconvert step for .raw, `bruker_to_mgf.py` for .d). Search params + result framing differ per mode; instrument-agnostic.
+
+**Borrowed from Michael Krawitzky's Ziggy/BOWIE** (numbers + tested observations only — his repos are mostly README + UI shells, no working HLA implementation):
+- HLA-I/II preset numbers (length, charge, mods) come straight from BOWIE's published preset table — match standard immunopeptidomics practice.
+- `precursor_charge_range = [1, 3]` for HLA on TOF instruments — Michael's `z=1 native` observation; most MHC-I peptides come off singly-charged on TOF.
+
+Skipping (aspirational, no source to crib): MHC-I binding corridor viz, HLA allele inference (Ziggy's "HLA Discovery" — README-only), NetMHCpan integration (license-gated), single-cell HLA. Build only if a user actually asks.
+
+- [ ] **Rename `De Novo` dropdown → `DDA`** in `R/ui.R` navbar
+- [ ] **Single shared Run Search form** with `selectInput("dda_mode")` at top — choices: `De Novo Search` (default, current behavior), `Peptidomics`, `HLA / MHC class I`, `HLA / MHC class II`. Mode drives downstream search-param defaults + which results page opens after Load.
+- [ ] **Sage preset variants** in `generate_sage_config()`:
+  - **Peptidomics**: `enzyme.cleave_at = ""` (nonspecific), `peptide_min_len=5, max_len=25, peptide_min_mass≈400, max_mass≈5000`. Variable mods: pyro-Glu (Q/E N-term), C-term amidation (−0.984), N-term acetylation. Walltime bump → 8h, mem → 128G (nonspecific search is ~10–50× slower than tryptic).
+  - **MHC class I**: `enzyme.cleave_at = ""`, `peptide_min_len=8, max_len=12` (BOWIE-compat, slightly broader than 8–11), `peptide_min_mass≈700, max_mass≈1500`. Variable mods: oxidation + deamidation. `precursor_charge_range = [1, 3]` (per Michael's `z=1 native` observation for TOF; safe default for Orbitrap too). Tighter `precursor_tol = ±5 ppm`. Default walltime OK.
+  - **MHC class II**: `enzyme.cleave_at = ""`, `peptide_min_len=13, max_len=25`, `peptide_min_mass≈1300, max_mass≈3000`. Variable mods: oxidation + deamidation. `precursor_charge_range = [1, 3]`. Default walltime OK.
+- [ ] **Mode-specific results pages** (three new sub-entries in the DDA dropdown). Build from published methods, not from Ziggy:
+  - **Peptidomics Results**: peptide-source-protein chart (parent contributions), N- and C-terminal cleavage motif logos (`ggseqlogo`, ~20 LOC), mass distribution histogram, PTM landscape (pyroGlu/amidation/oxidation rates).
+  - **HLA/MHC Results**: length distribution histogram (expect sharp 9-mer peak for class I — the diagnostic plot for a clean HLA-I prep), P2 + PΩ anchor residue sequence logos (`ggseqlogo`), source-protein analysis (re-skin of de novo's protein-family panel).
+  - **De Novo Results** (existing): species attribution, BLAST alignments, coverage maps, deamidation tracking — unchanged.
+- [ ] **Auto-route Load Results → correct page** based on the mode tag stored in `~/.delimp_dda_queue.rds`. User can also manually switch lenses for cross-comparison.
+- [ ] **`ggseqlogo` to Dockerfile** for sequence logo rendering (small CRAN dep).
+- [ ] **timsTOF-only bonus (HLA mode)**: pull `1/K₀` column from Sage output for .d-data searches and add a "CCS vs peptide length" panel. HLA peptides have tight CCS clustering by charge — quick sanity-check plot. Easy add since the data is already in Sage's output, just an extra ggplot.
+
+### Deferred / build only if a user asks
+- NetMHCpan-4.1 binding-affinity scoring (license-gated, ~1 day work to wire on Hive). Adds neoantigen prioritization. Only worthwhile for tumor immunopeptidomics users.
+- HLA allele inference (PSSM motif matching to predict donor HLA type from peptidome motifs). Published methods exist (e.g. GibbsCluster, MixMHCpred deconvolution). Not in any of Michael's code despite the marketing — would need to implement from papers.
 
 ## Claude Code Configuration
 - [ ] **Restructure CLAUDE.md into `.claude/rules/`**: Move verbose reference material (gotchas table, UI patterns, SSH patterns, Spectronaut parsing, DIA-NN flags, comparator details) into scoped rule files under `.claude/rules/`. Keep CLAUDE.md under ~150 lines with just project overview, architecture, working preferences, key commands. Do on a branch, test by verifying gotcha knowledge in fresh conversation. Per expert consensus: short CLAUDE.md + modular rules > monolithic file.
@@ -220,3 +247,11 @@
 - [ ] Sample CV distribution plots
 - [ ] Protein numbers bar plot per sample
 - [ ] Absence/presence table for on/off proteins
+
+## Code Audit Follow-ups (post-v3.10.8)
+Moved out of CLAUDE.md's Version History during the v3.x doc refactor. These are guardrail-driven cleanups (see CLAUDE.md "Architectural rules").
+- [ ] **Covariate-name single source of truth** — refactor the 22 read sites of `values$cov1_name %||% "Covariate1"` into one helper (Architectural Rule #3).
+- [ ] **`<<-` in `add_covariate()` closure** — refactor away the `<<-` per the `withProgress` gotcha.
+- [ ] **`DIANN_DEFAULTS` constant extraction** in `helpers_search.R` — stop scattering default mass-acc/Q-value fallbacks.
+- [ ] **`detect_organism_db()` silent-fallback refactor** — currently returns `"org.Hs.eg.db"` as a default with no signal to callers; should return `NULL` or `list(db, method)` so callers (PROMPT.md builder, Run Comparator, Explorer prompt, GSEA tab) handle uncertainty explicitly per Architectural Rule #2. Caused the v3.10.6 → v3.10.7 "Organism: Human" bug on a Peromyscus dataset. Sweep for similar silent-fallback functions (`coalesce_setting`, default Q-value cutoffs, default mass-acc fallbacks).
+- [ ] **Convert export bundlers to `safe_section()`** — sweep all export paths for the `if (!is.null(f)) files_to_zip <- c(...)` and `tryCatch(error = function(e) NULL)` patterns (Architectural Rule #4). The v3.10.4 → v3.10.8 hotfix train (5 patches in one day) was almost entirely silent-failure-masquerading-as-success bugs in export paths. Files to audit: `R/server_ai.R` (Claude AI export), `R/server_viz.R` (Explorer export), `R/server_phospho.R` (Phospho export), `R/server_mofa.R` (MOFA export), `R/server_comparator.R` (Comparator export). The Complete Analysis bundle in `R/server_session.R` was made clean in v3.10.8; the others are still likely broken the same way.

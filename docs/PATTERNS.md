@@ -424,3 +424,19 @@ Applied up-front in orchestrator, poller, and library-register paths before any 
 - **Build script** (`references/scripts/build_reference_genome.sh`): Downloads genome FASTA + GTF + ncRNA from Ensembl, extracts rRNA sequences by biotype, builds bowtie2 rRNA index (for QC filtering) and STAR genome index (for alignment), writes a pending JSON entry with paths to all assets
 - **Merge script** (`references/scripts/merge_registry_pending.sh`): Backups current registry, uses `jq` to merge pending entries by organism key (no duplicates), moves applied entries to `registry_pending/applied/` (audit trail), atomically renames the new registry into place (no intermediate corruption)
 - **Why this works**: Build script runs offline (Ensembl downloads can take hours). Merge is idempotent — running it twice produces the same result. Pending entries stay pending until someone explicitly runs merge, avoiding accidental stale entries in production.
+
+## UI Design Patterns (page_navbar layout)
+
+General layout/styling conventions for the navbar shell. The bslib `navset_card_tab` rendering hazards are documented above under "bslib navset_card_tab Rendering Issues"; the quick-reference one-liners are in `docs/GOTCHAS.md`.
+
+- **`page_navbar` layout**: Dark navbar with white text (CSS `!important`). `nav_spacer()` + `nav_item()` for gear icon. Hover dropdowns via `.navbar .dropdown:hover > .dropdown-menu { display: block; }`. Active tab gets teal underline.
+- **bslib `navbar_options()` required**: bslib 0.9.0+ deprecated `bg` as a direct arg to `page_navbar()`. Use `navbar_options = navbar_options(bg = ...)`.
+- **Sidebar accordion**: Three collapsible panels — "Upload Data" (open), "Pipeline Settings", "AI Chat". Conditional phospho/XIC sections use separate `accordion()` blocks.
+- **DE Dashboard sub-tabs**: `navset_card_tab(id = "de_dashboard_subtabs")` — Volcano+heatmap, Results Table, PCA, CV Analysis.
+- **`card()` at top level of `nav_panel()`**: `card()`/`card_body()` don't render at the top level inside `nav_panel()`. Use a plain `div()` with inline CSS.
+- **Dynamic content in sub-tabs**: `renderUI`/`uiOutput` disappears and `renderPlot` crashes (`invalid quartz() device size`) inside `navset_card_tab` sub-tabs. Use `plotlyOutput`/`renderPlotly` — the only reliable output type there.
+- **Info modal pattern**: `actionButton("[id]_info_btn", icon("question-circle"), class="btn-outline-info btn-sm")` + `observeEvent(...)`.
+- **Plotly annotations**: Use `layout(annotations = ...)` with paper coordinates, not ggplot `annotate()`. For summary stats, prefer ggplot subtitles over plotly annotation cards (more robust in bslib sub-tabs).
+- **Scrollable tab content**: Wrap dense sub-tab content in `div(style = "overflow-y: auto; max-height: calc(100vh - 200px);")` with `min-height` on key widgets to prevent bslib compression.
+- **SVG vector export**: Plotly plots get a camera icon for SVG via `config(toImageButtonOptions = list(format = "svg", scale = 2))`. ggplot/ComplexHeatmap use `downloadButton` with `ggsave(device = "svg")` or the `svg()` device.
+- **Plot heights**: viewport-relative units (`vh`, `calc()`) — no fixed pixel heights.
