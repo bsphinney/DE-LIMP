@@ -2088,38 +2088,32 @@ diamond blastp \\
   -o blast_results_swissprot.tsv \\
   --outfmt 6 \\
   --threads 8 \\
-  --max-target-seqs 5 \\
+  --max-target-seqs 25 \\
   --evalue 1e-3 \\
   --ignore-warnings
 N_SP_HITS=$(wc -l < blast_results_swissprot.tsv)
 N_SP_PEPS=$(cut -f1 blast_results_swissprot.tsv | sort -u | wc -l)
 echo "[DIAMOND-chain] SwissProt: $N_SP_HITS hits across $N_SP_PEPS peptides"
 
-# ── STEP 2: TrEMBL on peptides that DIDN’T hit SwissProt ───────────────
-# Peptides without a SwissProt hit = total set minus matched set.
-echo "[DIAMOND-chain] step 2/2: TrEMBL on SwissProt-misses"
-cut -f1 blast_results_swissprot.tsv | sort -u > swissprot_hit_peps.txt
-comm -23 all_casanovo_peptides.txt swissprot_hit_peps.txt > swissprot_miss_peps.txt
-N_MISS=$(wc -l < swissprot_miss_peps.txt)
-echo "[DIAMOND-chain] $N_MISS peptides not in SwissProt — sending to TrEMBL"
-if [ "$N_MISS" -gt 0 ]; then
-  awk \'{ print ">" $1; print $1 }\' swissprot_miss_peps.txt > trembl_query.fasta
-  diamond blastp \\
-    -d "$TREMBL_DB" \\
-    -q trembl_query.fasta \\
-    -o blast_results_trembl.tsv \\
-    --outfmt 6 \\
-    --threads 8 \\
-    --max-target-seqs 5 \\
-    --evalue 1e-3 \\
-    --ignore-warnings
-  N_TR_HITS=$(wc -l < blast_results_trembl.tsv)
-  N_TR_PEPS=$(cut -f1 blast_results_trembl.tsv | sort -u | wc -l)
-  echo "[DIAMOND-chain] TrEMBL: $N_TR_HITS hits across $N_TR_PEPS peptides"
-else
-  : > blast_results_trembl.tsv
-  N_TR_HITS=0; N_TR_PEPS=0
-fi
+# ── STEP 2: TrEMBL on ALL peptides (not just SwissProt-misses) ─────────
+# Search every peptide against TrEMBL too. Combined with SwissProt + an LCA
+# over the top hits, this avoids the model-organism skew you get when a
+# "good enough" SwissProt hit (mouse/human/bovine) freezes the call before the
+# real species-specific TrEMBL match (e.g. cat/felid) is ever considered.
+# Keep up to 25 hits/peptide so the LCA sees the species spread, not one best hit.
+echo "[DIAMOND-chain] step 2/2: TrEMBL on ALL peptides"
+diamond blastp \\
+  -d "$TREMBL_DB" \\
+  -q all_casanovo_peptides.fasta \\
+  -o blast_results_trembl.tsv \\
+  --outfmt 6 \\
+  --threads 8 \\
+  --max-target-seqs 25 \\
+  --evalue 1e-3 \\
+  --ignore-warnings
+N_TR_HITS=$(wc -l < blast_results_trembl.tsv)
+N_TR_PEPS=$(cut -f1 blast_results_trembl.tsv | sort -u | wc -l)
+echo "[DIAMOND-chain] TrEMBL: $N_TR_HITS hits across $N_TR_PEPS peptides"
 
 # ── Combine into a single blast_results.tsv with a db source column ───
 # Source-tag each hit so downstream code can tell DBs apart.

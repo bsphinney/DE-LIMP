@@ -5,6 +5,14 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.18] — 2026-05-29
+
+### Changed
+- **DIAMOND species search: TrEMBL now searches ALL peptides + keeps top-25 hits/peptide** (was: TrEMBL only on SwissProt-misses, top-5). Rationale: the SwissProt-first cascade froze ~80% of hits to model-organism species (mouse/human/bovine) before the real species-specific TrEMBL match (e.g. cat/felid) was ever considered — the source of the mouse/bovine skew. Keeping 25 hits/peptide across both DBs gives the *set* of candidate species per peptide, which is the input for proper LCA-based attribution (next).
+
+### In progress (foundation for LCA species attribution)
+- This is step 1 of the "Full LCA + diagnostic-only" species-ID rework: search breadth + multi-hit output. Still to come: per-peptide LCA (lowest common ancestor) so conserved peptides resolve to a clade (excluded from species calls) and only diagnostic peptides drive "Top species".
+
 ## [3.11.17] — 2026-05-29
 
 ### Fixed
