@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.14] — 2026-05-29
+
+### Fixed
+- **"BLAST Hits: 0" root cause — the Casanovo parser dropped ~98% of PSMs at load.** `parse_casanovo_mztab()` was called with a hard `score_threshold = 0.9` in the Load-from-HPC path (`R/server_dda.R`), keeping only 7,416 of 440,953 PSMs. But DIAMOND BLASTs *all* de novo peptides — so the app's loaded peptides (high-confidence, mostly short 5-mers that don't BLAST) barely overlapped the 6,006 blast-hit peptides → the novel↔BLAST join returned ~0. Removed the parse-time cutoff (`score_threshold = -Inf`); the confidence slider (default 0.9) now gates the *view* while the full peptide set is available for BLAST cross-referencing. Ground truth: 5,852 of the novel peptides have BLAST hits. This also enables the "a de novo peptide with no BLAST hit is probably an incorrect call" workflow, which requires every peptide to be loaded + cross-referenced. _Note: loads all ~440k de novo PSMs now, so the initial load is slower._
+
 ## [3.11.13] — 2026-05-29
 
 ### Changed

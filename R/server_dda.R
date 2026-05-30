@@ -1430,7 +1430,13 @@ server_dda <- function(input, output, session, values, add_to_log) {
             mztab_local <- list.files(mztab_local_dir, pattern = "\\.mztab$", full.names = TRUE)
           }
           if (length(mztab_local) > 0) {
-            casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = 0.9)
+            # Load ALL Casanovo PSMs (no parse-time score cutoff) so the
+            # confidence slider filters the full range AND every de novo peptide
+            # can be cross-referenced against the DIAMOND BLAST hits. A hard
+            # 0.9 cutoff here previously dropped ~98% of PSMs (440k -> 7k),
+            # leaving only short high-confidence peptides that don't BLAST — so
+            # the BLAST tab read 0. The slider (default 0.9) still gates the view.
+            casanovo_psms <- parse_casanovo_mztab(mztab_local, score_threshold = -Inf)
             if (nrow(casanovo_psms) > 0) {
               db_psms <- if (!is.null(parsed)) parsed$psms else NULL
               classified <- classify_dda_denovo(casanovo_psms, db_psms,
