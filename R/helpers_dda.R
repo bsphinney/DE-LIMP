@@ -976,7 +976,11 @@ parse_casanovo_mztab <- function(mztab_paths, score_threshold = -Inf) {
       charge       = as.integer(df$charge),
       exp_mz       = as.numeric(df$exp_mass_to_charge),
       calc_mz      = as.numeric(df$calc_mass_to_charge),
-      source_file  = basename(tools::file_path_sans_ext(path)),
+      # Strip Casanovo's "_sequence" suffix so source_file matches the Sage
+      # run name (Sage filenames are <run>.mzML; Casanovo mztabs are
+      # <run>_sequence.mztab). Without this, every Sage<->Casanovo match on
+      # filename (per-sample summary, Disagreements) finds 0 shared spectra.
+      source_file  = sub("_sequence$", "", basename(tools::file_path_sans_ext(path))),
       stringsAsFactors = FALSE
     )
 

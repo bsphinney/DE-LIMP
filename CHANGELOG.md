@@ -5,6 +5,16 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.16] — 2026-05-29
+
+### Fixed
+- **Per-sample summary + Disagreements broke after all-PSM loading.** Two issues, both surfaced by v3.11.14:
+  - **`Sage_Spectra = 0` and "No matched spectra found between Sage and Casanovo".** Casanovo mztabs are named `<run>_sequence.mztab` while Sage filenames are `<run>.mzML`, so the filename join never matched. `parse_casanovo_mztab()` now strips the `_sequence` suffix from `source_file`, so every Sage↔Casanovo match (per-sample summary, Disagreements) keys on the same run name.
+  - **`Confirmed`/`Novel` counts were full-set while `Casanovo_PSMs` was threshold-filtered** (e.g. Confirmed 2,924 > Casanovo_PSMs 884; Novel ~45k/sample). `filtered_classification()` returned the stored classification (computed on all ~440k PSMs at load) and ignored the confidence slider. It now restricts the stored confirmed/novel sets to PSMs above the current threshold and recomputes the summary stats, so every count is consistent with "Above Threshold".
+
+### Known follow-up
+- Disagreements may still need scan-number alignment (Casanovo `psm_id` vs Sage `scannr`) even with filenames now matching — verifying next.
+
 ## [3.11.15] — 2026-05-29
 
 ### Fixed

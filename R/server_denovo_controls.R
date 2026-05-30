@@ -73,7 +73,25 @@ server_denovo_controls <- function(input, output, session, values) {
       message("[denovo_controls] Using stored classification: ",
         nrow(values$denovo_classification$confirmed), " confirmed, ",
         nrow(values$denovo_classification$novel), " novel")
-      return(.drop_cont_confirmed(values$denovo_classification))
+      # The stored classification is computed on the FULL PSM set at load time.
+      # Restrict it to PSMs above the current confidence threshold so summary /
+      # per-sample counts (Confirmed, Novel) stay consistent with the slider and
+      # with "Above Threshold". (Before all-PSM loading these always agreed.)
+      thr <- input$dda_denovo_score_threshold %||% 0.9
+      cls <- values$denovo_classification
+      if (!is.null(cls$confirmed) && "score" %in% names(cls$confirmed))
+        cls$confirmed <- cls$confirmed[cls$confirmed$score >= thr, , drop = FALSE]
+      if (!is.null(cls$novel) && "score" %in% names(cls$novel))
+        cls$novel <- cls$novel[cls$novel$score >= thr, , drop = FALSE]
+      if (!is.null(cls$summary_stats)) {
+        nc <- nrow(cls$confirmed); nn <- nrow(cls$novel); nt <- nc + nn
+        cls$summary_stats$n_total      <- nt
+        cls$summary_stats$n_confirmed  <- nc
+        cls$summary_stats$n_novel      <- nn
+        cls$summary_stats$pct_confirmed <- if (nt > 0) round(100 * nc / nt, 1) else 0
+        cls$summary_stats$pct_novel     <- if (nt > 0) round(100 * nn / nt, 1) else 0
+      }
+      return(.drop_cont_confirmed(cls))
     }
 
     # For Casanovo mode, re-classify with the threshold-filtered PSMs
