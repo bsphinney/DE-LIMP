@@ -44,6 +44,13 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
   header = tagList(
     useShinyjs(),
     tags$head(tags$style(HTML("
+    /* Fullscreen (expand) button auto-added to every plotly figure */
+    .delimp-fs { position:absolute; top:6px; right:46px; z-index:20; cursor:pointer;
+      background:rgba(255,255,255,0.85); border:1px solid #ccc; border-radius:4px;
+      padding:0 6px; font-size:15px; line-height:1.4; color:#2c3e50; }
+    .delimp-fs:hover { background:#2c3e50; color:#fff; }
+    .js-plotly-plot:fullscreen { width:100vw !important; height:100vh !important; background:#fff; }
+    .js-plotly-plot:-webkit-full-screen { width:100vw !important; height:100vh !important; background:#fff; }
     /* Custom properties matching mockup */
     :root {
       --flatly-primary: #2c3e50;
@@ -158,6 +165,33 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
   "))),
 
   tags$head(tags$script(HTML("
+    // Auto-add a fullscreen (expand) button to every plotly figure — for the
+    // crowded de novo plots. Uses the browser Fullscreen API on the plot div;
+    // plotly redraws to fill the screen on the resize event.
+    function delimpAddFsButtons() {
+      document.querySelectorAll('.js-plotly-plot').forEach(function(p) {
+        var wrap = p.parentNode;
+        if (!wrap || wrap.querySelector('.delimp-fs')) return;
+        if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+        var b = document.createElement('div');
+        b.className = 'delimp-fs'; b.title = 'Fullscreen'; b.innerHTML = '\\u26F6';
+        b.onclick = function(e) {
+          e.stopPropagation();
+          if (p.requestFullscreen) p.requestFullscreen();
+          else if (p.webkitRequestFullscreen) p.webkitRequestFullscreen();
+        };
+        wrap.appendChild(b);
+      });
+    }
+    document.addEventListener('fullscreenchange', function() {
+      setTimeout(function() {
+        var fe = document.fullscreenElement;
+        if (fe && window.Plotly) { try { Plotly.Plots.resize(fe); } catch (e) {} }
+        window.dispatchEvent(new Event('resize'));
+      }, 150);
+    });
+    setInterval(delimpAddFsButtons, 1200);
+
     // Resize plotly charts when tabs or modals become visible
     function resizePlotlyAll() {
       var plots = document.querySelectorAll('.js-plotly-plot');
