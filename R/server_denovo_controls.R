@@ -815,7 +815,7 @@ server_denovo_controls <- function(input, output, session, values) {
 
     merged <- data.frame(
       scan_key       = shared_keys,
-      casanovo_seq   = cas_psms$seq_stripped[cas_idx],
+      casanovo_seq   = cas_psms$sequence[cas_idx],   # RAW (with mods) so PTMs are visible
       sage_seq       = sage_psms$peptide[sage_idx],
       casanovo_score = round(cas_psms$score[cas_idx], 3),
       sage_score     = round(sage_psms$hyperscore[sage_idx], 2),
@@ -826,43 +826,34 @@ server_denovo_controls <- function(input, output, session, values) {
       stringsAsFactors = FALSE
     )
 
-    # I/L normalize both for comparison
-    cas_norm <- gsub("I", "L", toupper(merged$casanovo_seq))
-    sage_norm <- gsub("I", "L", toupper(merged$sage_seq))
+    # Compare on the mod-stripped, I/L-normalized BACKBONE. Casanovo writes mods
+    # as names ([Oxidation]) and Sage as masses ([+15.9949]); comparing raw
+    # strings would flag identical IDs as "completely different" (and a genuinely
+    # missed PTM would be precursor-mass-penalized to a low score, so a high-score
+    # row with "different" mods is really the same peptide in different notation).
+    cas_bb  <- gsub("I", "L", build_dda_canonical_peptide(merged$casanovo_seq))
+    sage_bb <- gsub("I", "L", build_dda_canonical_peptide(merged$sage_seq))
 
-    # Classify disagreement type
-    merged$agreement <- mapply(function(c_seq, s_seq) {
-      if (c_seq == s_seq) return("Exact match")
-
-      # Check I/L swap only
-      c_il <- gsub("I", "L", c_seq)
-      s_il <- gsub("I", "L", s_seq)
-      if (c_il == s_il) return("I/L swap (benign)")
-
-      # Same length?
-      if (nchar(c_il) == nchar(s_il)) {
-        # Count mismatches
-        c_chars <- strsplit(c_il, "")[[1]]
-        s_chars <- strsplit(s_il, "")[[1]]
-        n_diff <- sum(c_chars != s_chars)
+    merged$agreement <- mapply(function(cb, sb) {
+      if (cb == sb) return("Same backbone")   # identical sequence (PTM/notation aside)
+      if (nchar(cb) == nchar(sb)) {
+        n_diff <- sum(strsplit(cb, "")[[1]] != strsplit(sb, "")[[1]])
         if (n_diff == 1) return("Single AA substitution")
         if (n_diff == 2) return("Two AA substitutions")
         return("Multiple substitutions")
       }
-
-      # Different lengths
       "Completely different"
-    }, toupper(merged$casanovo_seq), toupper(merged$sage_seq),
-    USE.NAMES = FALSE)
+    }, cas_bb, sage_bb, USE.NAMES = FALSE)
 
-    # Only keep disagreements (exclude exact + I/L swap)
-    disagreements <- merged[!merged$agreement %in% c("Exact match", "I/L swap (benign)"), ]
+    # A real disagreement = the amino-acid backbones differ. Same-backbone rows
+    # (incl. PTM-notation-only differences) are agreements, not disagreements.
+    disagreements <- merged[merged$agreement != "Same backbone", ]
 
     # Add the matched spectra for context
     attr(disagreements, "all_matched") <- merged
     attr(disagreements, "n_total_matched") <- nrow(merged)
-    attr(disagreements, "n_exact") <- sum(merged$agreement == "Exact match")
-    attr(disagreements, "n_il_swap") <- sum(merged$agreement == "I/L swap (benign)")
+    attr(disagreements, "n_exact") <- sum(merged$agreement == "Same backbone")  # agree (incl. I/L + PTM notation)
+    attr(disagreements, "n_il_swap") <- 0L  # I/L now folded into backbone comparison
 
     disagreements
   })
@@ -922,11 +913,10 @@ server_denovo_controls <- function(input, output, session, values) {
         sprintf("%s spectra matched between tools. ", format(n_total, big.mark = ",")),
         tags$br(),
         tags$span(style = "color: #2ecc71; font-weight: 500;",
-          icon("check"), sprintf(" %s exact matches", format(n_exact, big.mark = ","))),
-        tags$span(style = "margin-left: 12px; color: #3498db;",
-          sprintf("+ %s I/L swaps (benign)", format(n_il, big.mark = ","))),
+          icon("check"), sprintf(" %s agree (same backbone — incl. PTM notation + I/L)",
+                                 format(n_exact, big.mark = ","))),
         tags$span(style = "margin-left: 12px; color: #e74c3c; font-weight: 500;",
-          sprintf("= %s disagreements", format(n_disagree, big.mark = ","))),
+          sprintf(" %s real disagreements (backbone differs)", format(n_disagree, big.mark = ","))),
         tags$br(),
         tags$span(style = "font-weight: 600;",
           sprintf("Agreement rate: %s%%", pct_agree))
