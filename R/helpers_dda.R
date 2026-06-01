@@ -86,6 +86,30 @@ dda_protein_label <- function(subject) {
   out
 }
 
+#' Best BLAST hit per canonical peptide — alignment length, e-value, bitscore.
+#'
+#' "Best" = highest bitscore. Used to surface query coverage (alnlen / peptide
+#' length) + e-value so a 100%-identity-but-partial hit (e.g. 18 of 24 residues
+#' to an over-represented taxon) can't masquerade as a full match. Pure.
+#'
+#' @param blast BLAST hits (cols: peptide/query, length, evalue, bitscore)
+#' @return data.table(.k, blast_aln_len, blast_evalue, blast_bitscore) or NULL
+best_blast_hit_per_peptide <- function(blast) {
+  if (is.null(blast) || !is.data.frame(blast) || nrow(blast) == 0) return(NULL)
+  bt <- data.table::as.data.table(blast)
+  kcol <- if ("peptide" %in% names(bt)) "peptide" else if ("query" %in% names(bt)) "query" else NULL
+  if (is.null(kcol)) return(NULL)
+  bt$.k <- gsub("I", "L", build_dda_canonical_peptide(bt[[kcol]]))
+  if ("bitscore" %in% names(bt)) bt <- bt[order(-as.numeric(bt$bitscore)), ]
+  bt <- bt[!duplicated(bt$.k), ]
+  alnc <- if ("length" %in% names(bt)) "length" else if ("aln_len" %in% names(bt)) "aln_len" else NA
+  data.table::data.table(
+    .k             = bt$.k,
+    blast_aln_len  = if (!is.na(alnc)) as.numeric(bt[[alnc]]) else NA_real_,
+    blast_evalue   = if ("evalue" %in% names(bt)) as.numeric(bt$evalue) else NA_real_,
+    blast_bitscore = if ("bitscore" %in% names(bt)) as.numeric(bt$bitscore) else NA_real_)
+}
+
 #' Build the de novo Master Table — pure join, no Shiny (so it is unit-testable).
 #'
 #' One row per de novo peptide on the single canonical key
@@ -105,7 +129,8 @@ dda_protein_label <- function(subject) {
 #' @param lca        optional per-peptide LCA table (cols: peptide, lca_name,
 #'        lca_rank, category, top_pident, diagnostic)
 #' @return data.frame with seq_norm + biologist-facing columns
-build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
+build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL,
+                                blast = NULL) {
   if (is.null(classified) || nrow(classified) == 0)
     return(data.frame())
   cas <- data.table::as.data.table(classified)
@@ -145,6 +170,20 @@ build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
            diagnostic = "Diagnostic")
   for (k in names(ren)) if (k %in% names(pep)) data.table::setnames(pep, k, ren[[k]])
   if ("Diagnostic" %in% names(pep)) pep$Diagnostic <- pep$Diagnostic %in% c(1, "1", TRUE)
+
+  # Best-hit coverage / e-value / bitscore so a 100%-identity-but-partial hit
+  # (e.g. 18 of 24 residues) can't masquerade as a full-length match.
+  bb <- best_blast_hit_per_peptide(blast)
+  if (!is.null(bb)) {
+    data.table::setnames(bb, ".k", "seq_norm")
+    pep <- merge(pep, bb, by = "seq_norm", all.x = TRUE)
+    pep$Query_coverage <- ifelse(
+      is.na(pep$blast_aln_len), NA_real_,
+      round(100 * pep$blast_aln_len / nchar(pep$Peptide)))
+    data.table::setnames(pep, c("blast_evalue", "blast_bitscore"),
+                         c("E_value", "Bitscore"))
+    pep[, blast_aln_len := NULL]
+  }
   as.data.frame(pep)
 }
 

@@ -81,6 +81,18 @@ test_that("build_denovo_master tolerates missing Sage + LCA (de-novo-only)", {
   expect_false("Species_or_clade" %in% names(m))  # no LCA -> no species columns
 })
 
+test_that("build_denovo_master surfaces query coverage + e-value from blast", {
+  classified <- data.frame(seq_stripped = "FNGGYDNFNFNGLTGTGVLTESNK",  # 24 aa
+                           score = 0.036, match_type = "novel", stringsAsFactors = FALSE)
+  blast <- data.frame(peptide = "FNGGYDNFNFNGLTGTGVLTESNK", subject = "UJW42468.1",
+                      pident = 100, length = 18, evalue = 0.04, bitscore = 39.7,
+                      stringsAsFactors = FALSE)
+  m <- build_denovo_master(classified, NULL, NULL, blast)
+  expect_equal(m$Query_coverage, 75)        # 18/24 — partial, not a full match
+  expect_equal(m$E_value, 0.04)
+  expect_equal(m$Bitscore, 39.7)
+})
+
 test_that("build_denovo_master returns empty frame on empty input", {
   expect_equal(nrow(build_denovo_master(NULL)), 0)
   expect_equal(nrow(build_denovo_master(data.frame())), 0)

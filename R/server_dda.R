@@ -3612,6 +3612,14 @@ echo "[DIAMOND] Done: $(date)"
     req(lca, nrow(lca) > 0)
     ord <- if ("top_pident" %in% names(lca)) order(-lca$top_pident) else seq_len(nrow(lca))
     d <- lca[ord, , drop = FALSE]
+    # Surface best-hit query coverage + e-value (exposes partial "100%" hits).
+    bb <- best_blast_hit_per_peptide(values$denovo_blast %||% values$dda_casanovo_blast)
+    if (!is.null(bb) && "peptide" %in% names(d)) {
+      mi <- match(gsub("I", "L", build_dda_canonical_peptide(d$peptide)), bb$.k)
+      d$coverage_pct <- ifelse(is.na(bb$blast_aln_len[mi]), NA_real_,
+                               round(100 * bb$blast_aln_len[mi] / nchar(d$peptide)))
+      d$evalue <- signif(bb$blast_evalue[mi], 2)
+    }
     if (all(c("lca_name", "lca_taxid") %in% names(d)))
       d$lca_name <- ncbi_tax_link(d$lca_name, d$lca_taxid)
     DT::datatable(d, rownames = FALSE, filter = "top", escape = FALSE,
@@ -3677,7 +3685,8 @@ echo "[DIAMOND] Done: $(date)"
     values$denovo_session_trigger
     cls <- values$dda_casanovo_classification
     req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
-    build_denovo_master(cls$classified, values$dda_sage_psms, values$dda_lca)
+    build_denovo_master(cls$classified, values$dda_sage_psms, values$dda_lca,
+                        values$denovo_blast %||% values$dda_casanovo_blast)
   })
 
   # Master gated by the confidence slider (hide low-confidence by default).
@@ -3699,6 +3708,7 @@ echo "[DIAMOND] Done: $(date)"
     show <- m[, setdiff(names(m), c("seq_norm", "lca_taxid")), drop = FALSE]
     pref <- intersect(c("Peptide", "Casanovo_score", "Found_by_Sage",
                         "Species_or_clade", "Rank", "Type", "Best_pct_ID",
+                        "Query_coverage", "E_value", "Bitscore",
                         "Diagnostic", "Sage_protein", "n_PSMs"), names(show))
     show <- show[, c(pref, setdiff(names(show), pref)), drop = FALSE]
     if ("Best_pct_ID" %in% names(show))
