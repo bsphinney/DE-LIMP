@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.20] — 2026-06-01
+
+### Fixed
+- **Species (LCA) tab empty after a ZIP upload.** The ZIP-mode LCA loader used `list.files(local_tmp, ...)` without `recursive = TRUE`, so the `*_peptide_lca.tsv` table — which lives in the zip's `denovo/` subfolder — was never found and `values$dda_lca` stayed empty (panel rendered the banner but no data). Added `recursive = TRUE`. (HPC-load path already used the explicit `denovo/` path, so only ZIP upload was affected.)
+
 ## [3.11.19] — 2026-05-31
 
 ### Added

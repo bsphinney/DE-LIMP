@@ -1507,7 +1507,8 @@ server_dda <- function(input, output, session, values, add_to_log) {
           lca_local <- file.path(local_tmp, "peptide_lca.tsv")
           lca_present <- FALSE
           if (is.null(ssh_cfg)) {
-            cand <- list.files(local_tmp, pattern = "_peptide_lca\\.tsv$", full.names = TRUE)
+            cand <- list.files(local_tmp, pattern = "_peptide_lca\\.tsv$",
+                               full.names = TRUE, recursive = TRUE)
             if (length(cand) > 0) { lca_local <- tail(sort(cand), 1); lca_present <- TRUE }
           } else {
             found <- ssh_exec(ssh_cfg, paste0(
