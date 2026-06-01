@@ -931,6 +931,13 @@ server_dda <- function(input, output, session, values, add_to_log) {
   })
   outputOptions(output, "dda_mode_is_peptidomics", suspendWhenHidden = FALSE)
 
+  # TRUE once Casanovo de novo results are loaded — used to hide HLA/peptidomics
+  # anchor panels, which are meaningless for a de novo run.
+  output$dda_is_denovo <- reactive({
+    !is.null(values$dda_casanovo_classification) || !is.null(values$dda_casanovo_psms)
+  })
+  outputOptions(output, "dda_is_denovo", suspendWhenHidden = FALSE)
+
   # ─── Length distribution (universal for every DDA mode) ─────────────────
   .dda_clean_peptide <- function(x) gsub("\\[.*?\\]|[^A-Z]", "", x)
 

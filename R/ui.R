@@ -2848,7 +2848,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   "Peptidomics is typically broad 5–25."),
                 plotly::plotlyOutput("dda_length_hist", height = "320px"),
                 # HLA-specific section
-                conditionalPanel(condition = "output.dda_mode_is_hla",
+                conditionalPanel(condition = "output.dda_mode_is_hla && !output.dda_is_denovo",
                   tags$hr(),
                   tags$h6("HLA anchor residue frequencies",
                           style = "color: #b16e1f;"),
@@ -2860,7 +2860,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   plotly::plotlyOutput("dda_anchor_freq", height = "320px")
                 ),
                 # Peptidomics-specific section
-                conditionalPanel(condition = "output.dda_mode_is_peptidomics",
+                conditionalPanel(condition = "output.dda_mode_is_peptidomics && !output.dda_is_denovo",
                   tags$hr(),
                   tags$h6("Cleavage flanking residues",
                           style = "color: #198754;"),
