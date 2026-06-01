@@ -3986,8 +3986,8 @@ echo "[DIAMOND] Done: $(date)"
     blast <- tryCatch(blast_filtered(), error = function(e) NULL)
     req(!is.null(blast), nrow(blast) > 1)
 
-    # Parse protein name + species for display
-    blast$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+    # Protein label: UniProt mnemonic, or FULL accession for nr (single helper).
+    blast$protein_name <- dda_protein_label(blast$subject)
     blast$protein_label <- paste0(blast$protein_name, " (", blast$species, ")")
 
     # Count unique peptides per protein (best hit per peptide)

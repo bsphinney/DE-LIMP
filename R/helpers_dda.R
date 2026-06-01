@@ -69,6 +69,23 @@ ncbi_tax_link <- function(name, taxid) {
   out
 }
 
+#' Display label for a BLAST subject's protein — UniProt mnemonic or full accession.
+#'
+#' For UniProt `sp|ACC|NAME_SPECIES` returns the protein mnemonic (`NAME`). For
+#' NCBI / RefSeq / GenBank / PDB accessions returns the FULL accession unchanged
+#' (never split on `_`, which would mangle `XP_025773238.1` -> "XP"). Single
+#' definition for every de novo view that shows a protein label.
+#'
+#' @param subject character vector of BLAST subject accessions
+#' @return character vector of protein labels
+dda_protein_label <- function(subject) {
+  s <- as.character(subject)
+  isup <- grepl("^[a-z]{2}\\|[^|]+\\|", s)
+  out <- s
+  out[isup] <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", s[isup]))
+  out
+}
+
 #' Build the de novo Master Table — pure join, no Shiny (so it is unit-testable).
 #'
 #' One row per de novo peptide on the single canonical key

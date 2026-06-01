@@ -209,7 +209,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
     # Build display data
     near$accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", near$subject)
-    near$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", near$subject))
+    near$protein_name <- dda_protein_label(near$subject)
     near$species <- dda_blast_species(near[[pep_col]], near$subject, values$dda_lca)
 
     data.frame(
@@ -313,7 +313,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
     protein_name <- sub("^[a-z]+\\|[^|]+\\|", "", subject)
     accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", subject)
     species <- dda_blast_species(peptide, subject, values$dda_lca)
-    protein_name_clean <- sub("_[^_]+$", "", protein_name)
+    protein_name_clean <- dda_protein_label(subject)
 
     alignment_html <- render_blast_alignment(
       query_seq    = peptide,
