@@ -3675,8 +3675,8 @@ echo "[DIAMOND] Done: $(date)"
     m <- denovo_master()
     req(nrow(m) > 0)
     thr <- input$dda_denovo_score_threshold %||% 0
-    if ("Confidence" %in% names(m) && any(is.finite(m$Confidence)))
-      m <- m[is.na(m$Confidence) | m$Confidence >= thr, , drop = FALSE]
+    if ("Casanovo_score" %in% names(m) && any(is.finite(m$Casanovo_score)))
+      m <- m[is.na(m$Casanovo_score) | m$Casanovo_score >= thr, , drop = FALSE]
     m
   })
 
@@ -3684,7 +3684,7 @@ echo "[DIAMOND] Done: $(date)"
     m <- denovo_master_filtered()
     req(nrow(m) > 0)
     show <- m[, setdiff(names(m), "seq_norm"), drop = FALSE]
-    pref <- intersect(c("Peptide", "Confidence", "Found_by_Sage",
+    pref <- intersect(c("Peptide", "Casanovo_score", "Found_by_Sage",
                         "Species_or_clade", "Rank", "Type", "Best_pct_ID",
                         "Diagnostic", "Sage_protein", "n_PSMs"), names(show))
     show <- show[, c(pref, setdiff(names(show), pref)), drop = FALSE]

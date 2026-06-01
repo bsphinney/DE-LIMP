@@ -60,7 +60,7 @@ dda_blast_species <- function(peptide, subject, lca_tbl = NULL) {
 #' NOTE on confidence: Casanovo's `search_engine_score` runs roughly -1..+1, and
 #' species-diagnostic peptides for a non-model organism cluster in the MID range
 #' (~0.5-0.9), NOT at the top — so a high slider default can hide the entire nr
-#' signal. Filtering is left to the caller; `Confidence` is returned per row.
+#' signal. Filtering is left to the caller; `Casanovo_score` is returned per row.
 #'
 #' @param classified data.frame/data.table of Casanovo PSMs (cols: seq_stripped
 #'        or sequence, score, match_type; seq_norm optional)
@@ -78,12 +78,12 @@ build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
   if (!"match_type" %in% names(cas)) cas$match_type <- "novel"
   cas$disp_seq <- base_seq
   pep <- cas[, list(
-    Peptide       = disp_seq[1],
-    Confidence    = suppressWarnings(round(max(score, na.rm = TRUE), 3)),
-    n_PSMs        = .N,
-    Found_by_Sage = any(match_type == "confirmed")
+    Peptide        = disp_seq[1],
+    Casanovo_score = suppressWarnings(round(max(score, na.rm = TRUE), 3)),
+    n_PSMs         = .N,
+    Found_by_Sage  = any(match_type == "confirmed")
   ), by = "seq_norm"]
-  pep$Confidence[!is.finite(pep$Confidence)] <- NA_real_
+  pep$Casanovo_score[!is.finite(pep$Casanovo_score)] <- NA_real_
 
   if (!is.null(sage_psms) && all(c("peptide", "proteins") %in% names(sage_psms))) {
     sdt <- data.table::as.data.table(sage_psms)

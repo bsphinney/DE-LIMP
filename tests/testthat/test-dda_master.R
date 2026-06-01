@@ -56,7 +56,7 @@ test_that("build_denovo_master joins Casanovo + Sage + LCA on the canonical key"
   expect_equal(nrow(m), 3)                       # 3 unique peptides (ELVIS deduped)
 
   elvis <- m[m$Peptide == "ELVISLLVESK", ]
-  expect_equal(elvis$Confidence, 0.6)            # max score per peptide
+  expect_equal(elvis$Casanovo_score, 0.6)        # max score per peptide
   expect_equal(elvis$Species_or_clade, "Felidae")  # regression: LCA join populated
   expect_equal(elvis$Type, "host")
 
@@ -67,7 +67,7 @@ test_that("build_denovo_master joins Casanovo + Sage + LCA on the canonical key"
 
   mm <- m[m$Peptide == "MASSMISMATCHK", ]
   expect_true(mm$Diagnostic)                     # diagnostic flag -> logical TRUE
-  expect_true(mm$Confidence < 0)                 # negative-score peptide KEPT
+  expect_true(mm$Casanovo_score < 0)             # negative-score peptide KEPT
   expect_equal(mm$Species_or_clade, "Panthera onca")
 })
 
