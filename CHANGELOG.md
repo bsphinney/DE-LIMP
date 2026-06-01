@@ -5,6 +5,20 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.22] — 2026-06-01
+
+### Added
+- **De novo Master Table** (new sub-tab) — one row per de novo peptide joining the three evidence streams on a single canonical (mods-stripped, I/L-normalized) key: Casanovo confidence + Sage-confirmed/novel, Sage protein, and the nr LCA species/clade. Biologist-readable column names, category-colored Type column, CSV export. The single source the LCA panel, confidence slider, and stats all read from.
+- **Sage ⇄ Casanovo overlap stats** — stat-card row atop the Master Table (Sage peptides · Casanovo peptides · found-by-both · de-novo-only · with-nr-species · diagnostic), computed on the shared canonical key and respecting the confidence slider.
+- **Plain-language species verdict** — computed from the LCA at render time (never hardcoded): host/conserved/microbiome split + top diagnostic vs conserved taxa.
+- **LCA + Master Table CSV export buttons**.
+
+### Changed
+- **Confidence slider now filters the LCA + Master views.** The nr BLAST/LCA ran on ALL de novo peptides with no score cutoff; the slider (default 0.9) now hides low-confidence calls by default (every peptide still one slider-click away).
+
+### Fixed
+- **Species column derived from taxonomy/LCA, not the accession suffix** (v3.11.21) — NCBI nr accessions (`XP_`/`NP_`/…) have no `_SPECIES` mnemonic, so `sub('.*_','',subject)` produced garbage (`XP_025773238.1` → `025773238.1`) across ~8 de novo tabs. `blast_with_species()` now joins the per-peptide LCA on the canonical key; UniProt searches keep the mnemonic fallback.
+
 ## [3.11.20] — 2026-06-01
 
 ### Fixed

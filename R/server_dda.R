@@ -3570,7 +3570,7 @@ echo "[DIAMOND] Done: $(date)"
 
   # --- Species (LCA) panel: host/microbiome/conserved from the nr LCA table ---
   output$denovo_lca_category <- plotly::renderPlotly({
-    lca <- values$dda_lca
+    lca <- lca_filtered()
     req(lca, nrow(lca) > 0, "category" %in% names(lca))
     tab <- as.data.frame(table(lca$category), stringsAsFactors = FALSE)
     names(tab) <- c("category", "n")
@@ -3584,7 +3584,7 @@ echo "[DIAMOND] Done: $(date)"
   })
 
   output$denovo_lca_top_species <- plotly::renderPlotly({
-    lca <- values$dda_lca
+    lca <- lca_filtered()
     req(lca, nrow(lca) > 0, "lca_name" %in% names(lca))
     d <- lca[lca$category %in% "host", , drop = FALSE]
     req(nrow(d) > 0)
@@ -3601,7 +3601,7 @@ echo "[DIAMOND] Done: $(date)"
   })
 
   output$denovo_lca_table <- DT::renderDT({
-    lca <- values$dda_lca
+    lca <- lca_filtered()
     req(lca, nrow(lca) > 0)
     ord <- if ("top_pident" %in% names(lca)) order(-lca$top_pident) else seq_len(nrow(lca))
     DT::datatable(lca[ord, , drop = FALSE], rownames = FALSE, filter = "top",
@@ -3619,6 +3619,212 @@ echo "[DIAMOND] Done: $(date)"
       tags$p("For a non-model organism not in nr (e.g. ocelot), peptides correctly converge on the family (Felidae) and nearest relatives rather than over-committing to one species."),
       easyClose = TRUE, size = "l", footer = modalButton("Close")))
   })
+
+  # ════════════════════════════════════════════════════════════════════════
+  # MASTER PEPTIDE TABLE  (v3.11.22)
+  # One row per de novo peptide, joining the three evidence streams on a single
+  # canonical key (mods stripped, I/L-normalized): Casanovo confidence +
+  # confirmed/novel, Sage protein hit, and the nr LCA taxon attribution. The
+  # biologist-facing "what is this sample" view and the single source the
+  # confidence slider, the LCA panel, and the export all read from. Built data-
+  # first — nothing here is dataset-specific.
+  # ════════════════════════════════════════════════════════════════════════
+
+  # Per-canonical-peptide max Casanovo confidence. The nr BLAST/LCA ran on ALL
+  # de novo peptides with no score cutoff, so the slider is applied here.
+  casanovo_pep_score <- reactive({
+    cls <- values$dda_casanovo_classification
+    if (is.null(cls) || is.null(cls$classified) || nrow(cls$classified) == 0)
+      return(NULL)
+    cas <- data.table::as.data.table(cls$classified)
+    if (!"seq_norm" %in% names(cas)) {
+      base_seq <- if ("seq_stripped" %in% names(cas)) cas$seq_stripped else cas$sequence
+      cas$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(base_seq))
+    }
+    if (!"score" %in% names(cas)) cas$score <- NA_real_
+    cas[, list(best_score = suppressWarnings(max(score, na.rm = TRUE))),
+        by = "seq_norm"]
+  })
+
+  # LCA gated by the confidence slider; peptides below threshold (by best
+  # Casanovo PSM) are hidden, no-score peptides keep showing. Internal var
+  # `lcat` so the global `lca <- ...` rename doesn't recurse.
+  lca_filtered <- reactive({
+    lcat <- values$dda_lca
+    req(lcat, nrow(lcat) > 0)
+    sc <- casanovo_pep_score()
+    thr <- input$dda_denovo_score_threshold %||% 0.9
+    if (!is.null(sc) && "peptide" %in% names(lcat)) {
+      lkey <- gsub("I", "L", build_dda_canonical_peptide(lcat$peptide))
+      sco  <- sc$best_score[match(lkey, sc$seq_norm)]
+      lcat <- lcat[is.na(sco) | sco >= thr, , drop = FALSE]
+    }
+    lcat
+  })
+
+  # The master join (unfiltered — confidence filter applied downstream).
+  denovo_master <- reactive({
+    values$denovo_session_trigger
+    cls <- values$dda_casanovo_classification
+    req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
+    cas <- data.table::as.data.table(cls$classified)
+    base_seq <- if ("seq_stripped" %in% names(cas)) cas$seq_stripped else cas$sequence
+    if (!"seq_norm" %in% names(cas))
+      cas$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(base_seq))
+    if (!"score" %in% names(cas)) cas$score <- NA_real_
+    if (!"match_type" %in% names(cas)) cas$match_type <- "novel"
+    cas$disp_seq <- base_seq
+    pep <- cas[, list(
+      Peptide       = disp_seq[1],
+      Confidence    = suppressWarnings(round(max(score, na.rm = TRUE), 3)),
+      n_PSMs        = .N,
+      Found_by_Sage = any(match_type == "confirmed")
+    ), by = "seq_norm"]
+    pep$Confidence[!is.finite(pep$Confidence)] <- NA_real_
+
+    # Sage protein per peptide
+    sage <- values$dda_sage_psms
+    if (!is.null(sage) && all(c("peptide", "proteins") %in% names(sage))) {
+      sdt <- data.table::as.data.table(sage)
+      sdt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(sdt$peptide))
+      sdt <- sdt[!duplicated(sdt$seq_norm), ]
+      pep <- merge(pep, sdt[, list(seq_norm, Sage_protein = proteins)],
+                   by = "seq_norm", all.x = TRUE)
+    } else {
+      pep$Sage_protein <- NA_character_
+    }
+
+    # nr LCA attribution per peptide
+    lcat <- values$dda_lca
+    if (!is.null(lcat) && all(c("peptide", "lca_name") %in% names(lcat))) {
+      ldt <- data.table::as.data.table(lcat)
+      ldt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(ldt$peptide))
+      ldt <- ldt[!duplicated(ldt$seq_norm), ]
+      cols <- intersect(c("seq_norm", "lca_name", "lca_rank", "category",
+                          "top_pident", "diagnostic"), names(ldt))
+      pep <- merge(pep, ldt[, cols, with = FALSE], by = "seq_norm", all.x = TRUE)
+    }
+    ren <- c(lca_name = "Species_or_clade", lca_rank = "Rank",
+             category = "Type", top_pident = "Best_pct_ID",
+             diagnostic = "Diagnostic")
+    for (k in names(ren)) if (k %in% names(pep)) data.table::setnames(pep, k, ren[[k]])
+    if ("Diagnostic" %in% names(pep)) pep$Diagnostic <- pep$Diagnostic %in% c(1, "1", TRUE)
+    as.data.frame(pep)
+  })
+
+  # Master gated by the confidence slider (hide low-confidence by default).
+  denovo_master_filtered <- reactive({
+    m <- denovo_master()
+    req(nrow(m) > 0)
+    thr <- input$dda_denovo_score_threshold %||% 0.9
+    if ("Confidence" %in% names(m) && any(is.finite(m$Confidence)))
+      m <- m[is.na(m$Confidence) | m$Confidence >= thr, , drop = FALSE]
+    m
+  })
+
+  output$denovo_master_table <- DT::renderDT({
+    m <- denovo_master_filtered()
+    req(nrow(m) > 0)
+    show <- m[, setdiff(names(m), "seq_norm"), drop = FALSE]
+    pref <- intersect(c("Peptide", "Confidence", "Found_by_Sage",
+                        "Species_or_clade", "Rank", "Type", "Best_pct_ID",
+                        "Diagnostic", "Sage_protein", "n_PSMs"), names(show))
+    show <- show[, c(pref, setdiff(names(show), pref)), drop = FALSE]
+    if ("Best_pct_ID" %in% names(show))
+      show <- show[order(-replace(show$Best_pct_ID, is.na(show$Best_pct_ID), -1)), ]
+    dt <- DT::datatable(show, rownames = FALSE, filter = "top",
+                        options = list(pageLength = 25, scrollX = TRUE))
+    if ("Type" %in% names(show))
+      dt <- DT::formatStyle(dt, "Type", backgroundColor = DT::styleEqual(
+        c("host", "microbiome", "other/conserved", "plant/fungal"),
+        c("#e8f5e9", "#fff3e0", "#eceff1", "#f3e5f5")))
+    dt
+  })
+
+  # Plain-language species verdict — computed from the data, never hardcoded.
+  # Injected as static HTML (shinyjs::html) into a plain div because renderUI is
+  # unreliable inside navset_card_tab sub-tabs (CLAUDE.md UI gotcha).
+  observe({
+    m <- denovo_master_filtered()
+    req(nrow(m) > 0)
+    if (!all(c("Type", "Species_or_clade") %in% names(m))) {
+      shinyjs::html("denovo_master_verdict_box", as.character(
+        div(class = "alert alert-info",
+            "Run the nr BLAST + LCA to populate a species attribution here.")))
+      return(invisible(NULL))
+    }
+    host    <- m[!is.na(m$Type) & m$Type == "host", , drop = FALSE]
+    n_micro <- sum(m$Type == "microbiome", na.rm = TRUE)
+    n_cons  <- sum(m$Type %in% "other/conserved", na.rm = TRUE)
+    diag    <- if ("Diagnostic" %in% names(host))
+                 host[!is.na(host$Diagnostic) & host$Diagnostic, , drop = FALSE]
+               else host[0, , drop = FALSE]
+    top_diag <- head(sort(table(diag$Species_or_clade), decreasing = TRUE), 5)
+    top_host <- head(sort(table(host$Species_or_clade), decreasing = TRUE), 5)
+    fmt <- function(tb) if (length(tb))
+      paste(sprintf("%s (%d)", names(tb), as.integer(tb)), collapse = ", ") else "—"
+    shinyjs::html("denovo_master_verdict_box", as.character(
+      div(class = "alert alert-success",
+        tags$h5(icon("dna"), " Species attribution (confidence-filtered)"),
+        tags$p(sprintf("%s peptides placed — %d host, %d conserved, %d microbiome.",
+                       format(nrow(m), big.mark = ","), nrow(host), n_cons, n_micro)),
+        tags$p(tags$b("Diagnostic (species/genus) taxa: "), fmt(top_diag)),
+        tags$p(tags$b("All host taxa (incl. conserved clades): "), fmt(top_host)),
+        tags$small(class = "text-muted",
+          "Conserved peptides resolve only to family or higher and are NOT pinned to one species. For a non-model organism absent from NCBI, peptides correctly converge on the nearest represented clade."))))
+  })
+
+  output$dda_master_download <- downloadHandler(
+    filename = function() paste0("denovo_master_table_",
+                                 format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      m <- denovo_master_filtered()
+      utils::write.csv(m[, setdiff(names(m), "seq_norm"), drop = FALSE],
+                       file, row.names = FALSE)
+    }
+  )
+
+  # Venn-style overlap stats (Sage vs Casanovo), confidence-filtered. Computed
+  # from the master join + the full Sage peptide set on the shared canonical key.
+  observe({
+    m <- denovo_master_filtered()
+    req(nrow(m) > 0, "seq_norm" %in% names(m))
+    cas_keys <- unique(m$seq_norm)
+    cas_n    <- length(cas_keys)
+    sage <- values$dda_sage_psms
+    sage_keys <- if (!is.null(sage) && "peptide" %in% names(sage))
+      unique(gsub("I", "L", build_dda_canonical_peptide(sage$peptide))) else character(0)
+    sage_n      <- length(sage_keys)
+    overlap     <- length(intersect(cas_keys, sage_keys))
+    denovo_only <- cas_n - overlap
+    sage_only   <- max(sage_n - overlap, 0L)
+    with_sp <- if ("Species_or_clade" %in% names(m)) sum(!is.na(m$Species_or_clade)) else 0L
+    diagn   <- if ("Diagnostic" %in% names(m)) sum(m$Diagnostic %in% TRUE, na.rm = TRUE) else 0L
+    nf <- function(x) format(as.integer(x), big.mark = ",")
+    card <- function(val, lab, col, bg) sprintf(
+      '<div style="flex:1;min-width:120px;background:%s;padding:12px;border-radius:8px;text-align:center;"><div style="font-size:23px;font-weight:700;color:%s;">%s</div><div style="font-size:12px;color:#555;">%s</div></div>',
+      bg, col, val, lab)
+    cards <- paste0(
+      card(nf(sage_n),      "Sage peptides",        "#1565c0", "#e3f2fd"),
+      card(nf(cas_n),       "Casanovo peptides",    "#6a1b9a", "#f3e5f5"),
+      card(nf(overlap),     "Found by both",        "#2e7d32", "#e8f5e9"),
+      card(nf(denovo_only), "De-novo only",         "#e65100", "#fff3e0"),
+      card(nf(with_sp),     "With nr species",      "#00695c", "#e0f2f1"),
+      card(nf(diagn),       "Diagnostic (sp/genus)","#ad1457", "#fce4ec"))
+    shinyjs::html("denovo_master_stats_box", paste0(
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;">', cards, '</div>',
+      '<div style="font-size:11px;color:#888;margin-top:4px;">',
+      'Sage-only peptides: ', nf(sage_only),
+      ' &middot; counts reflect the confidence slider (low-confidence de novo hidden).</div>'))
+  })
+
+  output$dda_lca_download <- downloadHandler(
+    filename = function() paste0("peptide_lca_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      lcat <- lca_filtered()
+      utils::write.csv(as.data.frame(lcat), file, row.names = FALSE)
+    }
+  )
 
   # --- Summary cards ---
   output$dda_blast_summary_cards <- renderUI({
