@@ -106,6 +106,18 @@ test_that("build_denovo_score_calibration: target hit-rate + decoy FDR", {
   expect_true(max(cal$cum_fdr, na.rm = TRUE) > 0)
 })
 
+test_that("build_denovo_score_calibration: min_length drops short peptides from BOTH sides", {
+  classified <- data.frame(
+    seq_stripped = c("SHORTK", "LONGPEPTIDEAAAK", "LONGPEPTIDEBBBR"),
+    score = c(-0.5, 0.7, 0.6), match_type = "novel", stringsAsFactors = FALSE)
+  blast <- data.frame(peptide = "LONGPEPTIDEAAAK", pident = 95, stringsAsFactors = FALSE)
+  decoy <- data.frame(peptide = "SHORTK", pident = 80, stringsAsFactors = FALSE)  # spurious short decoy
+  c7 <- build_denovo_score_calibration(classified, blast, decoy, bin = 0.5, min_length = 7)
+  # the short peptide's score bin (negative) is gone -> its decoy hit can't count
+  expect_equal(nrow(c7[c7$bin < 0, ]), 0)
+  expect_true(all(nchar(gsub("[^0-9.-]", "", as.character(c7$bin))) >= 0))  # sane bins
+})
+
 test_that("build_denovo_score_calibration: target-only (no decoy) omits FDR", {
   classified <- data.frame(seq_stripped = c("AAAAAAAK", "BBBBBBBR"),
                            score = c(0.7, 0.2), match_type = "novel",

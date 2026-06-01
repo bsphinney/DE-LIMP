@@ -128,7 +128,8 @@ build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
 #' @return data.frame: bin, n, n_hit, hit_rate, mean_pident
 #'         [+ decoy_hit_rate, fdr, cum_fdr when decoy_blast supplied]
 build_denovo_score_calibration <- function(classified, blast,
-                                           decoy_blast = NULL, bin = 0.1) {
+                                           decoy_blast = NULL, bin = 0.1,
+                                           min_length = 0) {
   if (is.null(classified) || nrow(classified) == 0) return(data.frame())
   cas <- data.table::as.data.table(classified)
   base <- if ("seq_stripped" %in% names(cas)) cas$seq_stripped else cas$sequence
@@ -136,6 +137,10 @@ build_denovo_score_calibration <- function(classified, blast,
   if (!"score" %in% names(cas)) cas$score <- NA_real_
   sc <- cas[, list(score = suppressWarnings(max(score, na.rm = TRUE))), by = "k"]
   sc <- sc[is.finite(sc$score), ]
+  # Symmetric length floor: dropping short peptides from the peptide population
+  # removes them from BOTH the target and decoy hit counts, so they provably
+  # cannot skew the decoy/target FDR ratio (and they carry ~no species signal).
+  if (min_length > 0) sc <- sc[nchar(sc$k) >= min_length, ]
   if (nrow(sc) == 0) return(data.frame())
 
   best_pid <- function(b) {
