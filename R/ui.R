@@ -3062,7 +3062,17 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   )
                 ),
                 plotlyOutput("denovo_fdr_curve", height = "400px"),
-                plotlyOutput("denovo_fdr_hits", height = "300px")
+                plotlyOutput("denovo_fdr_hits", height = "300px"),
+                tags$hr(),
+                tags$h6(icon("dna"), " Shuffled-decoy FDR vs NCBI nr (recommended)",
+                        style = "color: #6a1b9a;"),
+                tags$small(style = "color:#6c757d; display:block; margin-bottom:8px;",
+                  "All Casanovo de novo peptides (residues shuffled, kept ∉ target set) are ",
+                  "BLASTed against the same nr DB. Decoy hit-rate per Casanovo-score bin = the ",
+                  "by-chance rate; FDR = decoy / target. Loaded from denovo/blast_results_decoy.tsv."),
+                tags$div(id = "denovo_decoy_fdr_callout"),
+                plotlyOutput("denovo_calib_plot", height = "360px"),
+                plotlyOutput("denovo_decoy_fdr_plot", height = "360px")
               )),
             nav_panel("Species (LCA)", icon = icon("dna"),
               div(style = "overflow-y: auto; max-height: calc(100vh - 250px);",

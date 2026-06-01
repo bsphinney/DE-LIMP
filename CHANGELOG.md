@@ -5,6 +5,16 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.26–3.11.33] — 2026-06-01
+
+### Added
+- **Shuffled-decoy FDR in the Target-Decoy pane** (3.11.33): loads `denovo/blast_results_decoy.tsv` and shows a Casanovo-score↔nr calibration plot, target-vs-decoy hit-rate with a cumulative-FDR line, and a recommended-cutoff callout. Ocelot: decoys hit 11/302,994 (0.0036%) vs target 3.1% → FDR ≈0 at every score bin (nr matches are real at any score). Engine: `build_denovo_score_calibration()` (decoy-aware, `min_length` floor) + `best_blast_hit_per_peptide()`.
+- **Query-coverage + e-value + bitscore columns** (3.11.32) in Master + LCA tables — exposes partial "100%" hits (e.g. 18-of-24-residue matches to over-represented taxa).
+- **Taxon names link to the NCBI Taxonomy Browser** (3.11.29), new tab.
+
+### Changed
+- **`Confidence` column → `Casanovo_score`** (3.11.28); full nr accessions instead of "XP" prefix via `dda_protein_label()` (3.11.30); HLA/peptidomics anchor panels hidden for de novo runs (3.11.31).
+
 ## [3.11.25] — 2026-06-01
 
 ### Fixed

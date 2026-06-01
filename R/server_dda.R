@@ -1271,6 +1271,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
       copy_first("^lfq\\.tsv$",              file.path(local_tmp, "lfq.tsv"))
       copy_first("^report\\.parquet$",       file.path(local_tmp, "report.parquet"))
       copy_first("^blast_results\\.tsv$",    file.path(local_tmp, "blast_results.tsv"))
+      copy_first("^blast_results_decoy\\.tsv$", file.path(local_tmp, "blast_results_decoy.tsv"))
       # mztab files: copy all into a single mztab/ subdir
       mztab_hits <- all_files[grepl("\\.mztab$", basename(all_files), ignore.case = TRUE)]
       if (length(mztab_hits) > 0) {
@@ -1507,6 +1508,31 @@ server_dda <- function(input, output, session, values, add_to_log) {
         }, error = function(e) {
           message("[DDA Load] BLAST load error: ", e$message)
         })
+
+        # Load the shuffled-decoy BLAST (for target-decoy FDR calibration).
+        tryCatch({
+          decoy_remote <- file.path(remote_dir, "denovo", "blast_results_decoy.tsv")
+          decoy_local  <- file.path(local_tmp, "blast_results_decoy.tsv")
+          decoy_present <- FALSE
+          if (is.null(ssh_cfg)) {
+            decoy_present <- file.exists(decoy_local) && file.info(decoy_local)$size > 0
+          } else {
+            chk <- ssh_exec(ssh_cfg, paste("test -s", shQuote(decoy_remote),
+                                           "&& echo YES || echo NO"), timeout = 10)
+            decoy_present <- grepl("YES", paste(chk$stdout, collapse = ""))
+            if (decoy_present) scp_download(ssh_cfg, decoy_remote, decoy_local)
+          }
+          if (decoy_present && file.exists(decoy_local) && file.info(decoy_local)$size > 0) {
+            ddf <- data.table::fread(decoy_local, header = FALSE)
+            if (nrow(ddf) > 0 && ncol(ddf) >= 12) {
+              names(ddf)[1:12] <- c("peptide", "subject", "pident", "length",
+                "mismatch", "gapopen", "qstart", "qend", "sstart", "send",
+                "evalue", "bitscore")
+              values$dda_decoy_blast <- as.data.frame(ddf)
+              message("[DDA Load] Loaded ", nrow(ddf), " decoy BLAST hits")
+            }
+          }
+        }, error = function(e) message("[DDA Load] decoy load error: ", e$message))
 
         # Load the LCA species-attribution table if present (nr + LCA pipeline).
         # Prefers the relaxed-evalue (*_e1) table when both exist.
@@ -3806,6 +3832,80 @@ echo "[DIAMOND] Done: $(date)"
       utils::write.csv(as.data.frame(lcat), file, row.names = FALSE)
     }
   )
+
+  # ── Shuffled-decoy FDR calibration (Casanovo score vs nr BLAST outcome) ──
+  denovo_calibration <- reactive({
+    values$denovo_session_trigger
+    cls <- values$dda_casanovo_classification
+    req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
+    tb <- values$denovo_blast %||% values$dda_casanovo_blast
+    req(!is.null(tb))
+    cal <- build_denovo_score_calibration(cls$classified, tb,
+             decoy_blast = values$dda_decoy_blast, min_length = 7)
+    req(is.data.frame(cal), nrow(cal) > 0)
+    cal[order(cal$bin), ]
+  })
+
+  output$denovo_calib_plot <- plotly::renderPlotly({
+    cal <- denovo_calibration()
+    plotly::plot_ly(cal) %>%
+      plotly::add_bars(x = ~bin, y = ~hit_rate, name = "nr hit-rate (%)",
+                       marker = list(color = "#1565c0")) %>%
+      plotly::add_lines(x = ~bin, y = ~mean_pident, name = "mean %identity",
+                        yaxis = "y2", line = list(color = "#e65100")) %>%
+      plotly::layout(
+        title = list(text = "Casanovo score vs nr BLAST outcome", font = list(size = 13)),
+        xaxis = list(title = "Casanovo score (bin)"),
+        yaxis = list(title = "nr hit-rate (%)"),
+        yaxis2 = list(title = "mean %identity", overlaying = "y", side = "right",
+                      range = c(0, 100), showgrid = FALSE),
+        legend = list(orientation = "h", y = 1.12))
+  })
+
+  output$denovo_decoy_fdr_plot <- plotly::renderPlotly({
+    cal <- denovo_calibration()
+    req("decoy_hit_rate" %in% names(cal))
+    cal$cum_fdr_pct <- round(100 * cal$cum_fdr, 2)
+    plotly::plot_ly(cal) %>%
+      plotly::add_bars(x = ~bin, y = ~hit_rate, name = "target",
+                       marker = list(color = "#2e7d32")) %>%
+      plotly::add_bars(x = ~bin, y = ~decoy_hit_rate, name = "decoy (shuffled)",
+                       marker = list(color = "#c62828")) %>%
+      plotly::add_lines(x = ~bin, y = ~cum_fdr_pct, name = "cumulative FDR (%)",
+                        yaxis = "y2", line = list(color = "#6a1b9a", dash = "dot")) %>%
+      plotly::layout(
+        title = list(text = "Target vs shuffled-decoy hit-rate + cumulative FDR",
+                     font = list(size = 13)),
+        barmode = "group", xaxis = list(title = "Casanovo score (bin)"),
+        yaxis = list(title = "hit-rate (%)"),
+        yaxis2 = list(title = "cumulative FDR (%)", overlaying = "y", side = "right",
+                      showgrid = FALSE),
+        legend = list(orientation = "h", y = 1.12))
+  })
+
+  # Recommended cutoff (static HTML inject — navset_card_tab renderUI gotcha).
+  observe({
+    cal <- tryCatch(denovo_calibration(), error = function(e) NULL)
+    if (is.null(cal) || !"cum_fdr" %in% names(cal)) {
+      shinyjs::html("denovo_decoy_fdr_callout", as.character(
+        div(class = "alert alert-secondary",
+            "Load a shuffled-decoy BLAST (denovo/blast_results_decoy.tsv) to estimate FDR.")))
+      return(invisible(NULL))
+    }
+    target_hits <- sum(cal$n_hit, na.rm = TRUE)
+    decoy_rate  <- stats::weighted.mean(cal$decoy_hit_rate, cal$n, na.rm = TRUE)
+    ok <- cal[is.finite(cal$cum_fdr) & cal$cum_fdr < 0.05, , drop = FALSE]
+    rec <- if (nrow(ok) > 0) sprintf("%.2f", min(ok$bin)) else "—"
+    shinyjs::html("denovo_decoy_fdr_callout", as.character(
+      div(class = "alert alert-success",
+        tags$h5(icon("chart-line"), " Shuffled-decoy FDR (vs nr)"),
+        tags$p(sprintf("%s target peptides with an nr hit; mean shuffled-decoy hit-rate %.4f%%.",
+                       format(target_hits, big.mark = ","), decoy_rate)),
+        tags$p(tags$b("Lowest Casanovo score with cumulative FDR < 5%: "), rec,
+               " — decoys essentially never hit, so nr matches are real sequence ",
+               "matches at any score (the score reflects de novo sequence quality, ",
+               "not false hits)."))))
+  })
 
   # --- Summary cards ---
   output$dda_blast_summary_cards <- renderUI({
