@@ -3469,8 +3469,27 @@ echo "[DIAMOND] Done: $(date)"
       }
     }
 
-    # Parse species from SwissProt IDs if not already done
-    if (!"species" %in% names(blast)) {
+    # --- Species attribution (single source of truth) ---
+    # NCBI nr accessions (XP_/NP_/WP_/YP_…) carry NO `_SPECIES` mnemonic, so the
+    # UniProt-style "text after the last underscore" parse produces garbage
+    # (XP_025773238.1 -> "025773238.1"). When the taxonomy-aware per-peptide LCA
+    # table is loaded it is the authoritative species/clade source — join it on
+    # the canonical (mods-stripped, I/L-normalized) peptide key. UniProt searches
+    # (no LCA table) fall back to the mnemonic parse. One definition of "species
+    # for a de novo peptide" — CLAUDE.md architectural rule #3.
+    lca_tbl <- values$dda_lca
+    if (!is.null(lca_tbl) && nrow(lca_tbl) > 0 &&
+        all(c("peptide", "lca_name") %in% names(lca_tbl))) {
+      bkey <- gsub("I", "L", build_dda_canonical_peptide(blast$peptide))
+      lkey <- gsub("I", "L", build_dda_canonical_peptide(lca_tbl$peptide))
+      mi <- match(bkey, lkey)
+      blast$species      <- lca_tbl$lca_name[mi]
+      blast$lca_rank     <- if ("lca_rank"   %in% names(lca_tbl)) lca_tbl$lca_rank[mi]   else NA_character_
+      blast$lca_category <- if ("category"   %in% names(lca_tbl)) lca_tbl$category[mi]   else NA_character_
+      blast$diagnostic   <- if ("diagnostic" %in% names(lca_tbl)) lca_tbl$diagnostic[mi] else NA_integer_
+      blast$species[is.na(blast$species)] <- "Unresolved"
+    } else if (!"species" %in% names(blast)) {
+      # UniProt mnemonic fallback: sp|ACC|PROT_SPECIES -> SPECIES
       blast$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
     }
     if (!"category" %in% names(blast)) {
