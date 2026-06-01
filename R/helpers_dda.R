@@ -49,6 +49,26 @@ dda_blast_species <- function(peptide, subject, lca_tbl = NULL) {
   sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", subject))
 }
 
+#' NCBI Taxonomy Browser link for a taxon — HTML <a>, opens in a new tab.
+#'
+#' Returns the plain name when the taxid is missing. Intended for DT columns
+#' rendered with `escape = FALSE`; taxon names come from our own LCA table so
+#' there is no untrusted HTML.
+#'
+#' @param name character vector of taxon names
+#' @param taxid character/numeric vector of NCBI taxids (same length)
+#' @return character vector of HTML anchors (or plain names where no taxid)
+ncbi_tax_link <- function(name, taxid) {
+  name <- as.character(name); taxid <- as.character(taxid)
+  out <- name
+  has <- !is.na(name) & nzchar(name) & !is.na(taxid) & nzchar(taxid) & taxid != "0"
+  out[has] <- sprintf(
+    paste0('<a href="https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=%s"',
+           ' target="_blank" rel="noopener">%s</a>'),
+    taxid[has], name[has])
+  out
+}
+
 #' Build the de novo Master Table — pure join, no Shiny (so it is unit-testable).
 #'
 #' One row per de novo peptide on the single canonical key
@@ -99,8 +119,8 @@ build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
     ldt <- data.table::as.data.table(lca)
     ldt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(ldt$peptide))
     ldt <- ldt[!duplicated(ldt$seq_norm), ]
-    cols <- intersect(c("seq_norm", "lca_name", "lca_rank", "category",
-                        "top_pident", "diagnostic"), names(ldt))
+    cols <- intersect(c("seq_norm", "lca_taxid", "lca_name", "lca_rank",
+                        "category", "top_pident", "diagnostic"), names(ldt))
     pep <- merge(pep, ldt[, cols, with = FALSE], by = "seq_norm", all.x = TRUE)
   }
   ren <- c(lca_name = "Species_or_clade", lca_rank = "Rank",

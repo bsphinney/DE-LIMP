@@ -3604,7 +3604,10 @@ echo "[DIAMOND] Done: $(date)"
     lca <- lca_filtered()
     req(lca, nrow(lca) > 0)
     ord <- if ("top_pident" %in% names(lca)) order(-lca$top_pident) else seq_len(nrow(lca))
-    DT::datatable(lca[ord, , drop = FALSE], rownames = FALSE, filter = "top",
+    d <- lca[ord, , drop = FALSE]
+    if (all(c("lca_name", "lca_taxid") %in% names(d)))
+      d$lca_name <- ncbi_tax_link(d$lca_name, d$lca_taxid)
+    DT::datatable(d, rownames = FALSE, filter = "top", escape = FALSE,
                   options = list(pageLength = 25, scrollX = TRUE))
   })
 
@@ -3683,14 +3686,17 @@ echo "[DIAMOND] Done: $(date)"
   output$denovo_master_table <- DT::renderDT({
     m <- denovo_master_filtered()
     req(nrow(m) > 0)
-    show <- m[, setdiff(names(m), "seq_norm"), drop = FALSE]
+    # Linkify the taxon to its NCBI Taxonomy page (new tab), then drop the raw taxid.
+    if (all(c("Species_or_clade", "lca_taxid") %in% names(m)))
+      m$Species_or_clade <- ncbi_tax_link(m$Species_or_clade, m$lca_taxid)
+    show <- m[, setdiff(names(m), c("seq_norm", "lca_taxid")), drop = FALSE]
     pref <- intersect(c("Peptide", "Casanovo_score", "Found_by_Sage",
                         "Species_or_clade", "Rank", "Type", "Best_pct_ID",
                         "Diagnostic", "Sage_protein", "n_PSMs"), names(show))
     show <- show[, c(pref, setdiff(names(show), pref)), drop = FALSE]
     if ("Best_pct_ID" %in% names(show))
       show <- show[order(-replace(show$Best_pct_ID, is.na(show$Best_pct_ID), -1)), ]
-    dt <- DT::datatable(show, rownames = FALSE, filter = "top",
+    dt <- DT::datatable(show, rownames = FALSE, filter = "top", escape = FALSE,
                         options = list(pageLength = 25, scrollX = TRUE))
     if ("Type" %in% names(show))
       dt <- DT::formatStyle(dt, "Type", backgroundColor = DT::styleEqual(
