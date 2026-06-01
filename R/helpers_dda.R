@@ -111,6 +111,70 @@ build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
   as.data.frame(pep)
 }
 
+#' Calibrate the Casanovo confidence score against nr BLAST outcome — and, when
+#' a shuffled-decoy BLAST is supplied, estimate the empirical FDR per cutoff.
+#'
+#' For each Casanovo score bin: how many de novo peptides got an nr hit
+#' (target hit-rate) and the mean %identity of those hits. The decoy BLAST
+#' (same peptides, residues shuffled) gives the by-chance hit-rate, so
+#'   FDR(bin) = decoy_hit_rate / target_hit_rate
+#' and a sensible cutoff is the lowest score whose CUMULATIVE FDR (peptides at
+#' or above that score) is below the target (e.g. 0.05). Pure + testable.
+#'
+#' @param classified Casanovo PSMs (seq_stripped/sequence + score)
+#' @param blast      target nr BLAST hits (peptide/query + pident/identity)
+#' @param decoy_blast optional shuffled-decoy nr BLAST (same columns)
+#' @param bin numeric bin width (default 0.1)
+#' @return data.frame: bin, n, n_hit, hit_rate, mean_pident
+#'         [+ decoy_hit_rate, fdr, cum_fdr when decoy_blast supplied]
+build_denovo_score_calibration <- function(classified, blast,
+                                           decoy_blast = NULL, bin = 0.1) {
+  if (is.null(classified) || nrow(classified) == 0) return(data.frame())
+  cas <- data.table::as.data.table(classified)
+  base <- if ("seq_stripped" %in% names(cas)) cas$seq_stripped else cas$sequence
+  cas$k <- gsub("I", "L", build_dda_canonical_peptide(base))
+  if (!"score" %in% names(cas)) cas$score <- NA_real_
+  sc <- cas[, list(score = suppressWarnings(max(score, na.rm = TRUE))), by = "k"]
+  sc <- sc[is.finite(sc$score), ]
+  if (nrow(sc) == 0) return(data.frame())
+
+  best_pid <- function(b) {
+    empty <- data.table::data.table(k = character(0), pid = numeric(0))
+    if (is.null(b) || nrow(b) == 0) return(empty)
+    bt <- data.table::as.data.table(b)
+    pcol <- if ("pident" %in% names(bt)) "pident" else if ("identity" %in% names(bt)) "identity" else NA
+    kcol <- if ("peptide" %in% names(bt)) "peptide" else if ("query" %in% names(bt)) "query" else NA
+    if (is.na(pcol) || is.na(kcol)) return(empty)
+    bt$k <- gsub("I", "L", build_dda_canonical_peptide(bt[[kcol]]))
+    bt[, list(pid = max(get(pcol), na.rm = TRUE)), by = "k"]
+  }
+
+  tpid <- best_pid(blast)
+  sc$bin <- floor(sc$score / bin) * bin
+  sc$hit <- sc$k %in% tpid$k
+  sc$pid <- tpid$pid[match(sc$k, tpid$k)]
+  agg <- sc[, list(n = .N, n_hit = sum(hit),
+                   hit_rate = 100 * mean(hit),
+                   mean_pident = mean(pid[hit], na.rm = TRUE)), by = "bin"]
+  agg <- agg[order(-agg$bin), ]
+
+  if (!is.null(decoy_blast)) {
+    dpid <- best_pid(decoy_blast)
+    sc$dhit <- sc$k %in% dpid$k
+    dagg <- sc[, list(decoy_hit_rate = 100 * mean(dhit)), by = "bin"]
+    agg <- merge(agg, dagg, by = "bin", all.x = TRUE)
+    agg <- agg[order(-agg$bin), ]
+    agg$fdr <- ifelse(agg$hit_rate > 0,
+                      pmin(1, agg$decoy_hit_rate / agg$hit_rate), NA_real_)
+    # cumulative FDR for peptides at-or-above each bin (decoy hits / target hits)
+    agg$cum_target <- cumsum(agg$n_hit)
+    cum_decoy <- cumsum((agg$decoy_hit_rate / 100) * agg$n)
+    agg$cum_fdr <- ifelse(agg$cum_target > 0,
+                          pmin(1, cum_decoy / agg$cum_target), NA_real_)
+  }
+  as.data.frame(agg)
+}
+
 #' TRUE for each protein group that is ENTIRELY contaminant — every accession
 #' carries the `Cont_` tag stamped by the contaminant FASTA appended at search
 #' time. Single definition used by the Results-page PSM filter and the de novo

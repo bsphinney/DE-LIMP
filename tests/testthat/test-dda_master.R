@@ -85,3 +85,34 @@ test_that("build_denovo_master returns empty frame on empty input", {
   expect_equal(nrow(build_denovo_master(NULL)), 0)
   expect_equal(nrow(build_denovo_master(data.frame())), 0)
 })
+
+test_that("build_denovo_score_calibration: target hit-rate + decoy FDR", {
+  classified <- data.frame(
+    seq_stripped = c("HIGHAAAAK", "HIGHBBBBR", "MIDCCCCK", "MIDDDDDR",
+                     "LOWEEEEK", "LOWFFFFR"),
+    score = c(0.9, 0.8, 0.4, 0.3, -0.5, -0.6),
+    match_type = "novel", stringsAsFactors = FALSE)
+  blast <- data.frame(peptide = c("HIGHAAAAK", "HIGHBBBBR", "MIDCCCCK", "MIDDDDDR"),
+                      pident = c(98, 95, 92, 90), stringsAsFactors = FALSE)
+  decoy <- data.frame(peptide = "LOWEEEEK", pident = 82, stringsAsFactors = FALSE)
+
+  cal <- build_denovo_score_calibration(classified, blast, decoy, bin = 0.5)
+  expect_true(all(c("hit_rate", "mean_pident", "decoy_hit_rate", "fdr", "cum_fdr")
+                  %in% names(cal)))
+  # peptides at/above 0 are all real (no decoy hits) -> cum FDR 0
+  hi <- cal[cal$bin >= 0, ]
+  expect_true(all(hi$cum_fdr == 0 | is.na(hi$cum_fdr)))
+  # including the negative bins pulls in a decoy hit -> cum FDR rises
+  expect_true(max(cal$cum_fdr, na.rm = TRUE) > 0)
+})
+
+test_that("build_denovo_score_calibration: target-only (no decoy) omits FDR", {
+  classified <- data.frame(seq_stripped = c("AAAAAAAK", "BBBBBBBR"),
+                           score = c(0.7, 0.2), match_type = "novel",
+                           stringsAsFactors = FALSE)
+  blast <- data.frame(peptide = "AAAAAAAK", pident = 95, stringsAsFactors = FALSE)
+  cal <- build_denovo_score_calibration(classified, blast, NULL, bin = 0.5)
+  expect_true("hit_rate" %in% names(cal))
+  expect_false("fdr" %in% names(cal))
+  expect_equal(nrow(build_denovo_score_calibration(NULL, NULL)), 0)
+})
