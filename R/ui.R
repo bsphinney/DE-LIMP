@@ -2745,8 +2745,11 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             div(style = "display: flex; align-items: center; gap: 16px; flex-wrap: wrap;",
               div(style = "flex: 0 0 340px;",
                 sliderInput("dda_denovo_score_threshold",
-                  label = tags$span(icon("sliders-h"), " Confidence Threshold"),
-                  min = 0.5, max = 1.0, value = 0.9, step = 0.01, width = "100%")
+                  label = tags$span(icon("sliders-h"), " Casanovo confidence ≥"),
+                  min = -1, max = 1.0, value = 0, step = 0.05, width = "100%"),
+                tags$small(style = "color:#6c757d; display:block; margin-top:-4px;",
+                  "Casanovo score −1 to 1 · ≥0 keeps mass-consistent predictions ",
+                  "(drops precursor-mass mismatches) · 0.9 ≈ 97% accuracy")
               ),
               div(style = "flex: 1; min-width: 200px;",
                 uiOutput("dda_denovo_threshold_count")

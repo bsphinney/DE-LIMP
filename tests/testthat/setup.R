@@ -13,6 +13,10 @@ source(file.path(project_root, "R", "helpers.R"))
 # Load helpers_search.R (build_diann_flags, parse_sbatch_output, etc.)
 source(file.path(project_root, "R", "helpers_search.R"))
 
+# Load helpers_dda.R (build_dda_canonical_peptide, dda_blast_species,
+# build_denovo_master, contaminant/skin-hair filters) — pure functions
+source(file.path(project_root, "R", "helpers_dda.R"))
+
 # Load helpers_phospho.R (parse_phospho_positions)
 source(file.path(project_root, "R", "helpers_phospho.R"))
 

@@ -3552,7 +3552,7 @@ echo "[DIAMOND] Done: $(date)"
   novel_thresholded <- reactive({
     n <- values$dda_casanovo_classification$novel
     if (is.null(n) || nrow(n) == 0) return(n)
-    thr <- input$dda_denovo_score_threshold %||% 0.9
+    thr <- input$dda_denovo_score_threshold %||% 0
     if ("score" %in% names(n)) n[n$score >= thr, , drop = FALSE] else n
   })
 
@@ -3653,7 +3653,7 @@ echo "[DIAMOND] Done: $(date)"
     lcat <- values$dda_lca
     req(lcat, nrow(lcat) > 0)
     sc <- casanovo_pep_score()
-    thr <- input$dda_denovo_score_threshold %||% 0.9
+    thr <- input$dda_denovo_score_threshold %||% 0
     if (!is.null(sc) && "peptide" %in% names(lcat)) {
       lkey <- gsub("I", "L", build_dda_canonical_peptide(lcat$peptide))
       sco  <- sc$best_score[match(lkey, sc$seq_norm)]
@@ -3667,56 +3667,14 @@ echo "[DIAMOND] Done: $(date)"
     values$denovo_session_trigger
     cls <- values$dda_casanovo_classification
     req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
-    cas <- data.table::as.data.table(cls$classified)
-    base_seq <- if ("seq_stripped" %in% names(cas)) cas$seq_stripped else cas$sequence
-    if (!"seq_norm" %in% names(cas))
-      cas$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(base_seq))
-    if (!"score" %in% names(cas)) cas$score <- NA_real_
-    if (!"match_type" %in% names(cas)) cas$match_type <- "novel"
-    cas$disp_seq <- base_seq
-    pep <- cas[, list(
-      Peptide       = disp_seq[1],
-      Confidence    = suppressWarnings(round(max(score, na.rm = TRUE), 3)),
-      n_PSMs        = .N,
-      Found_by_Sage = any(match_type == "confirmed")
-    ), by = "seq_norm"]
-    pep$Confidence[!is.finite(pep$Confidence)] <- NA_real_
-
-    # Sage protein per peptide
-    sage <- values$dda_sage_psms
-    if (!is.null(sage) && all(c("peptide", "proteins") %in% names(sage))) {
-      sdt <- data.table::as.data.table(sage)
-      sdt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(sdt$peptide))
-      sdt <- sdt[!duplicated(sdt$seq_norm), ]
-      pep <- merge(pep, sdt[, list(seq_norm, Sage_protein = proteins)],
-                   by = "seq_norm", all.x = TRUE)
-    } else {
-      pep$Sage_protein <- NA_character_
-    }
-
-    # nr LCA attribution per peptide
-    lcat <- values$dda_lca
-    if (!is.null(lcat) && all(c("peptide", "lca_name") %in% names(lcat))) {
-      ldt <- data.table::as.data.table(lcat)
-      ldt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(ldt$peptide))
-      ldt <- ldt[!duplicated(ldt$seq_norm), ]
-      cols <- intersect(c("seq_norm", "lca_name", "lca_rank", "category",
-                          "top_pident", "diagnostic"), names(ldt))
-      pep <- merge(pep, ldt[, cols, with = FALSE], by = "seq_norm", all.x = TRUE)
-    }
-    ren <- c(lca_name = "Species_or_clade", lca_rank = "Rank",
-             category = "Type", top_pident = "Best_pct_ID",
-             diagnostic = "Diagnostic")
-    for (k in names(ren)) if (k %in% names(pep)) data.table::setnames(pep, k, ren[[k]])
-    if ("Diagnostic" %in% names(pep)) pep$Diagnostic <- pep$Diagnostic %in% c(1, "1", TRUE)
-    as.data.frame(pep)
+    build_denovo_master(cls$classified, values$dda_sage_psms, values$dda_lca)
   })
 
   # Master gated by the confidence slider (hide low-confidence by default).
   denovo_master_filtered <- reactive({
     m <- denovo_master()
     req(nrow(m) > 0)
-    thr <- input$dda_denovo_score_threshold %||% 0.9
+    thr <- input$dda_denovo_score_threshold %||% 0
     if ("Confidence" %in% names(m) && any(is.finite(m$Confidence)))
       m <- m[is.na(m$Confidence) | m$Confidence >= thr, , drop = FALSE]
     m

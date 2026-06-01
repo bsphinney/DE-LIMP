@@ -5,6 +5,17 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.25] — 2026-06-01
+
+### Fixed
+- **Confidence slider was hiding 100% of the species signal.** Casanovo's `search_engine_score` runs −1..+1 (negative = precursor mass-mismatch; 0.9 ≈ 97% accuracy), but the slider was min 0.5 / default 0.9 — and **0 of 9,826 nr-hit peptides score ≥0.9**, so the LCA tab + Master Table came up empty. Reset the slider to Casanovo's real scale (min −1, default **0** = mass-consistent, step 0.05) with an explanatory caption; updated all `%||%` fallbacks to 0. At ≥0, 2,826 species peptides now show; calibration confirms BLAST hit-rate + %identity climb monotonically with the score.
+
+### Changed
+- **Extracted `build_denovo_master()`** (pure, in `helpers_dda.R`) from the Master Table reactive so the Sage/Casanovo/LCA join is unit-testable.
+
+### Added
+- **Unit tests** (`tests/testthat/test-dda_master.R`) for `build_dda_canonical_peptide`, `dda_blast_species` (NCBI-not-mangled + UniProt fallback + I/L join), and `build_denovo_master` (join, dedup, negative-score retention, missing-Sage/LCA tolerance). `setup.R` now sources `helpers_dda.R`.
+
 ## [3.11.24] — 2026-06-01
 
 ### Fixed

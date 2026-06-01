@@ -49,6 +49,68 @@ dda_blast_species <- function(peptide, subject, lca_tbl = NULL) {
   sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", subject))
 }
 
+#' Build the de novo Master Table — pure join, no Shiny (so it is unit-testable).
+#'
+#' One row per de novo peptide on the single canonical key
+#' `gsub("I","L", build_dda_canonical_peptide(seq))`, combining:
+#'   - Casanovo: best confidence + n PSMs + whether any PSM was Sage-confirmed
+#'   - Sage:     the protein the peptide maps to (NA if de-novo-only)
+#'   - nr LCA:   species/clade, rank, category, best %ID, diagnostic flag
+#'
+#' NOTE on confidence: Casanovo's `search_engine_score` runs roughly -1..+1, and
+#' species-diagnostic peptides for a non-model organism cluster in the MID range
+#' (~0.5-0.9), NOT at the top — so a high slider default can hide the entire nr
+#' signal. Filtering is left to the caller; `Confidence` is returned per row.
+#'
+#' @param classified data.frame/data.table of Casanovo PSMs (cols: seq_stripped
+#'        or sequence, score, match_type; seq_norm optional)
+#' @param sage_psms  optional Sage PSM table (cols: peptide, proteins)
+#' @param lca        optional per-peptide LCA table (cols: peptide, lca_name,
+#'        lca_rank, category, top_pident, diagnostic)
+#' @return data.frame with seq_norm + biologist-facing columns
+build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL) {
+  if (is.null(classified) || nrow(classified) == 0)
+    return(data.frame())
+  cas <- data.table::as.data.table(classified)
+  base_seq <- if ("seq_stripped" %in% names(cas)) cas$seq_stripped else cas$sequence
+  cas$seq_norm  <- gsub("I", "L", build_dda_canonical_peptide(base_seq))
+  if (!"score" %in% names(cas)) cas$score <- NA_real_
+  if (!"match_type" %in% names(cas)) cas$match_type <- "novel"
+  cas$disp_seq <- base_seq
+  pep <- cas[, list(
+    Peptide       = disp_seq[1],
+    Confidence    = suppressWarnings(round(max(score, na.rm = TRUE), 3)),
+    n_PSMs        = .N,
+    Found_by_Sage = any(match_type == "confirmed")
+  ), by = "seq_norm"]
+  pep$Confidence[!is.finite(pep$Confidence)] <- NA_real_
+
+  if (!is.null(sage_psms) && all(c("peptide", "proteins") %in% names(sage_psms))) {
+    sdt <- data.table::as.data.table(sage_psms)
+    sdt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(sdt$peptide))
+    sdt <- sdt[!duplicated(sdt$seq_norm), ]
+    pep <- merge(pep, sdt[, list(seq_norm, Sage_protein = proteins)],
+                 by = "seq_norm", all.x = TRUE)
+  } else {
+    pep$Sage_protein <- NA_character_
+  }
+
+  if (!is.null(lca) && all(c("peptide", "lca_name") %in% names(lca))) {
+    ldt <- data.table::as.data.table(lca)
+    ldt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(ldt$peptide))
+    ldt <- ldt[!duplicated(ldt$seq_norm), ]
+    cols <- intersect(c("seq_norm", "lca_name", "lca_rank", "category",
+                        "top_pident", "diagnostic"), names(ldt))
+    pep <- merge(pep, ldt[, cols, with = FALSE], by = "seq_norm", all.x = TRUE)
+  }
+  ren <- c(lca_name = "Species_or_clade", lca_rank = "Rank",
+           category = "Type", top_pident = "Best_pct_ID",
+           diagnostic = "Diagnostic")
+  for (k in names(ren)) if (k %in% names(pep)) data.table::setnames(pep, k, ren[[k]])
+  if ("Diagnostic" %in% names(pep)) pep$Diagnostic <- pep$Diagnostic %in% c(1, "1", TRUE)
+  as.data.frame(pep)
+}
+
 #' TRUE for each protein group that is ENTIRELY contaminant — every accession
 #' carries the `Cont_` tag stamped by the contaminant FASTA appended at search
 #' time. Single definition used by the Results-page PSM filter and the de novo

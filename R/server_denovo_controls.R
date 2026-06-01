@@ -27,7 +27,7 @@ server_denovo_controls <- function(input, output, session, values) {
     req(psms)
     req(nrow(psms) > 0)
 
-    threshold <- input$dda_denovo_score_threshold %||% 0.9
+    threshold <- input$dda_denovo_score_threshold %||% 0
     result <- psms[psms$score >= threshold, ]
     message("[denovo_controls] filtered: ", nrow(result), " PSMs above threshold ", threshold)
     result
@@ -77,7 +77,7 @@ server_denovo_controls <- function(input, output, session, values) {
       # Restrict it to PSMs above the current confidence threshold so summary /
       # per-sample counts (Confirmed, Novel) stay consistent with the slider and
       # with "Above Threshold". (Before all-PSM loading these always agreed.)
-      thr <- input$dda_denovo_score_threshold %||% 0.9
+      thr <- input$dda_denovo_score_threshold %||% 0
       cls <- values$denovo_classification
       if (!is.null(cls$confirmed) && "score" %in% names(cls$confirmed))
         cls$confirmed <- cls$confirmed[cls$confirmed$score >= thr, , drop = FALSE]
@@ -138,7 +138,7 @@ server_denovo_controls <- function(input, output, session, values) {
   output$dda_denovo_threshold_count <- renderUI({
     req(values$dda_casanovo_psms)
     total_all <- nrow(values$dda_casanovo_psms)
-    threshold <- input$dda_denovo_score_threshold %||% 0.9
+    threshold <- input$dda_denovo_score_threshold %||% 0
 
     n_above <- sum(values$dda_casanovo_psms$score >= threshold, na.rm = TRUE)
     pct <- round(100 * n_above / max(total_all, 1), 1)
@@ -226,7 +226,7 @@ server_denovo_controls <- function(input, output, session, values) {
         tags$div(class = "card text-center",
           style = "background: #f8f9fa; border-left: 4px solid #e74c3c; padding: 15px;",
           tags$h4(
-            sprintf("%.2f", input$dda_denovo_score_threshold %||% 0.9),
+            sprintf("%.2f", input$dda_denovo_score_threshold %||% 0),
             style = "margin: 0; color: #e74c3c;"
           ),
           tags$small("Score Cutoff")
@@ -278,7 +278,7 @@ server_denovo_controls <- function(input, output, session, values) {
       caption = htmltools::tags$caption(
         style = "caption-side: top; font-weight: bold; color: #2ecc71;",
         paste0("Confirmed peptides (score >= ",
-               input$dda_denovo_score_threshold %||% 0.9, ")")
+               input$dda_denovo_score_threshold %||% 0, ")")
       )
     )
   })
@@ -334,7 +334,7 @@ server_denovo_controls <- function(input, output, session, values) {
       caption = htmltools::tags$caption(
         style = "caption-side: top; color: #e67e22; font-weight: bold;",
         paste0("Novel peptides (score >= ",
-               input$dda_denovo_score_threshold %||% 0.9, ")")
+               input$dda_denovo_score_threshold %||% 0, ")")
       )
     )
   })
@@ -348,7 +348,7 @@ server_denovo_controls <- function(input, output, session, values) {
 
     # Use ALL PSMs for histogram, but show threshold line
     df <- values$dda_casanovo_psms
-    threshold <- input$dda_denovo_score_threshold %||% 0.9
+    threshold <- input$dda_denovo_score_threshold %||% 0
 
     cls <- filtered_classification()
     confirmed_seqs <- if (!is.null(cls)) cls$confirmed$seq_norm else character(0)
@@ -515,7 +515,7 @@ server_denovo_controls <- function(input, output, session, values) {
       caption = htmltools::tags$caption(
         style = "caption-side: top; font-weight: bold; color: #2d6a2d;",
         paste0("Per-sample summary (score >= ",
-               input$dda_denovo_score_threshold %||% 0.9, ")")
+               input$dda_denovo_score_threshold %||% 0, ")")
       )
     ) %>%
       DT::formatStyle(
