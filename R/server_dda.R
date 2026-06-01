@@ -5073,8 +5073,9 @@ echo "[DIAMOND] Done: $(date)"
             hits$protein[no_match] <- hits$subject[no_match]
           }
 
-          # Extract species from SwissProt ID: sp|P12345|PROT_SPECIES -> SPECIES
-          hits$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", hits$subject))
+          # Species via the single taxonomy-aware definition (LCA join when an
+          # nr LCA table is loaded; UniProt mnemonic otherwise).
+          hits$species <- dda_blast_species(hits$peptide, hits$subject, values$dda_lca)
           # Classify by identity
           hits$category <- ifelse(
             hits$identity >= 100, "Conserved",

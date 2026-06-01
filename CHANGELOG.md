@@ -5,6 +5,11 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.24] — 2026-06-01
+
+### Fixed
+- **Species column still wrong in BLAST Alignment + alignment detail.** v3.11.21 only fixed `blast_with_species()`; five other sites re-parsed species from the accession independently (`sub('.*_','',subject)` → `025773238.1` on nr accessions). Added one shared `dda_blast_species(peptide, subject, lca_tbl)` helper (taxonomy-aware LCA join, UniProt-mnemonic fallback) and routed the active de novo views at it: BLAST Alignment table + alignment detail (`server_denovo_viz.R`) and the fresh-BLAST handler (`server_dda.R`). Single definition — CLAUDE.md rule #3.
+
 ## [3.11.23] — 2026-06-01
 
 ### Changed

@@ -210,7 +210,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
     # Build display data
     near$accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", near$subject)
     near$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", near$subject))
-    near$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", near$subject))
+    near$species <- dda_blast_species(near[[pep_col]], near$subject, values$dda_lca)
 
     data.frame(
       Peptide = near[[pep_col]],
@@ -312,7 +312,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
     # Parse protein name from SwissProt format
     protein_name <- sub("^[a-z]+\\|[^|]+\\|", "", subject)
     accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", subject)
-    species <- sub(".*_", "", protein_name)
+    species <- dda_blast_species(peptide, subject, values$dda_lca)
     protein_name_clean <- sub("_[^_]+$", "", protein_name)
 
     alignment_html <- render_blast_alignment(

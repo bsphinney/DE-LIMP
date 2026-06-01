@@ -23,6 +23,32 @@ build_dda_canonical_peptide <- function(x) {
   toupper(gsub("[^A-Za-z]", "", x))        # drop hyphens, dots, digits, spaces
 }
 
+#' Taxonomy-aware species/clade for a de novo BLAST hit — THE single definition.
+#'
+#' NCBI nr accessions (XP_/NP_/WP_/YP_…) carry no `_SPECIES` mnemonic, so the
+#' UniProt-style "text after the last underscore" parse yields garbage
+#' (`XP_025773238.1` -> `025773238.1`). When a per-peptide nr LCA table is
+#' available it is authoritative — join on the canonical (mods-stripped,
+#' I/L-normalized) peptide. Otherwise fall back to the UniProt mnemonic. Every
+#' de novo view that needs a species must call this, never re-parse the subject
+#' (CLAUDE.md architectural rule #3).
+#'
+#' @param peptide character vector of peptide sequences (the BLAST query)
+#' @param subject character vector of BLAST subject accessions (same length)
+#' @param lca_tbl optional data.frame with `peptide` + `lca_name` columns
+#' @return character vector of species/clade names (same length as `subject`)
+dda_blast_species <- function(peptide, subject, lca_tbl = NULL) {
+  if (!is.null(lca_tbl) && nrow(lca_tbl) > 0 &&
+      all(c("peptide", "lca_name") %in% names(lca_tbl))) {
+    key  <- gsub("I", "L", build_dda_canonical_peptide(peptide))
+    lkey <- gsub("I", "L", build_dda_canonical_peptide(lca_tbl$peptide))
+    out  <- lca_tbl$lca_name[match(key, lkey)]
+    out[is.na(out)] <- "Unresolved"
+    return(out)
+  }
+  sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", subject))
+}
+
 #' TRUE for each protein group that is ENTIRELY contaminant — every accession
 #' carries the `Cont_` tag stamped by the contaminant FASTA appended at search
 #' time. Single definition used by the Results-page PSM filter and the de novo
