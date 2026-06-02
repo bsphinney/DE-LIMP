@@ -118,6 +118,27 @@ test_that("build_denovo_score_calibration: target hit-rate + decoy FDR", {
   expect_true(max(cal$cum_fdr, na.rm = TRUE) > 0)
 })
 
+test_that("parse_btop reconstructs the gapped alignment from btop + qseq", {
+  expect_equal(parse_btop("20", "ACDEFGHIKLMNPQRSTVWY")$qaln, "ACDEFGHIKLMNPQRSTVWY")
+  m <- parse_btop("6QH13", "AAAAAAQAAAAAAAAAAAAA")        # 6 match, Q->H, 13 match
+  expect_equal(nchar(m$qaln), 20); expect_equal(nchar(m$saln), 20)
+  expect_equal(substr(m$qaln, 7, 7), "Q"); expect_equal(substr(m$saln, 7, 7), "H")
+  g <- parse_btop("3-S4", "ACDEFGH")                      # gap in query
+  expect_true(grepl("-", g$qaln)); expect_equal(nchar(g$qaln), nchar(g$saln))
+})
+
+test_that("compute_cwi: low-confidence mismatches barely penalize (the 'good hit' case)", {
+  aln <- parse_btop("6QH13", "AAAAAAQAAAAAAAAAAAAA")
+  aa <- rep(0.99, 20); aa[7] <- 0.30                      # the only mismatch is low-confidence
+  cw <- compute_cwi(aln$qaln, aln$saln, aa, qstart = 1)
+  expect_true(cw$cwi >= 95)                               # high CWI despite a mismatch
+  expect_equal(cw$hca, 100)                               # every high-confidence residue agrees
+  # opposite: a HIGH-confidence mismatch should drag CWI + HCA down
+  aa2 <- rep(0.99, 20)                                    # mismatch position now high-confidence
+  cw2 <- compute_cwi(aln$qaln, aln$saln, aa2, qstart = 1)
+  expect_true(cw2$cwi < cw$cwi); expect_true(cw2$hca < 100)
+})
+
 test_that("build_denovo_score_calibration: min_length drops short peptides from BOTH sides", {
   classified <- data.frame(
     seq_stripped = c("SHORTK", "LONGPEPTIDEAAAK", "LONGPEPTIDEBBBR"),

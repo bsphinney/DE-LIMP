@@ -114,6 +114,82 @@ dda_protein_label <- function(subject) {
   out
 }
 
+#' Reconstruct the REAL gapped alignment from a DIAMOND/BLAST `btop` string + the
+#' ungapped aligned query (`qseq`). btop tokens: an integer = that many matches;
+#' a 2-char token = a non-match (query char, subject char), where `-` marks a gap.
+#' Matched stretches are filled from the query (match ⇒ same residue). Returns the
+#' aligned query + subject (equal length, `-` for gaps). No fabrication — purely
+#' decodes what DIAMOND reported.
+#'
+#' @param btop traceback string (e.g. "20", "6QH13", "3-S4", "Q-")
+#' @param qseq ungapped aligned query residues (DIAMOND qseq)
+#' @return list(qaln, saln) equal-length aligned strings, or NULL if unparseable
+parse_btop <- function(btop, qseq) {
+  bt <- as.character(btop)
+  if (length(bt) == 0 || is.na(bt) || !nzchar(bt)) return(NULL)
+  qres <- strsplit(toupper(as.character(qseq)), "")[[1]]
+  qi <- 0L; qa <- character(0); sa <- character(0)
+  toks <- regmatches(bt, gregexpr("[0-9]+|[A-Za-z*-]{2}", bt))[[1]]
+  for (t in toks) {
+    if (grepl("^[0-9]+$", t)) {
+      n <- as.integer(t)
+      if (n > 0) { seg <- qres[qi + seq_len(n)]; qa <- c(qa, seg); sa <- c(sa, seg); qi <- qi + n }
+    } else {
+      qch <- substr(t, 1, 1); sch <- substr(t, 2, 2)
+      if (qch == "-") {            # gap in query (insertion in subject)
+        qa <- c(qa, "-"); sa <- c(sa, sch)
+      } else {                      # mismatch, or gap in subject (sch == "-")
+        qi <- qi + 1L; qa <- c(qa, if (qi <= length(qres)) qres[qi] else qch); sa <- c(sa, sch)
+      }
+    }
+  }
+  list(qaln = paste(qa, collapse = ""), saln = paste(sa, collapse = ""))
+}
+
+#' Confidence-weighted identity (CWI) for a de novo peptide vs a BLAST subject,
+#' computed ONLY from the REAL DIAMOND alignment (qseq/sseq) — never from guessed
+#' positions (CLAUDE.md / feedback: never fabricate viz data).
+#'
+#' Each aligned query residue is weighted by its Casanovo per-residue confidence.
+#' A match at a confident residue counts fully; a mismatch where Casanovo was
+#' unsure (a likely de novo sequencing error) barely penalizes. So a peptide
+#' whose differences fall only at low-confidence residues scores high even at low
+#' raw %identity — it formalizes "every residue the model was sure of agrees."
+#'
+#' @param qseq aligned query sequence (DIAMOND qseq; '-' = gap)
+#' @param sseq aligned subject sequence (DIAMOND sseq; '-' = gap)
+#' @param aa_scores numeric per-residue Casanovo confidence for the FULL peptide (0..1)
+#' @param qstart 1-based start of the alignment within the full peptide (DIAMOND qstart)
+#' @param hi_conf high-confidence threshold (default 0.95)
+#' @return list(cwi, hca, n_hi, n_pos): CWI %, high-confidence-agreement %,
+#'         # high-confidence aligned residues, # aligned query residues
+compute_cwi <- function(qseq, sseq, aa_scores = NULL, qstart = 1, hi_conf = 0.95) {
+  qc <- strsplit(toupper(as.character(qseq)), "")[[1]]
+  sc <- strsplit(toupper(as.character(sseq)), "")[[1]]
+  n <- min(length(qc), length(sc))
+  if (n == 0) return(list(cwi = NA_real_, hca = NA_real_, n_hi = 0L, n_pos = 0L))
+  qpos <- as.integer(qstart) - 1L
+  num <- 0; den <- 0; hi_match <- 0L; hi_tot <- 0L; npos <- 0L
+  for (i in seq_len(n)) {
+    qa <- qc[i]; sa <- sc[i]
+    if (qa == "-") next                          # insertion in subject; no query residue
+    qpos <- qpos + 1L
+    conf <- if (!is.null(aa_scores) && qpos <= length(aa_scores) && !is.na(aa_scores[qpos]))
+              aa_scores[qpos] else NA_real_
+    w <- if (is.na(conf)) 0.5 else max(0, conf)  # weight; clamp any negative to 0
+    is_match <- sa != "-" && (qa == sa || (qa %in% c("I", "L") && sa %in% c("I", "L")))
+    den <- den + w; npos <- npos + 1L
+    if (is_match) num <- num + w
+    if (!is.na(conf) && conf >= hi_conf) {
+      hi_tot <- hi_tot + 1L; if (is_match) hi_match <- hi_match + 1L
+    }
+  }
+  list(
+    cwi  = if (den > 0)    round(100 * num / den, 1)         else NA_real_,
+    hca  = if (hi_tot > 0) round(100 * hi_match / hi_tot, 1) else NA_real_,
+    n_hi = hi_tot, n_pos = npos)
+}
+
 #' Best BLAST hit per canonical peptide — alignment length, e-value, bitscore.
 #'
 #' "Best" = highest bitscore. Used to surface query coverage (alnlen / peptide
