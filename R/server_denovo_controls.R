@@ -156,9 +156,9 @@ server_denovo_controls <- function(input, output, session, values) {
       ),
       tags$br(),
       tags$span(style = "color: #2ecc71; font-weight: 500;",
-        icon("check-circle"), " ", format(n_conf, big.mark = ","), " confirmed"),
+        icon("check-circle"), " ", format(n_conf, big.mark = ","), " Sage + de novo"),
       tags$span(style = "margin-left: 12px; color: #e67e22; font-weight: 500;",
-        icon("question-circle"), " ", format(n_novel, big.mark = ","), " novel")
+        icon("question-circle"), " ", format(n_novel, big.mark = ","), " de novo only")
     )
   })
 
@@ -198,7 +198,7 @@ server_denovo_controls <- function(input, output, session, values) {
         tags$div(class = "card text-center",
           style = "background: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px;",
           tags$h4(format(n_confirmed, big.mark = ","), style = "margin: 0; color: #2ecc71;"),
-          tags$small("Sage DB hits")
+          tags$small("Sage + de novo")
         )
       ),
       tags$div(class = "col-md-2",
@@ -354,8 +354,8 @@ server_denovo_controls <- function(input, output, session, values) {
     confirmed_seqs <- if (!is.null(cls)) cls$confirmed$seq_norm else character(0)
 
     match_type <- ifelse(df$seq_norm %in% confirmed_seqs & df$score >= threshold,
-      "Confirmed",
-      ifelse(df$score >= threshold, "Novel (above)", "Below threshold")
+      "Sage + de novo",
+      ifelse(df$score >= threshold, "De novo only", "Below threshold")
     )
 
     plot_df <- data.frame(
@@ -364,7 +364,7 @@ server_denovo_controls <- function(input, output, session, values) {
       stringsAsFactors = FALSE
     )
 
-    colors <- c("Confirmed" = "#2ecc71", "Novel (above)" = "#e67e22",
+    colors <- c("Sage + de novo" = "#2ecc71", "De novo only" = "#e67e22",
                 "Below threshold" = "#bdc3c7")
 
     p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = score, fill = type)) +

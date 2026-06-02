@@ -3355,9 +3355,9 @@ echo "[DIAMOND] Done: $(date)"
           if (!is.null(cls)) {
             tags$div(
               style = "margin-top: 4px; font-size: 12px;",
-              tags$strong(cls$summary_stats$n_confirmed), " confirmed (",
+              tags$strong(cls$summary_stats$n_confirmed), " Sage + de novo (",
               cls$summary_stats$pct_confirmed, "%) | ",
-              tags$strong(cls$summary_stats$n_novel), " novel (",
+              tags$strong(cls$summary_stats$n_novel), " de novo only (",
               cls$summary_stats$pct_novel, "%)"
             )
           }
@@ -4786,11 +4786,11 @@ echo "[DIAMOND] Done: $(date)"
 
     plot_df <- data.frame(
       length = c(conf_lengths, novel_lengths),
-      type   = c(rep("Confirmed", length(conf_lengths)), rep("Novel", length(novel_lengths))),
+      type   = c(rep("Sage + de novo", length(conf_lengths)), rep("De novo only", length(novel_lengths))),
       stringsAsFactors = FALSE
     )
 
-    colors <- c("Confirmed" = "#2ecc71", "Novel" = "#e67e22")
+    colors <- c("Sage + de novo" = "#2ecc71", "De novo only" = "#e67e22")
 
     p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = length, fill = type)) +
       ggplot2::geom_histogram(bins = 30, alpha = 0.75, position = "dodge") +
@@ -4804,7 +4804,7 @@ echo "[DIAMOND] Done: $(date)"
         x = "Peptide Length (amino acids)",
         y = "Count",
         fill = "Type",
-        subtitle = sprintf("Confirmed: median %d aa | Novel: median %d aa",
+        subtitle = sprintf("Sage + de novo: median %d aa | de novo only: median %d aa",
           as.integer(median(conf_lengths)), as.integer(median(novel_lengths)))
       ) +
       ggplot2::theme_minimal() +
@@ -4823,12 +4823,12 @@ echo "[DIAMOND] Done: $(date)"
 
     plot_df <- data.frame(
       charge = c(confirmed$charge, novel$charge),
-      type   = c(rep("Confirmed", nrow(confirmed)), rep("Novel", nrow(novel))),
+      type   = c(rep("Sage + de novo", nrow(confirmed)), rep("De novo only", nrow(novel))),
       stringsAsFactors = FALSE
     )
     plot_df$charge <- factor(plot_df$charge)
 
-    colors <- c("Confirmed" = "#2ecc71", "Novel" = "#e67e22")
+    colors <- c("Sage + de novo" = "#2ecc71", "De novo only" = "#e67e22")
 
     p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = charge, fill = type)) +
       ggplot2::geom_bar(position = "dodge", alpha = 0.8) +
@@ -5216,7 +5216,7 @@ echo "[DIAMOND] Done: $(date)"
 
   observeEvent(input$denovo_confirmed_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " Sage DB hits"),
+      title = tagList(icon("question-circle"), " Sage + de novo (DB-confirmed)"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
         p("Peptides sequenced de novo by Casanovo that were also identified by database search (Sage)."),
