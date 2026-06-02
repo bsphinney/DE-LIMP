@@ -2961,9 +2961,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                     )
                   )
                 ),
-                # Feature 2: Top Diagnostic Peptides Summary Card (first thing users see)
-                uiOutput("dda_blast_diagnostic_card"),
-                # Summary cards
+                # (delta-based "Top Diagnostic Peptides" card retired — delta
+                #  became unreliable once species came from the per-peptide LCA;
+                #  diagnostic/conserved is now the Species (LCA) tab + Master Table.)
+                # Summary cards (de-novo-only / with-nr-hit / top species / mean identity)
                 uiOutput("dda_blast_summary_cards"),
                 # Taxonomy + Identity side by side
                 div(class = "row",
@@ -2977,15 +2978,10 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 # Species bar + summary text
                 uiOutput("dda_blast_species_summary"),
                 plotlyOutput("dda_blast_species_bar", height = "300px"),
-                # Feature 1: Species Resolution Bar Chart
-                tags$h5(icon("chart-bar"), " Species Resolution",
-                  style = "margin-top: 16px; color: #333;"),
-                tags$p(style = "color: #666; font-size: 0.88em; margin-bottom: 8px;",
-                  "Delta = (best species identity %) minus (second-best species identity %). ",
-                  "Peptides right of the dashed line (delta > 15%) are species-diagnostic ",
-                  "and can be used for species identification. ",
-                  "Peptides left of the line are conserved across species."),
-                plotlyOutput("dda_blast_species_resolution", height = "700px"),
+                # (delta-based Species Resolution plot retired — delta = best - 2nd
+                #  species was unreliable once species came from the per-peptide LCA
+                #  (no per-hit species variation), so it flagged everything diagnostic.
+                #  Use the Species (LCA) tab for diagnostic vs conserved.)
                 # Top proteins by peptide count
                 tags$h5("Top Proteins by De Novo Peptide Count", style = "margin-top: 16px;"),
                 plotlyOutput("dda_blast_top_proteins", height = "800px"),
