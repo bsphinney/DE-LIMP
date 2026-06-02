@@ -1490,8 +1490,9 @@ server_dda <- function(input, output, session, values, add_to_log) {
                 if (ncol(blast_df) >= length(col_names)) {
                   names(blast_df)[seq_along(col_names)] <- col_names
                 }
-                # Add species + category columns
-                blast_df$species <- sub(".*_", "", blast_df$subject)
+                # Placeholder species (UniProt-aware); blast_with_species() overwrites
+                # this from the per-peptide LCA when the LCA table is loaded.
+                blast_df$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", blast_df$subject))
                 blast_df$category <- ifelse(blast_df$pident >= 100, "Conserved",
                   ifelse(blast_df$pident >= 90, "Near-match", "Distant"))
                 # Best hit per peptide
@@ -3533,8 +3534,8 @@ echo "[DIAMOND] Done: $(date)"
     }
 
     # --- Contaminant classification (paleoproteomics-aware) ---
-    # Parse protein name from SwissProt ID: sp|ACC|PROT_SPECIES -> PROT
-    blast$protein_name_raw <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
+    # Protein label via the single helper (UniProt mnemonic, or full nr accession).
+    blast$protein_name_raw <- dda_protein_label(blast$subject)
 
     # Known human keratins (definite contaminant at 100% identity)
     human_keratin_pattern <- "^(KRT[0-9]|K1C[0-9]|K2C[0-9]|K22[EO]|KR[0-9])"
@@ -4089,7 +4090,7 @@ echo "[DIAMOND] Done: $(date)"
       ggplot2::annotate("text", x = 99, y = Inf, label = "Identical", vjust = 1.5,
         hjust = 1, color = "#2e7d32", size = 3) +
       ggplot2::labs(
-        x = "% Identity to SwissProt",
+        x = "% Identity to reference (nr / DB)",
         y = "Number of peptides",
         fill = "Species",
         subtitle = "100% = identical to reference; 90-99% = likely variants; <80% = distant homologs"
@@ -4716,18 +4717,19 @@ echo "[DIAMOND] Done: $(date)"
     # BLAST hit info if available
     blast_html <- ""
     if (!is.null(blast_data) && nrow(blast_data) > 0) {
-      clean_seq <- gsub("[^ACDEFGHIKLMNPQRSTVWY]", "", toupper(seq))
-      hit <- blast_data[blast_data$peptide == clean_seq, ]
+      key <- gsub("I", "L", build_dda_canonical_peptide(seq))
+      hit <- blast_data[gsub("I", "L", build_dda_canonical_peptide(blast_data$peptide)) == key, ]
       if (nrow(hit) > 0) {
         hit <- hit[which.max(hit$bitscore), ]
-        prot_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", hit$subject))
+        prot_name <- dda_protein_label(hit$subject)
         acc <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", hit$subject)
+        sp <- dda_blast_species(key, hit$subject, values$dda_lca)
         blast_html <- sprintf(
           '<div style="margin-top: 8px; padding: 8px; background: #e3f2fd; border-radius: 6px; font-size: 0.9em;">
             <strong>BLAST Hit:</strong> %s
             (%s) | Identity: %.1f%% | E-value: %s
           </div>',
-          ncbi_protein_link(acc, prot_name), hit$species,
+          ncbi_protein_link(acc, prot_name), sp,
           hit$pident %||% hit$identity,
           formatC(hit$evalue, format = "e", digits = 2)
         )
