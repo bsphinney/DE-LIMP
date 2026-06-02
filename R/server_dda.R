@@ -3938,19 +3938,19 @@ echo "[DIAMOND] Done: $(date)"
         div(class = "col-md-2",
           div(style = "background: #e8f5e9; padding: 12px; border-radius: 8px; text-align: center;",
             tags$h4(style = "margin: 0; color: #2e7d32;", n_novel),
-            tags$small("Novel peptides")
+            tags$small("De-novo-only peptides")
           )
         ),
         div(class = "col-md-2",
           div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; text-align: center;",
             tags$h4(style = "margin: 0; color: #1565c0;", paste0(n_with_hits, " (", pct_hits, "%)")),
-            tags$small("With hits")
+            tags$small("With nr hit")
           )
         ),
         div(class = "col-md-2",
           div(style = "background: #fff3e0; padding: 12px; border-radius: 8px; text-align: center;",
             tags$h4(style = "margin: 0; color: #e65100;", n_no_hits),
-            tags$small("No hits (truly novel)")
+            tags$small("No nr hit")
           )
         ),
         div(class = "col-md-2",
@@ -4245,8 +4245,7 @@ echo "[DIAMOND] Done: $(date)"
       second_sp <- if (is.na(r$second_species)) "-" else get_common_name(r$second_species)
       second_id <- if (is.na(r$second_identity)) "-" else paste0(round(r$second_identity, 1), "%")
       delta_color <- if (r$delta_identity > 15) "#2e7d32" else if (r$delta_identity > 5) "#f57c00" else "#757575"
-      uniprot_link <- paste0('<a href="https://www.uniprot.org/uniprot/', r$accession,
-        '" target="_blank">', r$protein_name, '</a>')
+      uniprot_link <- ncbi_protein_link(r$accession)
 
       tags$tr(
         tags$td(style = "font-family: monospace; font-size: 0.85em;", pep_display),
@@ -4564,11 +4563,9 @@ echo "[DIAMOND] Done: $(date)"
 
     # Parse protein name and accession from SwissProt subject: sp|ACC|PROT_SPECIES
     blast$accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", blast$subject)
-    blast$protein_name <- sub("_[^_]+$", "", sub("^[a-z]+\\|[^|]+\\|", "", blast$subject))
-    # Create clickable UniProt link
-    blast$protein_link <- paste0(
-      '<a href="https://www.uniprot.org/uniprot/', blast$accession,
-      '" target="_blank">', blast$protein_name, '</a>')
+    blast$protein_name <- dda_protein_label(blast$subject)
+    # Clickable link — NCBI Protein for nr accessions, UniProt for UniProt
+    blast$protein_link <- ncbi_protein_link(blast$accession, blast$protein_name)
 
     display_df <- data.frame(
       Peptide     = blast$peptide,
@@ -4727,11 +4724,10 @@ echo "[DIAMOND] Done: $(date)"
         acc <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", hit$subject)
         blast_html <- sprintf(
           '<div style="margin-top: 8px; padding: 8px; background: #e3f2fd; border-radius: 6px; font-size: 0.9em;">
-            <strong>BLAST Hit:</strong>
-            <a href="https://www.uniprot.org/uniprot/%s" target="_blank">%s</a>
+            <strong>BLAST Hit:</strong> %s
             (%s) | Identity: %.1f%% | E-value: %s
           </div>',
-          acc, prot_name, hit$species,
+          ncbi_protein_link(acc, prot_name), hit$species,
           hit$pident %||% hit$identity,
           formatC(hit$evalue, format = "e", digits = 2)
         )

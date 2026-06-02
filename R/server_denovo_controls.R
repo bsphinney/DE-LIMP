@@ -494,45 +494,153 @@ server_denovo_controls <- function(input, output, session, values) {
     rbind(result, totals)
   })
 
-  output$dda_manuscript_summary <- DT::renderDT({
-    df <- manuscript_data()
-    req(nrow(df) > 0)
+  # Workflow-stage Table 1 (PSMs / unique peptides / proteins + species
+  # attribution + decoy FDR), computed from the canonical master join so every
+  # row is explicitly one unit. Replaces the old mixed-unit per-sample cards.
+  manuscript_table1 <- reactive({
+    values$denovo_session_trigger
+    cls <- values$dda_casanovo_classification
+    req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
+    classified <- cls$classified
+    thr   <- input$dda_denovo_score_threshold %||% 0
+    sage  <- values$dda_sage_psms
+    lca   <- values$dda_lca
+    blast <- values$denovo_blast %||% values$dda_casanovo_blast
 
+    m <- build_denovo_master(classified, sage, lca, blast)
+    if ("Casanovo_score" %in% names(m))
+      m <- m[is.na(m$Casanovo_score) | m$Casanovo_score >= thr, , drop = FALSE]
+
+    n_spectra <- nrow(classified)
+    n_psm_ab  <- sum(classified$score >= thr, na.rm = TRUE)
+    n_pep_dn  <- nrow(m)
+    if (!is.null(sage) && "peptide" %in% names(sage)) {
+      n_sage_psm  <- nrow(sage)
+      n_sage_pep  <- length(unique(gsub("I", "L", build_dda_canonical_peptide(sage$peptide))))
+      n_sage_prot <- if ("proteins" %in% names(sage))
+        length(unique(unlist(strsplit(as.character(sage$proteins), ";")))) else NA_integer_
+    } else { n_sage_psm <- 0L; n_sage_pep <- 0L; n_sage_prot <- 0L }
+    n_both   <- sum(m$Found_by_Sage, na.rm = TRUE)
+    n_dnonly <- sum(!m$Found_by_Sage, na.rm = TRUE)
+    has_sp   <- "Species_or_clade" %in% names(m)
+    n_hit    <- if (has_sp) sum(!is.na(m$Species_or_clade)) else 0L
+    n_diag   <- if ("Diagnostic" %in% names(m)) sum(m$Diagnostic %in% TRUE, na.rm = TRUE) else 0L
+    n_cons   <- if ("Type" %in% names(m)) sum(m$Type %in% "other/conserved", na.rm = TRUE) else 0L
+    n_micro  <- if ("Type" %in% names(m)) sum(m$Type %in% "microbiome", na.rm = TRUE) else 0L
+    top_diag <- "—"
+    if (has_sp && "Diagnostic" %in% names(m)) {
+      d <- m[m$Diagnostic %in% TRUE & !is.na(m$Species_or_clade), , drop = FALSE]
+      if (nrow(d) > 0) { tt <- sort(table(d$Species_or_clade), decreasing = TRUE)
+        top_diag <- sprintf("%s (%d)", names(tt)[1], as.integer(tt)[1]) }
+    }
+    fdr_txt <- "— (no decoy loaded)"
+    if (!is.null(values$dda_decoy_blast)) {
+      cal <- tryCatch(build_denovo_score_calibration(classified, blast,
+               values$dda_decoy_blast, min_length = 7), error = function(e) NULL)
+      if (!is.null(cal) && "cum_fdr" %in% names(cal) && nrow(cal) > 0) {
+        ab <- cal[cal$bin >= thr, , drop = FALSE]
+        if (nrow(ab) > 0) fdr_txt <- sprintf("%.2f%%", 100 * tail(ab$cum_fdr, 1))
+      }
+    }
+    nf <- function(x) if (length(x) == 0 || is.na(x)) "—" else format(as.integer(x), big.mark = ",")
+    data.frame(
+      Metric = c(
+        "MS/MS spectra (Casanovo PSMs)",
+        sprintf("De novo PSMs (conf ≥ %.2f)", thr),
+        "De novo unique peptides",
+        "Sage PSMs",
+        "Sage unique peptides",
+        "Sage protein groups",
+        "Peptides found by both (Sage + de novo)",
+        "De-novo-only peptides",
+        "Peptides with nr BLAST hit",
+        " diagnostic (species/genus)",
+        " conserved (family+)",
+        " microbiome / viral",
+        "Top diagnostic taxon",
+        "Shuffled-decoy FDR (nr)"),
+      Count = c(nf(n_spectra), nf(n_psm_ab), nf(n_pep_dn),
+                nf(n_sage_psm), nf(n_sage_pep), nf(n_sage_prot),
+                nf(n_both), nf(n_dnonly), nf(n_hit), nf(n_diag), nf(n_cons),
+                nf(n_micro), top_diag, fdr_txt),
+      stringsAsFactors = FALSE)
+  })
+
+  output$dda_manuscript_summary <- DT::renderDT({
+    df <- manuscript_table1()
+    req(nrow(df) > 0)
     DT::datatable(
-      df,
-      rownames = FALSE,
-      selection = "none",
-      options = list(
-        pageLength = 50,
-        paging = FALSE,
-        searching = FALSE,
-        scrollX = TRUE,
-        dom = "t",
-        columnDefs = list(
-          list(className = "dt-right", targets = 1:8)
-        )
-      ),
+      df, rownames = FALSE, selection = "none",
+      options = list(paging = FALSE, searching = FALSE, info = FALSE,
+                     ordering = FALSE, dom = "t",
+                     columnDefs = list(list(className = "dt-right", targets = 1))),
       caption = htmltools::tags$caption(
         style = "caption-side: top; font-weight: bold; color: #2d6a2d;",
-        paste0("Per-sample summary (score >= ",
-               input$dda_denovo_score_threshold %||% 0, ")")
-      )
+        paste0("Table 1 — de novo / database / species-attribution summary (Casanovo conf ≥ ",
+               input$dda_denovo_score_threshold %||% 0, ")"))
     ) %>%
-      DT::formatStyle(
-        "Sample",
-        target = "row",
-        fontWeight = DT::styleEqual("TOTAL", "bold"),
-        backgroundColor = DT::styleEqual("TOTAL", "#f0f0f0")
-      )
+      DT::formatStyle("Metric", target = "row",
+        fontWeight = DT::styleEqual(c("Top diagnostic taxon", "Shuffled-decoy FDR (nr)"),
+                                    c("bold", "bold"), default = "normal"))
   })
 
   output$dda_denovo_manuscript_csv <- downloadHandler(
-    filename = function() {
-      paste0("denovo_manuscript_summary_", Sys.Date(), ".csv")
-    },
+    filename = function() paste0("denovo_table1_", Sys.Date(), ".csv"),
     content = function(file) {
-      df <- manuscript_data()
-      utils::write.csv(df, file, row.names = FALSE)
+      utils::write.csv(manuscript_table1(), file, row.names = FALSE)
+    }
+  )
+
+  # De novo reproducibility export — methods paragraph + the actual commands
+  # (Casanovo, Sage, nr DIAMOND BLAST, LCA, shuffled-decoy FDR) + sessionInfo.
+  # The existing "Reproducibility Log" covers only the DIA/limpa analysis; this
+  # captures the de novo -> nr -> LCA pipeline so it can be reproduced.
+  output$dda_denovo_methods_code <- downloadHandler(
+    filename = function() paste0("denovo_methods_and_code_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".md"),
+    content = function(file) {
+      thr <- input$dda_denovo_score_threshold %||% 0
+      av  <- tryCatch(values$app_version %||% "unknown", error = function(e) "unknown")
+      si  <- paste(capture.output(utils::sessionInfo()), collapse = "\n")
+      lines <- c(
+        sprintf("# De novo species-ID workflow — methods & code (DE-LIMP v%s)", av),
+        sprintf("# Generated %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+        "",
+        "## Methods (summary)",
+        "Spectra were de novo sequenced with Casanovo. Peptides were classified as",
+        "'Sage + de novo' (also identified by a Sage database search) or 'de novo only'.",
+        "De novo peptides (mods stripped, I/L-normalized, >=7 aa, deduplicated) were searched",
+        "against the taxonomy-enabled NCBI nr database with DIAMOND blastp; each peptide was",
+        "assigned to the lowest common ancestor (LCA) of its top hits (species/genus = diagnostic,",
+        "family+ = conserved, bacterial/viral = microbiome). A shuffled-decoy search (same peptides,",
+        "residues randomized) against nr estimated the false-hit rate (FDR = decoy / target).",
+        sprintf("Casanovo confidence threshold applied: >= %.2f (score range -1..1; >=0 = mass-consistent).", thr),
+        "",
+        "## Commands",
+        "# Casanovo de novo (v4.2.0 weights; tryptic or non-tryptic per sample)",
+        "casanovo sequence -o <out>.mztab <input>.mgf",
+        "",
+        "# Sage database search (config in settings.json / sage.json of the export)",
+        "sage --write-pin --output_directory <out> sage.json <run>.mzML",
+        "",
+        "# DIAMOND BLAST of de novo peptides vs taxonomy-enabled NCBI nr",
+        "diamond blastp -d nr -q peptides.fasta -o blast_results.tsv \\",
+        "  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids \\",
+        "  --threads 32 --max-target-seqs 25 --evalue 1 --ignore-warnings",
+        "",
+        "# Per-peptide LCA (real ranks from nodes.dmp.preDmnd; anchors Metazoa/Bacteria/Archaea/Viruses)",
+        "python3 lca_attribute.py blast_results.tsv <prefix>   # -> <prefix>_peptide_lca.tsv",
+        "",
+        "# Shuffled-decoy FDR (interior residues shuffled, kept distinct from target; same nr params)",
+        "# decoy_hit_rate / target_hit_rate per Casanovo-score bin; min length 7 on both sides",
+        "",
+        "## Key parameters",
+        sprintf("- nr DB: taxonomy-enabled NCBI nr (diamond makedb --taxonmap)"),
+        sprintf("- DIAMOND: --evalue 1, --max-target-seqs 25, blastp"),
+        sprintf("- Canonical peptide key: strip [mods]/+mass, drop non-letters, uppercase, I->L"),
+        "",
+        "## sessionInfo()",
+        si)
+      writeLines(lines, file)
     }
   )
 

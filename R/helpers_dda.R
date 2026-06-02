@@ -69,6 +69,34 @@ ncbi_tax_link <- function(name, taxid) {
   out
 }
 
+#' Hyperlink a protein accession to the right database — NCBI Protein for
+#' RefSeq/GenBank (XP_, NP_, EGW08387.1, PNI49027.1 …), UniProt for UniProt.
+#'
+#' The discriminator: NCBI accessions carry an underscore (RefSeq) or a `.N`
+#' version suffix (GenBank); UniProt accessions have neither. `sp|ACC|NAME` is
+#' unwrapped to ACC. Label defaults to the FULL accession (never the mangled
+#' prefix). For DT/HTML rendered with `escape = FALSE`.
+#'
+#' @param accession character vector of accessions
+#' @param label optional display labels (default = accession)
+#' @return character vector of HTML anchors
+ncbi_protein_link <- function(accession, label = NULL) {
+  acc <- as.character(accession)
+  lab <- if (is.null(label)) acc else as.character(label)
+  out <- lab
+  ok  <- !is.na(acc) & nzchar(acc) & acc != "-"
+  is_up_piped <- grepl("^[a-z]{2}\\|[^|]+\\|", acc)          # sp|ACC|NAME / tr|ACC|NAME
+  upacc <- sub("^[a-z]{2}\\|([^|]+)\\|.*", "\\1", acc)        # -> ACC
+  # NCBI only when NOT a piped UniProt id AND (RefSeq underscore or GenBank .version).
+  # (the `_` test must come after the pipe check — UniProt NAMEs like KRT5_FELCA contain `_`)
+  is_ncbi <- !is_up_piped & (grepl("_", acc) | grepl("\\.[0-9]+$", acc))
+  url <- ifelse(is_ncbi,
+                paste0("https://www.ncbi.nlm.nih.gov/protein/", acc),
+                paste0("https://www.uniprot.org/uniprotkb/", ifelse(is_up_piped, upacc, acc)))
+  out[ok] <- sprintf('<a href="%s" target="_blank" rel="noopener">%s</a>', url[ok], lab[ok])
+  out
+}
+
 #' Display label for a BLAST subject's protein — UniProt mnemonic or full accession.
 #'
 #' For UniProt `sp|ACC|NAME_SPECIES` returns the protein mnemonic (`NAME`). For

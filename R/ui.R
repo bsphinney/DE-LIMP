@@ -2766,11 +2766,15 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
           # mode-specific summary CSVs (HLA anchors / peptidomics flanks).
           conditionalPanel(
             condition = "output.denovo_has_data",
-            div(style = "margin: 8px 0;",
+            div(style = "margin: 8px 0; display: flex; gap: 8px; flex-wrap: wrap;",
               downloadButton("dda_export_zip",
-                "Download Export ZIP (HF-viewable)",
+                "Download dataset for AI (ZIP)",
                 icon = icon("file-zipper"),
-                class = "btn-outline-primary btn-sm")
+                class = "btn-outline-primary btn-sm"),
+              downloadButton("dda_denovo_methods_code",
+                "Download methods + code (reproducibility)",
+                icon = icon("file-code"),
+                class = "btn-outline-secondary btn-sm")
             )
           ),
 

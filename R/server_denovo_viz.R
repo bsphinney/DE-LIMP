@@ -339,8 +339,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
         # Protein info header
         div(style = "background: #e3f2fd; padding: 12px; border-radius: 8px; margin-bottom: 12px;",
           tags$strong("Protein: "),
-          tags$a(href = paste0("https://www.uniprot.org/uniprot/", accession),
-                 target = "_blank", protein_name_clean),
+          HTML(ncbi_protein_link(accession, protein_name_clean)),
           tags$span(style = "margin-left: 12px; color: #666;",
                     paste0("(", accession, ", ", species, ")")),
           tags$br(),
