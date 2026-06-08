@@ -32,6 +32,7 @@ COPY contaminants/ /srv/shiny-server/contaminants/
 COPY VERSION /srv/shiny-server/VERSION
 COPY stats/ /srv/shiny-server/stats/
 COPY config.yml /srv/shiny-server/config.yml
+COPY www/ /srv/shiny-server/www/
 
 # Expose the port
 EXPOSE 3838

@@ -764,6 +764,32 @@ server_dda <- function(input, output, session, values, add_to_log) {
   observeEvent(input$load_dda_results_top, load_results_modal())
   observeEvent(input$load_dda_results_top2, load_results_modal())
 
+  # Load the bundled example de novo dataset (ocelot wildlife-forensics: Sage +
+  # Casanovo + nr BLAST/LCA) from the GitHub release, routed through the same
+  # ZIP-load path via dda_zip_override + dda_load_trigger. The release ZIP carries
+  # denovo_cache.rds, so the load skips the slow mztab re-parse.
+  observeEvent(input$load_dda_example, {
+    ex_url <- "https://github.com/bsphinney/DE-LIMP/releases/download/v1.0/ocelot_denovo_example.zip"
+    tmp <- file.path(tempdir(), "ocelot_denovo_example.zip")
+    old_to <- options(timeout = 600); on.exit(options(old_to), add = TRUE)
+    ok <- FALSE
+    withProgress(message = "Downloading example de novo data (~70 MB)...", value = 0.2, {
+      ok <- tryCatch({
+        if (!file.exists(tmp) || file.info(tmp)$size < 1e6)
+          utils::download.file(ex_url, tmp, mode = "wb", quiet = TRUE)
+        file.exists(tmp) && file.info(tmp)$size > 1e6
+      }, error = function(e) { message("[DDA example] download failed: ", e$message); FALSE })
+    })
+    if (!ok) {
+      showNotification("Could not download the example de novo data. Check your internet connection.",
+                       type = "error", duration = 10)
+      return()
+    }
+    dda_zip_override(tmp)
+    dda_load_trigger(dda_load_trigger() + 1L)
+    nav_select(id = "main_tabs", selected = "denovo_results_tab", session = session)
+  })
+
   # ── Info modal: explains both SSH-load and ZIP-upload formats ────────────
   # Aimed at users who got a results ZIP from a colleague and need to load it
   # into DE-LIMP on Hugging Face (no HPC access). Also useful for HPC users.
@@ -876,7 +902,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
       dt <- dt[as.character(dt$filename) %in% as.character(sel), ]
     }
     # Contaminant filter — drop Cont_-tagged groups (from the searched contaminant DB)
-    if (isTRUE(input$dda_results_exclude_contaminants %||% TRUE) &&
+    if (isTRUE(input$dda_results_exclude_contaminants %||% FALSE) &&
         "proteins" %in% names(dt)) {
       dt <- dt[!.dda_is_contaminant(dt$proteins), ]
     }
@@ -890,7 +916,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
     n_all_files  <- length(unique(values$dda_sage_psms$filename))
     n_sel_files  <- length(input$dda_file_filter %||% character(0))
     contam_note  <- ""
-    if (isTRUE(input$dda_results_exclude_contaminants %||% TRUE) &&
+    if (isTRUE(input$dda_results_exclude_contaminants %||% FALSE) &&
         "proteins" %in% names(values$dda_sage_psms)) {
       n_contam <- sum(.dda_is_contaminant(values$dda_sage_psms$proteins))
       if (n_contam > 0)
@@ -1144,10 +1170,19 @@ server_dda <- function(input, output, session, values, add_to_log) {
           type = "error", duration = 10)
         stop("dda_export_zip: no local output_dir available")
       }
+      # Bundle the parsed-data cache so a future reload skips the slow mztab
+      # re-parse (only when we actually have parsed PSMs in this session).
+      cache <- NULL
+      psms <- isolate(values$dda_casanovo_psms)
+      if (!is.null(psms) && nrow(psms) > 0) {
+        cache <- list(casanovo_psms  = psms,
+                      classification = isolate(values$dda_casanovo_classification))
+      }
       zip_path <- generate_dda_export_zip(
-        output_dir  = output_dir,
-        mode        = mode,
-        app_version = app_ver
+        output_dir   = output_dir,
+        mode         = mode,
+        app_version  = app_ver,
+        denovo_cache = cache
       )
       file.copy(zip_path, file, overwrite = TRUE)
     }
@@ -1203,12 +1238,26 @@ server_dda <- function(input, output, session, values, add_to_log) {
     list(ok = TRUE, msg = paste(parts, collapse = " + "))
   }
 
+  # The load can be fired by the modal's Confirm button OR programmatically (e.g.
+  # the "Load Example De Novo Data" button) via dda_load_trigger; in the latter
+  # case the zip path is supplied through dda_zip_override (a downloaded file).
+  dda_zip_override <- reactiveVal(NULL)
+  dda_load_trigger <- reactiveVal(0L)
   observeEvent(input$dda_load_confirm, {
-    # Either a ZIP upload (HF/local mode) or an HPC path must be provided
-    zip_uploaded <- !is.null(input$dda_load_zip) &&
+    dda_zip_override(NULL)                        # manual confirm uses the uploaded file
+    dda_load_trigger(dda_load_trigger() + 1L)
+  })
+
+  observeEvent(dda_load_trigger(), ignoreInit = TRUE, {
+    ovr <- dda_zip_override()
+    # ZIP can come from the upload fileInput OR an override (example/download).
+    uploaded <- !is.null(input$dda_load_zip) &&
                      is.data.frame(input$dda_load_zip) &&
                      nrow(input$dda_load_zip) > 0 &&
                      file.exists(input$dda_load_zip$datapath[1])
+    zip_path <- if (!is.null(ovr) && file.exists(ovr)) ovr else
+                if (uploaded) input$dda_load_zip$datapath[1] else NULL
+    zip_uploaded <- !is.null(zip_path)
 
     if (!zip_uploaded && !nzchar(input$dda_load_path %||% "")) {
       showNotification(
@@ -1249,7 +1298,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
       # of how the user structured their ZIP.
       withProgress(message = "Unpacking ZIP...", value = 0.05, {
         tryCatch({
-          utils::unzip(input$dda_load_zip$datapath[1], exdir = local_tmp)
+          utils::unzip(zip_path, exdir = local_tmp)
         }, error = function(e) {
           showNotification(sprintf("ZIP unpack failed: %s",
                                     conditionMessage(e)),
@@ -1272,6 +1321,9 @@ server_dda <- function(input, output, session, values, add_to_log) {
       copy_first("^report\\.parquet$",       file.path(local_tmp, "report.parquet"))
       copy_first("^blast_results\\.tsv$",    file.path(local_tmp, "blast_results.tsv"))
       copy_first("^blast_results_decoy\\.tsv$", file.path(local_tmp, "blast_results_decoy.tsv"))
+      copy_first("^denovo_cache\\.rds$",      file.path(local_tmp, "denovo_cache.rds"))
+      copy_first("^spectra_peaks\\.parquet$", file.path(local_tmp, "spectra_peaks.parquet"))
+      copy_first("^spectra_meta\\.parquet$",  file.path(local_tmp, "spectra_meta.parquet"))
       # mztab files: copy all into a single mztab/ subdir
       mztab_hits <- all_files[grepl("\\.mztab$", basename(all_files), ignore.case = TRUE)]
       if (length(mztab_hits) > 0) {
@@ -1361,12 +1413,71 @@ server_dda <- function(input, output, session, values, add_to_log) {
 
         setProgress(0.5, detail = "Checking for Casanovo results...")
 
+        # FAST PATH: if the bundle carries denovo_cache.rds (parsed PSMs +
+        # classification from a previous export), restore it and skip the slow
+        # mztab re-parse entirely. Validated by schema tag.
+        denovo_cache_loaded <- FALSE
+        cache_local <- file.path(local_tmp, "denovo_cache.rds")
+        if (!is.null(ssh_cfg)) {
+          cache_remote <- file.path(remote_dir, "denovo", "denovo_cache.rds")
+          chk <- tryCatch(ssh_exec(ssh_cfg, paste("test -s", shQuote(cache_remote),
+                            "&& echo YES || echo NO"), timeout = 10),
+                          error = function(e) NULL)
+          if (!is.null(chk) && grepl("YES", paste(chk$stdout, collapse = "")))
+            tryCatch(scp_download(ssh_cfg, cache_remote, cache_local),
+                     error = function(e) NULL)
+        }
+        if (file.exists(cache_local)) {
+          tryCatch({
+            cc <- readRDS(cache_local)
+            if (is.list(cc) && identical(cc$schema, "delimp-denovo-cache-v1") &&
+                !is.null(cc$casanovo_psms) && nrow(cc$casanovo_psms) > 0) {
+              values$dda_casanovo_psms <- cc$casanovo_psms
+              values$dda_casanovo_classification <- cc$classification
+              values$dda_casanovo_status <- "done"
+              denovo_cache_loaded <- TRUE
+              message("[DDA Load] Restored ", nrow(cc$casanovo_psms),
+                      " Casanovo PSMs from denovo_cache.rds (skipped mztab parse)")
+            }
+          }, error = function(e)
+            message("[DDA Load] denovo_cache.rds present but unreadable: ", e$message))
+        }
+
+        # Bundled MS/MS peaks for the in-app annotated spectrum viewer (HF-friendly:
+        # no SSH needed once loaded). Compact top-peak lists for BLAST-hit peptides.
+        sp_pk_local <- file.path(local_tmp, "spectra_peaks.parquet")
+        sp_mt_local <- file.path(local_tmp, "spectra_meta.parquet")
+        if (!is.null(ssh_cfg)) {
+          for (nm in c("spectra_peaks.parquet", "spectra_meta.parquet")) {
+            rem <- file.path(remote_dir, "denovo", nm)
+            chk <- tryCatch(ssh_exec(ssh_cfg, paste("test -s", shQuote(rem),
+                              "&& echo YES || echo NO"), timeout = 10), error = function(e) NULL)
+            if (!is.null(chk) && grepl("YES", paste(chk$stdout, collapse = "")))
+              tryCatch(scp_download(ssh_cfg, rem, file.path(local_tmp, nm)), error = function(e) NULL)
+          }
+        }
+        if (file.exists(sp_pk_local) && file.exists(sp_mt_local)) {
+          tryCatch({
+            pk <- data.table::as.data.table(arrow::read_parquet(sp_pk_local))
+            mt <- data.table::as.data.table(arrow::read_parquet(sp_mt_local))
+            data.table::setkey(pk, scan_key)
+            mt$pep_norm <- gsub("I", "L", build_dda_canonical_peptide(mt$peptide))
+            values$dda_spectra_peaks <- pk
+            values$dda_spectra_meta  <- as.data.frame(mt)
+            message("[DDA Load] Loaded annotated-spectrum peaks for ", nrow(mt), " peptides")
+          }, error = function(e)
+            message("[DDA Load] spectra peaks present but unreadable: ", e$message))
+        }
+
         # Check for Casanovo mztab files in multiple locations:
         # 1. {output_dir}/casanovo/mztab/*.mztab (DE-LIMP generated)
         # 2. {raw_data_dir}/*.mztab (pre-existing, e.g. Glendon's feather data)
         # ZIP-mode short-circuit: the unzip step already copied .mztab into local_tmp/mztab/.
+        # Skipped when the cache already restored the parsed PSMs.
         mztab_remote <- character(0)
-        if (is.null(ssh_cfg)) {
+        if (denovo_cache_loaded) {
+          # cache hit — leave mztab_remote empty so discovery + parse are skipped
+        } else if (is.null(ssh_cfg)) {
           local_mztab_dir <- file.path(local_tmp, "mztab")
           if (dir.exists(local_mztab_dir)) {
             mztab_remote <- list.files(local_mztab_dir, pattern = "\\.mztab$",
@@ -1396,8 +1507,9 @@ server_dda <- function(input, output, session, values, add_to_log) {
           }
         }
 
-        # Also check if raw data dir has mztabs (common for pre-existing Casanovo runs)
-        if (length(mztab_remote) == 0) {
+        # Also check if raw data dir has mztabs (common for pre-existing Casanovo runs).
+        # Only in SSH mode, and never when the cache already restored the PSMs.
+        if (!denovo_cache_loaded && !is.null(ssh_cfg) && length(mztab_remote) == 0) {
           # Try to find the raw data directory from search_info.md or sage config
           raw_dir_check <- ssh_exec(ssh_cfg,
             paste0("grep -r 'mztab\\|raw_data' ", shQuote(file.path(remote_dir, "search_info.md")),
@@ -1490,17 +1602,29 @@ server_dda <- function(input, output, session, values, add_to_log) {
                 if (ncol(blast_df) >= length(col_names)) {
                   names(blast_df)[seq_along(col_names)] <- col_names
                 }
+                # 16-col btop format (outfmt 6 ... staxids qseq sseq btop): name the
+                # extra columns so the alignment viewer can reconstruct the REAL
+                # gapped alignment + Confidence-Weighted Identity (no fabrication).
+                # (A 13-col file is the older cat-pipeline db_source tag, not staxid.)
+                if (ncol(blast_df) >= 16) {
+                  names(blast_df)[13:16] <- c("staxid", "qseq", "sseq", "btop")
+                }
                 # Placeholder species (UniProt-aware); blast_with_species() overwrites
                 # this from the per-peptide LCA when the LCA table is loaded.
                 blast_df$species <- sub(".*_", "", sub("^[a-z]+\\|[^|]+\\|", "", blast_df$subject))
                 blast_df$category <- ifelse(blast_df$pident >= 100, "Conserved",
                   ifelse(blast_df$pident >= 90, "Near-match", "Distant"))
+                # Keep the FULL hit graph (all hits per peptide) for FragPipe/
+                # IDPicker-style parsimonious protein inference; the per-peptide
+                # views below use the best-hit-per-peptide reduction.
+                values$dda_casanovo_blast_all <- as.data.frame(blast_df)
                 # Best hit per peptide
                 blast_df <- blast_df[order(-blast_df$bitscore), ]
                 blast_df <- blast_df[!duplicated(blast_df$peptide), ]
                 values$dda_casanovo_blast <- as.data.frame(blast_df)
                 blast_loaded <- TRUE
-                message("[DDA Load] Loaded ", nrow(blast_df), " BLAST hits")
+                message("[DDA Load] Loaded ", nrow(blast_df), " best-hit BLAST rows (",
+                        nrow(values$dda_casanovo_blast_all), " total hits)")
               }
             }
           } else {
@@ -1510,18 +1634,25 @@ server_dda <- function(input, output, session, values, add_to_log) {
           message("[DDA Load] BLAST load error: ", e$message)
         })
 
-        # Load the shuffled-decoy BLAST (for target-decoy FDR calibration).
+        # Load the decoy BLAST for target-decoy FDR. Prefer the NovoBoard decoy-SPECTRA
+        # file (blast_results_decoy_spectra.tsv); fall back to the legacy shuffled-peptide
+        # decoy (blast_results_decoy.tsv). build_denovo_score_calibration() is agnostic to
+        # which null produced the file. See docs/DENOVO_FDR_VALIDATION.md.
         tryCatch({
-          decoy_remote <- file.path(remote_dir, "denovo", "blast_results_decoy.tsv")
-          decoy_local  <- file.path(local_tmp, "blast_results_decoy.tsv")
-          decoy_present <- FALSE
-          if (is.null(ssh_cfg)) {
-            decoy_present <- file.exists(decoy_local) && file.info(decoy_local)$size > 0
-          } else {
-            chk <- ssh_exec(ssh_cfg, paste("test -s", shQuote(decoy_remote),
-                                           "&& echo YES || echo NO"), timeout = 10)
-            decoy_present <- grepl("YES", paste(chk$stdout, collapse = ""))
-            if (decoy_present) scp_download(ssh_cfg, decoy_remote, decoy_local)
+          decoy_names <- c("blast_results_decoy_spectra.tsv", "blast_results_decoy.tsv")
+          decoy_remote <- NULL; decoy_local <- NULL; decoy_present <- FALSE
+          for (dn in decoy_names) {
+            dr <- file.path(remote_dir, "denovo", dn)
+            dl <- file.path(local_tmp, dn)
+            if (is.null(ssh_cfg)) {
+              if (file.exists(dl) && file.info(dl)$size > 0) { decoy_remote <- dr; decoy_local <- dl; decoy_present <- TRUE; break }
+            } else {
+              chk <- ssh_exec(ssh_cfg, paste("test -s", shQuote(dr),
+                                             "&& echo YES || echo NO"), timeout = 10)
+              if (grepl("YES", paste(chk$stdout, collapse = ""))) {
+                scp_download(ssh_cfg, dr, dl); decoy_remote <- dr; decoy_local <- dl; decoy_present <- TRUE; break
+              }
+            }
           }
           if (decoy_present && file.exists(decoy_local) && file.info(decoy_local)$size > 0) {
             ddf <- data.table::fread(decoy_local, header = FALSE)
@@ -1615,7 +1746,7 @@ diamond blastp \\
   --query "', file.path(remote_denovo_dir, "novel_peptides.fasta"), '" \\
   --db "', swissprot_dmnd, '" \\
   --out "', blast_out, '" \\
-  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore \\
+  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids qseq sseq btop \\
   --sensitive --id 50 --max-target-seqs 5 \\
   --threads 8 --ignore-warnings
 
@@ -2546,7 +2677,7 @@ diamond blastp \\
   --query "', file.path(remote_denovo_dir, "novel_peptides.fasta"), '" \\
   --db "', swissprot_dmnd, '" \\
   --out "', blast_out, '" \\
-  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore \\
+  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids qseq sseq btop \\
   --sensitive --id 50 --max-target-seqs 5 --threads 8 --ignore-warnings
 
 echo "[DIAMOND] Hits: $(wc -l < "', blast_out, '")"
@@ -3586,7 +3717,7 @@ echo "[DIAMOND] Done: $(date)"
   novel_thresholded <- reactive({
     n <- values$dda_casanovo_classification$novel
     if (is.null(n) || nrow(n) == 0) return(n)
-    thr <- input$dda_denovo_score_threshold %||% 0
+    thr <- input$dda_denovo_score_threshold %||% -1
     if ("score" %in% names(n)) n[n$score >= thr, , drop = FALSE] else n
   })
 
@@ -3698,7 +3829,7 @@ echo "[DIAMOND] Done: $(date)"
     lcat <- values$dda_lca
     req(lcat, nrow(lcat) > 0)
     sc <- casanovo_pep_score()
-    thr <- input$dda_denovo_score_threshold %||% 0
+    thr <- input$dda_denovo_score_threshold %||% -1
     if (!is.null(sc) && "peptide" %in% names(lcat)) {
       lkey <- gsub("I", "L", build_dda_canonical_peptide(lcat$peptide))
       sco  <- sc$best_score[match(lkey, sc$seq_norm)]
@@ -3713,14 +3844,15 @@ echo "[DIAMOND] Done: $(date)"
     cls <- values$dda_casanovo_classification
     req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
     build_denovo_master(cls$classified, values$dda_sage_psms, values$dda_lca,
-                        values$denovo_blast %||% values$dda_casanovo_blast)
+                        values$denovo_blast %||% values$dda_casanovo_blast,
+                        aa_lookup = build_casanovo_aa_lookup(values$dda_casanovo_psms))
   })
 
   # Master gated by the confidence slider (hide low-confidence by default).
   denovo_master_filtered <- reactive({
     m <- denovo_master()
     req(nrow(m) > 0)
-    thr <- input$dda_denovo_score_threshold %||% 0
+    thr <- input$dda_denovo_score_threshold %||% -1
     if ("Casanovo_score" %in% names(m) && any(is.finite(m$Casanovo_score)))
       m <- m[is.na(m$Casanovo_score) | m$Casanovo_score >= thr, , drop = FALSE]
     m
@@ -3735,6 +3867,7 @@ echo "[DIAMOND] Done: $(date)"
     show <- m[, setdiff(names(m), c("seq_norm", "lca_taxid")), drop = FALSE]
     pref <- intersect(c("Peptide", "Casanovo_score", "Found_by_Sage",
                         "Species_or_clade", "Rank", "Type", "Best_pct_ID",
+                        "CWI", "HCA", "Call",
                         "Query_coverage", "E_value", "Bitscore",
                         "Diagnostic", "Sage_protein", "n_PSMs"), names(show))
     show <- show[, c(pref, setdiff(names(show), pref)), drop = FALSE]
@@ -3746,6 +3879,13 @@ echo "[DIAMOND] Done: $(date)"
       dt <- DT::formatStyle(dt, "Type", backgroundColor = DT::styleEqual(
         c("host", "microbiome", "other/conserved", "plant/fungal"),
         c("#e8f5e9", "#fff3e0", "#eceff1", "#f3e5f5")))
+    if ("CWI" %in% names(show))
+      dt <- DT::formatStyle(dt, "CWI", backgroundColor = DT::styleInterval(
+        c(70, 90), c("#fce4ec", "#fff3e0", "#e8f5e9")))
+    if ("Call" %in% names(show))
+      dt <- DT::formatStyle(dt, "Call", fontWeight = "bold",
+        color = DT::styleEqual(c("Confident", "Likely", "Uncertain"),
+                               c("#2e7d32", "#f57f17", "#c62828")))
     dt
   })
 
@@ -3791,6 +3931,287 @@ echo "[DIAMOND] Done: $(date)"
                        file, row.names = FALSE)
     }
   )
+
+  # ==========================================================================
+  #  PROTEINS pane — FragPipe / IDPicker-style parsimonious rollup of the de
+  #  novo peptides onto reference proteins, + a per-residue coverage map that
+  #  colours disagreements by Casanovo confidence (real btop, no fabrication).
+  # ==========================================================================
+
+  # Parsimony over the FULL hit graph, restricted to peptides passing the
+  # confidence slider (so the protein view honours the same gate as the rest).
+  denovo_protein_groups <- reactive({
+    values$denovo_session_trigger
+    ball <- values$dda_casanovo_blast_all %||% values$dda_casanovo_blast
+    req(ball, nrow(ball) > 0)
+    mf <- tryCatch(denovo_master_filtered(), error = function(e) NULL)
+    if (!is.null(mf) && "seq_norm" %in% names(mf) && nrow(mf) > 0) {
+      pcol <- if ("peptide" %in% names(ball)) "peptide" else "query"
+      k <- gsub("I", "L", build_dda_canonical_peptide(ball[[pcol]]))
+      ball <- ball[k %in% mf$seq_norm, , drop = FALSE]
+    }
+    req(nrow(ball) > 0)
+    build_denovo_protein_groups(ball, master = mf, min_pident = 50)
+  })
+
+  output$denovo_protein_table <- DT::renderDT({
+    g <- denovo_protein_groups()
+    req(nrow(g) > 0)
+    disp <- g
+    disp$Protein <- mapply(function(acc, lab) ncbi_protein_link(acc, lab),
+                           disp$Accession, disp$Protein)
+    disp <- disp[, setdiff(names(disp), "Subject"), drop = FALSE]
+    dt <- DT::datatable(
+      disp, rownames = FALSE, selection = "single", filter = "top", escape = FALSE,
+      options = list(pageLength = 25, scrollX = TRUE,
+                     order = list(list(which(names(disp) == "Razor_peptides") - 1, "desc"))),
+      caption = htmltools::tags$caption(
+        style = "caption-side: top; color: #1565c0;",
+        "Parsimonious protein inference (FragPipe/IDPicker model). ",
+        "Razor = peptides credited to this protein (unique + shared assigned here); ",
+        "Total = all peptides that can map to it. Click a row for the coverage map."))
+    if ("Evidence" %in% names(disp))
+      dt <- DT::formatStyle(dt, "Evidence", fontWeight = "bold",
+        color = DT::styleEqual(c("Strong", "Moderate", "Weak"),
+                               c("#2e7d32", "#f57f17", "#c62828")))
+    if ("Best_CWI" %in% names(disp))
+      dt <- DT::formatStyle(dt, "Best_CWI", backgroundColor = DT::styleInterval(
+        c(70, 90), c("#fce4ec", "#fff3e0", "#e8f5e9")))
+    dt
+  })
+
+  # Render the per-residue coverage map as colour-coded sequence blocks.
+  # PEAKS-style protein coverage map (made more informative):
+  #   - reference sequence in blocks of 10, position-numbered, covered residues shaded
+  #   - a SUBSTITUTION marker row above each line: the consensus de novo residue at
+  #     each disagreement, coloured by Casanovo per-residue confidence (kept — it's
+  #     the key signal): green = confident difference, amber = uncertain, red = error
+  #   - the peptides TILED beneath as bars, packed into rows, each bar coloured by the
+  #     peptide's mean Casanovo confidence; peptides UNIQUE to this protein (razor /
+  #     uniqueness) get a heavy dark underline on their bar + their covered reference
+  #     residues are bold. De-novo data only.
+  CW <- 13L   # px per residue column (shared by every row so they align)
+  render_protein_coverage_html <- function(track, subject, prot_name) {
+    if (is.null(track) || nrow(track) == 0)
+      return(paste0('<div style="color:#8a6d3b; background:#fff8e1; padding:10px; ',
+                    'border-radius:6px;">No alignment coverage available for ',
+                    htmltools::htmlEscape(prot_name), '.</div>'))
+    L <- nrow(track); W <- 60L
+    st_bg <- c(variant = "#2e7d32", error = "#c62828", amber = "#ff8f00", masked = "#dddddd")
+    st_fg <- c(variant = "white",   error = "white",   amber = "black",   masked = "#777")
+    conf_col <- function(mc) if (is.na(mc)) "#9e9e9e" else
+      if (mc >= 0.8) "#2e7d32" else if (mc >= 0.5) "#f9a825" else "#c62828"
+    cell <- function(content, style = "")
+      sprintf('<span style="display:inline-block;width:%dpx;text-align:center;font-family:monospace;font-size:13px;%s">%s</span>',
+              CW, style, content)
+
+    # ---- peptide packing (PEAKS-style tiling), confidence + uniqueness kept ----
+    pep <- attr(track, "peptides")
+    MAXPEP <- 400L; trunc_note <- ""
+    if (!is.null(pep) && nrow(pep) > MAXPEP) {
+      pep <- pep[order(-pep$uniq, -ifelse(is.na(pep$mean_conf), -1, pep$mean_conf)), ]
+      trunc_note <- sprintf(" (showing %d of %d peptides — unique + highest-confidence first)",
+                            MAXPEP, nrow(pep)); pep <- pep[seq_len(MAXPEP), ]
+    }
+    rowof <- integer(0); rowend <- numeric(0)
+    if (!is.null(pep) && nrow(pep) > 0) {
+      o <- order(pep$sstart); pep <- pep[o, ]; rowof <- integer(nrow(pep))
+      for (i in seq_len(nrow(pep))) {
+        placed <- FALSE
+        for (r in seq_along(rowend)) if (rowend[r] < pep$sstart[i]) {
+          rowof[i] <- r; rowend[r] <- pep$send[i]; placed <- TRUE; break }
+        if (!placed) { rowend <- c(rowend, pep$send[i]); rowof[i] <- length(rowend) }
+      }
+    }
+    nrows <- length(rowend)
+    # Cap the stack height so a deeply-tiled region (e.g. keratin) stays responsive.
+    MAXROWS <- 40L; rows_clipped <- 0L
+    if (nrows > MAXROWS) { rows_clipped <- nrows - MAXROWS; nrows <- MAXROWS }
+    # which peptide (if any) covers each (row, position)
+    rowcov <- if (nrows > 0) matrix(0L, nrow = nrows, ncol = L) else NULL
+    if (nrows > 0) for (i in seq_len(nrow(pep))) {
+      if (rowof[i] > nrows) next                 # dropped by the row cap (still counted above)
+      cols <- max(1L, pep$sstart[i]):min(L, pep$send[i])
+      rowcov[rowof[i], cols] <- i
+    }
+
+    # ---- render per 60-residue line ----
+    lab <- function(txt) sprintf(
+      '<span style="display:inline-block;width:64px;color:#888;font-size:11px;font-family:monospace;text-align:right;padding-right:6px;">%s</span>', txt)
+    gl <- function(p) if ((p - 1L) %% 10 == 0) "border-left:1px solid #e3e3e3;" else ""  # block-of-10 gridline (stays aligned across all rows)
+    blocks <- character(0); start <- 1L
+    while (start <= L) {
+      end <- min(start + W - 1L, L); rng <- start:end
+      # ruler: position number every 10
+      ruler <- vapply(rng, function(p) cell(if (p %% 10 == 0)
+        sprintf('<span style="font-size:9px;color:#999;">%d</span>', p) else "&nbsp;", gl(p)), character(1))
+      # substitution markers (de novo residue at disagreements, coloured by confidence)
+      marks <- vapply(rng, function(p) {
+        s <- track$state[p]
+        if (s %in% c("variant", "error", "amber", "masked") && !is.na(track$obs[p]) && nzchar(track$obs[p]))
+          cell(track$obs[p], sprintf("%sbackground:%s;color:%s;border-radius:2px;", gl(p), st_bg[[s]], st_fg[[s]]))
+        else cell("&nbsp;", gl(p)) }, character(1))
+      # reference sequence: covered shaded; unique-covered bold
+      seqr <- vapply(rng, function(p) {
+        ch <- track$ref[p]; ch <- if (is.na(ch) || !nzchar(ch)) "&middot;" else ch
+        if (track$n_cov[p] > 0) cell(ch, sprintf("%sbackground:#dfe3e8;color:#111;%s", gl(p),
+            if (isTRUE(track$unique_support[p])) "font-weight:bold;" else ""))
+        else cell(ch, paste0(gl(p), "color:#c2c2c2;")) }, character(1))
+      # peptide bars
+      bars <- character(0)
+      if (nrows > 0) for (r in seq_len(nrows)) {
+        if (all(rowcov[r, rng] == 0L)) next
+        rowcells <- vapply(rng, function(p) {
+          i <- rowcov[r, p]
+          if (i == 0L) return(cell("&nbsp;", gl(p)))
+          col <- conf_col(pep$mean_conf[i])
+          ttl <- sprintf("%s | mean conf %.2f | %s", pep$pep[i],
+                         pep$mean_conf[i] %||% NA_real_,
+                         if (isTRUE(pep$uniq[i])) "unique to this protein" else "shared")
+          cell('&nbsp;', sprintf('%sbackground:%s;height:9px;%s" title="%s', gl(p), col,
+               if (isTRUE(pep$uniq[i])) "border-bottom:3px solid #111;" else "", ttl)) },
+          character(1))
+        bars <- c(bars, sprintf('<div style="white-space:nowrap;line-height:10px;">%s%s</div>',
+                                lab(""), paste(rowcells, collapse = "")))
+      }
+      blocks <- c(blocks, paste0(
+        '<div style="margin-top:14px;">',
+        '<div style="white-space:nowrap;">', lab(""), paste(ruler, collapse = ""), '</div>',
+        '<div style="white-space:nowrap;">', lab(""), paste(marks, collapse = ""), '</div>',
+        '<div style="white-space:nowrap;">', lab(as.character(start)), paste(seqr, collapse = ""), '</div>',
+        paste(bars, collapse = ""), '</div>'))
+      start <- end + 1L
+    }
+
+    n_cov <- sum(track$n_cov > 0)
+    n_mis <- sum(track$state %in% c("variant", "error", "amber"))  # consensus differences
+    n_uniq <- sum(track$unique_support, na.rm = TRUE)
+    len_note <- if (isTRUE(attr(track, "len_exact"))) sprintf("full protein, %d aa", L) else
+      sprintf("residues 1–%d (to the last covered residue; full length not in this BLAST output)", track$pos[L])
+    legend <- paste0(
+      '<div style="margin-top:14px; font-size:12px; color:#666; line-height:2;">',
+      '<div><b>Substitution markers (above sequence)</b> — the de novo residue at a disagreement, coloured by confidence: ',
+      '<span style="background:#2e7d32;color:white;padding:2px 6px;border-radius:3px;">confident difference</span> ',
+      '<span style="background:#ff8f00;color:black;padding:2px 6px;border-radius:3px;">uncertain</span> ',
+      '<span style="background:#c62828;color:white;padding:2px 6px;border-radius:3px;margin-right:6px;">likely de novo error</span> ',
+      '<span style="background:#dddddd;color:#777;padding:2px 6px;border-radius:3px;">X = low-complexity masked (not scored)</span></div>',
+      '<div><b>Peptide bars (below)</b> — one per de novo peptide, coloured by mean Casanovo confidence: ',
+      '<span style="background:#2e7d32;color:white;padding:2px 6px;border-radius:3px;">high</span> ',
+      '<span style="background:#f9a825;color:black;padding:2px 6px;border-radius:3px;">medium</span> ',
+      '<span style="background:#c62828;color:white;padding:2px 6px;border-radius:3px;">low</span>. ',
+      'A <span style="border-bottom:3px solid #111;">heavy underline</span> on a bar (and <b>bold</b> reference residues) = peptide ',
+      '<b>unique to this protein</b> (razor evidence). Shaded reference residues = covered.</div></div>')
+    paste0(
+      '<div style="background:#fff;padding:6px;">',
+      '<div style="margin-bottom:6px; font-size:13px; color:#1a3c5e;">',
+      sprintf('<strong>%s</strong> &nbsp; <span style="color:#666;">%s; %d covered, %d disagreements, %d unique-supported.%s%s</span>',
+              htmltools::htmlEscape(prot_name), len_note, n_cov, n_mis, n_uniq, trunc_note,
+              if (rows_clipped > 0) sprintf(" Tiling capped at %d stacked rows (+%d deeper peptides not drawn).", 40L, rows_clipped) else ""),
+      '<br><span style="color:#888;font-size:12px;">De novo (Casanovo) peptides aligned to this nr protein. ',
+      'Sage DB peptides are matched against the search database, not BLAST-aligned, so they are not tiled here.</span></div>',
+      '<div style="overflow-x:auto;">', paste(blocks, collapse = ""), '</div>',
+      legend, '</div>')
+  }
+
+  observeEvent(input$denovo_protein_table_rows_selected, {
+    sel <- input$denovo_protein_table_rows_selected
+    g <- denovo_protein_groups()
+    req(g, length(sel) == 1, sel <= nrow(g))
+    subj <- g$Subject[sel]; prot <- g$Protein[sel]
+    ball <- values$dda_casanovo_blast_all %||% values$dda_casanovo_blast
+    # The coverage map needs the real alignment (qseq/sseq/btop). The protein
+    # TABLE builds without it (only needs subject+identity), so a btop-less load
+    # populates the table but not the map — say so explicitly rather than a bare
+    # "not available" (CLAUDE.md: surface the real reason).
+    if (is.null(ball) || !all(c("qseq", "sseq", "btop") %in% names(ball))) {
+      body_html <- paste0(
+        '<div style="color:#8a6d3b; background:#fff8e1; border:1px solid #ffe082; ',
+        'padding:12px; border-radius:6px;">The coverage map needs the BLAST alignment ',
+        '(<code>qseq/sseq/btop</code>), which is not in the currently loaded data. ',
+        'Re-upload the alignment-bearing results bundle (the 16-column ',
+        '<code>blast_results.tsv</code>) and the map will render.</div>')
+    } else {
+      tr <- tryCatch(build_protein_coverage_track(
+              subj, ball,
+              aa_lookup = build_casanovo_aa_lookup(values$dda_casanovo_psms)),
+              error = function(e) NULL)
+      body_html <- render_protein_coverage_html(tr, subj, prot)
+    }
+    # Open in a modal with a Full-screen button (browser Fullscreen API on the
+    # content div) instead of an inline box, so wide proteins are readable.
+    showModal(modalDialog(
+      title = tagList(icon("diagram-project"),
+                      sprintf(" Coverage map: %s", prot)),
+      size = "xl", easyClose = TRUE,
+      tags$div(
+        tags$button("⤢ Full screen", class = "btn btn-outline-secondary btn-sm",
+          style = "margin-bottom:8px;",
+          onclick = "var e=document.getElementById('denovo_cov_fs'); if(e.requestFullscreen){e.requestFullscreen();}else if(e.webkitRequestFullscreen){e.webkitRequestFullscreen();}"),
+        tags$div(id = "denovo_cov_fs",
+                 style = "background:#fff; overflow:auto; max-height:75vh; padding:4px;",
+                 HTML(body_html))),
+      footer = modalButton("Close")))
+  })
+
+  output$dda_protein_download <- downloadHandler(
+    filename = function() paste0("denovo_protein_groups_",
+                                 format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      g <- denovo_protein_groups()
+      utils::write.csv(g, file, row.names = FALSE)
+    }
+  )
+
+  observeEvent(input$denovo_protein_info_btn, {
+    showModal(modalDialog(
+      title = tagList(icon("question-circle"), " Protein inference (parsimony + razor)"),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(style = "font-size: 0.9em; line-height: 1.7;",
+        p("Rolls the de novo peptides up to ", strong("proteins"), " using the same ",
+          "parsimony model FragPipe (Philosopher/ProteinProphet) and IDPicker use — ",
+          "the minimal set of proteins that explains all the peptides (Occam's razor)."),
+        tags$ul(
+          tags$li(strong("Razor peptides"), " — peptides credited to this protein: those unique to it ",
+            "plus shared peptides the parsimony step assigns here (a shared peptide goes to the single ",
+            "best-supported protein). This is the headline evidence count."),
+          tags$li(strong("Unique peptides"), " — map to this protein only."),
+          tags$li(strong("Total peptides"), " — every peptide that can map to it, whether credited here or elsewhere."),
+          tags$li(strong("Indistinguishable"), " — other proteins with the identical peptide set, collapsed under this one."),
+          tags$li(strong("Evidence"), " — Strong (≥3 razor peptides or ≥2 confident), Moderate, or Weak.")
+        ),
+        tags$h6("Coverage map"),
+        p("Click a protein to open a coverage map (in a pop-out window with a ",
+          strong("Full screen"), " button). It lays the de novo peptides along the reference ",
+          "sequence as ", strong("two rows"), ": the reference protein on top and the consensus ",
+          "de novo residue beneath it, so amino-acid substitutions read directly. Each de novo ",
+          "residue is coloured by agreement, weighted by Casanovo confidence: ",
+          tags$span(style="color:#357a38;font-weight:bold;","matches"), ", ",
+          tags$span(style="color:#2e7d32;font-weight:bold;","confident differences"), " (genuine variants), and ",
+          tags$span(style="color:#c62828;font-weight:bold;","low-confidence disagreements"), " (likely de novo errors). ",
+          "Built from the real DIAMOND traceback — no positions are inferred."),
+        p("Residues covered by a peptide ", strong("unique to this protein"),
+          " (one that maps to no other protein in the graph) are shown ",
+          tags$b(tags$u("bold + underlined")), ". This is an orthogonal channel to the confidence ",
+          "colour: colour tells you residue reliability, bold/underline tells you the residue is ",
+          "pinned to THIS protein specifically rather than shared with homologs — the strongest ",
+          "evidence that this exact protein (and species) is present."),
+        p(style = "font-size: 0.85em; color:#555;",
+          strong("De-novo data only. "),
+          "The coverage map shows de novo (Casanovo) peptides aligned to this nr protein. ",
+          "Sage database peptides are ", em("not"), " shown: Sage matched them by exact sequence ",
+          "against its own search database (the proteome / nr-cat FASTA), not by BLAST alignment to ",
+          "these nr accessions, so there is no per-residue alignment to overlay. Whether a peptide ",
+          "was also found by Sage is captured in the table's ", tags$code("Found_by"), " column instead."),
+        tags$h6("What's different from a database search"),
+        p(style = "font-size: 0.85em; color:#555;",
+          "FragPipe/IDPicker infer proteins from exact tryptic peptide→protein membership in a search ",
+          "database. Here the graph is BLAST homology against nr (edges = hits with ≥50% identity), so a ",
+          "peptide can map to the same protein across many species; parsimony naturally collapses that ",
+          "redundancy to representative proteins. There is no ProteinProphet probability (that needs ",
+          "database-search PSM probabilities, which de novo + homology evidence does not provide).")
+      )
+    ))
+  })
 
   # Venn-style overlap stats (Sage vs Casanovo), confidence-filtered. Computed
   # from the master join + the full Sage peptide set on the shared canonical key.
@@ -3874,12 +4295,12 @@ echo "[DIAMOND] Done: $(date)"
     plotly::plot_ly(cal) %>%
       plotly::add_bars(x = ~bin, y = ~hit_rate, name = "target",
                        marker = list(color = "#2e7d32")) %>%
-      plotly::add_bars(x = ~bin, y = ~decoy_hit_rate, name = "decoy (shuffled)",
+      plotly::add_bars(x = ~bin, y = ~decoy_hit_rate, name = "decoy spectra",
                        marker = list(color = "#c62828")) %>%
       plotly::add_lines(x = ~bin, y = ~cum_fdr_pct, name = "cumulative FDR (%)",
                         yaxis = "y2", line = list(color = "#6a1b9a", dash = "dot")) %>%
       plotly::layout(
-        title = list(text = "Target vs shuffled-decoy hit-rate + cumulative FDR",
+        title = list(text = "Real spectra vs decoy spectra hit-rate + cumulative FDR",
                      font = list(size = 13)),
         barmode = "group", xaxis = list(title = "Casanovo score (bin)"),
         yaxis = list(title = "hit-rate (%)"),
@@ -3894,7 +4315,7 @@ echo "[DIAMOND] Done: $(date)"
     if (is.null(cal) || !"cum_fdr" %in% names(cal)) {
       shinyjs::html("denovo_decoy_fdr_callout", as.character(
         div(class = "alert alert-secondary",
-            "Load a shuffled-decoy BLAST (denovo/blast_results_decoy.tsv) to estimate FDR.")))
+            "Load a decoy-spectra BLAST (denovo/blast_results_decoy_spectra.tsv) to estimate FDR.")))
       return(invisible(NULL))
     }
     target_hits <- sum(cal$n_hit, na.rm = TRUE)
@@ -3903,13 +4324,126 @@ echo "[DIAMOND] Done: $(date)"
     rec <- if (nrow(ok) > 0) sprintf("%.2f", min(ok$bin)) else "—"
     shinyjs::html("denovo_decoy_fdr_callout", as.character(
       div(class = "alert alert-success",
-        tags$h5(icon("chart-line"), " Shuffled-decoy FDR (vs nr)"),
-        tags$p(sprintf("%s target peptides with an nr hit; mean shuffled-decoy hit-rate %.4f%%.",
+        tags$h5(icon("chart-line"), " Decoy-spectra FDR (vs nr)"),
+        tags$p(sprintf("%s target peptides with an nr hit; mean decoy-spectra hit-rate %.4f%%.",
                        format(target_hits, big.mark = ","), decoy_rate)),
         tags$p(tags$b("Lowest Casanovo score with cumulative FDR < 5%: "), rec,
-               " — decoys essentially never hit, so nr matches are real sequence ",
-               "matches at any score (the score reflects de novo sequence quality, ",
-               "not false hits)."))))
+               " — decoy spectra essentially never hit, so an nr match is a ",
+               tags$i("real sequence match"), " (chance homology is ~0). This does ",
+               "NOT certify the exact sequence or the species — see the gate note below."))))
+  })
+
+  # ── RECOMMENDED: bitscore-calibrated decoy-spectra FDR (ocelot-validated control) ──
+  # Ranks DIAMOND hits by BLAST bitscore (NOT Casanovo score) against the decoy-spectra
+  # null. helpers_dda.R::build_denovo_bitscore_fdr() + docs/denovo_decoy_method.html.
+  denovo_bitscore_fdr <- reactive({
+    values$denovo_session_trigger
+    mode <- input$denovo_fdr_calib_mode %||% "spectra"
+    if (identical(mode, "database")) {
+      # decoy-DATABASE: reversed-sequence competition (fwd vs rev best hit per peptide),
+      # mirrored from the forward/reversed FDR job in server_denovo_viz.R.
+      fw <- values$denovo_db_fwd; rv <- values$denovo_db_rev
+      req(!is.null(fw), is.data.frame(fw), nrow(fw) > 0)
+      res <- build_denovo_dbcompete_fdr(fw, rv, fdr_level = 0.01)
+    } else {
+      # decoy-SPECTRA: NovoBoard null, population-scaled.
+      rb <- values$denovo_blast %||% values$dda_casanovo_blast
+      db <- values$dda_decoy_blast
+      req(!is.null(rb), !is.null(db))
+      cls <- values$dda_casanovo_classification
+      real_n <- if (!is.null(cls) && !is.null(cls$classified) && nrow(cls$classified) > 0) {
+        base <- if ("seq_stripped" %in% names(cls$classified)) cls$classified$seq_stripped
+                else cls$classified$sequence
+        length(unique(base))
+      } else NULL
+      res <- build_denovo_bitscore_fdr(rb, db, real_n = real_n, decoy_n = real_n,
+                                       fdr_level = 0.01)
+    }
+    req(!is.null(res))
+    res
+  })
+
+  output$denovo_bitscore_fdr_curve <- plotly::renderPlotly({
+    res <- denovo_bitscore_fdr()
+    cv <- res$curve[is.finite(res$curve$q) & res$curve$q <= 0.05, , drop = FALSE]
+    req(nrow(cv) > 0)
+    cv <- cv[order(cv$q, cv$n_real), ]
+    cv$fdr_pct <- 100 * cv$q
+    plotly::plot_ly(cv, x = ~fdr_pct, y = ~n_real, type = "scatter", mode = "lines",
+                    line = list(color = "#1b7837", width = 3),
+                    hovertemplate = ~paste0(round(fdr_pct, 2), "% FDR<br>",
+                      format(n_real, big.mark = ","), " peptides (bitscore ≥ ",
+                      round(bitscore, 1), ")<extra></extra>")) %>%
+      plotly::layout(
+        title = list(text = "Recovery vs FDR (decoy-spectra, bitscore-calibrated)", font = list(size = 13)),
+        xaxis = list(title = "FDR (%)", range = c(0, 5)),
+        yaxis = list(title = "real peptides recovered", rangemode = "tozero"),
+        shapes = list(list(type = "line", x0 = 1, x1 = 1, yref = "paper", y0 = 0, y1 = 1,
+                           line = list(color = "#888", dash = "dot"))),
+        annotations = list(list(x = 1, y = 1, yref = "paper", text = "1% FDR",
+          showarrow = FALSE, xanchor = "left", font = list(size = 11, color = "#888"))))
+  })
+
+  output$denovo_bitscore_fdr_threshold <- plotly::renderPlotly({
+    res <- denovo_bitscore_fdr()
+    cv <- res$curve
+    req(nrow(cv) > 0)
+    cv$fdr_pct <- 100 * cv$q
+    ymax <- max(2, min(20, max(cv$fdr_pct, na.rm = TRUE)))
+    plotly::plot_ly(cv, x = ~bitscore, y = ~fdr_pct, type = "scatter", mode = "lines",
+                    line = list(color = "#1565c0", width = 3),
+                    hovertemplate = ~paste0("bitscore ≥ ", round(bitscore, 1), "<br>",
+                      round(fdr_pct, 2), "% FDR, ", format(n_real, big.mark = ","),
+                      " peptides<extra></extra>")) %>%
+      plotly::layout(
+        title = list(text = "FDR vs BLAST bitscore threshold", font = list(size = 13)),
+        xaxis = list(title = "BLAST bitscore threshold"),
+        yaxis = list(title = "FDR (%)", range = c(0, ymax)),
+        shapes = list(list(type = "line", y0 = 1, y1 = 1, xref = "paper", x0 = 0, x1 = 1,
+                           line = list(color = "#c62828", dash = "dot"))))
+  })
+
+  output$denovo_bitscore_fdr_bylength <- plotly::renderPlotly({
+    res <- denovo_bitscore_fdr()
+    req(!is.null(res$by_length), nrow(res$by_length) > 0)
+    plotly::plot_ly(res$by_length, x = ~length, y = ~n, type = "bar",
+                    marker = list(color = "#2e7d32"),
+                    hovertemplate = ~paste0(length, " aa: ", n, " peptides<extra></extra>")) %>%
+      plotly::layout(
+        title = list(text = "Confirmed peptides @ 1% FDR by length", font = list(size = 13)),
+        xaxis = list(title = "peptide length (aa)", type = "category"),
+        yaxis = list(title = "peptides @ 1% FDR"))
+  })
+
+  observe({
+    mode <- input$denovo_fdr_calib_mode %||% "spectra"
+    res <- tryCatch(denovo_bitscore_fdr(), error = function(e) NULL)
+    if (is.null(res)) {
+      msg <- if (identical(mode, "database"))
+        "Run the forward/reversed BLAST FDR job (in the DIAMOND BLAST pane) to enable decoy-database calibration."
+      else
+        "Load a real and a decoy-spectra DIAMOND result (denovo/blast_results_decoy_spectra.tsv) to compute the decoy-spectra FDR."
+      shinyjs::html("denovo_bitscore_fdr_callout", as.character(
+        div(class = "alert alert-secondary", msg)))
+      return(invisible(NULL))
+    }
+    n1 <- res$n_at_fdr; bt <- res$bits_at_fdr
+    is_db <- identical(res$mode, "database")
+    lab  <- if (is_db) "decoy database (reversed sequences)" else "decoy spectra (NovoBoard)"
+    note <- if (is_db)
+      paste0("Reversed-database competition (best target vs best reversed hit per peptide). Controls ",
+             "chance database matches only — more permissive than the decoy-spectra null, and it accepts ",
+             "more short peptides. Cross-reference against the decoy-spectra mode and the Sage IDs.")
+    else
+      paste0("Ranked by BLAST bitscore against the decoy-spectra null — the ocelot-validated control. ",
+             "Casanovo score is deliberately NOT used to threshold (it barely separates real from decoy ",
+             "spectra). Short peptides rarely clear 1% FDR, so a species call rests on the longer peptides.")
+    shinyjs::html("denovo_bitscore_fdr_callout", as.character(
+      div(class = "alert alert-success",
+        tags$h5(icon("circle-check"), sprintf(" Bitscore-calibrated FDR — %s", lab)),
+        tags$p(tags$b(format(n1, big.mark = ","), " peptides"), " at 1% FDR",
+               if (is.finite(bt)) paste0(" (BLAST bitscore ≥ ", round(bt, 1), ")") else "", "."),
+        tags$p(style = "font-size:12.5px; color:#5d4037; margin-bottom:0;", note))))
   })
 
   # --- Summary cards ---

@@ -40,144 +40,98 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
   # aa_scores_str: optional comma-separated per-residue confidence scores for the query
   # Returns HTML string
-  render_blast_alignment <- function(query_seq, subject_id, pident,
-                                     qstart = 1, qend = nchar(query_seq),
-                                     sstart = 1, send = NULL,
+  #  Render the alignment from the REAL DIAMOND output (qseq/sseq/btop) — never
+  #  guessed positions (CLAUDE.md: never fabricate viz data). btop reconstructs
+  #  the gapped alignment; each query residue is tinted by its Casanovo
+  #  per-residue confidence, and the header reports Confidence-Weighted Identity
+  #  (CWI) + High-Confidence Agreement (HCA). If btop is absent for the hit we
+  #  say so instead of inventing a layout.
+  render_blast_alignment <- function(subject_id, pident, qseq, sseq, btop,
+                                     qstart = 1, sstart = 1, send = NULL,
                                      mismatch = 0, aa_scores_str = NULL) {
-    q_chars <- strsplit(query_seq, "")[[1]]
-    q_len <- length(q_chars)
+    r <- dda_alignment_cwi(qseq, sseq, btop, qstart = qstart,
+                           aa_scores_str = aa_scores_str)
 
-    # Parse per-residue AA scores if available
-    aa_scores <- NULL
-    if (!is.null(aa_scores_str) && !is.na(aa_scores_str) &&
-        nzchar(aa_scores_str) && aa_scores_str != "null") {
-      aa_scores <- as.numeric(strsplit(aa_scores_str, ",")[[1]])
-      # Pad or truncate to match query length
-      if (length(aa_scores) < q_len) {
-        aa_scores <- c(aa_scores, rep(NA_real_, q_len - length(aa_scores)))
-      } else if (length(aa_scores) > q_len) {
-        aa_scores <- aa_scores[seq_len(q_len)]
-      }
+    if (!isTRUE(r$available)) {
+      return(paste0(
+        '<div style="background: #fff8e1; border: 1px solid #ffe082; border-radius: 8px; padding: 16px; margin: 10px 0;">',
+        '<strong>Subject:</strong> ', htmltools::htmlEscape(subject_id),
+        ' &nbsp; <strong>Identity:</strong> ', round(pident, 1), '%',
+        ' &nbsp; <strong>Mismatches:</strong> ', mismatch,
+        '<div style="margin-top: 8px; color: #8a6d3b; font-size: 13px;">',
+        'Residue-level alignment is not available for this hit (the BLAST run did ',
+        'not record the traceback). Re-run the de novo BLAST with the standard ',
+        '<code>qseq sseq btop</code> output to see the per-residue view.',
+        '</div></div>'))
     }
 
-    # For alignment display, we need to simulate the alignment
-    # The BLAST coordinates tell us which positions aligned
-    # Without actual subject sequence text, we reconstruct from identity info
-    # qstart..qend = query positions that aligned
-    # We highlight mismatched positions
+    qa <- strsplit(r$qaln, "")[[1]]
+    sa <- strsplit(r$saln, "")[[1]]
+    aa <- r$aa
+    qpos <- as.integer(r$qstart) - 1L
 
-    # Determine alignment region in the query
-    q_start <- max(1, as.integer(qstart))
-    q_end <- min(q_len, as.integer(qend))
-
-    # Build the alignment display lines
-    query_line <- ""
-    match_line <- ""
-    subject_line <- ""
-    score_line <- ""
-
-    # For each position in the query, show the alignment
-    aligned_len <- q_end - q_start + 1
-    n_match <- aligned_len - as.integer(mismatch)
-    n_mismatch_remaining <- as.integer(mismatch)
-
-    # Without the actual subject sequence from BLAST, we can infer:
-    # - positions that match show the same AA
-    # - positions that mismatch show a different AA (we mark with X)
-    # In practice, we color based on whether the position is "variant" or not
-    # To get actual subject sequence, we'd need DIAMOND with full alignment output
-
-    for (i in seq_len(q_len)) {
-      aa <- q_chars[i]
-      aa_score <- if (!is.null(aa_scores) && !is.na(aa_scores[i])) aa_scores[i] else NA_real_
-
-      if (i < q_start || i > q_end) {
-        # Outside alignment region — gap
-        q_color <- "#aaa"
-        q_bg <- "transparent"
-        match_char <- " "
-        s_char <- "-"
-        score_label <- ""
+    query_line <- ""; match_line <- ""; subject_line <- ""
+    for (i in seq_along(qa)) {
+      qch <- qa[i]; sch <- sa[i]
+      if (qch == "-") {
+        # gap in query (insertion in subject) — no query residue consumed
+        query_line   <- paste0(query_line, span_aa("-", "#aaa", "transparent", ""))
+        match_line   <- paste0(match_line, span_match(" "))
+        subject_line <- paste0(subject_line, span_subj(sch))
+        next
+      }
+      qpos <- qpos + 1L
+      aa_score <- if (!is.null(aa) && qpos <= length(aa) && !is.na(aa[qpos])) aa[qpos] else NA_real_
+      score_label <- if (!is.na(aa_score)) sprintf("%.2f", aa_score) else ""
+      il <- qch %in% c("I", "L") && sch %in% c("I", "L")
+      is_match <- sch != "-" && (qch == sch || il)
+      if (qch == "X" || sch == "X") {
+        # DIAMOND-masked low-complexity residue — not a real substitution
+        q_color <- "#888"; q_bg <- "#eeeeee"; mc <- " "
+      } else if (is_match) {
+        q_color <- "#555"; q_bg <- "#e8f5e9"; mc <- "|"
+      } else if (!is.na(aa_score) && aa_score >= 0.95) {
+        q_color <- "white"; q_bg <- "#2e7d32"; mc <- " "   # confident -> genuine variant
+      } else if (!is.na(aa_score) && aa_score < 0.70) {
+        q_color <- "white"; q_bg <- "#c62828"; mc <- " "   # unsure -> likely de novo error
       } else {
-        # Inside alignment region
-        # We distribute mismatches by checking identity percentage
-        # Approximate: every Nth position is a mismatch
-        pos_in_align <- i - q_start + 1
-        is_mismatch <- FALSE
-        if (n_mismatch_remaining > 0 && aligned_len > 0) {
-          # Distribute mismatches roughly evenly
-          mismatch_interval <- ceiling(aligned_len / max(as.integer(mismatch), 1))
-          if (pos_in_align %% mismatch_interval == 0 && n_mismatch_remaining > 0) {
-            is_mismatch <- TRUE
-            n_mismatch_remaining <- n_mismatch_remaining - 1
-          }
-        }
-
-        if (is_mismatch) {
-          match_char <- " "
-          s_char <- "?"  # Unknown substitution without full alignment
-          if (!is.na(aa_score) && aa_score > 0.95) {
-            # High confidence substitution = GENUINE VARIANT
-            q_color <- "white"
-            q_bg <- "#2e7d32"  # Green
-            score_label <- sprintf("%.2f", aa_score)
-          } else if (!is.na(aa_score) && aa_score < 0.7) {
-            # Low confidence = POSSIBLE SEQUENCING ERROR
-            q_color <- "white"
-            q_bg <- "#c62828"  # Red
-            score_label <- sprintf("%.2f", aa_score)
-          } else {
-            # Medium confidence or no score — amber
-            q_color <- "black"
-            q_bg <- "#ff8f00"  # Amber
-            score_label <- if (!is.na(aa_score)) sprintf("%.2f", aa_score) else "?"
-          }
-        } else {
-          match_char <- "|"
-          s_char <- aa  # Match
-          q_color <- "#555"
-          q_bg <- "#e8f5e9"  # Light green
-          score_label <- if (!is.na(aa_score)) sprintf("%.2f", aa_score) else ""
-        }
+        q_color <- "black"; q_bg <- "#ff8f00"; mc <- " "   # mid / no score
       }
-
-      query_line <- paste0(query_line, sprintf(
-        '<span style="background: %s; color: %s; padding: 1px 3px; font-family: monospace; font-size: 14px;" title="AA score: %s">%s</span>',
-        q_bg, q_color, score_label, aa
-      ))
-      match_line <- paste0(match_line, sprintf(
-        '<span style="color: %s; padding: 1px 3px; font-family: monospace; font-size: 14px;">%s</span>',
-        if (match_char == "|") "#2e7d32" else "#c62828", match_char
-      ))
-      subject_line <- paste0(subject_line, sprintf(
-        '<span style="color: %s; padding: 1px 3px; font-family: monospace; font-size: 14px;">%s</span>',
-        if (s_char == "?" || s_char == "-") "#c62828" else "#555", s_char
-      ))
+      query_line   <- paste0(query_line, span_aa(qch, q_color, q_bg, score_label))
+      match_line   <- paste0(match_line, span_match(mc))
+      subject_line <- paste0(subject_line, span_subj(sch))
     }
 
-    # Legend
+    cwi_txt <- if (!is.na(r$cwi)) sprintf("%.0f%%", r$cwi) else "n/a"
+    hca_txt <- if (!is.na(r$hca)) sprintf("%.0f%% (%d residues)", r$hca, r$n_hi) else "n/a"
+    call <- cwi_call_label(r$hca, r$n_hi)
+    call_color <- switch(call %||% "", Confident = "#2e7d32", Likely = "#f57f17",
+                         Uncertain = "#c62828", "#777")
+
     legend_html <- paste0(
       '<div style="margin-top: 10px; font-size: 12px; color: #666;">',
-      '<span style="background: #2e7d32; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">',
-      'Genuine Variant (AA score &gt; 0.95)</span>',
-      '<span style="background: #c62828; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">',
-      'Possible Error (AA score &lt; 0.70)</span>',
-      '<span style="background: #ff8f00; color: black; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">',
-      'Uncertain (0.70-0.95)</span>',
-      '<span style="background: #e8f5e9; color: #555; padding: 2px 6px; border-radius: 3px;">',
-      'Match</span>',
-      '</div>'
-    )
+      '<span style="background: #e8f5e9; color: #555; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">Match</span>',
+      '<span style="background: #2e7d32; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">Confident substitution (&ge;0.95) = genuine difference</span>',
+      '<span style="background: #ff8f00; color: black; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">Uncertain (0.70-0.95)</span>',
+      '<span style="background: #c62828; color: white; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">Low confidence (&lt;0.70) = likely de novo error</span>',
+      '<span style="background: #eeeeee; color: #888; padding: 2px 6px; border-radius: 3px;">X = low-complexity masked (not scored)</span>',
+      '</div>')
 
-    # Assemble HTML
-    html <- paste0(
+    paste0(
       '<div style="background: #fafafa; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 10px 0;">',
       '<div style="margin-bottom: 8px;">',
       '<strong>Subject:</strong> ', htmltools::htmlEscape(subject_id),
       ' &nbsp; <strong>Identity:</strong> ', round(pident, 1), '%',
       ' &nbsp; <strong>Mismatches:</strong> ', mismatch,
-      ' &nbsp; <strong>Query:</strong> ', q_start, '-', q_end,
+      ' &nbsp; <strong>Query from residue:</strong> ', r$qstart,
       ' &nbsp; <strong>Subject:</strong> ', sstart, '-', if (!is.null(send)) send else "?",
+      '</div>',
+      '<div style="margin-bottom: 10px; font-size: 13px;">',
+      '<strong>Confidence-Weighted Identity (CWI):</strong> ', cwi_txt,
+      ' &nbsp; <strong>High-Confidence Agreement (HCA):</strong> ', hca_txt,
+      if (!is.na(call)) paste0(' &nbsp; <span style="background:', call_color,
+        '; color:white; padding:2px 8px; border-radius:10px; font-weight:bold;">',
+        call, '</span>') else "",
       '</div>',
       '<div style="overflow-x: auto; white-space: nowrap;">',
       '<div style="margin-bottom: 2px;"><span style="color: #888; font-size: 11px; width: 60px; display: inline-block;">Query</span>', query_line, '</div>',
@@ -185,11 +139,25 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
       '<div><span style="color: #888; font-size: 11px; width: 60px; display: inline-block;">Subject</span>', subject_line, '</div>',
       '</div>',
       legend_html,
-      '</div>'
-    )
-
-    html
+      '</div>')
   }
+
+  # small span builders (kept local so the alignment renderer stays readable)
+  span_aa <- function(ch, color, bg, label) sprintf(
+    '<span style="background: %s; color: %s; padding: 1px 3px; font-family: monospace; font-size: 14px;" title="confidence: %s">%s</span>',
+    bg, color, if (nzchar(label)) label else "n/a", ch)
+  span_match <- function(ch) sprintf(
+    '<span style="color: %s; padding: 1px 3px; font-family: monospace; font-size: 14px;">%s</span>',
+    if (ch == "|") "#2e7d32" else "#c62828", ch)
+  span_subj <- function(ch) sprintf(
+    '<span style="color: %s; padding: 1px 3px; font-family: monospace; font-size: 14px;">%s</span>',
+    if (ch == "-") "#c62828" else "#555", ch)
+
+  # Per-peptide Casanovo aa_scores lookup (best PSM), keyed by the canonical
+  # (I/L-normalized) peptide — the single key used everywhere for the CWI join.
+  casanovo_aa_lookup <- reactive({
+    build_casanovo_aa_lookup(values$dda_casanovo_psms)
+  })
 
   # --- BLAST Alignment table (near-matches only, for selection) ---
   blast_near_matches <- reactive({
@@ -199,7 +167,7 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
     req(blast)
     req(nrow(blast) > 0)
 
-    # Filter to near-matches (90-99% identity) — these are interesting for alignment
+    # Filter to near-matches (50-99% identity) — these are interesting for alignment
     pident_col <- if ("pident" %in% names(blast)) "pident" else "identity"
     pep_col <- if ("peptide" %in% names(blast)) "peptide" else "peptide_sequence"
 
@@ -212,19 +180,46 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
     near$protein_name <- dda_protein_label(near$subject)
     near$species <- dda_blast_species(near[[pep_col]], near$subject, values$dda_lca)
 
+    # Confidence-Weighted Identity from the REAL btop alignment (one definition,
+    # via the shared helper). Needs qseq/sseq/btop + the peptide's aa_scores;
+    # when any are missing CWI is reported NA (never fabricated).
+    has_aln <- all(c("qseq", "sseq", "btop") %in% names(near))
+    aa_lookup <- casanovo_aa_lookup()
+    qstart_v <- if ("qstart" %in% names(near)) suppressWarnings(as.integer(near$qstart)) else rep(1L, nrow(near))
+    cwi_v <- rep(NA_real_, nrow(near)); hca_v <- cwi_v; call_v <- rep(NA_character_, nrow(near))
+    aa_str_v <- rep(NA_character_, nrow(near))
+    if (has_aln) {
+      keys <- gsub("I", "L", build_dda_canonical_peptide(near[[pep_col]]))
+      if (!is.null(aa_lookup)) aa_str_v <- unname(aa_lookup[keys])
+      for (i in seq_len(nrow(near))) {
+        rr <- dda_alignment_cwi(near$qseq[i], near$sseq[i], near$btop[i],
+                                qstart = qstart_v[i], aa_scores_str = aa_str_v[i])
+        if (isTRUE(rr$available)) {
+          cwi_v[i] <- rr$cwi; hca_v[i] <- rr$hca
+          call_v[i] <- cwi_call_label(rr$hca, rr$n_hi)
+        }
+      }
+    }
+
     data.frame(
       Peptide = near[[pep_col]],
       Protein = near$protein_name,
       Accession = near$accession,
       Species = near$species,
       Identity = round(near$pident_val, 1),
+      CWI = cwi_v,
+      HCA = hca_v,
+      Call = call_v,
       Mismatch = if ("mismatch" %in% names(near)) near$mismatch else
         round(nchar(near[[pep_col]]) * (1 - near$pident_val / 100)),
-      QStart = if ("qstart" %in% names(near)) near$qstart else 1L,
-      QEnd = if ("qend" %in% names(near)) near$qend else nchar(near[[pep_col]]),
+      QStart = qstart_v,
       SStart = if ("sstart" %in% names(near)) near$sstart else 1L,
       SEnd = if ("send" %in% names(near)) near$send else NA_integer_,
       Subject = near$subject,
+      qseq = if (has_aln) near$qseq else NA_character_,
+      sseq = if (has_aln) near$sseq else NA_character_,
+      btop = if (has_aln) near$btop else NA_character_,
+      aa_scores_str = aa_str_v,
       stringsAsFactors = FALSE
     )
   })
@@ -242,22 +237,29 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
       options = list(
         pageLength = 15,
         scrollX = TRUE,
-        order = list(list(4, "desc")),
+        order = list(list(which(names(near) == "CWI") - 1, "desc")),
         columnDefs = list(
-          list(visible = FALSE, targets = which(names(near) == "Subject") - 1)
+          # hide the lookup/alignment helper columns (used only by the modal)
+          list(visible = FALSE, targets = which(names(near) %in%
+            c("Subject", "qseq", "sseq", "btop", "aa_scores_str")) - 1)
         )
       ),
       caption = htmltools::tags$caption(
         style = "caption-side: top; font-weight: bold; color: #1565c0;",
-        "Select a peptide and click 'Show Alignment' to visualize mismatches with AA confidence scores"
+        "Select a peptide and click 'Show Alignment' for the residue-level view. ",
+        "CWI = Confidence-Weighted Identity, HCA = High-Confidence Agreement, ",
+        "Call = trust tier (Confident / Likely / Uncertain)."
       )
     ) %>%
       DT::formatStyle("Identity",
-        backgroundColor = DT::styleInterval(
-          c(70, 90),
-          c("#fce4ec", "#fff3e0", "#e8f5e9")
-        )
-      )
+        backgroundColor = DT::styleInterval(c(70, 90), c("#fce4ec", "#fff3e0", "#e8f5e9"))) %>%
+      DT::formatStyle("CWI",
+        backgroundColor = DT::styleInterval(c(70, 90), c("#fce4ec", "#fff3e0", "#e8f5e9"))) %>%
+      DT::formatStyle("Call",
+        color = DT::styleEqual(
+          c("Confident", "Likely", "Uncertain"),
+          c("#2e7d32", "#f57f17", "#c62828")),
+        fontWeight = "bold")
   })
 
   # --- Show Alignment button: uses selected row from alignment table ---
@@ -277,26 +279,14 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
     subject <- row$Subject
     pident <- row$Identity
     qstart <- row$QStart
-    qend <- row$QEnd
     sstart <- row$SStart
     send <- row$SEnd
     mismatch_count <- row$Mismatch
 
-    # Look up per-residue AA scores from Casanovo PSMs
-    aa_scores_str <- NULL
-    psms <- values$dda_casanovo_psms
-    if (!is.null(psms) && "aa_scores" %in% names(psms)) {
-      # Match by stripped sequence (I/L normalized)
-      pep_norm <- gsub("I", "L", gsub("[^A-Z]", "", toupper(peptide)))
-      match_idx <- which(psms$seq_norm == pep_norm)
-      if (length(match_idx) > 0) {
-        # Take the highest-scoring PSM's AA scores
-        best_idx <- match_idx[which.max(psms$score[match_idx])]
-        aa_scores_str <- psms$aa_scores[best_idx]
-      }
-    }
-
-    # Also check Cascadia SSL data
+    # Per-residue AA scores: prefer the value already joined into the table (best
+    # Casanovo PSM); fall back to Cascadia SSL data for DIA-sourced runs.
+    aa_scores_str <- if (!is.na(row$aa_scores_str) && nzchar(row$aa_scores_str))
+                       row$aa_scores_str else NULL
     if (is.null(aa_scores_str)) {
       ssl_data <- values$denovo_data
       if (!is.null(ssl_data) && "aa_scores" %in% names(ssl_data)) {
@@ -309,23 +299,50 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
       }
     }
 
-    # Parse protein name from SwissProt format
-    protein_name <- sub("^[a-z]+\\|[^|]+\\|", "", subject)
-    accession <- sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", subject)
-    species <- dda_blast_species(peptide, subject, values$dda_lca)
-    protein_name_clean <- dda_protein_label(subject)
+    accession <- row$Accession
+    species <- row$Species
+    protein_name_clean <- row$Protein
 
     alignment_html <- render_blast_alignment(
-      query_seq    = peptide,
-      subject_id   = subject,
-      pident       = pident,
-      qstart       = qstart,
-      qend         = qend,
-      sstart       = sstart,
-      send         = send,
-      mismatch     = mismatch_count,
+      subject_id    = subject,
+      pident        = pident,
+      qseq          = row$qseq,
+      sseq          = row$sseq,
+      btop          = row$btop,
+      qstart        = qstart,
+      sstart        = sstart,
+      send          = send,
+      mismatch      = mismatch_count,
       aa_scores_str = aa_scores_str
     )
+
+    # Trusted substitutions: confident (>=0.95) de novo residues that DIFFER from
+    # the reference. Calibration (vs close nr refs) shows conf>=0.95 residues are
+    # ~99% correctly sequenced, so these are genuine sequence differences, not de
+    # novo errors. Built from the same real btop alignment.
+    ts_html <- ""
+    rr <- dda_alignment_cwi(row$qseq, row$sseq, row$btop, qstart = qstart,
+                            aa_scores_str = aa_scores_str)
+    if (isTRUE(rr$available)) {
+      ts <- build_trusted_substitutions(rr$qaln, rr$saln, rr$aa, qstart = rr$qstart)
+      if (nrow(ts) > 0) {
+        rows_html <- paste(sprintf(
+          '<tr><td style="padding:1px 8px;">%d</td><td style="padding:1px 8px;font-family:monospace;">%s &rarr; <b style="color:#2e7d32;">%s</b></td><td style="padding:1px 8px;">%.2f</td><td style="padding:1px 8px;">%s</td></tr>',
+          ts$pos, ts$ref, ts$denovo, ts$conf,
+          ifelse(ts$bracketed, "yes — ion-bracketed", "")), collapse = "")
+        ts_html <- paste0(
+          '<div style="margin-top:12px; background:#eef7ee; border:1px solid #cfe8cf; border-radius:8px; padding:10px;">',
+          '<strong style="color:#1b5e20;">Trusted substitutions</strong> ',
+          '<span style="color:#666; font-size:12px;">(confident de novo residues that differ from the reference — genuine variants, ~99% correctly sequenced at conf&ge;0.95, not de novo errors)</span>',
+          '<table style="margin-top:6px; font-size:13px; border-collapse:collapse;">',
+          '<tr style="color:#888; font-size:11px;"><td style="padding:1px 8px;">pos</td><td style="padding:1px 8px;">ref &rarr; de novo</td><td style="padding:1px 8px;">conf</td><td style="padding:1px 8px;">mass-pinned</td></tr>',
+          rows_html, '</table></div>')
+      } else {
+        ts_html <- paste0('<div style="margin-top:12px; color:#888; font-size:12px;">',
+          'No trusted substitutions: every confident (&ge;0.95) residue agrees with the reference; ',
+          'all differences sit at low-confidence positions (likely de novo error, not real variants).</div>')
+      }
+    }
 
     # Build modal
     showModal(modalDialog(
@@ -344,35 +361,96 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
                     paste0("(", accession, ", ", species, ")")),
           tags$br(),
           tags$small(style = "color: #666;",
-            "Hover over amino acids to see per-residue confidence scores. ",
-            "Green = genuine variant (high confidence substitution), ",
-            "Red = possible sequencing error (low confidence)."
+            "Each residue is tinted by its Casanovo confidence. ",
+            "Confidence-Weighted Identity (CWI) and High-Confidence Agreement (HCA) ",
+            "are shown above the alignment: a hit is trustworthy when every residue ",
+            "the model was sure of agrees with the reference, even if raw % identity is modest."
           )
         ),
-        # Alignment
+        # Alignment (real btop reconstruction; CWI/HCA in the header)
         HTML(alignment_html),
-        # Additional context
-        if (!is.null(aa_scores_str) && !is.na(aa_scores_str) && nzchar(aa_scores_str)) {
-          div(style = "margin-top: 12px; padding: 10px; background: #f5f5f5; border-radius: 6px;",
-            tags$strong("Interpretation: "),
-            tags$span(style = "color: #333;",
-              if (mismatch_count == 0) {
-                "Perfect match -- this peptide is identical to the reference."
-              } else if (pident >= 95) {
-                paste0(mismatch_count, " substitution(s) at ",
-                       round(100 - pident, 1), "% divergence. ",
-                       "Check green-highlighted positions for species-specific markers.")
-              } else {
-                paste0(mismatch_count, " substitution(s). ",
-                       "This peptide is a distant homolog. ",
-                       "Red positions may indicate sequencing artifacts.")
-              }
-            )
-          )
-        }
+        # Trusted substitutions (confident genuine differences)
+        HTML(ts_html)
       ),
-      footer = modalButton("Close")
+      footer = tagList(
+        if (!is.null(values$dda_spectra_meta))
+          actionButton("dda_view_spectrum", "View annotated spectrum",
+                       icon = icon("chart-column"), class = "btn-info"),
+        modalButton("Close"))
     ))
+    dda_spectrum_pep(peptide)   # remember the selected peptide for the spectrum view
+  })
+
+  # ---- Annotated MS/MS spectrum viewer (confirms the de novo call + BLAST) ----
+  dda_spectrum_pep <- reactiveVal(NULL)
+
+  observeEvent(input$dda_view_spectrum, {
+    pep <- dda_spectrum_pep()
+    req(pep, values$dda_spectra_meta, values$dda_spectra_peaks)
+    pep_norm <- gsub("I", "L", build_dda_canonical_peptide(pep))
+    mt <- values$dda_spectra_meta
+    mrow <- mt[mt$pep_norm == pep_norm, , drop = FALSE]
+    if (nrow(mrow) == 0) {
+      showNotification("No bundled spectrum for this peptide (spectra are included for BLAST-hit peptides).",
+                       type = "warning", duration = 6); return()
+    }
+    showModal(modalDialog(
+      title = tagList(icon("chart-column"),
+        sprintf(" Annotated spectrum: %s (scan %s)", mrow$raw_seq[1], mrow$scan[1])),
+      size = "l", easyClose = TRUE, footer = modalButton("Close"),
+      div(
+        tags$div(id = "dda_spectrum_aaprob", style = "margin-bottom: 10px;"),
+        plotly::plotlyOutput("dda_spectrum_plot", height = "420px"),
+        tags$small(style = "color:#666; display:block; margin-top:8px;",
+          "Matched b ions (blue) and y ions (red) confirm the de novo sequence against the raw MS/MS. ",
+          "Residues above are tinted by Casanovo confidence — the same scores used in the BLAST alignment.")
+      )))
+    # per-residue Casanovo confidence row (same colours as the alignment view)
+    aa_str <- unname(build_casanovo_aa_lookup(values$dda_casanovo_psms)[pep_norm])
+    aa <- if (!is.na(aa_str) && nzchar(aa_str)) suppressWarnings(as.numeric(strsplit(aa_str, ",")[[1]])) else NULL
+    chars <- strsplit(gsub("[^A-Za-z]", "", toupper(pep)), "")[[1]]
+    conf_bg <- function(c) if (is.na(c)) "#eee" else if (c >= 0.95) "#2e7d32" else if (c < 0.70) "#c62828" else "#ff8f00"
+    conf_fg <- function(c) if (!is.na(c) && c >= 0.70 && c < 0.95) "black" else "white"
+    cells <- vapply(seq_along(chars), function(i) {
+      cc <- if (!is.null(aa) && i <= length(aa)) aa[i] else NA_real_
+      sprintf('<span title="confidence %s" style="display:inline-block;padding:2px 4px;margin:1px;border-radius:3px;font-family:monospace;font-size:14px;background:%s;color:%s;">%s</span>',
+              if (is.na(cc)) "n/a" else sprintf("%.2f", cc), conf_bg(cc), conf_fg(cc), chars[i])
+    }, character(1))
+    shinyjs::html("dda_spectrum_aaprob", paste0(
+      '<div style="font-size:12px;color:#1a3c5e;margin-bottom:4px;">Per-residue Casanovo confidence ',
+      '(green &ge;0.95, amber 0.70&ndash;0.95, red &lt;0.70):</div><div>', paste(cells, collapse = ""), '</div>'))
+  })
+
+  output$dda_spectrum_plot <- plotly::renderPlotly({
+    pep <- dda_spectrum_pep(); req(pep, values$dda_spectra_meta, values$dda_spectra_peaks)
+    pep_norm <- gsub("I", "L", build_dda_canonical_peptide(pep))
+    mt <- values$dda_spectra_meta; mrow <- mt[mt$pep_norm == pep_norm, , drop = FALSE]
+    req(nrow(mrow) > 0)
+    sk <- mrow$scan_key[1]; raw <- mrow$raw_seq[1]
+    pk <- values$dda_spectra_peaks[.(sk), nomatch = 0L]
+    req(nrow(pk) > 0)
+    frags <- dda_ms2_fragments(raw, max_charge = 2L)
+    ann <- dda_annotate_peaks(frags, pk$mz, pk$intensity, tol_ppm = 30)
+    ann$col <- ifelse(is.na(ann$type), "#bdbdbd",
+                ifelse(ann$type == "b", "#1565c0", "#c62828"))
+    p <- plotly::plot_ly()
+    # peaks as sticks
+    for (i in seq_len(nrow(ann))) {
+      p <- plotly::add_segments(p, x = ann$mz[i], xend = ann$mz[i], y = 0, yend = ann$intensity[i],
+                                line = list(color = ann$col[i], width = if (is.na(ann$label[i])) 1 else 2),
+                                hoverinfo = "text",
+                                text = sprintf("m/z %.4f<br>int %.0f%s", ann$mz[i], ann$intensity[i],
+                                               if (!is.na(ann$label[i])) paste0("<br><b>", ann$label[i], "</b> (", ann$ppm[i], " ppm)") else ""),
+                                showlegend = FALSE)
+    }
+    # labels on matched
+    lab <- ann[!is.na(ann$label), , drop = FALSE]
+    if (nrow(lab))
+      p <- plotly::add_text(p, x = lab$mz, y = lab$intensity, text = lab$label,
+                            textposition = "top center", textfont = list(size = 10, color = lab$col),
+                            hoverinfo = "skip", showlegend = FALSE)
+    plotly::layout(p, xaxis = list(title = "m/z"), yaxis = list(title = "intensity"),
+                   margin = list(t = 20))
   })
 
 
@@ -669,6 +747,12 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
         fwd_hits = fwd_best,
         rev_hits = rev_best
       ))
+
+      # Mirror the best forward/reversed hits into shared `values` so the
+      # bitscore-calibrated FDR pane (server_dda.R) can offer decoy-DATABASE
+      # calibration alongside the decoy-spectra null.
+      values$denovo_db_fwd <- as.data.frame(fwd_best)
+      values$denovo_db_rev <- as.data.frame(rev_best)
 
       add_to_log(
         sprintf("De novo FDR computed: %d forward hits, %d reversed hits",
@@ -1500,56 +1584,93 @@ server_denovo_viz <- function(input, output, session, values, add_to_log) {
 
   observeEvent(input$denovo_alignment_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " BLAST Alignment View"),
+      title = tagList(icon("question-circle"), " BLAST Alignment View & Confidence-Weighted Identity"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("Visual alignment of de novo peptides against their closest BLAST hits, annotated with ",
-          "per-residue confidence scores from Casanovo."),
+        p("The real DIAMOND alignment of each de novo peptide against its closest reference hit, ",
+          "reconstructed from the alignment traceback (BLAST ", tags$code("btop"), ") so every ",
+          "match, mismatch, and gap is exact — nothing is inferred. Each query residue is tinted ",
+          "by its Casanovo per-residue confidence."),
         tags$h6("How to Use"),
         tags$ol(
-          tags$li("Select a near-match peptide from the table (90-99% identity)."),
-          tags$li("Click ", strong("Show Alignment"), " to visualize the mismatch."),
-          tags$li("Review the color-coded alignment:")
+          tags$li("Select a near-match peptide from the table (50-99% identity)."),
+          tags$li("Click ", strong("Show Alignment"), " to see the residue-level view."),
+          tags$li("Read the color-coded alignment:")
         ),
         tags$ul(
-          tags$li(tags$span(style = "color: #2e7d32; font-weight: bold;", "Green"), " mismatch (AA score > 0.95): ",
-            "High-confidence variant — likely a genuine species-specific substitution."),
-          tags$li(tags$span(style = "color: #c62828; font-weight: bold;", "Red"), " mismatch (AA score < 0.70): ",
-            "Low-confidence — likely a de novo sequencing error."),
+          tags$li(tags$span(style = "color: #2e7d32; font-weight: bold;", "Green"), " mismatch (confidence ≥ 0.95): ",
+            "the model was sure here, so a disagreement is a genuine species-specific substitution."),
+          tags$li(tags$span(style = "color: #c62828; font-weight: bold;", "Red"), " mismatch (confidence < 0.70): ",
+            "the model was unsure — likely a de novo sequencing error, not a real difference."),
           tags$li(tags$span(style = "color: #e65100; font-weight: bold;", "Orange"), " mismatch (0.70-0.95): ",
-            "Ambiguous — could be either a real variant or an error.")
+            "ambiguous — could be either.")
+        ),
+        tags$h6("Confidence-Weighted Identity (CWI) & High-Confidence Agreement (HCA)"),
+        p("Raw % identity treats every mismatch equally, which penalizes a de novo peptide for ",
+          "its own sequencing errors. CWI fixes that by weighting each aligned position by the ",
+          "Casanovo confidence at that residue:"),
+        tags$div(style = "background:#f5f5f5; padding:8px 12px; border-radius:6px; font-family:monospace;",
+          "CWI = Σ(confidence at matching positions) / Σ(confidence at all aligned positions) × 100%"),
+        tags$ul(
+          tags$li(strong("CWI"), " — a hit whose only differences fall on low-confidence residues scores ",
+            "high even at modest raw % identity (the differences are probably de novo error, not biology)."),
+          tags$li(strong("HCA"), " — of the residues Casanovo was sure of (≥ 0.95), the % that agree with the ",
+            "reference. This is the decisive number: if every confident residue matches, the hit is trustworthy."),
+          tags$li(strong("Call"), " — a plain-language tier from HCA: ",
+            tags$span(style="color:#2e7d32;font-weight:bold;", "Confident"), " (HCA ≥ 90%, ≥ 3 confident residues), ",
+            tags$span(style="color:#f57f17;font-weight:bold;", "Likely"), " (HCA ≥ 75%), ",
+            tags$span(style="color:#c62828;font-weight:bold;", "Uncertain"), " (the confident residues themselves disagree).")
         ),
         tags$h6("Applications"),
-        p("In paleoproteomics: species-specific amino acid substitutions (SAPs) in conserved proteins ",
-          "(collagens, keratins) are used for phylogenetic placement. High-confidence mismatches ",
-          "at known SAP positions are the strongest evidence for species identification.")
+        p("In paleoproteomics / wildlife forensics, species-specific substitutions (SAPs) in conserved ",
+          "proteins (collagens, keratins) drive phylogenetic placement. CWI/HCA separate true SAPs from ",
+          "de novo artifacts, so a distant-but-real homolog is not discarded for low raw identity."),
+        tags$h6("Prior art"),
+        p(style = "font-size: 0.85em; color:#555;",
+          "Using de novo confidence to distinguish sequencing errors from real sequence differences is ",
+          "well established: ", strong("SPIDER"), " (Han, Ma & Zhang 2005; the homology-search engine in PEAKS) ",
+          "reconstructs a sequence by separating de novo errors from homology mutations, and ", strong("ALPS"),
+          " assembles de novo peptides using per-residue positional confidence. CWI is a simple, per-hit ",
+          "instance of that principle: it weights the homology % identity by Casanovo's own per-residue ",
+          "confidence and reports the high-confidence agreement, computed against the real DIAMOND/nr alignment.")
       )
     ))
   })
 
   observeEvent(input$denovo_fdr_info_btn, {
     showModal(modalDialog(
-      title = tagList(icon("question-circle"), " Target-Decoy FDR Estimation"),
+      title = tagList(icon("question-circle"), " Decoy-spectra FDR (NovoBoard method)"),
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
-        p("Estimates the false discovery rate (FDR) of de novo BLAST identifications using a ",
-          "target-decoy strategy."),
+        p("Estimates the false discovery rate of de novo → nr-BLAST identifications by ",
+          strong("target-decoy competition on decoy spectra"), " — the de-novo analogue of database ",
+          "target-decoy (Tran et al. 2024, ", em("Mol Cell Proteomics"),
+          ", doi:10.1016/j.mcpro.2024.100849)."),
         tags$h6("Method"),
         tags$ol(
-          tags$li(strong("Forward (target): "), "BLAST the actual de novo peptide sequences against SwissProt."),
-          tags$li(strong("Reversed (decoy): "), "BLAST the same sequences reversed (scrambled) against SwissProt."),
-          tags$li(strong("FDR = "), "reversed hits / forward hits at each identity threshold.")
+          tags$li(strong("Real: "), "BLAST the Casanovo de novo peptides against NCBI nr."),
+          tags$li(strong("Decoy spectra: "), "for every real MS/MS spectrum, replace ≥80% of its peaks ",
+            "with peaks sampled from the global pool (precursor m/z + charge preserved), sequence the ",
+            "decoy spectra with the same Casanovo model, and BLAST those peptides against nr."),
+          tags$li(strong("FDR = "), "decoy-spectra hit-rate ÷ real hit-rate, per Casanovo-score bin and cumulatively.")
         ),
-        tags$h6("Interpretation"),
+        tags$p(style = "color:#5d4037;",
+          "We validated ≥80% peak replacement on a HeLa entrapment: at 50% the most abundant real ",
+          "peptides (GAPDH, actin) still get reconstructed and leak into the null; at ≥80% the null is clean."),
+        tags$h6("Why this is necessary but NOT sufficient"),
+        p("A clean decoy-spectra FDR only rules out ", strong("chance homology"),
+          ". A species call has two further error modes that this FDR does not see:"),
         tags$ul(
-          tags$li(strong("FDR curve: "), "Shows estimated FDR as a function of BLAST identity threshold. ",
-            "Lower FDR = more reliable identifications."),
-          tags$li(strong("1% FDR line: "), "Standard target for proteomics. Identifications above this threshold ",
-            "are considered high-confidence."),
-          tags$li(strong("5% FDR line: "), "More permissive threshold. Acceptable for exploratory analysis.")
+          tags$li(strong("De novo sequence error "), "— Casanovo can mis-sequence a real spectrum. ",
+            "Exact accuracy was ~55% overall on the entrapment but rises with confidence ",
+            "(≈79% at conf ≥0.95, ≈88% at ≥0.99). ", em("Gate with the Casanovo confidence slider.")),
+          tags$li(strong("Species mis-assignment "), "— conserved peptides match many taxa, and a single ",
+            "best-hit can land on the wrong one. ", em("Use the Species (LCA) pane,"), " which takes the ",
+            "lowest common ancestor across all hits.")
         ),
-        p("This is an approximation — reversed peptides are not a perfect null model for short sequences. ",
-          "Use in conjunction with per-residue scores and biological context.")
+        p("Also note nr-BLAST recall is length-limited: short exact peptides (≤12 aa) rarely clear E≤1 ",
+          "against nr's ~700M sequences, so this is effectively a longer-peptide method. Full validation: ",
+          "docs/DENOVO_FDR_VALIDATION.md.")
       )
     ))
   })

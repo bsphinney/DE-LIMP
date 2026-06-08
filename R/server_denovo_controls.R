@@ -27,7 +27,7 @@ server_denovo_controls <- function(input, output, session, values) {
     req(psms)
     req(nrow(psms) > 0)
 
-    threshold <- input$dda_denovo_score_threshold %||% 0
+    threshold <- input$dda_denovo_score_threshold %||% -1
     result <- psms[psms$score >= threshold, ]
     message("[denovo_controls] filtered: ", nrow(result), " PSMs above threshold ", threshold)
     result
@@ -39,7 +39,7 @@ server_denovo_controls <- function(input, output, session, values) {
   # "Exclude Cont_ proteins" toggle is on. Novel peptides have no Sage protein
   # so they're untouched. Cont_ ONLY — never name-based (keratins are signal).
   .drop_cont_confirmed <- function(cls) {
-    if (is.null(cls) || !isTRUE(input$dda_results_exclude_contaminants %||% TRUE)) return(cls)
+    if (is.null(cls) || !isTRUE(input$dda_results_exclude_contaminants %||% FALSE)) return(cls)
     conf <- cls$confirmed
     if (is.null(conf) || nrow(conf) == 0 || !("proteins" %in% names(conf))) return(cls)
     keep <- !is_contaminant_protein_group(conf$proteins)
@@ -77,7 +77,7 @@ server_denovo_controls <- function(input, output, session, values) {
       # Restrict it to PSMs above the current confidence threshold so summary /
       # per-sample counts (Confirmed, Novel) stay consistent with the slider and
       # with "Above Threshold". (Before all-PSM loading these always agreed.)
-      thr <- input$dda_denovo_score_threshold %||% 0
+      thr <- input$dda_denovo_score_threshold %||% -1
       cls <- values$denovo_classification
       if (!is.null(cls$confirmed) && "score" %in% names(cls$confirmed))
         cls$confirmed <- cls$confirmed[cls$confirmed$score >= thr, , drop = FALSE]
@@ -138,7 +138,7 @@ server_denovo_controls <- function(input, output, session, values) {
   output$dda_denovo_threshold_count <- renderUI({
     req(values$dda_casanovo_psms)
     total_all <- nrow(values$dda_casanovo_psms)
-    threshold <- input$dda_denovo_score_threshold %||% 0
+    threshold <- input$dda_denovo_score_threshold %||% -1
 
     n_above <- sum(values$dda_casanovo_psms$score >= threshold, na.rm = TRUE)
     pct <- round(100 * n_above / max(total_all, 1), 1)
@@ -226,7 +226,7 @@ server_denovo_controls <- function(input, output, session, values) {
         tags$div(class = "card text-center",
           style = "background: #f8f9fa; border-left: 4px solid #e74c3c; padding: 15px;",
           tags$h4(
-            sprintf("%.2f", input$dda_denovo_score_threshold %||% 0),
+            sprintf("%.2f", input$dda_denovo_score_threshold %||% -1),
             style = "margin: 0; color: #e74c3c;"
           ),
           tags$small("Score Cutoff")
@@ -278,7 +278,7 @@ server_denovo_controls <- function(input, output, session, values) {
       caption = htmltools::tags$caption(
         style = "caption-side: top; font-weight: bold; color: #2ecc71;",
         paste0("Confirmed peptides (score >= ",
-               input$dda_denovo_score_threshold %||% 0, ")")
+               input$dda_denovo_score_threshold %||% -1, ")")
       )
     )
   })
@@ -334,7 +334,7 @@ server_denovo_controls <- function(input, output, session, values) {
       caption = htmltools::tags$caption(
         style = "caption-side: top; color: #e67e22; font-weight: bold;",
         paste0("Novel peptides (score >= ",
-               input$dda_denovo_score_threshold %||% 0, ")")
+               input$dda_denovo_score_threshold %||% -1, ")")
       )
     )
   })
@@ -348,7 +348,7 @@ server_denovo_controls <- function(input, output, session, values) {
 
     # Use ALL PSMs for histogram, but show threshold line
     df <- values$dda_casanovo_psms
-    threshold <- input$dda_denovo_score_threshold %||% 0
+    threshold <- input$dda_denovo_score_threshold %||% -1
 
     cls <- filtered_classification()
     confirmed_seqs <- if (!is.null(cls)) cls$confirmed$seq_norm else character(0)
@@ -502,7 +502,7 @@ server_denovo_controls <- function(input, output, session, values) {
     cls <- values$dda_casanovo_classification
     req(cls, !is.null(cls$classified), nrow(cls$classified) > 0)
     classified <- cls$classified
-    thr   <- input$dda_denovo_score_threshold %||% 0
+    thr   <- input$dda_denovo_score_threshold %||% -1
     sage  <- values$dda_sage_psms
     lca   <- values$dda_lca
     blast <- values$denovo_blast %||% values$dda_casanovo_blast
@@ -577,7 +577,7 @@ server_denovo_controls <- function(input, output, session, values) {
       caption = htmltools::tags$caption(
         style = "caption-side: top; font-weight: bold; color: #2d6a2d;",
         paste0("Table 1 — de novo / database / species-attribution summary (Casanovo conf ≥ ",
-               input$dda_denovo_score_threshold %||% 0, ")"))
+               input$dda_denovo_score_threshold %||% -1, ")"))
     ) %>%
       DT::formatStyle("Metric", target = "row",
         fontWeight = DT::styleEqual(c("Top diagnostic taxon", "Shuffled-decoy FDR (nr)"),
@@ -598,7 +598,7 @@ server_denovo_controls <- function(input, output, session, values) {
   output$dda_denovo_methods_code <- downloadHandler(
     filename = function() paste0("denovo_methods_and_code_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".md"),
     content = function(file) {
-      thr <- input$dda_denovo_score_threshold %||% 0
+      thr <- input$dda_denovo_score_threshold %||% -1
       av  <- tryCatch(values$app_version %||% "unknown", error = function(e) "unknown")
       si  <- paste(capture.output(utils::sessionInfo()), collapse = "\n")
       lines <- c(
@@ -614,6 +614,12 @@ server_denovo_controls <- function(input, output, session, values) {
         "family+ = conserved, bacterial/viral = microbiome). A shuffled-decoy search (same peptides,",
         "residues randomized) against nr estimated the false-hit rate (FDR = decoy / target).",
         sprintf("Casanovo confidence threshold applied: >= %.2f (score range -1..1; >=0 = mass-consistent).", thr),
+        "Each BLAST hit was scored by Confidence-Weighted Identity (CWI): the alignment % identity",
+        "weighted by Casanovo's per-residue confidence, so disagreements at low-confidence (likely",
+        "de-novo-error) residues are discounted while disagreements at high-confidence residues count",
+        "fully. High-Confidence Agreement (HCA) reports the fraction of >=0.95-confidence residues that",
+        "match the reference; a 3-tier Call (Confident/Likely/Uncertain) is derived from HCA. CWI is",
+        "computed from the real DIAMOND traceback (btop), not from guessed mismatch positions.",
         "",
         "## Commands",
         "# Casanovo de novo (v4.2.0 weights; tryptic or non-tryptic per sample)",
@@ -623,8 +629,9 @@ server_denovo_controls <- function(input, output, session, values) {
         "sage --write-pin --output_directory <out> sage.json <run>.mzML",
         "",
         "# DIAMOND BLAST of de novo peptides vs taxonomy-enabled NCBI nr",
+        "# qseq sseq btop are required to reconstruct the real gapped alignment for CWI.",
         "diamond blastp -d nr -q peptides.fasta -o blast_results.tsv \\",
-        "  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids \\",
+        "  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids qseq sseq btop \\",
         "  --threads 32 --max-target-seqs 25 --evalue 1 --ignore-warnings",
         "",
         "# Per-peptide LCA (real ranks from nodes.dmp.preDmnd; anchors Metazoa/Bacteria/Archaea/Viruses)",
@@ -633,10 +640,33 @@ server_denovo_controls <- function(input, output, session, values) {
         "# Shuffled-decoy FDR (interior residues shuffled, kept distinct from target; same nr params)",
         "# decoy_hit_rate / target_hit_rate per Casanovo-score bin; min length 7 on both sides",
         "",
+        "## Protein inference (Proteins pane)",
+        "De novo peptides were assembled into proteins by parsimony — the minimal set of",
+        "proteins explaining all peptides (greedy set-cover, Occam's razor), the same model",
+        "FragPipe (Philosopher/ProteinProphet) and IDPicker use. A shared peptide is credited",
+        "(razor) to the single most-supported protein; proteins with identical peptide evidence",
+        "are grouped as indistinguishable. Razor peptides = unique + shared-assigned; Total =",
+        "all peptides mappable to the protein. NOTE: edges are BLAST homology hits (>=50% identity)",
+        "against nr, NOT exact tryptic membership in a search database, so there is no",
+        "ProteinProphet probability (that needs database-search PSM probabilities). A per-residue",
+        "coverage map colours each reference position by agreement weighted by Casanovo confidence.",
+        "Helpers: build_denovo_protein_groups(), build_protein_coverage_track() (R/helpers_dda.R).",
+        "",
+        "## Confidence-Weighted Identity (CWI) — definition",
+        "# CWI  = sum(confidence at matching aligned positions) / sum(confidence at all aligned positions) * 100",
+        "# HCA  = % of aligned residues with Casanovo confidence >= 0.95 that match the reference",
+        "# Call = Confident (HCA>=90 & >=3 hi-conf residues) | Likely (HCA>=75) | Uncertain (else)",
+        "# Reconstruction: btop -> gapped alignment; I/L treated as equivalent; gaps excluded from weighting.",
+        "# Prior art: the principle of using de novo confidence to separate sequencing errors from real",
+        "#   sequence differences is established — SPIDER (Han, Ma & Zhang 2005, the PEAKS homology engine)",
+        "#   and ALPS (per-residue positional confidence in de novo assembly). CWI is a simple per-hit",
+        "#   instance applied to taxonomy-enabled nr/LCA species identification.",
+        "",
         "## Key parameters",
         sprintf("- nr DB: taxonomy-enabled NCBI nr (diamond makedb --taxonmap)"),
-        sprintf("- DIAMOND: --evalue 1, --max-target-seqs 25, blastp"),
+        sprintf("- DIAMOND: --evalue 1, --max-target-seqs 25, blastp, outfmt adds qseq sseq btop"),
         sprintf("- Canonical peptide key: strip [mods]/+mass, drop non-letters, uppercase, I->L"),
+        sprintf("- CWI high-confidence threshold: 0.95; CWI/HCA computed in R helper dda_alignment_cwi()"),
         "",
         "## sessionInfo()",
         si)

@@ -5,6 +5,146 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.66] — 2026-06-04
+
+### Added
+- **Live, per-dataset bitscore-calibrated FDR in the de novo Target-Decoy FDR pane** (the planned follow-up from v3.11.65 — but calibrated by BLAST **bitscore**, not Casanovo score). New helper `build_denovo_bitscore_fdr()` ranks the real and decoy-spectra DIAMOND hits by best bitscore per peptide and computes `FDR(t) = (decoy hits ≥ t, scaled by real_n/decoy_n) / (real hits ≥ t)` with a monotonised q-value. The pane now shows three live Plotly figures — **recovery vs FDR**, **FDR vs bitscore threshold**, and **confirmed peptides @ 1% FDR by length** — plus a callout reporting "*N* peptides at 1% FDR (bitscore ≥ *T*)".
+- **Toggle between two FDR nulls** in the same pane (new `build_denovo_dbcompete_fdr()` + a "Calibrate FDR against" control): **decoy spectra** (NovoBoard, population-scaled — the recommended, conservative null that also controls de novo sequencing error) and **decoy database** (the reversed-sequence best-hit competition, fed from the forward/reversed BLAST job). Lets you compare how each null's confirmed set correlates with the Sage search IDs. The reversed-DB hits are mirrored into shared `values` from `server_denovo_viz.R`.
+- **Why bitscore, not Casanovo score:** the ocelot validation (`docs/denovo_decoy_method.html`) showed the Casanovo peptide score barely separates real from decoy spectra — only ~171 of 312,820 peptides clear 1% FDR when gated on it, vs ~5,630 when gated on BLAST bitscore. Gating the homology FDR on Casanovo score is therefore wrong; the bitscore (or, for standard searches, E-value) is the correct axis.
+- **Recommended FDR control documented:** decoy-spectra null + EXTRA sensitivity + bitscore threshold @ 1% FDR + scramble FRAC ≥ 0.8. The decoy-spectra null is the primary control because it also captures de novo *sequencing* error (the reversed-database null controls only chance database matches, and so over-accepts short peptides). See `docs/denovo_decoy_method.html`.
+
+## [3.11.65] — 2026-06-03
+
+### Removed
+- **Removed the live score-bin calibration + decoy-FDR plots from the Target-Decoy FDR pane.** Their decoy estimate came from `build_denovo_score_calibration()`, whose logic (does a *real* peptide's sequence also appear in the decoy hits?) is valid only for shuffled-*peptide* decoys — not decoy *spectra* (different sequences) — so it reported a misleading ~0.0036% that contradicted the correct walkthrough figure (decoy 0.085%, 38× enrichment) on the same ocelot data. The correct NovoBoard competition is shown in the walkthrough; a per-dataset live FDR that bins the decoy-spectra population by its own Casanovo score is a planned follow-up.
+
+## [3.11.64] — 2026-06-03
+
+### Fixed
+- **De novo FDR walkthrough figures now actually load.** They 404'd as broken-image placeholders because the Docker image didn't serve them. Fixed two ways: (1) added `COPY www/` to the Dockerfile, and (2) — the robust fix — **inlined both SVGs as base64 data URIs** in `R/denovo_fdr_assets.R` (R/ is always copied + sourced), so the figures render with zero static-file-serving dependency.
+
+## [3.11.63] — 2026-06-03
+
+### Changed
+- **De novo "Target-Decoy FDR" pane rebuilt as an illustrated walkthrough.** Replaces the bare bar plots with a 5-step guided explanation of the NovoBoard decoy-spectra FDR method: (1) a real-vs-decoy **spectrum mirror plot** (real ocelot MS/MS, ~80% of peaks replaced) so users see what a decoy spectrum is; (2) sequence both with Casanovo; (3+4) BLAST both and compete — a polished **real-vs-decoy hit-rate + cumulative-FDR** figure (ocelot worked example, 38× enrichment); (5) the necessary-but-not-sufficient gate (chance-homology / confidence / LCA). The two live plotly plots remain below under "Live view — your loaded dataset". Teaching figures shipped in `www/denovo_fdr/`.
+
+## [3.11.62] — 2026-06-03
+
+### Changed
+- **De novo "Target-Decoy FDR" pane now uses NovoBoard decoy SPECTRA (not shuffled peptides).** Validated on a HeLa entrapment (Sage ground truth) + the ocelot case — see `docs/DENOVO_FDR_VALIDATION.md`. The pane loads `denovo/blast_results_decoy_spectra.tsv` (falls back to the legacy `blast_results_decoy.tsv`), reframes the method (Tran et al. 2024, doi:10.1016/j.mcpro.2024.100849), and adds a prominent gate note: a clean decoy-spectra FDR controls only **chance homology** and is **necessary but not sufficient** for a species call — de novo **sequence** error needs the Casanovo **confidence** gate (≈21% error at conf ≥0.95, ≈12% at ≥0.99), and **species** mis-assignment from conserved peptides needs the **Species (LCA)** pane (LCA over all hits, not best-hit). `?` modal + plot labels rewritten accordingly.
+- **Validated decoy scramble fraction = FRAC ≥ 0.8.** At 0.5 the most abundant real peptides (GAPDH, actin) leak into the null with top BLAST scores; at ≥0.8 the null is clean (HeLa: 116 mammal decoy-hits → 0).
+
+### Added
+- `scripts/denovo_decoy_gen.py` — NovoBoard decoy-spectra generator (FRAC default 0.8, mzML/MGF), and `generate_denovo_decoy_fdr_sbatch()` in `R/helpers_dda.R` — codifies the validated decoy-spectra → Casanovo → nr-BLAST pipeline arm that writes `blast_results_decoy_spectra.tsv` (true 1:1 target-decoy competition).
+- `docs/DENOVO_FDR_VALIDATION.md` — full validation: FRAC leakage sweep, 3-layer error anatomy, scan-level de novo accuracy vs Sage, length-limited nr recall, confidence calibration.
+
+## [3.11.61] — 2026-06-03
+
+### Changed
+- **De novo score slider defaults to -1 (show all), relabeled "Casanovo peptide score".** Decoy validation + the Casanovo 5.1.2 source (`_peptide_score`: `peptide_score = product(aa_scores); if not fits_precursor_mz: peptide_score -= 1`) show the peptide score is `(product of per-residue scores) - 1 when the peptide fails precursor-mass closure` - i.e. a NEGATIVE score means the whole peptide is mass-incomplete, NOT that the matched residues are wrong (71% of ocelot nr hits are score<0 yet match references 99% at their confident residues, with the mass error localised to the low-confidence unaligned tail: aligned conf 0.87 vs unaligned 0.63). The old default 0 hid ~71% of real nr hits for species ID. Slider now defaults to -1 (all) and the help text explains it is a mass-completeness control, not a confidence filter.
+
+## [3.11.60] — 2026-06-03
+
+### Added
+- **"Trusted substitutions" in the BLAST Alignment modal.** Lists the confident de novo residues (Casanovo conf ≥ 0.95) that *differ* from the reference — genuine sequence variants, not de novo errors. Grounded in a decoy-validation calibration: at conf ≥ 0.95 a de novo residue matches a close nr reference **99%** of the time (match-rate rises monotonically with confidence: 78%→99%), so a confident mismatch is ~99% a real difference. Each is shown as `pos: ref → de novo (conf)`, and flagged **mass-pinned** when bracketed by confident matches (the flanking fragment ions verify the residue mass on both sides). When none exist, the modal says so explicitly (all differences are low-confidence → likely de novo error). Engine: `build_trusted_substitutions()` in `helpers_dda.R` (pure, tested). This is the validated, defensible use of per-residue confidence (picking real variants), distinct from the retired use of HCA as a hit-level discriminator.
+
+## [3.11.59] — 2026-06-02
+
+### Added
+- **In-app annotated MS/MS spectrum viewer** (works on Hugging Face — no PDV, no SSH). From the BLAST Alignment modal, **"View annotated spectrum"** opens the raw MS/MS for that de novo peptide as an interactive plotly stick plot with **b/y fragment ions matched and labelled** (blue = b, red = y; hover for m/z + ppm), above a **per-residue Casanovo confidence** row — the same scores used in the alignment — so you can confirm the de novo call and the BLAST alignment in one place. Mod-aware fragment masses (Carbamidomethyl, Oxidation, Deamidated, …). Engine: `dda_ms2_fragments()` + `dda_annotate_peaks()` in `helpers_dda.R` (pure, verified against known b/y masses).
+- **Compact peaks travel in the bundle.** A `denovo/spectra_{peaks,meta}.parquet` (top ~150 peaks per scan, for the BLAST-hit peptides) is extracted from the mzMLs and bundled, so the viewer needs no raw files at view time. Loader reads it (ZIP + SSH); the AI export carries it when pre-extracted. The **example bundle now includes spectra for all 9,852 BLAST-hit ocelot peptides** (~18 MB).
+
+## [3.11.58] — 2026-06-02
+
+### Fixed
+- **AI export `sage_results.tsv` was the RAW, unfiltered Sage output** — it shipped decoys (label −1) mixed with targets and the full q-value range (e.g. ocelot: 77,423 decoys + 115,935 targets, no FDR cut), so any downstream/AI reader got decoy-inflated counts. The export now writes the same table the app analyses: **targets only, 1% FDR** (`spectrum_q ≤ 0.01 & protein_q ≤ 0.01`, decoys dropped), and PROMPT.md labels it accordingly. (Caught by an external analysis of the AI bundle.)
+- **`parse_sage_results` now drops decoys explicitly.** Filtering on q-values alone let the occasional decoy with q ≤ 0.01 into the analysed PSM set (ocelot: 24,949 → 24,927 once decoys removed). Decoys are no longer counted as identifications anywhere (Found_by_Sage, overlap stats, Sage-hits tab).
+
+## [3.11.57] — 2026-06-02
+
+### Performance
+- **De novo tables populate ~6× faster.** Loading a large de novo dataset (e.g. the ocelot example: 312k unique peptides) was spending ~65 s in two helpers; cut to ~5 s. Fixes (all benefit any dataset, not just the example):
+  - `build_denovo_master`: the CWI loop did a **named-vector lookup of `aa_lookup` per row** — a linear name-scan over a 300k-element vector, ~3 billion comparisons. Now resolved once, vectorised, and the loop only visits BLAST-hit peptides. **42 s → 3.7 s.**
+  - `build_denovo_protein_groups`: replaced the O(proteins × leads) indistinguishable-set comparison with signature hashing, precomputed the peptide→master-row index for `attr_for` (was a `match()` over the full master per call), and keyed the BLAST rows by subject for coverage lookups. **22.7 s → 1.2 s.**
+
+## [3.11.56] — 2026-06-02
+
+### Added
+- **"Load Example De Novo Data" button.** Next to the de novo results load/info buttons, a one-click button downloads a bundled ocelot wildlife-forensics dataset (Sage + Casanovo + nr BLAST/LCA) from the GitHub v1.0 release and opens it in the de novo results — the same Master Table / Proteins / coverage-map / CWI experience, no upload needed. The release ZIP carries `denovo_cache.rds` (parsed PSMs + classification), so it loads instantly without re-parsing the Casanovo mztabs. Routed through the existing ZIP-load pipeline via a `dda_zip_override` + `dda_load_trigger` mechanism (the manual Upload/Confirm path is unchanged).
+
+## [3.11.55] — 2026-06-02
+
+### Fixed
+- **DIAMOND-masked low-complexity residues (`X`) are no longer scored as confident substitutions.** For repeat-rich / low-complexity peptides DIAMOND writes `X` for masked residues in `qseq`/`sseq`; these were being treated as high-confidence mismatches — colouring them green ("genuine difference") in the BLAST alignment view and tanking CWI/HCA. Now `X` on either side is treated as **non-informative (masked)**: excluded from CWI/HCA and from the coverage-map difference count, rendered in grey with a "low-complexity masked (not scored)" legend entry. Example: a cysteine-repeat keratin peptide went from a misleading CWI 58% / HCA 50% ("Uncertain") to a fair **CWI 91% / HCA 91%** once the masked stretch was excluded, while its 2 real mismatches still count.
+
+## [3.11.54] — 2026-06-02
+
+### Changed
+- **De novo contaminant filtering now defaults OFF.** "Exclude Cont_ proteins" (de novo results) and "Exclude contaminant proteins" (DIAMOND BLAST) now start unchecked, and their server-side fallbacks match — so by default nothing is hidden. Toggle either on to filter.
+
+## [3.11.53] — 2026-06-02
+
+### Fixed
+- **Coverage map: substitution markers no longer appear over residues that match the reference.** A position was being coloured as a difference whenever *any* covering peptide mismatched there, even when the displayed (consensus) de novo residue matched — so green "confident difference" markers could sit over matching amino acids. Now a position is a difference **only when the consensus (majority) de novo residue actually differs from the reference** (I/L treated as equivalent), and its colour comes from the confidence of that consensus call. Lone misreads are still counted in the per-position mismatch tally but don't recolour a matching consensus. The header "disagreements" count now reflects consensus differences.
+
+## [3.11.52] — 2026-06-02
+
+### Changed
+- **Protein coverage map rebuilt as a PEAKS-style protein-coverage view (and then some).** Selecting a protein now shows the **whole protein from residue 1** (not just the matched span — so you can see *where* the peptides sit, with the uncovered N-terminus as dots), the reference sequence in position-numbered lines with block-of-10 gridlines and coverage shading, and the **de novo peptides tiled beneath as bars** packed into rows. Beyond PEAKS, it keeps the two signals that matter most here: **per-residue Casanovo confidence** (substitution markers above the sequence + bar colour: green = confident difference, amber = uncertain, red = likely de novo error) and **razor/uniqueness** (peptides unique to this protein get a heavy underline on their bar and bold reference residues). Tiling capped at 40 stacked rows for responsiveness (deeper peptides counted in the summary). Still de-novo-only and built from the real `btop` traceback. `build_protein_coverage_track()` gains a per-peptide `peptides` attribute and shows residue 1→`slen` (or →last covered residue when `slen` isn't in the BLAST output).
+
+## [3.11.51] — 2026-06-02
+
+### Changed
+- **Protein coverage map reworked into a two-line, pop-out, substitution-aware view.**
+  - **Two rows** now: the reference protein on top and the **consensus de novo residue** beneath each position, so amino-acid substitutions read directly (ref `S` / de novo `R`).
+  - Opens in a **pop-out modal with a Full-screen button** (browser Fullscreen API) instead of an inline box, so wide proteins are readable.
+  - **Unique-peptide support** is marked with **bold + underline** (an orthogonal channel to the confidence colour): residues covered by a peptide that maps to *only* this protein — the strongest evidence this exact protein/species is present, vs coverage shared with homologs. Summary line reports the unique-supported residue count.
+  - Explicitly documented as **de-novo-data only** (Casanovo peptides BLAST-aligned to the nr protein); Sage DB peptides are not overlaid (matched against the search database, not BLAST-aligned to nr accessions) — captured in the table's `Found_by` column instead. `build_protein_coverage_track()` gains `obs`, `n_unique`, `unique_support` columns.
+
+## [3.11.50] — 2026-06-02
+
+### Added
+- **Fast reload via a parsed-data cache.** The slow part of loading a de novo bundle is re-parsing the Casanovo mztabs into hundreds of thousands of PSMs. The export now writes `denovo/denovo_cache.rds` (parsed PSMs + classification, xz-compressed); on reload, if that file is present and schema-valid, the app restores it directly and **skips the mztab parse entirely**. BLAST/LCA were already fast freads. Workflow: load once → Export (the new zip carries the cache) → future loads of that zip are fast. Engine: `denovo_cache` arg to `generate_dda_export_zip()`; restore short-circuit in the DDA loader (works for both ZIP and SSH paths). Falls back to a normal parse when the cache is absent or unreadable.
+
+## [3.11.49] — 2026-06-02
+
+### Added
+- **Protein inference documented in the methods/code export** — the reproducibility export now describes the parsimony + razor model (FragPipe/IDPicker), the BLAST-homology-edge caveat (no ProteinProphet probability), and names the helpers.
+- **`protein_groups.tsv` in the AI export** — the AI bundle now includes the parsimonious protein table (computed from the bundle's BLAST graph + nr LCA, so species + diagnostic counts populate even in the headless path), and PROMPT.md gained a protein-inference interpretation section (top proteins by razor support, how to weigh protein support against the per-peptide LCA).
+
+### Fixed
+- **Clearer coverage-map message.** Selecting a protein when the loaded data lacks `qseq/sseq/btop` now explains that the alignment-bearing (16-column) `blast_results.tsv` must be reloaded, instead of a bare "not available" — the protein table builds without the traceback, but the residue map requires it.
+
+## [3.11.48] — 2026-06-02
+
+### Added
+- **Proteins pane in the de novo view** — assembles the de novo peptides into reference proteins using the same parsimony model FragPipe (Philosopher/ProteinProphet) and IDPicker use: the minimal protein set explaining the peptides (greedy set-cover), **razor** peptide assignment for shared peptides, and indistinguishable-protein grouping. Columns: Unique / Razor / Total peptides, N_indistinguishable, N_diagnostic, N_confident, Best_CWI, Best_Casanovo, AA_covered, Found_by, and a Strong/Moderate/Weak Evidence tier. Honours the confidence slider. Engine: `build_denovo_protein_groups()` in `helpers_dda.R` (pure + tested).
+- **Per-residue protein coverage map** — click a protein to lay its peptides along the reference sequence; each residue is coloured by agreement weighted by Casanovo confidence (match / confident difference / uncertain / likely de-novo-error / not covered), built from the real `btop` traceback (no fabricated positions). Engine: `build_protein_coverage_track()`.
+- Info modal documenting the parsimony/razor model and how it differs from a database search (BLAST-homology edges, no ProteinProphet probability), plus CSV export of the protein groups.
+
+### Changed
+- BLAST loader now also keeps the **full hit graph** (`values$dda_casanovo_blast_all`) alongside the best-hit-per-peptide table, so the parsimony inference sees every peptide→protein edge.
+
+## [3.11.47] — 2026-06-02
+
+### Added
+- **CWI / HCA / Call columns in the Master Table.** The de novo Master Table (the centerpiece) now carries Confidence-Weighted Identity, High-Confidence Agreement, and the trust-tier Call for each peptide's best nr hit — computed from that hit's real `btop` alignment, weighted by the peptide's Casanovo per-residue confidence. Columns appear only when the loaded BLAST data carries `qseq/sseq/btop` (otherwise omitted, never fabricated). `best_blast_hit_per_peptide()` now carries the best hit's alignment; `build_denovo_master(..., aa_lookup=)` computes the metrics; one shared `build_casanovo_aa_lookup()` keys the aa_scores join for both the Master Table and the BLAST-alignment table.
+
+### Changed
+- On-disk HPC `denovo/blast_results.tsv` for the ocelot + crane datasets repointed to the 16-column (btop-bearing) files so the "Load from HPC" path also serves CWI (the ocelot on-disk file had been a stale SwissProt run). Old files preserved as `*_OLD.tsv`.
+
+## [3.11.46] — 2026-06-02
+
+### Added
+- **Confidence-Weighted Identity (CWI) for de novo BLAST hits** — the de novo BLAST Alignment view and near-match table now show **CWI** (% identity weighted by Casanovo's per-residue confidence), **HCA** (High-Confidence Agreement: the % of ≥0.95-confidence residues that match the reference), and a 3-tier **Call** (Confident / Likely / Uncertain). A distant-but-real homolog whose only disagreements fall on low-confidence (likely de-novo-error) residues is no longer discarded for low raw identity; a hit whose *confident* residues disagree is flagged Uncertain. Engine: `compute_cwi()` + `dda_alignment_cwi()` + `cwi_call_label()` in `helpers_dda.R` (one definition, used by both the viewer and the table).
+- **CWI documented** in the BLAST Alignment `?` modal, the methods-and-code reproducibility export, and the AI-export `PROMPT.md`, with prior-art citations (SPIDER/PEAKS; ALPS).
+
+### Fixed
+- **BLAST alignment view no longer fabricates mismatch positions.** The previous renderer distributed mismatches "roughly evenly" and showed `?` for the subject (DIAMOND outfmt 6 lacks the subject sequence). It now reconstructs the **real gapped alignment** from the DIAMOND traceback (`btop`) — every match, mismatch, and gap is exact. If `btop` is absent for a hit it says so instead of inventing a layout. Verified: `parse_btop()` reproduces the actual subject/query on 89/89 real ocelot hits (incl. 30 gapped).
+
+### Changed
+- **De novo BLAST now requests `staxids qseq sseq btop`** in DIAMOND `--outfmt 6` (in-app sbatch generators) so the alignment + CWI are available for every future run. Loader reads the 16-column format (cols 13–16 = staxid/qseq/sseq/btop). Ocelot + Whooping-Crane result bundles re-built with the alignment-bearing `blast_results.tsv`.
+
 ## [3.11.26–3.11.33] — 2026-06-01
 
 ### Added

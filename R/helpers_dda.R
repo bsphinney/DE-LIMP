@@ -174,6 +174,10 @@ compute_cwi <- function(qseq, sseq, aa_scores = NULL, qstart = 1, hi_conf = 0.95
     qa <- qc[i]; sa <- sc[i]
     if (qa == "-") next                          # insertion in subject; no query residue
     qpos <- qpos + 1L
+    # 'X' = DIAMOND-masked (low-complexity) residue on either side — non-informative,
+    # NOT a real substitution. Advance the query position (it maps to a real peptide
+    # residue) but exclude it from scoring so masking neither rewards nor penalises.
+    if (qa == "X" || sa == "X") next
     conf <- if (!is.null(aa_scores) && qpos <= length(aa_scores) && !is.na(aa_scores[qpos]))
               aa_scores[qpos] else NA_real_
     w <- if (is.na(conf)) 0.5 else max(0, conf)  # weight; clamp any negative to 0
@@ -190,14 +194,82 @@ compute_cwi <- function(qseq, sseq, aa_scores = NULL, qstart = 1, hi_conf = 0.95
     n_hi = hi_tot, n_pos = npos)
 }
 
+#' One-call CWI for a single BLAST hit row — the DRY entry point used by BOTH the
+#' alignment viewer and the near-match table, so the metric has ONE definition
+#' (CLAUDE.md architectural rule 3). Reconstructs the REAL gapped alignment from
+#' btop (DIAMOND qseq/sseq are ungapped and unequal-length when the hit has gaps,
+#' so they CANNOT be compared column-wise directly), then weights by per-residue
+#' Casanovo confidence. If btop is absent the alignment cannot be reconstructed,
+#' so CWI is reported as unavailable rather than fabricated.
+#'
+#' @param qseq,sseq  DIAMOND qseq/sseq (ungapped aligned subsequences)
+#' @param btop       DIAMOND traceback string (needed to insert gaps)
+#' @param qstart     1-based alignment start within the full peptide
+#' @param aa_scores_str comma-separated per-residue Casanovo confidence (full peptide)
+#' @param hi_conf    high-confidence threshold (default 0.95)
+#' @return list(available, cwi, hca, n_hi, n_pos, qaln, saln, aa, qstart)
+dda_alignment_cwi <- function(qseq, sseq, btop, qstart = 1,
+                              aa_scores_str = NULL, hi_conf = 0.95) {
+  na_out <- list(available = FALSE, cwi = NA_real_, hca = NA_real_,
+                 n_hi = 0L, n_pos = 0L, qaln = NULL, saln = NULL,
+                 aa = NULL, qstart = as.integer(qstart %||% 1L))
+  if (is.null(qseq) || is.na(qseq) || !nzchar(as.character(qseq))) return(na_out)
+  if (is.null(btop) || is.na(btop) || !nzchar(as.character(btop)))  return(na_out)
+  aa <- NULL
+  if (!is.null(aa_scores_str) && !is.na(aa_scores_str) &&
+      nzchar(as.character(aa_scores_str)) && aa_scores_str != "null") {
+    aa <- suppressWarnings(as.numeric(strsplit(as.character(aa_scores_str), ",")[[1]]))
+  }
+  aln <- parse_btop(btop, qseq)
+  if (is.null(aln)) return(na_out)
+  cw <- compute_cwi(aln$qaln, aln$saln, aa, qstart = qstart, hi_conf = hi_conf)
+  list(available = TRUE, cwi = cw$cwi, hca = cw$hca, n_hi = cw$n_hi,
+       n_pos = cw$n_pos, qaln = aln$qaln, saln = aln$saln,
+       aa = aa, qstart = as.integer(qstart %||% 1L))
+}
+
+#' Three-tier biologist-facing call from the confidence-weighted metrics.
+#' "Confident" = every residue Casanovo was sure of agrees with the reference
+#' (so any disagreement is at de-novo-error residues); "Uncertain" = the model's
+#' confident residues themselves disagree (a real divergence or a wrong hit).
+#' Returns NA when there aren't enough high-confidence residues to judge.
+#'
+#' @param hca  high-confidence-agreement %  (from compute_cwi)
+#' @param n_hi number of high-confidence aligned residues
+#' @return one of "Confident", "Likely", "Uncertain", or NA_character_
+cwi_call_label <- function(hca, n_hi) {
+  if (is.na(hca) || is.na(n_hi) || n_hi < 2) return(NA_character_)
+  if (hca >= 90 && n_hi >= 3) return("Confident")
+  if (hca >= 75)              return("Likely")
+  "Uncertain"
+}
+
+#' Per-peptide Casanovo aa_scores lookup (best PSM), keyed by the canonical
+#' (I/L-normalized) peptide. ONE definition shared by the Master Table and the
+#' BLAST alignment table so the CWI join uses the same key everywhere.
+#'
+#' @param psms Casanovo PSM table (needs seq_norm + aa_scores; score optional)
+#' @return named character vector seq_norm -> aa_scores string, or NULL
+build_casanovo_aa_lookup <- function(psms) {
+  if (is.null(psms) || !is.data.frame(psms) ||
+      !all(c("seq_norm", "aa_scores") %in% names(psms))) return(NULL)
+  sc <- if ("score" %in% names(psms)) suppressWarnings(as.numeric(psms$score)) else rep(0, nrow(psms))
+  o <- order(-ifelse(is.na(sc), -Inf, sc))
+  p <- psms[o, , drop = FALSE]
+  p <- p[!duplicated(p$seq_norm), , drop = FALSE]
+  stats::setNames(as.character(p$aa_scores), p$seq_norm)
+}
+
 #' Best BLAST hit per canonical peptide — alignment length, e-value, bitscore.
 #'
 #' "Best" = highest bitscore. Used to surface query coverage (alnlen / peptide
 #' length) + e-value so a 100%-identity-but-partial hit (e.g. 18 of 24 residues
 #' to an over-represented taxon) can't masquerade as a full match. Pure.
 #'
-#' @param blast BLAST hits (cols: peptide/query, length, evalue, bitscore)
-#' @return data.table(.k, blast_aln_len, blast_evalue, blast_bitscore) or NULL
+#' @param blast BLAST hits (cols: peptide/query, length, evalue, bitscore;
+#'        optionally qseq/sseq/btop/qstart to carry the alignment for CWI)
+#' @return data.table(.k, blast_aln_len, blast_evalue, blast_bitscore
+#'         [+ blast_qseq/blast_sseq/blast_btop/blast_qstart when present]) or NULL
 best_blast_hit_per_peptide <- function(blast) {
   if (is.null(blast) || !is.data.frame(blast) || nrow(blast) == 0) return(NULL)
   bt <- data.table::as.data.table(blast)
@@ -207,11 +279,20 @@ best_blast_hit_per_peptide <- function(blast) {
   if ("bitscore" %in% names(bt)) bt <- bt[order(-as.numeric(bt$bitscore)), ]
   bt <- bt[!duplicated(bt$.k), ]
   alnc <- if ("length" %in% names(bt)) "length" else if ("aln_len" %in% names(bt)) "aln_len" else NA
-  data.table::data.table(
+  out <- data.table::data.table(
     .k             = bt$.k,
     blast_aln_len  = if (!is.na(alnc)) as.numeric(bt[[alnc]]) else NA_real_,
     blast_evalue   = if ("evalue" %in% names(bt)) as.numeric(bt$evalue) else NA_real_,
     blast_bitscore = if ("bitscore" %in% names(bt)) as.numeric(bt$bitscore) else NA_real_)
+  # carry the best hit's real alignment so CWI + protein coverage can be derived
+  if ("subject" %in% names(bt)) out$blast_subject <- as.character(bt$subject)
+  if ("qseq" %in% names(bt)) out$blast_qseq   <- as.character(bt$qseq)
+  if ("sseq" %in% names(bt)) out$blast_sseq   <- as.character(bt$sseq)
+  if ("btop" %in% names(bt)) out$blast_btop   <- as.character(bt$btop)
+  if ("qstart" %in% names(bt)) out$blast_qstart <- suppressWarnings(as.integer(bt$qstart))
+  if ("sstart" %in% names(bt)) out$blast_sstart <- suppressWarnings(as.integer(bt$sstart))
+  if ("send" %in% names(bt))   out$blast_send   <- suppressWarnings(as.integer(bt$send))
+  out
 }
 
 #' Build the de novo Master Table — pure join, no Shiny (so it is unit-testable).
@@ -232,9 +313,14 @@ best_blast_hit_per_peptide <- function(blast) {
 #' @param sage_psms  optional Sage PSM table (cols: peptide, proteins)
 #' @param lca        optional per-peptide LCA table (cols: peptide, lca_name,
 #'        lca_rank, category, top_pident, diagnostic)
+#' @param blast      optional BLAST hits; if they carry qseq/sseq/btop the best
+#'        hit's real alignment drives the CWI columns
+#' @param aa_lookup  optional named character vector (canonical seq_norm ->
+#'        Casanovo aa_scores string) used to weight CWI/HCA by per-residue
+#'        confidence. Without it, CWI still computes (unweighted) but HCA is NA.
 #' @return data.frame with seq_norm + biologist-facing columns
 build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL,
-                                blast = NULL) {
+                                blast = NULL, aa_lookup = NULL) {
   if (is.null(classified) || nrow(classified) == 0)
     return(data.frame())
   cas <- data.table::as.data.table(classified)
@@ -287,8 +373,323 @@ build_denovo_master <- function(classified, sage_psms = NULL, lca = NULL,
     data.table::setnames(pep, c("blast_evalue", "blast_bitscore"),
                          c("E_value", "Bitscore"))
     pep[, blast_aln_len := NULL]
+
+    # Confidence-Weighted Identity from the best hit's REAL alignment (btop).
+    # One definition (dda_alignment_cwi); HCA needs aa_scores via aa_lookup.
+    # PERF: only a small fraction of peptides have a BLAST hit (btop); iterate
+    # ONLY those rows over PRE-EXTRACTED vectors. Looping all N rows with per-row
+    # data.table `$[i]` indexing was O(N) slow (42s on a 312k-peptide dataset).
+    if (all(c("blast_qseq", "blast_sseq", "blast_btop") %in% names(pep))) {
+      n <- nrow(pep)
+      cwi <- rep(NA_real_, n); hca <- rep(NA_real_, n); call <- rep(NA_character_, n)
+      btop_v  <- pep$blast_btop
+      qseq_v  <- pep$blast_qseq
+      sseq_v  <- pep$blast_sseq
+      qst_v   <- if ("blast_qstart" %in% names(pep)) pep$blast_qstart else rep(1L, n)
+      norm_v  <- pep$seq_norm
+      hits <- which(!is.na(btop_v) & nzchar(btop_v))      # ~the BLAST-hit peptides only
+      # Resolve aa_scores for the hit peptides in ONE vectorised lookup. Indexing a
+      # 300k-element NAMED vector inside the loop is a linear name-scan per call
+      # (O(hits x N) ~ billions of comparisons); doing it once is O(N).
+      aa_hits <- if (!is.null(aa_lookup)) unname(aa_lookup[norm_v[hits]]) else rep(NA_character_, length(hits))
+      for (j in seq_along(hits)) {
+        i <- hits[j]
+        rr <- dda_alignment_cwi(qseq_v[i], sseq_v[i], btop_v[i],
+                                qstart = qst_v[i] %||% 1L, aa_scores_str = aa_hits[j])
+        if (isTRUE(rr$available)) {
+          cwi[i] <- rr$cwi; hca[i] <- rr$hca; call[i] <- cwi_call_label(rr$hca, rr$n_hi)
+        }
+      }
+      pep$CWI <- cwi; pep$HCA <- hca; pep$Call <- call
+    }
+    # drop the raw alignment/subject carrier columns (not for the peptide display;
+    # the protein rollup re-derives them straight from the BLAST table)
+    for (cc in c("blast_qseq", "blast_sseq", "blast_btop", "blast_qstart",
+                 "blast_subject", "blast_sstart", "blast_send"))
+      if (cc %in% names(pep)) pep[, (cc) := NULL]
   }
   as.data.frame(pep)
+}
+
+#' FragPipe/Philosopher-style PARSIMONIOUS protein inference for the de novo
+#' peptides, over the peptide->protein BLAST hit graph. Pure + testable.
+#'
+#' Mirrors the deterministic model FragPipe reports (parsimony + razor peptides
+#' + indistinguishable-protein grouping):
+#'   - Parsimony (Occam's razor): the minimal set of proteins explaining all
+#'     peptides, found by greedy set-cover — repeatedly take the protein
+#'     covering the most still-unexplained peptides.
+#'   - Razor peptide: a shared peptide is credited to the single most-supported
+#'     protein (the one that claims it during the greedy pass).
+#'   - Unique peptides: map to only one protein. Total: every peptide that can
+#'     map to the protein (here or elsewhere). Razor = unique + shared-assigned.
+#'   - Indistinguishable proteins: proteins with the identical peptide set are
+#'     collapsed under one lead and listed.
+#' NOTE: this is the parsimony/razor MODEL, not ProteinProphet's probabilistic
+#' EM — we have de novo + homology evidence, not DB-search PSM probabilities, so
+#' there is no protein probability. Edges are BLAST hits with pident >= min_pident
+#' (homology, not exact tryptic membership) — stated so it is not mistaken for a
+#' database-search inference.
+#'
+#' @param blast_all the FULL BLAST hit graph (NOT best-hit-deduped): peptide/query
+#'        + subject + pident (+ bitscore, sstart, send for coverage/ordering)
+#' @param master    optional build_denovo_master() frame (seq_norm + per-peptide
+#'        Casanovo_score / Species_or_clade / Diagnostic / CWI / Call / n_PSMs)
+#' @param min_pident edge threshold for "peptide maps to protein" (default 50)
+#' @return data.frame: Protein, Accession, Species, Unique_peptides,
+#'         Razor_peptides, Total_peptides, N_indistinguishable, N_diagnostic,
+#'         Best_CWI, Best_Casanovo, AA_covered, Found_by, Evidence, Subject
+build_denovo_protein_groups <- function(blast_all, master = NULL, min_pident = 50) {
+  if (is.null(blast_all) || !is.data.frame(blast_all) || nrow(blast_all) == 0)
+    return(data.frame())
+  bt <- data.table::as.data.table(blast_all)
+  pcol <- if ("peptide" %in% names(bt)) "peptide" else if ("query" %in% names(bt)) "query" else NULL
+  if (is.null(pcol) || !all(c("subject", "pident") %in% names(bt))) return(data.frame())
+  bt <- bt[suppressWarnings(as.numeric(pident)) >= min_pident &
+           !is.na(subject) & nzchar(as.character(subject))]
+  if (nrow(bt) == 0) return(data.frame())
+  bt$pep <- gsub("I", "L", build_dda_canonical_peptide(bt[[pcol]]))
+  edges <- unique(bt[, list(pep, subject = as.character(subject))])
+
+  peps  <- unique(edges$pep)
+  prots <- unique(edges$subject)
+  pep_i  <- stats::setNames(seq_along(peps),  peps)
+  prot_i <- stats::setNames(seq_along(prots), prots)
+  ep <- pep_i[edges$pep]; eq <- prot_i[edges$subject]
+  prot2pep <- split(ep, eq)                       # protein idx -> peptide idxs
+  pep2prot <- split(eq, ep)                        # peptide idx -> protein idxs
+  total_per_prot <- lengths(prot2pep)              # Total peptides (all mappable)
+  pep_degree     <- lengths(pep2prot)              # 1 == unique peptide
+
+  # ---- greedy parsimony / razor assignment ----
+  remaining <- total_per_prot                      # unexplained peptides per protein
+  explained <- logical(length(peps))
+  assigned  <- vector("list", length(prots))       # protein idx -> razor peptide idxs
+  repeat {
+    p <- which.max(remaining)
+    if (length(p) == 0 || remaining[p] <= 0) break
+    cand <- prot2pep[[p]]
+    take <- cand[!explained[cand]]
+    if (!length(take)) { remaining[p] <- 0L; next }
+    assigned[[p]] <- take
+    explained[take] <- TRUE
+    for (pp in take) for (q in pep2prot[[pp]]) remaining[q] <- remaining[q] - 1L
+  }
+  lead <- which(lengths(assigned) > 0)
+  if (!length(lead)) return(data.frame())
+
+  # indistinguishable proteins: non-lead proteins whose full peptide set equals a
+  # lead's (same evidence). PERF: hash each set to a signature string and count
+  # via a table lookup — O(proteins), not the old O(proteins x leads) identical().
+  sig_of <- function(p) paste0(sort(prot2pep[[p]]), collapse = ",")
+  lead_sig <- vapply(lead, sig_of, character(1))
+  nonlead <- setdiff(seq_along(prots), lead)
+  n_indist <- integer(length(lead))
+  if (length(nonlead)) {
+    nl_tab <- table(vapply(nonlead, sig_of, character(1)))
+    hit <- nl_tab[lead_sig]
+    n_indist <- as.integer(ifelse(is.na(hit), 0L, hit))
+  }
+
+  # per-peptide attributes from the master (keyed by canonical seq_norm). PERF:
+  # resolve peptide -> master-row ONCE (vectorised match); attr_for then does a
+  # direct integer index instead of a match() over the full master per call.
+  ma <- NULL; ma_row <- NULL
+  if (!is.null(master) && is.data.frame(master) && "seq_norm" %in% names(master)) {
+    ma <- data.table::as.data.table(master)
+    ma_row <- match(peps, ma$seq_norm)
+  }
+  attr_for <- function(pep_idx, col, fun, default = NA) {
+    if (is.null(ma) || !col %in% names(ma)) return(default)
+    fun(ma[[col]][ma_row[pep_idx]])
+  }
+  mode_chr <- function(x) { x <- x[!is.na(x) & nzchar(as.character(x))]
+    if (!length(x)) return(NA_character_); names(sort(table(x), decreasing = TRUE))[1] }
+  # PERF: key the BLAST rows by subject once so per-protein coverage is a binary-
+  # search lookup, not a full O(edges) scan per lead.
+  have_span <- all(c("sstart", "send") %in% names(bt))
+  bt_key <- NULL
+  if (have_span) {
+    bt_key <- data.table::data.table(
+      pep = bt$pep, subject = as.character(bt$subject),
+      sstart = suppressWarnings(as.integer(bt$sstart)),
+      send   = suppressWarnings(as.integer(bt$send)))
+    data.table::setkey(bt_key, subject)
+  }
+  span_union <- function(pep_idx, subj) {          # subject residues covered (union)
+    if (!have_span) return(NA_integer_)
+    e <- bt_key[list(subj), nomatch = 0L]
+    if (!nrow(e)) return(NA_integer_)
+    e <- e[e$pep %in% peps[pep_idx]]
+    s <- e$sstart; en <- e$send
+    ok <- !is.na(s) & !is.na(en); if (!any(ok)) return(NA_integer_)
+    s <- s[ok]; en <- en[ok]; o <- order(s); s <- s[o]; en <- en[o]
+    tot <- 0L; cs <- s[1]; ce <- en[1]
+    for (i in seq_along(s)[-1]) {
+      if (s[i] <= ce + 1L) ce <- max(ce, en[i])
+      else { tot <- tot + (ce - cs + 1L); cs <- s[i]; ce <- en[i] } }
+    as.integer(tot + (ce - cs + 1L))
+  }
+
+  rows <- lapply(seq_along(lead), function(li) {
+    p <- lead[li]; subj <- prots[p]
+    raz <- assigned[[p]]                            # razor peptides (unique + shared-assigned)
+    allp <- prot2pep[[p]]
+    data.frame(
+      Subject          = subj,
+      Protein          = dda_protein_label(subj),
+      Accession        = sub("^[a-z]+\\|([^|]+)\\|.*", "\\1", subj),
+      Species          = attr_for(raz, "Species_or_clade", mode_chr, NA_character_),
+      Unique_peptides  = sum(pep_degree[allp] == 1L),
+      Razor_peptides   = length(raz),
+      Total_peptides   = length(allp),
+      N_indistinguishable = n_indist[li],
+      N_diagnostic     = attr_for(raz, "Diagnostic", function(v) sum(v %in% c(TRUE,1,"1"), na.rm=TRUE), NA_integer_),
+      Best_CWI         = attr_for(raz, "CWI", function(v) { v<-suppressWarnings(max(as.numeric(v),na.rm=TRUE)); if(is.finite(v)) round(v,1) else NA_real_ }, NA_real_),
+      Best_Casanovo    = attr_for(raz, "Casanovo_score", function(v) { v<-suppressWarnings(max(as.numeric(v),na.rm=TRUE)); if(is.finite(v)) round(v,3) else NA_real_ }, NA_real_),
+      N_confident      = attr_for(raz, "Call", function(v) sum(v=="Confident", na.rm=TRUE), NA_integer_),
+      AA_covered       = span_union(raz, subj),
+      Found_by         = attr_for(raz, "Found_by_Sage", function(v) if (any(v %in% c(TRUE,1,"1"))) "Sage + de novo" else "de novo only", "de novo only"),
+      stringsAsFactors = FALSE)
+  })
+  g <- do.call(rbind, rows)
+  nconf <- ifelse(is.na(g$N_confident), 0L, g$N_confident)
+  g$Evidence <- ifelse(g$Razor_peptides >= 3 | nconf >= 2, "Strong",
+                ifelse(g$Razor_peptides >= 2 | nconf >= 1, "Moderate", "Weak"))
+  g <- g[order(-g$Razor_peptides, -ifelse(is.na(g$Best_CWI), -1, g$Best_CWI)), , drop = FALSE]
+  front <- c("Protein", "Accession", "Species", "Unique_peptides", "Razor_peptides",
+             "Total_peptides", "N_indistinguishable", "N_diagnostic", "N_confident",
+             "Best_CWI", "Best_Casanovo", "AA_covered", "Found_by", "Evidence", "Subject")
+  g[, c(intersect(front, names(g)), setdiff(names(g), front)), drop = FALSE]
+}
+
+#' Per-residue protein COVERAGE track for one subject protein — lays every de
+#' novo peptide that hits this protein onto the subject coordinate axis and
+#' classifies each covered position. Pure + testable; the server turns it into
+#' HTML. Uses ONLY the real btop alignment to this protein (no fabrication).
+#'
+#' state per subject position: "uncovered" | "match" | "variant" (a confident
+#' de novo residue disagrees -> genuine difference) | "error" (low-confidence
+#' disagreement -> likely de novo error) | "amber" (mid / gap / no score).
+#'
+#' @param subject   subject accession to map
+#' @param blast     FULL BLAST hits (peptide/query + subject/qseq/sseq/btop/qstart/sstart/send)
+#' @param aa_lookup optional seq_norm -> aa_scores string (for confidence)
+#' @return data.frame(pos, ref, state, n_cov, n_match, n_mismatch) or NULL
+build_protein_coverage_track <- function(subject, blast, aa_lookup = NULL,
+                                         hi_conf = 0.95) {
+  if (is.null(blast) || !is.data.frame(blast) || nrow(blast) == 0) return(NULL)
+  need <- c("subject", "sstart", "send", "qseq", "sseq", "btop")
+  if (!all(need %in% names(blast))) return(NULL)
+  subj_id <- as.character(subject)
+  bt <- data.table::as.data.table(blast)
+  pcol <- if ("peptide" %in% names(bt)) "peptide" else if ("query" %in% names(bt)) "query" else NULL
+  if (is.null(pcol)) return(NULL)
+  bt$.kall <- gsub("I", "L", build_dda_canonical_peptide(bt[[pcol]]))
+  # Peptide "uniqueness" = maps to only ONE protein in the full graph (FragPipe
+  # unique-peptide sense). Computed across ALL subjects (>=50% identity edges)
+  # before subsetting, so we can flag which residues are pinned to THIS protein
+  # specifically vs covered only by peptides shared with homologs.
+  deg <- if ("pident" %in% names(bt))
+    bt[suppressWarnings(as.numeric(pident)) >= 50,
+       list(.deg = data.table::uniqueN(subject)), by = ".kall"] else
+    bt[, list(.deg = data.table::uniqueN(subject)), by = ".kall"]
+  uniq_keys <- deg$.kall[deg$.deg == 1L]
+  rows <- bt[as.character(bt$subject) == subj_id, ]   # base index — avoids data.table NSE name clash
+  if (nrow(rows) == 0) return(NULL)
+  rows$.k <- rows$.kall
+  rows$.uniq <- rows$.k %in% uniq_keys
+  if ("bitscore" %in% names(rows)) rows <- rows[order(-suppressWarnings(as.numeric(rows$bitscore))), ]
+  rows <- rows[!duplicated(rows$.k), ]              # best hit per peptide TO this protein
+  rows$sstart <- suppressWarnings(as.integer(rows$sstart))
+  rows$send   <- suppressWarnings(as.integer(rows$send))
+  rows <- rows[!is.na(rows$sstart) & !is.na(rows$send), ]
+  if (nrow(rows) == 0) return(NULL)
+  qst <- if ("qstart" %in% names(rows)) suppressWarnings(as.integer(rows$qstart)) else rep(1L, nrow(rows))
+  # Show the WHOLE protein (residue 1 -> protein length), not just the covered
+  # span, so the user can see where the matched peptides sit. The full length
+  # comes from `slen` (subject length) when the BLAST output carries it; without
+  # it we can only extend to the last covered residue (the C-terminal tail beyond
+  # coverage is genuinely unknown — never fabricated).
+  smin <- 1L
+  slen_vec <- if ("slen" %in% names(rows)) suppressWarnings(as.integer(rows$slen)) else NA_integer_
+  len_exact <- any(!is.na(slen_vec)) && max(slen_vec, na.rm = TRUE) >= max(rows$send)
+  smax <- if (len_exact) max(slen_vec, na.rm = TRUE) else max(rows$send)
+  L <- smax - smin + 1L
+  if (!is.finite(L) || L <= 0 || L > 100000) return(NULL)
+  ref <- rep(NA_character_, L); ncov <- integer(L); nuniq <- integer(L)
+  obs_votes <- vector("list", L)                    # de novo residue calls per position
+  conf_votes <- vector("list", L)                   # Casanovo confidence aligned to each call
+  for (i in seq_len(nrow(rows))) {
+    aln <- parse_btop(rows$btop[i], rows$qseq[i])
+    if (is.null(aln)) next
+    qa <- strsplit(aln$qaln, "")[[1]]; sa <- strsplit(aln$saln, "")[[1]]
+    aa <- NULL
+    if (!is.null(aa_lookup)) {
+      s <- unname(aa_lookup[rows$.k[i]])
+      if (!is.na(s) && nzchar(s)) aa <- suppressWarnings(as.numeric(strsplit(s, ",")[[1]]))
+    }
+    spos <- rows$sstart[i] - 1L
+    qpos <- (qst[i] %||% 1L) - 1L
+    for (cc in seq_along(sa)) {
+      qch <- qa[cc]; sch <- sa[cc]
+      if (qch != "-") qpos <- qpos + 1L
+      if (sch == "-") next                          # gap in subject: no subject position
+      spos <- spos + 1L
+      idx <- spos - smin + 1L
+      if (idx < 1L || idx > L) next
+      ref[idx] <- sch; ncov[idx] <- ncov[idx] + 1L
+      if (isTRUE(rows$.uniq[i])) nuniq[idx] <- nuniq[idx] + 1L
+      conf <- if (qch != "-" && !is.null(aa) && qpos <= length(aa) && !is.na(aa[qpos])) aa[qpos] else NA_real_
+      obs_votes[[idx]]  <- c(obs_votes[[idx]], qch)  # "-" = de novo lacks this residue
+      conf_votes[[idx]] <- c(conf_votes[[idx]], conf)
+    }
+  }
+  # CONSENSUS per position: the de novo residue most peptides call. A position is
+  # a "difference" ONLY when that consensus differs from the reference — so the
+  # coloured marker never sits over a residue that actually matches (I/L treated
+  # as equivalent). Colour comes from the confidence of the consensus call.
+  obs <- rep(NA_character_, L); state <- rep("uncovered", L)
+  nmatch <- integer(L); nmis <- integer(L)
+  for (idx in seq_len(L)) {
+    if (ncov[idx] == 0L) next
+    v <- obs_votes[[idx]]; cf <- conf_votes[[idx]]
+    o <- names(sort(table(v), decreasing = TRUE))[1]; obs[idx] <- o
+    rL <- gsub("I", "L", ref[idx]); vL <- gsub("I", "L", v)
+    # 'X' = DIAMOND-masked low-complexity; non-informative (exclude from match/
+    # mismatch counts; a masked consensus is shown as 'masked', not a difference).
+    informative <- v != "-" & v != "X" & rL != "X"
+    mv <- vL == rL & informative
+    nmatch[idx] <- sum(mv); nmis[idx] <- sum(informative & !mv)
+    if (rL == "X" || (!is.na(o) && o == "X")) { state[idx] <- "masked"; next }
+    if (!is.na(o) && o != "-" && gsub("I", "L", o) == rL) { state[idx] <- "match"; next }
+    if (is.na(o) || o == "-") { state[idx] <- "amber"; next }   # consensus deletion
+    oc <- cf[v == o]; oc <- oc[!is.na(oc)]
+    oconf <- if (length(oc)) max(oc) else NA_real_
+    state[idx] <- if (!is.na(oconf) && oconf >= hi_conf) "variant" else
+                  if (!is.na(oconf) && oconf < 0.70) "error" else "amber"
+  }
+  out <- data.frame(pos = smin:smax, ref = ref, obs = obs, state = state, n_cov = ncov,
+             n_match = nmatch, n_mismatch = nmis, n_unique = nuniq,
+             unique_support = nuniq > 0L, stringsAsFactors = FALSE)
+  attr(out, "len_exact") <- isTRUE(len_exact)   # TRUE only when slen gave the true protein length
+  # Per-peptide spans for the tiling view (PEAKS-style bars under the sequence):
+  # one row per de novo peptide best-hitting this protein, with its subject span,
+  # mean Casanovo confidence, and whether it is unique to this protein.
+  pep_mc <- rep(NA_real_, nrow(rows))
+  if (!is.null(aa_lookup)) {
+    for (i in seq_len(nrow(rows))) {
+      s <- unname(aa_lookup[rows$.k[i]])
+      if (!is.na(s) && nzchar(s)) {
+        v <- suppressWarnings(as.numeric(strsplit(s, ",")[[1]]))
+        if (length(v)) pep_mc[i] <- mean(v, na.rm = TRUE)
+      }
+    }
+  }
+  attr(out, "peptides") <- data.frame(
+    pep = rows$.k, sstart = rows$sstart, send = rows$send,
+    uniq = rows$.uniq, mean_conf = pep_mc, stringsAsFactors = FALSE)
+  out
 }
 
 #' Calibrate the Casanovo confidence score against nr BLAST outcome — and, when
@@ -358,6 +759,196 @@ build_denovo_score_calibration <- function(classified, blast,
                           pmin(1, cum_decoy / agg$cum_target), NA_real_)
   }
   as.data.frame(agg)
+}
+
+#' Correct NovoBoard target-decoy SPECTRA competition + FDR, computed from the loaded
+#' dataset. Unlike build_denovo_score_calibration() (which only works for shuffled-peptide
+#' decoys), this bins BOTH the real and the decoy-spectra peptide populations by their OWN
+#' Casanovo score, so it is valid for decoy spectra. See docs/DENOVO_FDR_VALIDATION.md.
+#'
+#' @param real  data.frame with numeric `score` (Casanovo peptide score) + logical `hit` (>=1 nr BLAST hit)
+#' @param decoy data.frame with the same two columns, for the decoy-spectra population
+#' @param bin   score bin width for the hit-rate-vs-score panel (default 0.1)
+#' @param score_range plotted score range (default -1..1)
+#' @return list(bins, fdr, enrichment, real_n, decoy_n, real_hit, decoy_hit,
+#'   real_rate, decoy_rate, n_at_1pct) — or NULL if inputs are unusable
+build_denovo_spectra_fdr <- function(real, decoy, bin = 0.1, score_range = c(-1, 1)) {
+  ok <- function(d) is.data.frame(d) && all(c("score", "hit") %in% names(d)) && nrow(d) > 0
+  if (!ok(real) || !ok(decoy)) return(NULL)
+  real  <- real[is.finite(real$score), , drop = FALSE]
+  decoy <- decoy[is.finite(decoy$score), , drop = FALSE]
+  if (nrow(real) == 0 || nrow(decoy) == 0) return(NULL)
+  rr <- mean(real$hit); dr <- mean(decoy$hit)
+
+  brks <- seq(score_range[1], score_range[2], by = bin)
+  mids <- (utils::head(brks, -1) + utils::tail(brks, -1)) / 2
+  binhr <- function(d) {
+    b <- cut(d$score, brks, include.lowest = TRUE)
+    as.numeric(tapply(d$hit, b, function(x) 100 * mean(x)))[seq_along(mids)]
+  }
+  bins <- data.frame(mid = mids, real_hr = binhr(real), decoy_hr = binhr(decoy))
+
+  # cumulative competition FDR on a fine score grid: for peptides with score >= t,
+  # FDR = (# decoy hits >= t) / (# real hits >= t).
+  ths <- seq(score_range[1], score_range[2], by = 0.02)
+  n_real  <- vapply(ths, function(t) sum(real$hit  & real$score  >= t), numeric(1))
+  n_decoy <- vapply(ths, function(t) sum(decoy$hit & decoy$score >= t), numeric(1))
+  fdr <- data.frame(threshold = ths, n_real = n_real, n_decoy = n_decoy,
+                    fdr = ifelse(n_real > 0, n_decoy / n_real, NA_real_))
+  # q-value: min FDR over all equally-or-more-inclusive sets (lower threshold). ths is
+  # ascending, so that is a prefix cummin — q is non-decreasing as the accepted set grows.
+  fdr$q <- cummin(ifelse(is.na(fdr$fdr), 1, fdr$fdr))
+  ok1 <- fdr[is.finite(fdr$q) & fdr$q <= 0.01, , drop = FALSE]
+  list(bins = bins, fdr = fdr,
+       enrichment = if (dr > 0) rr / dr else NA_real_,
+       real_n = nrow(real), decoy_n = nrow(decoy),
+       real_hit = sum(real$hit), decoy_hit = sum(decoy$hit),
+       real_rate = 100 * rr, decoy_rate = 100 * dr,
+       n_at_1pct = if (nrow(ok1)) max(ok1$n_real) else 0L)
+}
+
+#' De-novo-ONLY target-decoy FDR (the original NovoBoard FDR, BEFORE any BLAST): compete
+#' real-spectra Casanovo PSMs against decoy-spectra PSMs by Casanovo score alone.
+#' FDR(t) = (# decoy PSMs with score >= t) / (# real PSMs with score >= t). This is the pure
+#' de-novo *sequencing* FDR — it answers "how many of my accepted de novo PSMs are likely
+#' wrong", independent of homology. See docs/DENOVO_FDR_VALIDATION.md.
+#'
+#' @param real_scores  numeric Casanovo peptide scores for the real spectra
+#' @param decoy_scores numeric Casanovo peptide scores for the decoy spectra
+#' @param bin score bin width for the distribution panel; @param score_range plotted range
+#' @return list(dist, fdr, n_at_1pct, real_n, decoy_n) or NULL
+build_denovo_casanovo_fdr <- function(real_scores, decoy_scores,
+                                      bin = 0.05, score_range = c(-1, 1)) {
+  real_scores  <- real_scores[is.finite(real_scores)]
+  decoy_scores <- decoy_scores[is.finite(decoy_scores)]
+  if (length(real_scores) == 0 || length(decoy_scores) == 0) return(NULL)
+  brks <- seq(score_range[1], score_range[2], by = bin)
+  mids <- (utils::head(brks, -1) + utils::tail(brks, -1)) / 2
+  frac <- function(s) as.numeric(table(cut(s, brks, include.lowest = TRUE)))[seq_along(mids)] / length(s) * 100
+  dist <- data.frame(mid = mids, real_pct = frac(real_scores), decoy_pct = frac(decoy_scores))
+  ths <- seq(score_range[1], score_range[2], by = 0.02)
+  n_real  <- vapply(ths, function(t) sum(real_scores  >= t), numeric(1))
+  n_decoy <- vapply(ths, function(t) sum(decoy_scores >= t), numeric(1))
+  fdr <- data.frame(threshold = ths, n_real = n_real, n_decoy = n_decoy,
+                    fdr = ifelse(n_real > 0, n_decoy / n_real, NA_real_))
+  fdr$q <- cummin(ifelse(is.na(fdr$fdr), 1, fdr$fdr))
+  ok1 <- fdr[is.finite(fdr$q) & fdr$q <= 0.01, , drop = FALSE]
+  list(dist = dist, fdr = fdr, n_at_1pct = if (nrow(ok1)) max(ok1$n_real) else 0L,
+       real_n = length(real_scores), decoy_n = length(decoy_scores))
+}
+
+#' Best (max) BLAST bitscore per de novo peptide from a DIAMOND hit table. Single
+#' definition used by both FDR calibrations below. Returns data.frame(pep, b) or NULL.
+denovo_best_bitscore_per_peptide <- function(b) {
+  if (is.null(b) || !is.data.frame(b) || nrow(b) == 0) return(NULL)
+  bt <- data.table::as.data.table(b)
+  qcol <- intersect(c("qseqid", "query", "peptide", "Peptide", "seq_stripped"), names(bt))
+  bcol <- intersect(c("bitscore", "bit_score"), names(bt))
+  if (length(qcol) == 0 || length(bcol) == 0) return(NULL)
+  bt$.q <- as.character(bt[[qcol[1]]])
+  bt$.b <- suppressWarnings(as.numeric(bt[[bcol[1]]]))
+  bt <- bt[is.finite(bt$.b) & bt$.b > 0 & !is.na(bt$.q) & nzchar(bt$.q), ]
+  if (nrow(bt) == 0) return(NULL)
+  agg <- bt[, list(b = max(.b)), by = ".q"]
+  data.table::setnames(agg, ".q", "pep")
+  as.data.frame(agg)
+}
+
+#' Confirmed-peptides-by-length table from a vector of accepted peptide ids. Only
+#' computed when the ids look like sequences (so length = nchar is meaningful).
+denovo_fdr_by_length <- function(peps) {
+  if (length(peps) == 0) return(NULL)
+  seqlike <- grepl("^[A-Za-z]{4,}$", peps)
+  if (mean(seqlike) <= 0.8) return(NULL)
+  brks <- c(0, 15, 20, 25, 30, Inf)
+  labs <- c("≤15", "16-20", "21-25", "26-30", "31+")
+  tb <- as.data.frame(table(length = cut(nchar(peps), brks, labs)))
+  names(tb) <- c("length", "n")
+  tb
+}
+
+#' RECOMMENDED de novo -> homology FDR: bitscore-calibrated decoy-SPECTRA null.
+#' The ocelot validation (docs/denovo_decoy_method.html) showed the homology FDR
+#' must be ranked by BLAST *bitscore* (or, for standard searches, E-value) and NOT
+#' by Casanovo score — the Casanovo peptide score barely separates real from decoy
+#' spectra, so it makes a poor threshold (only ~171 of 312,820 peptides clear 1%
+#' FDR when gated on it, vs ~5,630 when gated on bitscore). Procedure: best bitscore
+#' per peptide; FDR(t) = (decoy hits >= t, scaled by real_n/decoy_n) / (real hits >= t);
+#' q-value monotonised over the larger (lower-threshold) sets.
+#'
+#' Only the BLAST hit tables are needed for the threshold counts (non-hit peptides
+#' never enter n(>= t) for t > 0). real_n/decoy_n are used ONLY for the population
+#' scale; when decoy_n is unknown we fall back to scale = 1, which over-estimates
+#' the FDR when the decoy population is larger (i.e. it is conservative).
+#'
+#' @param real_blast  DIAMOND hits for REAL de novo peptides (query/peptide + bitscore)
+#' @param decoy_blast DIAMOND hits for DECOY-SPECTRA peptides (same columns)
+#' @param real_n  unique real de novo peptides searched (population denominator)
+#' @param decoy_n unique decoy-spectra peptides searched; NULL -> scale = 1 (conservative)
+#' @param fdr_level target FDR (default 0.01)
+#' @return list(curve, n_at_fdr, bits_at_fdr, by_length, scale, real_hit, decoy_hit,
+#'   global_fdr, fdr_level, mode) or NULL when inputs are unusable
+build_denovo_bitscore_fdr <- function(real_blast, decoy_blast,
+                                      real_n = NULL, decoy_n = NULL,
+                                      fdr_level = 0.01) {
+  rb <- denovo_best_bitscore_per_peptide(real_blast)
+  db <- denovo_best_bitscore_per_peptide(decoy_blast)
+  if (is.null(rb) || is.null(db)) return(NULL)
+  scale <- if (!is.null(real_n) && !is.null(decoy_n) &&
+               is.finite(real_n) && is.finite(decoy_n) && decoy_n > 0)
+             real_n / decoy_n else 1
+  ths <- sort(unique(rb$b))                          # ascending bitscore
+  n_real  <- vapply(ths, function(t) sum(rb$b >= t), numeric(1))
+  n_decoy <- vapply(ths, function(t) sum(db$b >= t), numeric(1))
+  fdr <- (n_decoy * scale) / n_real
+  q   <- cummin(ifelse(is.finite(fdr), fdr, 1))      # q over larger (lower-t) accepted sets
+  curve <- data.frame(bitscore = ths, n_real = n_real, n_decoy = n_decoy, fdr = fdr, q = q)
+  ok <- curve[is.finite(curve$q) & curve$q <= fdr_level, , drop = FALSE]
+  n_at    <- if (nrow(ok)) max(ok$n_real)   else 0L
+  bits_at <- if (nrow(ok)) min(ok$bitscore) else NA_real_
+  by_length <- if (n_at > 0 && is.finite(bits_at)) denovo_fdr_by_length(rb$pep[rb$b >= bits_at]) else NULL
+  list(curve = curve, n_at_fdr = n_at, bits_at_fdr = bits_at, by_length = by_length,
+       scale = scale, real_hit = nrow(rb), decoy_hit = nrow(db),
+       global_fdr = (nrow(db) * scale) / nrow(rb), fdr_level = fdr_level, mode = "spectra")
+}
+
+#' Decoy-DATABASE competition FDR (reversed-sequence null) — Mike Riffle's control.
+#' Per real peptide, compete the best TARGET-DB bitscore against the best DECOY-DB
+#' (reversed) bitscore: a peptide is a target-win if best-target >= best-decoy. Rank
+#' by the winning bitscore; FDR(t) = (#decoy-wins with score >= t) / (#target-wins
+#' with score >= t). This nulls *chance database matches* only — NOT de novo
+#' sequencing error — so it is more permissive than the decoy-spectra null (it
+#' over-accepts short peptides). Offered alongside the spectra null so the two can
+#' be compared (and cross-referenced against the Sage IDs). Same return shape.
+#'
+#' @param target_blast best target-DB hit per real peptide (query/peptide + bitscore)
+#' @param decoy_blast  best reversed-DB hit per real peptide (same columns)
+#' @param fdr_level target FDR (default 0.01)
+build_denovo_dbcompete_fdr <- function(target_blast, decoy_blast, fdr_level = 0.01) {
+  tb <- denovo_best_bitscore_per_peptide(target_blast)
+  if (is.null(tb)) return(NULL)
+  db <- denovo_best_bitscore_per_peptide(decoy_blast)
+  if (is.null(db)) db <- data.frame(pep = character(0), b = numeric(0))
+  m <- merge(tb, db, by = "pep", all = TRUE, suffixes = c("_t", "_d"))
+  m$b_t[is.na(m$b_t)] <- -Inf; m$b_d[is.na(m$b_d)] <- -Inf
+  m <- m[is.finite(pmax(m$b_t, m$b_d)), , drop = FALSE]
+  if (nrow(m) == 0) return(NULL)
+  m$winT <- m$b_t >= m$b_d
+  m$sc   <- pmax(m$b_t, m$b_d)
+  ths <- sort(unique(m$sc))
+  n_real  <- vapply(ths, function(t) sum(m$winT  & m$sc >= t), numeric(1))
+  n_decoy <- vapply(ths, function(t) sum(!m$winT & m$sc >= t), numeric(1))
+  fdr <- ifelse(n_real > 0, n_decoy / n_real, NA_real_)
+  q   <- cummin(ifelse(is.finite(fdr), fdr, 1))
+  curve <- data.frame(bitscore = ths, n_real = n_real, n_decoy = n_decoy, fdr = fdr, q = q)
+  ok <- curve[is.finite(curve$q) & curve$q <= fdr_level, , drop = FALSE]
+  n_at    <- if (nrow(ok)) max(ok$n_real)   else 0L
+  bits_at <- if (nrow(ok)) min(ok$bitscore) else NA_real_
+  by_length <- if (n_at > 0 && is.finite(bits_at)) denovo_fdr_by_length(m$pep[m$winT & m$sc >= bits_at]) else NULL
+  list(curve = curve, n_at_fdr = n_at, bits_at_fdr = bits_at, by_length = by_length,
+       scale = 1, real_hit = sum(m$winT), decoy_hit = sum(!m$winT),
+       global_fdr = if (sum(m$winT) > 0) sum(!m$winT) / sum(m$winT) else NA_real_,
+       fdr_level = fdr_level, mode = "database")
 }
 
 #' TRUE for each protein group that is ENTIRELY contaminant — every accession
@@ -585,10 +1176,16 @@ parse_sage_results <- function(
   psms <- data.table::fread(results_path)
   message("[DDA] Read ", nrow(psms), " total PSMs from Sage")
 
-  # FDR filter
+  # FDR filter — and drop DECOYS explicitly. Filtering on q alone lets the
+  # occasional decoy (label -1) with q <= 0.01 slip into the analysed set; decoys
+  # must never be counted as identifications.
   psms_filtered <- psms[spectrum_q <= fdr_threshold & protein_q <= protein_fdr_threshold]
+  if ("label" %in% names(psms_filtered))
+    psms_filtered <- psms_filtered[label == 1]
+  else if ("is_decoy" %in% names(psms_filtered))
+    psms_filtered <- psms_filtered[!as.logical(is_decoy)]
   message("[DDA] After FDR filter (spectrum_q <= ", fdr_threshold,
-          ", protein_q <= ", protein_fdr_threshold, "): ", nrow(psms_filtered), " PSMs")
+          ", protein_q <= ", protein_fdr_threshold, ", targets only): ", nrow(psms_filtered), " PSMs")
 
   # Per-protein peptide/spectra counts
   pep_counts <- psms_filtered[, .(
@@ -1260,6 +1857,106 @@ echo "[DE-LIMP Casanovo] Task ${SLURM_ARRAY_TASK_ID} done: $(date)"
 }
 
 
+#' Generate the de novo decoy-spectra FDR sbatch (NovoBoard target-decoy null).
+#'
+#' Codifies the validated method (docs/DENOVO_FDR_VALIDATION.md): for every input
+#' mzML, build a decoy spectrum (denovo_decoy_gen.py, FRAC>=0.8 peak replacement,
+#' precursor preserved), sequence the decoys with the SAME Casanovo model, extract
+#' bare peptides (mods stripped, >=7 aa, deduped), and DIAMOND blastp them against nr
+#' with the identical 16-column format used for the real hits. Writes
+#' `denovo/blast_results_decoy_spectra.tsv`, which the Target-Decoy FDR pane loads
+#' (build_denovo_score_calibration is agnostic to which null produced the file).
+#'
+#' This is the SAME pipeline as the real arm with the spectra swapped for decoys, so
+#' the FDR is a true 1:1 target-decoy competition. Submit after (or alongside) the
+#' real Casanovo + nr-BLAST run.
+#'
+#' @param mzml_dir directory of input .mzML files (the real spectra)
+#' @param output_dir search output dir (writes denovo/ + casanovo_decoy/ under it)
+#' @param nr_db path to the DIAMOND nr database (no extension)
+#' @param model_ckpt Casanovo model checkpoint
+#' @param conda_env_path Casanovo v5 conda env
+#' @param decoy_gen_script path to denovo_decoy_gen.py (shipped in scripts/)
+#' @param frac peak-replacement fraction (default 0.8 — validated floor)
+#' @param account,partition,qos SLURM placement for the GPU (Casanovo) step
+#' @return character SLURM script (one job: decoy-gen + Casanovo + extract + blast)
+generate_denovo_decoy_fdr_sbatch <- function(
+    mzml_dir, output_dir, nr_db,
+    model_ckpt     = "/quobyte/proteomics-grp/bioinformatics_programs/casanovo_modles/casanovo_v5_0_0.ckpt",
+    conda_env_path = "/quobyte/proteomics-grp/conda_envs/casanovo5",
+    decoy_gen_script = "/quobyte/proteomics-grp/de-limp/python/denovo_decoy_gen.py",
+    frac           = 0.8,
+    account        = "genome-center-grp",
+    partition      = "gpu-a100",
+    qos            = "genome-center-grp-gpu-a100-qos") {
+  denovo_dir <- file.path(output_dir, "denovo")
+  decoy_dir  <- file.path(output_dir, "casanovo_decoy")
+  logs_dir   <- file.path(output_dir, "logs")
+  fmt <- "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids qseq sseq btop"
+  paste0(
+'#!/bin/bash
+#SBATCH --job-name=delimp_denovo_decoyfdr
+#SBATCH --partition=', partition, '
+#SBATCH --account=', account, '
+#SBATCH --qos=', qos, '
+#SBATCH --gres=gpu:a100:1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
+#SBATCH --output="', logs_dir, '/decoyfdr_%j.out"
+#SBATCH --error="', logs_dir, '/decoyfdr_%j.err"
+
+set -euo pipefail
+ENV="', conda_env_path, '"
+MODEL="', model_ckpt, '"
+MZML_DIR="', mzml_dir, '"
+DECOY_DIR="', decoy_dir, '"
+DENOVO_DIR="', denovo_dir, '"
+NR="', nr_db, '"
+GEN="', decoy_gen_script, '"
+FRAC=', format(frac, nsmall = 1), '
+mkdir -p "$DECOY_DIR" "$DENOVO_DIR" "', logs_dir, '"
+export PATH="$ENV/bin:$PATH"
+
+echo "[decoy-FDR] decoy-spectra + Casanovo start $(date) on $(hostname)"
+for f in "$MZML_DIR"/*.mzML; do
+  [ -e "$f" ] || continue
+  b=$(basename "$f" .mzML)
+  "$ENV/bin/python" "$GEN" "$f" "$DECOY_DIR/decoy_${b}.mgf" "$FRAC"
+  casanovo sequence --model "$MODEL" --output_dir "$DECOY_DIR" \\
+    --output_root "decoy_${b}_sequence" --force_overwrite "$DECOY_DIR/decoy_${b}.mgf"
+done
+
+echo "[decoy-FDR] extracting decoy peptides $(date)"
+"$ENV/bin/python" - "$DECOY_DIR" "$DECOY_DIR/decoy_peptides.fasta" <<"PY"
+import sys, re, glob, os
+ddir, out = sys.argv[1], sys.argv[2]; seqs=set()
+for mz in glob.glob(os.path.join(ddir, "decoy_*_sequence.mztab")):
+    sc=None
+    for line in open(mz):
+        if line.startswith("PSH"): sc=line.rstrip("\\n").split("\\t").index("sequence"); continue
+        if line.startswith("PSM") and sc is not None:
+            s=line.rstrip("\\n").split("\\t")[sc]
+            s=re.sub(r"\\[[^\\]]*\\]","",s); s=re.sub(r"\\([^)]*\\)","",s)
+            s=re.sub(r"[+-]\\d+\\.?\\d*","",s); s=re.sub(r"[^A-Za-z]","",s).upper()
+            if len(s)>=7: seqs.add(s)
+open(out,"w").write("".join(f">{p}\\n{p}\\n" for p in sorted(seqs)))
+print(f"decoy peptides >=7aa: {len(seqs)}")
+PY
+
+echo "[decoy-FDR] DIAMOND blastp vs nr $(date)"
+module load diamond/2.1.7 2>/dev/null || true
+diamond blastp -d "$NR" -q "$DECOY_DIR/decoy_peptides.fasta" \\
+  -o "$DENOVO_DIR/blast_results_decoy_spectra.tsv" \\
+  --outfmt ', fmt, ' \\
+  --evalue 1 --max-target-seqs 25 --threads 16 --ignore-warnings
+echo "[decoy-FDR] DONE $(date); decoy hits=$(wc -l < "$DENOVO_DIR/blast_results_decoy_spectra.tsv")"
+')
+}
+
+
 #' Parse Casanovo mzTab output files
 #'
 #' Extracts PSM rows from mzTab format. Each row has a de novo predicted
@@ -1907,7 +2604,8 @@ check_casanovo_gpu_queue <- function(ssh_config, partition = "gpu-a100", sbatch_
 #' @return Path to the .zip file (in tempdir())
 generate_dda_export_zip <- function(output_dir, mode = "standard",
                                     app_version = "unknown",
-                                    search_info = NULL) {
+                                    search_info = NULL,
+                                    denovo_cache = NULL) {
   stopifnot(dir.exists(output_dir))
   safe_mode <- gsub("[^a-zA-Z0-9_.-]", "_", mode)
   stamp     <- format(Sys.time(), "%Y%m%d_%H%M%S")
@@ -1941,10 +2639,26 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
   })
 
   # ---- Sage results table (the main PSM TSV — needed for every mode) ----
-  safe_section(manifest, "sage_results.tsv (PSM table)", {
+  safe_section(manifest, "sage_results.tsv (PSM table, 1% FDR, targets only)", {
     src <- file.path(output_dir, "results.sage.tsv")
     if (!file.exists(src)) stop("results.sage.tsv not found")
-    file.copy(src, file.path(bundle_dir, "sage_results.tsv"), overwrite = TRUE)
+    # The RAW Sage output is UNFILTERED — it contains decoys (label -1) and the
+    # full q-value range. Copying it verbatim ships decoy-inflated counts that a
+    # downstream reader would mistake for identifications. Export the SAME table
+    # the app analyses: targets only, 1% FDR (spectrum_q <= 0.01 & protein_q <= 0.01).
+    ps <- data.table::fread(src)
+    n_raw <- nrow(ps)
+    keep <- rep(TRUE, nrow(ps))
+    n_dec <- 0L
+    if ("label" %in% names(ps))      { n_dec <- sum(ps$label == -1, na.rm = TRUE); keep <- keep & ps$label == 1 }
+    else if ("is_decoy" %in% names(ps)) { n_dec <- sum(as.logical(ps$is_decoy), na.rm = TRUE); keep <- keep & !as.logical(ps$is_decoy) }
+    if ("spectrum_q" %in% names(ps)) keep <- keep & ps$spectrum_q <= 0.01
+    if ("protein_q"  %in% names(ps)) keep <- keep & ps$protein_q  <= 0.01
+    ps <- ps[keep]
+    if (nrow(ps) == 0) stop("no target PSMs pass 1% FDR")
+    data.table::fwrite(ps, file.path(bundle_dir, "sage_results.tsv"), sep = "\t")
+    message(sprintf("[DDA Export] sage_results.tsv: %d target PSMs at 1%% FDR (from %d raw rows, %d decoys removed)",
+                    nrow(ps), n_raw, n_dec))
   })
 
   # ---- Casanovo mztabs (optional — bundled if Casanovo ran) ----
@@ -1976,6 +2690,68 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
     file.copy(tail(sort(cand), 1), file.path(bundle_dir, "peptide_lca.tsv"),
               overwrite = TRUE)   # prefer relaxed-evalue (*_e1) when both exist
   })
+
+  # ---- Protein inference (parsimony + razor) from the BLAST graph + LCA ----
+  safe_section(manifest, "protein_groups.tsv (parsimony / razor inference)", {
+    bcand <- c(file.path(output_dir, "denovo", "blast_results.tsv"),
+               file.path(output_dir, "denovo", "diamond_hits.tsv"))
+    bsrc <- bcand[file.exists(bcand)][1]
+    if (is.na(bsrc)) stop("no BLAST results for protein inference")
+    bl <- data.table::fread(bsrc, header = FALSE)
+    cn <- c("peptide","subject","pident","length","mismatch","gapopen",
+            "qstart","qend","sstart","send","evalue","bitscore")
+    if (ncol(bl) >= length(cn)) data.table::setnames(bl, seq_along(cn), cn)
+    if (ncol(bl) >= 16) data.table::setnames(bl, 13:16, c("staxid","qseq","sseq","btop"))
+    # Minimal master from the LCA file (species + diagnostic per peptide), so the
+    # protein rows carry species attribution even in the headless export path.
+    ma <- NULL
+    lcand <- list.files(file.path(output_dir, "denovo"),
+                        pattern = "_peptide_lca\\.tsv$", full.names = TRUE)
+    if (length(lcand)) {
+      lt <- tryCatch(data.table::fread(tail(sort(lcand), 1)), error = function(e) NULL)
+      if (!is.null(lt) && "peptide" %in% names(lt)) {
+        lt$seq_norm <- gsub("I", "L", build_dda_canonical_peptide(lt$peptide))
+        keep <- intersect(c("seq_norm","lca_name","diagnostic"), names(lt))
+        ma <- as.data.frame(lt[, keep, with = FALSE])
+        if ("lca_name" %in% names(ma)) names(ma)[names(ma)=="lca_name"] <- "Species_or_clade"
+        if ("diagnostic" %in% names(ma)) names(ma)[names(ma)=="diagnostic"] <- "Diagnostic"
+      }
+    }
+    g <- build_denovo_protein_groups(as.data.frame(bl), master = ma, min_pident = 50)
+    if (is.null(g) || nrow(g) == 0) stop("no protein groups inferred")
+    data.table::fwrite(g, file.path(bundle_dir, "protein_groups.tsv"), sep = "\t")
+  })
+
+  # ---- Processed-data cache (skips the slow mztab re-parse on reload) ----
+  # The expensive part of loading is parsing the Casanovo mztabs into ~hundreds
+  # of thousands of PSMs + classifying them; BLAST/LCA are fast freads. Caching
+  # the parsed PSMs + classification as an RDS lets a reload restore them
+  # directly. Same idea as the activity-log session.rds.
+  if (!is.null(denovo_cache)) {
+    safe_section(manifest, "denovo/denovo_cache.rds (parsed-data cache for fast reload)", {
+      dir.create(file.path(bundle_dir, "denovo"), showWarnings = FALSE, recursive = TRUE)
+      payload <- list(
+        schema         = "delimp-denovo-cache-v1",
+        app_version    = app_version,
+        casanovo_psms  = denovo_cache$casanovo_psms,
+        classification = denovo_cache$classification)
+      if (is.null(payload$casanovo_psms)) stop("no parsed PSMs to cache")
+      saveRDS(payload, file.path(bundle_dir, "denovo", "denovo_cache.rds"),
+              compress = "xz")
+    })
+  }
+
+  # ---- Annotated-spectrum peaks (for the in-app MS/MS viewer) if pre-extracted ----
+  if (all(file.exists(file.path(output_dir, "denovo",
+          c("spectra_peaks.parquet", "spectra_meta.parquet"))))) {
+    safe_section(manifest, "denovo/spectra_{peaks,meta}.parquet (annotated-spectrum viewer)", {
+      dir.create(file.path(bundle_dir, "denovo"), showWarnings = FALSE, recursive = TRUE)
+      file.copy(file.path(output_dir, "denovo", "spectra_peaks.parquet"),
+                file.path(bundle_dir, "denovo", "spectra_peaks.parquet"), overwrite = TRUE)
+      file.copy(file.path(output_dir, "denovo", "spectra_meta.parquet"),
+                file.path(bundle_dir, "denovo", "spectra_meta.parquet"), overwrite = TRUE)
+    })
+  }
 
   # ---- Universal peptide length distribution (cheap; useful for every mode) ----
   safe_section(manifest, "peptide_length_distribution.csv", {
@@ -2074,7 +2850,45 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
           "- Conserved peptides resolve only to family or higher and are NOT attributed to one species.",
           "- microbiome / viral hits (incl. nr over-represented taxa such as SARS-CoV-2 spike) are NOT host signal.",
           "- Weigh each hit by Casanovo score (-1..1; >=0 mass-consistent), query coverage, and e-value:",
-          "  a 100% identity over partial coverage (e.g. 18 of 24 residues) is NOT a full-length match.")
+          "  a 100% identity over partial coverage (e.g. 18 of 24 residues) is NOT a full-length match.",
+          "",
+          "## Confidence-Weighted Identity (CWI) — how to weigh a hit",
+          "",
+          "- Raw % identity penalizes a de novo peptide for its own sequencing errors. CWI weights each",
+          "  aligned position by Casanovo's per-residue confidence: mismatches at low-confidence residues",
+          "  (likely de-novo errors) are discounted; mismatches at high-confidence residues count fully.",
+          "- HCA (High-Confidence Agreement) = % of >=0.95-confidence residues that match the reference.",
+          "  HCA is the decisive number: a hit where every confident residue agrees is trustworthy even",
+          "  at modest raw identity; a hit where confident residues disagree is a real divergence or wrong.",
+          "- Call tier: Confident (HCA>=90 & >=3 hi-conf residues) | Likely (HCA>=75) | Uncertain (else).",
+          "- This formalizes established de-novo+homology practice (SPIDER/PEAKS; ALPS) as a simple per-hit",
+          "  score; it is computed from the real DIAMOND traceback, never from guessed positions.")
+      }
+    }
+    # Protein-level summary, computed from this dataset's protein_groups.tsv.
+    prot_lines <- character(0)
+    pg_path <- file.path(bundle_dir, "protein_groups.tsv")
+    if (file.exists(pg_path)) {
+      pg <- tryCatch(data.table::fread(pg_path), error = function(e) NULL)
+      if (!is.null(pg) && nrow(pg) > 0) {
+        n_strong <- if ("Evidence" %in% names(pg)) sum(pg$Evidence == "Strong", na.rm = TRUE) else NA
+        topn <- utils::head(pg, 8)
+        lab <- if (all(c("Protein", "Razor_peptides") %in% names(topn)))
+          paste(sprintf("%s (%d razor)", topn$Protein, as.integer(topn$Razor_peptides)),
+                collapse = ", ") else "n/a"
+        prot_lines <- c(
+          "",
+          "## Protein inference (parsimony + razor; FragPipe/IDPicker model)",
+          "",
+          sprintf("- %d protein groups inferred%s.", nrow(pg),
+                  if (!is.na(n_strong)) sprintf(", %d with Strong evidence", n_strong) else ""),
+          sprintf("- Top proteins by razor-peptide support: %s.", lab),
+          "- Razor = peptides credited to a protein (unique + shared assigned by parsimony);",
+          "  Total = all peptides mappable to it. Many razor peptides = strong support.",
+          "- Edges are nr BLAST homology hits (>=50% identity), NOT exact tryptic membership, so",
+          "  there is no protein probability. A protein backed by ONE peptide is tentative.",
+          "- For species ID, read protein support alongside the per-peptide LCA: agreement between",
+          "  many peptides on one protein AND a consistent LCA clade is the strongest call.")
       }
     }
     prompt <- c(
@@ -2087,7 +2901,7 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
       "",
       "- `methods.md` — full submission metadata (FASTA, instrument, search params, job IDs)",
       "- `settings.json` — exact Sage v0.14.7 config that ran",
-      "- `sage_results.tsv` — all Sage PSMs (1% FDR-filtered if `results.sage.tsv`)",
+      "- `sage_results.tsv` — Sage PSMs, **1% FDR-filtered, targets only** (decoys removed; spectrum_q & protein_q <= 0.01). NOT the raw Sage output — counts here are identifications, not decoy-inflated.",
       "- `peptide_length_distribution.csv` — universal length histogram",
       if (file.exists(file.path(bundle_dir, "hla_anchor_residues.csv")))
         "- `hla_anchor_residues.csv` — P2 + PΩ residue frequencies (the HLA fingerprint)" else "",
@@ -2096,9 +2910,15 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
       if (dir.exists(file.path(bundle_dir, "casanovo")))
         "- `casanovo/*.mztab` — per-file Casanovo de novo PSMs (sequences + scores)" else "",
       if (file.exists(file.path(bundle_dir, "diamond_hits.tsv")))
-        "- `diamond_hits.tsv` — DIAMOND BLAST hits for Casanovo peptides (nr or UniProt)" else "",
+        paste("- `diamond_hits.tsv` — DIAMOND BLAST hits for Casanovo peptides (nr or UniProt).",
+              "When present, the `qseq`/`sseq`/`btop` columns hold the real aligned subsequences",
+              "and traceback, from which Confidence-Weighted Identity is computed.") else "",
       if (file.exists(file.path(bundle_dir, "peptide_lca.tsv")))
         "- `peptide_lca.tsv` — per-peptide nr lowest-common-ancestor species/clade attribution" else "",
+      if (file.exists(file.path(bundle_dir, "protein_groups.tsv")))
+        paste("- `protein_groups.tsv` — parsimonious protein inference (FragPipe/IDPicker model):",
+              "one row per reference protein with Unique/Razor/Total peptide counts,",
+              "N_indistinguishable, N_diagnostic, AA_covered, and a Strong/Moderate/Weak Evidence tier.") else "",
       "- `MANIFEST.txt` — what made it into the bundle, what was skipped, and why",
       "",
       "## Interpretation hints",
@@ -2119,6 +2939,7 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
           sep = "\n"),
         ""),
       lca_lines,
+      prot_lines,
       ""
     )
     prompt <- prompt[nzchar(prompt)]
@@ -2137,4 +2958,148 @@ generate_dda_export_zip <- function(output_dir, mode = "standard",
 
   message(sprintf("[DDA Export] Bundle ready: %s", zip_path))
   zip_path
+}
+
+# ==============================================================================
+#  Annotated MS/MS spectrum support for the in-app de novo spectrum viewer.
+#  Pure + testable: compute b/y fragment-ion m/z for a (modified) peptide, then
+#  match observed peaks. Lets DE-LIMP render the spectrum behind a de novo call
+#  alongside the per-residue Casanovo confidence — to confirm the BLAST alignment.
+# ==============================================================================
+
+# Monoisotopic residue masses (Da).
+.DDA_AA_MASS <- c(
+  G=57.02146, A=71.03711, S=87.03203, P=97.05276, V=99.06841, T=101.04768,
+  C=103.00919, L=113.08406, I=113.08406, N=114.04293, D=115.02694, Q=128.05858,
+  K=128.09496, E=129.04259, M=131.04049, H=137.05891, F=147.06841, R=156.10111,
+  Y=163.06333, W=186.07931, U=150.95364)
+.DDA_PROTON <- 1.0072764665
+.DDA_WATER  <- 18.0105646863
+# Common Casanovo/Sage modification masses by name (case-insensitive prefix).
+.DDA_MOD_MASS <- c(carbamidomethyl=57.021464, oxidation=15.994915,
+  deamidated=0.984016, acetyl=42.010565, phospho=79.966331,
+  ammonialoss=-17.026549, "pyro-glu"=-17.026549, carbamyl=43.005814,
+  "+57.021"=57.021464, "+15.995"=15.994915, "+0.984"=0.984016)
+
+#' Parse a (modified) peptide into per-residue (aa, modmass). Handles Casanovo
+#' style `C[Carbamidomethyl]`, `+mass` tags, and an optional N-terminal mod.
+dda_parse_modseq <- function(raw_seq) {
+  s <- as.character(raw_seq)
+  aa <- character(0); mod <- numeric(0); nterm <- 0
+  i <- 1L; n <- nchar(s)
+  modval <- function(tok) {
+    tok <- tolower(gsub("[][]", "", tok))    # strip [ and ] (]/[ first avoids escaping)
+    if (grepl("^[+-]?[0-9.]+$", tok)) return(suppressWarnings(as.numeric(tok)))
+    hit <- .DDA_MOD_MASS[which(startsWith(names(.DDA_MOD_MASS), substr(tok, 1, 6)))]
+    if (length(hit)) as.numeric(hit[1]) else 0
+  }
+  while (i <= n) {
+    ch <- substr(s, i, i)
+    if (ch == "[") {
+      j <- i + 1L; while (j <= n && substr(s, j, j) != "]") j <- j + 1L
+      tok <- substr(s, i, j)
+      if (length(aa) == 0) nterm <- nterm + modval(tok)        # N-terminal mod
+      else mod[length(mod)] <- mod[length(mod)] + modval(tok)  # mod on prev residue
+      i <- j + 1L
+    } else if (grepl("[A-Za-z]", ch)) {
+      aa <- c(aa, toupper(ch)); mod <- c(mod, 0); i <- i + 1L
+    } else if (ch %in% c("+", "-")) {                          # bare +mass tag
+      j <- i + 1L; while (j <= n && grepl("[0-9.]", substr(s, j, j))) j <- j + 1L
+      tok <- substr(s, i, j - 1L)
+      if (length(mod)) mod[length(mod)] <- mod[length(mod)] + suppressWarnings(as.numeric(tok))
+      i <- j
+    } else i <- i + 1L
+  }
+  list(aa = aa, mod = mod, nterm = nterm)
+}
+
+#' b/y fragment-ion m/z for a (modified) peptide. Pure.
+#' @return data.frame(label, type, idx, charge, mz)
+dda_ms2_fragments <- function(raw_seq, max_charge = 2L) {
+  p <- dda_parse_modseq(raw_seq)
+  res <- .DDA_AA_MASS[p$aa] + p$mod
+  if (anyNA(res)) res[is.na(res)] <- 0      # unknown residue -> 0 (defensive)
+  L <- length(res); if (L < 2) return(data.frame())
+  bsum <- cumsum(res)[-L] + p$nterm         # b1..b(L-1) neutral (sum N-term residues)
+  ysum <- cumsum(rev(res))[-L] + .DDA_WATER  # y1..y(L-1): y1 = C-term residue, etc.
+  out <- list()
+  for (z in seq_len(max_charge)) {
+    out[[length(out)+1]] <- data.frame(
+      label = sprintf("b%d%s", seq_along(bsum), if (z>1) paste0("^",z,"+") else ""),
+      type = "b", idx = seq_along(bsum), charge = z,
+      mz = (bsum + z * .DDA_PROTON) / z, stringsAsFactors = FALSE)
+    out[[length(out)+1]] <- data.frame(
+      label = sprintf("y%d%s", seq_along(ysum), if (z>1) paste0("^",z,"+") else ""),
+      type = "y", idx = seq_along(ysum), charge = z,
+      mz = (ysum + z * .DDA_PROTON) / z, stringsAsFactors = FALSE)
+  }
+  do.call(rbind, out)
+}
+
+#' Match observed peaks to b/y fragments within a ppm tolerance. Pure.
+#' @return data.frame(mz, intensity, label, type, idx, ppm) — label NA if unmatched
+dda_annotate_peaks <- function(frag_df, mz, intensity, tol_ppm = 20) {
+  mz <- as.numeric(mz); intensity <- as.numeric(intensity)
+  lab <- rep(NA_character_, length(mz)); typ <- lab; ion_idx <- rep(NA_integer_, length(mz))
+  ppm <- rep(NA_real_, length(mz))
+  if (!is.null(frag_df) && nrow(frag_df)) {
+    for (i in seq_along(mz)) {
+      d <- abs(frag_df$mz - mz[i]) / mz[i] * 1e6
+      k <- which.min(d)
+      if (length(k) && d[k] <= tol_ppm) {
+        lab[i] <- frag_df$label[k]; typ[i] <- frag_df$type[k]
+        ion_idx[i] <- frag_df$idx[k]; ppm[i] <- round(d[k], 1)
+      }
+    }
+  }
+  data.frame(mz = mz, intensity = intensity, label = lab, type = typ,
+             idx = ion_idx, ppm = ppm, stringsAsFactors = FALSE)
+}
+
+#' Trusted de novo substitutions from a real (gapped) alignment + per-residue
+#' Casanovo confidence. A "trusted substitution" is a position where the de novo
+#' residue DIFFERS from the reference AND the model was confident (>= hi_conf).
+#' Calibration (ocelot, vs close nr references): residues at conf>=0.95 match a
+#' close reference 99% of the time — so a confident mismatch is ~99% a GENUINE
+#' sequence difference (variant), not a de novo error. `bracketed` flags the
+#' strongest case: the flanking aligned residues are themselves confident matches
+#' (the substitution is mass-pinned on both sides by the fragment-ion ladder).
+#'
+#' @param qaln,saln gapped aligned query/subject (from parse_btop); '-' = gap
+#' @param aa numeric per-residue Casanovo confidence for the FULL peptide (0..1)
+#' @param qstart 1-based alignment start within the peptide
+#' @return data.frame(pos, ref, denovo, conf, bracketed) — one row per trusted sub
+build_trusted_substitutions <- function(qaln, saln, aa = NULL, qstart = 1, hi_conf = 0.95) {
+  empty <- data.frame(pos = integer(0), ref = character(0), denovo = character(0),
+                      conf = numeric(0), bracketed = logical(0))
+  if (is.null(qaln) || is.null(saln) || !nzchar(qaln)) return(empty)
+  qc <- strsplit(qaln, "")[[1]]; sc <- strsplit(saln, "")[[1]]
+  n <- min(length(qc), length(sc)); if (n == 0) return(empty)
+  qpos <- as.integer(qstart) - 1L
+  # per aligned column: query peptide position, confidence, is-match (NA at gaps/X)
+  cols <- vector("list", n)
+  for (i in seq_len(n)) {
+    qa <- qc[i]; sa <- sc[i]
+    if (qa == "-") { cols[[i]] <- list(qpos = NA, conf = NA, match = NA, q = qa, s = sa); next }
+    qpos <- qpos + 1L
+    conf <- if (!is.null(aa) && qpos <= length(aa) && !is.na(aa[qpos])) aa[qpos] else NA_real_
+    il <- qa %in% c("I", "L") && sa %in% c("I", "L")
+    m <- if (qa == "X" || sa == "X" || sa == "-") NA else (qa == sa || il)
+    cols[[i]] <- list(qpos = qpos, conf = conf, match = m, q = qa, s = sa)
+  }
+  conf_match <- function(j) {                 # is column j a confident match?
+    if (j < 1 || j > n) return(FALSE)
+    cc <- cols[[j]]; isTRUE(cc$match) && !is.na(cc$conf) && cc$conf >= hi_conf
+  }
+  out <- empty
+  for (i in seq_len(n)) {
+    cc <- cols[[i]]
+    if (isTRUE(is.na(cc$match)) || isTRUE(cc$match)) next   # only mismatches with real residues
+    if (is.na(cc$conf) || cc$conf < hi_conf) next            # only confident ones
+    out <- rbind(out, data.frame(pos = cc$qpos, ref = cc$s, denovo = cc$q,
+                 conf = round(cc$conf, 3),
+                 bracketed = conf_match(i - 1) && conf_match(i + 1),
+                 stringsAsFactors = FALSE))
+  }
+  out
 }
