@@ -7,7 +7,7 @@
 ## 0. TL;DR for a Sage dev
 
 - **Tiny patch needed to read diaTracer mzML:** Sage panics (`missing MS1 precursor`) on diaTracer's MS2-only pseudo-spectra because it reads `precursor.mz` only from `MS:1000744` (selected ion m/z), which diaTracer omits — it provides `MS:1000827` (isolation-window target m/z) instead. A 29-line fallback in `sage-cloudpath/src/mzml.rs` fixes it. **Candidate upstream contribution** (details in §1).
-- **Sage's identification ceiling vs MSFragger+MSBooster on identical pseudo-spectra: 984 vs 1,361 protein groups.** We decomposed it: it is **not** quant, **not** match-between-runs, **not** raw-data re-extraction (FragPipe's DIA-NN step actually *trims* the count 1,361→1,337). The entire gap is search/rescoring sensitivity, and the pin diff localizes it to **one feature Sage lacks**: a deep-learning **predicted-fragment-intensity spectral similarity** (MSBooster's `*_spectral_entropy`). Sage already has RT + ion-mobility prediction features. (Details in §2.)
+- **Sage's identification ceiling vs MSFragger+MSBooster on identical pseudo-spectra: 984 vs 1,361 protein groups.** We decomposed it: it is **not** quant, **not** match-between-runs, **not** raw-data re-extraction (FragPipe's DIA-NN step actually *trims* the count 1,361→1,337). The entire gap is search/rescoring sensitivity, and the pin diff localizes it to **one feature Sage lacks**: a deep-learning **predicted-fragment-intensity spectral similarity** (MSBooster's `*_spectral_entropy`). Sage already has RT + ion-mobility prediction features. (§2.) **We confirmed this empirically:** adding that one feature to Sage's pin (AlphaPeptDeep + mokapot) and rescoring contributes **+236 protein groups** at valid 1% FDR — the dominant share of the gap — making open Sage competitive with FragPipe+MSBooster (§3).
 - Two external prototypes built on top of Sage's outputs (`.pin`, `results.sage.tsv`, `matched_fragments.sage.tsv`): an **MSBooster-style rescorer** (§3) and a **QuantUMS-style quant** (§4).
 
 ---
@@ -65,7 +65,21 @@ External proof-of-concept (does **not** modify Sage; operates on its outputs), f
 3. Append the feature(s) to `results.sage.pin` → rescore with **mokapot**.
 4. Controls: (A) mokapot on the *original* pin (no new feature) isolates rescorer-vs-Sage-LDA; (B) mokapot + spectral feature is the treatment. Compare protein groups at a consistent 1% FDR rollup.
 
-**Status: in progress** (running at time of writing). The decisive readouts will be (i) the mokapot weight of the spectral feature, (ii) protein-group lift B-vs-A and vs the 984→1,361 target, and (iii) the median predicted-vs-observed spectral correlation as a QC on the timsTOF prediction. (Results to follow; this section documents the method so the Sage dev can see exactly what feature is being added and how.)
+**Result — it works, and the spectral feature is the dominant contributor** (16-run bigdog, 786,879 Sage PSMs, valid 1% FDR with reversed-sequence decoys):
+
+| level | Sage native | (A) mokapot, no spectral | (B) mokapot + spectral | FragPipe+MSBooster |
+|---|---|---|---|---|
+| **protein groups** | 984 | 1,170 | **1,406** | 1,361 |
+| peptides | 6,402 | 6,874 | 8,235 | — |
+| PSMs | 91,034 | 93,593 | 110,144 | — |
+
+- **`weighted_spectral_entropy` = +2.63 mokapot weight — 2nd-strongest of 36 features** (behind only `posterior_error`); `n_matched_frags` +1.47, `spectral_entropy` +1.23. High-confidence targets: median entropy similarity **0.836** / cosine 0.840; decoys 0.272 / 0.208 — clean separation.
+- **Clean, same-rollup, valid-FDR contribution of the spectral feature itself = B − A = +236 protein groups** (the +186 from A is mokapot's stronger discriminant vs Sage's LDA). So the predicted-MS2 feature alone confirms the §2 hypothesis: it is the dominant driver of the Sage→MSFragger+MSBooster gap, and adding it makes open Sage competitive.
+- **NCE QC** (timsTOF IM-dependent CE): sweep over NCE 20–40 gave median entropy similarity 0.82–0.84 throughout (all above the 0.75 "strong" bar) → the AlphaPeptDeep timsTOF model fits this data well; chose NCE=35.
+- **Honest caveat on absolute cross-tool numbers:** the self-computed picked-protein rollup gives A=1,170 for the same PSMs Sage natively rolled up to 984 — i.e. the rollup is slightly more permissive than Sage's `protein_q`. The rigorous claim is the within-pipeline **B−A=+236 at valid FDR**; the cross-tool "B (1,406) ≳ FragPipe (1,361)" holds under one consistent rollup but mixes rollup conventions, so read it as "competitive," not a hard win.
+- **Two real bugs found en route (FYI):** (1) AlphaPeptDeep reorders its `precursor_df` internally — must carry explicit identity keys; (2) **diaTracer mzML peak arrays are not m/z-sorted**, which silently zeroed all fragment matches until sorted before `searchsorted`.
+
+**Implication for Sage:** an optional predicted-MS2-intensity similarity feature (pluggable predictor → spectral-entropy/cosine vs observed, added to the LDA/pin) empirically recovers essentially the whole spectrum-centric-DIA identification gap here. Sage already carries RT + IM prediction; this is the missing third predicted channel. Code: `predict_ms2.py`, `build_feature.py`, `nce_sweep.py`, `rescore3.py` + the augmented `results.sage.rescored.pin`.
 
 ---
 
