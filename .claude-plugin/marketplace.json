@@ -1,7 +1,7 @@
 {
-  "name": "delimp",
+  "name": "ucdavis-proteomics-core",
   "version": "1.0.0",
-  "description": "DE-LIMP proteomics skills for Claude — agentic mass-spec search + differential expression.",
+  "description": "UC Davis Proteomics Core skills for Claude — agentic mass-spec search + differential expression.",
   "owner": {
     "name": "Brett Phinney",
     "email": "bsphinney@ucdavis.edu",
