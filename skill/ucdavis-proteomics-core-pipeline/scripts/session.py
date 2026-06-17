@@ -195,7 +195,7 @@ def do_finalize(a):
     de_files = sorted(os.path.basename(f) for f in glob.glob(os.path.join(p["de_dir"], "DE_*.csv")))
     lines = [
         f"# {os.path.basename(p['session_dir'])}", "",
-        "Proteomics search + differential expression, run by the proteomics-pipeline skill.", "",
+        "Proteomics search + differential expression, run by the ucdavis-proteomics-core-pipeline skill.", "",
         "## Summary",
         f"- Organism (taxid): {q.get('organism_taxid', '?')}",
         f"- Acquisition / instrument: {q.get('acquisition', '?')} / {q.get('instrument') or '?'}",

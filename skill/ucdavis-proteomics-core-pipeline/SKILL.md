@@ -1,5 +1,5 @@
 ---
-name: proteomics-pipeline
+name: ucdavis-proteomics-core-pipeline
 description: >
   Run an end-to-end proteomics search + differential expression analysis from raw
   mass-spec data. Use this whenever the user wants to "analyze my proteomics data",
