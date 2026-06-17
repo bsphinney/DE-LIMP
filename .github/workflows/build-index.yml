@@ -1,0 +1,46 @@
+name: Build workflow index
+
+on:
+  push:
+    paths:
+      - "workflows/**/workflow.yaml"
+      - "workflows/build_index.py"
+      - "workflows/schema/workflow.schema.json"
+  workflow_dispatch:
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install deps
+        run: pip install pyyaml jsonschema
+      - name: Validate manifests against schema
+        run: |
+          python3 - <<'PY'
+          import glob, yaml, json, jsonschema, sys
+          schema = json.load(open("workflows/schema/workflow.schema.json"))
+          bad = 0
+          for f in glob.glob("workflows/*/workflow.yaml"):
+              try:
+                  jsonschema.validate(yaml.safe_load(open(f)), schema)
+                  print("ok:", f)
+              except jsonschema.ValidationError as e:
+                  print("INVALID:", f, "->", e.message); bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Rebuild index.json
+        run: cd workflows && python3 build_index.py
+      - name: Commit if changed
+        run: |
+          if ! git diff --quiet workflows/index.json; then
+            git config user.name  "github-actions"
+            git config user.email "actions@github.com"
+            git add workflows/index.json
+            git commit -m "chore: rebuild workflow index.json"
+            git push
+          else
+            echo "index.json already up to date."
+          fi

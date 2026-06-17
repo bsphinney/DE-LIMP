@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Validated proteomics workflow manifest",
+  "description": "Schema for workflow.yaml in the proteomics-pipeline registry.",
+  "type": "object",
+  "required": ["id", "name", "match", "engine", "fasta", "search", "de", "validated"],
+  "properties": {
+    "id":   { "type": "string", "pattern": "^[a-z0-9_]+$", "description": "Unique slug; must equal the folder name." },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "match": {
+      "type": "object",
+      "required": ["acquisition", "organism_taxid"],
+      "properties": {
+        "acquisition": { "enum": ["DDA", "DIA"], "description": "Hard filter against detected acquisition." },
+        "instruments": { "type": "array", "items": { "type": "string" } },
+        "instrument_aliases": { "type": "array", "items": { "type": "string" },
+          "description": "Lowercase substrings fuzzy-matched against detected instrument names." },
+        "organism": { "type": "string" },
+        "organism_taxid": { "type": "integer", "description": "Hard filter; authoritative." }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "enum": ["diann", "sage", "fragpipe"] },
+        "version": { "type": "string", "description": "Pinned version the acquire step installs." }
+      }
+    },
+    "fasta": {
+      "type": "object",
+      "properties": {
+        "uniprot_proteome": { "type": "string", "description": "UniProt proteome ID, e.g. UP000005640." },
+        "path": { "type": "string", "description": "Alternative: an absolute path (e.g. on HIVE) instead of downloading." },
+        "add_contaminants": { "type": "boolean", "default": true }
+      }
+    },
+    "search": {
+      "type": "object",
+      "properties": {
+        "estimate_params": { "type": "boolean", "default": true,
+          "description": "Estimate search parameters from the detected data type (instrument + acquisition) using known-good settings. Default. Set false only if you ship a validated params_file." },
+        "var_mods": { "type": "string",
+          "description": "Optional extra variable mods to enable during estimation, e.g. 'ox' for Ox(M). Off by default (DIA-NN: var mods don't help pure quant)." },
+        "param_overrides": { "type": "object",
+          "description": "Validated SOP values to force on top of the estimate (e.g. {\"--mass-acc\": 8}). Tagged 'user-override' in the rationale." },
+        "params_file": { "type": "string", "description": "Optional: a validated engine-native params file (relative to the workflow folder). If present it is used verbatim and overrides estimation." },
+        "extra_files": { "type": "array", "items": { "type": "string" },
+          "description": "Other files to fetch (e.g. a FragPipe manifest template)." }
+      }
+    },
+    "de": {
+      "type": "object",
+      "required": ["method"],
+      "properties": {
+        "method":   { "enum": ["dpc", "maxlfq"] },
+        "q_cutoff": { "type": "number", "default": 0.01 },
+        "logfc":    { "type": "number", "default": 1.0 },
+        "adjp":     { "type": "number", "default": 0.05 }
+      }
+    },
+    "validated": {
+      "type": "object",
+      "properties": {
+        "date":    { "type": "string" },
+        "by":      { "type": "string" },
+        "dataset": { "type": "string" },
+        "notes":   { "type": "string" }
+      }
+    }
+  }
+}

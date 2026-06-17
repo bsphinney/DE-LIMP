@@ -1,0 +1,43 @@
+# =============================================================================
+# Validated workflow: Sage, timsTOF ddaPASEF, human. MaxLFQ + limma DE path.
+# Second example — exists so the matcher has to discriminate on
+# acquisition (DDA vs DIA) and instrument. Values marked (CONFIRM) are defaults.
+# =============================================================================
+id: sage_timstof_dda_human
+name: "Sage — timsTOF ddaPASEF (human)"
+description: >
+  Sage database search of human ddaPASEF data from a Bruker timsTOF, with
+  label-free quantification, followed by MaxLFQ + limma differential
+  expression. Sage reads mzML; ddaPASEF .d is converted first (see VALIDATION).
+
+match:
+  acquisition: DDA
+  instruments: ["timsTOF Pro", "timsTOF HT", "timsTOF SCP"]
+  instrument_aliases: ["timstof", "tims"]
+  organism: "Homo sapiens"
+  organism_taxid: 9606
+
+engine:
+  name: sage
+  version: "0.14.7"                         # latest STABLE Sage release; 0.15.0 is beta-only (no stable release exists) and is what bioconda ships. Re-pin only if you validated a specific 0.15.0-beta.
+
+fasta:
+  uniprot_proteome: UP000005640
+  add_contaminants: true
+
+search:
+  estimate_params: true                     # derive Sage params from data type (timsTOF -> 20 ppm; DDA -> wide_window off, chimera on) via estimate_params.py
+  var_mods: ""                              # set "ox" to add Ox(M)
+  # param_overrides: {"fragment_tol": {"ppm": [-15, 15]}}  # force validated SOP values on top
+
+de:
+  method: maxlfq                            # Sage LFQ -> protein matrix -> limma
+  q_cutoff: 0.01
+  logfc: 1.0
+  adjp: 0.05
+
+validated:
+  date: "2026-05-15"                         # EXAMPLE
+  by: "Brett Phinney"
+  dataset: "HeLa ddaPASEF QC (CONFIRM)"
+  notes: "Sage > DIA-NN on timsTOF DDA in core testing (~2x PSMs). See VALIDATION for the .d->mzML and Sage->DE adapter steps."
