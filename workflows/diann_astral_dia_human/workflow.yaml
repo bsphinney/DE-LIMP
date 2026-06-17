@@ -1,0 +1,46 @@
+# =============================================================================
+# Validated workflow: DIA-NN, Orbitrap Astral narrow-window DIA, human.
+# Default DE-LIMP path (limpa DPC-Quant + limma).
+#
+# This is a WORKED EXAMPLE showing the manifest structure. Values marked
+# (CONFIRM) are sensible defaults — replace them with the exact settings you
+# validated before treating this workflow as production.
+# =============================================================================
+id: diann_astral_dia_human
+name: "DIA-NN — Orbitrap Astral narrow-window DIA (human)"
+description: >
+  Library-free DIA-NN search of human narrow-window DIA acquired on the
+  Orbitrap Astral, with QuantUMS quantification, followed by the limpa
+  DPC-Quant + limma differential expression pipeline.
+
+match:
+  acquisition: DIA
+  instruments: ["Orbitrap Astral"]
+  instrument_aliases: ["astral"]          # lowercase substrings matched against detected name
+  organism: "Homo sapiens"
+  organism_taxid: 9606                      # hard filter
+
+engine:
+  name: diann
+  version: "2.6.0"                          # pinned; acquire step installs/uses exactly this
+
+fasta:
+  uniprot_proteome: UP000005640             # human reference proteome
+  add_contaminants: true                    # append universal contaminants
+
+search:
+  estimate_params: true                     # derive DIA-NN params from data type (Astral -> MS1 4 / MS2 10 ppm) via estimate_params.py
+  var_mods: ""                              # no variable mods for relative quant (DIA-NN recommendation); set "ox" to add Ox(M)
+  # param_overrides: {"--mass-acc": 8}      # uncomment to force validated SOP values on top of the estimate
+
+de:
+  method: dpc                               # limpa DPC-Quant + limma (DE-LIMP default)
+  q_cutoff: 0.01
+  logfc: 1.0
+  adjp: 0.05
+
+validated:
+  date: "2026-05-01"                        # EXAMPLE — set to your real validation date
+  by: "Brett Phinney"
+  dataset: "HeLa QC, 3 technical replicates (CONFIRM)"
+  notes: "Matches Proteomics Core DIA SOP (CONFIRM version). Auto mass accuracy."

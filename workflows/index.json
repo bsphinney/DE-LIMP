@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "repo": "bsphinney/DE-LIMP",
+  "generated": "2026-06-17",
+  "workflows": [
+    {
+      "id": "diann_astral_dia_human",
+      "name": "DIA-NN — Orbitrap Astral narrow-window DIA (human)",
+      "path": "workflows/diann_astral_dia_human",
+      "match": {
+        "acquisition": "DIA",
+        "instruments": [
+          "Orbitrap Astral"
+        ],
+        "instrument_aliases": [
+          "astral"
+        ],
+        "organism": "Homo sapiens",
+        "organism_taxid": 9606
+      },
+      "engine": {
+        "name": "diann",
+        "version": "2.6.0"
+      },
+      "fasta": {
+        "uniprot_proteome": "UP000005640",
+        "add_contaminants": true
+      },
+      "search": {
+        "estimate_params": true,
+        "var_mods": "",
+        "param_overrides": {},
+        "params_file": null,
+        "extra_files": []
+      },
+      "de": {
+        "method": "dpc",
+        "q_cutoff": 0.01,
+        "logfc": 1.0,
+        "adjp": 0.05
+      },
+      "validated": {
+        "date": "2026-05-01",
+        "by": "Brett Phinney",
+        "dataset": "HeLa QC, 3 technical replicates (CONFIRM)",
+        "notes": "Matches Proteomics Core DIA SOP (CONFIRM version). Auto mass accuracy."
+      }
+    },
+    {
+      "id": "sage_timstof_dda_human",
+      "name": "Sage — timsTOF ddaPASEF (human)",
+      "path": "workflows/sage_timstof_dda_human",
+      "match": {
+        "acquisition": "DDA",
+        "instruments": [
+          "timsTOF Pro",
+          "timsTOF HT",
+          "timsTOF SCP"
+        ],
+        "instrument_aliases": [
+          "timstof",
+          "tims"
+        ],
+        "organism": "Homo sapiens",
+        "organism_taxid": 9606
+      },
+      "engine": {
+        "name": "sage",
+        "version": "0.14.7"
+      },
+      "fasta": {
+        "uniprot_proteome": "UP000005640",
+        "add_contaminants": true
+      },
+      "search": {
+        "estimate_params": true,
+        "var_mods": "",
+        "param_overrides": {},
+        "params_file": null,
+        "extra_files": []
+      },
+      "de": {
+        "method": "maxlfq",
+        "q_cutoff": 0.01,
+        "logfc": 1.0,
+        "adjp": 0.05
+      },
+      "validated": {
+        "date": "2026-05-15",
+        "by": "Brett Phinney",
+        "dataset": "HeLa ddaPASEF QC (CONFIRM)",
+        "notes": "Sage > DIA-NN on timsTOF DDA in core testing (~2x PSMs). See VALIDATION for the .d->mzML and Sage->DE adapter steps."
+      }
+    }
+  ]
+}

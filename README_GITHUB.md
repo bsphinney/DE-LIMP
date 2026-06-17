@@ -236,6 +236,34 @@ All dependencies install automatically on first run:
 
 ---
 
+## Claude Skill: UC Davis Proteomics Core pipeline
+
+Prefer to just *describe* your experiment and let an AI run the whole thing? DE-LIMP
+ships a **Claude skill** (`ucdavis-proteomics-core-pipeline`) that goes from raw mass-spec files to
+differentially expressed proteins end-to-end — it detects DIA/DDA + instrument,
+auto-installs the toolchain (no admin needed), runs DIA-NN or Sage with parameters
+derived from your data type, then limpa/limma DE, and writes a biological analysis
+report plus a full reproducibility bundle, all packaged into tidy session folders.
+It runs in **Claude Code** and **Claude Desktop**.
+
+**Install (one time):**
+```
+/plugin marketplace add bsphinney/DE-LIMP
+/plugin install ucdavis-proteomics-core-pipeline
+```
+On **Claude Desktop**: *Customize → Plugins → Browse plugins*, add the marketplace
+`bsphinney/DE-LIMP`, then install **ucdavis-proteomics-core-pipeline**.
+
+**Use it:** just say *"analyze my proteomics data in `~/data/HeLaQC` — it's human,
+first 3 are control, last 3 treated."* It asks only for what it can't detect
+(organism, conditions) and does the rest. First run installs its toolchain (a few
+minutes, one time).
+
+Source and docs: [`skill/ucdavis-proteomics-core-pipeline/`](skill/ucdavis-proteomics-core-pipeline). Validated
+search workflows live in [`workflows/`](workflows).
+
+---
+
 ## Usage
 
 1. **Load Data** -- Upload a DIA-NN `report.parquet` output file, or click "Load Example Data" for a demo HeLa dataset
