@@ -620,6 +620,21 @@
             <p class="section-sub">A complete proteomics analysis platform &mdash; from raw data search to multi-omics integration and core facility management.</p>
             <div class="features">
                 <div class="feature-card">
+                    <div class="feat-icon">&#x1F9EC;</div>
+                    <h3>De Novo Sequencing <span class="new-badge">v4.0</span></h3>
+                    <p>Sequence peptides directly from spectra with Cascadia or Casanovo when no database fits — ideal for non-model organisms, antibodies, and forensic or fossil samples. Per-spectrum sequences, score distributions, and alignment views that render only real BLAST alignments (never fabricated mismatch positions).</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F9EA;</div>
+                    <h3>DDA Database Search <span class="new-badge">v4.0</span></h3>
+                    <p>Run DDA data through the Sage search engine alongside the DIA pipeline — PSM/peptide/protein tables and Sage-vs-de-novo agreement views matched on (run, scan). DE-LIMP now spans DIA differential expression, DDA search, and de novo in one app.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feat-icon">&#x1F30D;</div>
+                    <h3>Homology Species ID <span class="new-badge">v4.0</span></h3>
+                    <p>Identify the organism behind de novo peptides by homology — DIAMOND against the NCBI nr database with lowest-common-ancestor (LCA) assignment, calibrated by a decoy-spectra FDR so you can report confirmed peptides at a controlled error rate.</p>
+                </div>
+                <div class="feature-card">
                     <div class="feat-icon">&#x1F50D;</div>
                     <h3>QuantUMS Quality Filter <span class="new-badge">v3.8</span></h3>
                     <p>Optional precursor pre-filter on DIA-NN's QuantUMS quality scores (Empirical.Quality, PG.MaxLFQ.Quality) before protein roll-up. Implements the recommendations of <a href="https://doi.org/10.1021/acs.jproteome.5c00009" target="_blank" rel="noopener">Moschem et al., J. Proteome Res. 2025, 24:3860</a>. Default 0 = off; the recommended cutoff of 0.75 removes low-quality precursors that drag the protein-level estimate, improving logFC reliability and cross-instrument comparability. Built-in <em>?</em> info modal cites the paper and the recommended thresholds.</p>

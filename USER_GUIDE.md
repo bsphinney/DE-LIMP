@@ -451,6 +451,56 @@ If you restart DE-LIMP, in-progress builds are automatically restored via the **
 
 ---
 
+## 3.9 De Novo Sequencing & DDA Search (NEW in v4.0)
+
+DE-LIMP v4.0 extends the app beyond DIA differential expression. Two new
+acquisition paths let you work with data that has no matching protein database,
+or that was acquired in data-dependent (DDA) mode.
+
+> **When do I need this?** If your samples come from a non-model organism,
+> an antibody or other engineered protein, or a forensic/archaeological sample —
+> i.e. anything where a trusted FASTA database does not exist — *de novo*
+> sequencing reads the peptide sequence directly from the spectrum. If your data
+> was acquired in DDA mode (rather than DIA), the Sage search path applies.
+> Standard DIA-NN users do **not** need either of these; the DIA workflow is
+> unchanged.
+
+### 🧬 De Novo Sequencing (Cascadia / Casanovo)
+- **What it does:** predicts each peptide's amino-acid sequence directly from the
+  fragmentation spectrum, with no protein database. Cascadia (DIA) and Casanovo
+  (DDA) are both supported.
+- **What you see:** per-spectrum predicted sequences with confidence scores,
+  score-distribution plots, and a per-residue alignment view. Alignment views
+  display **only real BLAST alignments** (`qseq`/`sseq`) — DE-LIMP never
+  fabricates mismatch positions.
+
+### 🧪 DDA Database Search (Sage)
+- **What it does:** runs DDA raw data through the Sage search engine, producing
+  PSM-, peptide-, and protein-level tables.
+- **Sage vs de novo agreement:** when both a database search and a de novo run
+  exist for the same data, DE-LIMP matches them on `(run, scan)` and shows where
+  Sage and the de novo caller agree or disagree (compared on the mod-stripped
+  peptide backbone, so PTM notation differences are not counted as
+  disagreements).
+
+### 🌍 Homology-Based Species Identification
+For de novo peptides, DE-LIMP can identify the source organism by homology:
+- **DIAMOND vs NCBI nr** with **lowest-common-ancestor (LCA)** assignment to
+  place each peptide on the taxonomy.
+- **Decoy-spectra-calibrated FDR:** a Target-Decoy FDR pane reports how many
+  peptides are confirmed at a controlled error rate (e.g. *N* peptides at 1% FDR,
+  bitscore ≥ *T*). You can toggle the null between **decoy spectra** (the
+  recommended, conservative control that also captures de novo *sequencing*
+  error) and **decoy database** (reversed-sequence competition). The error rate
+  is calibrated on BLAST **bitscore** (or E-value for standard searches), not the
+  de novo caller's own score — see the in-app walkthrough for why.
+
+> **Note:** de novo and DDA search require the HPC/search backend (Cascadia,
+> Casanovo, Sage, DIAMOND, and an nr database). They are not available on the
+> Hugging Face web version, which is DIA-analysis only.
+
+---
+
 ## 4. Deep Dive: The Data Overview & Grid View
 
 ### 📊 Data Overview
@@ -1265,7 +1315,8 @@ You have multiple options to access DE-LIMP:
 | Term | Definition |
 | :--- | :--- |
 | **DIA** | Data-Independent Acquisition -- a mass spectrometry method that fragments all ions in wide m/z windows, providing comprehensive peptide coverage |
-| **DDA** | Data-Dependent Acquisition -- an older MS method that selects the most abundant ions for fragmentation; DE-LIMP does not support DDA data |
+| **DDA** | Data-Dependent Acquisition -- an MS method that selects the most abundant ions for fragmentation. As of v4.0, DE-LIMP supports DDA data via the Sage search engine and Casanovo de novo sequencing (HPC backend required); the core DIA differential-expression workflow remains DIA-NN based |
+| **De novo sequencing** | Reading a peptide's amino-acid sequence directly from its fragmentation spectrum, without a protein database. Supported in v4.0 via Cascadia (DIA) and Casanovo (DDA), with homology-based species ID against NCBI nr |
 | **DIA-NN** | A software tool (by Vadim Demichev) that processes DIA raw files to identify and quantify peptides and proteins |
 | **Parquet** | A columnar file format used by DIA-NN for its output (`report.parquet`). More compact and faster to read than TSV |
 | **limpa** | A Bioconductor R package for DIA proteomics data processing. Handles data import from DIA-NN, normalization (DPC-CN), and protein quantification (DPC-Quant). DPC-Quant models missing values probabilistically via a detection probability curve, rather than imputing them. limpa reads the raw DIA-NN output; limma then performs the statistical testing |
@@ -1297,6 +1348,16 @@ You have multiple options to access DE-LIMP:
 ---
 
 ## Version History
+
+### What's New in v4.0.0 (June 2026)
+
+**De Novo Sequencing** -- Sequence peptides directly from spectra with Cascadia (DIA) or Casanovo (DDA) when no protein database fits — non-model organisms, antibodies, forensic/fossil samples. Per-spectrum sequences, score distributions, and alignment views that show only real BLAST alignments.
+
+**DDA Database Search (Sage)** -- DDA raw data now runs through the Sage search engine alongside the DIA pipeline, with PSM/peptide/protein tables and Sage-vs-de-novo agreement views matched on (run, scan). DE-LIMP now spans DIA differential expression, DDA search, and de novo in one app.
+
+**Homology Species Identification** -- Identify the organism behind de novo peptides via DIAMOND against NCBI nr with lowest-common-ancestor (LCA) assignment, calibrated by a decoy-spectra FDR so you can report confirmed peptides at a controlled error rate. (See §3.9.)
+
+> De novo and DDA search require the HPC/search backend and are not available on the Hugging Face web version.
 
 ### What's New in v3.7.0 (March 2026)
 

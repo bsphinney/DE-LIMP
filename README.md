@@ -6,7 +6,7 @@ Find which proteins are significantly different between your experimental condit
 
 Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipeline for normalization and protein quantification, and [limma](https://bioconductor.org/packages/limma/) for statistical testing with FDR correction. See [USER_GUIDE.md](USER_GUIDE.md#glossary) for methodology details.
 
-**Input:** DIA-NN `report.parquet` | **Not for:** DDA data, TMT/iTRAQ, Spectronaut/MaxQuant output
+**Web app input:** DIA-NN `report.parquet` | **Also supported (local/HPC install):** DDA search via Sage + de novo sequencing (Cascadia/Casanovo) | **Not for:** TMT/iTRAQ, Spectronaut/MaxQuant output
 
 > **Not sure if your data is DIA?** If your core facility used DIA-NN to process your samples, you have DIA data. Look for a `report.parquet` file in your results folder. If your data was processed with MaxQuant, Spectronaut, or Proteome Discoverer, or if you used isobaric labels (TMT, iTRAQ), DE-LIMP is not the right tool.
 
