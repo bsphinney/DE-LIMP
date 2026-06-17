@@ -5,6 +5,40 @@ All notable changes to DE-LIMP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] — 2026-06-17
+
+Major release. Merges the de novo + DDA work (the `feature/cascadia-denovo`
+line, 115 commits) into `main`. DE-LIMP is no longer DIA-only: it now spans
+DIA differential expression, DDA database search, and de novo sequencing with
+homology-based species identification.
+
+### Added
+- **De novo sequencing pipeline** (Cascadia / Casanovo) with a dedicated viz +
+  controls surface: per-spectrum sequences, score distributions, and an
+  alignment/per-residue view that renders **only real BLAST `qseq`/`sseq`
+  alignments** (no fabricated mismatch positions).
+- **DDA database search (Sage)** integration: PSM/peptide/protein tables,
+  Sage-vs-Casanovo agreement/disagreement views matched on `(run, scan)`, and
+  a Master Table with query-coverage, E-value, and bitscore columns.
+- **De novo → homology species identification** via DIAMOND against **nr** with
+  **LCA** assignment (a dedicated Species (LCA) tab), replacing the earlier
+  delta-based species-resolution views.
+- **Decoy-spectra FDR calibration** for de novo → homology hits: live
+  per-dataset bitscore-calibrated FDR with a toggle between two nulls
+  (decoy spectra vs decoy database), recovery-vs-FDR / FDR-vs-threshold /
+  confirmed-by-length plots, and `parse_btop` + `compute_cwi`
+  (confidence-weighted identity) helpers computed on real alignment ops only.
+- Auto fullscreen/expand control on every Plotly figure for the denser de novo
+  plots.
+
+### Changed
+- Major version bump to 4.0.0 to reflect the DIA + DDA + de novo scope.
+- De novo runs hide DIA/peptidomics-specific panels (HLA, length captions)
+  where they don't apply; protein links route to NCBI Protein for nr accessions.
+
+See the `## [3.x]` entries below for the full per-patch history that rolled into
+this release.
+
 ## [3.11.66] — 2026-06-04
 
 ### Added

@@ -22,8 +22,9 @@ tags:
 
 An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with **Google Gemini AI** integration.
 
-## ✨ What's New in v3.11.0
+## ✨ What's New in v4.0.0
 
+- 🧪 **De novo sequencing + DDA search**: Beyond DIA differential expression — de novo (Cascadia / Casanovo) and DDA (Sage) workflows with per-spectrum sequencing, Sage-vs-de-novo agreement views, and **homology-based species ID** (DIAMOND vs nr + LCA) calibrated with a decoy-spectra FDR. Alignment views show only real BLAST alignments.
 - 🧬 **Proteogenomics — Build sample-specific search databases from RNA-seq**: Upload fastq files or SRA/SLIMS accessions. DE-LIMP runs a complete HPC pipeline (fastp → bowtie2 rRNA filter → STAR → stringtie → merge → gffcompare → gffread → TransDecoder) to predict novel ORFs and alternative splice variants. Final FASTA auto-assembles with UniProt or NCBI RefSeq and registers in the FASTA library as "Proteogenomics DBs" on the main search page. Supports Human, Mouse, Pig, Rat, Arabidopsis. Multi-user catalog discovery via "Restore from Hive" and "Discover from Hive" buttons.
 
 **Previous highlights** (v3.10): Two analysis pipelines (DPC-Quant or MaxLFQ), QuantUMS quality filters, On/Off proteins, Coverage filter, FASTA picker, provenance block. (v3.7): Contaminant Analysis (keratin flagging + heatmap), Data Explorer (quartile profiles + sample scatter), NCBI Proteome Download with gene mapping, SSH File Browser, No-Replicates Mode, Environment Badge.

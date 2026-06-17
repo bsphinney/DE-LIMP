@@ -1,6 +1,6 @@
 # ==============================================================================
 #  DE-LIMP: Differential Expression & Limpa Proteomics App
-#  Version: 3.11.66  (canonical source: ./VERSION — bump both together)
+#  Version: 4.0.0  (canonical source: ./VERSION — bump both together)
 #  (Formerly LIMP-D)
 #  Status: Production Ready (Hugging Face Compatible v1.2)
 # ==============================================================================
