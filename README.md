@@ -18,9 +18,11 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
-## What's New in v3.11.0
+## What's New in v4.0.0
 
-**Proteogenomics — Build sample-specific FASTA databases from matched RNA-seq** -- Upload RNA-seq fastq files or SRA/SLIMS accessions, and DE-LIMP runs a complete HPC pipeline (fastp → bowtie2 rRNA filter → STAR → stringtie → merge → gffcompare → gffread → TransDecoder) to predict novel ORFs and alternative splice variants alongside your canonical proteome. Final FASTA auto-assembles with UniProt or NCBI RefSeq, registers in the FASTA library catalog, and appears as "Proteogenomics DBs" in the main search page's FASTA Database dropdown. Reference genomes: Human, Mouse, Pig, Rat, Arabidopsis. Multi-user workflow with "Restore from Hive" and "Discover from Hive" buttons for shared catalog discovery.
+**De novo sequencing + DDA database search** -- DE-LIMP now goes beyond DIA differential expression. New de novo (Cascadia / Casanovo) and DDA (Sage) workflows add per-spectrum sequencing, Sage-vs-de-novo agreement views, and **homology-based species identification** (DIAMOND against nr with LCA assignment) — with a decoy-spectra-calibrated FDR so you can report confirmed peptides at a controlled error rate. Alignment views render only real BLAST alignments, never fabricated positions.
+
+**Proteogenomics — Build sample-specific FASTA databases from your matched RNA-seq** -- Upload RNA-seq fastq files or provide SRA/SLIMS accessions, and DE-LIMP runs an HPC pipeline chain (fastp → bowtie2 rRNA filter → STAR → stringtie → merge → gffcompare → gffread → TransDecoder) to predict novel ORFs and alternative splice variants. The final FASTA auto-assembles with your canonical proteome (UniProt or NCBI RefSeq), registers in the FASTA library catalog, and shows up as a "Proteogenomics DBs" option in the main search page's FASTA Database dropdown. Reference genomes: Human, Mouse, Pig, Rat, Arabidopsis (Bovine and Maize building). Multi-user catalog discovery via "Restore from Hive" and "Discover from Hive" buttons. Includes an "Explain this workflow" modal for proteomics users new to RNA-seq.
 
 **Two analysis pipelines, one app** -- Choose between **DPC-Quant + limma** (limpa's detection-probability model, default) and **MaxLFQ + limma** (paper-faithful Moschem et al. 2025 implementation). The pipeline you pick is recorded in the dataset itself; methods text, AI prompts, exports, and the Reproducibility log all describe whichever pipeline actually ran -- no hardcoded "DPC-Quant" strings anywhere.
 
