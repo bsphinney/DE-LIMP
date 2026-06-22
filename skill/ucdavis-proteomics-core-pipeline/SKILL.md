@@ -246,28 +246,54 @@ Rscript scripts/run_de.R --input ./search_out/report.parquet \
     --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results
 ```
 Use the `de.method` from the bundle (`dpc` for DIA-NN/limpa, `maxlfq` for
-Sage/FragPipe). Writes `DE_<method>_<contrast>.csv` + `methods.txt` +
-`sessionInfo.txt` + `de_provenance.json` (exact R package versions).
+Sage/FragPipe). Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
+`methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions).
 → detail: `references/de-analysis.md`.
 
+### 8b. Generate figures
+```
+Rscript scripts/make_figures.R --de-dir ./de_results --conditions ./conditions.csv \
+    --outdir ./figures --adjp 0.05 --logfc 1
+```
+Produces publication-quality volcano (per contrast), PCA, heatmap of top proteins,
+p-value distributions, and a per-sample protein-count QC plot, plus `figures.json`
+(captions). These get embedded in the report.
+
+### 8c. Audit the results for common mistakes (surface every issue)
+```
+python3 scripts/audit_results.py --out AUDIT.md --conditions ./conditions.csv \
+    --de-dir ./de_results --acquisition-json /tmp/acq.json --adjp 0.05 --logfc 1
+```
+Checks for the classic new-user pitfalls: too few/no replicates, imbalanced or
+**confounded** design, **mixed acquisition or mixed instruments** in one analysis,
+suspiciously low ID depth, very high missingness, contaminant dominance, and DE
+results that are too-empty or implausibly-large (batch/normalization artefacts).
+**Surface every `WARN` to the user, and STOP on any `FAIL`** (e.g. a group with no
+replicate, or a batch confounded with the biology) until they resolve it — don't
+let a new user over-interpret a broken design. The findings also go into the
+report's "Audit & caveats" section. → detail: `references/audit.md`.
+
 ### 9. Analyze the data (you write the report)
-Generate the analysis brief, then **do the analysis yourself** — you are the
-consultant the brief addresses:
+Generate the analysis brief (it lists the figures to embed), then **do the analysis
+yourself** — you are the consultant the brief addresses:
 ```
 python3 scripts/analysis_prompt.py --out ANALYSIS_PROMPT.md \
   --de-dir ./de_results --report ./search_out/report.parquet \
-  --conditions ./conditions.csv [--qc ./QC_Metrics.csv] \
+  --conditions ./conditions.csv --figures-dir ./figures [--qc ./QC_Metrics.csv] \
   --engine <engine> --acquisition <DIA|DDA> --instrument "<name>" \
   --workflow-manifest ./wf/workflow.manifest.json
 ```
-Then **read `ANALYSIS_PROMPT.md` and every data file it lists, and write
-`AI_Analysis_Report.md`** following its OUTPUT sections (Overview, QC, Key
+Then **read `ANALYSIS_PROMPT.md` and every data file + figure it lists, and write a
+complete `AI_Analysis_Report.md`** with ALL its OUTPUT sections (Overview, QC, Key
 Findings Per Comparison, Cross-Comparison Biomarkers, High-Confidence Biomarkers,
-Biological Interpretation, How This Analysis Works, Methods). Compute significant
-proteins, up/down splits, cross-comparison overlaps, and lowest-CV proteins
-directly from the CSVs — cite specific proteins, never fabricate. The brief takes
-its pipeline description from `de_provenance.json`, so the report stays correct
-for whichever engine/method ran.
+Pathway/GSEA if present, Biological Interpretation, How This Analysis Works, Methods
+& Reproducibility) **plus an "Audit & caveats" section from `AUDIT.md`**. **Embed
+every figure** (`![caption](figures/<file>.png)`) with an expert interpretation of
+what it shows for THIS data. Compute significant proteins, up/down splits,
+cross-comparison overlaps, and lowest-CV proteins directly from the CSVs — cite
+specific proteins, never fabricate. Make it thorough and expert, like the DE-LIMP
+AI export. The brief takes its pipeline description from `de_provenance.json`, so
+the report stays correct for whichever engine/method ran.
 
 Then **also save the report as a Word document** (both formats are required):
 ```
@@ -292,20 +318,25 @@ python3 scripts/provenance.py --outdir ./reproducibility \
   --commands ./commands.log --timestamp "$(date -u +%FT%TZ)"
 ```
 This writes `reproducibility/` with `run_manifest.json`, `reproduce.sh`,
-`REPRODUCE.md`, the conda lock + pip freeze + R sessionInfo, copies of the params
-and conditions, and sha256 checksums of inputs/outputs. Check the returned
-`skipped` count — if anything important was skipped, fix it and re-run (don't ship
-a bundle that silently dropped the env lock or checksums).
+`REPRODUCE.md`, the conda lock + pip freeze + R sessionInfo + tool versions, a
+`skill.txt` recording **which skill produced this and how it was installed**, copies
+of the params and conditions, and sha256 checksums of inputs/outputs. This step is
+**mandatory and must always run** — code + versions are not optional. `provenance.py`
+auto-discovers the env and Rscript even if `--setup-json` is absent, so versions are
+always captured; still, **check the returned `skipped` count** and, if the conda
+lock / R sessionInfo / checksums were skipped, fix the cause and re-run.
 
 ### 11. Output-files report
 Catalog everything the run produced so the user knows what each file is:
 ```
 python3 scripts/make_report.py --out OUTPUT_FILES.md \
   --search-out ./search_out --de-dir ./de_results --repro ./reproducibility \
-  --extra ./conditions.csv ./search.fasta ./wf ./AI_Analysis_Report.md ./AI_Analysis_Report.docx
+  --extra ./conditions.csv ./search.fasta ./wf ./figures ./AUDIT.md \
+          ./AI_Analysis_Report.md ./AI_Analysis_Report.docx
 ```
-`OUTPUT_FILES.md` lists every file with its size and a plain-language description,
-grouped by purpose, and flags anything unrecognized (never silently omitted).
+`OUTPUT_FILES.md` lists every file (figures, audit, search/DE outputs, the bundle)
+with its size and a plain-language description, grouped by purpose, and flags
+anything unrecognized (never silently omitted).
 
 ### 11b. If this is a re-analysis: compare to the original
 When step 1b found a prior analysis of the same dataset, compare the two with the

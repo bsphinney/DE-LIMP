@@ -20,12 +20,13 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   input/                    # conditions.csv, search.fasta, params.*, wf/workflow.manifest.json,
                             #   raw_files.txt (raw data is referenced, NOT copied — too large)
   output/
-    search/                 # the normalized search report.parquet (+ engine logs)
-    tables/                 # DE_*.csv, methods.txt, sessionInfo.txt, de_provenance.json, QC
-    figures/                # plots (reserved)
-    reproducibility/        # the full bundle (reproduce.sh, env lock, checksums)
-    AI_Analysis_Report.md   # the biological interpretation (read first)
+    search/                 # the normalized search report.parquet (+ search_provenance.json, logs)
+    tables/                 # DE_*.csv, Expression_Matrix.csv, methods.txt, sessionInfo.txt, de_provenance.json
+    figures/                # volcano / PCA / heatmap / p-value / QC PNGs + figures.json
+    reproducibility/        # the full bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
+    AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
     AI_Analysis_Report.docx # the same report as a Word document
+    AUDIT.md                # results audit — common-mistake checks (PASS/WARN/FAIL)
     OUTPUT_FILES.md         # catalog of every file
     comparison/             # (re-analyses) COMPARISON.md + concordance CSVs
   scripts/                  # a copy of the skill scripts that ran this analysis (self-contained)

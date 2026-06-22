@@ -170,6 +170,15 @@ fit <- limma::eBayes(fit)
 gene_cols <- intersect(c("Genes", "Protein.Names"), names(genes))
 ann <- if (length(gene_cols)) genes[, c(if ("Protein.Group" %in% names(genes)) "Protein.Group", gene_cols), drop = FALSE] else NULL
 
+# Expression matrix (proteins x samples, log2) — feeds figures (PCA/heatmap) and
+# the report; mirrors DE-LIMP's Expression_Matrix.csv export.
+expr_df <- data.frame(Protein.Group = rownames(E), check.names = FALSE)
+if (!is.null(ann)) expr_df <- merge(expr_df, ann, by = "Protein.Group", all.x = TRUE, sort = FALSE)
+expr_df <- merge(expr_df, data.frame(Protein.Group = rownames(E), E, check.names = FALSE),
+                 by = "Protein.Group", all.x = TRUE, sort = FALSE)
+utils::write.csv(expr_df, file.path(outdir, "Expression_Matrix.csv"), row.names = FALSE)
+message(sprintf("[run_de] Expression_Matrix.csv: %d proteins x %d samples", nrow(E), ncol(E)))
+
 all_sig <- list()
 for (cn in forms) {
   tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = "BH")

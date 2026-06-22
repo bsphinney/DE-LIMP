@@ -86,6 +86,7 @@ create_env() {
   local pkgs=(python=3.11 pyarrow pyyaml
               "r-base>=4.5" bioconductor-limpa bioconductor-limma
               r-arrow r-dplyr r-tidyr sage-proteomics
+              r-ggplot2 r-ggrepel r-pheatmap r-jsonlite   # publication-quality figures
               pandoc python-docx)   # pandoc + python-docx: Markdown report -> Word .docx
   # proteowizard (msconvert) is bioconda LINUX-only
   if [ "$OS" = "linux" ]; then pkgs+=(proteowizard); fi
