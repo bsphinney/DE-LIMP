@@ -90,7 +90,7 @@ Ask the user for a directory or file list if not given. Recognized: `.d` (Bruker
 
 ### 1b. Check for a prior analysis of this dataset
 ```
-python3 scripts/session.py find-prior --base ~/Documents/DataAnalysis --raw /path/to/*.d
+python3 scripts/session.py find-prior --raw /path/to/*.d
 ```
 If a match is returned, this is a **re-analysis** of an existing dataset — note the
 prior session dir; you'll pass it to `session.py init --reanalysis-of` (step 3b) so
@@ -143,15 +143,23 @@ python3 scripts/collect_conditions.py --validate conditions.csv --against report
 File.Name,Group sheet for them to fill.) → detail: `references/conditions.md`.
 
 ### 3b. Create the analysis session (organize all files)
-Now that you know the organism + design, scaffold a tidy session directory (the
-lab `~/Documents/DataAnalysis/sessions/` convention) and route **everything** into
-it — inputs, outputs, scripts, logs:
+**Ask the user where the results should go** — two choices:
+- **In the folder with their raw data** (default, recommended — keeps results next
+  to the data): pass `--raw` and omit `--base`.
+- **A central location** (e.g. their Documents folder, or a path they give): pass
+  `--base <that path>` (results land under `<path>/sessions/`).
+
+Then scaffold the session and route **everything** into it:
 ```
-python3 scripts/session.py init --name "<short study name>" \
-    --base ~/Documents/DataAnalysis --raw /path/to/*.d \
+# default — results live with the raw data:
+python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
     [--reanalysis-of <prior session dir from step 1b>]
+# or central, if the user chose one:
+python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
+    --base ~/Documents/DataAnalysis
 ```
-It prints a `paths` map. **Use those paths for every later step** — put
+The output's `placement` tells you which was used. **Use the printed `paths` map for
+every later step** — put
 `conditions.csv` and the FASTA in `paths.input_dir`, search output in
 `paths.search_out`, DE results in `paths.de_dir` (= `output/tables`), the
 reproducibility bundle in `paths.repro_dir`, the report in
@@ -259,7 +267,14 @@ Biological Interpretation, How This Analysis Works, Methods). Compute significan
 proteins, up/down splits, cross-comparison overlaps, and lowest-CV proteins
 directly from the CSVs — cite specific proteins, never fabricate. The brief takes
 its pipeline description from `de_provenance.json`, so the report stays correct
-for whichever engine/method ran. → detail: `references/analysis.md`.
+for whichever engine/method ran.
+
+Then **also save the report as a Word document** (both formats are required):
+```
+python3 scripts/to_docx.py --in <session>/output/AI_Analysis_Report.md \
+    --out <session>/output/AI_Analysis_Report.docx
+```
+→ detail: `references/analysis.md`.
 
 ### 10. Reproducibility bundle (mandatory)
 Assemble the bundle that makes the whole analysis reproducible:
@@ -287,7 +302,7 @@ Catalog everything the run produced so the user knows what each file is:
 ```
 python3 scripts/make_report.py --out OUTPUT_FILES.md \
   --search-out ./search_out --de-dir ./de_results --repro ./reproducibility \
-  --extra ./conditions.csv ./search.fasta ./wf ./AI_Analysis_Report.md
+  --extra ./conditions.csv ./search.fasta ./wf ./AI_Analysis_Report.md ./AI_Analysis_Report.docx
 ```
 `OUTPUT_FILES.md` lists every file with its size and a plain-language description,
 grouped by purpose, and flags anything unrecognized (never silently omitted).

@@ -12,7 +12,10 @@ inline instead of shipping the prompt to an external API.
 2. **The agent reads the brief and the data files and writes `AI_Analysis_Report.md`.**
    It computes significant proteins, up/down splits, cross-comparison overlaps, and
    lowest-CV proteins from the CSVs — citing specific proteins, never fabricating.
-3. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
+3. `to_docx.py` saves the report **also as `AI_Analysis_Report.docx`** (pandoc, with
+   a python-docx fallback so the Word file is always produced). Both `.md` and
+   `.docx` are required outputs.
+4. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
    plain-language description, grouped by purpose.
 
 ## Report sections (faithful to DE-LIMP's export prompt)

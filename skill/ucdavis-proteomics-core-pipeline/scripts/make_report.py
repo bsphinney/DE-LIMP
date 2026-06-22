@@ -61,6 +61,7 @@ CATALOG = [
     (r"^commands\.log$", "Inputs", "Verbatim log of every command the run executed (audit trail)."),
 
     (r"^AI_Analysis_Report\.md$", "Analysis report", "The biological + QC interpretation of the results (the AI analysis)."),
+    (r"^AI_Analysis_Report\.docx$", "Analysis report", "The analysis report as a Word document (same content as the .md)."),
     (r"^ANALYSIS_PROMPT\.md$", "Analysis report", "The analysis brief the agent followed to write the report."),
     (r"^OUTPUT_FILES\.md$", "Analysis report", "This file — the catalog of all outputs."),
 ]

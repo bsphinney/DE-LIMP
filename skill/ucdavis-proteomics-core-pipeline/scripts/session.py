@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 session.py  --  Package a run's inputs and outputs into a tidy, browsable session
-directory, matching the lab convention in ~/Documents/DataAnalysis/sessions:
+directory. By DEFAULT the session is created IN THE FOLDER WITH THE RAW DATA being
+analyzed; pass --base to put it in a central location instead (e.g. the user's
+Documents). The orchestrator asks the user which they want (see SKILL.md).
 
-    sessions/<YYYY-MM-DD>_<DescriptiveName>/
+    <YYYY-MM-DD>_<DescriptiveName>/    # next to the raw files, or under <base>/sessions/
       README.md                 # what this analysis was + where everything is
       input/                    # conditions, FASTA, params, workflow manifest, raw-file list
       output/
@@ -18,9 +20,12 @@ directory, matching the lab convention in ~/Documents/DataAnalysis/sessions:
 
 Two subcommands:
 
-  # at the start, once you know the organism/study — make the folders, get paths
-  python3 session.py init --name "HeLa QC DIA" --base ~/Documents/DataAnalysis
-  #   -> prints JSON with every canonical path; route all later steps into them
+  # at the start — make the folders, get paths.
+  #   default (results live with the raw data):
+  python3 session.py init --name "HeLa QC DIA" --raw /data/HeLaQC/*.d
+  #   central location instead (user chose Documents / a custom folder):
+  python3 session.py init --name "HeLa QC DIA" --raw /data/HeLaQC/*.d --base ~/Documents/DataAnalysis
+  #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
   # at the end — write README, catalog outputs, optionally zip
   python3 session.py finalize --dir <session_dir> [--zip]
@@ -73,18 +78,23 @@ def raw_set(session_dir):
 
 def do_find_prior(a):
     """Scan existing sessions for ones covering the same raw files (same dataset)."""
-    base = os.path.abspath(os.path.expanduser(a.base))
-    sessions_root = os.path.join(base, "sessions")
-    mine = set()
+    mine, raw_dirs = set(), set()
     for pat in (a.raw or []):
         hits = [os.path.abspath(p.rstrip("/")) for p in glob.glob(pat)]
         if hits:
             mine.update(hits)
+            raw_dirs.update(os.path.dirname(h) for h in hits)
         else:
             mine.add(pat)
-    # also walk reanalysis subfolders
-    candidates = glob.glob(os.path.join(sessions_root, "*")) + \
-                 glob.glob(os.path.join(sessions_root, "*", "reanalysis", "*"))
+    # look where sessions can live: alongside the raw data (default), and in a
+    # central --base/sessions if the user used one. Include reanalysis subfolders.
+    roots = list(raw_dirs)
+    if a.base:
+        roots.append(os.path.join(os.path.abspath(os.path.expanduser(a.base)), "sessions"))
+    candidates = []
+    for root in roots:
+        candidates += glob.glob(os.path.join(root, "*"))
+        candidates += glob.glob(os.path.join(root, "*", "reanalysis", "*"))
     hits = []
     for c in candidates:
         if not os.path.isdir(c):
@@ -104,17 +114,50 @@ def do_find_prior(a):
                      indent=2))
 
 
+def _resolve_raws(patterns):
+    raws = []
+    for pat in (patterns or []):
+        raws.extend(sorted(glob.glob(pat)) or [pat])
+    return raws
+
+
+def _raw_dir(raws):
+    """The directory that contains the raw files (their common parent)."""
+    if not raws:
+        return None
+    dirs = [os.path.dirname(os.path.abspath(r.rstrip("/"))) for r in raws]
+    try:
+        return os.path.commonpath(dirs)
+    except ValueError:
+        return dirs[0]
+
+
 def do_init(a):
     date = a.date or datetime.date.today().isoformat()
     slug = slugify(a.name)
-    base = os.path.abspath(os.path.expanduser(a.base))
+    raws = _resolve_raws(a.raw)
+    raw_dir = _raw_dir(raws)
+
+    # WHERE the results go (the orchestrator asks the user; see SKILL.md):
+    #   --reanalysis-of <prior>  -> nested under the original
+    #   --base <path>            -> a central location the user chose (e.g. ~/Documents/DataAnalysis)
+    #   (neither, with --raw)    -> DEFAULT: in the folder with the raw data being analyzed
     if a.reanalysis_of:
         prior = os.path.abspath(os.path.expanduser(a.reanalysis_of))
         if not os.path.isdir(prior):
             sys.exit(f"--reanalysis-of: prior session not found: {prior}")
         session_dir = os.path.join(prior, "reanalysis", f"{date}_{slug}")
-    else:
+        placement = "reanalysis"
+    elif a.base:
+        base = os.path.abspath(os.path.expanduser(a.base))
         session_dir = os.path.join(base, "sessions", f"{date}_{slug}")
+        placement = "central"
+    elif raw_dir:
+        session_dir = os.path.join(raw_dir, f"{date}_{slug}")
+        placement = "with-raw-data"
+    else:
+        session_dir = os.path.join(os.path.abspath("."), f"{date}_{slug}")
+        placement = "cwd"
     for sd in SUBDIRS:
         os.makedirs(os.path.join(session_dir, sd), exist_ok=True)
     p = paths_for(session_dir)
@@ -129,10 +172,7 @@ def do_init(a):
         sys.stderr.write(f"[session] could not copy skill scripts: {e}\n")
 
     # record raw file locations (not the files themselves)
-    if a.raw:
-        raws = []
-        for pat in a.raw:
-            raws.extend(sorted(glob.glob(pat)) or [pat])
+    if raws:
         with open(p["raw_list"], "w") as fh:
             fh.write("# Raw MS files used in this analysis (not copied — too large).\n")
             for r in raws:
@@ -154,7 +194,7 @@ def do_init(a):
                  "(search, tables, figures, reproducibility, report), `scripts/`, `logs/`.\n")
 
     print(json.dumps({"created": session_dir, "date": date, "name": a.name,
-                      "reanalysis_of": parent, "paths": p}, indent=2))
+                      "placement": placement, "reanalysis_of": parent, "paths": p}, indent=2))
 
 
 def _load(path):
@@ -330,13 +370,13 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init", help="scaffold a session directory and print canonical paths")
     i.add_argument("--name", required=True, help="short descriptive study name")
-    i.add_argument("--base", default="~/Documents/DataAnalysis", help="root holding sessions/")
+    i.add_argument("--base", default="", help="central location for the session (e.g. ~/Documents/DataAnalysis). OMIT to put results in the folder with the raw data (default).")
     i.add_argument("--date", default="", help="YYYY-MM-DD (default: today)")
-    i.add_argument("--raw", nargs="*", help="raw file paths/globs to record in input/raw_files.txt")
+    i.add_argument("--raw", nargs="*", help="raw file paths/globs; their folder is where results go by default")
     i.add_argument("--reanalysis-of", default="", help="prior session dir; nests this run under <prior>/reanalysis/")
     i.set_defaults(func=do_init)
     fp = sub.add_parser("find-prior", help="find existing sessions covering the same raw files")
-    fp.add_argument("--base", default="~/Documents/DataAnalysis")
+    fp.add_argument("--base", default="", help="also scan this central location's sessions/ (optional)")
     fp.add_argument("--raw", nargs="*", required=True)
     fp.set_defaults(func=do_find_prior)
     f = sub.add_parser("finalize", help="write README, tidy output/, optionally zip")

@@ -1,11 +1,21 @@
 # Output packaging, re-analysis & comparison
 
-Every run is packaged into a tidy **session directory** so people can find things,
-matching the lab convention in `~/Documents/DataAnalysis/sessions/`.
+Every run is packaged into a tidy **session directory** so people can find things.
+
+## Where the session goes — ask the user
+The orchestrator asks where results should live (SKILL.md step 3b):
+- **Default (recommended): in the folder with the raw data** being analyzed. The
+  session folder is created right inside that directory, so results sit next to the
+  files they came from. Pass `--raw <globs>` and omit `--base`.
+- **A central location** the user prefers (e.g. `~/Documents/DataAnalysis`, or any
+  path they give): pass `--base <path>` → the session is created under
+  `<path>/sessions/`.
+
+`session.py init` reports `placement` (`with-raw-data` | `central` | `reanalysis`).
 
 ## Session layout (`session.py`)
 ```
-sessions/<YYYY-MM-DD>_<DescriptiveName>/
+<YYYY-MM-DD>_<DescriptiveName>/    # inside the raw-data folder, or under <base>/sessions/
   README.md                 # what this was + where everything is (written at finalize)
   input/                    # conditions.csv, search.fasta, params.*, wf/workflow.manifest.json,
                             #   raw_files.txt (raw data is referenced, NOT copied — too large)
@@ -15,15 +25,16 @@ sessions/<YYYY-MM-DD>_<DescriptiveName>/
     figures/                # plots (reserved)
     reproducibility/        # the full bundle (reproduce.sh, env lock, checksums)
     AI_Analysis_Report.md   # the biological interpretation (read first)
+    AI_Analysis_Report.docx # the same report as a Word document
     OUTPUT_FILES.md         # catalog of every file
     comparison/             # (re-analyses) COMPARISON.md + concordance CSVs
   scripts/                  # a copy of the skill scripts that ran this analysis (self-contained)
   logs/                     # commands.log + engine logs
 ```
 
-- `session.py init --name "..." [--reanalysis-of <prior>] --raw <globs>` makes the
-  folders and prints a `paths` map; **route every step's `--out`/`--outdir`/`--dest`
-  into those paths**.
+- `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior>]`
+  makes the folders and prints a `paths` map; **route every step's
+  `--out`/`--outdir`/`--dest` into those paths**.
 - `session.py finalize --dir <session> [--zip]` writes `README.md`, moves any loose
   tables/figures into their subdirs, and (for a re-analysis) writes `DIFFERENCES.md`.
 
