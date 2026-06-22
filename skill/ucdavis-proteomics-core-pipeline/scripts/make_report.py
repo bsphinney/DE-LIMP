@@ -26,6 +26,10 @@ CATALOG = [
      "Spectral library generated/used during the library-free search."),
     (r"^lfq\.parquet$|^results\.sage\.parquet$", "Search output", "Sage output (LFQ intensities / PSMs)."),
     (r"^combined_protein\.tsv$", "Search output", "FragPipe/IonQuant protein-level MaxLFQ table."),
+    (r"^search_provenance\.json$", "Search output", "Exact search engine, version, and command used (reproducibility)."),
+
+    (r".*\.png$", "Figures", "Publication-quality figure (volcano / PCA / heatmap / QC) embedded in the analysis report."),
+    (r"^figures\.json$", "Figures", "Figure manifest: each figure's file, type, and caption."),
 
     (r"^DE_.*\.csv$", "Differential expression",
      "DE results for one comparison: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val (BH), B, plus gene annotation. Sorted by adjusted p-value."),
@@ -49,6 +53,7 @@ CATALOG = [
     (r"^pip-freeze\.txt$", "Reproducibility bundle", "Installed Python packages + versions."),
     (r"^r-sessionInfo\.txt$", "Reproducibility bundle", "R + package versions captured for the bundle."),
     (r"^versions\.txt$", "Reproducibility bundle", "Search-engine versions + resolved commands."),
+    (r"^skill\.txt$", "Reproducibility bundle", "Which skill produced this analysis (name + version) and how it was installed."),
     (r"^checksums\.json$", "Reproducibility bundle", "sha256 / structural fingerprints of raw inputs, FASTA, report, and DE outputs."),
     (r".*\.rationale\.json$", "Reproducibility bundle",
      "Per-setting provenance for the estimated search parameters (which value came from the data type vs a default)."),

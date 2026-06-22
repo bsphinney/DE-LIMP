@@ -298,6 +298,20 @@ def main():
         res = run_fragpipe(cmd, bundle, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
     else:
         sys.exit(f"unknown engine {engine}")
+
+    # always record what was run (engine + version + exact command) for reproducibility
+    try:
+        os.makedirs(a.out, exist_ok=True)
+        version = (tools.get("versions", {}) or {}).get(engine) \
+            or (bundle.get("engine", {}) or {}).get("version")
+        with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
+            json.dump({"engine": engine, "version": version, "resolved_command": cmd,
+                       "params_file": a.params, "fasta": a.fasta, "threads": a.threads,
+                       "n_files": len(files), "files": files,
+                       "submitted_sbatch": a.sbatch or None, "result": res}, fh, indent=2)
+    except Exception as e:
+        sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")
+
     print(json.dumps(res, indent=2))
 
 
