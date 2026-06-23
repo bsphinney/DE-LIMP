@@ -67,6 +67,8 @@ CATALOG = [
 
     (r"^AI_Analysis_Report\.md$", "Analysis report", "The biological + QC interpretation of the results (the AI analysis)."),
     (r"^AI_Analysis_Report\.docx$", "Analysis report", "The analysis report as a Word document (same content as the .md)."),
+    (r"^methods\.md$|^methods\.docx$", "Analysis report", "Publication-ready LC-MS/MS Methods section (from raw metadata) + instrument grant acknowledgment."),
+    (r"^methods_params\.json$", "Analysis report", "Acquisition parameters extracted from the raw data for the Methods section."),
     (r"^ANALYSIS_PROMPT\.md$", "Analysis report", "The analysis brief the agent followed to write the report."),
     (r"^OUTPUT_FILES\.md$", "Analysis report", "This file — the catalog of all outputs."),
 ]

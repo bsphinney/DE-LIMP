@@ -1,6 +1,6 @@
 {
   "name": "ucdavis-proteomics-core",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "UC Davis Proteomics Core skills for Claude — agentic mass-spec search + differential expression.",
   "owner": {
     "name": "Brett Phinney",
@@ -11,7 +11,7 @@
     {
       "name": "ucdavis-proteomics-core-pipeline",
       "source": "./skill/ucdavis-proteomics-core-pipeline",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "UC Davis Proteomics Core pipeline — end-to-end proteomics search + differential expression from raw .raw/.d/.mzML files (DIA-NN / Sage, limpa/limma). Auto-installs its toolchain, derives search parameters from the data type, writes a biological analysis report and a full reproducibility bundle, and packages results into tidy session folders.",
       "author": {
         "name": "Brett Phinney",

@@ -8,7 +8,9 @@ description: >
   .raw / .d / .mzML files and asks what's in it. Detects acquisition + instrument,
   fetches a Brett-validated workflow from the DE-LIMP repo, downloads the pinned
   search engine, runs DIA-NN (DIA) or Sage (DDA), then limpa/limma DE — with full
-  provenance back to the validated workflow.
+  provenance back to the validated workflow. Also use it to "write the LC-MS methods
+  section" / "generate a publication-ready methods section with the instrument grant
+  acknowledgment" from facility raw data (UC Davis Proteomics Core).
 ---
 
 # Proteomics Pipeline
@@ -301,6 +303,26 @@ python3 scripts/to_docx.py --in <session>/output/AI_Analysis_Report.md \
     --out <session>/output/AI_Analysis_Report.docx
 ```
 → detail: `references/analysis.md`.
+
+### 9d. Publication-ready Methods section + acknowledgment
+Generate a drop-in LC-MS/MS Methods section straight from the facility raw data,
+with the correct UC Davis Proteomics Core instrument-grant acknowledgment:
+```
+python3 scripts/make_methods.py --raw /path/to/*.d \
+    --out <session>/output/methods.md --de-dir <session>/output/tables
+python3 scripts/to_docx.py --in <session>/output/methods.md \
+    --out <session>/output/methods.docx
+```
+It extracts the acquisition parameters from the raw metadata (Bruker `.d`
+`analysis.tdf`; Thermo by facility filename prefix), fills the rest from facility
+defaults **tagged `[facility default — confirm]`** (the LC column defaults to a
+PepSep C18 10 cm × 150 µm, 1.5 µm — override with `--lc-column`), builds a
+parameter table showing the source of each value, and appends the instrument's
+grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 → S10OD026918-01A1;
+timsTOF → Dr. Neil Hunter / HHMI). **Verify the draft against the params table and
+polish the prose; keep the acknowledgment exact** (confirm wording at the source
+URL). This can also be run standalone — just point `--raw` at facility data, no
+search/DE needed. → detail: `references/methods.md`.
 
 ### 10. Reproducibility bundle (mandatory)
 Assemble the bundle that makes the whole analysis reproducible:
