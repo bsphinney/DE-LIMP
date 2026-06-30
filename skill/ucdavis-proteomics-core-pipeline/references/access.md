@@ -95,7 +95,10 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
    reproducibility) is identical to a local run.
 
 ## Notes
-- Heavy compute **must** go through `sbatch` — never run a search on the login node.
+- **Never run computationally intensive work on the login/head node** — the search
+  and any heavy DE/figure/conversion step go through `sbatch`. The login node is only
+  for submitting jobs, `squeue`/`sacct` polling, and small file moves. Holds on HIVE
+  and any other cluster/scheduler.
 - "Core member" = read access to `/quobyte/proteomics-grp`. If `check_access.sh` shows
   `proteomics_grp_access: false` over SSH, the account isn't in the group yet — request
   it from the Core.

@@ -33,8 +33,15 @@ the spine.
 2. **Never fabricate parameters.** If a value isn't in the workflow bundle or given
    by the user, say so — don't invent an FDR, organism, or instrument. (DE-LIMP
    architectural rule #2.)
-3. **Never run heavy compute on an HPC login node.** On `platform_class: hpc`, emit
-   an sbatch script (`run_search.py --sbatch`) and submit it — don't run inline.
+3. **Never run computationally intensive work on a cluster login/head node — EVER.**
+   On any cluster (HIVE/SLURM, or any other scheduler), **every** heavy step — the
+   search, and any large DE / figure / conversion (e.g. msconvert) — must run as a
+   **scheduled job** (`run_search.py --sbatch` → `sbatch`), not inline on the login
+   node. Login nodes are shared; running compute there gets the user flagged/killed.
+   The **only** things allowed on the login node are tiny orchestration commands —
+   submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
+   If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
+   dataset locally? Warn the user it may be slow rather than hammering a shared host.)
 4. **Organism is a hard filter** (it defines the FASTA). Instrument is only a
    tiebreaker. Acquisition is auto-detected and confirmed.
 5. **Every run must be completely reproducible.** This is not optional. As you go,
