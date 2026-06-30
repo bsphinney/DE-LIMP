@@ -20,10 +20,14 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 - **No native macOS build exists.** On mac you must run DIA-NN through Docker. Set
   `DIANN_DOCKER_IMAGE` to a built image, or build one from the Academia Linux zip's
   bundled Dockerfile. `acquire_tools.sh` writes a note when this is unresolved.
-- **HIVE:** reuse `/quobyte/proteomics-grp/dia-nn/*.sif` (the `dia-nn/` image has
-  .NET and reads `.raw`; the `apptainers/` one does not — always prefer `dia-nn/`).
-  `acquire_tools.sh` picks the `.sif` whose name contains the pinned version, else
-  the newest.
+- **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`.
+  Recent versions are **native builds**, e.g. DIA-NN **2.6.0** at
+  `build_260/diann-2.6.0/diann-linux`; older 2.3.0 is a `.sif`. `acquire_tools.sh`
+  resolves the **pinned** version by looking for `build_*/diann-<version>/diann-linux`
+  first, then a version-matched `.sif`, and **never silently substitutes a different
+  version** (reproducibility). The facility's `run_diann_*.sbatch` in that folder is
+  the reference invocation. AlphaDIA is also on HIVE at
+  `/quobyte/proteomics-grp/apptainers/alphadia.sif` (auto-reused).
 - **Linux native:** needs glibc ≥ Linux Mint 21.2 and .NET 8. If missing, prefer
   Docker/Apptainer.
 - DIA-NN reads `.raw`/`.d` natively from 2.1+.
