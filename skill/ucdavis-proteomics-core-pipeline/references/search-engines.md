@@ -61,6 +61,12 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
   the matrix → DIA-NN-shaped `report.parquet` (Run, Protein.Group, PG.MaxLFQ; Q-values
   zeroed since AlphaDIA already FDR-filtered). Like the Sage adapter, confirm it on real
   data the first time.
+- **⚠ Limitation — timsTOF whole-proteome directDIA:** AlphaDIA does **not** work on
+  **timsTOF** `.d` for **whole-proteome library-free (directDIA)** searches. For that
+  case it is not a valid substitute for DIA-NN. Options: academic → DIA-NN; commercial →
+  run AlphaDIA **library-based** (a predicted/empirical spectral library, `--library`)
+  instead of directDIA, or use Sage. Non-timsTOF instruments and library-based timsTOF
+  runs are unaffected.
 
 ### Sage (mzML-first; adapter required)
 1. Convert `.d`/`.raw` → mzML with `msconvert` if needed (fails loudly if msconvert

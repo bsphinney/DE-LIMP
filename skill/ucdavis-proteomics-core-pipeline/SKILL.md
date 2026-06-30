@@ -276,11 +276,33 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   commercial-OK). A quick question: *"Is this academic/non-profit, or commercial?"* —
   commercial → AlphaDIA. (AlphaDIA is deep-learning based; a GPU is strongly
   recommended — best on a HIVE GPU node or a GPU workstation.)
-- **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` and wait for it (poll
-  the log). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to build
-  `report.parquet`.
+- **⚠ AlphaDIA limitation — timsTOF whole-proteome directDIA:** AlphaDIA does **not**
+  work on **timsTOF** `.d` files for **whole-proteome library-free (directDIA)**
+  searches. So for timsTOF + whole-proteome + library-free, AlphaDIA is NOT an option.
+  In that case: academic → DIA-NN; commercial → use a **spectral-library** approach
+  (predicted/empirical library) rather than directDIA, or Sage — and tell the user the
+  constraint. (Non-timsTOF instruments, or library-based timsTOF runs, are fine for AlphaDIA.)
+- **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` (over `hive_exec.sh` for a
+  remote HIVE run). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to
+  build `report.parquet`.
 - Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
 → detail: `references/search-engines.md`.
+
+### 7b. Watch the run — MANDATORY, auto-correct errors
+**The moment a search starts, watch it — never leave a multi-hour search
+unmonitored.** Poll with `watch_run.sh` in a loop until it finishes:
+```
+# local: python3 scripts/run_search.py ... run_in_background, then loop:
+bash scripts/watch_run.sh --log <search log>
+# SLURM on HIVE:
+bash scripts/watch_run.sh --slurm <jobid> --log <job log> --hive   # (HIVE_USER/HIVE_KEY set)
+```
+It returns `{state, done, failed, error_class, fix}`. While `done` is false, keep
+polling (sleep ~60s between polls; for long SLURM jobs use a scheduled wake-up). **If
+`failed` is true, apply the `fix`** (raise `--mem`/`--time`, switch DIA-NN container,
+fix a path, move to a GPU node, etc. — see `references/watcher.md`) and **resubmit**,
+then watch again. Report progress and any auto-fixes to the user. Only proceed to DE
+once the run is `COMPLETED` and `report.parquet` exists. → detail: `references/watcher.md`.
 
 ### 8. Differential expression
 ```

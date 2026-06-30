@@ -87,16 +87,29 @@ acquire_diann() {
   DIANN_VER="$ver"
   case "$CLASS" in
     hpc)
-      # prefer a .sif whose name contains the pinned version; else newest.
-      local sif
-      if [ -n "${ver}" ] && [ "$ver" != "latest" ]; then
-        sif="$(ls -1 /quobyte/proteomics-grp/dia-nn/*"${ver}"*.sif 2>/dev/null | sort -V | tail -n1)"
+      # On HIVE the Proteomics Core keeps DIA-NN as NATIVE builds, e.g. 2.6.0 at
+      #   /quobyte/proteomics-grp/dia-nn/build_260/diann-2.6.0/diann-linux
+      # (older 2.3.0 is a .sif). Match the PINNED version exactly — never silently
+      # substitute a different version (reproducibility).
+      local DN=/quobyte/proteomics-grp/dia-nn bin="" sif=""
+      if [ "$ver" != "latest" ]; then
+        bin="$(ls -1 "$DN"/*/diann-"$ver"/diann-linux 2>/dev/null | head -n1)"
+        [ -z "$bin" ] && bin="$(find "$DN" -maxdepth 3 -path "*diann-$ver*/diann-linux" -type f 2>/dev/null | head -n1)"
+        [ -z "$bin" ] && sif="$(ls -1 "$DN"/*"$ver"*.sif 2>/dev/null | sort -V | tail -n1)"
+      else
+        bin="$(find "$DN" -maxdepth 3 -name diann-linux -type f 2>/dev/null | sort -V | tail -n1)"
+        [ -z "$bin" ] && sif="$(ls -1 "$DN"/*.sif 2>/dev/null | sort -V | tail -n1)"
       fi
-      [ -z "${sif:-}" ] && sif="$(ls -1 /quobyte/proteomics-grp/dia-nn/*.sif 2>/dev/null | sort -V | tail -n1)"
-      if [ -n "${sif:-}" ] && have apptainer; then
-        DIANN_CMD="apptainer exec --bind /quobyte:/quobyte $sif /diann-*/diann-linux"
-        NOTES+=("DIA-NN: reusing Apptainer image $sif on HIVE (requested version '$ver').")
+      if [ -n "$bin" ]; then
+        DIANN_CMD="$bin"
+        NOTES+=("DIA-NN $ver: using the HIVE Proteomics Core native build $bin. Reference invocation: $DN/run_diann_*.sbatch.")
         return
+      elif [ -n "$sif" ] && have apptainer && { [ "$ver" = "latest" ] || printf '%s' "$sif" | grep -q "$ver"; }; then
+        DIANN_CMD="apptainer exec --bind /quobyte:/quobyte $sif /diann-*/diann-linux"
+        NOTES+=("DIA-NN $ver: reusing HIVE container $sif.")
+        return
+      else
+        NOTES+=("DIA-NN $ver NOT found on HIVE under $DN — NOT substituting a different version. Present: $(ls -d "$DN"/*.sif "$DN"/build_*/diann-* 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' '). Will fetch the pinned Academia build into your space instead (or build $ver).")
       fi ;;
     mac)
       if [ -n "${DIANN_DOCKER_IMAGE:-}" ] && have docker; then
@@ -154,6 +167,14 @@ acquire_fragpipe() {
 # whose free "Academia" build is academic/non-profit only. pip-installed into the
 # active env. Deep-learning based: a GPU is strongly recommended (CPU is slow).
 acquire_alphadia() {
+  # On HIVE the Proteomics Core keeps an AlphaDIA container.
+  if [ "$CLASS" = "hpc" ]; then
+    local asif=/quobyte/proteomics-grp/apptainers/alphadia.sif
+    if [ -f "$asif" ] && have apptainer; then
+      ALPHADIA_CMD="apptainer exec --bind /quobyte:/quobyte $asif alphadia"
+      NOTES+=("AlphaDIA: reusing the HIVE container $asif (Apache-2.0, commercial-OK)."); return
+    fi
+  fi
   if have alphadia; then ALPHADIA_CMD="$(command -v alphadia)"
     NOTES+=("AlphaDIA: using the alphadia on PATH ($ALPHADIA_CMD). Apache-2.0 (commercial use OK)."); return; fi
   local spec="alphadia"; pin_for alphadia && spec="alphadia==$PIN_VERSION"
@@ -170,8 +191,12 @@ echo "[acquire] platform=$CLASS  os=$OS arch=$ARCH  root=$ROOT  pin=${PIN_ENGINE
 acquire_sage
 acquire_diann
 acquire_fragpipe
-# AlphaDIA only when asked for (it's a large GPU package) — pinned or already present.
-if [ "${PIN_ENGINE:-}" = "alphadia" ] || have alphadia; then acquire_alphadia; fi
+# AlphaDIA: discover the HIVE container automatically; otherwise only acquire when
+# pinned/requested or already present (it's a large GPU pip package — don't auto-install).
+if [ "${PIN_ENGINE:-}" = "alphadia" ] || have alphadia \
+   || { [ "$CLASS" = "hpc" ] && [ -f /quobyte/proteomics-grp/apptainers/alphadia.sif ]; }; then
+  acquire_alphadia
+fi
 
 # ---- write manifest ----------------------------------------------------------
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
