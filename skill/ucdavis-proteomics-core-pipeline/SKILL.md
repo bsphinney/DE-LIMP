@@ -289,6 +289,15 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   In that case: academic → DIA-NN; commercial → use a **spectral-library** approach
   (predicted/empirical library) rather than directDIA, or Sage — and tell the user the
   constraint. (Non-timsTOF instruments, or library-based timsTOF runs, are fine for AlphaDIA.)
+- **DIA-NN search settings:** always use the **estimated cfg** (step 6b) — it encodes
+  DIA-NN's official recommended per-instrument mass tolerances (timsTOF → MS1/MS2 15
+  ppm; Orbitrap Astral → 4/10 ppm; Orbitrap by resolution 240k→4, 120k→7, 60k→10,
+  30k→15). Don't override these unless the user gives a validated SOP value.
+- **DIA-NN parallel (many DIA files on a cluster):** for ≳8–10 DIA files on HIVE, use
+  the **5-step parallel chain** instead of a single job — much faster (per-file passes
+  run as a SLURM array). Generate it with `diann_parallel.py` (pass the estimated
+  `--cfg`, which must have a **fixed** mass-acc — a known instrument), then submit
+  `submit.sh` over `hive_exec.sh`; it produces `report.parquet`. → `references/diann_parallel.md`.
 - **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` (over `hive_exec.sh` for a
   remote HIVE run). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to
   build `report.parquet`.
