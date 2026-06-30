@@ -27,6 +27,18 @@ Default by acquisition: **DIA → DIA-NN, DDA → Sage.** `--engine` overrides. 
 bundle's `engine.name` is authoritative when present. FragPipe is opt-in only (the
 bundle names it or the user asks) because MSFragger/IonQuant are license-gated.
 
+## Licensing — pick a commercial-OK engine for non-academic users
+| Engine | License | Commercial use | Notes |
+|---|---|---|---|
+| **DIA-NN** (Academia build) | academic / non-profit only | ❌ **no** | the free build the skill downloads is academic-only |
+| **AlphaDIA** | Apache-2.0 | ✅ yes | open-source DIA alternative; deep-learning, **GPU recommended** |
+| **Sage** | MIT | ✅ yes | fast, CPU; DDA + wide-window DIA |
+| **FragPipe** (MSFragger/IonQuant) | license-gated | depends | requires the user's own license |
+
+**For commercial / non-academic DIA users, route to AlphaDIA** (`--engine alphadia`)
+instead of DIA-NN — same job, no license problem. Ask "academic or commercial?" before
+a DIA run if it isn't already clear.
+
 ## Per-engine invocation & output adapter (`run_search.py`)
 
 ### DIA-NN (native contract — no adapter)
@@ -35,6 +47,20 @@ bundle names it or the user asks) because MSFragger/IonQuant are license-gated.
       --fasta <fasta> --out report.parquet --threads N
 ```
 `report.parquet` is already the DE contract — `run_de.R` reads it directly.
+
+### AlphaDIA (commercial-OK DIA; adapter required)
+Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Library-free:
+```
+<cmd> -o <out> -f <raw> [-f ...] --fasta <fasta> [-c <config.yaml>]
+```
+- Install: `pip install alphadia` (into the conda env); `acquire_tools.sh` does this
+  when AlphaDIA is pinned/requested. **GPU strongly recommended** (CPU works but is slow)
+  — best on a HIVE GPU node. Reads `.raw`/`.d`/mzML; no msconvert needed.
+- **Adapter:** AlphaDIA writes `pg.matrix.parquet` (protein-group × run matrix; also
+  `precursors.parquet` with `raw.name`/`pg.name`/`pg.intensity`). `adapt_alphadia` melts
+  the matrix → DIA-NN-shaped `report.parquet` (Run, Protein.Group, PG.MaxLFQ; Q-values
+  zeroed since AlphaDIA already FDR-filtered). Like the Sage adapter, confirm it on real
+  data the first time.
 
 ### Sage (mzML-first; adapter required)
 1. Convert `.d`/`.raw` → mzML with `msconvert` if needed (fails loudly if msconvert

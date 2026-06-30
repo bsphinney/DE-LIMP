@@ -24,7 +24,7 @@
       "type": "object",
       "required": ["name", "version"],
       "properties": {
-        "name": { "enum": ["diann", "sage", "fragpipe"] },
+        "name": { "enum": ["diann", "alphadia", "sage", "fragpipe"] },
         "version": { "type": "string", "description": "Pinned version the acquire step installs." }
       }
     },

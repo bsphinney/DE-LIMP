@@ -269,8 +269,15 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     --fasta ./search.fasta --out ./search_out --files /path/to/*.d --threads 16
 ```
 - DIA → DIA-NN; DDA → Sage; FragPipe only if the bundle names it or the user asks.
+- **⚠ DIA-NN licensing (ask before a DIA run):** DIA-NN's free "Academia" build is
+  licensed for **academic / non-profit use only**. If the user is in a **commercial /
+  non-academic** setting, do NOT use DIA-NN — **offer AlphaDIA** (`--engine alphadia`,
+  Apache-2.0, commercial-OK; the open-source DIA alternative) or Sage (MIT, also
+  commercial-OK). A quick question: *"Is this academic/non-profit, or commercial?"* —
+  commercial → AlphaDIA. (AlphaDIA is deep-learning based; a GPU is strongly
+  recommended — best on a HIVE GPU node or a GPU workstation.)
 - **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` and wait for it (poll
-  the log). Re-run with `--adapt-only` afterward for Sage/FragPipe to build
+  the log). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to build
   `report.parquet`.
 - Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
 → detail: `references/search-engines.md`.
