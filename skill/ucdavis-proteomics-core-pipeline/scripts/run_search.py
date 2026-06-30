@@ -74,6 +74,75 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch):
     return {"engine": "diann", "report": report, "ran": True}
 
 
+# --------------------------------------------------------------- AlphaDIA -----
+# Apache-2.0 (commercial use OK) — the open-source DIA alternative to DIA-NN,
+# whose free "Academia" build is academic/non-profit only. Library-free:
+#   alphadia -o <out> -f <raw> [-f ...] --fasta <fasta> [-c <config.yaml>]
+def run_alphadia(cmd, config, files, fasta, out, threads, sbatch):
+    os.makedirs(out, exist_ok=True)
+    f_args = " ".join(f"-f {shlex.quote(f)}" for f in files)
+    cfg = f"-c {shlex.quote(config)} " if config and os.path.exists(config) else ""
+    full = (f"{cmd} -o {shlex.quote(out)} {f_args} --fasta {shlex.quote(fasta)} {cfg}").strip()
+    if sbatch:
+        emit_sbatch(sbatch, full, out, threads, job="alphadia_search")
+        return {"engine": "alphadia", "out": out, "submitted": sbatch, "ran": False,
+                "note": "After the job runs, re-run with --adapt-only to build report.parquet."}
+    sh(full)
+    return {"engine": "alphadia", "report": adapt_alphadia(out), "ran": True}
+
+
+def adapt_alphadia(out):
+    """AlphaDIA pg.matrix.parquet (protein-group × run) -> DIA-NN-shaped report.parquet.
+    Falls back to precursors.parquet (raw.name, pg.name, pg.intensity). Like the Sage
+    adapter, this is the part to confirm on real data the first time."""
+    try:
+        import pyarrow.parquet as pq, pyarrow as pa
+    except ImportError:
+        sys.exit("pyarrow required to adapt AlphaDIA output. pip install pyarrow.")
+
+    runs, prots, ints = [], [], []
+    pgm = _find(out, ["pg.matrix.parquet"])
+    if pgm:
+        t = pq.read_table(pgm); cols = t.column_names
+        id_col = next((c for c in cols if c.lower() in
+                       ("pg", "pg.name", "protein", "proteins", "protein.group", "proteingroup")), cols[0])
+        sample_cols = [c for c in cols if c != id_col]
+        ids = [str(x) for x in t.column(id_col).to_pylist()]
+        for sc in sample_cols:
+            rn = os.path.splitext(os.path.basename(str(sc)))[0]
+            for pid, v in zip(ids, t.column(sc).to_pylist()):
+                runs.append(rn); prots.append(pid)
+                ints.append(float(v) if v not in (None, 0) else float("nan"))
+    else:
+        pr = _find(out, ["precursors.parquet"])
+        if not pr:
+            sys.exit(f"No pg.matrix.parquet or precursors.parquet under {out}.")
+        t = pq.read_table(pr); cols = {c.lower(): c for c in t.column_names}
+        def col(*c):
+            for x in c:
+                if x.lower() in cols: return cols[x.lower()]
+            return None
+        c_run, c_pg, c_int = col("raw.name", "run"), col("pg.name", "pg", "protein.group"), col("pg.intensity", "intensity")
+        if not all([c_run, c_pg, c_int]):
+            sys.exit(f"AlphaDIA precursors.parquet missing expected columns; saw {t.column_names}")
+        best = {}
+        for r, p, v in zip(t.column(c_run).to_pylist(), t.column(c_pg).to_pylist(), t.column(c_int).to_pylist()):
+            if v is None: continue
+            rn = os.path.splitext(os.path.basename(str(r)))[0]
+            best[(rn, str(p))] = max(best.get((rn, str(p)), 0.0), float(v))
+        for (rn, p), v in best.items():
+            runs.append(rn); prots.append(p); ints.append(v)
+
+    n = len(prots)
+    report = os.path.join(out, "report.parquet")
+    pq.write_table(pa.table({
+        "Run": runs, "Protein.Group": prots, "PG.MaxLFQ": ints,
+        "Q.Value": [0.0]*n, "Lib.Q.Value": [0.0]*n, "Lib.PG.Q.Value": [0.0]*n,
+    }), report)
+    print(f"  [adapt] AlphaDIA -> {report}  ({n} protein×run rows)")
+    return report
+
+
 # ------------------------------------------------------------------- Sage -----
 def ensure_mzml(files, out):
     """Sage is mzML-first. Convert .d/.raw via msconvert if present."""
@@ -266,7 +335,7 @@ def main():
     ap.add_argument("--out", default="search_out")
     ap.add_argument("--files", nargs="+", required=True)
     ap.add_argument("--threads", type=int, default=8)
-    ap.add_argument("--engine", choices=["diann", "sage", "fragpipe"])
+    ap.add_argument("--engine", choices=["diann", "alphadia", "sage", "fragpipe"])
     ap.add_argument("--sbatch", help="emit an sbatch script at this path instead of running inline")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
@@ -278,7 +347,8 @@ def main():
     files = expand_files(a.files)
 
     if a.adapt_only:
-        report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe}.get(engine, lambda o: None)(a.out)
+        report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe,
+                  "alphadia": adapt_alphadia}.get(engine, lambda o: None)(a.out)
         print(json.dumps({"engine": engine, "report": report, "ran": False, "adapt_only": True}, indent=2))
         return
 
@@ -292,6 +362,8 @@ def main():
           f"{'(emit sbatch)' if a.sbatch else '(inline)'}")
     if engine == "diann":
         res = run_diann(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+    elif engine == "alphadia":
+        res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
     elif engine == "sage":
         res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
     elif engine == "fragpipe":

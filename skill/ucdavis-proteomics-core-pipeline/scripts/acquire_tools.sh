@@ -46,7 +46,7 @@ asset_url_tag() { # owner/repo  tag  pattern
     | grep -iE "$pat" | head -n1
 }
 
-DIANN_CMD="null"; SAGE_CMD="null"; FRAGPIPE_CMD="null"; NOTES=()
+DIANN_CMD="null"; SAGE_CMD="null"; FRAGPIPE_CMD="null"; ALPHADIA_CMD="null"; NOTES=()
 SAGE_VER="${PIN_VERSION:-latest}"; DIANN_VER="${PIN_VERSION:-latest}"
 
 # Only honor PIN_VERSION for the engine it names.
@@ -149,10 +149,29 @@ acquire_fragpipe() {
   fi
 }
 
+# ------------------------------------------------------------- AlphaDIA -------
+# Apache-2.0 (commercial use OK) — the open-source DIA alternative to DIA-NN,
+# whose free "Academia" build is academic/non-profit only. pip-installed into the
+# active env. Deep-learning based: a GPU is strongly recommended (CPU is slow).
+acquire_alphadia() {
+  if have alphadia; then ALPHADIA_CMD="$(command -v alphadia)"
+    NOTES+=("AlphaDIA: using the alphadia on PATH ($ALPHADIA_CMD). Apache-2.0 (commercial use OK)."); return; fi
+  local spec="alphadia"; pin_for alphadia && spec="alphadia==$PIN_VERSION"
+  if have pip || have pip3; then
+    echo "  AlphaDIA: pip install $spec (large download; GPU recommended)..."
+    { pip install "$spec" >/dev/null 2>&1 || pip3 install "$spec" >/dev/null 2>&1; }
+    if have alphadia; then ALPHADIA_CMD="$(command -v alphadia)"
+      NOTES+=("AlphaDIA: installed via pip (Apache-2.0, commercial-OK). GPU strongly recommended; verify with 'alphadia --check'."); return; fi
+  fi
+  NOTES+=("AlphaDIA: not installed. Install with 'pip install alphadia' in the env (Apache-2.0, commercial-OK; GPU recommended). https://github.com/MannLabs/alphadia")
+}
+
 echo "[acquire] platform=$CLASS  os=$OS arch=$ARCH  root=$ROOT  pin=${PIN_ENGINE:-none}/${PIN_VERSION:-none}"
 acquire_sage
 acquire_diann
 acquire_fragpipe
+# AlphaDIA only when asked for (it's a large GPU package) — pinned or already present.
+if [ "${PIN_ENGINE:-}" = "alphadia" ] || have alphadia; then acquire_alphadia; fi
 
 # ---- write manifest ----------------------------------------------------------
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -165,6 +184,7 @@ esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   printf '  "diann":    %s,\n'  "$( [ "$DIANN_CMD" = null ]    && echo null || printf '"%s"' "$(esc "$DIANN_CMD")" )"
   printf '  "sage":     %s,\n'  "$( [ "$SAGE_CMD" = null ]     && echo null || printf '"%s"' "$(esc "$SAGE_CMD")" )"
   printf '  "fragpipe": %s,\n'  "$( [ "$FRAGPIPE_CMD" = null ] && echo null || printf '"%s"' "$(esc "$FRAGPIPE_CMD")" )"
+  printf '  "alphadia": %s,\n'  "$( [ "$ALPHADIA_CMD" = null ] && echo null || printf '"%s"' "$(esc "$ALPHADIA_CMD")" )"
   printf '  "notes": [\n'
   for i in "${!NOTES[@]}"; do
     printf '    "%s"%s\n' "$(esc "${NOTES[$i]}")" "$( [ "$i" -lt $((${#NOTES[@]}-1)) ] && echo , )"
