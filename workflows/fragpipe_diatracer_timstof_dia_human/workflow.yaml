@@ -50,7 +50,10 @@ search:
   estimate_params: false
 
 de:
-  method: maxlfq                            # FragPipe/DIA-NN quant -> MaxLFQ + limma
+  method: dpc
+  input_note: >
+    dia-quant-output/report.tsv (--format tsv) — FragPipe's DIA route bundles DIA-NN,
+    so that file is precursor-level and limpa reads it. NOT the adapted report.parquet.
   q_cutoff: 0.01
   logfc: 1.0                                # volcano reference line only; not a filter
   adjp: 0.05

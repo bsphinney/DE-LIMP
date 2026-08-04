@@ -107,19 +107,48 @@ if (method == "dpc") {
   if (length(have_cols) > 0 && length(miss_dpc) > 0)
     stop(sprintf(paste0(
       "--method dpc (limpa) needs PRECURSOR-level input but %s has no %s.\n",
-      "  DIA-NN's own report.parquet is precursor-level and works.\n",
-      "  Sage / FragPipe / Radiant reports are adapted to one row per protein x run,\n",
-      "  so limpa cannot run on them -- use --method maxlfq for those.\n",
-      "  (Radiant: radiant_to_delimp.py emits a precursor-level report that DOES\n",
-      "   support dpc; point --input at that instead.)"),
+      "  Precursor-level reports that DO work with dpc:\n",
+      "    DIA-NN   search_out/report.parquet          (native)\n",
+      "    FragPipe dia-quant-output/report.tsv        (--format tsv; its DIA route\n",
+      "             bundles DIA-NN, so this IS a DIA-NN report)\n",
+      "    Radiant  radiant_to_delimp.py --out <x>.parquet\n",
+      "  What does NOT work is the ADAPTED report.parquet from adapt_sage /\n",
+      "  adapt_fragpipe / adapt_radiant -- those collapse to one row per protein x\n",
+      "  run for the maxlfq path. Point --input at the precursor-level file above,\n",
+      "  or use --method maxlfq."),
       basename(input), paste(miss_dpc, collapse = " / ")))
 
   if (!requireNamespace("limpa", quietly = TRUE))
     stop("limpa is required for --method dpc. BiocManager::install('limpa') (needs R 4.5+, Bioc 3.22+).")
   suppressMessages({ library(limpa); library(limma) })
 
-  dat <- limpa::readDIANN(input, format = format, q.cutoffs = q_cutoff)
-  message(sprintf("[run_de] readDIANN: %d precursors x %d runs", nrow(dat$E), ncol(dat$E)))
+  # readDIANN() prints "Q-value columns <x> not found." for a missing q-column and
+  # then CARRIES ON with that filter simply not applied -- a message, not an error,
+  # easy to lose in a long log. Resolving against the real header instead means the
+  # run log states exactly which FDR filters were applied, and a report with no usable
+  # q-column stops rather than producing unfiltered results that look filtered.
+  # (FragPipe's own report.tsv does carry Lib.Q.Value / Lib.PG.Q.Value -- columns 39
+  # and 40 -- so it needs no special handling; it works with limpa's defaults.)
+  q_want <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
+  q_alt  <- c("Global.Q.Value", "Global.PG.Q.Value", "PG.Q.Value")
+  q_use  <- intersect(q_want, have_cols)
+  q_extra <- intersect(setdiff(q_alt, q_use), have_cols)
+  if (length(setdiff(q_want, have_cols)) > 0) {
+    q_use <- unique(c(q_use, q_extra))
+    message(sprintf(paste0("[run_de] this report has no %s; limpa would apply NO filter ",
+                           "for those columns without saying so. Filtering on %s instead."),
+                    paste(setdiff(q_want, have_cols), collapse = " / "),
+                    paste(q_use, collapse = " / ")))
+  }
+  if (length(q_use) == 0)
+    stop("No usable q-value column found in ", basename(input),
+         " -- cannot apply identification FDR. Columns present: ",
+         paste(have_cols, collapse = ", "))
+
+  dat <- limpa::readDIANN(input, format = format, q.cutoffs = q_cutoff,
+                          q.columns = q_use)
+  message(sprintf("[run_de] readDIANN: %d precursors x %d runs (FDR %.3f on %s)",
+                  nrow(dat$E), ncol(dat$E), q_cutoff, paste(q_use, collapse = ", ")))
 
   dpcfit    <- limpa::dpcCN(dat)
   y_protein <- limpa::dpcQuant(dat, "Protein.Group", dpc = dpcfit)

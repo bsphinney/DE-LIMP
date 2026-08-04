@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "repo": "bsphinney/DE-LIMP",
-  "generated": "2026-07-31",
+  "generated": "2026-08-04",
   "workflows": [
     {
       "id": "diann_astral_dia_human",
@@ -138,7 +138,8 @@
         "extra_files": []
       },
       "de": {
-        "method": "maxlfq",
+        "method": "dpc",
+        "input_note": "dia-quant-output/report.tsv (--format tsv) — FragPipe's DIA route bundles DIA-NN, so that file is precursor-level and limpa reads it. NOT the adapted report.parquet.\n",
         "q_cutoff": 0.01,
         "logfc": 1.0,
         "adjp": 0.05
@@ -187,7 +188,8 @@
         "extra_files": []
       },
       "de": {
-        "method": "maxlfq",
+        "method": "dpc",
+        "input_note": "dia-quant-output/report.tsv (--format tsv) — FragPipe's DIA route bundles DIA-NN, so that file is precursor-level and limpa reads it. NOT the adapted report.parquet.\n",
         "q_cutoff": 0.01,
         "logfc": 1.0,
         "adjp": 0.05
@@ -241,7 +243,8 @@
         "extra_files": []
       },
       "de": {
-        "method": "maxlfq",
+        "method": "dpc",
+        "input_note": "radiant_to_delimp.py output — precursor-level. adapt_radiant's report.parquet is protein-level and only supports maxlfq.\n",
         "q_cutoff": 0.01,
         "logfc": 1.0,
         "adjp": 0.05

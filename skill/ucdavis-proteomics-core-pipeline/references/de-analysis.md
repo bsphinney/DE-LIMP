@@ -66,15 +66,27 @@ as information rather than as a hole to filter around.
 
 1. **The user asked** — usually because they want QuantUMS quality filtering, or to
    match an earlier MaxLFQ analysis.
-2. **The input is protein-level.** `readDIANN()` keys on `Precursor.Id` and
-   `Precursor.Normalised`. DIA-NN's native `report.parquet` has them; the Sage /
-   FragPipe / Radiant adapters emit one row per protein x run and do not. `run_de.R`
-   checks before limpa is called and fails with the reason and the fix, rather than
-   letting limpa error on a missing column deep in its own code.
+2. **The file you point at is protein-level.** `readDIANN()` keys on `Precursor.Id`
+   and `Precursor.Normalised`. This is a property of the FILE, not of the engine —
+   most engines can feed limpa if you use the right output:
 
-   Radiant is the interesting case: `radiant_to_delimp.py` *does* emit precursor-level
-   output (that is what DE-LIMP's uploader needs), so pointing `--input` at that report
-   makes `dpc` work on Radiant results. `adapt_radiant`'s output does not.
+   - **DIA-NN** — `search_out/report.parquet`, native.
+   - **FragPipe** — `dia-quant-output/report.tsv` with `--format tsv`. Its DIA route
+     bundles DIA-NN, so this is a DIA-NN report and carries `Lib.Q.Value` /
+     `Lib.PG.Q.Value` (columns 39-40). Verified end-to-end on the 9-file class data:
+     22,425 precursors -> 12,485 proteins, both contrasts written.
+   - **Radiant** — `radiant_to_delimp.py` output. Verified twice: 3-run HeLa
+     (25,722 precursors x 3) and 18-run Poplar (21,370 precursors x 18).
+
+   The ADAPTED `report.parquet` from `adapt_*` is the exception: it collapses to one
+   row per protein x run on purpose, to feed the maxlfq path. `run_de.R` checks the
+   columns before limpa is called and names the precursor-level file to use instead.
+
+**q-value columns.** `readDIANN()` prints `Q-value columns <x> not found.` and then
+continues with that filter simply not applied — a message, not an error, easy to miss
+in a long log. `run_de.R` resolves `q.columns` against the real header, states which
+filters it applied, and stops if none are usable, so an unfiltered result can never
+look filtered.
 
 Do not read a bundle's `de.method: maxlfq` as a recommendation — it records what that
 engine's adapted output can support, not which method is better.

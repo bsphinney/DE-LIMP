@@ -49,7 +49,10 @@ search:
   estimate_params: false
 
 de:
-  method: maxlfq
+  method: dpc
+  input_note: >
+    radiant_to_delimp.py output — precursor-level. adapt_radiant's report.parquet is
+    protein-level and only supports maxlfq.
   q_cutoff: 0.01
   logfc: 1.0                                # volcano reference line only; not a filter
   adjp: 0.05

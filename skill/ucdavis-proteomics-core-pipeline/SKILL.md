@@ -639,11 +639,19 @@ Use `maxlfq` when **either**:
 1. **The user asks for it** — e.g. they want QuantUMS quality filtering (below), or
    to match a previous MaxLFQ-based analysis.
 2. **The input cannot support limpa.** `readDIANN()` needs PRECURSOR-level columns
-   (`Precursor.Id`, `Precursor.Normalised`). DIA-NN's own `report.parquet` has them.
-   The Sage / FragPipe / Radiant adapters collapse to one row per protein × run, so
-   limpa cannot run on their output — `run_de.R` checks this up front and says so.
-   (Radiant: `radiant_to_delimp.py` emits a precursor-level report that *does*
-   support `dpc` — point `--input` at that if you want limpa on Radiant results.)
+   (`Precursor.Id`, `Precursor.Normalised`). What matters is *which file you point at*,
+   not which engine ran:
+
+   | engine | file to use for `dpc` | verified |
+   |---|---|---|
+   | DIA-NN | `search_out/report.parquet` (native) | yes |
+   | FragPipe | `dia-quant-output/report.tsv` + `--format tsv` | yes — its DIA route bundles DIA-NN, so this **is** a DIA-NN report, `Lib.Q.Value`/`Lib.PG.Q.Value` included |
+   | Radiant | `radiant_to_delimp.py --out <x>.parquet` | yes |
+
+   What does **not** work is the *adapted* `report.parquet` from `adapt_sage` /
+   `adapt_fragpipe` / `adapt_radiant` — those deliberately collapse to one row per
+   protein × run to feed the maxlfq path. `run_de.R` checks up front and names the
+   precursor-level file to use instead.
 
 Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions).
