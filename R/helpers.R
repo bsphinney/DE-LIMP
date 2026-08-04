@@ -35,15 +35,26 @@ dpc_pipeline_descriptor <- function() {
 
 # Descriptor for the MaxLFQ + limma pipeline. Attached inside
 # build_maxlfq_pipeline() at quantification time.
+# NOTE: this pipeline does NOT implement Moschem et al. — see
+# docs/QUANTUMS_MAXLFQ_DEFECT.md. It reuses DIA-NN's precomputed PG.MaxLFQ, which
+# is broadcast across the precursor rows of a protein group and is therefore
+# unchanged by any precursor-level filter. The QuantUMS cutoffs here CENSOR cells;
+# they do not re-quantify. The label and citation reflect that.
 maxlfq_pipeline_descriptor <- function() {
   list(
     pipeline_id        = "maxlfq",
-    display_label      = "MaxLFQ + limma (Moschem 2025)",
-    rollup_method      = "DIA-NN PG.MaxLFQ",
+    display_label      = "QuantUMS-censored PG.MaxLFQ + limma",
+    rollup_method      = "DIA-NN PG.MaxLFQ (precomputed; reused, not recomputed)",
     normalization      = "quantile normalization (limma::normalizeBetweenArrays)",
     de_engine          = "limma::lmFit → contrasts.fit → eBayes (NA-tolerant per-row)",
     missing_value_policy = "NAs left in place; limma drops them per row at fit time. Proteins entirely missing in one condition surface in the On/Off Proteins panel.",
-    citation           = "Moschem et al., J. Proteome Res. 2025; 24:3860 (DOI: 10.1021/acs.jproteome.5c00009)"
+    quantums_semantics = paste(
+      "QuantUMS cutoffs remove protein x run CELLS (a cell is kept iff >=1 of its",
+      "precursors passed). The retained PG.MaxLFQ value is DIA-NN's, computed from",
+      "ALL precursors including the filtered ones, so it is never improved by the",
+      "filter. Moschem-style re-quantification is not implemented — see",
+      "docs/QUANTUMS_MAXLFQ_DEFECT.md."),
+    citation           = "MaxLFQ: Cox et al., MCP 2014. NOT Moschem et al. 2025 — no re-quantification is performed."
   )
 }
 
@@ -316,14 +327,27 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
   }
   filter_counts$input <- count_rows(flt)
 
-  # Identification FDR (matches paper's Methods, page 3861)
+  # Identification FDR (matches paper's Methods, page 3861).
+  #
+  # Run-level and library q-values alone do NOT control FDR across an experiment:
+  # a union of run-level-passing IDs over many runs has an experiment-wide FDR
+  # well above the nominal cutoff, and the inflated protein list also inflates the
+  # family size m that BH later corrects over. Global.PG.Q.Value / Global.Q.Value
+  # are DIA-NN's experiment-wide equivalents, so filter them too when present.
   if (!is.null(q_cutoff) && !is.na(q_cutoff) && q_cutoff > 0) {
     flt <- flt %>%
       dplyr::filter(Q.Value <= !!q_cutoff,
                     Lib.Q.Value <= !!q_cutoff,
                     Lib.PG.Q.Value <= !!q_cutoff)
+    fdr_cols <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
+    for (.qc in c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")) {
+      if (.qc %in% cols) {
+        flt <- flt %>% dplyr::filter(.data[[.qc]] <= !!q_cutoff)
+        fdr_cols <- c(fdr_cols, .qc)
+      }
+    }
     filters_applied <- c(filters_applied,
-      sprintf("Q.Value, Lib.Q.Value, Lib.PG.Q.Value <= %.3f", q_cutoff))
+      sprintf("%s <= %.3f", paste(fdr_cols, collapse = ", "), q_cutoff))
     filter_counts$after_fdr <- count_rows(flt)
   }
   # QuantUMS — eQ
@@ -357,11 +381,27 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
   # One PG.MaxLFQ value per (Protein.Group, Run). Take max in case multiple
   # precursor rows duplicate the protein-group MaxLFQ value (DIA-NN does
   # broadcast it across rows of a PG within a run).
+  #
+  # That broadcast is an ASSUMPTION the max() depends on: if it ever fails, max()
+  # silently biases every affected cell upward with nothing to detect it. Verified
+  # true on a DIA-NN 2.x report (772,285 of 772,285 cells had exactly 1 distinct
+  # value), but assert it rather than trust it.
+  #
+  # It is also why the QuantUMS cutoffs above cannot improve a retained number:
+  # the value is DIA-NN's, computed from ALL precursors including the filtered
+  # ones. See docs/QUANTUMS_MAXLFQ_DEFECT.md.
   pg_run <- rows %>%
     dplyr::group_by(Protein.Group, Run) %>%
-    dplyr::summarise(PG.MaxLFQ = max(PG.MaxLFQ, na.rm = TRUE),
+    dplyr::summarise(.n_distinct_maxlfq = dplyr::n_distinct(PG.MaxLFQ),
+                     PG.MaxLFQ = max(PG.MaxLFQ, na.rm = TRUE),
                      .groups = "drop") %>%
     dplyr::mutate(PG.MaxLFQ = ifelse(is.finite(PG.MaxLFQ), PG.MaxLFQ, NA_real_))
+
+  .n_bad <- sum(pg_run$.n_distinct_maxlfq > 1, na.rm = TRUE)
+  if (.n_bad > 0)
+    warning(sprintf(paste("MaxLFQ pipeline: PG.MaxLFQ is not broadcast in %d (Protein.Group, Run)",
+                          "cell(s); max() may bias those cells upward."), .n_bad))
+  pg_run$.n_distinct_maxlfq <- NULL
 
   # Pivot wide: rows = proteins, cols = runs
   wide <- pg_run %>%
@@ -381,6 +421,25 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
   # Use limma::normalizeBetweenArrays(method = "quantile"), the same
   # default used by FragPipe-Analyst, Spectronaut/MSstats, and DIA-NN's
   # own analyzer for cross-sample alignment.
+  # limma::normalizeQuantiles() calls approx() per column and fails hard with
+  #   "need at least two non-NA values to interpolate"
+  # if any run has <2 quantified proteins. An aggressive QuantUMS cutoff does
+  # exactly that: at eq/pgq >= 0.75 one run lost every row (so it never became a
+  # column and the job survived), but at >= 0.50 a run survived with a single
+  # value and the whole analysis died. Drop such runs explicitly and name them.
+  .n_finite <- colSums(is.finite(E_pre))
+  .degenerate <- colnames(E_pre)[.n_finite < 2]
+  if (length(.degenerate)) {
+    warning(sprintf("MaxLFQ pipeline: dropping %d run(s) with <2 quantified proteins after filtering: %s",
+                    length(.degenerate), paste(.degenerate, collapse = ", ")))
+    E_pre <- E_pre[, .n_finite >= 2, drop = FALSE]
+    filters_applied <- c(filters_applied,
+      sprintf("dropped %d degenerate run(s) (<2 proteins)", length(.degenerate)))
+  }
+  if (ncol(E_pre) < 2)
+    stop("MaxLFQ pipeline: fewer than 2 usable runs survived the filters. ",
+         "Loosen the QuantUMS cutoffs and try again.")
+
   if (requireNamespace("limma", quietly = TRUE)) {
     E <- limma::normalizeBetweenArrays(E_pre, method = "quantile")
   } else {
