@@ -93,7 +93,7 @@ bash scripts/check_access.sh <hive_user> <private_key_path>
 Read `recommended_mode` + `facility_software_available`, then:
 
 - **HIVE = yes → `hive_remote`:** drive HIVE over SSH from the local Claude Code
-  (`export HIVE_USER=… HIVE_KEY=…`; use `scripts/hive_exec.sh '<cmd>'`). The search
+  (`export HIVE_USER=… HIVE_KEY=…`; use `bash scripts/hive_exec.sh '<cmd>'`). The search
   runs as a **SLURM job** (`run_search.py --sbatch` → `hive_exec.sh 'sbatch job.sh'`),
   never the login node. HIVE gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
