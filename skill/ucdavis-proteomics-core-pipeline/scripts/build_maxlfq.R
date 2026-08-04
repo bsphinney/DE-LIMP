@@ -69,7 +69,7 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   # one PG.MaxLFQ per (Protein.Group, Run): DIA-NN broadcasts it across precursor rows.
   # Assert the broadcast rather than trust it — if it fails, max() silently biases the
   # affected cells upward. It is also the reason the QuantUMS cutoffs above only censor
-  # cells and never improve a retained value: see docs/QUANTUMS_MAXLFQ_DEFECT.md.
+  # cells and never improve a retained value: see docs/QUANTUMS_MAXLFQ_NOTES.md.
   pg_run <- rows |>
     dplyr::group_by(Protein.Group, Run) |>
     dplyr::summarise(.nd = dplyr::n_distinct(PG.MaxLFQ),

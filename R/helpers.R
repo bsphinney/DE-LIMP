@@ -35,26 +35,27 @@ dpc_pipeline_descriptor <- function() {
 
 # Descriptor for the MaxLFQ + limma pipeline. Attached inside
 # build_maxlfq_pipeline() at quantification time.
-# NOTE: this pipeline does NOT implement Moschem et al. — see
-# docs/QUANTUMS_MAXLFQ_DEFECT.md. It reuses DIA-NN's precomputed PG.MaxLFQ, which
-# is broadcast across the precursor rows of a protein group and is therefore
-# unchanged by any precursor-level filter. The QuantUMS cutoffs here CENSOR cells;
-# they do not re-quantify. The label and citation reflect that.
+# The QuantUMS cutoffs here CENSOR protein x run cells rather than re-quantifying:
+# DIA-NN broadcasts a precomputed PG.MaxLFQ across the precursor rows of a protein
+# group, so a precursor-level filter changes which cells survive, never their values.
+# That IS what Moschem et al. do — their published code uses diann::diann_matrix()
+# (which pivots a precomputed column), not diann::diann_maxlfq() (which recomputes).
+# So the citation is appropriate; see docs/QUANTUMS_MAXLFQ_NOTES.md for where this
+# pipeline still departs from the paper (proteotypic-only, cRAP removal).
 maxlfq_pipeline_descriptor <- function() {
   list(
     pipeline_id        = "maxlfq",
-    display_label      = "QuantUMS-censored PG.MaxLFQ + limma",
-    rollup_method      = "DIA-NN PG.MaxLFQ (precomputed; reused, not recomputed)",
+    display_label      = "MaxLFQ + limma (Moschem 2025)",
+    rollup_method      = "DIA-NN PG.MaxLFQ (precomputed, pivoted — not recomputed)",
     normalization      = "quantile normalization (limma::normalizeBetweenArrays)",
     de_engine          = "limma::lmFit → contrasts.fit → eBayes (NA-tolerant per-row)",
     missing_value_policy = "NAs left in place; limma drops them per row at fit time. Proteins entirely missing in one condition surface in the On/Off Proteins panel.",
     quantums_semantics = paste(
-      "QuantUMS cutoffs remove protein x run CELLS (a cell is kept iff >=1 of its",
-      "precursors passed). The retained PG.MaxLFQ value is DIA-NN's, computed from",
-      "ALL precursors including the filtered ones, so it is never improved by the",
-      "filter. Moschem-style re-quantification is not implemented — see",
-      "docs/QUANTUMS_MAXLFQ_DEFECT.md."),
-    citation           = "MaxLFQ: Cox et al., MCP 2014. NOT Moschem et al. 2025 — no re-quantification is performed."
+      "QuantUMS cutoffs remove protein x run CELLS; a cell is kept iff >=1 of its",
+      "precursors passed, and the retained value is DIA-NN's, unchanged. This matches",
+      "the reference implementation. Departures from the paper: it uses all peptides",
+      "(PG.MaxLFQ) where the paper uses proteotypic only (Genes.MaxLFQ.Unique)."),
+    citation           = "Moschem et al., J. Proteome Res. 2025; 24:3860 (DOI: 10.1021/acs.jproteome.5c00009)"
   )
 }
 
@@ -389,7 +390,7 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
   #
   # It is also why the QuantUMS cutoffs above cannot improve a retained number:
   # the value is DIA-NN's, computed from ALL precursors including the filtered
-  # ones. See docs/QUANTUMS_MAXLFQ_DEFECT.md.
+  # ones. See docs/QUANTUMS_MAXLFQ_NOTES.md.
   pg_run <- rows %>%
     dplyr::group_by(Protein.Group, Run) %>%
     dplyr::summarise(.n_distinct_maxlfq = dplyr::n_distinct(PG.MaxLFQ),
