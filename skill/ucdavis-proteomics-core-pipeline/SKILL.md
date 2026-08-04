@@ -632,6 +632,28 @@ Rscript scripts/run_de.R --input ./search_out/report.parquet \
 Use the `de.method` from the bundle (`dpc` for DIA-NN/limpa, `maxlfq` for
 Sage/FragPipe). Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions).
+
+**QuantUMS quality filtering (`--method maxlfq`, DIA-NN input only).** DIA-NN's
+QuantUMS scores how well MS1 and MS2 agree for each measurement, and filtering on it
+trades depth for quantitative reliability:
+
+| flag | column | default | what it does |
+|---|---|---|---|
+| `--eq-cutoff` | `Empirical.Quality` | 0 (off) | drop precursors whose empirical quality is below this |
+| `--pgq-cutoff` | `PG.MaxLFQ.Quality` | 0 (off) | drop protein groups whose MaxLFQ quality is below this |
+| `--coverage-min` | — | 0.5 | require a protein in ≥ this fraction of samples before testing |
+
+Both QuantUMS cutoffs are **off by default** — they discard real measurements, so
+they are the user's call, not a silent default. Offer them when quantitative
+precision matters more than depth (small fold-changes, few replicates), say roughly
+how many proteins each costs, and record the choice: the counts land in
+`filters_applied` and flow into `methods.txt`. They need DIA-NN input — the columns
+don't exist in Sage/FragPipe/Radiant output, and the filter is skipped if absent.
+
+`--coverage-min` is different: it is **on** at 0.5 because a protein seen in one or
+two samples is an on/off observation, and letting such rows into `eBayes` destabilises
+the variance moderation for *every* protein, not just those rows.
+
 → detail: `references/de-analysis.md`.
 
 ### 8b. Generate figures

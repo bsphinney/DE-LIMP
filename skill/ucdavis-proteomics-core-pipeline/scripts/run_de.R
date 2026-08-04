@@ -56,6 +56,9 @@ contrasts <- getarg("--contrasts", NULL)
 q_cutoff  <- as.numeric(getarg("--q-cutoff", "0.01"))
 eq_cutoff <- as.numeric(getarg("--eq-cutoff", "0"))
 pgq_cutoff<- as.numeric(getarg("--pgq-cutoff", "0"))
+# Fraction of samples a protein must be quantified in to be TESTED (maxlfq path).
+# 0.5 matches DE-LIMP's default and the UC Davis Bioinformatics Core recommendation.
+cov_min_frac <- as.numeric(getarg("--coverage-min", "0.5"))
 outdir    <- getarg("--outdir", "de_results")
 # --logfc is a REFERENCE LINE ONLY -- it is drawn and labelled on the volcano and never
 # filters anything. Significance is the BH-adjusted p-value alone, which is the exact
@@ -129,6 +132,33 @@ if (method == "dpc") {
   descriptor <- ml$descriptor
   message(sprintf("[run_de] MaxLFQ matrix: %d proteins x %d runs (%.1f%% missing)",
                   nrow(E), ncol(E), 100 * mean(is.na(E))))
+
+  # ---- coverage filter (ported from DE-LIMP server_data.R) -----------------
+  # The MaxLFQ matrix keeps every protein seen in ANY run, so rows with 1-2
+  # finite values reach limma. eBayes then moderates variance against rows whose
+  # variance is barely estimable, which destabilises the whole fit -- not just
+  # those rows. Require a protein to be quantified in at least `--coverage-min`
+  # of samples before testing; the rest are an on/off observation, not a
+  # differential-abundance result.
+  n_samples     <- ncol(E)
+  min_obs       <- max(2, ceiling(cov_min_frac * n_samples))
+  n_obs_per_row <- rowSums(!is.na(E))
+  keep_cov      <- n_obs_per_row >= min_obs
+  n_dropped     <- sum(!keep_cov)
+  message(sprintf("[run_de] coverage filter: keep proteins with >= %d/%d non-NA (%.0f%%). Kept %d, dropped %d.",
+                  min_obs, n_samples, 100 * cov_min_frac, sum(keep_cov), n_dropped))
+  if (sum(keep_cov) < 10)
+    stop(sprintf(paste0("Coverage filter left only %d testable proteins (needed >= %d non-NA ",
+                        "of %d samples). Loosen --coverage-min, or the QuantUMS cutoffs ",
+                        "(--eq-cutoff / --pgq-cutoff) if those are doing the damage."),
+                 sum(keep_cov), min_obs, n_samples))
+  E <- E[keep_cov, , drop = FALSE]
+  if (!is.null(genes) && nrow(genes) == length(keep_cov))
+    genes <- genes[keep_cov, , drop = FALSE]
+  prev_filters <- if (is.null(descriptor$filters_applied)) character(0) else descriptor$filters_applied
+  descriptor$filters_applied <- c(prev_filters,
+    sprintf("coverage >= %d/%d non-NA samples (%.0f%%); %d proteins dropped",
+            min_obs, n_samples, 100 * cov_min_frac, n_dropped))
 }
 
 # ---- align metadata to the matrix columns -----------------------------------

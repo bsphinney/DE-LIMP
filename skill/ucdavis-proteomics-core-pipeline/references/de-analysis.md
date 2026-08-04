@@ -55,6 +55,20 @@ Protein.Names`). `run_search.py` produces this for non-DIA-NN engines.
 or empty groups. Groups with <2 replicates have no within-group variance — warn the
 user at the design step (`collect_conditions.py --validate` flags singletons).
 
+## Coverage filter (maxlfq path)
+
+`--coverage-min` (default 0.5) drops proteins quantified in fewer than that fraction
+of samples **before** limma. The MaxLFQ matrix keeps every protein seen in *any* run,
+so rows with 1-2 finite values otherwise reach `eBayes`, which then moderates variance
+against rows whose variance is barely estimable — destabilising the whole fit, not just
+those rows. Dropped proteins are an on/off observation, not a differential-abundance
+result, and the count lands in `filters_applied` so the Methods text says so.
+
+Ported from DE-LIMP (`server_data.R`), whose default and rationale come from the
+UC Davis Bioinformatics Core. If it leaves <10 testable proteins the run stops rather
+than fitting noise — loosen `--coverage-min`, or the QuantUMS cutoffs if those are
+what emptied the matrix.
+
 ## Provenance (self-describing — DE-LIMP architectural rule #1)
 Each method path returns a `descriptor` (pipeline_id, display_label, rollup_method,
 de_engine, missing_policy, citation). `methods.txt` is built from it — **never
@@ -65,5 +79,13 @@ hardcode a description of what ran**, and hand `methods.txt` to the user verbati
   Li M, Smyth GK (2023) Bioinformatics 39(5):btad200. (DE-LIMP's
   `dpc_pipeline_descriptor()` mis-cites this as "Law CW, Smyth GK" — fix upstream.)
 - **MaxLFQ path:** DIA-NN MaxLFQ (Demichev et al. 2020, Nat Methods 17:41) +
-  limma (Ritchie et al. 2015, NAR 43:e47). (DE-LIMP's "Moschem et al. 2025"
-  reference could not be verified — reconcile before publishing methods text.)
+  limma (Ritchie et al. 2015, NAR 43:e47).
+- **QuantUMS quality filtering:** da Cruz Moschem J, Silva Campitelli de Barros BC,
+  de Toledo Serrano SM, Chaves AFA (2025) *Decoding the Impact of Isolation Window
+  Selection and QuantUMS Filtering in DIA-NN for DIA Quantification of Peptides and
+  Proteins.* J Proteome Res 24:3860-3873. doi:10.1021/acs.jproteome.5c00009.
+  **VERIFIED 2026-08-04** — an earlier note here said this "could not be verified";
+  that was wrong. DE-LIMP cites it as "Moschem et al." (the first author's surname is
+  da Cruz Moschem). QuantUMS computes three scores: protein-group MaxLFQ quality,
+  empirical quality, and quantity quality, all measuring MS1/MS2 feature agreement.
+  The skill filters on the first two (`--pgq-cutoff`, `--eq-cutoff`).
