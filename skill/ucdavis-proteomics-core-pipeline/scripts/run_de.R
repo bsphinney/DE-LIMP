@@ -92,7 +92,28 @@ message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s",
 
 descriptor <- NULL
 
+# limpa/DPC is the DEFAULT path. It needs PRECURSOR-level input: readDIANN() keys on
+# Precursor.Id + Precursor.Normalised. DIA-NN's native report.parquet has them; the
+# adapters for Sage/FragPipe/Radiant collapse to one protein x run row, so limpa
+# cannot run on their output. Check up front and say so in one line, rather than
+# letting limpa fail deep inside with a column error the user cannot act on.
 if (method == "dpc") {
+  have_cols <- tryCatch({
+    if (identical(format, "parquet")) names(arrow::open_dataset(input)$schema)
+    else names(utils::read.delim(input, nrows = 1, check.names = FALSE))
+  }, error = function(e) character(0))
+  need_dpc <- c("Precursor.Id", "Precursor.Normalised")
+  miss_dpc <- setdiff(need_dpc, have_cols)
+  if (length(have_cols) > 0 && length(miss_dpc) > 0)
+    stop(sprintf(paste0(
+      "--method dpc (limpa) needs PRECURSOR-level input but %s has no %s.\n",
+      "  DIA-NN's own report.parquet is precursor-level and works.\n",
+      "  Sage / FragPipe / Radiant reports are adapted to one row per protein x run,\n",
+      "  so limpa cannot run on them -- use --method maxlfq for those.\n",
+      "  (Radiant: radiant_to_delimp.py emits a precursor-level report that DOES\n",
+      "   support dpc; point --input at that instead.)"),
+      basename(input), paste(miss_dpc, collapse = " / ")))
+
   if (!requireNamespace("limpa", quietly = TRUE))
     stop("limpa is required for --method dpc. BiocManager::install('limpa') (needs R 4.5+, Bioc 3.22+).")
   suppressMessages({ library(limpa); library(limma) })

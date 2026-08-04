@@ -629,11 +629,27 @@ once `COMPLETED` and `report.parquet` exists. → detail: `references/watcher.md
 Rscript scripts/run_de.R --input ./search_out/report.parquet \
     --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results
 ```
-Use the `de.method` from the bundle (`dpc` for DIA-NN/limpa, `maxlfq` for
-Sage/FragPipe). Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
+**`dpc` (limpa) is THE DEFAULT — use it unless the user asks otherwise or the data
+cannot support it.** limpa models the detection-probability curve and quantifies from
+precursor intensities directly, so it uses the whole measurement rather than a
+pre-collapsed protein number. Don't switch away from it because a bundle happens to
+say `maxlfq`; switch only for the two reasons below.
+
+Use `maxlfq` when **either**:
+1. **The user asks for it** — e.g. they want QuantUMS quality filtering (below), or
+   to match a previous MaxLFQ-based analysis.
+2. **The input cannot support limpa.** `readDIANN()` needs PRECURSOR-level columns
+   (`Precursor.Id`, `Precursor.Normalised`). DIA-NN's own `report.parquet` has them.
+   The Sage / FragPipe / Radiant adapters collapse to one row per protein × run, so
+   limpa cannot run on their output — `run_de.R` checks this up front and says so.
+   (Radiant: `radiant_to_delimp.py` emits a precursor-level report that *does*
+   support `dpc` — point `--input` at that if you want limpa on Radiant results.)
+
+Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions).
 
-**QuantUMS quality filtering (`--method maxlfq`, DIA-NN input only).** DIA-NN's
+**QuantUMS quality filtering — opt-in, `--method maxlfq`, DIA-NN input only.**
+Only reach for this when the user asks. DIA-NN's
 QuantUMS scores how well MS1 and MS2 agree for each measurement, and filtering on it
 trades depth for quantitative reliability:
 

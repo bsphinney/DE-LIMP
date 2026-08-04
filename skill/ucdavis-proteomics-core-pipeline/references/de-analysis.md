@@ -55,6 +55,30 @@ Protein.Names`). `run_search.py` produces this for non-DIA-NN engines.
 or empty groups. Groups with <2 replicates have no within-group variance — warn the
 user at the design step (`collect_conditions.py --validate` flags singletons).
 
+## Method choice — limpa/DPC is the default
+
+`--method dpc` (limpa) is the default and should stay that way. It models the
+detection-probability curve and quantifies from precursor intensities, so it uses the
+whole measurement instead of a pre-collapsed protein number, and it handles missingness
+as information rather than as a hole to filter around.
+
+`--method maxlfq` is for two situations only:
+
+1. **The user asked** — usually because they want QuantUMS quality filtering, or to
+   match an earlier MaxLFQ analysis.
+2. **The input is protein-level.** `readDIANN()` keys on `Precursor.Id` and
+   `Precursor.Normalised`. DIA-NN's native `report.parquet` has them; the Sage /
+   FragPipe / Radiant adapters emit one row per protein x run and do not. `run_de.R`
+   checks before limpa is called and fails with the reason and the fix, rather than
+   letting limpa error on a missing column deep in its own code.
+
+   Radiant is the interesting case: `radiant_to_delimp.py` *does* emit precursor-level
+   output (that is what DE-LIMP's uploader needs), so pointing `--input` at that report
+   makes `dpc` work on Radiant results. `adapt_radiant`'s output does not.
+
+Do not read a bundle's `de.method: maxlfq` as a recommendation — it records what that
+engine's adapted output can support, not which method is better.
+
 ## Coverage filter (maxlfq path)
 
 `--coverage-min` (default 0.5) drops proteins quantified in fewer than that fraction
