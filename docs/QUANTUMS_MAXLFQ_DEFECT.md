@@ -62,10 +62,42 @@ So `pgQ` is a coherent **cell** filter and works correctly as written. `eQ` is a
 DPC-Quant quantifies proteins **from precursors**. There an eQ filter genuinely changes
 the result. The defect is confined to the MaxLFQ path.
 
-## Reference implementation (not yet wired in)
+## IMPORTANT: post-hoc re-quantification is NOT equivalent — measured
 
-`iq::fast_MaxLFQ` is the reference implementation of the MaxLFQ algorithm and installs
-cleanly alongside the existing container R:
+The obvious fix is "recompute MaxLFQ from the surviving precursors." We implemented that
+with `iq::fast_MaxLFQ` and **measured how well it reproduces DIA-NN's `PG.MaxLFQ` with the
+filter switched off**, which is the control that has to pass before the filtered version
+means anything. It does not pass:
+
+| `iq::fast_MaxLFQ` input | median per-protein r vs DIA-NN `PG.MaxLFQ` | fraction r > 0.9 |
+|---|---|---|
+| `Precursor.Normalised` | **0.598** | 5.5% |
+| `Precursor.Quantity` | 0.327 | 0.0% |
+| `Precursor.Normalised`, proteotypic only | 0.581 | 5.0% |
+| `Precursor.Quantity`, proteotypic only | 0.325 | 0.0% |
+
+(400 protein groups present in ≥200 of 276 runs; correlation computed per protein across
+runs, so a constant per-protein offset cannot explain the gap.)
+
+**Why:** DIA-NN 2.x does not compute `PG.MaxLFQ` with the classic MaxLFQ algorithm. It
+computes protein quantities with **QuantUMS**, its uncertainty-minimising estimator; the
+column retains the legacy name. So substituting `iq`'s classic MaxLFQ does not "recompute
+the same number from fewer precursors" — it swaps in a **different estimator**.
+
+Consequence: a post-hoc `iq` re-quantification arm conflates two changes (the filter *and*
+a different quantification algorithm) and cannot be presented as "the Moschem workflow
+done correctly". The higher `Precursor.Normalised` score does at least confirm DIA-NN's
+protein quantity is built from normalised precursor quantities, not raw ones.
+
+**The only faithful route is to apply the quality filtering inside DIA-NN** so that DIA-NN
+recomputes its own QuantUMS protein quantities from the surviving precursors. Any
+post-hoc re-quantification in R should be labelled as a different estimator, not as the
+published method.
+
+## Reference implementation (for the different-estimator route only)
+
+If a post-hoc route is wanted anyway — clearly labelled as classic MaxLFQ, not QuantUMS —
+`iq::fast_MaxLFQ` installs cleanly alongside the existing container R:
 
 ```r
 # after the eQ / pgQ filters, instead of reusing PG.MaxLFQ:
@@ -79,13 +111,19 @@ E_pre <- iq::fast_MaxLFQ(nd)$estimate      # log2, proteins x runs
 
 Requires `Precursor.Id` and `Precursor.Normalised` in the selected columns.
 
-**Suggested validation when wiring this in:** run it with the filter **off** and compare
-against DIA-NN's own `PG.MaxLFQ`. They should track closely; if they do not, the
-re-quantification is wrong.
+**Decision needed from the maintainer.** Three options, in order of faithfulness:
 
-**Decision needed from the maintainer:** adding `iq` is a new dependency. The alternative
-is to drop `eq_cutoff` from the MaxLFQ path entirely and expose only `pgq_cutoff`, which
-is coherent as written — at the cost of not offering the paper's method at all.
+1. **Apply the QuantUMS filtering inside DIA-NN** and let it recompute its own protein
+   quantities. This is the only route that actually reproduces the published method. It
+   means the filter becomes a search-time setting rather than a post-processing toggle.
+2. **Drop `eq_cutoff` from the MaxLFQ path** and expose only `pgq_cutoff`, which is
+   coherent as written because pgQ is already a per-cell score. Honest, cheap, and loses
+   nothing that currently works — but does not offer the paper's method.
+3. **Post-hoc `iq` re-quantification**, clearly labelled as *classic MaxLFQ*, accepting
+   that it is a different estimator from DIA-NN's QuantUMS (median per-protein r ≈ 0.6
+   against `PG.MaxLFQ` even with no filtering) and adds a dependency.
+
+Option 2 is the smallest correct change. Option 1 is the right long-term answer.
 
 ## Two further defects in the same function (fixed in this PR)
 
