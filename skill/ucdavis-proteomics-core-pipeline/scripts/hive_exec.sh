@@ -18,7 +18,13 @@
 # Heavy compute must go through SLURM (sbatch), never the login node.
 # =============================================================================
 set -uo pipefail
-HU="${HIVE_USER:?set HIVE_USER (ask the user for their HIVE username)}"
+# Env vars do not survive between tool calls / shells, so requiring HIVE_USER in the
+# environment means every helper that shells out (watch_run.sh especially) silently
+# fails with an empty result -- which downstream code reads as "nothing there".
+# Persist it once to a config file and every later invocation just works.
+CFG="${HIVE_ENV_FILE:-$HOME/.config/ucdavis-proteomics/hive.env}"
+if [ -z "${HIVE_USER:-}" ] && [ -f "$CFG" ]; then . "$CFG"; fi
+HU="${HIVE_USER:?set HIVE_USER, or save it once: mkdir -p ~/.config/ucdavis-proteomics && printf \'HIVE_USER=<user>\\nHIVE_KEY=~/.ssh/id_ed25519\\n\' > ~/.config/ucdavis-proteomics/hive.env}"
 KEY="${HIVE_KEY:?set HIVE_KEY to the private-key path the user gave you}"
 KEY="${KEY/#\~/$HOME}"
 HOST="${HIVE_HOST:-hive.hpc.ucdavis.edu}"

@@ -38,9 +38,14 @@ state="unknown"; done=false; failed=false; q_failed=false; fix_qf=""
 # running". jobs.txt is written by submit.sh with every id in the chain.
 if [ "$MODE" = "chain" ]; then
   JT="$CHAINDIR/jobs.txt"
+  probe="$(run "echo __ok__" 2>&1)"
+  if ! printf '%s' "$probe" | grep -q __ok__; then
+    echo "{\"mode\":\"chain\",\"failed\":true,\"done\":true,\"err_class\":\"watcher_query_failed\",\"detail\":$(printf '%s' "$probe" | head -2 | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))'),\"fix\":\"Cannot reach the cluster at all — this is NOT a job failure and NOT a missing file. Usually HIVE_USER/HIVE_KEY are unset: save them once to ~/.config/ucdavis-proteomics/hive.env. Re-run the watcher before drawing any conclusion about the run.\"}"
+    exit 3
+  fi
   ids="$(run "cat $JT 2>/dev/null | tr '\n' ' '" 2>/dev/null)"
   if [ -z "$ids" ]; then
-    echo "{\"error\":\"no jobs.txt under $CHAINDIR — was this chain submitted via submit.sh?\"}"
+    echo "{\"mode\":\"chain\",\"failed\":true,\"done\":true,\"err_class\":\"no_jobs_file\",\"fix\":\"Cluster is reachable but $JT does not exist — this chain was not submitted via submit.sh (older runs predate jobs.txt). Write it by hand with one job id per line, then re-run.\"}"
     exit 2
   fi
   worst=""; anyfail=false; allterm=true; summary=""
