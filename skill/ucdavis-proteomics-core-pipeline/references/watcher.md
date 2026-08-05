@@ -8,6 +8,22 @@ authorization for this — see golden rule #1's compute confirmation is for *sta
 the search, not for recovering a run that's already approved and in flight). Surface
 what you did afterwards; don't ask permission to unstick a job.
 
+## Watch the WHOLE chain, not its last job
+
+For any multi-step chain (`diann_parallel.py`, `radiant_parallel.py`), watch with:
+
+```bash
+bash scripts/watch_run.sh --all <search out dir> --hive
+```
+
+It reads `jobs.txt` (written by `submit.sh`) and reports every job's state at once.
+**Do not** watch only the final job. If an earlier step dies, the final job sits
+`PENDING` on a dependency that can never be satisfied — which is indistinguishable
+from "still queued" if that is the only job you are looking at. This actually
+happened: a step-4 array hit `TIMEOUT`, step 5 went `CANCELLED`, and a watcher
+pointed at step 5 alone reported "pending" for hours. `--all` returns
+`failed:true` with `first_failed_job` in that situation.
+
 `watch_run.sh` does one poll + diagnosis (state, **stall**, error class, fix); loop it
 until the run finishes, and on `failed` **or** `stalled` apply the fix and resubmit.
 

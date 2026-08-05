@@ -16,9 +16,10 @@
 #   while not done: watch_run.sh ...; sleep 60; done   # then act on failed/fix
 # =============================================================================
 set -uo pipefail
-MODE="local"; JOB=""; LOG=""; HIVE=false; STALL_MIN=15; OUTDIR=""; POLL=0
+MODE="local"; JOB=""; LOG=""; HIVE=false; STALL_MIN=15; OUTDIR=""; POLL=0; CHAINDIR=""
 while [ $# -gt 0 ]; do case "$1" in
   --slurm)     MODE="slurm"; JOB="$2"; shift 2;;
+  --all)       MODE="chain"; CHAINDIR="$2"; shift 2;;   # watch EVERY job in a chain
   --log)       LOG="$2"; shift 2;;
   --hive)      HIVE=true; shift;;
   --stall-min) STALL_MIN="$2"; shift 2;;   # RUNNING + log frozen this long ⇒ stalled
@@ -30,6 +31,37 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 run() { if $HIVE; then bash "$HERE/hive_exec.sh" "$*"; else bash -c "$*"; fi; }
 
 state="unknown"; done=false; failed=false; q_failed=false; fix_qf=""
+
+# --all <dir>: watch the WHOLE chain, not just its last link. Watching only the final
+# job is why a step-4 array that timed out went unnoticed for hours -- step 5 simply
+# sat PENDING on a dependency that could never be satisfied, which reads as "still
+# running". jobs.txt is written by submit.sh with every id in the chain.
+if [ "$MODE" = "chain" ]; then
+  JT="$CHAINDIR/jobs.txt"
+  ids="$(run "cat $JT 2>/dev/null | tr '\n' ' '" 2>/dev/null)"
+  if [ -z "$ids" ]; then
+    echo "{\"error\":\"no jobs.txt under $CHAINDIR — was this chain submitted via submit.sh?\"}"
+    exit 2
+  fi
+  worst=""; anyfail=false; allterm=true; summary=""
+  for id in $ids; do
+    js="$(run "sacct -j $id -X --noheader -o State 2>/dev/null | tr -d ' ' | sed 's/+$//' | sort -u | tr '\n' ','" 2>/dev/null)"
+    [ -z "$js" ] && js="UNKNOWN"
+    summary="$summary $id=${js%,}"
+    printf '%s' "$js" | grep -qE "FAILED|TIMEOUT|OUT_OF_ME|NODE_FAIL" && { anyfail=true; worst="$id"; }
+    printf '%s' "$js" | grep -qE "RUNNING|PENDING|UNKNOWN" && allterm=false
+  done
+  if $anyfail; then
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":true,\"done\":true,\"first_failed_job\":\"$worst\",\"chain\":\"${summary# }\",\"fix\":\"A step FAILED. Inspect it: watch_run.sh --slurm $worst --hive. Downstream steps will sit PENDING with DependencyNeverSatisfied forever until you fix and resubmit them.\"}"
+    exit 0
+  fi
+  if $allterm; then
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":true,\"chain\":\"${summary# }\"}"
+  else
+    echo "{\"mode\":\"chain\",\"dir\":\"$CHAINDIR\",\"failed\":false,\"done\":false,\"chain\":\"${summary# }\"}"
+  fi
+  exit 0
+fi
 if [ "$MODE" = "slurm" ] && [ -n "$JOB" ]; then
   # -X = one row per JOB STEP, not per .batch/.extern subrecord. For a job ARRAY this
   # is many rows; `head -1` would report one arbitrary task's state as the whole job's

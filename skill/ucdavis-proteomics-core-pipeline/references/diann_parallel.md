@@ -75,6 +75,8 @@ bash scripts/hive_exec.sh 'bash <out>/submit.sh'
 ```
 It writes `file_list.txt`, `step{1..5}_*.sbatch`, and `submit.sh` (which submits all
 five with dependencies and prints the job ids). **Watch the final job** with
+`watch_run.sh --all <out> --hive` (reads `jobs.txt`; covers all five steps — watching
+only step 5 hides an upstream failure as a permanent `PENDING`), or for one step
 `watch_run.sh --slurm <jid5> --log <out>/s5_report_<jid5>.log --hive`. When step 5
 completes, point `run_de.R` at `<out>/report.parquet`.
 

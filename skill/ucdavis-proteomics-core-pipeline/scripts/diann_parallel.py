@@ -323,6 +323,8 @@ def main():
         f'  --report "{D}/{report}" --watch-job "$jid5" --watch-log "{D}/s5_report_${{jid5}}.log" \\',
         f'  --next "Rscript run_de.R --input {D}/{report} --metadata {sess}/input/conditions.csv --method dpc --outdir {sess}/output/tables" \\',
         '  >/dev/null 2>&1 || true',
+        f'printf "%s\\n" {jobs.replace(",", " ")} > "{D}/jobs.txt"',
+        f'echo "all chain job ids -> {D}/jobs.txt  (watch the WHOLE chain: watch_run.sh --all {D})"',
         f'echo "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
     write("submit.sh", "\n".join(sub_lines))
 

@@ -589,6 +589,8 @@ unmonitored.** Poll with `watch_run.sh` in a loop until it finishes:
 bash scripts/watch_run.sh --log <search log> --out <search out dir> --poll <n>
 # SLURM on HIVE:
 bash scripts/watch_run.sh --slurm <jobid> --log <job log> --out <out> --poll <n> --hive
+# multi-step chains (diann_parallel / radiant_parallel): watch EVERY step, never just the last
+bash scripts/watch_run.sh --all <search out dir> --hive
 ```
 **Always pass `--out` and increment `--poll` each time.** `--out` is what turns "still
 running" into real progress: the chain drops a `.quant` per finished file, so the watcher
