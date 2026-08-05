@@ -29,11 +29,37 @@ esac; done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 run() { if $HIVE; then bash "$HERE/hive_exec.sh" "$*"; else bash -c "$*"; fi; }
 
-state="unknown"; done=false; failed=false
+state="unknown"; done=false; failed=false; q_failed=false; fix_qf=""
 if [ "$MODE" = "slurm" ] && [ -n "$JOB" ]; then
-  st="$(run "sacct -j $JOB --noheader -o State 2>/dev/null | head -1 | tr -d ' '" 2>/dev/null)"
-  [ -z "$st" ] && st="$(run "squeue -j $JOB -h -o %T 2>/dev/null" 2>/dev/null)"
-  state="${st:-PENDING}"
+  # -X = one row per JOB STEP, not per .batch/.extern subrecord. For a job ARRAY this
+  # is many rows; `head -1` would report one arbitrary task's state as the whole job's
+  # -- how a 4-COMPLETED / 14-TIMEOUT array read as healthy. Aggregate instead:
+  # failed if ANY task failed, done only when ALL tasks are terminal.
+  all_states="$(run "sacct -j $JOB -X --noheader -o State 2>/dev/null | tr -d ' ' | sed 's/+$//' | sort | uniq -c" 2>/dev/null)"
+  if [ -z "$all_states" ]; then
+    live="$(run "squeue -j $JOB -h -o %T 2>/dev/null | tr -d ' ' | sort -u" 2>/dev/null)"
+    if [ -n "$live" ]; then
+      all_states="$(printf '   1 %s\n' $live)"
+    else
+      # Neither sacct nor squeue answered. Do NOT call that PENDING -- that is how a
+      # dead job passes for a running one. Say the query failed and stop.
+      state="query_failed"; done=false; failed=true; q_failed=true
+      fix_qf="Could not read job state: sacct and squeue both returned nothing. Usually SLURM tools are not on PATH (hive_exec.sh must use a LOGIN shell), or the job id is wrong / aged out of sacct. Verify: hive_exec.sh 'sacct -j <id> -X'."
+    fi
+  fi
+  if [ "${state:-}" != "query_failed" ]; then
+    a_total=$(printf '%s\n' "$all_states" | awk '{s+=$1} END{print s+0}')
+    a_term=$(printf '%s\n' "$all_states" | awk '/COMPLETED|FAILED|TIMEOUT|OUT_OF_ME|CANCELLED|NODE_FAIL|PREEMPTED/{s+=$1} END{print s+0}')
+    a_bad=$(printf '%s\n' "$all_states"  | awk '/FAILED|TIMEOUT|OUT_OF_ME|NODE_FAIL/{s+=$1} END{print s+0}')
+    a_run=$(printf '%s\n' "$all_states"  | awk '/RUNNING/{s+=$1} END{print s+0}')
+    # worst state wins, so a partially-failed array is never reported as healthy
+    if   [ "$a_bad"  -gt 0 ]; then state="$(printf '%s\n' "$all_states" | awk '/FAILED|TIMEOUT|OUT_OF_ME|NODE_FAIL/{print $2; exit}')"
+    elif [ "$a_run"  -gt 0 ]; then state="RUNNING"
+    elif [ "$a_term" -gt 0 ] && [ "$a_term" -eq "$a_total" ]; then state="COMPLETED"
+    else state="PENDING"; fi
+    array_summary="$(printf '%s\n' "$all_states" | awk '{printf "%s=%s ", $2, $1}')"
+  fi
+  st="$state"
   reason="$(run "squeue -j $JOB -h -o %R 2>/dev/null" 2>/dev/null)"
   case "$state" in
     COMPLETED)                                   done=true;;
@@ -110,10 +136,12 @@ if [ -n "$OUTDIR" ]; then
 fi
 
 # ---- narration: what this stage is doing, plus something to read while waiting
+if $q_failed; then err_class="watcher_query_failed"; fix="$fix_qf"; fi
+
 notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/dev/null)"
 
 STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE="$MODE" \
-ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" \
+ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
 STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" python3 - <<'PY'
 import os, json
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
@@ -123,6 +151,7 @@ out = {
     "done": os.environ["DONE"] == "true", "failed": os.environ["FAILED"] == "true",
     "stalled": os.environ.get("STALLED") == "true",
     "error_class": os.environ["ECLASS"], "fix": os.environ["FIX"],
+    **({"array_tasks": os.environ["ATASKS"].strip()} if os.environ.get("ATASKS","").strip() else {}),
 }
 step_no = stage[4:] if stage.startswith("step") else None
 progress = {"stage": stage, "files_done": n_done, "files_total": n_total}
