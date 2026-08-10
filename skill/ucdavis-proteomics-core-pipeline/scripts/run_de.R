@@ -91,6 +91,7 @@ message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s",
 # genes (annotation df), and a `descriptor` describing the method (provenance).
 
 descriptor <- NULL
+quantums_applied <- character(0)   # populated on the dpc path; kept defined for provenance
 
 # limpa/DPC is the DEFAULT path. It needs PRECURSOR-level input: readDIANN() keys on
 # Precursor.Id + Precursor.Normalised. DIA-NN's native report.parquet has them; the
@@ -145,10 +146,75 @@ if (method == "dpc") {
          " -- cannot apply identification FDR. Columns present: ",
          paste(have_cols, collapse = ", "))
 
-  dat <- limpa::readDIANN(input, format = format, q.cutoffs = q_cutoff,
+  # QuantUMS cutoffs on the dpc path.
+  #
+  # readDIANN() takes no QuantUMS argument, so --eq-cutoff / --pgq-cutoff used to be
+  # parsed, silently dropped here, and then written into de_provenance.json anyway --
+  # producing UNFILTERED limpa output whose provenance claimed a filter. Silent wrong
+  # provenance is worse than a crash. Filter the report first, then hand limpa the
+  # filtered file (this is what DE-LIMP's filter_quantums_parquet() does in the app).
+  #
+  # Note the two scores sit at different levels, and it matters here because limpa
+  # RE-QUANTIFIES from precursors:
+  #   Empirical.Quality  varies within a (Protein.Group, Run) cell -> precursor-level;
+  #                      filtering it removes precursors and limpa re-rolls the protein
+  #                      from the survivors. Coherent.
+  #   PG.MaxLFQ.Quality  is constant within a cell -> protein x run level; filtering it
+  #                      deletes whole cells, which limpa's detection model then imputes
+  #                      back. Measured on a 274-run dataset: the fitted DPC slope
+  #                      flattened 16% (0.713 -> 0.600), detected fraction halved
+  #                      (73.5% -> 37.7%) and significant proteins fell 39%.
+  # So pgQ is allowed but warned about; eQ is the sane knob for this path.
+  dpc_input <- input
+  quantums_applied <- character(0)
+  if ((!is.na(eq_cutoff) && eq_cutoff > 0) || (!is.na(pgq_cutoff) && pgq_cutoff > 0)) {
+    if (!identical(format, "parquet"))
+      stop("--eq-cutoff / --pgq-cutoff on --method dpc need parquet input.")
+    if (!requireNamespace("arrow", quietly = TRUE) || !requireNamespace("dplyr", quietly = TRUE))
+      stop("arrow and dplyr are required to apply QuantUMS cutoffs on --method dpc.")
+    flt <- arrow::open_dataset(input)
+    if (!is.na(eq_cutoff) && eq_cutoff > 0) {
+      if (!"Empirical.Quality" %in% have_cols)
+        stop("--eq-cutoff given but this report has no Empirical.Quality column.")
+      flt <- dplyr::filter(flt, Empirical.Quality >= !!eq_cutoff)
+      quantums_applied <- c(quantums_applied, sprintf("Empirical.Quality >= %.2f", eq_cutoff))
+    }
+    if (!is.na(pgq_cutoff) && pgq_cutoff > 0) {
+      if (!"PG.MaxLFQ.Quality" %in% have_cols)
+        stop("--pgq-cutoff given but this report has no PG.MaxLFQ.Quality column.")
+      warning("--pgq-cutoff on --method dpc deletes whole protein x run cells, which limpa's ",
+              "detection model then imputes back. Prefer --eq-cutoff for this path.")
+      flt <- dplyr::filter(flt, PG.MaxLFQ.Quality >= !!pgq_cutoff)
+      quantums_applied <- c(quantums_applied, sprintf("PG.MaxLFQ.Quality >= %.2f", pgq_cutoff))
+    }
+    dpc_input <- file.path(tempdir(), "quantums_filtered_for_dpc.parquet")
+    arrow::write_parquet(dplyr::collect(flt), dpc_input)
+    message("[run_de] QuantUMS pre-filter for dpc: ", paste(quantums_applied, collapse = " | "))
+  }
+
+  dat <- limpa::readDIANN(dpc_input, format = format, q.cutoffs = q_cutoff,
                           q.columns = q_use)
   message(sprintf("[run_de] readDIANN: %d precursors x %d runs (FDR %.3f on %s)",
                   nrow(dat$E), ncol(dat$E), q_cutoff, paste(q_use, collapse = ", ")))
+
+  # ---- FIX: reconcile against the metadata BEFORE quantifying -----------------
+  # dpcQuant() on a 274-run report takes ~90 min. The run/metadata check used to sit
+  # after it, so a metadata file covering a SUBSET of the report burned the full
+  # quantification and then died with "Some report columns have no metadata row".
+  # maxlfq already honours keep_runs; dpc now does too.
+  .rep_runs <- colnames(dat$E)
+  .keep     <- .rep_runs %in% meta$File.Name
+  if (!any(.keep))
+    stop("No report run matches File.Name in the metadata. First report run: ", .rep_runs[1])
+  if (any(!.keep)) {
+    message(sprintf("[run_de] restricting to the %d of %d report runs present in the metadata",
+                    sum(.keep), length(.keep)))
+    dat <- dat[, .keep]
+  }
+  .absent <- setdiff(meta$File.Name, .rep_runs)
+  if (length(.absent))
+    message(sprintf("[run_de] note: %d metadata row(s) have no run in the report, e.g. %s",
+                    length(.absent), paste(utils::head(.absent, 2), collapse = ", ")))
 
   dpcfit    <- limpa::dpcCN(dat)
   y_protein <- limpa::dpcQuant(dat, "Protein.Group", dpc = dpcfit)
@@ -159,6 +225,7 @@ if (method == "dpc") {
     pipeline_id   = "dpc",
     display_label = "DPC-Quant + limma (limpa)",
     rollup_method = "DPC-Quant (Detection Probability Curve quantification, dpcCN)",
+    quantums_filter = if (length(quantums_applied)) paste(quantums_applied, collapse = " | ") else "none",
     de_engine     = "limpa::dpcDE (voomaLmFitWithImputation) -> contrasts.fit -> eBayes",
     missing_policy = "Missing precursors modelled via the detection probability curve; not imputed, not dropped.",
     citation      = "Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125; Li M, Smyth GK (2023) Bioinformatics 39(5):btad200"
@@ -350,7 +417,12 @@ prov <- list(
   pipeline_id = descriptor$pipeline_id, display_label = descriptor$display_label,
   rollup_method = descriptor$rollup_method, de_engine = descriptor$de_engine,
   missing_policy = descriptor$missing_policy, citation = descriptor$citation,
-  method = method, q_cutoff = q_cutoff, eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
+  method = method, q_cutoff = q_cutoff,
+  # Report the cutoffs as APPLIED. On the dpc path these were previously recorded
+  # whether or not they had any effect, so a provenance file could assert a filter the
+  # run never performed.
+  eq_cutoff  = if (method == "dpc" && !any(grepl("Empirical", quantums_applied))) 0 else eq_cutoff,
+  pgq_cutoff = if (method == "dpc" && !any(grepl("PG.MaxLFQ", quantums_applied))) 0 else pgq_cutoff,
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
   design = paste0("~ 0 + ", paste(formula_parts, collapse = " + ")),
