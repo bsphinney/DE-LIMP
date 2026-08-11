@@ -277,7 +277,15 @@ def main():
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
-        f'{DN} --f "$FILE" --fasta {fasta} --lib {empirical} \\',
+        # DIA-NN re-saves the library it is handed as "<lib>.skyline.speclib", written
+        # NEXT TO --lib. With one shared path every concurrent array task writes the same
+        # file; most win the race in seconds, the losers block until the wall clock kills
+        # them. Give each task its own copy so there is nothing to contend on.
+        f'LIBPRIV={D}/libpriv/t${{SLURM_ARRAY_TASK_ID}}',
+        'mkdir -p "$LIBPRIV"',
+        f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
+        'trap \'rm -rf "$LIBPRIV"\' EXIT',
+        f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
         f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names \\',
         f'  --threads {a.threads_per_file} {flags}']))
 

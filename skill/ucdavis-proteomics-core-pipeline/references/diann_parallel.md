@@ -52,6 +52,18 @@ empirical-library round-trip.
 - **No MBR** (`--reanalyse` is dropped) — the 5-step replaces it.
 - **`--quant-ori-names`** on every step so `.quant` files are `<basename>.quant`.
 - Step 4 **skips** files that failed step 2 (missing `.quant`).
+- Step 4 hands each task **its own copy** of the empirical library
+  (`libpriv/t<TASKID>/lib.parquet`, removed by a `trap` on exit). This is not an
+  optimisation — DIA-NN re-saves the library it is given as `<lib>.skyline.speclib`,
+  written *next to* `--lib`. Pointing every array task at one shared `empirical.parquet`
+  makes them all write the same file; most win the race in seconds and the losers block
+  until the wall clock kills them. Observed on a 399-file run: 51 tasks `TIMEOUT` at 3 h,
+  then after raising the limit to 12 h, 8 tasks stalled for over 3.5 h at
+  `[0:04] Saving the library`. With private copies the same 8 finished in 2 minutes.
+  **Raising `--time-per-file` does not fix this** — it only moves the stall further out.
+  Step 2 is unaffected because it is handed `step1.predicted.speclib`, already in
+  DIA-NN's processed form, so there is nothing to re-save. Step 5 is a single job and
+  cannot contend with itself.
 - **The `--temp` folders MUST pre-exist.** DIA-NN aborts immediately with
   `ERROR: cannot find the temp folder .../quant_step2. Specify an existing folder` if
   the `--temp` dir is missing — it will **not** create it. `submit.sh` therefore does
