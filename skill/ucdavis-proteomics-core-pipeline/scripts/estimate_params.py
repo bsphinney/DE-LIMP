@@ -105,7 +105,7 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
         return ("orbitrap_generic", None, None,
                 "Orbitrap (resolution unknown — using DIA-NN automatic calibration; "
                 "pass --ms1-resolution/--ms2-resolution to pin it)",
-                "DIA-NN default (--mass-acc 0 auto-optimises per run)")
+                "DIA-NN automatic calibration (mass-accuracy flags omitted)")
     return ("unknown", None, None, f"unrecognized instrument '{name}'", "auto-calibration fallback")
 
 
@@ -180,14 +180,28 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         r["variable_mods"] = tagged("none",
             "DIA-NN README: variable mods do not improve depth for relative quant; left off")
 
-    # mass accuracy — the data-type-dependent part
+    # mass accuracy — the data-type-dependent part.
+    #
+    # CRITICAL: `--mass-acc 0` is NOT "automatic" in DIA-NN. It fixes the tolerance
+    # at a literal 0 ppm, so no fragment can ever match and the run yields 0 IDs
+    # ("Mass accuracy will be fixed to 0 (MS2) and 0 (MS1)" in the log). Automatic
+    # calibration is what you get by OMITTING the flags entirely. So when we have no
+    # instrument-derived value, record the rationale but emit nothing (render=False).
+    # diann_parallel.parallel_safe() treats an absent flag exactly like 0 (both are
+    # "not fixed"), so the parallel-chain gate is unaffected.
     if ms2 is None:
-        add("--mass-acc", 0, src)        # 0 = automatic
-        add("--mass-acc-ms1", 0, src)
+        auto_src = (f"{src}; flags omitted so DIA-NN auto-calibrates per run "
+                    "(--mass-acc 0 would pin the tolerance at 0 ppm -> 0 IDs)")
+        add("--mass-acc", "auto (flag omitted)", auto_src, render=False)
+        add("--mass-acc-ms1", "auto (flag omitted)", auto_src, render=False)
     else:
         add("--mass-acc", ms2, f"{label}: MS2 {ms2} ppm [{src}]")
         add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{src}]")
-    add("--window", 0, "scan window auto-optimised per run (DIA-NN default)")
+    # --window 0 is likewise rejected ("scan window radius should be a positive
+    # integer"); omitting it lets DIA-NN set the radius from the observed peak width.
+    add("--window", "auto (flag omitted)",
+        "scan window radius auto-optimised per run from observed peak width",
+        render=False)
 
     # Contaminants: identify them, but keep them out of quant + normalisation.
     # The tag comes from fetch_fasta.py's sidecar so the cfg self-describes the

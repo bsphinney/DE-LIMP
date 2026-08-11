@@ -22,12 +22,18 @@ trypsin/LFQ default:
 | Orbitrap by MS2 resolution | 240k→4, 120k→7, 60k→10, 30k→15 ppm | (when resolution is known) |
 | Bruker timsTOF (dia-PASEF / ddaPASEF) | 15 / 15 ppm | name contains "tims" |
 | SCIEX TripleTOF / ZenoTOF | 20 / 20 ppm | name contains tripletof/zenotof/sciex |
-| Orbitrap, resolution unknown | **automatic calibration** (`--mass-acc 0`) | generic orbitrap names |
+| Orbitrap, resolution unknown | **automatic calibration** (flags omitted) | generic orbitrap names |
 | Instrument not detected | **automatic calibration** | fallback |
 
 Automatic calibration is DIA-NN's own recommended default — it optimises mass
 accuracy on the first run and reuses it. We fall back to it (never to a guessed
 number) whenever the instrument class can't be pinned down.
+
+⚠ **Automatic calibration means OMITTING `--mass-acc`/`--mass-acc-ms1`, not
+setting them to 0.** `--mass-acc 0` fixes the tolerance at a literal 0 ppm — the
+log reads `Mass accuracy will be fixed to 0 (MS2) and 0 (MS1)` and the search
+returns **0 identifications**. The same applies to `--window 0`, which DIA-NN
+rejects with `scan window radius should be a positive integer`.
 
 ## Sage tolerances are derived
 
