@@ -154,6 +154,11 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
 
     add("--qvalue", 0.01, "standard 1% precursor FDR")
     add("--matrices", True, UNIV)
+    # Extracted ion chromatograms: needed to visually validate an identification
+    # (DIA-NN XIC Viewer / Skyline) rather than trusting a q-value alone. 10s is
+    # DIA-NN's own default window and is cheap; the documented disk-space caveat
+    # applies to --xic-theoretical-fr and large windows, which are NOT enabled here.
+    add("--xic", 10, "extract XICs for identification validation (DIA-NN default 10s window)")
     add("--fasta-search", True, "library-free (predicted spectral library)")
     add("--gen-spec-lib", True, UNIV)
     add("--predictor", True, "deep-learning predictor for library-free DIA")

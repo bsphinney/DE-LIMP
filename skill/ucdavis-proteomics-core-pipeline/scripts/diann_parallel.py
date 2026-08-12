@@ -35,6 +35,9 @@ import os, sys, glob, argparse, shlex, subprocess
 # flows into every step (DIA-NN 2.6 searches DDA per file exactly as it does DIA).
 STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--reanalyse",
          "--rt-profiling", "--no-norm", "--xic", "--out-lib", "--lib", "--out", "--f",
+         # NOTE: --xic is stripped here on purpose and re-added to step 4 ONLY (see
+         # xic_flag() below) -- step 2 IDs are not final, and step 5 runs --use-quant,
+         # which never re-reads the raw spectra so --xic is silently a no-op there.
          "--fasta", "--threads", "--temp")
 
 
@@ -70,6 +73,27 @@ def read_cfg_flags(cfg):
         out.append(line)
     return " ".join(out)
 
+
+def xic_flag(cfg):
+    """Return the '--xic N' flag from the cfg, or '' if XICs were not requested.
+
+    XIC extraction must happen on the FINAL per-file pass (step 4): step 2 works
+    against the predicted library so its IDs are not final, and step 5 runs with
+    --use-quant, which reuses .quant files without re-reading the raw spectra --
+    DIA-NN accepts --xic there and logs that it will extract, but writes nothing.
+    """
+    if not cfg or not os.path.exists(cfg):
+        return ""
+    try:
+        toks = shlex.split(open(cfg).read(), comments=True)
+    except ValueError:
+        toks = open(cfg).read().split()
+    for i, t in enumerate(toks):
+        if t == "--xic":
+            if i + 1 < len(toks) and not toks[i + 1].startswith("-"):
+                return f"--xic {toks[i + 1]}"
+            return "--xic"
+    return ""
 
 def mass_acc_status(cfg):
     """Is mass accuracy FIXED (manual) in this cfg? Steps 3/5 reuse the .quant files
@@ -206,6 +230,7 @@ def main():
     D = out  # all DIA-NN intermediate/output lives here (real paths; native binary reads them directly)
     report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
+    xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
 
     # file list (1 raw path per line) — array tasks index into it
     open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
@@ -286,7 +311,7 @@ def main():
         f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names \\',
+        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic} \\',
         f'  --threads {a.threads_per_file} {flags}']))
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
