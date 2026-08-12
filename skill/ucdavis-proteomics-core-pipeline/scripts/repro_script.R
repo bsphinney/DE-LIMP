@@ -51,7 +51,16 @@ write_repro_script <- function(path,
                                adjp_thr, logfc_ref,
                                ann_cols = character(0),   # Genes / Protein.Names, if present
                                descriptor = NULL,
-                               timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S")) {
+                               timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                               # TRUE only when this is being generated for a run that
+                               # predates the feature, from that run's recorded provenance
+                               # rather than from live objects. The header must say so:
+                               # the normal file's claim ("from the objects that actually
+                               # ran") is precisely what makes it trustworthy, so a
+                               # reconstruction must not borrow it. Architectural rule #2 --
+                               # a value that reaches a reader is tagged or not asserted.
+                               reconstructed = FALSE,
+                               reconstructed_note = NULL) {
 
   is_dpc  <- identical(method, "dpc")
   rpt_abs <- normalizePath(input, mustWork = FALSE)
@@ -62,8 +71,20 @@ write_repro_script <- function(path,
     "# =============================================================================",
     "# The analysis, as R code.",
     "#",
-    sprintf("# Generated %s by the ucdavis-proteomics-core-pipeline skill, from the", timestamp),
-    "# objects that actually produced the results -- not re-derived from a config.",
+    sprintf("# Generated %s by the ucdavis-proteomics-core-pipeline skill.", timestamp),
+    if (reconstructed) c(
+    "#",
+    "# RECONSTRUCTED AFTER THE FACT. This run predates the skill version that emits",
+    "# this file, so it was not written by the run itself. Every value below was read",
+    "# back from what the run recorded about itself (de_provenance.json, conditions.csv,",
+    "# the expression matrix's column order) -- none of it was inferred. It is a faithful",
+    "# description of the analysis, but it does not carry the generated-from-live-objects",
+    "# guarantee that files from newer runs do, and package versions may have moved since.",
+    if (!is.null(reconstructed_note)) paste0("# ", reconstructed_note) else NULL)
+    else c(
+    "# Written from the objects that actually produced the results -- not re-derived",
+    "# from a config file, so it cannot describe a different analysis than the CSVs",
+    "# beside it."),
     "#",
     "# This is the whole differential-expression analysis. It needs only R and the",
     "# packages loaded below; no conda environment, no skill install, no shell",
