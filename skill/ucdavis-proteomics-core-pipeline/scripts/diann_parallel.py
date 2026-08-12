@@ -205,6 +205,9 @@ def main():
                     "(publicgrp-low-qos); high/genome-center-grp uses its default.")
     ap.add_argument("--max-simultaneous", type=int, default=20)
     ap.add_argument("--no-norm", action="store_true")
+    ap.add_argument("--probe-window", action=argparse.BooleanOptionalAction, default=True,
+                    help="measure the scan-window radius after step 1 and pin it for all "
+                         "steps (default: on). --no-probe-window requires --window in the cfg.")
     ap.add_argument("--allow-auto-mass-acc", action="store_true",
                     help="proceed even though the cfg leaves mass accuracy on auto. Results "
                          "across steps become inconsistent -- only for deliberate testing.")
@@ -243,6 +246,17 @@ def main():
     # The chain is only valid with pinned mass accuracy AND scan window (steps 3/5
     # reuse .quant files; see mass_acc_status for DIA-NN's own warning).
     ma = mass_acc_status(a.cfg)
+    # An unpinned --window is recoverable: the chain can MEASURE it after step 1 and
+    # feed the same value to steps 2 and 4 (--probe-window, on by default). Only an
+    # unpinned MASS ACCURACY is unrecoverable here, because DIA-NN calibrates that per
+    # run against the library and there is no single value to carry forward.
+    win_probe = (a.probe_window and ma.get("window") in (None, 0)
+                 and ma["ms2"] not in (None, 0) and ma["ms1"] not in (None, 0)
+                 and not a.seed_lib)
+    if win_probe:
+        ma = dict(ma, fixed=True,
+                  reason=f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; "
+                         "scan window measured by step 1b and pinned for steps 2+4")
     if not ma["fixed"] and not a.allow_auto_mass_acc:
         sys.exit(
             f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {ma['reason']}.\n"
@@ -311,13 +325,33 @@ def main():
             f'  --threads {a.libpred_cpus} {flags}',
             must_exist(predicted, "the predicted spectral library")]))
 
+    # Step 1b — measure the scan-window radius ONCE, so steps 2 and 4 share it.
+    # DIA-NN optimises the radius per file when --window is absent, and steps 3/5 then
+    # combine .quant files produced under different windows -- which DIA-NN's own
+    # warning calls "strongly not recommended". Measuring beats guessing: the radius
+    # depends on the acquisition scheme (cycle time vs peak width), not the instrument.
+    s1b = None
+    if win_probe:
+        probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
+        s1b = write("step1b_window.sbatch", "\n".join([
+            header("s1b_window", a.threads_per_file, a.mem_per_file, 2, _ps, _as_, qos=_qs), "",
+            'echo "Step 1b/5 measuring scan-window radius"; date',
+            f'python3 "{probe}" --diann {shlex.quote(a.diann)} --raw "{raws[0]}" \\',
+            f'  --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\',
+            f'  --extra {shlex.quote(read_cfg_flags(a.cfg))} > {D}/window.json',
+            f'python3 -c "import json;print(json.load(open(\'{D}/window.json\'))[\'window_radius\'])" > {D}/window.txt',
+            must_exist(f"{D}/window.txt", "the measured scan-window radius"),
+            f'echo "scan window radius = $(cat {D}/window.txt) (pinned for steps 2 and 4)"']))
+    # steps 2 and 4 read the measured radius at RUNTIME so both use the identical value
+    wflag = f'--window $(cat {D}/window.txt) ' if win_probe else ''
+
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
         header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
-        f'  --threads {a.threads_per_file} {flags}',
+        f'  --threads {a.threads_per_file} {wflag}{flags}',
         'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]))
 
@@ -329,7 +363,7 @@ def main():
         f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
         f'  --temp {D}/quant_step2 --out {D}/step3_assembly.parquet \\',
-        f'  --threads {a.assembly_cpus} {flags}',
+        f'  --threads {a.assembly_cpus} {wflag}{flags}',
         must_exist(empirical, "the empirical spectral library")]))
 
     # Step 4 — final pass (array): empirical lib -> per-file .quant
@@ -348,7 +382,7 @@ def main():
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
         f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic} \\',
-        f'  --threads {a.threads_per_file} {flags}',
+        f'  --threads {a.threads_per_file} {wflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]))
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
@@ -357,7 +391,7 @@ def main():
         f'echo "Step 5/5 cross-run report"; date',
         f'{DN} {all_f} --fasta {fasta} --lib {empirical} --use-quant --quant-ori-names \\',
         f'  --temp {D}/quant_step4 --matrices --out {D}/{report} \\',
-        f'  --threads {a.assembly_cpus} {norm} {flags}',
+        f'  --threads {a.assembly_cpus} {norm} {wflag}{flags}',
         must_exist(f'{D}/{report}', "the cross-run report"),
         # A step-4 task that failed silently leaves no .quant, and step 5 happily
         # reports on whatever survived. Count them: fewer quants than inputs means a
@@ -381,9 +415,13 @@ def main():
             f'echo "Step 1/5 SKIPPED — seeding first pass with {predicted}"',
             'jid2=$(sbatch --parsable %s%s)' % (dep2, s2)]
     else:
-        sub_lines += [
-            'jid1=$(sbatch --parsable %s)' % s1,
-            'jid2=$(sbatch --parsable --dependency=afterok:$jid1 %s)' % s2]
+        sub_lines += ['jid1=$(sbatch --parsable %s)' % s1]
+        if s1b:
+            sub_lines += [
+                'jid1b=$(sbatch --parsable --dependency=afterok:$jid1 %s)' % s1b,
+                'jid2=$(sbatch --parsable --dependency=afterok:$jid1b %s)' % s2]
+        else:
+            sub_lines += ['jid2=$(sbatch --parsable --dependency=afterok:$jid1 %s)' % s2]
     sub_lines += [
         'jid3=$(sbatch --parsable --dependency=afterok:$jid2 %s)' % s3,
         'jid4=$(sbatch --parsable --dependency=afterok:$jid3 %s)' % s4,

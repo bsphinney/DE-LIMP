@@ -181,7 +181,13 @@ optimises the radius **per file**. On a real 18-file poplar run that gave a radi
 `mass_acc_status()` now treats a missing or `0` `--window` as NOT parallel-safe, so the
 chain refuses to generate rather than producing a quietly-inconsistent report.
 
-Get the value by measuring it, never by guessing — it depends on the acquisition scheme
+**The chain does this for you.** When the cfg has no `--window`, `diann_parallel.py`
+inserts **step 1b** after library prediction: it runs `probe_window.py` on the first
+file, writes the radius to `<out>/window.txt`, and steps 2–5 read that file at runtime,
+so every pass uses the identical value. `--no-probe-window` disables it, in which case a
+pinned `--window` in the cfg is required or the chain refuses to generate.
+
+To measure it yourself instead, never by guessing — it depends on the acquisition scheme
 (cycle time vs peak width), not the instrument model:
 
 ```bash
