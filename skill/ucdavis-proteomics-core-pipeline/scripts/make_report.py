@@ -41,6 +41,11 @@ CATALOG = [
      "Machine-readable DE record: method, design, contrasts, thresholds, per-contrast significant counts, package versions."),
     (r"^Expression_Matrix\.csv$", "Differential expression",
      "Log2 protein expression per sample (proteins × runs), the matrix DE was run on."),
+    (r"^reproducibility_log\.R$", "Differential expression",
+     "THE ANALYSIS AS PLAIN R — the whole DE written out top to bottom with every value "
+     "literal (report path, FDR cutoff, sample→group map, design, contrasts). Read it to "
+     "see exactly what was done; run it with `Rscript reproducibility_log.R` to redo it "
+     "using only R and limpa/limma — no conda, no skill install."),
 
     (r"^run_manifest\.json$", "Reproducibility bundle",
      "The master record — registry commit, engine + versions, all parameters, environment, input/output checksums."),
@@ -156,7 +161,10 @@ def main():
     lines.append("- **`AI_Analysis_Report.md`** — read this first: the biological interpretation.")
     lines.append("- **`de_results/DE_*.csv`** — the differentially expressed proteins per comparison.")
     lines.append("- **`de_results/methods.txt`** — the Methods paragraph for your paper.")
-    lines.append("- **`reproducibility/REPRODUCE.md`** — how to reproduce everything.")
+    lines.append("- **`de_results/reproducibility_log.R`** — the analysis as plain R. "
+                 "Read it to see what was done; `Rscript` it to redo it with only R + limpa/limma.")
+    lines.append("- **`reproducibility/REPRODUCE.md`** — the full bundle, for reproducing the "
+                 "*search* too (pinned engine, environment lock, checksums).")
     lines.append("")
 
     with open(a.out, "w") as fh:

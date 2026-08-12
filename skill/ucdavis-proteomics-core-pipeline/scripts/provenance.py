@@ -377,10 +377,34 @@ echo "Done. Compare ./de_results against checksums/checksums.json to confirm rep
     if a.de_dir and os.path.exists(mt):
         methods = open(mt).read()
         ok("included DE methods.txt")
+    # The plain-R transcript of the DE, written by run_de.R. It is the thing most
+    # readers actually want, so REPRODUCE.md leads with it rather than with the
+    # environment lock. Only advertise it if it is really there.
+    repro_r = os.path.join(a.de_dir or "", "reproducibility_log.R")
+    if a.de_dir and os.path.exists(repro_r):
+        ok("found the DE's plain-R transcript (reproducibility_log.R)")
+        r_section = f"""## Just show me the code
+
+The whole differential-expression analysis, as plain R with every value written
+out literally, is **`{os.path.relpath(repro_r, out)}`**. Read it to see exactly what
+was done. To re-run it you need only R and limpa/limma — no conda environment, no
+skill install, no shell scripts:
+
+```
+Rscript reproducibility_log.R
+```
+
+That covers the DE. Everything below is for reproducing the **search** as well —
+the pinned engine build, the exact software environment, and the checksums that
+make input drift visible.
+"""
+    else:
+        skip("reproducibility_log.R", "not found in --de-dir (run run_de.R to generate it)")
+        r_section = ""
+
     md = f"""# Reproducibility — {(wfman or {}).get('name', 'proteomics analysis')}
 
-This bundle contains everything needed to reproduce the analysis.
-
+{r_section}
 ## Skill that produced this
 - **{skill_info['title']}** — `{skill_info['name']}` v{skill_info['version']}
 - Repository: {skill_info['repository']}
@@ -400,14 +424,15 @@ This bundle contains everything needed to reproduce the analysis.
   (significance is the BH adjusted p-value alone; |logFC|={a.logfc} is a volcano reference line, not a filter)
 - query: acquisition=`{a.acquisition}`, organism_taxid=`{a.organism_taxid}`, instrument=`{a.instrument}`
 
-## How to reproduce
+## How to reproduce the whole thing, search included
 ```
 SKILL=/path/to/ucdavis-proteomics-core-pipeline bash reproduce.sh
 ```
 `reproduce.sh` rebuilds the conda env from `environment/conda-explicit.txt`,
 re-fetches the workflow **pinned to commit `{commit}`**, re-resolves the engine,
 rebuilds the FASTA, and re-runs search + DE. Compare outputs to
-`checksums/checksums.json`.
+`checksums/checksums.json`. This is the heavyweight path — it re-runs a multi-hour
+search. If you only want the statistics, use the R script above.
 
 ## What's captured
 - `run_manifest.json` — full machine-readable record

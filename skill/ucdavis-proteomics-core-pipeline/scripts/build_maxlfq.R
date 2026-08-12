@@ -38,15 +38,18 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   # run-level-passing IDs over many runs sits well above the nominal cutoff, and the
   # inflated protein list also inflates the family size m that BH corrects over.
   # Add DIA-NN's protein-level and experiment-wide q-values when present.
+  q_columns <- character(0)
   if (!is.na(q_cutoff) && q_cutoff > 0) {
     flt <- dplyr::filter(flt, Q.Value <= !!q_cutoff,
                               Lib.Q.Value <= !!q_cutoff,
                               Lib.PG.Q.Value <= !!q_cutoff)
+    q_columns <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
     .fdr <- c("Q", "Lib.Q", "Lib.PG.Q")
     for (.qc in c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")) {
       if (.qc %in% cols) {
         flt <- dplyr::filter(flt, .data[[.qc]] <= !!q_cutoff)
         .fdr <- c(.fdr, .qc)
+        q_columns <- c(q_columns, .qc)
       }
     }
     filters_applied <- c(filters_applied,
@@ -125,6 +128,11 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
 
   list(
     E = E, genes = genes, n_obs = n_obs, filters_applied = filters_applied,
+    # The q-value columns actually filtered on. Recorded rather than assumed so the
+    # emitted reproducibility script names the same columns this run used -- older
+    # reports lack PG.Q.Value / Global.*, and hard-coding them would emit a script
+    # that filters on a column the run never had.
+    q_columns = q_columns,
     descriptor = list(
       pipeline_id    = "maxlfq",
       display_label  = "MaxLFQ + limma",

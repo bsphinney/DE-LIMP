@@ -72,6 +72,17 @@ adjp_thr  <- as.numeric(getarg("--adjp", "0.05"))
 
 if (is.null(input) || is.null(meta_path))
   stop("Required: --input <report> and --metadata <conditions.csv>")
+
+# Where this script lives — used to find its sibling helpers (build_maxlfq.R,
+# repro_script.R) whether it is run from the skill directory or a copy of it.
+.script_dir <- local({
+  f <- grep("^--file=", commandArgs(), value = TRUE)[1]
+  if (is.na(f)) getwd() else dirname(normalizePath(sub("^--file=", "", f), mustWork = FALSE))
+})
+.sibling <- function(nm) {
+  for (p in c(file.path(.script_dir, nm), nm)) if (file.exists(p)) return(p)
+  NULL
+}
 if (!method %in% c("dpc", "maxlfq"))
   stop("--method must be 'dpc' or 'maxlfq'")
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
@@ -235,9 +246,9 @@ if (method == "dpc") {
   if (!requireNamespace("arrow", quietly = TRUE) && identical(format, "parquet"))
     stop("arrow is required to read parquet for --method maxlfq. install.packages('arrow').")
   suppressMessages(library(limma))
-  src <- file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE)[1])), "..")
-  bm  <- file.path(src, "scripts", "build_maxlfq.R")
-  if (file.exists(bm)) source(bm) else source("build_maxlfq.R")  # defines build_maxlfq()
+  bm <- .sibling("build_maxlfq.R")             # defines build_maxlfq()
+  if (is.null(bm)) stop("build_maxlfq.R not found next to run_de.R")
+  source(bm)
 
   keep_runs <- meta$File.Name
   ml <- build_maxlfq(input, format = format, q_cutoff = q_cutoff,
@@ -247,6 +258,7 @@ if (method == "dpc") {
   run_names <- colnames(E)
   genes     <- ml$genes
   descriptor <- ml$descriptor
+  q_use     <- ml$q_columns
   message(sprintf("[run_de] MaxLFQ matrix: %d proteins x %d runs (%.1f%% missing)",
                   nrow(E), ncol(E), 100 * mean(is.na(E))))
 
@@ -359,6 +371,34 @@ for (cn in forms) {
   n_beyond <- sum(abs(sig$logFC) >= logfc_ref, na.rm = TRUE)   # descriptive, not a filter
   message(sprintf("[run_de] %-20s  %d proteins, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s",
                   cn, nrow(tt), nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn)))
+}
+
+# ---- the analysis as plain R ------------------------------------------------
+# The bundle in reproducibility/ pins the whole environment, which is what you need
+# to reproduce byte-for-byte -- but it is not something a reviewer can read. This is:
+# flat, literal R with every value written out, runnable with nothing but R and the
+# packages it loads. Same idea as DE-LIMP's reproducibility log. Generated from the
+# objects that actually ran, so it cannot describe a different analysis than the one
+# in the CSVs next to it.
+repro_lines <- NULL
+.rs <- .sibling("repro_script.R")
+if (is.null(.rs)) {
+  message("[run_de] repro_script.R not found next to run_de.R — reproducibility_log.R not written")
+} else {
+  tryCatch({
+    source(.rs)
+    repro_lines <- write_repro_script(
+      path = file.path(outdir, "reproducibility_log.R"),
+      method = method, input = input, format = format,
+      q_cutoff = q_cutoff, q_columns = q_use,
+      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
+      cov_min_frac = cov_min_frac,
+      meta = meta, covariates = covariates, formula_parts = formula_parts,
+      forms = forms, adjp_thr = adjp_thr, logfc_ref = logfc_ref,
+      ann_cols = gene_cols, descriptor = descriptor)
+    message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
+                    length(repro_lines)))
+  }, error = function(e) message("[run_de] reproducibility_log.R not written: ", e$message))
 }
 
 # ---- methods + reproducibility provenance -----------------------------------
@@ -484,7 +524,11 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
       dpc_fit      = if (exists("dpcfit")) dpcfit else NULL,
       design       = design,
       qc_stats     = list(detected_vs_inferred = qc_di),
-      repro_log    = NULL,
+      # The same plain-R script written to reproducibility_log.R. DE-LIMP's
+      # Reproducibility tab renders `repro_log` verbatim, so loading this session
+      # into the GUI shows the exact code that produced it — previously NULL, which
+      # left that tab blank for every skill-produced session.
+      repro_log    = repro_lines,
       contrast     = paste(forms, collapse = ","),
       # Key name is DE-LIMP's session schema (server_de.R draws its volcano lines from
       # it), so it stays -- but the value is our reference line, not a significance cut.

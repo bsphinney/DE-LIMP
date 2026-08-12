@@ -1,10 +1,51 @@
 # Reproducibility contract
 
-Every run produces a `reproducibility/` bundle. A result without one is incomplete.
-This is the skill's implementation of DE-LIMP architectural rules #1 (pipeline
-self-describes) and #4 (no silent gaps — `MANIFEST.txt` logs `[OK]`/`[SKIPPED]`).
+Reproducibility here has **two levels**, and they answer different questions.
 
-## The five things that make a run reproducible
+| | Artifact | Answers | Needs |
+|---|---|---|---|
+| **1. The analysis, as code** | `de_results/reproducibility_log.R` | "What did you actually do to the numbers?" | R + limpa/limma |
+| **2. The whole run, pinned** | `reproducibility/` bundle | "Can I re-derive this from the raw files?" | conda env, engine build, hours |
+
+**Level 1 is the one people read.** Level 2 is the one that makes the result
+defensible. Produce both — but when you point a user at "the reproducibility", point
+at the R script first.
+
+## Level 1 — the analysis as plain R
+
+`run_de.R` writes `reproducibility_log.R` into the DE output directory: the whole
+differential-expression analysis top to bottom, with every value written out
+literally — the report path, the FDR cutoff and the q-columns it was applied to, the
+sample→group map with real run names, any QuantUMS pre-filter, the covariates, the
+design formula, the contrasts, the significance rule. No arguments to look up, no
+config to cross-reference, no skill to install:
+
+```
+Rscript reproducibility_log.R
+```
+
+It is generated **from the objects that actually ran**, not re-derived from a
+parameter file, so it cannot describe a different analysis than the CSVs beside it
+(DE-LIMP architectural rule #1 — the pipeline self-describes). It writes to
+`de_results_rerun/` so a re-run never clobbers the original.
+
+The same lines go into `DE-LIMP_session.rds` as `repro_log`, so dropping that session
+into the DE-LIMP GUI shows this code in its Reproducibility tab.
+
+This is deliberately the same artifact DE-LIMP's GUI produces (`app.R`
+`add_to_log()` → `R/server_session.R`), so a GUI run and a skill run hand the user
+the same kind of thing.
+
+**What it does not cover:** the search. It starts from `report.parquet`. Re-running
+DIA-NN/Sage identically is level 2.
+
+## Level 2 — the pinned bundle
+
+Every run also produces a `reproducibility/` bundle. A result without one is
+incomplete. This is the skill's implementation of DE-LIMP architectural rules #1 and
+#4 (no silent gaps — `MANIFEST.txt` logs `[OK]`/`[SKIPPED]`).
+
+### The five things that make a run reproducible
 
 1. **Pinned validated parameters.** `fetch_workflows.py` resolves the registry to a
    git **commit SHA** and `pull --ref <sha>` fetches params at that commit, not the
@@ -25,7 +66,7 @@ self-describes) and #4 (no silent gaps — `MANIFEST.txt` logs `[OK]`/`[SKIPPED]
    workflow, re-resolves the engine, rebuilds the FASTA, and re-runs search + DE
    with identical arguments. `REPRODUCE.md` is the human-readable version.
 
-## The sequence database (`--fasta-info`)
+### The sequence database (`--fasta-info`)
 
 The database is the one input that can silently differ between a run and its
 "reproduction", so it is recorded explicitly rather than inferred. `fetch_fasta.py`
@@ -48,7 +89,7 @@ what make that drift visible instead of invisible. The same facts feed
 re-analysis `DIFFERENCES.md`, so an organism or database-type change shows up as a
 difference rather than hiding behind an unchanged sequence count.
 
-## What the orchestrator must do during the run
+### What the orchestrator must do during the run
 
 - **Log every command.** Append each command you execute (verbatim, full args) to
   `commands.log` and pass it via `--commands`. This is the audit trail.
@@ -60,7 +101,7 @@ difference rather than hiding behind an unchanged sequence count.
   sessionInfo were skipped, fix the cause and re-run `provenance.py`. Don't hand
   over a bundle that silently dropped a critical artifact.
 
-## Bundle layout
+### Bundle layout
 ```
 reproducibility/
 ├── run_manifest.json        # full machine-readable record (the master file)
@@ -76,7 +117,7 @@ reproducibility/
 └── checksums/checksums.json # sha256 / fingerprints of raw, fasta, report, DE outputs
 ```
 
-## Verifying a reproduction
+### Verifying a reproduction
 After `reproduce.sh` runs, compare the new `de_results/` against
 `checksums/checksums.json`. DE CSVs should match bit-for-bit when the env lock,
 engine version, params, and inputs all match. (DIA-NN/Sage are deterministic for a

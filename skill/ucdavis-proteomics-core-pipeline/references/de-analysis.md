@@ -110,6 +110,14 @@ Each method path returns a `descriptor` (pipeline_id, display_label, rollup_meth
 de_engine, missing_policy, citation). `methods.txt` is built from it — **never
 hardcode a description of what ran**, and hand `methods.txt` to the user verbatim.
 
+`run_de.R` also writes **`reproducibility_log.R`** (via `repro_script.R`): the same
+analysis emitted as flat, literal R — the report path, the q-cutoff and the q-columns
+it was actually applied to, any QuantUMS pre-filter, the sample→group map, the
+covariates, the design, the contrasts. Runnable with `Rscript`, needing only R and
+limpa/limma. It is built from the objects that ran, for the same reason `methods.txt`
+is: a hand-written recipe drifts, a generated one can't. Point users at it whenever
+they ask what was done or want the code. → `references/reproducibility.md`.
+
 ## Citations (verified June 2026)
 - **limpa / DPC:** Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125;
   Li M, Smyth GK (2023) Bioinformatics 39(5):btad200. (DE-LIMP's

@@ -21,9 +21,12 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   raw_files.txt (raw data is referenced, NOT copied — too large)
   output/
     search/                 # the normalized search report.parquet (+ search_provenance.json, logs)
-    tables/                 # DE_*.csv, Expression_Matrix.csv, methods.txt, sessionInfo.txt, de_provenance.json
+    tables/                 # DE_*.csv, Expression_Matrix.csv, methods.txt, sessionInfo.txt,
+                            #   de_provenance.json, and reproducibility_log.R — the analysis as
+                            #   plain R, runnable with just R + limpa/limma (point users here
+                            #   when they ask for "the code")
     figures/                # volcano / PCA / heatmap / p-value / QC PNGs + figures.json
-    reproducibility/        # the full bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
+    reproducibility/        # the pinned bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
     AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
     AI_Analysis_Report.docx # the same report as a Word document
     AUDIT.md                # results audit — common-mistake checks (PASS/WARN/FAIL)

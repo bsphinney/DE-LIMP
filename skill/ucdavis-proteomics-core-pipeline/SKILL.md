@@ -48,13 +48,18 @@ the spine.
    proteome. Instrument is only a tiebreaker. Acquisition is auto-detected and
    confirmed. If no validated workflow covers their organism, proceed unvalidated
    with estimated params — never swap in another species' bundle.
-5. **Every run must be completely reproducible.** This is not optional. As you go,
-   append every command you run (verbatim, with all arguments) to a `commands.log`.
-   At the end you MUST produce a reproducibility bundle (step 9) that captures the
-   pinned registry commit, exact tool + package versions, all parameters, input
-   and output checksums, and a runnable `reproduce.sh`. Pin the registry to the
-   commit SHA returned by `fetch_workflows.py` — never describe a result without
-   the bundle that lets someone re-derive it. (DE-LIMP architectural rules #1, #4.)
+5. **Every run must be completely reproducible**, at two levels. This is not optional.
+   - **The analysis, as code.** `run_de.R` writes `reproducibility_log.R` — the whole
+     DE as flat R with every value literal, runnable with just R + limpa/limma. This
+     is the artifact to point a user at; it's what they mean by "the R code".
+   - **The whole run, pinned.** As you go, append every command you run (verbatim,
+     with all arguments) to a `commands.log`. At the end you MUST produce the
+     reproducibility bundle (step 10) capturing the pinned registry commit, exact
+     tool + package versions, all parameters, input and output checksums, and a
+     runnable `reproduce.sh`. Pin the registry to the commit SHA returned by
+     `fetch_workflows.py`.
+
+   Never describe a result without both. (DE-LIMP architectural rules #1, #4.)
 6. **Assume nothing about the user's environment — this skill runs for anyone.** Most
    users are **not** UC Davis Core and **not** on HIVE: they're on macOS, Windows
    (**WSL2** recommended, but **native Windows works too** — the engines ship Windows
@@ -659,7 +664,16 @@ Use `maxlfq` when **either**:
    precursor-level file to use instead.
 
 Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
-`methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions).
+`methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions) +
+**`reproducibility_log.R`**.
+
+`reproducibility_log.R` is the whole analysis as plain, flat R — every value written
+out literally (report path, FDR cutoff, sample→group map, design, contrasts), runnable
+with `Rscript` using nothing but R and limpa/limma. It is generated from the objects
+that actually ran, so it can't drift from the CSVs next to it. **This is what to show
+a user who asks "what did you do?" or "can I have the R code?"** — not the
+`reproducibility/` bundle, which pins the environment and re-runs the multi-hour
+search. Mention it when you hand over results.
 
 **QuantUMS quality filtering — opt-in, `--method maxlfq`, DIA-NN input only.**
 Only reach for this when the user asks. DIA-NN's
@@ -949,8 +963,10 @@ and the link to the validated workflow at that commit
 (`https://github.com/bsphinney/DE-LIMP/tree/<commit>/<path>`). Point them at the
 **session folder** and its `README.md`, then `AI_Analysis_Report.md` (the
 interpretation), `OUTPUT_FILES.md` (what every file is), `tables/methods.txt`
-verbatim (the Methods paragraph — don't paraphrase), `reproducibility/REPRODUCE.md`
-(the re-run recipe), and — for a re-analysis — `DIFFERENCES.md` + the
+verbatim (the Methods paragraph — don't paraphrase), **`tables/reproducibility_log.R`
+(the analysis as plain R — say this is where the code is; it is what most people
+mean when they ask)**, `reproducibility/REPRODUCE.md` (the pinned recipe, for
+re-running the search too), and — for a re-analysis — `DIFFERENCES.md` + the
 `comparison/COMPARISON.md`.
 
 ## When something is missing

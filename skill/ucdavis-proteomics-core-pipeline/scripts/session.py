@@ -10,7 +10,8 @@ Documents). The orchestrator asks the user which they want (see SKILL.md).
       input/                    # conditions, FASTA, params, workflow manifest, raw-file list
       output/
         search/                 # the normalized search report (+ engine logs)
-        tables/                 # DE_*.csv, methods.txt, sessionInfo.txt, de_provenance.json, QC
+        tables/                 # DE_*.csv, methods.txt, sessionInfo.txt, de_provenance.json,
+                                #   reproducibility_log.R (the analysis as plain R), QC
         figures/                # plots (reserved)
         reproducibility/        # the full reproducibility bundle
         AI_Analysis_Report.md   # the interpretation
@@ -269,17 +270,25 @@ def do_finalize(a):
         "```",
         "input/                 conditions.csv, search.fasta, params, workflow manifest, raw_files.txt",
         "output/search/         normalized search report (DE input)",
-        "output/tables/         DE results (DE_*.csv), methods.txt, sessionInfo.txt, de_provenance.json",
+        "output/tables/         DE results (DE_*.csv), methods.txt, sessionInfo.txt, de_provenance.json,",
+        "                       reproducibility_log.R  <-- the analysis as plain R",
         "output/figures/        plots",
-        "output/reproducibility/ full reproducibility bundle (reproduce.sh, env lock, checksums)",
+        "output/reproducibility/ pinned bundle for re-running the search too (reproduce.sh, env lock, checksums)",
         "output/AI_Analysis_Report.md   the biological interpretation (read this first)",
         "output/OUTPUT_FILES.md         catalog of every file",
         "scripts/               copy of the skill scripts used",
         "logs/                  commands.log + engine logs",
         "```",
         "", "## Reproduce",
-        "See `output/reproducibility/REPRODUCE.md`. The DE results are "
-        f"{', '.join(de_files) if de_files else '(none found)'}.",
+        "**The analysis, as code:** `output/tables/reproducibility_log.R` — the whole "
+        "differential-expression analysis in plain R with every value written out. "
+        "Read it to see what was done, or `Rscript` it to redo it with nothing but R "
+        "and limpa/limma.",
+        "",
+        "**The whole run, pinned** (search included, takes hours): "
+        "`output/reproducibility/REPRODUCE.md`.",
+        "",
+        f"The DE results are {', '.join(de_files) if de_files else '(none found)'}.",
         "", "## Methods",
         "See `output/tables/methods.txt` (self-describing) and `output/AI_Analysis_Report.md`.", "",
     ]
