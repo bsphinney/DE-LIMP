@@ -52,6 +52,17 @@ empirical-library round-trip.
 - **No MBR** (`--reanalyse` is dropped) — the 5-step replaces it.
 - **`--quant-ori-names`** on every step so `.quant` files are `<basename>.quant`.
 - Step 4 **skips** files that failed step 2 (missing `.quant`).
+- **XICs require `--out` on step 4, not just `--xic`.** DIA-NN names the XIC folder after
+  the `--out` report basename. Step 4 otherwise has no `--out`, so DIA-NN resolves the
+  folder against the filesystem **root** and aborts with
+  `cannot create directory: Permission denied [/report_xic]` — *after* writing the
+  `.quant`, and **still exiting 0**. Verified on DIA-NN 2.6.0: zero `.xic.parquet`
+  produced, SLURM records `COMPLETED`, and the `afterok` chain advances as if XICs
+  existed. Step 4 therefore gets `--out <out>/xic/t<TASKID>.parquet` whenever `--xic` is
+  in the cfg, and DIA-NN writes `<out>/xic/t<TASKID>_xic/<run>.xic.parquet`.
+  *Why step 4 and not step 5:* extraction needs the raw spectra. Step 5 runs
+  `--use-quant`, which never re-reads them — DIA-NN accepts `--xic` there, logs that it
+  will extract, and writes nothing.
 - Step 4 hands each task **its own copy** of the empirical library
   (`libpriv/t<TASKID>/lib.parquet`, removed by a `trap` on exit). This is not an
   optimisation — DIA-NN re-saves the library it is given as `<lib>.skyline.speclib`,

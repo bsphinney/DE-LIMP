@@ -367,6 +367,15 @@ def main():
         must_exist(empirical, "the empirical spectral library")]))
 
     # Step 4 — final pass (array): empirical lib -> per-file .quant
+    # --xic alone is not enough. DIA-NN names the XIC folder after the --out report
+    # basename; with no --out it resolves that against the filesystem ROOT and dies with
+    # "cannot create directory: Permission denied [/report_xic]" -- AFTER writing the
+    # .quant, and STILL EXITING 0. Verified on DIA-NN 2.6.0 (single file, --xic, no
+    # --out): zero .xic.parquet produced, SLURM records COMPLETED, afterok advances.
+    # So step 4 needs its own --out whenever XICs are requested. DIA-NN then writes
+    # <out>/xic/t<TASKID>_xic/<run>.xic.parquet, one folder per array task.
+    xic_out = f' --out {D}/xic/t${{SLURM_ARRAY_TASK_ID}}.parquet' if xic else ''
+
     s4 = write("step4_finalpass.sbatch", "\n".join([
         header("s4_finalpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
@@ -376,12 +385,13 @@ def main():
         # NEXT TO --lib. With one shared path every concurrent array task writes the same
         # file; most win the race in seconds, the losers block until the wall clock kills
         # them. Give each task its own copy so there is nothing to contend on.
+        (f'mkdir -p {D}/xic' if xic else ''),
         f'LIBPRIV={D}/libpriv/t${{SLURM_ARRAY_TASK_ID}}',
         'mkdir -p "$LIBPRIV"',
         f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic} \\',
+        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic}{xic_out} \\',
         f'  --threads {a.threads_per_file} {wflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]))
 
