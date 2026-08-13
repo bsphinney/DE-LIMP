@@ -81,6 +81,17 @@ def xic_flag(cfg):
     against the predicted library so its IDs are not final, and step 5 runs with
     --use-quant, which reuses .quant files without re-reading the raw spectra --
     DIA-NN accepts --xic there and logs that it will extract, but writes nothing.
+
+    CRITICAL: a step given --xic MUST also be given --out. DIA-NN places the XIC
+    folder "next to the main report"; with no --out it derives that path from an
+    empty string and tries to create `/report_xic` at the filesystem root, which
+    inside a container is read-only and aborts the whole search:
+
+        terminate called after throwing an instance of std::filesystem::filesystem_error
+          what(): cannot create directory: Read-only file system [/report_xic]
+
+    That is why step 4 gains a per-file --out below when XICs are requested; the
+    chain's per-file passes otherwise deliberately write no report.
     """
     if not cfg or not os.path.exists(cfg):
         return ""
@@ -231,6 +242,9 @@ def main():
     report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
     xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
+    # --xic REQUIRES an --out to anchor the XIC folder, else DIA-NN aborts trying
+    # to mkdir /report_xic at the filesystem root. Per-file, so tasks cannot collide.
+    xic_out = (' --out ' + D + '/xic/${FILE##*/}.report.parquet') if xic else ''
 
     # file list (1 raw path per line) — array tasks index into it
     open(os.path.join(out, "file_list.txt"), "w").write("\n".join(raws) + "\n")
@@ -311,7 +325,7 @@ def main():
         f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic} \\',
+        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic}{xic_out} \\',
         f'  --threads {a.threads_per_file} {flags}']))
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
@@ -324,7 +338,7 @@ def main():
 
     # submit.sh — chain the steps with afterok dependencies
     sub_lines = ["#!/bin/bash", "set -euo pipefail", f'cd "{out}"',
-                 f'mkdir -p "{D}/quant_step2" "{D}/quant_step4"   # DIA-NN --temp dirs MUST pre-exist']
+                 f'mkdir -p "{D}/quant_step2" "{D}/quant_step4" "{D}/xic"   # DIA-NN --temp/--out dirs MUST pre-exist']
     if seed:
         # Step 1 skipped — the InfinDIA/empirical seed library IS the first-pass lib.
         # First pass optionally waits (afterok) on the lib-build job that produces it.
