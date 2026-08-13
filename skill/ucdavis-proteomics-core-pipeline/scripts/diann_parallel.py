@@ -374,6 +374,9 @@ def main():
     # --out): zero .xic.parquet produced, SLURM records COMPLETED, afterok advances.
     # So step 4 needs its own --out whenever XICs are requested. DIA-NN then writes
     # <out>/xic/t<TASKID>_xic/<run>.xic.parquet, one folder per array task.
+    # Both carry their own leading space so the command line has no double space (and no
+    # trailing space before the line continuation) when XICs are off.
+    xic_arg = f' {xic}' if xic else ''
     xic_out = f' --out {D}/xic/t${{SLURM_ARRAY_TASK_ID}}.parquet' if xic else ''
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
@@ -381,17 +384,19 @@ def main():
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
+        # Splat an empty list, not an empty string: a conditional string leaves a stray
+        # blank line in the generated sbatch when XICs are off.
+        *([f'mkdir -p {D}/xic'] if xic else []),
         # DIA-NN re-saves the library it is handed as "<lib>.skyline.speclib", written
         # NEXT TO --lib. With one shared path every concurrent array task writes the same
         # file; most win the race in seconds, the losers block until the wall clock kills
         # them. Give each task its own copy so there is nothing to contend on.
-        (f'mkdir -p {D}/xic' if xic else ''),
         f'LIBPRIV={D}/libpriv/t${{SLURM_ARRAY_TASK_ID}}',
         'mkdir -p "$LIBPRIV"',
         f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names {xic}{xic_out} \\',
+        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names{xic_arg}{xic_out} \\',
         f'  --threads {a.threads_per_file} {wflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]))
 
