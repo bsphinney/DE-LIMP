@@ -32,8 +32,11 @@ HOST="${HIVE_HOST:-hive.hpc.ucdavis.edu}"
 SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o ConnectTimeout=20 "$HU@$HOST")
 
 case "${1:-}" in
-  --put) shift; rsync -e "ssh -i $KEY -o IdentitiesOnly=yes" -a "$1" "$HU@$HOST:$2" ;;
-  --get) shift; rsync -e "ssh -i $KEY -o IdentitiesOnly=yes" -a "$HU@$HOST:$1" "$2" ;;
+  # $KEY is single-quoted inside -e: rsync parses that string itself and DOES honour
+  # quotes (verified -- a path with a space arrives as one argv entry), whereas bare
+  # $KEY gets split and ssh is handed a truncated path. Matches the SSH=() array above.
+  --put) shift; rsync -e "ssh -i '$KEY' -o IdentitiesOnly=yes" -a "$1" "$HU@$HOST:$2" ;;
+  --get) shift; rsync -e "ssh -i '$KEY' -o IdentitiesOnly=yes" -a "$HU@$HOST:$1" "$2" ;;
   "")    echo "usage: hive_exec.sh '<command>' | --put <local> <remote> | --get <remote> <local>" >&2; exit 2 ;;
   # LOGIN shell (bash -l). ssh with a bare command runs a NON-login shell, where
   # HIVE does not put sacct/squeue/sbatch on PATH. Every SLURM query then returned

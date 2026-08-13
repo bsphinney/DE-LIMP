@@ -27,7 +27,8 @@ compute never lands on a login node) — the orchestrator submits it.
 Usage:
   python3 run_search.py --tools tools.json --bundle wf/workflow.manifest.json \
       --params wf/diann.cfg --fasta search.fasta --out search_out \
-      --files /data/*.raw --threads 16 [--engine diann|sage|fragpipe] [--sbatch job.sh]
+      --files /data/*.raw --threads 16 [--sbatch job.sh]
+      [--engine diann|alphadia|sage|fragpipe|radiant]
 """
 import sys, os, json, glob, shlex, argparse, subprocess, shutil
 

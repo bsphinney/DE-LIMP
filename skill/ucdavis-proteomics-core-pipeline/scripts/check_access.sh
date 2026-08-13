@@ -33,9 +33,30 @@ GRP=false; [ -d /quobyte/proteomics-grp ] && ls /quobyte/proteomics-grp >/dev/nu
 HIVE_SSH="not_tested"; SSH_SBATCH=false; SSH_GRP=false; KEY_FOUND=true
 [ -n "$KEY" ] && [ ! -f "$KEY" ] && KEY_FOUND=false
 if ! $ON_HIVE && [ -n "$HU" ] && [ "$KEY_FOUND" = true ]; then
-  KEY_OPT=""; [ -n "$KEY" ] && KEY_OPT="-i $KEY"
-  out="$(timeout 25 ssh $KEY_OPT -o BatchMode=yes -o ConnectTimeout=12 -o IdentitiesOnly=yes "$HU@$HIVE_HOST" \
-        'command -v sbatch >/dev/null 2>&1 && echo HAS_SBATCH; ls -d /quobyte/proteomics-grp 2>/dev/null && echo HAS_GRP' 2>/dev/null)"
+  # `timeout` is GNU coreutils and a stock macOS does not have it -- there is no
+  # /usr/bin/timeout. Unguarded, the probe below died with "command not found", $out
+  # came back empty, and hive_ssh was reported "failed"; that then drops MODE to
+  # "local", so a user with a perfectly good HIVE key silently ran the whole analysis
+  # on their laptop. Degrading to no wrapper is safe: ssh's own ConnectTimeout already
+  # bounds a stalled connect, and this only additionally bounds a hang after the
+  # connection is up.
+  TMO=()
+  if   have timeout;  then TMO=(timeout 25)
+  elif have gtimeout; then TMO=(gtimeout 25)     # coreutils installed via Homebrew
+  fi
+  # Arrays, not a spliced string: a key path containing a space has to reach ssh as
+  # ONE argument. ${A[@]+"${A[@]}"} because the system bash on macOS is 3.2, where
+  # "${A[@]}" on an empty array is an unbound-variable error under `set -u`.
+  KEY_OPT=(); [ -n "$KEY" ] && KEY_OPT=(-i "$KEY")
+  # bash -l -c, exactly as hive_exec.sh does. ssh with a BARE command runs a NON-login
+  # shell, and HIVE does not put sbatch on PATH there -- so this probe reported
+  # HAS_SBATCH missing for an account that has it, can_use_slurm went false, and the
+  # recommended mode fell back to "local". A Core user with a working cluster account
+  # was told to run a multi-hour search on their laptop. Verified against HIVE: bare
+  # command -> no HAS_SBATCH, `bash -l -c` -> HAS_SBATCH.
+  out="$(${TMO[@]+"${TMO[@]}"} ssh ${KEY_OPT[@]+"${KEY_OPT[@]}"} \
+        -o BatchMode=yes -o ConnectTimeout=12 -o IdentitiesOnly=yes "$HU@$HIVE_HOST" \
+        "bash -l -c 'command -v sbatch >/dev/null 2>&1 && echo HAS_SBATCH; ls -d /quobyte/proteomics-grp 2>/dev/null && echo HAS_GRP'" 2>/dev/null)"
   if [ -n "$out" ]; then
     HIVE_SSH="ok"
     echo "$out" | grep -q HAS_SBATCH && SSH_SBATCH=true

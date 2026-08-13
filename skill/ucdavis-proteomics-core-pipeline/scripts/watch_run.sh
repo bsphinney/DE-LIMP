@@ -30,6 +30,14 @@ esac; done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 run() { if $HIVE; then bash "$HERE/hive_exec.sh" "$*"; else bash -c "$*"; fi; }
 
+# mtime of a file, in the syntax of whichever kernel `run` will actually execute on.
+# GNU stat wants -c %Y, BSD/macOS stat wants -f %m. This CANNOT key off the local
+# uname alone: with --hive the command is sent to HIVE, which is Linux no matter what
+# the laptop is, so a darwin check here would send BSD syntax to a GNU stat. Getting
+# this wrong is silent -- stat writes to stderr, the substitution yields "", and stall
+# detection below just never fires.
+if $HIVE || [ "$(uname -s)" = "Linux" ]; then STAT_MTIME="stat -c %Y"; else STAT_MTIME="stat -f %m"; fi
+
 state="unknown"; done=false; failed=false; q_failed=false; fix_qf=""
 
 # --all <dir>: watch the WHOLE chain, not just its last link. Watching only the final
@@ -140,7 +148,7 @@ fi
 stalled=false
 if [ -z "$err_class" ] && [ -n "$LOG" ] && printf '%s' "$state" | grep -qiE "RUNNING|^R$"; then
   now="$(run "date +%s" 2>/dev/null)"
-  mt="$(run "stat -c %Y $(printf %q "$LOG") 2>/dev/null" 2>/dev/null | tr -dc 0-9)"
+  mt="$(run "$STAT_MTIME $(printf %q "$LOG") 2>/dev/null" 2>/dev/null | tr -dc 0-9)"
   if [ -n "$now" ] && [ -n "$mt" ]; then
     age=$(( now - mt ))
     if [ "$age" -ge $(( STALL_MIN * 60 )) ]; then
