@@ -159,6 +159,14 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # DIA-NN's own default window and is cheap; the documented disk-space caveat
     # applies to --xic-theoretical-fr and large windows, which are NOT enabled here.
     add("--xic", 10, "extract XICs for identification validation (DIA-NN default 10s window)")
+    # --xic ALONE writes mobilogram files containing nothing but zeros. DIA-NN
+    # allocates ms1_mobilogram/ms2_mobilogram parquets but never populates them
+    # unless --mobilograms is ALSO passed -- silently, at plausible file size.
+    # On timsTOF the mobilograms are the ion-mobility axis: a real peptide should
+    # form a coherent peak in BOTH retention time and mobility, which a
+    # chromatogram alone cannot show. DIA-NN ignores the flag on instruments
+    # without ion mobility, so it is safe to emit unconditionally.
+    add("--mobilograms", True, "populate the mobilogram files -- --xic alone leaves them all zeros")
     add("--fasta-search", True, "library-free (predicted spectral library)")
     add("--gen-spec-lib", True, UNIV)
     add("--predictor", True, "deep-learning predictor for library-free DIA")

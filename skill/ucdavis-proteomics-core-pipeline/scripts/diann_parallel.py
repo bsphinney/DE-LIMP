@@ -34,7 +34,7 @@ import os, sys, glob, argparse, shlex, subprocess
 # NOTE: --dda is intentionally NOT stripped — for DDA data put --dda in the --cfg and it
 # flows into every step (DIA-NN 2.6 searches DDA per file exactly as it does DIA).
 STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--reanalyse",
-         "--rt-profiling", "--no-norm", "--xic", "--out-lib", "--lib", "--out", "--f",
+         "--rt-profiling", "--no-norm", "--xic", "--mobilograms", "--out-lib", "--lib", "--out", "--f",
          # NOTE: --xic is stripped here on purpose and re-added to step 4 ONLY (see
          # xic_flag() below) -- step 2 IDs are not final, and step 5 runs --use-quant,
          # which never re-reads the raw spectra so --xic is silently a no-op there.
@@ -75,7 +75,7 @@ def read_cfg_flags(cfg):
 
 
 def xic_flag(cfg):
-    """Return the '--xic N' flag from the cfg, or '' if XICs were not requested.
+    """Return the '--xic N' flag (plus --mobilograms when requested), or '' if not.
 
     XIC extraction must happen on the FINAL per-file pass (step 4): step 2 works
     against the predicted library so its IDs are not final, and step 5 runs with
@@ -88,12 +88,19 @@ def xic_flag(cfg):
         toks = shlex.split(open(cfg).read(), comments=True)
     except ValueError:
         toks = open(cfg).read().split()
+    out = ""
     for i, t in enumerate(toks):
         if t == "--xic":
             if i + 1 < len(toks) and not toks[i + 1].startswith("-"):
-                return f"--xic {toks[i + 1]}"
-            return "--xic"
-    return ""
+                out = f"--xic {toks[i + 1]}"
+            else:
+                out = "--xic"
+    # --mobilograms must ride along with --xic or the mobilogram parquets are written
+    # full of zeros. Emitted only when XICs are requested; DIA-NN ignores it on
+    # instruments without ion mobility.
+    if out and "--mobilograms" in toks:
+        out += " --mobilograms"
+    return out
 
 def mass_acc_status(cfg):
     """Is this cfg PARALLEL-SAFE? Steps 3/5 reuse the .quant files from steps 2/4, so
