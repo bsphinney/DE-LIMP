@@ -159,6 +159,14 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # DIA-NN's own default window and is cheap; the documented disk-space caveat
     # applies to --xic-theoretical-fr and large windows, which are NOT enabled here.
     add("--xic", 10, "extract XICs for identification validation (DIA-NN default 10s window)")
+    # --xic ALONE writes mobilogram files that contain nothing but zeros. DIA-NN
+    # allocates ms1_mobilogram/ms2_mobilogram parquets but never populates them
+    # unless --mobilograms is ALSO passed -- silently, at plausible file size.
+    # Observed on DIA-NN 2.3.0: 2,560,064 rows, 0 non-zero values, 1 distinct value,
+    # while the XICs from the same run were 100% populated. On timsTOF the
+    # mobilograms are the ion-mobility axis, which is a second validation
+    # dimension worth having; on Orbitrap data the flag is harmless.
+    add("--mobilograms", True, "populate the mobilogram files -- --xic alone leaves them all zeros")
     add("--fasta-search", True, "library-free (predicted spectral library)")
     add("--gen-spec-lib", True, UNIV)
     add("--predictor", True, "deep-learning predictor for library-free DIA")

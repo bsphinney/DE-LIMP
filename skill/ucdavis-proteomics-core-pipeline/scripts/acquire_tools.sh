@@ -11,6 +11,11 @@
 #   Version pinning (PLAN.md §7c): the orchestrator passes the workflow bundle's
 #   engine + version so we install/resolve THAT EXACT version, not GitHub
 #   "latest". Pass via env:
+#
+#   EXCEPTION -- DIA-NN: always resolved to the NEWEST available version, even
+#   when a bundle pins an older one. Set DIANN_HONOR_PIN=1 to restore pinning
+#   (only needed to reproduce a specific historical run). The resolved version
+#   is always recorded in tools.json, so provenance is unaffected.
 #          PIN_ENGINE=diann PIN_VERSION=2.6.0 bash acquire_tools.sh hpc
 #   Installs are cached under <root>/<engine>/<version>/ so multiple pinned
 #   versions coexist and results stay reproducible.
@@ -84,7 +89,22 @@ acquire_sage() {
 
 # --------------------------------------------------------------- DIA-NN -------
 acquire_diann() {
-  local ver; ver="latest"; pin_for diann && ver="$PIN_VERSION"
+  # DIA-NN ALWAYS resolves to the newest version available, even when a workflow
+  # bundle pins an older one. A bundle's `engine.version` records what was current
+  # when the bundle was written, not what is best to search with today -- and an
+  # honoured stale pin will happily download/build an OLD engine when a newer one
+  # is already installed. Reproducibility is preserved by RECORDING the resolved
+  # version in tools.json + the provenance bundle, not by freezing an old build.
+  #
+  # Set DIANN_HONOR_PIN=1 to opt back into the bundle pin -- the case that matters
+  # is reproducing a specific historical run bit-for-bit.
+  local ver; ver="latest"
+  if [ "${DIANN_HONOR_PIN:-0}" = "1" ] && pin_for diann; then
+    ver="$PIN_VERSION"
+    NOTES+=("DIA-NN: honouring the pinned version $ver because DIANN_HONOR_PIN=1.")
+  elif pin_for diann; then
+    NOTES+=("DIA-NN: bundle pins $PIN_VERSION, but resolving to the NEWEST available instead (set DIANN_HONOR_PIN=1 to pin). The version actually used is recorded in tools.json.")
+  fi
   DIANN_VER="$ver"
   case "$CLASS" in
     hpc)
@@ -103,7 +123,10 @@ acquire_diann() {
       fi
       if [ -n "$bin" ]; then
         DIANN_CMD="$bin"
-        NOTES+=("DIA-NN $ver: using the HIVE Proteomics Core native build $bin. Reference invocation: $DN/run_diann_*.sbatch.")
+        # report the REAL version, not the literal string "latest"
+        local resolved; resolved="$(printf '%s' "$bin" | sed -nE 's|.*/diann-([0-9][0-9.]*)/diann-linux$|\1|p')"
+        [ -n "$resolved" ] && DIANN_VER="$resolved"
+        NOTES+=("DIA-NN ${resolved:-$ver}: using the HIVE Proteomics Core native build $bin (newest of: $(find "$DN" -maxdepth 3 -name diann-linux -type f 2>/dev/null | sed -nE 's|.*/diann-([0-9][0-9.]*)/diann-linux$|\1|p' | sort -V | tr '\n' ' ')). Reference invocation: $DN/run_diann_*.sbatch.")
         return
       elif [ -n "$sif" ] && have apptainer && { [ "$ver" = "latest" ] || printf '%s' "$sif" | grep -q "$ver"; }; then
         DIANN_CMD="apptainer exec --bind /quobyte:/quobyte $sif /diann-*/diann-linux"
