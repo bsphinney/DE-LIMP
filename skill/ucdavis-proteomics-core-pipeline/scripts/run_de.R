@@ -151,14 +151,18 @@ if (method == "dpc") {
   # and grows with N. Lib.* is documented as "'global' if the library was created by DIA-NN",
   # but that cannot be relied on -- in some reports both Lib columns are identically 0 and
   # filter nothing -- which is why Global.* is applied explicitly rather than assumed.
-  # Measured on a 373-run DIA-NN 2.6 report (mouse, 4 cohorts): the three extra columns keep
-  # 329 protein groups out that the run-level three admit (6,531 vs 6,860), median ONE peptide
-  # and present in 8% of runs, of which 124 came out significant at BH < 0.05 -- i.e. they
-  # reach the results table.
+  # Measured on identical input (373-run DIA-NN 2.6 report, mouse, 4 cohorts, contaminants
+  # removed, Empirical.Quality >= 0.75 -- only the q-column set differs): the three extra
+  # columns keep out 227 protein groups that the run-level three admit, 6,531 vs 6,758.
+  # Those 227 carry a median of ONE precursor and appear in 9.4% of runs, against 12
+  # precursors and 82.3% for the protein groups both sets retain.
+  # Which column does the work is not what the name suggests: of the rows dropped,
+  # PG.Q.Value accounts for 22,465 (20,447 of them uniquely), Global.PG.Q.Value 15,752 and
+  # Global.Q.Value 7,873 -- i.e. the RUN-SPECIFIC column is the largest single contributor.
   # NOTE on cutoffs: DIA-NN recommends PG.Q.Value "at 0.01 to 0.05, typically 0.05 is
-  # sufficient". This applies the single --q-cutoff (default 0.01) to it, which is a
-  # deliberate tightening -- and is what build_maxlfq.R already does, so the two --method
-  # values agree on FDR rather than disagreeing.
+  # sufficient". This applies the single --q-cutoff (default 0.01) to it, a deliberate
+  # tightening that matches build_maxlfq.R so the two --method values agree on FDR. On this
+  # report the choice is nearly free: 0.01 vs 0.05 differs by 2 protein groups (6,564/6,566).
   q_want <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
   q_alt  <- c("Global.Q.Value", "Global.PG.Q.Value", "PG.Q.Value")
   q_use  <- intersect(q_want, have_cols)
