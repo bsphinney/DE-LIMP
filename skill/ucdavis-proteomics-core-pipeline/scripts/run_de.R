@@ -141,17 +141,31 @@ if (method == "dpc") {
   # q-column stops rather than producing unfiltered results that look filtered.
   # (FragPipe's own report.tsv does carry Lib.Q.Value / Lib.PG.Q.Value -- columns 39
   # and 40 -- so it needs no special handling; it works with limpa's defaults.)
+  #
+  # The experiment-wide columns are applied WHENEVER THEY EXIST, not only as a fallback for
+  # a missing run-level one. Q.Value / Lib.Q.Value / Lib.PG.Q.Value are per-run and per-
+  # library: each controls FDR within one run, so the union of run-level-passing IDs over N
+  # runs sits above the nominal cutoff and grows with N. Global.Q.Value / Global.PG.Q.Value /
+  # PG.Q.Value are what DIA-NN provides to control it across the experiment.
+  # Measured on a 373-run DIA-NN 2.6 report (mouse, 4 cohorts): filtering on the run-level
+  # three alone admits 329 extra protein groups (+5.0%, 6,860 vs 6,531), median ONE peptide
+  # and present in 8% of runs, of which 124 came out significant at BH < 0.05 -- i.e. they
+  # reach the results table. build_maxlfq.R has always applied all six; this brings the dpc
+  # path in line with it, so the two --method values no longer disagree on FDR.
   q_want <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
   q_alt  <- c("Global.Q.Value", "Global.PG.Q.Value", "PG.Q.Value")
   q_use  <- intersect(q_want, have_cols)
   q_extra <- intersect(setdiff(q_alt, q_use), have_cols)
-  if (length(setdiff(q_want, have_cols)) > 0) {
+  if (length(q_extra)) {
     q_use <- unique(c(q_use, q_extra))
+    message(sprintf("[run_de] experiment-wide FDR columns present; filtering on %s",
+                    paste(q_use, collapse = " / ")))
+  }
+  if (length(setdiff(q_want, have_cols)) > 0)
     message(sprintf(paste0("[run_de] this report has no %s; limpa would apply NO filter ",
                            "for those columns without saying so. Filtering on %s instead."),
                     paste(setdiff(q_want, have_cols), collapse = " / "),
                     paste(q_use, collapse = " / ")))
-  }
   if (length(q_use) == 0)
     stop("No usable q-value column found in ", basename(input),
          " -- cannot apply identification FDR. Columns present: ",
