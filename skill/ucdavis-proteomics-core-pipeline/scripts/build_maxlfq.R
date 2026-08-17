@@ -8,6 +8,20 @@
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 || (length(a) == 1 && is.na(a))) b else a
 
+# ONE definition of the q-value column set (mirrored in diann_q_columns.py).
+# run_de.R sources this file, so the constants are usually already present;
+# source them here too so build_maxlfq.R also works when loaded on its own.
+if (!exists("DIANN_FDR_REQUIRED")) local({
+  d <- local({
+    f <- grep("^--file=", commandArgs(), value = TRUE)[1]
+    if (is.na(f)) getwd() else dirname(normalizePath(sub("^--file=", "", f), mustWork = FALSE))
+  })
+  for (p in c(file.path(d, "diann_q_columns.R"), "diann_q_columns.R"))
+    if (file.exists(p)) { source(p); return(invisible()) }
+  stop("diann_q_columns.R not found next to build_maxlfq.R -- it defines the ",
+       "identification-FDR columns and there is no safe default to guess.")
+})
+
 build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
                          eq_cutoff = 0, pgq_cutoff = 0, keep_runs = NULL) {
   stopifnot(requireNamespace("dplyr", quietly = TRUE),
@@ -22,11 +36,13 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
     cols <- names(ds)
   }
 
-  needed   <- c("Run", "Protein.Group", "PG.MaxLFQ", "Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
-  # PG.Q.Value / Global.* are optional because older reports lack them, but they are
-  # what actually controls FDR at the protein and experiment level — see below.
+  needed   <- c("Run", "Protein.Group", "PG.MaxLFQ", DIANN_FDR_REQUIRED)
+  # DIANN_FDR_OPTIONAL is optional only because older reports lack those columns,
+  # not because applying them is discretionary. They MUST be listed here as well
+  # as filtered on: filtering an arrow dataset on a column select() dropped
+  # returns ZERO ROWS silently -- the defect that broke MaxLFQ in the DE-LIMP app.
   optional <- c("Empirical.Quality", "PG.MaxLFQ.Quality", "Genes", "Protein.Names",
-                "PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")
+                DIANN_FDR_OPTIONAL)
   miss <- setdiff(needed, cols)
   if (length(miss)) stop("MaxLFQ: missing required columns: ", paste(miss, collapse = ", "))
 
@@ -43,9 +59,11 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
     flt <- dplyr::filter(flt, Q.Value <= !!q_cutoff,
                               Lib.Q.Value <= !!q_cutoff,
                               Lib.PG.Q.Value <= !!q_cutoff)
-    q_columns <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
-    .fdr <- c("Q", "Lib.Q", "Lib.PG.Q")
-    for (.qc in c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")) {
+    q_columns <- DIANN_FDR_REQUIRED
+    # Derived, not restated: this label was a third hand-written copy of the
+    # required set and would have gone stale the moment the set changed.
+    .fdr <- sub("\\.Value$", "", DIANN_FDR_REQUIRED)
+    for (.qc in DIANN_FDR_OPTIONAL) {
       if (.qc %in% cols) {
         flt <- dplyr::filter(flt, .data[[.qc]] <= !!q_cutoff)
         .fdr <- c(.fdr, .qc)
