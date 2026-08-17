@@ -425,6 +425,24 @@ silently ignored, which is why the canonical set must come from FTP.
 Pass `--hive` when `uc_davis_hive` is true to reuse pre-staged proteomes +
 contaminants under `/quobyte/proteomics-grp/MRS/` instead of downloading.
 
+**Non-model organisms → NCBI.** UniProt reference proteomes cover a few thousand
+species; wildlife, agricultural and other non-model organisms often have an
+annotated RefSeq genome and no UniProt proteome. `resolve` searches NCBI
+automatically when UniProt returns nothing and lists hits under `ncbi_candidates`:
+```
+python3 scripts/fetch_fasta.py fetch --ncbi-accession GCF_007827085.1 \
+    --ncbi-organism "Peromyscus californicus insignis" --ncbi-taxid 42520 \
+    --contaminants universal --out ./search.fasta
+```
+- **Confirm the assembly with the user — never auto-pick one.** It's a different
+  kind of database and they need to know that's what they're searching.
+- **Use the RefSeq `GCF_` accession.** A GenBank `GCA_` record usually reports no
+  protein count and its download ZIP contains no `protein.faa` at all.
+- **It includes every isoform** — the analogue of UniProt `full_isoforms`, *not*
+  the `one_per_gene` default. The Core's Peromyscus assembly is 51,825 sequences
+  against 21,877 protein-coding genes. `fetch` counts them and warns; carry that
+  into the methods rather than calling it a "reference proteome".
+
 **Read the returned JSON** (also written to `<out>.meta.json` for the repro
 bundle) and act on it:
 - `warnings` non-empty → tell the user before searching; a one-per-gene→full

@@ -21,7 +21,24 @@ Proteome resolution priority (cheapest / most-trusted first):
   1. --path override            -> used verbatim (e.g. a pre-staged proteome).
   2. UC Davis HIVE (--hive)     -> reuse /quobyte/proteomics-grp/MRS/ instead of
                                    downloading.
-  3. UniProt.
+  3. --ncbi-accession           -> an annotated NCBI RefSeq genome assembly.
+  4. UniProt.
+
+NCBI (non-model organisms)
+  UniProt reference proteomes cover a few thousand organisms. Wildlife,
+  agricultural and other non-model species frequently have an annotated RefSeq
+  genome and NO UniProt proteome, which used to be a dead end. `resolve` now
+  searches NCBI automatically whenever UniProt returns nothing, and `fetch
+  --ncbi-accession GCF_...` downloads that assembly's protein set (ported from
+  DE-LIMP R/helpers_search.R, the version the Core uses).
+
+  Two things to keep straight, both surfaced in the output rather than assumed:
+    * Prefer the RefSeq GCF_ accession. A GenBank GCA_ record usually reports no
+      protein count and its download ZIP contains no protein.faa at all.
+    * NCBI's protein.faa includes EVERY isoform -- it is the analogue of UniProt
+      `full_isoforms`, not of the `one_per_gene` default used for UniProt. On the
+      Core's Peromyscus assembly that is 51,825 sequences vs 21,877 protein-coding
+      genes. `fetch` counts the isoform headers and warns.
 
 CONTENT TYPE (why the default is one_per_gene)
   UniProt's REST `&onePerGene=true` is SILENTLY IGNORED -- verified 2026-07-29:
@@ -42,7 +59,7 @@ CONTAMINANTS
 Emits JSON on stdout and writes a `<out>.meta.json` sidecar with the same content
 plus checksums, for the reproducibility bundle.
 """
-import sys, os, re, json, argparse, glob, gzip, shutil, hashlib
+import sys, os, re, json, argparse, glob, gzip, shutil, hashlib, zipfile
 import urllib.request, urllib.error, urllib.parse
 
 HIVE_MRS = "/quobyte/proteomics-grp/MRS"
@@ -337,9 +354,37 @@ def cmd_resolve(a):
             if taxid is not None else
             sum(1 for c in cands if c["exact_name_match"] and c["is_reference"]) != 1)),
     }
+    # NCBI fallback. UniProt reference proteomes cover a few thousand organisms; a
+    # wildlife / agricultural / non-model species often has an annotated RefSeq
+    # genome and no UniProt proteome at all. Search NCBI when UniProt came back
+    # empty (or when asked), so those runs have somewhere to go instead of a dead
+    # end. This is a SEPARATE list, never merged into `candidates` -- an NCBI
+    # assembly is not a UniProt proteome and must not be picked as if it were.
+    if a.ncbi or not cands:
+        query = organism or (ORGANISM_TAXIDS.get(taxid, ("",))[0] if taxid else "") or str(taxid or "")
+        ncbi = ncbi_search_assemblies(query, a.size) if query else []
+        out["ncbi_candidates"] = ncbi
+        if ncbi:
+            out["notes"].append(
+                f"UniProt has no reference proteome for '{query}', but NCBI has "
+                f"{len(ncbi)} annotated assembl{'y' if len(ncbi) == 1 else 'ies'}. "
+                f"Confirm one with the user, then: fetch --ncbi-accession "
+                f"{ncbi[0]['accession']} --ncbi-organism '{ncbi[0]['organism']}' "
+                f"--ncbi-taxid {ncbi[0]['taxid']}"
+                if not cands else
+                f"NCBI also has {len(ncbi)} annotated assembly/assemblies for '{query}'.")
+            # Never auto-pick an NCBI assembly: it is a different kind of database
+            # (one assembly's proteins, often several isoforms per gene) and the
+            # user has to know that is what they are searching.
+            out["needs_menu"] = True
+
     if not cands:
-        out["hint"] = ("No proteome matched. Try the scientific name "
-                       "(e.g. 'Danio rerio') or an NCBI taxid.")
+        out["hint"] = (
+            "No UniProt proteome matched. Try the scientific name (e.g. 'Danio rerio') "
+            "or an NCBI taxid."
+            + (" NCBI assemblies are listed under `ncbi_candidates` -- for a non-model "
+               "organism that is usually the right answer."
+               if out.get("ncbi_candidates") else ""))
     print(json.dumps(out, indent=2))
     return 0 if cands else 1
 
@@ -491,6 +536,113 @@ def resolve_contaminants(set_name, explicit_path, use_hive, workdir):
 
 
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# NCBI Datasets v2 -- the fallback when UniProt has no reference proteome.
+#
+# Ported from DE-LIMP's R implementation (R/helpers_search.R
+# ncbi_search_assemblies / ncbi_download_proteome), which is the version the Core
+# actually uses. Endpoints re-verified live on 2026-08-17.
+#
+# Why this exists: UniProt reference proteomes cover a few thousand organisms.
+# A wildlife, agricultural, or non-model species often has an annotated RefSeq
+# genome and no UniProt proteome at all, and without this the run had nowhere to
+# go. Peromyscus californicus (the Core's actual case) is exactly that.
+NCBI_API = "https://api.ncbi.nlm.nih.gov/datasets/v2"
+
+
+def ncbi_search_assemblies(query, size=25):
+    """Organism name (or taxid) -> annotated genome assemblies, best first.
+
+    Returns [] on any network/parse failure -- callers treat NCBI as a fallback,
+    so an outage must degrade to "no candidates", never abort the run.
+    """
+    url = f"{NCBI_API}/genome/taxon/{urllib.parse.quote(str(query), safe='')}/dataset_report"
+    try:
+        body, _hdrs = _get_json(url)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
+        _warn(f"NCBI assembly search failed for '{query}': {e}")
+        return []
+
+    rows, seen = [], set()
+    for r in body.get("reports") or []:
+        acc = r.get("accession") or ""
+        paired = r.get("paired_accession") or ""
+        info = r.get("assembly_info") or {}
+        ann = r.get("annotation_info") or {}
+        counts = ((ann.get("stats") or {}).get("gene_counts") or {})
+        n_prot = counts.get("protein_coding") or 0
+        # Prefer the RefSeq (GCF_) accession: on a paired record it is the one
+        # carrying the annotation. A GenBank GCA_ record commonly reports no
+        # protein count at all, and only GCF_ has PROT_FASTA to download.
+        best = paired if paired.startswith("GCF_") else acc
+        if not best or not n_prot:       # unannotated assembly -> no proteins to search
+            continue
+        if best in seen:
+            continue
+        seen.add(best)
+        rows.append({
+            "accession": best,
+            "genbank": acc,
+            "organism": (r.get("organism") or {}).get("organism_name") or "",
+            "taxid": (r.get("organism") or {}).get("tax_id") or 0,
+            "assembly_level": info.get("assembly_level") or "",
+            "refseq_category": info.get("refseq_category") or "",
+            "annotation": ann.get("name") or "",
+            "protein_count": int(n_prot),
+        })
+    # Reference genome first, then most proteins.
+    rows.sort(key=lambda d: (d["refseq_category"] != "reference genome", -d["protein_count"]))
+    return rows[:size]
+
+
+def ncbi_download_proteome(accession, outdir):
+    """Download an assembly's protein FASTA. Returns (text, path, url).
+
+    NCBI serves a ZIP; the protein FASTA is ncbi_dataset/data/<acc>/protein.faa.
+    """
+    url = (f"{NCBI_API}/genome/accession/{accession}"
+           f"/download?include_annotation_type=PROT_FASTA")
+    os.makedirs(outdir, exist_ok=True)
+    zip_path = os.path.join(outdir, f"{accession}_protein.zip")
+    try:
+        _download(url, zip_path)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        raise RuntimeError(f"NCBI download failed for {accession}: {e}")
+    # A too-small payload is NCBI's way of returning an error page or an
+    # assembly with no protein annotation. Treat it as a failure, not a FASTA.
+    size = os.path.getsize(zip_path) if os.path.exists(zip_path) else 0
+    if size < 1000:
+        try:
+            os.unlink(zip_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"NCBI returned only {size} bytes for {accession} -- that assembly "
+            f"probably has no protein annotation. Pick a GCF_ (RefSeq) accession "
+            f"with a non-zero protein count.")
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            faa = [n for n in zf.namelist() if n.endswith("protein.faa")]
+            if not faa:
+                raise RuntimeError(
+                    f"no protein.faa inside NCBI's ZIP for {accession} "
+                    f"(entries: {', '.join(zf.namelist()[:6])})")
+            text = zf.read(faa[0]).decode("utf-8", errors="replace")
+    except zipfile.BadZipFile as e:
+        raise RuntimeError(f"NCBI returned a malformed ZIP for {accession}: {e}")
+    finally:
+        try:
+            os.unlink(zip_path)
+        except OSError:
+            pass
+
+    path = os.path.join(outdir, f"{accession}_protein.fasta")
+    with open(path, "w") as fh:
+        fh.write(text)
+    return text, path, url
+
+
 def cmd_fetch(a):
     if a.content not in CONTENT_TYPES:
         sys.exit(f"--content must be one of {', '.join(CONTENT_TYPES)}")
@@ -519,10 +671,56 @@ def cmd_fetch(a):
             base_text = _read_fasta_text(staged)
             source, content_used = f"hive:{staged}", "as_staged"
 
-    # 3. UniProt
+    # 3. NCBI RefSeq assembly (for organisms with no UniProt reference proteome)
+    ncbi_info = None
+    if base_text is None and getattr(a, "ncbi_accession", None):
+        acc = a.ncbi_accession
+        if not acc.startswith(("GCF_", "GCA_")):
+            sys.exit(f"--ncbi-accession must be a genome assembly accession "
+                     f"(GCF_... or GCA_...), got '{acc}'. Run "
+                     f"`fetch_fasta.py resolve --organism '<name>' --ncbi` to find one.")
+        if acc.startswith("GCA_"):
+            # GenBank assemblies usually carry no protein annotation; the paired
+            # RefSeq GCF_ record is the one with PROT_FASTA.
+            msg = (f"{acc} is a GenBank (GCA_) accession. Protein annotation normally "
+                   f"lives on the paired RefSeq GCF_ record; if this download fails or "
+                   f"looks short, re-resolve and pick the GCF_ accession.")
+            _warn(msg)
+            warnings.append(msg)
+        try:
+            base_text, ncbi_path, base_url = ncbi_download_proteome(acc, outdir)
+        except RuntimeError as e:
+            sys.exit(str(e))
+        source, content_used = f"ncbi_refseq:{acc}", "assembly_proteins"
+        # NCBI's protein.faa is EVERY annotated protein, isoforms included -- it is
+        # the analogue of UniProt `full_isoforms`, NOT of the `one_per_gene` default
+        # this script uses for UniProt. On the Core's Peromyscus assembly that is
+        # 51,825 sequences against 21,877 protein-coding genes (34,417 headers say
+        # "isoform"). Silently handing back a ~2.4x larger search space would be the
+        # same class of bug as the one-per-gene->full fallback above, so say it.
+        n_iso = sum(1 for ln in base_text.splitlines()
+                    if ln.startswith(">") and "isoform" in ln.lower())
+        if n_iso:
+            msg = (f"NCBI {acc} contains all annotated isoforms: {n_iso} of "
+                   f"{_count(base_text)} sequences are labelled 'isoform'. This is "
+                   f"equivalent to UniProt's full_isoforms content, NOT the "
+                   f"one_per_gene canonical set used for UniProt proteomes -- a "
+                   f"larger search space. Report it as such in the methods.")
+            _warn(msg)
+            warnings.append(msg)
+        # Record what this actually is. NCBI assembly proteins are NOT a UniProt
+        # reference proteome -- they are one assembly's annotated protein set, often
+        # with multiple isoforms per gene. Methods text must not call it otherwise.
+        ncbi_info = {"accession": acc, "local_copy": ncbi_path}
+        meta = {"organism": a.ncbi_organism or "", "taxid": a.ncbi_taxid or 0,
+                "proteome_type": "NCBI RefSeq assembly proteins (not a UniProt "
+                                 "reference proteome)"}
+
+    # 4. UniProt
     if base_text is None:
         if not a.proteome:
-            sys.exit("Need --proteome (or --path). Run `fetch_fasta.py resolve` first.")
+            sys.exit("Need --proteome, --ncbi-accession, or --path. "
+                     "Run `fetch_fasta.py resolve` first.")
         try:
             meta = proteome_meta(a.proteome)
         except (urllib.error.URLError, urllib.error.HTTPError) as e:
@@ -631,6 +829,7 @@ def cmd_fetch(a):
         # Methods text must not call a strain assembly or a user-supplied file a
         # "reference proteome" -- record what it actually is.
         "proteome_type": meta.get("proteome_type", ""),
+        "ncbi_assembly": ncbi_info,
         "content_requested": a.content,
         "content_used": content_used,
         "uniprot_release": meta.get("uniprot_release", ""),
@@ -680,6 +879,9 @@ def main():
     r.add_argument("--list", action="store_true",
                    help="print the curated organism table and exit")
     r.add_argument("--size", type=int, default=25)
+    r.add_argument("--ncbi", action="store_true",
+                   help="also search NCBI genome assemblies. Automatic when UniProt "
+                        "returns no candidates.")
 
     f = sub.add_parser("fetch", help="build the search FASTA")
     f.add_argument("--proteome", help="UniProt proteome ID, e.g. UP000005640")
@@ -694,6 +896,14 @@ def main():
                         "omitting it there still means none")
     f.add_argument("--allow-missing-contaminants", action="store_true",
                    help="downgrade a contaminant-fetch failure from fatal to a warning")
+    f.add_argument("--ncbi-accession",
+                   help="NCBI genome assembly accession (GCF_...) to use instead of a "
+                        "UniProt proteome. For organisms with no UniProt reference "
+                        "proteome. Find one with `resolve --organism <name> --ncbi`.")
+    f.add_argument("--ncbi-organism", default="",
+                   help="organism name to record alongside --ncbi-accession")
+    f.add_argument("--ncbi-taxid", type=int, default=0,
+                   help="taxid to record alongside --ncbi-accession")
     f.add_argument("--hive", action="store_true",
                    help="prefer pre-staged HIVE FASTAs (set when env is uc_davis_hive)")
     f.add_argument("--out", required=True)

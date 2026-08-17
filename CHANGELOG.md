@@ -67,6 +67,23 @@ pull` no longer functions and `workflows/` no longer serves bundles.
   macOS build" is a property of the OS, not of whether a scheduler is on PATH.
 
 ### Added
+- **NCBI proteome download, for organisms UniProt doesn't cover.** Ported from
+  DE-LIMP's own `R/helpers_search.R` (`ncbi_search_assemblies` /
+  `ncbi_download_proteome`), endpoints re-verified live. `fetch_fasta.py resolve`
+  now searches NCBI Datasets automatically whenever UniProt returns no proteome and
+  lists hits under `ncbi_candidates`; `fetch --ncbi-accession GCF_...` downloads
+  that assembly's protein set. This removes the last dead end for non-model
+  organisms — wildlife, agricultural and other species that have an annotated
+  RefSeq genome and no UniProt reference proteome (e.g. *Peromyscus californicus*).
+  Two traps are handled explicitly rather than assumed: the RefSeq `GCF_` accession
+  is preferred because a GenBank `GCA_` record usually reports no protein count and
+  its ZIP contains no `protein.faa`; and NCBI's protein set includes **every
+  isoform** (51,825 sequences vs 21,877 protein-coding genes on the Peromyscus
+  assembly), so it is the analogue of UniProt `full_isoforms`, not the
+  `one_per_gene` default — `fetch` counts the isoform headers and warns so a ~2.4×
+  larger search space is never handed over silently. An NCBI assembly is never
+  auto-picked and is recorded as "NCBI RefSeq assembly proteins (not a UniProt
+  reference proteome)" so methods text can't miscall it.
 - **Platform capability map.** `detect_env.sh` now emits `engines` + `apple_silicon`,
   and `resolve_defaults.py --env` enforces it, so an engine that cannot run on this
   machine fails at resolve time with a usable alternative instead of mid-search.
