@@ -1,5 +1,9 @@
-#!/usr/bin/env bash
 # =============================================================================
+# NO SHEBANG ON PURPOSE: this file is `. sourced` by acquire_tools.sh and
+# build_diann_docker.sh, never executed. skill-checks.yml requires every
+# shebang-bearing script to be 100755, and marking a sourced library executable
+# would misrepresent how it is used.
+#
 # diann_release.sh -- resolve a DIA-NN "Academia" release asset URL BY VERSION.
 #
 # Sourced by acquire_tools.sh and build_diann_docker.sh. It is its own file so

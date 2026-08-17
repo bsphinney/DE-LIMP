@@ -1,0 +1,51 @@
+{
+  "id": "diann_timstof_dia",
+  "name": "diann \u2014 Bruker timsTOF (dia-PASEF / ddaPASEF) (DIA)",
+  "path": null,
+  "acquisition": "DIA",
+  "instruments": [
+    "timsTOF HT"
+  ],
+  "instrument_class": "timstof",
+  "instrument_label": "Bruker timsTOF (dia-PASEF / ddaPASEF)",
+  "organism": null,
+  "organism_taxid": 10090,
+  "engine": {
+    "name": "diann",
+    "version": "2.6.1"
+  },
+  "fasta": {
+    "path": null,
+    "add_contaminants": true
+  },
+  "de": {
+    "method": "dpc",
+    "q_cutoff": 0.01,
+    "logfc": 1.0,
+    "adjp": 0.05
+  },
+  "search": {
+    "estimate_params": true,
+    "params_file": null,
+    "ms1_ppm": 15,
+    "ms2_ppm": 15,
+    "ppm_source": "DIA-NN README recommended settings (verified 2026-06)",
+    "preset_provenance": null
+  },
+  "validated": {
+    "date": null,
+    "by": null,
+    "dataset": null,
+    "notes": "Parameters are this skill's data-type defaults (resolve_defaults.py 2026-08-14), not a site validation run. They are reproducible from the skill version alone."
+  },
+  "registry": {
+    "source": "local skill defaults",
+    "defaults_version": "2026-08-14",
+    "note": "no remote registry; parameters ship with the skill"
+  },
+  "platform": null,
+  "alternatives": [
+    "fragpipe"
+  ],
+  "notes": []
+}
