@@ -50,20 +50,28 @@ if docker image inspect "$TAG" >/dev/null 2>&1; then
   echo "[diann-docker] image already built: $TAG"; exit 0
 fi
 
-# resolve the Academia-Linux zip (free academic build) for the requested version
-asset_url() { # tag pattern
-  local api
-  if [ "$1" != "latest" ]; then api="https://api.github.com/repos/vdemichev/DiaNN/releases/tags/$1"
-  else api="https://api.github.com/repos/vdemichev/DiaNN/releases/latest"; fi
-  curl -fsSL "$api" 2>/dev/null | grep '"browser_download_url"' \
-    | sed -E 's/.*"(https[^"]+)".*/\1/' | grep -iE 'Academia-Linux.*zip' | head -n1
-}
-URL="$(asset_url "$VER")"
+# Resolve the Academia-Linux zip (free academic build) for the requested version.
+# Shared with acquire_tools.sh -- see diann_release.sh for why resolution is by
+# asset filename and never by release tag.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/diann_release.sh"
+URL="$(diann_asset_url "$VER" Linux)"
 if [ -z "$URL" ]; then
-  echo "[diann-docker] Could not find the DIA-NN Academia-Linux zip for version '$VER'." >&2
-  echo "  Download it manually (free for academics) from https://github.com/vdemichev/DiaNN/releases" >&2
-  echo "  unzip it into $WORK, then re-run this script." >&2
+  echo "[diann-docker] No DIA-NN Academia-Linux build named '$VER' exists." >&2
+  echo "  Check the version against https://github.com/vdemichev/DiaNN/releases (free for academics)," >&2
+  echo "  or download the zip manually, unzip it into $WORK, then re-run this script." >&2
   exit 5
+fi
+# Tag the image with the version we actually resolved, so "latest" does not
+# produce an image whose tag says nothing about what is inside it.
+GOT="$(printf '%s' "$URL" | sed -nE 's#.*/DIA-NN-([0-9][0-9.]*)-Academia-.*#\1#p')"
+if [ -n "$GOT" ] && [ "$GOT" != "$VER" ]; then
+  echo "[diann-docker] '$VER' resolved to DIA-NN $GOT"
+  VER="$GOT"; TAG="proteomics-pipeline/diann:${VER}"
+  if docker image inspect "$TAG" >/dev/null 2>&1; then
+    echo "$TAG" > "$PP_HOME/diann_docker_image"
+    echo "[diann-docker] image already built: $TAG"; exit 0
+  fi
 fi
 
 echo "[diann-docker] downloading $URL"

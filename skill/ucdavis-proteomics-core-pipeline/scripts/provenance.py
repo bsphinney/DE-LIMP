@@ -38,7 +38,7 @@ Outputs under --outdir:
   inputs/                    copies of params, conditions.csv, the workflow manifest
   checksums/                 sha256 of inputs, report, and DE outputs
 """
-import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform
+import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
@@ -280,6 +280,13 @@ def main():
     # ---- reproduce.sh --------------------------------------------------------
     commit = (reg or {}).get("commit") or "main"
     wf_id = (wfman or {}).get("id", "<workflow-id>")
+    # Parameters now ship with the skill; a run record names the defaults table
+    # version rather than a commit in a repo that no longer holds them.
+    defaults_version = (reg or {}).get("defaults_version") or "<defaults_version>"
+    acq_repro = (wfman or {}).get("acquisition") or "<DIA|DDA>"
+    _instr = ((wfman or {}).get("instruments") or [None])[0]
+    instr_repro = shlex.quote(_instr) if _instr else "'<instrument>'"
+    engine_repro = ((wfman or {}).get("engine") or {}).get("name") or "<engine>"
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
 
     # Rebuild the FASTA from what actually ran (fetch_fasta.py's output), falling back
@@ -341,8 +348,11 @@ else
   source ~/.proteomics-pipeline/activate.sh
 fi
 
-# 2. Re-fetch the validated workflow PINNED to the original commit (not moving main).
-python3 "$SKILL/scripts/fetch_workflows.py" pull --id {wf_id} --ref {commit} --dest ./wf
+# 2. Re-derive the search defaults from the data type. These ship with the skill, so
+#    the same skill version reproduces them exactly -- nothing is fetched.
+#    Original defaults_version: {defaults_version}
+python3 "$SKILL/scripts/resolve_defaults.py" --acquisition {acq_repro} \\
+  --instrument {instr_repro} --engine {engine_repro} --dest ./wf
 
 # 3. Resolve the same engine + version.
 PIN_ENGINE={a.engine or '<engine>'} PIN_VERSION={(wfman or {}).get('engine',{}).get('version','')} \\

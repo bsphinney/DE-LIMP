@@ -47,12 +47,18 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
 
 ### The five things that make a run reproducible
 
-1. **Pinned validated parameters.** `fetch_workflows.py` resolves the registry to a
-   git **commit SHA** and `pull --ref <sha>` fetches params at that commit, not the
-   moving `main` branch. The SHA is recorded in `workflow.manifest.json.registry`
-   and the run manifest. A re-run pulls byte-identical `diann.cfg`/`sage_config.json`.
+1. **Parameters pinned by the skill version.** `resolve_defaults.py` derives them
+   from the data type and they ship *with* the skill, so nothing is fetched at run
+   time and there is no moving branch to drift. `workflow.manifest.json.registry`
+   records `defaults_version`; record the skill version alongside it. Re-running the
+   same skill version on the same data type reproduces the parameters exactly.
+   (Before 2026-08-14 this came from a remote `workflows/` registry pinned by commit
+   SHA. That registry is retired — old run records citing a SHA stay valid; see
+   `workflows/README.md`.)
 2. **Pinned engine version.** `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION`
-   from the bundle and records resolved commands + versions in `tools.json`.
+   from the manifest and records resolved commands + versions in `tools.json`. For
+   DIA-NN it resolves the build by asset filename, so the recorded version is the
+   one actually installed — never the literal string `latest`.
 3. **Locked software environment.** `provenance.py` captures
    `environment/conda-explicit.txt` (every package pinned with URL + md5),
    `pip-freeze.txt`, and `r-sessionInfo.txt` (all R package versions). `reproduce.sh`

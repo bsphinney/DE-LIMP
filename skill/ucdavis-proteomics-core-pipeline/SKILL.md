@@ -6,20 +6,26 @@ description: >
   "search these raw files", "run my DIA/DDA data", "find differentially expressed
   proteins", "process this timsTOF/Astral/Orbitrap run", or points at a folder of
   .raw / .d / .mzML files and asks what's in it. Detects acquisition + instrument,
-  fetches a Brett-validated workflow from the DE-LIMP repo, downloads the pinned
-  search engine, runs DIA-NN (DIA) or Sage (DDA), then limpa/limma DE — with full
-  provenance back to the validated workflow. Also use it to "write the LC-MS methods
+  derives the search parameters from that data type, downloads the pinned search
+  engine, runs DIA-NN (DIA) or Sage (DDA), then limpa/limma DE — with full
+  provenance for every parameter. Also use it to "write the LC-MS methods
   section" / "generate a publication-ready methods section with the instrument grant
   acknowledgment" from facility raw data (UC Davis Proteomics Core).
 ---
 
 # Proteomics Pipeline
 
-Take a user from **raw MS files → differentially expressed proteins** using a
-**validated** workflow, never ad-hoc parameters. The validated parameters live in
-the public `bsphinney/DE-LIMP` repo under `workflows/`; this skill is the
-orchestrator that reads them. **You hold orchestration logic; the repo holds the
-science.** When they disagree, the repo wins.
+Take a user from **raw MS files → differentially expressed proteins** using
+parameters derived from their **data type** (instrument + acquisition), never
+ad-hoc numbers. Those defaults ship with this skill — `scripts/estimate_params.py`
+holds the instrument → mass-accuracy table, `scripts/resolve_defaults.py` picks the
+engine and version, `scripts/make_presets.py` writes FragPipe/Radiant configs. So
+**the skill version fully determines the search**, and nothing is fetched at run
+time. Every number carries its source; surface it rather than asserting it.
+
+> The old remote `workflows/` registry was retired 2026-08-14 — species never
+> affected a search parameter, and a mutable registry meant one skill version could
+> produce different parameters on different days. See `workflows/README.md`.
 
 All scripts are in `scripts/` next to this file. Reference detail is in
 `references/` — read the relevant one before the step it covers; keep this file as
@@ -27,12 +33,13 @@ the spine.
 
 ## Golden rules (do not violate)
 
-1. **Confirm before committing compute.** A search is multi-hour. Always show the
-   auto-picked workflow and the organism/design and get an explicit "go" before
-   running the engine.
-2. **Never fabricate parameters.** If a value isn't in the workflow bundle or given
-   by the user, say so — don't invent an FDR, organism, or instrument. (DE-LIMP
-   architectural rule #2.)
+1. **Confirm before committing compute.** A search is multi-hour. Show the resolved
+   defaults (engine + version, mass accuracy + source) with the organism/design and
+   get an explicit "go" before running the engine. **One confirmation, not a menu.**
+2. **Never fabricate parameters.** If a value isn't a shipped default or given by
+   the user, say so — don't invent an FDR, organism, or instrument. Every default
+   carries its source (`ppm_source`); quote it rather than asserting the number.
+   (DE-LIMP architectural rule #2.)
 3. **Never run computationally intensive work on a cluster login/head node — EVER.**
    On any cluster (HIVE/SLURM, or any other scheduler), **every** heavy step — the
    search, and any large DE / figure / conversion (e.g. msconvert) — must run as a
@@ -42,22 +49,22 @@ the spine.
    submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
    dataset locally? Warn the user it may be slow rather than hammering a shared host.)
-4. **Organism is a hard filter** (it defines the FASTA) and is **always asked, never
-   assumed** — not from a workflow bundle, not from a folder name, not "probably
-   human". Resolve it with `fetch_fasta.py resolve` and have the user confirm the
-   proteome. Instrument is only a tiebreaker. Acquisition is auto-detected and
-   confirmed. If no validated workflow covers their organism, proceed unvalidated
-   with estimated params — never swap in another species' bundle.
+4. **Organism decides the FASTA and nothing else**, and is **always asked, never
+   assumed** — not from a folder name, not "probably human". Resolve it with
+   `fetch_fasta.py resolve` and have the user confirm the proteome. It does **not**
+   affect a single search parameter: mass accuracy keys on instrument, and search
+   behaviour on acquisition. Both are auto-detected and confirmed. So any organism
+   is supported out of the box — there is no such thing as an unsupported species.
 5. **Every run must be completely reproducible**, at two levels. This is not optional.
    - **The analysis, as code.** `run_de.R` writes `reproducibility_log.R` — the whole
      DE as flat R with every value literal, runnable with just R + limpa/limma. This
      is the artifact to point a user at; it's what they mean by "the R code".
    - **The whole run, pinned.** As you go, append every command you run (verbatim,
      with all arguments) to a `commands.log`. At the end you MUST produce the
-     reproducibility bundle (step 10) capturing the pinned registry commit, exact
-     tool + package versions, all parameters, input and output checksums, and a
-     runnable `reproduce.sh`. Pin the registry to the commit SHA returned by
-     `fetch_workflows.py`.
+     reproducibility bundle (step 10) capturing the skill's `defaults_version`,
+     exact tool + package versions, all parameters, input and output checksums, and
+     a runnable `reproduce.sh`. Parameters ship with the skill, so recording the
+     skill version pins them — there is no external commit to chase.
 
    Never describe a result without both. (DE-LIMP architectural rules #1, #4.)
 6. **Assume nothing about the user's environment — this skill runs for anyone.** Most
@@ -192,9 +199,9 @@ Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
 
 ### 3. Ask organism + experimental design (auto-map conditions)
 - **Organism** cannot be detected — you MUST ask the user, every run. **Never** take
-  it from a workflow bundle, a previous session, the folder name, or an assumption
-  that it's human. The bundle's `fasta.uniprot_proteome` is a *default to confirm*,
-  never an answer. Getting this wrong silently searches the wrong species and every
+  it from a previous session, the folder name, or an assumption that it's human.
+  Nothing in the skill supplies a default organism, by design.
+  Getting this wrong silently searches the wrong species and every
   downstream number is void. Resolve their answer — don't guess the proteome ID:
 ```
 python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --taxid <n>
@@ -293,53 +300,69 @@ are recorded (in `input/raw_files.txt`), never copied. With `--reanalysis-of`, t
 session nests under `<prior>/reanalysis/<date>_<name>/`.
 → detail: `references/outputs.md`.
 
-### 4. Match a validated workflow (then CONFIRM)
+### 4. Resolve the defaults for this data type (then CONFIRM once)
 ```
-python3 scripts/fetch_workflows.py match \
-    --acquisition DIA --organism-taxid 9606 --instrument "Orbitrap Astral" \
-    [--engine diann]
+python3 scripts/resolve_defaults.py \
+    --acquisition DIA --instrument "timsTOF HT" \
+    [--engine diann] [--env env.json] [--fasta db.fasta] [--threads 32] --dest ./wf
 ```
-**If the user named an engine, you MUST pass `--engine`.** It is a hard filter. Without
-it the matcher returns the best workflow for the acquisition regardless of engine — so a
-user who asked for DIA-NN can be handed a FragPipe workflow with nothing saying so. If
-`wrong_engine_only` comes back true, no workflow uses the engine they asked for: say that
-plainly and let them choose between running their engine on estimated parameters or
-switching. **Never silently substitute a different engine.**
+Writes `./wf/workflow.manifest.json` (engine + pinned version, mass accuracy and its
+source, DE method) and, for FragPipe/Radiant, generates the config file itself. Pass
+`--env` (step 1's `detect_env.sh` output) so an engine that **cannot run on this
+machine** fails here with a usable alternative rather than mid-search.
 
-Organism is a *preference*, not a gate — an exact-species workflow always wins, but a
-different-species one stays eligible because search parameters do not depend on species,
-only the FASTA does (and that comes from the user's own organism answer). When
-`cross_organism` is true, `selected.fasta_note` says so; surface it.
-Hard-filters on acquisition+taxid, scores instrument, returns `selected` +
-`candidates` + `needs_menu` + `excluded_for_instrument`. **Present `selected` to the
-user** — name, engine + pinned version, FASTA, DE method, and the `validated`
-provenance — and get confirmation. If `needs_menu` is true (no match / tie / no
-instrument info / unvalidated pick), present `candidates` as a menu instead of
-auto-proceeding.
+**Confirm once, then run.** State the pick in one breath — data type, engine +
+version, mass accuracy + where it came from, FASTA, DE method — and get a yes:
 
-#### 4a. DIA: ASK which of the three search engines to use
+> timsTOF HT dia-PASEF → DIA-NN 2.6.1, MS1/MS2 15 ppm (DIA-NN README), mouse
+> UP000000589 + contaminants, limpa DPC-Quant + limma. Run it?
 
-For DIA there are **three** routes, and you must **ask the user which one they
-want** rather than silently taking the top match:
+Do **not** turn this into a menu. There is exactly one confirmation before compute,
+and it is this one.
 
-| Route | Engine | Instruments | Notes |
-|---|---|---|---|
-| **DIA-NN** — *the default* | `diann` | Thermo + Bruker | Reads `.raw` and `.d` natively. The validated Core route. |
-| **FragPipe DIA** | `fragpipe` | Thermo *or* Bruker — **different presets** | Thermo → `DIA_SpecLib_Quant`. Bruker → `DIA_SpecLib_Quant_diaPASEF` **with diaTracer**. Not interchangeable. |
-| **Radiant + Fulcrum** | `radiant` | **Thermo Orbitrap only** | Container reads mzML/Parquet, so `.raw` is converted first and Bruker `.d` is refused. Needs a DIA-NN-generated library. Licence-restricted — see below. |
+- **`--engine` is honoured, never overridden.** If the user names an engine that
+  isn't the default for their data type, it runs anyway and `notes` says so. Never
+  silently substitute a different engine.
+- **`alternatives`** lists the other engines valid for this data type. Mention them
+  in one clause; don't make the user adjudicate.
+- **Overrides are explicit.** `--ms1-ppm/--ms2-ppm` force a site SOP value and are
+  tagged as an override in the manifest, so a run record always distinguishes an SOP
+  value from the shipped default. Don't override without a stated reason.
+- Parameters come from the skill, so **record the skill version**, not a registry
+  commit. `registry.defaults_version` in the manifest carries it.
 
-- **If the user doesn't know, use DIA-NN.** Say that's what you're doing and why
-  (native vendor-format reading, and the route the Core has validated). Don't make
-  them adjudicate a tooling question to get their proteins.
+#### 4a. DIA: the three routes
+
+**DIA-NN is the default. Use it unless the user asks otherwise** — don't make them
+adjudicate a tooling question to get their proteins. Name the alternatives in a
+clause ("FragPipe and Radiant are also available") and move on.
+
+| Route | Engine | Instruments | Runs on a Mac? | Notes |
+|---|---|---|---|---|
+| **DIA-NN** — *the default* | `diann` | Thermo + Bruker | Docker only (**emulated** on Apple Silicon) | Reads `.raw` and `.d` natively. |
+| **FragPipe DIA** | `fragpipe` | Thermo *or* Bruker — **different presets** | **No — no macOS build at all** | Thermo → `DIA_SpecLib_Quant`. Bruker → `DIA_SpecLib_Quant_diaPASEF` **with diaTracer**. Not interchangeable. |
+| **Radiant + Fulcrum** | `radiant` | **Thermo Orbitrap only** | **Yes — natively, incl. Apple Silicon** | Container reads mzML/Parquet, so `.raw` is converted first and Bruker `.d` is refused. Needs a DIA-NN-generated library. Licence-restricted — see below. |
+
+**Platform gating (verified against each project's released artifacts).**
+`detect_env.sh` emits an `engines` map; `resolve_defaults.py --env` enforces it.
+
+- **FragPipe has no macOS build, Intel or ARM** — 24.0 ships only a Windows
+  installer and a Linux zip. On any Mac this route is unavailable; point at HIVE.
+- **DIA-NN has no macOS build either** and runs only in a linux/amd64 container. On
+  **Apple Silicon that means Rosetta emulation** — correct results, but far slower.
+  Say so before a big cohort, and offer HIVE.
+- **Radiant's image is multi-arch**, so on an M-series Mac it is the **only DIA
+  engine that runs natively**. Worth naming when someone is working locally.
+- **Sage** ships a native `aarch64-apple-darwin` build, so DDA on a Mac is fine.
 - **diaTracer is Bruker-only.** It converts dia-PASEF `.d` into pseudo-MS/MS
   spectra; it has no role on Thermo data and is switched off in the Thermo preset
   (`diatracer.run-diatracer=false`). The two FragPipe presets also differ in MBR,
   missed cleavages, precursor charge, mass tolerance, and topN peaks — never swap
   one for the other by flipping the diaTracer flag.
-- `excluded_for_instrument` lists bundles dropped because they are hardware-specific
-  (`match.instrument_required`). **Mention them and why** — a user asking for
-  "FragPipe" on Orbitrap data should hear that the diaTracer preset was excluded
-  because it's for timsTOF, not silently get a different answer.
+- **Presets are generated, not stored per organism.** `make_presets.py` picks the
+  vendor template by data type and patches only what's run-specific (FASTA, threads)
+  — see step 6c. If a route can't apply to the data (Radiant on Bruker `.d`), it
+  refuses with a pointer instead of producing a config no vendor validated.
 - **Radiant licence:** Apache-2.0 **+ Commons Clause + mandatory grant-back**. The
   Commons Clause restricts *selling* a service whose value derives substantially
   from the software. **Say this before running it for anything fee-for-service** —
@@ -360,34 +383,17 @@ thresholds, so the search is the only variable. Name the version gap out loud:
 FragPipe 24 bundles DIA-NN 1.8.2 beta 8, two majors behind what `diann_*` pins.
 → detail: `references/cross-tool-comparison.md`.
 
-**If zero candidates** (the registry only covers a few organisms — anything else
-lands here), say so plainly and offer to continue **unvalidated**: run the same
-acquisition+instrument engine choice with `estimate_params.py` (step 6b), against
-the organism's own FASTA. Search parameters key on instrument and acquisition, not
-species, so this is sound — it just isn't Core-validated. If they continue, set
-`workflow_id: null` + `validated: false` everywhere it's recorded (session,
-provenance, report, methods) and say so in the report. Offer to add the workflow to
-the registry afterwards — see `workflows/README.md`.
+**Every organism works.** There is no "unsupported species" case any more —
+parameters key on instrument and acquisition, and the FASTA comes from step 3. Never
+tell a user their organism isn't covered.
 
-⚠ **Never substitute a bundle from a different organism.** A human bundle carries
-`fasta.uniprot_proteome: UP000005640`; reusing it for a rat sample searches rat data
-against the human proteome and silently voids the whole run. Bundles supply engine +
-parameters; **the organism always comes from step 3.**
-
-**Record the `registry.commit` SHA from the match output** — it pins the exact
-validated-params version for reproducibility. On confirm, pull the bundle's params
-at that pinned commit:
-```
-python3 scripts/fetch_workflows.py pull --id <id> --ref <registry.commit> --dest ./wf
-```
-This writes the engine params file + `workflow.manifest.json` (engine, version,
-fasta spec, de spec, and the pinned `registry` commit). Pulling at the commit (not
-`main`) guarantees a future re-run gets byte-identical parameters.
+⚠ **The organism always comes from step 3**, never from anything cached or inferred.
+Searching rat data against a human proteome silently voids the whole run.
 
 ### 5. Acquire the pinned engine
-Honor the bundle's exact version — not "latest":
+Honor the manifest's exact version — not "latest":
 ```
-PIN_ENGINE=diann PIN_VERSION=2.6.0 bash scripts/acquire_tools.sh <platform_class>
+PIN_ENGINE=diann PIN_VERSION=2.6.1 bash scripts/acquire_tools.sh <platform_class>
 ```
 Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the
 existing `.sif`; on mac it uses Docker for DIA-NN. **Read `tools.json` `notes`** —
@@ -403,7 +409,7 @@ login node** (the note in `tools.json` gives the exact `srun apptainer build` li
 
 ### 6. Build the FASTA
 Use the proteome, database type, and contaminant set the **user confirmed in
-step 3** — not the bundle's defaults:
+step 3**:
 ```
 python3 scripts/fetch_fasta.py fetch --proteome <confirmed UPID> \
     --content <one_per_gene|reviewed|reviewed_isoforms|full|full_isoforms> \
@@ -431,13 +437,13 @@ bundle) and act on it:
 
 ### 6b. Estimate search parameters from the data type
 Search parameters are **derived from what the data is**, not hand-maintained.
-If the bundle has a `params_file` (a validated SOP config), use it verbatim.
-Otherwise (the default — `estimate_params: true`), generate them:
+For DIA-NN and Sage, generate them (for FragPipe/Radiant see 6c — step 4 already
+wrote their config):
 ```
 python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
-    --var-mods "<bundle var_mods>" --overrides '<bundle param_overrides as JSON>' \
+    [--var-mods ox] [--overrides '<site SOP values as JSON>'] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
@@ -460,6 +466,35 @@ standard trypsin/LFQ defaults for the rest. **It prints a `rationale` tagging
 every value's provenance** — surface this to the user (and it flows into the
 methods text), so a derived default is never mistaken for a confirmed setting.
 Use the resulting file as `--params` below. → detail: `references/parameters.md`.
+
+### 6c. FragPipe / Radiant: the config is generated, not stored
+These two are driven by a whole config file rather than flags, so
+`resolve_defaults.py` (step 4) already generated one into `./wf/` by calling:
+```
+python3 scripts/make_presets.py --engine <fragpipe|radiant> \
+    --instrument "<detected instrument>" --acquisition DIA \
+    [--fasta ./search.fasta] [--threads N] --out ./wf/<engine>.<workflow|radiantConfig>
+```
+Re-run it directly only if the FASTA or thread count changed after step 4.
+
+It starts from the **vendor's own preset for that data type** and patches only what
+is run-specific. That matters: FragPipe's two DIA presets differ in **20 keys**, not
+one — MBR, missed cleavages, precursor charge and tolerance, topN peaks, and the
+var-mod table — so flipping `diatracer.run-diatracer` on the wrong template yields a
+config no vendor ever validated. Never hand-edit a preset to switch routes; pick the
+right template by data type.
+
+- **timsTOF** → `DIA_SpecLib_Quant_diaPASEF.workflow`, diaTracer **on**.
+- **Thermo** → `DIA_SpecLib_Quant.workflow`, diaTracer **off** (MSFragger-DIA
+  searches the spectra directly; there are no pseudo-spectra to trace).
+- **Radiant on Bruker `.d` is refused**, not adapted — the container reads only
+  mzML/Parquet. It also narrows Seer's flat 20/20 ppm default using the instrument,
+  tagged `[DERIVED]` because that inference is ours, not Seer's.
+- Mass tolerances otherwise keep the **vendor's** values: FragPipe already tunes them
+  per data type, and DIA-NN's ppm table describes DIA-NN's matcher. Override only
+  with a stated SOP value (`--ms1-ppm/--ms2-ppm`).
+
+`<out>.provenance.json` records every key changed and why — it feeds the methods text.
 
 ### 7. Run the search
 ```
@@ -975,10 +1010,9 @@ python3 scripts/session.py finalize --dir <session> --zip
 ```
 This tidies `output/` (tables→`tables/`, figures→`figures/`), writes the session
 `README.md` (and `DIFFERENCES.md` for a re-analysis), and zips the session for easy
-sharing. Then summarize: workflow id + name, engine + **pinned version**,
-**registry commit SHA**, FASTA source, DE method, per-contrast significant counts,
-and the link to the validated workflow at that commit
-(`https://github.com/bsphinney/DE-LIMP/tree/<commit>/<path>`). Point them at the
+sharing. Then summarize: data type (instrument + acquisition), engine + **pinned
+version**, mass accuracy **and its source**, the skill's `defaults_version`, FASTA
+source, DE method, and per-contrast significant counts. Point them at the
 **session folder** and its `README.md`, then `AI_Analysis_Report.md` (the
 interpretation), `OUTPUT_FILES.md` (what every file is), `tables/methods.txt`
 verbatim (the Methods paragraph — don't paraphrase), **`tables/reproducibility_log.R`
@@ -994,6 +1028,7 @@ re-running the search too), and — for a re-analysis — `DIFFERENCES.md` + the
   steps (install Docker Desktop, open once). Don't silently switch to a DDA engine.
 - macOS + DDA + Bruker/Thermo → msconvert is Linux-only; see `references/install.md`
   ("macOS + Sage"). Prefer DIA-NN if the data is DIA; else convert to mzML first.
-- No validated workflow → stop, explain, offer to add one (`workflows/README.md`).
+- Unrecognised instrument → parameters fall back to automatic mass calibration;
+  say so plainly. This is never a stop: no organism or instrument is "unsupported".
 - FragPipe license (MSFragger/IonQuant) → surface the `tools.json` note and the fix.
 - Acquisition/instrument unknown → ask the user; never guess into a multi-hour run.

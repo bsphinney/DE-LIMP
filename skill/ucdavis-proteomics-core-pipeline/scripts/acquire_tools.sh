@@ -26,6 +26,10 @@ set -uo pipefail
 
 CLASS="${1:?platform_class required (hpc|mac|linux)}"
 ROOT="${2:-$HOME/.proteomics-pipeline/tools}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# DIA-NN resolves by asset filename, not by release tag -- see diann_release.sh
+# for why (every 2.x build hangs off the single release tagged "2.0").
+. "$SCRIPT_DIR/diann_release.sh"
 PIN_ENGINE="${PIN_ENGINE:-}"      # diann | sage | fragpipe  (optional)
 PIN_VERSION="${PIN_VERSION:-}"    # exact version to honor   (optional)
 mkdir -p "$ROOT"
@@ -121,19 +125,24 @@ acquire_diann() {
       NOTES+=("DIA-NN on macOS: no native build. Set DIANN_DOCKER_IMAGE to a built image (version $ver), or build from the Academia Linux zip's Dockerfile. See references/environment.md.")
       ;;
   esac
-  # linux native (or fallback): fetch the pinned Academia Linux zip
-  local dir="$ROOT/diann/$ver"; mkdir -p "$dir"
+  # linux native (or fallback): fetch the pinned Academia Linux zip.
+  # Resolve the URL FIRST so the cache is keyed on the real version: with
+  # ver=latest, caching under "latest" would both re-download every run and
+  # record a version string nobody can reproduce.
+  local url; url="$(diann_asset_url "$ver" Linux)"
+  if [ -z "$url" ]; then NOTES+=("DIA-NN: no Academia Linux build named '$ver' exists on https://github.com/vdemichev/DiaNN/releases (free for academic use). Check the version, or download manually."); return; fi
+  local got; got="$(printf '%s' "$url" | sed -nE 's#.*/DIA-NN-([0-9][0-9.]*)-Academia-.*#\1#p')"
+  [ -z "$got" ] && got="$ver"
+  [ "$got" != "$ver" ] && NOTES+=("DIA-NN: '$ver' resolved to build $got ($(basename "$url")).")
+  DIANN_VER="$got"
+  local dir="$ROOT/diann/$got"; mkdir -p "$dir"
   local existing; existing="$(find "$dir" -name 'diann-linux' -type f 2>/dev/null | head -n1)"
   if [ -n "$existing" ]; then DIANN_CMD="$existing"; return; fi
-  # DIA-NN release tags are usually the bare version (e.g. "2.6.0"); blank => latest.
-  local tag=""; [ "$ver" != "latest" ] && tag="$ver"
-  local url; url="$(asset_url_tag vdemichev/DiaNN "$tag" 'Academia-Linux.*zip')"
-  if [ -z "$url" ]; then NOTES+=("DIA-NN: could not resolve Academia Linux asset for version '$ver'; download manually from https://github.com/vdemichev/DiaNN/releases (free for academic use)."); return; fi
   echo "  DIA-NN: downloading $url"
   curl -fsSL "$url" -o "$dir/diann.zip" && (cd "$dir" && unzip -oq diann.zip)
   existing="$(find "$dir" -name 'diann-linux' -type f 2>/dev/null | head -n1)"
   if [ -n "$existing" ]; then chmod +x "$existing"; DIANN_CMD="$existing"
-    NOTES+=("DIA-NN $ver: Linux native needs glibc>=Mint 21.2 + .NET 8. If missing, prefer Docker/Apptainer (the zip ships a Dockerfile).")
+    NOTES+=("DIA-NN $got: Linux native needs glibc>=Mint 21.2 + .NET 8. If missing, prefer Docker/Apptainer (the zip ships a Dockerfile).")
   fi
 }
 

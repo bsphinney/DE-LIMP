@@ -39,6 +39,70 @@
   rather than a `readDIANN()` call whose defaults differ from what the app ran
   (architectural rule #1: exports self-describe).
 
+## [Skill 2.0.0] — 2026-08-17
+
+Skill-only release (`ucdavis-proteomics-core-pipeline`). **DE-LIMP itself is
+unchanged and stays at 4.0.3** — no `app.R`, `R/`, or Shiny code was touched.
+
+Major bump because the remote workflow registry is removed: `fetch_workflows.py
+pull` no longer functions and `workflows/` no longer serves bundles.
+
+### Fixed
+- **A pinned DIA-NN 2.x version could never be downloaded.** `acquire_tools.sh`
+  resolved release assets via `releases/tags/<version>`, but **every** DIA-NN 2.x
+  build is attached to the single release tagged `2.0` — there is no 2.1/2.3/2.6
+  tag — so any 2.x pin 404'd and fell through to "download it manually".
+- **`latest` silently installed DIA-NN 2.0.** `releases/latest` returns the `2.0`
+  release, whose first `Academia-Linux` asset is 2.0 itself. This *succeeded*, so
+  nothing looked wrong while the oldest 2.x build was installed and reported as
+  "latest". Both paths now resolve by asset **filename** across all releases
+  (`scripts/diann_release.sh`, shared with `build_diann_docker.sh`). Verified live:
+  `latest`→2.6.1, exact pins resolve, 2.3.0 finds its `-Preview` build, unknown
+  versions fail cleanly.
+- **The tools manifest recorded the string `latest`** instead of the version
+  actually installed, which is not reproducible. It now records the resolved build,
+  and the on-disk cache is keyed on it.
+- **A Mac with the SLURM client installed was classified as `hpc`** and would have
+  claimed DIA-NN runs natively on it. Engine availability now keys on OS — "no
+  macOS build" is a property of the OS, not of whether a scheduler is on PATH.
+
+### Added
+- **Platform capability map.** `detect_env.sh` now emits `engines` + `apple_silicon`,
+  and `resolve_defaults.py --env` enforces it, so an engine that cannot run on this
+  machine fails at resolve time with a usable alternative instead of mid-search.
+  Verified against each project's released artifacts: **FragPipe has no macOS build
+  at all** (Windows installer + Linux zip only), **DIA-NN has none either** and runs
+  under Rosetta emulation in a linux/amd64 container on Apple Silicon, **Radiant's
+  image is multi-arch** so it is the only DIA engine that runs natively on M-series,
+  and **Sage ships `aarch64-apple-darwin`** so DDA on a Mac is native.
+- **Generated engine presets.** `make_presets.py` writes the FragPipe `.workflow` /
+  Radiant `.radiantConfig` for the run, from vendor templates in `presets/`. It
+  patches only run-specific keys (`database.db-path`, `workflow.threads` — both
+  verified against FragPipe source) and preserves every other byte, including the
+  Java-properties escaping. Radiant narrows Seer's flat 20/20 ppm from the
+  instrument, tagged `[DERIVED]`, and refuses Bruker `.d` outright.
+
+### Changed
+- **The workflow registry is retired; parameters ship with the skill.** Six
+  organism-locked bundles are replaced by `resolve_defaults.py`, one defaults table
+  keyed on data type. Species never affected a search parameter — only the FASTA,
+  which always came from the user's own organism answer — so **every organism now
+  works out of the box** and there is no "unsupported species" path.
+- **No network call, no menu, no validation gate.** The registry was fetched per run
+  (GitHub's unauthenticated API rate-limits at 60/hour), and its `unvalidated` and
+  `cross_organism` checks fired on essentially every run, turning a first interaction
+  into a menu of ⚠ warnings. There is now exactly one confirmation before compute.
+- **Reproducibility is pinned by skill version**, not a registry commit: the same
+  skill version reproduces the same parameters with nothing fetched.
+  `reproduce.sh` and `references/reproducibility.md` updated accordingly.
+- Default DIA-NN pin is **2.6.1** (was split across bundles at 2.3.0 and 2.6.0; the
+  2.3.0 pin resolved only to a `-Preview` build).
+- Placeholder `validated:` blocks marked `EXAMPLE`/`CONFIRM` are gone with the
+  bundles, so nothing asserts a validation that never happened.
+- `fetch_workflows.py` is a shim: `match` forwards to `resolve_defaults.py`, anything
+  else prints a migration notice and exits 0. `workflows/index.json` is kept as a
+  tombstone with an empty list so un-updated installs degrade instead of 404-ing.
+
 ## [4.0.3] - 2026-08-13
 
 ### Fixed
