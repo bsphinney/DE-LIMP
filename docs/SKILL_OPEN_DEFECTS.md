@@ -15,49 +15,24 @@ reusable, add a row there instead. A shrinking file is the point.
 
 | # | Defect | Severity | Evidence |
 |---|---|---|---|
-| 1 | Precursor *m/z* range hardcoded to 380–980 regardless of the acquisition | **High — silently discards acquired data** | `scripts/estimate_params.py:179-180` |
-| 2 | The q-value column set is hand-written in five files and they disagree | Medium — this is how defect #48 drifted in | five files, see below |
-| 3 | One `--q-cutoff` applied to all six q-columns | Low | `scripts/run_de.R`, `scripts/build_maxlfq.R` |
-| 4 | `--min-pr-charge 2` narrows DIA-NN's own default with no stated reason | Low — decision, not a bug | `scripts/estimate_params.py:181` |
+| 1 | The q-value column set is hand-written in five files and they disagree | Medium — this is how defect #48 drifted in | five files, see below |
+| 2 | One `--q-cutoff` applied to all six q-columns | Low | `scripts/run_de.R`, `scripts/build_maxlfq.R` |
+| 3 | `--min-pr-charge 2` narrows DIA-NN's own default with no stated reason | Low — decision, not a bug | `scripts/estimate_params.py:181` |
 
 ---
 
-## 1. The precursor *m/z* range is hardcoded and ignores the acquisition
+## ~~1. The precursor *m/z* range is hardcoded~~ — FIXED 2026-08-17
 
-**What.** `estimate_params.py` emits a fixed range for every dataset:
+Fixed in `fix/skill-precursor-mz-range`. `detect_acquisition.py` now returns the acquired
+bounds it was already reading (`precursor_mz_range`), and `estimate_params.py` takes
+`--precursor-mz-range LO HI` and rounds outward. When no range is available the old 380–980 is
+still used but tagged **`FALLBACK — acquired range unknown for this input; NOT measured`**
+rather than `universal trypsin/LFQ default`, so a reader can tell a measurement from a guess.
 
-```python
-# scripts/estimate_params.py:179-180
-add("--min-pr-mz", 380, UNIV)
-add("--max-pr-mz", 980, UNIV)
-```
+Verified against a real `.d` on HIVE: acquired 299.5–1200.5 → emits `--min-pr-mz 299`
+/ `--max-pr-mz 1201`. Covered by `skill/ucdavis-proteomics-core-pipeline/tests/`, now run in CI.
 
-`UNIV` marks it as a universal default. Nothing consults the run.
-
-**Why it matters — measured, not hypothetical.** On a two-platform pilot (UC Davis, 2026-08-12)
-this emitted 380–980 for **both** instruments, matching neither acquisition:
-
-| Platform | Acquired range | Emitted | Discarded |
-|---|---|---|---|
-| timsTOF HT dia-PASEF | 299.5 – 1200.5 | 380 – 980 | 300–380 and 980–1200 |
-| Orbitrap Lumos DIA | 350 – 1200 | 380 – 980 | 350–380 and 980–1200 |
-
-The stated purpose of that run was measuring proteome depth, so silently searching a narrower
-window than was acquired is the worst possible failure mode for it: it does not error, and the
-loss is invisible in the output. It was caught only because a human read the emitted parameters
-against the instrument method.
-
-**The information is already available.** `detect_acquisition.py` parses the isolation windows
-it needs to classify DIA vs DDA — `DiaFrameMsMsWindowGroups` for Bruker `.d`, and MS2 isolation
-windows for mzML (`scripts/detect_acquisition.py:81, 133-143`) — but returns only the
-acquisition type, a confidence and a reason string. The window centres and widths are read and
-then thrown away.
-
-**Proposed fix.** Return the observed precursor *m/z* range from detection, and have
-`estimate_params.py` use it, widened to the nearest sensible bound. Keep 380–980 only as the
-fallback when no range can be read, and tag it in the output as a fallback rather than as
-`UNIV`, so a reader can tell a measured value from a guess. A one-line warning when the fallback
-is used would have surfaced this on the first run.
+Kept here as a stub only until the next edit of this file; the lesson is in `docs/GOTCHAS.md`.
 
 ---
 

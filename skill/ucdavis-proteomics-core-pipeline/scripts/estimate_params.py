@@ -29,7 +29,7 @@ Writes the engine params file to --out and prints a rationale JSON to stdout
 (one entry per setting: value + source). Pass --overrides '<json>' to force
 specific fields (e.g. a validated SOP value) — those are tagged "user-override".
 """
-import sys, os, json, argparse
+import sys, os, json, math, argparse
 
 # --- known-good mass accuracy by instrument class (DIA-NN README) ------------
 ORBITRAP_RES_PPM = {240000: 4, 120000: 7, 60000: 10, 30000: 15}
@@ -138,7 +138,7 @@ def tagged(value, source):
 
 # --- DIA-NN cfg --------------------------------------------------------------
 def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
-                cont_tag=None):
+                cont_tag=None, mz_range=None):
     UNIV = "universal trypsin/LFQ default"
     r = {}  # rationale
     lines = []
@@ -176,8 +176,32 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     add("--missed-cleavages", 1, "DIA-NN default")
     add("--min-pep-len", 7, UNIV)
     add("--max-pep-len", 30, UNIV)
-    add("--min-pr-mz", 380, UNIV)
-    add("--max-pr-mz", 980, UNIV)
+    # Precursor m/z search range.
+    #
+    # This MUST follow the acquisition. Searching narrower than was acquired
+    # discards real data, does not error, and is invisible in the output --
+    # measured on a UC Davis two-platform pilot where the old hardcoded 380-980
+    # was emitted for both instruments and matched neither:
+    #     timsTOF HT dia-PASEF   acquired 299.5-1200.5  -> lost 300-380, 980-1200
+    #     Orbitrap Lumos DIA     acquired  350 -1200    -> lost 350-380, 980-1200
+    # detect_acquisition.py already reads the isolation windows to classify
+    # DIA vs DDA; it now returns their bounds too, and run_search.py passes them
+    # in. Round outward to whole m/z so we never clip the edge window.
+    if mz_range:
+        lo, hi = float(mz_range[0]), float(mz_range[1])
+        add("--min-pr-mz", int(math.floor(lo)),
+            f"measured from the acquired isolation windows ({lo:.1f}-{hi:.1f} m/z)")
+        add("--max-pr-mz", int(math.ceil(hi)),
+            f"measured from the acquired isolation windows ({lo:.1f}-{hi:.1f} m/z)")
+    else:
+        # Tagged FALLBACK, not UNIV: a reader must be able to tell a measured
+        # range from a guess, and this guess can silently cost identifications.
+        add("--min-pr-mz", 380,
+            "FALLBACK -- acquired range unknown for this input; NOT measured. "
+            "If the method acquired outside 380-980, widen it")
+        add("--max-pr-mz", 980,
+            "FALLBACK -- acquired range unknown for this input; NOT measured. "
+            "If the method acquired outside 380-980, widen it")
     add("--min-pr-charge", 2, UNIV)
     add("--max-pr-charge", 4, UNIV)
     add("--min-fr-mz", 200, UNIV)
@@ -307,6 +331,12 @@ def main():
                     help="Orbitrap MS2 resolving power; maps to ppm via DIA-NN's table")
     ap.add_argument("--from-mzml", default="",
                     help="read both resolutions straight out of this mzML")
+    ap.add_argument("--precursor-mz-range", nargs=2, type=float, metavar=("LO", "HI"),
+                    default=None,
+                    help="ACQUIRED precursor m/z bounds, from detect_acquisition.py's "
+                         "precursor_mz_range. Without it the range falls back to 380-980 "
+                         "and is tagged FALLBACK -- which silently discards anything the "
+                         "method acquired outside that window.")
     ap.add_argument("--fasta-meta", default="",
                     help="fetch_fasta.py's <fasta>.meta.json — supplies the contaminant "
                          "tag so DIA-NN excludes contaminants from quant")
@@ -339,7 +369,7 @@ def main():
 
     if a.engine == "diann":
         text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
-                                      overrides, cont_tag)
+                                      overrides, cont_tag, a.precursor_mz_range)
     else:
         text, rationale = build_sage(a.acquisition, cls, var_mods, overrides)
 

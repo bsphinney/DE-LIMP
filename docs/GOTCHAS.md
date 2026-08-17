@@ -40,6 +40,7 @@ For **open** defects in the `ucdavis-proteomics-core-pipeline` skill — things 
 | Log import ignores `fr_mz`/`pr_charge` | `parse_diann_log` now parses `--max-fr-mz`/`--min-fr-mz`/`--min-pr-charge`/`--max-pr-charge` via `value_map` into `search_params` (was dumping to `extra_cli_flags`). |
 | Two DIA-NN containers, only one reads `.raw` | `/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif` has .NET, reads Thermo `.raw`. `/quobyte/proteomics-grp/apptainers/diann2.3.0.sif` has NO .NET — `.raw` silently skipped. Always use the `dia-nn/` version unless only `.d`/`.mzML`. |
 | DIA-NN binary path inside container | `/diann-2.3.0/diann-linux`, NOT just `diann`. `apptainer exec image.sif /diann-2.3.0/diann-linux ...`. |
+| Skill emitted a hardcoded 380–980 precursor m/z range for every dataset, silently discarding anything acquired outside it (timsTOF acquires 299.5–1200.5). | `detect_acquisition.py` already parsed the isolation windows to classify DIA/DDA and threw the bounds away. It now returns `precursor_mz_range`; pass it to `estimate_params.py --precursor-mz-range`. A parameter that can silently shrink the search space must be tagged measured-vs-fallback, never as a "universal default". |
 
 ## Data & Columns
 

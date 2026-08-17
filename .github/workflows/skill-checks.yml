@@ -48,6 +48,13 @@ jobs:
           [ "$bad" -eq 0 ] || exit 1
           echo "all .sh parse"
 
+      # Stdlib only (unittest + sqlite3) on purpose -- no extra CI dependencies,
+      # so this stage cannot start failing because a pinned test package moved.
+      - name: Python unit tests
+        run: |
+          python3 -m unittest discover \
+            -s skill/ucdavis-proteomics-core-pipeline/tests -v
+
       - name: Python scripts compile
         run: |
           python3 -m compileall -q skill/ucdavis-proteomics-core-pipeline/scripts/ \

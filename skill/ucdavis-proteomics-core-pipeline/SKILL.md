@@ -436,10 +436,18 @@ Otherwise (the default — `estimate_params: true`), generate them:
 ```
 python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
+    --precursor-mz-range <LO> <HI> \
     --var-mods "<bundle var_mods>" --overrides '<bundle param_overrides as JSON>' \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
 ```
+**Always pass `--precursor-mz-range`**, taking `precursor_mz_range` straight from
+step 2's `detect_acquisition.py` output. Without it the range falls back to
+380–980 — which on a timsTOF method acquiring 299.5–1200.5 silently discards both
+tails, does not error, and is invisible in the results. The rationale tags the
+value `measured …` or `FALLBACK …` so you can tell which you got; if it says
+FALLBACK, say so to the user before committing to a multi-hour search.
+
 Always pass `--fasta-meta` (step 6's sidecar): it carries the contaminant tag, so
 the cfg gets `--cont-quant-exclude Cont_` and contaminants are identified but kept
 out of quantification and normalisation. Both the single and 5-step parallel
