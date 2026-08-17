@@ -27,8 +27,8 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
 from diann_q_columns import (  # noqa: E402
-    FDR_REQUIRED, FDR_OPTIONAL, PROTEIN_Q_PREFERENCE,
-    fdr_columns, protein_q_column,
+    FDR_REQUIRED, FDR_OPTIONAL, PROTEIN_Q_PREFERENCE, COLUMN_CUTOFFS,
+    fdr_columns, protein_q_column, cutoff_for,
 )
 
 R_FILE = os.path.join(SCRIPTS, "diann_q_columns.R")
@@ -126,6 +126,50 @@ class TestPreferenceSemantics(unittest.TestCase):
     def test_every_preference_entry_is_a_real_diann_column(self):
         self.assertTrue(set(PROTEIN_Q_PREFERENCE)
                         <= set(FDR_REQUIRED + FDR_OPTIONAL))
+
+
+class TestPerColumnCutoffs(unittest.TestCase):
+    """SKILL_OPEN_DEFECTS #3: one --q-cutoff was applied to all six columns."""
+
+    def test_pg_q_value_uses_diann_recommended_cutoff(self):
+        # DIA-NN: "PG.Q.Value at 0.01 to 0.05, typically 0.05 is sufficient".
+        self.assertEqual(cutoff_for("PG.Q.Value", 0.01), 0.05)
+
+    def test_other_columns_use_the_run_cutoff(self):
+        for c in ("Q.Value", "Global.Q.Value", "Global.PG.Q.Value",
+                  "Lib.Q.Value", "Lib.PG.Q.Value"):
+            self.assertEqual(cutoff_for(c, 0.01), 0.01)
+            self.assertEqual(cutoff_for(c, 0.005), 0.005)
+
+    def test_pg_cutoff_is_independent_of_the_run_cutoff(self):
+        # --q-cutoff governs the other five; PG.Q.Value keeps DIA-NN's own value.
+        for q in (0.001, 0.01, 0.05, 0.10):
+            self.assertEqual(cutoff_for("PG.Q.Value", q), 0.05)
+
+    def test_uniform_restores_one_cutoff_for_all_six(self):
+        # The escape hatch for anyone who wants the pre-2026-08 behaviour.
+        for c in FDR_REQUIRED + FDR_OPTIONAL:
+            self.assertEqual(cutoff_for(c, 0.01, uniform=True), 0.01)
+
+    def test_unknown_column_falls_through_to_the_run_cutoff(self):
+        self.assertEqual(cutoff_for("Not.A.Column", 0.02), 0.02)
+
+    def test_only_pg_q_value_has_an_override(self):
+        # Adding more overrides is a behaviour change for every user; make it
+        # a deliberate test edit rather than a silent one.
+        self.assertEqual(set(COLUMN_CUTOFFS), {"PG.Q.Value"})
+
+    def test_r_mirror_agrees_on_cutoffs(self):
+        if not _have_rscript():
+            self.skipTest("Rscript not available")
+        cases = [("PG.Q.Value", 0.01), ("PG.Q.Value", 0.001),
+                 ("PG.Q.Value", 0.10), ("Q.Value", 0.01), ("Global.Q.Value", 0.02)]
+        expr = f'source("{R_FILE}"); cat(' + ", ".join(
+            f'diann_cutoff_for("{c}", {q})' for c, q in cases) + ')'
+        out = subprocess.run(["Rscript", "-e", expr], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        got = [float(x) for x in out.stdout.split()]
+        self.assertEqual(got, [cutoff_for(c, q) for c, q in cases])
 
 
 class TestNoHandWrittenCopiesRemain(unittest.TestCase):

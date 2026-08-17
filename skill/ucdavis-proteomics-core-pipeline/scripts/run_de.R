@@ -239,10 +239,17 @@ if (method == "dpc") {
     message("[run_de] QuantUMS pre-filter for dpc: ", paste(quantums_applied, collapse = " | "))
   }
 
-  dat <- limpa::readDIANN(dpc_input, format = format, q.cutoffs = q_cutoff,
+  # Per-column cutoffs. limpa recycles q.cutoffs against q.columns
+  # (EListFromLongFormatFile: rep_len(q.cutoffs, length(q.columns)), then
+  # Report[[q.columns[j]]] > q.cutoffs[j]), so a vector is honoured element-wise.
+  # PG.Q.Value takes DIA-NN's own recommended 0.05 rather than the uniform
+  # --q-cutoff -- see diann_q_columns.R.
+  q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
+  dat <- limpa::readDIANN(dpc_input, format = format, q.cutoffs = unname(q_cuts),
                           q.columns = q_use)
-  message(sprintf("[run_de] readDIANN: %d precursors x %d runs (FDR %.3f on %s)",
-                  nrow(dat$E), ncol(dat$E), q_cutoff, paste(q_use, collapse = ", ")))
+  message(sprintf("[run_de] readDIANN: %d precursors x %d runs (FDR on %s)",
+                  nrow(dat$E), ncol(dat$E),
+                  paste(sprintf("%s<=%.3f", q_use, q_cuts), collapse = ", ")))
 
   # ---- FIX: reconcile against the metadata BEFORE quantifying -----------------
   # dpcQuant() on a 274-run report takes ~90 min. The run/metadata check used to sit

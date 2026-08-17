@@ -34,6 +34,24 @@ DIANN_FDR_OPTIONAL <- c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")
 DIANN_PROTEIN_Q_PREFERENCE <- c("Global.PG.Q.Value", "Global.Q.Value",
                                 "Lib.PG.Q.Value", "PG.Q.Value", "Q.Value")
 
+# Per-column cutoffs -- see diann_q_columns.py for the measurements. DIA-NN
+# recommends PG.Q.Value at 0.01-0.05 ("typically 0.05 is sufficient") and
+# documents it as RUN-SPECIFIC, unlike the Global.* pair.
+DIANN_COLUMN_CUTOFFS <- list("PG.Q.Value" = 0.05)
+
+#' The cutoff to apply to `column` given the run's --q-cutoff.
+#'
+#' A column listed in DIANN_COLUMN_CUTOFFS uses its own value; everything else
+#' uses q_cutoff. uniform = TRUE disables the map, restoring one cutoff for all
+#' six. It deliberately does not try to be clever about a tightened --q-cutoff:
+#' the pipeline default (0.01) is already stricter than PG.Q.Value's recommended
+#' 0.05, so any "never loosen" rule would stop the recommendation ever applying.
+diann_cutoff_for <- function(column, q_cutoff, uniform = FALSE) {
+  if (isTRUE(uniform)) return(q_cutoff)
+  own <- DIANN_COLUMN_CUTOFFS[[column]]
+  if (is.null(own)) q_cutoff else own
+}
+
 #' Columns to FILTER on, restricted to those the report actually has.
 #'
 #' Never returns a column the report lacks: limpa::readDIANN() errors on an

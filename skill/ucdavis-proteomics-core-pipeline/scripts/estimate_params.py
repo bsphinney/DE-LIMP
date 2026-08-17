@@ -202,7 +202,16 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         add("--max-pr-mz", 980,
             "FALLBACK -- acquired range unknown for this input; NOT measured. "
             "If the method acquired outside 380-980, widen it")
-    add("--min-pr-charge", 2, UNIV)
+    # NOT a universal default: DIA-NN's own default is 1-4. Measured on the 2.6.0
+    # binary with a 60-protein FASTA -- no charge flags and --min-pr-charge 1 both
+    # give 10,899 precursors, --min-pr-charge 2 gives 8,805. So this discards ~19%
+    # of the predicted library. That is the right call for tryptic bottom-up work
+    # (z=1 precursors are rarely informative), but a reader must be able to see
+    # that a deliberate narrowing was applied on their behalf.
+    add("--min-pr-charge", 2,
+        "z=1 excluded: rarely informative for tryptic bottom-up. DIA-NN's own "
+        "default is 1-4; this drops ~19% of the predicted library (measured: "
+        "10,899 -> 8,805 precursors on a 60-protein FASTA)")
     add("--max-pr-charge", 4, UNIV)
     add("--min-fr-mz", 200, UNIV)
     add("--max-fr-mz", 1800, UNIV)

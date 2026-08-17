@@ -13,10 +13,8 @@ reusable, add a row there instead. A shrinking file is the point.
 
 ## Status at a glance
 
-| # | Defect | Severity | Evidence |
-|---|---|---|---|
-| 1 | One `--q-cutoff` applied to all six q-columns | Low | `scripts/run_de.R`, `scripts/build_maxlfq.R` |
-| 2 | `--min-pr-charge 2` narrows DIA-NN's own default with no stated reason | Low — decision, not a bug | `scripts/estimate_params.py:181` |
+**No open defects.** Every entry from the 2026-08-17 audit has been fixed; the fixed list is
+below and in `docs/GOTCHAS.md`. When a new one is found, add a row here.
 
 ---
 
@@ -61,53 +59,30 @@ available column would under-filter.
 
 ---
 
-## 3. A single `--q-cutoff` is applied to all six q-columns
+## ~~3. A single `--q-cutoff` for all six columns~~ — FIXED 2026-08-17
 
-**What.** Both paths apply `--q-cutoff` (default 0.01) uniformly. DIA-NN's README recommends
-`PG.Q.Value` **"at 0.01 to 0.05, typically 0.05 is sufficient"**, and documents it as a
-*run-specific* column, unlike the global ones.
+`COLUMN_CUTOFFS` in `scripts/diann_q_columns.py` (mirrored in the `.R`) gives `PG.Q.Value`
+DIA-NN's own recommended **0.05**; the other five keep `--q-cutoff`. `limpa::readDIANN()`
+recycles `q.cutoffs` against `q.columns` element-wise, verified in
+`EListFromLongFormatFile`, so the dpc path passes a vector; `build_maxlfq.R` applies the same map
+and labels any column whose cutoff differs as `PG.Q.Value@0.050` in `filters_applied`.
 
-**Why it is low severity.** Measured on a 373-run mouse DIA-NN 2.6 report, holding the other
-five at 0.01: `PG.Q.Value` at 0.01 vs 0.05 differs by **two protein groups** (6,564 vs 6,566),
-20,370 rows out of ~20 million. So the current uniform 0.01 is *conservative*, not wrong, and
-tightening beyond DIA-NN's advice costs almost nothing on that dataset.
+**This is a behaviour change that LOOSENS identification FDR.** Measured on a 2-run HeLa report:
+32,559 → 32,741 rows and 2,695 → 2,715 protein groups. `cutoff_for(..., uniform=True)` restores
+one cutoff for all six.
 
-That is one measurement on one report, which is why this is recorded rather than dismissed. It
-is also worth knowing that `PG.Q.Value` is the **largest single contributor** to what the six
-columns exclude on that report (22,465 rows, 20,447 of them uniquely, against 15,752 for
-`Global.PG.Q.Value` and 7,873 for `Global.Q.Value`) — so a change to its cutoff has more room to
-matter than its "low severity" label suggests, on a dataset less forgiving than this one.
-
-**Proposed fix.** A per-column cutoff map, defaulting `PG.Q.Value` to 0.05 and the rest to 0.01.
-This is a **behaviour change**, not a bug fix: it would loosen current `maxlfq` behaviour for
-every existing user. It should land in its own change, touching both paths together, after
-defect #2 so there is one definition to edit. Deliberately not bundled into PR #48.
+Deliberately *not* clever about a tightened `--q-cutoff`: the pipeline default (0.01) is already
+stricter than 0.05, so a "never loosen what the caller asked for" rule would stop the
+recommendation ever applying. `--q-cutoff` governs the other five.
 
 ---
 
-## 4. `--min-pr-charge 2` narrows DIA-NN's own default without saying why
+## ~~4. `--min-pr-charge 2` narrows DIA-NN's default without saying why~~ — FIXED 2026-08-17
 
-**What.** `scripts/estimate_params.py:181` emits `--min-pr-charge 2`, tagged `UNIV`. DIA-NN's
-own default is 1–4, verified by measurement on the 2.6.0 binary with a 60-protein FASTA:
-
-| config | precursors generated |
-|---|---|
-| no charge flags (DIA-NN default) | 10,899 |
-| `--min-pr-charge 1 --max-pr-charge 4` | 10,899 |
-| `--min-pr-charge 2 --max-pr-charge 4` | 8,805 |
-
-So the emitted default discards **2,094 precursors, ~19% of the predicted library**. (The DIA-NN
-README documents the flags but states no default, which is why this was measured rather than
-looked up.)
-
-**This is probably the right choice** for tryptic bottom-up work — singly-charged precursors are
-rarely informative — so it is listed as a decision to record, not a bug to fix. The problem is
-only that it is tagged `UNIV` alongside genuinely universal settings, so a user reading the
-emitted parameters cannot tell that a deliberate narrowing has been applied on their behalf.
-
-**Proposed fix.** Change the tag text to state the rationale and the cost, e.g.
-`"z=1 excluded: rarely informative for tryptic bottom-up; DIA-NN's own default is 1-4"`. No
-behaviour change.
+Tag only; no behaviour change. It now reads: *"z=1 excluded: rarely informative for tryptic
+bottom-up. DIA-NN's own default is 1-4; this drops ~19% of the predicted library (measured:
+10,899 → 8,805 precursors on a 60-protein FASTA)"*. The narrowing is still applied — it is the
+right call — but a reader of the emitted parameters can now see that it was a decision.
 
 ---
 

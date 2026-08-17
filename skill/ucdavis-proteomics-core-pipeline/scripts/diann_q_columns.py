@@ -72,6 +72,37 @@ PROTEIN_Q_PREFERENCE = [
 ]
 
 
+# Per-column cutoffs. DIA-NN's README recommends PG.Q.Value "at 0.01 to 0.05,
+# typically 0.05 is sufficient" and documents it as RUN-SPECIFIC, unlike the
+# Global.* pair -- so applying one uniform cutoff to all six was tighter than its
+# own author advises. Measured on a 373-run mouse report, holding the other five
+# at 0.01, PG.Q.Value at 0.01 vs 0.05 differs by two protein groups (6,564 vs
+# 6,566). Small there, but PG.Q.Value is the LARGEST single contributor to what
+# the six columns exclude on that report (22,465 rows, 20,447 uniquely), so it has
+# more room to matter on a less forgiving dataset.
+#
+# Anything not named here uses the run's --q-cutoff.
+COLUMN_CUTOFFS = {"PG.Q.Value": 0.05}
+
+
+def cutoff_for(column, q_cutoff, uniform=False):
+    """The cutoff to apply to `column` given the run's --q-cutoff.
+
+    A column listed in COLUMN_CUTOFFS uses its own value; everything else uses
+    q_cutoff. `uniform=True` disables the per-column map entirely, restoring the
+    pre-2026-08 behaviour of one cutoff for all six.
+
+    Note this deliberately does NOT try to be clever about a caller who tightened
+    --q-cutoff. The pipeline default (0.01) is already stricter than PG.Q.Value's
+    recommended 0.05, so any "never loosen what the caller asked for" rule would
+    prevent the recommendation from ever applying. --q-cutoff governs the other
+    five columns; pass uniform=True to make it govern all six.
+    """
+    if uniform:
+        return q_cutoff
+    return COLUMN_CUTOFFS.get(column, q_cutoff)
+
+
 def fdr_columns(available=None):
     """The columns to FILTER on, restricted to those the report has.
 

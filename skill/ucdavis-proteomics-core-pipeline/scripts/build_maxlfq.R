@@ -65,8 +65,12 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
     .fdr <- sub("\\.Value$", "", DIANN_FDR_REQUIRED)
     for (.qc in DIANN_FDR_OPTIONAL) {
       if (.qc %in% cols) {
-        flt <- dplyr::filter(flt, .data[[.qc]] <= !!q_cutoff)
-        .fdr <- c(.fdr, .qc)
+        .cut <- diann_cutoff_for(.qc, q_cutoff)
+        flt <- dplyr::filter(flt, .data[[.qc]] <= !!.cut)
+        # Label the column with its own cutoff when it differs, so the recorded
+        # provenance says what actually ran rather than implying one uniform value.
+        .fdr <- c(.fdr, if (isTRUE(all.equal(.cut, q_cutoff))) .qc
+                        else sprintf("%s@%.3f", .qc, .cut))
         q_columns <- c(q_columns, .qc)
       }
     }
