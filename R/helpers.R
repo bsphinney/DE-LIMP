@@ -325,6 +325,27 @@ filter_quantums_parquet <- function(parquet_path, eq_cutoff = 0, pgq_cutoff = 0)
 DIANN_Q_COLUMNS_BASE  <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
 DIANN_Q_COLUMNS_EXTRA <- c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")
 
+# Per-column cutoffs — MUST match the skill's diann_q_columns.R. DIA-NN
+# recommends PG.Q.Value "at 0.01 to 0.05, typically 0.05 is sufficient" and
+# documents it as RUN-SPECIFIC, unlike the Global.* pair, so a uniform cutoff was
+# tighter than its own author advises on the one column that is not
+# experiment-wide.
+#
+# Kept in step with the skill deliberately: the skill gained this in its v2.0.0
+# work and the app did not, which immediately recreated the divergence that
+# #50 existed to remove — the same report giving different FDR depending on
+# which product processed it.
+DIANN_COLUMN_CUTOFFS <- list("PG.Q.Value" = 0.05)
+
+#' The cutoff to apply to `column` given the run's q-cutoff.
+#'
+#' `uniform = TRUE` restores one cutoff for all six (pre-4.0.5 behaviour).
+diann_cutoff_for <- function(column, q_cutoff, uniform = FALSE) {
+  if (isTRUE(uniform)) return(q_cutoff)
+  own <- DIANN_COLUMN_CUTOFFS[[column]]
+  if (is.null(own)) q_cutoff else own
+}
+
 #' The identification-FDR columns to apply to a given DIA-NN report.
 #'
 #' Returns only columns the report actually HAS -- older reports lack the
@@ -404,11 +425,17 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
     # BEFORE select(), and every member is in select_cols, so none of these
     # filters can hit the dropped-column silent-zero trap described there.
     fdr_cols <- q_cols
+    .labels <- character(0)
     for (.qc in fdr_cols) {
-      flt <- flt %>% dplyr::filter(.data[[.qc]] <= !!q_cutoff)
+      .cut <- diann_cutoff_for(.qc, q_cutoff)
+      flt <- flt %>% dplyr::filter(.data[[.qc]] <= !!.cut)
+      # Label any column whose cutoff differs, so the recorded provenance stops
+      # implying one uniform value across all six.
+      .labels <- c(.labels, if (isTRUE(all.equal(.cut, q_cutoff))) .qc
+                            else sprintf("%s@%.3f", .qc, .cut))
     }
     filters_applied <- c(filters_applied,
-      sprintf("%s <= %.3f", paste(fdr_cols, collapse = ", "), q_cutoff))
+      sprintf("%s <= %.3f", paste(.labels, collapse = ", "), q_cutoff))
     filter_counts$after_fdr <- count_rows(flt)
   }
   # QuantUMS — eQ

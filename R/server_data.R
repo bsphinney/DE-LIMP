@@ -68,8 +68,11 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         # which pipeline the user picked. diann_q_columns() is the one
         # definition; see R/helpers.R.
         q_cols <- diann_q_columns(temp_file)
+        # Per-column cutoffs: limpa recycles q.cutoffs against q.columns
+        # element-wise, so PG.Q.Value can take DIA-NN's recommended 0.05.
+        q_cuts <- vapply(q_cols, diann_cutoff_for, numeric(1), q_cutoff = input$q_cutoff)
         values$raw_data <- limpa::readDIANN(temp_file, format="parquet",
-                                            q.columns=q_cols, q.cutoffs=input$q_cutoff)
+                                            q.columns=q_cols, q.cutoffs=unname(q_cuts))
         values$quantums_filter_applied <- character(0)
         classify_loaded_proteins()
         fnames <- sort(colnames(values$raw_data$E))
@@ -163,8 +166,9 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         # See the example-data handler: name q.columns explicitly so the DPC and
         # MaxLFQ paths apply the SAME identification FDR to the same report.
         q_cols <- diann_q_columns(input$report_file$datapath)
+        q_cuts <- vapply(q_cols, diann_cutoff_for, numeric(1), q_cutoff = input$q_cutoff)
         values$raw_data <- limpa::readDIANN(input$report_file$datapath, format="parquet",
-                                            q.columns=q_cols, q.cutoffs=input$q_cutoff)
+                                            q.columns=q_cols, q.cutoffs=unname(q_cuts))
         values$quantums_filter_applied <- character(0)
         classify_loaded_proteins()
         gc(verbose = FALSE)  # free readDIANN intermediates

@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.0.5] — 2026-08-17
+
+### Fixed
+- **The app and the skill applied different identification FDR to the same
+  report.** The skill's v2.0.0 work gave `PG.Q.Value` DIA-NN's recommended 0.05
+  cutoff (it is documented as *run-specific*, unlike the `Global.*` pair, and
+  DIA-NN advises *"0.01 to 0.05, typically 0.05 is sufficient"*), while the app
+  still applied one uniform `--q-cutoff` to all six columns. That recreated,
+  between the two products, exactly the divergence v4.0.4 removed between the two
+  `--method` values. The app now uses the same per-column map, and
+  `filters_applied` labels any differing column as `PG.Q.Value@0.050` so the
+  recorded provenance stops implying one uniform value.
+
+  **This loosens identification FDR**, as it did in the skill. Measured on the
+  app's own example dataset (429,015 rows, 12 runs): 4,624 → 4,648 protein groups
+  and 1,285 → 1,333 significant at adj.P < 0.05. `diann_cutoff_for(..., uniform =
+  TRUE)` restores the 4.0.4 behaviour.
+
 ## [4.0.4] — 2026-08-17
 
 ### Fixed

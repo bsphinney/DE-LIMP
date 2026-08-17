@@ -199,3 +199,44 @@ test_that("arrow silently returns 0 rows when filtering a dropped column", {
   # reading unselected columns, which would also be worth knowing about.
   expect_true(is.na(n) || n == 0)
 })
+
+
+# ------------------------------------------------------- per-column cutoffs ---
+
+test_that("PG.Q.Value uses DIA-NN's recommended 0.05, the rest use --q-cutoff", {
+  # The app gained diann_q_columns() before the skill gained per-column cutoffs,
+  # which briefly meant the same report got different FDR depending on whether it
+  # went through the app or the CLI. Keep them in step.
+  expect_equal(diann_cutoff_for("PG.Q.Value", 0.01), 0.05)
+  for (c in c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value",
+              "Global.Q.Value", "Global.PG.Q.Value")) {
+    expect_equal(diann_cutoff_for(c, 0.01), 0.01)
+  }
+})
+
+test_that("uniform = TRUE restores one cutoff for all six", {
+  for (c in c(DIANN_Q_COLUMNS_BASE, DIANN_Q_COLUMNS_EXTRA)) {
+    expect_equal(diann_cutoff_for(c, 0.01, uniform = TRUE), 0.01)
+  }
+})
+
+test_that("a differing cutoff is labelled in filters_applied, not hidden", {
+  skip_if_no_arrow()
+  # Provenance must not imply one uniform value across all six.
+  p <- make_report(tempfile(fileext = ".parquet"), extra_q = TRUE)
+  res <- build_maxlfq_pipeline(p, q_cutoff = 0.01)
+  expect_match(paste(res$other$filters_applied, collapse = " "), "PG.Q.Value@0.050",
+               fixed = TRUE)
+})
+
+test_that("the PG.Q.Value cutoff actually admits rows the uniform one rejected", {
+  skip_if_no_arrow()
+  # One protein sits between the two cutoffs: rejected at 0.01, kept at 0.05.
+  p <- make_report(tempfile(fileext = ".parquet"), extra_q = TRUE,
+                   q_override = function(df) {
+                     df$PG.Q.Value[df$Protein.Group == "P003"] <- 0.03
+                     df
+                   })
+  res <- build_maxlfq_pipeline(p, q_cutoff = 0.01)
+  expect_true("P003" %in% rownames(res$E))
+})
