@@ -142,23 +142,30 @@ if (method == "dpc") {
   # (FragPipe's own report.tsv does carry Lib.Q.Value / Lib.PG.Q.Value -- columns 39
   # and 40 -- so it needs no special handling; it works with limpa's defaults.)
   #
-  # The experiment-wide columns are applied WHENEVER THEY EXIST, not only as a fallback for
-  # a missing run-level one. Q.Value / Lib.Q.Value / Lib.PG.Q.Value are per-run and per-
-  # library: each controls FDR within one run, so the union of run-level-passing IDs over N
-  # runs sits above the nominal cutoff and grows with N. Global.Q.Value / Global.PG.Q.Value /
-  # PG.Q.Value are what DIA-NN provides to control it across the experiment.
-  # Measured on a 373-run DIA-NN 2.6 report (mouse, 4 cohorts): filtering on the run-level
-  # three alone admits 329 extra protein groups (+5.0%, 6,860 vs 6,531), median ONE peptide
+  # The columns in q_alt are applied WHENEVER THEY EXIST, not only as a fallback for a missing
+  # run-level one. Per the DIA-NN README (master), they are not all the same kind of filter:
+  #   Global.Q.Value / Global.PG.Q.Value  "global" -- experiment-wide
+  #   PG.Q.Value                          "run-specific q-value for the protein group"
+  # Q.Value / Lib.Q.Value / Lib.PG.Q.Value on their own do not control FDR across an
+  # experiment: the union of run-level-passing IDs over N runs sits above the nominal cutoff
+  # and grows with N. Lib.* is documented as "'global' if the library was created by DIA-NN",
+  # but that cannot be relied on -- in some reports both Lib columns are identically 0 and
+  # filter nothing -- which is why Global.* is applied explicitly rather than assumed.
+  # Measured on a 373-run DIA-NN 2.6 report (mouse, 4 cohorts): the three extra columns keep
+  # 329 protein groups out that the run-level three admit (6,531 vs 6,860), median ONE peptide
   # and present in 8% of runs, of which 124 came out significant at BH < 0.05 -- i.e. they
-  # reach the results table. build_maxlfq.R has always applied all six; this brings the dpc
-  # path in line with it, so the two --method values no longer disagree on FDR.
+  # reach the results table.
+  # NOTE on cutoffs: DIA-NN recommends PG.Q.Value "at 0.01 to 0.05, typically 0.05 is
+  # sufficient". This applies the single --q-cutoff (default 0.01) to it, which is a
+  # deliberate tightening -- and is what build_maxlfq.R already does, so the two --method
+  # values agree on FDR rather than disagreeing.
   q_want <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
   q_alt  <- c("Global.Q.Value", "Global.PG.Q.Value", "PG.Q.Value")
   q_use  <- intersect(q_want, have_cols)
   q_extra <- intersect(setdiff(q_alt, q_use), have_cols)
   if (length(q_extra)) {
     q_use <- unique(c(q_use, q_extra))
-    message(sprintf("[run_de] experiment-wide FDR columns present; filtering on %s",
+    message(sprintf("[run_de] additional q-value columns present; filtering on %s",
                     paste(q_use, collapse = " / ")))
   }
   if (length(setdiff(q_want, have_cols)) > 0)
