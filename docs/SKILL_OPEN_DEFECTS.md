@@ -15,9 +15,8 @@ reusable, add a row there instead. A shrinking file is the point.
 
 | # | Defect | Severity | Evidence |
 |---|---|---|---|
-| 1 | The q-value column set is hand-written in five files and they disagree | Medium — this is how defect #48 drifted in | five files, see below |
-| 2 | One `--q-cutoff` applied to all six q-columns | Low | `scripts/run_de.R`, `scripts/build_maxlfq.R` |
-| 3 | `--min-pr-charge 2` narrows DIA-NN's own default with no stated reason | Low — decision, not a bug | `scripts/estimate_params.py:181` |
+| 1 | One `--q-cutoff` applied to all six q-columns | Low | `scripts/run_de.R`, `scripts/build_maxlfq.R` |
+| 2 | `--min-pr-charge 2` narrows DIA-NN's own default with no stated reason | Low — decision, not a bug | `scripts/estimate_params.py:181` |
 
 ---
 
@@ -36,33 +35,29 @@ Kept here as a stub only until the next edit of this file; the lesson is in `doc
 
 ---
 
-## 2. The q-value column set is duplicated across five files, and they disagree
+## ~~2. The q-value column set is duplicated~~ — FIXED 2026-08-17
 
-**What.** Which DIA-NN q-value columns constitute "FDR filtering" is written out by hand in
-five places, with three different answers:
+Fixed in `fix/skill-q-column-definition`. The set now lives in
+`scripts/diann_q_columns.py`, mirrored by `scripts/diann_q_columns.R` (the two R scripts are
+standalone Rscripts that treat `jsonlite` as optional, so reading a shared JSON file would put
+a hard dependency in front of the identification filter). `tests/test_q_columns.py` parses the R
+source and asserts it equals the Python values, so drift is a CI failure rather than two subtly
+different FDR filters.
 
-| File | Columns |
-|---|---|
-| `scripts/run_de.R:166-167` | `Q.Value` / `Lib.Q.Value` / `Lib.PG.Q.Value` + `Global.Q.Value` / `Global.PG.Q.Value` / `PG.Q.Value` |
-| `scripts/build_maxlfq.R:29, 48` | the same six |
-| `scripts/run_search.py:554` | `col("Global.PG.Q.Value", "Q.Value")` — two, as a fallback chain |
-| `scripts/compare_searches.py:72` | `col("Global.PG.Q.Value", "Global.Q.Value", "Lib.PG.Q.Value", "Q.Value")` — four |
-| `scripts/radiant_to_delimp.py:180` | maps `Global.PG.Q.Value` onto `Lib.PG.Q.Value` |
+The audit undercounted: `run_search.py` alone held **six** hand-written copies, not one — four
+of them in output adapters (AlphaDIA, Sage, FragPipe DIA, FragPipe combined_protein,
+Radiant/Fulcrum) that emit the DE contract. A test asserts no call site restates the set inline,
+which is what found them.
 
-The last three are fallback chains for reading a single q-value out of a report rather than full
-FDR filters, so they are not all the same kind of thing — but that is precisely the problem: a
-reader cannot tell which copy is authoritative, and there is no single definition to consult.
+It also conflated **two distinct concepts**, and merging them would have been a bug:
 
-**Why it matters.** This is the mechanism behind **PR #48**. `run_de.R`'s dpc path and
-`build_maxlfq.R` disagreed about the same report for months because the definition lived in two
-hand-maintained copies and only one was updated. Since then the count has grown to five. The
-same failure mode produced a second, unrelated defect in a downstream session, where a control
-script copied from its sibling kept the sibling's filter description.
+* `FDR_REQUIRED` + `FDR_OPTIONAL` — the **filter set**: every column ANDed at the q-cutoff
+  (`run_de.R`, `build_maxlfq.R`).
+* `PROTEIN_Q_PREFERENCE` — a **preference chain**: the first available protein-level q-column
+  wins and the rest are ignored (`compare_searches.py`, `run_search.py`).
 
-**Proposed fix.** One exported definition — column names, the cutoff each takes, and a one-line
-description of what each controls — imported by both R scripts, with the Python readers pointing
-at it in a comment even where they cannot import it. The point is that a future change happens
-once and is reviewable in one place.
+Applying the preference order as a filter would over-filter; filtering on only the first
+available column would under-filter.
 
 ---
 

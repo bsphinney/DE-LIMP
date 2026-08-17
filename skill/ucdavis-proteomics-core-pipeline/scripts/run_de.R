@@ -83,6 +83,17 @@ if (is.null(input) || is.null(meta_path))
   for (p in c(file.path(.script_dir, nm), nm)) if (file.exists(p)) return(p)
   NULL
 }
+# ONE definition of the q-value column set, shared with build_maxlfq.R (and
+# mirrored in diann_q_columns.py for the Python scripts). Hand-copied duplicates
+# are what let this path drift away from build_maxlfq.R and apply a different
+# identification FDR to the same report -- see SKILL_OPEN_DEFECTS #2.
+local({
+  f <- .sibling("diann_q_columns.R")
+  if (is.null(f))
+    stop("diann_q_columns.R not found next to run_de.R -- it defines the ",
+         "identification-FDR columns and there is no safe default to guess.")
+  source(f)
+})
 if (!method %in% c("dpc", "maxlfq"))
   stop("--method must be 'dpc' or 'maxlfq'")
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
@@ -163,8 +174,8 @@ if (method == "dpc") {
   # sufficient". This applies the single --q-cutoff (default 0.01) to it, a deliberate
   # tightening that matches build_maxlfq.R so the two --method values agree on FDR. On this
   # report the choice is nearly free: 0.01 vs 0.05 differs by 2 protein groups (6,564/6,566).
-  q_want <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
-  q_alt  <- c("Global.Q.Value", "Global.PG.Q.Value", "PG.Q.Value")
+  q_want <- DIANN_FDR_REQUIRED
+  q_alt  <- DIANN_FDR_OPTIONAL
   q_use  <- intersect(q_want, have_cols)
   q_extra <- intersect(setdiff(q_alt, q_use), have_cols)
   if (length(q_extra)) {

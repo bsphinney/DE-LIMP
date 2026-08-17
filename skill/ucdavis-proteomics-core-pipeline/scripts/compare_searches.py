@@ -28,6 +28,11 @@ Usage:
 import argparse, json, math, os, statistics, sys
 from collections import defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ONE definition of the q-value columns, shared with run_search.py and (mirrored)
+# the R scripts -- see diann_q_columns.py. SKILL_OPEN_DEFECTS #2.
+from diann_q_columns import PROTEIN_Q_PREFERENCE
+
 
 def read_report(path, q_cut):
     """Read a DIA-NN-shaped report into {run: {protein: intensity}}.
@@ -69,7 +74,8 @@ def read_report(path, q_cut):
     c_int = col("PG.MaxLFQ", "PG.Quantity", "Intensity")
     if not all([c_run, c_pg, c_int]):
         sys.exit(f"{path} is not a DE-contract report (need Run, Protein.Group, PG.MaxLFQ).")
-    c_q = col("Global.PG.Q.Value", "Global.Q.Value", "Lib.PG.Q.Value", "Q.Value")
+    # Preference order, NOT a filter set: the first available column wins.
+    c_q = col(*PROTEIN_Q_PREFERENCE)
     q_basis = c_q or "(none — no q-value column, nothing filtered)"
 
     if is_tsv:

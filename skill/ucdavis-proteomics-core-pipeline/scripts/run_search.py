@@ -32,8 +32,14 @@ Usage:
 """
 import sys, os, json, glob, shlex, argparse, subprocess, shutil
 
-DIANN_CONTRACT = ["Run", "Protein.Group", "PG.MaxLFQ",
-                  "Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value"]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ONE definition of the q-value columns -- see diann_q_columns.py.
+from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
+
+# The minimum an adapted report must carry for the DE step to run. The q-columns
+# are exactly the REQUIRED filter set: an adapter that emits fewer leaves limpa
+# silently applying no filter for the missing ones.
+DIANN_CONTRACT = ["Run", "Protein.Group", "PG.MaxLFQ"] + FDR_REQUIRED
 
 
 def sh(cmd, **kw):
@@ -286,9 +292,13 @@ def adapt_alphadia(out):
 
     n = len(prots)
     report = os.path.join(out, "report.parquet")
+    # AlphaDIA has already applied its own FDR, so the contract's q-columns are
+    # emitted as 0.0 placeholders -- the downstream filter is deliberately a
+    # no-op here rather than a second, different FDR. Names come from the shared
+    # definition so this adapter cannot fall behind the contract it satisfies.
     pq.write_table(pa.table({
         "Run": runs, "Protein.Group": prots, "PG.MaxLFQ": ints,
-        "Q.Value": [0.0]*n, "Lib.Q.Value": [0.0]*n, "Lib.PG.Q.Value": [0.0]*n,
+        **{c: [0.0] * n for c in FDR_REQUIRED},
     }), report)
     print(f"  [adapt] AlphaDIA -> {report}  ({n} protein×run rows)")
     return report
@@ -551,7 +561,12 @@ def adapt_radiant(out):
                 "Precursor.Quantity")
     if not all([c_run, c_pg, c_int]):
         sys.exit(f"Radiant output missing expected columns; saw {t.column_names}")
-    c_q = col("Global.PG.Q.Value", "Q.Value")
+    # Preference order, NOT a filter set: the first available column wins. Shared
+    # with compare_searches.py so the two cannot disagree about which q-value a
+    # given report is being judged on (SKILL_OPEN_DEFECTS #2). Widens the old
+    # two-column chain -- Global.Q.Value / Lib.PG.Q.Value / PG.Q.Value are now
+    # tried before falling all the way back to the run-level Q.Value.
+    c_q = col(*PROTEIN_Q_PREFERENCE)
 
     runs = [_radiant_run_name(r) for r in t.column(c_run).to_pylist()]
     pgs = [str(p) for p in t.column(c_pg).to_pylist()]
@@ -578,9 +593,12 @@ def adapt_radiant(out):
     qv = [v[1] for v in best.values()]
     n = len(pgs2)
     report = os.path.join(out, "report.parquet")
+    # Fulcrum reports ONE q-value per protein x run, so it is broadcast to every
+    # column of the contract rather than invented per column. Names derived from
+    # the shared definition -- see the AlphaDIA adapter above.
     pq.write_table(pa.table({
         "Run": runs2, "Protein.Group": pgs2, "PG.MaxLFQ": ints,
-        "Q.Value": qv, "Lib.Q.Value": qv, "Lib.PG.Q.Value": qv,
+        **{c: qv for c in FDR_REQUIRED},
     }), report)
     print(f"  [adapt] Radiant/Fulcrum -> {report}  ({n} protein×run rows)")
     return report
@@ -666,9 +684,8 @@ def adapt_sage(out):
         "Run": run,
         "Protein.Group": [str(p) for p in prot],
         "PG.MaxLFQ": [float(x) if x is not None else float("nan") for x in inten],
-        "Q.Value": [0.0] * n,            # Sage already FDR-filtered at write time
-        "Lib.Q.Value": [0.0] * n,
-        "Lib.PG.Q.Value": [0.0] * n,
+        # Sage already FDR-filtered at write time, so these are 0.0 placeholders.
+        **{c: [0.0] * n for c in FDR_REQUIRED},
     })
     report = os.path.join(out, "report.parquet")
     pq.write_table(out_tbl, report)
@@ -766,15 +783,17 @@ def adapt_fragpipe_dia(out):
     if not all([c_run, c_pg, c_q]):
         sys.exit(f"{tsv} lacks Run / Protein.Group / PG.MaxLFQ — cannot build the DE contract.")
     # Carry the q-value columns through when present; the DE step filters on them.
-    cq, clq, clpq = col("Q.Value"), col("Lib.Q.Value"), col("Lib.PG.Q.Value")
+    # Carry each contract q-column through when the source has it, else 0.0.
+    # Driven off FDR_REQUIRED so adding a column to the contract cannot leave
+    # this adapter silently emitting one fewer.
+    src_q = {c: col(c) for c in FDR_REQUIRED}
     n = len(rows)
     tbl = pa.table({
         "Run": [r[c_run] for r in rows],
         "Protein.Group": [r[c_pg] for r in rows],
         "PG.MaxLFQ": [num(r[c_q]) for r in rows],
-        "Q.Value": [num(r[cq]) if cq else 0.0 for r in rows],
-        "Lib.Q.Value": [num(r[clq]) if clq else 0.0 for r in rows],
-        "Lib.PG.Q.Value": [num(r[clpq]) if clpq else 0.0 for r in rows],
+        **{c: [num(r[src_q[c]]) if src_q[c] else 0.0 for r in rows]
+           for c in FDR_REQUIRED},
     })
     report = os.path.join(out, "report.parquet")
     pq.write_table(tbl, report)
@@ -831,7 +850,8 @@ def adapt_fragpipe_dda(out):
             runs.append(sample); prots.append(pg); ints.append(v if v > 0 else float("nan"))
     n = len(prots)
     tbl = pa.table({"Run": runs, "Protein.Group": prots, "PG.MaxLFQ": ints,
-                    "Q.Value": [0.0]*n, "Lib.Q.Value": [0.0]*n, "Lib.PG.Q.Value": [0.0]*n})
+                    # already FDR-filtered upstream -> 0.0 placeholders
+                    **{c: [0.0] * n for c in FDR_REQUIRED}})
     report = os.path.join(out, "report.parquet")
     pq.write_table(tbl, report)
     print(f"  [adapt] FragPipe -> {report}  ({n} protein×run rows)")
