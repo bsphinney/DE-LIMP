@@ -2,6 +2,8 @@
 
 Quick-reference tables for known issues and their solutions. **This is the single source of truth for gotchas** — CLAUDE.md keeps only a category index that points here. When you hit (or fix) a non-obvious bug, add a row to the relevant table below.
 
+For **open** defects in the `ucdavis-proteomics-core-pipeline` skill — things that still need fixing rather than things already solved — see [`SKILL_OPEN_DEFECTS.md`](SKILL_OPEN_DEFECTS.md). When one of those is fixed, delete its entry there and add a row here if the lesson is reusable.
+
 ## R Shiny / bslib
 
 | Problem | Solution |
