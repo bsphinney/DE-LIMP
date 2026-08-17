@@ -41,7 +41,15 @@
 
 ## [Skill 2.0.0] — 2026-08-17
 
-Skill-only release (`ucdavis-proteomics-core-pipeline`). **DE-LIMP itself is
+Skill-only release (`ucdavis-proteomics-core-pipeline`).
+
+**Also carries the defect fixes merged on the way to this release**, which landed on
+`main` while the plugin manifest still said 1.8.0 — so 2.0.0 is the first version
+string that actually identifies them: the experiment-wide FDR columns on the dpc
+path (#48), the acquired precursor m/z range replacing a hardcoded 380–980 (#51),
+one definition of the q-value column set (#53), and per-column q-cutoffs plus an
+honest `--min-pr-charge` tag (#54). `docs/SKILL_OPEN_DEFECTS.md` is now empty of
+open defects. **DE-LIMP itself is
 unchanged and stays at 4.0.3** — no `app.R`, `R/`, or Shiny code was touched.
 
 Major bump because the remote workflow registry is removed: `fetch_workflows.py
