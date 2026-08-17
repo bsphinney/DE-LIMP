@@ -1,5 +1,44 @@
 # Changelog
 
+## [4.0.4] — 2026-08-17
+
+### Fixed
+- **MaxLFQ + limma produced NO results at all on any modern DIA-NN report.**
+  `build_maxlfq_pipeline()` selected a column subset that omitted `PG.Q.Value` /
+  `Global.Q.Value` / `Global.PG.Q.Value`, then filtered on exactly those columns.
+  Filtering an arrow dataset on a column `select()` dropped, via `.data[[name]]`,
+  **returns zero rows instead of erroring** (verified on arrow 24.0.0 / dplyr
+  1.2.1; the bare-symbol form does error, the `.data` form does not). So every
+  report carrying the experiment-wide q-columns — i.e. every recent DIA-NN
+  report — filtered to nothing, and the user was told
+  *"no precursor rows survived the filters. Loosen the QuantUMS cutoffs"* even
+  when those cutoffs were `0` and not applied. Introduced in `9d7f9a8` (PR #36,
+  v4.0.2) by the change that added experiment-wide filtering; **v4.0.2 and v4.0.3
+  are affected.** The q-columns are now selected before being filtered on.
+  Verified end-to-end: a 36,769-row report that previously errored now yields a
+  2,695 × 2 protein × run matrix, `input=36769 → after_fdr=32559`.
+- **The DPC path and the MaxLFQ path applied different identification FDR to the
+  same report.** The DPC load calls `limpa::readDIANN()`, whose `q.columns`
+  default is only the run-level three (`Q.Value`, `Lib.Q.Value`,
+  `Lib.PG.Q.Value`), and the app never named the argument — so
+  `Global.Q.Value` / `Global.PG.Q.Value` / `PG.Q.Value` were never applied on
+  load, while `build_maxlfq_pipeline()` applied all six. Which pipeline a user
+  picked silently changed which precursors survived. Both load handlers now pass
+  `q.columns` explicitly. This is the app-side counterpart of the skill fix in
+  #48.
+
+### Changed
+- **The DIA-NN identification-FDR column set now has one definition**
+  (`diann_q_columns()` in `R/helpers.R`), imported by both quantification paths
+  instead of being hand-copied. Hand-copied duplicates are what let the two paths
+  disagree in the first place (DE-LIMP architectural rule #3). The column
+  semantics are documented there against the DIA-NN 2.6 README — including that
+  `PG.Q.Value` is **run-specific** despite sitting beside the `Global.*` pair,
+  and that `Lib.*` are library-level and cannot be relied on as run-level.
+- The emitted reproducibility R now names the `q.columns` actually filtered on,
+  rather than a `readDIANN()` call whose defaults differ from what the app ran
+  (architectural rule #1: exports self-describe).
+
 ## [4.0.3] - 2026-08-13
 
 ### Fixed

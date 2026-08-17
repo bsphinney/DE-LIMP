@@ -297,6 +297,60 @@ filter_quantums_parquet <- function(parquet_path, eq_cutoff = 0, pgq_cutoff = 0)
 #   $other$n.observations — 1 / 0 matrix marking detection in each cell
 #   $other$pipeline — "maxlfq"  (used by downstream code to branch)
 #   $other$filters_applied — character vector of filters used (for Methods)
+# =============================================================================
+# DIA-NN identification-FDR columns — ONE definition for the whole app
+# =============================================================================
+# Both quantification paths must apply the SAME identification FDR to the same
+# report, or the pipeline a user picks silently changes which precursors survive.
+# They did not: build_maxlfq_pipeline() applied all six, while the DPC path went
+# through limpa::readDIANN(), whose q.columns default is only the run-level three
+# -- so Global.Q.Value / Global.PG.Q.Value / PG.Q.Value were never applied on
+# load. Same defect the skill carried on its dpc path until DE-LIMP PR #48.
+#
+# Semantics, per the DIA-NN 2.6 README "Main output reference" (verified against
+# github.com/vdemichev/DiaNN@master, NOT the much shorter 1.8-tag README):
+#   Q.Value           run-specific precursor q-value                    (L1242)
+#   Global.Q.Value    global (experiment-wide) precursor q-value        (L1244)
+#   Lib.Q.Value       library entry q-value; 'global' when DIA-NN built
+#                     the library, so NOT reliably run-level             (L1245)
+#   PG.Q.Value        RUN-SPECIFIC protein-group q-value -- despite
+#                     sitting alongside the Global.* pair               (L1255)
+#   Global.PG.Q.Value global protein-group q-value                      (L1259)
+#   Lib.PG.Q.Value    library-entry protein-group q-value               (L1260)
+#
+# Run-level q-values alone do not control FDR across an experiment: a union of
+# run-level-passing IDs over many runs sits above the nominal cutoff and grows
+# with run count, and the inflated protein list also inflates the family size m
+# that BH later corrects over.
+DIANN_Q_COLUMNS_BASE  <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
+DIANN_Q_COLUMNS_EXTRA <- c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")
+
+#' The identification-FDR columns to apply to a given DIA-NN report.
+#'
+#' Returns only columns the report actually HAS -- older reports lack the
+#' experiment-wide ones, and naming an absent column makes limpa error out.
+#' @param parquet_path report to inspect (ignored when `cols` is supplied)
+#' @param cols character vector of column names, if already known
+#' @return character vector, never empty (falls back to limpa's own default)
+diann_q_columns <- function(parquet_path = NULL, cols = NULL) {
+  if (is.null(cols) && !is.null(parquet_path)) {
+    cols <- tryCatch(
+      names(arrow::open_dataset(parquet_path, format = "parquet")$schema),
+      # Unreadable schema must not take the load down: fall back to limpa's
+      # default, which is exactly the behaviour we had before this helper.
+      error = function(e) NULL)
+  }
+  if (is.null(cols)) return(DIANN_Q_COLUMNS_BASE)
+  keep <- intersect(c(DIANN_Q_COLUMNS_BASE, DIANN_Q_COLUMNS_EXTRA), cols)
+  if (!length(keep)) DIANN_Q_COLUMNS_BASE else keep
+}
+
+#' Render `q.columns = c(...)` for the reproducibility log, so the emitted R
+#' names the columns this run actually filtered on rather than limpa's default.
+diann_q_columns_code <- function(qcols) {
+  sprintf("c(%s)", paste(sprintf("'%s'", qcols), collapse = ", "))
+}
+
 build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
                                    eq_cutoff = 0, pgq_cutoff = 0,
                                    keep_runs = NULL) {
@@ -315,7 +369,16 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
     stop("MaxLFQ pipeline: missing required columns in parquet: ",
          paste(missing_needed, collapse = ", "))
 
-  select_cols <- c(needed, intersect(optional, cols))
+  # The q-columns we are about to filter on MUST be selected here.
+  # They were not, from 9d7f9a8 (v4.0.2) until this fix, and the failure was
+  # SILENT: filtering an arrow dataset on a column that select() dropped, via
+  # `.data[[name]]`, returns ZERO ROWS instead of erroring (verified: arrow
+  # 24.0.0 / dplyr 1.2.1 -- the bare-symbol form errors, the .data form does
+  # not). So every report carrying PG.Q.Value / Global.* -- i.e. every modern
+  # DIA-NN report -- filtered to nothing, and the user was told to "loosen the
+  # QuantUMS cutoffs" even when those cutoffs were 0.
+  q_cols <- diann_q_columns(cols = cols)
+  select_cols <- unique(c(needed, intersect(optional, cols), q_cols))
   flt <- ds %>% dplyr::select(dplyr::all_of(select_cols))
 
   filters_applied <- character(0)
@@ -336,16 +399,13 @@ build_maxlfq_pipeline <- function(parquet_path, q_cutoff = 0.01,
   # family size m that BH later corrects over. Global.PG.Q.Value / Global.Q.Value
   # are DIA-NN's experiment-wide equivalents, so filter them too when present.
   if (!is.null(q_cutoff) && !is.na(q_cutoff) && q_cutoff > 0) {
-    flt <- flt %>%
-      dplyr::filter(Q.Value <= !!q_cutoff,
-                    Lib.Q.Value <= !!q_cutoff,
-                    Lib.PG.Q.Value <= !!q_cutoff)
-    fdr_cols <- c("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value")
-    for (.qc in c("PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value")) {
-      if (.qc %in% cols) {
-        flt <- flt %>% dplyr::filter(.data[[.qc]] <= !!q_cutoff)
-        fdr_cols <- c(fdr_cols, .qc)
-      }
+    # Column set comes from diann_q_columns() so this path and the DPC load path
+    # can never drift apart again -- see the definition above. q_cols was resolved
+    # BEFORE select(), and every member is in select_cols, so none of these
+    # filters can hit the dropped-column silent-zero trap described there.
+    fdr_cols <- q_cols
+    for (.qc in fdr_cols) {
+      flt <- flt %>% dplyr::filter(.data[[.qc]] <= !!q_cutoff)
     }
     filters_applied <- c(filters_applied,
       sprintf("%s <= %.3f", paste(fdr_cols, collapse = ", "), q_cutoff))

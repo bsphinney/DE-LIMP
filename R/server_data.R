@@ -61,7 +61,15 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         # build_maxlfq_pipeline(). Load handlers always read the unfiltered
         # parquet so DPC-Quant gets paper-faithful input regardless of slider
         # values. The filter sliders only take effect when MaxLFQ + limma runs.
-        values$raw_data <- limpa::readDIANN(temp_file, format="parquet", q.cutoffs=input$q_cutoff)
+        # q.columns is limpa's run-level default (Q.Value, Lib.Q.Value,
+        # Lib.PG.Q.Value) unless named. Left unnamed, the experiment-wide
+        # columns were never applied on this path while build_maxlfq_pipeline()
+        # applied all six -- the same report gave different FDR depending on
+        # which pipeline the user picked. diann_q_columns() is the one
+        # definition; see R/helpers.R.
+        q_cols <- diann_q_columns(temp_file)
+        values$raw_data <- limpa::readDIANN(temp_file, format="parquet",
+                                            q.columns=q_cols, q.cutoffs=input$q_cutoff)
         values$quantums_filter_applied <- character(0)
         classify_loaded_proteins()
         fnames <- sort(colnames(values$raw_data$E))
@@ -122,7 +130,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         add_to_log("Example Data Loaded", c(
           "# Example data: Affinisep vs Evosep (50ng Thermo Hela digest)",
           sprintf("# Downloaded from: %s", example_url),
-          sprintf("dat <- readDIANN('Affinisep_vs_evosep_noNorm.parquet', format='parquet', q.cutoffs=%s)", input$q_cutoff)
+          sprintf("dat <- readDIANN('Affinisep_vs_evosep_noNorm.parquet', format='parquet', q.columns=%s, q.cutoffs=%s)",
+                  diann_q_columns_code(q_cols), input$q_cutoff)
         ))
 
         showNotification("Example data loaded successfully!", type = "message", duration = 3)
@@ -151,7 +160,11 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
       tryCatch({
         # NOTE (v3.9.7): QuantUMS filtering happens at pipeline run-time only
         # (build_maxlfq_pipeline). Load always reads the unfiltered parquet.
-        values$raw_data <- limpa::readDIANN(input$report_file$datapath, format="parquet", q.cutoffs=input$q_cutoff)
+        # See the example-data handler: name q.columns explicitly so the DPC and
+        # MaxLFQ paths apply the SAME identification FDR to the same report.
+        q_cols <- diann_q_columns(input$report_file$datapath)
+        values$raw_data <- limpa::readDIANN(input$report_file$datapath, format="parquet",
+                                            q.columns=q_cols, q.cutoffs=input$q_cutoff)
         values$quantums_filter_applied <- character(0)
         classify_loaded_proteins()
         gc(verbose = FALSE)  # free readDIANN intermediates
@@ -230,10 +243,13 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
 
   observeEvent(input$report_file, {
     req(input$report_file)
+    # Resolve from the uploaded file so the logged call names the columns this
+    # report will actually be filtered on, not a guess.
+    q_cols_log <- diann_q_columns(input$report_file$datapath)
     add_to_log("Data Upload", c(
       sprintf("# File: %s", input$report_file$name),
-      sprintf("dat <- readDIANN('%s', format='parquet', q.cutoffs=%s)",
-              "path/to/your/report.parquet", input$q_cutoff)
+      sprintf("dat <- readDIANN('%s', format='parquet', q.columns=%s, q.cutoffs=%s)",
+              "path/to/your/report.parquet", diann_q_columns_code(q_cols_log), input$q_cutoff)
     ))
   })
 
@@ -560,8 +576,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         "library(limpa); library(limma)",
         "",
         "# 1. Read DIA-NN report.parquet, applying identification FDR cutoffs",
-        sprintf("dat <- limpa::readDIANN('%s', format = 'parquet', q.cutoffs = %.3f)",
-                report_path_dpc, qc_dpc),
+        sprintf("dat <- limpa::readDIANN('%s', format = 'parquet', q.columns = %s, q.cutoffs = %.3f)",
+                report_path_dpc, diann_q_columns_code(diann_q_columns(values$uploaded_report_path)), qc_dpc),
         "",
         "# 2. Normalize + quantify proteins via DPC-CN + DPC-Quant",
         "dpcfit <- limpa::dpcCN(dat)",
