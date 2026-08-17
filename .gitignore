@@ -96,3 +96,8 @@ Screenshot *.png
 
 # Private ops docs — kept in ~/Documents/claude_private/ only, never committed
 HIVE_CLAUDE_GUIDE.md
+
+# Test artifact: resolve_defaults.py --dest defaults to ./wf, so running it
+# from scripts/ during a smoke test creates scripts/wf/. It must never ship in
+# the plugin payload.
+skill/ucdavis-proteomics-core-pipeline/scripts/wf/
