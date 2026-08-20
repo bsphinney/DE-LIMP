@@ -214,12 +214,49 @@ if (method == "dpc") {
   # So pgQ is allowed but warned about; eQ is the sane knob for this path.
   dpc_input <- input
   quantums_applied <- character(0)
-  if ((!is.na(eq_cutoff) && eq_cutoff > 0) || (!is.na(pgq_cutoff) && pgq_cutoff > 0)) {
-    if (!identical(format, "parquet"))
+  # Does the report carry runs the design does not analyse?
+  #
+  # If so they MUST be removed before readDIANN(), not after. Subsetting columns
+  # afterwards (dat[, .keep]) drops the excluded runs' data but keeps every
+  # precursor row they justified -- rows that are then entirely NA in the
+  # retained runs. Those rows still reach dpcCN()/dpcQuant(), so the excluded
+  # runs go on deciding which proteins are eligible AND shifting the detection
+  # model every retained protein is quantified against.
+  #
+  # Measured on a 12-run report analysed at 7 runs: 158 all-NA precursor rows
+  # survived the subset; the protein set gained 3 proteins (exact superset, none
+  # lost) -- and 100% of the 4,645 SHARED proteins came out with a different
+  # logFC, flipping 54 significance calls. build_maxlfq.R has always applied
+  # keep_runs to the arrow query before collect(); dpc now matches it.
+  .rep_runs_pre <- tryCatch({
+    if (identical(format, "parquet") && requireNamespace("arrow", quietly = TRUE) &&
+        requireNamespace("dplyr", quietly = TRUE))
+      sort(unique(dplyr::collect(dplyr::select(arrow::open_dataset(input), Run))$Run))
+    else NULL
+  }, error = function(e) NULL)
+  .restrict_runs <- !is.null(.rep_runs_pre) && length(setdiff(.rep_runs_pre, meta$File.Name)) > 0
+
+  if (.restrict_runs || (!is.na(eq_cutoff) && eq_cutoff > 0) ||
+      (!is.na(pgq_cutoff) && pgq_cutoff > 0)) {
+    if (!identical(format, "parquet")) {
+      if (.restrict_runs)
+        stop("this report contains runs the metadata does not analyse, and run ",
+             "restriction before quantification needs parquet input.")
       stop("--eq-cutoff / --pgq-cutoff on --method dpc need parquet input.")
+    }
     if (!requireNamespace("arrow", quietly = TRUE) || !requireNamespace("dplyr", quietly = TRUE))
-      stop("arrow and dplyr are required to apply QuantUMS cutoffs on --method dpc.")
+      stop("arrow and dplyr are required to pre-filter the report on --method dpc.")
     flt <- arrow::open_dataset(input)
+    if (.restrict_runs) {
+      .keep_runs <- meta$File.Name
+      flt <- dplyr::filter(flt, Run %in% !!.keep_runs)
+      message(sprintf(paste0("[run_de] restricting to the %d of %d report runs in the metadata ",
+                             "BEFORE quantification (excluded runs must not decide the protein set)"),
+                      length(intersect(.rep_runs_pre, meta$File.Name)), length(.rep_runs_pre)))
+      quantums_applied <- c(quantums_applied,
+                            sprintf("restricted to %d analysed run(s) before rollup",
+                                    length(intersect(.rep_runs_pre, meta$File.Name))))
+    }
     if (!is.na(eq_cutoff) && eq_cutoff > 0) {
       if (!"Empirical.Quality" %in% have_cols)
         stop("--eq-cutoff given but this report has no Empirical.Quality column.")
@@ -236,7 +273,7 @@ if (method == "dpc") {
     }
     dpc_input <- file.path(tempdir(), "quantums_filtered_for_dpc.parquet")
     arrow::write_parquet(dplyr::collect(flt), dpc_input)
-    message("[run_de] QuantUMS pre-filter for dpc: ", paste(quantums_applied, collapse = " | "))
+    message("[run_de] pre-filter for dpc: ", paste(quantums_applied, collapse = " | "))
   }
 
   # Per-column cutoffs. limpa recycles q.cutoffs against q.columns

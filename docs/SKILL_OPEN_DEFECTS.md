@@ -13,17 +13,14 @@ reusable, add a row there instead. A shrinking file is the point.
 
 ## Status at a glance
 
-| # | Defect | Severity | Evidence |
-|---|---|---|---|
-| 5 | The dpc path decides the protein set over **every run in the report**, then restricts to the analysed ones — so protein groups whose inclusion depended on excluded runs survive into the results | Medium | `scripts/run_de.R:248-267` |
+**No open defects.**
 
 Every entry from the 2026-08-17 audit has been fixed; those are listed below and in
-`docs/GOTCHAS.md`. Defect 5 was found afterwards, by an end-to-end confirmation run of the #48
-fix, and is open as of `a735fbb`.
+`docs/GOTCHAS.md`. The run-restriction defect was found afterwards, by an end-to-end
+confirmation run of the #48 fix, and is fixed as of skill v2.1.1.
 
 ---
 
-## 5. The dpc path determines the protein set before restricting to the analysed runs
 
 **What.** `--method dpc` reads the entire report, then subsets:
 
@@ -144,6 +141,39 @@ Tag only; no behaviour change. It now reads: *"z=1 excluded: rarely informative 
 bottom-up. DIA-NN's own default is 1-4; this drops ~19% of the predicted library (measured:
 10,899 → 8,805 precursors on a 60-protein FASTA)"*. The narrowing is still applied — it is the
 right call — but a reader of the emitted parameters can now see that it was a decision.
+
+---
+
+## ~~The dpc path decides the protein set before restricting to analysed runs~~ — FIXED 2026-08-20
+
+Fixed in `fix/dpc-restrict-runs-before-rollup`. `run_de.R` now applies
+`Run %in% meta$File.Name` to the arrow query **before** `readDIANN()`, matching what
+`build_maxlfq.R` has always done, instead of subsetting columns afterwards.
+
+**The audit understated it.** It measured the protein-set effect (98 extra, 0 lost). It did not
+measure what happens to the proteins that were *already* there. Reproduced on a 12-run report
+analysed at 7 runs:
+
+| | before fix | after fix |
+|---|---|---|
+| all-NA precursor rows surviving the subset | 158 | 0 |
+| extra protein groups vs a pre-filtered report | 3 (exact superset) | 0 |
+| **shared proteins with a different `logFC`** | **4,645 of 4,645 (100%)** | 0 structural |
+| **significance calls flipped** | **54** | **0** |
+
+So the excluded runs were not only deciding which proteins were *eligible* — those all-NA rows
+reach `dpcCN()`/`dpcQuant()`, so they shifted the detection model **every retained protein was
+quantified against**. On this data the extra proteins were not themselves significant; the harm
+was 54 flipped calls among proteins that would have been analysed either way.
+
+A residual numeric difference remains vs a natively pre-filtered report (median |Δ logFC|
+1.1e-07, max 3.0e-03, **0** significance flips), consistent with row ordering changing an
+iterative fit's path rather than anything structural. Before the fix the same comparison was
+median 0.0021 / max 0.11 / 54 flips.
+
+Guarded by `tests/test_reproducibility_contract.py::TestRunRestrictionHappensBeforeRollup`,
+verified to fail when the restriction is removed. The post-hoc `dat[, .keep]` is retained as a
+backstop for the tsv route, which cannot pre-filter.
 
 ---
 
