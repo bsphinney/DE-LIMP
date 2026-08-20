@@ -178,7 +178,15 @@ write_repro_script <- function(path,
   } else {
     sel <- unique(c("Run", "Protein.Group", "PG.MaxLFQ", q_columns, ann_cols,
                     if (eq_on) "Empirical.Quality", if (pgq_on) "PG.MaxLFQ.Quality"))
-    qfilt <- paste(sprintf("%s <= %s", q_columns, .rnum(q_cutoff)), collapse = ", ")
+    # Per-column cutoffs, same as the dpc branch above. build_maxlfq() applies
+    # diann_cutoff_for() per column, so emitting the scalar --q-cutoff for all of
+    # them produced a script that ran clean and returned different results than
+    # the run it claims to reproduce (measured: 4,526 -> 4,444 proteins,
+    # 1,326 -> 1,281 significant) -- architectural rule #1.
+    .mcuts <- if (!is.null(q_cutoffs)) q_cutoffs else
+              vapply(q_columns, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
+    qfilt <- paste(sprintf("%s <= %s", q_columns, vapply(.mcuts, .rnum, character(1))),
+                   collapse = ", ")
     if (eq_on)  qfilt <- paste0(qfilt, sprintf(", Empirical.Quality >= %s", .rnum(eq_cutoff)))
     if (pgq_on) qfilt <- paste0(qfilt, sprintf(", PG.MaxLFQ.Quality >= %s", .rnum(pgq_cutoff)))
     L <- c(L,

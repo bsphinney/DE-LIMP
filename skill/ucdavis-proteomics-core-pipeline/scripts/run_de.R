@@ -294,6 +294,10 @@ if (method == "dpc") {
   source(bm)
 
   keep_runs <- meta$File.Name
+  # Record the per-column cutoffs build_maxlfq() will apply, so the emitted
+  # reproducibility script can state them instead of the scalar --q-cutoff.
+  q_use  <- diann_fdr_columns(names(arrow::open_dataset(input, format = format)$schema))
+  q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
   ml <- build_maxlfq(input, format = format, q_cutoff = q_cutoff,
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
                      keep_runs = keep_runs)

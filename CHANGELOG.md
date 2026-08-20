@@ -1,5 +1,32 @@
 # Changelog
 
+## [Skill 2.0.2] — 2026-08-20
+
+### Fixed
+- **The `maxlfq` path's `reproducibility_log.R` did not reproduce its analysis
+  either** — the same defect fixed for `dpc` in 2.0.1, and worse in effect. That
+  branch emits a `dplyr::filter` chain rather than a `readDIANN` call, and it
+  wrote the scalar `--q-cutoff` for every column while `build_maxlfq()` applies
+  `PG.Q.Value` at 0.05:
+
+  | | proteins | significant |
+  |---|---|---|
+  | original run | 4,526 | 1,326 |
+  | emitted script | 4,444 | 1,281 |
+
+  (dpc's gap was 4,648 → 4,624 / 1,859 → 1,846.) Re-running the corrected script
+  now reproduces the run exactly — identical protein set with zero differing
+  `logFC` / `P.Value` / `adj.P.Val` / `AveExpr` across all 4,526 rows.
+- **`de_provenance.json` on the `maxlfq` path** now records `q_columns`,
+  per-column `q_cutoffs`, and `input_sha256`, matching what 2.0.1 added for
+  `dpc`. Previously the maxlfq branch never computed them.
+
+### Added
+- 4 tests covering the maxlfq emitter branch, including one asserting **both**
+  branches agree on the `PG.Q.Value` cutoff — fixing one and not the other is the
+  obvious way to regress here, and is exactly what happened between 2.0.1 and
+  this release. 46 tests total.
+
 ## [Skill 2.0.1] — 2026-08-20
 
 Found by auditing the skill's own output end to end, at the user's request:
