@@ -433,7 +433,12 @@ if (is.null(.rs)) {
     repro_lines <- write_repro_script(
       path = file.path(outdir, "reproducibility_log.R"),
       method = method, input = input, format = format,
-      q_cutoff = q_cutoff, q_columns = q_use,
+      # q_use / q_cuts exist only on the dpc branch; guard rather than rely on
+      # the surrounding tryCatch, which would swallow the error and silently
+      # skip writing reproducibility_log.R altogether.
+      q_cutoff = q_cutoff,
+      q_columns = if (exists("q_use")) q_use else NULL,
+      q_cutoffs = if (exists("q_cuts")) unname(q_cuts) else NULL,
       eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
       cov_min_frac = cov_min_frac,
       meta = meta, covariates = covariates, formula_parts = formula_parts,
@@ -501,6 +506,23 @@ prov <- list(
   rollup_method = descriptor$rollup_method, de_engine = descriptor$de_engine,
   missing_policy = descriptor$missing_policy, citation = descriptor$citation,
   method = method, q_cutoff = q_cutoff,
+  # WHICH columns were filtered and at WHAT cutoff. q_cutoff alone stopped being
+  # the whole story once PG.Q.Value took DIA-NN's recommended 0.05: a record
+  # saying "q_cutoff: 0.01" while six different cutoffs ran is the kind of
+  # plausible-but-wrong provenance rule #2 exists to prevent.
+  q_columns = if (exists("q_use")) as.list(q_use) else NULL,
+  q_cutoffs = if (exists("q_cuts")) as.list(unname(q_cuts)) else NULL,
+  # Ties this DE run to the EXACT search output it consumed. A path alone is not
+  # traceability -- it does not survive the file being moved, regenerated, or
+  # shipped in a bundle without its input.
+  input_sha256 = tryCatch(
+    if (file.exists(input) && requireNamespace("digest", quietly = TRUE))
+      digest::digest(input, algo = "sha256", file = TRUE)
+    else if (file.exists(input) && nzchar(Sys.which("shasum")))
+      sub(" .*", "", system2("shasum", c("-a", "256", shQuote(input)), stdout = TRUE)[1])
+    else NA_character_,
+    error = function(e) NA_character_),
+  input_bytes = tryCatch(as.numeric(file.info(input)$size), error = function(e) NA_real_),
   # Report the cutoffs as APPLIED. On the dpc path these were previously recorded
   # whether or not they had any effect, so a provenance file could assert a filter the
   # run never performed.

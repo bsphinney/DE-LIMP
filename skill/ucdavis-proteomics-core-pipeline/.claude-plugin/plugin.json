@@ -1,6 +1,6 @@
 {
   "name": "ucdavis-proteomics-core-pipeline",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "UC Davis Proteomics Core pipeline \u2014 end-to-end proteomics search + differential expression from raw mass-spec data. Detects DIA/DDA + instrument, auto-installs the toolchain, runs DIA-NN (DIA) or Sage (DDA) with data-derived parameters, then limpa/limma DE \u2014 with a written analysis report, full reproducibility bundle, and tidy session packaging.",
   "author": {
     "name": "Brett Phinney",

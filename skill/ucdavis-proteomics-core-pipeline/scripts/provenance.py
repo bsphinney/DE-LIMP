@@ -98,6 +98,13 @@ def expand(patterns):
     return out
 
 
+def _utc_now():
+    """ISO-8601 UTC. Separate helper so the default is obvious and testable."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).replace(
+        microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def load_json(path):
     try:
         return json.load(open(path))
@@ -256,7 +263,11 @@ def main():
     # ---- the master run manifest --------------------------------------------
     reg = (wfman or {}).get("registry")
     manifest = {
-        "timestamp": a.timestamp or None,
+        # Default to now (UTC) rather than null. A reproducibility bundle whose
+        # whole job is to make a run auditable must be able to say WHEN it ran;
+        # recording null because the orchestrator forgot the flag is a gap, not
+        # an honest absence.
+        "timestamp": a.timestamp or _utc_now(),
         "skill": skill_info,
         "registry": reg,
         "workflow": {k: (wfman or {}).get(k) for k in
@@ -287,6 +298,13 @@ def main():
     _instr = ((wfman or {}).get("instruments") or [None])[0]
     instr_repro = shlex.quote(_instr) if _instr else "'<instrument>'"
     engine_repro = ((wfman or {}).get("engine") or {}).get("name") or "<engine>"
+    # Replay the ORIGINAL invocation, not a subset of it. Omitting these dropped
+    # the organism and the platform block from the regenerated manifest: the
+    # engine params still came back byte-identical (they do not depend on either),
+    # but the run RECORD lost the species -- the single most important contextual
+    # fact about a proteomics run -- and could not say what machine it ran on.
+    _tax = (wfman or {}).get("organism_taxid") or a.organism_taxid
+    tax_repro = f" \\\n  --organism-taxid {int(_tax)}" if _tax else ""
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
 
     # Rebuild the FASTA from what actually ran (fetch_fasta.py's output), falling back
@@ -351,8 +369,10 @@ fi
 # 2. Re-derive the search defaults from the data type. These ship with the skill, so
 #    the same skill version reproduces them exactly -- nothing is fetched.
 #    Original defaults_version: {defaults_version}
+bash "$SKILL/scripts/detect_env.sh" > ./env.json
 python3 "$SKILL/scripts/resolve_defaults.py" --acquisition {acq_repro} \\
-  --instrument {instr_repro} --engine {engine_repro} --dest ./wf
+  --instrument {instr_repro} --engine {engine_repro}{tax_repro} \\
+  --env ./env.json --dest ./wf
 
 # 3. Resolve the same engine + version.
 PIN_ENGINE={a.engine or '<engine>'} PIN_VERSION={(wfman or {}).get('engine',{}).get('version','')} \\

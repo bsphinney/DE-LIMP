@@ -41,7 +41,7 @@ write_repro_script <- function(path,
                                input,            # report path as it was read
                                format,           # "parquet" | "tsv"
                                q_cutoff,
-                               q_columns,        # q-value columns actually filtered on
+                               q_columns, q_cutoffs = NULL,        # q-value columns actually filtered on
                                eq_cutoff, pgq_cutoff,
                                cov_min_frac,     # maxlfq coverage filter
                                meta,             # design, already aligned to the matrix
@@ -147,10 +147,24 @@ write_repro_script <- function(path,
         "")
       src <- "report_filtered"
     }
+    # q.cutoffs must be the VECTOR that actually ran, not the scalar --q-cutoff.
+    # PG.Q.Value takes DIA-NN's recommended 0.05 while the rest take --q-cutoff,
+    # and limpa recycles q.cutoffs against q.columns element-wise. Emitting the
+    # scalar produced a script that ran clean and returned DIFFERENT numbers than
+    # the analysis it claims to reproduce (measured: 4,648 -> 4,624 proteins,
+    # 1,859 -> 1,846 significant) -- DE-LIMP architectural rule #1.
+    .cuts <- if (!is.null(q_cutoffs)) q_cutoffs else
+             vapply(q_columns, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
+    .cuts_src <- if (length(unique(.cuts)) == 1L) .rnum(.cuts[1]) else
+                 sprintf("c(%s)", paste(sprintf("%s = %s", .rq(q_columns),
+                                                vapply(.cuts, .rnum, character(1))),
+                                        collapse = ", "))
     L <- c(L,
-      "# --- 1. Read the DIA-NN report, applying the identification FDR cutoff -------",
+      "# --- 1. Read the DIA-NN report, applying the identification FDR cutoffs ------",
+      "#     PG.Q.Value uses DIA-NN's recommended 0.05; the rest use --q-cutoff.",
+      "#     limpa recycles q.cutoffs against q.columns element-wise.",
       sprintf("dat <- limpa::readDIANN(%s, format = %s, q.cutoffs = %s,",
-              src, .rq(format), .rnum(q_cutoff)),
+              src, .rq(format), .cuts_src),
       sprintf("                        q.columns = %s)", .rvec(q_columns)),
       "",
       "# --- 2. Keep only the runs that appear in the design -------------------------",

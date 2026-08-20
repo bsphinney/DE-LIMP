@@ -1,5 +1,45 @@
 # Changelog
 
+## [Skill 2.0.1] — 2026-08-20
+
+Found by auditing the skill's own output end to end, at the user's request:
+"can we verify everything is traceable and reproducible using the output the
+skill generates". Three provenance defects, all of which left every scientific
+number correct — which is exactly why they survived.
+
+### Fixed
+- **`reproducibility_log.R` did not reproduce the analysis.** Once `PG.Q.Value`
+  took DIA-NN's recommended 0.05 while the other five columns kept `--q-cutoff`,
+  the emitter still wrote a **scalar** `q.cutoffs = 0.01` next to all six
+  columns. `limpa` recycles `q.cutoffs` across `q.columns`, so the emitted script
+  ran clean and returned **4,624 proteins / 1,846 significant** against the run's
+  actual **4,648 / 1,859**. Nothing errored and the CSVs beside it were right;
+  only the script disagreed — DE-LIMP architectural rule #1. It now emits the
+  cutoff vector that actually ran, and re-running it reproduces the run exactly:
+  same protein set, and zero differing `logFC` / `P.Value` / `adj.P.Val`.
+- **`de_provenance.json` asserted one cutoff while six ran.** It recorded
+  `q_cutoff: 0.01` and never named the columns. It now records `q_columns` and
+  the per-column `q_cutoffs` as applied (rule #2).
+- **The DE step could not be tied to the search output it consumed.** Provenance
+  recorded the input *path* — which does not survive the file being moved,
+  regenerated, or shipped in a bundle without its input. It now records
+  `input_sha256` and `input_bytes`; verified against an independently computed
+  checksum.
+- **`reproduce.sh` replayed a subset of the original invocation**, dropping
+  `--organism-taxid` and `--env`. Engine params still came back byte-identical
+  (they depend on neither), but the regenerated record lost the **species** and
+  the platform block. Replay now reproduces all 18 manifest fields.
+- **`run_manifest.json` recorded `"timestamp": null`** whenever the orchestrator
+  omitted `--timestamp`. A bundle whose job is auditability must say when it ran;
+  it now defaults to UTC now.
+- **`reproducibility_log.R` was silently skipped for `--method maxlfq`.**
+  `q_use` / `q_cuts` exist only on the dpc branch and the call sat inside a
+  `tryCatch`, so the failure was swallowed. Guarded explicitly.
+
+### Added
+- 10 tests covering emitter cutoff rendering, replay fidelity, timestamp,
+  and the recorded skill version (42 total, up from 32).
+
 ## [4.0.5] — 2026-08-17
 
 ### Fixed
