@@ -228,25 +228,29 @@ if (method == "dpc") {
   # lost) -- and 100% of the 4,645 SHARED proteins came out with a different
   # logFC, flipping 54 significance calls. build_maxlfq.R has always applied
   # keep_runs to the arrow query before collect(); dpc now matches it.
+  # arrow reads BOTH formats, so the restriction is not parquet-only. A tsv left
+  # on the post-hoc dat[, .keep] path would keep exactly the defect this block
+  # exists to remove -- and silently, since nothing errors.
+  .open_report <- function(path, fmt) {
+    if (identical(fmt, "parquet")) arrow::open_dataset(path)
+    else arrow::read_tsv_arrow(path, as_data_frame = FALSE)
+  }
   .rep_runs_pre <- tryCatch({
-    if (identical(format, "parquet") && requireNamespace("arrow", quietly = TRUE) &&
+    if (requireNamespace("arrow", quietly = TRUE) &&
         requireNamespace("dplyr", quietly = TRUE))
-      sort(unique(dplyr::collect(dplyr::select(arrow::open_dataset(input), Run))$Run))
+      sort(unique(dplyr::collect(dplyr::select(.open_report(input, format), Run))$Run))
     else NULL
   }, error = function(e) NULL)
   .restrict_runs <- !is.null(.rep_runs_pre) && length(setdiff(.rep_runs_pre, meta$File.Name)) > 0
 
   if (.restrict_runs || (!is.na(eq_cutoff) && eq_cutoff > 0) ||
       (!is.na(pgq_cutoff) && pgq_cutoff > 0)) {
-    if (!identical(format, "parquet")) {
-      if (.restrict_runs)
-        stop("this report contains runs the metadata does not analyse, and run ",
-             "restriction before quantification needs parquet input.")
+    if (!identical(format, "parquet") &&
+        ((!is.na(eq_cutoff) && eq_cutoff > 0) || (!is.na(pgq_cutoff) && pgq_cutoff > 0)))
       stop("--eq-cutoff / --pgq-cutoff on --method dpc need parquet input.")
-    }
     if (!requireNamespace("arrow", quietly = TRUE) || !requireNamespace("dplyr", quietly = TRUE))
       stop("arrow and dplyr are required to pre-filter the report on --method dpc.")
-    flt <- arrow::open_dataset(input)
+    flt <- .open_report(input, format)
     if (.restrict_runs) {
       .keep_runs <- meta$File.Name
       flt <- dplyr::filter(flt, Run %in% !!.keep_runs)
@@ -271,8 +275,19 @@ if (method == "dpc") {
       flt <- dplyr::filter(flt, PG.MaxLFQ.Quality >= !!pgq_cutoff)
       quantums_applied <- c(quantums_applied, sprintf("PG.MaxLFQ.Quality >= %.2f", pgq_cutoff))
     }
-    dpc_input <- file.path(tempdir(), "quantums_filtered_for_dpc.parquet")
-    arrow::write_parquet(dplyr::collect(flt), dpc_input)
+    # Write back in the SAME format limpa is about to be told to read. Writing a
+    # parquet and still passing format = "tsv" would fail inside readDIANN().
+    if (identical(format, "parquet")) {
+      dpc_input <- file.path(tempdir(), "quantums_filtered_for_dpc.parquet")
+      arrow::write_parquet(dplyr::collect(flt), dpc_input)
+    } else {
+      dpc_input <- file.path(tempdir(), "runs_filtered_for_dpc.tsv")
+      # base write.table, not arrow::write_csv_arrow -- the latter does not accept
+      # a `delim` argument in arrow 24 ("not yet supported in Arrow"), so it
+      # cannot write a TSV at all. collect() has already materialised the frame.
+      utils::write.table(dplyr::collect(flt), dpc_input, sep = "\t",
+                         quote = FALSE, row.names = FALSE, na = "")
+    }
     message("[run_de] pre-filter for dpc: ", paste(quantums_applied, collapse = " | "))
   }
 
