@@ -32,7 +32,7 @@ def have_rscript():
     return shutil.which("Rscript") is not None
 
 
-def emit(q_columns, q_cutoffs, q_cutoff=0.01):
+def emit(q_columns, q_cutoffs, q_cutoff=0.01, method="dpc"):
     """Run write_repro_script() and return the generated R source."""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "reproducibility_log.R")
@@ -43,7 +43,7 @@ def emit(q_columns, q_cutoffs, q_cutoff=0.01):
           meta <- data.frame(File.Name = c("r1","r2","r3","r4"),
                              Group = c("A","A","B","B"), stringsAsFactors = FALSE)
           invisible(write_repro_script(
-            path = "{out}", method = "dpc", input = "report.parquet",
+            path = "{out}", method = "{method}", input = "report.parquet",
             format = "parquet", q_cutoff = {q_cutoff},
             q_columns = c({cols}), q_cutoffs = {cuts},
             eq_cutoff = 0, pgq_cutoff = 0, cov_min_frac = 0,
@@ -59,6 +59,43 @@ def emit(q_columns, q_cutoffs, q_cutoff=0.01):
 
 ALL_SIX = ["Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value",
            "PG.Q.Value", "Global.Q.Value", "Global.PG.Q.Value"]
+MIXED = [0.01, 0.01, 0.01, 0.05, 0.01, 0.01]
+
+
+class TestMaxlfqBranch(unittest.TestCase):
+    """The maxlfq branch emits a dplyr::filter chain, not a readDIANN call, and
+    had the SAME scalar bug -- worse in effect: 4,526 -> 4,444 proteins and
+    1,326 -> 1,281 significant, against dpc's 4,648 -> 4,624 / 1,859 -> 1,846.
+    Fixing one branch and not the other is the obvious way to regress here."""
+
+    def setUp(self):
+        if not have_rscript():
+            self.skipTest("Rscript not available")
+
+    def test_maxlfq_filter_uses_the_per_column_cutoff(self):
+        src = emit(ALL_SIX, MIXED, method="maxlfq")
+        # Anchor on the separator: "Lib.PG.Q.Value <= 0.01" CONTAINS the
+        # substring "PG.Q.Value <= 0.01", so a bare `in` check passes on correct
+        # output and fails on it too, depending on which way you write it.
+        self.assertRegex(src, r"[,(]\s*PG\.Q\.Value <= 0\.05")
+        self.assertNotRegex(src, r"[,(]\s*PG\.Q\.Value <= 0\.01")
+
+    def test_maxlfq_keeps_the_run_cutoff_for_every_other_column(self):
+        src = emit(ALL_SIX, MIXED, method="maxlfq")
+        import re as _re
+        for c in ("Q.Value", "Lib.Q.Value", "Lib.PG.Q.Value",
+                  "Global.Q.Value", "Global.PG.Q.Value"):
+            self.assertRegex(src, r"[,(]\s*" + _re.escape(c) + r" <= 0\.01")
+
+    def test_maxlfq_defaults_to_the_shared_map_when_not_passed(self):
+        src = emit(ALL_SIX, None, method="maxlfq")
+        self.assertRegex(src, r"[,(]\s*PG\.Q\.Value <= 0\.05")
+
+    def test_both_branches_agree_on_the_pg_cutoff(self):
+        # The invariant that actually matters: whichever --method a user picks,
+        # the emitted script must filter PG.Q.Value the same way the run did.
+        self.assertIn("0.05", emit(ALL_SIX, MIXED, method="dpc"))
+        self.assertIn("0.05", emit(ALL_SIX, MIXED, method="maxlfq"))
 
 
 class TestEmittedCutoffs(unittest.TestCase):
