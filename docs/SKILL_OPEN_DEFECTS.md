@@ -1,6 +1,6 @@
 # ucdavis-proteomics-core-pipeline — open defects
 
-**Audited:** 2026-08-17 against `c29f269` (`main`, immediately after PR #48 merged).
+**Audited:** 2026-08-17 against `c29f269`, re-checked 2026-08-20 against `a735fbb`.
 **Scope:** `skill/ucdavis-proteomics-core-pipeline/`. Every claim below was checked against the
 tree, not recalled — file and line references are from that commit, and the audited files are
 byte-identical between `main` and the `skill-v2.0.0` branch, so both carry what follows.
@@ -13,8 +13,69 @@ reusable, add a row there instead. A shrinking file is the point.
 
 ## Status at a glance
 
-**No open defects.** Every entry from the 2026-08-17 audit has been fixed; the fixed list is
-below and in `docs/GOTCHAS.md`. When a new one is found, add a row here.
+| # | Defect | Severity | Evidence |
+|---|---|---|---|
+| 5 | The dpc path decides the protein set over **every run in the report**, then restricts to the analysed ones — so protein groups whose inclusion depended on excluded runs survive into the results | Medium | `scripts/run_de.R:248-267` |
+
+Every entry from the 2026-08-17 audit has been fixed; those are listed below and in
+`docs/GOTCHAS.md`. Defect 5 was found afterwards, by an end-to-end confirmation run of the #48
+fix, and is open as of `a735fbb`.
+
+---
+
+## 5. The dpc path determines the protein set before restricting to the analysed runs
+
+**What.** `--method dpc` reads the entire report, then subsets:
+
+```r
+# scripts/run_de.R:248-267
+dat <- limpa::readDIANN(dpc_input, format = format, q.cutoffs = ..., q.columns = q_use)
+...
+.keep <- .rep_runs %in% meta$File.Name
+if (any(!.keep)) dat <- dat[, .keep]        # <-- columns dropped AFTER the matrix is built
+```
+
+`readDIANN()` builds the precursor matrix over **all** runs in the report, so the precursor set
+— and therefore the protein set that `dpcQuant()` rolls up — is decided using runs the metadata
+excludes. Subsetting afterwards drops those columns but keeps the rows they justified.
+
+`build_maxlfq.R` does the opposite, and is right: `keep_runs` is applied to the arrow query at
+line 88, **before** `collect()` and the pivot, so the protein set is decided on the analysed
+runs only. **This is the same class of defect as #48 — the two `--method` values disagreeing
+about the same report — this time about which runs define the protein set rather than which
+q-columns are applied.**
+
+**Measured.** Found by the end-to-end confirmation run of the #48 fix, which tested 6,629
+protein groups where an otherwise identical arm tested 6,531. With the q-columns now equal, that
+gap is entirely this: the 6,531 set is an exact subset — **98 extra, 0 lost**.
+
+The report has 399 runs; the analysis used 373 (22 UE, 2 DDA and 2 others excluded by design).
+
+| protein groups | median peptides | median fraction of analysed runs observed | called significant (BH < 0.05) |
+|---|---|---|---|
+| in both sets (6,531) | 12 | 25.6% | 71.4% |
+| **admitted only by the 399-run read (98)** | **5** | **6.8%** | **40.8% — 40 proteins** |
+
+Eleven of the 98 are observed in ≤1% of the analysed samples. **Forty of them reach the results
+table**, tested on data that barely contains them.
+
+**Why it matters.** Excluding runs from an analysis is a deliberate act — here a fourth
+preparation present in only one cohort, plus two DDA acquisitions inside a DIA search. The
+exclusion should mean those runs cannot influence the result. At present they still decide which
+proteins are eligible to be tested, which is a quieter kind of influence than contributing data
+and harder to notice.
+
+**Proposed fix.** Restrict before the protein set is decided, matching the maxlfq path: pre-filter
+the report to `meta$File.Name` and hand `readDIANN()` the filtered input, as the session wrapper
+that produced 6,531 did. If pre-filtering the input is awkward for the tsv route, the fallback is
+to drop precursor rows with no observations in the retained runs immediately after `dat[, .keep]`
+— narrower, and it would not catch precursors that are merely sparse rather than absent.
+
+**Not urgent for existing results.** Any workflow whose report contains only the runs being
+analysed is unaffected, which is the common case. It bites exactly when a report deliberately
+contains more runs than the design uses.
+
+---
 
 ---
 
