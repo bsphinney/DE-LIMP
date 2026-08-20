@@ -1,5 +1,45 @@
 # Changelog
 
+## [Skill 2.1.1] — 2026-08-20
+
+### Fixed
+- **Runs excluded from the design still decided the protein set — and shifted
+  every retained protein's quantification.** `--method dpc` called `readDIANN()`
+  on the whole report and subset columns afterwards (`dat[, .keep]`). That drops
+  the excluded runs' data but keeps every precursor row they justified — rows
+  then entirely NA in the retained runs, which still reach `dpcCN()`/
+  `dpcQuant()`. `build_maxlfq.R` has always applied `keep_runs` to the arrow
+  query before `collect()`; dpc now matches it.
+
+  Reported by the audit in #60, which measured the protein-set effect (98 extra,
+  0 lost). Reproducing it surfaced a larger one it had not measured — what
+  happens to the proteins that were *already* there. On a 12-run report analysed
+  at 7 runs:
+
+  | | before | after |
+  |---|---|---|
+  | all-NA precursor rows surviving the subset | 158 | 0 |
+  | extra protein groups vs a pre-filtered report | 3 (exact superset) | 0 |
+  | **shared proteins with a different `logFC`** | **4,645 / 4,645 (100%)** | 0 structural |
+  | **significance calls flipped** | **54** | **0** |
+
+  The extra proteins were not themselves significant here; the harm was 54
+  flipped calls among proteins that would have been analysed either way.
+
+  A residual numeric difference remains against a natively pre-filtered report
+  (median |Δ logFC| 1.1e-07, max 3.0e-03, **0** flips) — row ordering changing an
+  iterative fit's path, not structure. Before the fix: median 0.0021, max 0.11,
+  54 flips.
+
+  **Unaffected if your report contains only the runs you analyse** — the common
+  case. It bites when a report deliberately holds more runs than the design uses.
+  The tsv route cannot pre-filter, so the post-hoc `dat[, .keep]` is retained as
+  a backstop for it.
+
+### Added
+- `TestRunRestrictionHappensBeforeRollup` asserts the restriction precedes
+  `readDIANN()`, verified to fail when it is removed. 56 tests.
+
 ## [Skill 2.1.0] — 2026-08-20
 
 ### Added

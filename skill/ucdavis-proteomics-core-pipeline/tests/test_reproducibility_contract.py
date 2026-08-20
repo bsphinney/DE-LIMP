@@ -264,5 +264,51 @@ class TestEndToEndReproduction(unittest.TestCase):
                                                    f"{len(diff)} protein(s)")
 
 
+class TestRunRestrictionHappensBeforeRollup(unittest.TestCase):
+    """Runs the design excludes must not decide the protein set.
+
+    run_de.R used to call readDIANN() on the whole report and subset columns
+    afterwards (dat[, .keep]). That drops the excluded runs' DATA but keeps every
+    precursor row they justified -- rows then entirely NA in the retained runs,
+    which still reach dpcCN()/dpcQuant().
+
+    Measured on a 12-run report analysed at 7 runs: 158 such rows survived, the
+    protein set gained 3 (exact superset, none lost), and 100% of the 4,645
+    shared proteins came out with a different logFC -- flipping 54 significance
+    calls. build_maxlfq.R has always applied keep_runs to the arrow query before
+    collect(); this asserts dpc does too.
+
+    Source-level because the behavioural check needs limpa; the end-to-end class
+    above covers it when the stack is present.
+    """
+
+    def setUp(self):
+        with open(os.path.join(SCRIPTS, "run_de.R")) as fh:
+            self.src = fh.read()
+
+    def test_runs_are_filtered_before_readdiann(self):
+        restrict = self.src.find("Run %in%")
+        read = self.src.find("limpa::readDIANN(dpc_input")
+        self.assertNotEqual(restrict, -1,
+                            "run_de.R no longer restricts runs in the arrow query; "
+                            "excluded runs will decide the protein set again")
+        self.assertNotEqual(read, -1, "could not find the dpc readDIANN call")
+        self.assertLess(restrict, read,
+                        "the run restriction must come BEFORE readDIANN(); "
+                        "subsetting columns afterwards keeps the precursor rows "
+                        "the excluded runs justified")
+
+    def test_maxlfq_still_restricts_in_the_query(self):
+        with open(os.path.join(SCRIPTS, "build_maxlfq.R")) as fh:
+            ml = fh.read()
+        self.assertIn("keep_runs", ml)
+
+    def test_the_post_hoc_column_subset_is_still_present_as_a_backstop(self):
+        # Belt and braces: the tsv route cannot pre-filter, so dat[, .keep] must
+        # remain for it. Removing it would silently reintroduce the mismatch for
+        # non-parquet input.
+        self.assertIn("dat[, .keep]", self.src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
