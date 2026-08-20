@@ -1,5 +1,34 @@
 # Changelog
 
+## [Skill 2.1.0] — 2026-08-20
+
+### Added
+- **A reproducibility contract, enforced in CI.** Two reproducibility defects
+  shipped back to back (2.0.1 dpc, 2.0.2 maxlfq) with the same shape: the emitted
+  `reproducibility_log.R` ran clean and returned different numbers than the
+  analysis beside it. The second happened *because* the first was fixed on one
+  branch only — `repro_script.R` has a separate emitter per `--method`.
+
+  `tests/test_reproducibility_contract.py` now enforces:
+  - **Every `--method` `run_de.R` accepts must have coverage.** The list is
+    parsed from `run_de.R`'s own validation line, so a new method fails CI until
+    someone covers it rather than shipping an unverified emitter.
+  - **Every cutoff a run applies must appear in the script it emits**, for each
+    method, whatever shape that emitter uses (`readDIANN` `q.cutoffs` vector for
+    dpc, a `dplyr::filter` chain for maxlfq).
+  - **Each emitted script must be valid R** (parsed, per method).
+  - **End-to-end**: run the pipeline, execute the emitted script, diff protein
+    counts, significant counts and per-protein `logFC`. Needs limpa/arrow so it
+    skips in CI; run it with `DELIMP_TEST_REPORT=<report.parquet>`.
+
+  Verified to fail on all three regressions rather than assumed to: a new
+  uncovered method, the maxlfq scalar bug, and the dpc scalar bug (caught by two
+  separate assertions). The end-to-end check also guards against a hollow pass —
+  `0 == 0` would otherwise satisfy every assertion while proving nothing ran.
+
+- `SKILL.md` §6d documents the contract for contributors, with the measured cost
+  of both bugs, so it is met before CI has to say so.
+
 ## [Skill 2.0.2] — 2026-08-20
 
 ### Fixed
