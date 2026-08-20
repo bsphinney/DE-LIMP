@@ -514,6 +514,30 @@ right template by data type.
 
 `<out>.provenance.json` records every key changed and why — it feeds the methods text.
 
+### 6d. Adding a new `--method` or analysis path
+
+`tests/test_reproducibility_contract.py` enforces one rule: **every analysis path
+the skill can run must emit a `reproducibility_log.R` that reproduces it.** A new
+`--method` fails CI until it is listed in `COVERED` there *and* its emitter is
+verified against a real run.
+
+That guard exists because the same defect shipped twice. `repro_script.R` has a
+separate emitter per method, and both wrote the scalar `--q-cutoff` where the run
+applied per-column cutoffs — so the emitted script ran clean and returned
+different numbers than the analysis beside it:
+
+| method | run | emitted script |
+|---|---|---|
+| dpc | 4,648 proteins / 1,859 sig | 4,624 / 1,846 |
+| maxlfq | 4,526 / 1,326 | 4,444 / 1,281 |
+
+Nothing errored either time. Fixing dpc alone is what let maxlfq ship broken.
+
+Before adding a path: run it, execute the script it emits, and diff the results —
+`DELIMP_TEST_REPORT=<report.parquet> python3 tests/test_reproducibility_contract.py
+TestEndToEndReproduction`. Reading the emitted script is not enough; both bugs
+were invisible on inspection and obvious on execution.
+
 ### 7. Run the search
 ```
 python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
