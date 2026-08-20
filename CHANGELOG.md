@@ -1,5 +1,29 @@
 # Changelog
 
+## [Skill 2.1.2] — 2026-08-20
+
+### Fixed
+- **The tsv route still let excluded runs decide the protein set.** 2.1.1 gated
+  the pre-filter on `identical(format, "parquet")`, leaving `--format tsv` on the
+  old post-hoc `dat[, .keep]` path with exactly the defect that release removed —
+  and silently, since nothing errors. arrow reads both formats
+  (`read_tsv_arrow`), so both are now pre-filtered. Verified on a 12-run TSV
+  report analysed at 7 runs: **4,645 proteins / 577 significant**, identical
+  protein set and identical `logFC` to a natively pre-filtered TSV, and matching
+  the parquet result. Before the fix that path produced 4,648 / 553.
+- **The filtered frame is now written back in the format `readDIANN()` is told to
+  read.** Writing parquet while still passing `format = "tsv"` would fail inside
+  limpa.
+- **TSV is written with `utils::write.table`, not `arrow::write_csv_arrow`** —
+  the latter has no `delim` argument in arrow 24 (*"not yet supported in
+  Arrow"*), so it cannot write a TSV at all. The first draft of this fix used it
+  and would have failed at runtime for anyone passing `--format tsv`.
+
+### Added
+- Three guards: the restriction is not parquet-only, the TSV write-back exists,
+  and `write_csv_arrow` is not used in code (comments excluded — a bare substring
+  check trips on the comment explaining why it is unusable). 58 tests.
+
 ## [Skill 2.1.1] — 2026-08-20
 
 ### Fixed

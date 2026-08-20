@@ -304,10 +304,32 @@ class TestRunRestrictionHappensBeforeRollup(unittest.TestCase):
         self.assertIn("keep_runs", ml)
 
     def test_the_post_hoc_column_subset_is_still_present_as_a_backstop(self):
-        # Belt and braces: the tsv route cannot pre-filter, so dat[, .keep] must
-        # remain for it. Removing it would silently reintroduce the mismatch for
-        # non-parquet input.
+        # Retained for the case where arrow/dplyr are unavailable and the
+        # pre-filter cannot run at all. Removing it would silently reintroduce
+        # the mismatch there.
         self.assertIn("dat[, .keep]", self.src)
+
+    def test_the_restriction_is_not_parquet_only(self):
+        # The first version of this fix gated the pre-filter on
+        # `identical(format, "parquet")`, leaving tsv on the post-hoc path with
+        # exactly the defect the fix exists to remove -- and silently, since
+        # nothing errors. arrow reads both formats, so both are pre-filtered.
+        self.assertIn("read_tsv_arrow", self.src,
+                      "the tsv route no longer pre-filters runs")
+        # ...and the filtered frame must be written back in the SAME format
+        # readDIANN is told to read.
+        self.assertIn("runs_filtered_for_dpc.tsv", self.src)
+
+    def test_tsv_is_written_with_base_write_table_not_arrow(self):
+        # arrow::write_csv_arrow has no `delim` argument in arrow 24
+        # ("not yet supported in Arrow"), so it cannot write a TSV. Using it here
+        # fails at runtime only when someone actually passes --format tsv.
+        self.assertIn("utils::write.table", self.src)
+        # Ignore comments: the code comment explaining why write_csv_arrow is
+        # unusable mentions it by name, and a bare substring check trips on that.
+        code = [l for l in self.src.splitlines() if not l.lstrip().startswith("#")]
+        self.assertFalse([l for l in code if "write_csv_arrow" in l],
+                         "write_csv_arrow cannot write a TSV in arrow 24")
 
 
 if __name__ == "__main__":
