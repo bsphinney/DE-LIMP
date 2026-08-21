@@ -1,5 +1,50 @@
 # Changelog
 
+## [Skill 2.2.0] — 2026-08-20
+
+### Added
+- **De novo → homology species ID** (`§6e`), for samples with no proteome —
+  forensic hair, feather, fossil, wildlife. Casanovo → DIAMOND vs nr → LCA, as
+  four scripts: `denovo_decoy_gen.py` (FRAC-0.8 decoy spectra),
+  `denovo_search_cmd.py` (DIAMOND settings), `denovo_homology_fdr.py` (FDR), and
+  `denovo_lca.py` (species call).
+
+  The scoring half was rebuilt: the original lived in `/tmp/decoyval/` and was
+  lost to scratch, while the data survived on `/quobyte`. It is a
+  **reimplementation validated against preserved outputs**, not the original
+  code. `denovo_homology_fdr.py` reproduces the published E-value result
+  **exactly** (13,074 peptides at 1% FDR) and raw bitscore exactly (10,404);
+  mokapot rebuilds land within a few percent (14,925 / 19,757 / 9,554 / 11,325
+  against 14,706 / 19,556 / 9,335 / 12,352 — mokapot is semi-supervised, so exact
+  equality is not expected).
+
+### Fixed (in the method, not the code)
+- **`--max-target-seqs 1` makes the LCA step impossible.** The production ocelot
+  search used it (0.9 hits/peptide), so "LCA over all hits" — step 4 of the
+  method's own recommendation — silently degraded to best-hit, which is the ~36%
+  species-mis-assignment error mode LCA exists to prevent. The skill defaults to
+  **25** (the HeLa benchmark setting, 22.5 hits/peptide), `denovo_search_cmd.py`
+  warns when given < 2, and `denovo_lca.py` warns when its input averages < 2
+  hits/peptide.
+
+### Decisions, each from measurement
+- **Linear model, never gradient boosting.** GBT overfits the decoy and scores
+  *worse than raw bitscore* (9,554 vs 10,404).
+- **Five features, not thirteen.** On HeLa ground truth more features accept more
+  peptides at lower precision and recover fewer correct ones (12-feature: 2,532 /
+  55.5% / 1,405 vs 5-feature: 2,400 / 59.8% / 1,436).
+- **Confidence is load-bearing.** The homology-only model does not separate at
+  all on a standard search; every model that works includes `mean_conf`.
+- **Do not gate the species call on the FDR model.** Filtering lifts peptide
+  precision 42.4% → 59.8% but moves primate attribution only 29.5% → 32.9%,
+  leaves mammal flat at 68.5%, and discards 715 correct peptides. Species error
+  is conserved peptides — an LCA problem. Run LCA over unfiltered hits and report
+  the score as a confidence tier.
+- **Two FDR definitions, not interchangeable.** Raw scores use a rate-normalised,
+  tie-aware target-decoy threshold (the universes differ: 312,820 vs 424,552);
+  mokapot scores use mokapot's own q-values. Applying rate-normalisation to a
+  mokapot score returns ~everything (298,889 of 299,099).
+
 ## [Skill 2.1.2] — 2026-08-20
 
 ### Fixed
