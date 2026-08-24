@@ -1,15 +1,15 @@
 {
-  "generated_at": "2026-08-17 08:34:00",
+  "generated_at": "2026-08-24 08:38:39",
   "github": {
     "repo": null,
-    "stars": 9,
+    "stars": 13,
     "forks": 1,
     "open_issues": 2,
     "traffic_14d": {
-      "clones": 750,
-      "clones_unique": 269,
-      "views": 176,
-      "views_unique": 67
+      "clones": 605,
+      "clones_unique": 253,
+      "views": 172,
+      "views_unique": 64
     },
     "release_downloads_all_time": 0,
     "per_release": []
@@ -17,11 +17,11 @@
   "huggingface": {
     "space": null,
     "likes": 1,
-    "last_modified": "2026-08-14T17:18:39.000Z"
+    "last_modified": "2026-08-21T00:02:46.000Z"
   },
   "docker": {
     "image": null,
-    "pull_count": 430,
+    "pull_count": 433,
     "stars": 0
   }
 }
