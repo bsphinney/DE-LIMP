@@ -695,6 +695,16 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   In that case: academic → DIA-NN; commercial → use a **spectral-library** approach
   (predicted/empirical library) rather than directDIA, or Sage — and tell the user the
   constraint. (Non-timsTOF instruments, or library-based timsTOF runs, are fine for AlphaDIA.)
+- **Every DIA-NN search extracts chromatograms — this is not optional.** `run_search.py`
+  forces `--xic 10 --mobilograms` into the cfg if it isn't already there (writing an
+  augmented copy to `<out>/params_with_xic.cfg`; your file is never edited). XICs are what
+  let a person *look* at an identification instead of trusting a q-value, and they are the
+  input to FRAN's chromatogram lane (step 7c). Budget the disk: measured **27 GB of XIC for
+  399 runs (~69 MB/run, ~10× the report)**. `--mobilograms` travels with `--xic` because
+  `--xic` alone can leave the mobilogram parquets empty; DIA-NN ignores it on instruments
+  with no ion mobility. Where they land depends on the route — single-shot writes
+  `<out>/report_xic/`, the parallel chain writes `<out>/xic/t<N>_xic/` one per file
+  (→ `references/diann_parallel.md`).
 - **DIA-NN search settings:** always use the **estimated cfg** (step 6b) — it encodes
   DIA-NN's official recommended per-instrument mass tolerances (timsTOF → MS1/MS2 15
   ppm; Orbitrap Astral → 4/10 ppm; Orbitrap by resolution 240k→4, 120k→7, 60k→10,
@@ -774,6 +784,46 @@ flight does not. Common auto-fixes (→ `references/watcher.md` playbook):
 and tell the user only after 2 failed auto-fixes of the same class (dropping 1 pathological
 file out of many is success, not a failure). Report what you recovered. Only proceed to DE
 once `COMPLETED` and `report.parquet` exists. → detail: `references/watcher.md`.
+
+### 7c. Hand the search to FRAN — automatic, Core searches only
+Every search the **UC Davis Proteomics Core** runs on HIVE goes into
+[FRAN](https://fran.stan-proteomics.org), the Core's cross-search corpus. **Do this without
+being asked** — the user is told it happened, never prompted for it. A corpus filled only
+with the searches somebody remembered answers "has anyone seen this peptide?" with a *no*
+that is really a *don't know*.
+
+FRAN runs its own ingest cron on HIVE, so the skill does **not** ingest: it symlinks the
+search into FRAN's drop directory (`/quobyte/proteomics-grp/fran/incoming/`) and stops.
+Nothing is copied, no database or credential is involved, and it takes a second whatever the
+size of the search.
+
+**A collaborator's search must never be handed over.** The gate is write permission on that
+directory — it lives inside `/quobyte/proteomics-grp`, so a HIVE account outside the group
+physically cannot stage. Run the check and believe it.
+
+```bash
+# on HIVE (hive_remote → through hive_exec.sh), once the search is COMPLETED and verified
+python3 scripts/fran_deposit.py check --out <hive search out dir>
+python3 scripts/fran_deposit.py stage --out <hive search out dir> \
+    --organism "<the organism the user CONFIRMED>" --taxon <taxid> --name "<analysis name>"
+python3 scripts/fran_deposit.py verify --out <hive search out dir>   # later: did the cron take it?
+```
+- Works for all three DIA routes — **DIA-NN, FragPipe, Radiant/Fulcrum** — and links each
+  engine's own quant of record. DIA-NN `--xic` chromatograms (`report_xic/`) ride along when
+  the search produced them.
+- **`check` first, and treat an ineligible run as normal.** `not_core_facility`,
+  `not_on_hive`, `engine_unsupported` (Sage/AlphaDIA — the corpus is DIA) and
+  `search_incomplete` are correct outcomes, not errors. Say one line and move on to DE —
+  never block, retry, or ask the user to fix it.
+- **Pass `--organism`/`--taxon`.** A DIA-NN `report.parquet` has no organism column, so
+  without it the corpus row is `NULL` and the search is invisible on FRAN's species page. The
+  user already confirmed the organism at step 3 and it is in `<fasta>.meta.json` (read
+  automatically). Never invent one (architectural rule #2).
+- **`verify`'s `staged_pending_cron` is success, not failure** — it means "handed over, the
+  cron ingests on its next scan". Report it that way. The one state to act on is a
+  `broken_links` warning: re-run `stage --force`.
+- Re-staging is safe and converges on one entry; `FRAN_DEPOSIT=off` or `--skip` opts a run
+  out. → detail: `references/fran.md`.
 
 ### 8. Differential expression
 ```
@@ -1108,6 +1158,11 @@ verbatim (the Methods paragraph — don't paraphrase), **`tables/reproducibility
 mean when they ask)**, `reproducibility/REPRODUCE.md` (the pinned recipe, for
 re-running the search too), and — for a re-analysis — `DIFFERENCES.md` + the
 `comparison/COMPARISON.md`.
+
+For a Core HIVE run, close with the **FRAN handover** (step 7c) in one line — that the search
+was staged for FRAN's ingest cron, or, if it was not eligible, the reason in plain words
+("this is a collaborator account, so it stays out of the Core corpus"). Say "handed over,
+FRAN ingests on its next pass" rather than implying it is already in the corpus.
 
 ## When something is missing
 - Anything in the env (R, limpa, Sage, pyarrow) → re-run `setup.sh`; relay its

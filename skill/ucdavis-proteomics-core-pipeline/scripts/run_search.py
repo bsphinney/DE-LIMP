@@ -132,6 +132,43 @@ def parallel_decision(engine, files, params, a):
                   f"{ma['reason']}")
 
 
+XIC_WINDOW_DEFAULT = 10          # seconds; DIA-NN's own default window
+
+
+def ensure_xic(params, out):
+    """Guarantee the DIA-NN cfg extracts XICs. Returns the cfg path to actually use.
+
+    Chromatograms are what let a person *look* at an identification instead of trusting a
+    q-value, and they are the input to FRAN's XIC lane — so every DIA-NN search this skill runs
+    produces them. `estimate_params.py` already writes `--xic 10 --mobilograms`, but a cfg can
+    also arrive from a workflow bundle or straight from the user, and those have no reason to
+    carry it. Without this, whether a search has chromatograms depends on where its cfg came
+    from — which is invisible until someone goes looking for a trace that was never extracted.
+
+    The user's file is never edited: an augmented copy is written into the output directory, so
+    the cfg that ran is recorded next to the results and the original stays exactly as given.
+
+    `--mobilograms` rides along because `--xic` alone allocates the mobilogram parquets and
+    leaves them full of zeros — silently, at plausible file size. DIA-NN ignores it on
+    instruments without ion mobility.
+    """
+    try:
+        txt = open(params).read()
+    except OSError:
+        return params                       # nothing to augment; the caller will fail louder
+    toks = txt.split()
+    if "--xic" in toks:
+        return params
+    os.makedirs(out, exist_ok=True)
+    aug = os.path.join(out, "params_with_xic.cfg")
+    extra = f"--xic {XIC_WINDOW_DEFAULT}" + ("" if "--mobilograms" in toks else " --mobilograms")
+    with open(aug, "w") as fh:
+        fh.write(txt.rstrip("\n") + f"\n{extra}\n")
+    print(f"[run_search] cfg had no --xic; using {aug} (added: {extra}). "
+          f"Every DIA-NN search extracts chromatograms.")
+    return aug
+
+
 def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
     """Generate DIA-NN's 5-step SLURM chain (does not submit -- the orchestrator does,
     then watches the step-5 job with watch_run.sh)."""
@@ -1091,6 +1128,10 @@ def main():
                  f"Re-run acquire_tools.sh, or check its notes:\n  "
                  + "\n  ".join(tools.get("notes", [])))
 
+    # Do this BEFORE parallel_decision: that reads the cfg to check mass accuracy, and the
+    # augmented copy is the cfg the run will actually use.
+    if engine == "diann":
+        a.params = ensure_xic(a.params, a.out)
     use_parallel, why = parallel_decision(engine, files, a.params, a)
     if engine == "diann":
         print(f"[run_search] parallel routing: {'YES' if use_parallel else 'no'} -- {why}")
