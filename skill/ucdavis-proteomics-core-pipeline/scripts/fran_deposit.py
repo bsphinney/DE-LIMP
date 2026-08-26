@@ -241,6 +241,80 @@ def organism_from_meta(out, explicit_meta=None):
     return None, None, None
 
 
+def fasta_from_meta(out, explicit_meta=None):
+    """Which DATABASE this search used, from the <fasta>.meta.json fetch_fasta.py wrote.
+
+    The cron cannot derive this. FRAN's own detector (ingest/engine_fasta.py) falls back to
+    parsing --fasta out of report.log.txt, which works for DIA-NN and is best-effort for
+    Spectronaut -- but a search that came through this skill KNOWS its database exactly, so
+    hand it over rather than making the corpus guess.
+
+    Why the corpus wants it: fasta_n_proteins divided by the distinct gene count gives
+    entries-per-gene, and that is what separates a real depth difference from database
+    redundancy. A one-protein-per-gene proteome sits near 1.00; a full proteome with
+    unreviewed isoforms can exceed 2, which alone can move a cross-engine protein-group gap
+    from a few percent to tens of percent.
+
+    Returns (path, md5, n_entries) with any unknown field None. Older meta files predate the
+    md5/n_entries fields, so those are recomputed here when the FASTA is still readable --
+    and left None rather than invented when it is not.
+    """
+    cands = [explicit_meta] if explicit_meta else []
+    cands += sorted(glob.glob(os.path.join(out, "*.meta.json"))) \
+        + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(out)), "*.fasta.meta.json"))) \
+        + sorted(glob.glob(os.path.join(out, "..", "input", "*.fasta.meta.json")))
+    for c in cands:
+        if not c or not os.path.isfile(c):
+            continue
+        try:
+            with open(c) as fh:
+                m = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        sel = m.get("selected") if isinstance(m.get("selected"), dict) else m
+        path = sel.get("fasta") or m.get("fasta")
+        if not path:
+            continue
+        md5 = sel.get("md5") or m.get("md5")
+        # `n_sequences` is what fetch_fasta.py has ALWAYS written (proteome + appended
+        # contaminants), and it is the same number: verified on a real sidecar, n_sequences 34306
+        # against 34306 headers counted in the file. Reading it means no meta written before the
+        # md5/n_entries fields has to be re-scanned at all -- which matters because this runs
+        # inside `check`, on a login node, and the file is hundreds of MB (measured 0.6-1.3 s).
+        n = (sel.get("n_entries") or m.get("n_entries")
+             or sel.get("n_sequences") or m.get("n_sequences"))
+        # Only a sidecar carrying NEITHER count falls through to counting the file, and only when
+        # the FASTA is still there. Left None rather than invented when it is not: a guessed
+        # database size is a claim about comparability.
+        if (md5 is None or n is None) and os.path.isfile(path):
+            helpers = _fasta_helpers()
+            if helpers:
+                _m, _c = helpers
+                md5 = md5 if md5 is not None else _m(path)
+                n = n if n is not None else _c(path)
+        return path, md5, n
+    return None, None, None
+
+
+def _fasta_helpers():
+    """(md5, entry-count) from fetch_fasta.py, or None if it cannot be imported.
+
+    ONE definition, imported rather than copied -- the same rule radiant_parallel.py follows for
+    slurm_queue(). The entry counter walks chunk boundaries (a per-chunk count(b"\n>") silently
+    drops every header landing on one), and a second copy of logic like that is a bug fixed in one
+    place and left in the other. Degrades to None rather than raising: the fields are then absent
+    from the manifest, which is honest, and FRAN's own log-parsing detector is the fallback."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import _count_entries, _md5
+        return _md5, _count_entries
+    except Exception as e:                                          # noqa: BLE001
+        sys.stderr.write(f"[fran_deposit] could not import the FASTA helpers from "
+                         f"fetch_fasta.py ({type(e).__name__}: {e}); recording the database "
+                         f"path without md5/entry count\n")
+        return None
+
+
 def entry_name(out):
     """Deterministic drop-entry name for a search dir: `<dir name>__<8 hex of its real path>`.
 
@@ -419,6 +493,8 @@ def check(a):
 
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
     r["organism"] = a.organism or org
+    fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
+    r["fasta_path"], r["fasta_md5"], r["fasta_n_proteins"] = fp, fmd5, fn
     r["taxon"] = a.taxon or tax
     r["organism_source"] = "--organism (given)" if a.organism else org_src
     r["name"] = a.name
@@ -509,6 +585,12 @@ def stage(a):
         "organism": c.get("organism"),
         "taxon": c.get("taxon"),
         "organism_source": c.get("organism_source"),
+        # The search DATABASE, for delimp_searches.fasta_path / fasta_md5 / fasta_n_proteins.
+        # Absent, not guessed, when the meta.json is missing -- FRAN's own log-parsing detector
+        # is the fallback for searches that did not come through this skill.
+        "fasta_path": c.get("fasta_path"),
+        "fasta_md5": c.get("fasta_md5"),
+        "fasta_n_proteins": c.get("fasta_n_proteins"),
         "xic": c["xic"],
         "linked": linked,
         "staged_by": c["user"],

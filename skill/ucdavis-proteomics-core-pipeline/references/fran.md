@@ -65,6 +65,28 @@ skip it in silence. Re-run `stage --force`.
 | any DIA-NN | `report_xic/` — the chromatograms, **flattened** (see below) |
 | plus | `fran_manifest.json`, the only real file in the entry |
 
+**`fran_manifest.json` carries what the cron cannot derive** — the real `output_dir`, the engine
+that genuinely ran, the confirmed **organism**, and the search **database**:
+
+| field | why it cannot be inferred |
+|---|---|
+| `fasta_path` | FRAN parses `--fasta` out of an engine log as a fallback, but that is best-effort and, for Spectronaut, depends on an `ExperimentSetupOverview` the export may not have kept |
+| `fasta_md5` | fingerprints *which build* of a proteome, which the filename does not |
+| `fasta_n_proteins` | ÷ distinct genes = **entries-per-gene**, and that is what separates a real depth difference from database redundancy — near 1.00 for one-protein-per-gene, above 2 for a full proteome with unreviewed isoforms |
+
+All three come from the `<fasta>.meta.json` `fetch_fasta.py` writes, so the skill hands over what
+it already knows rather than making the corpus guess. Absent, never invented, when that file is
+missing: `delimp_searches.fasta_*` were populated for 157 / 0 / 0 of 2,014 searches before this,
+and a NULL is honest where a guessed database is a claim about comparability.
+
+The entry count is read from the sidecar's `n_entries`, falling back to **`n_sequences`** — the
+count `fetch_fasta.py` has always written (proteome + appended contaminants). They are the same
+number, verified against a real sidecar: `n_sequences` 34,306 against 34,306 headers counted in
+the file. That matters for `check`, which is meant to stat rather than parse: reading the count
+that is already there means no sidecar written before these fields existed has to be re-scanned.
+Only a sidecar carrying neither count causes the FASTA to be read (measured on a HIVE login node:
+0.6 s for 40 MB, 1.3 s for 118 MB), and then only if the file is still where the sidecar says.
+
 **XICs ride along, but they are not in one place.** Every DIA-NN search this skill runs
 extracts chromatograms (`--xic` is forced into the cfg — SKILL.md step 6b), and where they land
 depends on the route:
