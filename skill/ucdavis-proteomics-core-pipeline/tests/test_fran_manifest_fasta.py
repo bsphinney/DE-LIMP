@@ -23,6 +23,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
 import fran_deposit as fd  # noqa: E402
+from fetch_fasta import _count_entries  # noqa: E402  -- the ONE definition; fran_deposit imports it
 
 # 3 entries; the middle '>' is placed so a naive per-chunk count would still see it, while
 # test_entry_count_survives_chunk_boundary below forces the boundary case explicitly.
@@ -58,6 +59,30 @@ class FastaInManifest(unittest.TestCase):
             self.assertEqual(md5, hashlib.md5(FASTA.encode()).hexdigest())  # noqa: S324
             self.assertEqual(n, 3)
 
+    def test_the_count_already_in_older_sidecars_is_used_rather_than_rescanned(self):
+        """`fetch_fasta.py` has ALWAYS written `n_sequences` (proteome + appended contaminants),
+        and it is the same number as the header count -- verified against a real sidecar,
+        n_sequences 34,306 against 34,306 headers. Reading it keeps `check` a stat rather than a
+        parse: no sidecar predating the md5/n_entries fields has to be re-scanned, which on a
+        login node costs 0.6-1.3 s per hundred MB of FASTA."""
+        with tempfile.TemporaryDirectory() as root:
+            fa, mp = self._meta(root)
+            with open(mp) as fh:
+                m = json.load(fh)
+            m["n_sequences"] = 4321               # deliberately NOT the real header count
+            with open(mp, "w") as fh:
+                json.dump(m, fh)
+            _, _, n = fd.fasta_from_meta(root, mp)
+            self.assertEqual(n, 4321, "the count already in the sidecar was ignored and the "
+                                      "FASTA re-scanned instead")
+
+    def test_the_helpers_are_imported_not_copied(self):
+        """One definition. The chunk-boundary counter is exactly the logic you do not want two
+        copies of -- a bug fixed in one would silently survive in the other."""
+        src = open(os.path.join(SCRIPTS, "fran_deposit.py")).read()
+        self.assertNotIn("def _count_entries(", src)
+        self.assertIn("from fetch_fasta import", src)
+
     def test_absent_not_guessed_when_no_meta(self):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual(fd.fasta_from_meta(root, None), (None, None, None))
@@ -81,7 +106,7 @@ class FastaInManifest(unittest.TestCase):
                 head = ">a\n"
                 fh.write(head + "P" * (chunk - len(head) - 1) + "\n")  # next '>' starts at 1 MiB
                 fh.write(">b\nPEPTIDEK\n>c\nPEPTIDER\n")
-            self.assertEqual(fd._count_entries(fa), 3)
+            self.assertEqual(_count_entries(fa), 3)
 
 
 if __name__ == "__main__":

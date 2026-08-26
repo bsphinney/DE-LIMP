@@ -275,34 +275,44 @@ def fasta_from_meta(out, explicit_meta=None):
         path = sel.get("fasta") or m.get("fasta")
         if not path:
             continue
-        md5, n = sel.get("md5") or m.get("md5"), sel.get("n_entries") or m.get("n_entries")
-        if (not md5 or not n) and os.path.isfile(path):
-            md5 = md5 or _md5(path)
-            n = n or _count_entries(path)
+        md5 = sel.get("md5") or m.get("md5")
+        # `n_sequences` is what fetch_fasta.py has ALWAYS written (proteome + appended
+        # contaminants), and it is the same number: verified on a real sidecar, n_sequences 34306
+        # against 34306 headers counted in the file. Reading it means no meta written before the
+        # md5/n_entries fields has to be re-scanned at all -- which matters because this runs
+        # inside `check`, on a login node, and the file is hundreds of MB (measured 0.6-1.3 s).
+        n = (sel.get("n_entries") or m.get("n_entries")
+             or sel.get("n_sequences") or m.get("n_sequences"))
+        # Only a sidecar carrying NEITHER count falls through to counting the file, and only when
+        # the FASTA is still there. Left None rather than invented when it is not: a guessed
+        # database size is a claim about comparability.
+        if (md5 is None or n is None) and os.path.isfile(path):
+            helpers = _fasta_helpers()
+            if helpers:
+                _m, _c = helpers
+                md5 = md5 if md5 is not None else _m(path)
+                n = n if n is not None else _c(path)
         return path, md5, n
     return None, None, None
 
 
-def _md5(path):
-    h = hashlib.md5()  # noqa: S324 - provenance fingerprint, not a security control
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _fasta_helpers():
+    """(md5, entry-count) from fetch_fasta.py, or None if it cannot be imported.
 
-
-def _count_entries(path):
-    """'>' records, counted across chunk boundaries -- a per-chunk count(b"\n>") drops every
-    header landing on one."""
-    n, tail, first = 0, b"", True
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            if first and chunk.startswith(b">"):
-                n += 1
-            first = False
-            n += (tail + chunk).count(b"\n>")
-            tail = chunk[-1:]
-    return n
+    ONE definition, imported rather than copied -- the same rule radiant_parallel.py follows for
+    slurm_queue(). The entry counter walks chunk boundaries (a per-chunk count(b"\n>") silently
+    drops every header landing on one), and a second copy of logic like that is a bug fixed in one
+    place and left in the other. Degrades to None rather than raising: the fields are then absent
+    from the manifest, which is honest, and FRAN's own log-parsing detector is the fallback."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import _count_entries, _md5
+        return _md5, _count_entries
+    except Exception as e:                                          # noqa: BLE001
+        sys.stderr.write(f"[fran_deposit] could not import the FASTA helpers from "
+                         f"fetch_fasta.py ({type(e).__name__}: {e}); recording the database "
+                         f"path without md5/entry count\n")
+        return None
 
 
 def entry_name(out):
