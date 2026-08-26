@@ -189,6 +189,31 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _md5(path):
+    """md5 of the built FASTA. Streamed -- these run to hundreds of MB."""
+    h = hashlib.md5()  # noqa: S324 - provenance fingerprint, not a security control
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _count_entries(path):
+    """Number of '>' records. Counted over chunk boundaries -- a naive per-chunk
+    count(b"\n>") silently drops every header that lands on one."""
+    n = 0
+    tail = b""
+    first = True
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            if first and chunk.startswith(b">"):
+                n += 1
+            first = False
+            n += (tail + chunk).count(b"\n>")
+            tail = chunk[-1:]
+    return n
+
+
 def _warn(msg):
     sys.stderr.write(f"[fetch_fasta] WARNING: {msg}\n")
 
@@ -821,6 +846,13 @@ def cmd_fetch(a):
     result = {
         "fasta": os.path.abspath(a.out),
         "sha256": _sha256(a.out),
+        # md5 and the entry count exist for FRAN, whose delimp_searches columns are fasta_md5 /
+        # fasta_n_proteins. Written HERE, where the file was just built, rather than recomputed
+        # downstream: entries-per-gene is what decides whether a protein-count difference between
+        # two searches is real depth or database redundancy, and a corpus that cannot answer
+        # "which database?" cannot warn anyone their comparison is not like-for-like.
+        "md5": _md5(a.out),
+        "n_entries": _count_entries(a.out),
         "source": source,
         "url": base_url,
         "proteome": a.proteome,

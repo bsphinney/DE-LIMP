@@ -241,6 +241,70 @@ def organism_from_meta(out, explicit_meta=None):
     return None, None, None
 
 
+def fasta_from_meta(out, explicit_meta=None):
+    """Which DATABASE this search used, from the <fasta>.meta.json fetch_fasta.py wrote.
+
+    The cron cannot derive this. FRAN's own detector (ingest/engine_fasta.py) falls back to
+    parsing --fasta out of report.log.txt, which works for DIA-NN and is best-effort for
+    Spectronaut -- but a search that came through this skill KNOWS its database exactly, so
+    hand it over rather than making the corpus guess.
+
+    Why the corpus wants it: fasta_n_proteins divided by the distinct gene count gives
+    entries-per-gene, and that is what separates a real depth difference from database
+    redundancy. A one-protein-per-gene proteome sits near 1.00; a full proteome with
+    unreviewed isoforms can exceed 2, which alone can move a cross-engine protein-group gap
+    from a few percent to tens of percent.
+
+    Returns (path, md5, n_entries) with any unknown field None. Older meta files predate the
+    md5/n_entries fields, so those are recomputed here when the FASTA is still readable --
+    and left None rather than invented when it is not.
+    """
+    cands = [explicit_meta] if explicit_meta else []
+    cands += sorted(glob.glob(os.path.join(out, "*.meta.json"))) \
+        + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(out)), "*.fasta.meta.json"))) \
+        + sorted(glob.glob(os.path.join(out, "..", "input", "*.fasta.meta.json")))
+    for c in cands:
+        if not c or not os.path.isfile(c):
+            continue
+        try:
+            with open(c) as fh:
+                m = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        sel = m.get("selected") if isinstance(m.get("selected"), dict) else m
+        path = sel.get("fasta") or m.get("fasta")
+        if not path:
+            continue
+        md5, n = sel.get("md5") or m.get("md5"), sel.get("n_entries") or m.get("n_entries")
+        if (not md5 or not n) and os.path.isfile(path):
+            md5 = md5 or _md5(path)
+            n = n or _count_entries(path)
+        return path, md5, n
+    return None, None, None
+
+
+def _md5(path):
+    h = hashlib.md5()  # noqa: S324 - provenance fingerprint, not a security control
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _count_entries(path):
+    """'>' records, counted across chunk boundaries -- a per-chunk count(b"\n>") drops every
+    header landing on one."""
+    n, tail, first = 0, b"", True
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            if first and chunk.startswith(b">"):
+                n += 1
+            first = False
+            n += (tail + chunk).count(b"\n>")
+            tail = chunk[-1:]
+    return n
+
+
 def entry_name(out):
     """Deterministic drop-entry name for a search dir: `<dir name>__<8 hex of its real path>`.
 
@@ -419,6 +483,8 @@ def check(a):
 
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
     r["organism"] = a.organism or org
+    fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
+    r["fasta_path"], r["fasta_md5"], r["fasta_n_proteins"] = fp, fmd5, fn
     r["taxon"] = a.taxon or tax
     r["organism_source"] = "--organism (given)" if a.organism else org_src
     r["name"] = a.name
@@ -509,6 +575,12 @@ def stage(a):
         "organism": c.get("organism"),
         "taxon": c.get("taxon"),
         "organism_source": c.get("organism_source"),
+        # The search DATABASE, for delimp_searches.fasta_path / fasta_md5 / fasta_n_proteins.
+        # Absent, not guessed, when the meta.json is missing -- FRAN's own log-parsing detector
+        # is the fallback for searches that did not come through this skill.
+        "fasta_path": c.get("fasta_path"),
+        "fasta_md5": c.get("fasta_md5"),
+        "fasta_n_proteins": c.get("fasta_n_proteins"),
         "xic": c["xic"],
         "linked": linked,
         "staged_by": c["user"],
