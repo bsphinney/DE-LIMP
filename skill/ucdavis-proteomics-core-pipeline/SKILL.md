@@ -5,20 +5,16 @@ description: >
   Use this whenever the user wants to "analyze my proteomics data", "search these raw
   files", "run my DIA/DDA data", "find differentially expressed proteins", "process this
   timsTOF/Astral/Orbitrap run", or points at a folder of .raw / .d / .mzML files and asks
-  what's in it. ALSO use it for any single search step, even when no DE is wanted and the
-  file paths are already known: "run DIA-NN on these files", "re-run this search",
-  "re-search with different parameters", "match the search settings to the Spectronaut /
-  FragPipe run", "compare DIA-NN vs Spectronaut", "submit a search to the cluster /
-  SLURM / HPC", "extract XICs". Use it INSTEAD OF hand-writing an sbatch script or a
-  diann-linux / sage command line — the skill picks the validated workflow, including the
-  5-step parallel SLURM chain that searches files concurrently (DIA-NN's own --threads
-  parallelises only WITHIN one run, so a hand-rolled single-shot job searches raw files
-  one at a time and is dramatically slower). Detects acquisition + instrument, derives the
-  search parameters from that data type, downloads the pinned search engine, runs DIA-NN
-  (DIA) or Sage (DDA), then limpa/limma DE — with full provenance for every parameter.
-  Also use it to "write the LC-MS methods section" / "generate a publication-ready methods
-  section with the instrument grant acknowledgment" from facility raw data (UC Davis
-  Proteomics Core).
+  what's in it. ALSO use it for a single search step, when no DE is wanted and the file
+  paths are already known: "run DIA-NN on these files", "re-run this search", "re-search
+  with different parameters", "match the search settings to the Spectronaut / FragPipe
+  run", "compare DIA-NN vs Spectronaut", "submit a search to the cluster / SLURM / HPC",
+  "extract XICs". Use it INSTEAD OF hand-writing an sbatch script or a diann-linux / sage
+  command line — a hand-rolled job searches the files one at a time and is dramatically
+  slower. Detects acquisition + instrument, derives the search parameters from that data
+  type, installs the pinned engine, runs DIA-NN (DIA) or Sage (DDA), then limpa/limma DE —
+  with full provenance. Also use it to "write the LC-MS methods section" with the
+  instrument grant acknowledgment (UC Davis Proteomics Core).
 ---
 
 # Proteomics Pipeline
@@ -75,7 +71,17 @@ the spine.
      skill version pins them — there is no external commit to chase.
 
    Never describe a result without both. (DE-LIMP architectural rules #1, #4.)
-6. **Assume nothing about the user's environment — this skill runs for anyone.** Most
+6. **Never hand-write the engine command line — always go through `run_search.py`.**
+   Not even for "just one quick search" with known paths. `--threads` parallelises *within*
+   one run, not across runs, so a hand-rolled `sbatch` + `diann-linux` searches the raw files
+   **one at a time**: measured at ~30 min per file, that is ~12 h for 24 files and ~19.5 h for
+   39, where the 5-step chain runs them concurrently. `run_search.py` routes there by itself
+   (DIA-NN, >5 files, SLURM, fixed mass accuracy — step 7), and also pins the engine version,
+   forces `--xic`, creates the `--temp` dirs, picks a queue you can actually submit to, and
+   writes `search_provenance.json`. A hand-written command silently has none of that. This
+   happened for real: ~3 h of cluster time across 7 nodes was discarded and resubmitted
+   through the chain.
+7. **Assume nothing about the user's environment — this skill runs for anyone.** Most
    users are **not** UC Davis Core and **not** on HIVE: they're on macOS, Windows
    (**WSL2** recommended, but **native Windows works too** — the engines ship Windows
    builds), or generic Linux. HIVE / `/quobyte/proteomics-grp` is a Core **fast-path,
