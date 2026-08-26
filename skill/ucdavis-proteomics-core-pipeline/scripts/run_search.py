@@ -132,6 +132,40 @@ def parallel_decision(engine, files, params, a):
                   f"{ma['reason']}")
 
 
+def ensure_temp_dirs(params, out):
+    """Create any `--temp` directory the DIA-NN cfg names. Returns the list created.
+
+    DIA-NN aborts with "cannot find the temp folder" when `--temp` points at a directory that
+    does not exist -- it will NOT create it -- and it aborts BEFORE doing any work, so on a
+    cluster the whole submission cycle is lost to a missing directory: queue, start, die, read
+    the log, resubmit. This cost a real user a cycle. `mkdir -p` is idempotent and free.
+
+    The 5-step parallel chain makes its own (each step, plus submit.sh). This covers the
+    single-shot path, where `--temp` can only arrive from the cfg -- a workflow bundle's or the
+    user's own. Relative paths resolve against the output directory, which is where DIA-NN runs.
+    """
+    made = []
+    try:
+        toks = shlex.split(open(params).read(), comments=True)
+    except (OSError, ValueError):
+        return made
+    for i, t in enumerate(toks):
+        if t == "--temp" and i + 1 < len(toks) and not toks[i + 1].startswith("-"):
+            d = toks[i + 1]
+            d = d if os.path.isabs(d) else os.path.join(out, d)
+            try:
+                os.makedirs(d, exist_ok=True)
+                made.append(d)
+            except OSError as e:
+                # Report it; do not raise. DIA-NN's own error names the folder, and failing here
+                # would hide a permissions problem behind an unrelated traceback.
+                sys.stderr.write(f"[run_search] could not create --temp {d}: {e}\n")
+    if made:
+        print(f"[run_search] --temp ready: {', '.join(made)} "
+              f"(DIA-NN aborts rather than creating it)")
+    return made
+
+
 XIC_WINDOW_DEFAULT = 10          # seconds; DIA-NN's own default window
 
 
@@ -1132,6 +1166,7 @@ def main():
     # augmented copy is the cfg the run will actually use.
     if engine == "diann":
         a.params = ensure_xic(a.params, a.out)
+        ensure_temp_dirs(a.params, a.out)
     use_parallel, why = parallel_decision(engine, files, a.params, a)
     if engine == "diann":
         print(f"[run_search] parallel routing: {'YES' if use_parallel else 'no'} -- {why}")

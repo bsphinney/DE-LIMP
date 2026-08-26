@@ -86,7 +86,10 @@ any auto-fix you applied to the user.
   completed `.quant`** (don't re-run step 1/library-prediction — reuse `step1.predicted.speclib`).
 - **`out_of_memory`:** raise `--mem` and resubmit only the failed step (reuse prior `.quant`).
 - **Missing `--temp` dir** (`cannot find the temp folder`): the temp dirs must pre-exist —
-  `mkdir -p <out>/quant_step2 <out>/quant_step4` and resubmit (the generator now does this).
+  `mkdir -p <out>/quant_step2 <out>/quant_step4` and resubmit. **Every generated step now does
+  this itself**, so a step resubmitted directly (as this playbook tells you to) cannot hit it;
+  you should only ever see this from a hand-written sbatch or a cfg-supplied `--temp` on the
+  single-shot path (which `run_search.ensure_temp_dirs` also creates).
 - **Whole-cohort restart is rarely needed** — resume from the earliest incomplete step,
   reusing everything already computed.
 

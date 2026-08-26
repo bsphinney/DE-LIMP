@@ -75,9 +75,26 @@ empirical-library round-trip.
   Step 2 is unaffected because it is handed `step1.predicted.speclib`, already in
   DIA-NN's processed form, so there is nothing to re-save. Step 5 is a single job and
   cannot contend with itself.
+- **Queue: detected, never hardcoded — and never demoted in silence.** Every sbatch the
+  skill emits derives `--partition/--account/--qos` from `run_search.slurm_queue()`, which
+  asks SLURM what this account is entitled to (`genome-center-grp/high` for facility
+  members, `publicgrp/low` for everyone else) and then considers *utilisation*, not just
+  entitlement — the per-user CPU cap on `high` means a big array can start sooner on `low`.
+  If detection ever fails, the fallback is `publicgrp/low` **with a warning on stderr**: it
+  is preemptible, and quietly putting a facility member's multi-hour search there is a real
+  demotion. If you see that warning, pass `--partition high --account genome-center-grp`.
+- **`high` needs no explicit `--qos`.** Measured on HIVE 2026-08-25: a job submitted with
+  `--partition high --account genome-center-grp` and no `--qos` is accepted, and SLURM
+  assigns `genome-center-grp-high-qos` by itself. `publicgrp/low` **does** need
+  `--qos publicgrp-low-qos` named, and the generator adds it. Do not "fix" this by
+  hardcoding the facility QOS — an account outside the group cannot submit with it.
 - **The `--temp` folders MUST pre-exist.** DIA-NN aborts immediately with
   `ERROR: cannot find the temp folder .../quant_step2. Specify an existing folder` if
-  the `--temp` dir is missing — it will **not** create it. `submit.sh` therefore does
+  the `--temp` dir is missing — it will **not** create it, and it aborts *before* doing any
+  work, so a whole submission cycle is lost to a missing directory. **Every step now
+  `mkdir -p`s its own** — the watcher playbook tells you to resubmit individual steps after a
+  failure (`sbatch step4_finalpass.sbatch`), and that path never runs `submit.sh`.
+  `submit.sh` also does
   `mkdir -p <out>/quant_step2 <out>/quant_step4` before submitting. (This bit us on the
   first DDA cohort run — every first-pass array task died in ~7 s until the dirs existed.
   If you ever hand-edit or hand-run a step script, create the temp dirs first.)

@@ -238,9 +238,18 @@ def main():
         a.partition, a.account, _q = slurm_queue(a.partition, a.account, None)
         if not a.qos and a.partition == "low" and a.account == "publicgrp":
             a.qos = "publicgrp-low-qos"
-    except Exception:
+    except Exception as e:
+        # NEVER silently. This fallback puts the run on the PREEMPTIBLE queue, and for a facility
+        # member that is a real demotion -- a multi-hour search exposed to preemption because an
+        # import or sacctmgr call failed. Silent was how it read as "the skill just uses low".
         a.partition = a.partition or "low"
         a.account = a.account or "publicgrp"
+        if not a.qos and a.partition == "low" and a.account == "publicgrp":
+            a.qos = "publicgrp-low-qos"
+        sys.stderr.write(f"[diann_parallel] WARNING: queue detection failed ({type(e).__name__}: "
+                         f"{e}); falling back to {a.account}/{a.partition}, which is PREEMPTIBLE. "
+                         f"If you are in genome-center-grp, pass --partition high --account "
+                         f"genome-center-grp to avoid preemption.\n")
     n = len(raws)
     if n < 2:
         sys.exit("Parallel search needs >= 2 raw files (pass --raw or --raw-list); "
@@ -352,10 +361,20 @@ def main():
     # steps 2 and 4 read the measured radius at RUNTIME so both use the identical value
     wflag = f'--window $(cat {D}/window.txt) ' if win_probe else ''
 
+    # DIA-NN aborts with "cannot find the temp folder" if --temp does not exist -- it will NOT
+    # create it -- and it does so BEFORE doing any work, so the whole submission cycle is lost to
+    # a missing directory. submit.sh makes them, but the watcher playbook (references/watcher.md)
+    # tells the orchestrator to resubmit individual steps after a failure, and `sbatch
+    # step4_finalpass.sbatch` never goes through submit.sh. So each step makes its own: mkdir -p
+    # is idempotent and free, and it means no step can be submitted into that error.
+    def tmpguard(d):
+        return f'mkdir -p {D}/{d}   # DIA-NN will NOT create --temp and aborts without it'
+
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
         header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
+        tmpguard("quant_step2"),
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
         f'  --threads {a.threads_per_file} {wflag}{flags}',
@@ -365,7 +384,7 @@ def main():
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
         header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
-        f'echo "Step 3/5 empirical library assembly"; date',
+        f'echo "Step 3/5 empirical library assembly"; date', tmpguard("quant_step2"),
         f'cp -r {D}/quant_step2 {D}/quant_step2_orig 2>/dev/null || true   # backup for resume',
         f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
@@ -389,6 +408,7 @@ def main():
     s4 = write("step4_finalpass.sbatch", "\n".join([
         header("s4_finalpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
+        tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
         # Splat an empty list, not an empty string: a conditional string leaves a stray
@@ -410,7 +430,7 @@ def main():
     # Step 5 — cross-run report (single job, --use-quant --matrices)
     s5 = write("step5_report.sbatch", "\n".join([
         header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
-        f'echo "Step 5/5 cross-run report"; date',
+        f'echo "Step 5/5 cross-run report"; date', tmpguard("quant_step4"),
         f'{DN} {all_f} --fasta {fasta} --lib {empirical} --use-quant --quant-ori-names \\',
         f'  --temp {D}/quant_step4 --matrices --out {D}/{report} \\',
         f'  --threads {a.assembly_cpus} {norm} {wflag}{flags}',

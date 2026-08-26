@@ -59,8 +59,14 @@ def main():
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--mem", type=int, default=96, help="GB per task")
     ap.add_argument("--time", type=int, default=6, help="hours per task")
-    ap.add_argument("--partition", default="low")
-    ap.add_argument("--account")
+    # No hardcoded queue. Defaults of None mean "detect it" (see below) -- `low`/publicgrp was
+    # wrong in both directions: it put facility members on the PREEMPTIBLE queue when they had a
+    # non-preemptible one, and it emitted no --qos, which publicgrp/low requires on HIVE.
+    ap.add_argument("--partition", default=None)
+    ap.add_argument("--account", default=None)
+    ap.add_argument("--qos", default=None,
+                    help="SLURM QOS. publicgrp/low needs publicgrp-low-qos; "
+                         "genome-center-grp/high uses its default. Detected when omitted.")
     ap.add_argument("--max-simultaneous", type=int, default=0,
                     help="cap concurrent tasks (0 = all at once)")
     a = ap.parse_args()
@@ -88,8 +94,32 @@ def main():
                          indent=2))
         return
 
+    # ONE definition of the queue: reuse run_search.slurm_queue() rather than re-deriving it.
+    # It asks SLURM what this account is actually entitled to -- genome-center-grp/high for
+    # facility members, publicgrp/low for everyone else. A hardcoded facility queue is REJECTED
+    # outright for an account outside the group, and a hardcoded `low` needlessly exposes a
+    # facility member's 20-min-per-file conversion to preemption.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from run_search import slurm_queue
+        a.partition, a.account, _q = slurm_queue(a.partition, a.account, a.qos)
+        a.qos = a.qos or _q
+        if not a.qos and a.partition == "low" and a.account == "publicgrp":
+            a.qos = "publicgrp-low-qos"
+    except Exception as e:                 # no SLURM/sacctmgr: emit nothing and let SLURM decide
+        # Say so. Emitting no queue is the safe choice, but it is NOT the same as having chosen
+        # one, and a facility member should know they may land on the cluster default.
+        sys.stderr.write(f"[diatracer_parallel] queue detection unavailable "
+                         f"({type(e).__name__}: {e}); emitting no partition/account/qos and "
+                         f"letting SLURM apply its default\n")
+
     cap = f"%{a.max_simultaneous}" if a.max_simultaneous else ""
     acct = f"#SBATCH --account={a.account}\n" if a.account else ""
+    part = f"#SBATCH --partition={a.partition}\n" if a.partition else ""
+    qos = f"#SBATCH --qos={a.qos}\n" if a.qos else ""
+    # --requeue only where it means something: `low` is preemptible, so without it a preempted
+    # conversion is simply lost. On a non-preemptible queue it is noise.
+    rq = "#SBATCH --requeue\n" if a.partition == "low" else ""
     opts = " ".join(f"{k} {v}" for k, v in DEFAULTS.items())
 
     script = f"""#!/bin/bash -l
@@ -98,9 +128,7 @@ def main():
 #SBATCH --cpus-per-task={a.threads}
 #SBATCH --mem={a.mem}G
 #SBATCH --time={a.time}:00:00
-#SBATCH --partition={a.partition}
-{acct}#SBATCH --requeue
-#SBATCH -o {out}/diatracer_%A_%a.log
+{part}{acct}{qos}{rq}#SBATCH -o {out}/diatracer_%A_%a.log
 #SBATCH -e {out}/diatracer_%A_%a.log
 set -uo pipefail
 
