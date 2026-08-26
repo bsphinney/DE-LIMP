@@ -28,7 +28,7 @@ Usage:
       [--assembly-cpus 64] [--assembly-mem 128] [--assembly-time 12] \
       [--partition <auto>] [--account <auto>] [--max-simultaneous 20] [--no-norm]
 """
-import os, sys, glob, argparse, shlex, subprocess
+import os, re, sys, glob, argparse, shlex, subprocess
 
 # flags that are step-specific or auto-determined — never carry them into every step.
 # NOTE: --dda is intentionally NOT stripped — for DDA data put --dda in the --cfg and it
@@ -59,6 +59,30 @@ def dotnet_prefix(raws):
     return f'export DOTNET_ROOT={root}; export PATH={root}:"$PATH"; '
 
 
+# Glob metacharacters. A cfg value carrying one of these is spliced into a bash command line,
+# where bash will rewrite it if a file in the working directory happens to match.
+_GLOBBY = re.compile(r"[*?\[\]]")
+
+
+def _shield(line):
+    """Quote only the tokens that bash would try to expand as a filename pattern.
+
+    DIA-NN's own recommended values contain globs -- `--cut K*,R*` is the trypsin rule, and an
+    N-terminal variable modification is spelled `--var-mod UniMod:1,42.010565,*n`. Spliced into
+    the sbatch bare, those are subject to pathname expansion: with nothing matching they pass
+    through untouched (which is why this has never been noticed), but a single file in the
+    working directory matching the pattern silently rewrites them. Verified:
+
+        no matching file      --cut K*,R*      -> --cut K*,R*
+        file 'Kfoo,Rbar'      --cut K*,R*      -> --cut Kfoo,Rbar
+
+    which is a changed digest rule, in a search that reports success. Only globby tokens are
+    quoted, deliberately: quoting everything would also disable `$VAR` and `$(...)`, which a
+    hand-written cfg may legitimately rely on, and would change behaviour for every existing
+    cfg rather than only the ones actually at risk."""
+    return " ".join(shlex.quote(t) if _GLOBBY.search(t) else t for t in line.split())
+
+
 def read_cfg_flags(cfg):
     """Read a diann.cfg into a flat flag string, dropping step-specific flags."""
     if not cfg or not os.path.exists(cfg):
@@ -70,7 +94,7 @@ def read_cfg_flags(cfg):
             continue
         if any(line == s or line.startswith(s + " ") for s in STRIP):
             continue
-        out.append(line)
+        out.append(_shield(line))
     return " ".join(out)
 
 

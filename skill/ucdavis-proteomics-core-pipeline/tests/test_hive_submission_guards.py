@@ -121,6 +121,72 @@ class ParallelChainTempTests(unittest.TestCase):
             self.assertIn("quant_step4", body)
 
 
+class CfgSplicingTests(unittest.TestCase):
+    """cfg values reach DIA-NN through a bash command line, so bash gets a say in them.
+
+    DIA-NN's own recommended values contain glob characters: `--cut K*,R*` IS the trypsin rule,
+    and an N-terminal variable mod is spelled `--var-mod UniMod:1,42.010565,*n`. Unquoted, those
+    are subject to pathname expansion. With nothing matching they pass through untouched, which
+    is why this went unnoticed -- but one file in the working directory matching the pattern
+    rewrites them silently, and the search then reports success with a changed digest rule.
+    """
+
+    def _flags(self, lines, files=()):
+        import diann_parallel
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "p.cfg")
+            with open(cfg, "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            for f in files:
+                open(os.path.join(d, f), "w").close()
+            flags = diann_parallel.read_cfg_flags(cfg)
+            # what bash actually hands the engine, evaluated in that directory
+            argv = subprocess.run(["bash", "-c", f"cd {d} && printf '%s\\n' {flags}"],
+                                  capture_output=True, text=True).stdout.split("\n")
+            return flags, [x for x in argv if x]
+
+    def test_a_glob_value_survives_a_matching_file_in_the_working_dir(self):
+        _, argv = self._flags(["--qvalue 0.01", "--cut K*,R*"], files=["Kfoo,Rbar"])
+        self.assertIn("K*,R*", argv, "bash rewrote the digest rule from a filename")
+        self.assertNotIn("Kfoo,Rbar", argv)
+
+    def test_an_nterm_variable_mod_survives_too(self):
+        mod = "UniMod:1,42.010565,*n"
+        _, argv = self._flags([f"--var-mod {mod}"], files=["UniMod:1,42.010565,Xn"])
+        self.assertIn(mod, argv)
+
+    def test_shell_variables_still_expand(self):
+        """Only globby tokens are quoted. Quoting everything would disable $VAR and $(...) for
+        every existing cfg -- a bigger behaviour change than the bug being fixed."""
+        _, argv = self._flags(["--qvalue 0.01", "--lib-dir $HOME/libs"])
+        self.assertIn(os.path.expanduser("~/libs"), argv)
+
+    def test_ordinary_values_are_not_quoted_at_all(self):
+        """The generated line stays byte-identical for a cfg with nothing at risk, so this
+        cannot change what any existing search runs."""
+        flags, _ = self._flags(["--qvalue 0.01", "--mass-acc 15"])
+        self.assertEqual(flags, "--qvalue 0.01 --mass-acc 15")
+
+
+class VersionBumpTests(unittest.TestCase):
+    """The version lives in three places and CI fails the run if any disagrees. Two consecutive
+    PRs bumped plugin.json alone; nothing about the third location is discoverable from the file
+    you are editing."""
+
+    def _bump(self, *args):
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "bump_version.py"), *args],
+                              capture_output=True, text=True)
+
+    def test_check_reports_agreement_and_exits_zero(self):
+        p = self._bump("--check")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("agree: True", p.stdout)
+
+    def test_a_bad_version_is_refused(self):
+        self.assertNotEqual(self._bump("2.4").returncode, 0)
+        self.assertNotEqual(self._bump("banana").returncode, 0)
+
+
 class QueueTests(unittest.TestCase):
     def test_an_explicit_queue_is_always_honoured(self):
         self.assertEqual(run_search.slurm_queue("high", "genome-center-grp", "x"),
