@@ -1,16 +1,24 @@
 ---
 name: ucdavis-proteomics-core-pipeline
 description: >
-  Run an end-to-end proteomics search + differential expression analysis from raw
-  mass-spec data. Use this whenever the user wants to "analyze my proteomics data",
-  "search these raw files", "run my DIA/DDA data", "find differentially expressed
-  proteins", "process this timsTOF/Astral/Orbitrap run", or points at a folder of
-  .raw / .d / .mzML files and asks what's in it. Detects acquisition + instrument,
-  derives the search parameters from that data type, downloads the pinned search
-  engine, runs DIA-NN (DIA) or Sage (DDA), then limpa/limma DE — with full
-  provenance for every parameter. Also use it to "write the LC-MS methods
-  section" / "generate a publication-ready methods section with the instrument grant
-  acknowledgment" from facility raw data (UC Davis Proteomics Core).
+  Run a proteomics search and/or differential expression analysis from mass-spec data.
+  Use this whenever the user wants to "analyze my proteomics data", "search these raw
+  files", "run my DIA/DDA data", "find differentially expressed proteins", "process this
+  timsTOF/Astral/Orbitrap run", or points at a folder of .raw / .d / .mzML files and asks
+  what's in it. ALSO use it for any single search step, even when no DE is wanted and the
+  file paths are already known: "run DIA-NN on these files", "re-run this search",
+  "re-search with different parameters", "match the search settings to the Spectronaut /
+  FragPipe run", "compare DIA-NN vs Spectronaut", "submit a search to the cluster /
+  SLURM / HPC", "extract XICs". Use it INSTEAD OF hand-writing an sbatch script or a
+  diann-linux / sage command line — the skill picks the validated workflow, including the
+  5-step parallel SLURM chain that searches files concurrently (DIA-NN's own --threads
+  parallelises only WITHIN one run, so a hand-rolled single-shot job searches raw files
+  one at a time and is dramatically slower). Detects acquisition + instrument, derives the
+  search parameters from that data type, downloads the pinned search engine, runs DIA-NN
+  (DIA) or Sage (DDA), then limpa/limma DE — with full provenance for every parameter.
+  Also use it to "write the LC-MS methods section" / "generate a publication-ready methods
+  section with the instrument grant acknowledgment" from facility raw data (UC Davis
+  Proteomics Core).
 ---
 
 # Proteomics Pipeline
