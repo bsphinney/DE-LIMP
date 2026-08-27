@@ -34,7 +34,7 @@ only).
 3. **Empirical-library assembly** — single job: `--use-quant` over the step-2 `.quant`
    to build the empirical library (`--out-lib empirical.parquet`).
 4. **Final pass** — SLURM array: search each raw vs the empirical library
-   (`--lib empirical.parquet --temp quant_step4 --no-ifs-removal --quant-ori-names`).
+   (`--lib empirical.parquet --temp quant_step4 --quant-ori-names`).
 5. **Cross-run report** — single job: `--use-quant --matrices` over the step-4
    `.quant` → `report.parquet` (the DE contract).
 
