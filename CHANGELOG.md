@@ -1,5 +1,37 @@
 # Changelog
 
+## [4.0.6] — 2026-08-27
+
+### Fixed
+- **Contaminants were only ever recognised by the `Cont_` tag** (issue #67), which is
+  the tag DE-LIMP's own FASTA builder stamps. Anyone who searched against a contaminant
+  database they built themselves — the reporter used DIA-NN 2.6.1 with a `cRAP_`-prefixed
+  cRAP database — had **every** contaminant kept: the "Exclude contaminants" checkboxes
+  silently did nothing, and the Contaminant Analysis tab reported none present.
+
+  `Cont_`, `cRAP_`/`cRAP-`, MaxQuant's `CON__` and FragPipe's `contam_` are now all
+  recognised, at the start of an accession **or** after a `|`, so a tag applied inside a
+  UniProt-style header (`sp|Cont_P00761|TRYP_PIG`) matches too.
+
+### Added
+- **"Additional contaminant prefix" box** on the Contaminant Analysis tab, for a database
+  that tags them some other way. Comma-separate several. Taken literally, so a regex
+  metacharacter typed into it cannot error or match everything, and it applies everywhere
+  contaminants are counted or excluded.
+- "No contaminants detected" now lists the tags it actually looked for, instead of naming
+  only `Cont_` — so the message distinguishes "you have none" from "yours are tagged
+  differently".
+
+### Changed
+- **One definition of "is this a contaminant"** (`is_contaminant_accession()`,
+  `strip_contaminant_prefix()`, `detected_contaminant_tags()` in `R/helpers.R`), replacing
+  ~24 copies of `grepl("^Cont_", …)` across 8 files. Architectural rule #3: this is exactly
+  the shape of the "Detected vs Inferred had 4 independent classifiers" problem, and it is
+  why one convention was supported and three were not.
+- 21 tests, asserting both directions — every shipped convention matches, and `CONTACTIN`,
+  `Q9CONT`, `CONTRA_MOUSE` do not. A false positive deletes a real protein from the
+  analysis, which is worse than a contaminant surviving.
+
 ## [Skill 2.2.0] — 2026-08-20
 
 ### Added

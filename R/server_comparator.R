@@ -4796,7 +4796,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
                 pg_mat <- as.matrix(pg[, int_cols])
                 detected <- colSums(pg_mat > 0, na.rm = TRUE)
                 total_pg <- nrow(pg_mat)
-                contam_count <- sum(grepl("^Cont_", pg$Protein.Group))
+                contam_count <- sum(is_contaminant_accession(pg$Protein.Group))
 
                 quality_df <- data.frame(
                   Sample = int_cols,

@@ -1997,6 +1997,23 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                           title = "About Contaminant Analysis", class = "btn-outline-info btn-sm")
                       ),
 
+                      # Custom tag. Cont_ / cRAP / CON__ / contam_ are recognised
+                      # automatically; this is for a database that tags them some
+                      # other way, so the user is never stuck with contaminants they
+                      # can see but the app will not match (issue #67).
+                      div(style = "margin-bottom: 12px;",
+                        textInput("contaminant_custom_tag",
+                          label = tagList(icon("tag"),
+                            " Additional contaminant prefix (optional)"),
+                          placeholder = "e.g. myCONTAM_  \u2014 comma-separate several",
+                          width = "100%"),
+                        tags$small(
+                          "Recognised automatically: Cont_, cRAP_, CON__, contam_. ",
+                          "Add yours here if your FASTA tags them differently \u2014 it ",
+                          "applies everywhere contaminants are counted or excluded.",
+                          style = "color: #6c757d;")
+                      ),
+
                       # Summary statistics cards
                       div(style = "min-height: 80px;",
                         uiOutput("contaminant_summary_cards")

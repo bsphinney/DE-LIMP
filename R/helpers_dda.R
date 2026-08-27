@@ -958,7 +958,7 @@ build_denovo_dbcompete_fdr <- function(target_blast, decoy_blast, fdr_level = 0.
 is_contaminant_protein_group <- function(proteins) {
   vapply(strsplit(as.character(proteins), ";", fixed = TRUE), function(accs) {
     accs <- accs[nzchar(accs)]
-    length(accs) > 0 && all(grepl("Cont_", accs, fixed = TRUE))
+    length(accs) > 0 && all(is_contaminant_accession(accs))
   }, logical(1))
 }
 

@@ -891,7 +891,7 @@ server_dda <- function(input, output, session, values, add_to_log) {
   .dda_is_contaminant <- function(proteins) {
     vapply(strsplit(as.character(proteins), ";", fixed = TRUE), function(accs) {
       accs <- accs[nzchar(accs)]
-      length(accs) > 0 && all(grepl("Cont_", accs, fixed = TRUE))
+      length(accs) > 0 && all(is_contaminant_accession(accs))
     }, logical(1))
   }
 

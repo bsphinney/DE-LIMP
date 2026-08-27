@@ -270,8 +270,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     df_raw$Accession <- str_split_fixed(df_raw$Protein.Group, "[; ]", 2)[, 1]
 
     # Clean contaminant prefixes (Cont_P04264 → P04264 for UniProt lookup)
-    df_raw$Accession_clean <- gsub("^Cont_", "", df_raw$Accession)
-    df_raw$is_contaminant <- grepl("^Cont_", df_raw$Accession)
+    df_raw$Accession_clean <- strip_contaminant_prefix(df_raw$Accession)
+    df_raw$is_contaminant <- is_contaminant_accession(df_raw$Accession)
 
     # Detect if accessions are NCBI RefSeq (XP_, NP_, WP_) vs UniProt
     non_contam <- df_raw$Accession_clean[!df_raw$is_contaminant]
@@ -432,7 +432,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     new_headers <- as.character(run_ids)
 
     # Add Type column before final select
-    df_merged$Type <- ifelse(grepl("^Cont_", df_merged$Protein.Group), "Contaminant", "Sample")
+    df_merged$Type <- ifelse(is_contaminant_accession(df_merged$Protein.Group), "Contaminant", "Sample")
 
     df_final <- df_merged %>%
       dplyr::select(Protein.Group, Gene, Protein.Name, Significance, logFC, P.Value, adj.P.Val, Type, all_of(valid_cols)) %>%
@@ -495,7 +495,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     # Link to correct database: NCBI for XP_/NP_/WP_, UniProt for others (strip Cont_ prefix)
     link_urls <- ifelse(grepl("^[XNW]P_", acc),
       paste0("https://www.ncbi.nlm.nih.gov/protein/", acc),
-      paste0("https://www.uniprot.org/uniprotkb/", gsub("^Cont_", "", acc), "/entry")
+      paste0("https://www.uniprot.org/uniprotkb/", strip_contaminant_prefix(acc), "/entry")
     )
     df_display$Protein.Group <- paste0("<a href='", link_urls, "' target='_blank'>", df_display$Protein.Group, "</a>")
 
@@ -778,7 +778,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       mutate(Average_Signal_Log10 = Average_Signal_Log2 / log2(10))
 
     # Tag contaminants
-    plot_df$Is_Contaminant <- grepl("^Cont_", plot_df$Protein.Group)
+    plot_df$Is_Contaminant <- is_contaminant_accession(plot_df$Protein.Group)
 
     # Base view: always show sample proteins
     sample_df <- plot_df[!plot_df$Is_Contaminant, ]
@@ -1189,7 +1189,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
     req(values$y_protein)
     mat <- values$y_protein$E
     protein_ids <- rownames(mat)
-    is_contam <- grepl("^Cont_", protein_ids)
+    is_contam <- is_contaminant_accession(protein_ids)
 
     if (sum(is_contam) == 0) return(NULL)
 
@@ -1274,7 +1274,19 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
   })
 
   # Summary cards
+  # The user's own tag reaches the helpers through an option rather than being
+  # threaded through ~20 call sites. Set before anything reads it, and cleared
+  # when the box is emptied so a stale tag cannot keep filtering silently.
+  observeEvent(input$contaminant_custom_tag, ignoreNULL = FALSE, {
+    tags_in <- trimws(strsplit(input$contaminant_custom_tag %||% "", ",")[[1]])
+    tags_in <- tags_in[nzchar(tags_in)]
+    options(delimp.contaminant_tags = if (length(tags_in)) tags_in else NULL)
+    # Recompute anything downstream that has already been drawn.
+    values$contaminant_tag_version <- (values$contaminant_tag_version %||% 0) + 1
+  })
+
   output$contaminant_summary_cards <- renderUI({
+    values$contaminant_tag_version          # redraw when the custom tag changes
     cdata <- contaminant_data()
 
     if (is.null(cdata)) {
@@ -1282,7 +1294,12 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         style = "background-color: #d4edda; padding: 20px; border-radius: 8px; text-align: center;",
         icon("check-circle", style = "color: #28a745; font-size: 1.5em;"),
         tags$h5("No contaminant proteins detected", style = "color: #28a745; margin-top: 10px;"),
-        tags$p("No proteins with 'Cont_' prefix found in the dataset.",
+        tags$p(paste0(
+          "No accessions matched a known contaminant tag (",
+          paste(CONTAMINANT_PATTERNS, collapse = ", "),
+          if (length(getOption("delimp.contaminant_tags", NULL)))
+            paste0(", ", paste(getOption("delimp.contaminant_tags"), collapse = ", ")) else "",
+          "). If your database tags them differently, add the prefix above."),
           style = "color: #6c757d;")
       ))
     }
@@ -1439,7 +1456,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
         tags$h6("What are contaminant proteins?"),
-        p("Contaminant proteins (prefixed with 'Cont_') come from the contaminant FASTA library ",
+        p("Contaminant proteins come from the contaminant FASTA library ",
           "included in DIA-NN searches. These are common lab contaminants like keratins (skin), ",
           "trypsin (digestion enzyme), albumin (serum), and other environmental proteins."),
         tags$h6("Why monitor them?"),
@@ -1577,7 +1594,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
     # Exclude contaminants if requested
     if (isTRUE(input$explorer_exclude_contam_profile)) {
-      keep <- !grepl("^Cont_", rownames(mat))
+      keep <- !is_contaminant_accession(rownames(mat))
       mat <- mat[keep, , drop = FALSE]
       if (!is.null(genes_df)) genes_df <- genes_df[keep, , drop = FALSE]
     }
@@ -1825,7 +1842,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
       B = mat[, sb],
       stringsAsFactors = FALSE
     )
-    df$is_contaminant <- grepl("^Cont_", df$Protein.Group)
+    df$is_contaminant <- is_contaminant_accession(df$Protein.Group)
 
     # Gene labels
     df$Gene <- vapply(df$Protein.Group, function(pid) explorer_gene_label(pid, genes_df), character(1))
@@ -1965,7 +1982,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         # --- 0. Load NCBI gene map if applicable ---
         export_gene_map <- NULL
         n_gene_mapped <- 0L
-        non_contam_ids <- rownames(mat)[!grepl("^Cont_", rownames(mat))]
+        non_contam_ids <- rownames(mat)[!is_contaminant_accession(rownames(mat))]
         first_accessions <- sub(";.*", "", head(non_contam_ids, 50))
         is_ncbi_export <- length(first_accessions) > 0 && any(grepl("^[XNW]P_", first_accessions))
 
@@ -2031,7 +2048,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         resolve_gene <- function(protein_id) {
           if (!is.null(export_gene_map)) {
             acc <- sub(";.*", "", protein_id)  # first accession from semicolon group
-            acc <- sub("^Cont_", "", acc)
+            acc <- strip_contaminant_prefix(acc)
             idx <- match(acc, export_gene_map$accession)
             if (!is.na(idx)) {
               gs <- export_gene_map$gene_symbol[idx]
@@ -2049,8 +2066,8 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
         expr_df$Gene <- vapply(rownames(mat), resolve_gene, character(1))
         # Count how many NCBI proteins were successfully mapped via gene_map.tsv
         if (!is.null(export_gene_map)) {
-          non_contam_genes <- expr_df$Gene[!grepl("^Cont_", expr_df$Protein.Group)]
-          non_contam_pids <- expr_df$Protein.Group[!grepl("^Cont_", expr_df$Protein.Group)]
+          non_contam_genes <- expr_df$Gene[!is_contaminant_accession(expr_df$Protein.Group)]
+          non_contam_pids <- expr_df$Protein.Group[!is_contaminant_accession(expr_df$Protein.Group)]
           n_gene_mapped <- sum(non_contam_genes != non_contam_pids &
             non_contam_genes != substr(non_contam_pids, 1, 15))
         }
@@ -2177,7 +2194,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
               # 0 = not detected in DIA-NN pg_matrix
               detected <- colSums(pg_mat > 0, na.rm = TRUE)
               total_pg <- nrow(pg_mat)
-              contam_count <- sum(grepl("^Cont_", pg$Protein.Group))
+              contam_count <- sum(is_contaminant_accession(pg$Protein.Group))
 
               quality_df <- data.frame(
                 Sample = int_cols,
@@ -2250,7 +2267,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
           quartile_df[[col_name]] <- paste0("Q", all_sample_q[, j])
         }
         quartile_df$Quartile_Range <- q_range
-        quartile_df$Is_Contaminant <- grepl("^Cont_", rownames(mat))
+        quartile_df$Is_Contaminant <- is_contaminant_accession(rownames(mat))
 
         quartile_df <- quartile_df[order(-quartile_df$Avg_Intensity), ]
         quartile_file <- file.path(tmp_dir, "quartile_profiles.csv")
@@ -2285,7 +2302,7 @@ server_viz <- function(input, output, session, values, add_to_log, is_hf_space) 
 
         # --- 5. Contaminant summary CSV ---
         incProgress(0.45, detail = "Contaminant summary...")
-        contam_mask <- grepl("^Cont_", rownames(mat))
+        contam_mask <- is_contaminant_accession(rownames(mat))
         n_contam <- sum(contam_mask)
         contam_note <- "No contaminant proteins detected in this dataset."
         if (n_contam > 0) {

@@ -734,3 +734,68 @@ detect_organism_db <- function(protein_ids) {
   }
   return("org.Hs.eg.db")
 }
+
+# ---------------------------------------------------------------------------
+# Contaminants: ONE definition of "is this accession a contaminant"
+# ---------------------------------------------------------------------------
+# Architectural rule #3. This used to be `grepl("^Cont_", x)` copied to ~20
+# sites across 9 files, which meant the app recognised exactly one convention:
+# the `Cont_` tag its own FASTA builder stamps (and the pipeline skill's
+# fetch_fasta.py CONT_TAG). Anyone who searched against a contaminant database
+# they built themselves got NOTHING filtered, silently — every "Exclude
+# contaminants" checkbox stayed on and did nothing, and the Contaminant
+# Analysis tab reported none present. Reported by a user whose DIA-NN 2.6.1
+# report carried `cRAP_`-prefixed accessions (issue #67).
+#
+# Each pattern below is a convention someone actually ships, with its source.
+# Do NOT add loose ones: a false positive silently DELETES a real protein from
+# the analysis, which is far worse than a contaminant surviving.
+CONTAMINANT_PATTERNS <- c(
+  Cont_    = "Cont_",      # DE-LIMP's own builder + the pipeline skill (CONT_TAG)
+  cRAP     = "cRAP[-_]",   # GPM cRAP, as prefixed by several FASTA builders (issue #67)
+  MaxQuant = "CON__",      # MaxQuant
+  FragPipe = "contam_"     # FragPipe / Philosopher
+)
+
+#' Regex matching a contaminant accession.
+#'
+#' Anchored to the start of the accession OR to a `|` field separator, because
+#' the tag may be applied to the bare accession (`Cont_P00761`) or inside a
+#' UniProt-style header (`sp|Cont_P00761|TRYP_PIG`). An unanchored match would
+#' hit any protein whose *description* happened to contain the word.
+#'
+#' @param extra optional extra tag(s) the user supplied for their own database.
+#'   Taken literally (escaped), never as a regex — a stray `(` typed into a text
+#'   box must not error or match everything.
+contaminant_pattern <- function(extra = getOption("delimp.contaminant_tags", NULL)) {
+  tags <- unname(CONTAMINANT_PATTERNS)
+  extra <- extra[nzchar(extra %||% "")]
+  if (length(extra)) {
+    tags <- c(tags, gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", trimws(extra)))
+  }
+  paste0("(^|\\|)(", paste(tags, collapse = "|"), ")")
+}
+
+#' TRUE for each accession that is a contaminant.
+is_contaminant_accession <- function(x, extra = getOption("delimp.contaminant_tags", NULL)) {
+  if (length(x) == 0) return(logical(0))
+  grepl(contaminant_pattern(extra), as.character(x))
+}
+
+#' Drop the contaminant tag, for display and for database links.
+#' `Cont_P04264` -> `P04264`, so the UniProt URL resolves.
+strip_contaminant_prefix <- function(x, extra = getOption("delimp.contaminant_tags", NULL)) {
+  sub(contaminant_pattern(extra), "\\1", as.character(x))
+}
+
+#' Which conventions are actually present in this dataset.
+#' Used by the Contaminant Analysis tab so the user is told what was matched
+#' rather than left to infer it — and so "none found" can say which tags were
+#' looked for, instead of naming only `Cont_`.
+detected_contaminant_tags <- function(x) {
+  x <- as.character(x)
+  present <- vapply(CONTAMINANT_PATTERNS, function(p) {
+    any(grepl(paste0("(^|\\|)", p), x))
+  }, logical(1))
+  names(CONTAMINANT_PATTERNS)[present]
+}

@@ -1734,7 +1734,7 @@ server_session <- function(input, output, session, values, add_to_log) {
               pg_mat <- as.matrix(pg[, int_cols])
               detected <- colSums(pg_mat > 0, na.rm = TRUE)
               total_pg <- nrow(pg_mat)
-              contam_count <- sum(grepl("^Cont_", pg$Protein.Group))
+              contam_count <- sum(is_contaminant_accession(pg$Protein.Group))
 
               quality_df <- data.frame(
                 Sample = int_cols,
@@ -1761,7 +1761,7 @@ server_session <- function(input, output, session, values, add_to_log) {
         incProgress(0.75, detail = "Contaminant summary...")
         tryCatch({
           protein_ids <- rownames(mat)
-          is_contam <- grepl("^Cont_", protein_ids)
+          is_contam <- is_contaminant_accession(protein_ids)
           if (sum(is_contam) > 0) {
             linear_mat <- 2^mat
             contam_mat <- linear_mat[is_contam, , drop = FALSE]
@@ -1871,7 +1871,7 @@ server_session <- function(input, output, session, values, add_to_log) {
             qdf[[paste0("Q_", colnames(mat)[j])]] <- paste0("Q", all_sample_q[, j])
           }
           qdf$Quartile_Range <- q_range
-          qdf$Is_Contaminant <- grepl("^Cont_", rownames(mat))
+          qdf$Is_Contaminant <- is_contaminant_accession(rownames(mat))
           qdf <- qdf[order(-qdf$Avg_Intensity), ]
           q_file <- file.path(tmp_dir, "quartile_profiles.csv")
           write.csv(qdf, q_file, row.names = FALSE)

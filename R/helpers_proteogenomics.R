@@ -249,7 +249,7 @@ classify_proteins <- function(diann_report, fasta_path = NULL) {
       grepl("^[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9]$", bare) ||  # 10-char (A0A...)
       grepl("^ENSP[0-9]+", bare) ||                                  # Ensembl protein
       grepl("^(sp|tr)\\|", acc) ||                                   # sp|/tr| wrapper
-      grepl("^Cont_", bare) || grepl("^Cont_", acc)) {               # cRAP/HaoGroup contaminants
+      is_contaminant_accession(bare) || is_contaminant_accession(acc)) {               # cRAP/HaoGroup contaminants
     return("UNIPROT")
   }
   "UNKNOWN"

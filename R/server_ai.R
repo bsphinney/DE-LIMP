@@ -837,7 +837,7 @@ server_ai <- function(input, output, session, values) {
                 Pct_Detected = round(100 * detected / total_pg, 1),
                 Missing = total_pg - detected,
                 Pct_Missing = round(100 * (total_pg - detected) / total_pg, 1),
-                Contaminant_Proteins = sum(grepl("^Cont_", pg$Protein.Group)),
+                Contaminant_Proteins = sum(is_contaminant_accession(pg$Protein.Group)),
                 stringsAsFactors = FALSE
               )
               if (!is.null(values$metadata)) {
