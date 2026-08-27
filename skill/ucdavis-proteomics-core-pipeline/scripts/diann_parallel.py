@@ -447,7 +447,7 @@ def main():
         f'cp -f {empirical} "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp {D}/quant_step4 --no-ifs-removal --quant-ori-names{xic_arg}{xic_out} \\',
+        f'  --temp {D}/quant_step4 --quant-ori-names{xic_arg}{xic_out} \\',
         f'  --threads {a.threads_per_file} {wflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]))
 
