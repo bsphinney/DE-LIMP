@@ -18,6 +18,44 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 
 ---
 
+## 🤖 Also available as an AI agentic skill for Claude Code
+
+**This whole workflow runs as a Claude Code skill — you point it at a folder of raw mass-spec files and describe what you want in plain English, and it does the rest.** No GUI, no scripts to write.
+
+📺 **[Watch it search timsTOF and Orbitrap DIA data](https://www.youtube.com/watch?v=roHknILC-Ec)** — *Searching Proteomics Data using the Claude Code UCD Proteomics Skill*
+
+### What the skill does
+
+Give it `.raw`, `.d` or `.mzML` files and it takes them all the way to differentially expressed proteins:
+
+- **Works out the search parameters from your data**, not from a template. It detects the acquisition type and instrument and derives mass accuracy from that — every value carries its source, so you can see *why* it chose 15 ppm rather than being told to trust it.
+- **Runs the engine for you** — DIA-NN or Radiant/Fulcrum (DIA), Sage (DDA), or FragPipe + diaTracer — downloading the pinned version so the same skill version always produces the same search.
+- **Uses a cluster properly if you have one.** On SLURM it automatically fans a DIA-NN run out into a 5-step parallel chain: files are searched concurrently instead of one at a time, and it picks a queue your account can actually submit to. It watches the jobs and fixes what it can on its own — out-of-memory, timeouts, a hung file — instead of leaving a chain dead in the queue overnight.
+- **Then does the statistics** — limpa/limma differential expression, with QC, figures, and a written interpretation of your results.
+- **Writes the methods section**, publication-ready, with the instrument grant acknowledgment.
+- **Ships a reproducibility bundle**: the analysis as flat R with every value literal, exact tool versions, input checksums, and a runnable `reproduce.sh`. A result you cannot reproduce is not a result.
+
+You can also ask it for just one piece — *"re-run this search with the settings matched to the Spectronaut run"* — without wanting the full analysis.
+
+### Install
+
+Requires [Claude Code](https://claude.com/claude-code). In a Claude Code session:
+
+```
+/plugin marketplace add bsphinney/DE-LIMP
+/plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core
+```
+
+Then just ask, in your own words:
+
+```
+analyze my proteomics data in /path/to/raw_files
+```
+
+It installs its own toolchain on first run (R, limpa/limma, the search engine) with no admin rights needed, and works entirely on your own machine — a cluster is optional. UC Davis Proteomics Core members with a HIVE account get the facility's installed software and pre-staged FASTAs reused automatically.
+
+---
+
 ## What's New in v4.0.0
 
 **De novo sequencing + DDA database search** -- DE-LIMP now goes beyond DIA differential expression. New de novo (Cascadia / Casanovo) and DDA (Sage) workflows add per-spectrum sequencing, Sage-vs-de-novo agreement views, and **homology-based species identification** (DIAMOND against nr with LCA assignment) — with a decoy-spectra-calibrated FDR so you can report confirmed peptides at a controlled error rate. Alignment views render only real BLAST alignments, never fabricated positions.
