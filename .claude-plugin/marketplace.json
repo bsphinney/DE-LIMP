@@ -1,7 +1,7 @@
 {
   "name": "ucdavis-proteomics-core",
   "version": "2.4.3",
-  "description": "UC Davis Proteomics Core skills for Claude \u2014 agentic mass-spec search + differential expression.",
+  "description": "UC Davis Proteomics Core skills for Claude — agentic mass-spec search + differential expression.",
   "owner": {
     "name": "Brett Phinney",
     "email": "bsphinney@ucdavis.edu",
@@ -12,7 +12,7 @@
       "name": "ucdavis-proteomics-core-pipeline",
       "source": "./skill/ucdavis-proteomics-core-pipeline",
       "version": "2.4.3",
-      "description": "UC Davis Proteomics Core pipeline \u2014 end-to-end proteomics search + differential expression from raw .raw/.d/.mzML files (DIA-NN / Sage, limpa/limma). Auto-installs its toolchain, derives search parameters from the data type, writes a biological analysis report and a full reproducibility bundle, and packages results into tidy session folders.",
+      "description": "UC Davis Proteomics Core pipeline — end-to-end proteomics search + differential expression from raw .raw/.d/.mzML files (DIA-NN / Sage, limpa/limma). Auto-installs its toolchain, derives search parameters from the data type, writes a biological analysis report and a full reproducibility bundle, and packages results into tidy session folders.",
       "author": {
         "name": "Brett Phinney",
         "email": "bsphinney@ucdavis.edu",
@@ -31,6 +31,22 @@
         "limpa",
         "bioinformatics",
         "LC-MS"
+      ]
+    },
+    {
+      "name": "ucdavis-proteomics-dev",
+      "source": "./skill/ucdavis-proteomics-dev",
+      "version": "0.1.0",
+      "description": "SANDBOX copy of the UC Davis Proteomics Core pipeline (forked from stable v2.4.3). For developing new capability -- phosphosite analysis and the DE-LIMP visualisations -- without risking the skill that runs real searches. Not for production analyses.",
+      "author": {
+        "name": "Brett Phinney",
+        "email": "bsphinney@ucdavis.edu",
+        "url": "https://github.com/bsphinney/DE-LIMP"
+      },
+      "keywords": [
+        "proteomics",
+        "development",
+        "sandbox"
       ]
     }
   ]

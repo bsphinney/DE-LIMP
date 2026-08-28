@@ -1,0 +1,24 @@
+{
+  "name": "ucdavis-proteomics-dev",
+  "version": "0.1.0",
+  "description": "SANDBOX copy of the UC Davis Proteomics Core pipeline (forked from stable v2.4.3). For developing new capability -- phosphosite analysis and the DE-LIMP visualisations -- without risking the skill that runs real searches. Not for production analyses.",
+  "author": {
+    "name": "Brett Phinney",
+    "email": "bsphinney@ucdavis.edu",
+    "url": "https://github.com/bsphinney/DE-LIMP"
+  },
+  "homepage": "https://github.com/bsphinney/DE-LIMP",
+  "repository": "https://github.com/bsphinney/DE-LIMP",
+  "keywords": [
+    "proteomics",
+    "mass-spectrometry",
+    "DIA",
+    "DDA",
+    "DIA-NN",
+    "Sage",
+    "differential-expression",
+    "limma",
+    "limpa",
+    "bioinformatics"
+  ]
+}

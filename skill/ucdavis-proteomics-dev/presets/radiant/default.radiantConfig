@@ -1,0 +1,51 @@
+[FdrParams]
+percentFDR = 1.0
+reportDecoys = true
+
+[FeatureFinderParams]
+minScanCount = 3
+skipScanCount = 3
+
+[General]
+reannotate = false
+shortReport = false
+threadCount = 0
+verbosity = 0
+
+[LibraryParams]
+chargeStateMax = 4
+chargeStateMin = 1
+mzMaxMS2 = 1500.0
+mzMinMS2 = 200.0
+peptideLengthMax = 35
+peptideLengthMin = 7
+trancheSizeMax = 20000.0
+
+[MS1Params]
+ms1ExtractionWidthPPM = 20.0
+precursorExtractionWindowThomsons = 0.0
+
+[MS2Params]
+filterLengthIntegration = 5
+filterLengthMS2 = 3
+ionsSharedToReject = 4
+maxAnchorColumnIndex = 6
+minMs2FragCount = 2
+ms2ExtractionWidthPPM = 20
+scanTimeWindowStDevs = 3
+smoothCountMS2 = 1
+stopThresholdFractionMS2 = 0.65
+subtractShadows = true
+
+[NeuralNetParams]
+baggingSize = 14
+epochs = 12
+learningRate = 0.003
+nodesFraction = 0.5
+parallelNeuralNets = true
+
+[PeakIntegrationParams]
+filterLength = 3
+sigma = 1.0
+signalToNoiseRatio = 2.0
+smoothCount = 1
