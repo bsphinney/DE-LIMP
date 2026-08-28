@@ -1916,10 +1916,25 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                       ),
 
                       # Run Pipeline button
-                      div(style="min-width: 150px; display: flex; align-items: center;",
+                      div(style="min-width: 150px; display: flex; align-items: center; flex-direction: column; gap: 6px;",
                         actionButton("run_pipeline", "Run Pipeline",
                           class="btn-success btn-lg w-100", icon = icon("play"),
-                          style="padding: 12px; font-size: 1.05em; white-space: nowrap;")
+                          style="padding: 12px; font-size: 1.05em; white-space: nowrap;"),
+                        # Shown only for phospho experiments. Ticked by default, so the
+                        # common case is ONE click -- but visible and untickable, because
+                        # site extraction runs at a localization threshold that decides
+                        # which sites exist at all, and because phospho-enriched data is
+                        # legitimately analysed at protein level too.
+                        conditionalPanel(
+                          condition = "output.phospho_is_detected == true",
+                          div(style = "width: 100%;",
+                            checkboxInput("run_phospho_with_pipeline",
+                              "Also run phosphosite analysis",
+                              value = TRUE),
+                            tags$small(class = "text-muted",
+                              "Site localization confidence is set on the Phosphoproteomics tab (default 0.75).")
+                          )
+                        )
                       )
                     ),
 

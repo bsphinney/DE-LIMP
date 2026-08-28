@@ -315,6 +315,15 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
   # Clicks the real sidebar control rather than duplicating its body, so the two
   # entry points can never drift apart.
+  # Lets the Run Pipeline panel offer the phospho step only when there IS one.
+  # suspendWhenHidden = FALSE because the checkbox lives on a different tab than
+  # anything that reads phospho outputs -- without it the flag never updates and
+  # the box never appears.
+  output$phospho_is_detected <- reactive({
+    isTRUE(values$phospho_detected$detected)
+  })
+  outputOptions(output, "phospho_is_detected", suspendWhenHidden = FALSE)
+
   observeEvent(input$phospho_run_from_banner, {
     shinyjs::click("run_phospho_pipeline")
   })

@@ -1059,12 +1059,28 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         values$status <- "\u2705 Complete!"
 
         if (!is.null(values$fit)) {
+          # Chain the phosphosite step for a phospho experiment. Deliberately AFTER
+          # values$fit is set and the notification logic below: the protein-level
+          # result is already committed, so a phospho failure cannot take it down
+          # with it -- the user keeps their DE and gets an error about the site
+          # step only. It clicks the real control rather than duplicating it.
+          chain_phospho <- isTRUE(values$phospho_detected$detected) &&
+            isTRUE(input$run_phospho_with_pipeline %||% TRUE)
           if (isTRUE(values$phospho_detected$detected)) {
             nav_select("main_tabs", "Phosphoproteomics")
           } else {
             nav_select("main_tabs", "DE Dashboard")
           }
-          showNotification("\u2713 Pipeline complete! View results in tabs below.", type="message", duration=10)
+          if (chain_phospho) {
+            showNotification(
+              "\u2713 Pipeline complete \u2014 now running phosphosite analysis\u2026",
+              type = "message", duration = 8)
+            # A moment for the tab to render, so the control exists to be clicked.
+            shinyjs::delay(500, shinyjs::click("run_phospho_pipeline"))
+          } else {
+            showNotification("\u2713 Pipeline complete! View results in tabs below.",
+                             type = "message", duration = 10)
+          }
         } else {
           nav_select("main_tabs", "Data Overview")
           showNotification("\u2713 Quantification complete! View Expression Grid and QC tabs.", type="message", duration=10)
