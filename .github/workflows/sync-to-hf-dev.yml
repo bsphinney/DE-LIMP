@@ -1,0 +1,65 @@
+name: Sync to Hugging Face (dev)
+
+# Deploy any branch to the DEV Space, on demand.
+#
+# Why this exists rather than `git push hf-dev <branch>:main --force`: HF's pre-receive
+# hook scans everything in a push, including history, and rejects any blob over 10 MiB.
+# This repo's history contains such blobs (tests/fixtures/example_claude_export.zip is
+# 10.5 MB), so a raw history push to a Space can never succeed -- it fails on files that
+# are not even in the tree being deployed. Production has never hit this because it does
+# not push history either: it snapshots the working tree into a fresh clone of the Space.
+# This is that same approach, pointed at de-limp-dev and parameterised by branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy to the dev Space'
+        required: true
+        default: 'main'
+
+jobs:
+  sync-to-hf-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the branch being deployed
+        uses: actions/checkout@v4
+        with:
+          path: github-repo
+          ref: ${{ inputs.branch }}
+
+      - name: Checkout the dev Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git clone https://brettphinney:$HF_TOKEN@huggingface.co/spaces/brettsp/de-limp-dev hf-repo
+
+      - name: Sync files to HF
+        run: |
+          cd hf-repo
+          # Same exclusions as the production sync. `tests` matters most: it holds the
+          # 10.5 MB fixture that HF refuses.
+          rsync -av --delete \
+            --exclude='.git' --exclude='README.md' --exclude='.github' \
+            --exclude='tests' --exclude='docs/specs' --exclude='*_SPEC*.md' \
+            ../github-repo/ ./
+          cp README_HF.md README.md
+          # Belt and braces: nothing over HF's limit may reach the push, whatever a
+          # future branch adds. Fail loudly rather than get rejected at the remote.
+          big=$(find . -path ./.git -prune -o -type f -size +10M -print)
+          if [ -n "$big" ]; then
+            echo "::error::files over HF's 10 MiB limit would be pushed:"; echo "$big"; exit 1
+          fi
+
+      - name: Commit and push to the dev Space
+        run: |
+          cd hf-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add -A
+          git commit -m "Dev sync from ${{ inputs.branch }} (${{ github.sha }})" \
+            || echo "No changes to commit"
+          git push origin main
+
+      - name: Where it landed
+        run: echo "https://huggingface.co/spaces/brettsp/de-limp-dev"
