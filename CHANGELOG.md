@@ -1,5 +1,27 @@
 # Changelog
 
+## [4.0.9] — 2026-08-27
+
+### Fixed
+- **The phospho banner told you to click a button that does not exist.** It said "click
+  **Run Phosphosite Pipeline** in the sidebar"; the button is labelled **"Run Phosphosite
+  Analysis"**. Reported by a user who went looking for it and concluded the page was
+  broken. The wording now lives in one place and quotes the real label.
+- **Empty phospho tabs explained nothing.** Every output was gated with
+  `req(values$phospho_fit, …)`, which renders *nothing* — so Volcano, Site Table, Residue
+  Distribution, QC, Kinase Activity and Site Annotation were all blank, and blank is
+  indistinguishable from broken. They now say what is outstanding, via `validate(need(…))`.
+  Each names its own prerequisite and its own real button: the three KSEA/annotation tabs
+  are separate opt-in steps, so a generic "pipeline not run" would have pointed at the
+  wrong control.
+
+### Changed
+- **The banner now carries the action instead of describing it.** When groups are
+  assigned it shows a **Run Phosphosite Analysis** button directly; when they are not, it
+  still sends you to Assign Groups. Telling someone to find a control in a sidebar means
+  they have to find it — and this one sits below several other inputs. It clicks the real
+  sidebar button rather than duplicating the pipeline, so the two entry points cannot drift.
+
 ## [4.0.8] — 2026-08-27
 
 ### Fixed

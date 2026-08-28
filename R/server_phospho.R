@@ -291,6 +291,34 @@ server_phospho <- function(input, output, session, values, add_to_log) {
   # ============================================================================
   #  Run Phosphosite Analysis pipeline
   # ============================================================================
+  # The one place the "you have not run it yet" wording lives. It quotes the
+  # ACTUAL sidebar button label (ui.R: "Run Phosphosite Analysis"). The banner
+  # used to say "Run Phosphosite Pipeline" -- a button by that name does not
+  # exist, and the mismatch sent a user looking for it.
+  PHOSPHO_NOT_RUN_MSG <- paste(
+    "Phosphosite pipeline not yet run.",
+    "Assign sample groups in Data Overview \u2192 Assign Groups & Run,",
+    "then click 'Run Phosphosite Analysis' in the sidebar."
+  )
+  # Kinase activity and site annotation are separate opt-in steps with their own
+  # buttons, so a generic "pipeline not run" would send someone to the wrong control.
+  KSEA_NOT_RUN_MSG <- paste(
+    "Kinase activity not computed yet.",
+    "Run the phosphosite analysis first, then click",
+    "'Run Kinase Enrichment (KSEA)' under Advanced in the sidebar."
+  )
+  ANNOTATION_NOT_RUN_MSG <- paste(
+    "No site annotations yet.",
+    "Run the phosphosite analysis first, then click",
+    "'Query UniProt for Known Sites' under Advanced in the sidebar."
+  )
+
+  # Clicks the real sidebar control rather than duplicating its body, so the two
+  # entry points can never drift apart.
+  observeEvent(input$phospho_run_from_banner, {
+    shinyjs::click("run_phospho_pipeline")
+  })
+
   observeEvent(input$run_phospho_pipeline, {
     req(values$metadata)
 
@@ -533,7 +561,13 @@ server_phospho <- function(input, output, session, values, add_to_log) {
     }
 
     # --- Phospho detected: full UI ---
-    pipeline_done <- !is.null(values$phospho_fit)
+pipeline_done <- !is.null(values$phospho_fit)
+    # "Assign groups" means at least two of them -- the same test
+    # observeEvent(input$run_phospho_pipeline) applies before it will run.
+    groups_ready <- {
+      m <- values$metadata
+      !is.null(m) && length(unique(trimws(m$Group)[nzchar(trimws(m$Group))])) >= 2
+    }
 
     tagList(
       # Status & controls card
@@ -554,13 +588,27 @@ server_phospho <- function(input, output, session, values, add_to_log) {
               " Assign sample groups in the ",
               tags$strong("Data Overview \u2192 Assign Groups & Run"),
               " tab, then click ",
-              tags$strong("Run Phosphosite Pipeline"),
+              tags$strong("Run Phosphosite Analysis"),
               " in the sidebar to generate site-level results."
             ),
-            actionButton("phospho_go_to_assign",
-                          "Go to Assign Groups \u2192",
-                          class = "btn btn-warning btn-sm",
-                          icon = icon("arrow-right"))
+            # THE ACTION GOES WHERE THE INSTRUCTION IS. Telling someone to find a
+            # button in the sidebar means they have to find it -- and the sidebar
+            # button sits below several other controls, so it gets missed even by
+            # people who wrote the app. Which button shows depends on what is
+            # actually outstanding, so it is never advice for the wrong step:
+            #   groups not assigned yet -> send them to assign groups
+            #   groups assigned         -> run it, right here
+            if (isTRUE(groups_ready)) {
+              actionButton("phospho_run_from_banner",
+                            "Run Phosphosite Analysis",
+                            class = "btn btn-warning btn-sm",
+                            icon = icon("bolt"))
+            } else {
+              actionButton("phospho_go_to_assign",
+                            "Go to Assign Groups \u2192",
+                            class = "btn btn-warning btn-sm",
+                            icon = icon("arrow-right"))
+            }
           )
         },
 
@@ -764,7 +812,8 @@ server_phospho <- function(input, output, session, values, add_to_log) {
   #  Phospho Volcano Plot
   # ============================================================================
   output$phospho_volcano <- renderPlot({
-    req(values$phospho_fit, input$phospho_contrast_selector)
+    validate(need(values$phospho_fit, PHOSPHO_NOT_RUN_MSG))
+    req(input$phospho_contrast_selector)
 
     de <- limma::topTable(values$phospho_fit,
                           coef = input$phospho_contrast_selector,
@@ -891,7 +940,8 @@ server_phospho <- function(input, output, session, values, add_to_log) {
   #  Site Table
   # ============================================================================
   output$phospho_site_table <- DT::renderDT({
-    req(values$phospho_fit, input$phospho_contrast_selector)
+    validate(need(values$phospho_fit, PHOSPHO_NOT_RUN_MSG))
+    req(input$phospho_contrast_selector)
 
     de <- limma::topTable(values$phospho_fit,
                           coef = input$phospho_contrast_selector,
@@ -954,7 +1004,8 @@ server_phospho <- function(input, output, session, values, add_to_log) {
   #  Residue Distribution
   # ============================================================================
   output$phospho_residue_dist <- renderPlot({
-    req(values$phospho_fit, input$phospho_contrast_selector, values$phospho_site_info)
+    validate(need(values$phospho_fit, PHOSPHO_NOT_RUN_MSG))
+    req( input$phospho_contrast_selector, values$phospho_site_info)
 
     de <- limma::topTable(values$phospho_fit,
                           coef = input$phospho_contrast_selector,
@@ -1019,6 +1070,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
   #  Completeness QC
   # ============================================================================
   output$phospho_completeness <- renderPlot({
+    validate(need(values$phospho_site_matrix, PHOSPHO_NOT_RUN_MSG))
     req(values$phospho_site_matrix)
 
     mat <- values$phospho_site_matrix
@@ -1192,6 +1244,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
   # KSEA Bar Plot — Compact default view (top 8+8)
   output$ksea_barplot <- renderPlot({
+    validate(need(values$ksea_results, KSEA_NOT_RUN_MSG))
     req(values$ksea_results)
 
     ks <- values$ksea_results
@@ -1246,6 +1299,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
   # KSEA Results Table
   output$ksea_results_table <- DT::renderDT({
+    validate(need(values$ksea_results, KSEA_NOT_RUN_MSG))
     req(values$ksea_results)
     ks <- values$ksea_results
     # Round numeric columns
@@ -1504,6 +1558,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
   # Annotation table
   output$site_annotation_table <- DT::renderDT({
+    validate(need(values$phospho_annotations, ANNOTATION_NOT_RUN_MSG))
     req(values$phospho_annotations)
     ann <- values$phospho_annotations
 
