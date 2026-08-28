@@ -828,7 +828,7 @@ detected_contaminant_tags <- function(x) {
 #' @return data.frame in KSData's schema, with an attribute `ksea_source`
 #'   describing what was actually assembled — never a silent substitution.
 load_ksea_database <- function(
-    path = system.file_or_local("data/networkin_kinase_substrate_July2016.csv.gz")) {
+    path = system.file_or_local("data/networkin_kinase_substrate_ge5_July2016.csv")) {
   ks <- NULL
   utils::data("KSData", package = "KSEAapp", envir = environment())
   ks <- get("KSData", envir = environment())
@@ -845,8 +845,8 @@ load_ksea_database <- function(
   nk <- utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
   out <- rbind(psp[, names(nk), drop = FALSE], nk)
   attr(out, "ksea_source") <- sprintf(
-    "PhosphoSitePlus %d records (via KSEAapp) + NetworKIN %d records (full July 2016 table)",
-    nrow(psp), nrow(nk))
+    "PhosphoSitePlus %d records (via KSEAapp) + NetworKIN %d records (July 2016, score >= 5; %s)",
+    nrow(psp), nrow(nk), basename(path))
   out
 }
 

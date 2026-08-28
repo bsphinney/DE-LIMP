@@ -1146,7 +1146,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
           "# ships with DE-LIMP (KSEAapp bundles only an arbitrary 10,000-row sample).",
           "data('KSData', package = 'KSEAapp')",
           "psp <- KSData[KSData$Source == 'PhosphoSitePlus', ]",
-          "nk  <- read.csv('data/networkin_kinase_substrate_July2016.csv.gz')",
+          "nk  <- read.csv('data/networkin_kinase_substrate_ge5_July2016.csv')",
           "KSData <- rbind(psp[, names(nk)], nk)",
           "",
           "# Prepare phospho DE results for KSEA input",

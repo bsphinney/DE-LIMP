@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.0.8] — 2026-08-27
+
+### Fixed
+- **The KSEA database file broke the Hugging Face deploy.** HF rejects binary files
+  outright ("Please use xet to store binary files"), so v4.0.7's `.csv.gz` failed the sync
+  while GitHub accepted it happily. Shipped as plain text instead.
+- Shipping it as text meant choosing what to include: the full NetworKIN table is 22 MB
+  uncompressed, and **every row below score 5 is discarded by
+  `KSEA.Scores(NetworKIN.cutoff = 5)` before it can affect a result**. The usable subset is
+  1.7 MB. So `data/networkin_kinase_substrate_ge5_July2016.csv` holds the 17,896 NetworKIN
+  records that clear the cutoff, and KSEA behaves identically to shipping all 230,992.
+
+  Totals in use: **9,757 PhosphoSitePlus + 17,896 NetworKIN = 27,653** annotations, against
+  9,757 + 759 before. `load_ksea_database(path = ...)` takes any file in this schema, so
+  the complete table can be dropped in — and must be, if the cutoff ever becomes
+  user-settable.
+
 ## [4.0.7] — 2026-08-27
 
 ### Added

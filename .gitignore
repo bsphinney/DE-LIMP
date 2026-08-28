@@ -16,6 +16,11 @@ shinyapps/
 # Data files (usually too large for Git)
 *.parquet
 *.csv
+# ...except the kinase-substrate table KSEA scores against. `*.csv` above is for
+# user data; this one is code-adjacent reference data that MUST ship, or the app
+# falls back to KSEAapp's 759-usable-row sample on HF and in Docker while working
+# fine locally -- the exact silent degradation load_ksea_database() reports.
+!data/networkin_kinase_substrate_ge5_July2016.csv
 *.xlsx
 *.tsv
 *.feather
