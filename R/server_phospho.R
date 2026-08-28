@@ -1093,10 +1093,12 @@ server_phospho <- function(input, output, session, values, add_to_log) {
       incProgress(0.5, detail = "Computing KSEA scores...")
 
       tryCatch({
-        # Load PhosphoSitePlus + NetworKIN kinase-substrate database
-        ks_data <- NULL
-        data("KSData", package = "KSEAapp", envir = environment())
-        ks_data <- get("KSData", envir = environment())
+        # Load PhosphoSitePlus + NetworKIN kinase-substrate database.
+        # KSEAapp's bundled KSData carries an arbitrary 10,000-row sample of
+        # NetworKIN, of which only 759 survive NetworKIN.cutoff = 5 below; the
+        # complete table leaves 17,896. See load_ksea_database() in helpers.R.
+        ks_data <- load_ksea_database()
+        ks_source <- attr(ks_data, "ksea_source") %||% "unknown"
 
         # Suppress KSEAapp's built-in plot output
         grDevices::png(tempfile())
@@ -1124,6 +1126,12 @@ server_phospho <- function(input, output, session, values, add_to_log) {
           sprintf("# Contrast: %s", input$phospho_contrast_selector),
           sprintf("# Input: %d phosphosites with gene annotations", nrow(ksea_input)),
           sprintf("# Significant kinases (FDR < 0.05): %d", n_sig),
+          sprintf("# Kinase-substrate database: %s", ks_source),
+          sprintf("# Annotations passing NetworKIN.cutoff = 5: %d",
+                  sum(ks_data$Source == "PhosphoSitePlus") +
+                    sum(ks_data$Source == "NetworKIN" &
+                          suppressWarnings(as.numeric(ks_data$networkin_score)) >= 5,
+                        na.rm = TRUE)),
           "",
           "# --- Kinase-Substrate Enrichment Analysis (KSEA) ---",
           "# Uses PhosphoSitePlus + NetworKIN kinase-substrate relationships",
@@ -1134,7 +1142,12 @@ server_phospho <- function(input, output, session, values, add_to_log) {
           "#   Residue.Both (e.g. 'S472'), p (p-value), FC (fold change, NOT log2)",
           "",
           "library(KSEAapp)",
+          "# PhosphoSitePlus records come from KSEAapp; the full NetworKIN table",
+          "# ships with DE-LIMP (KSEAapp bundles only an arbitrary 10,000-row sample).",
           "data('KSData', package = 'KSEAapp')",
+          "psp <- KSData[KSData$Source == 'PhosphoSitePlus', ]",
+          "nk  <- read.csv('data/networkin_kinase_substrate_July2016.csv.gz')",
+          "KSData <- rbind(psp[, names(nk)], nk)",
           "",
           "# Prepare phospho DE results for KSEA input",
           "de_phospho <- topTable(fit_phospho, coef = contrast, number = Inf)",

@@ -1,5 +1,35 @@
 # Changelog
 
+## [4.0.7] — 2026-08-27
+
+### Added
+- **Full PhosphoSitePlus + NetworKIN kinase-substrate database for KSEA** (issue #3) —
+  240,749 records, exactly the table the reporter linked (verified row-for-row: identical
+  row set, zero differences in either direction).
+
+  `KSEAapp`'s bundled `KSData` carries all 9,757 PhosphoSitePlus records but only a
+  10,000-row slice of NetworKIN — and that slice is **not** a quality filter. It is
+  neither the top 10,000 by score nor the first 10,000 in file order, and its score
+  distribution matches the full set almost exactly (quartiles 1 / 1.03 / 1.19 / 2.03
+  against 1 / 1.03 / 1.19 / 2.01). Which substrates a kinase was credited with was
+  arbitrary.
+
+  It mattered more than the row count suggests, because `KSEA.Scores()` runs with
+  `NetworKIN.cutoff = 5`: only **759** of the sampled rows cleared it, against **17,896**
+  in the complete table — a 23.6x increase in usable predicted annotations. Measured on a
+  4,000-site synthetic input: **298 → 335 kinases scored** (37 newly scorable), median
+  substrates per kinase **4 → 7**.
+
+  DE-LIMP ships **only the NetworKIN half** (`data/networkin_kinase_substrate_July2016.csv.gz`,
+  3.0 MB). PhosphoSitePlus is licensed by Cell Signaling Technology under a formal licence
+  agreement (phosphosite.org/staticLicensing, verified 2026-08-27 — it was CC BY-NC-SA 3.0
+  when this dataset was published in 2016), so the curated half keeps arriving through the
+  `KSEAapp` dependency exactly as before and this repo redistributes none of it.
+
+  The reproducibility log now records which database actually scored and how many
+  annotations cleared the cutoff, and the emitted R rebuilds the same table — a run that
+  fell back to the sampled one says so rather than substituting silently (rule #2).
+
 ## [4.0.6] — 2026-08-27
 
 ### Fixed

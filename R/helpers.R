@@ -799,3 +799,71 @@ detected_contaminant_tags <- function(x) {
   }, logical(1))
   names(CONTAMINANT_PATTERNS)[present]
 }
+
+# ---------------------------------------------------------------------------
+# KSEA kinase-substrate database
+# ---------------------------------------------------------------------------
+#' The kinase-substrate table KSEA scores against.
+#'
+#' `KSEAapp`'s bundled `KSData` is 9,757 PhosphoSitePlus records plus a
+#' 10,000-row slice of NetworKIN. That slice is **not** a quality filter — it is
+#' neither the top 10,000 by score nor the first 10,000 in file order, and its
+#' score distribution matches the full set almost exactly (quartiles
+#' 1 / 1.03 / 1.19 / 2.03 against 1 / 1.03 / 1.19 / 2.01). It is an arbitrary
+#' ~4% sample, so which substrates a kinase is credited with is arbitrary too.
+#'
+#' That matters more than the row count suggests, because `KSEA.Scores()` is
+#' called with `NetworKIN.cutoff = 5`: of the 10,000 sampled rows only **759**
+#' survive it, against **17,896** in the complete dataset. Restoring the full
+#' NetworKIN table therefore multiplies the usable predicted annotations by
+#' ~23.6x. (Issue #3.)
+#'
+#' The PhosphoSitePlus half is taken from `KSEAapp` and is identical in both —
+#' this repo deliberately ships **only** the NetworKIN rows. PSP data is
+#' licensed by Cell Signaling Technology under a formal licence agreement
+#' (phosphosite.org/staticLicensing, verified 2026-08-27), so DE-LIMP
+#' redistributes none of it; the curated core arrives through the KSEAapp
+#' dependency exactly as before.
+#'
+#' @return data.frame in KSData's schema, with an attribute `ksea_source`
+#'   describing what was actually assembled — never a silent substitution.
+load_ksea_database <- function(
+    path = system.file_or_local("data/networkin_kinase_substrate_July2016.csv.gz")) {
+  ks <- NULL
+  utils::data("KSData", package = "KSEAapp", envir = environment())
+  ks <- get("KSData", envir = environment())
+  psp <- ks[ks$Source == "PhosphoSitePlus", , drop = FALSE]
+
+  if (is.null(path) || !nzchar(path) || !file.exists(path)) {
+    # Honest degradation: say which table was used rather than quietly scoring
+    # against the sampled one. (Architectural rule #2.)
+    attr(ks, "ksea_source") <- sprintf(
+      "KSEAapp bundled KSData (%d PhosphoSitePlus + %d NetworKIN) -- full NetworKIN table not found",
+      nrow(psp), sum(ks$Source == "NetworKIN"))
+    return(ks)
+  }
+  nk <- utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+  out <- rbind(psp[, names(nk), drop = FALSE], nk)
+  attr(out, "ksea_source") <- sprintf(
+    "PhosphoSitePlus %d records (via KSEAapp) + NetworKIN %d records (full July 2016 table)",
+    nrow(psp), nrow(nk))
+  out
+}
+
+#' Path to a file shipped with the app, wherever the app happens to be running
+#' from. Returns "" when it genuinely is not there.
+#'
+#' The working directory is not one thing: `shiny::runApp()` runs from the repo
+#' root, the container from /app, and testthat from tests/testthat. A lookup
+#' that only tried getwd() would silently miss the file in two of those and the
+#' app would quietly fall back to the sampled database.
+system.file_or_local <- function(rel) {
+  roots <- c(".", "..", "../..", "/app",
+             Sys.getenv("DELIMP_HOME", unset = NA_character_))
+  roots <- roots[!is.na(roots) & nzchar(roots)]
+  for (r in roots) {
+    p <- file.path(r, rel)
+    if (file.exists(p)) return(normalizePath(p, mustWork = FALSE))
+  }
+  ""
+}
