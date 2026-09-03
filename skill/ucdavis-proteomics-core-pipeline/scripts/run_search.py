@@ -124,6 +124,25 @@ def parallel_decision(engine, files, params, a):
                        "chain runs as job arrays, so a single search is the only option")
     ma = _diann_parallel_mod().mass_acc_status(params)
     if not ma["fixed"]:
+        # An unpinned --window is RECOVERABLE and must not decline the chain. diann_parallel
+        # measures the scan-window radius after step 1 (probe_window.py, --probe-window is on
+        # by default) and pins that one value into steps 2 and 4, which is precisely what
+        # estimate_params.py cannot do: the radius is a property of the acquisition scheme and
+        # has to be measured against a real file. That module already encodes this rule in its
+        # `win_probe` branch; leaving it out here made the two disagree, and the router lost.
+        #
+        # The cost of getting this wrong is not a warning, it is a silent demotion: the fallback
+        # is ONE single-shot search, and --threads parallelises WITHIN a run, not across runs.
+        # Measured at ~30 min/file, a 310-file cohort is ~155 h sequentially against a few hours
+        # for the chain -- the exact outcome the "always go through run_search.py" rule exists to
+        # prevent. Only an unpinned MASS ACCURACY is genuinely unrecoverable, because DIA-NN
+        # calibrates it per run against the library and there is no single value to carry forward.
+        mass_pinned = ma["ms1"] not in (None, 0) and ma["ms2"] not in (None, 0)
+        if mass_pinned:
+            return True, (f"{n} files > {a.parallel_threshold}, SLURM present, mass accuracy "
+                          f"fixed (MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm); --window is "
+                          "unpinned but recoverable -- step 1b measures it and pins it for "
+                          "steps 2+4")
         return False, (f"{n} files, but mass accuracy is not pinned in {params} "
                        f"({ma['reason']}); steps 3/5 reuse .quant files, so the chain needs "
                        "fixed --mass-acc/--mass-acc-ms1. Re-run estimate_params.py with the "
