@@ -122,14 +122,28 @@ def parallel_decision(engine, files, params, a):
     if not slurm_available():
         return False, (f"{n} files, but no SLURM here (sbatch not on PATH) -- the 5-step "
                        "chain runs as job arrays, so a single search is the only option")
-    ma = _diann_parallel_mod().mass_acc_status(params)
-    if not ma["fixed"]:
-        return False, (f"{n} files, but mass accuracy is not pinned in {params} "
-                       f"({ma['reason']}); steps 3/5 reuse .quant files, so the chain needs "
-                       "fixed --mass-acc/--mass-acc-ms1. Re-run estimate_params.py with the "
-                       "real instrument to enable parallel")
-    return True, (f"{n} files > {a.parallel_threshold}, SLURM present, mass accuracy "
-                  f"{ma['reason']}")
+    # THE routing rule lives in diann_parallel.parallel_safe(), which the generator consumes
+    # too, so the router can no longer decline a cfg the chain would happily run. That drift
+    # is the whole bug: an unpinned --window -- which estimate_params.py omits BY DESIGN,
+    # because the scan-window radius has to be measured against a real file, not guessed --
+    # read as "not parallel-safe" here while diann_parallel was ready to measure it in step
+    # 1b. The router won, and the fallback is not a slower path but a different order of
+    # magnitude: --threads parallelises WITHIN a run, not across runs, so at ~30 min/file a
+    # 310-file cohort is ~155 h sequential against a few hours for the chain. Nothing errors;
+    # SLURM reports success and the user waits a week.
+    #
+    # The defaults below match what run_diann_parallel() actually passes today (probing on,
+    # no seed library). If this ever grows --seed-lib or --no-probe-window passthroughs, they
+    # must be forwarded here as well, or the two answers diverge again.
+    safe = _diann_parallel_mod().parallel_safe(params)
+    if not safe["ok"]:
+        return False, (f"{n} files, but {params} is not parallel-safe: {safe['reason']}; "
+                       "steps 3/5 reuse .quant files, so anything DIA-NN auto-optimises per "
+                       "file is applied inconsistently between passes and then stitched "
+                       "together. Re-run estimate_params.py with the real instrument "
+                       "(timsTOF 15/15, Astral 4/10, Orbitrap by resolution) to enable "
+                       "parallel")
+    return True, (f"{n} files > {a.parallel_threshold}, SLURM present, {safe['reason']}")
 
 
 def ensure_temp_dirs(params, out):
@@ -1191,6 +1205,19 @@ def main():
 
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
+    if use_parallel and a.sbatch:
+        # --sbatch asks for ONE script to submit; the chain instead generates six and a
+        # submit.sh that sbatches them in dependency order, so there is nothing to write
+        # here. Say so before the caller's `&& sbatch job.sh` fails on a file we never
+        # created -- SKILL.md documents exactly that chained invocation, and until this
+        # PR it worked, because a big cohort declined to the single-shot path where
+        # --sbatch IS honoured. Routing it to the chain is what made the flag moot, so
+        # the routing change owes the caller this line.
+        sys.stderr.write(
+            f"[run_search] NOTE: --sbatch {a.sbatch} does not apply to the 5-step chain "
+            f"and no such file was written.\n"
+            f"[run_search] The chain submits itself: run `bash {os.path.join(a.out, 'submit.sh')}` "
+            f"(or hive_exec.sh 'bash .../submit.sh'), NOT sbatch.\n")
     if use_parallel:
         res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a)
     elif engine == "diann":
@@ -1226,7 +1253,13 @@ def main():
             or (bundle.get("engine", {}) or {}).get("version")
         with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
             json.dump({"engine": engine, "version": version, "resolved_command": cmd,
-                       "params_file": a.params, "fasta": a.fasta, "threads": a.threads,
+                       "params_file": a.params,
+                       # where the FULLY-resolved parameters land. The 5-step chain measures
+                       # the scan window at run time (step 1b), so a.params alone does not
+                       # describe what actually ran and replaying it would not reproduce it.
+                       "resolved_params_file": (res.get("resolved_cfg") or a.params
+                                                if isinstance(res, dict) else a.params),
+                       "fasta": a.fasta, "threads": a.threads,
                        "n_files": len(files), "files": files,
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
