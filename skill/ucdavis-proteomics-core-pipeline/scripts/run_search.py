@@ -122,33 +122,28 @@ def parallel_decision(engine, files, params, a):
     if not slurm_available():
         return False, (f"{n} files, but no SLURM here (sbatch not on PATH) -- the 5-step "
                        "chain runs as job arrays, so a single search is the only option")
-    ma = _diann_parallel_mod().mass_acc_status(params)
-    if not ma["fixed"]:
-        # An unpinned --window is RECOVERABLE and must not decline the chain. diann_parallel
-        # measures the scan-window radius after step 1 (probe_window.py, --probe-window is on
-        # by default) and pins that one value into steps 2 and 4, which is precisely what
-        # estimate_params.py cannot do: the radius is a property of the acquisition scheme and
-        # has to be measured against a real file. That module already encodes this rule in its
-        # `win_probe` branch; leaving it out here made the two disagree, and the router lost.
-        #
-        # The cost of getting this wrong is not a warning, it is a silent demotion: the fallback
-        # is ONE single-shot search, and --threads parallelises WITHIN a run, not across runs.
-        # Measured at ~30 min/file, a 310-file cohort is ~155 h sequentially against a few hours
-        # for the chain -- the exact outcome the "always go through run_search.py" rule exists to
-        # prevent. Only an unpinned MASS ACCURACY is genuinely unrecoverable, because DIA-NN
-        # calibrates it per run against the library and there is no single value to carry forward.
-        mass_pinned = ma["ms1"] not in (None, 0) and ma["ms2"] not in (None, 0)
-        if mass_pinned:
-            return True, (f"{n} files > {a.parallel_threshold}, SLURM present, mass accuracy "
-                          f"fixed (MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm); --window is "
-                          "unpinned but recoverable -- step 1b measures it and pins it for "
-                          "steps 2+4")
-        return False, (f"{n} files, but mass accuracy is not pinned in {params} "
-                       f"({ma['reason']}); steps 3/5 reuse .quant files, so the chain needs "
-                       "fixed --mass-acc/--mass-acc-ms1. Re-run estimate_params.py with the "
-                       "real instrument to enable parallel")
-    return True, (f"{n} files > {a.parallel_threshold}, SLURM present, mass accuracy "
-                  f"{ma['reason']}")
+    # THE routing rule lives in diann_parallel.parallel_safe(), which the generator consumes
+    # too, so the router can no longer decline a cfg the chain would happily run. That drift
+    # is the whole bug: an unpinned --window -- which estimate_params.py omits BY DESIGN,
+    # because the scan-window radius has to be measured against a real file, not guessed --
+    # read as "not parallel-safe" here while diann_parallel was ready to measure it in step
+    # 1b. The router won, and the fallback is not a slower path but a different order of
+    # magnitude: --threads parallelises WITHIN a run, not across runs, so at ~30 min/file a
+    # 310-file cohort is ~155 h sequential against a few hours for the chain. Nothing errors;
+    # SLURM reports success and the user waits a week.
+    #
+    # The defaults below match what run_diann_parallel() actually passes today (probing on,
+    # no seed library). If this ever grows --seed-lib or --no-probe-window passthroughs, they
+    # must be forwarded here as well, or the two answers diverge again.
+    safe = _diann_parallel_mod().parallel_safe(params)
+    if not safe["ok"]:
+        return False, (f"{n} files, but {params} is not parallel-safe: {safe['reason']}; "
+                       "steps 3/5 reuse .quant files, so anything DIA-NN auto-optimises per "
+                       "file is applied inconsistently between passes and then stitched "
+                       "together. Re-run estimate_params.py with the real instrument "
+                       "(timsTOF 15/15, Astral 4/10, Orbitrap by resolution) to enable "
+                       "parallel")
+    return True, (f"{n} files > {a.parallel_threshold}, SLURM present, {safe['reason']}")
 
 
 def ensure_temp_dirs(params, out):
@@ -1245,7 +1240,13 @@ def main():
             or (bundle.get("engine", {}) or {}).get("version")
         with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
             json.dump({"engine": engine, "version": version, "resolved_command": cmd,
-                       "params_file": a.params, "fasta": a.fasta, "threads": a.threads,
+                       "params_file": a.params,
+                       # where the FULLY-resolved parameters land. The 5-step chain measures
+                       # the scan window at run time (step 1b), so a.params alone does not
+                       # describe what actually ran and replaying it would not reproduce it.
+                       "resolved_params_file": (res.get("resolved_cfg") or a.params
+                                                if isinstance(res, dict) else a.params),
+                       "fasta": a.fasta, "threads": a.threads,
                        "n_files": len(files), "files": files,
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,

@@ -733,11 +733,22 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     (the chain is job arrays — nothing to fall back to) or when the cfg is **not
     parallel-safe**. Steps 3/5 reuse the `.quant` files, so *anything* DIA-NN
     auto-optimises per file gets stitched together inconsistently — DIA-NN's own warning
-    names **mass accuracy AND scan window**. Both must be pinned:
-    - **mass accuracy** — re-run `estimate_params.py` with the **real instrument** (step 6b).
-    - **`--window`** — `estimate_params.py` omits it, which means auto. **Measure it**,
-      never guess: on an 18-file poplar run DIA-NN inferred radius 7 for seventeen files
-      and 8 for one, and the chain combined them. After step 1 has built the library:
+    names **mass accuracy AND scan window**. The two are not equally recoverable:
+    - **mass accuracy — you must pin it.** DIA-NN calibrates it per run against the
+      library, so there is no one value to carry into steps 3/5. Unpinned (or `0`, or
+      negative) declines the chain: re-run `estimate_params.py` with the **real
+      instrument** (step 6b).
+    - **`--window` — the chain handles it; do nothing.** `estimate_params.py` omits it by
+      design, because the radius depends on the acquisition scheme and has to be
+      *measured*. **Step 1b** does that automatically: it runs `probe_window.py` once
+      after library prediction and pins the one radius into steps 2 and 4, writing the
+      fully-resolved parameters to `<out>/params.resolved.cfg`. An unpinned or `0`
+      `--window` therefore does **not** decline the chain — don't send the user off to
+      measure it by hand, and don't read such a routing decline as a window problem.
+      (Why it matters: on an 18-file poplar run DIA-NN inferred radius 7 for seventeen
+      files and 8 for one, and the chain combined them.) A **non-numeric** `--window` is
+      a typo and does decline — fix the cfg. To measure it yourself anyway, e.g. with
+      `--no-probe-window`, after step 1 has built the library:
       ```bash
       python3 scripts/probe_window.py --diann "<diann cmd>" --raw <one file> \
           --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg>

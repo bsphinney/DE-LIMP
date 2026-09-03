@@ -30,6 +30,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
 import run_search  # noqa: E402
+import diann_parallel as dp  # noqa: E402
 
 
 class Args:
@@ -92,6 +93,95 @@ class WindowIsRecoverableTests(unittest.TestCase):
             use, why = run_search.parallel_decision("diann", ["f%d.d" % i for i in range(310)],
                                                     cfg, Args())
             self.assertTrue(use)
+
+
+class WindowZeroAndJunkTests(unittest.TestCase):
+    """`--window 0` is recoverable; `--window <junk>` is not; and in neither case may a
+    --window from the cfg reach the same command line as the measured one."""
+
+    def setUp(self):
+        self._real = run_search.slurm_available
+        run_search.slurm_available = lambda: True
+
+    def tearDown(self):
+        run_search.slurm_available = self._real
+
+    def test_window_zero_routes_and_cfg_window_is_dropped(self):
+        """0 is DIA-NN for "optimise automatically" -- per file, which is exactly the
+        inconsistency step 1b removes, so it is a case to FIX, not a case to decline.
+
+        But routing it is only safe if the cfg's own --window comes out: steps 2 and 4 get
+        `--window $(cat window.txt)` PREFIXED, so a surviving `--window 0` puts two values on
+        one line. DIA-NN then either honours the wrong one (silently undoing step 1b, no
+        error) or rejects 0 outright and kills every array task, after step 1 has already
+        paid for the library prediction.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _cfg(d, "--mass-acc 15\n--mass-acc-ms1 15\n--window 0\n--qvalue 0.01\n")
+            use, why = run_search.parallel_decision("diann", ["f%d.d" % i for i in range(310)],
+                                                    cfg, Args())
+            self.assertTrue(use, f"declined a recoverable --window 0: {why}")
+            flags = dp.read_cfg_flags(cfg, drop=("--window",))
+            self.assertNotIn("--window", flags,
+                             "cfg --window survived into the step flags; it would collide "
+                             "with the measured one")
+            self.assertIn("--qvalue", flags, "dropping --window must not drop anything else")
+
+    def test_unparseable_window_declines(self):
+        """A typo is a mistake to report, not something to quietly measure over."""
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _cfg(d, "--mass-acc 15\n--mass-acc-ms1 15\n--window wide\n")
+            use, why = run_search.parallel_decision("diann", ["f%d.d" % i for i in range(310)],
+                                                    cfg, Args())
+            self.assertFalse(use, "measured over a typo'd --window instead of reporting it")
+            self.assertIn("window", why)
+
+    def test_negative_mass_accuracy_declines(self):
+        """`not in (None, 0)` accepted any non-zero float, so a corrupt cfg routed a whole
+        cohort to the cluster; DIA-NN exits 0 on fatal errors, so it surfaces late."""
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _cfg(d, "--mass-acc -3\n--mass-acc-ms1 15\n")
+            use, why = run_search.parallel_decision("diann", ["f%d.d" % i for i in range(310)],
+                                                    cfg, Args())
+            self.assertFalse(use)
+
+
+class RouterAndGeneratorAgreeTests(unittest.TestCase):
+    """The original bug was DRIFT: run_search decided one way, diann_parallel the other, and
+    the router won. Pinning each side's answer separately would not have caught it -- this
+    asserts they are the SAME answer, for every shape of cfg we know about."""
+
+    CASES = [
+        ("pinned, window unset", "--mass-acc 15\n--mass-acc-ms1 15\n"),
+        ("pinned, window 0", "--mass-acc 15\n--mass-acc-ms1 15\n--window 0\n"),
+        ("fully pinned", "--mass-acc 15\n--mass-acc-ms1 15\n--window 7\n"),
+        ("no mass accuracy", "--qvalue 0.01\n"),
+        ("mass accuracy auto", "--mass-acc 0\n--mass-acc-ms1 0\n"),
+        ("mass accuracy negative", "--mass-acc -3\n--mass-acc-ms1 15\n"),
+        ("window junk", "--mass-acc 15\n--mass-acc-ms1 15\n--window wide\n"),
+        ("ms1 only", "--mass-acc-ms1 15\n"),
+    ]
+
+    def setUp(self):
+        self._real = run_search.slurm_available
+        run_search.slurm_available = lambda: True
+
+    def tearDown(self):
+        run_search.slurm_available = self._real
+
+    def test_router_matches_generator_for_every_cfg_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            for label, body in self.CASES:
+                cfg = os.path.join(d, label.replace(" ", "_").replace(",", "") + ".cfg")
+                with open(cfg, "w") as fh:
+                    fh.write(body)
+                routed, why = run_search.parallel_decision(
+                    "diann", ["f%d.d" % i for i in range(310)], cfg, Args())
+                # the generator's own verdict, with the defaults run_diann_parallel passes
+                generated = dp.parallel_safe(cfg)["ok"]
+                self.assertEqual(routed, generated,
+                                 f"{label}: router says {routed}, generator says "
+                                 f"{generated} -- they must not disagree ({why})")
 
 
 if __name__ == "__main__":
