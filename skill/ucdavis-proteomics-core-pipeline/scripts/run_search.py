@@ -1205,6 +1205,19 @@ def main():
 
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
+    if use_parallel and a.sbatch:
+        # --sbatch asks for ONE script to submit; the chain instead generates six and a
+        # submit.sh that sbatches them in dependency order, so there is nothing to write
+        # here. Say so before the caller's `&& sbatch job.sh` fails on a file we never
+        # created -- SKILL.md documents exactly that chained invocation, and until this
+        # PR it worked, because a big cohort declined to the single-shot path where
+        # --sbatch IS honoured. Routing it to the chain is what made the flag moot, so
+        # the routing change owes the caller this line.
+        sys.stderr.write(
+            f"[run_search] NOTE: --sbatch {a.sbatch} does not apply to the 5-step chain "
+            f"and no such file was written.\n"
+            f"[run_search] The chain submits itself: run `bash {os.path.join(a.out, 'submit.sh')}` "
+            f"(or hive_exec.sh 'bash .../submit.sh'), NOT sbatch.\n")
     if use_parallel:
         res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a)
     elif engine == "diann":

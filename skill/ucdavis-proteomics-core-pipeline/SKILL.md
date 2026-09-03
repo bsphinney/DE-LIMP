@@ -762,6 +762,11 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
 - **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` (over `hive_exec.sh` for a
   remote HIVE run). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to
   build `report.parquet`.
+  - **Except when it routed to the 5-step chain** (DIA-NN, >5 files, SLURM — i.e. most
+    real cohorts). The chain generates six scripts plus its own `submit.sh`, so there is
+    no single job to submit and `--sbatch` writes nothing; `run_search.py` prints a NOTE
+    saying so. Run **`bash <out>/submit.sh`** instead. Check the routing line it prints
+    before reaching for `sbatch`.
 - Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
 → detail: `references/search-engines.md`.
 
