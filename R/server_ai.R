@@ -147,28 +147,60 @@ server_ai <- function(input, output, session, values) {
       incProgress(0.7, detail = "Constructing prompt...")
 
       # --- Build the full prompt ---
+      # NOTE ON THE RULES BLOCK (v4.1.0): each rule below fixes a failure measured
+      # against four open-weight models on 2026-09-10/11 using this app's own demo
+      # dataset. The previous version of this prompt asked the model to discuss
+      # biology "where you recognize the gene name" — an explicit instruction to
+      # answer from memory, which produced confidently wrong protein identities
+      # (ALDH3A1 reported as a haemoglobin, with a paragraph of invented
+      # interpretation built on it). Do not reintroduce that phrasing.
       system_prompt <- paste0(
         "You are a senior proteomics and systems biology consultant. Write a comprehensive ",
         "analysis of the differential expression results across ALL comparisons below.\n\n",
+
+        "## RULES - these override any stylistic instruction below\n\n",
+        "1. IDENTITY. Name a protein ONLY using the gene name supplied in the data. Never ",
+        "from memory. Where no gene name is supplied, use the accession alone and say the ",
+        "identity was not provided.\n",
+        "2. BIOLOGY. Discuss function, pathway or disease association ONLY for proteins whose ",
+        "identity was supplied. If you cannot support a claim from the data given, omit it. ",
+        "Do not write biology you merely recognise.\n",
+        "3. NUMBERS. Do not state any numeric fact - fold-change, p-value, residue count, ",
+        "molecular weight - unless it appears in the data below.\n",
+        "4. EFFECT SIZE vs SIGNIFICANCE. 'Most increased' and 'most decreased' mean the ",
+        "largest and smallest logFC. That is a question about effect size, not significance; ",
+        "the protein with the best p-value is often a different one. If they differ, say both.\n",
+        "5. EVIDENCE STRENGTH. Where NPrec (precursor count) and PropObs (proportion of runs ",
+        "observed) are supplied, cite them when calling a result reliable or unreliable. ",
+        "Treat NPrec = 1 or PropObs < 0.5 as weak evidence regardless of p-value.\n",
+        "6. TECHNICAL vs BIOLOGICAL. If a comparison is strongly one-sided, consider whether ",
+        "it reflects a global normalisation or loading difference rather than biology, and ",
+        "say which you think it is. If the contrast is a method or sample-preparation ",
+        "comparison rather than a biological one, say so plainly instead of constructing a ",
+        "biological narrative.\n\n",
+
         "Structure your response with these markdown sections:\n\n",
         "## Overview\n",
         "Number of comparisons analyzed, total significant proteins per comparison (up/down split). ",
-        "Overall assessment of the experiment's quality and scope.\n\n",
+        "Overall assessment of the experiment's quality and scope, including whether any comparison ",
+        "looks technical rather than biological (rule 6).\n\n",
         "## Key Findings Per Comparison\n",
         "For each comparison: highlight the top upregulated and downregulated proteins by fold-change ",
-        "(use gene names). Note any comparison with unusually few or many significant hits.\n\n",
+        "(use the supplied gene names). Note any comparison with unusually few or many significant hits.\n\n",
+        "## Evidence Quality\n",
+        "For the headline hits, assess the strength of the underlying measurement (rule 5). Name any ",
+        "hit whose statistics look strong but whose measurement is thin, and any contaminant entries ",
+        "(accessions beginning Cont_) that reached significance.\n\n",
         "## Cross-Comparison Biomarkers\n",
         "Proteins significant in multiple comparisons are highest-confidence candidates. ",
         "Discuss consistency of direction (always up, always down, or mixed across comparisons).\n\n",
         "## High-Confidence Biomarker Insights\n",
-        "For the most stable proteins (lowest coefficient of variation): discuss their known biological functions, ",
-        "pathway involvement, and disease associations where you recognize the gene name. ",
-        "Assess their potential as reliable biomarkers based on the combination of low CV, ",
-        "significant p-value, and meaningful fold-change.\n\n",
+        "For the most stable proteins (lowest coefficient of variation): assess their potential as ",
+        "reliable biomarkers based on the combination of low CV, significant p-value, meaningful ",
+        "fold-change and measurement depth. Discuss biology only within rule 2.\n\n",
         "## Biological Interpretation\n",
-        "Suggest what biological processes or pathways may be affected based on the protein lists. ",
-        "Note any well-known protein families, complexes, or signaling cascades represented. ",
-        "If the data suggests a clear biological narrative, describe it.\n\n",
+        "Suggest what biological processes or pathways may be affected, within rule 2. ",
+        "If the data does not support a biological narrative, say so rather than constructing one.\n\n",
         "Use markdown formatting with headers. Be scientific but accessible."
       )
 
@@ -186,7 +218,8 @@ server_ai <- function(input, output, session, values) {
       message(sprintf("[DE-LIMP] AI Summary prompt: %d characters, %d contrasts", nchar(final_prompt), ctx$n_contrasts))
 
       incProgress(0.8, detail = "Asking AI...")
-      ai_summary <- ask_gemini_text_chat(final_prompt, input$user_api_key, input$model_name)
+      ai_summary <- ask_ai_text(final_prompt, input$user_api_key, input$model_name,
+                                input$ai_provider %||% "gemini", input$ai_base_url)
 
       # Store for export and show download buttons
       values$ai_summary_text <- ai_summary
@@ -1939,7 +1972,7 @@ server_ai <- function(input, output, session, values) {
           "It identifies the top differentially expressed proteins per comparison, finds proteins that are significant across multiple ",
           "comparisons (cross-comparison biomarkers), and highlights the most reproducibly measured proteins (lowest CV) as high-confidence candidates."),
         p("The AI then provides biological interpretation, discussing known functions, pathway involvement, and disease associations for the top biomarkers."),
-        tags$h6("What data is sent to Google Gemini"),
+        tags$h6(paste0("What data is sent to ", ai_provider_field(input$ai_provider, "destination"))),
         tags$ul(
           tags$li("Top significant proteins per comparison (gene names, log2 fold-changes, adjusted p-values)"),
           tags$li("Proteins significant across multiple comparisons with their fold-changes"),
@@ -1954,10 +1987,12 @@ server_ai <- function(input, output, session, values) {
           tags$li("QC statistics or run-level information")
         ),
         tags$h6("Privacy"),
-        p("Data is sent to Google's Gemini API and processed according to Google's API terms of service. ",
-          "No data is stored permanently by this app \u2014 uploaded files are deleted when your session ends."),
+        p("This request goes to ", strong(ai_provider_field(input$ai_provider, "destination")),
+          ", the provider currently selected in the sidebar, and is processed under that provider's terms. ",
+          "No data is stored permanently by this app."),
         tags$h6("API key"),
-        p("You need a Google Gemini API key (enter in the sidebar). Get one free at ",
+        p("You need an API key for the selected provider (enter in the sidebar). ",
+          "For Google Gemini, get one free at ",
           tags$a(href = "https://aistudio.google.com/apikey", target = "_blank", "Google AI Studio"), ".")
       )
     ))
@@ -1970,30 +2005,168 @@ server_ai <- function(input, output, session, values) {
       size = "l", easyClose = TRUE, footer = modalButton("Close"),
       div(style = "font-size: 0.9em; line-height: 1.7;",
         tags$h6("How it works"),
-        p("Data Chat uses the Google Gemini API to provide AI-powered analysis of your proteomics data. ",
-          "Your QC statistics and the top 100-800 differentially expressed proteins (scaled by dataset size) are uploaded to Gemini for context-aware responses."),
+        p("Data Chat sends your QC statistics and the top 100-800 differentially expressed proteins ",
+          "(scaled by dataset size) to ", strong(ai_provider_field(input$ai_provider, "destination")),
+          " for context-aware responses. Choose the provider in the sidebar."),
         tags$h6("What data is sent"),
         tags$ul(
           tags$li("QC statistics (precursor counts, protein counts, MS1 signal per sample)"),
-          tags$li("Top 800 DE proteins with fold-changes and p-values"),
+          tags$li("Top 800 DE proteins: fold-changes, adjusted p-values, and per-group mean/SD"),
           tags$li("Your chat messages")
         ),
+        tags$h6("What is NOT sent"),
+        tags$ul(
+          tags$li("Per-sample expression values \u2014 limpa/limma have already done the statistics, ",
+                  "so only the summarised results are sent")
+        ),
         tags$h6("Privacy"),
-        p("Data is sent to Google's Gemini API. It is processed according to Google's API terms of service. ",
-          "No data is stored permanently by this app \u2014 uploaded files are deleted when your session ends."),
+        p("This request goes to ", strong(ai_provider_field(input$ai_provider, "destination")),
+          " and is processed under that provider's terms. ",
+          "No data is stored permanently by this app."),
         tags$h6("Plot selection integration"),
         p("If you select proteins in the volcano plot or results table, the chat knows about your selection. ",
           "The AI can also suggest proteins to highlight \u2014 look for the ",
           tags$em("'I have updated your plots'"), " message after AI responses."),
         tags$h6("API key"),
-        p("You need a Google Gemini API key (enter in the sidebar). Get one free at ",
+        p("You need an API key for the selected provider (enter in the sidebar). ",
+          "For Google Gemini, get one free at ",
           tags$a(href = "https://aistudio.google.com/apikey", target = "_blank", "Google AI Studio"), ".")
       )
     ))
   })
 
-  observeEvent(input$check_models, { if (nchar(input$user_api_key) < 10) { showNotification("Please enter a valid API Key first.", type="error"); return() }; withProgress(message = "Checking Google Models...", { models <- list_google_models(input$user_api_key); if (length(models) > 0 && !grepl("Error", models[1])) { showModal(modalDialog(title = "Available Models for Your Key", p("Copy one of these into the Model Name box:"), tags$textarea(paste(models, collapse="\n"), rows=10, style="width:100%;"), easyClose = TRUE)) } else { showNotification(paste("Failed to list models:", models), type="error") } }) })
+  # --- Provider switch: swap the key placeholder and the default model name ---
+  observeEvent(input$ai_provider, {
+    updateTextInput(session, "model_name",
+                    value = ai_provider_field(input$ai_provider, "default_model"),
+                    placeholder = ai_provider_field(input$ai_provider, "default_model"))
+    updateTextInput(session, "user_api_key",
+                    label = ai_provider_field(input$ai_provider, "key_label"),
+                    placeholder = ai_provider_field(input$ai_provider, "key_placeholder"))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$check_models, {
+    if (nchar(input$user_api_key %||% "") < 10) {
+      showNotification("Please enter a valid API Key first.", type = "error"); return()
+    }
+    provider <- input$ai_provider %||% "gemini"
+    withProgress(message = paste("Checking models on", ai_provider_field(provider, "label")), {
+      models <- list_ai_models(input$user_api_key, provider, input$ai_base_url)
+      if (length(models) > 0 && !grepl("Error", models[1])) {
+        showModal(modalDialog(title = "Available Models for Your Key",
+          p("Copy one of these into the Model Name box:"),
+          tags$textarea(paste(models, collapse = "\n"), rows = 10, style = "width:100%;"),
+          easyClose = TRUE))
+      } else {
+        showNotification(paste("Failed to list models:", models), type = "error")
+      }
+    })
+  })
   output$chat_selection_indicator <- renderText({ if (!is.null(values$plot_selected_proteins)) { paste("\u2705 Current Selection:", length(values$plot_selected_proteins), "Proteins from Plots.") } else { "\u2139\ufe0f No proteins selected in plots." } })
+
+  # --- SHARED DATA CHAT PAYLOAD BUILDER ---------------------------------------
+  # Both Data Chat handlers (auto-summarize and free-text) used to carry
+  # identical copies of this block. One definition (CLAUDE.md rule #3).
+  #
+  # Returns pre-formatted tab-separated text via format_ai_table(), which drops
+  # per-sample intensity columns: limpa/limma have already done the statistics,
+  # so the model interprets logFC/adj.P.Val rather than recomputing from raw
+  # values. Group-level Mean_/SD_ summaries are kept where metadata allows.
+  build_chat_data_table <- function(include_selected = TRUE) {
+    n_samples <- ncol(values$y_protein$E)
+    n_max <- if (n_samples > 200) 100 else if (n_samples > 100) 200 else if (n_samples > 50) 400 else 800
+
+    df_de <- topTable(values$fit, coef = input$contrast_selector, number = n_max)
+
+    # Make sure proteins the user selected in a plot are present even if they
+    # fall outside the top-N cut
+    if (include_selected && !is.null(values$plot_selected_proteins)) {
+      missing_ids <- setdiff(values$plot_selected_proteins, rownames(df_de))
+      if (length(missing_ids) > 0) {
+        valid_missing <- intersect(missing_ids, rownames(values$fit$coefficients))
+        if (length(valid_missing) > 0) {
+          df_extra <- topTable(values$fit, coef = input$contrast_selector, number = Inf)[valid_missing, ]
+          df_de <- rbind(df_de, df_extra)
+        }
+      }
+    }
+
+    df_full <- cbind(Protein = rownames(df_de), df_de)
+
+    # Attach the annotations DIA-NN already carries (Genes, from the search FASTA)
+    # plus evidence strength (NPrec/PropObs). Without these the model has to recall
+    # a protein's identity, which is where every fabricated annotation measured on
+    # 2026-09-10 came from. Entirely local — no lookup, no network, works offline.
+    #
+    # Deliberately NOT sent, after measuring the cost per row against a fixed
+    # character budget:
+    #   Protein.Names — redundant with Genes (AL3A1_HUMAN vs ALDH3A1)
+    #   Mean_/SD_     — the group summaries were mainly serving as an artifact
+    #                   signal (SD == 0 meaning "imputed"), and PropObs states
+    #                   that directly instead of leaving it to be inferred.
+    # Dropping both buys ~210 extra proteins in the same budget (444 -> 654),
+    # so this is more depth AND more information, not a trade.
+    ann <- values$y_protein$genes
+    if (!is.null(ann) && nrow(ann) > 0) {
+      ann_cols <- intersect(c("Genes", "NPrec", "PropObs"), names(ann))
+      if (length(ann_cols) > 0) {
+        idx <- match(rownames(df_de), rownames(ann))
+        for (cl in ann_cols) df_full[[cl]] <- ann[[cl]][idx]
+        if ("PropObs" %in% ann_cols) df_full$PropObs <- round(df_full$PropObs, 3)
+      }
+    }
+
+    # Cap the payload to what the selected provider's context can take. DE
+    # tables tokenise at ~1 char/token (measured), so a char budget is a token
+    # budget; trimming drops the least-significant rows first.
+    budget <- ai_provider_field(input$ai_provider %||% "gemini", "max_payload_chars")
+    tbl <- format_ai_table(df_full, max_chars = budget)
+    message(sprintf("[DE-LIMP] AI payload: %d proteins x %d samples, %d chars (~%d tokens, budget %d)",
+                    nrow(df_full), n_samples, nchar(tbl),
+                    round(nchar(tbl) / ai_chars_per_token()), budget))
+    tbl
+  }
+
+  # QC table shared by both handlers
+  build_chat_qc <- function() {
+    if (is.null(values$qc_stats) || is.null(values$metadata)) return(NULL)
+    left_join(values$qc_stats, values$metadata, by = c("Run" = "File.Name")) %>%
+      dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal)
+  }
+
+  # --- PROJECT MEMORY --------------------------------------------------------
+  # The user's own project name and notes from the unified activity log. Cached
+  # per session so Data Chat does not re-read the CSV on every message.
+  #
+  # Only user-authored text is carried forward. Model conclusions are NOT
+  # persisted: a confident fabrication would become durable project knowledge
+  # and compound across sessions (CLAUDE.md rule #2).
+  chat_project_ctx <- reactiveVal(NULL)
+  get_project_notes <- function() {
+    cached <- chat_project_ctx()
+    if (!is.null(cached)) return(cached)
+    out <- tryCatch({
+      log <- activity_log_read()
+      if (is.null(log) || nrow(log) == 0) {
+        list(project = NULL, notes = NULL)
+      } else {
+        row <- log[nrow(log), , drop = FALSE]
+        list(project = row$project %||% NULL, notes = row$notes %||% NULL)
+      }
+    }, error = function(e) list(project = NULL, notes = NULL))
+    chat_project_ctx(out)
+    out
+  }
+
+  # Phospho context appended to the user message when phospho analysis is live
+  append_phospho_ctx <- function(msg) {
+    if (is.null(values$phospho_fit) || is.null(input$phospho_contrast_selector)) return(msg)
+    phospho_ctx <- tryCatch(
+      phospho_ai_context(values$phospho_fit, input$phospho_contrast_selector, values$ksea_results),
+      error = function(e) ""
+    )
+    if (nzchar(phospho_ctx)) paste0(msg, phospho_ctx) else msg
+  }
 
   observeEvent(input$summarize_data, {
     req(input$user_api_key)
@@ -2001,50 +2174,16 @@ server_ai <- function(input, output, session, values) {
     values$chat_history <- append(values$chat_history, list(list(role = "user", content = "(Auto-Query: Summarize & Analyze)")))
     withProgress(message = "Auto-Analyzing Dataset...", {
       if (!is.null(values$fit) && !is.null(values$y_protein)) {
-        # Scale protein count to stay within Gemini's token limit (~1M tokens)
-        n_samples <- ncol(values$y_protein$E)
-        n_max <- if (n_samples > 200) 100 else if (n_samples > 100) 200 else if (n_samples > 50) 400 else 800
-        message(sprintf("[DE-LIMP] AI data: %d proteins x %d samples (scaled from 800)", n_max, n_samples))
-
-        df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max)
-
-        # For large datasets (>100 samples), send group-level summary stats
-        # instead of per-sample expression to stay within token limits
-        if (n_samples > 100 && !is.null(values$metadata)) {
-          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
-          row_idx <- row_idx[!is.na(row_idx)]
-          exprs_mat <- values$y_protein$E[row_idx, , drop = FALSE]
-          meta <- values$metadata[values$metadata$Group != "", ]
-          group_stats <- do.call(cbind, lapply(unique(meta$Group), function(g) {
-            cols <- intersect(meta$File.Name[meta$Group == g], colnames(exprs_mat))
-            if (length(cols) == 0) return(NULL)
-            data.frame(
-              setNames(list(
-                rowMeans(exprs_mat[, cols, drop = FALSE], na.rm = TRUE),
-                apply(exprs_mat[, cols, drop = FALSE], 1, sd, na.rm = TRUE)
-              ), c(paste0("Mean_", g), paste0("SD_", g)))
-            )
-          }))
-          df_full <- cbind(Protein = rownames(df_de), df_de, group_stats)
-        } else {
-          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
-          row_idx <- row_idx[!is.na(row_idx)]
-          df_exprs <- as.data.frame(values$y_protein$E[row_idx, ])
-          df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
-        }
-
-        incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
-        qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }
-        # Append phospho context if phospho analysis is active
-        auto_msg <- auto_prompt
-        if (!is.null(values$phospho_fit) && !is.null(input$phospho_contrast_selector)) {
-          phospho_ctx <- tryCatch(
-            phospho_ai_context(values$phospho_fit, input$phospho_contrast_selector, values$ksea_results),
-            error = function(e) ""
-          )
-          if (nzchar(phospho_ctx)) auto_msg <- paste0(auto_msg, phospho_ctx)
-        }
-        incProgress(0.7, detail = "Thinking..."); ai_reply <- ask_gemini_file_chat(auto_msg, current_file_uri, qc_final, input$user_api_key, input$model_name, values$plot_selected_proteins)
+        incProgress(0.3, detail = "Preparing data...")
+        data_tbl <- build_chat_data_table(include_selected = FALSE)
+        incProgress(0.7, detail = "Thinking...")
+        pn <- get_project_notes()
+        ai_reply <- ask_ai_data(append_phospho_ctx(auto_prompt), data_tbl, build_chat_qc(),
+                                input$user_api_key, input$model_name,
+                                input$ai_provider %||% "gemini",
+                                values$plot_selected_proteins, input$ai_base_url,
+                                chat_history = NULL,
+                                project = pn$project, notes = pn$notes)
       } else { ai_reply <- "Please load data and run analysis first." }
       values$chat_history <- append(values$chat_history, list(list(role = "ai", content = ai_reply)))
     })
@@ -2055,45 +2194,20 @@ server_ai <- function(input, output, session, values) {
     values$chat_history <- append(values$chat_history, list(list(role = "user", content = input$chat_input)))
     withProgress(message = "Processing...", {
       if (!is.null(values$fit) && !is.null(values$y_protein)) {
-        # Scale protein count to stay within Gemini's token limit (~1M tokens)
-        n_samples <- ncol(values$y_protein$E)
-        n_max <- if (n_samples > 200) 100 else if (n_samples > 100) 200 else if (n_samples > 50) 400 else 800
-        df_de <- topTable(values$fit, coef=input$contrast_selector, number=n_max)
-        if (!is.null(values$plot_selected_proteins)) { missing_ids <- setdiff(values$plot_selected_proteins, rownames(df_de)); if (length(missing_ids) > 0) { valid_missing <- intersect(missing_ids, rownames(values$fit$coefficients)); if(length(valid_missing) > 0) { df_extra <- topTable(values$fit, coef=input$contrast_selector, number=Inf)[valid_missing, ]; df_de <- rbind(df_de, df_extra) } } }
-        # For large datasets (>100 samples), send group-level summary stats
-        if (n_samples > 100 && !is.null(values$metadata)) {
-          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
-          row_idx <- row_idx[!is.na(row_idx)]
-          exprs_mat <- values$y_protein$E[row_idx, , drop = FALSE]
-          meta <- values$metadata[values$metadata$Group != "", ]
-          group_stats <- do.call(cbind, lapply(unique(meta$Group), function(g) {
-            cols <- intersect(meta$File.Name[meta$Group == g], colnames(exprs_mat))
-            if (length(cols) == 0) return(NULL)
-            data.frame(
-              setNames(list(
-                rowMeans(exprs_mat[, cols, drop = FALSE], na.rm = TRUE),
-                apply(exprs_mat[, cols, drop = FALSE], 1, sd, na.rm = TRUE)
-              ), c(paste0("Mean_", g), paste0("SD_", g)))
-            )
-          }))
-          df_full <- cbind(Protein = rownames(df_de), df_de, group_stats)
-        } else {
-          row_idx <- match(rownames(df_de), rownames(values$y_protein$E))
-          row_idx <- row_idx[!is.na(row_idx)]
-          df_exprs <- as.data.frame(values$y_protein$E[row_idx, ]); df_full <- cbind(Protein = rownames(df_de), df_de, df_exprs)
-        }
-        incProgress(0.3, detail = "Sending data file..."); current_file_uri <- upload_csv_to_gemini(df_full, input$user_api_key)
-        qc_final <- NULL; if(!is.null(values$qc_stats) && !is.null(values$metadata)) { qc_final <- left_join(values$qc_stats, values$metadata, by=c("Run"="File.Name")) %>% dplyr::select(Run, Group, Precursors, Proteins, MS1_Signal) }
-        # Append phospho context if phospho analysis is active
-        chat_msg <- input$chat_input
-        if (!is.null(values$phospho_fit) && !is.null(input$phospho_contrast_selector)) {
-          phospho_ctx <- tryCatch(
-            phospho_ai_context(values$phospho_fit, input$phospho_contrast_selector, values$ksea_results),
-            error = function(e) ""
-          )
-          if (nzchar(phospho_ctx)) chat_msg <- paste0(chat_msg, phospho_ctx)
-        }
-        incProgress(0.7, detail = "Thinking..."); ai_reply <- ask_gemini_file_chat(chat_msg, current_file_uri, qc_final, input$user_api_key, input$model_name, values$plot_selected_proteins)
+        incProgress(0.3, detail = "Preparing data...")
+        data_tbl <- build_chat_data_table(include_selected = TRUE)
+        incProgress(0.7, detail = "Thinking...")
+        pn <- get_project_notes()
+        # Drop the turn just appended above - it is the current question and is
+        # passed separately, so including it here would duplicate it.
+        prior <- values$chat_history
+        if (length(prior) > 0) prior <- prior[-length(prior)]
+        ai_reply <- ask_ai_data(append_phospho_ctx(input$chat_input), data_tbl, build_chat_qc(),
+                                input$user_api_key, input$model_name,
+                                input$ai_provider %||% "gemini",
+                                values$plot_selected_proteins, input$ai_base_url,
+                                chat_history = prior,
+                                project = pn$project, notes = pn$notes)
       } else { ai_reply <- "Please load data and run analysis first." }
     })
 
