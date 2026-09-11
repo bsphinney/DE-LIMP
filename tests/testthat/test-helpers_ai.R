@@ -402,6 +402,41 @@ test_that("the data prompt requires evidence strength to be cited", {
   expect_match(p, "PropObs")
 })
 
+# Source-level guard: no DE-LIMP prompt may invite the model to identify a
+# protein from memory. Measured 2026-09-10: that phrasing produced ALDH3A1
+# reported as a haemoglobin, with invented interpretation built on top.
+# This scans the real files, so a new prompt anywhere inherits the rule.
+test_that("no prompt asks the model to recognise proteins from memory", {
+  root <- normalizePath(file.path(getwd(), "..", ".."))
+  files <- list.files(file.path(root, "R"), pattern = "\\.R$", full.names = TRUE)
+  banned <- c("note any you recognize", "where you recognize the gene name",
+              "any you recognise")
+  hits <- character(0)
+  for (f in files) {
+    src <- readLines(f, warn = FALSE)
+    # ignore comment lines — they may legitimately quote the removed phrasing
+    src <- src[!grepl("^\\s*#", src)]
+    for (b in banned) {
+      w <- grep(b, src, fixed = TRUE)
+      if (length(w)) hits <- c(hits, paste0(basename(f), ": ", b))
+    }
+  }
+  expect_equal(hits, character(0))
+})
+
+test_that("prompts do not ask for biology the model merely knows", {
+  root <- normalizePath(file.path(getwd(), "..", ".."))
+  files <- list.files(file.path(root, "R"), pattern = "\\.R$", full.names = TRUE)
+  hits <- character(0)
+  for (f in files) {
+    src <- readLines(f, warn = FALSE)
+    src <- src[!grepl("^\\s*#", src)]
+    w <- grep("discuss their known biological functions", src, fixed = TRUE)
+    if (length(w)) hits <- c(hits, basename(f))
+  }
+  expect_equal(hits, character(0))
+})
+
 test_that("format_ai_table handles NA without emitting the string 'NA' as a value", {
   df <- make_de_df(3)
   df$logFC[2] <- NA_real_
