@@ -2267,7 +2267,11 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
     "- Do the concordant proteins suggest a coherent biological narrative for this comparison?\n",
     "- Are there notable proteins in the concordant set that are well-known markers or ",
     "functionally relevant?\n",
-    "If the protein IDs are UniProt accessions rather than gene symbols, note any you recognize.\n\n",
+    "IDENTITY RULE: name a protein only from a gene symbol supplied in the data. Where the ",
+    "identifier is a bare UniProt accession, refer to it by accession and say the identity ",
+    "was not supplied - do NOT identify it from memory. Measured 2026-09-10: asked to ",
+    "recognise accessions, models reported ALDH3A1 as a haemoglobin and built an ",
+    "interpretation on it.\n\n",
     "## 7. Synthesis\n",
     "Now weigh the cases from sections 3-4. Where do the pipelines agree? Where is the evidence ",
     "genuinely ambiguous? If one pipeline is clearly more appropriate for this experiment design ",
@@ -4264,14 +4268,16 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     mofa_obj <- values$comparator_mofa
     prompt <- build_gemini_comparator_prompt(res, mofa_obj, values$instrument_metadata)
 
-    withProgress(message = "Generating Gemini summary...", value = 0.3, {
+    ai_provider <- input$ai_provider %||% "gemini"
+    withProgress(message = paste("Generating", ai_provider_field(ai_provider, "label"), "summary..."), value = 0.3, {
       tryCatch({
-        response <- ask_gemini_text_chat(prompt, input$user_api_key,
-                                         input$model_name %||% "gemini-2.0-flash")
+        response <- ask_ai_text(prompt, input$user_api_key,
+                                input$model_name %||% ai_provider_field(ai_provider, "default_model"),
+                                ai_provider, input$ai_base_url)
         setProgress(1.0, detail = "Done")
         values$comparator_gemini_narrative <- response
       }, error = function(e) {
-        showNotification(paste("Gemini error:", e$message), type = "error")
+        showNotification(paste("AI error:", e$message), type = "error")
       })
     })
   })

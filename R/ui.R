@@ -429,21 +429,50 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       ),
 
       accordion_panel("AI Chat", icon = icon("robot"),
-        passwordInput("user_api_key", "Gemini API Key", value = "", placeholder = "AIzaSy..."),
-        tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
-          tags$summary(style = "cursor: pointer; color: #17a2b8;", "How to get a free API key"),
-          tags$ol(style = "margin-top: 5px; padding-left: 20px;",
-            tags$li("Go to ", tags$a("Google AI Studio", href = "https://aistudio.google.com/apikey",
-              target = "_blank", rel = "noopener noreferrer")),
-            tags$li("Sign in with your Google account"),
-            tags$li('Click "Create API Key"'),
-            tags$li("Copy and paste the key above")
-          ),
-          tags$p(style = "margin-bottom: 0;", "The free tier is sufficient for DE-LIMP.")
+        # Provider choices come from the registry in helpers_ai.R so that
+        # adding a provider needs no edit here (CLAUDE.md rule #3).
+        selectInput("ai_provider", "AI Provider",
+          choices  = setNames(names(ai_providers()),
+                              vapply(ai_providers(), function(p) p$label, character(1))),
+          selected = "gemini"),
+
+        passwordInput("user_api_key", "API Key", value = "", placeholder = "AIzaSy..."),
+
+        # --- Gemini-specific help ---
+        conditionalPanel("input.ai_provider == 'gemini'",
+          tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
+            tags$summary(style = "cursor: pointer; color: #17a2b8;", "How to get a free API key"),
+            tags$ol(style = "margin-top: 5px; padding-left: 20px;",
+              tags$li("Go to ", tags$a("Google AI Studio", href = "https://aistudio.google.com/apikey",
+                target = "_blank", rel = "noopener noreferrer")),
+              tags$li("Sign in with your Google account"),
+              tags$li('Click "Create API Key"'),
+              tags$li("Copy and paste the key above")
+            ),
+            tags$p(style = "margin-bottom: 0;", "The free tier is sufficient for DE-LIMP.")
+          )
         ),
+
+        # --- OpenAI-compatible endpoint ---
+        conditionalPanel("input.ai_provider == 'openai_compat'",
+          textInput("ai_base_url", "Endpoint URL",
+            value = ai_provider_field("openai_compat", "base_url"),
+            placeholder = "https://llm.metabolomics.us/v1"),
+          tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
+            tags$summary(style = "cursor: pointer; color: #17a2b8;", "What is this?"),
+            tags$p(style = "margin-top: 5px;",
+              "Any endpoint that speaks the OpenAI ", tags$code("/v1/chat/completions"),
+              " API — a self-hosted vLLM or llama.cpp server, or an institutional gateway."),
+            tags$p(style = "margin-bottom: 0;",
+              "Your data goes to that endpoint only, not to Google.")
+          )
+        ),
+
         actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
         br(), br(),
-        textInput("model_name", "Model Name", value = "gemini-2.5-flash", placeholder = "gemini-2.5-flash")
+        textInput("model_name", "Model Name",
+                  value = ai_provider_field("gemini", "default_model"),
+                  placeholder = "gemini-2.5-flash")
       )
     ),
 

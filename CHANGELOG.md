@@ -1,5 +1,79 @@
 # Changelog
 
+## [4.1.0] — 2026-09-10
+
+### Added
+- **The AI features are no longer tied to Google.** A new **AI Provider** selector in the
+  sidebar chooses between Google Gemini and any OpenAI-compatible endpoint — a self-hosted
+  vLLM or llama.cpp server, or an institutional gateway such as
+  `https://llm.metabolomics.us/v1`. The endpoint URL is editable, so the same setting also
+  points at a local server. Gemini remains the default and is unchanged for existing users;
+  nobody needs to do anything.
+- Reasoning models are handled: `<think>` blocks that Qwen3 and similar models emit through
+  vLLM are stripped before the text reaches a summary, including the unterminated block you
+  get when the model runs out of budget mid-thought.
+
+- **Data Chat now remembers the conversation.** `values$chat_history` had always existed,
+  but it fed only the on-screen chat window and the download button — it was never sent to
+  the model. Every question went out as a fresh request, so a follow-up like "why is that?"
+  arrived with no referent and got a plausible answer to a question the model couldn't see.
+  The last few turns are now threaded into the request, capped so they can't crowd out the
+  DE table on a 65k-context model. No model has memory between API calls; what looks like
+  memory in any chat product is the client resending history, and DE-LIMP wasn't.
+- **Your project name and notes now reach the AI.** Pulled from the unified activity log
+  and labelled in the prompt as recorded by the user, so the model can't mistake your note
+  for its own earlier conclusion. Nothing is sent when both are empty — no placeholder,
+  no invented default.
+- **The AI Summary prompt no longer asks the model to answer from memory.** It used to
+  request biology "where you recognize the gene name" — an explicit instruction to recall.
+  Benchmarked against four open-weight models on the app's own demo dataset, that clause
+  produced confidently wrong identities: ALDH3A1 reported as a haemoglobin, with a full
+  paragraph of invented interpretation about blood contamination built on top of it. The
+  clause is gone, replaced by a rules block covering identity, sourcing, numeric claims,
+  effect size vs significance, evidence strength, and technical vs biological reads. A new
+  **Evidence Quality** section asks the model to name hits whose statistics look strong but
+  whose measurement is thin, and contaminants that reached significance.
+- **"Most increased" is now defined.** Two models, asked for the most decreased protein,
+  answered the most *significant* one — quoting entirely correct statistics for the wrong
+  protein. Both prompts now state that it is a question about effect size, and that if the
+  largest fold-change and the best p-value belong to different proteins, both should be
+  reported. Regression tests pin this and the other rules.
+- **Protein identities are now supplied, not recalled.** The DE table sent to the AI
+  carries `Genes` from the search FASTA, which DIA-NN has been putting in
+  `y_protein$genes` all along and DE-LIMP simply wasn't sending. Benchmarking against the
+  gateway on 2026-09-10 found two models inventing protein names for accessions whose real
+  identities were sitting one column away — one of them built an entire paragraph about
+  haemoglobin contamination on top of a protein that is actually ALDH3A1. The prompt now
+  forbids naming any protein absent from that column. A join cannot be wrong; recall can.
+- **Evidence strength travels with the result.** `NPrec` and `PropObs` are included, so a
+  hit resting on a single detection reads as `PropObs 0.083` instead of having to be
+  inferred from a zero standard deviation. `Protein.Names` and the per-group Mean/SD
+  columns were dropped to pay for it — measured, that trade buys ~210 *more* proteins in
+  the same budget (444 → 654), so it is more depth and more information at once.
+
+### Changed
+- **Data Chat no longer sends per-sample expression values.** limpa and limma have already
+  done the statistics by the time the AI sees anything — its job is to interpret log2
+  fold-changes and adjusted p-values, not to recompute from intensities. Those columns were
+  roughly 65% of the payload and the least useful 65%. Per-group Mean/SD summaries are kept.
+- The DE table sent to the AI is now formatted by a single `format_ai_table()` helper:
+  3 significant figures instead of 6 decimal places (precision the measurement does not
+  have), bare accessions instead of `sp|P12345|ALBU_HUMAN`, and tab-separated instead of
+  CSV. Combined with the change above this cuts the payload by roughly 80% — a top-800
+  table drops from ~49,000 tokens to ~10,000 — which is what lets a 32k-context local model
+  do the same job Gemini's 1M-token window was doing. Gemini benefits too: cheaper, faster,
+  and less numeric noise for the model to chew through.
+- **Both Data Chat handlers now share one payload builder.** The auto-summarize and
+  free-text paths carried independent copies of the same 30 lines, which is exactly the
+  duplication architectural rule #3 exists to prevent.
+- The AI privacy modals no longer hardcode "Google Gemini". They name whichever provider is
+  actually selected, read from the provider registry — under architectural rule #1, text
+  that tells a user where their data went must not be a hardcoded guess.
+- The Gemini File API is no longer on the Data Chat path. It never reduced context cost
+  (uploaded files are tokenised into the request exactly like inline text; it only avoided
+  re-uploading bytes), and at ~10k tokens there is nothing left for it to solve. One code
+  path now serves both providers. `upload_csv_to_gemini()` is retained but marked legacy.
+
 ## [4.0.9] — 2026-08-27
 
 ### Fixed
