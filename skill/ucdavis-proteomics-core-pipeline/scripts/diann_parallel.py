@@ -83,16 +83,26 @@ def _shield(line):
     return " ".join(shlex.quote(t) if _GLOBBY.search(t) else t for t in line.split())
 
 
-def read_cfg_flags(cfg):
-    """Read a diann.cfg into a flat flag string, dropping step-specific flags."""
+def read_cfg_flags(cfg, drop=()):
+    """Read a diann.cfg into a flat flag string, dropping step-specific flags.
+
+    `drop` removes further flags on top of STRIP. It exists for --window: when step 1b
+    measures the radius, steps 2 and 4 get it PREFIXED as `--window $(cat window.txt)`, so
+    a --window still sitting in the cfg lands on the same command line twice. DIA-NN then
+    either honours the wrong one -- silently undoing step 1b and going back to the per-file
+    auto-optimisation the chain exists to prevent, with no error anywhere -- or rejects
+    `--window 0` outright ("scan window radius should be a positive integer"), killing every
+    array task after step 1 has already paid for the library prediction.
+    """
     if not cfg or not os.path.exists(cfg):
         return ""
     out = []
+    strip = tuple(STRIP) + tuple(drop)
     for raw in open(cfg):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if any(line == s or line.startswith(s + " ") for s in STRIP):
+        if any(line == s or line.startswith(s + " ") for s in strip):
             continue
         out.append(_shield(line))
     return " ".join(out)
@@ -144,6 +154,7 @@ def mass_acc_status(cfg):
     This is the single definition of "is this cfg parallel-safe"; run_search.py imports
     it to decide whether it may auto-route. Returns {fixed, ms2, ms1, window, reason}."""
     vals = {"--mass-acc": None, "--mass-acc-ms1": None, "--window": None}
+    bad = []
     if cfg and os.path.exists(cfg):
         try:
             toks = shlex.split(open(cfg).read(), comments=True)
@@ -154,21 +165,80 @@ def mass_acc_status(cfg):
                 try:
                     vals[t] = float(toks[i + 1])
                 except ValueError:
-                    pass
+                    # Present but not a number. This must NOT read as "unset": an unset
+                    # --window is recoverable (step 1b measures it), a typo'd one is a
+                    # mistake to report. Collapsing the two would measure over the typo.
+                    bad.append(t)
     ms2, ms1, win = vals["--mass-acc"], vals["--mass-acc-ms1"], vals["--window"]
     pairs = (("--mass-acc", ms2), ("--mass-acc-ms1", ms1), ("--window", win))
-    missing = [k for k, v in pairs if v is None]
+    missing = [k for k, v in pairs if v is None and k not in bad]
     auto = [k for k, v in pairs if v == 0]      # 0 means "optimise automatically"
-    if missing or auto:
+    neg = [k for k, v in pairs if v is not None and v < 0]   # physically impossible
+    if missing or auto or neg or bad:
         why = []
         if missing:
             why.append("not set: " + ", ".join(missing))
         if auto:
             why.append("auto (0): " + ", ".join(auto))
-        return {"fixed": False, "ms2": ms2, "ms1": ms1, "window": win,
+        if neg:
+            why.append("negative: " + ", ".join(neg))
+        if bad:
+            why.append("not a number: " + ", ".join(bad))
+        return {"fixed": False, "ms2": ms2, "ms1": ms1, "window": win, "bad": bad,
                 "reason": "; ".join(why)}
-    return {"fixed": True, "ms2": ms2, "ms1": ms1, "window": win,
+    return {"fixed": True, "ms2": ms2, "ms1": ms1, "window": win, "bad": bad,
             "reason": f"fixed (MS1 {ms1} ppm / MS2 {ms2} ppm / window {int(win)})"}
+
+
+def parallel_safe(cfg, probe_window=True, seed_lib=None):
+    """THE definition of "may this cfg run as the 5-step chain?" -- for BOTH callers.
+
+    diann_parallel.main() uses it to decide whether to generate; run_search.py uses it to
+    decide whether to auto-route. They used to answer separately and drifted: run_search
+    read `mass_acc_status()["fixed"]` literally, so it declined every cfg estimate_params.py
+    produces (which omits --window by design) and silently demoted the cohort to ONE
+    single-shot search. --threads parallelises WITHIN a run, not across runs, so at
+    ~30 min/file a 310-file cohort is ~155 h against a few hours for the chain -- and
+    nothing errors, SLURM reports success and the user just waits a week. Keep the rule
+    here, never in a caller: a second copy is what caused that bug (CLAUDE.md rule 3).
+
+    What is recoverable, and what is not:
+      * mass accuracy -- NOT recoverable. DIA-NN calibrates it per run against the library,
+        so there is no single value to carry into steps 3/5, which reuse the .quant files.
+      * --window unset or 0 -- recoverable when probing. Step 1b runs probe_window.py once
+        and pins that radius into steps 2 and 4. estimate_params.py cannot supply it: the
+        radius is a property of the acquisition scheme and has to be MEASURED on a real
+        file. (0 is DIA-NN for "optimise automatically", i.e. per file -- the very
+        inconsistency step 1b removes, so it is a case to fix, not a case to decline.)
+      * --window negative or non-numeric -- NOT recoverable. A typo is a mistake to report,
+        not something to quietly measure over.
+
+    Returns {ok, probe, ma, reason}; `probe` says whether step 1b is needed. `ma` carries
+    mass_acc_status's dict, with fixed=True when the window will be measured.
+    """
+    ma = mass_acc_status(cfg)
+    if not ((ma["ms1"] or 0) > 0 and (ma["ms2"] or 0) > 0):
+        return {"ok": False, "probe": False, "ma": ma,
+                "reason": f"mass accuracy is not pinned ({ma['reason']})"}
+    win = ma["window"]
+    if "--window" in ma["bad"] or (win is not None and win < 0):
+        return {"ok": False, "probe": False, "ma": ma,
+                "reason": f"--window is set but is not a usable radius ({ma['reason']})"}
+    if win:                                     # already a real, positive radius
+        return {"ok": True, "probe": False, "ma": ma, "reason": ma["reason"]}
+    if seed_lib:
+        return {"ok": False, "probe": False, "ma": ma,
+                "reason": "--window is unpinned and the first pass is seeded from an "
+                          "existing library, so there is no step 1 for step 1b to follow"}
+    if not probe_window:
+        return {"ok": False, "probe": False, "ma": ma,
+                "reason": "--window is unpinned and --no-probe-window was given"}
+    return {"ok": True, "probe": True,
+            "ma": dict(ma, fixed=True,
+                       reason=f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; scan window "
+                              "measured by step 1b and pinned for steps 2+4"),
+            "reason": f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; --window is unpinned but "
+                      "recoverable -- step 1b measures it and pins it for steps 2+4"}
 
 
 # DIA-NN 2.6 EXITS 0 ON A FATAL ERROR -- verified: a run against a nonexistent .mzML and
@@ -281,25 +351,20 @@ def main():
     out = os.path.abspath(a.out); os.makedirs(out, exist_ok=True)
     fasta = os.path.abspath(a.fasta)
     DN = dotnet_prefix(raws) + a.diann     # .NET 8 export prefix when inputs are Thermo .raw
-    flags = read_cfg_flags(a.cfg)
+    # The chain is only valid with pinned mass accuracy AND a scan window that is the same
+    # in every step (steps 3/5 reuse .quant files; see mass_acc_status for DIA-NN's own
+    # warning). parallel_safe() is the shared rule -- run_search.py routes on this same
+    # call, so the router and the generator cannot disagree again.
+    safe = parallel_safe(a.cfg, probe_window=a.probe_window, seed_lib=a.seed_lib)
+    win_probe, ma = safe["probe"], safe["ma"]
 
-    # The chain is only valid with pinned mass accuracy AND scan window (steps 3/5
-    # reuse .quant files; see mass_acc_status for DIA-NN's own warning).
-    ma = mass_acc_status(a.cfg)
-    # An unpinned --window is recoverable: the chain can MEASURE it after step 1 and
-    # feed the same value to steps 2 and 4 (--probe-window, on by default). Only an
-    # unpinned MASS ACCURACY is unrecoverable here, because DIA-NN calibrates that per
-    # run against the library and there is no single value to carry forward.
-    win_probe = (a.probe_window and ma.get("window") in (None, 0)
-                 and ma["ms2"] not in (None, 0) and ma["ms1"] not in (None, 0)
-                 and not a.seed_lib)
-    if win_probe:
-        ma = dict(ma, fixed=True,
-                  reason=f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; "
-                         "scan window measured by step 1b and pinned for steps 2+4")
+    # When step 1b measures the radius it is PREFIXED onto steps 2 and 4, so any --window
+    # still in the cfg has to come out or both land on the same command line.
+    flags = read_cfg_flags(a.cfg, drop=("--window",) if win_probe else ())
+
     if not ma["fixed"] and not a.allow_auto_mass_acc:
         sys.exit(
-            f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {ma['reason']}.\n"
+            f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {safe['reason']}.\n"
             "The 5-step chain reuses .quant files across steps, so anything DIA-NN\n"
             "auto-optimises PER FILE (mass accuracy AND scan window) is applied\n"
             "inconsistently between passes and then stitched together.\n"
@@ -371,17 +436,33 @@ def main():
     # warning calls "strongly not recommended". Measuring beats guessing: the radius
     # depends on the acquisition scheme (cycle time vs peak width), not the instrument.
     s1b = None
+    resolved_cfg = a.cfg
     if win_probe:
         probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
+        # The measured radius has to end up in a PARAMETER FILE, not just window.txt, or the
+        # run is not reproducible from what we recorded: search_provenance.json would name a
+        # cfg with no --window, and replaying it would re-optimise per file and not reproduce
+        # the numbers (SKILL.md golden rule 5). params.base.cfg is the cfg minus any --window;
+        # step 1b copies it and probe_window.py --write-cfg appends the measured value. The
+        # copy is remade on every run, so a resubmit cannot append a second --window.
+        base_cfg = os.path.join(out, "params.base.cfg")
+        resolved_cfg = os.path.join(out, "params.resolved.cfg")
+        with open(base_cfg, "w") as fh:
+            for raw_line in (open(a.cfg) if a.cfg and os.path.exists(a.cfg) else []):
+                if raw_line.strip().split()[:1] != ["--window"]:
+                    fh.write(raw_line)
         s1b = write("step1b_window.sbatch", "\n".join([
             header("s1b_window", a.threads_per_file, a.mem_per_file, 2, _ps, _as_, qos=_qs), "",
             'echo "Step 1b/5 measuring scan-window radius"; date',
-            f'python3 "{probe}" --diann {shlex.quote(a.diann)} --raw "{raws[0]}" \\',
+            f'cp {shlex.quote(base_cfg)} {shlex.quote(resolved_cfg)}',
+            f'python3 "{probe}" --diann {shlex.quote(a.diann)} --raw {shlex.quote(raws[0])} \\',
             f'  --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\',
-            f'  --extra {shlex.quote(read_cfg_flags(a.cfg))} > {D}/window.json',
+            f'  --write-cfg {shlex.quote(resolved_cfg)} \\',
+            f'  --extra {shlex.quote(flags)} > {D}/window.json',
             f'python3 -c "import json;print(json.load(open(\'{D}/window.json\'))[\'window_radius\'])" > {D}/window.txt',
             must_exist(f"{D}/window.txt", "the measured scan-window radius"),
-            f'echo "scan window radius = $(cat {D}/window.txt) (pinned for steps 2 and 4)"']))
+            f'echo "scan window radius = $(cat {D}/window.txt) (pinned for steps 2 and 4)"',
+            f'echo "fully-resolved parameters -> {resolved_cfg}"']))
     # steps 2 and 4 read the measured radius at RUNTIME so both use the identical value
     wflag = f'--window $(cat {D}/window.txt) ' if win_probe else ''
 
@@ -501,7 +582,13 @@ def main():
     # <out> is normally <session>/output/search, so the session is two levels up.
     sess = os.path.dirname(os.path.dirname(out))
     ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint.py")
-    jobs = '$jid2,$jid3,$jid4,$jid5' if seed else '$jid1,$jid2,$jid3,$jid4,$jid5'
+    # $jid1b belongs here too. It is an afterok link like any other, so if it dies the whole
+    # chain stalls forever on a dependency that will never fire -- and left out of jobs.txt
+    # that shows up to `watch_run.sh --all` as "nothing running, nothing failed", with a
+    # resuming session having no record the job was ever submitted (golden rule 7b).
+    jobs = ('$jid2,$jid3,$jid4,$jid5' if seed else
+            '$jid1,$jid1b,$jid2,$jid3,$jid4,$jid5' if s1b else
+            '$jid1,$jid2,$jid3,$jid4,$jid5')
     sub_lines += [
         f'python3 "{ck}" record --session "{sess}" --stage search \\',
         f'  --jobs "{jobs}" --desc "DIA-NN 5-step parallel chain ({n} files)" \\',
@@ -518,7 +605,8 @@ def main():
         "out": out, "n_files": n, "report": f"{D}/{report}",
         "mass_acc": ma,
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
-        "scripts": [x for x in [s1, s2, s3, s4, s5, "submit.sh"] if x],
+        "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
+        "resolved_cfg": resolved_cfg,
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",
         "note": "5-step DIA-NN parallel chain. Mass accuracy is fixed (manual) — ensure --cfg has --mass-acc/--mass-acc-ms1 set, not 0/auto. Watch the run with watch_run.sh. Then point run_de.R at the report.",

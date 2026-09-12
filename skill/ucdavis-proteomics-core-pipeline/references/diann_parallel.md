@@ -206,13 +206,23 @@ Steps 3/5 reuse the `.quant` files written by steps 2/4. DIA-NN warns:
 optimises the radius **per file**. On a real 18-file poplar run that gave a radius of
 **7 for seventeen files and 8 for one**, and the chain combined them anyway.
 
-`mass_acc_status()` now treats a missing or `0` `--window` as NOT parallel-safe, so the
-chain refuses to generate rather than producing a quietly-inconsistent report.
+`parallel_safe()` is the single rule for "may this cfg run as the chain?", and both
+`diann_parallel.py` (generate?) and `run_search.py` (auto-route?) call it — they used to
+decide separately and drifted, which silently demoted a 310-file cohort to one sequential
+search. Unpinned **mass accuracy** is not parallel-safe and refuses, rather than producing
+a quietly-inconsistent report. A missing or `0` **`--window`** *is* recoverable and routes:
+step 1b measures the radius (below). A negative or non-numeric `--window` is a typo and
+refuses — the chain will not measure over a mistake.
 
 **The chain does this for you.** When the cfg has no `--window`, `diann_parallel.py`
 inserts **step 1b** after library prediction: it runs `probe_window.py` on the first
 file, writes the radius to `<out>/window.txt`, and steps 2–5 read that file at runtime,
-so every pass uses the identical value. `--no-probe-window` disables it, in which case a
+so every pass uses the identical value. Any `--window` in the cfg is dropped from those
+steps so the measured value cannot collide with it. Step 1b also writes
+`<out>/params.resolved.cfg` — the cfg plus the measured `--window` — which is what
+`search_provenance.json` records as `resolved_params_file`, so the run stays reproducible
+from a parameter file rather than only from `window.txt`. Its job id is in `jobs.txt`
+along with the rest of the chain, so `watch_run.sh --all` sees it fail. `--no-probe-window` disables it, in which case a
 pinned `--window` in the cfg is required or the chain refuses to generate.
 
 To measure it yourself instead, never by guessing — it depends on the acquisition scheme
