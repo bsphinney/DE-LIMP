@@ -9,12 +9,57 @@ DE-input contract.
 |---|---|---|
 | Bruker `.d` | `analysis.tdf` SQLite: `DiaFrameMsMsInfo`/`DiaFrameMsMsWindowGroups` or `Frames.MsMsType==9` → DIA; `PasefFrameMsMsInfo`/`MsMsType==8` → DDA | `GlobalMetadata.InstrumentName` (e.g. "timsTOF Pro") |
 | `.mzML[.gz]` | stream MS2 isolation windows: median width ≥3 Da over few centers → DIA; ≤2 Da, many centers → DDA | none (mzML rarely carries model reliably) |
-| Thermo `.raw` | needs ThermoRawFileParser → mzML, else `unknown` | ThermoRawFileParser `metadata` model string, if present |
+| Thermo `.raw` | ThermoRawFileParser `query` of a mid-run slice of scans → MS2 isolation windows → the **same** width/centre rule as mzML, then the filter string's data-dependent `d` flag, which outranks window shape. Parser missing or failing → `unknown`/`low` + `warnings` | ThermoRawFileParser metadata JSON, `MS:1000494` (e.g. "Orbitrap Exploris 480") |
 | `.wiff` | convert to mzML first | none |
 
-Confidence is `high`/`medium`/`low`. **Anything not `high`, mixed, or with
-disagreeing instruments sets `needs_confirmation` — ask the user.** Instrument may
-be null; that's fine (matcher falls back to score 0 and the user confirms).
+Confidence is `high`/`medium`/`low`. **Anything not `high`, mixed, with
+disagreeing instruments, or with any per-file `warnings` sets `needs_confirmation` —
+ask the user.** Instrument may be null; that's fine (matcher falls back to score 0
+and the user confirms).
+
+### Thermo `.raw`: what is read, and how it fails
+
+`.raw` is read through **ThermoRawFileParser** (public source below; v1.4.0+). The
+parser is `$THERMORAWFILEPARSER` if set — a whole command, for the builds that are not
+one executable (`dotnet /opt/trfp/ThermoRawFileParser.dll`, or `mono
+ThermoRawFileParser.exe` for 1.4.x) — else `ThermoRawFileParser` / `thermorawfileparser`
+on PATH. Two calls per file, in the `-option=value` form the parser's README requires:
+
+| call | gives | measured on HIVE (TRFP 2.0.0.0) |
+|---|---|---|
+| `-i=<raw> -m=0 -o=<tmp>` | instrument model, scan range, MS1/MS2 counts | 2.6–3.6 s on 3.5 GB raws |
+| `query -i=<raw> -n=<a>-<b> -b=<tmp>/q.json` | isolation target + lower/upper offsets per MS2 scan; filter string (1.4.5+) | 1.1–5.8 s for 200–2000 scans |
+
+The whole `detect_acquisition.py` call took 4.2–5.7 s per file on the Exploris 480,
+Fusion Lumos and a DDA Exploris run, against ~3 min to write one full mzML.
+
+- **Which scans.** The middle of the run, 4 acquisition cycles (cycle = MS2/MS1 count
+  ratio + 1, so 26 scans on a 25-window Exploris method), clamped to 200–1500 scans.
+  Four cycles also cover staggered schemes, which alternate two window sets.
+- **Range = window edges, never centres.** `precursor_mz_range` is
+  min(target − lower offset) … max(target + upper offset): **350.0–1201.0** (Exploris
+  480, 25 × 35 m/z) and **350.05–1200.95** (Fusion Lumos, 19 × 45.7 m/z) — the same edges
+  `detect_acquisition.py` reads from the full mzML of those runs (rounded to 0.001 m/z:
+  the parser writes float32 targets, so the mzML path shows `350.04999389648435`). The
+  metadata JSON's `MS min MZ`/`MS max MZ` (367.5 / 1183.5 on that Exploris run) and FRAN's
+  `raw_files.mass_range_min/max` are the extreme window **centres**; using them clips half
+  a window off each end.
+- **DDA vs DIA.** A standalone `d` token in the filter string (`FTMS + c NSI d Full ms2
+  …`) is the instrument saying "data-dependent". All flagged + narrow windows → DDA
+  `high`; none flagged → never DDA (narrow-window DIA or PRM → DIA `medium`, confirm).
+  Builds before 1.4.5 do not report the filter string, so the width rule decides alone
+  and the `reason` says the flag was unavailable.
+- **Failures are loud.** Parser not found, a non-zero exit (the parser's own message is
+  quoted), a timeout or unreadable output → `unknown`/`low`, a `reason` that names the
+  consequence (the precursor range falls back to 380–980, tagged `FALLBACK` by
+  `estimate_params.py`), an entry in the file's `warnings`, and a `WARNING` line on
+  stderr. A failed metadata call alone still classifies from the query, but leaves
+  `instrument` null with a warning — and the instrument decides mass accuracy. The
+  per-file `reader` field records the parser command and `--version`.
+- **Before this was fixed** the detector called `ThermoRawFileParser metadata -i` (no
+  such subcommand: exit 255 "Unexpected extra arguments") and `query -i` without `-n`
+  (exit 255 "specify a valid scan range"), ignored both exits, and returned
+  `unknown`/null for every `.raw` — so every Orbitrap search got 380–980.
 
 ## Parameters
 
@@ -53,7 +98,7 @@ Windows, or Linux). `setup.sh`/`acquire_tools.sh` fetch the free ones automatica
 | **AlphaDIA** | https://github.com/MannLabs/alphadia | Win, macOS, Linux | Apache-2.0 (commercial-OK); `pip install alphadia`, GPU recommended. |
 | **Radiant DIA + Fulcrum** (Seer) | https://github.com/seerbio/radiant-fulcrum-container · image `seerbio/radiant-fulcrum` | container only (multi-arch amd64+arm64) | **Thermo Orbitrap only** here (mzML/Parquet input). Needs a DIA-NN-generated library. **Apache-2.0 + Commons Clause + grant-back** — restricts selling a derived service. |
 | **FragPipe** (MSFragger/IonQuant) | https://github.com/Nesvilab/FragPipe/releases | Win, macOS, Linux | Java GUI; MSFragger/IonQuant need the user's own (free-academic) license. |
-| **ThermoRawFileParser** | https://github.com/compomics/ThermoRawFileParser/releases | Win, macOS, Linux | `.raw`→mzML; cross-platform .NET. |
+| **ThermoRawFileParser** | https://github.com/compomics/ThermoRawFileParser/releases | Win, macOS, Linux | Reads `.raw` for `detect_acquisition.py`, and `.raw`→mzML. v2.0.0-dev: self-contained Linux/macOS/Windows zips, or the `-net8` zip run as `dotnet ThermoRawFileParser.dll` (.NET 8 runtime); `conda install -c bioconda thermorawfileparser` (Linux/macOS). 1.4.x needs Mono off Windows. Not a single executable on PATH → `export THERMORAWFILEPARSER="dotnet /path/ThermoRawFileParser.dll"`. Its mzML carries **no resolving power** (see `parameters.md`). |
 | **ProteoWizard / msconvert** | https://proteowizard.sourceforge.io/ | Windows (native); Linux/macOS via Docker | vendor→mzML; Linux via the `chambm/pwiz-...` Docker image. |
 | **.NET 8 runtime** | https://dotnet.microsoft.com/download/dotnet/8.0 · installer script https://dot.net/v1/dotnet-install.sh | Win, macOS, Linux | needed only so the **Linux** DIA-NN binary can read `.raw`; `ensure_dotnet8.sh` installs 8.0.latest. **Native Windows doesn't need it.** |
 | **UniProt proteomes (FASTA)** | https://www.uniprot.org/proteomes/ · canonical sets: https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/ | web / REST / FTP | `fetch_fasta.py resolve` finds the ID from an organism name; `fetch` downloads it. One-per-gene comes from the **FTP** tree — REST `onePerGene` is silently ignored. |
@@ -101,7 +146,9 @@ export PATH="$DOTNET_ROOT:$PATH"
 run, and baked into the emitted sbatch as a preamble). When it's right, DIA-NN logs
 `.NET runtime found, Thermo .raw support enabled`. Alternative with **no** .NET: feed
 `.mzML` (DIA-NN reads those natively) — convert `.raw`→mzML with ThermoRawFileParser /
-msconvert if you don't already have them.
+msconvert if you don't already have them. A ThermoRawFileParser mzML has no
+`MS:1000800` resolving-power terms, so `estimate_params.py --from-mzml` cannot pin
+Orbitrap mass accuracy from it — pass the resolutions explicitly (`parameters.md`).
 
 ### Radiant DIA + Fulcrum (Seer; Thermo Orbitrap only)
 

@@ -29,6 +29,27 @@ Automatic calibration is DIA-NN's own recommended default — it optimises mass
 accuracy on the first run and reuses it. We fall back to it (never to a guessed
 number) whenever the instrument class can't be pinned down.
 
+### Orbitrap resolution: where it is, and where it is not
+
+The Orbitrap rows need the MS1/MS2 resolving power. `--from-mzml <file>` reads it from
+the mzML's `mass resolving power` (`MS:1000800`) terms — **and ThermoRawFileParser does
+not write that term.** Measured 2026-09-16 on HIVE with TRFP 2.0.0.0: the full indexed
+mzML of an Exploris 480 run (60k / 15k) and a Fusion Lumos run (120k / 15k), ~1 GB each,
+held **zero** `MS:1000800` terms, so `read_mzml_resolution()` returned `(None, None)`.
+Nothing errors: the class falls to `orbitrap_generic`, mass accuracy to automatic
+calibration, and — because the 5-step chain needs it pinned — a large cohort to the
+slow single-shot path. TRFP's other outputs do not carry it either: its metadata JSON
+`mass resolution` (`MS:1000011`) is `0.5` on every run checked (a header tolerance, not
+resolving power), and its `query` JSON has no resolution attribute.
+
+Where the numbers do live: the instrument method text (`Orbitrap Resolution = 60000`
+then `= 15000` on that Exploris; `= 120K` then `= 15K` on the Lumos) and every scan's
+trailer (`FT Resolution:` on Exploris, `Orbitrap Resolution:` on Fusion Lumos — not
+`Resolution Comp. (ppm):`). Take them from the method or the instrument operator and
+pass `--ms1-resolution`/`--ms2-resolution`. Before trusting `--from-mzml` with any
+converter, check the file: `grep -c 'MS:1000800' run.mzML` — `0` means it will pin
+nothing.
+
 ⚠ **Automatic calibration means OMITTING `--mass-acc`/`--mass-acc-ms1`, not
 setting them to 0.** `--mass-acc 0` fixes the tolerance at a literal 0 ppm — the
 log reads `Mass accuracy will be fixed to 0 (MS2) and 0 (MS1)` and the search

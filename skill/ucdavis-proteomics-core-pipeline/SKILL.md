@@ -211,6 +211,12 @@ python3 scripts/detect_acquisition.py /path/to/*.d /path/to/*.raw
 Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
 `instrument`. **If `needs_confirmation` is true, ask the user** before continuing
 — mixed/unknown/low-confidence must not silently pick an engine.
+Thermo `.raw` is read through **ThermoRawFileParser** (public:
+https://github.com/compomics/ThermoRawFileParser/releases or `conda install -c bioconda
+thermorawfileparser`; set `THERMORAWFILEPARSER="dotnet …/ThermoRawFileParser.dll"` if it
+is not one executable on PATH). If a `.raw` comes back `unknown` or any file has
+`warnings`, **tell the user what the warning says** — without the parser there is no
+measured precursor range and step 6b falls back to 380–980.
 → detail: `references/search-engines.md`.
 
 ### 3. Ask organism + experimental design (auto-map conditions)
