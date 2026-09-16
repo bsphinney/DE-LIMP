@@ -51,8 +51,11 @@ reproducible.
 `versions` never says `latest`: an unpinned run records the number it resolved to — for
 DIA-NN from the build path, `.sif` name, download asset or Docker image tag; for Sage from
 the release tarball kept beside the binary, **not** `sage --version`, which prints 0.14.6
-for the v0.14.7 release. When no version can be determined it records `""` with a note.
-(An older `tools.json` may still say `"latest"`; re-run `acquire_tools.sh` to replace it.)
+for the v0.14.7 release; for Radiant from a pinned image tag or the `.sif` name. When no
+version can be determined it records `""` with a note — an unpinned Radiant image
+(`seerbio/radiant-fulcrum:latest`) is one such case. Two values are sources, not builds:
+`"env"` (a `sage` found on PATH, e.g. the conda env's) and, in a `tools.json` written
+before this was fixed, `"latest"`.
 
 The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins 2.6.1, but
 `tools.json` holds whatever was last acquired (the FRAN pilot pinned 2.7.0). Nothing forces
@@ -61,14 +64,24 @@ them to match, so `run_search.py` compares them before submitting and records bo
 
 | field | meaning |
 |---|---|
-| `version` | the build that ran — **from `tools.json`**, which describes the command actually executed; if `tools.json` names no build, the manifest's pin (see `version_source`); else `null` |
-| `version_source` | `tools.json`, or the manifest labelled as an unconfirmed request when `tools.json` names no build (`latest`, `env`, missing) |
-| `tools_engine_version` / `manifest_engine_version` | both values as written |
-| `engine_version_mismatch` | `true` when both are concrete and differ; a WARNING is printed |
+| `version` | the build that ran: `tools.json` `versions`, else the one version the **command itself** names (a build folder such as `diann-2.6.0/`, a `.sif` name, an image tag); else `null`. **Never the manifest's pin** — `fran_deposit.py` sends `version`, and only `version`, to FRAN as the engine version, so a pin nothing confirmed would be stored there as fact |
+| `version_source` | `tools.json`, `command`, or `null` |
+| `tools_engine_version` | `tools.json` `versions.<engine>` as written, even `latest` / `env` |
+| `command_engine_versions` | every version the command names (usually zero or one) |
+| `manifest_engine_version` | the manifest's pin as written (`null` if it pins another engine) |
+| `engine_version_mismatch` | `true`/`false` when `version` and the pin are both known; **`null`** when they cannot be compared. A WARNING is printed when `true` |
+
+A `tools.json` whose `versions` contradicts its own command (says 2.6.1, runs
+`diann-2.6.0/diann-linux`) records `version: null` with a WARNING: one is wrong and nothing
+tells which. A version *directory* (`sage/0.14.6/sage`) is not read, because
+`acquire_tools.sh` names cache folders after the request, not the build inside.
 
 A mismatch WARNING means the version the user confirmed (SKILL.md golden rule #1) is not
-the one about to run: say so before submitting, and either re-acquire the pin or get the
-new version confirmed.
+the one about to run: say so before submitting, and either re-acquire the pin (the WARNING
+prints the command, with this `tools.json`'s platform and tools root; on macOS it rebuilds
+the Docker image) or get the new version confirmed. `version: null` means the search is
+recorded — and deposited to FRAN — with no engine version; for a `sage` on PATH that is
+currently the only outcome.
 
 ## FASTA resolution (`fetch_fasta.py`)
 

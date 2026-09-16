@@ -15,8 +15,12 @@ record happened to be right -- but it carried no trace of the disagreement, and 
 had no entry the SAME expression quietly recorded the manifest's pin as if it had run (for any
 engine: a Sage search under a DIA-NN manifest would have been stamped with DIA-NN's version).
 
-tools.json is authoritative for `version`, because it describes the command that actually runs.
-The manifest's pin is still recorded, both are compared, and a mismatch is printed and flagged.
+`version` is only ever a build something CONFIRMS ran: tools.json `versions`, or failing that the
+version the command itself names (a build folder like diann-2.6.0/, a .sif name, an image tag).
+The manifest's pin is a request; it is recorded beside `version` and compared with it, but it is
+never promoted to `version`, because fran_deposit.detect_engine() hands `version` -- and only
+`version` -- to FRAN as the engine version. When nothing names the build, `version` is null and
+`engine_version_mismatch` is null (not comparable), not false.
 """
 import contextlib
 import io
@@ -34,13 +38,16 @@ sys.path.insert(0, SCRIPTS)
 import run_search  # noqa: E402
 
 
-def record(engine, tools_versions, manifest_engine):
+def record(engine, tools_versions, manifest_engine, cmd="/opt/engine/bin", **tools_extra):
     err = io.StringIO()
+    tools = {"versions": tools_versions, engine: cmd, **tools_extra}
     with contextlib.redirect_stderr(err):
         rec = run_search.engine_version_record(
-            engine, {"versions": tools_versions, engine: "/opt/engine/bin"},
-            {"engine": manifest_engine} if manifest_engine is not None else {})
+            engine, tools, {"engine": manifest_engine} if manifest_engine is not None else {})
     return rec, err.getvalue()
+
+
+DIANN_261 = {"name": "diann", "version": "2.6.1"}
 
 
 class EngineVersionRecordTests(unittest.TestCase):
@@ -67,19 +74,109 @@ class EngineVersionRecordTests(unittest.TestCase):
         self.assertIs(rec["engine_version_mismatch"], False)
         self.assertEqual(err, "")
 
-    def test_a_placeholder_in_tools_json_falls_back_to_the_pin_LABELLED(self):
-        """A tools.json written before acquire_tools.sh resolved `latest` says "latest" (and
-        Sage from the conda env says "env"). Neither names a build. The pin is the best
-        available answer, but the record must say it is a request nobody confirmed."""
+    def test_a_placeholder_never_promotes_the_pin_to_version(self):
+        """A tools.json written before acquire_tools.sh resolved `latest` says "latest"; Sage
+        from a conda env says "env". Neither names a build, and the command here names none
+        either. The pin is what was ASKED for: recording it as `version` would send FRAN a
+        version nothing checked (an old tools.json pointing at build_260/diann-2.6.0 was
+        recorded as 2.6.1 this way). So: null, and not comparable."""
         for placeholder in ("latest", "env", ""):
-            rec, err = record("diann", {"diann": placeholder},
-                              {"name": "diann", "version": "2.6.1"})
-            self.assertEqual(rec["version"], "2.6.1", placeholder)
-            self.assertNotEqual(rec["version_source"], "tools.json", placeholder)
-            self.assertIn("manifest", rec["version_source"], placeholder)
-            self.assertIs(rec["engine_version_mismatch"], False, placeholder)
+            rec, err = record("diann", {"diann": placeholder}, DIANN_261)
+            self.assertIsNone(rec["version"], placeholder)
+            self.assertIsNone(rec["version_source"], placeholder)
+            self.assertIsNone(rec["engine_version_mismatch"], placeholder)
+            self.assertEqual(rec["manifest_engine_version"], "2.6.1", placeholder)
             self.assertEqual(rec["tools_engine_version"], placeholder or None)
-            self.assertIn("tools.json", err, placeholder)
+            self.assertIn("null", err, placeholder)
+
+    def test_an_old_latest_tools_json_takes_the_build_its_command_path_names(self):
+        """An old acquire_tools.sh wrote "latest" beside a HIVE build path that names 2.6.0,
+        under a manifest pinning 2.6.1. 2.6.0 is what runs."""
+        rec, err = record("diann", {"diann": "latest"}, DIANN_261,
+                          cmd="/quobyte/proteomics-grp/dia-nn/build_260/diann-2.6.0/diann-linux")
+        self.assertEqual(rec["version"], "2.6.0")
+        self.assertEqual(rec["version_source"], "command")
+        self.assertEqual(rec["command_engine_versions"], ["2.6.0"])
+        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertIn("WARNING", err)
+
+    def test_a_docker_image_tag_names_the_build(self):
+        rec, _ = record("diann", {"diann": ""}, DIANN_261,
+                        cmd="docker run --rm -v $PWD:/data proteomics-pipeline/diann:2.7.0 diann-linux")
+        self.assertEqual(rec["version"], "2.7.0")
+        self.assertIs(rec["engine_version_mismatch"], True)
+
+    def test_a_hive_sif_names_the_build(self):
+        rec, _ = record("diann", {"diann": "latest"}, DIANN_261,
+                        cmd="apptainer exec --bind /quobyte:/quobyte "
+                            "/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif /diann-*/diann-linux")
+        self.assertEqual(rec["version"], "2.3.0")
+
+    def test_conda_env_sage_records_null_and_does_not_say_rerun_acquire_tools(self):
+        """acquire_tools.sh writes "env" for EVERY sage on PATH, so re-running it cannot
+        change the record -- telling the user to do that is advice that cannot work."""
+        rec, err = record("sage", {"sage": "env"}, {"name": "sage", "version": "0.14.7"},
+                          cmd="/home/u/.proteomics-pipeline/micromamba/envs/proteomics-pipeline/bin/sage")
+        self.assertIsNone(rec["version"])
+        self.assertIsNone(rec["engine_version_mismatch"])
+        self.assertNotIn("acquire_tools", err)
+
+    def test_an_unpinned_radiant_image_records_null(self):
+        """tools.json `radiant` is only the runtime prefix; the image is `radiant_image`."""
+        rec, _ = record("radiant", {"radiant": "latest"}, {"name": "radiant", "version": "2.3.3"},
+                        cmd="docker run --rm", radiant_image="seerbio/radiant-fulcrum:latest")
+        self.assertIsNone(rec["version"])
+        rec, _ = record("radiant", {"radiant": ""}, {"name": "radiant", "version": "2.3.3"},
+                        cmd="docker run --rm", radiant_image="seerbio/radiant-fulcrum:2.3.3")
+        self.assertEqual(rec["version"], "2.3.3")
+        self.assertIs(rec["engine_version_mismatch"], False)
+
+    def test_tools_json_contradicting_its_own_command_records_null(self):
+        """tools.json says 2.6.1 but the path it runs is diann-2.6.0/. One of them is wrong
+        and nothing here can tell which: say so, record neither as `version`."""
+        rec, err = record("diann", {"diann": "2.6.1"}, DIANN_261,
+                          cmd="/opt/dia-nn/build_260/diann-2.6.0/diann-linux")
+        self.assertIsNone(rec["version"])
+        self.assertIsNone(rec["engine_version_mismatch"])
+        self.assertEqual(rec["tools_engine_version"], "2.6.1")
+        self.assertEqual(rec["command_engine_versions"], ["2.6.0"])
+        self.assertIn("WARNING", err)
+
+    def test_tools_json_agreeing_with_its_command_is_quiet(self):
+        rec, err = record("diann", {"diann": "2.6.1"}, DIANN_261,
+                          cmd="/quobyte/proteomics-grp/dia-nn/build_261/diann-2.6.1/diann-linux")
+        self.assertEqual(rec["version"], "2.6.1")
+        self.assertEqual(rec["version_source"], "tools.json")
+        self.assertIs(rec["engine_version_mismatch"], False)
+        self.assertEqual(err, "")
+
+    def test_the_request_keyed_sage_cache_dir_is_not_read_as_a_version(self):
+        """acquire_sage caches under sage/<REQUEST>/: sage/0.14.6/sage can hold another
+        release (acquire_tools.sh notes that case). Only a release folder name counts."""
+        rec, _ = record("sage", {"sage": ""}, {"name": "sage", "version": "0.14.7"},
+                        cmd="/home/u/.proteomics-pipeline/tools/sage/0.14.6/sage")
+        self.assertIsNone(rec["version"])
+        self.assertEqual(rec["command_engine_versions"], [])
+
+    def test_mismatch_fix_it_names_this_tools_root_and_platform(self):
+        """The pilot ran with --tools .../pilot_tools/tools.json. A fix-it that omits the root
+        rewrites ~/.proteomics-pipeline/tools/tools.json instead, and the WARNING returns."""
+        rec, err = record("diann", {"diann": "2.7.0"}, DIANN_261,
+                          cmd="/quobyte/proteomics-grp/fran/engines/pilot_tools/diann/2.7.0/diann-2.7.0/diann-linux",
+                          tools_root="/quobyte/proteomics-grp/fran/engines/pilot_tools",
+                          platform_class="hpc")
+        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertIn("PIN_ENGINE=diann PIN_VERSION=2.6.1 bash scripts/acquire_tools.sh hpc "
+                      "/quobyte/proteomics-grp/fran/engines/pilot_tools", err)
+
+    def test_mac_docker_mismatch_fix_it_rebuilds_the_image(self):
+        """On macOS acquire_tools.sh only wraps $DIANN_DOCKER_IMAGE, so re-running it cannot
+        change the version; the image has to be built for the pin."""
+        rec, err = record("diann", {"diann": "2.7.0"}, DIANN_261,
+                          cmd="docker run --rm -v $PWD:/data proteomics-pipeline/diann:2.7.0 diann-linux",
+                          platform_class="mac", tools_root="/Users/u/.proteomics-pipeline/tools")
+        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertIn("build_diann_docker.sh 2.6.1", err)
 
     def test_another_engines_pin_is_never_borrowed(self):
         """The manifest pins ONE engine. `--engine sage` under a DIA-NN manifest used to be
@@ -87,7 +184,7 @@ class EngineVersionRecordTests(unittest.TestCase):
         rec, _ = record("sage", {}, {"name": "diann", "version": "2.6.1"})
         self.assertIsNone(rec["version"])
         self.assertIsNone(rec["manifest_engine_version"])
-        self.assertIs(rec["engine_version_mismatch"], False)
+        self.assertIsNone(rec["engine_version_mismatch"])
 
     def test_no_version_anywhere_is_null_and_said(self):
         rec, err = record("fragpipe", {}, {"name": "fragpipe"})
@@ -99,7 +196,7 @@ class EngineVersionRecordTests(unittest.TestCase):
 class SearchProvenanceFileTests(unittest.TestCase):
     """End to end through main(): the fields land in search_provenance.json."""
 
-    def _run(self, d, tools_diann_version, manifest_version):
+    def _run(self, d, tools_diann_version, manifest_version, diann_cmd="/opt/diann/diann-linux"):
         raw = os.path.join(d, "a.d")                   # a timsTOF-shaped input: no .NET needed
         os.makedirs(raw)
         cfg = os.path.join(d, "diann.cfg")
@@ -110,7 +207,7 @@ class SearchProvenanceFileTests(unittest.TestCase):
             fh.write(">sp|P1|X\nPEPTIDEK\n")
         tools = os.path.join(d, "tools.json")
         with open(tools, "w") as fh:
-            json.dump({"diann": "/opt/diann/diann-linux",
+            json.dump({"diann": diann_cmd,
                        "versions": {"diann": tools_diann_version}}, fh)
         bundle = os.path.join(d, "workflow.manifest.json")
         with open(bundle, "w") as fh:
@@ -144,6 +241,21 @@ class SearchProvenanceFileTests(unittest.TestCase):
             prov, _ = self._run(d, "2.6.1", "2.6.1")
             self.assertIs(prov["engine_version_mismatch"], False)
             self.assertEqual(prov["version"], "2.6.1")
+
+    def test_what_fran_deposit_forwards_is_never_the_unconfirmed_pin(self):
+        """fran_deposit.detect_engine() passes `version` -- and nothing else from this record --
+        to FRAN as engine_version. Check at that consumer, not only in the file."""
+        import fran_deposit
+        with tempfile.TemporaryDirectory() as d:
+            self._run(d, "latest", "2.6.1")                     # names no build anywhere
+            eng, ver, _src = fran_deposit.detect_engine(os.path.join(d, "search_out"))
+            self.assertEqual(eng, "diann")
+            self.assertIsNone(ver)
+        with tempfile.TemporaryDirectory() as d:
+            self._run(d, "latest", "2.6.1",
+                      diann_cmd="/quobyte/proteomics-grp/dia-nn/build_260/diann-2.6.0/diann-linux")
+            _eng, ver, _src = fran_deposit.detect_engine(os.path.join(d, "search_out"))
+            self.assertEqual(ver, "2.6.0")
 
 
 if __name__ == "__main__":

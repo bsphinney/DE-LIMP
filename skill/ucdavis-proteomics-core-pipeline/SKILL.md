@@ -415,9 +415,11 @@ Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Co
 native DIA-NN build for that version (downloading it if the Core has none); on mac it uses
 Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
 missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
-never `latest`. If `run_search.py` later prints an **engine version mismatch WARNING**,
-the version the user confirmed is not the one about to run — say so before submitting
-(both land in `search_provenance.json`). → `references/environment.md` ("Version pinning").
+never `latest` (`""` when it cannot tell, `env` for a `sage` on PATH). If `run_search.py`
+later prints an **engine version mismatch WARNING**, the version the user confirmed is not
+the one about to run — say so before submitting (both land in `search_provenance.json`). If
+it prints that the record is **`version: null`**, say that too: the search will be recorded
+and deposited with no engine version. → `references/environment.md` ("Version pinning").
 
 Radiant is a ~3 GB image pull, so it is **not** acquired unless asked for:
 ```

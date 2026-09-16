@@ -58,16 +58,19 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
 2. **Pinned engine version.** `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION`
    from the manifest and records resolved commands + versions in `tools.json`. The
    recorded version is the build each command actually is — read from the HIVE build
-   path, `.sif` name, download asset or Docker tag for DIA-NN, and from the release
-   tarball for Sage — never the literal string `latest` (an older `tools.json` may
-   still say it; re-run `acquire_tools.sh`).
+   path, `.sif` name, download asset or Docker tag for DIA-NN, from the release
+   tarball for Sage, and from a pinned image tag or `.sif` name for Radiant — never the
+   literal string `latest`. What cannot be determined is recorded as `""`; a `sage`
+   found on PATH is recorded as `env` (a source, not a build). A `tools.json` written
+   before this change may still say `latest`.
    The manifest's pin and `tools.json` can disagree (the FRAN pilot: manifest 2.6.1,
-   2.7.0 ran). `search_provenance.json` is the record of which build ran: `version` comes
-   from `tools.json`, with `manifest_engine_version`, `tools_engine_version` and
-   `engine_version_mismatch` beside it (→ `references/environment.md`, "Version
-   pinning"). `reproduce.sh` still re-acquires the **manifest's** pin, so when
-   `engine_version_mismatch` is `true`, edit its `PIN_VERSION` to `tools_engine_version`
-   before replaying the search.
+   2.7.0 ran). `search_provenance.json` is the record of which build ran: `version` is
+   `tools.json`'s, else the version the command itself names, else `null` — **never the
+   manifest's pin**, which is kept beside it as `manifest_engine_version` with
+   `engine_version_mismatch` (`null` when the two cannot be compared) (→
+   `references/environment.md`, "Version pinning"). `reproduce.sh` still re-acquires the
+   **manifest's** pin, so when `engine_version_mismatch` is `true`, edit its
+   `PIN_VERSION` to `version` before replaying the search.
 3. **Locked software environment.** `provenance.py` captures
    `environment/conda-explicit.txt` (every package pinned with URL + md5),
    `pip-freeze.txt`, and `r-sessionInfo.txt` (all R package versions). `reproduce.sh`

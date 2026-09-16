@@ -30,7 +30,7 @@ Usage:
       --files /data/*.raw --threads 16 [--sbatch job.sh]
       [--engine diann|alphadia|sage|fragpipe|radiant]
 """
-import sys, os, json, glob, shlex, argparse, subprocess, shutil, stat, time
+import sys, os, json, glob, re, shlex, argparse, subprocess, shutil, stat, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
@@ -72,6 +72,10 @@ def pick_engine(args, bundle):
 # conda env), and "" (nothing could be determined).
 _NOT_A_BUILD = {"", "latest", "env", "unknown"}
 
+# How a build folder / image file spells each engine's name. Everything else uses the
+# engine key itself (fragpipe-24.0/ is how the FragPipe zip unpacks).
+_ENGINE_NAME_RE = {"diann": r"dia-?nn", "radiant": r"radiant(?:-fulcrum)?"}
+
 
 def _concrete_version(v):
     """'v0.14.7' / '0.14.7' -> '0.14.7'; a placeholder or a non-string -> None."""
@@ -80,60 +84,130 @@ def _concrete_version(v):
     return v.strip().lstrip("vV")
 
 
+def command_engine_versions(engine, tools):
+    """The versions the command tools.json runs for `engine` names IN ITSELF, sorted, distinct.
+
+      * a build folder or image file: <name>[-_]<version>, last one in the string -- the rule
+        acquire_tools.sh's diann_version_of() uses, e.g. build_260/diann-2.6.0/diann-linux,
+        diann_2.3.0.sif, radiant-fulcrum-2.3.3.sif, fragpipe-24.0/bin/fragpipe,
+        sage-v0.14.7-x86_64-unknown-linux-gnu/sage;
+      * an image tag: a word ending :<version>, e.g. proteomics-pipeline/diann:2.7.0.
+    tools.json keeps Radiant's image apart from its runtime prefix (`radiant_image`), so that
+    is read too. A bare version DIRECTORY (sage/0.14.6/sage, diann/2.7.0/) is deliberately not
+    matched: acquire_tools.sh names cache folders after the REQUEST, and a request-keyed
+    folder can hold another release (it writes a note when a pinned Sage cache does)."""
+    name = _ENGINE_NAME_RE.get(engine, re.escape(engine))
+    found = set()
+    for s in ((tools or {}).get(engine), (tools or {}).get(f"{engine}_image")):
+        if not isinstance(s, str):
+            continue
+        hits = re.findall(rf"(?i){name}[-_]v?(\d+(?:\.\d+)+)", s)
+        if hits:
+            found.add(hits[-1])
+        for word in s.split():
+            m = re.search(r":v?(\d+(?:\.\d+)+)$", word)
+            if m:
+                found.add(m.group(1))
+    return sorted(found)
+
+
+def _reacquire_hint(engine, pin, tools):
+    """The command that gets the manifest's pin into THIS tools.json. The root matters: the
+    pilot ran --tools .../pilot_tools/tools.json, and acquire_tools.sh without a root rewrites
+    ~/.proteomics-pipeline/tools/tools.json instead, leaving the mismatch in place."""
+    t = tools or {}
+    cls = t.get("platform_class") or "<platform_class>"
+    root = f" {shlex.quote(t['tools_root'])}" if t.get("tools_root") else ""
+    # acquire_tools.sh re-resolves EVERY engine into that tools.json, and an engine it is not
+    # pinning goes to "latest": on HIVE the pilot's pinned 2.7.0 DIA-NN entry would become
+    # the Core's 2.6.1 after a Sage-only re-acquire. Say so rather than let the fix move it.
+    caveat = (" (this rewrites every engine's entry in that tools.json; engines other than "
+              f"{engine} are re-resolved unpinned)")
+    if engine == "diann" and cls == "mac":
+        # acquire_tools.sh only wraps $DIANN_DOCKER_IMAGE on macOS; re-running it cannot
+        # change the version inside the image. The image has to be built for the pin.
+        return (f"bash scripts/build_diann_docker.sh {pin}, re-source activate.sh so "
+                f"DIANN_DOCKER_IMAGE is proteomics-pipeline/diann:{pin}, then "
+                f"bash scripts/acquire_tools.sh mac{root}{caveat}")
+    return f"PIN_ENGINE={engine} PIN_VERSION={pin} bash scripts/acquire_tools.sh {cls}{root}{caveat}"
+
+
 def engine_version_record(engine, tools, bundle):
     """Which engine build this search ran, and whether it is the one the manifest asked for.
 
-    Two files name a version and, until this, nothing compared them:
+    Three things name a version, and until this nothing compared them:
       * workflow.manifest.json `engine.version` -- resolve_defaults.py's PIN. A request.
       * tools.json `versions.<engine>`          -- what acquire_tools.sh resolved, beside the
                                                    command run_search.py executes VERBATIM.
-    tools.json is authoritative for `version`: it describes the binary that actually runs,
-    and nothing checks a binary against the manifest's pin. The FRAN pilot (2026-09-16) is
-    the case: manifest 2.6.1, tools.json 2.7.0, and the compute-node banner said
-    "DIA-NN 2.7.0 Academia". Recording the pin would have put a false version into FRAN.
+      * that command itself                     -- a build folder, .sif name or image tag.
+    The FRAN pilot (2026-09-16) is why they must be compared: manifest 2.6.1, tools.json 2.7.0,
+    and the compute-node banner said "DIA-NN 2.7.0 Academia".
 
-    But neither value is silently dropped. Both are kept, a disagreement is flagged
-    (`engine_version_mismatch`) and printed, and when tools.json names no build (a
-    placeholder above, or no entry at all) the manifest's pin is used ONLY with
-    `version_source` saying it is an unconfirmed request. The pin is used only if the
-    manifest pins THIS engine: `tools.versions or manifest.version` used to stamp a Sage
-    search run under a DIA-NN manifest with DIA-NN's version.
+    `version` is only ever a build something CONFIRMS runs: tools.json, else the one version
+    the command names. The manifest's pin is NEVER promoted to `version`, because
+    fran_deposit.detect_engine() forwards `version` -- and nothing else from this record -- to
+    FRAN as the engine version. Promoting the pin whenever tools.json said "latest" would stamp
+    an old tools.json pointing at build_260/diann-2.6.0 as 2.6.1, and every conda-env Sage as
+    whatever the manifest pins. An unknown version is null; a wrong one is a false claim about
+    published results.
+
+    `engine_version_mismatch` is True/False only when both `version` and the pin are known;
+    null otherwise (not comparable -- "false" would claim they were checked and agree). A
+    tools.json that contradicts its own command is recorded as `version: null` with a WARNING:
+    one of them is wrong and nothing here can tell which.
     """
-    tools_raw = ((tools or {}).get("versions") or {}).get(engine)
+    t = tools or {}
+    tools_raw = (t.get("versions") or {}).get(engine)
     beng = (bundle or {}).get("engine") or {}
-    pins_this_engine = beng.get("name") in (None, engine)
-    manifest_raw = beng.get("version") if pins_this_engine else None
+    # The manifest pins ONE engine: `tools.versions or manifest.version` used to stamp a Sage
+    # search run under a DIA-NN manifest with DIA-NN's version.
+    manifest_raw = beng.get("version") if beng.get("name") in (None, engine) else None
     tv, mv = _concrete_version(tools_raw), _concrete_version(manifest_raw)
+    cvs = command_engine_versions(engine, t)
+    # What runs, as printed: Radiant's runtime prefix alone ("apptainer exec") says nothing.
+    cmd = " ".join(str(x) for x in (t.get(engine), t.get(f"{engine}_image")) if x)
+    out = sys.stderr.write
 
-    if tv:
+    if tv and cvs and tv not in cvs:
+        version, source = None, None
+        out(f"[run_search] WARNING: tools.json says {engine} {tv}, but the command it runs names "
+            f"{', '.join(cvs)} ({cmd}). One of them is wrong, so search_provenance.json records "
+            f"`version: null` (both values are kept). Re-run acquire_tools.sh to rewrite "
+            f"tools.json from what it finds.\n")
+    elif tv:
         version, source = tv, "tools.json"
-    elif mv:
-        version = mv
-        source = ("workflow.manifest.json (the requested pin; tools.json did not confirm "
-                  "which build ran)")
+    elif len(cvs) == 1:
+        version, source = cvs[0], "command"
+        out(f"[run_search] NOTE: tools.json names no {engine} build ({tools_raw!r}); the "
+            f"command it runs names {version} ({cmd}), recorded as `version` "
+            f"(version_source: command).\n")
     else:
         version, source = None, None
-    mismatch = bool(tv and mv and tv != mv)
+        why = (f"its command names several ({', '.join(cvs)})" if cvs
+               else "neither does the command it runs")
+        pin = (f" The manifest's pin {mv} is kept as `manifest_engine_version` but is not "
+               f"recorded as `version`: it is what was asked for, not evidence of what ran."
+               if mv else "")
+        if tools_raw == "env":
+            fix = (" (A sage on PATH has no release record, and `sage --version` cannot supply "
+                   "one: the v0.14.7 release binary prints 0.14.6.)")
+        elif mv:
+            fix = f" To record the build, re-acquire it: {_reacquire_hint(engine, mv, t)}"
+        else:
+            fix = ""
+        out(f"[run_search] NOTE: tools.json names no {engine} build ({tools_raw!r}) and {why}; "
+            f"search_provenance.json records `version: null`.{pin}{fix}\n")
 
+    mismatch = (version != mv) if (version and mv) else None
     if mismatch:
-        sys.stderr.write(
-            f"[run_search] WARNING: engine version mismatch -- workflow.manifest.json pins "
-            f"{engine} {mv}, but tools.json resolved {tv} ({(tools or {}).get(engine)}). "
-            f"{tv} is what runs and is recorded as `version`; both are kept in "
-            f"search_provenance.json (engine_version_mismatch: true). If {mv} was intended, "
-            f"re-acquire it: PIN_ENGINE={engine} PIN_VERSION={mv} bash scripts/acquire_tools.sh "
-            f"<platform_class>\n")
-    elif not tv and mv:
-        sys.stderr.write(
-            f"[run_search] NOTE: tools.json does not name the {engine} build "
-            f"({tools_raw!r}); recording the manifest's pin {mv} as `version`, marked "
-            f"unconfirmed in `version_source`. Re-run acquire_tools.sh to record the build.\n")
-    elif not tv:
-        sys.stderr.write(
-            f"[run_search] NOTE: no {engine} version in tools.json ({tools_raw!r}) or the "
-            f"workflow manifest; search_provenance.json records `version: null`.\n")
+        out(f"[run_search] WARNING: engine version mismatch -- workflow.manifest.json pins "
+            f"{engine} {mv}, but {version} is what runs ({cmd}; from {source}). {version} is "
+            f"recorded as `version`; the pin is kept beside it in search_provenance.json "
+            f"(engine_version_mismatch: true). If {mv} was intended, re-acquire it: "
+            f"{_reacquire_hint(engine, mv, t)}\n")
     return {"version": version, "version_source": source,
             "tools_engine_version": tools_raw or None,     # as written, even "latest"
+            "command_engine_versions": cvs,
             "manifest_engine_version": manifest_raw,
             "engine_version_mismatch": mismatch}
 
