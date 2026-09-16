@@ -12,15 +12,21 @@ Detection per format (best-effort, with a confidence score):
   mzML(.gz)   stream isolation windows of MS2 scans. Wide windows (median
               >= 3 Da) over a small repeating set of centers => DIA; narrow
               windows (<= 2 Da) with many distinct centers => DDA.
-  Thermo .raw not natively readable here. If ThermoRawFileParser is on PATH we
-              convert a header sample; otherwise we return 'unknown' and ask.
+  Thermo .raw not natively readable here; read through ThermoRawFileParser
+              (https://github.com/compomics/ThermoRawFileParser/releases, v1.4.0+).
+              Metadata JSON -> instrument model and scan counts; a `query` of a
+              mid-run slice of scans -> isolation windows + the filter string's
+              data-dependent flag -> DIA/DDA and the acquired bounds. Parser missing
+              or failing => 'unknown'/low, a stated reason, and a stderr WARNING.
 
 Output: JSON to stdout. The orchestrator MUST confirm with the user whenever
 confidence != "high" before launching a multi-hour search.
 
 Usage: python3 detect_acquisition.py FILE [FILE ...]
+       THERMORAWFILEPARSER="dotnet /opt/trfp/ThermoRawFileParser.dll" \
+       python3 detect_acquisition.py run.raw        # parser not on PATH as one executable
 """
-import sys, os, json, glob, gzip, sqlite3, statistics, shutil, subprocess
+import sys, os, json, glob, gzip, math, sqlite3, statistics, shutil, subprocess, shlex, tempfile
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -45,26 +51,15 @@ def instrument_bruker_d(path):
     return None
 
 def instrument_thermo_raw(path):
-    # Thermo .raw model string requires a reader. Try ThermoRawFileParser metadata.
-    parser = shutil.which("ThermoRawFileParser") or shutil.which("thermorawfileparser")
-    if not parser:
-        return None
-    try:
-        out = subprocess.run([parser, "metadata", "-i", path],
-                             capture_output=True, text=True, timeout=120).stdout
-        for line in out.splitlines():
-            low = line.lower()
-            if "instrument model" in low or "instrument name" in low:
-                return line.split(":", 1)[-1].strip() or None
-    except Exception:
-        return None
-    return None
+    """Instrument model of a Thermo .raw, e.g. "Orbitrap Exploris 480", or None."""
+    meta, _err = trfp_metadata(path)
+    return _cv(meta, "InstrumentProperties", CV_MODEL) if meta else None
 
 def detect_instrument(path):
     low = path.lower().rstrip("/")
     if low.endswith(".d"):
         return instrument_bruker_d(path)
-    if low.endswith(".raw"):
+    if low.endswith(".raw") and not os.path.isdir(path):     # a .raw FOLDER is Waters
         return instrument_thermo_raw(path)
     return None
 
@@ -147,18 +142,16 @@ def _iter_mzml(path, cap=3000):
                 el.clear()
                 if n >= cap: break
 
-def detect_mzml(path):
-    widths, targets, los, his = [], [], [], []
-    try:
-        for lvl, tgt, w, lo, hi in _iter_mzml(path):
-            if w: widths.append(w)
-            if tgt is not None: targets.append(round(tgt * 2) / 2)
-            if lo is not None and hi is not None and hi > lo:
-                los.append(lo); his.append(hi)
-    except Exception as e:
-        return ("unknown", "low", f"mzML parse error: {e}", None)
+def classify_isolation_windows(widths, targets, los, his):
+    """DIA vs DDA from MS2 isolation windows -> (kind, confidence, reason, range).
+
+    The one definition of the width/centre rule, shared by the mzML reader and the Thermo
+    .raw reader so the two formats cannot drift into classifying the same run differently.
+    `targets` are window centres, `los`/`his` the ACQUIRED window edges.
+    """
     if not widths:
         return ("unknown", "low", "no MS2 isolation windows found", None)
+    targets = [round(t * 2) / 2 for t in targets]
     med = statistics.median(widths)
     distinct = len(set(targets))
     n = len(widths)
@@ -172,47 +165,383 @@ def detect_mzml(path):
                 f"median isolation width {med:.1f} Da, {distinct} distinct precursors",
                 None)
     return ("unknown", "low", f"ambiguous: median width {med:.1f} Da, {distinct} centers", None)
-def detect_thermo_raw(path):
-    parser = shutil.which("ThermoRawFileParser") or shutil.which("thermorawfileparser")
-    if not parser:
-        return ("unknown", "low",
-                "Thermo .raw needs ThermoRawFileParser (-> mzML) or DIA-NN's own reader to classify; confirm manually",
-                None)
+
+def detect_mzml(path):
+    widths, targets, los, his = [], [], [], []
     try:
-        out = subprocess.run([parser, "query", "-i", path], capture_output=True,
-                             text=True, timeout=120).stdout.lower()
-        if "dia" in out: return ("DIA", "medium", "ThermoRawFileParser metadata mentions DIA", None)
-        if "dda" in out: return ("DDA", "medium", "ThermoRawFileParser metadata mentions DDA", None)
+        for lvl, tgt, w, lo, hi in _iter_mzml(path):
+            if w: widths.append(w)
+            if tgt is not None: targets.append(tgt)
+            if lo is not None and hi is not None and hi > lo:
+                los.append(lo); his.append(hi)
     except Exception as e:
-        return ("unknown", "low", f"ThermoRawFileParser error: {e}", None)
-    return ("unknown", "low", "could not classify from header", None)
+        return ("unknown", "low", f"mzML parse error: {e}", None)
+    return classify_isolation_windows(widths, targets, los, his)
+
+
+# ---------------------------------------------------------------------------
+# Thermo .raw, read through ThermoRawFileParser (TRFP).
+#
+# Public source (golden rule 7): https://github.com/compomics/ThermoRawFileParser/releases
+# -- self-contained Linux/macOS/Windows builds, a .NET 8 framework-dependent DLL, and
+# `conda install -c bioconda thermorawfileparser`. Nothing here assumes HIVE.
+#
+# The command lines below are the only ones this parser accepts. The previous code called
+# `ThermoRawFileParser metadata -i <raw>` and `ThermoRawFileParser query -i <raw>`; on
+# TRFP 2.0.0.0 (HIVE srun job 23510571) both exit 255 -- "Unexpected extra arguments"
+# (there is no `metadata` subcommand) and "specify a valid scan range" (query needs -n).
+# The exit codes were ignored and the empty stdout grepped for "dia", so EVERY .raw came
+# back unknown / instrument null / range null and estimate_params.py searched 380-980 on
+# methods that acquired 350.0-1201.0 (Exploris 480) and 350.05-1200.95 (Fusion Lumos).
+#
+# Grammar read from MainClass.cs for every release v1.4.0 .. v.2.0.0-dev, and run for real on
+# 2.0.0.0 (the only build exercised on data -- 1.4.x needs Mono). The README states that
+# optional parameters "only work in the -option=value format", so every value is inlined.
+#   metadata:  -i=<raw> -m=0 -o=<dir>            -> <dir>/<stem>-metadata.json
+#              (-m alone writes no spectra: the indexed-mzML default applies only when
+#               neither -m nor -f is given. `-f=4` means the same but is documented only
+#               from 1.4.4, so it is left out rather than relied on.)
+#   spectra:   query -i=<raw> -n=<a>-<b> -b=<file>  -> JSON PROXI spectra with isolation
+#              target + lower/upper offsets (1.4.0+) and the filter string (1.4.5+)
+# ---------------------------------------------------------------------------
+TRFP_RELEASES = "https://github.com/compomics/ThermoRawFileParser/releases"
+TRFP_ENV = "THERMORAWFILEPARSER"     # a full command, e.g. "dotnet /opt/trfp/ThermoRawFileParser.dll"
+TRFP_NAMES = ("ThermoRawFileParser", "thermorawfileparser")   # release binary / bioconda link
+# Measured on HIVE for 3.5 GB raws: metadata 2.6-3.6 s; a query of 200-2000 scans 1.1-5.8 s
+# (10.8 s once, for the first 1000 scans of a DDA run). The metadata call walks every scan
+# header, so a slow network mount can take far longer -- but a parser that has not answered
+# in 5 min is stuck, and stuck must not look like done.
+TRFP_TIMEOUT_S = 300
+# JSON metadata terms, keyed by ACCESSION: TRFP's own `name` strings are not stable
+# (the source labels the MS2 count "Number of MS1 spectra").
+CV_MODEL = "MS:1000494"          # InstrumentProperties: Thermo Scientific instrument model
+CV_SCAN_RANGE = "PRIDE:0000479"  # ScanSettings: "first:last"
+CV_N_MS1 = "PRIDE:0000481"       # MsData
+CV_N_MS2 = "PRIDE:0000482"       # MsData
+# NOT used, on purpose: MsData "MS min MZ"/"MS max MZ" (PRIDE:0000476/7) are the lowest and
+# highest isolation window CENTRES (367.5/1183.5 on the Exploris run above, whose windows
+# span 350.0-1201.0). Taking them as the range clips half a window off each end.
+
+# How many scans to query. A DIA cycle is one MS1 plus its MS2 windows, so the metadata's
+# MS2/MS1 count ratio is the cycle length (78352/3135 -> 26 scans on the Exploris). Four
+# cycles guarantees every window is seen, including staggered schemes that alternate
+# window sets between cycles; the floor covers methods with extra MS1 scans per cycle, the
+# ceiling bounds the output (TRFP writes every peak: 1000 mid-run Exploris DIA scans were
+# 43 MB of JSON, 200 are ~9 MB).
+QUERY_CYCLES, QUERY_MIN_SCANS, QUERY_MAX_SCANS = 4, 200, 1500
+QUERY_SCANS_WITHOUT_METADATA = 1000
+
+FALLBACK_CONSEQUENCE = ("precursor m/z range NOT measured, so estimate_params.py will search "
+                        "its 380-980 FALLBACK -- pass --precursor-mz-range if the method "
+                        "acquired wider")
+
+
+def find_trfp():
+    """The ThermoRawFileParser command as an argv prefix, or None.
+
+    $THERMORAWFILEPARSER wins, because two public distributions are not one executable on
+    PATH: the framework-dependent release is `dotnet ThermoRawFileParser.dll`, and 1.4.x on
+    Linux/macOS is `mono ThermoRawFileParser.exe`.
+    """
+    env = os.environ.get(TRFP_ENV, "").strip()
+    if env:
+        toks = shlex.split(env, posix=(os.name != "nt"))
+        return [t[1:-1] if len(t) > 1 and t[0] == t[-1] == '"' else t for t in toks]
+    for name in TRFP_NAMES:
+        hit = shutil.which(name)
+        if hit:
+            return [hit]
+    return None
+
+
+def _trfp_not_found():
+    return (f"ThermoRawFileParser not found (${TRFP_ENV} is unset and neither "
+            f"{' nor '.join(TRFP_NAMES)} is on PATH), so this .raw was not read: acquisition "
+            f"and instrument unknown, and {FALLBACK_CONSEQUENCE}. Install it from "
+            f"{TRFP_RELEASES} (self-contained Linux/macOS/Windows builds, or "
+            f"`conda install -c bioconda thermorawfileparser`), or convert the .raw to mzML")
+
+
+def _trfp_message(stdout, stderr):
+    """The parser's own words. Usage errors go to stderr; processing errors are log4net
+    `ERROR` lines on stdout (its console appender), so look in both."""
+    errs = [ln.strip() for ln in (stdout or "").splitlines() if " ERROR " in f" {ln} "]
+    usage = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    msg = " | ".join(errs[:2] + usage[:1]) or "no message"
+    return msg if len(msg) <= 400 else msg[:400] + "..."
+
+
+def _run_trfp(cmd, args):
+    """(True, None) or (False, "exit N: <parser message>"). Never raises."""
+    try:
+        p = subprocess.run(cmd + args, capture_output=True, text=True, errors="replace",
+                           timeout=TRFP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return False, f"no answer after {TRFP_TIMEOUT_S} s"
+    except OSError as e:                       # includes FileNotFoundError / PermissionError
+        return False, f"could not run {' '.join(cmd)!r}: {e}"
+    if p.returncode != 0:
+        return False, f"exit {p.returncode}: {_trfp_message(p.stdout, p.stderr)}"
+    return True, None
+
+
+_TRFP_VERSIONS = {}
+
+def trfp_version(cmd):
+    """`--version` output (e.g. "2.0.0.0"), cached per command; None if it will not say."""
+    key = tuple(cmd)
+    if key not in _TRFP_VERSIONS:
+        try:
+            p = subprocess.run(cmd + ["--version"], capture_output=True, text=True,
+                               errors="replace", timeout=60)
+            lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+            _TRFP_VERSIONS[key] = lines[-1] if p.returncode == 0 and lines else None
+        except (OSError, subprocess.TimeoutExpired):
+            _TRFP_VERSIONS[key] = None
+    return _TRFP_VERSIONS[key]
+
+
+def _cv(meta, section, accession):
+    for term in (meta or {}).get(section) or []:
+        if isinstance(term, dict) and term.get("accession") == accession:
+            v = term.get("value")
+            return v.strip() if isinstance(v, str) and v.strip() else None
+    return None
+
+
+def trfp_metadata(path, cmd=None):
+    """(metadata dict, None) or (None, why)."""
+    cmd = cmd or find_trfp()
+    if not cmd:
+        return None, _trfp_not_found()
+    with tempfile.TemporaryDirectory(prefix="trfp_meta_") as tmp:
+        ok, why = _run_trfp(cmd, [f"-i={path}", "-m=0", f"-o={tmp}"])
+        if not ok:
+            return None, f"ThermoRawFileParser metadata call failed ({why})"
+        hits = [f for f in os.listdir(tmp) if f.endswith("-metadata.json")]
+        if not hits:
+            return None, "ThermoRawFileParser metadata call wrote no *-metadata.json"
+        try:
+            with open(os.path.join(tmp, hits[0]), encoding="utf-8-sig") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError) as e:
+            return None, f"ThermoRawFileParser metadata JSON unreadable ({e})"
+    if not isinstance(meta, dict):
+        return None, "ThermoRawFileParser metadata JSON is not an object"
+    return meta, None
+
+
+def trfp_query(path, first, last, cmd):
+    """(list of PROXI spectra, None) or (None, why)."""
+    with tempfile.TemporaryDirectory(prefix="trfp_query_") as tmp:
+        dest = os.path.join(tmp, "query.json")
+        ok, why = _run_trfp(cmd, ["query", f"-i={path}", f"-n={first}-{last}", f"-b={dest}"])
+        if not ok:
+            return None, f"ThermoRawFileParser query of scans {first}-{last} failed ({why})"
+        try:
+            with open(dest, encoding="utf-8-sig") as fh:
+                spectra = json.load(fh)
+        except (OSError, ValueError) as e:
+            return None, f"ThermoRawFileParser query output for scans {first}-{last} unreadable ({e})"
+    if not isinstance(spectra, list):
+        return None, "ThermoRawFileParser query output is not a JSON list of spectra"
+    return spectra, None
+
+
+def query_scan_range(meta):
+    """(first, last) scans to query: several acquisition cycles from the middle of the run,
+    where the method is at steady state -- not the loading/wash start."""
+    try:
+        first, last = (int(v) for v in _cv(meta, "ScanSettings", CV_SCAN_RANGE).split(":"))
+    except (AttributeError, ValueError):
+        return 1, QUERY_SCANS_WITHOUT_METADATA
+    if last < first:
+        return 1, QUERY_SCANS_WITHOUT_METADATA
+    try:
+        cycle = int(_cv(meta, "MsData", CV_N_MS2)) / int(_cv(meta, "MsData", CV_N_MS1)) + 1
+        want = min(QUERY_MAX_SCANS, max(QUERY_MIN_SCANS, math.ceil(QUERY_CYCLES * cycle)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        want = QUERY_SCANS_WITHOUT_METADATA
+    a = max(first, (first + last) // 2 - want // 2)
+    return a, min(last, a + want - 1)
+
+
+def thermo_isolation_windows(spectra):
+    """MS2 isolation windows + data-dependent evidence from TRFP `query` JSON.
+
+    Edges are target -/+ the lower/upper offsets TRFP reports, which already fold in the
+    instrument's isolation-width offset -- the same values it writes to mzML, so the two
+    readers agree (both gave 350.0-1201.0 and 350.05-1200.95 on the runs above).
+    """
+    w = {"widths": [], "centres": [], "los": [], "his": [],
+         "n_ms2": 0, "n_filter": 0, "n_dependent": 0}
+    for s in spectra:
+        attrs = {}
+        for a in (s.get("attributes") or []) if isinstance(s, dict) else []:
+            if isinstance(a, dict) and a.get("accession"):
+                attrs.setdefault(a["accession"], a.get("value"))
+        try:
+            if int(float(attrs.get("MS:1000511"))) != 2:
+                continue
+        except (TypeError, ValueError):
+            continue
+        w["n_ms2"] += 1
+        filt = attrs.get("MS:1000512")
+        if isinstance(filt, str) and filt.strip():
+            w["n_filter"] += 1
+            # Thermo filter grammar: a standalone `d` token before the mass list means
+            # "data-dependent scan" ("FTMS + c NSI d Full ms2 572.3181@hcd30.00 [...]");
+            # DIA windows carry none ("FTMS + p NSI Full ms2 367.5000@hcd30.00 [...]").
+            if "d" in filt.split("[", 1)[0].split():
+                w["n_dependent"] += 1
+        try:
+            tgt = float(attrs["MS:1000827"])
+            lo_off = float(attrs.get("MS:1000828") or 0)
+            hi_off = float(attrs.get("MS:1000829") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if lo_off + hi_off <= 0:
+            continue
+        w["widths"].append(lo_off + hi_off)
+        w["centres"].append(tgt)
+        w["los"].append(tgt - lo_off)
+        w["his"].append(tgt + hi_off)
+    return w
+
+
+def classify_thermo_windows(w):
+    """(kind, confidence, reason, range) from thermo_isolation_windows() output.
+
+    The width/centre rule first (the same one mzML gets), then the instrument's own
+    data-dependent flag, which outranks window shape whenever the parser reports it.
+    """
+    kind, conf, why, rng = classify_isolation_windows(w["widths"], w["centres"],
+                                                      w["los"], w["his"])
+    if w["n_filter"] == 0:
+        return (kind, conf, why + "; data-dependent flag not available (filter strings "
+                "need ThermoRawFileParser 1.4.5+)", rng)
+    dep = f"{w['n_dependent']}/{w['n_filter']} MS2 scans flagged data-dependent"
+    if w["n_dependent"] == 0 and kind != "DIA" and w["widths"]:
+        # Nothing was data-dependent, so this is not DDA whatever the widths look like:
+        # narrow-window DIA (2-3 m/z isolation, Astral-style) or targeted PRM. Medium, so
+        # the user confirms which.
+        kind, conf, rng = "DIA", "medium", (min(w["los"]), max(w["his"]))
+        dep += " -- so not DDA despite the window widths (narrow-window DIA or PRM?)"
+    elif w["n_dependent"] == w["n_filter"]:
+        if kind == "DDA":
+            conf = "high"                      # instrument flag and window shape agree
+        else:
+            kind, conf, rng = "DDA", "medium", None
+            dep += " -- so DDA despite the window widths"
+    elif w["n_dependent"]:
+        conf = "medium" if conf == "high" else conf
+        dep += " -- mixed dependent and independent MS2 scans (hybrid method?)"
+    return kind, conf, f"{why}; {dep}", rng
+
+
+def read_thermo_raw(path):
+    """Everything detect_acquisition reports for one Thermo .raw, from at most two TRFP calls.
+
+    Returns a dict: acquisition, confidence, reason, precursor_mz_range, instrument,
+    warnings (every read failure, in words), reader.
+    """
+    out = {"acquisition": "unknown", "confidence": "low", "reason": "",
+           "precursor_mz_range": None, "instrument": None, "warnings": [], "reader": None}
+    cmd = find_trfp()
+    if not cmd:
+        out["reason"] = _trfp_not_found()
+        out["warnings"].append(out["reason"])
+        return out
+    version = trfp_version(cmd)
+    out["reader"] = f"ThermoRawFileParser {version or '(version unknown)'} [{' '.join(cmd)}]"
+
+    meta, meta_err = trfp_metadata(path, cmd)
+    if meta is None:
+        # Not fatal for DIA/DDA, but the instrument decides mass accuracy downstream.
+        out["warnings"].append(f"instrument unknown: {meta_err}")
+    else:
+        out["instrument"] = _cv(meta, "InstrumentProperties", CV_MODEL)
+        if not out["instrument"]:
+            out["warnings"].append("instrument unknown: ThermoRawFileParser metadata has no "
+                                   f"instrument model ({CV_MODEL})")
+
+    first, last = query_scan_range(meta)
+    spectra, q_err = trfp_query(path, first, last, cmd)
+    if spectra is None:
+        out["reason"] = f"{q_err}: acquisition unknown and {FALLBACK_CONSEQUENCE}"
+        out["warnings"].append(out["reason"])
+        return out
+
+    kind, conf, why, rng = classify_thermo_windows(thermo_isolation_windows(spectra))
+    if rng:
+        # TRFP serialises the isolation target as a float32 -- 372.8999938964844 for the
+        # Lumos method's 372.9 -- so the raw edge comes out 350.0499938964844. Near m/z 1200
+        # a float32 is only good to ~1e-4, so three decimals is all the precision there is,
+        # and it returns the method's own 350.05 / 1200.95.
+        rng = (round(rng[0], 3), round(rng[1], 3))
+    out.update(acquisition=kind, confidence=conf, precursor_mz_range=rng,
+               reason=f"ThermoRawFileParser query of scans {first}-{last}: {why}")
+    if kind == "DIA" and not rng:
+        out["warnings"].append(f"DIA, but no isolation window edges were readable: "
+                               f"{FALLBACK_CONSEQUENCE}")
+    elif kind == "unknown":
+        out["warnings"].append(f"{out['reason']}: {FALLBACK_CONSEQUENCE}")
+    return out
+
+
+def detect_thermo_raw(path):
+    """(kind, confidence, reason, precursor m/z range) -- the shape every detector returns."""
+    t = read_thermo_raw(path)
+    return (t["acquisition"], t["confidence"], t["reason"], t["precursor_mz_range"])
+
+
 def classify(path):
     p = path.rstrip("/")
     low = p.lower()
     mz_range = None
+    warnings, reader, instrument = [], None, None
     if low.endswith(".d"):
         kind, conf, why, mz_range = detect_bruker_d(p); vendor = "Bruker"
     elif low.endswith((".mzml", ".mzml.gz")):
         kind, conf, why, mz_range = detect_mzml(p); vendor = "mzML"
+    elif low.endswith(".raw") and os.path.isdir(p):
+        # Waters .raw is a FOLDER; handing it to a Thermo reader only produces a confusing
+        # "not a valid RAW file" from the wrong vendor's tool.
+        kind, conf, why, vendor = ("unknown", "low",
+                                   "Waters .raw folder: convert to mzML to classify", "Waters")
     elif low.endswith(".raw"):
-        kind, conf, why, mz_range = detect_thermo_raw(p); vendor = "Thermo"
+        t = read_thermo_raw(p); vendor = "Thermo"
+        kind, conf, why, mz_range = (t["acquisition"], t["confidence"], t["reason"],
+                                     t["precursor_mz_range"])
+        # instrument comes from the same metadata call -- do not run the parser twice
+        instrument, warnings, reader = t["instrument"], t["warnings"], t["reader"]
     elif low.endswith((".wiff", ".wiff2")):
         kind, conf, why, vendor = "unknown", "low", "SCIEX .wiff: convert to mzML to classify", "SCIEX"
     else:
         kind, conf, why, vendor = "unknown", "low", "unrecognized extension", "?"
-    instrument = detect_instrument(p)
+    if vendor != "Thermo":
+        instrument = detect_instrument(p)
     return {"file": p, "vendor": vendor, "acquisition": kind,
             "confidence": conf, "reason": why, "instrument": instrument,
             # ACQUIRED precursor m/z bounds, or null when the format cannot tell
             # us. estimate_params.py searches this range instead of a hardcoded
             # 380-980 -- see its --precursor-mz-range flag.
-            "precursor_mz_range": (list(mz_range) if mz_range else None)}
+            "precursor_mz_range": (list(mz_range) if mz_range else None),
+            # every way reading this file went wrong, in words (also printed to stderr)
+            "warnings": warnings,
+            # the external reader and its version, when one was needed (Thermo .raw)
+            "reader": reader}
 
 def main(argv):
     files = []
     for a in argv:
         files.extend(sorted(glob.glob(a)) or [a])
     results = [classify(f) for f in files]
+    # stdout is JSON for the caller; problems also go to stderr, where a person sees them
+    # even when a script only keeps the JSON.
+    for r in results:
+        for w in r.get("warnings") or []:
+            print(f"[detect_acquisition] WARNING: {r['file']}: {w}", file=sys.stderr)
     kinds = {r["acquisition"] for r in results}
     overall = (next(iter(kinds)) if len(kinds) == 1 else "mixed")
     low_conf = [r["file"] for r in results if r["confidence"] != "high"]
@@ -234,7 +563,9 @@ def main(argv):
         "precursor_mz_range_mixed": mixed_ranges,
         "precursor_mz_range_files_without": [
             r["file"] for r in results if not r.get("precursor_mz_range")],
-        "needs_confirmation": bool(low_conf) or overall in ("mixed", "unknown") or len(instruments) > 1,
+        "needs_confirmation": (bool(low_conf) or overall in ("mixed", "unknown")
+                               or len(instruments) > 1
+                               or any(r.get("warnings") for r in results)),
         "low_confidence_files": low_conf,
         "files": results,
     }, indent=2))
