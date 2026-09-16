@@ -293,8 +293,16 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "diann_parallel.py"),
             "--diann", cmd, "--raw-list", listing, "--fasta", fasta,
             "--out", out, "--cfg", params, "--threads-per-file", str(threads)]
+    # Chain resources are forwarded only when given, so diann_parallel.py's own defaults stay
+    # the single definition of them. They are exposed because steps 3 and 5 ask for 64 CPUs
+    # by default (--assembly-cpus), a whole node's worth that can sit pending for a long time
+    # on a busy preemptible queue, and until now the only way to ask for less was to bypass
+    # run_search.py and hand-run diann_parallel.py (FRAN pilot, publicgrp/low, 2026-09-16).
     for flag, val in (("--partition", a.partition), ("--account", a.account),
-                      ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous)):
+                      ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
+                      ("--libpred-cpus", getattr(a, "libpred_cpus", None)),
+                      ("--assembly-cpus", getattr(a, "assembly_cpus", None)),
+                      ("--time-per-file", getattr(a, "time_per_file", None))):
         if val:
             argv += [flag, str(val)]
     res = subprocess.run(argv, capture_output=True, text=True)
@@ -1210,6 +1218,17 @@ def slurm_queue(partition=None, account=None, qos=None,
     return partition or "low", account or "publicgrp", qos
 
 
+def _positive_int(v):
+    """argparse type: a CPU count or an hour count of 0 is a job SLURM rejects outright."""
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {v!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
+    return n
+
+
 def emit_sbatch(path, command, out, threads, job, preamble="",
                 partition=None, account=None, qos=None, mem="64G", hours=12):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
@@ -1283,6 +1302,16 @@ def main():
     ap.add_argument("--qos", help="SLURM QOS for every job this writes")
     ap.add_argument("--max-simultaneous", type=int,
                     help="cap concurrent array tasks in the parallel chain")
+    ap.add_argument("--libpred-cpus", type=_positive_int,
+                    help="parallel chain: CPUs for step 1, library prediction "
+                         "(diann_parallel.py default: 16)")
+    ap.add_argument("--assembly-cpus", type=_positive_int,
+                    help="parallel chain: CPUs for steps 3 and 5, assembly and report "
+                         "(diann_parallel.py default: 64, a whole node's worth that can "
+                         "wait a long time on a busy preemptible queue)")
+    ap.add_argument("--time-per-file", type=_positive_int,
+                    help="parallel chain: wall-clock hours per array task in steps 2 and 4 "
+                         "(diann_parallel.py default: 2)")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
     a = ap.parse_args()

@@ -384,6 +384,44 @@ class RtProfilingTests(unittest.TestCase):
         self.assertNotIn("--rt-profiling", toks)
 
 
+class ChainResourceTests(unittest.TestCase):
+    """Steps 3 and 5 default to 64 CPUs, which rarely schedule on a congested preemptible
+    queue; run_search.py gave no way to ask for less."""
+
+    def test_chain_cpu_and_time_limits_pass_through(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d, cfg_lines=LIBFREE_CFG + ["--window 7"], n_runs=3, ext=".d")
+            a = argparse.Namespace(partition="low", account="publicgrp", qos="publicgrp-low-qos",
+                                   max_simultaneous=None, assembly_cpus=24, libpred_cpus=8,
+                                   time_per_file=5)
+            os.makedirs(w.out, exist_ok=True)
+            run_search.run_diann_parallel(w.diann, w.cfg, w.runs, w.fasta, w.out, 16, a)
+            s1 = _headers(os.path.join(w.out, "step1_libpred.sbatch"))
+            s2 = _headers(os.path.join(w.out, "step2_firstpass.sbatch"))
+            s3 = _headers(os.path.join(w.out, "step3_assembly.sbatch"))
+            s5 = _headers(os.path.join(w.out, "step5_report.sbatch"))
+            self.assertIn("#SBATCH --cpus-per-task=8", s1)
+            self.assertIn("#SBATCH --time=5:00:00", s2)
+            self.assertIn("#SBATCH --cpus-per-task=24", s3)
+            self.assertIn("#SBATCH --cpus-per-task=24", s5)
+
+    def test_run_search_exposes_the_flags(self):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"), "--help"],
+                           capture_output=True, text=True)
+        for flag in ("--assembly-cpus", "--libpred-cpus", "--time-per-file"):
+            self.assertIn(flag, p.stdout)
+
+    def test_unset_flags_leave_the_generator_defaults_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d, cfg_lines=LIBFREE_CFG + ["--window 7"], n_runs=3, ext=".d")
+            a = argparse.Namespace(partition="high", account="genome-center-grp", qos=None,
+                                   max_simultaneous=None)
+            os.makedirs(w.out, exist_ok=True)
+            run_search.run_diann_parallel(w.diann, w.cfg, w.runs, w.fasta, w.out, 16, a)
+            self.assertIn("#SBATCH --cpus-per-task=64",
+                          _headers(os.path.join(w.out, "step3_assembly.sbatch")))
+
+
 class ExecutableTests(unittest.TestCase):
     def test_the_report_checker_is_executable(self):
         """CI requires every shebang script to ship 100755."""
