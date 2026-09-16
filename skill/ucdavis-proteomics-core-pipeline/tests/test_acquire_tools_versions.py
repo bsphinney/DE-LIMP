@@ -17,11 +17,16 @@ the request back out:
     `--version` says "sage 0.14.6" -- so nothing in the record could tell anyone which it was.
 
 Everything here runs against a MOCKED layout: a fake HIVE build directory, a fake tools root,
-and a stub `curl` on PATH that serves canned GitHub listings. No network, no real engine.
+and a stub `curl` that serves canned GitHub listings. PATH holds ONLY that stub directory and
+a directory of links to the few coreutils the script calls -- never /usr/bin itself -- so a
+machine's own `sage` (SageMath installs /usr/bin/sage on Linux), `docker`, `apptainer` or
+`pip` cannot change the answer, and acquire_alphadia's `pip install` cannot fire on a host that
+has HIVE's alphadia.sif but no apptainer. No network, no real engine.
 """
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -62,6 +67,14 @@ esac
 """
 
 
+# What acquire_tools.sh and diann_release.sh call, plus what STUB_CURL itself needs. Linked
+# one by one into the harness PATH; anything else (sage, docker, apptainer, pip, java,
+# alphadia) is absent unless a test stubs it.
+COREUTILS = ("basename", "cat", "chmod", "cp", "cut", "dirname", "find", "grep", "gzip", "head",
+             "ls", "mkdir", "rm", "sed", "sort", "tail", "tar", "tee", "tr", "uname", "unzip",
+             "xargs")
+
+
 def _exe(path, text):
     with open(path, "w") as fh:
         fh.write(text)
@@ -76,8 +89,15 @@ class AcquireHarness(unittest.TestCase):
         self.fix = os.path.join(self.d, "fixtures")
         self.root = os.path.join(self.d, "tools")
         self.hive = os.path.join(self.d, "dia-nn")
-        for p in (self.bin, self.fix, self.root, self.hive):
+        self.sys = os.path.join(self.d, "sysbin")
+        for p in (self.bin, self.fix, self.root, self.hive, self.sys):
             os.makedirs(p)
+        for tool in COREUTILS:
+            real = shutil.which(tool)
+            if not real:
+                self.skipTest(f"{tool} is not installed; acquire_tools.sh needs it")
+            os.symlink(real, os.path.join(self.sys, tool))
+        self.bash = shutil.which("bash")
         _exe(os.path.join(self.bin, "curl"), STUB_CURL)
         with open(os.path.join(self.fix, "diann_releases.json"), "w") as fh:
             fh.write(DIANN_RELEASES)
@@ -97,13 +117,13 @@ class AcquireHarness(unittest.TestCase):
         return os.path.join(p, "diann-linux")
 
     def acquire(self, platform_class, pin_engine="", pin_version="", extra_env=None):
-        # PATH is the stub dir plus the system basics only: no real curl, sage, docker or
-        # apptainer on the developer's machine can leak into the result.
-        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": self.d, "FIXTURES": self.fix,
+        # PATH is the stub dir plus the linked coreutils only (see COREUTILS): no real curl,
+        # sage, docker, apptainer or pip on the machine running the tests can leak in.
+        env = {"PATH": f"{self.bin}:{self.sys}", "HOME": self.d, "FIXTURES": self.fix,
                "DIANN_HIVE_DIR": self.hive, "PIN_ENGINE": pin_engine,
                "PIN_VERSION": pin_version}
         env.update(extra_env or {})
-        r = subprocess.run(["bash", ACQUIRE, platform_class, self.root],
+        r = subprocess.run([self.bash, ACQUIRE, platform_class, self.root],
                            capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(os.path.join(self.root, "tools.json")) as fh:
@@ -217,7 +237,40 @@ class SageTests(AcquireHarness):
         resolve_defaults.py pins (0.14.7) and what anyone can download again."""
         self._cached_sage("latest")
         t = self.acquire("linux")
-        self.assertNotEqual(t["versions"]["sage"], "0.14.6")
+        self.assertEqual(t["versions"]["sage"], "0.14.7")     # not 0.14.6, and not "" either
+
+    def test_a_sage_on_PATH_is_not_a_release(self):
+        """A `sage` on PATH records "env": a source, not a build. run_search.py must then
+        record no version -- see test_engine_version_provenance.py."""
+        _exe(os.path.join(self.bin, "sage"), "#!/bin/sh\necho 'sage 0.14.6'\n")
+        t = self.acquire("linux")
+        self.assertEqual(t["sage"], os.path.join(self.bin, "sage"))
+        self.assertEqual(t["versions"]["sage"], "env")
+
+
+class RadiantTests(AcquireHarness):
+    """Radiant is only acquired on request (ACQUIRE_RADIANT=1 or PIN_ENGINE=radiant)."""
+
+    def test_an_unpinned_radiant_image_records_no_version_not_latest(self):
+        """`seerbio/radiant-fulcrum:latest` names no release, and resolving what :latest
+        points at would mean pulling ~3 GB. So nothing is recorded, and a note says how to
+        get a recorded release (pin one)."""
+        _exe(os.path.join(self.bin, "docker"), "#!/bin/sh\nexit 0\n")
+        t = self.acquire("linux", extra_env={"ACQUIRE_RADIANT": "1"})
+        self.assertEqual(t["radiant_image"], "seerbio/radiant-fulcrum:latest")
+        self.assertEqual(t["versions"]["radiant"], "")
+        self.assertTrue(any("PIN_ENGINE=radiant" in n for n in t["notes"]), t["notes"])
+
+    def test_a_pinned_radiant_image_records_its_tag(self):
+        _exe(os.path.join(self.bin, "docker"), "#!/bin/sh\nexit 0\n")
+        t = self.acquire("linux", "radiant", "2.3.3")
+        self.assertEqual(t["radiant_image"], "seerbio/radiant-fulcrum:2.3.3")
+        self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+    def test_no_container_runtime_records_no_version(self):
+        t = self.acquire("linux", "radiant", "2.3.3")
+        self.assertIsNone(t["radiant"])
+        self.assertEqual(t["versions"]["radiant"], "")
 
 
 if __name__ == "__main__":

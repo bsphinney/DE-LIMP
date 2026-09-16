@@ -231,8 +231,11 @@ acquire_diann() {
 # for the inputs, and docker (-v) and apptainer (--bind) spell those differently.
 acquire_radiant() {
   local ver; ver="latest"; pin_for radiant && ver="$PIN_VERSION"
-  RADIANT_VER="$ver"
   local image="seerbio/radiant-fulcrum:$ver"
+  # RADIANT_VER stays "" until an image is chosen, and is the release that image IS (see
+  # "versions" in the header). An unpinned Docker/Apptainer image is `:latest`, which names
+  # no release; finding out which one it points at means pulling ~3 GB, so it records "".
+  local unpinned_note="Radiant: the image is seerbio/radiant-fulcrum:latest, which names no release, so tools.json records no Radiant version. To record one, pin it: PIN_ENGINE=radiant PIN_VERSION=<release> (resolve_defaults.py pins 2.3.3)."
 
   # LICENSE: Apache-2.0 with a MANDATORY GRANT-BACK and the COMMONS CLAUSE, which
   # removes the right to "Sell" the software or a service whose value derives
@@ -256,19 +259,27 @@ acquire_radiant() {
       done
       if [ -n "$sif" ] && have apptainer; then
         RADIANT_CMD="apptainer exec"; RADIANT_RUNTIME="apptainer"; RADIANT_IMAGE="$sif"
-        NOTES+=("Radiant $ver: reusing HIVE container $sif.")
+        # The .sif's own name, as the build step below writes it (radiant-fulcrum-<ver>.sif);
+        # the pin only when the glob that found it had the pin in the name.
+        RADIANT_VER="$(basename "$sif" | sed -nE 's#.*[-_]v?([0-9]+(\.[0-9]+)+)\.sif$#\1#p')"
+        [ -z "$RADIANT_VER" ] && [ "$ver" != "latest" ] && RADIANT_VER="${ver#v}"
+        [ -z "$RADIANT_VER" ] && NOTES+=("Radiant: $sif names no release, so tools.json records no Radiant version.")
+        NOTES+=("Radiant ${RADIANT_VER:-$ver}: reusing HIVE container $sif.")
         return
       fi
       NOTES+=("Radiant $ver: no .sif found under /quobyte/proteomics-grp/{apptainers,radiant}. Build one ON A COMPUTE NODE (never the login node): 'srun -c 8 --mem 16G --pty apptainer build radiant-fulcrum-$ver.sif docker://$image', then re-run acquire_tools.sh.")
       ;;
     mac|linux)
+      # The tag IS the release when it was pinned: seerbio/radiant-fulcrum:2.3.3.
       if have docker; then
         RADIANT_CMD="docker run --rm"; RADIANT_RUNTIME="docker"; RADIANT_IMAGE="$image"
+        if [ "$ver" != "latest" ]; then RADIANT_VER="${ver#v}"; else NOTES+=("$unpinned_note"); fi
         NOTES+=("Radiant $ver: using Docker image $image (multi-arch; runs natively on Apple Silicon and x86). First run pulls ~3 GB.")
         return
       fi
       if have apptainer; then
         RADIANT_CMD="apptainer exec"; RADIANT_RUNTIME="apptainer"; RADIANT_IMAGE="docker://$image"
+        if [ "$ver" != "latest" ]; then RADIANT_VER="${ver#v}"; else NOTES+=("$unpinned_note"); fi
         NOTES+=("Radiant $ver: no Docker; will let Apptainer pull $image on first use (~3 GB).")
         return
       fi
