@@ -302,3 +302,10 @@ Every step therefore asserts its own artefact:
 
 Step 5's count check is the backstop: it is the only place that can notice a sample went
 missing several steps earlier. On failure it prints the loop that names the missing file.
+
+The **single-shot** search `run_search.py` writes for ≤ 5 files has the same contract: its
+library job asserts `diann_lib.predicted.speclib`, and its search job asserts
+`report.parquet` and then runs `scripts/check_report_runs.py`, which fails unless the report
+holds one `Run` per input (→ `references/search-engines.md`). Re-measured on DIA-NN 2.7.0:
+a search over one readable `.raw`, one truncated `.raw` and one nonexistent path exited 0
+with a report holding 1 of the 3 runs.

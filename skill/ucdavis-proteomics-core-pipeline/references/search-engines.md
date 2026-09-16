@@ -103,6 +103,44 @@ run, and baked into the emitted sbatch as a preamble). When it's right, DIA-NN l
 `.mzML` (DIA-NN reads those natively) — convert `.raw`→mzML with ThermoRawFileParser /
 msconvert if you don't already have them.
 
+**Single-shot on SLURM (`--sbatch`, ≤ 5 files or no chain).** A library-free cfg becomes
+**two jobs**, `<job>_1_lib.sh` (predict the library) → `<job>_2_search.sh` (search it with
+MBR), chained `afterok` by `<out>/submit.sh`; any other cfg becomes one job at `<job>.sh`.
+Every job is held to the same contract as the 5-step chain
+(→ `references/diann_parallel.md`, "DIA-NN exits 0 on fatal errors"):
+- **Queue.** `--partition/--account/--qos` go into every job header, and `--requeue` is added
+  on `low` or a `public*` QOS by the same rule as the chain (`diann_parallel.needs_requeue`).
+  Omit them and the queue is detected (`slurm_queue()`). Before this, the single-shot path
+  dropped them and re-detected a queue over the user's choice (on the 2026-09-16 FRAN pilot,
+  `genome-center-grp/high` in place of the requested `publicgrp/low`).
+- **Job 1 fails unless `<out>/diann_lib.predicted.speclib` exists and is non-empty.** That is
+  the name DIA-NN 2.7.0 writes for `--out-lib <out>/diann_lib` (verified).
+- **Job 2 fails unless `report.parquet` exists and holds every input run.**
+  `scripts/check_report_runs.py` counts distinct `Run` values against the inputs and names
+  the missing ones. Measured on DIA-NN 2.7.0: one readable `.raw`, one truncated `.raw` and
+  one nonexistent path → DIA-NN logged `ERROR: DIA-NN tried but failed to load the following
+  files: ...`, **exited 0**, and wrote a report holding **1 of 3** runs. The check reads the
+  `Run` column with pyarrow or polars, and without either falls back to DIA-NN's own
+  `report.stats.tsv`, counting only rows with `Precursors.Identified > 0` — the stats file
+  lists the two failed files too, with zeros. (`report.pg_matrix.tsv`'s header listed all
+  three, so it is no evidence.) With no parquet reader **and** `--no-stats` in the cfg the
+  check cannot count, and fails rather than pass an unverified report.
+- **The cfg is spliced into the search command safely.** Glob tokens are quoted
+  (`--cut 'K*,R*'`, `--var-mod 'UniMod:1,42.010565,*n'`) so a matching file in the output
+  folder cannot rewrite them, and `#` comment lines are skipped — one would otherwise comment
+  out the input files, `--lib` and `--out`.
+- **`--rt-profiling` stays in the search job.** Only `--fasta-search --predictor
+  --gen-spec-lib` (library job) and `--reanalyse --matrices` (re-added) are taken out. The
+  search job's first MBR pass is where the empirical library is built, and `--rt-profiling`
+  sets how ("IDs, RT and IM profiling", which the DIA-NN README calls strongly recommended).
+  It is not a no-op: on 2.7.0 the log prints `The spectral library (if generated) will
+  retain the original spectra but will include empirically-aligned RTs` only when it is set.
+
+**5-step chain resources from `run_search.py`.** `--libpred-cpus` (step 1, default 16),
+`--assembly-cpus` (steps 3 and 5, default 64) and `--time-per-file` (hours per array task in
+steps 2 and 4, default 2) are forwarded to `diann_parallel.py` when given. Ask for fewer
+assembly CPUs when a 64-CPU job would wait a long time on a busy preemptible queue.
+
 ### Radiant DIA + Fulcrum (Seer; Thermo Orbitrap only)
 
 Peptide-centric DIA search (Radiant) inside Seer's Fulcrum workflow engine, which
