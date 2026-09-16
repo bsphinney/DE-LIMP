@@ -66,6 +66,78 @@ def pick_engine(args, bundle):
     return "diann" if bundle.get("acquisition", "").upper() == "DIA" else "sage"
 
 
+# What acquire_tools.sh has written into tools.json `versions` that names a request or a
+# source rather than a build: "latest" (every tools.json written before it resolved that;
+# both HIVE copies in use on 2026-09-16 still say "sage": "latest"), "env" (Sage from the
+# conda env), and "" (nothing could be determined).
+_NOT_A_BUILD = {"", "latest", "env", "unknown"}
+
+
+def _concrete_version(v):
+    """'v0.14.7' / '0.14.7' -> '0.14.7'; a placeholder or a non-string -> None."""
+    if not isinstance(v, str) or v.strip().lower() in _NOT_A_BUILD:
+        return None
+    return v.strip().lstrip("vV")
+
+
+def engine_version_record(engine, tools, bundle):
+    """Which engine build this search ran, and whether it is the one the manifest asked for.
+
+    Two files name a version and, until this, nothing compared them:
+      * workflow.manifest.json `engine.version` -- resolve_defaults.py's PIN. A request.
+      * tools.json `versions.<engine>`          -- what acquire_tools.sh resolved, beside the
+                                                   command run_search.py executes VERBATIM.
+    tools.json is authoritative for `version`: it describes the binary that actually runs,
+    and nothing checks a binary against the manifest's pin. The FRAN pilot (2026-09-16) is
+    the case: manifest 2.6.1, tools.json 2.7.0, and the compute-node banner said
+    "DIA-NN 2.7.0 Academia". Recording the pin would have put a false version into FRAN.
+
+    But neither value is silently dropped. Both are kept, a disagreement is flagged
+    (`engine_version_mismatch`) and printed, and when tools.json names no build (a
+    placeholder above, or no entry at all) the manifest's pin is used ONLY with
+    `version_source` saying it is an unconfirmed request. The pin is used only if the
+    manifest pins THIS engine: `tools.versions or manifest.version` used to stamp a Sage
+    search run under a DIA-NN manifest with DIA-NN's version.
+    """
+    tools_raw = ((tools or {}).get("versions") or {}).get(engine)
+    beng = (bundle or {}).get("engine") or {}
+    pins_this_engine = beng.get("name") in (None, engine)
+    manifest_raw = beng.get("version") if pins_this_engine else None
+    tv, mv = _concrete_version(tools_raw), _concrete_version(manifest_raw)
+
+    if tv:
+        version, source = tv, "tools.json"
+    elif mv:
+        version = mv
+        source = ("workflow.manifest.json (the requested pin; tools.json did not confirm "
+                  "which build ran)")
+    else:
+        version, source = None, None
+    mismatch = bool(tv and mv and tv != mv)
+
+    if mismatch:
+        sys.stderr.write(
+            f"[run_search] WARNING: engine version mismatch -- workflow.manifest.json pins "
+            f"{engine} {mv}, but tools.json resolved {tv} ({(tools or {}).get(engine)}). "
+            f"{tv} is what runs and is recorded as `version`; both are kept in "
+            f"search_provenance.json (engine_version_mismatch: true). If {mv} was intended, "
+            f"re-acquire it: PIN_ENGINE={engine} PIN_VERSION={mv} bash scripts/acquire_tools.sh "
+            f"<platform_class>\n")
+    elif not tv and mv:
+        sys.stderr.write(
+            f"[run_search] NOTE: tools.json does not name the {engine} build "
+            f"({tools_raw!r}); recording the manifest's pin {mv} as `version`, marked "
+            f"unconfirmed in `version_source`. Re-run acquire_tools.sh to record the build.\n")
+    elif not tv:
+        sys.stderr.write(
+            f"[run_search] NOTE: no {engine} version in tools.json ({tools_raw!r}) or the "
+            f"workflow manifest; search_provenance.json records `version: null`.\n")
+    return {"version": version, "version_source": source,
+            "tools_engine_version": tools_raw or None,     # as written, even "latest"
+            "manifest_engine_version": manifest_raw,
+            "engine_version_mismatch": mismatch}
+
+
 # ----------------------------------------------------------------- DIA-NN -----
 def dotnet_env_for(files):
     """DIA-NN 2.6's NATIVE binary needs a .NET 8 runtime (>= 8.0.17) to read Thermo
@@ -1248,6 +1320,9 @@ def main():
         sys.exit(f"tools.json has no command for engine '{engine}'. "
                  f"Re-run acquire_tools.sh, or check its notes:\n  "
                  + "\n  ".join(tools.get("notes", [])))
+    # Before anything is submitted, so a version the user did not confirm is on screen
+    # while it can still be stopped -- not only in a file read after the search.
+    ver_rec = engine_version_record(engine, tools, bundle)
 
     # A DIA-NN cfg that is not there is reported as exactly that, first -- not as whatever a
     # later reader makes of an empty flag list ("mass accuracy is not pinned").
@@ -1342,8 +1417,7 @@ def main():
     # always record what was run (engine + version + exact command) for reproducibility
     try:
         os.makedirs(a.out, exist_ok=True)
-        version = (tools.get("versions", {}) or {}).get(engine) \
-            or (bundle.get("engine", {}) or {}).get("version")
+        version = ver_rec["version"]          # see engine_version_record(): tools.json wins
         with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
             # Where the FULLY-resolved parameters are, and WHEN they exist -- as the generator
             # reports it, not assumed here. On the probe path the chain measures the scan
@@ -1362,7 +1436,8 @@ def main():
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
                        "submitted_sbatch": None if sbatch_refused else (a.sbatch or None),
-                       "sbatch_refused": sbatch_refused, "result": res}, fh, indent=2)
+                       "sbatch_refused": sbatch_refused, "result": res,
+                       **{k: v for k, v in ver_rec.items() if k != "version"}}, fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")
 
