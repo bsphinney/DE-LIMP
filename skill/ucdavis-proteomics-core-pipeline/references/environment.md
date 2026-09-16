@@ -6,12 +6,12 @@ How the skill adapts to where it's running, plus FASTA resolution.
 
 | class | how detected | engine acquisition | execution |
 |---|---|---|---|
-| `hpc` | `sbatch` on PATH, or `/quobyte/proteomics-grp` visible | reuse existing Apptainer `.sif` (DIA-NN); download Sage binary | **submit via sbatch** (never login-node) |
+| `hpc` | `sbatch` on PATH, or `/quobyte/proteomics-grp` visible | on HIVE, reuse the Core's native DIA-NN builds (below); elsewhere download the Academia Linux build. Sage from the conda env, else its release binary | **submit via sbatch** (never login-node) |
 | `mac` | `uname` = darwin | DIA-NN via **Docker** (no native mac build); Sage native | inline |
 | `linux` | everything else | native binaries | inline |
 
 `uc_davis_hive` is true when `/quobyte/proteomics-grp` exists → enables FASTA reuse
-and the existing `.sif`.
+and the Core's DIA-NN builds.
 
 Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 
@@ -20,25 +20,55 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 - **No native macOS build exists.** On mac you must run DIA-NN through Docker. Set
   `DIANN_DOCKER_IMAGE` to a built image, or build one from the Academia Linux zip's
   bundled Dockerfile. `acquire_tools.sh` writes a note when this is unresolved.
-- **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`.
-  Recent versions are **native builds**, e.g. DIA-NN **2.6.0** at
-  `build_260/diann-2.6.0/diann-linux`; older 2.3.0 is a `.sif`. `acquire_tools.sh`
-  resolves the **pinned** version by looking for `build_*/diann-<version>/diann-linux`
-  first, then a version-matched `.sif`, and **never silently substitutes a different
-  version** (reproducibility). The facility's `run_diann_*.sbatch` in that folder is
-  the reference invocation. AlphaDIA is also on HIVE at
-  `/quobyte/proteomics-grp/apptainers/alphadia.sif` (auto-reused).
+- **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`
+  as **native builds** at `build_<nnn>/diann-<version>/diann-linux` — **2.5.1, 2.6.0 and
+  2.6.1** when listed on 2026-09-16 — plus one older Apptainer image, `diann_2.3.0.sif`.
+  The skill pins **2.6.1** (`resolve_defaults.py`). `acquire_tools.sh` resolves the
+  **pinned** version by looking for `build_*/diann-<version>/diann-linux` first, then a
+  version-matched `.sif`, and **never silently substitutes a different version**
+  (reproducibility): a pin that is not there — the FRAN pilot's **2.7.0**, say — is
+  downloaded as the Academia Linux build into your own tools root instead. Unpinned, it
+  takes the highest *version* the build paths name. Either way `tools.json` records the
+  version of the build it found, never `latest`. Listing it yourself is cheap and allowed
+  on the login node: `ls -d /quobyte/proteomics-grp/dia-nn/build_*/diann-*`. The
+  facility's `run_diann_*.sbatch` in that folder is the reference invocation. AlphaDIA is
+  also on HIVE at `/quobyte/proteomics-grp/apptainers/alphadia.sif` (auto-reused).
+  (`DIANN_HIVE_DIR` overrides the build directory; the tests use it to mock the layout.)
 - **Linux native:** needs glibc ≥ Linux Mint 21.2 and .NET 8. If missing, prefer
   Docker/Apptainer.
-- DIA-NN reads `.raw`/`.d` natively from 2.1+.
+- DIA-NN reads `.raw`/`.d` natively from 2.1+. On Linux, `.raw` also needs a **.NET 8
+  runtime ≥ 8.0.17** (`ensure_dotnet8.sh`; see `references/search-engines.md`).
 
 ## Version pinning (reproducibility)
 
 `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION` from the workflow bundle and
 caches under `~/.proteomics-pipeline/tools/<engine>/<version>/`. Different pinned
-versions coexist. The written `tools.json` records `pinned` and `versions` so the
-report can state exactly what ran. **Always pass the bundle's engine+version** — a
-result from "latest" is not reproducible.
+versions coexist. The written `tools.json` records `pinned` (what was asked for) and
+`versions` (the build each command **is**) so the report can state exactly what ran.
+**Always pass the bundle's engine+version** — a result from "latest" is not
+reproducible.
+
+`versions` never says `latest`: an unpinned run records the number it resolved to — for
+DIA-NN from the build path, `.sif` name, download asset or Docker image tag; for Sage from
+the release tarball kept beside the binary, **not** `sage --version`, which prints 0.14.6
+for the v0.14.7 release. When no version can be determined it records `""` with a note.
+(An older `tools.json` may still say `"latest"`; re-run `acquire_tools.sh` to replace it.)
+
+The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins 2.6.1, but
+`tools.json` holds whatever was last acquired (the FRAN pilot pinned 2.7.0). Nothing forces
+them to match, so `run_search.py` compares them before submitting and records both in
+`search_provenance.json`:
+
+| field | meaning |
+|---|---|
+| `version` | the build that ran — **from `tools.json`**, which describes the command actually executed; if `tools.json` names no build, the manifest's pin (see `version_source`); else `null` |
+| `version_source` | `tools.json`, or the manifest labelled as an unconfirmed request when `tools.json` names no build (`latest`, `env`, missing) |
+| `tools_engine_version` / `manifest_engine_version` | both values as written |
+| `engine_version_mismatch` | `true` when both are concrete and differ; a WARNING is printed |
+
+A mismatch WARNING means the version the user confirmed (SKILL.md golden rule #1) is not
+the one about to run: say so before submitting, and either re-acquire the pin or get the
+new version confirmed.
 
 ## FASTA resolution (`fetch_fasta.py`)
 
@@ -133,10 +163,34 @@ citation, and any warnings. Pass it to `provenance.py --fasta-info` so
 
 ## SLURM submission (hpc)
 
-`run_search.py --sbatch job.sh` emits a login-node-safe script:
-`--partition=high --qos=genome-center-grp-high-qos`, 64G, 12h. If that queue is
-full, the DE-LIMP fallback is `publicgrp/low` (the only fallback — there is no
-`genome-center-grp` LOW partition). Submit with `sbatch job.sh`, poll the
+`run_search.py --sbatch job.sh` emits a login-node-safe script (64G, 12h). **No queue is
+hard-coded**: `run_search.slurm_queue()` — the one definition, also used by
+`diann_parallel.py`, `radiant_parallel.py` and `diatracer_parallel.py` — asks SLURM what
+the submitting user may use (`sacctmgr show assoc user=$USER`) and picks:
+
+1. an explicit `--partition` **and** `--account`, used as given;
+2. `genome-center-grp` on `high` (facility members: not preemptible);
+3. `publicgrp` on `low` (everyone else: preemptible, so `#SBATCH --requeue` is added).
+
+When an account has both, **utilisation** decides, not entitlement: `high` has a per-user
+CPU cap, so if too few of *your* CPUs are free there and `low` has idle CPUs, the job goes
+to `low`. The 5-step chain's per-file array steps (2 and 4) move to `low` sooner — when
+fewer than two tasks' worth of your CPUs are free on `high` — because a preempted task costs
+one file; steps 1, 3 and 5 cannot restart mid-way, so they move only when a single job no
+longer fits under the cap. If associations cannot be read at all the script falls back to
+`publicgrp/low`, **not** the cluster default: that is `high`, which rejects a non-facility
+account.
+
+Checked on HIVE 2026-09-16 (`sacctmgr show assoc` / `show qos`, `sinfo`): the default
+partition is `high`; `genome-center-grp` has `high` (per-user cap 64 CPUs) and `gpu-a100`
+but no `low`; `publicgrp` has `high` (8 CPUs / 128 GB **per job**) and `low` (no per-job
+cap, preemptible).
+
+`--partition/--account/--qos` are forwarded to the job-array routes (the DIA-NN 5-step
+chain and the Radiant per-file array). The single-script `--sbatch` paths — DIA-NN at ≤5
+files or when the chain declines, Sage, FragPipe, AlphaDIA, single-file Radiant — use the
+detected queue; read the `#SBATCH` header they print before submitting. Submit with
+`sbatch job.sh` (or `bash <out>/submit.sh` for a two-job or chained search), poll the
 `<job>_<id>.log`, then run `run_search.py --adapt-only` for Sage/FragPipe to build
 `report.parquet`.
 

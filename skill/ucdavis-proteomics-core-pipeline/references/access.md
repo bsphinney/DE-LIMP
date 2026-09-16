@@ -41,15 +41,16 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
    bash scripts/hive_exec.sh --put ./scripts '~/proteomics-pipeline/'
    ```
 2. **Toolchain on HIVE:**
-   - **Core member:** `acquire_tools.sh` (run on HIVE) finds the group DIA-NN
-     container (`/quobyte/proteomics-grp/dia-nn/*.sif`); `fetch_fasta.py --hive`
+   - **Core member:** `acquire_tools.sh` (run on HIVE) finds the group's DIA-NN
+     builds (`/quobyte/proteomics-grp/dia-nn/build_*/diann-<version>/`, plus an older
+     `.sif`); `fetch_fasta.py --hive`
      reuses `/quobyte/proteomics-grp/MRS/` FASTAs. Build the R/Python/DE env once with
      `setup.sh` (it's the same micromamba env):
      ```
      bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'
      ```
    - **Non-Core HIVE user:** same `setup.sh`, plus you must acquire DIA-NN/Sage
-     yourself (no group `.sif`). See "Rebuild on HIVE".
+     yourself (no access to the group's builds). See "Rebuild on HIVE".
 3. **Stage the raw data** (skip if it's already on HIVE — Core data usually is):
    ```
    bash scripts/hive_exec.sh --put /path/to/raw '~/proteomics-pipeline/data/'
