@@ -561,6 +561,16 @@ def must_exist(path, what):
             f'exit 1; fi')
 
 
+def needs_requeue(partition, qos):
+    """Should a job on this queue carry `#SBATCH --requeue`?
+
+    publicgrp/low is PREEMPTIBLE: without --requeue a preempted job is simply lost. The one
+    rule for every sbatch the skill writes -- this header and run_search.emit_sbatch() -- so a
+    single-shot job and a chain step on the same queue cannot disagree about it. They did:
+    emit_sbatch keyed on `partition == "low"` alone and ignored a public QOS."""
+    return (qos or "").startswith("public") or partition == "low"
+
+
 def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
     h = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
@@ -571,8 +581,7 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
          f"#SBATCH --account={account}"]
     if qos:
         h.append(f"#SBATCH --qos={qos}")
-    # publicgrp/low is PREEMPTIBLE: without --requeue a preempted task is simply lost.
-    if (qos or "").startswith("public") or partition == "low":
+    if needs_requeue(partition, qos):
         h.append("#SBATCH --requeue")
     h += [f"#SBATCH -o {name}_%j.log", f"#SBATCH -e {name}_%j.log"]
     if array:

@@ -310,11 +310,52 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
 
 a_globals = None   # set in main(); carries --one-step
 
+# Dropped from the cfg for the single-shot SEARCH job, because that job supplies its own:
+# --fasta-search/--predictor/--gen-spec-lib belong to the library job (in the search they would
+# re-digest the FASTA instead of using the predicted library), and --reanalyse/--matrices are
+# re-added explicitly. --rt-profiling is deliberately NOT here. It sets "the empirical library
+# generation mode to IDs, RT and IM profiling" (DIA-NN README, command-line reference), which the
+# README calls "strongly recommended for almost all workflows", and with --reanalyse this job is
+# where the empirical library is generated -- MBR's first pass "creates an empirical spectral
+# library from the data". Stripping it is not a no-op: measured on DIA-NN 2.7.0 (HIVE,
+# 2026-09-16), the search log prints "The spectral library (if generated) will retain the
+# original spectra but will include empirically-aligned RTs" with the flag and nothing without
+# it, so the library mode silently changed. The 5-step chain passes it to exactly its
+# library-building steps (2 and 3), and DE-LIMP's own single search keeps it. It was stripped
+# here since e20ae63 with no stated reason. The rest of the cfg goes through
+# diann_parallel.bash_flags(), the one emitter the chain uses too.
+SINGLE_SHOT_SEARCH_STRIP = ("--fasta-search", "--gen-spec-lib", "--predictor",
+                            "--reanalyse", "--matrices")
 
-def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
+
+def report_guard(report, listing):
+    """Bash that fails the job unless DIA-NN wrote the report AND it holds every input run.
+
+    DIA-NN exits 0 on fatal errors, so the job state alone says nothing. must_exist() is the
+    chain's own assertion; check_report_runs.py is the single-shot stand-in for the chain's
+    step-5 .quant count, which has no per-file directory to count here. It runs under the
+    interpreter that generated the job (on a cluster that path is on the shared filesystem,
+    exactly like the scripts/ directory this references), falling back to python3."""
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
+    return "\n".join([
+        _diann_parallel_mod().must_exist(report, "the report"),
+        f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3',
+        f'"$PY" {shlex.quote(checker)} --report {shlex.quote(report)} '
+        f'--files-list {shlex.quote(listing)}',
+    ])
+
+
+def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None):
+    """Single-shot DIA-NN. `queue` is {partition, account, qos} from the command line, handed
+    to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
+    the one the user chose."""
+    queue = queue or {}
     os.makedirs(out, exist_ok=True)
     report = os.path.join(out, "report.parquet")
     f_args = " ".join(f"--f {shlex.quote(f)}" for f in files)
+    listing = os.path.join(out, "search_input_files.txt")
+    with open(listing, "w") as fh:                    # a list file survives spaces in paths
+        fh.write("\n".join(files) + "\n")
     # DIA-NN 2.6 supports DDA via --dda (must NOT be used on DIA data). QuantUMS is
     # auto-disabled on DDA; for DDA quant DIA-NN recommends extra MS1 filtering on
     # Ms1.Global.Q.Value / Ms1.Global.Quality (see references/search-engines.md).
@@ -332,7 +373,8 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     # parallel chain's. `cfg_txt.split()` spliced raw words into bash: a `# comment` commented
     # out --f/--fasta/--out, and `--cut K*,R*` went in bare, where one matching file in the
     # output directory rewrites the digest rule. Comment-free cfgs emit the same command as
-    # before apart from that quoting (tests/test_parallel_routing_window.py pins both).
+    # before apart from that quoting and the --rt-profiling this job now keeps
+    # (SINGLE_SHOT_SEARCH_STRIP); tests/test_cfg_reader_quoting.py pins both.
     dp = _diann_parallel_mod()
     try:
         groups = dp.cfg_groups(dp.cfg_tokens(params))
@@ -346,9 +388,10 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     dnet = dotnet_env_for(files)          # .NET 8 for reading Thermo .raw, if needed
 
     lib = os.path.join(out, "diann_lib")
-    strip = ("--fasta-search", "--gen-spec-lib", "--predictor", "--reanalyse",
-             "--matrices", "--rt-profiling")
-    search_cfg = dp.bash_flags(groups, drop=strip)
+    # DIA-NN ignores the extension asked of --out-lib for a PREDICTED library and always writes
+    # <name>.predicted.speclib (README, "Output library") -- the file the search job reads.
+    predicted = lib + ".predicted.speclib"
+    search_cfg = dp.bash_flags(groups, drop=SINGLE_SHOT_SEARCH_STRIP)
     lib_cmd = (f"{cmd} --cfg {shlex.quote(params)} --fasta {shlex.quote(fasta)} "
                f"--out-lib {shlex.quote(lib)} --threads {threads}")
     search_cmd = (f"{cmd} {search_cfg} {f_args} --fasta {shlex.quote(fasta)} "
@@ -357,14 +400,20 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     onecmd = (f"{cmd} --cfg {shlex.quote(params)} {f_args} "
               f"--fasta {shlex.quote(fasta)} --out {shlex.quote(report)} "
               f"--threads {threads}{dda}")
+    # DIA-NN exits 0 on fatal errors, so each job asserts the artefact it exists to make --
+    # the same contract every step of the 5-step chain has (references/diann_parallel.md).
+    lib_job = lib_cmd + "\n" + dp.must_exist(predicted, "the predicted spectral library")
+    guard = report_guard(report, listing)
 
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
     if libfree and sbatch:
         lib_sh = sbatch.replace(".sh", "") + "_1_lib.sh"
         srch_sh = sbatch.replace(".sh", "") + "_2_search.sh"
-        emit_sbatch(lib_sh, lib_cmd, out, threads, job="diann_libpred", preamble=dnet)
-        emit_sbatch(srch_sh, search_cmd, out, threads, job="diann_search", preamble=dnet)
+        emit_sbatch(lib_sh, lib_job, out, threads, job="diann_libpred", preamble=dnet,
+                    **queue)
+        emit_sbatch(srch_sh, search_cmd + "\n" + guard, out, threads, job="diann_search",
+                    preamble=dnet, **queue)
         submit = os.path.join(out, "submit.sh")
         with open(submit, "w") as fh:
             fh.write("#!/bin/bash -l\nset -euo pipefail\n"
@@ -375,17 +424,30 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
         os.chmod(submit, 0o755)
         print(f"  [sbatch] two-job chain: {lib_sh} -> {srch_sh}; submit with: bash {submit}")
         return {"engine": "diann", "report": report, "submitted": submit,
-                "mode": "two_job_libfree", "library": lib + ".predicted.speclib",
+                "mode": "two_job_libfree", "library": predicted,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
 
-    full = (lib_cmd + " && " + search_cmd) if libfree else onecmd
-    if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="diann_search", preamble=dnet)
+    if sbatch:                          # libfree + sbatch returned above, so this is onecmd
+        emit_sbatch(sbatch, onecmd + "\n" + guard, out, threads, job="diann_search",
+                    preamble=dnet, **queue)
         return {"engine": "diann", "report": report, "submitted": sbatch,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
-    sh((dnet + " " if dnet else "") + full)
+    pre = (dnet + " ") if dnet else ""
+    if libfree:
+        sh(pre + lib_cmd)
+        if not (os.path.exists(predicted) and os.path.getsize(predicted) > 0):
+            sys.exit(f"DIA-NN exited 0 but did not write the predicted library {predicted} "
+                     "-- check its output above for ERROR:")
+        sh(pre + search_cmd)
+    else:
+        sh(pre + onecmd)
     if not os.path.exists(report):
         sys.exit(f"DIA-NN finished but {report} is missing.")
+    import check_report_runs
+    ok, msg = check_report_runs.verify(report, files)
+    if not ok:
+        sys.exit(msg)
+    print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda)}
 
 
@@ -393,13 +455,13 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
 # Apache-2.0 (commercial use OK) — the open-source DIA alternative to DIA-NN,
 # whose free "Academia" build is academic/non-profit only. Library-free:
 #   alphadia -o <out> -f <raw> [-f ...] --fasta <fasta> [-c <config.yaml>]
-def run_alphadia(cmd, config, files, fasta, out, threads, sbatch):
+def run_alphadia(cmd, config, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     f_args = " ".join(f"-f {shlex.quote(f)}" for f in files)
     cfg = f"-c {shlex.quote(config)} " if config and os.path.exists(config) else ""
     full = (f"{cmd} -o {shlex.quote(out)} {f_args} --fasta {shlex.quote(fasta)} {cfg}").strip()
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="alphadia_search")
+        emit_sbatch(sbatch, full, out, threads, job="alphadia_search", **(queue or {}))
         return {"engine": "alphadia", "out": out, "submitted": sbatch, "ran": False,
                 "note": "After the job runs, re-run with --adapt-only to build report.parquet."}
     sh(full)
@@ -594,7 +656,8 @@ def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=N
     return info
 
 
-def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None, mbr=True):
+def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None, mbr=True,
+                queue=None):
     os.makedirs(out, exist_ok=True)
     bad = [f for f in files if f.rstrip("/").lower().endswith(".d")]
     if bad:
@@ -644,7 +707,7 @@ def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None,
     argv = _container_argv(tools, mounts, inner)
     full = " ".join(shlex.quote(x) for x in argv)
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="radiant_search")
+        emit_sbatch(sbatch, full, out, threads, job="radiant_search", **(queue or {}))
         return {"engine": "radiant", "out": out, "submitted": sbatch, "ran": False}
     sh(full)
     report = adapt_radiant(out)
@@ -787,14 +850,14 @@ def ensure_mzml(files, out):
     return converted
 
 
-def run_sage(cmd, params, files, fasta, out, threads, sbatch):
+def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     mzml = ensure_mzml(files, out)
     files_args = " ".join(shlex.quote(m) for m in mzml)
     full = (f"{cmd} {shlex.quote(params)} -f {shlex.quote(fasta)} -o {shlex.quote(out)} "
             f"--parquet --disable-telemetry-i-dont-want-to-improve-sage {files_args}")
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="sage_search")
+        emit_sbatch(sbatch, full, out, threads, job="sage_search", **(queue or {}))
         return {"engine": "sage", "out": out, "submitted": sbatch, "ran": False,
                 "note": "After the job runs, re-run with --adapt-only to build report.parquet."}
     sh(full)
@@ -852,7 +915,7 @@ def adapt_sage(out):
 
 
 # --------------------------------------------------------------- FragPipe -----
-def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch):
+def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     acq = bundle.get("acquisition", "DDA").upper()
     manifest = os.path.join(out, "fragpipe.fp-manifest")
@@ -887,7 +950,7 @@ def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch):
     full = (f"{cmd} --headless --workflow {shlex.quote(params)} "
             f"--manifest {shlex.quote(manifest)} --workdir {shlex.quote(out)} {tools_arg}")
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="fragpipe_search")
+        emit_sbatch(sbatch, full, out, threads, job="fragpipe_search", **(queue or {}))
         return {"engine": "fragpipe", "out": out, "submitted": sbatch, "ran": False}
     sh(full)
     report = adapt_fragpipe(out)
@@ -1151,8 +1214,12 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
                 partition=None, account=None, qos=None, mem="64G", hours=12):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
-    slurm_queue(). `preamble` runs before the command (e.g. the DOTNET_ROOT exports
-    that let DIA-NN 2.6 read Thermo .raw)."""
+    slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
+    the command line's --partition/--account/--qos: on the 2026-09-16 FRAN pilot run_diann()
+    did not, so `--partition low --account publicgrp --qos publicgrp-low-qos` came out as
+    genome-center-grp/high in both job headers and had to be hand-edited before submission.
+    `preamble` runs before the command (e.g. the DOTNET_ROOT exports that let DIA-NN 2.6
+    read Thermo .raw)."""
     part, acct, q = slurm_queue(partition, account, qos)
     pre = (preamble + "\n") if preamble else ""
     lines = [
@@ -1166,15 +1233,18 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     if part:  lines.append(f"#SBATCH --partition={part}")
     if acct:  lines.append(f"#SBATCH --account={acct}")
     if q:     lines.append(f"#SBATCH --qos={q}")
-    # `low` is preemptible; without --requeue a preempted search is simply lost.
-    if part == "low":
+    # Preemptible queue: without --requeue a preempted search is simply lost. The rule is
+    # diann_parallel.needs_requeue(), shared with the chain's step headers.
+    requeue = _diann_parallel_mod().needs_requeue(part, q)
+    if requeue:
         lines.append("#SBATCH --requeue")
     lines += ["set -euo pipefail", f"cd {shlex.quote(os.path.abspath(out))}", f"{pre}{command}", ""]
     script = "\n".join(lines)
     with open(path, "w") as fh:
         fh.write(script)
     print(f"  [sbatch] wrote {path} (partition={part or 'default'}, "
-          f"account={acct or 'default'}) — submit with: sbatch {path}")
+          f"account={acct or 'default'}, qos={q or 'default'}"
+          f"{', requeue' if requeue else ''}) — submit with: sbatch {path}")
 
 
 def main():
@@ -1207,9 +1277,10 @@ def main():
                     help="DIA-NN: use the 5-step SLURM chain above this many files (default 5)")
     ap.add_argument("--no-parallel", action="store_true",
                     help="force a single-shot DIA-NN search regardless of file count")
-    ap.add_argument("--partition", help="SLURM partition for the parallel chain")
-    ap.add_argument("--account", help="SLURM account for the parallel chain")
-    ap.add_argument("--qos", help="SLURM QOS for the parallel chain")
+    ap.add_argument("--partition", help="SLURM partition for every job this writes (the "
+                    "single-shot --sbatch job(s) and the parallel chain); detected if omitted")
+    ap.add_argument("--account", help="SLURM account for every job this writes")
+    ap.add_argument("--qos", help="SLURM QOS for every job this writes")
     ap.add_argument("--max-simultaneous", type=int,
                     help="cap concurrent array tasks in the parallel chain")
     ap.add_argument("--adapt-only", action="store_true",
@@ -1218,6 +1289,8 @@ def main():
 
     global a_globals
     a_globals = a
+    # The queue the user asked for, handed to every emit_sbatch() -- see emit_sbatch().
+    queue = {"partition": a.partition, "account": a.account, "qos": a.qos}
     tools = json.load(open(a.tools))
     bundle = json.load(open(a.bundle))
     engine = pick_engine(a, bundle)
@@ -1315,13 +1388,15 @@ def main():
             sbatch_refused["existing_file_moved_to"] = moved and os.path.abspath(moved)
     elif engine == "diann":
         res = run_diann(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
-                        acquisition=bundle.get("acquisition", ""))
+                        acquisition=bundle.get("acquisition", ""), queue=queue)
     elif engine == "alphadia":
-        res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+        res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
+                           queue=queue)
     elif engine == "sage":
-        res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+        res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch, queue=queue)
     elif engine == "fragpipe":
-        res = run_fragpipe(cmd, bundle, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+        res = run_fragpipe(cmd, bundle, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
+                           queue=queue)
     elif engine == "radiant":
         # Takes the whole tools dict: it needs the container runtime + image to build
         # bind mounts, and DIA-NN to generate the spectral library.
@@ -1335,7 +1410,7 @@ def main():
                                        a.threads, a, library=a.library)
         else:
             res = run_radiant(tools, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
-                              library=a.library, mbr=a.mbr)
+                              library=a.library, mbr=a.mbr, queue=queue)
     else:
         sys.exit(f"unknown engine {engine}")
 
