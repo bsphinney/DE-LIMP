@@ -185,14 +185,25 @@ the submitting user may use (`sacctmgr show assoc user=$USER`) and picks:
 2. `genome-center-grp` on `high` (facility members: not preemptible);
 3. `publicgrp` on `low` (everyone else: preemptible, so `#SBATCH --requeue` is added).
 
-When an account has both, **utilisation** decides, not entitlement: `high` has a per-user
-CPU cap, so if too few of *your* CPUs are free there and `low` has idle CPUs, the job goes
-to `low`. The 5-step chain's per-file array steps (2 and 4) move to `low` sooner — when
-fewer than two tasks' worth of your CPUs are free on `high` — because a preempted task costs
-one file; steps 1, 3 and 5 cannot restart mid-way, so they move only when a single job no
-longer fits under the cap. If associations cannot be read at all the script falls back to
-`publicgrp/low`, **not** the cluster default: that is `high`, which rejects a non-facility
-account.
+When an account has both, **utilisation** decides, not entitlement. `slurm_queue()` counts
+the CPUs *you* already run on `high` (`squeue`) against the 64-CPU per-user cap, and the idle
+CPUs on `low` (`sinfo`), and compares both with `need = min(peak_cpus, 16)` — one array
+task's worth, **not** the job's own request (a caller that passes no peak, like the
+single-script `--sbatch` paths, gets 16):
+
+- **any job** goes to `low` when fewer than `need` of your CPUs are free on `high` and `low`
+  has at least `need` idle;
+- the 5-step chain's **array steps (2 and 4)** also go to `low` (given the same `need` idle
+  there) when fewer than `2 × need` are free on `high`, or when your usage there cannot be
+  read (`squeue` cannot run) — a preempted task costs one file;
+- **steps 1, 3 and 5** cannot restart mid-way, so only the first rule applies. Because
+  `need` is capped at 16, a 64-CPU step 3 **stays on `high` while 16 or more of your CPUs
+  are free there, then waits on `high`** for the rest; it does not move to `low` because
+  the 64 it asked for are unavailable. To send it to `low`, pass `--partition low --account
+  publicgrp` (plus `--qos` if the association has one).
+
+If associations cannot be read at all the script falls back to `publicgrp/low`, **not** the
+cluster default: that is `high`, which rejects a non-facility account.
 
 Checked on HIVE 2026-09-16 (`sacctmgr show assoc` / `show qos`, `sinfo`): the default
 partition is `high`; `genome-center-grp` has `high` (per-user cap 64 CPUs) and `gpu-a100`

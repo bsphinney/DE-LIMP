@@ -87,7 +87,7 @@ cat <<JSON
   "recommended_mode": "$MODE",
   "notes": [
     "Claude Code runs locally; in hive_remote mode it drives HIVE over SSH with the user's private key (ssh -i <key> <user>@hive).",
-    "Proteomics Core members (proteomics_grp_access=true) reuse the software already installed in /quobyte/proteomics-grp (DIA-NN .sif, pre-staged FASTAs).",
+    "Proteomics Core members (proteomics_grp_access=true) reuse the software already installed in /quobyte/proteomics-grp (DIA-NN builds, pre-staged FASTAs).",
     "HIVE users NOT in the Core must rebuild the toolchain in their own HIVE home — see references/access.md 'Rebuild on HIVE'.",
     "No HIVE + no Core is fine: the skill installs its own toolchain locally and uses public engines (DIA-NN Academia, Sage).",
     "hive_ssh='failed' usually means VPN off, wrong key path, or account not set up."

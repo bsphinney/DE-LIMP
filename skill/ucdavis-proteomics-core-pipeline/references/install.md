@@ -46,7 +46,8 @@ installed system-wide; deleting `~/.proteomics-pipeline/` fully uninstalls it.
   finds it on PATH — no separate download.
 - **DIA-NN** (DIA): license-gated, not on conda. By platform:
   - **Linux:** `acquire_tools.sh` downloads the free DIA-NN *Academia* binary.
-  - **UC Davis HIVE:** reuse the existing Apptainer `.sif`.
+  - **UC Davis HIVE:** Proteomics Core members reuse the Core's native DIA-NN builds
+    under `/quobyte/proteomics-grp/dia-nn/`; everyone else gets the Linux download above.
   - **macOS:** *no native build exists.* See the one manual step below.
 - **FragPipe** (opt-in): downloaded on demand; MSFragger/IonQuant are license-gated
   and can't be auto-downloaded — `acquire_tools.sh` says so if you opt in.

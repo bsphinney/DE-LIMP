@@ -24,7 +24,7 @@ Reads `recommended_mode` + `facility_software_available`. Then:
 | HIVE access | Core member | Mode | What happens |
 |---|---|---|---|
 | no | no | **local** | `setup.sh` installs the toolchain on the user's machine; public engines (DIA-NN Academia, Sage). |
-| **yes** | **yes** | **hive_remote** | Drive HIVE over SSH. **Reuse the Core software already installed** in `/quobyte/proteomics-grp` (DIA-NN `.sif`, pre-staged FASTAs). Search runs as a SLURM job. |
+| **yes** | **yes** | **hive_remote** | Drive HIVE over SSH. **Reuse the Core software already installed** in `/quobyte/proteomics-grp` (DIA-NN builds, pre-staged FASTAs). Search runs as a SLURM job. |
 | **yes** | no | **hive_remote** | Drive HIVE over SSH, but you **rebuild the toolchain in your own HIVE home** (you can't read the Core group dir). See "Rebuild on HIVE" below. |
 | no | yes | **local** | The Core software is on HIVE; without HIVE access you can't reach it → run locally with public engines and tell the user to request a HIVE account. |
 
@@ -81,10 +81,12 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
    ```
    This installs micromamba + R + limpa + limma + arrow + Sage + Python/pyarrow into
    `~/.proteomics-pipeline/` (no admin). DE, Sage (DDA), and figures now work.
-2. **DIA-NN (for DIA data):** you can't use the group `.sif`, so let the skill fetch
-   the free academic Linux build into your home:
+2. **DIA-NN (for DIA data):** you can't read the group's DIA-NN builds, so let the skill
+   fetch the free academic Linux build into your home. Pin the version the workflow
+   manifest pins (`engine.version`; `resolve_defaults.py` pins 2.6.1) — any other version
+   makes `run_search.py` print an engine version mismatch WARNING:
    ```
-   bash scripts/hive_exec.sh 'PIN_ENGINE=diann PIN_VERSION=2.6.0 bash ~/proteomics-pipeline/scripts/acquire_tools.sh hpc'
+   bash scripts/hive_exec.sh 'PIN_ENGINE=diann PIN_VERSION=2.6.1 bash ~/proteomics-pipeline/scripts/acquire_tools.sh hpc'
    ```
    `acquire_tools.sh` downloads the DIA-NN Academia Linux zip to
    `~/.proteomics-pipeline/tools/diann/<version>/` (needs glibc ≥ Mint 21.2 / .NET 8;
