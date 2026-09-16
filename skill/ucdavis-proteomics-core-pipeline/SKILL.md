@@ -735,20 +735,26 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     auto-optimises per file gets stitched together inconsistently — DIA-NN's own warning
     names **mass accuracy AND scan window**. The two are not equally recoverable:
     - **mass accuracy — you must pin it.** DIA-NN calibrates it per run against the
-      library, so there is no one value to carry into steps 3/5. Unpinned (or `0`, or
-      negative) declines the chain: re-run `estimate_params.py` with the **real
-      instrument** (step 6b).
+      library, so there is no one value to carry into steps 3/5. Omitted declines the
+      chain: re-run `estimate_params.py` with the **real instrument** (step 6b). `0` is
+      **not** auto — DIA-NN reads it as a literal 0 ppm tolerance and returns 0 IDs
+      (auto is the flag *omitted*) — so `0`, negative, non-numeric, or set twice with
+      different values also declines; fix the value.
     - **`--window` — the chain handles it; do nothing.** `estimate_params.py` omits it by
       design, because the radius depends on the acquisition scheme and has to be
-      *measured*. **Step 1b** does that automatically: it runs `probe_window.py` once
-      after library prediction and pins the one radius into steps 2 and 4, writing the
-      fully-resolved parameters to `<out>/params.resolved.cfg`. An unpinned or `0`
-      `--window` therefore does **not** decline the chain — don't send the user off to
-      measure it by hand, and don't read such a routing decline as a window problem.
-      (Why it matters: on an 18-file poplar run DIA-NN inferred radius 7 for seventeen
-      files and 8 for one, and the chain combined them.) A **non-numeric** `--window` is
-      a typo and does decline — fix the cfg. To measure it yourself anyway, e.g. with
-      `--no-probe-window`, after step 1 has built the library:
+      *measured*. **Step 1b** does that automatically: after library prediction it runs
+      `probe_window.py` (on the first file, falling through to the next if that one gives
+      no radius — up to 3) and pins the one radius into steps 2–5. Only once a radius is
+      measured does it write `<out>/params.resolved.cfg`; if all 3 fail, step 1b fails
+      loudly and steps 2–5 never start. An omitted `--window` therefore does **not**
+      decline the chain — don't send the user off to measure it by hand, and don't read
+      such a routing decline as a window problem. `--window 0` routes the same way: it is
+      **not** a valid radius (DIA-NN logs `scan window radius should be a positive
+      integer` and optimises per file — seen on the 18-file poplar run, radius 7 for
+      seventeen files and 8 for one), and the chain removes it. Anything else that is not
+      a positive integer (`0.5`, `7.0`, `-1`, `wide`) is a typo and declines — fix the cfg.
+      The decline message names the fix for its actual cause. To measure it yourself
+      anyway, e.g. with `--no-probe-window`, after step 1 has built the library:
       ```bash
       python3 scripts/probe_window.py --diann "<diann cmd>" --raw <one file> \
           --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg>
@@ -764,9 +770,12 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
   build `report.parquet`.
   - **Except when it routed to the 5-step chain** (DIA-NN, >5 files, SLURM — i.e. most
     real cohorts). The chain generates six scripts plus its own `submit.sh`, so there is
-    no single job to submit and `--sbatch` writes nothing; `run_search.py` prints a NOTE
-    saying so. Run **`bash <out>/submit.sh`** instead. Check the routing line it prints
-    before reaching for `sbatch`.
+    no single job to submit: `--sbatch` is **not** written, `run_search.py` **exits 3**
+    (so `--sbatch job.sh && sbatch job.sh` stops), and any existing `job.sh` from an
+    earlier search is renamed to `job.sh.stale-<time>` so it cannot be resubmitted by
+    mistake. The chain *is* generated — run **`bash <out>/submit.sh`**. Exit 3 here is
+    that message, not a failed search; check the routing line it prints. Want one job
+    script anyway? `--no-parallel`.
 - Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
 → detail: `references/search-engines.md`.
 

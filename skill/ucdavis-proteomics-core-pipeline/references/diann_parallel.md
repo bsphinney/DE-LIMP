@@ -21,9 +21,17 @@ almost always mass accuracy: re-run `estimate_params.py` with the **real instrum
 it pins the DIA-NN recommended values, and parallel enables itself. Force the decision
 with `--no-parallel` or `--parallel-threshold N`.
 
-`diann_parallel.py` **refuses to run** on an auto/0 mass-accuracy cfg rather than
-producing a silently inconsistent report (`--allow-auto-mass-acc` overrides, for testing
-only).
+`diann_parallel.py` **refuses to run** on a cfg whose mass accuracy is omitted (auto) or
+invalid rather than producing a silently inconsistent report. `--allow-auto-mass-acc`
+overrides the *omitted* case only, for testing; it never overrides an invalid value (`0`,
+which DIA-NN reads as a literal 0 ppm tolerance, negative, non-numeric, or set twice
+differently), a bad `--window`, or an unparseable cfg. The refusal and `run_search.py`'s
+routing decline come from the same `parallel_safe()` verdict and name the same fix.
+
+**`--sbatch` does not apply to the chain.** It is six jobs chained by `submit.sh`, so
+`run_search.py --sbatch job.sh` writes no `job.sh`, moves any existing one aside to
+`job.sh.stale-<time>`, generates the chain, and exits **3** — so a chained `&& sbatch job.sh`
+cannot resubmit a stale script. Submit with `bash <out>/submit.sh`.
 
 ## The 5 steps (chained with `afterok` dependencies)
 1. **Library prediction** — single job, no raw: predict a spectral library from the
@@ -47,8 +55,9 @@ empirical-library round-trip.
   auto-calibration would be inconsistent (per DIA-NN dev guidance). So the `--cfg` you
   pass **must** have real `--mass-acc`/`--mass-acc-ms1` values — i.e. estimate params
   from a **known instrument** (timsTOF → 15/15, Astral → 4/10, Orbitrap by resolution;
-  the DIA-NN-recommended table in `estimate_params.py`). Don't run parallel with an
-  `--mass-acc 0` (auto) cfg.
+  the DIA-NN-recommended table in `estimate_params.py`). `--mass-acc 0` is **not** auto:
+  DIA-NN fixes the tolerance at a literal 0 ppm and returns 0 IDs. Auto is the flags
+  omitted, and neither can run as the chain.
 - **No MBR** (`--reanalyse` is dropped) — the 5-step replaces it.
 - **`--quant-ori-names`** on every step so `.quant` files are `<basename>.quant`.
 - Step 4 **skips** files that failed step 2 (missing `.quant`).
@@ -207,23 +216,40 @@ optimises the radius **per file**. On a real 18-file poplar run that gave a radi
 **7 for seventeen files and 8 for one**, and the chain combined them anyway.
 
 `parallel_safe()` is the single rule for "may this cfg run as the chain?", and both
-`diann_parallel.py` (generate?) and `run_search.py` (auto-route?) call it — they used to
-decide separately and drifted, which silently demoted a 310-file cohort to one sequential
-search. Unpinned **mass accuracy** is not parallel-safe and refuses, rather than producing
-a quietly-inconsistent report. A missing or `0` **`--window`** *is* recoverable and routes:
-step 1b measures the radius (below). A negative or non-numeric `--window` is a typo and
-refuses — the chain will not measure over a mistake.
+`diann_parallel.py` (generate?) and `run_search.py` (auto-route?) gate on its `ok` — they
+used to decide separately and drifted, which silently demoted a 310-file cohort to one
+sequential search. It reads the cfg through one tokeniser (`cfg_tokens`, shlex with
+`# comments` stripped) that the step flags and `params.base.cfg` also use, so a
+`--window 0` mid-line or after a tab, or a trailing `# comment`, means the same thing to
+the gate as to the generated steps. Unpinned or invalid **mass accuracy** is not
+parallel-safe and refuses, rather than producing a quietly-inconsistent report.
 
-**The chain does this for you.** When the cfg has no `--window`, `diann_parallel.py`
-inserts **step 1b** after library prediction: it runs `probe_window.py` on the first
-file, writes the radius to `<out>/window.txt`, and steps 2–5 read that file at runtime,
+`--window` must be a **positive integer**. DIA-NN does not accept `0` — it logs
+`scan window radius should be a positive integer` and optimises per file (the poplar run
+above) — so a missing or `0` `--window` is treated the same: recoverable, and step 1b
+measures the radius (below). Anything else that is not a positive integer (`0.5`, `7.0`,
+`-1`, `nan`, `wide`, or two different values) is a typo and refuses — the chain will not
+measure over a mistake.
+
+**The chain does this for you.** When the cfg has no usable `--window`, `diann_parallel.py`
+inserts **step 1b** after library prediction: it runs `probe_window.py` on the first file
+and, if that file yields no radius (a blank, a wash, a failed injection), on the next — up
+to 3. It writes the radius to `<out>/window.txt`, and steps 2–5 read that file at runtime,
 so every pass uses the identical value. Any `--window` in the cfg is dropped from those
-steps so the measured value cannot collide with it. Step 1b also writes
-`<out>/params.resolved.cfg` — the cfg plus the measured `--window` — which is what
-`search_provenance.json` records as `resolved_params_file`, so the run stays reproducible
-from a parameter file rather than only from `window.txt`. Its job id is in `jobs.txt`
-along with the rest of the chain, so `watch_run.sh --all` sees it fail. `--no-probe-window` disables it, in which case a
-pinned `--window` in the cfg is required or the chain refuses to generate.
+steps so the measured value cannot collide with it. For Thermo `.raw` inputs step 1b
+exports the same .NET 8 environment every other step's DIA-NN gets — without it DIA-NN
+cannot read `.raw`, no radius is logged, and steps 2–5 wait on `afterok` for ever.
+
+Only after a radius is measured does step 1b write `<out>/params.resolved.cfg` — the cfg
+plus the measured `--window` — so a "resolved" cfg without a window can never exist; a
+resubmitted step 1b first removes the previous run's `window.txt` and resolved cfg. If no
+candidate yields a radius, step 1b exits non-zero with `FAILED:` and steps 2–5 never
+start. `search_provenance.json` records the file as `resolved_params_file` with
+`resolved_params_produced: "runtime"` (and `scan_window.source` saying it is measured by
+step 1b), because at generation time it does not exist yet. Its job id is in `jobs.txt`
+along with the rest of the chain, so `watch_run.sh --all` sees it fail.
+`--no-probe-window` disables step 1b, in which case a pinned `--window` in the cfg is
+required or the chain refuses to generate.
 
 To measure it yourself instead, never by guessing — it depends on the acquisition scheme
 (cycle time vs peak width), not the instrument model:

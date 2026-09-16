@@ -30,7 +30,7 @@ Usage:
       --files /data/*.raw --threads 16 [--sbatch job.sh]
       [--engine diann|alphadia|sage|fragpipe|radiant]
 """
-import sys, os, json, glob, shlex, argparse, subprocess, shutil
+import sys, os, json, glob, shlex, argparse, subprocess, shutil, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
@@ -135,15 +135,54 @@ def parallel_decision(engine, files, params, a):
     # The defaults below match what run_diann_parallel() actually passes today (probing on,
     # no seed library). If this ever grows --seed-lib or --no-probe-window passthroughs, they
     # must be forwarded here as well, or the two answers diverge again.
+    #
+    # The fix comes from the same verdict (`remedy`, keyed on WHY it declined). This used to
+    # say "re-run estimate_params.py with the instrument table" for every decline -- including
+    # a typo'd --window, which estimate_params.py cannot fix because it never writes one.
     safe = _diann_parallel_mod().parallel_safe(params)
     if not safe["ok"]:
-        return False, (f"{n} files, but {params} is not parallel-safe: {safe['reason']}; "
-                       "steps 3/5 reuse .quant files, so anything DIA-NN auto-optimises per "
-                       "file is applied inconsistently between passes and then stitched "
-                       "together. Re-run estimate_params.py with the real instrument "
-                       "(timsTOF 15/15, Astral 4/10, Orbitrap by resolution) to enable "
-                       "parallel")
+        return False, (f"{n} files, but {params} is not parallel-safe for the 5-step chain "
+                       f"(steps 3/5 reuse .quant files): {safe['reason']}. To enable it: "
+                       f"{safe['remedy']}")
     return True, (f"{n} files > {a.parallel_threshold}, SLURM present, {safe['reason']}")
+
+
+# Exit status when the search routed to the 5-step chain but --sbatch asked for ONE job
+# script. The chain is generated; the file the caller is about to `sbatch` is not.
+SBATCH_NOT_WRITTEN = 3
+
+
+def set_aside(path):
+    """Rename an existing file out of the way -- never delete it. Returns the new path, or None
+    when there was nothing there. The name records that it is stale and when it was moved."""
+    if not os.path.lexists(path):
+        return None
+    base = f"{path}.stale-{time.strftime('%Y%m%dT%H%M%S')}"
+    new, k = base, 1
+    while os.path.lexists(new):
+        new, k = f"{base}.{k}", k + 1
+    os.rename(path, new)
+    return new
+
+
+def scan_window_record(engine, params, res):
+    """What set the DIA-NN scan window, for search_provenance.json.
+
+    The chain describes itself (res["scan_window"]: measured at run time by step 1b, or pinned
+    in the cfg). The single-shot path is described from the cfg it ran. estimate_params.py
+    cannot say which happened -- it runs before routing -- so its rationale points here."""
+    if isinstance(res, dict) and res.get("scan_window"):
+        return res["scan_window"]
+    if engine != "diann":
+        return None
+    try:
+        st = _diann_parallel_mod().mass_acc_status(params)
+    except ValueError as e:                       # CfgError: unparseable cfg
+        return {"source": f"unknown -- the cfg could not be parsed ({e})", "value": None}
+    if st["state"]["--window"] == "ok":
+        return {"source": "pinned in the cfg", "value": st["window"]}
+    return {"source": "not pinned -- single-shot search, DIA-NN optimises it per run",
+            "value": None}
 
 
 def ensure_temp_dirs(params, out):
@@ -1205,19 +1244,22 @@ def main():
 
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
+    sbatch_refused = None
     if use_parallel and a.sbatch:
-        # --sbatch asks for ONE script to submit; the chain instead generates six and a
-        # submit.sh that sbatches them in dependency order, so there is nothing to write
-        # here. Say so before the caller's `&& sbatch job.sh` fails on a file we never
-        # created -- SKILL.md documents exactly that chained invocation, and until this
-        # PR it worked, because a big cohort declined to the single-shot path where
-        # --sbatch IS honoured. Routing it to the chain is what made the flag moot, so
-        # the routing change owes the caller this line.
-        sys.stderr.write(
-            f"[run_search] NOTE: --sbatch {a.sbatch} does not apply to the 5-step chain "
-            f"and no such file was written.\n"
-            f"[run_search] The chain submits itself: run `bash {os.path.join(a.out, 'submit.sh')}` "
-            f"(or hive_exec.sh 'bash .../submit.sh'), NOT sbatch.\n")
+        # --sbatch asks for ONE script to submit; the chain is six jobs chained by its own
+        # submit.sh, so there is nothing to write there. A NOTE and exit 0 were not enough:
+        # SKILL.md documents `run_search.py ... --sbatch job.sh && sbatch job.sh`, and when a
+        # job.sh is left over from an earlier run -- say a sequential 310-file search -- the
+        # `&& sbatch` resubmits THAT, silently. So: move any existing file aside (renamed,
+        # never deleted), generate the chain, then exit non-zero so the `&&` stops here.
+        moved = set_aside(a.sbatch)
+        if moved:       # said now too: if generation fails below, the summary never prints
+            sys.stderr.write(f"[run_search] moved existing {a.sbatch} -> {moved} (it does not "
+                             f"describe this search, which routed to the 5-step chain)\n")
+        sbatch_refused = {"requested": os.path.abspath(a.sbatch), "written": False,
+                          "existing_file_moved_to": moved and os.path.abspath(moved),
+                          "exit_status": SBATCH_NOT_WRITTEN,
+                          "why": "routed to the 5-step chain, which submits itself via submit.sh"}
     if use_parallel:
         res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a)
     elif engine == "diann":
@@ -1252,22 +1294,41 @@ def main():
         version = (tools.get("versions", {}) or {}).get(engine) \
             or (bundle.get("engine", {}) or {}).get("version")
         with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
+            # Where the FULLY-resolved parameters are, and WHEN they exist -- as the generator
+            # reports it, not assumed here. On the probe path the chain measures the scan
+            # window at run time (step 1b) and only then writes the file, so recording it as
+            # already resolved would be false until step 1b succeeds.
+            rp = res.get("resolved_params") if isinstance(res, dict) else None
             json.dump({"engine": engine, "version": version, "resolved_command": cmd,
                        "params_file": a.params,
-                       # where the FULLY-resolved parameters land. The 5-step chain measures
-                       # the scan window at run time (step 1b), so a.params alone does not
-                       # describe what actually ran and replaying it would not reproduce it.
-                       "resolved_params_file": (res.get("resolved_cfg") or a.params
-                                                if isinstance(res, dict) else a.params),
+                       "resolved_params_file": (rp or {}).get("file") or a.params,
+                       "resolved_params_produced": ((rp or {}).get("produced")
+                                                    or "before the search (the params file as given)"),
+                       "resolved_params_note": (rp or {}).get("note"),
+                       "scan_window": scan_window_record(engine, a.params, res),
                        "fasta": a.fasta, "threads": a.threads,
                        "n_files": len(files), "files": files,
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
-                       "submitted_sbatch": a.sbatch or None, "result": res}, fh, indent=2)
+                       "submitted_sbatch": None if sbatch_refused else (a.sbatch or None),
+                       "sbatch_refused": sbatch_refused, "result": res}, fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")
 
     print(json.dumps(res, indent=2))
+
+    if sbatch_refused:
+        moved = sbatch_refused["existing_file_moved_to"]
+        sys.stderr.write(
+            f"[run_search] --sbatch {a.sbatch} was NOT written: this search routed to the "
+            f"5-step parallel chain, which is six SLURM jobs chained by its own submit.sh.\n"
+            + (f"[run_search] The existing {a.sbatch} does not describe this search and was "
+               f"moved to {moved}, so `sbatch {a.sbatch}` cannot resubmit it.\n" if moved else "")
+            + f"[run_search] The chain IS generated. Submit it with: bash "
+              f"{os.path.join(a.out, 'submit.sh')}  (or hive_exec.sh 'bash .../submit.sh')\n"
+            f"[run_search] Exiting {SBATCH_NOT_WRITTEN} so `... --sbatch {a.sbatch} && sbatch "
+            f"{a.sbatch}` stops here. For ONE job script instead, re-run with --no-parallel.\n")
+        sys.exit(SBATCH_NOT_WRITTEN)
 
 
 if __name__ == "__main__":

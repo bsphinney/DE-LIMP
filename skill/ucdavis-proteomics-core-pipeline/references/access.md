@@ -62,6 +62,8 @@ bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
    bash scripts/hive_exec.sh 'cd ~/proteomics-pipeline && sbatch job.sh'
    bash scripts/hive_exec.sh 'squeue -u $USER'     # poll until done
    ```
+   If `run_search.py` routed a DIA-NN search to the 5-step chain (>5 files, on a SLURM
+   host), there is no `job.sh`: it exits 3 and you submit `bash <out>/submit.sh` instead.
 5. **DE + figures + report:** run on HIVE (`run_de.R`, `make_figures.R`, …) or pull
    `report.parquet` back and run them locally (DE/figures are light).
 6. **Retrieve results** into the session folder on the user's machine:

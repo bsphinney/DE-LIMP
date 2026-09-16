@@ -34,6 +34,10 @@ USAGE
                     --lib <predicted.speclib> [--threads 16] [--timeout 3600]
 
 The library must already exist -- run this after step 1 of the chain, not before.
+
+--diann is exec'd directly (no shell), so an environment it needs -- e.g. the .NET 8 exports
+DIA-NN 2.6 needs to read Thermo .raw -- must be exported BEFORE running this script; it cannot
+be spliced into --diann. The chain's step 1b does exactly that.
 """
 import argparse, json, os, re, shlex, subprocess, sys, threading, time
 
@@ -50,16 +54,23 @@ def probe(diann, raw, fasta, lib, threads, timeout, extra=""):
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, bufsize=1)
     radius, lines, deadline = None, [], time.time() + timeout
+    # The deadline check below only runs when DIA-NN prints a line, so a DIA-NN that goes
+    # silent would block this loop until SLURM's wall clock killed the whole job -- and step 1b
+    # would never get to try its next file. The timer ends the read from outside.
+    watchdog = threading.Timer(timeout, p.kill)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         for line in p.stdout:
             lines.append(line.rstrip())
             m = WINDOW_RE.search(line)
-            if m:
+            if m and int(m.group(1)) > 0:
                 radius = int(m.group(1))
                 break                      # got it -- no need to finish the search
             if time.time() > deadline:
                 break
     finally:
+        watchdog.cancel()
         if p.poll() is None:
             p.terminate()
             try:

@@ -28,7 +28,7 @@ Usage:
       [--assembly-cpus 64] [--assembly-mem 128] [--assembly-time 12] \
       [--partition <auto>] [--account <auto>] [--max-simultaneous 20] [--no-norm]
 """
-import os, re, sys, glob, argparse, shlex, subprocess
+import os, re, sys, glob, argparse, shlex, subprocess, math
 
 # flags that are step-specific or auto-determined — never carry them into every step.
 # NOTE: --dda is intentionally NOT stripped — for DDA data put --dda in the --cfg and it
@@ -39,6 +39,14 @@ STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--rea
          # xic_flag() below) -- step 2 IDs are not final, and step 5 runs --use-quant,
          # which never re-reads the raw spectra so --xic is silently a no-op there.
          "--fasta", "--threads", "--temp")
+
+# Step 1b tries this many files before giving up: the radius is a property of the method, so
+# one blank or wash first in the list must not fail the cohort. Each attempt normally costs
+# minutes (DIA-NN logs the radius during calibration); the per-attempt timeout bounds a file
+# that never gets there, and the wall clock covers every attempt.
+PROBE_CANDIDATES = 3
+PROBE_TIMEOUT_S = 2700
+PROBE_WALL_HOURS = 3
 
 
 def dotnet_prefix(raws):
@@ -59,13 +67,60 @@ def dotnet_prefix(raws):
     return f'export DOTNET_ROOT={root}; export PATH={root}:"$PATH"; '
 
 
-# Glob metacharacters. A cfg value carrying one of these is spliced into a bash command line,
-# where bash will rewrite it if a file in the working directory happens to match.
-_GLOBBY = re.compile(r"[*?\[\]]")
+# Characters that change how bash parses a word: glob metacharacters, whitespace, comment,
+# control operators, redirections and quotes. `$` and parentheses are deliberately absent --
+# see _shield().
+_NEEDS_QUOTING = re.compile(r"""[\s*?\[\]#;&|<>'"\\`]""")
 
 
-def _shield(line):
-    """Quote only the tokens that bash would try to expand as a filename pattern.
+class CfgError(ValueError):
+    """The cfg cannot be tokenised -- e.g. an unbalanced quote."""
+
+
+def cfg_tokens(cfg):
+    """THE tokeniser for a DIA-NN cfg. Every reader in this file goes through it.
+
+    There used to be three rules for one file: read_cfg_flags() dropped flags per LINE
+    (`line.startswith("--window ")`), mass_acc_status() found them per shlex TOKEN, and the
+    params.base.cfg writer used a third (`split()[:1]`). They disagreed on ordinary cfgs:
+
+        --qvalue 0.01 --window 0    the token rule saw `--window 0` and sent the cfg to step
+                                    1b; the line rule left it in the step flags, next to the
+                                    measured `--window $(cat window.txt)`
+        --window<TAB>0              the same, through a tab
+        --qvalue 0.01  # 1% FDR     the token rule (comments=True) counted every later flag as
+                                    set; the line rule spliced the `#` into the joined bash
+                                    line, which comments out EVERY flag after it
+
+    so the gate approved flags the generated steps did not carry (CLAUDE.md rule 3). shlex
+    with comments=True is the rule because it reads the file the way a person does. Returns
+    [] when there is no cfg; raises CfgError when it cannot be parsed -- never a fallback
+    split, which is how a second answer would creep back in."""
+    if not cfg or not os.path.exists(cfg):
+        return []
+    with open(cfg) as fh:
+        text = fh.read()
+    try:
+        return shlex.split(text, comments=True)
+    except ValueError as e:
+        raise CfgError(f"{cfg} cannot be parsed as DIA-NN flags ({e})") from None
+
+
+def cfg_groups(tokens):
+    """[(flag, [values])]: a `--flag` owns every following token up to the next `--flag`,
+    wherever the line breaks fall. DIA-NN values never start with `--` (a negative number is
+    `-3`, which stays a value)."""
+    groups = []
+    for t in tokens:
+        if t.startswith("--") or not groups:
+            groups.append((t, []))
+        else:
+            groups[-1][1].append(t)
+    return groups
+
+
+def _shield(token):
+    """Quote a cfg token only if bash would otherwise change it.
 
     DIA-NN's own recommended values contain globs -- `--cut K*,R*` is the trypsin rule, and an
     N-terminal variable modification is spelled `--var-mod UniMod:1,42.010565,*n`. Spliced into
@@ -76,36 +131,53 @@ def _shield(line):
         no matching file      --cut K*,R*      -> --cut K*,R*
         file 'Kfoo,Rbar'      --cut K*,R*      -> --cut Kfoo,Rbar
 
-    which is a changed digest rule, in a search that reports success. Only globby tokens are
-    quoted, deliberately: quoting everything would also disable `$VAR` and `$(...)`, which a
-    hand-written cfg may legitimately rely on, and would change behaviour for every existing
-    cfg rather than only the ones actually at risk."""
-    return " ".join(shlex.quote(t) if _GLOBBY.search(t) else t for t in line.split())
+    which is a changed digest rule, in a search that reports success. A token cfg_tokens()
+    unquoted from `"/data/my libs"` must be re-quoted too, or bash splits it apart again.
+
+    Only tokens at risk are quoted, deliberately: quoting everything would also disable `$VAR`
+    and `$(...)`, which a hand-written cfg may legitimately rely on, and would change the
+    command line of every existing cfg rather than only the ones actually at risk. A token
+    that must be quoted AND carries a `$` is double-quoted, so it still expands."""
+    if token and not _NEEDS_QUOTING.search(token):
+        return token
+    if "$" in token:
+        return '"' + re.sub(r'(["\\`])', r"\\\1", token) + '"'
+    return shlex.quote(token)
 
 
 def read_cfg_flags(cfg, drop=()):
-    """Read a diann.cfg into a flat flag string, dropping step-specific flags.
+    """Read a diann.cfg into a flat, bash-safe flag string, dropping step-specific flags.
 
     `drop` removes further flags on top of STRIP. It exists for --window: when step 1b
-    measures the radius, steps 2 and 4 get it PREFIXED as `--window $(cat window.txt)`, so
-    a --window still sitting in the cfg lands on the same command line twice. DIA-NN then
-    either honours the wrong one -- silently undoing step 1b and going back to the per-file
-    auto-optimisation the chain exists to prevent, with no error anywhere -- or rejects
-    `--window 0` outright ("scan window radius should be a positive integer"), killing every
-    array task after step 1 has already paid for the library prediction.
-    """
-    if not cfg or not os.path.exists(cfg):
-        return ""
-    out = []
-    strip = tuple(STRIP) + tuple(drop)
-    for raw in open(cfg):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if any(line == s or line.startswith(s + " ") for s in strip):
-            continue
-        out.append(_shield(line))
-    return " ".join(out)
+    measures the radius, steps 2-5 get it PREFIXED as `--window $(cat window.txt)`, so a
+    --window still in the cfg lands on the same command line twice. Which of the two DIA-NN
+    honours is not verified -- and if it is the cfg's, step 1b is silently undone. A cfg
+    `--window 0` is not even a radius: DIA-NN logs "scan window radius should be a positive
+    integer" and optimises per file instead (the 18-file poplar run, 7 for seventeen files
+    and 8 for one), which is exactly what the chain exists to prevent.
+
+    Flags are matched by TOKEN (cfg_tokens) and removed with their values, wherever they sit
+    on a line; inline `# comments` never reach bash."""
+    names = set(STRIP) | set(drop)
+    kept = [g for g in cfg_groups(cfg_tokens(cfg)) if g[0] not in names]
+    return " ".join(_shield(t) for flag, vals in kept for t in (flag, *vals))
+
+
+def write_cfg(cfg, dest, drop=()):
+    """Write `cfg` minus the `drop` flags to `dest`, one flag per line.
+
+    Written from the same tokens every other reader sees, so what params.base.cfg leaves out
+    is exactly what the gate and the step flags left out. Comments are not carried over. This
+    file is read back by DIA-NN (`--cfg`), not by bash, so glob values stay bare -- quoting
+    `K*,R*` here would hand DIA-NN the quote characters. Only a value with whitespace or a
+    quote is quoted (shlex style, so cfg_tokens reads it back identically; how DIA-NN's own
+    cfg reader treats quotes is not verified)."""
+    names = set(drop)
+    with open(dest, "w") as fh:
+        for flag, vals in cfg_groups(cfg_tokens(cfg)):
+            if flag not in names:
+                fh.write(" ".join([flag] + [shlex.quote(v) if re.search(r"""[\s'"#]""", v) or not v
+                                            else v for v in vals]) + "\n")
 
 
 def xic_flag(cfg):
@@ -116,129 +188,218 @@ def xic_flag(cfg):
     --use-quant, which reuses .quant files without re-reading the raw spectra --
     DIA-NN accepts --xic there and logs that it will extract, but writes nothing.
     """
-    if not cfg or not os.path.exists(cfg):
-        return ""
-    try:
-        toks = shlex.split(open(cfg).read(), comments=True)
-    except ValueError:
-        toks = open(cfg).read().split()
+    groups = cfg_groups(cfg_tokens(cfg))
     out = ""
-    for i, t in enumerate(toks):
-        if t == "--xic":
-            if i + 1 < len(toks) and not toks[i + 1].startswith("-"):
-                out = f"--xic {toks[i + 1]}"
-            else:
-                out = "--xic"
+    for flag, vals in groups:
+        if flag == "--xic":
+            out = f"--xic {_shield(vals[0])}" if vals and not vals[0].startswith("-") else "--xic"
     # --mobilograms must ride along with --xic or the mobilogram parquets are written
     # full of zeros. Emitted only when XICs are requested; DIA-NN ignores it on
     # instruments without ion mobility.
-    if out and "--mobilograms" in toks:
+    if out and any(flag == "--mobilograms" for flag, _ in groups):
         out += " --mobilograms"
     return out
 
+
+MASS_ACC_FLAGS = ("--mass-acc", "--mass-acc-ms1")
+
+
+def _mass_acc_value(groups, flag):
+    """(state, ppm, problem) for one mass-accuracy flag; state is 'unset' | 'ok' | 'invalid'.
+
+    0 is INVALID, not auto: DIA-NN reads `--mass-acc 0` as a literal 0 ppm tolerance ("Mass
+    accuracy will be fixed to 0 (MS2) and 0 (MS1)") and a 28-run Lumos search returned 0 IDs
+    at 1% FDR (estimate_params.py, PR #38). Auto-calibration is the flag ABSENT."""
+    seen = [vals for f, vals in groups if f == flag]
+    if not seen:
+        return "unset", None, None
+    ppms = []
+    for vals in seen:
+        shown = f"{flag} {' '.join(vals)}".strip()
+        if len(vals) != 1:
+            return "invalid", None, f"`{shown}` needs exactly one value"
+        try:
+            v = float(vals[0])
+        except ValueError:
+            return "invalid", None, f"`{shown}` is not a number"
+        if not math.isfinite(v):
+            return "invalid", None, f"`{shown}` is not a finite number"
+        if v == 0:
+            return "invalid", None, (f"`{shown}` is a literal 0 ppm tolerance in DIA-NN "
+                                     "(0 IDs), not auto")
+        if v < 0:
+            return "invalid", None, f"`{shown}` is negative"
+        ppms.append(v)
+    if len(set(ppms)) > 1:
+        return "invalid", None, (f"{flag} is set {len(ppms)} times with different values "
+                                 f"({', '.join(map(str, ppms))}); which one DIA-NN uses is "
+                                 "not verified")
+    return "ok", ppms[0], None
+
+
+def _window_value(groups):
+    """(state, radius, problem) for --window; state is 'unset' | 'zero' | 'ok' | 'invalid'.
+
+    DIA-NN requires a POSITIVE INTEGER ("scan window radius should be a positive integer").
+    So only digits count: `0.5` used to read as a truthy float and route straight to DIA-NN,
+    and `nan` crashed int() with a traceback. 0 is its own state because it behaves like the
+    flag being absent -- on the poplar run DIA-NN logged that warning and optimised per file --
+    which is recoverable by measuring, not a typo."""
+    seen = [vals for f, vals in groups if f == "--window"]
+    if not seen:
+        return "unset", None, None
+    radii = []
+    for vals in seen:
+        if len(vals) != 1 or not re.fullmatch(r"[0-9]+", vals[0]):
+            shown = f"--window {' '.join(vals)}".strip()
+            return "invalid", None, f"`{shown}` is not a positive integer"
+        radii.append(int(vals[0]))
+    if len(set(radii)) > 1:
+        return "invalid", None, (f"--window is set {len(radii)} times with different values "
+                                 f"({', '.join(map(str, radii))})")
+    if radii[0] == 0:
+        return "zero", 0, ("`--window 0` is not a radius (DIA-NN: \"scan window radius "
+                           "should be a positive integer\") -- it optimises per file")
+    return "ok", radii[0], None
+
+
 def mass_acc_status(cfg):
-    """Is this cfg PARALLEL-SAFE? Steps 3/5 reuse the .quant files from steps 2/4, so
-    anything DIA-NN auto-optimises per file is applied inconsistently between passes
-    and then stitched together. DIA-NN says so itself:
+    """Read the per-file-optimised settings out of a cfg, validated. Raises CfgError.
+
+    Steps 3/5 reuse the .quant files from steps 2/4, so anything DIA-NN auto-optimises per
+    file is applied inconsistently between passes and then stitched together. DIA-NN says so
+    itself:
 
         WARNING: combining reuse of .quant files with automatic optimisation of mass
         accuracies OR SCAN WINDOW will lead to results that are different from those
         of the original analysis that produced the .quant files and is strongly not
         recommended
 
-    So this checks BOTH mass accuracy and --window. Checking only mass accuracy was a
-    real defect: on an 18-file poplar run with mass accuracy correctly pinned, DIA-NN
-    still inferred a scan-window radius of 7 for seventeen files and 8 for one, emitted
-    the warning above, and the chain combined them anyway.
+    So this reads BOTH mass accuracy and --window. Checking only mass accuracy was a real
+    defect: on an 18-file poplar run with mass accuracy correctly pinned, DIA-NN still
+    inferred a scan-window radius of 7 for seventeen files and 8 for one, emitted the warning
+    above, and the chain combined them anyway.
 
-    This is the single definition of "is this cfg parallel-safe"; run_search.py imports
-    it to decide whether it may auto-route. Returns {fixed, ms2, ms1, window, reason}."""
-    vals = {"--mass-acc": None, "--mass-acc-ms1": None, "--window": None}
-    bad = []
-    if cfg and os.path.exists(cfg):
-        try:
-            toks = shlex.split(open(cfg).read(), comments=True)
-        except ValueError:                      # unbalanced quotes -- fall back to raw split
-            toks = open(cfg).read().split()
-        for i, t in enumerate(toks):
-            if t in vals and i + 1 < len(toks):
-                try:
-                    vals[t] = float(toks[i + 1])
-                except ValueError:
-                    # Present but not a number. This must NOT read as "unset": an unset
-                    # --window is recoverable (step 1b measures it), a typo'd one is a
-                    # mistake to report. Collapsing the two would measure over the typo.
-                    bad.append(t)
-    ms2, ms1, win = vals["--mass-acc"], vals["--mass-acc-ms1"], vals["--window"]
-    pairs = (("--mass-acc", ms2), ("--mass-acc-ms1", ms1), ("--window", win))
-    missing = [k for k, v in pairs if v is None and k not in bad]
-    auto = [k for k, v in pairs if v == 0]      # 0 means "optimise automatically"
-    neg = [k for k, v in pairs if v is not None and v < 0]   # physically impossible
-    if missing or auto or neg or bad:
-        why = []
-        if missing:
-            why.append("not set: " + ", ".join(missing))
-        if auto:
-            why.append("auto (0): " + ", ".join(auto))
-        if neg:
-            why.append("negative: " + ", ".join(neg))
-        if bad:
-            why.append("not a number: " + ", ".join(bad))
-        return {"fixed": False, "ms2": ms2, "ms1": ms1, "window": win, "bad": bad,
-                "reason": "; ".join(why)}
-    return {"fixed": True, "ms2": ms2, "ms1": ms1, "window": win, "bad": bad,
-            "reason": f"fixed (MS1 {ms1} ppm / MS2 {ms2} ppm / window {int(win)})"}
+    This only READS; parallel_safe() decides. Returns {fixed, ms2, ms1, window, state, bad,
+    unset, reason}: `state` maps each flag to unset/ok/invalid (and zero, for --window)."""
+    groups = cfg_groups(cfg_tokens(cfg))
+    ms2 = _mass_acc_value(groups, "--mass-acc")
+    ms1 = _mass_acc_value(groups, "--mass-acc-ms1")
+    win = _window_value(groups)
+    per = {"--mass-acc": ms2, "--mass-acc-ms1": ms1, "--window": win}
+    state = {k: v[0] for k, v in per.items()}
+    unset = [k for k, s in state.items() if s == "unset"]
+    bad = [k for k, s in state.items() if s == "invalid"]
+    problems = [v[2] for v in per.values() if v[2]]
+    if unset:
+        problems.insert(0, "not set: " + ", ".join(unset))
+    fixed = all(s == "ok" for s in state.values())
+    reason = ("; ".join(problems) if problems else
+              f"fixed (MS1 {ms1[1]} ppm / MS2 {ms2[1]} ppm / window {win[1]})")
+    return {"fixed": fixed, "ms2": ms2[1], "ms1": ms1[1], "window": win[1], "state": state,
+            "bad": bad, "unset": unset, "reason": reason}
+
+
+def _remedy(code):
+    """How to fix a refusal -- derived from WHY it was refused, in one place, so the router's
+    decline and the generator's exit say the same thing. Both used to hardcode "re-run
+    estimate_params.py with the instrument table" whatever the cause, and the generator also
+    told users to hand-run probe_window.py for a window step 1b measures by itself."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from estimate_params import instrument_ppm_summary         # the ONE ppm table
+    table = instrument_ppm_summary()
+    return {
+        "cfg_unparseable":
+            "fix the quoting in the cfg (every quote must be closed), then re-run",
+        "mass_acc_unset":
+            "pin mass accuracy: re-run estimate_params.py with the real instrument "
+            f"({table}); for an Orbitrap pass --ms1-resolution/--ms2-resolution. "
+            "Left on auto it can only run as the single-shot search",
+        "mass_acc_invalid":
+            "correct --mass-acc/--mass-acc-ms1 in the cfg to ONE positive ppm value each "
+            f"({table}), or re-run estimate_params.py with the real instrument. For "
+            "auto-calibration delete the flags -- never 0 -- and run single-shot",
+        "window_invalid":
+            "set --window to one positive integer, or delete it and the chain measures it "
+            "itself (step 1b). Do not guess a value: it depends on the acquisition scheme",
+        "window_seeded":
+            "pin --window in the cfg: a seeded chain has no step 1 for step 1b to follow, so "
+            "measure it once with probe_window.py against the seed library on one file",
+        "window_no_probe":
+            "drop --no-probe-window (step 1b then measures it), or pin --window in the cfg "
+            "with a value measured by probe_window.py",
+    }.get(code)
 
 
 def parallel_safe(cfg, probe_window=True, seed_lib=None):
     """THE definition of "may this cfg run as the 5-step chain?" -- for BOTH callers.
 
-    diann_parallel.main() uses it to decide whether to generate; run_search.py uses it to
-    decide whether to auto-route. They used to answer separately and drifted: run_search
-    read `mass_acc_status()["fixed"]` literally, so it declined every cfg estimate_params.py
+    diann_parallel.main() gates generation on `ok`; run_search.py auto-routes on the same
+    `ok`. They used to answer separately and drifted: run_search read
+    `mass_acc_status()["fixed"]` literally, so it declined every cfg estimate_params.py
     produces (which omits --window by design) and silently demoted the cohort to ONE
     single-shot search. --threads parallelises WITHIN a run, not across runs, so at
     ~30 min/file a 310-file cohort is ~155 h against a few hours for the chain -- and
-    nothing errors, SLURM reports success and the user just waits a week. Keep the rule
-    here, never in a caller: a second copy is what caused that bug (CLAUDE.md rule 3).
+    nothing errors, SLURM reports success and the user just waits a week. Then the generator
+    gated on `ma["fixed"]` while the router used `ok`, which let a duplicated, unparseable
+    --mass-acc through one and not the other. Keep the rule here, never in a caller: a second
+    copy is what caused both (CLAUDE.md rule 3).
 
     What is recoverable, and what is not:
-      * mass accuracy -- NOT recoverable. DIA-NN calibrates it per run against the library,
-        so there is no single value to carry into steps 3/5, which reuse the .quant files.
-      * --window unset or 0 -- recoverable when probing. Step 1b runs probe_window.py once
-        and pins that radius into steps 2 and 4. estimate_params.py cannot supply it: the
-        radius is a property of the acquisition scheme and has to be MEASURED on a real
-        file. (0 is DIA-NN for "optimise automatically", i.e. per file -- the very
-        inconsistency step 1b removes, so it is a case to fix, not a case to decline.)
-      * --window negative or non-numeric -- NOT recoverable. A typo is a mistake to report,
-        not something to quietly measure over.
+      * mass accuracy unset -- NOT recoverable. DIA-NN calibrates it per run against the
+        library, so there is no single value to carry into steps 3/5, which reuse .quant.
+      * mass accuracy 0 / negative / non-numeric / non-finite / set twice differently --
+        NOT recoverable, and not "auto": 0 is a literal 0 ppm tolerance (0 IDs).
+      * --window unset or 0 -- recoverable when probing. Step 1b runs probe_window.py and
+        pins one radius into steps 2-5. estimate_params.py cannot supply it: the radius is a
+        property of the acquisition scheme and has to be MEASURED on a real file. DIA-NN
+        does not accept 0 ("scan window radius should be a positive integer") and optimises
+        per file instead -- the very inconsistency step 1b removes.
+      * --window anything but a non-negative integer (0.5, nan, -1, 7.0, wide), or set twice
+        differently -- NOT recoverable. A typo is a mistake to report, not something to
+        quietly measure over.
+      * an unparseable cfg (unbalanced quote) -- NOT recoverable.
 
-    Returns {ok, probe, ma, reason}; `probe` says whether step 1b is needed. `ma` carries
-    mass_acc_status's dict, with fixed=True when the window will be measured.
+    Returns {ok, probe, code, ma, reason, remedy}: `probe` says step 1b is needed, `code`
+    names the outcome (probe | pinned | cfg_unparseable | mass_acc_unset | mass_acc_invalid |
+    window_invalid | window_seeded | window_no_probe), `remedy` is how to fix a refusal.
+    `ma` is mass_acc_status() untouched -- on the probe path its window is still unset,
+    because it IS unset until step 1b runs.
     """
-    ma = mass_acc_status(cfg)
-    if not ((ma["ms1"] or 0) > 0 and (ma["ms2"] or 0) > 0):
-        return {"ok": False, "probe": False, "ma": ma,
-                "reason": f"mass accuracy is not pinned ({ma['reason']})"}
-    win = ma["window"]
-    if "--window" in ma["bad"] or (win is not None and win < 0):
-        return {"ok": False, "probe": False, "ma": ma,
-                "reason": f"--window is set but is not a usable radius ({ma['reason']})"}
-    if win:                                     # already a real, positive radius
-        return {"ok": True, "probe": False, "ma": ma, "reason": ma["reason"]}
+    def verdict(ok, probe, code, ma, reason):
+        return {"ok": ok, "probe": probe, "code": code, "ma": ma, "reason": reason,
+                "remedy": None if ok else _remedy(code)}
+
+    try:
+        ma = mass_acc_status(cfg)
+    except CfgError as e:
+        return verdict(False, False, "cfg_unparseable", None, str(e))
+    st = ma["state"]
+    # Invalid values before unset ones: `mass_acc_unset` is the one code --allow-auto-mass-acc
+    # may override, so it must never be what hides a junk --window behind it.
+    if any(st[f] == "invalid" for f in MASS_ACC_FLAGS):
+        return verdict(False, False, "mass_acc_invalid", ma,
+                       f"mass accuracy is set but not usable ({ma['reason']})")
+    if st["--window"] == "invalid":
+        return verdict(False, False, "window_invalid", ma,
+                       f"--window is set but is not a usable radius ({ma['reason']})")
+    if any(st[f] == "unset" for f in MASS_ACC_FLAGS):
+        return verdict(False, False, "mass_acc_unset", ma,
+                       f"mass accuracy is not pinned ({ma['reason']})")
+    if st["--window"] == "ok":
+        return verdict(True, False, "pinned", ma, ma["reason"])
     if seed_lib:
-        return {"ok": False, "probe": False, "ma": ma,
-                "reason": "--window is unpinned and the first pass is seeded from an "
-                          "existing library, so there is no step 1 for step 1b to follow"}
+        return verdict(False, False, "window_seeded", ma,
+                       "--window is unpinned and the first pass is seeded from an existing "
+                       "library, so there is no step 1 for step 1b to follow")
     if not probe_window:
-        return {"ok": False, "probe": False, "ma": ma,
-                "reason": "--window is unpinned and --no-probe-window was given"}
-    return {"ok": True, "probe": True,
-            "ma": dict(ma, fixed=True,
-                       reason=f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; scan window "
-                              "measured by step 1b and pinned for steps 2+4"),
-            "reason": f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; --window is unpinned but "
-                      "recoverable -- step 1b measures it and pins it for steps 2+4"}
+        return verdict(False, False, "window_no_probe", ma,
+                       "--window is unpinned and --no-probe-window was given")
+    return verdict(True, True, "probe", ma,
+                   f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; --window is unpinned but "
+                   "recoverable -- step 1b measures it and pins it for steps 2-5")
 
 
 # DIA-NN 2.6 EXITS 0 ON A FATAL ERROR -- verified: a run against a nonexistent .mzML and
@@ -310,8 +471,10 @@ def main():
                     help="measure the scan-window radius after step 1 and pin it for all "
                          "steps (default: on). --no-probe-window requires --window in the cfg.")
     ap.add_argument("--allow-auto-mass-acc", action="store_true",
-                    help="proceed even though the cfg leaves mass accuracy on auto. Results "
-                         "across steps become inconsistent -- only for deliberate testing.")
+                    help="proceed even though the cfg OMITS mass accuracy (auto). Results "
+                         "across steps become inconsistent -- only for deliberate testing. "
+                         "It does not override an INVALID value (0, negative, non-numeric, "
+                         "set twice), a bad --window, or an unparseable cfg.")
     a = ap.parse_args()
 
     raws = []
@@ -350,34 +513,36 @@ def main():
                  "use the single-shot run_search.py for 1.")
     out = os.path.abspath(a.out); os.makedirs(out, exist_ok=True)
     fasta = os.path.abspath(a.fasta)
-    DN = dotnet_prefix(raws) + a.diann     # .NET 8 export prefix when inputs are Thermo .raw
+    dnet = dotnet_prefix(raws)             # .NET 8 export prefix when inputs are Thermo .raw
+    DN = dnet + a.diann
     # The chain is only valid with pinned mass accuracy AND a scan window that is the same
     # in every step (steps 3/5 reuse .quant files; see mass_acc_status for DIA-NN's own
-    # warning). parallel_safe() is the shared rule -- run_search.py routes on this same
-    # call, so the router and the generator cannot disagree again.
+    # warning). parallel_safe()["ok"] is the shared rule -- run_search.py routes on this same
+    # value, so the router and the generator cannot disagree. Gate on "ok", never on a
+    # field of `ma`: gating on ma["fixed"] here while the router used "ok" is how a cfg that
+    # one approved could be refused (or waved through) by the other.
     safe = parallel_safe(a.cfg, probe_window=a.probe_window, seed_lib=a.seed_lib)
+    if not safe["ok"]:
+        # The override is for the one deliberate-testing case it is named after: mass accuracy
+        # left to DIA-NN. An invalid value is a mistake (0 is a literal 0 ppm tolerance), and a
+        # bad --window or an unparseable cfg would be spliced into every step as-is.
+        if not (a.allow_auto_mass_acc and safe["code"] == "mass_acc_unset"):
+            sys.exit(
+                f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {safe['reason']}.\n"
+                "The 5-step chain reuses .quant files across steps, so anything DIA-NN\n"
+                "auto-optimises PER FILE (mass accuracy AND scan window) is applied\n"
+                "inconsistently between passes and then stitched together.\n"
+                f"Fix: {safe['remedy']}.\n"
+                "Or run the single-shot search instead (run_search.py --no-parallel)."
+                + ("\nTo override deliberately: --allow-auto-mass-acc."
+                   if safe["code"] == "mass_acc_unset" else ""))
+        sys.stderr.write(f"[diann_parallel] WARNING: proceeding with auto mass accuracy "
+                         f"({safe['reason']}) -- steps will not be mutually consistent.\n")
     win_probe, ma = safe["probe"], safe["ma"]
 
-    # When step 1b measures the radius it is PREFIXED onto steps 2 and 4, so any --window
+    # When step 1b measures the radius it is PREFIXED onto steps 2-5, so any --window
     # still in the cfg has to come out or both land on the same command line.
     flags = read_cfg_flags(a.cfg, drop=("--window",) if win_probe else ())
-
-    if not ma["fixed"] and not a.allow_auto_mass_acc:
-        sys.exit(
-            f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {safe['reason']}.\n"
-            "The 5-step chain reuses .quant files across steps, so anything DIA-NN\n"
-            "auto-optimises PER FILE (mass accuracy AND scan window) is applied\n"
-            "inconsistently between passes and then stitched together.\n"
-            "  mass accuracy -> re-run estimate_params.py with the real instrument\n"
-            "                   (timsTOF 15/15, Astral 4/10, Orbitrap by resolution)\n"
-            "  --window      -> run `probe_window.py` on ONE of these files to measure\n"
-            "                   the radius DIA-NN infers, then pin that value. Do NOT\n"
-            "                   guess it: it depends on the acquisition scheme.\n"
-            "Or run the single-shot search instead, which calibrates safely on its own.\n"
-            "To override deliberately: --allow-auto-mass-acc.")
-    if not ma["fixed"]:
-        sys.stderr.write(f"[diann_parallel] WARNING: proceeding with auto mass accuracy "
-                         f"({ma['reason']}) -- steps will not be mutually consistent.\n")
     D = out  # all DIA-NN intermediate/output lives here (real paths; native binary reads them directly)
     report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
@@ -430,40 +595,71 @@ def main():
             f'  --threads {a.libpred_cpus} {flags}',
             must_exist(predicted, "the predicted spectral library")]))
 
-    # Step 1b — measure the scan-window radius ONCE, so steps 2 and 4 share it.
+    # Step 1b — measure the scan-window radius ONCE, so steps 2-5 share it.
     # DIA-NN optimises the radius per file when --window is absent, and steps 3/5 then
     # combine .quant files produced under different windows -- which DIA-NN's own
     # warning calls "strongly not recommended". Measuring beats guessing: the radius
     # depends on the acquisition scheme (cycle time vs peak width), not the instrument.
     s1b = None
     resolved_cfg = a.cfg
+    probe_cands = raws[:PROBE_CANDIDATES]
     if win_probe:
         probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
         # The measured radius has to end up in a PARAMETER FILE, not just window.txt, or the
         # run is not reproducible from what we recorded: search_provenance.json would name a
         # cfg with no --window, and replaying it would re-optimise per file and not reproduce
-        # the numbers (SKILL.md golden rule 5). params.base.cfg is the cfg minus any --window;
-        # step 1b copies it and probe_window.py --write-cfg appends the measured value. The
-        # copy is remade on every run, so a resubmit cannot append a second --window.
+        # the numbers (SKILL.md golden rule 5). params.base.cfg is the cfg minus any --window,
+        # by the same token rule as the step flags. params.resolved.cfg is NOT created here:
+        # step 1b builds it in a .tmp and moves it into place only once a radius is measured,
+        # so a "resolved" cfg with no --window can never exist to be replayed.
         base_cfg = os.path.join(out, "params.base.cfg")
         resolved_cfg = os.path.join(out, "params.resolved.cfg")
-        with open(base_cfg, "w") as fh:
-            for raw_line in (open(a.cfg) if a.cfg and os.path.exists(a.cfg) else []):
-                if raw_line.strip().split()[:1] != ["--window"]:
-                    fh.write(raw_line)
+        tmp_cfg = resolved_cfg + ".tmp"
+        write_cfg(a.cfg, base_cfg, drop=("--window",))
+        q = shlex.quote
         s1b = write("step1b_window.sbatch", "\n".join([
-            header("s1b_window", a.threads_per_file, a.mem_per_file, 2, _ps, _as_, qos=_qs), "",
+            header("s1b_window", a.threads_per_file, a.mem_per_file, PROBE_WALL_HOURS,
+                   _ps, _as_, qos=_qs), "",
             'echo "Step 1b/5 measuring scan-window radius"; date',
-            f'cp {shlex.quote(base_cfg)} {shlex.quote(resolved_cfg)}',
-            f'python3 "{probe}" --diann {shlex.quote(a.diann)} --raw {shlex.quote(raws[0])} \\',
-            f'  --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\',
-            f'  --write-cfg {shlex.quote(resolved_cfg)} \\',
-            f'  --extra {shlex.quote(flags)} > {D}/window.json',
-            f'python3 -c "import json;print(json.load(open(\'{D}/window.json\'))[\'window_radius\'])" > {D}/window.txt',
+            # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
+            # Thermo .raw needs. probe_window.py runs DIA-NN as its own subprocess (no shell),
+            # so the prefix cannot ride on --diann -- it has to be in the ENVIRONMENT the probe
+            # inherits. Without it DIA-NN cannot read .raw, no radius is logged, window.txt is
+            # never written, and steps 2-5 sit on afterok for ever.
+            *([f"{dnet.strip()}   # .NET 8 for Thermo .raw, inherited by probe_window.py's DIA-NN"]
+              if dnet else []),
+            # A resubmitted step 1b must never find the previous run's answer and carry on.
+            f"rm -f {D}/window.txt {D}/window.json {q(resolved_cfg)} {q(tmp_cfg)}",
+            # One blank, wash or failed injection first in the list used to fail the whole
+            # cohort. The radius is a property of the method, so any good file answers it.
+            'W=""',
+            f'for RAW in {" ".join(q(r) for r in probe_cands)}; do',
+            f"  cp {q(base_cfg)} {q(tmp_cfg)}",
+            f'  if python3 {q(probe)} --diann {q(a.diann)} --raw "$RAW" \\',
+            f"      --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\",
+            f"      --timeout {PROBE_TIMEOUT_S} --write-cfg {q(tmp_cfg)} \\",
+            f"      --extra {q(flags)} > {D}/window.json; then",
+            '    W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
+            f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json) && break',
+            "  fi",
+            '  echo "step 1b: no scan-window radius from $RAW -- trying the next file" >&2',
+            '  W=""',
+            "done",
+            'if [ -z "$W" ]; then',
+            f'  echo "FAILED: no scan-window radius from any of the first {len(probe_cands)} '
+            'file(s) (DIA-NN log tails above)." >&2',
+            '  echo "Steps 2-5 wait on this job (afterok) and will not start. Do NOT guess a '
+            '--window: fix the cause and resubmit step 1b, or pin a measured value." >&2',
+            f"  rm -f {q(tmp_cfg)} {D}/window.json",
+            "  exit 1",
+            "fi",
+            f'echo "$W" > {D}/window.txt',
+            f"mv -f {q(tmp_cfg)} {q(resolved_cfg)}",
             must_exist(f"{D}/window.txt", "the measured scan-window radius"),
-            f'echo "scan window radius = $(cat {D}/window.txt) (pinned for steps 2 and 4)"',
+            must_exist(resolved_cfg, "the fully-resolved parameter file"),
+            'echo "scan window radius = $W (pinned for steps 2-5)"',
             f'echo "fully-resolved parameters -> {resolved_cfg}"']))
-    # steps 2 and 4 read the measured radius at RUNTIME so both use the identical value
+    # steps 2-5 read the measured radius at RUNTIME so every pass uses the identical value
     wflag = f'--window $(cat {D}/window.txt) ' if win_probe else ''
 
     # DIA-NN aborts with "cannot find the temp folder" if --temp does not exist -- it will NOT
@@ -600,16 +796,41 @@ def main():
         f'echo "recovery notes written to {sess}/RECOVERY.md — you can safely close your terminal"']
     write("submit.sh", "\n".join(sub_lines))
 
+    # Describe what WILL run, not what the cfg says (CLAUDE.md rule 1). On the probe path the
+    # radius and the resolved cfg do not exist yet -- they are produced at run time by step
+    # 1b -- so they are recorded as such, not as if they were already resolved.
+    if win_probe:
+        scan_window = {"source": "measured at run time by step 1b (probe_window.py) and pinned "
+                                 "for steps 2-5",
+                       "value": None, "value_file": f"{D}/window.txt",
+                       "probe_candidates": probe_cands}
+        resolved = {"file": resolved_cfg, "produced": "runtime", "by": s1b,
+                    "note": "written by step 1b only after a radius is measured; absent until "
+                            "then, so a missing file after step 1b means step 1b failed"}
+    elif safe["ok"]:
+        scan_window = {"source": "pinned in the cfg", "value": ma["window"], "value_file": None}
+        resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
+                    "note": "the cfg as given already pins mass accuracy and --window"}
+    else:
+        scan_window = {"source": "NOT pinned -- --allow-auto-mass-acc override; DIA-NN "
+                                 "optimises per file", "value": ma["window"], "value_file": None}
+        resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
+                    "note": "NOT fully resolved: --allow-auto-mass-acc left per-file "
+                            "optimisation on, so this cfg does not reproduce the run"}
+
     import json
     print(json.dumps({
         "out": out, "n_files": n, "report": f"{D}/{report}",
+        "parallel_safe": {k: safe[k] for k in ("ok", "probe", "code", "reason")},
         "mass_acc": ma,
+        "scan_window": scan_window,
+        "resolved_params": resolved,
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
         "scripts": [x for x in [s1, s1b, s2, s3, s4, s5, "submit.sh"] if x],
-        "resolved_cfg": resolved_cfg,
         "submit": f"bash {out}/submit.sh   (or: hive_exec.sh 'bash {out}/submit.sh')",
         "report_jobid_var": "jid5",
-        "note": "5-step DIA-NN parallel chain. Mass accuracy is fixed (manual) — ensure --cfg has --mass-acc/--mass-acc-ms1 set, not 0/auto. Watch the run with watch_run.sh. Then point run_de.R at the report.",
+        "note": "5-step DIA-NN parallel chain. Submit with submit.sh, watch EVERY step with "
+                "watch_run.sh --all, then point run_de.R at the report.",
     }, indent=2))
 
 
