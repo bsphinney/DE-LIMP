@@ -17,10 +17,11 @@ against both FRAN pilot Orbitraps, whose methods acquire much wider than that:
 The fixtures in fixtures/trfp/ are that run's real ThermoRawFileParser 2.0.0.0 output
 (`-i=<raw> -m=0 -f=4 -o=<dir>` and `query -i=<raw> -n=<scans> -b=<file>`), cut to one
 acquisition cycle -- DIA: an MS1, every window, the next MS1 (scans 1-27 / 1-21); DDA: 30
-mid-run scans -- with the peak arrays emptied and the file/method paths replaced (they name
-clients). Every attribute the detector reads is verbatim. They carry a trap worth keeping: the
-metadata's "MS min MZ"/"MS max MZ" (367.5/1183.5, 372.9/1178.1) are isolation window
-CENTRES. Searching those would clip half a window off each end of the range.
+mid-run scans -- with the peak arrays emptied, the file/method paths replaced (they name
+clients), and the instrument serial/slot, creation date and vial/row/sample number replaced
+by placeholders. Every attribute the detector reads is verbatim. They carry a trap worth
+keeping: the metadata's "MS min MZ"/"MS max MZ" (367.5/1183.5, 372.9/1178.1) are isolation
+window CENTRES. Searching those would clip half a window off each end of the range.
 
 fixtures/trfp/fake_trfp.py replays them behind the real parser's command-line grammar and
 rejects the two calls that shipped, so these tests fail on the old code for the right
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
@@ -75,7 +77,7 @@ class _FakeParserCase(unittest.TestCase):
         os.environ["PATH"] = self.bin + os.pathsep + self._env.get("PATH", "")
         os.environ["FAKE_TRFP_LOG"] = self.log
         for k in ("THERMORAWFILEPARSER", "FAKE_TRFP_FAIL", "FAKE_TRFP_GARBAGE",
-                  "FAKE_TRFP_NO_FILTER"):
+                  "FAKE_TRFP_NO_FILTER", "FAKE_TRFP_FILTER_ACCESSION", "FAKE_TRFP_SLEEP"):
             os.environ.pop(k, None)
 
     def tearDown(self):
@@ -83,8 +85,10 @@ class _FakeParserCase(unittest.TestCase):
         os.environ.update(self._env)
         self._tmp.cleanup()
 
-    def raw(self, stem):
-        p = os.path.join(self.tmp, stem + ".raw")
+    def raw(self, stem, subdir=""):
+        d = os.path.join(self.tmp, subdir)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, stem + ".raw")
         with open(p, "wb") as fh:
             fh.write(b"\x01\xa1F\x00i\x00n\x00n\x00i\x00g\x00a\x00n")  # Finnigan magic, nothing more
         return p
@@ -186,16 +190,43 @@ class ThermoRawIsReadThroughTheRealCommandLine(_FakeParserCase):
     def test_detect_instrument_alone_reads_the_model(self):
         self.assertEqual(da.detect_instrument(self.raw(LUMOS)), "Orbitrap Fusion Lumos")
 
-    def test_parsers_older_than_1_4_5_still_classify_from_windows(self):
-        """1.4.0-1.4.4 report isolation windows but no filter string: the width rule alone
-        must still carry DIA with its bounds, and say the flag was unavailable."""
+    def test_filter_string_under_the_pre_1_4_5_accession_is_still_read(self):
+        """v1.3.0-v1.4.4 DO write the filter string, as "MS:10000512" (one zero too many;
+        Query/ProxiSpectrumReader.cs at every one of those tags, corrected in v1.4.5), and
+        bioconda still serves all of them. Reading only MS:1000512 threw the data-dependent
+        flag away on those builds -- and with it the check that keeps narrow-window DIA
+        from being called DDA."""
+        os.environ["FAKE_TRFP_FILTER_ACCESSION"] = "MS:10000512"
+        dia = da.classify(self.raw(EXPLORIS))
+        self.assertEqual((dia["acquisition"], dia["confidence"]), ("DIA", "high"), dia["reason"])
+        self.assertRegex(dia["reason"], r"\b0/\d+ MS2 scans flagged data-dependent")
+        self.assertNotIn("not available", dia["reason"])
+        dda = da.classify(self.raw(DDA))
+        self.assertEqual((dda["acquisition"], dda["confidence"]), ("DDA", "high"), dda["reason"])
+        self.assertRegex(dda["reason"], r"\b(\d+)/\1 MS2 scans flagged data-dependent")
+
+    def test_a_parser_that_reports_no_filter_string_still_classifies_from_windows(self):
+        """No release omits it, but if one does the width rule alone must still carry DIA
+        with its bounds, and the reason must say the flag was missing -- without blaming a
+        parser version for it."""
         os.environ["FAKE_TRFP_NO_FILTER"] = "1"
         r = da.classify(self.raw(EXPLORIS))
         self.assertEqual((r["acquisition"], r["confidence"]), ("DIA", "high"), r["reason"])
         self.assertEqual([round(x, 3) for x in r["precursor_mz_range"]], [350.0, 1201.0])
         self.assertIn("not available", r["reason"])
+        self.assertNotIn("1.4.5", r["reason"])
         d = da.classify(self.raw(DDA))
         self.assertEqual(d["acquisition"], "DDA", d["reason"])
+
+    def test_reader_field_records_the_parser_version_and_command(self):
+        """Which parser build read the file decides what could be read (see the filter
+        string accession above), so it belongs in the per-file record."""
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertIsNotNone(r["reader"])
+        self.assertTrue(r["reader"].startswith("ThermoRawFileParser 2.0.0.0 "), r["reader"])
+        self.assertIn(os.path.join(self.bin, "ThermoRawFileParser"), r["reader"])
+        self.hide_parser()
+        self.assertIsNone(da.classify(self.raw(EXPLORIS))["reader"])
 
     def test_parser_named_by_environment_variable_is_used(self):
         """The framework-dependent release is a DLL (`dotnet ThermoRawFileParser.dll`) and the
@@ -234,6 +265,48 @@ class DataDependentFlagOutranksWindowShape(unittest.TestCase):
         self.assertEqual((kind, conf), ("DDA", "medium"), why)
         self.assertIsNone(rng)
 
+    def test_mixed_dependent_and_independent_scans_are_never_high(self):
+        """A hybrid method (DIA windows plus data-dependent scans) must reach the user."""
+        centres = [367.5 + 34.0 * i for i in range(25)]
+        w = self.windows(35.0, centres, 4, False)
+        w["n_dependent"] = w["n_filter"] // 2
+        kind, conf, why, rng = da.classify_thermo_windows(w)
+        self.assertEqual((kind, conf), ("DIA", "medium"), why)
+        self.assertIn("mixed", why)
+        self.assertIsNotNone(rng)
+
+    @staticmethod
+    def proxi(width, centres, cycles, filter_accession):
+        """TRFP `query` JSON as the parser writes it: an MS1, then one MS2 per window."""
+        spectra = []
+        for _ in range(cycles):
+            spectra.append({"attributes": [
+                {"accession": "MS:1000511", "value": "1"},
+                {"accession": filter_accession,
+                 "value": "FTMS + p NSI Full ms [350.0000-1500.0000]"}]})
+            for c in centres:
+                spectra.append({"attributes": [
+                    {"accession": "MS:1000511", "value": "2"},
+                    {"accession": "MS:1000827", "value": str(c)},
+                    {"accession": "MS:1000828", "value": str(width / 2)},
+                    {"accession": "MS:1000829", "value": str(width / 2)},
+                    {"accession": filter_accession,
+                     "value": f"FTMS + p NSI Full ms2 {c:.4f}@hcd30.00 [150.0000-2000.0000]"}]})
+        return spectra
+
+    def test_narrow_window_dia_is_not_called_dda_on_a_pre_1_4_5_parser(self):
+        """End to end from query JSON: 300 x 2 m/z windows, nothing data-dependent, the
+        filter string under v1.3.0-v1.4.4's "MS:10000512". Reading only the correct
+        accession returned DDA/high with no range and no confirmation -- DIA data routed to
+        Sage without asking."""
+        centres = [381.0 + 2.0 * i for i in range(300)]
+        for acc in ("MS:1000512", "MS:10000512"):
+            w = da.thermo_isolation_windows(self.proxi(2.0, centres, 3, acc))
+            self.assertEqual((w["n_filter"], w["n_dependent"]), (900, 0), acc)
+            kind, conf, why, rng = da.classify_thermo_windows(w)
+            self.assertEqual((kind, conf), ("DIA", "medium"), f"{acc}: {why}")
+            self.assertEqual(rng, (380.0, 980.0), acc)
+
 
 class ThermoRawFailuresAreLoud(_FakeParserCase):
     def test_parser_not_found_says_so_and_points_at_the_public_source(self):
@@ -263,6 +336,30 @@ class ThermoRawFailuresAreLoud(_FakeParserCase):
         self.assertEqual(r["acquisition"], "unknown")
         self.assertIsNone(r["precursor_mz_range"])
         self.assertIn("FALLBACK", r["reason"])
+
+    def test_a_parser_that_does_not_answer_is_a_failure_not_a_hang(self):
+        """A raw on a stalled mount must come back unknown, loudly -- not block forever,
+        and not look like a result."""
+        self.addCleanup(setattr, da, "TRFP_TIMEOUT_S", da.TRFP_TIMEOUT_S)
+        da.TRFP_TIMEOUT_S = 1
+        os.environ["FAKE_TRFP_SLEEP"] = "4"
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertEqual((r["acquisition"], r["confidence"]), ("unknown", "low"))
+        self.assertIsNone(r["precursor_mz_range"])
+        self.assertIn("no answer after 1 s", r["reason"])
+        self.assertIn("FALLBACK", r["reason"])
+        self.assertTrue(r["warnings"])
+
+    def test_dia_without_readable_window_edges_is_a_warning(self):
+        """DIA with no range would silently search the 380-980 FALLBACK. It must warn, and
+        a warning is what sets needs_confirmation."""
+        with mock.patch.object(da, "classify_thermo_windows",
+                               return_value=("DIA", "high", "stub", None)):
+            r = da.classify(self.raw(EXPLORIS))
+        self.assertEqual(r["acquisition"], "DIA")
+        self.assertIsNone(r["precursor_mz_range"])
+        self.assertTrue(any("no isolation window edges" in w and "FALLBACK" in w
+                            for w in r["warnings"]), r["warnings"])
 
     def test_metadata_failure_still_classifies_but_flags_the_instrument(self):
         os.environ["FAKE_TRFP_FAIL"] = "metadata"

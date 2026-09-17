@@ -24,14 +24,20 @@ Test knobs (environment):
   FAKE_TRFP_FAIL=<mode>     make `metadata` or `query` fail the way a damaged raw does:
                             ERROR line on STDOUT (log4net's console appender), exit 1
   FAKE_TRFP_GARBAGE=query   write a query file that is not JSON (truncated output)
-  FAKE_TRFP_NO_FILTER=1     drop the filter-string attribute (MS:1000512), as 1.4.0-1.4.4
-                            write it: those builds report isolation windows but not the
-                            data-dependent flag
+  FAKE_TRFP_SLEEP=<secs>    `query` sits that long before answering (a stalled mount)
+  FAKE_TRFP_FILTER_ACCESSION=<acc>
+                            write the filter string under <acc> instead of MS:1000512.
+                            MS:10000512 is what every release v1.3.0-v1.4.4 writes -- one
+                            zero too many (Query/ProxiSpectrumReader.cs at each tag; fixed in
+                            v1.4.5) -- and every bioconda build before 1.4.5 is one of them
+  FAKE_TRFP_NO_FILTER=1     drop the filter string entirely. No release does this; it keeps
+                            the width-only fallback honest for a build that stops writing it
 """
 import json
 import os
 import re
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VALUE_OPTS = {"i": "input", "n": "scans", "b": "output", "o": "output_directory",
@@ -92,6 +98,8 @@ def main():
         scans = opts.get("n")
         if not scans or scans is True or not re.match(r"^[\d,\-\s]+$", scans):
             usage_error("-s, --scans: specify a valid scan range")
+        if os.environ.get("FAKE_TRFP_SLEEP"):
+            time.sleep(float(os.environ["FAKE_TRFP_SLEEP"]))
         if fail == "query":
             print("2026-09-16 16:09:00 ERROR RAW file cannot be processed because of an error - "
                   "file is corrupt")
@@ -108,10 +116,15 @@ def main():
             else:
                 with open(os.path.join(HERE, stem + ".query.json")) as src:
                     spectra = json.load(src)
-                if os.environ.get("FAKE_TRFP_NO_FILTER"):
-                    for spec in spectra:
+                rename = os.environ.get("FAKE_TRFP_FILTER_ACCESSION")
+                for spec in spectra:
+                    if os.environ.get("FAKE_TRFP_NO_FILTER"):
                         spec["attributes"] = [a for a in spec["attributes"]
                                               if a.get("accession") != "MS:1000512"]
+                    elif rename:
+                        for a in spec["attributes"]:
+                            if a.get("accession") == "MS:1000512":
+                                a["accession"] = rename
                 json.dump(spectra, fh)
         return 0
 

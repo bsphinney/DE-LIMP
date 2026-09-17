@@ -28,7 +28,7 @@ on PATH. Two calls per file, in the `-option=value` form the parser's README req
 | call | gives | measured on HIVE (TRFP 2.0.0.0) |
 |---|---|---|
 | `-i=<raw> -m=0 -o=<tmp>` | instrument model, scan range, MS1/MS2 counts | 2.6–3.6 s on 3.5 GB raws |
-| `query -i=<raw> -n=<a>-<b> -b=<tmp>/q.json` | isolation target + lower/upper offsets per MS2 scan; filter string (1.4.5+) | 1.1–5.8 s for 200–2000 scans |
+| `query -i=<raw> -n=<a>-<b> -b=<tmp>/q.json` | isolation target + lower/upper offsets per MS2 scan; filter string (`MS:1000512`, or `MS:10000512` from v1.3.0–v1.4.4) | 1.1–5.8 s for 200–2000 scans |
 
 The whole `detect_acquisition.py` call took 4.2–5.7 s per file on the Exploris 480,
 Fusion Lumos and a DDA Exploris run, against ~3 min to write one full mzML.
@@ -39,23 +39,30 @@ Fusion Lumos and a DDA Exploris run, against ~3 min to write one full mzML.
 - **Range = window edges, never centres.** `precursor_mz_range` is
   min(target − lower offset) … max(target + upper offset): **350.0–1201.0** (Exploris
   480, 25 × 35 m/z) and **350.05–1200.95** (Fusion Lumos, 19 × 45.7 m/z) — the same edges
-  `detect_acquisition.py` reads from the full mzML of those runs (rounded to 0.001 m/z:
-  the parser writes float32 targets, so the mzML path shows `350.04999389648435`). The
+  the mzML reader got from the full TRFP 2.0.0.0 mzML of those runs (HIVE srun jobs
+  23508203/23508208), rounded to 0.001 m/z: the parser writes float32 targets, so the
+  mzML path shows `350.04999389648435–1200.9499755859374` for the Lumos. The
   metadata JSON's `MS min MZ`/`MS max MZ` (367.5 / 1183.5 on that Exploris run) and FRAN's
   `raw_files.mass_range_min/max` are the extreme window **centres**; using them clips half
   a window off each end.
 - **DDA vs DIA.** A standalone `d` token in the filter string (`FTMS + c NSI d Full ms2
   …`) is the instrument saying "data-dependent". All flagged + narrow windows → DDA
-  `high`; none flagged → never DDA (narrow-window DIA or PRM → DIA `medium`, confirm).
-  Builds before 1.4.5 do not report the filter string, so the width rule decides alone
-  and the `reason` says the flag was unavailable.
+  `high`; none flagged → never DDA (narrow-window DIA or PRM → DIA `medium`, confirm);
+  a mix → never `high`. **Every release v1.3.0–v1.4.4 writes the filter string under a
+  misspelled accession, `MS:10000512`** (one zero too many; `Query/ProxiSpectrumReader.cs`
+  at each tag, corrected in v1.4.5), and bioconda still serves 1.3.2–1.4.4, so both
+  spellings are read. Read only the correct one and those builds lose the flag: a 300 ×
+  2 m/z DIA method then comes back DDA/`high`, no range, no confirmation. If no filter
+  string is found at all, the width rule decides alone and the `reason` says so.
 - **Failures are loud.** Parser not found, a non-zero exit (the parser's own message is
   quoted), a timeout or unreadable output → `unknown`/`low`, a `reason` that names the
   consequence (the precursor range falls back to 380–980, tagged `FALLBACK` by
   `estimate_params.py`), an entry in the file's `warnings`, and a `WARNING` line on
   stderr. A failed metadata call alone still classifies from the query, but leaves
-  `instrument` null with a warning — and the instrument decides mass accuracy. The
-  per-file `reader` field records the parser command and `--version`.
+  `instrument` null with a warning — and the instrument feeds `estimate_params.py`
+  (Orbitrap Astral pins 4/10 ppm; other Orbitraps still get automatic calibration unless
+  their resolutions are given; Sage gets ±10 ppm for an Orbitrap, ±20 ppm when unknown).
+  The per-file `reader` field records the parser command and `--version`.
 - **Before this was fixed** the detector called `ThermoRawFileParser metadata -i` (no
   such subcommand: exit 255 "Unexpected extra arguments") and `query -i` without `-n`
   (exit 255 "specify a valid scan range"), ignored both exits, and returned

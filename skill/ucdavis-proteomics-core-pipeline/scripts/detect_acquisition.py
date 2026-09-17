@@ -202,12 +202,12 @@ def detect_mzml(path):
 #               neither -m nor -f is given. `-f=4` means the same but is documented only
 #               from 1.4.4, so it is left out rather than relied on.)
 #   spectra:   query -i=<raw> -n=<a>-<b> -b=<file>  -> JSON PROXI spectra with isolation
-#              target + lower/upper offsets (1.4.0+) and the filter string (1.4.5+)
+#              target + lower/upper offsets and the filter string (see CV_FILTER_* below)
 # ---------------------------------------------------------------------------
 TRFP_RELEASES = "https://github.com/compomics/ThermoRawFileParser/releases"
 TRFP_ENV = "THERMORAWFILEPARSER"     # a full command, e.g. "dotnet /opt/trfp/ThermoRawFileParser.dll"
 TRFP_NAMES = ("ThermoRawFileParser", "thermorawfileparser")   # release binary / bioconda link
-# Measured on HIVE for 3.5 GB raws: metadata 2.6-3.6 s; a query of 200-2000 scans 1.1-5.8 s
+# Measured on HIVE for 3.5 GB raws: metadata 2.6-4.8 s; a query of 200-2000 scans 1.1-5.8 s
 # (10.8 s once, for the first 1000 scans of a DDA run). The metadata call walks every scan
 # header, so a slow network mount can take far longer -- but a parser that has not answered
 # in 5 min is stuck, and stuck must not look like done.
@@ -218,6 +218,15 @@ CV_MODEL = "MS:1000494"          # InstrumentProperties: Thermo Scientific instr
 CV_SCAN_RANGE = "PRIDE:0000479"  # ScanSettings: "first:last"
 CV_N_MS1 = "PRIDE:0000481"       # MsData
 CV_N_MS2 = "PRIDE:0000482"       # MsData
+# `query` spectrum attributes. The filter string carries the instrument's data-dependent
+# flag, and its accession depends on the build: every release v1.3.0-v1.4.4 writes it as
+# "MS:10000512" -- one zero too many -- and v1.4.5 corrected it to MS:1000512
+# (Query/ProxiSpectrumReader.cs at each tag). Bioconda still serves 1.3.2-1.4.4. Reading only
+# the correct spelling silently loses the flag on those builds, and with it the check that
+# stops narrow-window DIA being called DDA (300 x 2 m/z DIA came back DDA/high, no range, no
+# confirmation). ms level and the isolation offsets are spelled correctly in every release.
+CV_FILTER = "MS:1000512"
+CV_FILTER_PRE_1_4_5 = "MS:10000512"
 # NOT used, on purpose: MsData "MS min MZ"/"MS max MZ" (PRIDE:0000476/7) are the lowest and
 # highest isolation window CENTRES (367.5/1183.5 on the Exploris run above, whose windows
 # span 350.0-1201.0). Taking them as the range clips half a window off each end.
@@ -371,7 +380,9 @@ def thermo_isolation_windows(spectra):
 
     Edges are target -/+ the lower/upper offsets TRFP reports, which already fold in the
     instrument's isolation-width offset -- the same values it writes to mzML, so the two
-    readers agree (both gave 350.0-1201.0 and 350.05-1200.95 on the runs above).
+    readers agree: detect_mzml() on the full TRFP 2.0.0.0 mzML of the runs above gave
+    350.0-1201.0 and 350.04999389648435-1200.9499755859374 (HIVE srun jobs 23508203/23508208),
+    this reader 350.0-1201.0 and 350.05-1200.95 after rounding (job 23511567).
     """
     w = {"widths": [], "centres": [], "los": [], "his": [],
          "n_ms2": 0, "n_filter": 0, "n_dependent": 0}
@@ -386,7 +397,7 @@ def thermo_isolation_windows(spectra):
         except (TypeError, ValueError):
             continue
         w["n_ms2"] += 1
-        filt = attrs.get("MS:1000512")
+        filt = attrs.get(CV_FILTER) or attrs.get(CV_FILTER_PRE_1_4_5)
         if isinstance(filt, str) and filt.strip():
             w["n_filter"] += 1
             # Thermo filter grammar: a standalone `d` token before the mass list means
@@ -418,8 +429,8 @@ def classify_thermo_windows(w):
     kind, conf, why, rng = classify_isolation_windows(w["widths"], w["centres"],
                                                       w["los"], w["his"])
     if w["n_filter"] == 0:
-        return (kind, conf, why + "; data-dependent flag not available (filter strings "
-                "need ThermoRawFileParser 1.4.5+)", rng)
+        return (kind, conf, why + "; data-dependent flag not available (the parser reported "
+                f"no filter string, {CV_FILTER} or {CV_FILTER_PRE_1_4_5})", rng)
     dep = f"{w['n_dependent']}/{w['n_filter']} MS2 scans flagged data-dependent"
     if w["n_dependent"] == 0 and kind != "DIA" and w["widths"]:
         # Nothing was data-dependent, so this is not DDA whatever the widths look like:
