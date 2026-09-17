@@ -186,26 +186,41 @@ hard-coded**: `run_search.slurm_queue()` — the one definition, also used by
 `diann_parallel.py`, `radiant_parallel.py` and `diatracer_parallel.py` — asks SLURM what
 the submitting user may use (`sacctmgr show assoc user=$USER`) and picks:
 
-1. an explicit `--partition` **and** `--account`, used as given;
+1. an explicit queue (pass `--partition` **and** `--account` together, plus `--qos` if the
+   association has one), which skips everything below;
 2. `genome-center-grp` on `high` (facility members: not preemptible);
 3. `publicgrp` on `low` (everyone else: preemptible, so `#SBATCH --requeue` is added).
 
 When an account has both, **utilisation** decides, not entitlement. `slurm_queue()` counts
 the CPUs *you* already run on `high` (`squeue`) against the 64-CPU per-user cap, and the idle
-CPUs on `low` (`sinfo`), and compares both with `need = min(peak_cpus, 16)` — one array
-task's worth, **not** the job's own request (a caller that passes no peak, like the
-single-script `--sbatch` paths, gets 16):
+CPUs on `low` (`sinfo`), and compares both with `need = min(peak, 16)`, where `peak` is what
+the caller passes (16 when it passes none) — at most one array task's worth, **not** the
+job's own request. It does this **once, when the scripts are generated**, not when each job
+starts. Two rules:
 
-- **any job** goes to `low` when fewer than `need` of your CPUs are free on `high` and `low`
-  has at least `need` idle;
-- the 5-step chain's **array steps (2 and 4)** also go to `low` (given the same `need` idle
-  there) when fewer than `2 × need` are free on `high`, or when your usage there cannot be
-  read (`squeue` cannot run) — a preempted task costs one file;
-- **steps 1, 3 and 5** cannot restart mid-way, so only the first rule applies. Because
-  `need` is capped at 16, a 64-CPU step 3 **stays on `high` while 16 or more of your CPUs
-  are free there, then waits on `high`** for the rest; it does not move to `low` because
-  the 64 it asked for are unavailable. To send it to `low`, pass `--partition low --account
-  publicgrp` (plus `--qos` if the association has one).
+- **A (every job):** `low` when fewer than `need` of your CPUs are free on `high` and `low`
+  has at least `need` idle.
+- **B (only where a caller marks a step preemption-safe):** also `low`, given the same `need`
+  idle there, when fewer than `2 × need` are free on `high`, or when your usage there
+  cannot be read (`squeue` cannot run).
+
+| route | how often the queue is decided | rules |
+|---|---|---|
+| DIA-NN 5-step chain (`diann_parallel.py`) | **once, for all five steps**, with `need` 16 | A only |
+| Radiant per-file array (`radiant_parallel.py`) | step 2 (the array) apart from steps 1 and 3 | step 2: A and B, `need = min(--threads-per-file, 16)`; steps 1 and 3: A, `need = min(--fulcrum-cpus, 16)` |
+| diaTracer (`diatracer_parallel.py`) | once, `need` 16 | A only |
+| single-script `--sbatch` | once per script, `need` 16 | A only |
+
+So the DIA-NN chain's array steps (2 and 4) **always share the queue of steps 1, 3 and 5**:
+they do not move to `low` on their own when `high` is merely busy or `squeue` is missing.
+(`diann_parallel.py` does ask `slurm_queue()` for a separate array-step queue, but it has
+already filled in partition and account by then, and an explicit pair is returned
+unchanged.) The whole chain moves to `low` only under rule A. Because `need` is capped at
+16, the chain's 64-CPU steps (3 and 5 by default; step 1 asks for 16) **go to `high`
+whenever 16 or more of your CPUs were free there at generation, and then wait on `high`**
+for the rest; they do not move to `low` because the 64 they ask for are unavailable. To put
+the chain on `low`, pass `--partition low --account publicgrp` (the generator adds
+`--qos=publicgrp-low-qos`).
 
 If associations cannot be read at all the script falls back to `publicgrp/low`, **not** the
 cluster default: that is `high`, which rejects a non-facility account.
@@ -215,13 +230,14 @@ partition is `high`; `genome-center-grp` has `high` (per-user cap 64 CPUs) and `
 but no `low`; `publicgrp` has `high` (8 CPUs / 128 GB **per job**) and `low` (no per-job
 cap, preemptible).
 
-`--partition/--account/--qos` are forwarded to the job-array routes (the DIA-NN 5-step
-chain and the Radiant per-file array). The single-script `--sbatch` paths — DIA-NN at ≤5
-files or when the chain declines, Sage, FragPipe, AlphaDIA, single-file Radiant — use the
-detected queue; read the `#SBATCH` header they print before submitting. Submit with
-`sbatch job.sh` (or `bash <out>/submit.sh` for a two-job or chained search), poll the
-`<job>_<id>.log`, then run `run_search.py --adapt-only` for Sage/FragPipe to build
-`report.parquet`.
+`run_search.py` passes `--partition/--account/--qos` on to the job-array routes (the DIA-NN
+5-step chain and the Radiant per-file array). Whether the single-script `--sbatch` paths —
+DIA-NN at ≤5 files or when the chain declines, Sage, FragPipe, AlphaDIA, single-file
+Radiant — honour them has changed between skill versions, so on every route **read the
+`#SBATCH` header of the generated script before submitting**: it is the queue the job will
+use. Submit with `sbatch job.sh` (or `bash <out>/submit.sh` for a two-job or chained
+search), poll the `<job>_<id>.log`, then run `run_search.py --adapt-only` for Sage/FragPipe
+to build `report.parquet`.
 
 A DIA-NN search of more than 5 files on a SLURM host routes to the 5-step parallel chain
 instead, which has no single job script: `job.sh` is not written, an existing regular file of
