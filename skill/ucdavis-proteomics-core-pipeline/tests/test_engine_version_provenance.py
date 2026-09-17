@@ -21,7 +21,13 @@ version the command itself names (a build folder like diann-2.6.0/, a .sif name,
 The manifest's pin is a request; it is recorded beside `version` and compared with it, but it is
 never promoted to `version`, because fran_deposit.detect_engine() hands `version` -- and only
 `version` -- to FRAN as the engine version. When nothing names the build, `version` is null and
-`engine_version_mismatch` is null (not comparable), not false.
+the mismatch is null (not comparable), not false.
+
+The record has the shape of `scan_window`, its neighbour in search_provenance.json: ONE object,
+`engine_version`, with a `value` and a `source` that says in words where the value came from
+("unknown -- ..." when there is none), and every input kept beside them as written. Top-level
+`version` stays, because fran_deposit.py forwards it to FRAN, and always equals
+`engine_version.value`.
 """
 import contextlib
 import io
@@ -54,25 +60,25 @@ DIANN_261 = {"name": "diann", "version": "2.6.1"}
 class EngineVersionRecordTests(unittest.TestCase):
     def test_pilot_mismatch_is_recorded_both_ways_and_warned(self):
         rec, err = record("diann", {"diann": "2.7.0"}, {"name": "diann", "version": "2.6.1"})
-        self.assertEqual(rec["version"], "2.7.0")              # the build that runs
-        self.assertEqual(rec["version_source"], "tools.json")
-        self.assertEqual(rec["tools_engine_version"], "2.7.0")
-        self.assertEqual(rec["manifest_engine_version"], "2.6.1")
-        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertEqual(rec["value"], "2.7.0")                # the build that runs
+        self.assertTrue(rec["source"].startswith("tools.json"), rec["source"])
+        self.assertEqual(rec["tools_json"], "2.7.0")
+        self.assertEqual(rec["manifest_pin"], "2.6.1")
+        self.assertIs(rec["mismatch"], True)
         self.assertIn("WARNING", err)
         self.assertIn("2.6.1", err)
         self.assertIn("2.7.0", err)
 
     def test_agreement_is_quiet(self):
         rec, err = record("diann", {"diann": "2.6.1"}, {"name": "diann", "version": "2.6.1"})
-        self.assertEqual(rec["version"], "2.6.1")
-        self.assertIs(rec["engine_version_mismatch"], False)
+        self.assertEqual(rec["value"], "2.6.1")
+        self.assertIs(rec["mismatch"], False)
         self.assertEqual(err, "")
 
     def test_a_leading_v_is_not_a_mismatch(self):
         """Sage release tags are `v0.14.7`; resolve_defaults.py pins `0.14.7`."""
         rec, err = record("sage", {"sage": "v0.14.7"}, {"name": "sage", "version": "0.14.7"})
-        self.assertIs(rec["engine_version_mismatch"], False)
+        self.assertIs(rec["mismatch"], False)
         self.assertEqual(err, "")
 
     def test_a_placeholder_never_promotes_the_pin_to_version(self):
@@ -83,11 +89,12 @@ class EngineVersionRecordTests(unittest.TestCase):
         recorded as 2.6.1 this way). So: null, and not comparable."""
         for placeholder in ("latest", "env", ""):
             rec, err = record("diann", {"diann": placeholder}, DIANN_261)
-            self.assertIsNone(rec["version"], placeholder)
-            self.assertIsNone(rec["version_source"], placeholder)
-            self.assertIsNone(rec["engine_version_mismatch"], placeholder)
-            self.assertEqual(rec["manifest_engine_version"], "2.6.1", placeholder)
-            self.assertEqual(rec["tools_engine_version"], placeholder or None)
+            self.assertIsNone(rec["value"], placeholder)
+            self.assertTrue(rec["source"].startswith("unknown -- "), rec["source"])
+            self.assertNotIn("2.6.1", rec["source"], "the pin must not read as the source")
+            self.assertIsNone(rec["mismatch"], placeholder)
+            self.assertEqual(rec["manifest_pin"], "2.6.1", placeholder)
+            self.assertEqual(rec["tools_json"], placeholder or None)
             self.assertIn("null", err, placeholder)
 
     def test_an_old_latest_tools_json_takes_the_build_its_command_path_names(self):
@@ -95,60 +102,63 @@ class EngineVersionRecordTests(unittest.TestCase):
         under a manifest pinning 2.6.1. 2.6.0 is what runs."""
         rec, err = record("diann", {"diann": "latest"}, DIANN_261,
                           cmd="/quobyte/proteomics-grp/dia-nn/build_260/diann-2.6.0/diann-linux")
-        self.assertEqual(rec["version"], "2.6.0")
-        self.assertEqual(rec["version_source"], "command")
-        self.assertEqual(rec["command_engine_versions"], ["2.6.0"])
-        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertEqual(rec["value"], "2.6.0")
+        self.assertTrue(rec["source"].startswith("named by the command"), rec["source"])
+        self.assertIn("build_260/diann-2.6.0", rec["source"])
+        self.assertEqual(rec["named_by_command"], ["2.6.0"])
+        self.assertIs(rec["mismatch"], True)
         self.assertIn("WARNING", err)
 
     def test_a_docker_image_tag_names_the_build(self):
         rec, _ = record("diann", {"diann": ""}, DIANN_261,
                         cmd="docker run --rm -v $PWD:/data proteomics-pipeline/diann:2.7.0 diann-linux")
-        self.assertEqual(rec["version"], "2.7.0")
-        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertEqual(rec["value"], "2.7.0")
+        self.assertIs(rec["mismatch"], True)
 
     def test_a_hive_sif_names_the_build(self):
         rec, _ = record("diann", {"diann": "latest"}, DIANN_261,
                         cmd="apptainer exec --bind /quobyte:/quobyte "
                             "/quobyte/proteomics-grp/dia-nn/diann_2.3.0.sif /diann-*/diann-linux")
-        self.assertEqual(rec["version"], "2.3.0")
+        self.assertEqual(rec["value"], "2.3.0")
 
     def test_conda_env_sage_records_null_and_does_not_say_rerun_acquire_tools(self):
         """acquire_tools.sh writes "env" for EVERY sage on PATH, so re-running it cannot
         change the record -- telling the user to do that is advice that cannot work."""
         rec, err = record("sage", {"sage": "env"}, {"name": "sage", "version": "0.14.7"},
                           cmd="/home/u/.proteomics-pipeline/micromamba/envs/proteomics-pipeline/bin/sage")
-        self.assertIsNone(rec["version"])
-        self.assertIsNone(rec["engine_version_mismatch"])
+        self.assertIsNone(rec["value"])
+        self.assertIsNone(rec["mismatch"])
         self.assertNotIn("acquire_tools", err)
 
     def test_an_unpinned_radiant_image_records_null(self):
         """tools.json `radiant` is only the runtime prefix; the image is `radiant_image`."""
         rec, _ = record("radiant", {"radiant": "latest"}, {"name": "radiant", "version": "2.3.3"},
                         cmd="docker run --rm", radiant_image="seerbio/radiant-fulcrum:latest")
-        self.assertIsNone(rec["version"])
+        self.assertIsNone(rec["value"])
         rec, _ = record("radiant", {"radiant": ""}, {"name": "radiant", "version": "2.3.3"},
                         cmd="docker run --rm", radiant_image="seerbio/radiant-fulcrum:2.3.3")
-        self.assertEqual(rec["version"], "2.3.3")
-        self.assertIs(rec["engine_version_mismatch"], False)
+        self.assertEqual(rec["value"], "2.3.3")
+        self.assertIs(rec["mismatch"], False)
 
     def test_tools_json_contradicting_its_own_command_records_null(self):
         """tools.json says 2.6.1 but the path it runs is diann-2.6.0/. One of them is wrong
         and nothing here can tell which: say so, record neither as `version`."""
         rec, err = record("diann", {"diann": "2.6.1"}, DIANN_261,
                           cmd="/opt/dia-nn/build_260/diann-2.6.0/diann-linux")
-        self.assertIsNone(rec["version"])
-        self.assertIsNone(rec["engine_version_mismatch"])
-        self.assertEqual(rec["tools_engine_version"], "2.6.1")
-        self.assertEqual(rec["command_engine_versions"], ["2.6.0"])
+        self.assertIsNone(rec["value"])
+        self.assertIsNone(rec["mismatch"])
+        self.assertEqual(rec["tools_json"], "2.6.1")
+        self.assertEqual(rec["named_by_command"], ["2.6.0"])
+        self.assertTrue(rec["source"].startswith("unknown -- "), rec["source"])
+        self.assertIn("2.6.0", rec["source"])
         self.assertIn("WARNING", err)
 
     def test_tools_json_agreeing_with_its_command_is_quiet(self):
         rec, err = record("diann", {"diann": "2.6.1"}, DIANN_261,
                           cmd="/quobyte/proteomics-grp/dia-nn/build_261/diann-2.6.1/diann-linux")
-        self.assertEqual(rec["version"], "2.6.1")
-        self.assertEqual(rec["version_source"], "tools.json")
-        self.assertIs(rec["engine_version_mismatch"], False)
+        self.assertEqual(rec["value"], "2.6.1")
+        self.assertTrue(rec["source"].startswith("tools.json"), rec["source"])
+        self.assertIs(rec["mismatch"], False)
         self.assertEqual(err, "")
 
     def test_the_request_keyed_sage_cache_dir_is_not_read_as_a_version(self):
@@ -156,8 +166,8 @@ class EngineVersionRecordTests(unittest.TestCase):
         release (acquire_tools.sh notes that case). Only a release folder name counts."""
         rec, _ = record("sage", {"sage": ""}, {"name": "sage", "version": "0.14.7"},
                         cmd="/home/u/.proteomics-pipeline/tools/sage/0.14.6/sage")
-        self.assertIsNone(rec["version"])
-        self.assertEqual(rec["command_engine_versions"], [])
+        self.assertIsNone(rec["value"])
+        self.assertEqual(rec["named_by_command"], [])
 
     def test_mismatch_fix_it_names_this_tools_root_and_platform(self):
         """The pilot ran with --tools .../pilot_tools/tools.json. A fix-it that omits the root
@@ -166,7 +176,7 @@ class EngineVersionRecordTests(unittest.TestCase):
                           cmd="/quobyte/proteomics-grp/fran/engines/pilot_tools/diann/2.7.0/diann-2.7.0/diann-linux",
                           tools_root="/quobyte/proteomics-grp/fran/engines/pilot_tools",
                           platform_class="hpc")
-        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertIs(rec["mismatch"], True)
         self.assertIn("PIN_ENGINE=diann PIN_VERSION=2.6.1 bash scripts/acquire_tools.sh hpc "
                       "/quobyte/proteomics-grp/fran/engines/pilot_tools", err)
 
@@ -176,7 +186,7 @@ class EngineVersionRecordTests(unittest.TestCase):
         rec, err = record("diann", {"diann": "2.7.0"}, DIANN_261,
                           cmd="docker run --rm -v $PWD:/data proteomics-pipeline/diann:2.7.0 diann-linux",
                           platform_class="mac", tools_root="/Users/u/.proteomics-pipeline/tools")
-        self.assertIs(rec["engine_version_mismatch"], True)
+        self.assertIs(rec["mismatch"], True)
         self.assertIn("build_diann_docker.sh 2.6.1", err)
 
     def test_another_engines_pin_is_never_borrowed(self):
@@ -187,15 +197,22 @@ class EngineVersionRecordTests(unittest.TestCase):
                         {"name": "diann", "version": "2.6.1"},
                         cmd="apptainer exec --bind /quobyte:/quobyte "
                             "/quobyte/proteomics-grp/apptainers/alphadia.sif alphadia")
-        self.assertIsNone(rec["version"])
-        self.assertIsNone(rec["manifest_engine_version"])
-        self.assertIsNone(rec["engine_version_mismatch"])
+        self.assertIsNone(rec["value"])
+        self.assertIsNone(rec["manifest_pin"])
+        self.assertIsNone(rec["mismatch"])
 
     def test_no_version_anywhere_is_null_and_said(self):
         rec, err = record("fragpipe", {}, {"name": "fragpipe"})
-        self.assertIsNone(rec["version"])
-        self.assertIsNone(rec["version_source"])
+        self.assertIsNone(rec["value"])
+        self.assertTrue(rec["source"].startswith("unknown -- "), rec["source"])
         self.assertIn("fragpipe", err)
+
+    def test_the_record_has_exactly_the_provenance_record_shape(self):
+        """One object with `value` and `source`, like scan_window -- not a second, flat set of
+        top-level keys beside main's records."""
+        rec, _ = record("diann", {"diann": "2.7.0"}, DIANN_261)
+        self.assertEqual(set(rec), {"value", "source", "tools_json", "named_by_command",
+                                    "manifest_pin", "mismatch"})
 
 
 class SearchProvenanceFileTests(unittest.TestCase):
@@ -235,17 +252,80 @@ class SearchProvenanceFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             prov, err = self._run(d, "2.7.0", "2.6.1")
             self.assertEqual(prov["version"], "2.7.0")
-            self.assertEqual(prov["tools_engine_version"], "2.7.0")
-            self.assertEqual(prov["manifest_engine_version"], "2.6.1")
-            self.assertIs(prov["engine_version_mismatch"], True)
-            self.assertEqual(prov["version_source"], "tools.json")
+            ev = prov["engine_version"]
+            self.assertEqual(ev["value"], "2.7.0")
+            self.assertEqual(ev["tools_json"], "2.7.0")
+            self.assertEqual(ev["manifest_pin"], "2.6.1")
+            self.assertIs(ev["mismatch"], True)
+            self.assertTrue(ev["source"].startswith("tools.json"), ev["source"])
             self.assertIn("WARNING", err)
 
     def test_matching_versions_record_no_mismatch(self):
         with tempfile.TemporaryDirectory() as d:
             prov, _ = self._run(d, "2.6.1", "2.6.1")
-            self.assertIs(prov["engine_version_mismatch"], False)
+            self.assertIs(prov["engine_version"]["mismatch"], False)
             self.assertEqual(prov["version"], "2.6.1")
+
+    def test_one_record_beside_the_others_not_a_parallel_set_of_keys(self):
+        """search_provenance.json describes each thing with one self-describing object
+        (`scan_window`, `sbatch_refused`). The engine version is one more such object; the flat
+        `version_source` / `*_engine_version` / `engine_version_mismatch` keys an earlier
+        revision of this change spread over the top level must not come back beside it."""
+        with tempfile.TemporaryDirectory() as d:
+            prov, _ = self._run(d, "latest", "2.6.1",
+                                diann_cmd="/quobyte/proteomics-grp/dia-nn/build_260/diann-2.6.0/diann-linux")
+            self.assertEqual(prov["version"], prov["engine_version"]["value"])
+            self.assertEqual(prov["version"], "2.6.0")
+            self.assertIn("scan_window", prov)
+            for flat in ("version_source", "tools_engine_version", "command_engine_versions",
+                         "manifest_engine_version", "engine_version_mismatch"):
+                self.assertNotIn(flat, prov)
+
+    def test_the_chain_route_records_the_engine_version_too(self):
+        """A DIA-NN search of >5 files on a SLURM host routes to the 5-step chain, and with
+        --sbatch run_search.py exits 3 after writing search_provenance.json. The engine
+        version must be in THAT file as well -- most real cohorts take this route."""
+        with tempfile.TemporaryDirectory() as d:
+            bindir = os.path.join(d, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "sbatch"), "w") as fh:      # slurm_available()
+                fh.write("#!/bin/sh\necho 1\n")
+            os.chmod(os.path.join(bindir, "sbatch"), 0o755)
+            raws = []
+            for i in range(6):
+                raws.append(os.path.join(d, f"f{i}.d"))
+                os.makedirs(raws[-1])
+            cfg = os.path.join(d, "diann.cfg")
+            with open(cfg, "w") as fh:
+                fh.write("--qvalue 0.01\n--mass-acc 15\n--mass-acc-ms1 15\n--xic 10\n--mobilograms\n")
+            fasta = os.path.join(d, "db.fasta")
+            with open(fasta, "w") as fh:
+                fh.write(">sp|P1|X\nPEPTIDEK\n")
+            tools = os.path.join(d, "tools.json")
+            with open(tools, "w") as fh:
+                json.dump({"diann": "/opt/dia-nn/build_270/diann-2.7.0/diann-linux",
+                           "versions": {"diann": "2.7.0"}}, fh)
+            bundle = os.path.join(d, "workflow.manifest.json")
+            with open(bundle, "w") as fh:
+                json.dump({"acquisition": "DIA",
+                           "engine": {"name": "diann", "version": "2.6.1"}}, fh)
+            out = os.path.join(d, "search_out")
+            env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
+            env["PATH"] = bindir + os.pathsep + "/usr/bin:/bin"
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
+                                "--tools", tools, "--bundle", bundle, "--params", cfg,
+                                "--fasta", fasta, "--out", out, "--files", *raws,
+                                "--sbatch", "job.sh"],
+                               cwd=d, capture_output=True, text=True, env=env, timeout=120)
+            self.assertEqual(r.returncode, run_search.SBATCH_NOT_WRITTEN, r.stdout + r.stderr)
+            with open(os.path.join(out, "search_provenance.json")) as fh:
+                prov = json.load(fh)
+            self.assertEqual(prov["search_mode"], "parallel_5step")
+            self.assertEqual(prov["version"], "2.7.0")
+            self.assertIs(prov["engine_version"]["mismatch"], True)
+            self.assertEqual(prov["engine_version"]["manifest_pin"], "2.6.1")
+            self.assertIn("step 1b", prov["scan_window"]["source"])
+            self.assertIn("engine version mismatch", r.stderr)
 
     def test_what_fran_deposit_forwards_is_never_the_unconfirmed_pin(self):
         """fran_deposit.detect_engine() passes `version` -- and nothing else from this record --

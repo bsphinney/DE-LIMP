@@ -60,16 +60,18 @@ before this was fixed, `"latest"`.
 The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins 2.6.1, but
 `tools.json` holds whatever was last acquired (the FRAN pilot pinned 2.7.0). Nothing forces
 them to match, so `run_search.py` compares them before submitting and records both in
-`search_provenance.json`:
+`search_provenance.json` — as one `engine_version` object shaped like `scan_window` (a
+`value`, and a `source` saying in words where it came from), plus top-level `version`, which
+always equals `engine_version.value`:
 
 | field | meaning |
 |---|---|
-| `version` | the build that ran: `tools.json` `versions`, else the one version the **command itself** names (a build folder such as `diann-2.6.0/`, a `.sif` name, an image tag); else `null`. **Never the manifest's pin** — `fran_deposit.py` sends `version`, and only `version`, to FRAN as the engine version, so a pin nothing confirmed would be stored there as fact |
-| `version_source` | `tools.json`, `command`, or `null` |
-| `tools_engine_version` | `tools.json` `versions.<engine>` as written, even `latest` / `env` |
-| `command_engine_versions` | every version the command names (usually zero or one) |
-| `manifest_engine_version` | the manifest's pin as written (`null` if it pins another engine) |
-| `engine_version_mismatch` | `true`/`false` when `version` and the pin are both known; **`null`** when they cannot be compared. A WARNING is printed when `true` |
+| `version` = `engine_version.value` | the build that runs: `tools.json` `versions`, else the one version the **command itself** names (a build folder such as `diann-2.6.0/`, a `.sif` name, an image tag); else `null`. **Never the manifest's pin** — `fran_deposit.py` sends `version` to FRAN as the engine version it stores, so a pin nothing confirmed would be stored there as fact |
+| `engine_version.source` | where `value` came from: `tools.json versions.<engine>, …`, `named by the command tools.json runs (…)`, or `unknown -- <why>` |
+| `engine_version.tools_json` | `tools.json` `versions.<engine>` as written, even `latest` / `env` |
+| `engine_version.named_by_command` | every version the command names (usually zero or one) |
+| `engine_version.manifest_pin` | the manifest's pin as written (`null` if it pins another engine) |
+| `engine_version.mismatch` | `true`/`false` when `value` and the pin are both known; **`null`** when they cannot be compared. A WARNING is printed when `true` |
 
 A `tools.json` whose `versions` contradicts its own command (says 2.6.1, runs
 `diann-2.6.0/diann-linux`) records `version: null` with a WARNING: one is wrong and nothing

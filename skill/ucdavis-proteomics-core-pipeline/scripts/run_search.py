@@ -133,7 +133,8 @@ def _reacquire_hint(engine, pin, tools):
 
 
 def engine_version_record(engine, tools, bundle):
-    """Which engine build this search ran, and whether it is the one the manifest asked for.
+    """Which engine build this search ran, and whether it is the one the manifest asked for --
+    the `engine_version` record of search_provenance.json.
 
     Three things name a version, and until this nothing compared them:
       * workflow.manifest.json `engine.version` -- resolve_defaults.py's PIN. A request.
@@ -143,18 +144,28 @@ def engine_version_record(engine, tools, bundle):
     The FRAN pilot (2026-09-16) is why they must be compared: manifest 2.6.1, tools.json 2.7.0,
     and the compute-node banner said "DIA-NN 2.7.0 Academia".
 
-    `version` is only ever a build something CONFIRMS runs: tools.json, else the one version
-    the command names. The manifest's pin is NEVER promoted to `version`, because
-    fran_deposit.detect_engine() forwards `version` -- and nothing else from this record -- to
-    FRAN as the engine version. Promoting the pin whenever tools.json said "latest" would stamp
-    an old tools.json pointing at build_260/diann-2.6.0 as 2.6.1, and every conda-env Sage as
-    whatever the manifest pins. An unknown version is null; a wrong one is a false claim about
-    published results.
+    Shaped like `scan_window`, its neighbour in that file: one object whose `value` is the
+    answer and whose `source` says in words where it came from, with every input kept as
+    written beside it:
 
-    `engine_version_mismatch` is True/False only when both `version` and the pin are known;
-    null otherwise (not comparable -- "false" would claim they were checked and agree). A
-    tools.json that contradicts its own command is recorded as `version: null` with a WARNING:
-    one of them is wrong and nothing here can tell which.
+      value             the build that runs: tools.json, else the ONE version the command
+                        names, else None
+      source            "tools.json versions.<engine> ..." | "named by the command ..." |
+                        "unknown -- <why>"
+      tools_json        tools.json `versions.<engine>` as written, even "latest" / "env"
+      named_by_command  every version the command names
+      manifest_pin      the manifest's pin as written; None if it pins another engine
+      mismatch          True/False only when `value` and the pin are both known, else None
+
+    `value` is only ever a build something CONFIRMS runs. The manifest's pin is NEVER promoted
+    to it, because main() also writes it as top-level `version`, which
+    fran_deposit.detect_engine() forwards -- and nothing else from this record -- to FRAN as
+    the engine version. Promoting the pin whenever tools.json said "latest" would stamp an old
+    tools.json pointing at build_260/diann-2.6.0 as 2.6.1, and every conda-env Sage as whatever
+    the manifest pins. An unknown version is null; a wrong one is a false claim about published
+    results. `mismatch` is null when the two cannot be compared -- "false" would claim they were
+    checked and agree. A tools.json that contradicts its own command records `value` null with
+    a WARNING: one of them is wrong and nothing here can tell which.
     """
     t = tools or {}
     tools_raw = (t.get("versions") or {}).get(engine)
@@ -170,23 +181,29 @@ def engine_version_record(engine, tools, bundle):
     out = sys.stderr.write
 
     if tv and cvs and tv not in cvs:
-        version, source = None, None
+        version = None
+        source = (f"unknown -- tools.json says {tv}, but the command it runs names "
+                  f"{', '.join(cvs)} ({cmd})")
         out(f"[run_search] WARNING: tools.json says {engine} {tv}, but the command it runs names "
             f"{', '.join(cvs)} ({cmd}). One of them is wrong, so search_provenance.json records "
-            f"`version: null` (both values are kept). Re-run acquire_tools.sh to rewrite "
-            f"tools.json from what it finds.\n")
+            f"`version: null` (both values are kept in `engine_version`). Re-run "
+            f"acquire_tools.sh to rewrite tools.json from what it finds.\n")
     elif tv:
-        version, source = tv, "tools.json"
+        version = tv
+        source = (f"tools.json versions.{engine}, as acquire_tools.sh recorded it"
+                  + ("; the command names it too" if cvs else
+                     "; the command names no version to check it against"))
     elif len(cvs) == 1:
-        version, source = cvs[0], "command"
+        version = cvs[0]
+        source = f"named by the command tools.json runs ({cmd})"
         out(f"[run_search] NOTE: tools.json names no {engine} build ({tools_raw!r}); the "
-            f"command it runs names {version} ({cmd}), recorded as `version` "
-            f"(version_source: command).\n")
+            f"command it runs names {version} ({cmd}), recorded as `version`.\n")
     else:
-        version, source = None, None
+        version = None
         why = (f"its command names several ({', '.join(cvs)})" if cvs
                else "neither does the command it runs")
-        pin = (f" The manifest's pin {mv} is kept as `manifest_engine_version` but is not "
+        source = f"unknown -- tools.json names no {engine} build ({tools_raw!r}) and {why}"
+        pin = (f" The manifest's pin {mv} is kept as `engine_version.manifest_pin` but is not "
                f"recorded as `version`: it is what was asked for, not evidence of what ran."
                if mv else "")
         if tools_raw == "env":
@@ -202,15 +219,15 @@ def engine_version_record(engine, tools, bundle):
     mismatch = (version != mv) if (version and mv) else None
     if mismatch:
         out(f"[run_search] WARNING: engine version mismatch -- workflow.manifest.json pins "
-            f"{engine} {mv}, but {version} is what runs ({cmd}; from {source}). {version} is "
-            f"recorded as `version`; the pin is kept beside it in search_provenance.json "
-            f"(engine_version_mismatch: true). If {mv} was intended, re-acquire it: "
+            f"{engine} {mv}, but {version} is what runs ({cmd}). {version} is recorded as "
+            f"`version`; the pin is kept beside it in search_provenance.json "
+            f"(`engine_version.mismatch: true`). If {mv} was intended, re-acquire it: "
             f"{_reacquire_hint(engine, mv, t)}\n")
-    return {"version": version, "version_source": source,
-            "tools_engine_version": tools_raw or None,     # as written, even "latest"
-            "command_engine_versions": cvs,
-            "manifest_engine_version": manifest_raw,
-            "engine_version_mismatch": mismatch}
+    return {"value": version, "source": source,
+            "tools_json": tools_raw or None,               # as written, even "latest"
+            "named_by_command": cvs,
+            "manifest_pin": manifest_raw,
+            "mismatch": mismatch}
 
 
 # ----------------------------------------------------------------- DIA-NN -----
@@ -1492,14 +1509,17 @@ def main():
     # always record what was run (engine + version + exact command) for reproducibility
     try:
         os.makedirs(a.out, exist_ok=True)
-        version = ver_rec["version"]          # see engine_version_record(): tools.json wins
         with open(os.path.join(a.out, "search_provenance.json"), "w") as fh:
             # Where the FULLY-resolved parameters are, and WHEN they exist -- as the generator
             # reports it, not assumed here. On the probe path the chain measures the scan
             # window at run time (step 1b) and only then writes the file, so recording it as
             # already resolved would be false until step 1b succeeds.
             rp = res.get("resolved_params") if isinstance(res, dict) else None
-            json.dump({"engine": engine, "version": version, "resolved_command": cmd,
+            # `version` is what fran_deposit.py forwards to FRAN as the engine version (FRAN's
+            # own ingest also reads it for Radiant); `engine_version` is the record it comes
+            # from (engine_version_record: never "latest", never the manifest's pin).
+            json.dump({"engine": engine, "version": ver_rec["value"],
+                       "engine_version": ver_rec, "resolved_command": cmd,
                        "params_file": a.params,
                        "resolved_params_file": (rp or {}).get("file") or a.params,
                        "resolved_params_produced": ((rp or {}).get("produced")
@@ -1511,8 +1531,7 @@ def main():
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
                        "submitted_sbatch": None if sbatch_refused else (a.sbatch or None),
-                       "sbatch_refused": sbatch_refused, "result": res,
-                       **{k: v for k, v in ver_rec.items() if k != "version"}}, fh, indent=2)
+                       "sbatch_refused": sbatch_refused, "result": res}, fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")
 

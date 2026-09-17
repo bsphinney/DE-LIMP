@@ -66,11 +66,12 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
    The manifest's pin and `tools.json` can disagree (the FRAN pilot: manifest 2.6.1,
    2.7.0 ran). `search_provenance.json` is the record of which build ran: `version` is
    `tools.json`'s, else the version the command itself names, else `null` — **never the
-   manifest's pin**, which is kept beside it as `manifest_engine_version` with
-   `engine_version_mismatch` (`null` when the two cannot be compared) (→
-   `references/environment.md`, "Version pinning"). `reproduce.sh` still re-acquires the
-   **manifest's** pin, so when `engine_version_mismatch` is `true`, edit its
-   `PIN_VERSION` to `version` before replaying the search.
+   manifest's pin**, which is kept beside it in the `engine_version` record as
+   `manifest_pin`, with `mismatch` (`null` when the two cannot be compared) and a
+   `source` saying where `version` came from (→ `references/environment.md`, "Version
+   pinning"). `reproduce.sh` still re-acquires the **manifest's** pin, so when
+   `engine_version.mismatch` is `true`, edit its `PIN_VERSION` to `version` before
+   replaying the search.
 3. **Locked software environment.** `provenance.py` captures
    `environment/conda-explicit.txt` (every package pinned with URL + md5),
    `pip-freeze.txt`, and `r-sessionInfo.txt` (all R package versions). `reproduce.sh`
