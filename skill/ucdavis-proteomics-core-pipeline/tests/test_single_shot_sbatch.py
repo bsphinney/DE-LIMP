@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
@@ -126,14 +127,14 @@ class _Workspace:
         self.out = os.path.join(d, "search_out")
         self.job = os.path.join(d, "diann_job.sh")
 
-    def generate(self, *queue):
+    def generate(self, *queue, check=True):
         p = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS, "run_search.py"),
              "--tools", self.tools, "--bundle", self.bundle, "--params", self.cfg,
              "--fasta", self.fasta, "--out", self.out, "--files", *self.runs,
              "--threads", "4", "--sbatch", self.job, *queue],
             capture_output=True, text=True)
-        if p.returncode != 0:
+        if check and p.returncode != 0:
             raise AssertionError(f"run_search.py failed:\n{p.stdout}\n{p.stderr}")
         return p
 
@@ -241,6 +242,103 @@ class QueueTests(unittest.TestCase):
         self.assertGreaterEqual(len(calls), 5, calls)
         for c in calls:
             self.assertRegex(c, r"\*\*\(?queue\b", f"emit_sbatch call without the queue: {c}")
+
+
+# HIVE's real associations for a facility member who is also in publicgrp, read with
+# `sacctmgr -nP show assoc user=brettsp format=account,partition,qos` on 2026-09-16.
+HIVE_ASSOCIATIONS = """genome-center-grp|gpu-a100|genome-center-grp-gpu-a100-qos
+genome-center-grp|high|genome-center-grp-high-qos
+publicgrp|high|publicgrp-high-qos
+publicgrp|low|publicgrp-low-qos
+"""
+
+
+class PartialQueueTests(unittest.TestCase):
+    """Forwarding --partition/--account/--qos to every job made a PARTIAL override dangerous.
+
+    slurm_queue() filled the missing fields from the first preferred association, not one
+    that matched what was given. The review generated these against HIVE's associations and
+    checked each header with `srun --test-only`:
+      --partition low  -> low / genome-center-grp / genome-center-grp-high-qos
+                          "Invalid account or account/partition combination specified"
+      --qos publicgrp-low-qos -> high / genome-center-grp / publicgrp-low-qos
+                          "Invalid qos specification"
+    Before the flags were forwarded these paths ignored them and wrote a valid detected
+    queue; the 5-step chain had the same fill-in and still does unless this is fixed there."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        fakebin = os.path.join(self._tmp.name, "bin")
+        os.makedirs(fakebin)
+        _write(os.path.join(fakebin, "sacctmgr"),
+               "#!/bin/sh\ncat <<'ASSOC'\n" + HIVE_ASSOCIATIONS + "ASSOC\n", 0o755)
+        env = mock.patch.dict(os.environ, {"PATH": fakebin + os.pathsep + os.environ["PATH"],
+                                           "USER": "tester"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _queue(self, path):
+        h = _headers(path)
+        get = lambda k: next((l.split("=", 1)[1] for l in h if l.startswith(f"#SBATCH --{k}=")),
+                             None)
+        return get("partition"), get("account"), get("qos"), "#SBATCH --requeue" in h
+
+    def _both_jobs(self, *flags):
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            w.generate(*flags)
+            got = {self._queue(w.lib_job), self._queue(w.search_job)}
+            self.assertEqual(len(got), 1, got)
+            return got.pop()
+
+    def test_a_partition_alone_takes_the_account_that_has_it(self):
+        self.assertEqual(self._both_jobs("--partition", "low"),
+                         ("low", "publicgrp", "publicgrp-low-qos", True))
+
+    def test_a_qos_alone_takes_the_association_it_belongs_to(self):
+        self.assertEqual(self._both_jobs("--qos", "publicgrp-low-qos"),
+                         ("low", "publicgrp", "publicgrp-low-qos", True))
+
+    def test_an_account_alone_stays_on_that_account(self):
+        part, acct, qos = run_search.slurm_queue(account="publicgrp")
+        self.assertEqual(acct, "publicgrp")
+        self.assertIn(f"{acct}|{part}|{qos}", HIVE_ASSOCIATIONS)
+        part, acct, qos = run_search.slurm_queue(account="genome-center-grp")
+        self.assertEqual((part, acct), ("high", "genome-center-grp"))
+
+    def test_a_combination_no_association_has_fails_loudly(self):
+        """Nothing can be filled in to make this valid, so no job is written at all."""
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            p = w.generate("--partition", "low", "--qos", "genome-center-grp-high-qos",
+                           check=False)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("publicgrp|low", p.stderr)          # names what the user CAN use
+            self.assertFalse(os.path.exists(w.lib_job))
+            self.assertFalse(os.path.exists(w.search_job))
+
+    def test_partition_and_account_get_the_qos_the_chain_gives_them(self):
+        """diann_parallel adds publicgrp-low-qos for low/publicgrp; emit_sbatch did not, so the
+        same flags wrote different headers on the two paths."""
+        self.assertEqual(self._both_jobs("--partition", "low", "--account", "publicgrp"),
+                         ("low", "publicgrp", "publicgrp-low-qos", True))
+
+    def test_the_chain_resolves_a_partial_queue_the_same_way(self):
+        for given in ({"partition": "low"}, {"qos": "publicgrp-low-qos"},
+                      {"partition": "low", "account": "publicgrp"}):
+            with self.subTest(**given), tempfile.TemporaryDirectory() as d:
+                w = _Workspace(d, cfg_lines=LIBFREE_CFG + ["--window 7"], n_runs=3, ext=".d")
+                a = argparse.Namespace(partition=None, account=None, qos=None,
+                                       max_simultaneous=None)
+                for k, v in given.items():
+                    setattr(a, k, v)
+                os.makedirs(w.out, exist_ok=True)
+                run_search.run_diann_parallel(w.diann, w.cfg, w.runs, w.fasta, w.out, 16, a)
+                for step in ("step1_libpred.sbatch", "step2_firstpass.sbatch",
+                             "step5_report.sbatch"):
+                    self.assertEqual(self._queue(os.path.join(w.out, step)),
+                                     ("low", "publicgrp", "publicgrp-low-qos", True), step)
 
 
 class LibraryJobGuardTests(unittest.TestCase):

@@ -663,7 +663,9 @@ def main():
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from run_search import slurm_queue
-        a.partition, a.account, _q = slurm_queue(a.partition, a.account, None)
+        # a.qos goes in so that a partial queue (e.g. --qos alone) is completed from the
+        # association it belongs to; the detected QOS itself is still not used (see below).
+        a.partition, a.account, _q = slurm_queue(a.partition, a.account, a.qos)
         if not a.qos and a.partition == "low" and a.account == "publicgrp":
             a.qos = "publicgrp-low-qos"
     except Exception as e:

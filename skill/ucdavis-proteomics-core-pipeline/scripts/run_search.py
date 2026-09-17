@@ -1157,10 +1157,16 @@ def slurm_queue(partition=None, account=None, qos=None,
       2. genome-center-grp on `high`   (facility members: no per-job cap, not preemptible)
       3. publicgrp on `low`            (everyone else, incl. class accounts: no per-job
                                         cap either, preemptible — add --requeue)
+    A PARTIAL override (say `--partition low` alone) is completed from an association that
+    matches every field given, never from the preferred one: filling `--partition low` with
+    genome-center-grp's account and QOS wrote a header HIVE rejects ("Invalid account or
+    account/partition combination specified", srun --test-only, 2026-09-16), and `--qos
+    publicgrp-low-qos` alone on `high` gave "Invalid qos specification". When no association
+    matches, this EXITS naming the ones that exist -- there is nothing valid to fill in.
     Returns (partition, account, qos); any may be None, and a None is simply omitted
     from the script so SLURM applies its own default."""
     if partition and account:
-        return partition, account, qos
+        return partition, account, _public_low_qos(partition, account, qos)
     assoc = []
     # sacctmgr is frequently absent from PATH in a non-login shell, so look for it
     # explicitly. Failing to find it must NOT silently emit an empty queue: SLURM would
@@ -1195,13 +1201,38 @@ def slurm_queue(partition=None, account=None, qos=None,
 
     lab, pub = find("genome-center-grp", "high"), find("publicgrp", "low")
 
+    if (partition or account or qos) and assoc:
+        # An empty partition or QOS in an association means "any" (an account-wide
+        # association, or an inherited QOS list), so it matches rather than rejects: a
+        # cluster laid out differently from HIVE must not be refused on a guess.
+        def fits(a, p, q):
+            return ((not account or a == account)
+                    and (not partition or p in ("", partition))
+                    and (not qos or not q or qos in q.split(",")))
+        hits = [x for x in assoc if fits(*x)]
+        if not hits:
+            given = " ".join(f"--{k} {v}" for k, v in (("partition", partition),
+                             ("account", account), ("qos", qos)) if v)
+            sys.exit(f"[slurm_queue] no SLURM association of user "
+                     f"{os.environ.get('USER', '?')} has {given}, so SLURM would reject the "
+                     f"job. Associations (account|partition|qos): "
+                     f"{', '.join('|'.join(x) for x in assoc)}. Pass --partition/--account/"
+                     f"--qos from ONE of them, or none to have one chosen.")
+        preferred = [h for key in (("genome-center-grp", "high"), ("publicgrp", "low"))
+                     for h in hits if h[:2] == key]
+        a, p, q = (preferred or hits)[0]
+        p = partition or p or None
+        # a comma-separated QOS list names no single QOS to write; SLURM picks the default
+        q = qos or (q if q and "," not in q else None)
+        return p, a, _public_low_qos(p, a, q)
+
     # Port of DE-LIMP's select_best_partition() (R/helpers_search.R). Entitlement is
     # not the question -- UTILISATION is. The priority queue has a PER-USER CPU cap
     # (64 on HIVE), and once you are at it your own jobs queue behind each other:
     # an 18-task array on `high` starves everything else you submit (QOSGrpCpuLimit,
     # observed). publicgrp/low is preemptible but has thousands of idle CPUs, so for
     # work that is safe to preempt it starts sooner and finishes sooner.
-    if lab and pub and not partition:
+    if lab and pub and not (partition or account or qos):
         need = min(peak_cpus or 16, 16)          # at least one array task's worth
         avail = _lab_cpus_available()
         idle = _partition_idle_cpus("low")
@@ -1228,7 +1259,27 @@ def slurm_queue(partition=None, account=None, qos=None,
     # Could not detect. Do NOT fall through to the cluster default — on HIVE that is
     # `high`, which rejects non-facility accounts. publicgrp/low is submittable by
     # everyone who has any allocation at all, so it is the safe floor.
-    return partition or "low", account or "publicgrp", qos
+    if partition or account or qos:
+        print("[slurm_queue] WARNING: cannot read SLURM associations here, so the partial "
+              f"queue (partition={partition}, account={account}, qos={qos}) is completed "
+              "with publicgrp/low unchecked; read the #SBATCH header before submitting",
+              file=sys.stderr)
+    p, a = partition or "low", account or "publicgrp"
+    return p, a, _public_low_qos(p, a, qos)
+
+
+def _public_low_qos(partition, account, qos):
+    """The QOS for publicgrp on `low` when none was given.
+
+    diann_parallel.py and diatracer_parallel.py already add `publicgrp-low-qos` there ("low
+    DOES need its qos named", tests/test_hive_submission_guards.py); emit_sbatch() did not, so
+    `--partition low --account publicgrp` wrote a --qos line in the 5-step chain and none in
+    the single-shot jobs. Here, every caller gets it. `high` is left alone on purpose: a
+    facility job with no --qos is accepted and SLURM assigns genome-center-grp-high-qos
+    (measured 2026-08-25, test_high_needs_no_explicit_qos)."""
+    if not qos and partition == "low" and account == "publicgrp":
+        return "publicgrp-low-qos"
+    return qos
 
 
 def _positive_int(v):
