@@ -18,6 +18,11 @@
 #   de_engine          — short string, e.g. "limma::lmFit + eBayes"
 #   missing_value_policy — "imputed via DPC detection model" / "kept as NA, dropped per row by limma"
 #   citation           — for methods text, e.g. "Moschem et al., J. Proteome Res. 2025; 24:3860"
+#   evidence_columns   — named character: per-protein measurement-depth columns this
+#                        pipeline writes into y_protein$genes -> what each one means.
+#                        character(0) when the pipeline has none. Read through
+#                        pipeline_evidence_columns(), never by column name elsewhere.
+#   evidence_guidance  — one sentence on how to read those columns ("" when none)
 
 # Default descriptor for the historical limpa DPC-Quant pipeline. Attached to
 # y_protein after dpcQuant() runs (server_data.R does this).
@@ -29,7 +34,18 @@ dpc_pipeline_descriptor <- function() {
     normalization      = "DPC-CN (Data Point Correspondence cyclic loess)",
     de_engine          = "limpa::dpcDE → contrasts.fit → eBayes",
     missing_value_policy = "Missing precursors contribute via the detection probability model — not imputed, not filled in",
-    citation           = "Law CW, Smyth GK (limpa, Bioconductor)"
+    citation           = "Law CW, Smyth GK (limpa, Bioconductor)",
+    # Written by limpa::dpcQuant() (peptides2Proteins): NPrec = npeptides, and
+    # PropObs = rowMeans(n.observations) / NPrec — the share of this protein's
+    # precursor x run cells that were observed. It equals "fraction of runs
+    # detected" ONLY for a one-precursor protein. Checked against limpa 1.4.0.
+    evidence_columns   = c(
+      NPrec   = "number of precursors quantified into this protein",
+      PropObs = paste("proportion of this protein's precursor-by-run measurements that were",
+                      "observed rather than missing (for a one-precursor protein, the",
+                      "fraction of runs in which it was detected)")
+    ),
+    evidence_guidance  = "Treat NPrec = 1 or PropObs < 0.5 as weak evidence regardless of p-value."
   )
 }
 
@@ -55,7 +71,11 @@ maxlfq_pipeline_descriptor <- function() {
       "precursors passed, and the retained value is DIA-NN's, unchanged. This matches",
       "the reference implementation. Departures from the paper: it uses all peptides",
       "(PG.MaxLFQ) where the paper uses proteotypic only (Genes.MaxLFQ.Unique)."),
-    citation           = "Moschem et al., J. Proteome Res. 2025; 24:3860 (DOI: 10.1021/acs.jproteome.5c00009)"
+    citation           = "Moschem et al., J. Proteome Res. 2025; 24:3860 (DOI: 10.1021/acs.jproteome.5c00009)",
+    # PG.MaxLFQ is pivoted per protein group; no precursor count or observed
+    # proportion is carried into y_protein$genes, so none is claimed.
+    evidence_columns   = character(0),
+    evidence_guidance  = ""
   )
 }
 
@@ -83,6 +103,42 @@ is_maxlfq <- function(y_protein) {
 pipeline_label <- function(y_protein) {
   d <- pipeline_descriptor(y_protein)
   if (is.null(d)) "(no pipeline ran)" else d$display_label
+}
+
+# Evidence-strength columns actually present on this y_protein, named by column,
+# valued by what the column means. Descriptors saved by a pre-4.1.0 session lack
+# the field, so the canonical descriptor for the same pipeline_id is used; an
+# unknown pipeline claims nothing. Filtered to columns that really exist, because
+# a pipeline can drop one (dpcQuantByRow() removes NPrec when every protein has a
+# single precursor) and a prompt must never describe a column it does not send.
+pipeline_evidence_columns <- function(y_protein) {
+  if (is.null(y_protein)) return(character(0))
+  d <- pipeline_descriptor(y_protein)
+  ev <- d$evidence_columns
+  if (is.null(ev)) {
+    ev <- switch(d$pipeline_id %||% "",
+                 dpc    = dpc_pipeline_descriptor()$evidence_columns,
+                 maxlfq = maxlfq_pipeline_descriptor()$evidence_columns,
+                 character(0))
+  }
+  present <- tryCatch(colnames(y_protein$genes), error = function(e) NULL) %||% character(0)
+  ev[names(ev) %in% present]
+}
+
+# The reading guidance for those columns — only when every column it refers to
+# is present (the guidance names them).
+pipeline_evidence_guidance <- function(y_protein) {
+  if (is.null(y_protein)) return("")
+  d <- pipeline_descriptor(y_protein)
+  canon <- switch(d$pipeline_id %||% "",
+                  dpc    = dpc_pipeline_descriptor(),
+                  maxlfq = maxlfq_pipeline_descriptor(),
+                  list())
+  cols <- d$evidence_columns %||% canon$evidence_columns %||% character(0)
+  guide <- d$evidence_guidance %||% canon$evidence_guidance %||% ""
+  if (length(cols) == 0 || !nzchar(guide)) return("")
+  if (!all(names(cols) %in% names(pipeline_evidence_columns(y_protein)))) return("")
+  guide
 }
 
 # --- safe_section: wraps an export sub-step so silent failures become visible

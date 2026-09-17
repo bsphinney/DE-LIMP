@@ -4263,6 +4263,96 @@ activity_log_headers <- c(
   "session_file", "speclib_cached", "app_version", "source_type"
 )
 
+# --- Notes the APP writes into the `notes` column (not the user) ---
+# The activity log's notes column is shared between user-typed notes and a few
+# machine-written placeholders. Anything that forwards "the user's notes" (the
+# AI prompts) must be able to tell them apart, so the placeholders are defined
+# once here and the write sites use these helpers.
+ACTIVITY_NOTE_SESSION_RESTORED <- "Loaded from session file"
+ACTIVITY_NOTE_BACKFILLED       <- "Backfilled from job queue"
+activity_note_job_loaded <- function(job_name, job_id) sprintf("Job: %s (%s)", job_name, job_id)
+
+activity_note_is_auto <- function(notes) {
+  n <- trimws(as.character(notes))
+  n[is.na(n)] <- ""
+  n %in% c(ACTIVITY_NOTE_SESSION_RESTORED, ACTIVITY_NOTE_BACKFILLED) |
+    grepl("^Job: .* \\([^()]*\\)$", n)
+}
+
+#' Identities under which THIS process records activity-log rows. The write
+#' sites use both Sys.info()[["user"]] and Sys.getenv("USER"), which differ in
+#' containers (e.g. "shiny" vs unset), so both count as the current user.
+activity_current_user_ids <- function() {
+  ids <- c(tryCatch(Sys.info()[["user"]], error = function(e) NA_character_),
+           Sys.getenv("USER", ""))
+  ids <- unique(trimws(as.character(ids)))
+  ids[!is.na(ids) & nzchar(ids) & ids != "unknown"]
+}
+
+#' Identity of the dataset loaded right now, for attributing activity-log rows.
+#'
+#' Set ONLY by loads that come from a known search output folder (HPC browse,
+#' job queue, facility history, History tab, session restore) and CLEARED by
+#' every other load (report upload, example data). It records the samples it was
+#' set for, so a load path that forgets to clear it fails closed: once
+#' raw_data's samples are not the recorded ones, the identity no longer applies.
+#' (values$diann_search_settings is NOT an identity — uploads never reset it.)
+loaded_dataset_identity <- function(output_dir, raw_data, source = "") {
+  od <- if (is.null(output_dir) || length(output_dir) != 1 || is.na(output_dir)) "" else
+    sub("/+$", "", trimws(as.character(output_dir)))
+  samples <- tryCatch(colnames(raw_data$E), error = function(e) NULL)
+  if (!nzchar(od) || length(samples) == 0) return(NULL)
+  list(output_dir = od, samples = sort(as.character(samples)), source = source)
+}
+
+#' The loaded dataset's output folder, or NULL when there is no identity or it
+#' does not belong to the raw_data currently loaded (samples must be a subset of
+#' those recorded — excluding runs keeps the identity, a different report loses it).
+loaded_dataset_output_dir <- function(identity, raw_data) {
+  if (is.null(identity) || is.null(identity$output_dir) || length(identity$samples) == 0) return(NULL)
+  current <- tryCatch(colnames(raw_data$E), error = function(e) NULL)
+  if (length(current) == 0 || !all(current %in% identity$samples)) return(NULL)
+  identity$output_dir
+}
+
+#' The user's own project name and notes for ONE loaded dataset.
+#'
+#' The activity log is shared: on HPC every user's rows are in one CSV, and on a
+#' hosted deployment every visitor's rows are in the same HOME file. So a row is
+#' only used when its output_dir IS the loaded dataset's output_dir, and when the
+#' row records a user, that user is the current one. No match -> nothing (both
+#' NULL) - never "the most recent row". Machine-written placeholder notes are
+#' ignored. Pure: the caller reads the log and supplies the identifiers.
+activity_project_context <- function(log, output_dir, current_users = activity_current_user_ids()) {
+  none <- list(project = NULL, notes = NULL)
+  od <- if (is.null(output_dir) || length(output_dir) != 1 || is.na(output_dir)) "" else
+    sub("/+$", "", trimws(as.character(output_dir)))
+  if (!nzchar(od) || is.null(log) || !is.data.frame(log) || nrow(log) == 0 ||
+      !"output_dir" %in% names(log)) return(none)
+
+  log_od <- sub("/+$", "", trimws(as.character(log$output_dir)))
+  keep <- !is.na(log_od) & log_od == od
+  if ("user" %in% names(log)) {
+    u <- trimws(as.character(log$user))
+    recorded <- !is.na(u) & nzchar(u) & u != "unknown"
+    keep <- keep & (!recorded | u %in% current_users)
+  }
+  rows <- log[keep, , drop = FALSE]
+  if (nrow(rows) == 0) return(none)
+
+  latest <- function(x) {
+    x <- trimws(as.character(x))
+    x <- x[!is.na(x) & nzchar(x)]
+    if (length(x) == 0) NULL else x[length(x)]
+  }
+  project <- if ("project" %in% names(rows)) latest(rows$project) else NULL
+  notes <- if ("notes" %in% names(rows)) {
+    n <- as.character(rows$notes)
+    latest(n[!activity_note_is_auto(n)])
+  } else NULL
+  list(project = project, notes = notes)
+}
+
 #' Get path for the unified activity log CSV
 #' Prefers shared storage on HPC, falls back to home dir.
 activity_log_path <- function() {
@@ -4640,7 +4730,7 @@ backfill_activity_log <- function(jobs, path = activity_log_path(),
       duration_min = dur,
       speclib_cached = isTRUE(j$speclib_cached),
       app_version = app_version,
-      notes = "Backfilled from job queue",
+      notes = ACTIVITY_NOTE_BACKFILLED,
       source_type = "search"
     ), path = path)
     n_added <- n_added + 1

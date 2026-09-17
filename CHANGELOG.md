@@ -1,5 +1,187 @@
 # Changelog
 
+## [4.1.0] — 2026-09-10
+
+### Added
+- **The AI features are no longer tied to Google.** A new **AI Provider** selector in the
+  sidebar chooses between Google Gemini and any OpenAI-compatible endpoint — a self-hosted
+  vLLM or llama.cpp server, or an institutional gateway such as
+  `https://llm.metabolomics.us/v1`. The endpoint URL is editable, so the same setting also
+  points at a local server. Gemini remains the default and is unchanged for existing users;
+  nobody needs to do anything.
+- Reasoning models are handled: `<think>` blocks that Qwen3 and similar models emit through
+  vLLM are stripped before the text reaches a summary, including the unterminated block you
+  get when the model runs out of budget mid-thought, and the lone closing `</think>` you get
+  when the chat template injected the opening tag itself.
+
+- **Data Chat now remembers the conversation.** `values$chat_history` had always existed,
+  but it fed only the on-screen chat window and the download button — it was never sent to
+  the model. Every question went out as a fresh request, so a follow-up like "why is that?"
+  arrived with no referent and got a plausible answer to a question the model couldn't see.
+  The last few turns are now threaded into the request, capped so they can't crowd out the
+  DE table on a 65k-context model. No model has memory between API calls; what looks like
+  memory in any chat product is the client resending history, and DE-LIMP wasn't.
+- **Your project name and notes now reach the AI — for the dataset you have loaded, and only
+  yours.** Data Chat looks up the activity-log rows whose search output folder is the loaded
+  dataset's and, where a row records a user, whose user is you. The loaded dataset's folder is
+  recorded only when data is loaded from a search output (HPC browse, job queue, History tab,
+  facility history, or a session that carries one) and is cleared when you upload a report or
+  load example data; it is also tied to the loaded samples, so it can never outlive the data
+  it describes. Notes the app writes itself ("Loaded from session file", "Job: … (…)",
+  "Backfilled from job queue") are not forwarded. The result is labelled in the prompt as
+  recorded by the user, so the model can't mistake your note for its own earlier conclusion.
+  Nothing is sent when nothing matches — including an uploaded report or example data, even
+  right after a search was loaded — no placeholder, no invented default, and never "the most
+  recent row". On the public Hugging Face Space no
+  activity-log notes are sent at all: every visitor runs as the same user in the same home
+  directory, so a row cannot be attributed to the person asking.
+- **The AI Summary prompt no longer asks the model to answer from memory.** It used to
+  request biology "where you recognize the gene name" — an explicit instruction to recall.
+  Benchmarked against four open-weight models on the app's own demo dataset, that clause
+  produced confidently wrong identities: ALDH3A1 reported as a haemoglobin, with a full
+  paragraph of invented interpretation about blood contamination built on top of it. The
+  clause is gone, replaced by a rules block covering identity, sourcing, numeric claims,
+  effect size vs significance, evidence strength, and technical vs biological reads. A new
+  **Evidence Quality** section asks the model to name hits whose statistics look strong but
+  whose measurement is thin, and contaminants that reached significance.
+- **"Most increased" is now defined.** Two models, asked for the most decreased protein,
+  answered the most *significant* one — quoting entirely correct statistics for the wrong
+  protein. Both prompts now state that it is a question about effect size, and that if the
+  largest fold-change and the best p-value belong to different proteins, both should be
+  reported. Regression tests pin this and the other rules.
+- **Protein identities are now supplied, not recalled.** The DE table sent to the AI
+  carries `Genes` from the search FASTA, which DIA-NN has been putting in
+  `y_protein$genes` all along and DE-LIMP simply wasn't sending. Benchmarking against the
+  gateway on 2026-09-10 found two models inventing protein names for accessions whose real
+  identities were sitting one column away — one of them built an entire paragraph about
+  haemoglobin contamination on top of a protein that is actually ALDH3A1. The prompt now
+  forbids naming any protein absent from that column. A join cannot be wrong; recall can.
+- **Evidence strength travels with the result — where the pipeline has it.** Under
+  DPC-Quant, limpa writes `NPrec` (precursors quantified into the protein) and `PropObs`
+  (the share of that protein's precursor-by-run measurements that were observed; for a
+  one-precursor protein, the fraction of runs it was detected in) into `y_protein$genes`.
+  Both are sent to Data Chat and the AI Summary, so thin evidence is a number the model can
+  read rather than something inferred from a zero standard deviation. Which columns exist is
+  read from the pipeline descriptor (`evidence_columns`), so MaxLFQ — which produces
+  neither — is never described as having them. `Protein.Names` and the per-group Mean/SD
+  columns are not sent — measured, that trade buys ~210 *more* proteins in the same budget
+  (444 → 654), so it is more depth and more information at once.
+
+### Changed
+- **Data Chat no longer sends per-sample expression values.** limpa and limma have already
+  done the statistics by the time the AI sees anything — its job is to interpret log2
+  fold-changes and adjusted p-values, not to recompute from intensities. Those columns were
+  roughly 65% of the payload and the least useful 65%. Per-group Mean/SD summaries are not
+  sent either (see "Evidence strength" above).
+- The DE table sent to the AI is now formatted by a single `format_ai_table()` helper:
+  3 significant figures instead of 6 decimal places (precision the measurement does not
+  have), bare accessions instead of `sp|P12345|ALBU_HUMAN`, and tab-separated instead of
+  CSV. Combined with the change above this cuts the payload by roughly 80% — a top-800
+  table drops from ~49,000 tokens to ~10,000 — which is what lets a 32k-context local model
+  do the same job Gemini's 1M-token window was doing. Gemini benefits too: cheaper, faster,
+  and less numeric noise for the model to chew through.
+- **Both Data Chat handlers now share one payload builder.** The auto-summarize and
+  free-text paths carried independent copies of the same 30 lines, which is exactly the
+  duplication architectural rule #3 exists to prevent.
+- The AI privacy modals no longer hardcode "Google Gemini". They name whichever provider is
+  actually selected, read from the provider registry — under architectural rule #1, text
+  that tells a user where their data went must not be a hardcoded guess. Their "what is
+  sent / not sent" lists now match the payload builders field for field (run names in the QC
+  table, Genes, evidence columns, contaminant flag, conversation turns, project notes), and
+  the AI Summary modal no longer promises "known functions, pathway involvement and disease
+  associations", which the new rules forbid.
+- The Gemini File API is no longer on the Data Chat path. It never reduced context cost
+  (uploaded files are tokenised into the request exactly like inline text; it only avoided
+  re-uploading bytes), and at ~10k tokens there is nothing left for it to solve. One code
+  path now serves both providers. `upload_csv_to_gemini()` is retained but marked legacy.
+
+### Fixed before release (independent review of the 4.1.0 AI changes)
+Merging this release deploys to the public Hugging Face Space, where the person typing an
+endpoint URL and API key is an anonymous visitor and every visitor shares one R process.
+- **API keys no longer follow you across providers.** Switching the AI provider, or changing
+  the endpoint host, now clears the API key box. Before, a Gemini key typed first was sent as
+  a `Bearer` token to the OpenAI-compatible endpoint. As a second guard, a key in Google's
+  documented Gemini format is refused by the OpenAI-compatible path — except when the endpoint
+  is Google's own (`https://generativelanguage.googleapis.com/v1beta/openai`); the refusal
+  message explains why and how to proceed (e.g. a LiteLLM proxy's own key). The server also
+  binds the typed key to the provider and endpoint host it was entered for and refuses to send
+  it anywhere else, so an endpoint edit and a click arriving together cannot carry the old key
+  to the new host; emptying the endpoint box (the default host) or editing only its path no
+  longer clears the key.
+- **The endpoint URL can no longer point the server at internal addresses (SSRF).** The URL is
+  validated before any request: https only; no user name, password, query or fragment; and on
+  the public Space the host must resolve to public internet addresses — loopback, RFC 1918,
+  CGNAT, IPv6 ULA, link-local and cloud-metadata ranges are refused, including IPv4 embedded
+  in IPv6. The validated addresses are pinned for the connection and redirects are not
+  followed, so DNS cannot change between the check and the request. A local install may use a
+  private https endpoint, or plain `http://` to a model server on its own machine, its local
+  network (RFC 1918 / CGNAT / ULA) or the container host (`host.docker.internal` — in Docker
+  mode `localhost` is the container), since vLLM, llama.cpp and Ollama serve plain http by
+  default; a one-line warning says the key is then sent unencrypted. Metadata and link-local
+  addresses are refused everywhere. Hosts written in ambiguous numeric forms (`012.0.0.1`,
+  `0x7f.1`, `127.1`) are refused, because curl reads them differently from how they look. Upstream error bodies are
+  no longer echoed into the chat — a failure is one short line (HTTP status plus the
+  provider's own short error message, secrets redacted, markup stripped).
+- **A slow AI request can no longer freeze the public Space for 15 minutes.** Requests are
+  synchronous and block the single R process for every visitor. The Gemini timeout was
+  declared but never applied (Gemini calls had no timeout at all); every request now has one.
+  On the public Space each request is capped at **180 s**; local installs keep the provider's
+  own ceiling (300 s Gemini, 900 s gateway), since there the only session blocked is the
+  user's own. Trade-off: a gateway model slower than 180 s cannot be used on the public Space
+  (it times out with a message saying so). Making the calls asynchronous would remove the
+  trade-off, but `future` is not in the Docker base image and adding packages requires a
+  base-image rebuild, so that is left for a later release.
+- **A failed AI call is no longer presented as a result.** An error used to be rendered under
+  "Analysis Complete" with the download enabled, and in the Run Comparator stored as the
+  narrative — saved to `session.rds` and exported in the Claude ZIP. Errors now raise an error
+  notification and are not stored, rendered as complete, exported, or re-sent to the model as
+  a previous answer. A blocked or empty Gemini response is an error, not a blank result.
+- **"Most increased/decreased" can now actually be answered from the AI Summary data.** The
+  rule told the model to use the largest and smallest logFC, but only the top hits by adjusted
+  p-value were sent. Each comparison now also lists the largest increases and decreases by
+  logFC among significant proteins, labelled as effect-size lists.
+- **Selected proteins are never trimmed from Data Chat.** They were appended to the bottom of
+  the table, which is the end the size budget trims, while the prompt said "focus on these".
+  They are now listed first and exempt from trimming, and the selection list uses the same
+  shortened IDs as the table.
+- **Contaminants are flagged from the single definition.** The AI Summary prompt described
+  contaminants as "accessions beginning Cont_", a second definition that misses cRAP, MaxQuant
+  and FragPipe tags (architectural rule #3). Rows are now flagged with a `Contaminant` column
+  computed by `is_contaminant_accession()`, and the prompts tell the model not to judge
+  contamination from names.
+- **Exports say which AI wrote the text** (architectural rule #1). The chat download labels
+  each reply with its provider and model instead of "GEMINI:"; the Run Comparator panel, its
+  ZIP (`## AI Analysis`) and the Claude prompt (`AI PRE-ANALYSIS (…)`) name the provider and
+  model, which are also saved with the session; the AI Summary report records them too.
+- **`[[SELECT: …]]` highlights what the model named.** The table sends shortened accessions,
+  so the model's IDs matched no row while the chat still said "I have updated your plots". IDs
+  are now mapped back to the full row names (including members of a protein group); the chat
+  only says it updated the plots when something matched, and lists IDs it could not find.
+- **Conversation history is valid for strict chat templates.** Error replies and app notices
+  are dropped, the history always starts with a user turn and alternates, so vLLM
+  Mistral/Gemma/Llama templates no longer reject every request after the first failure.
+- Gemini model names are validated before they are placed in the request path.
+- **A large protein selection can no longer overflow the request.** Selected proteins fill the
+  size budget first but are now capped by it — each also counted for its entry in the prompt's
+  selection list. (1,000 selected proteins previously produced a 52,796-character table against
+  a 40,000-character budget and failed on 65k-token models.) You are told how many selected
+  proteins were left out, and the prompt's selection list names exactly those that were sent.
+- **The Claude export prompt describes measurement depth only when it exists.** It asked for
+  "measurement depth" even under MaxLFQ and never explained the `NPrec`/`PropObs` columns it
+  included. It now uses the same evidence rule as the AI Summary, read from the pipeline
+  descriptor (architectural rule #3).
+- **A failed AI request saved in an older session is no longer shown or exported.** Sessions
+  saved before 4.1.0 could hold an `API Error: …` string as the Run Comparator narrative; on
+  restore it is shown as "not available (saved error)" and left out of exports.
+- **`DELIMP_PUBLIC_DEPLOYMENT` environment variable.** Public-vs-local AI policy was detected
+  only from Hugging Face's `SPACE_ID`, so any other publicly reachable server got the
+  permissive local policy. `DELIMP_PUBLIC_DEPLOYMENT=1` forces the public policy, `=0` forces
+  local; unset keeps `SPACE_ID` detection, and an unrecognised value applies the public policy.
+  See `docs/GOTCHAS.md`.
+- **The Hugging Face page and the User Guide describe the AI features accurately.** They said
+  Data Chat sends per-sample expression data (it does not) and that a Gemini key is required
+  (any supported provider works).
+
 ## [4.0.9] — 2026-08-27
 
 ### Fixed

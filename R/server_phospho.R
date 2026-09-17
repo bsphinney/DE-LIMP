@@ -97,6 +97,7 @@ server_phospho <- function(input, output, session, values, add_to_log) {
 
         incProgress(0.6, detail = "Loading report...")
         # Load main report into pipeline
+        values$loaded_dataset <- NULL   # example data: no activity-log identity
         values$raw_data <- limpa::readDIANN(report_tmp, format = "parquet",
                                              q.cutoffs = input$q_cutoff)
         fnames <- sort(colnames(values$raw_data$E))

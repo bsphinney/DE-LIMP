@@ -461,14 +461,19 @@ server_session <- function(input, output, session, values, add_to_log) {
     showModal(modalDialog(
       title = tagList(icon("gear"), " Settings"),
       size = "m",
-      passwordInput("settings_api_key", "Gemini API Key",
-        value = input$user_api_key %||% "", placeholder = "AIzaSy..."),
+      # Provider-aware: this key goes to the provider selected in the AI Chat sidebar
+      passwordInput("settings_api_key",
+        paste0(ai_provider_field(input$ai_provider %||% "gemini", "key_label"),
+               " (", ai_provider_field(input$ai_provider %||% "gemini", "label"), ")"),
+        value = input$user_api_key %||% "",
+        placeholder = ai_provider_field(input$ai_provider %||% "gemini", "key_placeholder")),
       p(class = "text-muted small",
-        "Required for AI Analysis. Get a key at ",
-        a(href = "https://ai.google.dev", target = "_blank", "ai.google.dev")),
+        "Required for AI Analysis. The key is sent only to the provider selected in the AI Chat sidebar. ",
+        "For Google Gemini, get a key at ",
+        a(href = "https://aistudio.google.com/apikey", target = "_blank", "Google AI Studio"), "."),
       textInput("settings_model_name", "Model Name",
-        value = input$model_name %||% "gemini-3-flash-preview",
-        placeholder = "gemini-3-flash-preview"),
+        value = input$model_name %||% ai_provider_field(input$ai_provider %||% "gemini", "default_model"),
+        placeholder = ai_provider_field(input$ai_provider %||% "gemini", "default_model")),
       footer = tagList(
         modalButton("Cancel"),
         actionButton("save_settings", "Save", class = "btn-success", icon = icon("check"))
@@ -623,6 +628,7 @@ server_session <- function(input, output, session, values, add_to_log) {
         comparator_run_b            = values$comparator_run_b,
         comparator_mode             = values$comparator_mode,
         comparator_gemini_narrative = values$comparator_gemini_narrative,
+        comparator_ai_narrative_source = values$comparator_ai_narrative_source,
         comparator_mofa             = values$comparator_mofa,
         # Acquisition mode
         acquisition_mode = values$acquisition_mode,
@@ -684,6 +690,9 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       # Restore reactive values
       values$raw_data   <- session_data$raw_data
+      # Identity comes from the session's own search settings (NULL when it has none)
+      values$loaded_dataset <- loaded_dataset_identity(session_data$diann_search_settings$output_dir,
+                                                       session_data$raw_data, "session_file")
       values$metadata   <- session_data$metadata
       values$fit        <- session_data$fit
       values$y_protein  <- session_data$y_protein
@@ -748,7 +757,11 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$comparator_run_a            <- session_data$comparator_run_a
         values$comparator_run_b            <- session_data$comparator_run_b
         values$comparator_mode             <- session_data$comparator_mode
-        values$comparator_gemini_narrative <- session_data$comparator_gemini_narrative
+        # A pre-4.1.0 session may hold a stored "API Error: ..." as the narrative
+        restored_ai <- ai_restored_narrative(session_data$comparator_gemini_narrative,
+                                             session_data$comparator_ai_narrative_source)
+        values$comparator_gemini_narrative <- restored_ai$narrative
+        values$comparator_ai_narrative_source <- restored_ai$source
         values$comparator_mofa             <- session_data$comparator_mofa
       }
 
@@ -888,7 +901,7 @@ server_session <- function(input, output, session, values, add_to_log) {
           n_de_proteins = if (!is.null(values$fit)) count_de_proteins(values$fit) else NA,
           app_version = values$app_version %||% "unknown",
           source_type = "session-load",
-          notes = "Loaded from session file"
+          notes = ACTIVITY_NOTE_SESSION_RESTORED
         ))
       }, error = function(e) message("[DE-LIMP] Activity log record failed: ", e$message))
 
@@ -3331,6 +3344,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
         if (all(c("raw_data", "metadata", "fit") %in% names(session_data))) {
           # Full restore
           values$raw_data   <- session_data$raw_data
+          values$loaded_dataset <- loaded_dataset_identity(od, session_data$raw_data, "history_session")
           values$metadata   <- session_data$metadata
           values$fit        <- session_data$fit
           values$y_protein  <- session_data$y_protein
@@ -3378,7 +3392,10 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
             values$comparator_run_a <- session_data$comparator_run_a
             values$comparator_run_b <- session_data$comparator_run_b
             values$comparator_mode <- session_data$comparator_mode
-            values$comparator_gemini_narrative <- session_data$comparator_gemini_narrative
+            restored_ai <- ai_restored_narrative(session_data$comparator_gemini_narrative,
+                                                 session_data$comparator_ai_narrative_source)
+            values$comparator_gemini_narrative <- restored_ai$narrative
+            values$comparator_ai_narrative_source <- restored_ai$source
             values$comparator_mofa <- session_data$comparator_mofa
           }
           if (!is.null(session_data$diann_search_settings)) {
@@ -3438,6 +3455,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
         showNotification("Reading DIA-NN report...", type = "message", duration = 30, id = "hist_load")
         raw_data <- suppressMessages(suppressWarnings(limpa::readDIANN(report_path, format = "parquet")))
         values$raw_data <- raw_data
+        values$loaded_dataset <- loaded_dataset_identity(od, raw_data, "history_report")
         values$qc_stats <- get_diann_stats_r(report_path)
         values$uploaded_report_path <- report_path
         values$original_report_name <- basename(report_path)
@@ -3796,6 +3814,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
 
     # --- Loaded data & pipeline results ---
     values$raw_data <- NULL
+    values$loaded_dataset <- NULL
     values$metadata <- NULL
     values$fit <- NULL
     values$y_protein <- NULL
@@ -3860,6 +3879,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
     values$comparator_run_b <- NULL
     values$comparator_mode <- NULL
     values$comparator_gemini_narrative <- NULL
+    values$comparator_ai_narrative_source <- NULL
     values$comparator_mofa <- NULL
     values$comparator_compare_from_history <- NULL
     values$comparator_diann_log_a <- NULL

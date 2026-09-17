@@ -9,7 +9,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      delimp_data_dir = "",
                      is_core_facility = FALSE, cf_config = NULL,
                      deploy_env = "Local",
-                     config = list(), is_hive = FALSE) {
+                     config = list(), is_hive = FALSE,
+                     ai_public_deployment = is_hf_space) {
 
   # Read app version directly so the navbar shows it without needing
   # values$app_version to round-trip through reactivity.
@@ -429,21 +430,59 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
       ),
 
       accordion_panel("AI Chat", icon = icon("robot"),
-        passwordInput("user_api_key", "Gemini API Key", value = "", placeholder = "AIzaSy..."),
-        tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
-          tags$summary(style = "cursor: pointer; color: #17a2b8;", "How to get a free API key"),
-          tags$ol(style = "margin-top: 5px; padding-left: 20px;",
-            tags$li("Go to ", tags$a("Google AI Studio", href = "https://aistudio.google.com/apikey",
-              target = "_blank", rel = "noopener noreferrer")),
-            tags$li("Sign in with your Google account"),
-            tags$li('Click "Create API Key"'),
-            tags$li("Copy and paste the key above")
-          ),
-          tags$p(style = "margin-bottom: 0;", "The free tier is sufficient for DE-LIMP.")
+        # Provider choices come from the registry in helpers_ai.R so that
+        # adding a provider needs no edit here (CLAUDE.md rule #3).
+        selectInput("ai_provider", "AI Provider",
+          choices  = setNames(names(ai_providers()),
+                              vapply(ai_providers(), function(p) p$label, character(1))),
+          selected = "gemini"),
+
+        passwordInput("user_api_key", "API Key", value = "", placeholder = "AIzaSy..."),
+
+        # --- Gemini-specific help ---
+        conditionalPanel("input.ai_provider == 'gemini'",
+          tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
+            tags$summary(style = "cursor: pointer; color: #17a2b8;", "How to get a free API key"),
+            tags$ol(style = "margin-top: 5px; padding-left: 20px;",
+              tags$li("Go to ", tags$a("Google AI Studio", href = "https://aistudio.google.com/apikey",
+                target = "_blank", rel = "noopener noreferrer")),
+              tags$li("Sign in with your Google account"),
+              tags$li('Click "Create API Key"'),
+              tags$li("Copy and paste the key above")
+            ),
+            tags$p(style = "margin-bottom: 0;", "The free tier is sufficient for DE-LIMP.")
+          )
         ),
+
+        # --- OpenAI-compatible endpoint ---
+        conditionalPanel("input.ai_provider == 'openai_compat'",
+          textInput("ai_base_url", "Endpoint URL",
+            value = ai_provider_field("openai_compat", "base_url"),
+            placeholder = "https://llm.metabolomics.us/v1"),
+          tags$details(style = "margin: 5px 0 10px 0; font-size: 0.85em; color: #6c757d;",
+            tags$summary(style = "cursor: pointer; color: #17a2b8;", "What is this?"),
+            tags$p(style = "margin-top: 5px;",
+              "Any endpoint that speaks the OpenAI ", tags$code("/v1/chat/completions"),
+              " API — a self-hosted vLLM or llama.cpp server, or an institutional gateway."),
+            tags$p("Your data goes to that endpoint only, not to Google."),
+            # Mirrors ai_deployment_policy() in helpers_ai.R
+            if (ai_public_deployment) tags$p(style = "margin-bottom: 0;",
+              "On this public site the endpoint must be a public https:// address; ",
+              "local and private-network servers are refused, and each request is limited to ",
+              AI_PUBLIC_MAX_TIMEOUT_S, " seconds. Run DE-LIMP locally to use a model server on your own machine or network. ",
+              "Changing the provider or the endpoint host clears the API key.")
+            else tags$p(style = "margin-bottom: 0;",
+              "Use https://. Plain http:// is accepted for a model server on this computer, your local network ",
+              "or the Docker host (http://host.docker.internal:11434/v1) \u2014 the key is then sent unencrypted. ",
+              "Changing the provider or the endpoint host clears the API key.")
+          )
+        ),
+
         actionButton("check_models", "Check Models", class="btn-warning btn-xs w-100"),
         br(), br(),
-        textInput("model_name", "Model Name", value = "gemini-2.5-flash", placeholder = "gemini-2.5-flash")
+        textInput("model_name", "Model Name",
+                  value = ai_provider_field("gemini", "default_model"),
+                  placeholder = "gemini-2.5-flash")
       )
     ),
 
@@ -2620,7 +2659,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   tags$p(class = "text-muted small",
                     "Generate an AI narrative summary or export data for external analysis."),
                   tags$div(style = "display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;",
-                    actionButton("comparator_gemini_btn", "Generate Gemini Summary",
+                    actionButton("comparator_gemini_btn", "Generate AI Summary",
                                  icon = icon("wand-magic-sparkles"),
                                  class = "btn-outline-primary"),
                     actionButton("comparator_view_prompt_btn", "View Prompt",

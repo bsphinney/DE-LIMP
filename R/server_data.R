@@ -71,6 +71,8 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         # Per-column cutoffs: limpa recycles q.cutoffs against q.columns
         # element-wise, so PG.Q.Value can take DIA-NN's recommended 0.05.
         q_cuts <- vapply(q_cols, diann_cutoff_for, numeric(1), q_cutoff = input$q_cutoff)
+        # Not a search output folder: no activity-log identity (see loaded_dataset_identity)
+        values$loaded_dataset <- NULL
         values$raw_data <- limpa::readDIANN(temp_file, format="parquet",
                                             q.columns=q_cols, q.cutoffs=unname(q_cuts))
         values$quantums_filter_applied <- character(0)
@@ -167,6 +169,9 @@ server_data <- function(input, output, session, values, add_to_log, is_hf_space)
         # MaxLFQ paths apply the SAME identification FDR to the same report.
         q_cols <- diann_q_columns(input$report_file$datapath)
         q_cuts <- vapply(q_cols, diann_cutoff_for, numeric(1), q_cutoff = input$q_cutoff)
+        # An uploaded report has no search output folder: drop any identity left by
+        # an earlier HPC/session load so its project notes are not attached here.
+        values$loaded_dataset <- NULL
         values$raw_data <- limpa::readDIANN(input$report_file$datapath, format="parquet",
                                             q.columns=q_cols, q.cutoffs=unname(q_cuts))
         values$quantums_filter_applied <- character(0)

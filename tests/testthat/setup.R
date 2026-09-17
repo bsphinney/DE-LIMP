@@ -31,3 +31,7 @@ source(file.path(project_root, "R", "helpers_proteog_assembly.R"))
 source(file.path(project_root, "R", "helpers_slims.R"))
 source(file.path(project_root, "R", "helpers_rnaseq.R"))
 source(file.path(project_root, "R", "helpers_proteog_qc.R"))
+
+# Load helpers_ai.R (ai_providers, format_ai_table) — pure functions; the HTTP
+# callers below them are defined but never invoked by the test suite.
+source(file.path(project_root, "R", "helpers_ai.R"))

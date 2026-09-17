@@ -20,7 +20,7 @@ tags:
 
 # DE-LIMP: Differential Expression & Limpa Proteomics 🧬
 
-An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with **Google Gemini AI** integration.
+An interactive R Shiny application for differential expression analysis of DIA-NN proteomics data. Built on **Limpa** (a Bioconductor package for DIA proteomics normalization and quantification) and **Limma** (a widely-used statistical framework for differential expression), with optional AI assistance (Google Gemini or an OpenAI-compatible endpoint).
 
 ## ✨ What's New in v4.0.0
 
@@ -41,8 +41,8 @@ An interactive R Shiny application for differential expression analysis of DIA-N
 - **QC Trends** - Monitor run quality with group averages
 - **Multi-Protein Violin Plots** - Compare expression distributions
 
-### 🤖 AI-Powered Analysis (Google Gemini)
-> **API Key Required:** You must provide your own free Gemini API key. Get one at [Google AI Studio](https://aistudio.google.com/) and paste it into the sidebar. AI Summary sends only summary statistics (protein names, logFC, adj.P.Val). Data Chat sends per-sample expression data for top DE proteins to enable interactive Q&A.
+### 🤖 AI-Powered Analysis (Google Gemini or an OpenAI-compatible endpoint)
+> **API Key Required:** Choose a provider in the AI Chat sidebar and bring your own key — a free Gemini key from [Google AI Studio](https://aistudio.google.com/apikey), or the key for an OpenAI-compatible service. On this public Space the endpoint must be a public `https://` address. **No per-sample expression values are sent by either feature.** AI Summary sends, per comparison, the top significant proteins and the largest increases/decreases by fold-change (accession, gene name, log2FC, adjusted p-value, precursor count and observed proportion when the quantification pipeline provides them, and a contaminant flag), plus cross-comparison and CV-stability summaries. Data Chat sends the QC table (run names, groups, precursor/protein counts, MS1 signal), the top 100–800 DE proteins for the selected comparison with the same per-protein statistics plus AveExpr, t, P.Value and B, your selected proteins, your messages and the last few turns of the conversation. The model is told to name proteins only from the supplied gene names — it is not asked to recall biology from memory.
 
 - **AI Summary** - Analyzes all contrasts at once: top DE proteins, cross-comparison biomarkers, and CV stability metrics. Export as standalone HTML report
 - **Interactive Data Chat** - Conversational AI with full dataset context (QC stats, top DE proteins, phospho sites when available). Auto-Analyze button for one-click reports
