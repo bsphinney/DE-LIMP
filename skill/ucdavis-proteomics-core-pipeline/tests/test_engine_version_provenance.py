@@ -180,6 +180,45 @@ class EngineVersionRecordTests(unittest.TestCase):
         self.assertIn("PIN_ENGINE=diann PIN_VERSION=2.6.1 bash scripts/acquire_tools.sh hpc "
                       "/quobyte/proteomics-grp/fran/engines/pilot_tools", err)
 
+    def _assert_pasteable(self, err, *commands):
+        """Each command the message tells the user to run is a line of its own, and bash can
+        parse every such line as it stands. The first version glued the explanation onto the
+        end -- `... acquire_tools.sh hpc <root> (this rewrites every engine's entry ...)` -- so
+        the line an agent or user copied failed with `syntax error near unexpected token '('`.
+        Here "a line of its own" means: some stderr line, stripped, IS the command."""
+        lines = [ln.strip() for ln in err.splitlines()]
+        for cmd in commands:
+            self.assertIn(cmd, lines, err)
+            r = subprocess.run(["bash", "-n", "-c", cmd], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, f"{cmd!r}: {r.stderr}")
+
+    def test_the_mismatch_fix_it_command_can_be_pasted_as_it_stands(self):
+        rec, err = record("diann", {"diann": "2.7.0"}, DIANN_261,
+                          cmd="/quobyte/proteomics-grp/fran/engines/pilot_tools/diann/2.7.0/diann-2.7.0/diann-linux",
+                          tools_root="/quobyte/proteomics-grp/fran/engines/pilot_tools",
+                          platform_class="hpc")
+        self.assertIs(rec["mismatch"], True)
+        self._assert_pasteable(err, "PIN_ENGINE=diann PIN_VERSION=2.6.1 bash "
+                                    "scripts/acquire_tools.sh hpc "
+                                    "/quobyte/proteomics-grp/fran/engines/pilot_tools")
+        self.assertIn("rewrites every engine's entry", err)      # the caveat is still said
+
+    def test_the_null_note_fix_it_command_can_be_pasted_as_it_stands(self):
+        rec, err = record("diann", {"diann": "latest"}, DIANN_261, cmd="/opt/engine/bin",
+                          tools_root="/home/u/my tools", platform_class="linux")
+        self.assertIsNone(rec["value"])
+        self._assert_pasteable(err, "PIN_ENGINE=diann PIN_VERSION=2.6.1 bash "
+                                    "scripts/acquire_tools.sh linux '/home/u/my tools'")
+
+    def test_the_mac_fix_it_commands_can_be_pasted_as_they_stand(self):
+        rec, err = record("diann", {"diann": "2.7.0"}, DIANN_261,
+                          cmd="docker run --rm -v $PWD:/data proteomics-pipeline/diann:2.7.0 diann-linux",
+                          platform_class="mac", tools_root="/Users/u/.proteomics-pipeline/tools")
+        self.assertIs(rec["mismatch"], True)
+        self._assert_pasteable(err, "bash scripts/build_diann_docker.sh 2.6.1",
+                               "DIANN_DOCKER_IMAGE=proteomics-pipeline/diann:2.6.1 bash "
+                               "scripts/acquire_tools.sh mac /Users/u/.proteomics-pipeline/tools")
+
     def test_mac_docker_mismatch_fix_it_rebuilds_the_image(self):
         """On macOS acquire_tools.sh only wraps $DIANN_DOCKER_IMAGE, so re-running it cannot
         change the version; the image has to be built for the pin."""

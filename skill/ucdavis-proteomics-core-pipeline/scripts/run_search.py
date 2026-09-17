@@ -112,24 +112,34 @@ def command_engine_versions(engine, tools):
 
 
 def _reacquire_hint(engine, pin, tools):
-    """The command that gets the manifest's pin into THIS tools.json. The root matters: the
-    pilot ran --tools .../pilot_tools/tools.json, and acquire_tools.sh without a root rewrites
-    ~/.proteomics-pipeline/tools/tools.json instead, leaving the mismatch in place."""
+    """How to get the manifest's pin into THIS tools.json: a lead-in ending in ':' and then
+    each command on a line of its own, indented, so the line a user or agent copies is
+    exactly a command. (The first version put the explanation after the command on the same
+    line, and pasting it failed with `syntax error near unexpected token '('`.)
+
+    The root matters: the pilot ran --tools .../pilot_tools/tools.json, and acquire_tools.sh
+    without a root rewrites ~/.proteomics-pipeline/tools/tools.json instead, leaving the
+    mismatch in place."""
     t = tools or {}
     cls = t.get("platform_class") or "<platform_class>"
     root = f" {shlex.quote(t['tools_root'])}" if t.get("tools_root") else ""
     # acquire_tools.sh re-resolves EVERY engine into that tools.json, and an engine it is not
     # pinning goes to "latest": on HIVE the pilot's pinned 2.7.0 DIA-NN entry would become
     # the Core's 2.6.1 after a Sage-only re-acquire. Say so rather than let the fix move it.
-    caveat = (" (this rewrites every engine's entry in that tools.json; engines other than "
-              f"{engine} are re-resolved unpinned)")
+    caveat = (f"this rewrites every engine's entry in that tools.json; engines other than "
+              f"{engine} are re-resolved unpinned")
     if engine == "diann" and cls == "mac":
         # acquire_tools.sh only wraps $DIANN_DOCKER_IMAGE on macOS; re-running it cannot
-        # change the version inside the image. The image has to be built for the pin.
-        return (f"bash scripts/build_diann_docker.sh {pin}, re-source activate.sh so "
-                f"DIANN_DOCKER_IMAGE is proteomics-pipeline/diann:{pin}, then "
-                f"bash scripts/acquire_tools.sh mac{root}{caveat}")
-    return f"PIN_ENGINE={engine} PIN_VERSION={pin} bash scripts/acquire_tools.sh {cls}{root}{caveat}"
+        # change the version inside the image. The image has to be built for the pin, and
+        # build_diann_docker.sh tags it proteomics-pipeline/diann:<pin>. Passing that tag on
+        # the acquire line works without re-sourcing activate.sh first.
+        image = f"proteomics-pipeline/diann:{pin}"
+        cmds = [f"bash scripts/build_diann_docker.sh {pin}",
+                f"DIANN_DOCKER_IMAGE={image} bash scripts/acquire_tools.sh mac{root}"]
+        caveat += f"; afterwards re-source activate.sh so new shells export {image}"
+    else:
+        cmds = [f"PIN_ENGINE={engine} PIN_VERSION={pin} bash scripts/acquire_tools.sh {cls}{root}"]
+    return f"({caveat}):" + "".join(f"\n    {c}" for c in cmds)
 
 
 def engine_version_record(engine, tools, bundle):
@@ -210,7 +220,7 @@ def engine_version_record(engine, tools, bundle):
             fix = (" (A sage on PATH has no release record, and `sage --version` cannot supply "
                    "one: the v0.14.7 release binary prints 0.14.6.)")
         elif mv:
-            fix = f" To record the build, re-acquire it: {_reacquire_hint(engine, mv, t)}"
+            fix = f" To record the build, re-acquire it {_reacquire_hint(engine, mv, t)}"
         else:
             fix = ""
         out(f"[run_search] NOTE: tools.json names no {engine} build ({tools_raw!r}) and {why}; "
@@ -221,7 +231,7 @@ def engine_version_record(engine, tools, bundle):
         out(f"[run_search] WARNING: engine version mismatch -- workflow.manifest.json pins "
             f"{engine} {mv}, but {version} is what runs ({cmd}). {version} is recorded as "
             f"`version`; the pin is kept beside it in search_provenance.json "
-            f"(`engine_version.mismatch: true`). If {mv} was intended, re-acquire it: "
+            f"(`engine_version.mismatch: true`). If {mv} was intended, re-acquire it "
             f"{_reacquire_hint(engine, mv, t)}\n")
     return {"value": version, "source": source,
             "tools_json": tools_raw or None,               # as written, even "latest"

@@ -11,7 +11,7 @@
 #   Version pinning (PLAN.md §7c): the orchestrator passes the workflow bundle's
 #   engine + version so we install/resolve THAT EXACT version, not GitHub
 #   "latest". Pass via env:
-#          PIN_ENGINE=diann PIN_VERSION=2.6.0 bash acquire_tools.sh hpc
+#          PIN_ENGINE=diann PIN_VERSION=2.6.1 bash acquire_tools.sh hpc   # the pin resolve_defaults.py writes
 #   Installs are cached under <root>/<engine>/<version>/ so multiple pinned
 #   versions coexist and results stay reproducible.
 #
