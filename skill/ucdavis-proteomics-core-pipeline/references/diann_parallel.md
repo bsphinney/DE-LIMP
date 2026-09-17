@@ -13,12 +13,13 @@ routes to the chain when **all** of these hold, and prints the reason either way
 | engine is **DIA-NN** | the chain is DIA-NN-specific |
 | **more than 5 files** (`--parallel-threshold`, default 5) | below that, chain overhead (library prediction + two array round-trips) outweighs the win |
 | **SLURM present** (`sbatch` on PATH) | steps 2 and 4 are job arrays — there is no non-cluster equivalent |
-| **mass accuracy fixed** in the `--cfg` | steps 3/5 reuse the `.quant` files from 2/4; auto-calibration would differ between passes and corrupt the cross-run report |
+| **mass accuracy fixed** in the `--cfg` — or planned `measure_with_diann` by `estimate_params.py` (an Orbitrap with a level outside DIA-NN's table) | steps 3/5 reuse the `.quant` files from 2/4; auto-calibration would differ between passes and corrupt the cross-run report |
 
 Any condition unmet → single-shot search, reason printed and written to
 `search_provenance.json` (`search_mode`, `parallel_routing_reason`). The fixable one is
 almost always mass accuracy: re-run `estimate_params.py` with the **real instrument** so
-it pins the DIA-NN recommended values, and parallel enables itself. Force the decision
+it pins the DIA-NN recommended values (or, for an Orbitrap level outside the table, plans
+to measure it with DIA-NN), and parallel enables itself. Force the decision
 with `--no-parallel` or `--parallel-threshold N`.
 
 `diann_parallel.py` **refuses to run** on a cfg whose mass accuracy is omitted (auto) or
@@ -53,13 +54,14 @@ nodes simultaneously instead of one long single-node job; MBR is replaced by the
 empirical-library round-trip.
 
 ## Critical details (don't change these)
-- **Mass accuracy is FIXED (manual), never auto.** Steps 3/5 reuse `.quant` files, so
+- **Mass accuracy is FIXED, never auto.** Steps 3/5 reuse `.quant` files, so
   auto-calibration would be inconsistent (per DIA-NN dev guidance). So the `--cfg` you
   pass **must** have real `--mass-acc`/`--mass-acc-ms1` values — i.e. estimate params
   from a **known instrument** (timsTOF → 15/15, Astral → 4/10, Orbitrap by resolution;
-  the DIA-NN-recommended table in `estimate_params.py`). `--mass-acc 0` is **not** auto:
-  DIA-NN fixes the tolerance at a literal 0 ppm and returns 0 IDs. Auto is the flags
-  omitted, and neither can run as the chain.
+  the DIA-NN-recommended table in `estimate_params.py`) — **or** be an `estimate_params.py`
+  cfg for an Orbitrap with a level outside that table, which step 1b measures and pins for
+  every step (below). `--mass-acc 0` is **not** auto: DIA-NN fixes the tolerance at a literal
+  0 ppm and returns 0 IDs. Auto is the flags omitted, and neither can run as the chain.
 - **No MBR** (`--reanalyse` is dropped) — the 5-step replaces it.
 - **`--quant-ori-names`** on every step so `.quant` files are `<basename>.quant`.
 - Step 4 **skips** files that failed step 2 (missing `.quant`).
@@ -231,7 +233,11 @@ with a bash syntax error after the gate had approved it, and `x{1,2}`, `~/libs` 
 would be rewritten. Only `$NAME`/`${NAME}` still expand; `$(...)` and backticks are
 literal. A cfg path that is not a file is reported as `cfg not found`, not as unpinned mass
 accuracy. Unpinned or invalid **mass accuracy** is not
-parallel-safe and refuses, rather than producing a quietly-inconsistent report.
+parallel-safe and refuses, rather than producing a quietly-inconsistent report — **except**
+when `estimate_params.py` planned to measure it (both flags omitted and
+`measure_with_diann` in `<cfg>.rationale.json`: an Orbitrap with a level outside DIA-NN's
+table; see "Orbitrap mass accuracy" below). The plan never rescues an invalid value, one flag
+of the two, or a bad `--window`.
 
 `--window` must be a **positive integer**. DIA-NN does not accept `0` — it logs
 `scan window radius should be a positive integer` and optimises per file (the poplar run
@@ -246,13 +252,17 @@ inserts **step 1b** after library prediction: it hands `probe_window.py` the who
 **median** (below — not the first file). It writes the radius to `<out>/window.txt` and
 every probe to `<out>/window.json`, and steps 2–5 read `window.txt` at runtime, so every
 pass uses the identical value. Any `--window` in the cfg is dropped from those
-steps so the measured value cannot collide with it. For Thermo `.raw` inputs step 1b
+steps so the measured value cannot collide with it. When mass accuracy is planned for
+measurement the same probes measure it too, into `<out>/massacc.txt` (`$(cat massacc.txt)` on
+steps 2–5); a pinned `--window` with a planned mass accuracy still gets step 1b, measuring mass
+accuracy only. For Thermo `.raw` inputs step 1b
 exports the same .NET 8 environment every other step's DIA-NN gets — without it DIA-NN
 cannot read `.raw`, no radius is logged, and steps 2–5 wait on `afterok` for ever.
 
-Only after a radius is measured does step 1b write `<out>/params.resolved.cfg` — the cfg
-plus the measured `--window` — so a "resolved" cfg without a window can never exist; a
-resubmitted step 1b first removes the previous run's `window.txt`, `window.json`, resolved
+Only after a radius (and a planned mass accuracy) is measured does step 1b write
+`<out>/params.resolved.cfg` — the cfg plus the measured `--window` (and `--mass-acc` /
+`--mass-acc-ms1`) — so a "resolved" cfg without them can never exist; a
+resubmitted step 1b first removes the previous run's `window.txt`, `massacc.txt`, `window.json`, resolved
 cfg and probe logs. If no radius comes back, step 1b exits non-zero with `FAILED:` (keeping
 `window.json` as the evidence) and steps 2–5 never
 start: they were submitted `afterok` on that job id, so they sit `DependencyNeverSatisfied`
@@ -399,6 +409,210 @@ the probe: SIGKILL) goes to the whole group. On HIVE (apptainer 1.5.3, srun job 
 `--diann "apptainer exec … bash -c 'sleep 40; echo Scan window radius set to 9'"`: a 5 s
 timeout returned after 5.3 s with 0 container processes left, and SIGTERM to the probe left
 0 (a probe that signalled only its child returned after 41.2 s and left 2).
+
+## Orbitrap mass accuracy with no documented tier: measured with DIA-NN
+
+DIA-NN's README gives mass accuracy for Orbitraps at 240k, 120k, 60k and 30k only. Real DIA
+methods sit outside that: both Orbitraps in the FRAN re-search pilot acquire MS2 at **15,000**
+(Exploris 480 at 60k/15k and 120k/15k, Fusion Lumos at 120k/15k). `estimate_params.py` used to
+extrapolate that to 23.3 ppm and pin it. It no longer extrapolates. For an Orbitrap with a level
+whose resolution is unknown or outside 30k–240k it writes `mass_accuracy_plan:
+measure_with_diann` into `<cfg>.rationale.json`, and records any level that **does** have a tier
+under `mass_accuracy_documented` (MS1 7 ppm at 120k, 10 at 60k).
+
+**The cfg carries neither flag.** DIA-NN 2.7.0 fixes BOTH levels when either is given:
+
+```
+WARNING: note the mass accuracy settings used by DIA-NN, automatic optimisation will not be performed as at least one of MS1/MS2 mass accuracies is user-provided
+Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)
+```
+
+(HIVE srun job 23528991, `--window 7 --mass-acc-ms1 7` alone; with `--mass-acc 14` alone MS1 was
+fixed at 2e-05 instead.) A cfg holding only the documented `--mass-acc-ms1 7` would therefore
+search MS2 at an unchosen 20 ppm. The measurement writes both flags together.
+
+**A documented level keeps its documented value.** An earlier cut of this branch measured MS1 as
+well and pinned 4.2 ppm at 120k. Every DIA-NN pass then logged `WARNING: the MS1 mass accuracy
+setting (4.2 ppm) deviates significantly from the value recommended (7 ppm) for the Orbitrap
+resolution of this run (120000)` — DIA-NN reads the run's resolution itself, and at 120k its
+runtime value and the README table agree. The per-run MS1 values are still recorded in the
+evidence JSON; they are not pinned.
+
+**The rule** (`mass_acc_measure_plan()`, read by `parallel_safe()` for the router and the
+generator, and by `run_search.run_diann()` for a single-shot search): unpinned mass accuracy is
+measured only when (1) both flags are absent — not `0`, negative, junk, or one of the two;
+(2) the sidecar plans `measure_with_diann`; and (3) any documented value is one positive number
+for one level. The chain also needs a step 1b — probing on and no `--seed-lib`; without one the
+verdict is `mass_acc_no_probe` / `mass_acc_seeded`, whose fix names the flag. Anything else
+still declines, in `parallel_safe()`'s order: an invalid value (`mass_acc_invalid`) or a bad
+`--window` (`window_invalid`) is reported first, and the plan never rescues it. Only the
+*omitted* cases — `mass_acc_unset`, `mass_acc_no_probe`, `mass_acc_seeded` — can be overridden
+with `--allow-auto-mass-acc`, as upstream (#70) limits it. A pinned `--window` with a planned
+mass accuracy still gets step 1b, measuring mass accuracy only, and the probes run under that
+`--window`, as steps 2–5 do.
+
+**Why a single value exists to carry forward.** DIA-NN keeps two things apart. *Mass
+calibration* — correcting each run's systematic m/z error — happens in every run, pinned
+tolerance or not (with `--mass-acc 20 --mass-acc-ms1 7` DIA-NN 2.7.0 still logs `Calibrating
+with mass accuracies 25 (MS1), 25 (MS2)`). *Mass accuracy* is the tolerance setting, and in
+auto mode DIA-NN itself optimises it on the first run "and then reuse[s] the optimised settings
+for other runs" (README) — so a single value per experiment is DIA-NN's own model; the question
+is only which run it comes from.
+
+**Where the method comes from, and where it departs.** The README's item 6 of "Changing default
+settings", in full: *"One can also optimise all parameters to achieve the best possible
+performance from the data. For this, run DIA-NN on several representative runs (best to use any
+suitable empirical library, as this is the quickest) with **Unrelated runs** option checked and
+review the 'Averaged recommended settings for this experiment' values reported at the end of
+the log."* Step 1b is **adapted from** that, not an implementation of it: it uses the chain's
+predicted library (no empirical library exists yet), runs one DIA-NN per representative run
+rather than one "Unrelated runs" search, and pins the **median** of what each run printed rather
+than DIA-NN's averaged line. On the validation cohort the two disagree — DIA-NN's averaged line
+says MS2 16 / MS1 4, the per-run median is MS2 14 (below).
+
+**What step 1b does.** `probe_window.py --measure window mass-acc --ms1-ppm 7` runs one DIA-NN
+per chosen run with both mass-accuracy flags and `--window` omitted, and stops it once it has
+logged what it needs:
+
+```
+DIA-NN will automatically optimise the mass accuracy for the first run of the experiment, use this mode for preliminary analyses only
+[1:34] Scan window radius set to 7
+[1:35] Recommended MS1 mass accuracy setting: 4.1 ppm
+[2:27] Optimised mass accuracy: 14 ppm
+[2:45] Searching decoys
+```
+
+(DIA-NN 2.7.0, HIVE srun job 23522741: Exploris 480 120k/15k, full mouse predicted library,
+32 threads; the whole run took 5:13.) It pins the median (low) of each **measured** level, **as
+DIA-NN printed it and not rounded**, and the documented value of the other. `<out>/massacc.txt`
+holds `--mass-acc X --mass-acc-ms1 Y`; steps 2–5 put `$(cat massacc.txt)` on their command lines;
+`params.resolved.cfg` gets both flags; `window.json` records each run's `ms2_ppm` / `ms1_ppm`
+beside its radius, and `mass_acc` holds the pin, the per-run lists and each level's source.
+
+A probe **counts only when its run logged everything asked** — the radius and the mass accuracy.
+A run that did not is replaced by the next run nearest the median, exactly as a run with no
+radius is, and what it did log is recorded in `window.json` but never pinned: otherwise the radius
+and the mass accuracy would describe different sets of runs. If no run answers (3 failures, the
+budget, or no runs left), step 1b fails with `FAILED: step 1b measured no scan-window radius and
+mass accuracy`, keeps `window.json`, and leaves no `window.txt`, `massacc.txt` or
+`params.resolved.cfg`; the earlier ones are deleted before the probe starts. The generator's
+`mass_acc` record — `result.mass_acc` in `search_provenance.json` — says `measured: true`, with
+`value_file` (`massacc.txt`), `evidence_file` (`window.json`) and the documented level, instead of
+the record for an omitted flag ("not in the cfg (DIA-NN calibrates it itself)").
+
+Values are read only from a run that **announced** automatic optimisation (the first line
+above). A pinned run still prints `Recommended MS1 mass accuracy setting` (`[1:50] ... 4.3 ppm`
+under a pinned 20/7), so recognising "fixed" by its wording alone would let a reworded notice pass
+a pinned run's recommendation off as a measurement. A run whose settings end (`1 files will be
+processed`) without the announcement is stopped at once and reported, and **no other run is
+tried** (`stopped_because: environment`, like DIA-NN's missing-.NET error): every run gets the
+same flags.
+
+**Steps 2–5 refuse to start without what step 1b measured.** `$(cat massacc.txt)` expands to
+nothing when the file is missing, and DIA-NN then optimises mass accuracy per file and still
+writes a `.quant`, so `must_exist` passes. Step 1b deletes the file before probing, and
+`references/watcher.md` resubmits the downstream steps of a stalled chain, so this is reachable
+(review reproduction: `step2_firstpass.sbatch` after a failed step 1b ran DIA-NN with no
+mass-accuracy flag). Each of steps 2–5 now checks that `window.txt` holds a positive integer and
+`massacc.txt` holds the two flags before anything else, and names step 1b when either does not.
+(Steps 2–5 of the *same* submission are `afterok` on a failed step 1b and never start; this is
+for the resubmission, which must run step 1b again before them.)
+
+**Validated on HIVE** (DIA-NN 2.7.0, 2026-09-16): the generated step 1b, run with bash inside
+`srun` on 16 CPUs, on the Set1-30-34-mouse cohort — 5 Exploris 480 runs at 120k/15k — against
+a mouse one-per-gene predicted library built with the pilot's settings (3,757,675 precursors).
+The tables below come from this branch before it was rebased onto the representative-run step
+1b (size-ranked `.raw` then too, so the same three runs; no replacement, no `--budget`). **The
+rebased code was re-run the same way** (HIVE srun jobs 23544316 and 23544317, 16 CPUs each): the
+generated step 1b probed TT33 (median, now first) / TT34 / TT32 and logged radius 7, 7, 7, MS2
+17, 14, 14 and MS1 4.3, 4.1, 4.2 ppm (214 / 184 / 271 s). It wrote `massacc.txt` `--mass-acc 14
+--mass-acc-ms1 7`, `window.txt` 7 and a `params.resolved.cfg` ending `--window 7 --mass-acc 14
+--mass-acc-ms1 7`, in 670 s, with `stopped_because: measured`. With `massacc.txt` moved away,
+step 2 exited 1 with the `FAILED: ... does not hold the two mass-accuracy flags` message. The
+single-shot search job's probe gave the same per-run values and `--mass-acc 14 --mass-acc-ms1 7`
+in 694 s, moved `params.resolved.cfg` into place, and `search_provenance.json` recorded
+`resolved_params_produced: runtime`. No `diann-linux` was left running. The first two columns
+below are from the first cut of this branch, which measured both levels:
+
+| run (role, size) | `--window` omitted: radius / MS2 / MS1 | `--window 7` in the cfg: MS2 / MS1 |
+|---|---|---|
+| TT34 (lower quartile, 1.29 GB) | 7 / 14 / 4.1 ppm (198 s) | 14 / 4.1 ppm (205 s) |
+| TT33 (median, 1.36 GB) | 7 / 17 / 4.3 ppm (222 s) | 17 / 4.3 ppm (233 s) |
+| TT32 (upper quartile, 1.46 GB) | 7 / 14 / 4.2 ppm (274 s) | 12 / 4.5 ppm (302 s) |
+| **median** | MS2 14 / MS1 4.2 | MS2 14 / MS1 4.3 |
+
+After the review fixes, the same cohort and library, 16 CPUs each (HIVE srun jobs 23531717 and
+23531719): the generated step 1b with `--window` omitted, and `run_search.py --sbatch` for a
+single-shot search with its search job run up to (not including) the DIA-NN search line.
+
+| | step 1b (chain) | single-shot search job, pre-search probe |
+|---|---|---|
+| probe command | `--measure window mass-acc --ms1-ppm 7` | `--measure mass-acc --ms1-ppm 7` |
+| TT34 / TT33 / TT32 | radius 7, 7, 7; MS2 14, 17, 14; MS1 4.1, 4.3, 4.2 (194 / 214 / 273 s) | MS2 14, 17, 14; MS1 4.1, 4.3, 4.2 (227 / 256 / 325 s) |
+| `massacc.txt` | `--mass-acc 14 --mass-acc-ms1 7`, window 7 (680 s) | `--mass-acc 14 --mass-acc-ms1 7` (810 s) |
+| `params.resolved.cfg` | `--window 7 --mass-acc 14 --mass-acc-ms1 7` | `--mass-acc 14 --mass-acc-ms1 7` |
+
+Every probe logged the automatic-optimisation announcement before `1 files will be processed`,
+which is what the probe now requires. With `massacc.txt` moved away, `step2_firstpass.sbatch`
+exited 1 at once with `FAILED: .../massacc.txt does not hold the two mass-accuracy flags -- step
+1b (step1b_window.sbatch) measures it ...`, and no DIA-NN started.
+
+The per-run values equal those of complete DIA-NN searches of the same runs at 32 threads, and
+of one search of all three with `--individual-mass-acc --individual-windows` (the README's
+"Unrelated runs"), whose log ends `Averaged recommended settings for this experiment: MS1
+accuracy = 4 ppm, MS2 accuracy = 16 ppm, Scan window = 7`. That MS2 average is neither the median
+(14) nor the mean (15) of the MS2 values DIA-NN printed per run, so it comes from something the
+log does not show.
+
+**The TT32 row is not noise.** Its `--window 7` values (MS2 12 / MS1 4.5) reproduced exactly in
+two separate sruns (23524590 and 23526415). Pinning the window changes the conditions DIA-NN
+optimises under, deterministically. So with `--window` omitted, step 1b measures mass accuracy
+under the radius DIA-NN infers, while steps 2–5 run with the median radius pinned — on this cohort
+every run inferred 7 and only TT32 moved, and the pinned MS2 median is 14 either way (MS1, now
+documented at 120k, is not affected). A cohort whose runs infer different radii could shift
+more; measuring the window first and mass accuracy second would remove the difference at the
+cost of a second probe per run.
+
+With `--window N` given, DIA-NN echoes `Scan window radius set to N` among its startup settings.
+That is the cfg's value, so the probe records only what it was asked to measure, and refuses to
+"measure" a window that its DIA-NN flags pin (`--extra`, or after `--` as step 1b passes them).
+
+**What the pinned value changes**, on TT33 (the median run) searched with `--window 7` and each
+candidate (32 threads, same library and flags). The last column is DIA-NN 2.7.0's own verdict on
+the setting; it prints at most one such warning per run, MS1 first:
+
+| MS2 / MS1 ppm | where it comes from | precursors at 1% FDR | protein groups, global q ≤ 0.01 | DIA-NN warning |
+|---|---|---|---|---|
+| **14 / 7** | **this branch: step 1b MS2 median, README MS1 tier** | 18,476 | 2,574 | MS2 14 "deviates significantly from the value recommended (25 ppm) for ... (15000)" |
+| 14 / 4.2 | the first cut: both levels measured | 18,563 | 2,595 | MS1 4.2 "deviates significantly from the value recommended (7 ppm) for ... (120000)" |
+| 16 / 4 | DIA-NN's averaged recommendation (item 6) | 18,804 | 2,606 | MS1 4 vs 7 |
+| 20 / 7 | the pilot's hand-set override | 19,592 | 2,618 | none |
+| 23.3 / 7 | the old extrapolation | 19,501 | 2,549 | none |
+| 25 / 7 | DIA-NN 2.7.0's value for this run's resolutions | 19,229 | 2,537 | none |
+| auto (DIA-NN chose 17 / 4.3) | DIA-NN on this run alone | 18,660 | 2,633 | (auto mode: "preliminary analyses only") |
+
+**Open question — the measured MS2 and DIA-NN's resolution value disagree.** DIA-NN 2.7.0 has an
+MS2 value for a 15,000-resolution Orbitrap run, 25 ppm, that its README table does not document,
+and it warns on every pass that pins the measured 14 ppm. The measurement on this cohort's own
+data says 12–17 ppm per run. Wider settings report more precursors here (19,229–19,592 at
+20–25 ppm against 18,476 at 14); protein groups do not follow (2,537 at 25 ppm, 2,618 at 20, 2,574
+at 14). One run is not a benchmark. The skill pins the measurement, as decided for the FRAN pilot;
+the alternative is DIA-NN's runtime value, which it only prints inside a deviation warning — so
+reading it would mean parsing that warning from a deliberately mis-set run. That choice belongs to
+the maintainer, not to this document.
+
+**Single-shot searches measure it too.** A machine without SLURM always searches single-shot
+(`parallel_decision` returns "no SLURM here" before it reads the cfg), whatever the cohort size;
+so do cohorts at or below the threshold. For a `measure_with_diann` cfg, `run_search.py` puts the
+same probe into the search job, between the library job and the DIA-NN search, with the same
+arguments step 1b uses (`--measure mass-acc`, the documented level as `--ms1-ppm`, the same
+`--timeout`/`--budget`/replacement limits, the cfg's flags as bash words after `--`). It writes
+`<out>/massacc.txt` and `<out>/mass_acc.json` (the evidence), then moves `<out>/params.resolved.cfg`
+into place from a `.tmp` only once the value is measured; `search_provenance.json` records it as
+`resolved_params_file` with `resolved_params_produced: "runtime"`, and `result.mass_acc` as
+measured. The search refuses to run without a valid `massacc.txt`. The window is left as before (DIA-NN infers it in the search). With
+`--one-step` there is no library before the search to measure against: `run_search.py` says so,
+records `mass_acc.measured: false`, and DIA-NN optimises on the first run.
 
 ## DIA-NN exits 0 on fatal errors — never trust the job state alone
 
