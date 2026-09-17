@@ -45,8 +45,10 @@ STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--rea
 # minutes (DIA-NN logs the radius during calibration); the per-attempt timeout bounds a file
 # that never gets there, and the wall clock covers every attempt.
 PROBE_CANDIDATES = 3
-PROBE_TIMEOUT_S = 2700
-PROBE_WALL_HOURS = 3
+PROBE_TIMEOUT_S = 3600      # probe_window.py's own default, and step 1b's effective limit before
+                            # it tried more than one file. Nothing shorter has been measured on a
+                            # large Astral .raw, so it is not shortened to fit three attempts.
+PROBE_WALL_HOURS = -(-PROBE_CANDIDATES * PROBE_TIMEOUT_S // 3600) + 1   # every attempt + 1 h
 
 
 def dotnet_prefix(raws):
@@ -67,43 +69,109 @@ def dotnet_prefix(raws):
     return f'export DOTNET_ROOT={root}; export PATH={root}:"$PATH"; '
 
 
-# Characters that change how bash parses a word: glob metacharacters, whitespace, comment,
-# control operators, redirections and quotes. `$` and parentheses are deliberately absent --
-# see _shield().
-_NEEDS_QUOTING = re.compile(r"""[\s*?\[\]#;&|<>'"\\`]""")
-
-
 class CfgError(ValueError):
-    """The cfg cannot be tokenised -- e.g. an unbalanced quote."""
+    """The cfg cannot be read as flags. `code` is "cfg_missing" (no such regular file) or
+    "cfg_unparseable" (e.g. an unclosed quote) -- parallel_safe() reports them separately, so a
+    missing file never reads as "mass accuracy is not pinned"."""
+
+    def __init__(self, msg, code="cfg_unparseable"):
+        super().__init__(msg)
+        self.code = code
+
+
+def _split_cfg_text(text, where):
+    """Split cfg text into words by BASH's quoting and comment rules, with no expansion.
+
+    shlex (comments=True) was the rule before, and it is not bash: it ends a word at ANY `#`,
+    so `/data/run#1` read as `/data/run` while bash -- which the chain splices these words into
+    -- keeps the `#` and starts a comment only at the START of a word. The gate and the steps
+    must read one file the same way, so this follows bash:
+      * space, tab and newline separate words (so does CR, which bash would keep -- a cfg saved
+        with Windows line endings must not turn `--window 7` into `7\\r`)
+      * '...' is literal; "..." is literal except \\$ \\` \\" \\\\ and \\<newline>
+      * outside quotes a backslash escapes the next character; backslash-newline joins lines
+      * `#` starts a comment only where a word would start
+    Every other character is literal -- `(`, `{`, `~`, `*`, `$` included. Expansion is decided
+    on the way OUT, by _shield(), not here."""
+    toks, cur, in_word, i, n = [], [], False, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n":
+            if in_word:
+                toks.append("".join(cur))
+                cur, in_word = [], False
+            i += 1
+        elif c == "#" and not in_word:
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                raise CfgError(f"{where} cannot be parsed as DIA-NN flags (unclosed ')")
+            cur.append(text[i + 1:j])
+            in_word, i = True, j + 1
+        elif c == '"':
+            in_word, i = True, i + 1
+            while True:
+                if i >= n:
+                    raise CfgError(f'{where} cannot be parsed as DIA-NN flags (unclosed ")')
+                c = text[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == "\\" and i + 1 < n and text[i + 1] in '$`"\\\n':
+                    if text[i + 1] != "\n":
+                        cur.append(text[i + 1])
+                    i += 2
+                else:
+                    cur.append(c)
+                    i += 1
+        elif c == "\\":
+            if i + 1 >= n:
+                cur.append(c)
+                in_word, i = True, i + 1
+            elif text[i + 1] == "\n":
+                i += 2
+            else:
+                cur.append(text[i + 1])
+                in_word, i = True, i + 2
+        else:
+            cur.append(c)
+            in_word, i = True, i + 1
+    if in_word:
+        toks.append("".join(cur))
+    return toks
 
 
 def cfg_tokens(cfg):
-    """THE tokeniser for a DIA-NN cfg. Every reader in this file goes through it.
+    """THE tokeniser for a DIA-NN cfg. Every reader goes through it: the parallel gate, the
+    step flags, params.base.cfg, the single-shot command and ensure_xic in run_search.py.
 
-    There used to be three rules for one file: read_cfg_flags() dropped flags per LINE
-    (`line.startswith("--window ")`), mass_acc_status() found them per shlex TOKEN, and the
-    params.base.cfg writer used a third (`split()[:1]`). They disagreed on ordinary cfgs:
+    There used to be several rules for one file: read_cfg_flags() dropped flags per LINE
+    (`line.startswith("--window ")`), mass_acc_status() found them per shlex TOKEN, the
+    params.base.cfg writer used `split()[:1]`, and run_search used `txt.split()`. They
+    disagreed on ordinary cfgs:
 
         --qvalue 0.01 --window 0    the token rule saw `--window 0` and sent the cfg to step
                                     1b; the line rule left it in the step flags, next to the
                                     measured `--window $(cat window.txt)`
-        --window<TAB>0              the same, through a tab
-        --qvalue 0.01  # 1% FDR     the token rule (comments=True) counted every later flag as
-                                    set; the line rule spliced the `#` into the joined bash
-                                    line, which comments out EVERY flag after it
+        --qvalue 0.01  # 1% FDR     the token rule counted every later flag as set; the line
+                                    rule spliced the `#` into the joined bash line, which
+                                    comments out EVERY flag after it
+        # --xic 10                  split() saw --xic, so ensure_xic added none, while the
+                                    chain saw no --xic -- and step 4 extracted no XICs
 
-    so the gate approved flags the generated steps did not carry (CLAUDE.md rule 3). shlex
-    with comments=True is the rule because it reads the file the way a person does. Returns
-    [] when there is no cfg; raises CfgError when it cannot be parsed -- never a fallback
-    split, which is how a second answer would creep back in."""
-    if not cfg or not os.path.exists(cfg):
+    so the gate approved flags the generated steps did not carry (CLAUDE.md rule 3). The rule
+    is bash's (_split_cfg_text), because bash is what finally reads these words. Returns []
+    when no cfg was given; raises CfgError for a path that is not a regular file or that cannot
+    be parsed -- never a fallback split, which is how a second answer creeps back in."""
+    if not cfg:
         return []
+    if not os.path.isfile(cfg):
+        raise CfgError(f"cfg not found: {cfg}" if not os.path.exists(cfg)
+                       else f"cfg is not a regular file: {cfg}", code="cfg_missing")
     with open(cfg) as fh:
-        text = fh.read()
-    try:
-        return shlex.split(text, comments=True)
-    except ValueError as e:
-        raise CfgError(f"{cfg} cannot be parsed as DIA-NN flags ({e})") from None
+        return _split_cfg_text(fh.read(), cfg)
 
 
 def cfg_groups(tokens):
@@ -119,30 +187,52 @@ def cfg_groups(tokens):
     return groups
 
 
+# `$NAME` / `${NAME}` in a cfg value still expand in the chain, deliberately and ONLY in that
+# form: tests/test_hive_submission_guards.py pins `--lib-dir $HOME/libs`, and a hand-written cfg
+# may rely on it. `$(...)`, backticks and every other `$` are emitted literally.
+_SHELL_VAR = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+
+
 def _shield(token):
-    """Quote a cfg token only if bash would otherwise change it.
+    """One cfg token as ONE bash word whose value is exactly the token.
 
-    DIA-NN's own recommended values contain globs -- `--cut K*,R*` is the trypsin rule, and an
-    N-terminal variable modification is spelled `--var-mod UniMod:1,42.010565,*n`. Spliced into
-    the sbatch bare, those are subject to pathname expansion: with nothing matching they pass
-    through untouched (which is why this has never been noticed), but a single file in the
-    working directory matching the pattern silently rewrites them. Verified:
+    A token made only of characters bash never reinterprets (shlex.quote's own safe set:
+    letters, digits, `@%+=:,./-_`) is emitted bare, so a cfg with nothing at risk -- every cfg
+    estimate_params.py writes, apart from the glob below -- yields the same command line as
+    before. Anything else is quoted:
 
-        no matching file      --cut K*,R*      -> --cut K*,R*
-        file 'Kfoo,Rbar'      --cut K*,R*      -> --cut Kfoo,Rbar
+      * globs. DIA-NN's own recommended `--cut K*,R*` is the trypsin rule and an N-terminal mod
+        is `UniMod:1,42.010565,*n`. Bare, one matching file rewrites them. Verified:
+            no matching file      --cut K*,R*      -> --cut K*,R*
+            file 'Kfoo,Rbar'      --cut K*,R*      -> --cut Kfoo,Rbar
+      * parentheses. `--var-mod "Phospho(STY),79.966331,STY"` loses its quotes in the
+        tokeniser; the previous rule re-emitted it bare, and EVERY step died on bash's
+        "syntax error near unexpected token `('" -- after the gate had approved the cfg.
+      * braces and tildes: `x{1,2}` would become two words and `~/libs` a home directory.
+      * whitespace, `#`, `;&|<>`, quotes, backslash, `!`, `$`: re-split, comment, control
+        operator, or expansion.
 
-    which is a changed digest rule, in a search that reports success. A token cfg_tokens()
-    unquoted from `"/data/my libs"` must be re-quoted too, or bash splits it apart again.
-
-    Only tokens at risk are quoted, deliberately: quoting everything would also disable `$VAR`
-    and `$(...)`, which a hand-written cfg may legitimately rely on, and would change the
-    command line of every existing cfg rather than only the ones actually at risk. A token
-    that must be quoted AND carries a `$` is double-quoted, so it still expands."""
-    if token and not _NEEDS_QUOTING.search(token):
+    A token carrying `$NAME`/`${NAME}` is double-quoted with everything else escaped, so the
+    variable expands and nothing else does; any other token is single-quoted."""
+    if token and shlex.quote(token) == token:
         return token
-    if "$" in token:
-        return '"' + re.sub(r'(["\\`])', r"\\\1", token) + '"'
-    return shlex.quote(token)
+    if not _SHELL_VAR.search(token):
+        return shlex.quote(token)
+    out, pos = ['"'], 0
+    esc = lambda s: re.sub(r'([\\"`$])', r"\\\1", s)
+    for m in _SHELL_VAR.finditer(token):
+        out += [esc(token[pos:m.start()]), m.group(0)]
+        pos = m.end()
+    out += [esc(token[pos:]), '"']
+    return "".join(out)
+
+
+def bash_flags(groups, drop=()):
+    """Flag groups -> one bash-safe string. The one emitter for cfg flags spliced into a
+    command line: the chain's steps (read_cfg_flags) and run_search's single-shot search."""
+    names = set(drop)
+    return " ".join(_shield(t) for flag, vals in groups if flag not in names
+                    for t in (flag, *vals))
 
 
 def read_cfg_flags(cfg, drop=()):
@@ -152,15 +242,13 @@ def read_cfg_flags(cfg, drop=()):
     measures the radius, steps 2-5 get it PREFIXED as `--window $(cat window.txt)`, so a
     --window still in the cfg lands on the same command line twice. Which of the two DIA-NN
     honours is not verified -- and if it is the cfg's, step 1b is silently undone. A cfg
-    `--window 0` is not even a radius: DIA-NN logs "scan window radius should be a positive
-    integer" and optimises per file instead (the 18-file poplar run, 7 for seventeen files
-    and 8 for one), which is exactly what the chain exists to prevent.
+    `--window 0` is not even a radius: on the 18-file poplar run DIA-NN logged "scan window
+    radius should be a positive integer" and chose a radius per file (7 for seventeen, 8 for
+    one), which is exactly what the chain exists to prevent.
 
     Flags are matched by TOKEN (cfg_tokens) and removed with their values, wherever they sit
-    on a line; inline `# comments` never reach bash."""
-    names = set(STRIP) | set(drop)
-    kept = [g for g in cfg_groups(cfg_tokens(cfg)) if g[0] not in names]
-    return " ".join(_shield(t) for flag, vals in kept for t in (flag, *vals))
+    on a line; `# comments` never reach bash."""
+    return bash_flags(cfg_groups(cfg_tokens(cfg)), drop=tuple(STRIP) + tuple(drop))
 
 
 def write_cfg(cfg, dest, drop=()):
@@ -168,15 +256,17 @@ def write_cfg(cfg, dest, drop=()):
 
     Written from the same tokens every other reader sees, so what params.base.cfg leaves out
     is exactly what the gate and the step flags left out. Comments are not carried over. This
-    file is read back by DIA-NN (`--cfg`), not by bash, so glob values stay bare -- quoting
-    `K*,R*` here would hand DIA-NN the quote characters. Only a value with whitespace or a
-    quote is quoted (shlex style, so cfg_tokens reads it back identically; how DIA-NN's own
-    cfg reader treats quotes is not verified)."""
+    file is read back by DIA-NN (`--cfg`), not by bash, so glob and parenthesis values stay
+    bare -- quoting `K*,R*` here would hand DIA-NN the quote characters. Only a value the
+    tokeniser itself would split or strip (whitespace, a quote, a backslash, a leading `#`, or
+    empty) is quoted, so cfg_tokens reads the file back identically; how DIA-NN's own cfg
+    reader treats quotes is not verified."""
     names = set(drop)
+    special = re.compile(r"""[\s'"\\]|^#""")
     with open(dest, "w") as fh:
         for flag, vals in cfg_groups(cfg_tokens(cfg)):
             if flag not in names:
-                fh.write(" ".join([flag] + [shlex.quote(v) if re.search(r"""[\s'"#]""", v) or not v
+                fh.write(" ".join([flag] + [shlex.quote(v) if not v or special.search(v)
                                             else v for v in vals]) + "\n")
 
 
@@ -202,6 +292,11 @@ def xic_flag(cfg):
 
 
 MASS_ACC_FLAGS = ("--mass-acc", "--mass-acc-ms1")
+
+
+def _passed(groups, flag):
+    """Each occurrence of `flag` exactly as the cfg passes it, e.g. ["--window 7.0"]."""
+    return [" ".join([flag, *vals]) for f, vals in groups if f == flag]
 
 
 def _mass_acc_value(groups, flag):
@@ -243,8 +338,8 @@ def _window_value(groups):
     DIA-NN requires a POSITIVE INTEGER ("scan window radius should be a positive integer").
     So only digits count: `0.5` used to read as a truthy float and route straight to DIA-NN,
     and `nan` crashed int() with a traceback. 0 is its own state because it behaves like the
-    flag being absent -- on the poplar run DIA-NN logged that warning and optimised per file --
-    which is recoverable by measuring, not a typo."""
+    flag being absent -- on the poplar run DIA-NN logged that warning and chose a radius per
+    file -- which is recoverable by measuring, not a typo."""
     seen = [vals for f, vals in groups if f == "--window"]
     if not seen:
         return "unset", None, None
@@ -258,8 +353,9 @@ def _window_value(groups):
         return "invalid", None, (f"--window is set {len(radii)} times with different values "
                                  f"({', '.join(map(str, radii))})")
     if radii[0] == 0:
-        return "zero", 0, ("`--window 0` is not a radius (DIA-NN: \"scan window radius "
-                           "should be a positive integer\") -- it optimises per file")
+        return "zero", 0, ("`--window 0` is not a positive integer (on the poplar run DIA-NN "
+                           "warned \"scan window radius should be a positive integer\" and "
+                           "chose a radius per file)")
     return "ok", radii[0], None
 
 
@@ -280,8 +376,11 @@ def mass_acc_status(cfg):
     inferred a scan-window radius of 7 for seventeen files and 8 for one, emitted the warning
     above, and the chain combined them anyway.
 
-    This only READS; parallel_safe() decides. Returns {fixed, ms2, ms1, window, state, bad,
-    unset, reason}: `state` maps each flag to unset/ok/invalid (and zero, for --window)."""
+    This only READS; parallel_safe() decides. Mass accuracy and the window are reported
+    SEPARATELY (mass_acc_fixed/mass_acc_reason vs window_state/window_passed/window_reason):
+    one combined `fixed: false, reason: "not set: --window"` for a cfg whose mass accuracy WAS
+    pinned is the wording that caused the original routing bug, and it had reappeared in the
+    provenance. `state` maps each flag to unset/ok/invalid (and zero, for --window)."""
     groups = cfg_groups(cfg_tokens(cfg))
     ms2 = _mass_acc_value(groups, "--mass-acc")
     ms1 = _mass_acc_value(groups, "--mass-acc-ms1")
@@ -290,14 +389,53 @@ def mass_acc_status(cfg):
     state = {k: v[0] for k, v in per.items()}
     unset = [k for k, s in state.items() if s == "unset"]
     bad = [k for k, s in state.items() if s == "invalid"]
-    problems = [v[2] for v in per.values() if v[2]]
-    if unset:
-        problems.insert(0, "not set: " + ", ".join(unset))
-    fixed = all(s == "ok" for s in state.values())
-    reason = ("; ".join(problems) if problems else
-              f"fixed (MS1 {ms1[1]} ppm / MS2 {ms2[1]} ppm / window {win[1]})")
-    return {"fixed": fixed, "ms2": ms2[1], "ms1": ms1[1], "window": win[1], "state": state,
-            "bad": bad, "unset": unset, "reason": reason}
+
+    ma_unset = [k for k in MASS_ACC_FLAGS if state[k] == "unset"]
+    ma_problems = [per[k][2] for k in MASS_ACC_FLAGS if per[k][2]]
+    if ma_unset:
+        ma_problems.insert(0, "not in the cfg: " + ", ".join(ma_unset)
+                           + " (DIA-NN calibrates it itself)")
+    ma_fixed = not ma_problems
+    ma_reason = ("; ".join(ma_problems) if ma_problems else
+                 f"MS1 {ms1[1]} ppm / MS2 {ms2[1]} ppm, pinned in the cfg")
+    win_reason = win[2] or ("--window not in the cfg" if win[0] == "unset" else None)
+
+    reason = "; ".join(x for x in ([] if ma_fixed else [ma_reason]) + [win_reason] if x) or \
+        f"fixed (MS1 {ms1[1]} ppm / MS2 {ms2[1]} ppm / window {win[1]})"
+    return {"ms2": ms2[1], "ms1": ms1[1], "window": win[1], "state": state,
+            "bad": bad, "unset": unset,
+            "mass_acc_fixed": ma_fixed, "mass_acc_reason": ma_reason,
+            "window_state": win[0], "window_passed": _passed(groups, "--window"),
+            "window_reason": win_reason, "reason": reason}
+
+
+def mass_acc_record(ma):
+    """Mass accuracy only, for the generator's output and search_provenance.json."""
+    return {"fixed": ma["mass_acc_fixed"], "ms1": ma["ms1"], "ms2": ma["ms2"],
+            "reason": ma["mass_acc_reason"]}
+
+
+def window_record(ma):
+    """What the cfg hands DIA-NN for --window, for provenance -- exactly what was passed, and
+    "unverified" wherever DIA-NN's behaviour has not been measured. Used for the chain when it
+    does not probe, and by run_search.py for the single-shot search."""
+    st, passed = ma["window_state"], ma["window_passed"]
+    if st == "ok":
+        return {"source": f"pinned in the cfg ({'; '.join(passed)})", "value": ma["window"],
+                "passed": passed}
+    if st == "unset":
+        return {"source": "not in the cfg -- DIA-NN chooses the radius itself (on the 18-file "
+                          "poplar chain it chose per file: 7 for seventeen, 8 for one; how it "
+                          "chooses within one multi-file search is unverified)",
+                "value": None, "passed": []}
+    if st == "zero":
+        return {"source": "passed as `--window 0`, which is not a positive integer -- on the "
+                          "poplar run DIA-NN warned and chose a radius per file; unverified "
+                          "beyond that run",
+                "value": None, "passed": passed}
+    return {"source": f"passed as given ({'; '.join(passed)}) -- not one positive integer, so "
+                      "what DIA-NN does with it is unverified",
+            "value": None, "passed": passed}
 
 
 def _remedy(code):
@@ -311,6 +449,9 @@ def _remedy(code):
     from estimate_params import instrument_ppm_summary         # the ONE ppm table
     table = instrument_ppm_summary()
     return {
+        "cfg_missing":
+            "check the cfg path (diann_parallel --cfg / run_search --params) -- nothing "
+            "could be read from it",
         "cfg_unparseable":
             "fix the quoting in the cfg (every quote must be closed), then re-run",
         "mass_acc_unset":
@@ -363,8 +504,11 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
       * an unparseable cfg (unbalanced quote) -- NOT recoverable.
 
     Returns {ok, probe, code, ma, reason, remedy}: `probe` says step 1b is needed, `code`
-    names the outcome (probe | pinned | cfg_unparseable | mass_acc_unset | mass_acc_invalid |
-    window_invalid | window_seeded | window_no_probe), `remedy` is how to fix a refusal.
+    names the outcome (probe | pinned | cfg_missing | cfg_unparseable | mass_acc_unset |
+    mass_acc_invalid | window_invalid | window_seeded | window_no_probe), `remedy` is how to fix
+    a refusal. A cfg path that is not a file is `cfg_missing`, never "mass accuracy is not
+    pinned": `--sbatch proj` once renamed the folder holding the cfg, and the refusal that
+    followed blamed mass accuracy.
     `ma` is mass_acc_status() untouched -- on the probe path its window is still unset,
     because it IS unset until step 1b runs.
     """
@@ -375,7 +519,7 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
     try:
         ma = mass_acc_status(cfg)
     except CfgError as e:
-        return verdict(False, False, "cfg_unparseable", None, str(e))
+        return verdict(False, False, e.code, None, str(e))
     st = ma["state"]
     # Invalid values before unset ones: `mass_acc_unset` is the one code --allow-auto-mass-acc
     # may override, so it must never be what hides a junk --window behind it.
@@ -526,6 +670,8 @@ def main():
         # The override is for the one deliberate-testing case it is named after: mass accuracy
         # left to DIA-NN. An invalid value is a mistake (0 is a literal 0 ppm tolerance), and a
         # bad --window or an unparseable cfg would be spliced into every step as-is.
+        if safe["code"] in ("cfg_missing", "cfg_unparseable"):
+            sys.exit(f"{safe['reason']}.\nFix: {safe['remedy']}.")
         if not (a.allow_auto_mass_acc and safe["code"] == "mass_acc_unset"):
             sys.exit(
                 f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {safe['reason']}.\n"
@@ -638,7 +784,9 @@ def main():
             f'  if python3 {q(probe)} --diann {q(a.diann)} --raw "$RAW" \\',
             f"      --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\",
             f"      --timeout {PROBE_TIMEOUT_S} --write-cfg {q(tmp_cfg)} \\",
-            f"      --extra {q(flags)} > {D}/window.json; then",
+            # the flags as bash words, after `--`: the probe's DIA-NN gets the same argv as
+            # steps 2-5, not a second parse of them through shlex
+            f"      -- {flags} > {D}/window.json; then",
             '    W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
             f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json) && break',
             "  fi",
@@ -648,15 +796,33 @@ def main():
             'if [ -z "$W" ]; then',
             f'  echo "FAILED: no scan-window radius from any of the first {len(probe_cands)} '
             'file(s) (DIA-NN log tails above)." >&2',
-            '  echo "Steps 2-5 wait on this job (afterok) and will not start. Do NOT guess a '
-            '--window: fix the cause and resubmit step 1b, or pin a measured value." >&2',
+            # Resubmitting step 1b ALONE does not restart the chain: steps 2-5 were submitted
+            # afterok on THIS job id, so they sit PENDING (DependencyNeverSatisfied) for ever.
+            '  echo "Steps 2-5 were submitted afterok on THIS job, so they are now PENDING with '
+            'DependencyNeverSatisfied and will never start -- even if step 1b is resubmitted '
+            'and succeeds." >&2',
+            '  echo "Recover: fix the cause (do NOT guess a --window), scancel steps 2-5 (ids in '
+            f'{D}/jobs.txt), then resubmit step1b_window.sbatch and steps 2-5 chained afterok on '
+            'the new ids, reusing step1.predicted.speclib -- or re-run submit.sh, which also '
+            'repeats step 1. See references/watcher.md (dependency_failed)." >&2',
             f"  rm -f {q(tmp_cfg)} {D}/window.json",
             "  exit 1",
             "fi",
-            f'echo "$W" > {D}/window.txt',
-            f"mv -f {q(tmp_cfg)} {q(resolved_cfg)}",
-            must_exist(f"{D}/window.txt", "the measured scan-window radius"),
-            must_exist(resolved_cfg, "the fully-resolved parameter file"),
+            # These are written by this script, not by DIA-NN, so must_exist()'s "DIA-NN exited
+            # 0 but did not write" would name the wrong culprit. Say what actually failed.
+            f'if ! echo "$W" > {D}/window.txt || [ ! -f {D}/window.txt ] || [ ! -s {D}/window.txt ]; then',
+            f'  echo "FAILED: radius $W was measured but could not be written to {D}/window.txt '
+            '(disk full? permissions?)" >&2',
+            "  exit 1",
+            "fi",
+            # -f as well as -s: `mv` INTO a directory of that name succeeds, and a directory
+            # is non-empty.
+            f"if ! mv -f {q(tmp_cfg)} {q(resolved_cfg)} || [ ! -f {q(resolved_cfg)} ] "
+            f"|| [ ! -s {q(resolved_cfg)} ]; then",
+            f'  echo "FAILED: radius $W was measured but {resolved_cfg} could not be moved into '
+            f'place from {tmp_cfg} (disk full? permissions?)" >&2',
+            "  exit 1",
+            "fi",
             'echo "scan window radius = $W (pinned for steps 2-5)"',
             f'echo "fully-resolved parameters -> {resolved_cfg}"']))
     # steps 2-5 read the measured radius at RUNTIME so every pass uses the identical value
@@ -808,21 +974,23 @@ def main():
                     "note": "written by step 1b only after a radius is measured; absent until "
                             "then, so a missing file after step 1b means step 1b failed"}
     elif safe["ok"]:
-        scan_window = {"source": "pinned in the cfg", "value": ma["window"], "value_file": None}
+        scan_window = dict(window_record(ma), value_file=None)
         resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
                     "note": "the cfg as given already pins mass accuracy and --window"}
     else:
-        scan_window = {"source": "NOT pinned -- --allow-auto-mass-acc override; DIA-NN "
-                                 "optimises per file", "value": ma["window"], "value_file": None}
+        # --allow-auto-mass-acc. Describe what the steps are actually handed -- a `--window 7`
+        # in the cfg IS passed to every step -- rather than assuming the override unpinned it.
+        scan_window = dict(window_record(ma), value_file=None)
         resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
-                    "note": "NOT fully resolved: --allow-auto-mass-acc left per-file "
-                            "optimisation on, so this cfg does not reproduce the run"}
+                    "note": "NOT fully resolved: mass accuracy is not in the cfg "
+                            "(--allow-auto-mass-acc), so DIA-NN chooses it at run time and "
+                            "this cfg does not record the value used"}
 
     import json
     print(json.dumps({
         "out": out, "n_files": n, "report": f"{D}/{report}",
         "parallel_safe": {k: safe[k] for k in ("ok", "probe", "code", "reason")},
-        "mass_acc": ma,
+        "mass_acc": mass_acc_record(ma),
         "scan_window": scan_window,
         "resolved_params": resolved,
         "seeded": bool(seed), "seed_lib": predicted if seed else None,

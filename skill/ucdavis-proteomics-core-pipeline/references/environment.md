@@ -141,6 +141,7 @@ full, the DE-LIMP fallback is `publicgrp/low` (the only fallback — there is no
 `report.parquet`.
 
 A DIA-NN search of more than 5 files on a SLURM host routes to the 5-step parallel chain
-instead, which has no single job script: `job.sh` is not written, an existing one is renamed
-to `job.sh.stale-<time>`, and `run_search.py` exits 3. Submit `<out>/submit.sh`
+instead, which has no single job script: `job.sh` is not written, an existing regular file of
+that name is renamed to `job.sh.stale-<time>` once the chain is generated, and
+`run_search.py` exits 3. Submit `<out>/submit.sh`
 (→ `references/diann_parallel.md`).

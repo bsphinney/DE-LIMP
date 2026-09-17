@@ -30,7 +30,7 @@ Usage:
       --files /data/*.raw --threads 16 [--sbatch job.sh]
       [--engine diann|alphadia|sage|fragpipe|radiant]
 """
-import sys, os, json, glob, shlex, argparse, subprocess, shutil, time
+import sys, os, json, glob, shlex, argparse, subprocess, shutil, stat, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
@@ -140,6 +140,8 @@ def parallel_decision(engine, files, params, a):
     # say "re-run estimate_params.py with the instrument table" for every decline -- including
     # a typo'd --window, which estimate_params.py cannot fix because it never writes one.
     safe = _diann_parallel_mod().parallel_safe(params)
+    if safe["code"] in ("cfg_missing", "cfg_unparseable"):
+        return False, f"{n} files, but {safe['reason']}. To fix: {safe['remedy']}"
     if not safe["ok"]:
         return False, (f"{n} files, but {params} is not parallel-safe for the 5-step chain "
                        f"(steps 3/5 reuse .quant files): {safe['reason']}. To enable it: "
@@ -152,9 +154,26 @@ def parallel_decision(engine, files, params, a):
 SBATCH_NOT_WRITTEN = 3
 
 
+def _not_a_regular_file(path):
+    """None if `path` is absent or a regular file; otherwise what it is (for the refusal)."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(mode):
+        return None
+    return ("a directory" if stat.S_ISDIR(mode) else "a symlink" if stat.S_ISLNK(mode)
+            else "not a regular file")
+
+
 def set_aside(path):
-    """Rename an existing file out of the way -- never delete it. Returns the new path, or None
-    when there was nothing there. The name records that it is stale and when it was moved."""
+    """Rename an existing REGULAR FILE out of the way -- never delete it. Returns the new path,
+    or None when there was nothing there. The name records that it is stale and when it was
+    moved. Anything else (a directory, a symlink, a device) raises ValueError: `--sbatch proj`
+    once renamed a whole project folder, including the cfg the search was about to read."""
+    kind = _not_a_regular_file(path)
+    if kind:
+        raise ValueError(f"{path} is {kind}, not a job script -- refusing to move it")
     if not os.path.lexists(path):
         return None
     base = f"{path}.stale-{time.strftime('%Y%m%dT%H%M%S')}"
@@ -175,14 +194,13 @@ def scan_window_record(engine, params, res):
         return res["scan_window"]
     if engine != "diann":
         return None
+    dp = _diann_parallel_mod()
     try:
-        st = _diann_parallel_mod().mass_acc_status(params)
-    except ValueError as e:                       # CfgError: unparseable cfg
-        return {"source": f"unknown -- the cfg could not be parsed ({e})", "value": None}
-    if st["state"]["--window"] == "ok":
-        return {"source": "pinned in the cfg", "value": st["window"]}
-    return {"source": "not pinned -- single-shot search, DIA-NN optimises it per run",
-            "value": None}
+        # the same description the chain uses when it does not probe -- exactly what was
+        # passed, "unverified" where DIA-NN's handling has not been measured
+        return dp.window_record(dp.mass_acc_status(params))
+    except dp.CfgError as e:
+        return {"source": f"unknown -- {e}", "value": None, "passed": None}
 
 
 def ensure_temp_dirs(params, out):
@@ -198,13 +216,14 @@ def ensure_temp_dirs(params, out):
     user's own. Relative paths resolve against the output directory, which is where DIA-NN runs.
     """
     made = []
+    dp = _diann_parallel_mod()
     try:
-        toks = shlex.split(open(params).read(), comments=True)
-    except (OSError, ValueError):
-        return made
-    for i, t in enumerate(toks):
-        if t == "--temp" and i + 1 < len(toks) and not toks[i + 1].startswith("-"):
-            d = toks[i + 1]
+        groups = dp.cfg_groups(dp.cfg_tokens(params))    # the one cfg reader
+    except dp.CfgError:
+        return made                         # ensure_xic, which runs first, reports it
+    for flag, vals in groups:
+        if flag == "--temp" and vals and not vals[0].startswith("-"):
+            d = vals[0]
             d = d if os.path.isabs(d) else os.path.join(out, d)
             try:
                 os.makedirs(d, exist_ok=True)
@@ -239,16 +258,23 @@ def ensure_xic(params, out):
     leaves them full of zeros — silently, at plausible file size. DIA-NN ignores it on
     instruments without ion mobility.
     """
+    # Read through the one cfg reader. `txt.split()` counted a commented-out `# --xic 10` as
+    # present and added nothing, while the chain's reader saw no --xic -- so step 4 extracted
+    # no XICs and nothing said so.
+    dp = _diann_parallel_mod()
     try:
-        txt = open(params).read()
-    except OSError:
-        return params                       # nothing to augment; the caller will fail louder
-    toks = txt.split()
-    if "--xic" in toks:
+        flags = {f for f, _ in dp.cfg_groups(dp.cfg_tokens(params))}
+    except dp.CfgError as e:
+        if e.code == "cfg_missing":
+            return params                   # nothing to augment; the caller will fail louder
+        sys.exit(f"[run_search] {e}. Every route splices this cfg's flags into a command line "
+                 f"or reads them to decide routing, so it must parse -- close the quote.")
+    if "--xic" in flags:
         return params
+    txt = open(params).read()
     os.makedirs(out, exist_ok=True)
     aug = os.path.join(out, "params_with_xic.cfg")
-    extra = f"--xic {XIC_WINDOW_DEFAULT}" + ("" if "--mobilograms" in toks else " --mobilograms")
+    extra = f"--xic {XIC_WINDOW_DEFAULT}" + ("" if "--mobilograms" in flags else " --mobilograms")
     with open(aug, "w") as fh:
         fh.write(txt.rstrip("\n") + f"\n{extra}\n")
     print(f"[run_search] cfg had no --xic; using {aug} (added: {extra}). "
@@ -302,19 +328,27 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     # a failed search can be requeued against the SAME library instead of rebuilding it.
     # The 5-step parallel chain already worked this way; this makes the single-shot path
     # match. `--one-step` collapses them back if you ever want the old behaviour.
-    cfg_txt = ""
+    # The cfg is read by the same reader, and its flags emitted by the same quoting, as the
+    # parallel chain's. `cfg_txt.split()` spliced raw words into bash: a `# comment` commented
+    # out --f/--fasta/--out, and `--cut K*,R*` went in bare, where one matching file in the
+    # output directory rewrites the digest rule. Comment-free cfgs emit the same command as
+    # before apart from that quoting (tests/test_parallel_routing_window.py pins both).
+    dp = _diann_parallel_mod()
     try:
-        cfg_txt = open(params).read()
-    except OSError:
-        pass
-    libfree = all(f in cfg_txt for f in ("--fasta-search", "--gen-spec-lib")) \
+        groups = dp.cfg_groups(dp.cfg_tokens(params))
+    except dp.CfgError as e:
+        if e.code != "cfg_missing":
+            sys.exit(f"[run_diann] {e}")
+        groups = []                         # onecmd below hands DIA-NN the path; it reports it
+    present = {f for f, _ in groups}
+    libfree = {"--fasta-search", "--gen-spec-lib"} <= present \
         and not getattr(a_globals, "one_step", False)
     dnet = dotnet_env_for(files)          # .NET 8 for reading Thermo .raw, if needed
 
     lib = os.path.join(out, "diann_lib")
     strip = ("--fasta-search", "--gen-spec-lib", "--predictor", "--reanalyse",
              "--matrices", "--rt-profiling")
-    search_cfg = " ".join(t for t in cfg_txt.split() if t not in strip)
+    search_cfg = dp.bash_flags(groups, drop=strip)
     lib_cmd = (f"{cmd} --cfg {shlex.quote(params)} --fasta {shlex.quote(fasta)} "
                f"--out-lib {shlex.quote(lib)} --threads {threads}")
     search_cmd = (f"{cmd} {search_cfg} {f_args} --fasta {shlex.quote(fasta)} "
@@ -1215,6 +1249,11 @@ def main():
                  f"Re-run acquire_tools.sh, or check its notes:\n  "
                  + "\n  ".join(tools.get("notes", [])))
 
+    # A DIA-NN cfg that is not there is reported as exactly that, first -- not as whatever a
+    # later reader makes of an empty flag list ("mass accuracy is not pinned").
+    if engine == "diann" and not os.path.isfile(a.params):
+        sys.exit(f"[run_search] cfg not found: {a.params}")
+
     # Do this BEFORE parallel_decision: that reads the cfg to check mass accuracy, and the
     # augmented copy is the cfg the run will actually use.
     if engine == "diann":
@@ -1250,18 +1289,30 @@ def main():
         # submit.sh, so there is nothing to write there. A NOTE and exit 0 were not enough:
         # SKILL.md documents `run_search.py ... --sbatch job.sh && sbatch job.sh`, and when a
         # job.sh is left over from an earlier run -- say a sequential 310-file search -- the
-        # `&& sbatch` resubmits THAT, silently. So: move any existing file aside (renamed,
-        # never deleted), generate the chain, then exit non-zero so the `&&` stops here.
-        moved = set_aside(a.sbatch)
-        if moved:       # said now too: if generation fails below, the summary never prints
-            sys.stderr.write(f"[run_search] moved existing {a.sbatch} -> {moved} (it does not "
-                             f"describe this search, which routed to the 5-step chain)\n")
+        # `&& sbatch` resubmits THAT, silently. So: generate the chain, THEN move an existing
+        # job script aside (renamed, never deleted), then exit non-zero so the `&&` stops.
+        #
+        # Anything but a regular file is refused before anything happens. `--sbatch proj`
+        # renamed a whole project folder -- the cfg inside it with it -- and generation then
+        # failed blaming mass accuracy.
+        kind = _not_a_regular_file(a.sbatch)
+        if kind:
+            sys.exit(f"[run_search] REFUSING --sbatch {a.sbatch}: it is {kind}, not a job "
+                     f"script, and nothing was changed. This search routed to the 5-step "
+                     f"chain, which never writes --sbatch: drop the flag and submit "
+                     f"{os.path.join(a.out, 'submit.sh')} once generated.")
         sbatch_refused = {"requested": os.path.abspath(a.sbatch), "written": False,
-                          "existing_file_moved_to": moved and os.path.abspath(moved),
+                          "existing_file_moved_to": None,
                           "exit_status": SBATCH_NOT_WRITTEN,
                           "why": "routed to the 5-step chain, which submits itself via submit.sh"}
     if use_parallel:
         res = run_diann_parallel(cmd, a.params, files, a.fasta, a.out, a.threads, a)
+        if sbatch_refused:
+            # Only now that the chain exists: a failed generation must leave the user's file
+            # exactly where it was. run_diann_parallel exits on failure, so reaching here is
+            # success.
+            moved = set_aside(a.sbatch)
+            sbatch_refused["existing_file_moved_to"] = moved and os.path.abspath(moved)
     elif engine == "diann":
         res = run_diann(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
                         acquisition=bundle.get("acquisition", ""))

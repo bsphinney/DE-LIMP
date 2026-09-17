@@ -47,8 +47,9 @@ the spine.
 3. **Never run computationally intensive work on a cluster login/head node — EVER.**
    On any cluster (HIVE/SLURM, or any other scheduler), **every** heavy step — the
    search, and any large DE / figure / conversion (e.g. msconvert) — must run as a
-   **scheduled job** (`run_search.py --sbatch` → `sbatch`), not inline on the login
-   node. Login nodes are shared; running compute there gets the user flagged/killed.
+   **scheduled job** (`run_search.py --sbatch` → `sbatch`; a DIA-NN search of >5 files on
+   SLURM instead routes to the 5-step chain, exits 3 without writing `--sbatch`, and is
+   submitted with `bash <out>/submit.sh`), not inline on the login node. Login nodes are shared; running compute there gets the user flagged/killed.
    The **only** things allowed on the login node are tiny orchestration commands —
    submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
@@ -120,8 +121,9 @@ Read `recommended_mode` + `facility_software_available`, then:
 
 - **HIVE = yes → `hive_remote`:** drive HIVE over SSH from the local Claude Code
   (`export HIVE_USER=… HIVE_KEY=…`; use `bash scripts/hive_exec.sh '<cmd>'`). The search
-  runs as a **SLURM job** (`run_search.py --sbatch` → `hive_exec.sh 'sbatch job.sh'`),
-  never the login node. HIVE gives **compute**; the Core software is separate (next).
+  runs as a **SLURM job** (`run_search.py --sbatch` → `hive_exec.sh 'sbatch job.sh'`;
+  for a DIA-NN search of >5 files it routes to the 5-step chain instead — exit 3, no
+  `job.sh`, run `hive_exec.sh 'bash <out>/submit.sh'`), never the login node. HIVE gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the DIA-NN `.sif`,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -746,7 +748,9 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       `probe_window.py` (on the first file, falling through to the next if that one gives
       no radius — up to 3) and pins the one radius into steps 2–5. Only once a radius is
       measured does it write `<out>/params.resolved.cfg`; if all 3 fail, step 1b fails
-      loudly and steps 2–5 never start. An omitted `--window` therefore does **not**
+      loudly and steps 2–5 never start — they sit `DependencyNeverSatisfied`, so after the
+      fix resubmit step 1b **and** steps 2–5 (ids in `<out>/jobs.txt`; →
+      `references/watcher.md`), not step 1b alone. An omitted `--window` therefore does **not**
       decline the chain — don't send the user off to measure it by hand, and don't read
       such a routing decline as a window problem. `--window 0` routes the same way: it is
       **not** a valid radius (DIA-NN logs `scan window radius should be a positive

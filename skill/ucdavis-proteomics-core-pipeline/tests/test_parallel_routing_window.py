@@ -444,6 +444,37 @@ class Step1bRunsTests(unittest.TestCase):
             self.assertIn("FAILED", p.stderr)
             self.assertFalse(os.path.exists(os.path.join(out, "window.txt")))
             self.assertFalse(os.path.exists(os.path.join(out, "params.resolved.cfg")))
+            # Round 2, item 5: resubmitting step 1b alone does not restart the chain -- steps
+            # 2-5 are afterok on THIS job id. The message must say so and name the way out.
+            self.assertIn("DependencyNeverSatisfied", p.stderr)
+            self.assertIn("jobs.txt", p.stderr)
+            self.assertIn("steps 2-5", p.stderr)
+
+    def test_a_resolved_cfg_that_cannot_be_written_says_so_not_dianns_fault(self):
+        """Round 2, item 5. The check on params.resolved.cfg reused must_exist(), whose message
+        is "DIA-NN exited 0 but did not write ..." -- but bash writes that file, not DIA-NN.
+        A directory of that name makes the move land INSIDE it, which `-s` alone accepts."""
+        with tempfile.TemporaryDirectory() as d:
+            out, _ = self._chain(d, ["s%d.mzML" % i for i in range(6)])
+            blocker = os.path.join(out, "params.resolved.cfg")
+            os.makedirs(blocker)
+            _write(os.path.join(blocker, "keep"), "x")
+            p, _ = self._run_step1b(d, out)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("could not be moved into place", p.stderr)
+            self.assertNotIn("DIA-NN exited 0", p.stderr)
+
+    def test_step1b_wall_clock_covers_every_attempt(self):
+        """Round 2, item 7. The per-attempt timeout went from probe_window's 3600 s to 2700 s to
+        fit three attempts into 3 h -- unmeasured on a large Astral .raw. Keep 3600 s and size
+        the wall clock to the attempts instead."""
+        self.assertEqual(dp.PROBE_TIMEOUT_S, 3600)
+        self.assertGreater(dp.PROBE_WALL_HOURS * 3600, dp.PROBE_CANDIDATES * dp.PROBE_TIMEOUT_S)
+        with tempfile.TemporaryDirectory() as d:
+            out, _ = self._chain(d, ["s%d.mzML" % i for i in range(6)])
+            body = _read(os.path.join(out, "step1b_window.sbatch"))
+            self.assertIn("--timeout 3600", body)
+            self.assertIn(f"#SBATCH --time={dp.PROBE_WALL_HOURS}:00:00", body)
 
 
 class ProbeTimeoutTests(unittest.TestCase):
@@ -463,30 +494,82 @@ class ProbeTimeoutTests(unittest.TestCase):
             self.assertIsNone(radius)
             self.assertLess(time.time() - t0, 20, "probe hung on a silent DIA-NN")
 
+    def _forking(self, d, body):
+        """A --diann that FORKS (no exec), as a bash wrapper does and apptainer very likely
+        does: the grandchild holds the stdout pipe. Its pid is written before anything else."""
+        pidfile = os.path.join(d, "grandchild.pid")
+        fake = os.path.join(d, "forking-diann")
+        _write(fake, f"#!/bin/bash\nsleep 300 &\necho $! > {pidfile}\n{body}\nwait\n")
+        os.chmod(fake, 0o755)
+        return fake, pidfile
+
+    def _gone(self, pidfile):
+        """Dead, or a zombie waiting for init to reap it (not burning anything)."""
+        import time
+        pid = int(_read(pidfile))
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                capture_output=True, text=True).stdout.strip()
+            if not st or st.startswith("Z"):
+                return True
+            time.sleep(0.1)
+        os.kill(pid, 9)                     # do not leak it past the test
+        return False
+
+    def test_a_forking_silent_diann_is_cut_off_and_leaves_no_orphan(self):
+        """Round 2, item 3. The watchdog killed only the direct child; the forked grandchild kept
+        the pipe open, so the read blocked until it exited on its own (60 s here) and kept
+        burning the job's CPUs."""
+        import probe_window
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            fake, pidfile = self._forking(d, "")
+            t0 = time.time()
+            radius, _ = probe_window.probe(fake, "x.mzML", "db.fasta", "lib", 1, timeout=1)
+            self.assertIsNone(radius)
+            # well under the grandchild's 300 s; allows _end_group's 30 s grace on a host whose
+            # init is slow to reap
+            self.assertLess(time.time() - t0, 60, "probe blocked on a forked grandchild")
+            self.assertTrue(self._gone(pidfile), "the forked DIA-NN was left running")
+
+    def test_a_forking_diann_that_answers_leaves_no_orphan(self):
+        import probe_window
+        with tempfile.TemporaryDirectory() as d:
+            fake, pidfile = self._forking(d, 'echo "Scan window radius set to 7"')
+            radius, _ = probe_window.probe(fake, "x.mzML", "db.fasta", "lib", 1, timeout=60)
+            self.assertEqual(radius, 7)
+            self.assertTrue(self._gone(pidfile), "the forked DIA-NN kept running after the answer")
+
 
 class SbatchCannotResubmitAStaleJobTests(unittest.TestCase):
     """Finding 7. With the chain, `--sbatch job.sh` writes nothing; a NOTE and exit 0 let the
     documented `run_search.py ... --sbatch job.sh && sbatch job.sh` resubmit whatever job.sh was
     already there -- e.g. an old sequential 310-file search."""
 
-    def _run(self, d, existing=None):
+    def _run(self, d, existing=None, sbatch="job.sh", cfg=None, before=None):
         bindir = os.path.join(d, "bin")
         os.makedirs(bindir)
         _write(os.path.join(bindir, "sbatch"), "#!/bin/sh\necho 1\n")   # slurm_available() true
         os.chmod(os.path.join(bindir, "sbatch"), 0o755)
         raws, fasta = _inputs(d)
-        cfg = _cfg(d, "--qvalue 0.01\n" + PINNED_MA)
+        cfg = cfg or _cfg(d, "--qvalue 0.01\n--xic 10\n--mobilograms\n" + PINNED_MA)
         tools, bundle = os.path.join(d, "tools.json"), os.path.join(d, "bundle.json")
         _write(tools, json.dumps({"diann": "/bin/true"}))
         _write(bundle, json.dumps({"acquisition": "DIA"}))
         if existing is not None:
             _write(os.path.join(d, "job.sh"), existing)
+        if before:
+            before(d)
         env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
                             "--tools", tools, "--bundle", bundle, "--params", cfg,
                             "--fasta", fasta, "--out", os.path.join(d, "out"),
-                            "--files", *raws, "--sbatch", "job.sh"],
+                            "--files", *raws, "--sbatch", sbatch],
                            cwd=d, env=env, capture_output=True, text=True)
         return p
 
@@ -508,6 +591,59 @@ class SbatchCannotResubmitAStaleJobTests(unittest.TestCase):
             # finding 6: recorded as produced at run time, not as already resolved
             self.assertEqual(prov["resolved_params_produced"], "runtime")
             self.assertIn("step 1b", prov["scan_window"]["source"])
+            # round 2, item 4a: mass accuracy IS pinned; the unset window is not its business
+            self.assertTrue(prov["result"]["mass_acc"]["fixed"], prov["result"]["mass_acc"])
+            self.assertNotIn("window", prov["result"]["mass_acc"]["reason"])
+
+    def test_sbatch_naming_a_directory_is_refused_and_nothing_moves(self):
+        """Round 2, item 2. `--sbatch proj` renamed the project folder -- the cfg inside it too
+        -- and generation then failed blaming mass accuracy."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = os.path.join(d, "proj")
+            os.makedirs(proj)
+            cfg = _cfg(proj, "--qvalue 0.01\n--xic 10\n--mobilograms\n" + PINNED_MA)
+            p = self._run(d, sbatch="proj", cfg=cfg)
+            self.assertNotIn(p.returncode, (0, run_search.SBATCH_NOT_WRITTEN), p.stderr)
+            self.assertIn("a directory", p.stderr + p.stdout)
+            self.assertTrue(os.path.isfile(cfg), "the folder holding the cfg was moved")
+            self.assertEqual(glob.glob(os.path.join(d, "proj.stale-*")), [])
+            self.assertNotIn("mass accuracy", p.stderr)
+
+    def test_a_failed_generation_leaves_the_job_script_where_it_was(self):
+        """Round 2, item 2: set aside only AFTER the chain exists."""
+        def block_generation(d):                    # diann_parallel cannot write its file list
+            os.makedirs(os.path.join(d, "out", "file_list.txt"))
+        with tempfile.TemporaryDirectory() as d:
+            p = self._run(d, existing="#!/bin/bash\n# the user's script\n", before=block_generation)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertNotEqual(p.returncode, run_search.SBATCH_NOT_WRITTEN)
+            self.assertEqual(_read(os.path.join(d, "job.sh")), "#!/bin/bash\n# the user's script\n")
+            self.assertEqual(glob.glob(os.path.join(d, "job.sh.stale-*")), [])
+
+    def test_a_missing_cfg_is_reported_as_missing(self):
+        """Round 2, item 2. cfg_tokens returned [] for a path that was not there, which every
+        reader then took for "mass accuracy is not pinned"."""
+        with tempfile.TemporaryDirectory() as d:
+            gone = os.path.join(d, "moved-away", "params.cfg")
+            safe = dp.parallel_safe(gone)
+            self.assertEqual(safe["code"], "cfg_missing")
+            self.assertIn("cfg not found", safe["reason"])
+            with mock.patch.object(run_search, "slurm_available", lambda: True):
+                use, why = _route(gone)
+            self.assertFalse(use)
+            self.assertIn("cfg not found", why)
+            self.assertNotIn("mass accuracy", why)
+            raws, fasta = _inputs(d)
+            g, _ = _generate(d, gone, raws, fasta)
+            self.assertNotEqual(g.returncode, 0)
+            self.assertIn("cfg not found", g.stderr)
+            self.assertNotIn("mass accuracy", g.stderr)
+        with tempfile.TemporaryDirectory() as d:
+            p = self._run(d, cfg=os.path.join(d, "nope.cfg"))
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("cfg not found", p.stderr)
+            self.assertNotIn("mass accuracy", p.stderr)
+
 
     def test_with_no_existing_file_it_still_stops_the_chained_sbatch(self):
         with tempfile.TemporaryDirectory() as d:
@@ -515,6 +651,51 @@ class SbatchCannotResubmitAStaleJobTests(unittest.TestCase):
             self.assertEqual(p.returncode, run_search.SBATCH_NOT_WRITTEN, p.stderr)
             self.assertFalse(os.path.exists(os.path.join(d, "job.sh")))
             self.assertEqual(glob.glob(os.path.join(d, "job.sh.stale-*")), [])
+
+
+class ProvenanceSaysWhatWasPassedTests(unittest.TestCase):
+    """Round 2, item 4 (CLAUDE.md rule 1): every record describes exactly what DIA-NN is handed,
+    and says "unverified" where its handling has not been measured."""
+
+    def test_probe_path_mass_accuracy_is_reported_as_pinned(self):
+        with tempfile.TemporaryDirectory() as d:
+            raws, fasta = _inputs(d)
+            p, _ = _generate(d, _cfg(d, PINNED_MA), raws, fasta)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            info = json.loads(p.stdout)
+            self.assertEqual(info["mass_acc"],
+                             {"fixed": True, "ms1": 15.0, "ms2": 15.0,
+                              "reason": "MS1 15.0 ppm / MS2 15.0 ppm, pinned in the cfg"})
+
+    def test_override_with_a_pinned_window_says_pinned(self):
+        """--allow-auto-mass-acc with `--window 7`: every step carries --window 7, and the record
+        used to say "NOT pinned -- DIA-NN optimises per file"."""
+        with tempfile.TemporaryDirectory() as d:
+            raws, fasta = _inputs(d)
+            p, out = _generate(d, _cfg(d, "--qvalue 0.01\n--window 7\n"), raws, fasta,
+                               "--allow-auto-mass-acc")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            info = json.loads(p.stdout)
+            self.assertTrue(info["scan_window"]["source"].startswith("pinned in the cfg"),
+                            info["scan_window"])
+            self.assertEqual(info["scan_window"]["value"], 7)
+            self.assertIn("--window 7", _read(os.path.join(out, "step2_firstpass.sbatch")))
+            self.assertFalse(info["mass_acc"]["fixed"])
+
+    def test_single_shot_records_an_unusable_window_as_passed_and_unverified(self):
+        for body, passed in (("--window 7.0\n", ["--window 7.0"]),
+                             ("--window 7\n--window 9\n", ["--window 7", "--window 9"])):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as d:
+                rec = run_search.scan_window_record("diann", _cfg(d, PINNED_MA + body), None)
+                self.assertEqual(rec["passed"], passed)
+                self.assertIn("unverified", rec["source"])
+                self.assertNotIn("optimises it per run", rec["source"])
+                self.assertIsNone(rec["value"])
+        with tempfile.TemporaryDirectory() as d:
+            rec = run_search.scan_window_record("diann", _cfg(d, PINNED_MA), None)
+            self.assertIn("unverified", rec["source"])
+            rec = run_search.scan_window_record("diann", _cfg(d, PINNED_MA + "--window 7\n", "p7.cfg"), None)
+            self.assertEqual((rec["value"], rec["passed"]), (7, ["--window 7"]))
 
 
 if __name__ == "__main__":

@@ -264,13 +264,14 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     #
     # What happens to the omitted flag depends on the ROUTE, which is decided later, by
     # run_search.py -- so this names both instead of asserting one. A single-shot search
-    # leaves DIA-NN to optimise the radius per run; the 5-step parallel chain measures it
-    # ONCE in step 1b and pins that value for steps 2-5. Saying "auto-optimised per run"
+    # leaves DIA-NN to choose the radius (how, within one multi-file search, is unverified);
+    # the 5-step parallel chain measures it ONCE in step 1b and pins it for steps 2-5. Saying "auto-optimised per run"
     # here was wrong for the chain, which is the route most real cohorts take. The route
     # that actually ran is recorded in search_provenance.json (`scan_window`).
     add("--window", "not set here (flag omitted)",
         "radius depends on the acquisition scheme and must be measured, not guessed. "
-        "Single-shot search: DIA-NN optimises it per run. 5-step parallel chain: step 1b "
+        "Single-shot search: DIA-NN chooses it itself (how, within one multi-file search, "
+        "is unverified). 5-step parallel chain: step 1b "
         "measures it once (probe_window.py) and pins it for steps 2-5, writing "
         "params.resolved.cfg. search_provenance.json `scan_window` records which ran",
         render=False)

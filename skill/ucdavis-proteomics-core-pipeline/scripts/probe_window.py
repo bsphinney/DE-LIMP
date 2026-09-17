@@ -39,25 +39,64 @@ The library must already exist -- run this after step 1 of the chain, not before
 DIA-NN 2.6 needs to read Thermo .raw -- must be exported BEFORE running this script; it cannot
 be spliced into --diann. The chain's step 1b does exactly that.
 """
-import argparse, json, os, re, shlex, subprocess, sys, threading, time
+import argparse, json, os, re, shlex, signal, subprocess, sys, threading, time
 
 # DIA-NN prints e.g. "Scan window radius set to 7". Match loosely (case-insensitive,
 # tolerant of the leading '[m:ss]' timestamp) but require the integer.
 WINDOW_RE = re.compile(r"window\s+radius\s+set\s+to\s+(\d+)", re.I)
 
 
-def probe(diann, raw, fasta, lib, threads, timeout, extra=""):
+def _signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass                               # the whole group is already gone
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _end_group(p, grace=30):
+    """SIGTERM DIA-NN's whole process group, then SIGKILL whatever is still there after `grace` s.
+
+    Signalling only the direct child is not enough: when --diann is a wrapper that forks (a bash
+    script without `exec`; `apptainer exec` very likely too), the grandchild that is DIA-NN keeps
+    running -- holding the stdout pipe open, so the read never ends and the next file is never
+    tried, and burning the job's CPUs as an orphan. Verified with a forking bash wrapper. A
+    process that moves itself into a NEW session escapes this; whether apptainer's starter does
+    is unverified."""
+    _signal_group(p.pid, signal.SIGTERM)
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        p.poll()                           # reap our child so it stops counting as a member
+        if not _group_alive(p.pid):
+            return
+        time.sleep(0.1)
+    _signal_group(p.pid, signal.SIGKILL)
+    p.wait()
+
+
+def probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=()):
     cmd = shlex.split(diann) + [
         "--f", raw, "--fasta", fasta, "--lib", lib,
         "--threads", str(threads),
-    ] + shlex.split(extra)
+    ] + shlex.split(extra) + list(extra_args)
+    # Its own session, so DIA-NN and anything it forks share one process group we can end.
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         text=True, bufsize=1)
+                         text=True, bufsize=1, start_new_session=True)
     radius, lines, deadline = None, [], time.time() + timeout
     # The deadline check below only runs when DIA-NN prints a line, so a DIA-NN that goes
     # silent would block this loop until SLURM's wall clock killed the whole job -- and step 1b
-    # would never get to try its next file. The timer ends the read from outside.
-    watchdog = threading.Timer(timeout, p.kill)
+    # would never get to try its next file. The timer ends the read from outside, for the whole
+    # group (see _end_group).
+    watchdog = threading.Timer(timeout, _signal_group, (p.pid, signal.SIGKILL))
     watchdog.daemon = True
     watchdog.start()
     try:
@@ -71,12 +110,7 @@ def probe(diann, raw, fasta, lib, threads, timeout, extra=""):
                 break
     finally:
         watchdog.cancel()
-        if p.poll() is None:
-            p.terminate()
-            try:
-                p.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                p.kill()
+        _end_group(p)
     return radius, lines
 
 
@@ -90,15 +124,26 @@ def main():
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--timeout", type=int, default=3600,
                     help="give up after N seconds (default 3600)")
-    ap.add_argument("--extra", default="", help="extra DIA-NN flags to match the real search")
+    ap.add_argument("--extra", default="", help="extra DIA-NN flags to match the real search, "
+                    "as ONE shlex-quoted string (for hand use)")
     ap.add_argument("--write-cfg", help="append '--window N' to this cfg file on success")
-    a = ap.parse_args()
+    # Everything after a bare `--` goes to DIA-NN verbatim, as separate arguments. Step 1b
+    # passes the cfg flags this way, so bash quotes and expands them exactly as it does for
+    # steps 2-5 -- a second parse through shlex (--extra) differs from bash on `$VAR` and
+    # backslashes, and the probe would measure under different flags than the search runs.
+    argv = sys.argv[1:]
+    extra_args = []
+    if "--" in argv:
+        k = argv.index("--")
+        argv, extra_args = argv[:k], argv[k + 1:]
+    a = ap.parse_args(argv)
 
     for f, what in ((a.raw, "raw"), (a.fasta, "fasta"), (a.lib, "library")):
         if not os.path.exists(f):
             sys.exit(f"{what} not found: {f}")
 
-    radius, lines = probe(a.diann, a.raw, a.fasta, a.lib, a.threads, a.timeout, a.extra)
+    radius, lines = probe(a.diann, a.raw, a.fasta, a.lib, a.threads, a.timeout, a.extra,
+                          extra_args)
     if radius is None:
         sys.stderr.write("\n".join(lines[-25:]) + "\n")
         sys.exit("Could not read the scan-window radius from DIA-NN's output (see log tail "
