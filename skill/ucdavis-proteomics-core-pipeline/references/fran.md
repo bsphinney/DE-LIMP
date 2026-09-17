@@ -152,7 +152,8 @@ The manifest's `output_dir` is the **real** search directory, so `corpus_ingest.
 keys idempotency and provenance on where the search actually lives, not on the handover path.
 
 ## Follow-ups
-- **`--xic` is not on by default.** Searches only carry chromatograms if the cfg asked for
-  them. Turning it on for Core runs is a storage/time decision for the facility, not something
-  this skill should switch on silently.
+- **XIC storage.** Every DIA-NN search extracts chromatograms — `--xic` is forced by
+  `run_search.ensure_xic()` since v2.3.0 (see above), so it is not something a cfg can leave
+  out. The cost is disk: 27 GB for the 399-run cohort above. How long they are kept is the
+  facility's retention decision, not the skill's.
 - **Local (non-HIVE) searches** have no drop directory to write to and are not handed over.

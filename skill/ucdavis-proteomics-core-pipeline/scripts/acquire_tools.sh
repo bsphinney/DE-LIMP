@@ -11,14 +11,24 @@
 #   Version pinning (PLAN.md §7c): the orchestrator passes the workflow bundle's
 #   engine + version so we install/resolve THAT EXACT version, not GitHub
 #   "latest". Pass via env:
-#          PIN_ENGINE=diann PIN_VERSION=2.6.0 bash acquire_tools.sh hpc
+#          PIN_ENGINE=diann PIN_VERSION=2.6.1 bash acquire_tools.sh hpc   # the pin resolve_defaults.py writes
 #   Installs are cached under <root>/<engine>/<version>/ so multiple pinned
 #   versions coexist and results stay reproducible.
+#
+#   tools.json `versions.<engine>` is the build the resolved command IS, never the
+#   request: an unpinned ("latest") run records the number it resolved to, and a
+#   build whose version cannot be determined records "" rather than echoing the
+#   request back (Sage taken from a conda env on PATH records "env", a source rather
+#   than a build). run_search.py copies this into search_provenance.json, and FRAN
+#   stores it as the engine version -- the word "latest" there names nothing.
+#   (Measured 2026-09-16: both HIVE tools.json files in use said "sage": "latest";
+#   the cached tarball was sage-v0.14.7.)
 #
 # Engine acquisition matrix (current upstream state, June 2026):
 #   Sage     open source, cross-platform binary -> always downloadable.
 #   DIA-NN   Win/Linux only; free "Academia" zip on GitHub. No macOS build ->
-#            on mac, run via Docker. On HIVE, reuse the existing .sif.
+#            on mac, run via Docker. On HIVE, reuse the Core's native builds
+#            (or its older .sif) under $DIANN_HIVE_DIR.
 #   FragPipe Java app; MSFragger + IonQuant are LICENSE-GATED and cannot be
 #            silently downloaded.
 # =============================================================================
@@ -52,66 +62,129 @@ asset_url_tag() { # owner/repo  tag  pattern
 
 DIANN_CMD="null"; SAGE_CMD="null"; FRAGPIPE_CMD="null"; ALPHADIA_CMD="null"; NOTES=()
 RADIANT_CMD="null"; RADIANT_RUNTIME=""; RADIANT_IMAGE=""; RADIANT_VER=""
-SAGE_VER="${PIN_VERSION:-latest}"; DIANN_VER="${PIN_VERSION:-latest}"
+# Empty until a command is resolved; see "versions" in the header.
+SAGE_VER=""; DIANN_VER=""
+
+# The Core's shared DIA-NN builds on HIVE. Overridable so the resolution below can be
+# tested against a mocked layout (tests/test_acquire_tools_versions.py), and so another
+# site can point it at its own shared builds; nobody else needs to set it.
+DIANN_HIVE_DIR="${DIANN_HIVE_DIR:-/quobyte/proteomics-grp/dia-nn}"
+# The folders searched for the Core's Radiant .sif, colon-separated, in order. Overridable for
+# the same two reasons.
+RADIANT_HIVE_DIRS="${RADIANT_HIVE_DIRS:-/quobyte/proteomics-grp/apptainers:/quobyte/proteomics-grp/radiant}"
 
 # Only honor PIN_VERSION for the engine it names.
 pin_for() { [ -n "$PIN_ENGINE" ] && [ "$PIN_ENGINE" = "$1" ] && [ -n "$PIN_VERSION" ]; }
 
+# diann_version_of <path>: the DIA-NN version a build's PATH names, or nothing.
+#   .../build_261/diann-2.6.1/diann-linux -> 2.6.1     .../diann_2.3.0.sif -> 2.3.0
+# Read from the path, not by running the binary: that would start DIA-NN on what is
+# often a login node, and the .sif needs apptainer just to print a banner.
+diann_version_of() {
+  printf '%s' "$1" | sed -nE 's#.*[Dd][Ii][Aa]-?[Nn][Nn][-_]([0-9]+(\.[0-9]+)+).*#\1#p'
+}
+
+# newest_diann <candidate paths on stdin>: the path with the highest VERSION.
+# Never `sort -V` the whole paths: that orders by whatever folder sits in front of the
+# version, so a 2.5.1 kept under z_archive/ would outrank build_261/diann-2.6.1.
+# Candidates whose path names no version are dropped -- "newest" is unknowable for them.
+newest_diann() {
+  local p v
+  while IFS= read -r p; do
+    v="$(diann_version_of "$p")"
+    [ -n "$v" ] && printf '%s %s\n' "$v" "$p"
+  done | sort -V -k1,1 | tail -n1 | cut -d' ' -f2-
+}
+
 # ---------------------------------------------------------------- Sage --------
+# sage_release_of <cache dir> <requested>: the release a cached Sage came from, read from
+# the tarball acquire_sage keeps beside the binary (its top folder is
+# sage-v0.14.7-<target>/). NOT `sage --version`: the v0.14.7 release binary prints
+# "sage 0.14.6" (measured on HIVE 2026-09-16), while 0.14.7 is what resolve_defaults.py
+# pins and what anyone can download again. Falls back to a concrete pin, else prints nothing.
+sage_release_of() {
+  local dir="$1" want="$2" got=""
+  if [ -f "$dir/sage.tar.gz" ]; then
+    got="$(tar -tzf "$dir/sage.tar.gz" 2>/dev/null | head -n1 \
+           | sed -nE 's#^(\./)?sage-v?([0-9]+(\.[0-9]+)+)-.*#\2#p')"
+  fi
+  if [ -z "$got" ] && [ "$want" != "latest" ]; then got="${want#v}"; fi
+  printf '%s' "$got"
+}
+
 acquire_sage() {
   # Prefer a Sage already on PATH (setup.sh installs sage-proteomics into the
   # conda env and activate.sh puts it on PATH). No need to re-download.
+  # "env" names a source, not a build; run_search.py treats it as no version.
   if have sage; then SAGE_CMD="$(command -v sage)"; SAGE_VER="env"
     NOTES+=("Sage: using the conda-env build on PATH ($SAGE_CMD)."); return; fi
   local ver tag; ver="latest"; tag=""
   if pin_for sage; then ver="$PIN_VERSION"; tag="$(sage_tag "$PIN_VERSION")"; fi
-  SAGE_VER="$ver"
   local dir="$ROOT/sage/$ver" bin
   bin="$(find "$dir" -name sage -type f -perm -u+x 2>/dev/null | head -n1)"
-  if [ -n "$bin" ]; then SAGE_CMD="$bin"; return; fi
-  mkdir -p "$dir"
-  local pat
-  case "$OS-$ARCH" in
-    linux-x86_64)  pat="x86_64-unknown-linux-gnu.*tar" ;;
-    darwin-arm64)  pat="aarch64-apple-darwin.*tar" ;;
-    darwin-x86_64) pat="x86_64-apple-darwin.*tar" ;;
-    *)             pat="x86_64-unknown-linux-gnu.*tar" ;;
-  esac
-  local url; url="$(asset_url_tag lazear/sage "$tag" "$pat")"
-  if [ -z "$url" ]; then NOTES+=("Sage: could not resolve a release asset for $OS-$ARCH version='$ver'; see https://github.com/lazear/sage/releases"); return; fi
-  echo "  Sage: downloading $url"
-  curl -fsSL "$url" -o "$dir/sage.tar.gz" && { tar -xzf "$dir/sage.tar.gz" -C "$dir" --strip-components=1 2>/dev/null || tar -xzf "$dir/sage.tar.gz" -C "$dir"; }
-  bin="$(find "$dir" -name sage -type f 2>/dev/null | head -n1)"
-  [ -n "$bin" ] && chmod +x "$bin" && SAGE_CMD="$bin"
-  NOTES+=("Sage $ver: run with --parquet; v0.14.x needs sage_protein_groups.py post-hoc for protein rollup. Telemetry off via --disable-telemetry-i-dont-want-to-improve-sage.")
+  if [ -z "$bin" ]; then
+    mkdir -p "$dir"
+    local pat
+    case "$OS-$ARCH" in
+      linux-x86_64)  pat="x86_64-unknown-linux-gnu.*tar" ;;
+      darwin-arm64)  pat="aarch64-apple-darwin.*tar" ;;
+      darwin-x86_64) pat="x86_64-apple-darwin.*tar" ;;
+      *)             pat="x86_64-unknown-linux-gnu.*tar" ;;
+    esac
+    local url; url="$(asset_url_tag lazear/sage "$tag" "$pat")"
+    if [ -z "$url" ]; then NOTES+=("Sage: could not resolve a release asset for $OS-$ARCH version='$ver'; see https://github.com/lazear/sage/releases"); return; fi
+    echo "  Sage: downloading $url"
+    curl -fsSL "$url" -o "$dir/sage.tar.gz" && { tar -xzf "$dir/sage.tar.gz" -C "$dir" --strip-components=1 2>/dev/null || tar -xzf "$dir/sage.tar.gz" -C "$dir"; }
+    bin="$(find "$dir" -name sage -type f 2>/dev/null | head -n1)"
+    [ -n "$bin" ] && chmod +x "$bin"
+  fi
+  [ -z "$bin" ] && return
+  SAGE_CMD="$bin"
+  # The cache is keyed on the REQUEST (sage/latest/ is what real installs look like), so
+  # the version has to come from what is inside it, not from the folder name.
+  SAGE_VER="$(sage_release_of "$dir" "$ver")"
+  if [ -z "$SAGE_VER" ]; then
+    NOTES+=("Sage ($bin): cannot tell which release this is (no sage.tar.gz naming one beside it), so tools.json records no version. Delete $dir and re-run to re-download a known release.")
+  elif [ "$ver" != "latest" ] && [ "$SAGE_VER" != "${ver#v}" ]; then
+    NOTES+=("Sage: pinned '$ver' but the cached build in $dir is release $SAGE_VER.")
+  fi
+  NOTES+=("Sage ${SAGE_VER:-$ver}: run with --parquet; v0.14.x needs sage_protein_groups.py post-hoc for protein rollup. Telemetry off via --disable-telemetry-i-dont-want-to-improve-sage.")
 }
 
 # --------------------------------------------------------------- DIA-NN -------
 acquire_diann() {
   local ver; ver="latest"; pin_for diann && ver="$PIN_VERSION"
-  DIANN_VER="$ver"
   case "$CLASS" in
     hpc)
-      # On HIVE the Proteomics Core keeps DIA-NN as NATIVE builds, e.g. 2.6.0 at
-      #   /quobyte/proteomics-grp/dia-nn/build_260/diann-2.6.0/diann-linux
-      # (older 2.3.0 is a .sif). Match the PINNED version exactly — never silently
-      # substitute a different version (reproducibility).
-      local DN=/quobyte/proteomics-grp/dia-nn bin="" sif=""
+      # On HIVE the Proteomics Core keeps DIA-NN as NATIVE builds at
+      #   /quobyte/proteomics-grp/dia-nn/build_<nnn>/diann-<version>/diann-linux
+      # (2.5.1, 2.6.0, 2.6.1 on 2026-09-16) plus an older diann_2.3.0.sif. Match the
+      # PINNED version exactly -- never silently substitute a different version
+      # (reproducibility).
+      local DN="$DIANN_HIVE_DIR" bin="" sif="" got=""
       if [ "$ver" != "latest" ]; then
         bin="$(ls -1 "$DN"/*/diann-"$ver"/diann-linux 2>/dev/null | head -n1)"
         [ -z "$bin" ] && bin="$(find "$DN" -maxdepth 3 -path "*diann-$ver*/diann-linux" -type f 2>/dev/null | head -n1)"
         [ -z "$bin" ] && sif="$(ls -1 "$DN"/*"$ver"*.sif 2>/dev/null | sort -V | tail -n1)"
       else
-        bin="$(find "$DN" -maxdepth 3 -name diann-linux -type f 2>/dev/null | sort -V | tail -n1)"
-        [ -z "$bin" ] && sif="$(ls -1 "$DN"/*.sif 2>/dev/null | sort -V | tail -n1)"
+        bin="$(find "$DN" -maxdepth 3 -name diann-linux -type f 2>/dev/null | newest_diann)"
+        [ -z "$bin" ] && sif="$(ls -1 "$DN"/*.sif 2>/dev/null | newest_diann)"
       fi
+      # The version is read off what was FOUND. The request is only a fallback, and only
+      # when it was concrete and the glob that matched it had it in the name.
+      if [ -n "$bin" ]; then got="$(diann_version_of "$bin")"
+      elif [ -n "$sif" ]; then got="$(diann_version_of "$sif")"; fi
+      [ -z "$got" ] && [ "$ver" != "latest" ] && got="$ver"
       if [ -n "$bin" ]; then
-        DIANN_CMD="$bin"
-        NOTES+=("DIA-NN $ver: using the HIVE Proteomics Core native build $bin. Reference invocation: $DN/run_diann_*.sbatch.")
+        DIANN_CMD="$bin"; DIANN_VER="$got"
+        [ "$ver" = "latest" ] && NOTES+=("DIA-NN: 'latest' resolved to $got, the highest version under $DN.")
+        [ "$ver" != "latest" ] && [ "$got" != "$ver" ] && NOTES+=("DIA-NN: pinned '$ver' matched build $got ($bin).")
+        NOTES+=("DIA-NN $got: using the HIVE Proteomics Core native build $bin. Reference invocation: $DN/run_diann_*.sbatch.")
         return
       elif [ -n "$sif" ] && have apptainer && { [ "$ver" = "latest" ] || printf '%s' "$sif" | grep -q "$ver"; }; then
-        DIANN_CMD="apptainer exec --bind /quobyte:/quobyte $sif /diann-*/diann-linux"
-        NOTES+=("DIA-NN $ver: reusing HIVE container $sif.")
+        DIANN_CMD="apptainer exec --bind /quobyte:/quobyte $sif /diann-*/diann-linux"; DIANN_VER="$got"
+        [ "$ver" = "latest" ] && NOTES+=("DIA-NN: 'latest' resolved to $got, the highest-versioned .sif under $DN (no native build found).")
+        NOTES+=("DIA-NN $got: reusing HIVE container $sif.")
         return
       else
         NOTES+=("DIA-NN $ver NOT found on HIVE under $DN — NOT substituting a different version. Present: $(ls -d "$DN"/*.sif "$DN"/build_*/diann-* 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' '). Will fetch the pinned Academia build into your space instead (or build $ver).")
@@ -119,7 +192,16 @@ acquire_diann() {
     mac)
       if [ -n "${DIANN_DOCKER_IMAGE:-}" ] && have docker; then
         DIANN_CMD="docker run --rm -v \$PWD:/data ${DIANN_DOCKER_IMAGE} diann-linux"
+        # build_diann_docker.sh tags the image with the version it RESOLVED
+        # (proteomics-pipeline/diann:2.6.1), so the tag is the record. An image tagged
+        # otherwise says nothing about what is inside; record nothing rather than a guess.
+        DIANN_VER="$(printf '%s' "$DIANN_DOCKER_IMAGE" | sed -nE 's#.*:v?([0-9]+(\.[0-9]+)+)$#\1#p')"
         NOTES+=("DIA-NN: using Docker image \$DIANN_DOCKER_IMAGE on macOS (no native mac build exists).")
+        if [ -z "$DIANN_VER" ]; then
+          NOTES+=("DIA-NN: Docker image '$DIANN_DOCKER_IMAGE' has no version in its tag, so tools.json records no DIA-NN version. Rebuild with build_diann_docker.sh, which tags the image with the version it contains.")
+        elif [ "$ver" != "latest" ] && [ "$DIANN_VER" != "$ver" ]; then
+          NOTES+=("DIA-NN: pinned '$ver' but DIANN_DOCKER_IMAGE is $DIANN_VER ('$DIANN_DOCKER_IMAGE'). Build the pinned one: bash scripts/build_diann_docker.sh $ver")
+        fi
         return
       fi
       NOTES+=("DIA-NN on macOS: no native build. Set DIANN_DOCKER_IMAGE to a built image (version $ver), or build from the Academia Linux zip's Dockerfile. See references/environment.md.")
@@ -134,14 +216,13 @@ acquire_diann() {
   local got; got="$(printf '%s' "$url" | sed -nE 's#.*/DIA-NN-([0-9][0-9.]*)-Academia-.*#\1#p')"
   [ -z "$got" ] && got="$ver"
   [ "$got" != "$ver" ] && NOTES+=("DIA-NN: '$ver' resolved to build $got ($(basename "$url")).")
-  DIANN_VER="$got"
   local dir="$ROOT/diann/$got"; mkdir -p "$dir"
   local existing; existing="$(find "$dir" -name 'diann-linux' -type f 2>/dev/null | head -n1)"
-  if [ -n "$existing" ]; then DIANN_CMD="$existing"; return; fi
+  if [ -n "$existing" ]; then DIANN_CMD="$existing"; DIANN_VER="$got"; return; fi
   echo "  DIA-NN: downloading $url"
   curl -fsSL "$url" -o "$dir/diann.zip" && (cd "$dir" && unzip -oq diann.zip)
   existing="$(find "$dir" -name 'diann-linux' -type f 2>/dev/null | head -n1)"
-  if [ -n "$existing" ]; then chmod +x "$existing"; DIANN_CMD="$existing"
+  if [ -n "$existing" ]; then chmod +x "$existing"; DIANN_CMD="$existing"; DIANN_VER="$got"
     NOTES+=("DIA-NN $got: Linux native needs glibc>=Mint 21.2 + .NET 8. If missing, prefer Docker/Apptainer (the zip ships a Dockerfile).")
   fi
 }
@@ -153,8 +234,11 @@ acquire_diann() {
 # for the inputs, and docker (-v) and apptainer (--bind) spell those differently.
 acquire_radiant() {
   local ver; ver="latest"; pin_for radiant && ver="$PIN_VERSION"
-  RADIANT_VER="$ver"
   local image="seerbio/radiant-fulcrum:$ver"
+  # RADIANT_VER stays "" until an image is chosen, and is the release that image IS (see
+  # "versions" in the header). An unpinned Docker/Apptainer image is `:latest`, which names
+  # no release; finding out which one it points at means pulling ~3 GB, so it records "".
+  local unpinned_note="Radiant: the image is seerbio/radiant-fulcrum:latest, which names no release, so tools.json records no Radiant version. To record one, pin it: PIN_ENGINE=radiant PIN_VERSION=<release> (resolve_defaults.py pins 2.3.3)."
 
   # LICENSE: Apache-2.0 with a MANDATORY GRANT-BACK and the COMMONS CLAUSE, which
   # removes the right to "Sell" the software or a service whose value derives
@@ -166,8 +250,9 @@ acquire_radiant() {
     hpc)
       # Prefer an existing .sif; do NOT auto-build one (a docker->apptainer
       # conversion pulls ~3 GB and needs a writable cache -- not a login-node job).
-      local RS sif=""
-      for RS in /quobyte/proteomics-grp/apptainers /quobyte/proteomics-grp/radiant; do
+      local RS sif="" rdirs
+      IFS=: read -r -a rdirs <<< "$RADIANT_HIVE_DIRS"
+      for RS in "${rdirs[@]}"; do
         [ -d "$RS" ] || continue
         if [ "$ver" != "latest" ]; then
           sif="$(ls -1 "$RS"/*radiant*"$ver"*.sif 2>/dev/null | sort -V | tail -n1)"
@@ -178,19 +263,27 @@ acquire_radiant() {
       done
       if [ -n "$sif" ] && have apptainer; then
         RADIANT_CMD="apptainer exec"; RADIANT_RUNTIME="apptainer"; RADIANT_IMAGE="$sif"
-        NOTES+=("Radiant $ver: reusing HIVE container $sif.")
+        # The .sif's own name, as the build step below writes it (radiant-fulcrum-<ver>.sif);
+        # the pin only when the glob that found it had the pin in the name.
+        RADIANT_VER="$(basename "$sif" | sed -nE 's#.*[-_]v?([0-9]+(\.[0-9]+)+)\.sif$#\1#p')"
+        [ -z "$RADIANT_VER" ] && [ "$ver" != "latest" ] && RADIANT_VER="${ver#v}"
+        [ -z "$RADIANT_VER" ] && NOTES+=("Radiant: $sif names no release, so tools.json records no Radiant version.")
+        NOTES+=("Radiant ${RADIANT_VER:-$ver}: reusing HIVE container $sif.")
         return
       fi
-      NOTES+=("Radiant $ver: no .sif found under /quobyte/proteomics-grp/{apptainers,radiant}. Build one ON A COMPUTE NODE (never the login node): 'srun -c 8 --mem 16G --pty apptainer build radiant-fulcrum-$ver.sif docker://$image', then re-run acquire_tools.sh.")
+      NOTES+=("Radiant $ver: no .sif found under ${RADIANT_HIVE_DIRS//:/ or }. Build one ON A COMPUTE NODE (never the login node): 'srun -c 8 --mem 16G --pty apptainer build radiant-fulcrum-$ver.sif docker://$image', then re-run acquire_tools.sh.")
       ;;
     mac|linux)
+      # The tag IS the release when it was pinned: seerbio/radiant-fulcrum:2.3.3.
       if have docker; then
         RADIANT_CMD="docker run --rm"; RADIANT_RUNTIME="docker"; RADIANT_IMAGE="$image"
+        if [ "$ver" != "latest" ]; then RADIANT_VER="${ver#v}"; else NOTES+=("$unpinned_note"); fi
         NOTES+=("Radiant $ver: using Docker image $image (multi-arch; runs natively on Apple Silicon and x86). First run pulls ~3 GB.")
         return
       fi
       if have apptainer; then
         RADIANT_CMD="apptainer exec"; RADIANT_RUNTIME="apptainer"; RADIANT_IMAGE="docker://$image"
+        if [ "$ver" != "latest" ]; then RADIANT_VER="${ver#v}"; else NOTES+=("$unpinned_note"); fi
         NOTES+=("Radiant $ver: no Docker; will let Apptainer pull $image on first use (~3 GB).")
         return
       fi

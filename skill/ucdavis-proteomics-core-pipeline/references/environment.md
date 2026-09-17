@@ -6,12 +6,12 @@ How the skill adapts to where it's running, plus FASTA resolution.
 
 | class | how detected | engine acquisition | execution |
 |---|---|---|---|
-| `hpc` | `sbatch` on PATH, or `/quobyte/proteomics-grp` visible | reuse existing Apptainer `.sif` (DIA-NN); download Sage binary | **submit via sbatch** (never login-node) |
+| `hpc` | `sbatch` on PATH, or `/quobyte/proteomics-grp` visible | on HIVE, reuse the Core's native DIA-NN builds (below); elsewhere download the Academia Linux build. Sage from the conda env, else its release binary | **submit via sbatch** (never login-node) |
 | `mac` | `uname` = darwin | DIA-NN via **Docker** (no native mac build); Sage native | inline |
 | `linux` | everything else | native binaries | inline |
 
 `uc_davis_hive` is true when `/quobyte/proteomics-grp` exists → enables FASTA reuse
-and the existing `.sif`.
+and the Core's DIA-NN builds.
 
 Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 
@@ -20,25 +20,73 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
 - **No native macOS build exists.** On mac you must run DIA-NN through Docker. Set
   `DIANN_DOCKER_IMAGE` to a built image, or build one from the Academia Linux zip's
   bundled Dockerfile. `acquire_tools.sh` writes a note when this is unresolved.
-- **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`.
-  Recent versions are **native builds**, e.g. DIA-NN **2.6.0** at
-  `build_260/diann-2.6.0/diann-linux`; older 2.3.0 is a `.sif`. `acquire_tools.sh`
-  resolves the **pinned** version by looking for `build_*/diann-<version>/diann-linux`
-  first, then a version-matched `.sif`, and **never silently substitutes a different
-  version** (reproducibility). The facility's `run_diann_*.sbatch` in that folder is
-  the reference invocation. AlphaDIA is also on HIVE at
-  `/quobyte/proteomics-grp/apptainers/alphadia.sif` (auto-reused).
+- **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`
+  as **native builds** at `build_<nnn>/diann-<version>/diann-linux` — **2.5.1, 2.6.0 and
+  2.6.1** when listed on 2026-09-16 — plus one older Apptainer image, `diann_2.3.0.sif`.
+  The skill pins **2.6.1** (`resolve_defaults.py`). `acquire_tools.sh` resolves the
+  **pinned** version by looking for `build_*/diann-<version>/diann-linux` first, then a
+  version-matched `.sif`, and **never silently substitutes a different version**
+  (reproducibility): a pin that is not there — the FRAN pilot's **2.7.0**, say — is
+  downloaded as the Academia Linux build into your own tools root instead. Unpinned, it
+  takes the highest *version* the build paths name. Either way `tools.json` records the
+  version of the build it found, never `latest`. Listing it yourself is cheap and allowed
+  on the login node: `ls -d /quobyte/proteomics-grp/dia-nn/build_*/diann-*`. The
+  facility's `run_diann_*.sbatch` in that folder is the reference invocation. AlphaDIA is
+  also on HIVE at `/quobyte/proteomics-grp/apptainers/alphadia.sif` (auto-reused).
+  (`DIANN_HIVE_DIR` overrides the build directory, and `RADIANT_HIVE_DIRS` the
+  colon-separated folders searched for a Radiant `.sif` — by default
+  `/quobyte/proteomics-grp/apptainers` then `/quobyte/proteomics-grp/radiant`; the tests
+  use both to mock the layout.)
 - **Linux native:** needs glibc ≥ Linux Mint 21.2 and .NET 8. If missing, prefer
   Docker/Apptainer.
-- DIA-NN reads `.raw`/`.d` natively from 2.1+.
+- DIA-NN reads `.raw`/`.d` natively from 2.1+. On Linux, `.raw` also needs a **.NET 8
+  runtime ≥ 8.0.17** (`ensure_dotnet8.sh`; see `references/search-engines.md`).
 
 ## Version pinning (reproducibility)
 
 `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION` from the workflow bundle and
 caches under `~/.proteomics-pipeline/tools/<engine>/<version>/`. Different pinned
-versions coexist. The written `tools.json` records `pinned` and `versions` so the
-report can state exactly what ran. **Always pass the bundle's engine+version** — a
-result from "latest" is not reproducible.
+versions coexist. The written `tools.json` records `pinned` (what was asked for) and
+`versions` (the build each command **is**) so the report can state exactly what ran.
+**Always pass the bundle's engine+version** — a result from "latest" is not
+reproducible.
+
+`versions` never says `latest`: an unpinned run records the number it resolved to — for
+DIA-NN from the build path, `.sif` name, download asset or Docker image tag; for Sage from
+the release tarball kept beside the binary, **not** `sage --version`, which prints 0.14.6
+for the v0.14.7 release; for Radiant from a pinned image tag or the `.sif` name. When no
+version can be determined it records `""` with a note — an unpinned Radiant image
+(`seerbio/radiant-fulcrum:latest`) is one such case. Two values are sources, not builds:
+`"env"` (a `sage` found on PATH, e.g. the conda env's) and, in a `tools.json` written
+before this was fixed, `"latest"`.
+
+The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins 2.6.1, but
+`tools.json` holds whatever was last acquired (the FRAN pilot pinned 2.7.0). Nothing forces
+them to match, so `run_search.py` compares them before submitting and records both in
+`search_provenance.json` — as one `engine_version` object shaped like `scan_window` (a
+`value`, and a `source` saying in words where it came from), plus top-level `version`, which
+always equals `engine_version.value`:
+
+| field | meaning |
+|---|---|
+| `version` = `engine_version.value` | the build that runs: `tools.json` `versions`, else the one version the **command itself** names (a build folder such as `diann-2.6.0/`, a `.sif` name, an image tag); else `null`. **Never the manifest's pin** — `fran_deposit.py` sends `version` to FRAN as the engine version it stores, so a pin nothing confirmed would be stored there as fact |
+| `engine_version.source` | where `value` came from: `tools.json versions.<engine>, …`, `named by the command tools.json runs (…)`, or `unknown -- <why>` |
+| `engine_version.tools_json` | `tools.json` `versions.<engine>` as written, even `latest` / `env` |
+| `engine_version.named_by_command` | every version the command names (usually zero or one) |
+| `engine_version.manifest_pin` | the manifest's pin as written (`null` if it pins another engine) |
+| `engine_version.mismatch` | `true`/`false` when `value` and the pin are both known; **`null`** when they cannot be compared. A WARNING is printed when `true` |
+
+A `tools.json` whose `versions` contradicts its own command (says 2.6.1, runs
+`diann-2.6.0/diann-linux`) records `version: null` with a WARNING: one is wrong and nothing
+tells which. A version *directory* (`sage/0.14.6/sage`) is not read, because
+`acquire_tools.sh` names cache folders after the request, not the build inside.
+
+A mismatch WARNING means the version the user confirmed (SKILL.md golden rule #1) is not
+the one about to run: say so before submitting, and either re-acquire the pin (the WARNING
+prints the command, with this `tools.json`'s platform and tools root; on macOS it rebuilds
+the Docker image) or get the new version confirmed. `version: null` means the search is
+recorded — and deposited to FRAN — with no engine version; for a `sage` on PATH that is
+currently the only outcome.
 
 ## FASTA resolution (`fetch_fasta.py`)
 
@@ -133,12 +181,63 @@ citation, and any warnings. Pass it to `provenance.py --fasta-info` so
 
 ## SLURM submission (hpc)
 
-`run_search.py --sbatch job.sh` emits a login-node-safe script:
-`--partition=high --qos=genome-center-grp-high-qos`, 64G, 12h. If that queue is
-full, the DE-LIMP fallback is `publicgrp/low` (the only fallback — there is no
-`genome-center-grp` LOW partition). Submit with `sbatch job.sh`, poll the
-`<job>_<id>.log`, then run `run_search.py --adapt-only` for Sage/FragPipe to build
-`report.parquet`.
+`run_search.py --sbatch job.sh` emits a login-node-safe script (64G, 12h). **No queue is
+hard-coded**: `run_search.slurm_queue()` — the one definition, also used by
+`diann_parallel.py`, `radiant_parallel.py` and `diatracer_parallel.py` — asks SLURM what
+the submitting user may use (`sacctmgr show assoc user=$USER`) and picks:
+
+1. an explicit queue (pass `--partition` **and** `--account` together, plus `--qos` if the
+   association has one), which skips everything below;
+2. `genome-center-grp` on `high` (facility members: not preemptible);
+3. `publicgrp` on `low` (everyone else: preemptible, so `#SBATCH --requeue` is added).
+
+When an account has both, **utilisation** decides, not entitlement. `slurm_queue()` counts
+the CPUs *you* already run on `high` (`squeue`) against the 64-CPU per-user cap, and the idle
+CPUs on `low` (`sinfo`), and compares both with `need = min(peak, 16)`, where `peak` is what
+the caller passes (16 when it passes none) — at most one array task's worth, **not** the
+job's own request. It does this **once, when the scripts are generated**, not when each job
+starts. Two rules:
+
+- **A (every job):** `low` when fewer than `need` of your CPUs are free on `high` and `low`
+  has at least `need` idle.
+- **B (only where a caller marks a step preemption-safe):** also `low`, given the same `need`
+  idle there, when fewer than `2 × need` are free on `high`, or when your usage there
+  cannot be read (`squeue` cannot run).
+
+| route | how often the queue is decided | rules |
+|---|---|---|
+| DIA-NN 5-step chain (`diann_parallel.py`) | **once, for all five steps**, with `need` 16 | A only |
+| Radiant per-file array (`radiant_parallel.py`) | step 2 (the array) apart from steps 1 and 3 | step 2: A and B, `need = min(--threads-per-file, 16)`; steps 1 and 3: A, `need = min(--fulcrum-cpus, 16)` |
+| diaTracer (`diatracer_parallel.py`) | once, `need` 16 | A only |
+| single-script `--sbatch` | once per script, `need` 16 | A only |
+
+So the DIA-NN chain's array steps (2 and 4) **always share the queue of steps 1, 3 and 5**:
+they do not move to `low` on their own when `high` is merely busy or `squeue` is missing.
+(`diann_parallel.py` does ask `slurm_queue()` for a separate array-step queue, but it has
+already filled in partition and account by then, and an explicit pair is returned
+unchanged.) The whole chain moves to `low` only under rule A. Because `need` is capped at
+16, the chain's 64-CPU steps (3 and 5 by default; step 1 asks for 16) **go to `high`
+whenever 16 or more of your CPUs were free there at generation, and then wait on `high`**
+for the rest; they do not move to `low` because the 64 they ask for are unavailable. To put
+the chain on `low`, pass `--partition low --account publicgrp` (the generator adds
+`--qos=publicgrp-low-qos`).
+
+If associations cannot be read at all the script falls back to `publicgrp/low`, **not** the
+cluster default: that is `high`, which rejects a non-facility account.
+
+Checked on HIVE 2026-09-16 (`sacctmgr show assoc` / `show qos`, `sinfo`): the default
+partition is `high`; `genome-center-grp` has `high` (per-user cap 64 CPUs) and `gpu-a100`
+but no `low`; `publicgrp` has `high` (8 CPUs / 128 GB **per job**) and `low` (no per-job
+cap, preemptible).
+
+`run_search.py` passes `--partition/--account/--qos` on to the job-array routes (the DIA-NN
+5-step chain and the Radiant per-file array). Whether the single-script `--sbatch` paths —
+DIA-NN at ≤5 files or when the chain declines, Sage, FragPipe, AlphaDIA, single-file
+Radiant — honour them has changed between skill versions, so on every route **read the
+`#SBATCH` header of the generated script before submitting**: it is the queue the job will
+use. Submit with `sbatch job.sh` (or `bash <out>/submit.sh` for a two-job or chained
+search), poll the `<job>_<id>.log`, then run `run_search.py --adapt-only` for Sage/FragPipe
+to build `report.parquet`.
 
 A DIA-NN search of more than 5 files on a SLURM host routes to the 5-step parallel chain
 instead, which has no single job script: `job.sh` is not written, an existing regular file of
