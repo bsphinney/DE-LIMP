@@ -47,8 +47,9 @@ the spine.
 3. **Never run computationally intensive work on a cluster login/head node — EVER.**
    On any cluster (HIVE/SLURM, or any other scheduler), **every** heavy step — the
    search, and any large DE / figure / conversion (e.g. msconvert) — must run as a
-   **scheduled job** (`run_search.py --sbatch` → `sbatch`), not inline on the login
-   node. Login nodes are shared; running compute there gets the user flagged/killed.
+   **scheduled job** (`run_search.py --sbatch` → `sbatch`; a DIA-NN search of >5 files on
+   SLURM instead routes to the 5-step chain, exits 3 without writing `--sbatch`, and is
+   submitted with `bash <out>/submit.sh`), not inline on the login node. Login nodes are shared; running compute there gets the user flagged/killed.
    The **only** things allowed on the login node are tiny orchestration commands —
    submitting jobs, `squeue`/`sacct` polling (`watch_run.sh`), and small file moves.
    If you're unsure whether a step is heavy, submit it as a job. (No SLURM but a big
@@ -120,8 +121,9 @@ Read `recommended_mode` + `facility_software_available`, then:
 
 - **HIVE = yes → `hive_remote`:** drive HIVE over SSH from the local Claude Code
   (`export HIVE_USER=… HIVE_KEY=…`; use `bash scripts/hive_exec.sh '<cmd>'`). The search
-  runs as a **SLURM job** (`run_search.py --sbatch` → `hive_exec.sh 'sbatch job.sh'`),
-  never the login node. HIVE gives **compute**; the Core software is separate (next).
+  runs as a **SLURM job** (`run_search.py --sbatch` → `hive_exec.sh 'sbatch job.sh'`;
+  for a DIA-NN search of >5 files it routes to the 5-step chain instead — exit 3, no
+  `job.sh`, run `hive_exec.sh 'bash <out>/submit.sh'`), never the login node. HIVE gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the DIA-NN `.sif`,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -733,11 +735,30 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     (the chain is job arrays — nothing to fall back to) or when the cfg is **not
     parallel-safe**. Steps 3/5 reuse the `.quant` files, so *anything* DIA-NN
     auto-optimises per file gets stitched together inconsistently — DIA-NN's own warning
-    names **mass accuracy AND scan window**. Both must be pinned:
-    - **mass accuracy** — re-run `estimate_params.py` with the **real instrument** (step 6b).
-    - **`--window`** — `estimate_params.py` omits it, which means auto. **Measure it**,
-      never guess: on an 18-file poplar run DIA-NN inferred radius 7 for seventeen files
-      and 8 for one, and the chain combined them. After step 1 has built the library:
+    names **mass accuracy AND scan window**. The two are not equally recoverable:
+    - **mass accuracy — you must pin it.** DIA-NN calibrates it per run against the
+      library, so there is no one value to carry into steps 3/5. Omitted declines the
+      chain: re-run `estimate_params.py` with the **real instrument** (step 6b). `0` is
+      **not** auto — DIA-NN reads it as a literal 0 ppm tolerance and returns 0 IDs
+      (auto is the flag *omitted*) — so `0`, negative, non-numeric, or set twice with
+      different values also declines; fix the value.
+    - **`--window` — the chain handles it; do nothing.** `estimate_params.py` omits it by
+      design, because the radius depends on the acquisition scheme and has to be
+      *measured*. **Step 1b** does that automatically: after library prediction it runs
+      `probe_window.py` (on the first file, falling through to the next if that one gives
+      no radius — up to 3) and pins the one radius into steps 2–5. Only once a radius is
+      measured does it write `<out>/params.resolved.cfg`; if all 3 fail, step 1b fails
+      loudly and steps 2–5 never start — they sit `DependencyNeverSatisfied`, so after the
+      fix resubmit step 1b **and** steps 2–5 (ids in `<out>/jobs.txt`; →
+      `references/watcher.md`), not step 1b alone. An omitted `--window` therefore does **not**
+      decline the chain — don't send the user off to measure it by hand, and don't read
+      such a routing decline as a window problem. `--window 0` routes the same way: it is
+      **not** a valid radius (DIA-NN logs `scan window radius should be a positive
+      integer` and optimises per file — seen on the 18-file poplar run, radius 7 for
+      seventeen files and 8 for one), and the chain removes it. Anything else that is not
+      a positive integer (`0.5`, `7.0`, `-1`, `wide`) is a typo and declines — fix the cfg.
+      The decline message names the fix for its actual cause. To measure it yourself
+      anyway, e.g. with `--no-probe-window`, after step 1 has built the library:
       ```bash
       python3 scripts/probe_window.py --diann "<diann cmd>" --raw <one file> \
           --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg>
@@ -751,6 +772,14 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
 - **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` (over `hive_exec.sh` for a
   remote HIVE run). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to
   build `report.parquet`.
+  - **Except when it routed to the 5-step chain** (DIA-NN, >5 files, SLURM — i.e. most
+    real cohorts). The chain generates six scripts plus its own `submit.sh`, so there is
+    no single job to submit: `--sbatch` is **not** written, `run_search.py` **exits 3**
+    (so `--sbatch job.sh && sbatch job.sh` stops), and any existing `job.sh` from an
+    earlier search is renamed to `job.sh.stale-<time>` so it cannot be resubmitted by
+    mistake. The chain *is* generated — run **`bash <out>/submit.sh`**. Exit 3 here is
+    that message, not a failed search; check the routing line it prints. Want one job
+    script anyway? `--no-parallel`.
 - Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
 → detail: `references/search-engines.md`.
 

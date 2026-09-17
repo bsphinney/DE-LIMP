@@ -42,6 +42,22 @@ SRC_DIANN = "DIA-NN README recommended settings (verified 2026-06)"
 DIANN_ORBITRAP_PPM = {240000: 4, 120000: 7, 60000: 10, 30000: 15}
 SRC_TABLE = "DIA-NN README, Orbitrap resolution->accuracy table"
 
+# The per-instrument (MS1 ppm, MS2 ppm) rows of the same README table. classify_instrument()
+# reads them from here, and so does every message that tells a user what to pin -- the
+# parallel-chain refusal in diann_parallel.py and the routing decline in run_search.py used
+# to spell "timsTOF 15/15, Astral 4/10" out by hand, i.e. a second copy of this table.
+DIANN_INSTRUMENT_PPM = {"orbitrap_astral": (4, 10), "timstof": (15, 15), "sciex_tof": (20, 20)}
+
+
+def instrument_ppm_summary():
+    """One line of the table, MS1/MS2 ppm, for remediation text."""
+    t = DIANN_INSTRUMENT_PPM
+    orb = ", ".join(f"{r // 1000}k->{p}" for r, p in sorted(DIANN_ORBITRAP_PPM.items(), reverse=True))
+    return (f"MS1/MS2 ppm: timsTOF {t['timstof'][0]}/{t['timstof'][1]}, "
+            f"Astral {t['orbitrap_astral'][0]}/{t['orbitrap_astral'][1]}, "
+            f"SCIEX {t['sciex_tof'][0]}/{t['sciex_tof'][1]}, "
+            f"Orbitrap by resolution ({orb})")
+
 
 def ppm_for_resolution(res):
     """Map an Orbitrap resolving power to mass accuracy (ppm), per DIA-NN's table.
@@ -92,11 +108,11 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
     if not n:
         return ("unknown", None, None, "instrument not detected", "auto-calibration fallback")
     if "astral" in n:
-        return ("orbitrap_astral", 4, 10, "Orbitrap Astral (assumes 240k MS1)", SRC_DIANN)
+        return ("orbitrap_astral", *DIANN_INSTRUMENT_PPM["orbitrap_astral"], "Orbitrap Astral (assumes 240k MS1)", SRC_DIANN)
     if "tims" in n:
-        return ("timstof", 15, 15, "Bruker timsTOF (dia-PASEF / ddaPASEF)", SRC_DIANN)
+        return ("timstof", *DIANN_INSTRUMENT_PPM["timstof"], "Bruker timsTOF (dia-PASEF / ddaPASEF)", SRC_DIANN)
     if "tripletof" in n or "zenotof" in n or "sciex" in n:
-        return ("sciex_tof", 20, 20, "SCIEX TripleTOF / ZenoTOF", SRC_DIANN)
+        return ("sciex_tof", *DIANN_INSTRUMENT_PPM["sciex_tof"], "SCIEX TripleTOF / ZenoTOF", SRC_DIANN)
     # Orbitrap family with no resolution to work from -> DIA-NN auto-calibration.
     # Prefer passing --ms1-resolution/--ms2-resolution (read_mzml_resolution() gets
     # them straight out of the mzML) so the run is reproducible and parallel-capable.
@@ -233,8 +249,8 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # ("Mass accuracy will be fixed to 0 (MS2) and 0 (MS1)" in the log). Automatic
     # calibration is what you get by OMITTING the flags entirely. So when we have no
     # instrument-derived value, record the rationale but emit nothing (render=False).
-    # diann_parallel.parallel_safe() treats an absent flag exactly like 0 (both are
-    # "not fixed"), so the parallel-chain gate is unaffected.
+    # diann_parallel.parallel_safe() declines the chain for both an absent flag (auto) and
+    # a 0 (literal 0 ppm) -- for different reasons, which its message now names.
     if ms2 is None:
         auto_src = (f"{src}; flags omitted so DIA-NN auto-calibrates per run "
                     "(--mass-acc 0 would pin the tolerance at 0 ppm -> 0 IDs)")
@@ -245,8 +261,19 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{src}]")
     # --window 0 is likewise rejected ("scan window radius should be a positive
     # integer"); omitting it lets DIA-NN set the radius from the observed peak width.
-    add("--window", "auto (flag omitted)",
-        "scan window radius auto-optimised per run from observed peak width",
+    #
+    # What happens to the omitted flag depends on the ROUTE, which is decided later, by
+    # run_search.py -- so this names both instead of asserting one. A single-shot search
+    # leaves DIA-NN to choose the radius (how, within one multi-file search, is unverified);
+    # the 5-step parallel chain measures it ONCE in step 1b and pins it for steps 2-5. Saying "auto-optimised per run"
+    # here was wrong for the chain, which is the route most real cohorts take. The route
+    # that actually ran is recorded in search_provenance.json (`scan_window`).
+    add("--window", "not set here (flag omitted)",
+        "radius depends on the acquisition scheme and must be measured, not guessed. "
+        "Single-shot search: DIA-NN chooses it itself (how, within one multi-file search, "
+        "is unverified). 5-step parallel chain: step 1b "
+        "measures it once (probe_window.py) and pins it for steps 2-5, writing "
+        "params.resolved.cfg. search_provenance.json `scan_window` records which ran",
         render=False)
 
     # Contaminants: identify them, but keep them out of quant + normalisation.
