@@ -567,6 +567,7 @@ server <- function(input, output, session) {
     comparator_run_b            = NULL,
     comparator_mode             = NULL,
     comparator_gemini_narrative = NULL,
+    comparator_ai_narrative_source = NULL,   # provider + model that wrote the narrative (rule #1)
     comparator_mofa             = NULL,
     comparator_compare_from_history = NULL,
     comparator_diann_log_a      = NULL,
@@ -632,7 +633,7 @@ server <- function(input, output, session) {
   server_qc(input, output, session, values)
   server_viz(input, output, session, values, add_to_log, is_hf_space)
   server_gsea(input, output, session, values, add_to_log)
-  server_ai(input, output, session, values)
+  server_ai(input, output, session, values, ai_public_deployment = is_hf_space)
   server_xic(input, output, session, values, is_hf_space)
   server_phospho(input, output, session, values, add_to_log)
   server_search(input, output, session, values, add_to_log,
@@ -640,7 +641,7 @@ server <- function(input, output, session) {
                 local_diann, delimp_data_dir,
                 is_core_facility, cf_config, local_sbatch_path)
   server_mofa(input, output, session, values, add_to_log)
-  server_comparator(input, output, session, values, add_to_log)
+  server_comparator(input, output, session, values, add_to_log, ai_public_deployment = is_hf_space)
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_denovo(input, output, session, values, add_to_log)

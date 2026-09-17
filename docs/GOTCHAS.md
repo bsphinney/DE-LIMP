@@ -24,6 +24,9 @@ For **open** defects in the `ucdavis-proteomics-core-pipeline` skill — things 
 | Quarto `output_file` path error | Pass filename only, then `file.rename()` to target dir |
 | SQLite `Parameter N does not have length 1` | Use `NA_character_` instead of `NULL` |
 | History tab slow with network CSV | Multiple `activity_log_read()` per render. Use `cached_activity_log()` reactive (read once per invalidation). |
+| AI request freezes the app for every visitor | `httr2::req_perform()` is synchronous and all sessions share one R process. Every AI request goes through `ai_request_timeout()`, which caps it at `AI_PUBLIC_MAX_TIMEOUT_S` on the HF Space (`ai_deployment_policy(is_hf_space)`). No request without `req_timeout()` — a test enforces it. |
+| "Latest activity-log row" used as this user's context | The log is shared (all HPC users; every HF visitor's HOME). Use `activity_project_context(log, output_dir)` — matches the loaded dataset's `output_dir` and the current user; no match = nothing. |
+| User-typed URL fetched server-side | SSRF on a public deployment. Validate with `ai_validate_endpoint()` and send with `ai_harden_request()` (pins the validated IPs, no redirects). Never echo an upstream error body — use `ai_error_from_condition()`. |
 
 ## DIA-NN
 

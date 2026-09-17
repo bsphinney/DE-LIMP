@@ -2,7 +2,8 @@
 #  server_comparator.R
 #  Run Comparator — Compare two analyses of the same dataset
 #  Modes: DE-LIMP vs DE-LIMP, vs Spectronaut, vs FragPipe
-#  Called from app.R as: server_comparator(input, output, session, values, add_to_log)
+#  Called from app.R as: server_comparator(input, output, session, values, add_to_log,
+#                                           ai_public_deployment = is_hf_space)
 # ==============================================================================
 
 # --- Pure helper functions (no Shiny reactivity) ---
@@ -2295,7 +2296,10 @@ build_gemini_comparator_prompt <- function(comp_results, mofa_obj = NULL, instru
 
 #' Build Claude export prompt
 #' @details Readable template: docs/AI_PROMPTS.md section 2. Keep them in sync.
-build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL, instrument_meta = NULL) {
+# `narrative_source` records which provider + model wrote `gemini_narrative`
+# (ai_source_label()); the prompt names it instead of assuming Gemini (rule #1).
+build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL, instrument_meta = NULL,
+                                           narrative_source = NULL) {
   stats    <- comp_results$summary_stats
   source_b <- stats$source_b
 
@@ -2321,7 +2325,8 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
   } else "N/A"
 
   gemini_section <- if (!is.null(gemini_narrative)) {
-    paste0("\n\nGEMINI PRE-ANALYSIS:\n", gemini_narrative)
+    paste0("\n\nAI PRE-ANALYSIS (", narrative_source %||% "provider and model not recorded", "):\n",
+           gemini_narrative)
   } else ""
 
   # Instrument context (brief)
@@ -2416,7 +2421,11 @@ build_claude_comparator_prompt <- function(comp_results, gemini_narrative = NULL
 #  SERVER MODULE
 # ==============================================================================
 
-server_comparator <- function(input, output, session, values, add_to_log) {
+server_comparator <- function(input, output, session, values, add_to_log,
+                              ai_public_deployment = TRUE) {
+
+  # Endpoint restrictions + timeout cap for AI requests (helpers_ai.R). Strict by default.
+  ai_policy <- ai_deployment_policy(ai_public_deployment)
 
   # --- Info modal ---
   # --- Spectronaut Setup Guide download ---
@@ -2656,7 +2665,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           "missing values, direction reversal, etc.).")
       ),
       tags$h6("AI Analysis"),
-      tags$p("Generate a Gemini summary of the comparison, optionally run MOFA2 factor decomposition, ",
+      tags$p("Generate an AI summary of the comparison (using the provider selected in the sidebar), optionally run MOFA2 factor decomposition, ",
              "or export a ZIP for Claude analysis."),
       tags$hr(),
       tags$p(class = "text-muted small",
@@ -2847,10 +2856,11 @@ server_comparator <- function(input, output, session, values, add_to_log) {
   observeEvent(input$comparator_ai_info_btn, {
     showModal(modalDialog(
       title = "AI Analysis",
-      tags$h6("Gemini Summary"),
-      tags$p("Generates a narrative interpretation of the comparison using Google Gemini. ",
+      tags$h6("AI Summary"),
+      tags$p("Generates a narrative interpretation of the comparison using the AI provider selected in the ",
+             "AI Chat sidebar (currently ", ai_provider_field(input$ai_provider %||% "gemini", "label"), "). ",
              "The prompt includes the settings diff, concordance statistics, systematic bias metrics, ",
-             "and top discordant proteins with hypotheses. Requires a Gemini API key in AI Chat settings."),
+             "and top discordant proteins with hypotheses. Requires an API key for that provider."),
       tags$h6("Export ZIP for Claude"),
       tags$p("Downloads a ZIP file containing structured CSVs and a pre-written prompt ",
              "for analysis in Claude or another LLM. Includes settings diff, protein universe, ",
@@ -4260,7 +4270,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
   #  AI ANALYSIS TAB
   # ==========================================================================
 
-  # Gemini summary
+  # AI summary (input id kept as comparator_gemini_btn — see CLAUDE.md tab/id rules)
   observeEvent(input$comparator_gemini_btn, {
     res <- comp_results()
     req(res, input$user_api_key)
@@ -4269,15 +4279,25 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     prompt <- build_gemini_comparator_prompt(res, mofa_obj, values$instrument_metadata)
 
     ai_provider <- input$ai_provider %||% "gemini"
+    model <- input$model_name
+    if (is.null(model) || !nzchar(trimws(model))) model <- ai_provider_field(ai_provider, "default_model")
+    source_label <- ai_source_label(ai_provider, model, input$ai_base_url)
     withProgress(message = paste("Generating", ai_provider_field(ai_provider, "label"), "summary..."), value = 0.3, {
       tryCatch({
-        response <- ask_ai_text(prompt, input$user_api_key,
-                                input$model_name %||% ai_provider_field(ai_provider, "default_model"),
-                                ai_provider, input$ai_base_url)
+        response <- ask_ai_text(prompt, input$user_api_key, model,
+                                ai_provider, input$ai_base_url, policy = ai_policy)
         setProgress(1.0, detail = "Done")
-        values$comparator_gemini_narrative <- response
+        if (is_ai_error(response)) {
+          # A failure is never stored as the narrative: it would be rendered as
+          # an analysis, saved to session.rds and exported in the Claude ZIP.
+          showNotification(paste0("AI summary failed (", source_label, "): ", response),
+                           type = "error", duration = NULL)
+        } else {
+          values$comparator_gemini_narrative <- response
+          values$comparator_ai_narrative_source <- source_label
+        }
       }, error = function(e) {
-        showNotification(paste("AI error:", e$message), type = "error")
+        showNotification(paste("AI error:", e$message), type = "error", duration = NULL)
       })
     })
   })
@@ -4297,11 +4317,13 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     )
 
     showModal(modalDialog(
-      title = "Gemini Comparator Prompt",
+      title = "AI Comparator Prompt",
       size = "l",
       easyClose = TRUE,
       tags$p(class = "text-muted small",
-        "This is the exact prompt sent to Gemini. Review for bias or missing context. ",
+        "This is the exact prompt sent to the AI provider selected in the sidebar (",
+        ai_provider_field(input$ai_provider %||% "gemini", "label"),
+        "). Review for bias or missing context. ",
         "You can copy it to use with any AI tool."),
       tags$div(style = "margin-bottom: 10px;",
         actionButton("comparator_copy_prompt_btn", "Copy to Clipboard",
@@ -4320,14 +4342,16 @@ server_comparator <- function(input, output, session, values, add_to_log) {
     showNotification("Prompt copied to clipboard", type = "message", duration = 2)
   })
 
-  # Inject Gemini narrative into static div (avoids bslib uiOutput disappearing bug)
+  # Inject AI narrative into static div (avoids bslib uiOutput disappearing bug)
   observe({
     narrative <- values$comparator_gemini_narrative
     if (is.null(narrative)) {
       shinyjs::html("comparator_gemini_container", "")
     } else {
+      src <- values$comparator_ai_narrative_source %||% "provider and model not recorded"
       html_content <- paste0(
-        '<div class="card mt-3"><div class="card-header"><b>Gemini Analysis</b></div>',
+        '<div class="card mt-3"><div class="card-header"><b>AI Analysis</b> <span class="text-muted small">(',
+        htmltools::htmlEscape(src), ')</span></div>',
         '<div class="card-body" style="max-height:500px;overflow-y:auto;">',
         markdown::markdownToHTML(text = narrative, fragment.only = TRUE),
         '</div></div>'
@@ -4717,7 +4741,9 @@ server_comparator <- function(input, output, session, values, add_to_log) {
 
           if (!is.null(values$comparator_gemini_narrative)) {
             context_lines <- c(context_lines,
-              "## Gemini Analysis", "",
+              "## AI Analysis", "",
+              paste0("_Generated by ", values$comparator_ai_narrative_source %||%
+                       "an AI provider and model that were not recorded", "._"), "",
               values$comparator_gemini_narrative
             )
           }
@@ -4871,7 +4897,8 @@ server_comparator <- function(input, output, session, values, add_to_log) {
           message("[Export] Step 6: Claude prompt")
           # 6. Claude prompt
           setProgress(0.8, detail = "Building prompt...")
-          prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative, values$instrument_metadata)
+          prompt <- build_claude_comparator_prompt(res, values$comparator_gemini_narrative, values$instrument_metadata,
+                                                    narrative_source = values$comparator_ai_narrative_source)
           prompt_file <- file.path(tmp_dir, "claude_prompt.md")
           writeLines(prompt, prompt_file)
           files_to_zip <- c(files_to_zip, prompt_file)
@@ -5038,7 +5065,7 @@ server_comparator <- function(input, output, session, values, add_to_log) {
             "",
             "## Files",
             "- `claude_prompt.md` - Opening prompt with context and questions",
-            "- `comparison_context.md` - Tool context and Gemini analysis (if generated)",
+            "- `comparison_context.md` - Tool context and AI analysis with its provider and model (if generated)",
             "- `settings_diff.csv` - Parameter comparison table",
             "- `protein_universe.csv` - All proteins with tier classification",
             "- `de_results_combined.csv` - Full DE stats from both runs (if available)",

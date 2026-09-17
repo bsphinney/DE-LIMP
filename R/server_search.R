@@ -6883,7 +6883,7 @@ server_search <- function(input, output, session, values, add_to_log,
               output_dir = job$output_dir,
               app_version = values$app_version %||% "unknown",
               source_type = "auto-load",
-              notes = sprintf("Job: %s (%s)", job$name, job$job_id)
+              notes = activity_note_job_loaded(job$name, job$job_id)
             ))
           }, error = function(e) message("[DE-LIMP] Activity log record failed: ", e$message))
 

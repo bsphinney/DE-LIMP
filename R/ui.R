@@ -463,8 +463,16 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
             tags$p(style = "margin-top: 5px;",
               "Any endpoint that speaks the OpenAI ", tags$code("/v1/chat/completions"),
               " API — a self-hosted vLLM or llama.cpp server, or an institutional gateway."),
-            tags$p(style = "margin-bottom: 0;",
-              "Your data goes to that endpoint only, not to Google.")
+            tags$p("Your data goes to that endpoint only, not to Google."),
+            # Mirrors ai_deployment_policy() in helpers_ai.R
+            if (is_hf_space) tags$p(style = "margin-bottom: 0;",
+              "On this public site the endpoint must be a public https:// address; ",
+              "local and private-network servers are refused, and each request is limited to ",
+              AI_PUBLIC_MAX_TIMEOUT_S, " seconds. Run DE-LIMP locally to use a model server on your own machine or network. ",
+              "Changing the endpoint or the provider clears the API key.")
+            else tags$p(style = "margin-bottom: 0;",
+              "Use https://, or http://localhost for a model server on this computer. ",
+              "Changing the endpoint or the provider clears the API key.")
           )
         ),
 
@@ -2649,7 +2657,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                   tags$p(class = "text-muted small",
                     "Generate an AI narrative summary or export data for external analysis."),
                   tags$div(style = "display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;",
-                    actionButton("comparator_gemini_btn", "Generate Gemini Summary",
+                    actionButton("comparator_gemini_btn", "Generate AI Summary",
                                  icon = icon("wand-magic-sparkles"),
                                  class = "btn-outline-primary"),
                     actionButton("comparator_view_prompt_btn", "View Prompt",

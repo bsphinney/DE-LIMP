@@ -1150,7 +1150,7 @@ The hypothesis engine assigns one of 7 categories to each discordant protein. Th
 
 ### 9.7 AI Analysis & Export
 
-- **Gemini Analysis**: Click "Analyze with Gemini" on the AI Analysis sub-tab for a narrative interpretation. The prompt is tool-aware -- it includes context about structural differences between the compared tools.
+- **AI Analysis**: Click "Generate AI Summary" on the AI Analysis sub-tab for a narrative interpretation, using the provider selected in the AI Chat sidebar (Google Gemini or an OpenAI-compatible endpoint). The prompt is tool-aware -- it includes context about structural differences between the compared tools. The panel, the ZIP export and saved sessions record which provider and model wrote the narrative; a failed request shows an error and is never saved as a narrative.
 - **MOFA2 Decomposition**: Click "Run MOFA2" to decompose the joint variance between runs into latent factors. Helps identify whether discordant proteins share hidden biological or technical patterns.
 - **Claude ZIP Export**: Download a .zip optimized for deep analysis with Claude or ChatGPT. Includes settings diff, protein universe, DE results, discordant proteins with hypotheses, DIA-NN log parameters (if uploaded), and a structured prompt.
 

@@ -198,7 +198,7 @@ KEY FINDING: Of <n_shared> shared proteins, <n_discordant> are discordant (<n_a_
 Most common discordance pattern: <dominant hypothesis_category>.
 Global intensity offset: <n> log2 units (<SYSTEMATIC BIAS DETECTED if |offset| > 0.2, else no systematic bias>).
 
-GEMINI PRE-ANALYSIS:                                         [if the in-app Gemini narrative was generated first]
+AI PRE-ANALYSIS (<provider>, model <model>):                 [if the in-app AI narrative was generated first; provider + model from ai_source_label()]
 <narrative text>
 
 FILES ATTACHED:
