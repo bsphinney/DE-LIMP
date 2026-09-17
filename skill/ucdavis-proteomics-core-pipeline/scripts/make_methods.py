@@ -29,8 +29,8 @@ Usage:
 import sys, os, json, glob, sqlite3, argparse, statistics
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# analysis.tdf is opened read-only AND immutable -- see bruker_tdf.py for the HIVE
-# incident a read-write open caused, and why mode=ro alone is not enough.
+# analysis.tdf is opened read-only AND immutable -- see bruker_tdf.py for how a read-write
+# open truncates a tdf (the state of 342 on HIVE), and why mode=ro alone is not enough.
 from bruker_tdf import connect_tdf  # noqa: E402
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"

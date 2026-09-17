@@ -95,13 +95,16 @@ def make_intact_d(tmp, name="intact.d", n_indexed=N_FRAMES, n_bin=N_FRAMES, wal=
     return d
 
 
-def make_stale_wal_d(tmp, name="stale.d"):
+def make_stale_wal_d(tmp, name="stale.d", rollback_header=False):
     """A finished run with a stale mid-acquisition -wal beside it -- the Hive state.
 
     The -wal is captured after N_STALE frames; the acquisition then finishes, is
     checkpointed into the main file and closed (which deletes the live -wal but leaves
     the header in WAL mode); the stale -wal is then put back. The DIA windows are
-    written after the snapshot, so a reader that replays the -wal cannot see them."""
+    written after the snapshot, so a reader that replays the -wal cannot see them.
+
+    `rollback_header` switches the finished file out of WAL mode before it is closed
+    (header 1,1) -- the state of the two intact HIVE blank runs with a ~4 MB stale -wal."""
     d = os.path.join(tmp, name)
     os.makedirs(d)
     _write_bin(d, N_FRAMES)
@@ -118,10 +121,29 @@ def make_stale_wal_d(tmp, name="stale.d"):
     _windows(con)
     con.commit()
     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if rollback_header:
+        con.execute("PRAGMA journal_mode=DELETE")
     con.close()
     with open(tdf + "-wal", "wb") as fh:
         fh.write(stale)
     return d
+
+
+def header_bytes(tdf):
+    with open(tdf, "rb") as fh:
+        hdr = fh.read(20)
+    return hdr[18], hdr[19]
+
+
+def move_side_files_out(d, backup):
+    """The remedy a stale_side_file warning gives: copy the side files to a backup outside
+    the .d, then remove them from the .d."""
+    os.makedirs(backup, exist_ok=True)
+    for side in ("-wal", "-shm", "-journal"):
+        p = os.path.join(d, "analysis.tdf" + side)
+        if os.path.exists(p):
+            shutil.copy2(p, backup)
+            os.remove(p)
 
 
 def truncate_like_hive(d):
@@ -169,9 +191,59 @@ class TestFixturesReallyHaveTheHazard(unittest.TestCase):
             self.assertLess(os.path.getsize(tdf), size_before)
             self.assertEqual(frame_count(tdf, "mode=ro&immutable=1"), N_STALE)
             self.assertNotIn("analysis.tdf-wal", os.listdir(d))
+            self.assertEqual(header_bytes(tdf), (2, 2), "the header stays in WAL mode")
+
+    def test_a_rollback_header_does_not_stop_a_stale_wal_being_replayed(self):
+        # SQLite opens WAL mode whenever a -wal exists, whatever header bytes 18-19 say. So a
+        # finished 1,1 file with a stale -wal beside it (the HIVE blank runs) is read as the
+        # mid-acquisition database by a read-only open, and truncated by a read-write one.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_stale_wal_d(tmp, rollback_header=True)
+            tdf = os.path.join(d, "analysis.tdf")
+            self.assertEqual(header_bytes(tdf), (1, 1))
+            self.assertEqual(frame_count(tdf, "mode=ro&immutable=1"), N_FRAMES)
+            self.assertEqual(frame_count(tdf, "mode=ro"), N_STALE)
+            size_before = os.path.getsize(tdf)
+            truncate_like_hive(d)
+            self.assertLess(os.path.getsize(tdf), size_before)
+            self.assertEqual(header_bytes(tdf), (2, 2), "the replay brings the WAL header back")
+            self.assertEqual(frame_count(tdf, "mode=ro&immutable=1"), N_STALE)
+            self.assertEqual(bruker_tdf.tdf_integrity(d)["status"], "truncated")
+
+    def test_with_the_side_files_moved_out_every_open_reads_the_whole_run(self):
+        # what the stale_side_file remedy relies on: the finished file indexes the whole run
+        # on its own, and once nothing stale sits beside it no kind of open can change that
+        for rollback_header in (True, False):
+            with self.subTest(rollback_header=rollback_header), \
+                    tempfile.TemporaryDirectory() as tmp:
+                d = make_stale_wal_d(tmp, rollback_header=rollback_header)
+                tdf = os.path.join(d, "analysis.tdf")
+                frame_count(tdf, "mode=ro")         # leaves an -shm beside it, as on HIVE
+                move_side_files_out(d, os.path.join(tmp, "backup"))
+                with open(tdf, "rb") as fh:
+                    finished = fh.read()
+                self.assertEqual(frame_count(tdf, "mode=ro"), N_FRAMES)
+                truncate_like_hive(d)
+                with open(tdf, "rb") as fh:
+                    self.assertEqual(fh.read(), finished, "a read-write open changed the file")
+                self.assertEqual(frame_count(tdf, "mode=ro&immutable=1"), N_FRAMES)
+                self.assertIn(bruker_tdf.tdf_integrity(d)["status"], ("ok", "at_risk"))
+
+    def test_a_wal_header_alone_is_read_whole_by_every_open(self):
+        # header 2,2 and nothing beside it: nothing to replay, so it is safe to search
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intact_d(tmp, wal=True)
+            tdf = os.path.join(d, "analysis.tdf")
             with open(tdf, "rb") as fh:
-                hdr = fh.read(20)
-            self.assertEqual((hdr[18], hdr[19]), (2, 2), "the header stays in WAL mode")
+                finished = fh.read()
+            self.assertEqual(frame_count(tdf, "mode=ro"), N_FRAMES)
+            for side in ("-wal", "-shm"):             # mode=ro leaves them; both are harmless
+                if os.path.exists(tdf + side):
+                    os.remove(tdf + side)
+            truncate_like_hive(d)
+            with open(tdf, "rb") as fh:
+                self.assertEqual(fh.read(), finished, "a read-write open changed the file")
+            self.assertEqual(sorted(os.listdir(d)), ["analysis.tdf", "analysis.tdf_bin"])
 
 
 class TestConnectTdf(unittest.TestCase):
@@ -247,6 +319,10 @@ class TestTdfIntegrity(unittest.TestCase):
             self.assertAlmostEqual(r["index_coverage"], N_STALE / N_FRAMES)
             self.assertTrue(r["sqlite_header_wal"])
             self.assertTrue(any("1.0%" in p for p in r["problems"]), r["problems"])
+            # the shortfall in bytes, so a few KB of trailing slack on a tiny run is recognisable
+            short = N_FRAMES * BLOCK - N_STALE * BLOCK
+            self.assertTrue(any(f"{short:,} bytes short" in p for p in r["problems"]),
+                            r["problems"])
 
     def test_truncated_index_is_caught_without_any_wal_signal(self):
         # the coverage check stands on its own: header 1,1, no -wal, index 1% of tdf_bin
@@ -256,15 +332,29 @@ class TestTdfIntegrity(unittest.TestCase):
             self.assertFalse(r["sqlite_header_wal"])
             self.assertEqual(r["wal_bytes"], 0)
 
-    def test_stale_wal_beside_a_complete_index_is_at_risk(self):
+    def test_stale_wal_beside_a_complete_wal_mode_index_is_stale_side_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = make_stale_wal_d(tmp)
             before = snapshot(d)
             r = bruker_tdf.tdf_integrity(d)
-            self.assertEqual(r["status"], "at_risk", r)
+            self.assertEqual(r["status"], "stale_side_file", r)
             self.assertAlmostEqual(r["index_coverage"], 1.0, "read from the finished file")
             self.assertGreater(r["wal_bytes"], 0)
-            self.assertTrue(any("read-write" in p for p in r["problems"]), r["problems"])
+            self.assertEqual(snapshot(d), before, "the check itself must write nothing")
+
+    def test_stale_wal_beside_a_rollback_header_is_stale_side_file(self):
+        # the two intact HIVE blank runs: header 1,1, complete index, ~4 MB stale -wal. The
+        # 1,1 header protects nothing -- a read-only open that is not immutable replays it.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_stale_wal_d(tmp, rollback_header=True)
+            before = snapshot(d)
+            r = bruker_tdf.tdf_integrity(d)
+            self.assertEqual(r["status"], "stale_side_file", r)
+            self.assertFalse(r["sqlite_header_wal"])
+            self.assertAlmostEqual(r["index_coverage"], 1.0)
+            self.assertEqual(len(r["problems"]), 1, r["problems"])
+            self.assertIn("read-only", r["problems"][0])
+            self.assertIn("not immutable", r["problems"][0])
             self.assertEqual(snapshot(d), before, "the check itself must write nothing")
 
     def test_wal_header_alone_is_at_risk(self):
@@ -275,7 +365,7 @@ class TestTdfIntegrity(unittest.TestCase):
             self.assertEqual(r["status"], "at_risk", r)
             self.assertTrue(r["sqlite_header_wal"])
 
-    def test_non_empty_wal_alone_is_at_risk(self):
+    def test_non_empty_wal_alone_is_stale_side_file(self):
         # header 1,1, so only the -wal size can raise it
         with tempfile.TemporaryDirectory() as tmp:
             d = make_intact_d(tmp)
@@ -283,7 +373,7 @@ class TestTdfIntegrity(unittest.TestCase):
                 fh.write(b"\x37\x7f\x06\x82" + b"\0" * 28)
             r = bruker_tdf.tdf_integrity(d)
             self.assertFalse(r["sqlite_header_wal"])
-            self.assertEqual(r["status"], "at_risk", r)
+            self.assertEqual(r["status"], "stale_side_file", r)
             self.assertEqual(r["wal_bytes"], 32)
             self.assertTrue(any("analysis.tdf-wal" in p for p in r["problems"]), r["problems"])
 
@@ -293,20 +383,43 @@ class TestTdfIntegrity(unittest.TestCase):
             open(os.path.join(d, "analysis.tdf-wal"), "wb").close()
             self.assertEqual(bruker_tdf.tdf_integrity(d)["status"], "ok")
 
-    def test_hot_rollback_journal_is_at_risk(self):
-        # a read-write open would roll a non-empty -journal back into the file, too
+    def test_hot_rollback_journal_is_stale_side_file(self):
+        # a read-write open would roll a non-empty -journal back into the file
         with tempfile.TemporaryDirectory() as tmp:
             d = make_intact_d(tmp)
             with open(os.path.join(d, "analysis.tdf-journal"), "wb") as fh:
                 fh.write(b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7" + b"\0" * 504)
             r = bruker_tdf.tdf_integrity(d)
-            self.assertEqual(r["status"], "at_risk", r)
+            self.assertEqual(r["status"], "stale_side_file", r)
             self.assertGreater(r["journal_bytes"], 0)
+            self.assertTrue(any("analysis.tdf-journal" in p for p in r["problems"]),
+                            r["problems"])
+
+    def test_side_file_outranks_the_wal_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = bruker_tdf.tdf_integrity(make_stale_wal_d(tmp))
+            self.assertEqual(r["status"], "stale_side_file")
+            self.assertEqual(len(r["problems"]), 2, r["problems"])
+            self.assertIn("analysis.tdf-wal", r["problems"][0])
+            self.assertIn("WAL mode", r["problems"][1])
 
     def test_index_past_the_end_of_tdf_bin_is_bin_incomplete(self):
         with tempfile.TemporaryDirectory() as tmp:
             r = bruker_tdf.tdf_integrity(make_intact_d(tmp, n_bin=N_FRAMES // 2))
             self.assertEqual(r["status"], "bin_incomplete", r)
+
+    def test_last_block_running_past_the_end_of_tdf_bin_is_bin_incomplete(self):
+        # the last indexed block STARTS inside tdf_bin but ends past it: a copy cut off
+        # inside its final frame
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_intact_d(tmp)
+            b = os.path.join(d, "analysis.tdf_bin")
+            with open(b, "r+b") as fh:
+                fh.truncate(N_FRAMES * BLOCK - BLOCK // 2)
+            r = bruker_tdf.tdf_integrity(d)
+            self.assertEqual(r["status"], "bin_incomplete", r)
+            self.assertEqual(r["index_end_bytes"], N_FRAMES * BLOCK)
+            self.assertTrue(any("ends at byte" in p for p in r["problems"]), r["problems"])
 
     def test_missing_tdf_bin_is_bin_incomplete(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,6 +471,38 @@ class TestTdfIntegrity(unittest.TestCase):
             # the finding that decides what to do is the one read first
             self.assertTrue(r["problems"][0].startswith("analysis.tdf is truncated"), r["problems"])
             self.assertEqual(len(r["problems"]), 2)
+
+
+class TestIntegrityWarning(unittest.TestCase):
+    """The remedy is what the user acts on, so its wording is pinned per state."""
+
+    def test_every_status_but_ok_has_a_remedy(self):
+        for status in bruker_tdf.STATUSES:
+            if status != "ok":
+                self.assertIn(status, bruker_tdf._REMEDY)
+
+    def test_stale_side_file_says_do_not_search_and_how_to_clear_it(self):
+        # a read-only engine that is not immutable would search the mid-acquisition index; a
+        # read-write one would truncate the file. Backing up analysis.tdf prevents neither.
+        for rollback_header in (True, False):
+            with self.subTest(rollback_header=rollback_header), \
+                    tempfile.TemporaryDirectory() as tmp:
+                w = bruker_tdf.integrity_warning(bruker_tdf.tdf_integrity(
+                    make_stale_wal_d(tmp, rollback_header=rollback_header)))
+                self.assertIn("Do NOT search", w)
+                self.assertNotIn("can be searched", w)
+                self.assertIn("backup outside the .d", w)
+                self.assertIn("-wal", w)
+                self.assertIn("-shm", w)
+                self.assertIn("re-check", w)
+
+    def test_wal_header_alone_can_be_searched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = bruker_tdf.integrity_warning(bruker_tdf.tdf_integrity(
+                make_intact_d(tmp, wal=True)))
+            self.assertIn("can be searched", w)
+            self.assertNotIn("Do NOT", w)
+            self.assertIn("immutable", w)
 
 
 class TestDetectAcquisition(unittest.TestCase):
@@ -412,14 +557,25 @@ class TestDetectAcquisition(unittest.TestCase):
             self.assertEqual(out["overall"], "DIA")
             self.assertEqual(out["low_confidence_files"], [])
 
-    def test_at_risk_run_warns_and_needs_confirmation(self):
+    def test_stale_wal_run_says_do_not_search_and_needs_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            d = make_stale_wal_d(tmp)
-            out = self._cli(d)
+            d = make_stale_wal_d(tmp, rollback_header=True)
+            out, err = self._run(d)
+            self.assertTrue(out["needs_confirmation"])
+            self.assertEqual(out["tdf_integrity_problem_files"], [d])
+            f = out["files"][0]
+            self.assertEqual(f["tdf_integrity"]["status"], "stale_side_file")
+            self.assertIn("Do NOT search", f["warnings"][0])
+            self.assertNotIn("can be searched", f["warnings"][0])
+            self.assertIn(f"WARNING: {d}: analysis.tdf stale_side_file", err)
+
+    def test_wal_header_only_run_warns_but_is_searchable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._cli(make_intact_d(tmp, wal=True))
             self.assertTrue(out["needs_confirmation"])
             f = out["files"][0]
             self.assertEqual(f["tdf_integrity"]["status"], "at_risk")
-            self.assertIn("read-write", f["warnings"][0])
+            self.assertIn("can be searched", f["warnings"][0])
 
     def test_non_bruker_files_carry_no_tdf_check(self):
         with tempfile.TemporaryDirectory() as tmp:

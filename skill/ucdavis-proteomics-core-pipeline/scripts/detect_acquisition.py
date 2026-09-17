@@ -30,7 +30,8 @@ import sys, os, json, glob, gzip, sqlite3, statistics, shutil, subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Every analysis.tdf is opened through bruker_tdf.connect_tdf (read-only AND immutable):
-# a read-write open truncated 342 tdfs on HIVE, and mode=ro alone replays a stale -wal.
+# a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
+# HIVE), and mode=ro alone reads through the stale -wal.
 from bruker_tdf import connect_tdf, tdf_integrity, integrity_warning  # noqa: E402
 
 # ---------------------------------------------------------------------------

@@ -24,27 +24,45 @@ at 0.7% of its `tdf_bin`, and DIA-NN searched 121 cycles of it with no error. Th
 from the instrument can leave a stale, mid-acquisition `analysis.tdf-wal` beside the
 finished file, and any **read-write** sqlite open (e.g. `sqlite3 analysis.tdf`)
 checkpoints it into the finished file and truncates it. `?mode=ro` alone does not
-truncate, but still reads the stale `-wal` and writes an `-shm` beside the tdf.
+truncate, but still reads the stale `-wal` and writes an `-shm` beside the tdf. The
+header does not protect a file: SQLite uses a `-wal` whenever one exists, so a finished
+1,1 file with a stale `-wal` beside it is read as the mid-acquisition database by every
+open that is not immutable.
 
 So every tdf the skill reads is opened through `bruker_tdf.connect_tdf()`
-(`file:<tdf>?mode=ro&immutable=1`), and every `.d` gets a per-file `tdf_integrity`:
+(`file:<tdf>?mode=ro&immutable=1`), and every `.d` gets a per-file `tdf_integrity`
+(worst first):
 
 | `status` | found | what to do |
 |---|---|---|
-| `ok` | header 1,1, no `-wal`/`-journal`, index reaches the end of `tdf_bin` | nothing |
-| `at_risk` | SQLite header bytes 18–19 = 2 (WAL mode), or a non-empty `-wal`/`-journal` beside it; index complete | searchable, but never open it read-write; back up `analysis.tdf` first |
 | `truncated` | last frame's `TimsId` + its block size < 0.999 × `tdf_bin` size | **do not search it**; find an intact copy (same `tdf_bin`) |
 | `bin_incomplete` | `tdf_bin` missing, or shorter than the index | re-copy the `.d` |
 | `unverified` | the index could not be read | confirm the `.d` is readable |
+| `stale_side_file` | a non-empty `-wal` or `-journal` beside it (any header); index complete when read immutable | **do not search it as it is** — an engine whose sqlite open is not immutable, read-only or not, reads through a `-wal` (a `-journal` is rolled back into the file, or the file refused), and backing up `analysis.tdf` stops neither. With the user's agreement copy the side files and any `-shm` to a backup outside the `.d`, remove them from the `.d` (or search a copy of the `.d` without them), then re-check |
+| `at_risk` | SQLite header bytes 18–19 = 2 (WAL mode), nothing beside it; index complete | searchable as it is; never open it read-write |
+| `ok` | header 1,1, no `-wal`/`-journal`, index reaches the end of `tdf_bin` | nothing |
 
 Anything but `ok` is a line in that file's `warnings` (also printed to stderr), lists the
 file in `tdf_integrity_problem_files`, and sets `needs_confirmation`. `ClosedProperly` in the
-tdf proves nothing here — 240 of the truncated files say 1. A WAL-mode header or a stale
-`-wal` does not by itself mean damage, which is why those are `at_risk` and only the index
-check says `truncated`. Checked on HIVE (2026-09-16): the truncated run above reports
-`truncated` (header 2,2, index at 0.74% of `tdf_bin`); two intact blank runs with a ~4 MB
-stale `-wal` beside a 1,1 header report `at_risk` (coverage 0.99998 and 1.0 — the 0.999
-margin is what keeps the first from reading as damage); two sibling runs report `ok`.
+tdf proves nothing here — 240 of the truncated files say 1. A WAL-mode header does not by
+itself mean damage, and neither does a stale side file while the finished file's index is
+complete; only the index check says `truncated`. Reproduced with SQLite on a synthetic `.d`
+(1000 frames, `-wal` captured after 10): with the `-wal` beside a 1,1 header, `mode=ro`
+sees 10 frames and a read-write open truncates the file; with the `-wal` and `-shm` moved
+out, `mode=ro` and read-write opens both see 1000 and leave the file unchanged. A WAL
+header alone is read whole by every open.
+
+Checked on HIVE (2026-09-16, real files only read, immutable): the truncated run above
+reports `truncated` (header 2,2, index at 0.74% of `tdf_bin`); two intact blank runs with
+a ~4 MB stale `-wal` beside a 1,1 header report `stale_side_file`; two sibling runs report
+`ok`. On a copy of each blank's `analysis.tdf` and `-wal`, a `mode=ro` open saw 7,052 of
+7,512 frames (index to 89.8% of `tdf_bin`) and 5,743 of 7,522 (52.5%) — what an engine
+whose sqlite open is not immutable would read.
+
+The 0.999 margin is relative. Those four intact runs' indexes ended 0.8–3.5 KB short of
+their `tdf_bin` (coverage 0.99998 at worst), so a `tdf_bin` under ~3.5 MB with that much
+trailing slack reads as `truncated`; the warning gives the shortfall in bytes, and a few
+KB short on a run that small is slack, not a truncated index.
 
 ## Parameters
 

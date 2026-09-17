@@ -10,7 +10,8 @@ still in WAL mode (SQLite header bytes 18-19 = 2,2; intact files are 1,1). The c
 the instrument can leave a stale, mid-acquisition analysis.tdf-wal beside the finished
 file, and a READ-WRITE sqlite open replays it: SQLite checkpoints the mid-run pages into
 the finished file, cuts it down to the size the -wal recorded, and deletes the -wal. The
-file keeps its WAL header and otherwise looks normal.
+file keeps its WAL header and otherwise looks normal. That reproduces the HIVE state; which
+tool opened those files read-write is not known.
 
     sqlite3.connect(tdf)                       read-write: truncates the file
     sqlite3.connect("file:<tdf>?mode=ro")      no truncation, but READS the stale -wal (the
@@ -18,6 +19,13 @@ file keeps its WAL header and otherwise looks normal.
                                                an analysis.tdf-shm beside the tdf
     connect_tdf(tdf)  (mode=ro&immutable=1)    reads the file as it is on disk, takes no
                                                locks, writes nothing
+
+SQLite reads a -wal whenever one exists, whatever the header says, so a finished 1,1 file
+with a stale -wal beside it is no safer: every open that is not immutable -- read-only ones
+included, so a search engine's too unless it opens the tdf immutable -- sees the mid-run
+index. On copies of two intact HIVE blank runs (1,1 header, ~4 MB stale -wal) a mode=ro open
+saw 7,052 of 7,512 and 5,743 of 7,522 frames. Only once the stale side files are out of the
+.d does every reader see the whole run.
 
 immutable=1 is right for a tdf because nothing writes one after acquisition, and taking no
 locks is what a network mount wants anyway.
@@ -36,13 +44,18 @@ import struct
 
 # An index that ends before this fraction of tdf_bin is reported as truncated. The last
 # block normally ends exactly at the end of the file; the margin only keeps trailing
-# padding from ever reading as damage. The truncated files on HIVE were far below it.
+# slack from reading as damage. The truncated files on HIVE were far below it.
+# Limit: the margin is relative. Four intact HIVE runs' indexes ended 0.8-3.5 KB short of
+# their tdf_bin (0.99998 at worst), so a tdf_bin under ~3.5 MB with that much slack reads
+# as truncated. The message gives the shortfall in bytes so such a run can be recognised.
+# Kept equal to probe_window.INDEX_COVERAGE_MIN on the step-1b branch until the two share
+# this helper.
 COVERAGE_MIN = 0.999
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
 # worst first; tdf_integrity() reports the worst status it found
-STATUSES = ("truncated", "bin_incomplete", "unverified", "at_risk", "ok")
+STATUSES = ("truncated", "bin_incomplete", "unverified", "stale_side_file", "at_risk", "ok")
 
 
 def tdf_uri(path):
@@ -72,7 +85,8 @@ def tdf_integrity(d_path):
     """Does this .d's analysis.tdf still index its whole analysis.tdf_bin, and is it exposed
     to a read-write open? Reads only; writes nothing. Returns
 
-      status             ok | at_risk | truncated | bin_incomplete | unverified
+      status             ok | at_risk | stale_side_file | truncated | bin_incomplete |
+                         unverified
       problems           one sentence per finding ([] when ok)
       sqlite_header_wal  header bytes 18-19 say WAL mode (None when the header is unreadable)
       wal_bytes          size of analysis.tdf-wal (0 when absent)
@@ -83,9 +97,12 @@ def tdf_integrity(d_path):
 
     `status` is the worst finding: truncated (the index ends before COVERAGE_MIN of tdf_bin,
     so a search reads only part of the run) > bin_incomplete (tdf_bin missing, or shorter
-    than the index) > unverified (the index could not be read) > at_risk (the index is
-    complete, but the header is in WAL mode or a non-empty -wal/-journal sits beside it, so
-    one read-write open can truncate it) > ok."""
+    than the index) > unverified (the index could not be read) > stale_side_file (the index
+    read immutable is complete, but a non-empty -wal/-journal sits beside it: every open
+    that is not immutable reads through it, and a read-write one rewrites the file, so it
+    is not searchable until those files are moved out of the .d) > at_risk (the index is
+    complete and nothing sits beside it, but the header is still in WAL mode, the state
+    every truncated tdf on HIVE was found in; searchable as it is) > ok."""
     tdf = os.path.join(d_path, "analysis.tdf")
     tdf_bin = os.path.join(d_path, "analysis.tdf_bin")
     r = {"status": "ok", "problems": [], "sqlite_header_wal": None,
@@ -112,17 +129,21 @@ def tdf_integrity(d_path):
             problem("at_risk",
                     f"analysis.tdf is still in WAL mode (SQLite header bytes 18-19 = "
                     f"{hdr[18]},{hdr[19]}; a finished tdf is 1,1) -- every truncated tdf found "
-                    f"on HIVE was, and a read-write sqlite open is what truncated them")
+                    f"on HIVE is, and replaying a stale -wal leaves that header")
 
-    # 2. what a read-write open would replay into it
+    # 2. side files every open that is not immutable reads through (the header is no guard:
+    #    SQLite uses a -wal whenever one exists)
     if r["wal_bytes"]:
-        problem("at_risk",
-                f"a non-empty analysis.tdf-wal ({r['wal_bytes']:,} bytes) sits beside it, which "
-                f"a read-write sqlite open would checkpoint into the finished file")
+        problem("stale_side_file",
+                f"a non-empty analysis.tdf-wal ({r['wal_bytes']:,} bytes) sits beside it: any "
+                f"sqlite open that is not immutable, read-only ones included, reads the "
+                f"database through it, and a read-write open checkpoints it into "
+                f"analysis.tdf and can truncate it")
     if r["journal_bytes"]:
-        problem("at_risk",
+        problem("stale_side_file",
                 f"a non-empty analysis.tdf-journal ({r['journal_bytes']:,} bytes) sits beside "
-                f"it, which a read-write sqlite open would roll back into the finished file")
+                f"it: a read-write sqlite open rolls it back into analysis.tdf, and a read-only "
+                f"open that is not immutable refuses to read the file")
 
     # 3. does the index reach the end of tdf_bin?
     if not any(s == "unverified" for s, _ in findings):
@@ -169,8 +190,9 @@ def tdf_integrity(d_path):
             elif end < COVERAGE_MIN * size:
                 problem("truncated",
                         f"analysis.tdf is truncated: its frame index ends at byte {end:,} of the "
-                        f"{size:,}-byte analysis.tdf_bin ({100 * end / size:.1f}%), so a search "
-                        f"reads only that part of the run, silently")
+                        f"{size:,}-byte analysis.tdf_bin ({100 * end / size:.1f}%, "
+                        f"{size - end:,} bytes short), so a search reads only that part of "
+                        f"the run, silently")
 
     # worst first, so the finding that decides what to do is the one read first
     findings.sort(key=lambda f: STATUSES.index(f[0]))
@@ -184,10 +206,18 @@ _REMEDY = {
                  "of the run with the same analysis.tdf_bin, or the instrument PC), then re-check",
     "bin_incomplete": "Do NOT search this run: re-copy the .d from its source, then re-check",
     "unverified": "Confirm this .d is readable before searching it",
-    "at_risk": "Its index is complete, so it can be searched, but never open this tdf "
-               "read-write (e.g. the sqlite3 CLI on the bare path), and back up "
-               "analysis.tdf (it is small) first -- whether each search engine opens it "
-               "read-only is unverified",
+    "stale_side_file": "Do NOT search this .d as it is, and open its analysis.tdf only "
+                       "immutable: a search engine whose sqlite open is not immutable reads "
+                       "or rewrites analysis.tdf through that side file, so it could "
+                       "silently search part of the run or truncate the file, and backing "
+                       "up analysis.tdf prevents neither. Read immutable, "
+                       "analysis.tdf on its own indexes the whole run. With the user's "
+                       "agreement, copy analysis.tdf-wal / -journal and any analysis.tdf-shm "
+                       "to a backup outside the .d, remove them from the .d (or search a copy "
+                       "of the .d without them), then re-check",
+    "at_risk": "Its index is complete and nothing sits beside it to replay, so it can be "
+               "searched as it is; open this tdf by hand only immutable "
+               "(file:<tdf>?mode=ro&immutable=1), never read-write",
 }
 
 
