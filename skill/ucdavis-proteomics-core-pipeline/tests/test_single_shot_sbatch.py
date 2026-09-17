@@ -82,6 +82,8 @@ try:
 except ImportError:
     open(out, "wb").write(b"PAR1 placeholder: no pyarrow in this interpreter")
 stem = out[:-len(".parquet")] if out.endswith(".parquet") else out
+if os.environ.get("FAKE_NO_STATS") == "1":      # --no-stats in the cfg
+    sys.exit(0)
 with open(stem + ".stats.tsv", "w") as fh:
     fh.write("File.Name\tPrecursors.Identified\tProteins.Identified\n")
     for f in inputs:
@@ -147,6 +149,17 @@ class _Workspace:
         e = dict(os.environ, FAKE_PY=sys.executable)
         e.update({k: str(v) for k, v in env.items()})
         return subprocess.run(["bash", script], capture_output=True, text=True, env=e)
+
+    def run_inline(self, **env):
+        """run_search.py with no --sbatch: the search runs in run_search.py's own shell."""
+        e = dict(os.environ, FAKE_PY=sys.executable)
+        e.update({k: str(v) for k, v in env.items()})
+        return subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS, "run_search.py"),
+             "--tools", self.tools, "--bundle", self.bundle, "--params", self.cfg,
+             "--fasta", self.fasta, "--out", self.out, "--files", *self.runs,
+             "--threads", "4", "--allow-inline"],
+            capture_output=True, text=True, env=e)
 
 
 def _headers(path):
@@ -286,6 +299,86 @@ class SearchJobGuardTests(unittest.TestCase):
             self.assertIn("sample_0", bad.stdout + bad.stderr)
             good = w.run_job(w.job, FAKE_REPORT_RUNS="sample_0,sample_1")
             self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
+
+
+class StaleArtefactTests(unittest.TestCase):
+    """A guard that checks a FILE cannot tell this search's output from the previous one's.
+
+    Re-running a search into the same --out is routine (SKILL.md triggers: "re-run this
+    search", "re-search with different parameters"). If DIA-NN then exits 0 without writing --
+    no .NET on the node, an unmounted path -- the previous report is still there, the guards
+    read it, and the job reports success on results from other parameters. Reproduced on HIVE
+    with DIA-NN 2.7.0 (review srun 23512013): an old report.parquet + report.stats.tsv, a search
+    with no DOTNET_ROOT, "ERROR: cannot read .raw files", exit 0, both files unchanged by md5,
+    and check_report_runs.py printed "OK: report holds all 2 runs"."""
+
+    def test_an_old_report_does_not_pass_for_a_search_that_wrote_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            w.generate(*HIGH)
+            first = w.run_job(w.search_job, FAKE_REPORT_RUNS="sample_0,sample_1")
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            again = w.run_job(w.search_job)               # DIA-NN "succeeds", writes nothing
+            self.assertNotEqual(again.returncode, 0, "passed on the previous search's report:\n"
+                                + again.stdout + again.stderr)
+            self.assertIn("report.parquet", again.stderr)
+
+    def test_an_old_stats_file_does_not_stand_in_for_this_search(self):
+        """The checker's no-parquet-reader route reads <report>.stats.tsv, so a stale one is the
+        same hole. pyarrow and polars are hidden from the job to force that route."""
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            w.generate(*HIGH)
+            hide = os.path.join(d, "no_parquet_readers")
+            for mod in ("pyarrow", "polars"):
+                os.makedirs(os.path.join(hide, mod))
+                _write(os.path.join(hide, mod, "__init__.py"), "raise ImportError('hidden')\n")
+            env = {"PYTHONPATH": hide}
+            first = w.run_job(w.search_job, FAKE_REPORT_RUNS="sample_0,sample_1", **env)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertIn("stats", first.stdout)
+            # this search loses sample_1 and writes no stats file (--no-stats)
+            again = w.run_job(w.search_job, FAKE_REPORT_RUNS="sample_0", FAKE_NO_STATS=1, **env)
+            self.assertNotEqual(again.returncode, 0, "the previous search's stats file vouched "
+                                "for this one:\n" + again.stdout + again.stderr)
+
+    def test_an_old_library_does_not_pass_for_a_library_job_that_wrote_nothing(self):
+        """Otherwise afterok releases the search against the PREVIOUS search's library."""
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            w.generate(*HIGH)
+            self.assertEqual(w.run_job(w.lib_job, FAKE_WRITE_LIB=1).returncode, 0)
+            again = w.run_job(w.lib_job, FAKE_WRITE_LIB=0)
+            self.assertNotEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertIn("diann_lib.predicted.speclib", again.stderr)
+
+    def test_the_single_job_path_does_not_pass_on_an_old_report(self):
+        cfg = [l for l in LIBFREE_CFG if l not in ("--fasta-search", "--predictor")]
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d, cfg_lines=cfg)
+            w.generate(*HIGH)
+            first = w.run_job(w.job, FAKE_REPORT_RUNS="sample_0,sample_1")
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            again = w.run_job(w.job)
+            self.assertNotEqual(again.returncode, 0, again.stdout + again.stderr)
+
+    def test_an_inline_search_does_not_pass_on_an_old_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            first = w.run_inline(FAKE_WRITE_LIB=1, FAKE_REPORT_RUNS="sample_0,sample_1")
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            again = w.run_inline(FAKE_WRITE_LIB=1)
+            self.assertNotEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertIn("report.parquet", again.stderr)
+
+    def test_an_inline_search_does_not_pass_on_an_old_library(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            first = w.run_inline(FAKE_WRITE_LIB=1, FAKE_REPORT_RUNS="sample_0,sample_1")
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            again = w.run_inline(FAKE_WRITE_LIB=0, FAKE_REPORT_RUNS="sample_0,sample_1")
+            self.assertNotEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertIn("predicted", again.stderr)
 
 
 class ReportCheckTests(unittest.TestCase):

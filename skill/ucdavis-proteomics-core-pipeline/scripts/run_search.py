@@ -410,8 +410,19 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
               f"--threads {threads}{dda}")
     # DIA-NN exits 0 on fatal errors, so each job asserts the artefact it exists to make --
     # the same contract every step of the 5-step chain has (references/diann_parallel.md).
-    lib_job = lib_cmd + "\n" + dp.must_exist(predicted, "the predicted spectral library")
+    # And each job first DELETES that artefact, because an existence check cannot tell this
+    # run's file from the previous search's in the same --out. Reproduced on HIVE, DIA-NN
+    # 2.7.0 (review srun 23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read
+    # .raw files", exited 0 and wrote nothing; the old report.parquet and report.stats.tsv
+    # were byte-identical afterwards, and both guards passed on them. The stats file goes too:
+    # it is check_report_runs.py's fallback evidence when there is no parquet reader.
+    import check_report_runs
+    report_files = (report, check_report_runs.stats_path(report))
+    lib_job = "\n".join([dp.clear_stale(predicted), lib_cmd,
+                         dp.must_exist(predicted, "the predicted spectral library")])
     guard = report_guard(report, listing)
+    search_job = "\n".join([dp.clear_stale(*report_files), search_cmd, guard])
+    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard])
 
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
@@ -420,7 +431,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         srch_sh = sbatch.replace(".sh", "") + "_2_search.sh"
         emit_sbatch(lib_sh, lib_job, out, threads, job="diann_libpred", preamble=dnet,
                     **queue)
-        emit_sbatch(srch_sh, search_cmd + "\n" + guard, out, threads, job="diann_search",
+        emit_sbatch(srch_sh, search_job, out, threads, job="diann_search",
                     preamble=dnet, **queue)
         submit = os.path.join(out, "submit.sh")
         with open(submit, "w") as fh:
@@ -436,11 +447,14 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
 
     if sbatch:                          # libfree + sbatch returned above, so this is onecmd
-        emit_sbatch(sbatch, onecmd + "\n" + guard, out, threads, job="diann_search",
+        emit_sbatch(sbatch, one_job, out, threads, job="diann_search",
                     preamble=dnet, **queue)
         return {"engine": "diann", "report": report, "submitted": sbatch,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
     pre = (dnet + " ") if dnet else ""
+    for p in ((predicted,) if libfree else ()) + report_files:   # see clear_stale above
+        if os.path.lexists(p):
+            os.remove(p)
     if libfree:
         sh(pre + lib_cmd)
         if not (os.path.exists(predicted) and os.path.getsize(predicted) > 0):
@@ -451,7 +465,6 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         sh(pre + onecmd)
     if not os.path.exists(report):
         sys.exit(f"DIA-NN finished but {report} is missing.")
-    import check_report_runs
     ok, msg = check_report_runs.verify(report, files)
     if not ok:
         sys.exit(msg)

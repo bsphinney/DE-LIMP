@@ -561,6 +561,24 @@ def must_exist(path, what):
             f'exit 1; fi')
 
 
+def clear_stale(*paths):
+    """Bash that deletes `paths` BEFORE DIA-NN runs, so must_exist() can only pass on a file
+    this run wrote.
+
+    must_exist() checks that a file is there, not that this run made it. A search re-run into
+    the same --out still has the previous run's artefacts, and a DIA-NN that exits 0 having
+    written nothing leaves them untouched. Measured on HIVE, DIA-NN 2.7.0 (review srun
+    23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read .raw files", exited 0,
+    the old report.parquet and report.stats.tsv were unchanged by md5, and every guard passed
+    on them -- a COMPLETED job reporting results from different parameters. Deleting beats a
+    marker file checked with `-newer`: after a failed run the marker approach still leaves a
+    plausible report.parquet in --out for the DE step (or anyone listing the folder) to pick
+    up, and `-nt` compares whole seconds in some shells (macOS /bin/bash 3.2), so a fast
+    failure can look new. Paths go in double quotes, like must_exist(), so a `$VAR` in an
+    array-task path still expands."""
+    return "rm -f -- " + " ".join(f'"{p}"' for p in paths)
+
+
 def needs_requeue(partition, qos):
     """Should a job on this queue carry `#SBATCH --requeue`?
 
