@@ -412,17 +412,27 @@ class Step1bRunsTests(unittest.TestCase):
             p, probed = self._run_step1b(d, out)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertEqual(_read(os.path.join(out, "window.txt")).strip(), "7")
-            self.assertEqual(probed, ["s0.raw"], "the first .raw should have answered")
+            # every representative run answered, so none was replaced
+            self.assertEqual(len(probed), dp.PROBE_CANDIDATES, probed)
+            self.assertTrue(all(r.endswith(".raw") for r in probed), probed)
 
-    def test_a_blank_first_file_falls_through_to_the_next(self):
+    def test_a_run_that_gives_no_radius_falls_through_to_the_next_representative_run(self):
         """Finding 12. Step 1b probed raws[0] only, so one blank or wash first in the list
-        failed the whole cohort. The radius is a property of the method; any good file will do."""
+        failed the whole cohort. The radius is a property of the method, so a run that gives no
+        radius is replaced -- by the next run nearest the median (tests/test_step1b_window_probe.py
+        covers the selection), not by the next file of the listing. The files here are all
+        empty, so the blank cannot be told apart by size and lands on the median itself."""
         with tempfile.TemporaryDirectory() as d:
-            out, info = self._chain(d, ["blank_01.mzML"] + ["s%d.mzML" % i for i in range(5)])
-            self.assertEqual(len(info["scan_window"]["probe_candidates"]), dp.PROBE_CANDIDATES)
+            out, info = self._chain(d, ["a0.mzML", "a1.mzML", "blank_01.mzML", "c0.mzML",
+                                        "c1.mzML"])
+            self.assertEqual(info["scan_window"]["evidence_file"],
+                             os.path.join(out, "window.json"))
             p, probed = self._run_step1b(d, out)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            self.assertEqual(probed, ["blank_01.mzML", "s0.mzML"])
+            self.assertEqual(probed, ["blank_01.mzML", "a1.mzML", "c0.mzML", "c1.mzML"])
+            w = json.loads(_read(os.path.join(out, "window.json")))
+            self.assertEqual(w["failed"], ["blank_01.mzML"])
+            self.assertEqual(w["radii"], [7, 7, 7])
             resolved = dp.cfg_tokens(os.path.join(out, "params.resolved.cfg"))
             self.assertEqual(resolved.count("--window"), 1)
             self.assertEqual(resolved[resolved.index("--window") + 1], "7")
@@ -440,7 +450,7 @@ class Step1bRunsTests(unittest.TestCase):
                 _write(os.path.join(out, stale), "--window 9\n")
             p, probed = self._run_step1b(d, out)
             self.assertNotEqual(p.returncode, 0)
-            self.assertEqual(len(probed), dp.PROBE_CANDIDATES)
+            self.assertEqual(len(probed), dp.PROBE_MAX_FAILURES)
             self.assertIn("FAILED", p.stderr)
             self.assertFalse(os.path.exists(os.path.join(out, "window.txt")))
             self.assertFalse(os.path.exists(os.path.join(out, "params.resolved.cfg")))
@@ -467,13 +477,18 @@ class Step1bRunsTests(unittest.TestCase):
     def test_step1b_wall_clock_covers_every_attempt(self):
         """Round 2, item 7. The per-attempt timeout went from probe_window's 3600 s to 2700 s to
         fit three attempts into 3 h -- unmeasured on a large Astral .raw. Keep 3600 s and size
-        the wall clock to the attempts instead."""
+        the wall clock to the attempts instead. The probe's --budget is that wall clock less a
+        margin, so replacements after a failure can never run the job into SLURM's limit before
+        window.json is written."""
         self.assertEqual(dp.PROBE_TIMEOUT_S, 3600)
         self.assertGreater(dp.PROBE_WALL_HOURS * 3600, dp.PROBE_CANDIDATES * dp.PROBE_TIMEOUT_S)
+        self.assertGreaterEqual(dp.PROBE_BUDGET_S, dp.PROBE_CANDIDATES * dp.PROBE_TIMEOUT_S)
+        self.assertLess(dp.PROBE_BUDGET_S, dp.PROBE_WALL_HOURS * 3600)
         with tempfile.TemporaryDirectory() as d:
             out, _ = self._chain(d, ["s%d.mzML" % i for i in range(6)])
             body = _read(os.path.join(out, "step1b_window.sbatch"))
             self.assertIn("--timeout 3600", body)
+            self.assertIn(f"--budget {dp.PROBE_BUDGET_S}", body)
             self.assertIn(f"#SBATCH --time={dp.PROBE_WALL_HOURS}:00:00", body)
 
 

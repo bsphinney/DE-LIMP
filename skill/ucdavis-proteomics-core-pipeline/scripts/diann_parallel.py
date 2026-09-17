@@ -40,15 +40,23 @@ STRIP = ("--fasta-search", "--predictor", "--gen-spec-lib", "--matrices", "--rea
          # which never re-reads the raw spectra so --xic is silently a no-op there.
          "--fasta", "--threads", "--temp")
 
-# Step 1b tries this many files before giving up: the radius is a property of the method, so
-# one blank or wash first in the list must not fail the cohort. Each attempt normally costs
-# minutes (DIA-NN logs the radius during calibration); the per-attempt timeout bounds a file
-# that never gets there, and the wall clock covers every attempt.
+# Step 1b measures the radius on this many REPRESENTATIVE runs (the median and quartile runs
+# of the cohort, never a blank, wash, failed injection or a .d with a damaged index -- see
+# probe_window.py) and pins the median. DIA-NN's README: auto-optimised values "depend on which
+# run is first in the list"; one timsTOF cohort gave 10, 11 or 14 depending on the run probed.
 PROBE_CANDIDATES = 3
-PROBE_TIMEOUT_S = 3600      # probe_window.py's own default, and step 1b's effective limit before
-                            # it tried more than one file. Nothing shorter has been measured on a
-                            # large Astral .raw, so it is not shortened to fit three attempts.
-PROBE_WALL_HOURS = -(-PROBE_CANDIDATES * PROBE_TIMEOUT_S // 3600) + 1   # every attempt + 1 h
+# A run that logs no radius is replaced by the next run nearest the median, so one bad run does
+# not fail the cohort. After this many such runs step 1b gives up (the radius is a property of
+# the method, so repeated failures mean something is wrong beyond one run).
+PROBE_MAX_FAILURES = 3
+PROBE_TIMEOUT_S = 3600      # per probe: probe_window.py's own default, and step 1b's effective
+                            # limit before it tried more than one file. Nothing shorter has been
+                            # measured on a large Astral .raw, so it is not shortened.
+PROBE_WALL_HOURS = -(-PROBE_CANDIDATES * PROBE_TIMEOUT_S // 3600) + 1   # 3 full probes + 1 h
+# ONE budget for all probes, replacements included (they can outnumber what the wall clock covers
+# at the full per-probe timeout): the wall clock less 10 minutes, so the probe stops itself and
+# writes window.json before SLURM kills the job with no evidence.
+PROBE_BUDGET_S = PROBE_WALL_HOURS * 3600 - 600
 
 
 def dotnet_prefix(raws):
@@ -467,7 +475,8 @@ def _remedy(code):
             "itself (step 1b). Do not guess a value: it depends on the acquisition scheme",
         "window_seeded":
             "pin --window in the cfg: a seeded chain has no step 1 for step 1b to follow, so "
-            "measure it once with probe_window.py against the seed library on one file",
+            "measure it once with probe_window.py against the seed library, handing it the "
+            "cohort's runs (it picks representative ones)",
         "window_no_probe":
             "drop --no-probe-window (step 1b then measures it), or pin --window in the cfg "
             "with a value measured by probe_window.py",
@@ -748,7 +757,6 @@ def main():
     # depends on the acquisition scheme (cycle time vs peak width), not the instrument.
     s1b = None
     resolved_cfg = a.cfg
-    probe_cands = raws[:PROBE_CANDIDATES]
     if win_probe:
         probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
         # The measured radius has to end up in a PARAMETER FILE, not just window.txt, or the
@@ -761,12 +769,13 @@ def main():
         base_cfg = os.path.join(out, "params.base.cfg")
         resolved_cfg = os.path.join(out, "params.resolved.cfg")
         tmp_cfg = resolved_cfg + ".tmp"
+        probe_dir = os.path.join(out, "window_probe")
         write_cfg(a.cfg, base_cfg, drop=("--window",))
         q = shlex.quote
         s1b = write("step1b_window.sbatch", "\n".join([
             header("s1b_window", a.threads_per_file, a.mem_per_file, PROBE_WALL_HOURS,
                    _ps, _as_, qos=_qs), "",
-            'echo "Step 1b/5 measuring scan-window radius"; date',
+            'echo "Step 1b/5 measuring scan-window radius on representative runs"; date',
             # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
             # Thermo .raw needs. probe_window.py runs DIA-NN as its own subprocess (no shell),
             # so the prefix cannot ride on --diann -- it has to be in the ENVIRONMENT the probe
@@ -776,26 +785,32 @@ def main():
               if dnet else []),
             # A resubmitted step 1b must never find the previous run's answer and carry on.
             f"rm -f {D}/window.txt {D}/window.json {q(resolved_cfg)} {q(tmp_cfg)}",
-            # One blank, wash or failed injection first in the list used to fail the whole
-            # cohort. The radius is a property of the method, so any good file answers it.
+            f"rm -rf {q(probe_dir)}",
+            f"cp {q(base_cfg)} {q(tmp_cfg)}",
+            # WHICH runs: not the first files of the listing. The probe gets the whole cohort
+            # (file_list.txt) and, at run time on this node, keeps out blanks, washes, failed
+            # injections and any .d whose analysis.tdf index is damaged (WAL mode, a stale
+            # -wal/-journal, or an index that stops short of tdf_bin -- 342 such .d on HIVE, and
+            # a bytes rule picked one in the pilot). It measures the median and quartile runs,
+            # replaces a run that logs no radius with the next one nearest the median, and pins
+            # the MEDIAN radius. window.json records every probe, and the damaged runs.
+            # --timeout bounds one hung run; --budget bounds them all inside this job's limit.
             'W=""',
-            f'for RAW in {" ".join(q(r) for r in probe_cands)}; do',
-            f"  cp {q(base_cfg)} {q(tmp_cfg)}",
-            f'  if python3 {q(probe)} --diann {q(a.diann)} --raw "$RAW" \\',
-            f"      --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\",
-            f"      --timeout {PROBE_TIMEOUT_S} --write-cfg {q(tmp_cfg)} \\",
+            f"if python3 {q(probe)} --diann {q(a.diann)} \\",
+            f"    --raw-list {q(os.path.join(out, 'file_list.txt'))} \\",
+            f"    --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\",
+            f"    --max-probes {PROBE_CANDIDATES} --max-failures {PROBE_MAX_FAILURES} \\",
+            f"    --timeout {PROBE_TIMEOUT_S} --budget {PROBE_BUDGET_S} \\",
+            f"    --workdir {q(probe_dir)} --write-cfg {q(tmp_cfg)} \\",
             # the flags as bash words, after `--`: the probe's DIA-NN gets the same argv as
             # steps 2-5, not a second parse of them through shlex
-            f"      -- {flags} > {D}/window.json; then",
-            '    W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
-            f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json) && break',
-            "  fi",
-            '  echo "step 1b: no scan-window radius from $RAW -- trying the next file" >&2',
-            '  W=""',
-            "done",
+            f"    -- {flags} > {D}/window.json; then",
+            '  W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
+            f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json)',
+            "fi",
             'if [ -z "$W" ]; then',
-            f'  echo "FAILED: no scan-window radius from any of the first {len(probe_cands)} '
-            'file(s) (DIA-NN log tails above)." >&2',
+            '  echo "FAILED: step 1b measured no scan-window radius -- the reason and each '
+            f'probe\'s DIA-NN log tail are above; every probe is recorded in {D}/window.json." >&2',
             # Resubmitting step 1b ALONE does not restart the chain: steps 2-5 were submitted
             # afterok on THIS job id, so they sit PENDING (DependencyNeverSatisfied) for ever.
             '  echo "Steps 2-5 were submitted afterok on THIS job, so they are now PENDING with '
@@ -805,7 +820,8 @@ def main():
             f'{D}/jobs.txt), then resubmit step1b_window.sbatch and steps 2-5 chained afterok on '
             'the new ids, reusing step1.predicted.speclib -- or re-run submit.sh, which also '
             'repeats step 1. See references/watcher.md (dependency_failed)." >&2',
-            f"  rm -f {q(tmp_cfg)} {D}/window.json",
+            # window.json stays: it is the evidence. window.txt and the resolved cfg never exist.
+            f"  rm -f {q(tmp_cfg)}",
             "  exit 1",
             "fi",
             # These are written by this script, not by DIA-NN, so must_exist()'s "DIA-NN exited
@@ -823,7 +839,7 @@ def main():
             f'place from {tmp_cfg} (disk full? permissions?)" >&2',
             "  exit 1",
             "fi",
-            'echo "scan window radius = $W (pinned for steps 2-5)"',
+            'echo "scan window radius = $W (median of the runs listed above; pinned for steps 2-5)"',
             f'echo "fully-resolved parameters -> {resolved_cfg}"']))
     # steps 2-5 read the measured radius at RUNTIME so every pass uses the identical value
     wflag = f'--window $(cat {D}/window.txt) ' if win_probe else ''
@@ -966,10 +982,15 @@ def main():
     # radius and the resolved cfg do not exist yet -- they are produced at run time by step
     # 1b -- so they are recorded as such, not as if they were already resolved.
     if win_probe:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from probe_window import SELECTION_RULE
         scan_window = {"source": "measured at run time by step 1b (probe_window.py) and pinned "
                                  "for steps 2-5",
                        "value": None, "value_file": f"{D}/window.txt",
-                       "probe_candidates": probe_cands}
+                       # which runs were measured is decided on the compute node, against the
+                       # files as they are then; window.json is the record of it
+                       "evidence_file": f"{D}/window.json",
+                       "probe_rule": SELECTION_RULE}
         resolved = {"file": resolved_cfg, "produced": "runtime", "by": s1b,
                     "note": "written by step 1b only after a radius is measured; absent until "
                             "then, so a missing file after step 1b means step 1b failed"}
