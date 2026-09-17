@@ -143,17 +143,19 @@ Every job is held to the same contract as the 5-step chain
   runs searched against an empty library also had 0 in every column.
 - **Inputs that share a run name are refused at generation.** DIA-NN names a run by its file
   name without the folder, so `/plate1/s1.raw` and `/plate2/s1.raw` would be one `Run`.
-- **The cfg reaches the search command word for word.** The library job reads the cfg with
-  `--cfg`; the search job has it spliced into bash. Each line is tokenised like the skill's
-  other cfg readers (shlex, `#` comments allowed inline) and every token is shell-quoted, so
-  `--cut 'K*,R*'` cannot be rewritten by a matching file, `--channels SILAC,L,KR,0:0;
-  SILAC,H,...` is not cut at the `;` (the README says `;`, `*` and `!` need escaping on
-  Linux), a `# comment` cannot swallow the inputs, `--lib` and `--out`, and `$X` stays
-  literal as it is under `--cfg`.
-- **`--rt-profiling` stays in the search job.** Skill 2.4.3 and earlier stripped it, so the
-  same cfg gives a different single-shot search on those versions — check the skill version
-  in the provenance before comparing or reproducing an older run. Only `--fasta-search --predictor --gen-spec-lib` (library job) and
-  `--reanalyse --matrices` (re-added) are taken out. The search job's first MBR pass is where
+- **The cfg is spliced into the search command by the chain's reader and quoting.** The
+  library job hands DIA-NN the cfg with `--cfg`; the search job's flags come from
+  `diann_parallel.cfg_tokens()` and `bash_flags()`, the same functions every chain step uses
+  (→ `references/diann_parallel.md`), so globs, `;`, parentheses and `# comments` reach
+  DIA-NN as written. One difference remains between the two jobs: `bash_flags()` lets
+  `$NAME`/`${NAME}` expand, so the search job gets the variable's value while the library
+  job's `--cfg` holds the literal text (what DIA-NN's cfg reader does with it is not
+  verified), and an unset variable stops the search job under `set -u`. Write paths out in a
+  single-shot cfg.
+- **`--rt-profiling` stays in the search job.** Earlier skill versions stripped it, so the
+  same cfg gives a different single-shot search on those versions: compare the job scripts
+  before comparing or reproducing an older run. Only `--fasta-search --predictor
+  --gen-spec-lib` (library job) and `--reanalyse --matrices` (re-added) are taken out. The search job's first MBR pass is where
   the empirical library is built, and `--rt-profiling` sets how ("IDs, RT and IM profiling",
   which the DIA-NN README calls strongly recommended). It is not a no-op: on 2.7.0 the log
   prints `The spectral library (if generated) will retain the original spectra but will

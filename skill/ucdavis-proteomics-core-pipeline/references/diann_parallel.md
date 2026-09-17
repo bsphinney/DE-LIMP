@@ -300,6 +300,7 @@ DIA-NN 2.7.0 (HIVE, review srun 23512013): a re-run with no .NET logged `ERROR: 
 | step | deletes first | asserts |
 |---|---|---|
 | 1 | `step1.predicted.speclib` | the predicted spectral library exists and is non-empty |
+| 1b (window measured) | `window.txt`, `window.json`, `params.resolved.cfg` and its `.tmp` | a positive-integer radius was measured, and `window.txt` and `params.resolved.cfg` are non-empty regular files |
 | 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
 | 3 | `empirical.parquet` | the empirical spectral library exists |
 | 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |
