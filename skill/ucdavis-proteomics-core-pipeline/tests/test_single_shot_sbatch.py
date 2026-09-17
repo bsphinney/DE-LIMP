@@ -479,6 +479,24 @@ class StaleArtefactTests(unittest.TestCase):
             self.assertIn("predicted", again.stderr)
 
 
+class DuplicateRunNameTests(unittest.TestCase):
+    def test_inputs_sharing_a_run_name_are_refused_before_any_job_is_written(self):
+        """DIA-NN names a run by its file name without the folder, so /a/s1.raw and /b/s1.raw
+        collide. That is knowable from the input list, so it must stop generation -- not fail
+        the search after it has used its SLURM hours."""
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            for sub in ("plate1", "plate2"):
+                os.makedirs(os.path.join(d, sub))
+            w.runs = [_write(os.path.join(d, sub, "sample_0.mzML"), "")
+                      for sub in ("plate1", "plate2")]
+            p = w.generate(*HIGH, check=False)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("sample_0", p.stderr)
+            self.assertFalse(os.path.exists(w.lib_job))
+            self.assertFalse(os.path.exists(w.search_job))
+
+
 class ReportCheckTests(unittest.TestCase):
     """check_report_runs.py: the one place that decides whether a report holds every run."""
 
@@ -533,6 +551,48 @@ class ReportCheckTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("s1", msg)
 
+    def test_a_missing_run_is_not_blamed_on_a_load_failure_without_evidence(self):
+        """A run can be absent from the report because DIA-NN could not load it OR because it
+        loaded and nothing passed the q-value filter (a blank, a failed injection). With no
+        stats file to tell them apart, the message must not pick one."""
+        import check_report_runs as crr
+        with tempfile.TemporaryDirectory() as d:
+            report = _write(os.path.join(d, "report.parquet"), "x")
+            files = [os.path.join(d, "s1.raw"), os.path.join(d, "blank_01.raw")]
+            ok, msg = crr.verify(report, files, parquet_runs=lambda p: {"s1"})
+            self.assertFalse(ok)
+            self.assertIn("blank_01", msg)
+            self.assertIn("could not load", msg)
+            self.assertIn("identified nothing", msg)
+
+    def _signal_stats(self, d, rows):
+        p = os.path.join(d, "report.stats.tsv")
+        with open(p, "w") as fh:
+            fh.write("File.Name\tPrecursors.Identified\tProteins.Identified\tTotal.Quantity"
+                     "\tMS1.Signal\tMS2.Signal\n")
+            for f, n, ms1, ms2 in rows:
+                fh.write(f"{f}\t{n}\t{n // 10}\t{n * 1000}\t{ms1}\t{ms2}\n")
+
+    def test_a_run_with_signal_but_no_identifications_is_reported_as_read(self):
+        """DIA-NN's stats row separates the two when there is signal: a run it read has
+        MS1/MS2 signal even with nothing identified. The job still fails -- a run with no
+        identifications is not a sample the DE step can use -- but it says why."""
+        import check_report_runs as crr
+        with tempfile.TemporaryDirectory() as d:
+            report = _write(os.path.join(d, "report.parquet"), "x")
+            files = [os.path.join(d, "s1.raw"), os.path.join(d, "blank_01.raw"),
+                     os.path.join(d, "broken.raw")]
+            self._signal_stats(d, [(files[0], 2400, 2.2e12, 1.3e12),
+                                   (files[1], 0, 3.1e10, 8.4e9),
+                                   (files[2], 0, 0, 0)])
+            ok, msg = crr.verify(report, files, parquet_runs=lambda p: {"s1"})
+            self.assertFalse(ok)
+            line = next(l for l in msg.splitlines() if l.strip().startswith("blank_01:"))
+            self.assertIn("read", line)
+            self.assertNotIn("could not load", line)
+            line = next(l for l in msg.splitlines() if l.strip().startswith("broken:"))
+            self.assertIn("could not load", line)
+
     def test_names_are_the_file_name_without_path_or_extension(self):
         import check_report_runs as crr
         self.assertEqual(crr.run_name("/data/a/Ex_42.raw"), "Ex_42")
@@ -584,7 +644,7 @@ class ChainResourceTests(unittest.TestCase):
             w = _Workspace(d, cfg_lines=LIBFREE_CFG + ["--window 7"], n_runs=3, ext=".d")
             a = argparse.Namespace(partition="low", account="publicgrp", qos="publicgrp-low-qos",
                                    max_simultaneous=None, assembly_cpus=24, libpred_cpus=8,
-                                   time_per_file=5)
+                                   time_per_file=5, assembly_mem=48)
             os.makedirs(w.out, exist_ok=True)
             run_search.run_diann_parallel(w.diann, w.cfg, w.runs, w.fasta, w.out, 16, a)
             s1 = _headers(os.path.join(w.out, "step1_libpred.sbatch"))
@@ -595,12 +655,23 @@ class ChainResourceTests(unittest.TestCase):
             self.assertIn("#SBATCH --time=5:00:00", s2)
             self.assertIn("#SBATCH --cpus-per-task=24", s3)
             self.assertIn("#SBATCH --cpus-per-task=24", s5)
+            # fewer CPUs on a busy queue is not enough if the job still asks for 128 GB
+            self.assertIn("#SBATCH --mem=48G", s3)
+            self.assertIn("#SBATCH --mem=48G", s5)
 
     def test_run_search_exposes_the_flags(self):
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"), "--help"],
                            capture_output=True, text=True)
-        for flag in ("--assembly-cpus", "--libpred-cpus", "--time-per-file"):
+        for flag in ("--assembly-cpus", "--assembly-mem", "--libpred-cpus", "--time-per-file"):
             self.assertIn(flag, p.stdout)
+
+    def test_chain_sizing_on_a_single_shot_search_is_not_silently_ignored(self):
+        """Routing picks single-shot at <= 5 files, where these flags size nothing."""
+        with tempfile.TemporaryDirectory() as d:
+            w = _Workspace(d)
+            p = w.generate(*HIGH, "--assembly-cpus", "8")
+            self.assertIn("--assembly-cpus", p.stderr)
+            self.assertIn("single-shot", p.stderr)
 
     def test_unset_flags_leave_the_generator_defaults_alone(self):
         with tempfile.TemporaryDirectory() as d:

@@ -71,28 +71,65 @@ def stats_path(report):
     return stem + ".stats.tsv"
 
 
+def _num(row, col):
+    try:
+        return float(row.get(col) or 0)
+    except ValueError:
+        return 0.0
+
+
+def stats_rows(path):
+    """{run name: row} for every run in DIA-NN's stats file, or None when there is none."""
+    if not os.path.exists(path):
+        return None
+    with open(path, newline="") as fh:
+        return {run_name(r["File.Name"]): r for r in csv.DictReader(fh, delimiter="\t")
+                if r.get("File.Name")}
+
+
 def runs_from_stats(path):
     """Run names DIA-NN's stats file shows with at least one identified precursor, or None
     when there is no stats file to read."""
-    if not os.path.exists(path):
+    rows = stats_rows(path)
+    if rows is None:
         return None
-    found = set()
-    with open(path, newline="") as fh:
-        for row in csv.DictReader(fh, delimiter="\t"):
-            try:
-                n = float(row.get("Precursors.Identified") or 0)
-            except ValueError:
-                n = 0
-            if n > 0 and row.get("File.Name"):
-                found.add(run_name(row["File.Name"]))
-    return found
+    return {name for name, r in rows.items() if _num(r, "Precursors.Identified") > 0}
+
+
+def duplicate_run_names(files):
+    """Run names more than one input would share. DIA-NN names a run by its file name without
+    the folder, so /a/s1.raw and /b/s1.raw are one Run in the report. Known from the input list
+    alone, which is why run_search.py calls this before it writes a job."""
+    names = [run_name(f) for f in files]
+    return sorted({x for x in names if names.count(x) > 1})
+
+
+def why_missing(name, stats, stats_file):
+    """One line saying what the evidence shows about a run that is not in the report.
+
+    A run is absent both when DIA-NN could not load it and when it loaded the run but nothing
+    passed the q-value filter (a blank or a failed injection), and the log line naming load
+    failures exists only for the first. The stats file separates them only one way round: a
+    run with MS1/MS2 signal was read. All zeros is NOT proof of a load failure -- measured on
+    DIA-NN 2.7.0, two readable runs searched against an empty library also had 0 in every
+    column -- so that case keeps both explanations."""
+    r = (stats or {}).get(name)
+    load = ("DIA-NN could not load it (its log names such files after 'ERROR: DIA-NN tried "
+            "but failed to load the following files')")
+    if r is not None and max(_num(r, "MS1.Signal"), _num(r, "MS2.Signal")) > 0:
+        return (f"  {name}: DIA-NN read it ({stats_file}: MS1.Signal {_num(r, 'MS1.Signal'):.3g},"
+                f" MS2.Signal {_num(r, 'MS2.Signal'):.3g}) but identified nothing that passed "
+                "the report's q-value filter -- a blank, wash or failed injection? If it is "
+                "not a sample, leave it out of the inputs.")
+    seen = f"all zeros in {stats_file}" if r is not None else "not in the report"
+    return f"  {name}: {seen} -- {load}, or it identified nothing in it."
 
 
 def verify(report, files, parquet_runs=runs_from_parquet):
     """(ok, message). `parquet_runs` is injectable so the stdlib route can be tested."""
     n = len(files)
     expected = [run_name(f) for f in files]
-    dupes = sorted({e for e in expected if expected.count(e) > 1})
+    dupes = duplicate_run_names(files)
     if dupes:
         return False, (f"FAILED: {n} inputs but only {len(set(expected))} distinct run names -- "
                        f"{', '.join(dupes)} appear more than once. DIA-NN names a run by its file "
@@ -116,9 +153,13 @@ def verify(report, files, parquet_runs=runs_from_parquet):
     if len(runs) != n:
         missing = [e for e in expected if e not in runs]
         which = f" Missing: {', '.join(missing)}." if missing else ""
-        return False, (f"FAILED: the report holds {len(runs)} of {n} runs ({source}).{which} "
-                       "DIA-NN exits 0 when it cannot read a run -- its log names them on the "
-                       "line 'ERROR: DIA-NN tried but failed to load the following files'.")
+        sp = stats_path(report)
+        stats = stats_rows(sp)
+        lines = [f"FAILED: the report holds {len(runs)} of {n} runs ({source}).{which}"]
+        lines += [why_missing(m, stats, os.path.basename(sp)) for m in missing]
+        lines.append("DIA-NN exits 0 either way, so this job fails rather than hand the DE "
+                     "step fewer samples than were acquired.")
+        return False, "\n".join(lines)
     return True, f"OK: report holds all {n} runs ({source})"
 
 

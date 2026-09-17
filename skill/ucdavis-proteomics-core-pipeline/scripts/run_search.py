@@ -302,6 +302,7 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
                       ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
                       ("--libpred-cpus", getattr(a, "libpred_cpus", None)),
                       ("--assembly-cpus", getattr(a, "assembly_cpus", None)),
+                      ("--assembly-mem", getattr(a, "assembly_mem", None)),
                       ("--time-per-file", getattr(a, "time_per_file", None))):
         if val:
             argv += [flag, str(val)]
@@ -1373,6 +1374,10 @@ def main():
                     help="parallel chain: CPUs for steps 3 and 5, assembly and report "
                          "(diann_parallel.py default: 64, a whole node's worth that can "
                          "wait a long time on a busy preemptible queue)")
+    ap.add_argument("--assembly-mem", type=_positive_int,
+                    help="parallel chain: memory in GB for steps 3 and 5 (diann_parallel.py "
+                         "default: 128); lower it with --assembly-cpus, or a smaller job "
+                         "still waits for 128 GB")
     ap.add_argument("--time-per-file", type=_positive_int,
                     help="parallel chain: wall-clock hours per array task in steps 2 and 4 "
                          "(diann_parallel.py default: 2)")
@@ -1401,6 +1406,18 @@ def main():
         if v:
             setattr(a, attr, os.path.abspath(v))
     files = [os.path.abspath(f) for f in files]
+
+    # DIA-NN names a run by its file name without the folder, so /plate1/s1.raw and
+    # /plate2/s1.raw become ONE Run: two samples merged in the report (and, in the chain, two
+    # array tasks writing the same .quant). That is knowable now, from the input list, so it
+    # stops here instead of failing check_report_runs.py after the search has run.
+    if engine == "diann" and not a.adapt_only:
+        import check_report_runs
+        dupes = check_report_runs.duplicate_run_names(files)
+        if dupes:
+            sys.exit(f"[run_search] inputs share a run name: {', '.join(dupes)}. DIA-NN names a "
+                     "run by its file name without the folder, so they would be merged into "
+                     "one Run. Rename them, or search them separately.")
 
     if a.adapt_only:
         report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe,
@@ -1447,6 +1464,17 @@ def main():
             f"    ... --sbatch ./{engine}_job.sh && sbatch ./{engine}_job.sh\n"
             "  (--allow-inline overrides this, e.g. inside an salloc/srun session.)")
 
+    # These size the 5-step chain only. Said out loud when the route is single-shot, where
+    # they change nothing: the flag being accepted reads as the jobs having got smaller.
+    chain_only = [f for f, v in (("--libpred-cpus", a.libpred_cpus),
+                                 ("--assembly-cpus", a.assembly_cpus),
+                                 ("--assembly-mem", a.assembly_mem),
+                                 ("--time-per-file", a.time_per_file),
+                                 ("--max-simultaneous", a.max_simultaneous)) if v]
+    if chain_only and not use_parallel:
+        sys.stderr.write(f"[run_search] NOTE: {', '.join(chain_only)} size the 5-step chain "
+                         f"only; this search is single-shot ({why}), so they are ignored. "
+                         f"Its job(s) request --threads {a.threads} CPUs.\n")
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
     sbatch_refused = None
