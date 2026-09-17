@@ -16,6 +16,36 @@ Confidence is `high`/`medium`/`low`. **Anything not `high`, mixed, or with
 disagreeing instruments sets `needs_confirmation` — ask the user.** Instrument may
 be null; that's fine (matcher falls back to score 0 and the user confirms).
 
+### Bruker `analysis.tdf` integrity (`tdf_integrity`, `scripts/bruker_tdf.py`)
+
+On HIVE, 342 of 39,374 Bruker `.d` (measured 2026-09-16) had an `analysis.tdf` whose
+frame index covered only part of a complete `analysis.tdf_bin` — one run's index ended
+at 0.7% of its `tdf_bin`, and DIA-NN searched 121 cycles of it with no error. The copy
+from the instrument can leave a stale, mid-acquisition `analysis.tdf-wal` beside the
+finished file, and any **read-write** sqlite open (e.g. `sqlite3 analysis.tdf`)
+checkpoints it into the finished file and truncates it. `?mode=ro` alone does not
+truncate, but still reads the stale `-wal` and writes an `-shm` beside the tdf.
+
+So every tdf the skill reads is opened through `bruker_tdf.connect_tdf()`
+(`file:<tdf>?mode=ro&immutable=1`), and every `.d` gets a per-file `tdf_integrity`:
+
+| `status` | found | what to do |
+|---|---|---|
+| `ok` | header 1,1, no `-wal`/`-journal`, index reaches the end of `tdf_bin` | nothing |
+| `at_risk` | SQLite header bytes 18–19 = 2 (WAL mode), or a non-empty `-wal`/`-journal` beside it; index complete | searchable, but never open it read-write; back up `analysis.tdf` first |
+| `truncated` | last frame's `TimsId` + its block size < 0.999 × `tdf_bin` size | **do not search it**; find an intact copy (same `tdf_bin`) |
+| `bin_incomplete` | `tdf_bin` missing, or shorter than the index | re-copy the `.d` |
+| `unverified` | the index could not be read | confirm the `.d` is readable |
+
+Anything but `ok` is a line in that file's `warnings` (also printed to stderr), lists the
+file in `tdf_integrity_problem_files`, and sets `needs_confirmation`. `ClosedProperly` in the
+tdf proves nothing here — 240 of the truncated files say 1. A WAL-mode header or a stale
+`-wal` does not by itself mean damage, which is why those are `at_risk` and only the index
+check says `truncated`. Checked on HIVE (2026-09-16): the truncated run above reports
+`truncated` (header 2,2, index at 0.74% of `tdf_bin`); two intact blank runs with a ~4 MB
+stale `-wal` beside a 1,1 header report `at_risk` (coverage 0.99998 and 1.0 — the 0.999
+margin is what keeps the first from reading as damage); two sibling runs report `ok`.
+
 ## Parameters
 
 Search parameters are derived from the data type (instrument + acquisition) by

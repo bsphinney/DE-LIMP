@@ -211,6 +211,13 @@ python3 scripts/detect_acquisition.py /path/to/*.d /path/to/*.raw
 Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
 `instrument`. **If `needs_confirmation` is true, ask the user** before continuing
 — mixed/unknown/low-confidence must not silently pick an engine.
+**Tell the user every file's `warnings`** (also printed to stderr). For a Bruker
+`.d` they come from `tdf_integrity`: `truncated` means `analysis.tdf` indexes only
+part of the run and a search would silently read just that part — **do not search
+that run**; find an intact copy. `at_risk` (WAL-mode header or a stale `-wal` beside a complete index)
+can be searched, but never open that tdf read-write. Open any `analysis.tdf`
+yourself only with `sqlite3 "file:<tdf>?mode=ro&immutable=1"` — a plain
+`sqlite3 <tdf>` is what truncated 342 runs on HIVE.
 → detail: `references/search-engines.md`.
 
 ### 3. Ask organism + experimental design (auto-map conditions)
