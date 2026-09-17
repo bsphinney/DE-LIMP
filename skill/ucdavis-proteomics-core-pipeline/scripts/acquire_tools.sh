@@ -69,6 +69,9 @@ SAGE_VER=""; DIANN_VER=""
 # tested against a mocked layout (tests/test_acquire_tools_versions.py), and so another
 # site can point it at its own shared builds; nobody else needs to set it.
 DIANN_HIVE_DIR="${DIANN_HIVE_DIR:-/quobyte/proteomics-grp/dia-nn}"
+# The folders searched for the Core's Radiant .sif, colon-separated, in order. Overridable for
+# the same two reasons.
+RADIANT_HIVE_DIRS="${RADIANT_HIVE_DIRS:-/quobyte/proteomics-grp/apptainers:/quobyte/proteomics-grp/radiant}"
 
 # Only honor PIN_VERSION for the engine it names.
 pin_for() { [ -n "$PIN_ENGINE" ] && [ "$PIN_ENGINE" = "$1" ] && [ -n "$PIN_VERSION" ]; }
@@ -247,8 +250,9 @@ acquire_radiant() {
     hpc)
       # Prefer an existing .sif; do NOT auto-build one (a docker->apptainer
       # conversion pulls ~3 GB and needs a writable cache -- not a login-node job).
-      local RS sif=""
-      for RS in /quobyte/proteomics-grp/apptainers /quobyte/proteomics-grp/radiant; do
+      local RS sif="" rdirs
+      IFS=: read -r -a rdirs <<< "$RADIANT_HIVE_DIRS"
+      for RS in "${rdirs[@]}"; do
         [ -d "$RS" ] || continue
         if [ "$ver" != "latest" ]; then
           sif="$(ls -1 "$RS"/*radiant*"$ver"*.sif 2>/dev/null | sort -V | tail -n1)"
@@ -267,7 +271,7 @@ acquire_radiant() {
         NOTES+=("Radiant ${RADIANT_VER:-$ver}: reusing HIVE container $sif.")
         return
       fi
-      NOTES+=("Radiant $ver: no .sif found under /quobyte/proteomics-grp/{apptainers,radiant}. Build one ON A COMPUTE NODE (never the login node): 'srun -c 8 --mem 16G --pty apptainer build radiant-fulcrum-$ver.sif docker://$image', then re-run acquire_tools.sh.")
+      NOTES+=("Radiant $ver: no .sif found under ${RADIANT_HIVE_DIRS//:/ or }. Build one ON A COMPUTE NODE (never the login node): 'srun -c 8 --mem 16G --pty apptainer build radiant-fulcrum-$ver.sif docker://$image', then re-run acquire_tools.sh.")
       ;;
     mac|linux)
       # The tag IS the release when it was pinned: seerbio/radiant-fulcrum:2.3.3.

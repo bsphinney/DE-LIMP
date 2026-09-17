@@ -90,7 +90,9 @@ class AcquireHarness(unittest.TestCase):
         self.root = os.path.join(self.d, "tools")
         self.hive = os.path.join(self.d, "dia-nn")
         self.sys = os.path.join(self.d, "sysbin")
-        for p in (self.bin, self.fix, self.root, self.hive, self.sys):
+        # stand-ins for /quobyte/proteomics-grp/apptainers and /quobyte/proteomics-grp/radiant
+        self.radiant_dirs = (os.path.join(self.d, "apptainers"), os.path.join(self.d, "radiant"))
+        for p in (self.bin, self.fix, self.root, self.hive, self.sys, *self.radiant_dirs):
             os.makedirs(p)
         for tool in COREUTILS:
             real = shutil.which(tool)
@@ -119,9 +121,12 @@ class AcquireHarness(unittest.TestCase):
     def acquire(self, platform_class, pin_engine="", pin_version="", extra_env=None):
         # PATH is the stub dir plus the linked coreutils only (see COREUTILS): no real curl,
         # sage, docker, apptainer or pip on the machine running the tests can leak in.
+        # RADIANT_HIVE_DIRS points the HIVE Radiant .sif search at empty mocked folders, so
+        # the real /quobyte/proteomics-grp/apptainers on HIVE cannot answer for a test.
         env = {"PATH": f"{self.bin}:{self.sys}", "HOME": self.d, "FIXTURES": self.fix,
                "DIANN_HIVE_DIR": self.hive, "PIN_ENGINE": pin_engine,
-               "PIN_VERSION": pin_version}
+               "PIN_VERSION": pin_version,
+               "RADIANT_HIVE_DIRS": f"{self.radiant_dirs[0]}:{self.radiant_dirs[1]}"}
         env.update(extra_env or {})
         r = subprocess.run([self.bash, ACQUIRE, platform_class, self.root],
                            capture_output=True, text=True, env=env, timeout=120)
@@ -271,6 +276,71 @@ class RadiantTests(AcquireHarness):
         t = self.acquire("linux", "radiant", "2.3.3")
         self.assertIsNone(t["radiant"])
         self.assertEqual(t["versions"]["radiant"], "")
+
+
+class HiveRadiantSifTests(AcquireHarness):
+    """On HIVE Radiant is a prebuilt .sif, found in /quobyte/proteomics-grp/apptainers or
+    /quobyte/proteomics-grp/radiant (listed 2026-09-16: apptainers/radiant-fulcrum-2.3.3.sif).
+    The release recorded is the one the .sif's NAME carries; RADIANT_HIVE_DIRS mocks the two
+    folders here, as DIANN_HIVE_DIR does for DIA-NN."""
+
+    def setUp(self):
+        super().setUp()
+        _exe(os.path.join(self.bin, "apptainer"), "#!/bin/sh\nexit 0\n")
+
+    def sif(self, name, where=0):
+        p = os.path.join(self.radiant_dirs[where], name)
+        with open(p, "w") as fh:
+            fh.write("not really an image")
+        return p
+
+    def test_an_unpinned_hive_sif_records_the_release_its_name_carries(self):
+        """HIVE's real layout. origin/main recorded "latest" here (srun 23512217)."""
+        p = self.sif("radiant-fulcrum-2.3.3.sif")
+        t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
+        self.assertEqual(t["radiant_image"], p)
+        self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+    def test_unpinned_takes_the_highest_release_by_version(self):
+        self.sif("radiant-fulcrum-2.3.2.sif")
+        p = self.sif("radiant-fulcrum-2.3.10.sif")
+        t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
+        self.assertEqual(t["radiant_image"], p)
+        self.assertEqual(t["versions"]["radiant"], "2.3.10")
+
+    def test_a_pinned_hive_sif_records_that_release(self):
+        self.sif("radiant-fulcrum-2.3.2.sif")
+        p = self.sif("radiant-fulcrum-2.3.3.sif")
+        t = self.acquire("hpc", "radiant", "2.3.3")
+        self.assertEqual(t["radiant_image"], p)
+        self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+    def test_the_second_folder_is_searched_too(self):
+        p = self.sif("radiant-fulcrum-2.3.3.sif", where=1)
+        t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
+        self.assertEqual(t["radiant_image"], p)
+        self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+    def test_a_pinned_sif_whose_name_ends_otherwise_falls_back_to_the_pin_it_matched(self):
+        """The name must end `-<ver>.sif` to be read; a pinned search only matches names that
+        contain the pin, so the pin is then what the name carries."""
+        p = self.sif("radiant-2.3.3-fulcrum.sif")
+        t = self.acquire("hpc", "radiant", "2.3.3")
+        self.assertEqual(t["radiant_image"], p)
+        self.assertEqual(t["versions"]["radiant"], "2.3.3")
+
+    def test_an_unpinned_sif_that_names_no_release_records_none_and_says_so(self):
+        p = self.sif("radiant-fulcrum.sif")
+        t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
+        self.assertEqual(t["radiant_image"], p)
+        self.assertEqual(t["versions"]["radiant"], "")
+        self.assertTrue(any("names no release" in n for n in t["notes"]), t["notes"])
+
+    def test_no_hive_sif_records_no_version_and_names_the_folders_searched(self):
+        t = self.acquire("hpc", extra_env={"ACQUIRE_RADIANT": "1"})
+        self.assertIsNone(t["radiant"])
+        self.assertEqual(t["versions"]["radiant"], "")
+        self.assertTrue(any(self.radiant_dirs[0] in n for n in t["notes"]), t["notes"])
 
 
 if __name__ == "__main__":

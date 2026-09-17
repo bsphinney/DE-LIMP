@@ -33,7 +33,10 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   on the login node: `ls -d /quobyte/proteomics-grp/dia-nn/build_*/diann-*`. The
   facility's `run_diann_*.sbatch` in that folder is the reference invocation. AlphaDIA is
   also on HIVE at `/quobyte/proteomics-grp/apptainers/alphadia.sif` (auto-reused).
-  (`DIANN_HIVE_DIR` overrides the build directory; the tests use it to mock the layout.)
+  (`DIANN_HIVE_DIR` overrides the build directory, and `RADIANT_HIVE_DIRS` the
+  colon-separated folders searched for a Radiant `.sif` — by default
+  `/quobyte/proteomics-grp/apptainers` then `/quobyte/proteomics-grp/radiant`; the tests
+  use both to mock the layout.)
 - **Linux native:** needs glibc ≥ Linux Mint 21.2 and .NET 8. If missing, prefer
   Docker/Apptainer.
 - DIA-NN reads `.raw`/`.d` natively from 2.1+. On Linux, `.raw` also needs a **.NET 8
