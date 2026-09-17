@@ -280,8 +280,12 @@ def ensure_xic(params, out):
     # The copy is the same parameters plus XICs, so it keeps the cfg's estimate_params.py
     # rationale: without it the mass-accuracy plan (measure_with_diann) would be lost here and the
     # search would fall back to DIA-NN's first-run auto mode (diann_parallel.mass_acc_measure_plan).
+    # A cfg with NO sidecar must not inherit one an earlier search left in the same --out: that
+    # stale plan would have a hand-written cfg's missing mass accuracy measured instead of reported.
     if os.path.exists(params + ".rationale.json"):
         shutil.copyfile(params + ".rationale.json", aug + ".rationale.json")
+    elif os.path.lexists(aug + ".rationale.json"):
+        os.remove(aug + ".rationale.json")
     print(f"[run_search] cfg had no --xic; using {aug} (added: {extra}). "
           f"Every DIA-NN search extracts chromatograms.")
     return aug

@@ -190,6 +190,33 @@ class SingleShotMassAccTests(unittest.TestCase):
             self.assertIn("params_with_xic.cfg", p.stdout)
             self.assertIn("probe_window.py", open(os.path.join(d, "job_2_search.sh")).read())
 
+    def test_a_cfg_without_a_sidecar_does_not_inherit_a_stale_one(self):
+        """ensure_xic() copied the sidecar only when the source HAD one. A second search into the
+        same --out with a hand-written cfg (no --xic, no mass accuracy, no sidecar) kept the first
+        cfg's params_with_xic.cfg.rationale.json -- and its measure_with_diann plan, so the chain
+        or the single-shot probe would measure mass accuracy and pin MS1 7 for a cfg that may not
+        be an Orbitrap at all, instead of reporting the missing flags (mass_acc_unset)."""
+        sys.path.insert(0, SCRIPTS)
+        import diann_parallel as dp
+        import run_search
+        with tempfile.TemporaryDirectory() as d:
+            _raws, _fasta, cfg, _tools, _bundle = self._setup(d)
+            kept = [ln for ln in open(cfg) if not ln.startswith(("--xic", "--mobilograms"))]
+            with open(cfg, "w") as fh:
+                fh.writelines(kept)
+            out = os.path.join(d, "out")
+            aug = run_search.ensure_xic(cfg, out)
+            self.assertIsNotNone(dp.mass_acc_measure_plan(aug))
+            hand = os.path.join(d, "hand.cfg")
+            with open(hand, "w") as fh:
+                fh.writelines(kept)                       # the same flags, and no sidecar
+            self.assertEqual(dp.parallel_safe(hand)["code"], "mass_acc_unset")
+            self.assertEqual(run_search.ensure_xic(hand, out), aug)
+            self.assertFalse(os.path.exists(aug + ".rationale.json"),
+                             "the earlier cfg's rationale sidecar survived beside the new copy")
+            self.assertIsNone(dp.mass_acc_measure_plan(aug))
+            self.assertEqual(dp.parallel_safe(aug)["code"], "mass_acc_unset")
+
     def test_one_step_has_no_library_to_measure_against_and_says_so(self):
         with tempfile.TemporaryDirectory() as d:
             p, out = self._run_search(d, *self._setup(d), "--one-step",
