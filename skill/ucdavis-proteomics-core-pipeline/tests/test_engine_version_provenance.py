@@ -12,8 +12,9 @@ Two files name the engine version and nothing compared them:
 The FRAN pilot on 2026-09-16 ran DIA-NN 2.7.0 (banner "DIA-NN 2.7.0 Academia" on a compute node)
 against a manifest pinning 2.6.1. run_search.py took `tools.versions or manifest.version`, so the
 record happened to be right -- but it carried no trace of the disagreement, and when tools.json
-had no entry the SAME expression quietly recorded the manifest's pin as if it had run (for any
-engine: a Sage search under a DIA-NN manifest would have been stamped with DIA-NN's version).
+had no entry the SAME expression quietly recorded the manifest's pin as if it had run -- even
+another engine's: acquire_tools.sh writes `versions` only for diann, sage and radiant, so a
+FragPipe or AlphaDIA search under a DIA-NN manifest was stamped with DIA-NN's version.
 
 `version` is only ever a build something CONFIRMS ran: tools.json `versions`, or failing that the
 version the command itself names (a build folder like diann-2.6.0/, a .sif name, an image tag).
@@ -179,9 +180,13 @@ class EngineVersionRecordTests(unittest.TestCase):
         self.assertIn("build_diann_docker.sh 2.6.1", err)
 
     def test_another_engines_pin_is_never_borrowed(self):
-        """The manifest pins ONE engine. `--engine sage` under a DIA-NN manifest used to be
-        stamped with DIA-NN's version when tools.json had no Sage entry."""
-        rec, _ = record("sage", {}, {"name": "diann", "version": "2.6.1"})
+        """The manifest pins ONE engine. tools.json has no `versions` entry for AlphaDIA or
+        FragPipe, and `--engine alphadia` under a DIA-NN manifest used to be stamped with
+        DIA-NN's version."""
+        rec, _ = record("alphadia", {"diann": "2.6.1", "sage": "latest"},
+                        {"name": "diann", "version": "2.6.1"},
+                        cmd="apptainer exec --bind /quobyte:/quobyte "
+                            "/quobyte/proteomics-grp/apptainers/alphadia.sif alphadia")
         self.assertIsNone(rec["version"])
         self.assertIsNone(rec["manifest_engine_version"])
         self.assertIsNone(rec["engine_version_mismatch"])

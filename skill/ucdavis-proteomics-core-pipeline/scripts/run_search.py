@@ -159,8 +159,9 @@ def engine_version_record(engine, tools, bundle):
     t = tools or {}
     tools_raw = (t.get("versions") or {}).get(engine)
     beng = (bundle or {}).get("engine") or {}
-    # The manifest pins ONE engine: `tools.versions or manifest.version` used to stamp a Sage
-    # search run under a DIA-NN manifest with DIA-NN's version.
+    # The manifest pins ONE engine. acquire_tools.sh writes `versions` keys only for diann,
+    # sage and radiant, so `tools.versions or manifest.version` stamped `--engine fragpipe` or
+    # `--engine alphadia` under a DIA-NN manifest with DIA-NN's version.
     manifest_raw = beng.get("version") if beng.get("name") in (None, engine) else None
     tv, mv = _concrete_version(tools_raw), _concrete_version(manifest_raw)
     cvs = command_engine_versions(engine, t)
