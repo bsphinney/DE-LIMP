@@ -71,7 +71,9 @@ def instrument_ppm_summary():
 #                          omits BOTH flags, and before the search DIA-NN is run on representative
 #                          runs (chain step 1b, or run_search.py's single-shot probe). The level
 #                          that has a documented tier is recorded under
-#                          `mass_accuracy_documented` and pinned as documented.
+#                          `mass_accuracy_documented` and pinned as given. An SOP override of
+#                          one flag makes the plan pinned (the other level from the table) or
+#                          is refused (no table value for it: LoneMassAccOverride).
 #   auto                -- instrument not identified; flags omitted, DIA-NN optimises on its own
 PLAN_PINNED, MEASURE_WITH_DIANN, PLAN_AUTO = "pinned", "measure_with_diann", "auto"
 
@@ -108,6 +110,36 @@ SRC_MEASURE = ("measured with DIA-NN before the search: one DIA-NN per represent
 LONE_FLAG_NOTE = ("not written into the cfg on its own: DIA-NN 2.7.0 fixes BOTH levels when either "
                   "flag is given, the other at 20 ppm; it is pinned together with the measured "
                   "level")
+
+MASS_ACC_FLAGS = ("--mass-acc", "--mass-acc-ms1")        # the same pair as diann_parallel's
+MASS_ACC_LEVEL = {"--mass-acc": "MS2", "--mass-acc-ms1": "MS1"}
+
+
+class LoneMassAccOverride(ValueError):
+    """An --overrides mass-accuracy flag whose other level has no value: it could only be written
+    as a lone flag (LONE_FLAG_NOTE). references/parameters.md's own example, {"--mass-acc": 8},
+    once went into the cfg alone for a 120k/15k Orbitrap while the sidecar still planned to measure
+    MS2 -- so MS1 ran at 20 ppm instead of its documented 7, and nothing said so."""
+
+
+def lone_override_message(given, missing, instr_class, label):
+    """Why a one-flag override is refused, and what to give instead."""
+    lvl, gone = MASS_ACC_LEVEL[given], MASS_ACC_LEVEL[missing]
+    why = {"orbitrap_untabled": f"its resolution is outside DIA-NN's 30k-240k Orbitrap table "
+                                f"({label})",
+           "orbitrap_generic": "the Orbitrap resolution is unknown"}.get(instr_class, label)
+    fixes = [f"give both {given} and {missing} in --overrides"]
+    if instr_class == "orbitrap_generic":
+        fixes.append("pass --ms1-resolution/--ms2-resolution, so DIA-NN's table can supply "
+                     f"{gone} if it has a tier")
+    if instr_class in MEASURE_CLASSES:
+        fixes.append(f"or override neither, and DIA-NN measures the level with no value on "
+                     "representative runs before the search")
+    return (f"--overrides sets {given} ({lvl}) but not {missing} ({gone}), and {gone} has no "
+            f"value here: {why}. Written alone, {given} makes DIA-NN fix {gone} at 20 ppm too "
+            "(DIA-NN 2.7.0: 'automatic optimisation will not be performed as at least one of "
+            "MS1/MS2 mass accuracies is user-provided'), so no cfg was written. To fix: "
+            + "; ".join(fixes) + ".")
 
 
 def ppm_for_resolution(res):
@@ -335,7 +367,19 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # a 0 (literal 0 ppm) -- for different reasons, which its message now names -- EXCEPT an
     # absent pair this function planned to measure (MEASURE_WITH_DIANN, below).
     plan = mass_acc_plan(instr_class, ms1, ms2)
-    documented = {}
+    documented, basis = {}, {}
+    # An SOP override of a mass-accuracy level (applied below, with the other overrides) is a
+    # value for that level. Both levels known -- overridden, or from the table -- means both are
+    # written and nothing is measured. A one-flag override whose other level has NO value would
+    # be a lone flag (LONE_FLAG_NOTE: the other level silently fixed at 20 ppm), so it is refused.
+    given = [f for f in MASS_ACC_FLAGS if f in (overrides or {})]
+    if given:
+        table = {"--mass-acc-ms1": ms1, "--mass-acc": ms2}
+        missing = [f for f in MASS_ACC_FLAGS if f not in given and table[f] is None]
+        if missing:
+            raise LoneMassAccOverride(lone_override_message(given[0], missing[0], instr_class,
+                                                            label))
+        plan = PLAN_PINNED            # an SOP value wins; it must not be re-measured
     if plan == MEASURE_WITH_DIANN:
         # No curve fit for the level outside the table (see ppm_for_resolution): it is measured
         # with DIA-NN before the search -- chain step 1b, or run_search.py's single-shot probe --
@@ -348,6 +392,7 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
                                          ("--mass-acc", "MS2", ms2, s2)):
             if value is not None:
                 documented[flag] = value
+                basis[flag] = lsrc
                 add(flag, value, f"{label}: {level} {value} ppm [{lsrc}] -- {LONE_FLAG_NOTE}",
                     render=False)
             else:
@@ -361,9 +406,12 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     else:
         # level_src = (MS1 source, MS2 source) when both came from resolutions, so each flag
         # names ITS level's evidence (a documented tier vs an interpolation), not a merged one.
+        # An overridden level is written by the override loop below, with its own tag.
         s1, s2 = level_src or (src, src)
-        add("--mass-acc", ms2, f"{label}: MS2 {ms2} ppm [{s2}]")
-        add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{s1}]")
+        if "--mass-acc" not in given:
+            add("--mass-acc", ms2, f"{label}: MS2 {ms2} ppm [{s2}]")
+        if "--mass-acc-ms1" not in given:
+            add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{s1}]")
     # --window 0 is likewise rejected ("scan window radius should be a positive
     # integer"); omitting it lets DIA-NN set the radius from the observed peak width.
     #
@@ -394,17 +442,19 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         r[k] = tagged(v, "user-override (validated SOP)")
         lines = [ln for ln in lines if not (ln == k or ln.startswith(k + " "))]
         lines.append(k if v is True else f"{k} {v}")
-    if all(k in (overrides or {}) for k in ("--mass-acc", "--mass-acc-ms1")):
-        plan = PLAN_PINNED            # an SOP value wins; it must not be re-measured
-        documented = {}
     r["mass_accuracy_plan"] = tagged(plan, {
         PLAN_PINNED: "--mass-acc/--mass-acc-ms1 are in the cfg",
         MEASURE_WITH_DIANN: SRC_MEASURE,
         PLAN_AUTO: "instrument not identified; DIA-NN optimises it itself (not parallel-safe)",
     }[plan])
+    # Each level's basis, not one claim for all: a value between tiers (MS1 at 90k -> 7.5) is
+    # interpolated from the table, and the gate and provenance once called it "as documented".
     r["mass_accuracy_documented"] = tagged(
-        documented, "levels with a documented DIA-NN value, pinned as documented alongside the "
-                    "measured level (empty unless the plan is measure_with_diann)")
+        documented,
+        ("levels pinned as given alongside the measured level, each a value from DIA-NN's Orbitrap "
+         "resolution table: " + "; ".join(f"{f} {v} [{basis[f]}]" for f, v in documented.items()))
+        if documented else
+        "none: only a measure_with_diann plan pins a level from the table alongside a measured one")
 
     return "\n".join(lines) + "\n", r
 
@@ -522,9 +572,12 @@ def main():
                  if cls in ("orbitrap_measured", "orbitrap_untabled") else None)
 
     if a.engine == "diann":
-        text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
-                                      overrides, cont_tag, a.precursor_mz_range,
-                                      level_src=level_src)
+        try:
+            text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
+                                          overrides, cont_tag, a.precursor_mz_range,
+                                          level_src=level_src)
+        except LoneMassAccOverride as e:
+            sys.exit(f"[estimate_params] {e}")
     else:
         text, rationale = build_sage(a.acquisition, cls, var_mods, overrides)
 

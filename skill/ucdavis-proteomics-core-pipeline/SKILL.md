@@ -502,7 +502,10 @@ when either is given), the sidecar plans `measure_with_diann`, and a level that 
 tier keeps it (`mass_accuracy_documented`, e.g. MS1 7 ppm at 120k). DIA-NN measures the
 missing level on representative runs before the search — step 1b of the parallel chain,
 or a probe inside the single-shot search job (step 7). Pass
-`--ms1-resolution/--ms2-resolution` when you know them. It sets DIA/DDA window mode from acquisition, and uses
+`--ms1-resolution/--ms2-resolution` when you know them. An `--overrides` that sets only one of
+the two flags gets the other level from the table, and is refused when the table has no value
+for it (written alone, that flag would fix the other level at 20 ppm): relay the refusal to the
+user. It sets DIA/DDA window mode from acquisition, and uses
 standard trypsin/LFQ defaults for the rest. **It prints a `rationale` tagging
 every value's provenance** — surface this to the user (and it flows into the
 methods text), so a derived default is never mistaken for a confirmed setting.

@@ -50,7 +50,9 @@ performed as at least one of MS1/MS2 mass accuracies is user-provided`, and `--m
 alone gave `Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)` (HIVE srun 23528991) — so
 a cfg with only `--mass-acc-ms1 7` would silently search MS2 at 20 ppm. The cfg omits both; the
 measurement writes both. A search that cannot measure (`--one-step`: no library exists before the
-search) says so and leaves DIA-NN's first-run optimisation.
+search) says so and leaves DIA-NN's first-run optimisation. The same holds for an SOP override
+of one flag (below): the other level is written from the table beside it, and when the table has
+no value for that level `estimate_params.py` refuses rather than write a lone flag.
 
 **An open question, with numbers.** DIA-NN 2.7.0 also has a resolution-based MS2 value for 15k
 that its README does not document: pinned at the measured 14 ppm, the search logs `WARNING: the
@@ -107,6 +109,11 @@ is never mistaken for a confirmed setting.
 Two ways, both honored:
 - `param_overrides` in the workflow.yaml (e.g. `{"--mass-acc": 8}` or
   `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged
-  `user-override`.
+  `user-override`. An override of one mass-accuracy flag is a value for that level, so
+  nothing is measured: the other level is written from DIA-NN's table (`{"--mass-acc": 8}` at
+  120k/15k gives `--mass-acc-ms1 7 --mass-acc 8`, plan `pinned`). When the table has no value
+  for the other level (outside 30k–240k, resolution unknown, instrument not identified), the
+  override is **refused** with a message naming the missing flag: written alone it would fix
+  that level at 20 ppm. Give both flags, pass the resolutions, or override neither.
 - Ship a full validated `params_file` in the workflow — used verbatim, estimation
   skipped entirely. Use this when a method is locked and must not move.

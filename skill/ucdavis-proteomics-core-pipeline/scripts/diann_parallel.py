@@ -502,6 +502,16 @@ def probe_mass_acc_args(documented):
     return " ".join(f"{names[f]} {v:g}" for f, v in sorted(documented.items(), reverse=True))
 
 
+def documented_levels_text(documented):
+    """The levels a plan pins as given, for a verdict or a provenance record. "Documented" here
+    means a value from DIA-NN's Orbitrap resolution table -- an exact tier, OR interpolated between
+    tiers (MS1 at 90k gives 7.5 ppm) -- so the text must not call it a README value: it said
+    "--mass-acc-ms1 7.5 as documented". The cfg's rationale sidecar names which each level is."""
+    return (", ".join(f"{f} {v:g}" for f, v in sorted(documented.items()))
+            + " from DIA-NN's Orbitrap resolution table (an exact tier, or interpolated between "
+              "tiers -- `mass_accuracy_documented` in the cfg's .rationale.json says which)")
+
+
 # What step 1b writes, as steps 2-5 read it. A pattern for `grep -Eqx` and Python's re alike.
 MEASURED_FILE_RE = {
     "window.txt": "[1-9][0-9]*",
@@ -682,7 +692,7 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
         measure.insert(0, "window")
     if not measure:
         return verdict(True, False, "pinned", ma, ma["reason"])
-    doc = "".join(f", {f} {v:g} as documented" for f, v in sorted(documented.items()))
+    doc = f"; {documented_levels_text(documented)}" if documented else ""
     got = (f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm" if "mass-acc" not in measure else
            "mass accuracy is unpinned but recoverable -- DIA-NN measures it on representative "
            "runs in step 1b (planned by estimate_params.py: no documented value for this "
@@ -1187,9 +1197,8 @@ def main():
                     "source": "measured at run time by step 1b (probe_window.py --measure "
                               "mass-acc) and pinned for steps 2-5; planned by estimate_params.py "
                               "(measure_with_diann) for an Orbitrap level with no documented "
-                              "DIA-NN value" + ("; " + ", ".join(
-                                  f"{f} {v:g} as documented" for f, v in sorted(documented.items()))
-                                  if documented else ""),
+                              "DIA-NN value" + (f"; {documented_levels_text(documented)}"
+                                                if documented else ""),
                     "value_file": mtxt, "evidence_file": f"{D}/window.json",
                     "probe_rule": SELECTION_RULE,
                     "reason": "not in the cfg; measured with DIA-NN on representative runs in "

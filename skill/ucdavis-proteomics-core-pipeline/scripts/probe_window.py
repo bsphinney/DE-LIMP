@@ -604,9 +604,11 @@ def pin_mass_acc(probes, documented=None):
         out[key.replace("_ppm", "_per_run")] = per_run
         if key in documented:
             out[key] = float(documented[key])
-            out["sources"][key] = (f"documented: {ppm_text(out[key])} ppm, given to the probe as "
-                                   f"--{key.replace('_ppm', '-ppm')} and pinned as given; the "
-                                   "per-run values are recorded, not used")
+            out["sources"][key] = (f"given, not measured: {ppm_text(out[key])} ppm, passed to the "
+                                   f"probe as --{key.replace('_ppm', '-ppm')} (a value from "
+                                   "DIA-NN's resolution table: a documented tier, or interpolated "
+                                   "between tiers) and pinned as given; the per-run values are "
+                                   "recorded, not used")
             continue
         if None in per_run:
             return None
@@ -618,7 +620,7 @@ def pin_mass_acc(probes, documented=None):
         pin_as=f"--mass-acc {ppm_text(out['ms2_ppm'])} --mass-acc-ms1 {ppm_text(out['ms1_ppm'])}",
         agree=all(len(set(out[k.replace("_ppm", "_per_run")])) == 1 for k in measured),
         rule=("median (low) of each measured level over the probed runs, as DIA-NN printed it; "
-              "a documented level as documented"))
+              "a level given as --ms1-ppm/--ms2-ppm as given"))
     return out
 
 

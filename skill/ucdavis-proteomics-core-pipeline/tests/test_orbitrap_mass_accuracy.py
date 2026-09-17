@@ -44,8 +44,8 @@ import estimate_params as ep  # noqa: E402
 import run_search  # noqa: E402
 
 
-def estimate(d, instrument, ms1_res=None, ms2_res=None, overrides=None, name="params.cfg"):
-    """Run estimate_params.py exactly as SKILL.md step 6b does. Returns (cfg path, sidecar)."""
+def estimate_proc(d, instrument, ms1_res=None, ms2_res=None, overrides=None, name="params.cfg"):
+    """Run estimate_params.py exactly as SKILL.md step 6b does. Returns (process, cfg path)."""
     cfg = os.path.join(d, name)
     argv = [sys.executable, os.path.join(SCRIPTS, "estimate_params.py"), "--engine", "diann",
             "--acquisition", "DIA", "--instrument", instrument,
@@ -56,7 +56,12 @@ def estimate(d, instrument, ms1_res=None, ms2_res=None, overrides=None, name="pa
         argv += ["--ms2-resolution", str(ms2_res)]
     if overrides:
         argv += ["--overrides", json.dumps(overrides)]
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60), cfg
+
+
+def estimate(d, instrument, ms1_res=None, ms2_res=None, overrides=None, name="params.cfg"):
+    """estimate_proc(), which must succeed. Returns (cfg path, sidecar)."""
+    p, cfg = estimate_proc(d, instrument, ms1_res, ms2_res, overrides, name)
     if p.returncode != 0:
         raise AssertionError(p.stderr)
     with open(cfg + ".rationale.json") as fh:
@@ -202,6 +207,74 @@ class EstimateParamsTests(unittest.TestCase):
             lines = open(cfg).read().splitlines()
             self.assertIn("--mass-acc 20", lines)
             self.assertEqual(side["mass_accuracy_plan"], "pinned")
+
+    def test_a_one_flag_override_writes_the_other_levels_table_value_too(self):
+        """references/parameters.md's own override example, `{"--mass-acc": 8}`, at the pilot's
+        120k/15k wrote ONLY `--mass-acc 8`, while the sidecar still planned measure_with_diann
+        with MS1 7 documented. DIA-NN 2.7.0 fixes the other level at 20 ppm when one flag is given
+        (HIVE srun 23528991), the chain declined the cfg as mass_acc_unset, and a single-shot
+        search ran MS1 at 20 ppm with no probe. origin/main wrote `--mass-acc-ms1 7 --mass-acc 8`
+        for the same input. The overridden level is given and the other has a table value, so
+        both are known: both are written, and nothing is left to measure."""
+        cases = (((120000, 15000), {"--mass-acc": 8}, {"--mass-acc": "8", "--mass-acc-ms1": "7"}),
+                 ((15000, 120000), {"--mass-acc-ms1": 9},
+                  {"--mass-acc": "7", "--mass-acc-ms1": "9"}),
+                 ((90000, 15000), {"--mass-acc": 8},
+                  {"--mass-acc": "8", "--mass-acc-ms1": "7.5"}),
+                 ((120000, 60000), {"--mass-acc": 8}, {"--mass-acc": "8", "--mass-acc-ms1": "7"}))
+        for (r1, r2), ov, want in cases:
+            with self.subTest(res=(r1, r2), overrides=ov), tempfile.TemporaryDirectory() as d:
+                cfg, side = estimate(d, "Orbitrap Exploris 480", r1, r2, overrides=ov)
+                lines = [ln.split(None, 1) for ln in open(cfg).read().splitlines()
+                         if ln.split()[:1] in (["--mass-acc"], ["--mass-acc-ms1"])]
+                self.assertEqual(len(lines), 2, lines)
+                self.assertEqual(dict(lines), want)
+                self.assertEqual(side["mass_accuracy_plan"], "pinned")
+                self.assertEqual(side["mass_accuracy_documented"], {})
+                (other,) = [f for f in want if f not in ov]
+                src = side["rationale"][other]["source"]
+                self.assertIn(ep.SRC_TABLE, src)
+                self.assertNotIn(ep.LONE_FLAG_NOTE, src)
+                for f in ov:
+                    self.assertEqual(side["rationale"][f]["source"],
+                                     "user-override (validated SOP)")
+                self.assertIsNone(dp.mass_acc_measure_plan(cfg))
+                safe = dp.parallel_safe(cfg)
+                self.assertTrue(safe["ok"], safe["reason"])
+                self.assertEqual(safe["measure"], ["window"])
+
+    def test_a_one_flag_override_with_no_value_for_the_other_level_is_refused(self):
+        """With no value for the other level -- outside the table, resolution unknown, or an
+        unidentified instrument -- a one-flag override can only be written as a lone flag, and
+        DIA-NN 2.7.0 then fixes the other level at 20 ppm. origin/main already did that silently
+        for an Orbitrap of unknown resolution and for an unidentified instrument. Nothing is
+        written; the message names the missing flag and what to give instead."""
+        cases = (("MS1 overridden, MS2 15k", ("Orbitrap Exploris 480", 120000, 15000),
+                  {"--mass-acc-ms1": 5}, "--mass-acc ", "measure"),
+                 ("resolution unknown", ("Orbitrap Fusion Lumos", None, None),
+                  {"--mass-acc": 8}, "--mass-acc-ms1", "--ms1-resolution"),
+                 ("unidentified instrument", ("Mystery-9000", None, None),
+                  {"--mass-acc": 8}, "--mass-acc-ms1", None))
+        for label, (instr, r1, r2), ov, missing, remedy in cases:
+            with self.subTest(label), tempfile.TemporaryDirectory() as d:
+                p, cfg = estimate_proc(d, instr, r1, r2, overrides=ov)
+                self.assertNotEqual(p.returncode, 0, f"{label}: {open(cfg).read()}"
+                                    if os.path.exists(cfg) else label)
+                self.assertNotIn("Traceback", p.stderr)
+                self.assertIn(missing, p.stderr)
+                self.assertIn("20 ppm", p.stderr)
+                if remedy:
+                    self.assertIn(remedy, p.stderr)
+                self.assertFalse(os.path.exists(cfg), "a lone-flag cfg was written")
+                self.assertFalse(os.path.exists(cfg + ".rationale.json"))
+        with tempfile.TemporaryDirectory() as d:              # both given: nothing is missing
+            cfg, side = estimate(d, "Orbitrap Fusion Lumos",
+                                 overrides={"--mass-acc": 8, "--mass-acc-ms1": 5})
+            lines = open(cfg).read().splitlines()
+            self.assertIn("--mass-acc 8", lines)
+            self.assertIn("--mass-acc-ms1 5", lines)
+            self.assertEqual(side["mass_accuracy_plan"], "pinned")
+            self.assertEqual(dp.parallel_safe(cfg)["measure"], ["window"])
 
 
 class OtherRoutesTests(unittest.TestCase):
@@ -369,6 +442,30 @@ class RoutingTests(unittest.TestCase):
             self.assertTrue(s["ok"], s["reason"])
             self.assertTrue(s["probe"])
             self.assertEqual(s["measure"], ["mass-acc"])
+
+    def test_an_interpolated_level_is_not_called_documented(self):
+        """MS1 at 90k is between tiers, so its 7.5 ppm is interpolated from DIA-NN's table -- not a
+        README value. The gate's reason and the chain's provenance said '--mass-acc-ms1 7.5 as
+        documented'; only the level's own rationale entry said 'interpolated'."""
+        with tempfile.TemporaryDirectory() as d:
+            cfg, side = estimate(d, "Orbitrap Exploris 480", 90000, 15000)
+            self.assertEqual(side["mass_accuracy_documented"], {"--mass-acc-ms1": 7.5})
+            self.assertIn("interpolated for 90,000",
+                          side["rationale"]["mass_accuracy_documented"]["source"])
+            cfg120, side120 = estimate(d, "Orbitrap Exploris 480", 120000, 15000, name="t.cfg")
+            self.assertNotIn("interpolated", side120["rationale"]["mass_accuracy_documented"]
+                             ["source"], "an exact 120k tier was described as interpolated")
+            safe = dp.parallel_safe(cfg)
+            self.assertIn("7.5", safe["reason"])
+            self.assertNotIn("as documented", safe["reason"])
+            self.assertIn("interpolated", safe["reason"])
+            raws, fasta = _inputs(d)
+            p = _generate(d, cfg, raws, fasta)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            src = json.loads(p.stdout)["mass_acc"]["source"]
+            self.assertIn("7.5", src)
+            self.assertNotIn("as documented", src)
+            self.assertIn("interpolated", src)
 
     def test_pinned_mass_accuracy_is_never_re_measured(self):
         with tempfile.TemporaryDirectory() as d:
