@@ -719,6 +719,7 @@ def main():
     # still in the cfg has to come out or both land on the same command line.
     flags = read_cfg_flags(a.cfg, drop=("--window",) if win_probe else ())
     D = out  # all DIA-NN intermediate/output lives here (real paths; native binary reads them directly)
+    from check_report_runs import stats_path   # one definition of <report>.stats.tsv
     report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
     xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
@@ -765,6 +766,7 @@ def main():
         s1 = write("step1_libpred.sbatch", "\n".join([
             header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs), "",
             f'echo "Step 1/5 library prediction"; date',
+            clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
             f'{DN} --fasta {fasta} --fasta-search --predictor --gen-spec-lib \\',
             f'  --out-lib {D}/step1.speclib --out {D}/step1_lib.parquet \\',
             f'  --threads {a.libpred_cpus} {flags}',
@@ -871,10 +873,11 @@ def main():
         header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         tmpguard("quant_step2"),
+        'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
+        clear_stale(f'{D}/quant_step2/$QOUT'),
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
         f'  --threads {a.threads_per_file} {wflag}{flags}',
-        'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]))
 
     # Step 3 — empirical library assembly (single job, --use-quant)
@@ -882,6 +885,7 @@ def main():
         header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
         f'echo "Step 3/5 empirical library assembly"; date', tmpguard("quant_step2"),
         f'cp -r {D}/quant_step2 {D}/quant_step2_orig 2>/dev/null || true   # backup for resume',
+        clear_stale(empirical),
         f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
         f'  --temp {D}/quant_step2 --out {D}/step3_assembly.parquet \\',
@@ -906,6 +910,8 @@ def main():
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
+        # cleared BEFORE the skip: a skipped task must leave no .quant for step 5 to count
+        clear_stale(f'{D}/quant_step4/$QUANT'),
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
         # Splat an empty list, not an empty string: a conditional string leaves a stray
         # blank line in the generated sbatch when XICs are off.
@@ -927,18 +933,22 @@ def main():
     s5 = write("step5_report.sbatch", "\n".join([
         header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
         f'echo "Step 5/5 cross-run report"; date', tmpguard("quant_step4"),
+        # the report AND its stats file: check_report_runs.stats_path() names the latter
+        clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}')),
         f'{DN} {all_f} --fasta {fasta} --lib {empirical} --use-quant --quant-ori-names \\',
         f'  --temp {D}/quant_step4 --matrices --out {D}/{report} \\',
         f'  --threads {a.assembly_cpus} {norm} {wflag}{flags}',
         must_exist(f'{D}/{report}', "the cross-run report"),
         # A step-4 task that failed silently leaves no .quant, and step 5 happily
         # reports on whatever survived. Count them: fewer quants than inputs means a
-        # sample was dropped, which must never pass as success.
-        f'NQ=$(ls -1 {D}/quant_step4/*.quant 2>/dev/null | wc -l | tr -d " ")',
+        # sample was dropped, which must never pass as success. Count THIS chain's inputs
+        # (file_list.txt), not every .quant in the folder: a previous search's .quant for
+        # another run would otherwise make up the number for a missing one.
+        f'NQ=0; while IFS= read -r f; do [ -n "$f" ] || continue; b="${{f##*/}}"; '
+        f'if [ -s "{D}/quant_step4/${{b%.*}}.quant" ]; then NQ=$((NQ + 1)); '
+        f'else echo "MISSING: $b has no final-pass .quant" >&2; fi; done < "{D}/file_list.txt"',
         f'if [ "$NQ" -ne {n} ]; then '
         f'echo "FAILED: report built from $NQ of {n} runs -- a step-4 task produced no .quant." >&2; '
-        f'echo "Find it: for f in \\$(cat {D}/file_list.txt); do b=\\$(basename \\"\\$f\\"); '
-        f'[ -f {D}/quant_step4/\\${{b%.*}}.quant ] || echo MISSING \\$b; done" >&2; '
         f'exit 1; fi',
         f'echo "OK: report built from all {n} runs"']))
 

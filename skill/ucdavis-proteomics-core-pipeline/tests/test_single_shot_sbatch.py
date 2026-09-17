@@ -684,6 +684,89 @@ class ChainResourceTests(unittest.TestCase):
                           _headers(os.path.join(w.out, "step3_assembly.sbatch")))
 
 
+class ChainStaleArtefactTests(unittest.TestCase):
+    """The 5-step chain's guards had the same blind spot as the single-shot jobs: must_exist()
+    and step 5's `ls quant_step4/*.quant | wc -l` count files, not files THIS search wrote.
+    Re-run a chain into the same --out (or resubmit a step, as references/watcher.md says to)
+    and a step whose DIA-NN exits 0 having written nothing passes on the previous run's
+    library, .quant or report."""
+
+    def _chain(self, d):
+        w = _Workspace(d, cfg_lines=LIBFREE_CFG + ["--window 7"], n_runs=3, ext=".d")
+        a = argparse.Namespace(partition="high", account="genome-center-grp", qos=None,
+                               max_simultaneous=None)
+        os.makedirs(w.out, exist_ok=True)
+        run_search.run_diann_parallel(w.diann, w.cfg, w.runs, w.fasta, w.out, 16, a)
+        return w
+
+    def _old(self, w, *rel):
+        for r in rel:
+            p = os.path.join(w.out, r)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            _write(p, "from the previous search")
+
+    def _step(self, w, name, **env):
+        return w.run_job(os.path.join(w.out, name), **env)
+
+    def test_step1_does_not_pass_on_an_old_predicted_library(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, "step1.predicted.speclib")
+            p = self._step(w, "step1_libpred.sbatch")
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_step2_does_not_pass_on_an_old_quant(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, "quant_step2/sample_0.quant")
+            p = self._step(w, "step2_firstpass.sbatch", SLURM_ARRAY_TASK_ID=0)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_step3_does_not_pass_on_an_old_empirical_library(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, "empirical.parquet")
+            p = self._step(w, "step3_assembly.sbatch")
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_step4_does_not_pass_on_an_old_quant(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, "empirical.parquet", "quant_step2/sample_0.quant",
+                      "quant_step4/sample_0.quant")
+            p = self._step(w, "step4_finalpass.sbatch", SLURM_ARRAY_TASK_ID=0)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_step5_does_not_pass_on_an_old_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, "report.parquet", "report.stats.tsv",
+                      *[f"quant_step4/sample_{i}.quant" for i in range(3)])
+            p = self._step(w, "step5_report.sbatch")               # DIA-NN writes nothing
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_step5_counts_this_searchs_runs_not_every_quant_in_the_folder(self):
+        """sample_2's step-4 task left no .quant, and a previous search's other_run.quant
+        makes the folder count 3 of 3 anyway."""
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, "quant_step4/sample_0.quant", "quant_step4/sample_1.quant",
+                      "quant_step4/other_run.quant")
+            p = self._step(w, "step5_report.sbatch",
+                           FAKE_REPORT_RUNS="sample_0,sample_1,sample_2")
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("sample_2", p.stdout + p.stderr)
+
+    def test_step5_passes_when_every_run_has_its_quant(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = self._chain(d)
+            self._old(w, *[f"quant_step4/sample_{i}.quant" for i in range(3)])
+            p = self._step(w, "step5_report.sbatch",
+                           FAKE_REPORT_RUNS="sample_0,sample_1,sample_2")
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("all 3 runs", p.stdout)
+
+
 class ExecutableTests(unittest.TestCase):
     def test_the_report_checker_is_executable(self):
         """CI requires every shebang script to ship 100755."""
