@@ -37,7 +37,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from estimate_params import classify_instrument  # noqa: E402  (one ppm table)
+from estimate_params import classify_instrument, MEASURE_CLASSES  # noqa: E402  (one ppm table)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -66,6 +66,21 @@ ROUTES = {
 }
 
 DE_METHOD = {"diann": "dpc", "fragpipe": "dpc", "radiant": "dpc", "sage": "maxlfq"}
+
+# What each engine does with an Orbitrap mass-accuracy level that has no documented DIA-NN value
+# (ms1_ppm/ms2_ppm None: resolution unknown, or outside the README's 30k-240k table). Appended to
+# ppm_source, which SKILL.md tells the agent to quote when it asks the user to confirm -- so it
+# has to be true for THIS engine. It once said "measured in step 1b of the 5-step chain" for
+# Radiant and FragPipe as well, which have no step 1b and run at their vendor tolerances.
+UNDOCUMENTED_LEVEL = {
+    "diann": "DIA-NN: the missing level is measured with DIA-NN on representative runs before "
+             "the search (estimate_params.py plan measure_with_diann)",
+    "radiant": "Radiant: nothing to derive the missing level from, so its vendor 20 ppm "
+               "extraction width is kept for it",
+    "fragpipe": "FragPipe: its vendor preset tolerances are used (the DIA-NN table is not "
+                "applied to MSFragger)",
+    "sage": "Sage: its own derived tolerances are used (estimate_params.py --engine sage)",
+}
 
 # Engines configured by a whole config file rather than by flags. These are
 # generated per run by make_presets.py.
@@ -187,7 +202,9 @@ def main():
             "params_file": params_file,
             "ms1_ppm": args.ms1_ppm if args.ms1_ppm is not None else ms1,
             "ms2_ppm": args.ms2_ppm if args.ms2_ppm is not None else ms2,
-            "ppm_source": ("site SOP override" if args.ms1_ppm is not None else src),
+            "ppm_source": ("site SOP override" if args.ms1_ppm is not None else
+                           f"{src}; {UNDOCUMENTED_LEVEL[engine]}"
+                           if cls in MEASURE_CLASSES and (ms1 is None or ms2 is None) else src),
             "preset_provenance": preset_prov,
         },
         "validated": {

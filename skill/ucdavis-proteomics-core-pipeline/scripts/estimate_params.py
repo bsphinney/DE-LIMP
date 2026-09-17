@@ -15,6 +15,9 @@ table (verified against the DIA-NN README, June 2026):
     Orbitrap by MS2 resolution:  240k->4, 120k->7, 60k->10, 30k->15 ppm
     Bruker timsTOF (dia-PASEF):  MS1 15 ppm, MS2 15 ppm
     SCIEX TripleTOF / ZenoTOF:   MS1 20 ppm, MS2 20 ppm
+    Orbitrap level with no documented tier (resolution unknown, or outside 30k-240k):
+                                 MEASURED with DIA-NN on representative runs
+                                 before the search; a level that has a tier keeps it
     Unidentified instrument:     automatic calibration (DIA-NN's own default)
 Sage's docs give NO instrument-specific tolerances, so Sage ppm windows are
 DERIVED from the same per-instrument logic and tagged as such.
@@ -56,45 +59,108 @@ def instrument_ppm_summary():
     return (f"MS1/MS2 ppm: timsTOF {t['timstof'][0]}/{t['timstof'][1]}, "
             f"Astral {t['orbitrap_astral'][0]}/{t['orbitrap_astral'][1]}, "
             f"SCIEX {t['sciex_tof'][0]}/{t['sciex_tof'][1]}, "
-            f"Orbitrap by resolution ({orb})")
+            f"Orbitrap by resolution ({orb}; a level outside 30k-240k, or of unknown resolution, "
+            f"is not extrapolated: estimate_params.py plans a DIA-NN measurement of it)")
+
+
+# How the mass accuracy of a DIA-NN cfg is settled. Written to the rationale sidecar
+# (<cfg>.rationale.json) as `mass_accuracy_plan`, which diann_parallel.mass_acc_measure_plan()
+# reads for both the 5-step chain and the single-shot search:
+#   pinned              -- --mass-acc/--mass-acc-ms1 are in the cfg (a documented value or an SOP)
+#   measure_with_diann  -- an Orbitrap with at least one level outside DIA-NN's table; the cfg
+#                          omits BOTH flags, and before the search DIA-NN is run on representative
+#                          runs (chain step 1b, or run_search.py's single-shot probe). The level
+#                          that has a documented tier is recorded under
+#                          `mass_accuracy_documented` and pinned as documented.
+#   auto                -- instrument not identified; flags omitted, DIA-NN optimises on its own
+PLAN_PINNED, MEASURE_WITH_DIANN, PLAN_AUTO = "pinned", "measure_with_diann", "auto"
+
+# Orbitrap classes with a level that has no documented value, measured instead.
+MEASURE_CLASSES = ("orbitrap_generic", "orbitrap_untabled")
+
+# Where a measured level comes from -- for the DIA-NN cfg only (build_diann). NOT for
+# classify_instrument()'s source: resolve_defaults.py and make_presets.py write that into the
+# manifest for Radiant and FragPipe too, which measure nothing.
+#
+# The README's item 6 of "Changing default settings", in full: "One can also optimise all
+# parameters to achieve the best possible performance from the data. For this, run DIA-NN on
+# several representative runs (best to use any suitable empirical library, as this is the
+# quickest) with Unrelated runs option checked and review the 'Averaged recommended settings for
+# this experiment' values reported at the end of the log." What is measured here is NOT that
+# procedure: it uses the predicted library, one DIA-NN per run rather than one "Unrelated runs"
+# search, and pins the median of what each run printed rather than DIA-NN's averaged line. On the
+# HIVE validation cohort the two disagreed (MS2 14 here, 16 averaged) -- references/
+# diann_parallel.md has the numbers.
+SRC_MEASURE = ("measured with DIA-NN before the search: one DIA-NN per representative run (the "
+               "median run by size, plus the quartile runs) in automatic mode, stopped once it "
+               "logs 'Optimised mass accuracy' (MS2) and 'Recommended MS1 mass accuracy "
+               "setting' (MS1); the median of each measured level (a level with a documented "
+               "value keeps it) is pinned for every pass -- step 1b of the 5-step chain, or "
+               "run_search.py's probe before a single-shot search. Adapted "
+               "from DIA-NN README 'Changing default settings' item 6, which averages over an "
+               "'Unrelated runs' search instead")
+
+# A lone --mass-acc or --mass-acc-ms1 FIXES BOTH levels in DIA-NN 2.7.0: "WARNING: note the mass
+# accuracy settings used by DIA-NN, automatic optimisation will not be performed as at least one
+# of MS1/MS2 mass accuracies is user-provided", and the other level falls to 20 ppm -- `--window 7
+# --mass-acc-ms1 7` logged "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)" (HIVE srun
+# job 23528991, 2026-09-16). So a documented level is never written into the cfg on its own.
+LONE_FLAG_NOTE = ("not written into the cfg on its own: DIA-NN 2.7.0 fixes BOTH levels when either "
+                  "flag is given, the other at 20 ppm; it is pinned together with the measured "
+                  "level")
 
 
 def ppm_for_resolution(res):
     """Map an Orbitrap resolving power to mass accuracy (ppm), per DIA-NN's table.
 
-    Exact tiers use the documented value. Anything between/outside is interpolated on
-    a log-log fit of the table and TAGGED as extrapolated -- DIA-NN documents 30k-240k
-    only, and real acquisitions sit outside it (an Exploris 480 DIA method commonly
-    runs MS2 at 15k). Silently emitting a number as if it were documented is exactly
-    the fabricated-default failure mode; the caller renders the tag.
+    Returns (ppm, source), or (None, why) when the table has nothing to say.
+
+    Exact tiers use the documented value. Between 30k and 240k the value is interpolated on a
+    log-log fit of the table and TAGGED as interpolated. Outside that range there is NO value:
+    the old extrapolation turned an Exploris 480's 15,000 MS2 into 23.3 ppm and pinned it for a
+    whole cohort, with nothing but a curve fit behind it -- and 15k is not a corner case, it is
+    what both Orbitraps in the FRAN re-search pilot (2026-09-16) acquire MS2 at. A number with no
+    evidence is a fabricated default; the caller measures it instead (MEASURE_WITH_DIANN).
     """
     if not res or res <= 0:
         return None, None
     res = float(res)
     if int(res) in DIANN_ORBITRAP_PPM:
         return DIANN_ORBITRAP_PPM[int(res)], SRC_TABLE
-    import math
     pts = sorted(DIANN_ORBITRAP_PPM.items())
+    if not pts[0][0] <= res <= pts[-1][0]:
+        return None, (f"{int(res):,} is outside DIA-NN's documented 30k-240k Orbitrap table, "
+                      "not extrapolated")
     # log(ppm) is close to linear in log(resolution) across the documented tiers
     (r1, p1), (r2, p2) = pts[0], pts[-1]
     slope = (math.log(p2) - math.log(p1)) / (math.log(r2) - math.log(r1))
-    ppm = math.exp(math.log(p1) + slope * (math.log(res) - math.log(r1)))
-    ppm = round(ppm, 1)
-    inside = pts[0][0] <= res <= pts[-1][0]
-    tag = (f"{SRC_TABLE}, interpolated for {int(res):,} resolution" if inside else
-           f"{SRC_TABLE}, EXTRAPOLATED — {int(res):,} is outside the documented "
-           f"30k-240k range; verify against a real run")
-    return ppm, tag
+    ppm = round(math.exp(math.log(p1) + slope * (math.log(res) - math.log(r1))), 1)
+    return ppm, f"{SRC_TABLE}, interpolated for {int(res):,} resolution"
 
 
 def classify_instrument(name, ms1_res=None, ms2_res=None):
-    """Return (class, ms1_ppm, ms2_ppm, label, source). None ppm => auto-calibrate.
+    """Return (class, ms1_ppm, ms2_ppm, label, source). None ppm => not pinned.
 
     DIA-NN asks for these to be FIXED rather than auto-optimised, and not only for
     speed: "This optimisation is inherently noisy: even replicate injections may not
     produce identical results, and therefore the analysis results will depend on which
     run is first in the list." Auto therefore makes a result depend on FILE ORDER,
     which also blocks the 5-step parallel chain (steps 3/5 reuse .quant files).
+
+    `source` names each level separately when both resolutions are read. It used to be ONE
+    level's source stamped on both flags -- MS2's when MS2 was extrapolated, else MS1's -- so a
+    documented 120k MS1 read "EXTRAPOLATED", and an interpolated MS2 read as documented.
+
+    An Orbitrap with a level outside the table (class orbitrap_untabled) returns the documented
+    value for the level that has one and None for the other; orbitrap_generic (resolution
+    unknown) returns None for both. A None level is measured with DIA-NN (see mass_acc_plan).
+    The documented level is NOT measured away: an earlier cut of this branch measured both, and
+    the pinned MS1 of 4.2 ppm at 120k made every DIA-NN pass log "WARNING: the MS1 mass accuracy
+    setting (4.2 ppm) deviates significantly from the value recommended (7 ppm) for the Orbitrap
+    resolution of this run (120000)" (HIVE, compare/probe_median).
+
+    `source` says only where each value comes from, never what a search route does about a
+    missing one: resolve_defaults.py writes it as the manifest's ppm_source for every engine.
     """
     n = (name or "").strip().lower()
     # Measured resolution beats any model-name guess.
@@ -102,9 +168,18 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
         p1, s1 = ppm_for_resolution(ms1_res)
         p2, s2 = ppm_for_resolution(ms2_res)
         if p1 and p2:
+            src = s1 if s1 == s2 else f"MS1: {s1}; MS2: {s2}"
             return ("orbitrap_measured", p1, p2,
                     f"Orbitrap, MS1 {int(ms1_res):,} / MS2 {int(ms2_res):,} resolution "
-                    f"read from the data", s2 if "EXTRAPOL" in (s2 or "") else s1)
+                    f"read from the data", src)
+        if ms1_res and ms2_res:
+            src = "; ".join(
+                f"{lvl} {int(res):,}: {s}" if p is not None else
+                f"{lvl} {int(res):,}: no documented DIA-NN value ({s})"
+                for lvl, res, p, s in (("MS1", ms1_res, p1, s1), ("MS2", ms2_res, p2, s2)))
+            return ("orbitrap_untabled", p1, p2,
+                    f"Orbitrap, MS1 {int(ms1_res):,} / MS2 {int(ms2_res):,} resolution "
+                    f"read from the data", src)
     if not n:
         return ("unknown", None, None, "instrument not detected", "auto-calibration fallback")
     if "astral" in n:
@@ -113,16 +188,23 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
         return ("timstof", *DIANN_INSTRUMENT_PPM["timstof"], "Bruker timsTOF (dia-PASEF / ddaPASEF)", SRC_DIANN)
     if "tripletof" in n or "zenotof" in n or "sciex" in n:
         return ("sciex_tof", *DIANN_INSTRUMENT_PPM["sciex_tof"], "SCIEX TripleTOF / ZenoTOF", SRC_DIANN)
-    # Orbitrap family with no resolution to work from -> DIA-NN auto-calibration.
-    # Prefer passing --ms1-resolution/--ms2-resolution (read_mzml_resolution() gets
-    # them straight out of the mzML) so the run is reproducible and parallel-capable.
+    # Orbitrap family with no resolution to work from -> measured with DIA-NN (DIA-NN route).
+    # Passing --ms1-resolution/--ms2-resolution (read_mzml_resolution() gets them straight out
+    # of the mzML) lets a documented tier pin it instead.
     if any(k in n for k in ("orbitrap", "exploris", "exactive", "fusion", "lumos",
                             "eclipse", "velos", "hf-x", "hf", "qe", "astral")):
         return ("orbitrap_generic", None, None,
-                "Orbitrap (resolution unknown — using DIA-NN automatic calibration; "
-                "pass --ms1-resolution/--ms2-resolution to pin it)",
-                "DIA-NN automatic calibration (mass-accuracy flags omitted)")
+                "Orbitrap (resolution unknown -- pass --ms1-resolution/--ms2-resolution to "
+                "use DIA-NN's documented table)",
+                "no documented DIA-NN value (resolution unknown)")
     return ("unknown", None, None, f"unrecognized instrument '{name}'", "auto-calibration fallback")
+
+
+def mass_acc_plan(instr_class, ms1, ms2):
+    """pinned | measure_with_diann | auto -- see PLAN_PINNED above. The one place that decides."""
+    if ms1 and ms2:
+        return PLAN_PINNED
+    return MEASURE_WITH_DIANN if instr_class in MEASURE_CLASSES else PLAN_AUTO
 
 
 def read_mzml_resolution(path, max_bytes=4_000_000):
@@ -154,7 +236,7 @@ def tagged(value, source):
 
 # --- DIA-NN cfg --------------------------------------------------------------
 def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
-                cont_tag=None, mz_range=None):
+                cont_tag=None, mz_range=None, level_src=None):
     UNIV = "universal trypsin/LFQ default"
     r = {}  # rationale
     lines = []
@@ -250,15 +332,38 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # calibration is what you get by OMITTING the flags entirely. So when we have no
     # instrument-derived value, record the rationale but emit nothing (render=False).
     # diann_parallel.parallel_safe() declines the chain for both an absent flag (auto) and
-    # a 0 (literal 0 ppm) -- for different reasons, which its message now names.
-    if ms2 is None:
+    # a 0 (literal 0 ppm) -- for different reasons, which its message now names -- EXCEPT an
+    # absent pair this function planned to measure (MEASURE_WITH_DIANN, below).
+    plan = mass_acc_plan(instr_class, ms1, ms2)
+    documented = {}
+    if plan == MEASURE_WITH_DIANN:
+        # No curve fit for the level outside the table (see ppm_for_resolution): it is measured
+        # with DIA-NN before the search -- chain step 1b, or run_search.py's single-shot probe --
+        # and written to params.resolved.cfg. diann_parallel.mass_acc_measure_plan() accepts the
+        # omitted flags ONLY because of this plan. A level WITH a tier keeps it, recorded under
+        # `mass_accuracy_documented`, but neither flag is rendered (LONE_FLAG_NOTE). Without a
+        # library before the search (--one-step) nothing can be measured; run_search.py says so.
+        s1, s2 = level_src or (src, src)
+        for flag, level, value, lsrc in (("--mass-acc-ms1", "MS1", ms1, s1),
+                                         ("--mass-acc", "MS2", ms2, s2)):
+            if value is not None:
+                documented[flag] = value
+                add(flag, value, f"{label}: {level} {value} ppm [{lsrc}] -- {LONE_FLAG_NOTE}",
+                    render=False)
+            else:
+                add(flag, "measured with DIA-NN before the search (flag omitted)",
+                    f"{label}: {level}: {lsrc}; {SRC_MEASURE}", render=False)
+    elif plan == PLAN_AUTO:
         auto_src = (f"{src}; flags omitted so DIA-NN auto-calibrates per run "
                     "(--mass-acc 0 would pin the tolerance at 0 ppm -> 0 IDs)")
         add("--mass-acc", "auto (flag omitted)", auto_src, render=False)
         add("--mass-acc-ms1", "auto (flag omitted)", auto_src, render=False)
     else:
-        add("--mass-acc", ms2, f"{label}: MS2 {ms2} ppm [{src}]")
-        add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{src}]")
+        # level_src = (MS1 source, MS2 source) when both came from resolutions, so each flag
+        # names ITS level's evidence (a documented tier vs an interpolation), not a merged one.
+        s1, s2 = level_src or (src, src)
+        add("--mass-acc", ms2, f"{label}: MS2 {ms2} ppm [{s2}]")
+        add("--mass-acc-ms1", ms1, f"{label}: MS1 {ms1} ppm [{s1}]")
     # --window 0 is likewise rejected ("scan window radius should be a positive
     # integer"); omitting it lets DIA-NN set the radius from the observed peak width.
     #
@@ -289,6 +394,17 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
         r[k] = tagged(v, "user-override (validated SOP)")
         lines = [ln for ln in lines if not (ln == k or ln.startswith(k + " "))]
         lines.append(k if v is True else f"{k} {v}")
+    if all(k in (overrides or {}) for k in ("--mass-acc", "--mass-acc-ms1")):
+        plan = PLAN_PINNED            # an SOP value wins; it must not be re-measured
+        documented = {}
+    r["mass_accuracy_plan"] = tagged(plan, {
+        PLAN_PINNED: "--mass-acc/--mass-acc-ms1 are in the cfg",
+        MEASURE_WITH_DIANN: SRC_MEASURE,
+        PLAN_AUTO: "instrument not identified; DIA-NN optimises it itself (not parallel-safe)",
+    }[plan])
+    r["mass_accuracy_documented"] = tagged(
+        documented, "levels with a documented DIA-NN value, pinned as documented alongside the "
+                    "measured level (empty unless the plan is measure_with_diann)")
 
     return "\n".join(lines) + "\n", r
 
@@ -402,10 +518,13 @@ def main():
                   f"MS1 {int(r1):,} / MS2 {int(r2):,}", file=sys.stderr)
     cls, ms1, ms2, label, src = classify_instrument(a.instrument, r1, r2)
     var_mods = [v.strip().lower() for v in a.var_mods.split(",") if v.strip()]
+    level_src = ((ppm_for_resolution(r1)[1], ppm_for_resolution(r2)[1])
+                 if cls in ("orbitrap_measured", "orbitrap_untabled") else None)
 
     if a.engine == "diann":
         text, rationale = build_diann(a.acquisition, cls, ms1, ms2, label, src, var_mods,
-                                      overrides, cont_tag, a.precursor_mz_range)
+                                      overrides, cont_tag, a.precursor_mz_range,
+                                      level_src=level_src)
     else:
         text, rationale = build_sage(a.acquisition, cls, var_mods, overrides)
 
@@ -416,6 +535,11 @@ def main():
         "engine": a.engine, "acquisition": a.acquisition.upper(),
         "instrument": a.instrument, "instrument_class": cls, "class_label": label,
         "mass_accuracy_source": src,
+        # read by diann_parallel.mass_acc_measure_plan(): measure_with_diann is the ONLY way an
+        # unpinned mass accuracy is accepted by the 5-step chain, and what makes the single-shot
+        # search measure it; the documented levels are pinned as documented
+        "mass_accuracy_plan": (rationale.get("mass_accuracy_plan") or {}).get("value"),
+        "mass_accuracy_documented": (rationale.get("mass_accuracy_documented") or {}).get("value"),
         "params_file": os.path.abspath(a.out),
         "rationale": rationale,
         "note": "Every value is tagged with its provenance. Mass tolerances are the "

@@ -179,6 +179,20 @@ def build_fragpipe(args, cls, ms1, ms2, label, src, prov):
     return out
 
 
+def radiant_tolerances(cls, m1, m2, label):
+    """One line for the Radiant provenance: which extraction widths were narrowed, and why any
+    level kept the vendor 20 ppm."""
+    if m1 is not None and m2 is not None:
+        return "narrowed from the instrument"
+    why = ("instrument not recognised" if cls == "unknown" else
+           f"no documented DIA-NN tolerance for {label}")
+    if m1 is None and m2 is None:
+        return f"vendor 20/20 ppm kept -- {why}"
+    kept = "MS2" if m2 is None else "MS1"
+    return (f"{'MS1' if kept == 'MS2' else 'MS2'} narrowed from the instrument; {kept} vendor "
+            f"20 ppm kept -- no documented DIA-NN tolerance for this {kept} resolution ({label})")
+
+
 def build_radiant(args, cls, ms1, ms2, label, src, prov):
     if cls == "timstof":
         sys.exit("make_presets: Radiant/Fulcrum cannot read Bruker .d at all -- its search "
@@ -218,8 +232,11 @@ def build_radiant(args, cls, ms1, ms2, label, src, prov):
         "template_is_vendor_default": True,
         "keys_changed": why,
         "keys_patched_in_place": applied,
-        "tolerances": ("vendor 20/20 ppm kept -- instrument not recognised"
-                       if m1 is None else "narrowed from the instrument"),
+        # An Orbitrap level with no documented DIA-NN tier (e.g. a 15k MS2) keeps the vendor
+        # width. Its DIA-NN value is measured with DIA-NN before a DIA-NN search, which Radiant
+        # does not run, and the table is no longer extrapolated -- so say which level stayed at
+        # the vendor default and why, rather than "narrowed" or "not recognised".
+        "tolerances": radiant_tolerances(cls, m1, m2, label),
         "licence": "Apache-2.0 + Commons Clause + grant-back; restricts fee-for-service use",
     })
     return out

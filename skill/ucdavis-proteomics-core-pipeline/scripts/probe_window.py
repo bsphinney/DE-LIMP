@@ -10,8 +10,9 @@ The 5-step parallel chain reuses .quant files across steps. DIA-NN warns:
     the original analysis that produced the .quant files and is strongly not
     recommended
 
-Mass accuracy is pinned by estimate_params.py. The scan window was NOT: the flag was
-omitted, so DIA-NN optimised it PER FILE. On a real 18-file poplar run that produced a
+Mass accuracy is pinned by estimate_params.py -- except an Orbitrap level with no documented
+DIA-NN value, which is measured here too (MASS ACCURACY, below). The scan window was NOT: the
+flag was omitted, so DIA-NN optimised it PER FILE. On a real 18-file poplar run that produced a
 radius of 7 for seventeen files and 8 for one, which the chain then stitched together.
 
 The radius is a property of the ACQUISITION SCHEME (cycle time vs chromatographic peak
@@ -95,19 +96,58 @@ timeout or budget (SIGKILL), SIGTERM/SIGINT/SIGHUP to this script -- goes to the
 Measured on HIVE under apptainer 1.5.3: a 5 s timeout returned after 5.3 s with 0 container
 processes left (a probe that signalled only its child returned after 41.2 s and left 2).
 
+MASS ACCURACY (--measure window mass-acc [--ms1-ppm X | --ms2-ppm Y])
+--------------------------------------------------------------------
+For an Orbitrap with a level outside DIA-NN's README table -- resolution unknown, or outside
+30k-240k, e.g. the 15k MS2 both pilot Orbitraps acquire -- estimate_params.py omits
+--mass-acc/--mass-acc-ms1 and plans `measure_with_diann`. The measurement is adapted from the
+README's item 6 of "Changing default settings" ("run DIA-NN on several representative runs (best
+to use any suitable empirical library, as this is the quickest) with Unrelated runs option
+checked and review the 'Averaged recommended settings for this experiment' values reported at the
+end of the log") -- adapted, not followed: it uses the predicted library, one DIA-NN per run
+instead of one "Unrelated runs" search, and pins the median of what each run printed instead of
+DIA-NN's averaged line. The same DIA-NN run per probe logs the values, after the radius and
+before the search proper (DIA-NN 2.7.0 on HIVE, srun job 23522741, Exploris 480 120k/15k, full
+mouse predicted library, 32 threads):
+
+    DIA-NN will automatically optimise the mass accuracy for the first run of the experiment, ...
+    [1:34] Scan window radius set to 7
+    [1:35] Recommended MS1 mass accuracy setting: 4.1 ppm
+    [2:27] Optimised mass accuracy: 14 ppm
+    [2:45] Searching decoys                     (the whole run: 5:13)
+
+So the probe stops at the later of the lines it needs. A probe counts only when its run logged
+EVERYTHING asked; one that did not is replaced like a run with no radius, and what it did log is
+recorded but never pinned (the radius and the mass accuracy then describe the same runs). The
+MEDIAN (low) of each measured level is pinned, as DIA-NN printed it, never rounded (see
+pin_mass_acc). A level with a documented value is passed as --ms1-ppm / --ms2-ppm and pinned as
+given; its per-run values are still recorded. (Measuring the documented 120k MS1 instead pinned
+4.2 ppm, and every DIA-NN pass then warned that it "deviates significantly from the value
+recommended (7 ppm) for the Orbitrap resolution of this run (120000)".)
+
+The flags must not set EITHER mass-accuracy flag: DIA-NN 2.7.0 fixes both levels when one is
+given ("automatic optimisation will not be performed as at least one of MS1/MS2 mass accuracies
+is user-provided"; `--mass-acc-ms1 7` alone -> "Mass accuracy will be fixed to 2e-05 (MS2) and
+7e-06 (MS1)", HIVE srun job 23528991). And a pinned run still prints "Recommended MS1 mass
+accuracy setting". So values are accepted only from a run that ANNOUNCED automatic optimisation;
+a run whose settings block ends without that line -- whatever its fixed-accuracy notice says --
+is stopped at once, and no other run is tried: they all get the same flags.
+
 USAGE
 -----
     probe_window.py --diann <diann cmd> --raw <run> [<run> ...] | --raw-list <file> \\
                     --fasta <f.fasta> --lib <predicted.speclib> [--threads 16] \\
                     [--timeout 3600] [--budget S] [--max-probes 3] [--max-failures 3] \\
+                    [--measure window [mass-acc]] [--ms1-ppm X | --ms2-ppm Y] \\
                     [--workdir DIR] [--write-cfg CFG] [-- <DIA-NN flags of the real search>]
 
 The library must already exist -- run this after step 1 of the chain, not before. Everything
 after a bare `--` goes to DIA-NN verbatim (the chain passes the cfg flags this way, so the probe
 runs under exactly the flags steps 2-5 run). --diann is exec'd without a shell, so the .NET 8
 exports Thermo .raw needs must be in THIS script's environment (ensure_dotnet8.sh, next to
-this script, prints DOTNET_ROOT). Prints JSON: the pinned radius and every probe's evidence --
-also on failure, with window_radius null and a non-zero exit status.
+this script, prints DOTNET_ROOT). Prints JSON: the pinned radius and/or mass accuracy and every
+probe's evidence -- also on failure, with window_radius and mass_acc null and a non-zero exit
+status.
 """
 import argparse, json, os, re, shlex, signal, sqlite3, statistics, struct, subprocess, sys
 import tempfile, time
@@ -118,6 +158,40 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # DIA-NN prints e.g. "Scan window radius set to 7". Match loosely (case-insensitive,
 # tolerant of the leading '[m:ss]' timestamp) but require the integer.
 WINDOW_RE = re.compile(r"window\s+radius\s+set\s+to\s+(\d+)", re.I)
+
+# Mass accuracy, when --mass-acc/--mass-acc-ms1 are omitted (DIA-NN's auto mode). Verbatim from
+# DIA-NN 2.7.0 on HIVE (srun job 23522741; Exploris 480, 120k/15k, full mouse predicted library):
+#
+#     [0:36] Calibrating with mass accuracies 25 (MS1), 25 (MS2)
+#     [1:34] Scan window radius set to 7
+#     [1:35] Recommended MS1 mass accuracy setting: 4.1 ppm
+#     [2:27] Optimised mass accuracy: 14 ppm
+#     [2:45] Searching decoys
+#
+# "Optimised mass accuracy" is the MS2 tolerance DIA-NN settles on; the MS1 line is its
+# recommendation. Both are printed during calibration, after the radius and before the search
+# proper, so one DIA-NN per run yields all three and is stopped there.
+MS2_ACC_RE = re.compile(r"Optimised\s+mass\s+accuracy:\s*([0-9]*\.?[0-9]+)\s*ppm", re.I)
+MS1_ACC_RE = re.compile(r"Recommended\s+MS1\s+mass\s+accuracy\s+setting:\s*([0-9]*\.?[0-9]+)\s*ppm",
+                        re.I)
+# Printed at startup when the flags FIX mass accuracy; DIA-NN then optimises nothing, so a probe
+# asked to measure it would wait for lines that never come. Seen with --mass-acc 20
+# --mass-acc-ms1 7: "Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)"; with ONE of the
+# two flags, DIA-NN 2.7.0 first warns "note the mass accuracy settings used by DIA-NN, automatic
+# optimisation will not be performed as at least one of MS1/MS2 mass accuracies is user-provided".
+FIXED_ACC_RE = re.compile(r"Mass\s+accuracy\s+will\s+be\s+fixed\s+to|"
+                          r"automatic\s+optimisation\s+will\s+not\s+be\s+performed", re.I)
+# ...but a list of what means "fixed" is not enough: a pinned run STILL prints "Recommended MS1
+# mass accuracy setting" (HIVE, --mass-acc 20 --mass-acc-ms1 7: "[1:50] Recommended MS1 mass
+# accuracy setting: 4.3 ppm"), so a reworded notice would let a pinned run's recommendation pass
+# as a measurement. Mass accuracy is therefore read only from a run that announced automatic
+# optimisation among its settings -- "DIA-NN will automatically optimise the mass accuracy for
+# the first run of the experiment" -- and the settings block ends at "N files will be processed".
+AUTO_ACC_RE = re.compile(r"automatically\s+optimise\s+the\s+mass\s+accuracy", re.I)
+SETTINGS_END_RE = re.compile(r"^\s*\d+\s+files?\s+will\s+be\s+processed", re.I)
+
+# What a probe can measure, and the values each yields per run.
+MEASURES = {"window": ("radius",), "mass-acc": ("ms2_ppm", "ms1_ppm")}
 
 # Printed by DIA-NN when it has no usable .NET 8 runtime -- and it still exits 0. Measured on
 # HIVE with DIA-NN 2.7.0 (srun job 23509324). Not a property of the run: nothing else will read.
@@ -149,8 +223,9 @@ SELECTION_RULE = (
     "analysis.tdf_bin); when every run left is a .d with a frame index, rank by acquisition time "
     f"(max Frames.Time) and drop runs under {MIN_FRACTION:.0%} of its larger-half median too, "
     "otherwise rank by size; probe the median run, then the lower and upper quartile runs; "
-    "replace a run that logs no radius with the remaining run nearest the median; pin the "
-    "median of the measured radii")
+    "replace a run that logs no radius (or, when mass accuracy is measured too, not all of what "
+    "it measures) with the remaining run nearest the median; pin the median of what the runs "
+    "that logged everything measured")
 
 POLL_S = 0.2          # how often DIA-NN's log is read; nothing against minutes of calibration
 STOP_GRACE_S = 30     # SIGTERM -> SIGKILL, once a radius is in hand
@@ -445,12 +520,118 @@ def _say(text):
     sys.stderr.flush()
 
 
-def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(), workdir=None,
-              tag=""):
-    """Run DIA-NN on one run until it logs the radius.
+def read_log_line(line):
+    """{radius | ms2_ppm | ms1_ppm: value} for whatever one DIA-NN log line reports.
+    Non-positive values are ignored: DIA-NN rejects a 0 radius, and 0 ppm matches nothing."""
+    out = {}
+    m = WINDOW_RE.search(line)
+    if m and int(m.group(1)) > 0:
+        out["radius"] = int(m.group(1))
+    for key, rx in (("ms2_ppm", MS2_ACC_RE), ("ms1_ppm", MS1_ACC_RE)):
+        m = rx.search(line)
+        if m and float(m.group(1)) > 0:
+            out[key] = float(m.group(1))
+    return out
 
-    Returns {radius, lines, timed_out, log, environmental}; `environmental` means the failure
-    is not about this run (DIA-NN cannot read .raw here, or could not be started).
+
+class LogReader:
+    """What one DIA-NN run's log says about the values in `measure`, fed a line at a time.
+
+    `found` maps radius / ms2_ppm / ms1_ppm to the first value DIA-NN logged, and holds
+    `fixed_mass_acc: True` once mass accuracy was asked for and the run is plainly not optimising
+    it (FIXED_ACC_RE, or the settings ended without AUTO_ACC_RE). `skip` names levels given as
+    documented: still recorded when logged, never waited for."""
+
+    def __init__(self, measure, skip=()):
+        self.measure = list(measure)
+        self.wanted = [k for m in self.measure for k in MEASURES[m] if k not in skip]
+        self.found = {}
+        self.auto = False
+
+    def feed(self, line):
+        for k, v in read_log_line(line).items():
+            if k == "radius":
+                # Only when asked for. With --window N pinned, DIA-NN 2.7.0 echoes "Scan window
+                # radius set to N" among its startup settings: the cfg's value, not a measurement.
+                if "window" in self.measure:
+                    self.found.setdefault(k, v)
+            elif "mass-acc" in self.measure and self.auto:
+                self.found.setdefault(k, v)       # the first value DIA-NN settles on
+        if "mass-acc" in self.measure and not self.auto and not self.found.get("fixed_mass_acc"):
+            if AUTO_ACC_RE.search(line):
+                self.auto = True
+            elif FIXED_ACC_RE.search(line) or SETTINGS_END_RE.search(line):
+                self.found["fixed_mass_acc"] = True
+
+    def missing(self):
+        return [k for k in self.wanted if k not in self.found]
+
+    def done(self):
+        return not self.missing() or bool(self.found.get("fixed_mass_acc"))
+
+
+def ppm_text(v):
+    """14.0 -> '14', 4.1 -> '4.1': DIA-NN's own spelling, so the pinned flag reads as printed."""
+    return f"{v:g}"
+
+
+def describe_missing(keys):
+    """Human names for the values a run did not log."""
+    names = {"radius": "a scan-window radius",
+             "ms2_ppm": "an 'Optimised mass accuracy' (MS2)",
+             "ms1_ppm": "a 'Recommended MS1 mass accuracy setting'"}
+    return " or ".join(names[k] for k in keys) or "anything"
+
+
+def pin_mass_acc(probes, documented=None):
+    """The mass accuracy to pin from the per-run values: the MEDIAN of each measured level, taken
+    low, and the documented value of a level in `documented` ({"ms1_ppm": 7}).
+
+    The median rather than the mean for the same reason the radius uses it: one atypical run of
+    three cannot move it. median_low, and no rounding, so a measured number is always one DIA-NN
+    itself printed for one of the runs -- DIA-NN already rounds what it prints (MS2 "14 ppm", MS1
+    "4.1 ppm"), and rounding again, e.g. up to 0.5 ppm, would pin a tolerance no run produced. A
+    documented level is pinned as documented and its per-run values are kept only as evidence.
+    `probes` are the runs that logged everything (main() never passes a failed one). Returns None
+    unless every probe logged every measured level."""
+    documented = documented or {}
+    if not probes:
+        return None
+    out = {"sources": {}, "documented": dict(documented)}
+    for key, level, line in (("ms2_ppm", "MS2", "Optimised mass accuracy"),
+                             ("ms1_ppm", "MS1", "Recommended MS1 mass accuracy setting")):
+        per_run = [p.get(key) for p in probes]
+        out[key.replace("_ppm", "_per_run")] = per_run
+        if key in documented:
+            out[key] = float(documented[key])
+            out["sources"][key] = (f"documented: {ppm_text(out[key])} ppm, given to the probe as "
+                                   f"--{key.replace('_ppm', '-ppm')} and pinned as given; the "
+                                   "per-run values are recorded, not used")
+            continue
+        if None in per_run:
+            return None
+        out[key] = statistics.median_low(per_run)
+        out["sources"][key] = (f"measured: median (low) of DIA-NN's per-run '{line}' ({level}), "
+                               "as printed -- not rounded")
+    measured = [k for k in ("ms2_ppm", "ms1_ppm") if k not in documented]
+    out.update(
+        pin_as=f"--mass-acc {ppm_text(out['ms2_ppm'])} --mass-acc-ms1 {ppm_text(out['ms1_ppm'])}",
+        agree=all(len(set(out[k.replace("_ppm", "_per_run")])) == 1 for k in measured),
+        rule=("median (low) of each measured level over the probed runs, as DIA-NN printed it; "
+              "a documented level as documented"))
+    return out
+
+
+def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(), workdir=None,
+              tag="", measure=("window",), skip=()):
+    """Run DIA-NN on one run until it has logged everything in `measure` (bar the `skip` levels).
+
+    Returns {radius, found, missing, lines, timed_out, log, environmental}. `found` is
+    LogReader.found -- what was logged, and `fixed_mass_acc: True` when the flags fix mass
+    accuracy the probe was asked to measure (DIA-NN is stopped at once: it would never log it).
+    `missing` lists what was asked and not logged; the probe succeeded only when it is empty.
+    `environmental` means the failure is not about this run (DIA-NN cannot read .raw here, could
+    not be started, or every run's flags fix the mass accuracy).
 
     `workdir` gives DIA-NN its own --temp and --out and holds probe.log. Without them a probe
     that never logs a radius runs on, writes its report into the working directory (in the
@@ -467,8 +648,9 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
         cmd += ["--out", os.path.join(workdir, "report.parquet")]
     cmd += ["--threads", str(threads)] + flags
     log_path = os.path.join(workdir, "probe.log")
-    res = {"radius": None, "lines": [], "timed_out": False, "log": log_path,
-           "environmental": False}
+    reader = LogReader(measure, skip)
+    res = {"radius": None, "found": reader.found, "missing": reader.missing(), "lines": [],
+           "timed_out": False, "log": log_path, "environmental": False}
     deadline = time.time() + max(0.0, timeout)
 
     def note(msg):
@@ -498,7 +680,7 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
     try:
         with open(log_path, "rb") as src:
             pending = b""
-            while res["radius"] is None:
+            while not reader.done():
                 exited = p.poll() is not None   # before reading: the read then has it all
                 pending += src.read()
                 if exited and pending and not pending.endswith(b"\n"):
@@ -508,29 +690,30 @@ def run_probe(diann, raw, fasta, lib, threads, timeout, extra="", extra_args=(),
                     line = raw_line.decode("utf-8", "replace").rstrip()
                     res["lines"].append(line)
                     _say(tag + line)
-                    m = WINDOW_RE.search(line)
-                    if m and int(m.group(1)) > 0:
-                        res["radius"] = int(m.group(1))
-                        break              # got it -- no need to finish the search
-                if res["radius"] is not None or exited or _STOP:
+                    reader.feed(line)
+                    if reader.done():
+                        break              # got it all -- no need to finish the search
+                if reader.done() or exited or _STOP:
                     break
                 if time.time() >= deadline:
                     res["timed_out"] = True
                     break
                 time.sleep(POLL_S)
-            if res["radius"] is None and pending.strip():
+            if not reader.done() and pending.strip():
                 res["lines"].append(pending.decode("utf-8", "replace").rstrip())
                 _say(tag + res["lines"][-1])
     finally:
         if p.poll() is None and not (res["timed_out"] or _STOP):
-            _end_group(p)                   # radius in hand: let it stop gracefully
+            _end_group(p)                   # values in hand: let it stop gracefully
         else:
             _kill_now(p)                    # timeout, signal, or the leader already gone
         _LIVE.discard(p)
+    res["radius"], res["missing"] = reader.found.get("radius"), reader.missing()
     if res["timed_out"]:
-        note(f"[probe_window] timeout: DIA-NN stopped after {timeout:.0f} s without logging a "
-             "scan-window radius")
-    res["environmental"] = res["environmental"] or any(DOTNET_RE.search(ln) for ln in res["lines"])
+        note(f"[probe_window] timeout: DIA-NN stopped after {timeout:.0f} s without logging "
+             + describe_missing(res["missing"]))
+    res["environmental"] = (res["environmental"] or bool(reader.found.get("fixed_mass_acc"))
+                            or any(DOTNET_RE.search(ln) for ln in res["lines"]))
     return res
 
 
@@ -579,7 +762,16 @@ def main():
                     "(default: a fresh temporary directory)")
     ap.add_argument("--extra", default="", help="extra DIA-NN flags to match the real search, "
                     "as ONE shlex-quoted string (for hand use; the chain passes them after --)")
-    ap.add_argument("--write-cfg", help="append '--window N' to this cfg file on success")
+    ap.add_argument("--measure", nargs="+", choices=tuple(MEASURES), default=["window"],
+                    help="what to measure (default: window). `mass-acc` needs the DIA-NN flags "
+                         "WITHOUT --mass-acc/--mass-acc-ms1 -- DIA-NN optimises only what is "
+                         "omitted -- and is read from the same DIA-NN run as the radius")
+    ap.add_argument("--ms1-ppm", type=float, help="with --measure mass-acc: MS1 has a "
+                    "documented DIA-NN value -- pin it as given instead of the measured median "
+                    "(the per-run values are still recorded)")
+    ap.add_argument("--ms2-ppm", type=float, help="with --measure mass-acc: the same for MS2")
+    ap.add_argument("--write-cfg", help="append the measured '--window N' and/or "
+                    "'--mass-acc X --mass-acc-ms1 Y' to this cfg file on success")
     # Everything after a bare `--` goes to DIA-NN verbatim, as separate arguments, so bash quotes
     # and expands them exactly as it does for steps 2-5.
     argv = sys.argv[1:]
@@ -588,6 +780,28 @@ def main():
         k = argv.index("--")
         argv, extra_args = argv[:k], argv[k + 1:]
     a = ap.parse_args(argv)
+
+    measure = [m for m in MEASURES if m in a.measure]       # canonical order, no repeats
+    documented = {k: v for k, v in (("ms1_ppm", a.ms1_ppm), ("ms2_ppm", a.ms2_ppm))
+                  if v is not None}
+    if documented and "mass-acc" not in measure:
+        sys.exit("--ms1-ppm/--ms2-ppm pin a documented level of a mass-accuracy measurement; "
+                 "add --measure mass-acc, or drop them")
+    if any(not v > 0 for v in documented.values()):
+        sys.exit("--ms1-ppm/--ms2-ppm must be positive ppm values")
+    if len(documented) == 2:
+        sys.exit("--ms1-ppm and --ms2-ppm both given: both levels are documented, so there is "
+                 "nothing to measure -- pin them in the cfg instead of running DIA-NN")
+    try:
+        flag_words = shlex.split(a.extra) + extra_args
+    except ValueError as e:
+        sys.exit(f"--extra is not a valid shell word list: {e}")
+    if "window" in measure and "--window" in flag_words:
+        # DIA-NN 2.7.0 echoes a given --window N as "Scan window radius set to N" among its
+        # startup settings (HIVE, 2026-09-16), so this would report the flags' value as measured.
+        sys.exit("the DIA-NN flags (--extra, or after --) pin --window, so there is no radius to "
+                 "measure: DIA-NN only echoes the given value. Drop --window from them, or "
+                 "measure only mass-acc (--measure mass-acc).")
 
     started = time.time()
     deadline = started + a.budget if a.budget is not None else None
@@ -608,9 +822,9 @@ def main():
     try:
         sel = select_representative(raws, max_probes=a.max_probes)
     except NoProbeableRun as e:
-        report({"window_radius": None, "pin_as": None, "radii": [], "radii_agree": None,
-                "incomplete": None, "failed": [], "stopped_because": "no_probeable_run",
-                "probes": [], "selection": e.selection})
+        report({"measured": measure, "window_radius": None, "pin_as": None, "radii": [],
+                "radii_agree": None, "mass_acc": None, "incomplete": None, "failed": [],
+                "stopped_because": "no_probeable_run", "probes": [], "selection": e.selection})
         sys.exit(str(e))
 
     for f in sel["unreadable"]:
@@ -649,7 +863,8 @@ def main():
         else:
             label = f"probe {k}/{len(targets)}: {base} ({c['role']}"
         _say(f"[probe_window] {label}, {_gb(c['size_bytes'])}{_min(c['time_s'])}), "
-             f"{a.threads} threads")
+             f"{a.threads} threads" + (", measuring " + " + ".join(measure)
+                                       if measure != ["window"] else ""))
         limit = a.timeout
         budget_cut = deadline is not None and deadline - time.time() < a.timeout
         if budget_cut:
@@ -657,16 +872,22 @@ def main():
         t0 = time.time()
         wd = os.path.join(workdir, f"probe{k}_{base}")
         r = run_probe(a.diann, c["file"], a.fasta, a.lib, a.threads, limit, a.extra,
-                      extra_args, workdir=wd, tag=f"[probe {k}] ")
+                      extra_args, workdir=wd, tag=f"[probe {k}] ", measure=measure,
+                      skip=tuple(documented))
         secs = round(time.time() - t0, 1)
-        probes.append(dict(c, radius=r["radius"], seconds=secs, threads=a.threads,
-                           timed_out=r["timed_out"], log=r["log"]))
-        if r["radius"] is not None:
-            _say(f"[probe_window] probe {k}: {base} -> radius {r['radius']} in {secs} s")
+        rec = dict(c, radius=r["radius"], seconds=secs, threads=a.threads,
+                   timed_out=r["timed_out"], missing=r["missing"], log=r["log"])
+        if "mass-acc" in measure:
+            rec.update(ms2_ppm=r["found"].get("ms2_ppm"), ms1_ppm=r["found"].get("ms1_ppm"),
+                       mass_acc_fixed_by_flags=bool(r["found"].get("fixed_mass_acc")))
+        probes.append(rec)
+        if not r["missing"]:
+            _say(f"[probe_window] probe {k}: {base} -> {_values(rec, measure)} in {secs} s")
             continue
         tails[k] = r["lines"]
         failures += 1
-        _say(f"[probe_window] probe {k}: {base} -> NO radius"
+        _say(f"[probe_window] probe {k}: {base} -> NO {_names(r['missing'])}"
+             + (f" (logged {_values(rec, measure)})" if _values(rec, measure) else "")
              + (" (timed out)" if r["timed_out"] else "") + f" in {secs} s")
         if _STOP:
             stopped = "signal"
@@ -685,48 +906,62 @@ def main():
         if reserves:
             nxt = dict(reserves.pop(0), replaces=c["file"])
             queue.append(nxt)
-            _say(f"[probe_window] {base} gave no radius; {_base(nxt['file'])}, the next run "
-                 "nearest the median, takes its place")
+            _say(f"[probe_window] {base} gave no {_names(r['missing'])}; {_base(nxt['file'])}, "
+                 "the next run nearest the median, takes its place")
 
-    radii = [p["radius"] for p in probes if p["radius"] is not None]
+    # Only runs that logged EVERYTHING asked count, for every value: a run with a radius but no
+    # mass accuracy would otherwise put the radius and the mass accuracy on different run sets.
+    good = [p for p in probes if not p["missing"]]
     if stopped is None:
-        stopped = "measured" if len(radii) >= len(targets) else "no_more_runs"
-    pin = bool(radii) and stopped not in ("environment", "signal")
-    radius = statistics.median_low(radii) if pin else None
+        stopped = "measured" if len(good) >= len(targets) else "no_more_runs"
+    pin = bool(good) and stopped not in ("environment", "signal")
+    radii = [p["radius"] for p in good] if "window" in measure else []
+    radius = statistics.median_low(radii) if pin and radii else None
+    mass_acc = pin_mass_acc(good, documented) if pin and "mass-acc" in measure else None
+    pinned = pin and (radius is not None or "window" not in measure) and \
+        (mass_acc is not None or "mass-acc" not in measure)
+    what = _what(measure)
     result = {
-        "window_radius": radius,
-        "pin_as": f"--window {radius}" if radius is not None else None,
+        "measured": measure,
+        "window_radius": radius if pinned else None,
+        "pin_as": f"--window {radius}" if pinned and radius is not None else None,
         "radii": radii,
         "radii_agree": (len(set(radii)) == 1) if radii else None,
-        "incomplete": (len(radii) < len(targets)) if radius is not None else None,
-        "failed": [_base(p["file"]) for p in probes if p["radius"] is None],
+        # null unless mass accuracy was asked for AND a run logged all of it
+        "mass_acc": mass_acc if pinned else None,
+        "incomplete": (len(good) < len(targets)) if pinned else None,
+        "failed": [_base(p["file"]) for p in probes if p["missing"]],
         "stopped_because": stopped,
         "seconds": round(time.time() - started, 1),
         "probes": probes,
         "selection": dict({x: v for x, v in sel.items() if x not in ("chosen", "reserves")},
                           planned=[c["file"] for c in targets],
                           reserves=[c["file"] for c in sel["reserves"]]),
-        "note": ("Pin this in the cfg for EVERY step of the parallel chain. It is a property of "
-                 "the acquisition scheme, so it is valid for all files acquired with the same "
-                 "method -- but re-probe for a different gradient, cycle time, or instrument."),
+        "note": ("Pin this in the cfg for EVERY step of the parallel chain. The radius and the "
+                 "mass accuracies are properties of the acquisition method and instrument, so "
+                 "they are valid for all files acquired the same way -- but re-probe for a "
+                 "different gradient, cycle time, resolution or instrument."),
     }
 
-    _say("[probe_window] per-run radii:")
+    _say("[probe_window] per-run radii:" if measure == ["window"] else
+         f"[probe_window] per-run {what}:")
     for p in probes:
+        got = _values(p, measure)
         _say(f"[probe_window]   {p['role']:<15} {_base(p['file'])}  {_gb(p['size_bytes'])}"
              f"{_min(p['time_s'])}  "
-             + (f"radius {p['radius']}" if p["radius"] is not None else
-                "NO radius" + (" (timed out)" if p["timed_out"] else "")))
+             + (got if not p["missing"] else
+                "NO " + _names(p["missing"]) + (f" (logged {got})" if got else "")
+                + (" (timed out)" if p["timed_out"] else "")))
 
     if stopped == "signal":
         report(result)
         sys.exit(128 + _STOP[0])
 
-    if radius is None:
+    if not pinned:
         report(result)                     # the evidence first: window.json is what is read
         for i, p in enumerate(probes, 1):
-            if p["radius"] is None:
-                _say(f"\n--- {p['file']}: no scan-window radius; DIA-NN log tail "
+            if p["missing"]:
+                _say(f"\n--- {p['file']}: no {_names(p['missing'])}; DIA-NN log tail "
                      f"(full log {p['log']}) ---\n" + "\n".join(tails.get(i, [])[-25:]))
         if any(DOTNET_RE.search(ln) for t in tails.values() for ln in t):
             _say("\nDIA-NN could not open Thermo .raw: there is no .NET 8 runtime in this "
@@ -734,26 +969,65 @@ def main():
                  f'    export DOTNET_ROOT="$(bash {shlex.quote(os.path.join(HERE, "ensure_dotnet8.sh"))} '
                  '| tail -1)"; export PATH="$DOTNET_ROOT:$PATH"\n'
                  "(diann_parallel.py puts that export into every generated step.)")
-        why = {"environment": "a failure no other run can fix -- DIA-NN could not start, or "
-                              "cannot read .raw in this environment (above) -- so no other run "
-                              "was tried",
-               "max_failures": f"{failures} runs logged no radius",
+        if any(p.get("mass_acc_fixed_by_flags") for p in probes):
+            _say("\nDIA-NN was asked to measure mass accuracy, but it is not optimising it: the "
+                 "run fixed it, or never announced 'DIA-NN will automatically optimise the mass "
+                 "accuracy'. DIA-NN 2.7.0 fixes BOTH levels when either --mass-acc or "
+                 "--mass-acc-ms1 is given, so remove both from the DIA-NN flags (pass a "
+                 "documented level as --ms1-ppm/--ms2-ppm instead), or do not ask for "
+                 "--measure mass-acc. Every run gets the same flags, so no other run was tried.")
+        why = {"environment": "a failure no other run can fix -- DIA-NN could not start, "
+                              "cannot read .raw in this environment, or the flags fix the mass "
+                              "accuracy (above) -- so no other run was tried",
+               "max_failures": f"{failures} runs did not log it",
                "budget": f"the {a.budget} s budget ran out",
                "no_more_runs": "every eligible run was tried"}.get(stopped, stopped)
-        sys.exit("Could not read the scan-window radius: " + why + " ("
-                 + ", ".join(result["failed"]) + "). Do NOT guess a value -- an inconsistent "
-                 "window across files is exactly the defect this probe exists to prevent. Fix the "
-                 "cause above, or re-run with --raw naming runs to use.")
+        sys.exit(f"Could not read the {what}: " + why + " ("
+                 + ", ".join(result["failed"]) + "). Do NOT guess a value, and do not pin one "
+                 "from what a failed run did log -- a value inconsistent across files is exactly "
+                 "the defect this probe exists to prevent. Fix the cause above, or re-run with "
+                 "--raw naming runs to use.")
 
     if a.write_cfg:
         with open(a.write_cfg, "a") as fh:
-            fh.write(f"\n--window {radius}\n")
+            fh.write("\n")                        # the cfg may not end in a newline
+            if radius is not None:
+                fh.write(f"--window {radius}\n")
+            if mass_acc:
+                fh.write(f"--mass-acc {ppm_text(mass_acc['ms2_ppm'])}\n"
+                         f"--mass-acc-ms1 {ppm_text(mass_acc['ms1_ppm'])}\n")
     report(result)
     if result["incomplete"]:
-        _say(f"[probe_window] WARNING: pinned --window {radius} from {len(radii)} of the "
-             f"{len(targets)} runs planned ({stopped}; no radius from "
+        pins = "; ".join(x for x in (result["pin_as"], mass_acc and mass_acc["pin_as"]) if x)
+        _say(f"[probe_window] WARNING: pinned {pins} from {len(good)} of the "
+             f"{len(targets)} runs planned ({stopped}; nothing usable from "
              + ", ".join(result["failed"]) + "). It is the median of the runs that answered; "
              "the per-run evidence is in the JSON.")
+
+
+def _what(measure):
+    """'scan-window radius', 'mass accuracy', or both -- for messages."""
+    return " and ".join({"window": "scan-window radius", "mass-acc": "mass accuracy"}[m]
+                        for m in measure)
+
+
+def _names(keys):
+    """What a run did not log, without articles: `radius` -> 'radius'."""
+    names = {"radius": "radius", "ms2_ppm": "'Optimised mass accuracy' (MS2)",
+             "ms1_ppm": "'Recommended MS1 mass accuracy setting' (MS1)"}
+    return " or ".join(names[k] for k in keys)
+
+
+def _values(p, measure):
+    """What one probe logged, as the job log shows it: 'radius 7, MS2 14 ppm, MS1 4.1 ppm'."""
+    out = []
+    if "window" in measure and p.get("radius") is not None:
+        out.append(f"radius {p['radius']}")
+    if "mass-acc" in measure:
+        for key, level in (("ms2_ppm", "MS2"), ("ms1_ppm", "MS1")):
+            if p.get(key) is not None:
+                out.append(f"{level} {ppm_text(p[key])} ppm")
+    return ", ".join(out)
 
 
 if __name__ == "__main__":

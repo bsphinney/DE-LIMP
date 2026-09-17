@@ -14,8 +14,10 @@ The 5 steps (each chained `afterok` on the previous):
 
 Why it's faster: the per-file passes (steps 2 & 4) run as a SLURM **array** across many
 nodes at once instead of one long single-node job; MBR is replaced by the empirical-
-library round-trip. **Mass accuracy is FIXED (manual), not auto** — steps 3/5 reuse the
-.quant files and auto-calibration would be inconsistent (per DIA-NN dev guidance).
+library round-trip. **Mass accuracy is FIXED, not auto** — steps 3/5 reuse the .quant
+files and auto-calibration would be inconsistent (per DIA-NN dev guidance). It is fixed in
+the cfg, or -- for an Orbitrap with no documented DIA-NN value -- measured once in step 1b
+and pinned for steps 2-5 (see parallel_safe).
 
 Writes into <out>: `file_list.txt`, `step{1..5}_*.sbatch`, and `submit.sh` (submits the
 chain with dependencies). Run `submit.sh` on the cluster (or via `hive_exec.sh`). All
@@ -28,7 +30,7 @@ Usage:
       [--assembly-cpus 64] [--assembly-mem 128] [--assembly-time 12] \
       [--partition <auto>] [--account <auto>] [--max-simultaneous 20] [--no-norm]
 """
-import os, re, sys, glob, argparse, shlex, subprocess, math
+import os, re, sys, glob, argparse, json, shlex, subprocess, math
 
 # flags that are step-specific or auto-determined — never carry them into every step.
 # NOTE: --dda is intentionally NOT stripped — for DDA data put --dda in the --cfg and it
@@ -446,6 +448,92 @@ def window_record(ma):
             "value": None, "passed": passed}
 
 
+def mass_acc_measure_plan(cfg):
+    """Is this cfg's mass accuracy to be MEASURED with DIA-NN before the search? Returns
+    {"documented": {flag: ppm}} -- the levels that have a documented DIA-NN value, pinned as
+    documented -- or None.
+
+    The plan travels with the cfg as its rationale sidecar, `<cfg>.rationale.json` -- the file
+    estimate_params.py already writes next to every cfg and provenance.py already copies into the
+    reproducibility bundle. It says `measure_with_diann` only for an Orbitrap with a level outside
+    DIA-NN's table (see estimate_params.mass_acc_plan). None, and so nothing measured, when:
+      * there is no sidecar, or it says anything else -- a hand-written cfg that merely forgot
+        mass accuracy is a mistake to report, not something to measure over (on a timsTOF the
+        documented 15/15 is right, and a measured value would quietly replace it);
+      * the cfg sets either flag after all, validly or not (mass_acc_status "unset" for BOTH is
+        required) -- the plan no longer describes it, and a lone flag fixes BOTH levels in DIA-NN
+        2.7.0, so there would be nothing left to measure;
+      * the cfg cannot be read (CfgError -- parallel_safe reports that itself);
+      * a documented value is not one positive number per flag, or documents both levels.
+    Both callers -- parallel_safe() for the chain, run_search.run_diann() for a single-shot
+    search -- read the plan here, so they cannot disagree about it."""
+    if not cfg:
+        return None
+    try:
+        with open(cfg + ".rationale.json") as fh:
+            side = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from estimate_params import MEASURE_WITH_DIANN     # one name for the plan, one file
+    if not isinstance(side, dict) or side.get("mass_accuracy_plan") != MEASURE_WITH_DIANN:
+        return None
+    try:
+        st = mass_acc_status(cfg)["state"]
+    except CfgError:
+        return None
+    if any(st[f] != "unset" for f in MASS_ACC_FLAGS):
+        return None
+    doc = side.get("mass_accuracy_documented") or {}
+    if not isinstance(doc, dict) or set(doc) - set(MASS_ACC_FLAGS) or len(doc) == 2:
+        return None
+    for v in doc.values():
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) \
+                or not v > 0:
+            return None
+    return {"documented": dict(doc)}
+
+
+def probe_mass_acc_args(documented):
+    """probe_window.py flags that pin the documented levels: {"--mass-acc-ms1": 7} -> "--ms1-ppm 7"."""
+    names = {"--mass-acc-ms1": "--ms1-ppm", "--mass-acc": "--ms2-ppm"}
+    return " ".join(f"{names[f]} {v:g}" for f, v in sorted(documented.items(), reverse=True))
+
+
+# What step 1b writes, as steps 2-5 read it. A pattern for `grep -Eqx` and Python's re alike.
+MEASURED_FILE_RE = {
+    "window.txt": "[1-9][0-9]*",
+    "massacc.txt": "--mass-acc [0-9]*[.]?[0-9]+ --mass-acc-ms1 [0-9]*[.]?[0-9]+",
+}
+
+
+def needs_measured(path, what, producer="step 1b (step1b_window.sbatch)"):
+    """Bash that fails the job unless step 1b's `path` holds a measurement.
+
+    Steps 2-5 splice `$(cat massacc.txt)` and `--window $(cat window.txt)` into DIA-NN's command
+    line. A missing file expands to NOTHING: DIA-NN then optimises mass accuracy per file -- the
+    very thing the chain exists to prevent -- and still writes its .quant, so must_exist passes
+    and steps 3/5 stitch auto-calibrated passes together. That is not hypothetical: step 1b
+    deletes both files before it probes, and references/watcher.md tells the orchestrator to
+    resubmit the downstream steps of a stalled chain (review reproduction: `sbatch
+    step2_firstpass.sbatch` after a failed step 1b ran DIA-NN with no mass-accuracy flag). The
+    content is checked too, so a "None" printed into the file cannot reach DIA-NN."""
+    pat = MEASURED_FILE_RE[os.path.basename(path)]
+    return (f'if ! grep -Eqx -- {shlex.quote(pat)} "{path}" 2>/dev/null; then '
+            f'echo "FAILED: {path} does not hold {what} -- {producer} measures '
+            f'it and has not completed successfully. Re-run it first; running DIA-NN '
+            f'without it would let DIA-NN optimise it itself." >&2; exit 1; fi')
+
+
+# The refusals that mean "mass accuracy is OMITTED and nothing will measure it" -- the only ones
+# --allow-auto-mass-acc may override (upstream #70: never an invalid value, a bad --window or an
+# unreadable cfg). A cfg estimate_params.py planned to measure is omitted mass accuracy too, when
+# the chain has no step 1b to measure it in.
+MASS_ACC_OMITTED_CODES = ("mass_acc_unset", "mass_acc_seeded", "mass_acc_no_probe")
+
+
 def _remedy(code):
     """How to fix a refusal -- derived from WHY it was refused, in one place, so the router's
     decline and the generator's exit say the same thing. Both used to hardcode "re-run
@@ -464,8 +552,17 @@ def _remedy(code):
             "fix the quoting in the cfg (every quote must be closed), then re-run",
         "mass_acc_unset":
             "pin mass accuracy: re-run estimate_params.py with the real instrument "
-            f"({table}); for an Orbitrap pass --ms1-resolution/--ms2-resolution. "
+            f"({table}); for an Orbitrap pass --ms1-resolution/--ms2-resolution. A plan to "
+            "measure it is read from the <cfg>.rationale.json estimate_params.py writes beside "
+            "the cfg -- keep the two together, and never add just one of the two flags. "
             "Left on auto it can only run as the single-shot search",
+        "mass_acc_seeded":
+            "pin --mass-acc and --mass-acc-ms1 in the cfg (a validated SOP value): a seeded "
+            "chain has no step 1 for step 1b to follow, so nothing can measure them -- or "
+            "drop --seed-lib and let step 1b measure them",
+        "mass_acc_no_probe":
+            "drop --no-probe-window (step 1b then measures mass accuracy), or pin --mass-acc "
+            "and --mass-acc-ms1 in the cfg",
         "mass_acc_invalid":
             "correct --mass-acc/--mass-acc-ms1 in the cfg to ONE positive ppm value each "
             f"({table}), or re-run estimate_params.py with the real instrument. For "
@@ -498,10 +595,20 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
     copy is what caused both (CLAUDE.md rule 3).
 
     What is recoverable, and what is not:
-      * mass accuracy unset -- NOT recoverable. DIA-NN calibrates it per run against the
-        library, so there is no single value to carry into steps 3/5, which reuse .quant.
+      * mass accuracy unset -- recoverable ONLY when step 1b will measure it: both flags
+        absent, the cfg's estimate_params.py sidecar plans `measure_with_diann` (an Orbitrap
+        with a level outside DIA-NN's table; see mass_acc_measure_plan), and the chain has a
+        step 1b (probing on, no seed library -- else mass_acc_seeded / mass_acc_no_probe).
+        Step 1b then runs DIA-NN in automatic mode on representative runs and pins the median
+        of each measured level, and the documented value of a level that has one, for steps
+        2-5 -- so every pass uses the same tolerance, which is what reusing .quant files needs.
+        That is a TOLERANCE, not the per-run mass CALIBRATION: DIA-NN recalibrates every run
+        whether or not the tolerance is fixed (its log prints "Calibrating with mass accuracies
+        25 (MS1), 25 (MS2)" under a pinned 20/7 too). Any other unset mass accuracy -- no
+        sidecar, instrument not identified, only one of the two flags -- is NOT recoverable:
+        DIA-NN would calibrate it per run, so there is no single value to carry into steps 3/5.
       * mass accuracy 0 / negative / non-numeric / non-finite / set twice differently --
-        NOT recoverable, and not "auto": 0 is a literal 0 ppm tolerance (0 IDs).
+        NOT recoverable, plan or no plan, and not "auto": 0 is a literal 0 ppm tolerance.
       * --window unset or 0 -- recoverable when probing. Step 1b runs probe_window.py and
         pins one radius into steps 2-5. estimate_params.py cannot supply it: the radius is a
         property of the acquisition scheme and has to be MEASURED on a real file. DIA-NN
@@ -512,26 +619,33 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
         quietly measure over.
       * an unparseable cfg (unbalanced quote) -- NOT recoverable.
 
-    Returns {ok, probe, code, ma, reason, remedy}: `probe` says step 1b is needed, `code`
-    names the outcome (probe | pinned | cfg_missing | cfg_unparseable | mass_acc_unset |
-    mass_acc_invalid | window_invalid | window_seeded | window_no_probe), `remedy` is how to fix
-    a refusal. A cfg path that is not a file is `cfg_missing`, never "mass accuracy is not
-    pinned": `--sbatch proj` once renamed the folder holding the cfg, and the refusal that
-    followed blamed mass accuracy.
-    `ma` is mass_acc_status() untouched -- on the probe path its window is still unset,
-    because it IS unset until step 1b runs.
+    Returns {ok, probe, code, ma, reason, remedy, measure, mass_acc_documented}: `probe` says
+    step 1b is needed, `measure` lists what it measures ("window", "mass-acc"),
+    `mass_acc_documented` the mass-accuracy levels it pins as documented instead ({flag: ppm}),
+    `code` names the outcome (probe | pinned | cfg_missing | cfg_unparseable | mass_acc_unset |
+    mass_acc_seeded | mass_acc_no_probe | mass_acc_invalid | window_invalid | window_seeded |
+    window_no_probe), `remedy` is how to fix a refusal. A cfg path that is not a file is
+    `cfg_missing`, never "mass accuracy is not pinned": `--sbatch proj` once renamed the folder
+    holding the cfg, and the refusal that followed blamed mass accuracy.
+    `ma` is mass_acc_status() untouched -- on the probe path what step 1b measures is still
+    unset, because it IS unset until step 1b runs.
     """
+    measure, documented = [], {}
+
     def verdict(ok, probe, code, ma, reason):
         return {"ok": ok, "probe": probe, "code": code, "ma": ma, "reason": reason,
-                "remedy": None if ok else _remedy(code)}
+                "remedy": None if ok else _remedy(code),
+                "measure": list(measure) if ok else [],
+                "mass_acc_documented": dict(documented) if ok else {}}
 
     try:
         ma = mass_acc_status(cfg)
     except CfgError as e:
         return verdict(False, False, e.code, None, str(e))
     st = ma["state"]
-    # Invalid values before unset ones: `mass_acc_unset` is the one code --allow-auto-mass-acc
-    # may override, so it must never be what hides a junk --window behind it.
+    # Invalid values before unset ones: the MASS_ACC_OMITTED_CODES are the ones
+    # --allow-auto-mass-acc may override, so they must never hide a junk value behind them --
+    # and a plan to measure never rescues a junk value either.
     if any(st[f] == "invalid" for f in MASS_ACC_FLAGS):
         return verdict(False, False, "mass_acc_invalid", ma,
                        f"mass accuracy is set but not usable ({ma['reason']})")
@@ -539,20 +653,43 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
         return verdict(False, False, "window_invalid", ma,
                        f"--window is set but is not a usable radius ({ma['reason']})")
     if any(st[f] == "unset" for f in MASS_ACC_FLAGS):
-        return verdict(False, False, "mass_acc_unset", ma,
-                       f"mass accuracy is not pinned ({ma['reason']})")
-    if st["--window"] == "ok":
+        plan = mass_acc_measure_plan(cfg)          # None unless BOTH are unset and planned
+        if not plan:
+            both = all(st[f] == "unset" for f in MASS_ACC_FLAGS)
+            return verdict(False, False, "mass_acc_unset", ma,
+                           f"mass accuracy is not pinned ({ma['reason']})"
+                           + (f"; {cfg}.rationale.json does not plan to measure it with DIA-NN"
+                              if both else ""))
+        if seed_lib:
+            return verdict(False, False, "mass_acc_seeded", ma,
+                           "mass accuracy is to be measured in step 1b (planned by "
+                           "estimate_params.py), but the first pass is seeded from an existing "
+                           "library, so there is no step 1 for step 1b to follow")
+        if not probe_window:
+            return verdict(False, False, "mass_acc_no_probe", ma,
+                           "mass accuracy is to be measured in step 1b (planned by "
+                           "estimate_params.py), and --no-probe-window was given")
+        measure.append("mass-acc")
+        documented = plan["documented"]
+    if st["--window"] != "ok":
+        if seed_lib:
+            return verdict(False, False, "window_seeded", ma,
+                           "--window is unpinned and the first pass is seeded from an existing "
+                           "library, so there is no step 1 for step 1b to follow")
+        if not probe_window:
+            return verdict(False, False, "window_no_probe", ma,
+                           "--window is unpinned and --no-probe-window was given")
+        measure.insert(0, "window")
+    if not measure:
         return verdict(True, False, "pinned", ma, ma["reason"])
-    if seed_lib:
-        return verdict(False, False, "window_seeded", ma,
-                       "--window is unpinned and the first pass is seeded from an existing "
-                       "library, so there is no step 1 for step 1b to follow")
-    if not probe_window:
-        return verdict(False, False, "window_no_probe", ma,
-                       "--window is unpinned and --no-probe-window was given")
-    return verdict(True, True, "probe", ma,
-                   f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm; --window is unpinned but "
-                   "recoverable -- step 1b measures it and pins it for steps 2-5")
+    doc = "".join(f", {f} {v:g} as documented" for f, v in sorted(documented.items()))
+    got = (f"MS1 {ma['ms1']} ppm / MS2 {ma['ms2']} ppm" if "mass-acc" not in measure else
+           "mass accuracy is unpinned but recoverable -- DIA-NN measures it on representative "
+           "runs in step 1b (planned by estimate_params.py: no documented value for this "
+           f"Orbitrap level{doc})")
+    win = (f"window {ma['window']}" if "window" not in measure else
+           "--window is unpinned but recoverable -- step 1b measures it")
+    return verdict(True, True, "probe", ma, f"{got}; {win}; pinned for steps 2-5")
 
 
 # DIA-NN 2.6 EXITS 0 ON A FATAL ERROR -- verified: a run against a nonexistent .mzML and
@@ -681,7 +818,7 @@ def main():
         # bad --window or an unparseable cfg would be spliced into every step as-is.
         if safe["code"] in ("cfg_missing", "cfg_unparseable"):
             sys.exit(f"{safe['reason']}.\nFix: {safe['remedy']}.")
-        if not (a.allow_auto_mass_acc and safe["code"] == "mass_acc_unset"):
+        if not (a.allow_auto_mass_acc and safe["code"] in MASS_ACC_OMITTED_CODES):
             sys.exit(
                 f"Not parallel-safe: {a.cfg or '(no --cfg given)'} -- {safe['reason']}.\n"
                 "The 5-step chain reuses .quant files across steps, so anything DIA-NN\n"
@@ -690,14 +827,21 @@ def main():
                 f"Fix: {safe['remedy']}.\n"
                 "Or run the single-shot search instead (run_search.py --no-parallel)."
                 + ("\nTo override deliberately: --allow-auto-mass-acc."
-                   if safe["code"] == "mass_acc_unset" else ""))
+                   if safe["code"] in MASS_ACC_OMITTED_CODES else ""))
         sys.stderr.write(f"[diann_parallel] WARNING: proceeding with auto mass accuracy "
                          f"({safe['reason']}) -- steps will not be mutually consistent.\n")
     win_probe, ma = safe["probe"], safe["ma"]
+    # What step 1b measures ("window", "mass-acc"; empty when it does not run), and the
+    # mass-accuracy levels it pins as documented rather than measured ({flag: ppm}).
+    measure, documented = safe["measure"], safe["mass_acc_documented"]
 
-    # When step 1b measures the radius it is PREFIXED onto steps 2-5, so any --window
-    # still in the cfg has to come out or both land on the same command line.
-    flags = read_cfg_flags(a.cfg, drop=("--window",) if win_probe else ())
+    # What step 1b measures is PREFIXED onto steps 2-5 at run time, so the same flags still in
+    # the cfg have to come out or two values land on the same command line. (A planned mass
+    # accuracy has neither flag in the cfg -- mass_acc_measure_plan requires it -- so dropping
+    # them only makes that explicit.)
+    measured_flags = ((("--window",) if "window" in measure else ())
+                      + (MASS_ACC_FLAGS if "mass-acc" in measure else ()))
+    flags = read_cfg_flags(a.cfg, drop=measured_flags)
     D = out  # all DIA-NN intermediate/output lives here (real paths; native binary reads them directly)
     report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
@@ -750,13 +894,28 @@ def main():
             f'  --threads {a.libpred_cpus} {flags}',
             must_exist(predicted, "the predicted spectral library")]))
 
-    # Step 1b — measure the scan-window radius ONCE, so steps 2-5 share it.
+    # Step 1b — measure the scan-window radius (and, when planned, mass accuracy) ONCE, so
+    # steps 2-5 share it.
     # DIA-NN optimises the radius per file when --window is absent, and steps 3/5 then
     # combine .quant files produced under different windows -- which DIA-NN's own
     # warning calls "strongly not recommended". Measuring beats guessing: the radius
     # depends on the acquisition scheme (cycle time vs peak width), not the instrument.
+    #
+    # MASS ACCURACY ("mass-acc" in measure): only for a cfg estimate_params.py planned that way
+    # -- an Orbitrap with a level outside DIA-NN's table (see parallel_safe). The same DIA-NN run
+    # per probe logs it: measured on HIVE with DIA-NN 2.7.0 (srun job 23522741, Exploris 480
+    # 120k/15k, full mouse library) the radius came at 1:34, "Recommended MS1 mass accuracy
+    # setting: 4.1 ppm" at 1:35 and "Optimised mass accuracy: 14 ppm" at 2:27, of a 5:13 search.
+    # The probes run with BOTH flags omitted -- DIA-NN 2.7.0 fixes both levels when either is
+    # given -- and massacc.txt gets the two flags: the median of a measured level, the
+    # documented value of a level that has one (--ms1-ppm 7 at 120k; a measured 4.2 there drew
+    # DIA-NN's "deviates significantly from the value recommended (7 ppm)" warning on every
+    # pass). Both also go into params.resolved.cfg.
     s1b = None
     resolved_cfg = a.cfg
+    what = " and ".join({"window": "scan-window radius", "mass-acc": "mass accuracy"}[m]
+                        for m in measure)
+    wtxt, mtxt = f"{D}/window.txt", f"{D}/massacc.txt"
     if win_probe:
         probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
         # The measured radius has to end up in a PARAMETER FILE, not just window.txt, or the
@@ -770,12 +929,17 @@ def main():
         resolved_cfg = os.path.join(out, "params.resolved.cfg")
         tmp_cfg = resolved_cfg + ".tmp"
         probe_dir = os.path.join(out, "window_probe")
-        write_cfg(a.cfg, base_cfg, drop=("--window",))
+        write_cfg(a.cfg, base_cfg, drop=measured_flags)
         q = shlex.quote
+        mess = "mass-acc" in measure
+        # The window-only script is exactly upstream's; mass accuracy adds its own lines.
+        doc_args = f" {probe_mass_acc_args(documented)}" if documented else ""
+        failed_if = " || ".join(f'[ -z "${v}" ]' for m, v in (("window", "W"), ("mass-acc", "M"))
+                                if m in measure)
         s1b = write("step1b_window.sbatch", "\n".join([
             header("s1b_window", a.threads_per_file, a.mem_per_file, PROBE_WALL_HOURS,
                    _ps, _as_, qos=_qs), "",
-            'echo "Step 1b/5 measuring scan-window radius on representative runs"; date',
+            f'echo "Step 1b/5 measuring {what} on representative runs"; date',
             # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
             # Thermo .raw needs. probe_window.py runs DIA-NN as its own subprocess (no shell),
             # so the prefix cannot ride on --diann -- it has to be in the ENVIRONMENT the probe
@@ -784,7 +948,8 @@ def main():
             *([f"{dnet.strip()}   # .NET 8 for Thermo .raw, inherited by probe_window.py's DIA-NN"]
               if dnet else []),
             # A resubmitted step 1b must never find the previous run's answer and carry on.
-            f"rm -f {D}/window.txt {D}/window.json {q(resolved_cfg)} {q(tmp_cfg)}",
+            f"rm -f {wtxt} {D}/window.json {q(resolved_cfg)} {q(tmp_cfg)}"
+            + (f" {mtxt}" if mess else ""),
             f"rm -rf {q(probe_dir)}",
             f"cp {q(base_cfg)} {q(tmp_cfg)}",
             # WHICH runs: not the first files of the listing. The probe gets the whole cohort
@@ -792,57 +957,84 @@ def main():
             # injections and any .d whose analysis.tdf index is damaged (WAL mode, a stale
             # -wal/-journal, or an index that stops short of tdf_bin -- 342 such .d on HIVE, and
             # a bytes rule picked one in the pilot). It measures the median and quartile runs,
-            # replaces a run that logs no radius with the next one nearest the median, and pins
-            # the MEDIAN radius. window.json records every probe, and the damaged runs.
+            # replaces a run that does not log everything asked with the next one nearest the
+            # median, and pins the MEDIAN. window.json records every probe, and the damaged runs.
             # --timeout bounds one hung run; --budget bounds them all inside this job's limit.
-            'W=""',
+            *(['W=""'] if "window" in measure else []),
+            *(['M=""'] if mess else []),
             f"if python3 {q(probe)} --diann {q(a.diann)} \\",
             f"    --raw-list {q(os.path.join(out, 'file_list.txt'))} \\",
             f"    --fasta {fasta} --lib {predicted} --threads {a.threads_per_file} \\",
             f"    --max-probes {PROBE_CANDIDATES} --max-failures {PROBE_MAX_FAILURES} \\",
             f"    --timeout {PROBE_TIMEOUT_S} --budget {PROBE_BUDGET_S} \\",
+            *([f"    --measure {' '.join(measure)}{doc_args} \\"] if mess else []),
             f"    --workdir {q(probe_dir)} --write-cfg {q(tmp_cfg)} \\",
             # the flags as bash words, after `--`: the probe's DIA-NN gets the same argv as
             # steps 2-5, not a second parse of them through shlex
             f"    -- {flags} > {D}/window.json; then",
-            '  W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
-            f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json)',
+            *(['  W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
+               f'assert isinstance(w, int) and w > 0; print(w)" {D}/window.json)']
+              if "window" in measure else []),
+            # the two flags, in exactly the shape steps 2-5's guard (needs_measured) accepts
+            *(['  M=$(python3 -c "import json,re,sys; m=json.load(open(sys.argv[1]))[\'mass_acc\'][\'pin_as\']; '
+               f'assert re.fullmatch(sys.argv[2], m); print(m)" {D}/window.json '
+               f'{q(MEASURED_FILE_RE["massacc.txt"])})'] if mess else []),
             "fi",
-            'if [ -z "$W" ]; then',
-            '  echo "FAILED: step 1b measured no scan-window radius -- the reason and each '
+            f"if {failed_if}; then",
+            f'  echo "FAILED: step 1b measured no {what} -- the reason and each '
             f'probe\'s DIA-NN log tail are above; every probe is recorded in {D}/window.json." >&2',
             # Resubmitting step 1b ALONE does not restart the chain: steps 2-5 were submitted
             # afterok on THIS job id, so they sit PENDING (DependencyNeverSatisfied) for ever.
             '  echo "Steps 2-5 were submitted afterok on THIS job, so they are now PENDING with '
             'DependencyNeverSatisfied and will never start -- even if step 1b is resubmitted '
             'and succeeds." >&2',
-            '  echo "Recover: fix the cause (do NOT guess a --window), scancel steps 2-5 (ids in '
+            '  echo "Recover: fix the cause (do NOT guess a '
+            + ("--window or a mass accuracy" if mess and "window" in measure else
+               "mass accuracy" if mess else "--window")
+            + f'), scancel steps 2-5 (ids in '
             f'{D}/jobs.txt), then resubmit step1b_window.sbatch and steps 2-5 chained afterok on '
             'the new ids, reusing step1.predicted.speclib -- or re-run submit.sh, which also '
             'repeats step 1. See references/watcher.md (dependency_failed)." >&2',
-            # window.json stays: it is the evidence. window.txt and the resolved cfg never exist.
+            # window.json stays: it is the evidence. window.txt, massacc.txt and the resolved cfg
+            # never exist.
             f"  rm -f {q(tmp_cfg)}",
             "  exit 1",
             "fi",
             # These are written by this script, not by DIA-NN, so must_exist()'s "DIA-NN exited
             # 0 but did not write" would name the wrong culprit. Say what actually failed.
-            f'if ! echo "$W" > {D}/window.txt || [ ! -f {D}/window.txt ] || [ ! -s {D}/window.txt ]; then',
-            f'  echo "FAILED: radius $W was measured but could not be written to {D}/window.txt '
-            '(disk full? permissions?)" >&2',
-            "  exit 1",
-            "fi",
+            *([f'if ! echo "$W" > {wtxt} || [ ! -f {wtxt} ] || [ ! -s {wtxt} ]; then',
+               f'  echo "FAILED: radius $W was measured but could not be written to {wtxt} '
+               '(disk full? permissions?)" >&2',
+               "  exit 1",
+               "fi"] if "window" in measure else []),
+            *([f'if ! echo "$M" > {mtxt} || [ ! -f {mtxt} ] || [ ! -s {mtxt} ]; then',
+               f'  echo "FAILED: mass accuracy $M was measured but could not be written to {mtxt} '
+               '(disk full? permissions?)" >&2',
+               "  exit 1",
+               "fi"] if mess else []),
             # -f as well as -s: `mv` INTO a directory of that name succeeds, and a directory
             # is non-empty.
             f"if ! mv -f {q(tmp_cfg)} {q(resolved_cfg)} || [ ! -f {q(resolved_cfg)} ] "
             f"|| [ ! -s {q(resolved_cfg)} ]; then",
-            f'  echo "FAILED: radius $W was measured but {resolved_cfg} could not be moved into '
+            ("  echo \"FAILED: radius $W was measured" if measure == ["window"] else
+             f"  echo \"FAILED: {what} {'were' if len(measure) > 1 else 'was'} measured")
+            + f' but {resolved_cfg} could not be moved into '
             f'place from {tmp_cfg} (disk full? permissions?)" >&2',
             "  exit 1",
             "fi",
-            'echo "scan window radius = $W (median of the runs listed above; pinned for steps 2-5)"',
+            *(['echo "scan window radius = $W (median of the runs listed above; pinned for steps 2-5)"']
+              if "window" in measure else []),
+            *(['echo "mass accuracy = $M (per level: the median of the runs listed above, or the '
+               'documented value; pinned for steps 2-5)"'] if mess else []),
             f'echo "fully-resolved parameters -> {resolved_cfg}"']))
-    # steps 2-5 read the measured radius at RUNTIME so every pass uses the identical value
-    wflag = f'--window $(cat {D}/window.txt) ' if win_probe else ''
+    # steps 2-5 read the measured values at RUNTIME so every pass uses the identical ones --
+    # after checking they are there (needs_measured: a missing file expands to nothing)
+    wflag = f'--window $(cat {wtxt}) ' if "window" in measure else ''
+    mflag = f'$(cat {mtxt}) ' if "mass-acc" in measure else ''
+    measured_guard = (([needs_measured(wtxt, "a scan-window radius")]
+                       if "window" in measure else [])
+                      + ([needs_measured(mtxt, "the two mass-accuracy flags")]
+                         if "mass-acc" in measure else []))
 
     # DIA-NN aborts with "cannot find the temp folder" if --temp does not exist -- it will NOT
     # create it -- and it does so BEFORE doing any work, so the whole submission cycle is lost to
@@ -856,23 +1048,24 @@ def main():
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
         header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
-        f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
-        tmpguard("quant_step2"),
+        f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
+        *measured_guard, pick, tmpguard("quant_step2"),
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
-        f'  --threads {a.threads_per_file} {wflag}{flags}',
+        f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
         'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]))
 
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
         header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
-        f'echo "Step 3/5 empirical library assembly"; date', tmpguard("quant_step2"),
+        f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
+        tmpguard("quant_step2"),
         f'cp -r {D}/quant_step2 {D}/quant_step2_orig 2>/dev/null || true   # backup for resume',
         f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
         f'  --temp {D}/quant_step2 --out {D}/step3_assembly.parquet \\',
-        f'  --threads {a.assembly_cpus} {wflag}{flags}',
+        f'  --threads {a.assembly_cpus} {wflag}{mflag}{flags}',
         must_exist(empirical, "the empirical spectral library")]))
 
     # Step 4 — final pass (array): empirical lib -> per-file .quant
@@ -890,8 +1083,8 @@ def main():
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
         header("s4_finalpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
-        f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
-        tmpguard("quant_step4"),
+        f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
+        *measured_guard, pick, tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
         # Splat an empty list, not an empty string: a conditional string leaves a stray
@@ -907,16 +1100,16 @@ def main():
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
         f'  --temp {D}/quant_step4 --quant-ori-names{xic_arg}{xic_out} \\',
-        f'  --threads {a.threads_per_file} {wflag}{flags}',
+        f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]))
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
     s5 = write("step5_report.sbatch", "\n".join([
         header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
-        f'echo "Step 5/5 cross-run report"; date', tmpguard("quant_step4"),
+        f'echo "Step 5/5 cross-run report"; date', *measured_guard, tmpguard("quant_step4"),
         f'{DN} {all_f} --fasta {fasta} --lib {empirical} --use-quant --quant-ori-names \\',
         f'  --temp {D}/quant_step4 --matrices --out {D}/{report} \\',
-        f'  --threads {a.assembly_cpus} {norm} {wflag}{flags}',
+        f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}',
         must_exist(f'{D}/{report}', "the cross-run report"),
         # A step-4 task that failed silently leaves no .quant, and step 5 happily
         # reports on whatever survived. Count them: fewer quants than inputs means a
@@ -984,24 +1177,48 @@ def main():
     if win_probe:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from probe_window import SELECTION_RULE
+    if "mass-acc" in measure:
+        # Upstream's mass_acc_record() describes the CFG, which omits both flags -- "not in the
+        # cfg (DIA-NN calibrates it itself)". That is not what runs: step 1b measures it and every
+        # step gets the same pinned value. The documented level is known now; the measured one
+        # only at run time, in massacc.txt.
+        mass_acc = {"fixed": True, "measured": True, "documented": documented,
+                    "ms1": documented.get("--mass-acc-ms1"), "ms2": documented.get("--mass-acc"),
+                    "source": "measured at run time by step 1b (probe_window.py --measure "
+                              "mass-acc) and pinned for steps 2-5; planned by estimate_params.py "
+                              "(measure_with_diann) for an Orbitrap level with no documented "
+                              "DIA-NN value" + ("; " + ", ".join(
+                                  f"{f} {v:g} as documented" for f, v in sorted(documented.items()))
+                                  if documented else ""),
+                    "value_file": mtxt, "evidence_file": f"{D}/window.json",
+                    "probe_rule": SELECTION_RULE,
+                    "reason": "not in the cfg; measured with DIA-NN on representative runs in "
+                              "step 1b, the same value for every step"}
+    else:
+        mass_acc = mass_acc_record(ma)
+    if "window" in measure:
         scan_window = {"source": "measured at run time by step 1b (probe_window.py) and pinned "
                                  "for steps 2-5",
-                       "value": None, "value_file": f"{D}/window.txt",
+                       "value": None, "value_file": wtxt,
                        # which runs were measured is decided on the compute node, against the
                        # files as they are then; window.json is the record of it
                        "evidence_file": f"{D}/window.json",
                        "probe_rule": SELECTION_RULE}
+    else:
+        # --window pinned in the cfg (also when step 1b measures only mass accuracy), or, under
+        # --allow-auto-mass-acc, whatever the cfg hands every step
+        scan_window = dict(window_record(ma), value_file=None)
+    if win_probe:
         resolved = {"file": resolved_cfg, "produced": "runtime", "by": s1b,
-                    "note": "written by step 1b only after a radius is measured; absent until "
+                    "note": f"written by step 1b only after the {what} "
+                            f"{'are' if len(measure) > 1 else 'is'} measured; absent until "
                             "then, so a missing file after step 1b means step 1b failed"}
     elif safe["ok"]:
-        scan_window = dict(window_record(ma), value_file=None)
         resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
                     "note": "the cfg as given already pins mass accuracy and --window"}
     else:
         # --allow-auto-mass-acc. Describe what the steps are actually handed -- a `--window 7`
         # in the cfg IS passed to every step -- rather than assuming the override unpinned it.
-        scan_window = dict(window_record(ma), value_file=None)
         resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
                     "note": "NOT fully resolved: mass accuracy is not in the cfg "
                             "(--allow-auto-mass-acc), so DIA-NN chooses it at run time and "
@@ -1011,7 +1228,9 @@ def main():
     print(json.dumps({
         "out": out, "n_files": n, "report": f"{D}/{report}",
         "parallel_safe": {k: safe[k] for k in ("ok", "probe", "code", "reason")},
-        "mass_acc": mass_acc_record(ma),
+        # what step 1b measures at run time ("window", "mass-acc"); [] when nothing is measured
+        "step1b_measures": measure,
+        "mass_acc": mass_acc,
         "scan_window": scan_window,
         "resolved_params": resolved,
         "seeded": bool(seed), "seed_lib": predicted if seed else None,
