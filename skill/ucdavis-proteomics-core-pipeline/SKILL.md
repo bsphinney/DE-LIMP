@@ -744,11 +744,20 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       different values also declines; fix the value.
     - **`--window` — the chain handles it; do nothing.** `estimate_params.py` omits it by
       design, because the radius depends on the acquisition scheme and has to be
-      *measured*. **Step 1b** does that automatically: after library prediction it runs
-      `probe_window.py` (on the first file, falling through to the next if that one gives
-      no radius — up to 3) and pins the one radius into steps 2–5. Only once a radius is
-      measured does it write `<out>/params.resolved.cfg`; if all 3 fail, step 1b fails
-      loudly and steps 2–5 never start — they sit `DependencyNeverSatisfied`, so after the
+      *measured*. **Step 1b** does that automatically: after library prediction it hands
+      `probe_window.py` the whole cohort, which measures **three representative runs** —
+      the median, lower- and upper-quartile runs (a Bruker `.d` ranked by acquisition time
+      from its `analysis.tdf`, anything else by size), never a blank, wash or failed
+      injection (under half a typical run), and never a `.d` whose `analysis.tdf` index is
+      damaged (WAL-mode header, a non-empty `-wal`/`-journal` beside it, or an index that
+      stops short of `analysis.tdf_bin`) — and pins the **median** radius into steps 2–5. A
+      run that logs no radius is replaced by the next run nearest the median. Every probe,
+      and every run left out and why, is in `<out>/window.json`; the job log names damaged
+      `.d` (they are still searched — look at them). It never probes just the first file:
+      DIA-NN's README warns auto-optimised values "depend on which run is first in the
+      list". Only once a radius is measured does it write `<out>/params.resolved.cfg`; if no
+      radius comes back (3 runs without one, missing .NET, or its time budget spent), step
+      1b fails loudly and steps 2–5 never start — they sit `DependencyNeverSatisfied`, so after the
       fix resubmit step 1b **and** steps 2–5 (ids in `<out>/jobs.txt`; →
       `references/watcher.md`), not step 1b alone. An omitted `--window` therefore does **not**
       decline the chain — don't send the user off to measure it by hand, and don't read
@@ -760,11 +769,14 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       The decline message names the fix for its actual cause. To measure it yourself
       anyway, e.g. with `--no-probe-window`, after step 1 has built the library:
       ```bash
-      python3 scripts/probe_window.py --diann "<diann cmd>" --raw <one file> \
-          --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg>
+      python3 scripts/probe_window.py --diann "<diann cmd>" --raw <ALL the runs> \
+          --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg> \
+          --workdir <scratch dir> > window.json
       ```
-      It exits as soon as DIA-NN logs `Scan window radius set to N` (during calibration),
-      so it costs minutes. One file covers a set acquired with the same method.
+      Hand it every run, not one: it picks the representative runs itself. It stops each
+      DIA-NN as soon as it logs `Scan window radius set to N` (during calibration), so it
+      costs minutes per run. For `.raw`, export `DOTNET_ROOT` first (`ensure_dotnet8.sh`
+      prints it) or DIA-NN cannot open the files.
   - Override either way with `--no-parallel` (force one job) or `--parallel-threshold N`.
   - It **generates** the chain but does not submit it. Submit `<out>/submit.sh` (over
     `hive_exec.sh` on HIVE), then watch the **step-5** job — that's the one that writes

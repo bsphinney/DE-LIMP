@@ -241,26 +241,28 @@ measures the radius (below). Anything else that is not a positive integer (`0.5`
 measure over a mistake.
 
 **The chain does this for you.** When the cfg has no usable `--window`, `diann_parallel.py`
-inserts **step 1b** after library prediction: it runs `probe_window.py` on the first file
-and, if that file yields no radius (a blank, a wash, a failed injection), on the next — up
-to 3. It writes the radius to `<out>/window.txt`, and steps 2–5 read that file at runtime,
-so every pass uses the identical value. Any `--window` in the cfg is dropped from those
+inserts **step 1b** after library prediction: it hands `probe_window.py` the whole cohort
+(`file_list.txt`), which measures the radius on **representative runs** and pins their
+**median** (below — not the first file). It writes the radius to `<out>/window.txt` and
+every probe to `<out>/window.json`, and steps 2–5 read `window.txt` at runtime, so every
+pass uses the identical value. Any `--window` in the cfg is dropped from those
 steps so the measured value cannot collide with it. For Thermo `.raw` inputs step 1b
 exports the same .NET 8 environment every other step's DIA-NN gets — without it DIA-NN
 cannot read `.raw`, no radius is logged, and steps 2–5 wait on `afterok` for ever.
 
 Only after a radius is measured does step 1b write `<out>/params.resolved.cfg` — the cfg
 plus the measured `--window` — so a "resolved" cfg without a window can never exist; a
-resubmitted step 1b first removes the previous run's `window.txt` and resolved cfg. If no
-candidate yields a radius, step 1b exits non-zero with `FAILED:` and steps 2–5 never
+resubmitted step 1b first removes the previous run's `window.txt`, `window.json`, resolved
+cfg and probe logs. If no radius comes back, step 1b exits non-zero with `FAILED:` (keeping
+`window.json` as the evidence) and steps 2–5 never
 start: they were submitted `afterok` on that job id, so they sit `DependencyNeverSatisfied`
 even if a fixed step 1b is resubmitted and succeeds. Cancel them and resubmit step 1b and
 steps 2–5 chained on the new ids (ids in `jobs.txt`; reuse `step1.predicted.speclib`), or
-re-run `submit.sh`, which also repeats step 1 (→ `references/watcher.md`). Each probe attempt
-has `probe_window.py`'s 3600 s timeout, which kills DIA-NN's whole process group, so a
-forking wrapper (e.g. `apptainer exec`) cannot leave the read blocked or an orphan running. `search_provenance.json` records the file as `resolved_params_file` with
-`resolved_params_produced: "runtime"` (and `scan_window.source` saying it is measured by
-step 1b), because at generation time it does not exist yet. Its job id is in `jobs.txt`
+re-run `submit.sh`, which also repeats step 1 (→ `references/watcher.md`).
+`search_provenance.json` records the file as `resolved_params_file` with
+`resolved_params_produced: "runtime"` (and `scan_window` saying it is measured by step 1b,
+with `evidence_file` pointing at `window.json` and `probe_rule` stating the rule), because
+at generation time it does not exist yet. Its job id is in `jobs.txt`
 along with the rest of the chain, so `watch_run.sh --all` sees it fail.
 `--no-probe-window` disables step 1b, in which case a pinned `--window` in the cfg is
 required or the chain refuses to generate.
@@ -269,15 +271,134 @@ To measure it yourself instead, never by guessing — it depends on the acquisit
 (cycle time vs peak width), not the instrument model:
 
 ```bash
-# after step 1 has produced the predicted library
-python3 scripts/probe_window.py --diann "<diann cmd>" --raw <one file> \
-    --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg>
+# after step 1 has produced the predicted library. Give it ALL the runs -- it chooses.
+# Thermo .raw: export DOTNET_ROOT first, or DIA-NN cannot open the files.
+export DOTNET_ROOT="$(bash scripts/ensure_dotnet8.sh | tail -1)"; export PATH="$DOTNET_ROOT:$PATH"
+python3 scripts/probe_window.py --diann "<diann cmd>" --raw <all runs> \
+    --fasta <f.fasta> --lib <step1.predicted.speclib> --write-cfg <params.cfg> \
+    --workdir <scratch dir> [-- <the search's DIA-NN flags>] > window.json
 ```
 
-It terminates as soon as DIA-NN logs `Scan window radius set to N` (printed during
-calibration, well before the search completes), so it costs minutes, not a full pass.
-One file is enough for a set acquired with the same method; re-probe for a different
-gradient, cycle time, or instrument.
+It stops each DIA-NN as soon as it logs `Scan window radius set to N` (printed during
+calibration, well before the search completes), so it costs minutes per run, not a full
+pass. Re-probe for a different gradient, cycle time, or instrument.
+
+### Which runs step 1b measures
+
+Not the first file. DIA-NN's README ("Changing default settings") says automatic
+optimisation "is inherently noisy: even replicate injections may not produce identical
+results, and therefore the analysis results will depend on which run is first in the
+list", and recommends running "on several representative runs". The first file of a
+listing is whatever sorts first — often a blank, a QC injection, or a failed acquisition.
+`probe_window.select_representative()`:
+
+1. **Never probes a Bruker `.d` whose frame index cannot be trusted** — its `analysis.tdf`
+   header is in WAL mode (bytes 18–19 = 2,2), a non-empty `analysis.tdf-wal` or `-journal`
+   sits beside it, or the last indexed frame block (its `TimsId` offset plus the uint32
+   block size stored there) ends before 99.9% of `analysis.tdf_bin` or past its end. The
+   header and side files are read as bytes; the tdf is only ever opened with
+   `file:<tdf>?mode=ro&immutable=1` (`mode=ro` alone still reads a stale WAL and leaves
+   `-wal`/`-shm` files beside it). These runs are named as `WARNING` in the job log and
+   listed under `excluded_damaged` in `window.json`: **they are still searched** by steps 2–5,
+   so look at them.
+2. **Never probes a run under half a typical run's size** (a `.d`: the indexed bytes of its
+   `analysis.tdf_bin`), where typical is the median of the **larger half** of the runs — a
+   blank, wash or failed acquisition. Not the median of all runs: with a blank after every
+   sample the blanks are the majority and nothing would be excluded (6 samples + 7 blanks
+   probed blank3, blank6 and s2). Then it **ranks what is left by how much was acquired**:
+   when every run is a `.d` with a frame index, by acquisition time (max `Frames.Time`), with
+   the same half-of-typical floor on time (a short wash the size of a real run); otherwise by
+   size. The size floor comes first so a failed acquisition with no data at all (a `.d` with
+   neither file) cannot switch a timsTOF cohort to size ranking.
+3. **Probes the median run first**, then the lower and upper quartile runs (positions ⌊m/4⌋
+   and ⌈3m/4⌉ of the ranked eligible runs, distinct for every n ≥ 3), independent of input
+   order.
+4. **Replaces a run that logs no radius** with the remaining run nearest the median — the
+   fall-through from PR #70, applied to representative runs rather than to the next file.
+   After 3 runs without a radius step 1b gives up. DIA-NN's missing-.NET error is not
+   replaced: no other `.raw` can succeed in that environment, so it stops at once and prints
+   the export.
+5. **Pins the median** of the measured radii (the lower middle of two). If fewer than three
+   answered — the replacements ran out, or the time budget did — it still pins, as the
+   first-file fall-through did, but `window.json` says `incomplete: true` and the job log
+   prints a `WARNING`. `window.json` records every probe (role, size, time, radius, seconds,
+   log) and every run left out and why.
+
+**Thermo `.raw`** is ranked by size only. Reading a `.raw`'s acquisition length or checking
+its integrity needs Thermo's RawFileReader (.NET), the library DIA-NN itself loads, so the
+probe does not; a `.raw` DIA-NN cannot open logs no radius and is replaced.
+
+Why these rules, measured on HIVE:
+
+- **The truncated index.** 342 of 39,374 Bruker `.d` on HIVE have an `analysis.tdf` whose
+  frame index stops early while `analysis.tdf_bin` is complete (a stale mid-acquisition
+  `-wal` was checkpointed into the finished tdf by a read-write open); every one has a WAL
+  header, intact ones are 1,1. The FRAN pilot's size rule picked one:
+  `8aug25_KogantiLys7uL_60spd_6_S4-B6_1_15704.d`, `tdf_bin` 2.40 GB, index 1,451 frames /
+  134 s covering **0.74%** of it (read with the immutable URI), where its 11 siblings index
+  13,736–13,743 frames / 21.0 min covering 99.9999–100%. DIA-NN read 121 cycles and 80
+  precursors. On that cohort (srun jobs 23536639 and 23536675) the rule excludes run 6 by its WAL header,
+  ranks the other 11 by time, and picks B11 / B3 / B9 in 0.07 s; two intact blanks with a
+  4.2 MB stale `-wal` (`apr26/blankDia_S1-H11_1_21474.d`, `June26/blankDia_S1-H2_1_22321.d`)
+  are refused without being opened, and no file in any of the 14 `.d` changed.
+- **Half, and of the larger half** — sizes in `raw_data/Lumos1/noi25`: washes 120–240 MB
+  and 60-min washes 527–567 MB beside 80 90-min DIA runs of 0.93–2.85 GB (median 2.12 GB;
+  median of the larger half 2.42 GB). The 60-min washes are 25–27% of that DIA median, so a
+  25% floor let them in. At 50% of the larger half's median they are out; 2 of the 80 DIA
+  runs (38–40%) are not probed (still searched). The rule keeps blanks out while they are at
+  most 60–75% of the list; the 16 60-min runs of one project plus every wash in that folder
+  (86% washes) probe three washes, so hand the search the cohort, not the folder.
+- **Several runs, median** — DIA-NN 2.7.0, 200-protein library / full predicted library:
+
+  | set | runs probed | full library | 200-protein library |
+  |---|---|---|---|
+  | Exploris 480 `.raw`, 5 runs | TT34 / TT33 / TT32 | 7, 7, 7 → 7 | 7, 8, 8 → 8 |
+  | timsTOF Pro `.d`, 8 runs + a 0-byte failed acquisition (excluded) | A3 / A7 / A4 | 14, 10, 11 → 11 | 15, 12, 12 → 12 |
+
+  A run's radius is reproducible (A3 gave 14 in three separate probes); it is the runs that
+  differ, so a one-file probe of that timsTOF cohort pins 10, 11 or 14 depending on the run.
+  The old first-file step 1b handed DIA-NN the failed acquisition, never got a radius, and
+  DIA-NN wrote `report.parquet` into `<out>` — the path step 5's check reads.
+- **This step 1b, run as a compute node would** (DIA-NN 2.7.0, 200-protein library, 16 CPUs):
+  - timsTOF, the 8 runs + failed acquisition above (srun job 23538112): the failed acquisition
+    is excluded by size, the 8 runs are ranked by acquisition time, A6 / A2 / A1 give 12, 12, 11
+    → **12** in 252 s, 129 DIA-NN lines streamed into the job log, no `diann-linux` left. Every
+    run there is 21.0 min, so which full-length runs the quartiles land on comes down to
+    sub-second differences in the last frame's time; ranked by size instead (srun job
+    23537237, before the size floor came first) it probed A7 / A3 / A4 → 12, 15, 12 → **12**.
+  - Exploris `.raw`, 5 runs (srun job 23537237): TT33 / TT34 / TT32 → 8, 7, 8 → **8** in 67 s.
+    With the `.NET` export line removed: exit 1 after one probe in 1.8 s (`stopped_because:
+    environment`), no `window.txt`, no resolved cfg, no traceback.
+
+**Each probe gets its own `--temp` and `--out`** under `<out>/window_probe/probe<N>_<run>/`
+(with its `probe.log`), placed before `--threads` so the search's flags stay the tail of
+DIA-NN's argv, as in steps 2–5. Without them a probe that never logs a radius writes its
+report into `<out>` and, if the search completes, its `.quant` next to the raw file.
+
+**One at a time, live in the job log.** Measured on a 16-CPU `high` allocation with full
+mouse predicted libraries, the same three runs each way: timsTOF `.d` 1083 s one at a time
+vs 1314 s concurrent (loading each `.d` took 227–238 s concurrent against 39–43 s alone);
+Exploris `.raw` 289 s vs 250 s. Neither wins, concurrent needs three probes' memory (~30 GB
+on those timsTOF runs), and one at a time is what lets a failed run be replaced. Each probe
+is announced (`[probe_window] probe 1/3: <run> (median, 2.20 GB, 21.0 min), 16 threads`) and
+DIA-NN's output is copied into the step-1b log as it arrives, tagged `[probe N]`: 1083 s of
+silence is past `watch_run.sh`'s 15-minute stall rule, whose playbook is to cancel the job.
+
+**Time.** `--timeout` (3600 s) is per probe, so one hung run is cut and replaced — one
+timsTOF probe once made no progress for 28 minutes while other jobs read the same storage.
+`--budget` covers all probes, replacements included: step 1b passes its 4-hour wall clock
+less 10 minutes (13,800 s), so the probe stops itself and writes `window.json` before SLURM
+would kill the job. Three probes at the full 3600 s still fit.
+
+**Stopping DIA-NN means all of it.** `--diann` is not always the engine: without a native
+build `acquire_tools.sh` records `apptainer exec --bind /quobyte:/quobyte <sif>
+/diann-*/diann-linux`, and sites wrap binaries in scripts. DIA-NN runs in its own process
+group, writes to `probe.log` rather than a pipe a grandchild could hold open, and every stop
+(radius found: SIGTERM then SIGKILL after 30 s; timeout, budget, or SIGTERM/SIGINT/SIGHUP to
+the probe: SIGKILL) goes to the whole group. On HIVE (apptainer 1.5.3, srun job 23521026) with
+`--diann "apptainer exec … bash -c 'sleep 40; echo Scan window radius set to 9'"`: a 5 s
+timeout returned after 5.3 s with 0 container processes left, and SIGTERM to the probe left
+0 (a probe that signalled only its child returned after 41.2 s and left 2).
 
 ## DIA-NN exits 0 on fatal errors — never trust the job state alone
 
