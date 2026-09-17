@@ -64,7 +64,7 @@ any auto-fix you applied to the user.
 | `disk` | Disk quota / No space left | free space or point `--out` elsewhere; resubmit |
 | `missing_input` | No such file / fasta/raw not found | a path is wrong — re-check Windows→WSL/HIVE path translation; resubmit |
 | `stalled` | job **RUNNING** but log frozen > `--stall-min` (default 15 min) | a hung file. `scancel` the task/job, **retry it once on a fresh node**; if it stalls again, **drop that file** and continue (see playbook), note it in Data Quality Notes |
-| `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs |
+| `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file) |
 | `unknown_failure` | job FAILED with no known signature | read the full log; diagnose; fix; resubmit (and add the new signature here) |
 
 ## SLURM specifics (HIVE)
