@@ -1317,7 +1317,8 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     if part:  lines.append(f"#SBATCH --partition={part}")
     if acct:  lines.append(f"#SBATCH --account={acct}")
     if q:     lines.append(f"#SBATCH --qos={q}")
-    # Preemptible queue: without --requeue a preempted search is simply lost. The rule is
+    # Preemptible queue: requeue a preempted search rather than lose it (HIVE's JobRequeue=1
+    # does this by default; another cluster's may not). The rule is
     # diann_parallel.needs_requeue(), shared with the chain's step headers.
     requeue = _diann_parallel_mod().needs_requeue(part, q)
     if requeue:

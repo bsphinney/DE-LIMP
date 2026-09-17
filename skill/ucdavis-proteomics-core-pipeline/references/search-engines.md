@@ -108,38 +108,63 @@ msconvert if you don't already have them.
 MBR), chained `afterok` by `<out>/submit.sh`; any other cfg becomes one job at `<job>.sh`.
 Every job is held to the same contract as the 5-step chain
 (→ `references/diann_parallel.md`, "DIA-NN exits 0 on fatal errors"):
-- **Queue.** `--partition/--account/--qos` go into every job header, and `--requeue` is added
-  on `low` or a `public*` QOS by the same rule as the chain (`diann_parallel.needs_requeue`).
-  Omit them and the queue is detected (`slurm_queue()`). Before this, the single-shot path
-  dropped them and re-detected a queue over the user's choice (on the 2026-09-16 FRAN pilot,
-  `genome-center-grp/high` in place of the requested `publicgrp/low`).
-- **Job 1 fails unless `<out>/diann_lib.predicted.speclib` exists and is non-empty.** That is
-  the name DIA-NN 2.7.0 writes for `--out-lib <out>/diann_lib` (verified).
-- **Job 2 fails unless `report.parquet` exists and holds every input run.**
-  `scripts/check_report_runs.py` counts distinct `Run` values against the inputs and names
-  the missing ones. Measured on DIA-NN 2.7.0: one readable `.raw`, one truncated `.raw` and
-  one nonexistent path → DIA-NN logged `ERROR: DIA-NN tried but failed to load the following
-  files: ...`, **exited 0**, and wrote a report holding **1 of 3** runs. The check reads the
-  `Run` column with pyarrow or polars, and without either falls back to DIA-NN's own
-  `report.stats.tsv`, counting only rows with `Precursors.Identified > 0` — the stats file
-  lists the two failed files too, with zeros. (`report.pg_matrix.tsv`'s header listed all
-  three, so it is no evidence.) With no parquet reader **and** `--no-stats` in the cfg the
-  check cannot count, and fails rather than pass an unverified report.
-- **The cfg is spliced into the search command safely.** Glob tokens are quoted
-  (`--cut 'K*,R*'`, `--var-mod 'UniMod:1,42.010565,*n'`) so a matching file in the output
-  folder cannot rewrite them, and `#` comment lines are skipped — one would otherwise comment
-  out the input files, `--lib` and `--out`.
-- **`--rt-profiling` stays in the search job.** Only `--fasta-search --predictor
-  --gen-spec-lib` (library job) and `--reanalyse --matrices` (re-added) are taken out. The
-  search job's first MBR pass is where the empirical library is built, and `--rt-profiling`
-  sets how ("IDs, RT and IM profiling", which the DIA-NN README calls strongly recommended).
-  It is not a no-op: on 2.7.0 the log prints `The spectral library (if generated) will
-  retain the original spectra but will include empirically-aligned RTs` only when it is set.
+- **Queue.** `--partition/--account/--qos` go into every job header — DIA-NN, Sage,
+  FragPipe, AlphaDIA and single-file Radiant alike. Omit all three and the queue is detected
+  (`slurm_queue()`). Give only some and the rest are filled from **your association that
+  matches all of them** (`--partition low` → `publicgrp`/`publicgrp-low-qos`); if none
+  matches, generation stops and lists your associations — filling from the wrong one wrote
+  headers HIVE rejects (`Invalid account or account/partition combination specified`,
+  `Invalid qos specification`; `srun --test-only`, 2026-09-16). `publicgrp` on `low` gets
+  `--qos=publicgrp-low-qos` on every path, as the chain always did. `--requeue` is added on
+  `low` or a `public*` QOS (`diann_parallel.needs_requeue`, shared with the chain). Before
+  this, the single-shot path dropped the flags and re-detected a queue over the user's choice
+  (FRAN pilot: `genome-center-grp/high` in place of the requested `publicgrp/low`).
+- **Each job deletes its artefact before DIA-NN runs, then asserts it.** An existence check
+  cannot tell this run's file from the previous search's in the same `--out`: reproduced on
+  2.7.0 (review srun 23512013), a re-run with no .NET logged `ERROR: cannot read .raw files`,
+  exited 0, left the old `report.parquet`/`report.stats.tsv` byte-identical, and both checks
+  passed on them. So job 1 removes, then requires, `<out>/diann_lib.predicted.speclib` (the
+  name 2.7.0 writes for `--out-lib <out>/diann_lib`); job 2 removes `report.parquet` and
+  `report.stats.tsv`, then requires the report and runs the check below. The inline
+  (no `--sbatch`) path does the same. A failed re-run therefore leaves **no** report in `--out`.
+- **Job 2 fails unless the report holds every input run.** `scripts/check_report_runs.py`
+  counts distinct `Run` values against the inputs. Measured on 2.7.0: one readable `.raw`, one
+  truncated `.raw` and one nonexistent path → `ERROR: DIA-NN tried but failed to load the
+  following files: ...`, **exit 0**, a report holding **1 of 3** runs. It reads `Run` with
+  pyarrow or polars; without either it falls back to DIA-NN's `report.stats.tsv`, counting
+  rows with `Precursors.Identified > 0` (failed files are listed there too, with zeros;
+  `report.pg_matrix.tsv`'s header named all three, so it is no evidence). With no parquet
+  reader **and** `--no-stats` it cannot count, and fails. A run counts as present with a
+  single row: a wash injection searched beside a real run (2.7.0, srun 23512769) was read
+  (`MS1.Signal` 3.5e11), identified 1 precursor, had 1 row in the report, and passes — this
+  catches dropped runs, not poor ones. For each missing run the message says what the stats
+  file shows: MS1/MS2 signal means DIA-NN **read** it and nothing passed the q-value filter (a
+  blank or failed injection); all zeros or no row keeps both explanations, since two readable
+  runs searched against an empty library also had 0 in every column.
+- **Inputs that share a run name are refused at generation.** DIA-NN names a run by its file
+  name without the folder, so `/plate1/s1.raw` and `/plate2/s1.raw` would be one `Run`.
+- **The cfg reaches the search command word for word.** The library job reads the cfg with
+  `--cfg`; the search job has it spliced into bash. Each line is tokenised like the skill's
+  other cfg readers (shlex, `#` comments allowed inline) and every token is shell-quoted, so
+  `--cut 'K*,R*'` cannot be rewritten by a matching file, `--channels SILAC,L,KR,0:0;
+  SILAC,H,...` is not cut at the `;` (the README says `;`, `*` and `!` need escaping on
+  Linux), a `# comment` cannot swallow the inputs, `--lib` and `--out`, and `$X` stays
+  literal as it is under `--cfg`.
+- **`--rt-profiling` stays in the search job.** Skill 2.4.3 and earlier stripped it, so the
+  same cfg gives a different single-shot search on those versions — check the skill version
+  in the provenance before comparing or reproducing an older run. Only `--fasta-search --predictor --gen-spec-lib` (library job) and
+  `--reanalyse --matrices` (re-added) are taken out. The search job's first MBR pass is where
+  the empirical library is built, and `--rt-profiling` sets how ("IDs, RT and IM profiling",
+  which the DIA-NN README calls strongly recommended). It is not a no-op: on 2.7.0 the log
+  prints `The spectral library (if generated) will retain the original spectra but will
+  include empirically-aligned RTs` only when it is set.
 
 **5-step chain resources from `run_search.py`.** `--libpred-cpus` (step 1, default 16),
-`--assembly-cpus` (steps 3 and 5, default 64) and `--time-per-file` (hours per array task in
-steps 2 and 4, default 2) are forwarded to `diann_parallel.py` when given. Ask for fewer
-assembly CPUs when a 64-CPU job would wait a long time on a busy preemptible queue.
+`--assembly-cpus` and `--assembly-mem` (steps 3 and 5, defaults 64 CPUs / 128 GB) and
+`--time-per-file` (hours per array task in steps 2 and 4, default 2) are forwarded to
+`diann_parallel.py` when given. Ask for less when a 64-CPU / 128 GB job would wait a long time
+on a busy preemptible queue. They size only the chain: when routing picks single-shot,
+`run_search.py` prints a NOTE saying they were ignored.
 
 ### Radiant DIA + Fulcrum (Seer; Thermo Orbitrap only)
 

@@ -582,10 +582,16 @@ def clear_stale(*paths):
 def needs_requeue(partition, qos):
     """Should a job on this queue carry `#SBATCH --requeue`?
 
-    publicgrp/low is PREEMPTIBLE: without --requeue a preempted job is simply lost. The one
-    rule for every sbatch the skill writes -- this header and run_search.emit_sbatch() -- so a
-    single-shot job and a chain step on the same queue cannot disagree about it. They did:
-    emit_sbatch keyed on `partition == "low"` alone and ignored a public QOS."""
+    Shared by this header() and run_search.emit_sbatch(), which used to disagree (emit_sbatch
+    keyed on `partition == "low"` alone and ignored a public QOS). radiant_parallel.header()
+    (public QOS only) and diatracer_parallel.py (`low` only) still carry their own rules.
+
+    What it protects, measured on HIVE 2026-09-16 (`scontrol show partition/config`):
+    preemption is by partition (PreemptType=preempt/partition_prio; `low` PreemptMode=REQUEUE,
+    `high` OFF) and JobRequeue=1, so HIVE requeues a preempted batch job even without this
+    line. It is written anyway because JobRequeue=0 on another cluster would make a preempted
+    job simply lost. The public-QOS clause also marks publicgrp jobs on `high`, which are not
+    preempted there; on such a job the line only allows a requeue after a node failure."""
     return (qos or "").startswith("public") or partition == "low"
 
 

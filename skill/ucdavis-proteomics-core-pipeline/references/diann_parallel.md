@@ -311,8 +311,9 @@ the folder — a previous search's `.quant` for some other run would otherwise m
 number — and names each missing run (`MISSING: <file> has no final-pass .quant`).
 
 The **single-shot** search `run_search.py` writes for ≤ 5 files has the same contract: its
-library job asserts `diann_lib.predicted.speclib`, and its search job asserts
-`report.parquet` and then runs `scripts/check_report_runs.py`, which fails unless the report
-holds one `Run` per input (→ `references/search-engines.md`). Re-measured on DIA-NN 2.7.0:
+library job deletes, then asserts, `diann_lib.predicted.speclib`, and its search job deletes
+`report.parquet` and `report.stats.tsv`, then asserts the report and runs
+`scripts/check_report_runs.py`, which fails unless the report holds one `Run` per input
+(→ `references/search-engines.md`). Re-measured on DIA-NN 2.7.0:
 a search over one readable `.raw`, one truncated `.raw` and one nonexistent path exited 0
 with a report holding 1 of the 3 runs.
