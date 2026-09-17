@@ -23,12 +23,16 @@
   memory in any chat product is the client resending history, and DE-LIMP wasn't.
 - **Your project name and notes now reach the AI — for the dataset you have loaded, and only
   yours.** Data Chat looks up the activity-log rows whose search output folder is the loaded
-  dataset's and, where a row records a user, whose user is you. Notes the app writes itself
-  ("Loaded from session file", "Job: … (…)", "Backfilled from job queue") are not forwarded.
-  The result is labelled in the prompt as recorded by the user, so the model can't mistake
-  your note for its own earlier conclusion. Nothing is sent when nothing matches (including
-  every uploaded-file or demo dataset, which has no search folder) — no placeholder, no
-  invented default, and never "the most recent row". On the public Hugging Face Space no
+  dataset's and, where a row records a user, whose user is you. The loaded dataset's folder is
+  recorded only when data is loaded from a search output (HPC browse, job queue, History tab,
+  facility history, or a session that carries one) and is cleared when you upload a report or
+  load example data; it is also tied to the loaded samples, so it can never outlive the data
+  it describes. Notes the app writes itself ("Loaded from session file", "Job: … (…)",
+  "Backfilled from job queue") are not forwarded. The result is labelled in the prompt as
+  recorded by the user, so the model can't mistake your note for its own earlier conclusion.
+  Nothing is sent when nothing matches — including an uploaded report or example data, even
+  right after a search was loaded — no placeholder, no invented default, and never "the most
+  recent row". On the public Hugging Face Space no
   activity-log notes are sent at all: every visitor runs as the same user in the same home
   directory, so a row cannot be attributed to the person asking.
 - **The AI Summary prompt no longer asks the model to answer from memory.** It used to
@@ -97,15 +101,25 @@ endpoint URL and API key is an anonymous visitor and every visitor shares one R 
 - **API keys no longer follow you across providers.** Switching the AI provider, or changing
   the endpoint host, now clears the API key box. Before, a Gemini key typed first was sent as
   a `Bearer` token to the OpenAI-compatible endpoint. As a second guard, a key in Google's
-  documented Gemini format is refused by the OpenAI-compatible path outright.
+  documented Gemini format is refused by the OpenAI-compatible path — except when the endpoint
+  is Google's own (`https://generativelanguage.googleapis.com/v1beta/openai`); the refusal
+  message explains why and how to proceed (e.g. a LiteLLM proxy's own key). The server also
+  binds the typed key to the provider and endpoint host it was entered for and refuses to send
+  it anywhere else, so an endpoint edit and a click arriving together cannot carry the old key
+  to the new host; emptying the endpoint box (the default host) or editing only its path no
+  longer clears the key.
 - **The endpoint URL can no longer point the server at internal addresses (SSRF).** The URL is
   validated before any request: https only; no user name, password, query or fragment; and on
   the public Space the host must resolve to public internet addresses — loopback, RFC 1918,
   CGNAT, IPv6 ULA, link-local and cloud-metadata ranges are refused, including IPv4 embedded
   in IPv6. The validated addresses are pinned for the connection and redirects are not
   followed, so DNS cannot change between the check and the request. A local install may use a
-  private https endpoint, or `http://localhost`, for a model server on its own machine or
-  network; metadata and link-local addresses are refused everywhere. Upstream error bodies are
+  private https endpoint, or plain `http://` to a model server on its own machine, its local
+  network (RFC 1918 / CGNAT / ULA) or the container host (`host.docker.internal` — in Docker
+  mode `localhost` is the container), since vLLM, llama.cpp and Ollama serve plain http by
+  default; a one-line warning says the key is then sent unencrypted. Metadata and link-local
+  addresses are refused everywhere. Hosts written in ambiguous numeric forms (`012.0.0.1`,
+  `0x7f.1`, `127.1`) are refused, because curl reads them differently from how they look. Upstream error bodies are
   no longer echoed into the chat — a failure is one short line (HTTP status plus the
   provider's own short error message, secrets redacted, markup stripped).
 - **A slow AI request can no longer freeze the public Space for 15 minutes.** Requests are
@@ -147,6 +161,26 @@ endpoint URL and API key is an anonymous visitor and every visitor shares one R 
   are dropped, the history always starts with a user turn and alternates, so vLLM
   Mistral/Gemma/Llama templates no longer reject every request after the first failure.
 - Gemini model names are validated before they are placed in the request path.
+- **A large protein selection can no longer overflow the request.** Selected proteins fill the
+  size budget first but are now capped by it — each also counted for its entry in the prompt's
+  selection list. (1,000 selected proteins previously produced a 52,796-character table against
+  a 40,000-character budget and failed on 65k-token models.) You are told how many selected
+  proteins were left out, and the prompt's selection list names exactly those that were sent.
+- **The Claude export prompt describes measurement depth only when it exists.** It asked for
+  "measurement depth" even under MaxLFQ and never explained the `NPrec`/`PropObs` columns it
+  included. It now uses the same evidence rule as the AI Summary, read from the pipeline
+  descriptor (architectural rule #3).
+- **A failed AI request saved in an older session is no longer shown or exported.** Sessions
+  saved before 4.1.0 could hold an `API Error: …` string as the Run Comparator narrative; on
+  restore it is shown as "not available (saved error)" and left out of exports.
+- **`DELIMP_PUBLIC_DEPLOYMENT` environment variable.** Public-vs-local AI policy was detected
+  only from Hugging Face's `SPACE_ID`, so any other publicly reachable server got the
+  permissive local policy. `DELIMP_PUBLIC_DEPLOYMENT=1` forces the public policy, `=0` forces
+  local; unset keeps `SPACE_ID` detection, and an unrecognised value applies the public policy.
+  See `docs/GOTCHAS.md`.
+- **The Hugging Face page and the User Guide describe the AI features accurately.** They said
+  Data Chat sends per-sample expression data (it does not) and that a Gemini key is required
+  (any supported provider works).
 
 ## [4.0.9] — 2026-08-27
 

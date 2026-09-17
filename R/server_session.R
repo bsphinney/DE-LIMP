@@ -690,6 +690,9 @@ server_session <- function(input, output, session, values, add_to_log) {
 
       # Restore reactive values
       values$raw_data   <- session_data$raw_data
+      # Identity comes from the session's own search settings (NULL when it has none)
+      values$loaded_dataset <- loaded_dataset_identity(session_data$diann_search_settings$output_dir,
+                                                       session_data$raw_data, "session_file")
       values$metadata   <- session_data$metadata
       values$fit        <- session_data$fit
       values$y_protein  <- session_data$y_protein
@@ -754,8 +757,11 @@ server_session <- function(input, output, session, values, add_to_log) {
         values$comparator_run_a            <- session_data$comparator_run_a
         values$comparator_run_b            <- session_data$comparator_run_b
         values$comparator_mode             <- session_data$comparator_mode
-        values$comparator_gemini_narrative <- session_data$comparator_gemini_narrative
-        values$comparator_ai_narrative_source <- session_data$comparator_ai_narrative_source
+        # A pre-4.1.0 session may hold a stored "API Error: ..." as the narrative
+        restored_ai <- ai_restored_narrative(session_data$comparator_gemini_narrative,
+                                             session_data$comparator_ai_narrative_source)
+        values$comparator_gemini_narrative <- restored_ai$narrative
+        values$comparator_ai_narrative_source <- restored_ai$source
         values$comparator_mofa             <- session_data$comparator_mofa
       }
 
@@ -3338,6 +3344,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
         if (all(c("raw_data", "metadata", "fit") %in% names(session_data))) {
           # Full restore
           values$raw_data   <- session_data$raw_data
+          values$loaded_dataset <- loaded_dataset_identity(od, session_data$raw_data, "history_session")
           values$metadata   <- session_data$metadata
           values$fit        <- session_data$fit
           values$y_protein  <- session_data$y_protein
@@ -3385,8 +3392,10 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
             values$comparator_run_a <- session_data$comparator_run_a
             values$comparator_run_b <- session_data$comparator_run_b
             values$comparator_mode <- session_data$comparator_mode
-            values$comparator_gemini_narrative <- session_data$comparator_gemini_narrative
-            values$comparator_ai_narrative_source <- session_data$comparator_ai_narrative_source
+            restored_ai <- ai_restored_narrative(session_data$comparator_gemini_narrative,
+                                                 session_data$comparator_ai_narrative_source)
+            values$comparator_gemini_narrative <- restored_ai$narrative
+            values$comparator_ai_narrative_source <- restored_ai$source
             values$comparator_mofa <- session_data$comparator_mofa
           }
           if (!is.null(session_data$diann_search_settings)) {
@@ -3446,6 +3455,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
         showNotification("Reading DIA-NN report...", type = "message", duration = 30, id = "hist_load")
         raw_data <- suppressMessages(suppressWarnings(limpa::readDIANN(report_path, format = "parquet")))
         values$raw_data <- raw_data
+        values$loaded_dataset <- loaded_dataset_identity(od, raw_data, "history_report")
         values$qc_stats <- get_diann_stats_r(report_path)
         values$uploaded_report_path <- report_path
         values$original_report_name <- basename(report_path)
@@ -3804,6 +3814,7 @@ Keep the tone approachable and encouraging. Avoid jargon where possible, and def
 
     # --- Loaded data & pipeline results ---
     values$raw_data <- NULL
+    values$loaded_dataset <- NULL
     values$metadata <- NULL
     values$fit <- NULL
     values$y_protein <- NULL

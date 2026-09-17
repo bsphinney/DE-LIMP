@@ -600,13 +600,27 @@ test_that("A: a Gemini-format key is recognised as belonging to another provider
   expect_false(ai_key_belongs_to_other_provider("openai_compat", NULL))
 })
 
-test_that("A: the OpenAI-compatible path refuses to send a Gemini key", {
-  out <- ask_openai_compat("sys", "q", gemini_like_key, "m",
-                           base_url = "https://llm.metabolomics.us/v1", policy = priv)
-  expect_true(is_ai_error(out))
-  expect_match(out, "Gemini key")
-  expect_false(grepl(gemini_like_key, out, fixed = TRUE))
-  expect_true(is_ai_error(list_openai_compat_models(gemini_like_key, policy = priv)))
+test_that("A: the OpenAI-compatible preflight refuses to send a Gemini key to a non-Google host", {
+  pre <- ai_openai_preflight(gemini_like_key, "https://llm.metabolomics.us/v1", priv,
+                             resolver = fake_resolver("128.120.1.1"))
+  expect_false(pre$ok)
+  expect_match(pre$error, "Gemini")
+  expect_false(grepl(gemini_like_key, pre$error, fixed = TRUE))
+  expect_true(ai_openai_preflight("sk-gateway-key", "https://llm.metabolomics.us/v1", priv,
+                                  resolver = fake_resolver("128.120.1.1"))$ok)
+})
+
+test_that("A: ask_openai_compat and model listing run the preflight before any request (source guard)", {
+  root <- normalizePath(file.path(getwd(), "..", ".."))
+  exprs <- parse(file.path(root, "R", "helpers_ai.R"))
+  for (fn in c("ask_openai_compat", "list_openai_compat_models")) {
+    e <- Filter(function(x) is.call(x) && identical(x[[2]], as.name(fn)), as.list(exprs))[[1]]
+    body_txt <- paste(deparse(e[[3]]), collapse = "\n")
+    pre_at <- regexpr("ai_openai_preflight(", body_txt, fixed = TRUE)
+    req_at <- regexpr("request(", body_txt, fixed = TRUE)
+    expect_gt(pre_at, 0)
+    expect_lt(pre_at, req_at)
+  }
 })
 
 test_that("A: the provider-switch observer clears the key (source guard)", {
@@ -668,17 +682,47 @@ test_that("B: https to a public host is accepted and empty input means the provi
   expect_true(ai_validate_endpoint(NULL, policy = pub, resolver = fake_resolver("93.184.216.34"))$ok)
 })
 
-test_that("B: plain http is refused except for localhost on a local install", {
+test_that("B: plain http is refused on a public deployment and to public hosts everywhere", {
   expect_false(ai_validate_endpoint("http://api.example.org/v1", policy = pub,
                                     resolver = fake_resolver("93.184.216.34"))$ok)
   expect_false(ai_validate_endpoint("http://api.example.org/v1", policy = priv,
                                     resolver = fake_resolver("93.184.216.34"))$ok)
   expect_false(ai_validate_endpoint("http://localhost:8000/v1", policy = pub,
                                     resolver = fake_resolver("127.0.0.1"))$ok)
-  expect_true(ai_validate_endpoint("http://localhost:8000/v1", policy = priv,
-                                   resolver = fake_resolver("127.0.0.1"))$ok)
-  expect_false(ai_validate_endpoint("http://192.168.1.20:8000/v1", policy = priv,
-                                    resolver = fake_resolver("192.168.1.20"))$ok)
+  expect_false(ai_validate_endpoint("http://192.168.1.50:8000/v1", policy = pub)$ok)
+  expect_false(ai_validate_endpoint("http://host.docker.internal:11434/v1", policy = pub,
+                                    resolver = fake_resolver("192.168.65.254"))$ok)
+})
+
+test_that("round 2 item 1: a local install accepts http to this computer, the LAN and the Docker host", {
+  cases <- list(
+    list(url = "http://localhost:8000/v1", ips = "127.0.0.1"),
+    list(url = "http://192.168.1.50:8000/v1", ips = character(0)),            # literal RFC1918
+    list(url = "http://10.20.30.40:8000/v1", ips = character(0)),
+    list(url = "http://172.20.0.5:8080/v1", ips = character(0)),
+    list(url = "http://100.101.102.103:8000/v1", ips = character(0)),         # CGNAT / Tailscale
+    list(url = "http://[fd12:3456::1]:8000/v1", ips = character(0)),          # ULA
+    list(url = "http://vllm.lab.internal:8000/v1", ips = "192.168.1.50"),
+    list(url = "http://host.docker.internal:11434/v1", ips = "192.168.65.254"),
+    list(url = "http://host.containers.internal:11434/v1", ips = "10.88.0.1")
+  )
+  for (case in cases) {
+    v <- ai_validate_endpoint(case$url, policy = priv, resolver = fake_resolver(case$ips))
+    expect_true(v$ok, info = case$url)
+    expect_match(v$warning, "unencrypted", info = case$url)
+  }
+  expect_null(ai_validate_endpoint("https://vllm.lab.internal/v1", policy = priv,
+                                   resolver = fake_resolver("192.168.1.50"))$warning)
+})
+
+test_that("round 2 item 1: metadata and link-local stay refused over http on a local install", {
+  expect_false(ai_validate_endpoint("http://169.254.169.254/v1", policy = priv)$ok)
+  expect_false(ai_validate_endpoint("http://metadata.example/v1", policy = priv,
+                                    resolver = fake_resolver("169.254.169.254"))$ok)
+  expect_false(ai_validate_endpoint("http://[fe80::1]:8000/v1", policy = priv)$ok)
+  expect_false(ai_validate_endpoint("http://host.docker.internal:11434/v1", policy = priv,
+                                    resolver = fake_resolver("169.254.169.254"))$ok)
+  expect_match(ai_http_key_warning("192.168.1.50"), "unencrypted")
 })
 
 test_that("B: a local install may use a private https endpoint but never metadata", {
@@ -977,11 +1021,48 @@ test_that("H: selected rows are listed first and survive trimming", {
   expect_lte(nchar(out), 2000)
 })
 
-test_that("H: selected rows are kept even when they alone exceed the budget", {
+test_that("round 2 item 3: selected rows are capped by the budget and the drop is reported", {
   df <- make_de_df(50)
   df$Protein <- sprintf("PROT%03d", seq_len(50))
   out <- format_ai_table(df, max_chars = 10, pin = "PROT050")
-  expect_true(grepl("PROT050", out, fixed = TRUE))
+  expect_false(grepl("PROT050", out, fixed = TRUE))
+  expect_equal(attr(out, "pinned_sent"), character(0))
+  expect_equal(attr(out, "pinned_dropped"), "PROT050")
+})
+
+test_that("round 2 item 3: 1000 selected proteins fit the 40,000-char budget together with the selection list", {
+  set.seed(7)
+  n <- 3000
+  df <- data.frame(Protein = sprintf("sp|P%05d|G%d_HUMAN", seq_len(n), seq_len(n)),
+                   Genes = sprintf("GENE%d", seq_len(n)), logFC = rnorm(n), AveExpr = rnorm(n, 20),
+                   t = rnorm(n), P.Value = runif(n), adj.P.Val = runif(n), B = rnorm(n),
+                   NPrec = 3L, PropObs = runif(n), stringsAsFactors = FALSE)
+  pin <- df$Protein[1001:2000]
+  budget <- ai_provider_field("openai_compat", "max_payload_chars")
+  tbl <- format_ai_table(df, max_chars = budget, pin = pin, extra_cols = c("NPrec", "PropObs"))
+  sent <- attr(tbl, "pinned_sent")
+  dropped <- attr(tbl, "pinned_dropped")
+  sel <- ai_selection_context(sent, length(dropped))
+  expect_lte(nchar(tbl) + nchar(sel), budget)
+  expect_equal(length(sent) + length(dropped), 1000L)
+  expect_gt(length(sent), 0)
+  expect_gt(length(dropped), 0)
+  # the table holds exactly the sent selection, first, and the list names exactly those
+  rows <- strsplit(tbl, "\n", fixed = TRUE)[[1]][-1]
+  expect_equal(sub("\t.*$", "", rows[seq_along(sent)]), ai_short_protein_id(sent))
+  expect_false(any(ai_short_protein_id(dropped) %in% sub("\t.*$", "", rows)))
+  listed <- strsplit(sub("^.*\\):\n([^\n]*)\n.*$", "\\1", sel), ", ", fixed = TRUE)[[1]]
+  expect_equal(listed, ai_short_protein_id(sent))
+  expect_match(sel, paste0(length(dropped), " further selected proteins were not sent"))
+})
+
+test_that("round 2 item 3: the data prompt reports omitted selected proteins", {
+  p <- ai_data_prompt("Protein\tlogFC\nP1\t1", selected_ids = "P1", n_selected_omitted = 12)
+  expect_match(p, "12 further selected proteins were not sent")
+  expect_equal(ai_selection_context(character(0), 0), "")
+  root <- normalizePath(file.path(getwd(), "..", ".."))
+  src <- paste(readLines(file.path(root, "R", "server_ai.R"), warn = FALSE), collapse = "\n")
+  expect_match(src, "selected = sent_selected, n_selected_omitted = n_dropped", fixed = TRUE)
 })
 
 test_that("H: the selection list in the prompt uses the same IDs as the table", {
@@ -1113,4 +1194,247 @@ test_that("O: alternation holds for arbitrary histories, caps and budgets", {
     m <- ai_history_messages(h, max_turns = sample(1:8, 1), max_chars = sample(c(500, 6000), 1))
     expect_true(alternates(roles_of(m)), info = paste("iteration", i))
   }
+})
+
+# =============================================================================
+# Round 2 review fixes (PR #71). No DNS, no HTTP: every resolver is injected.
+# =============================================================================
+
+src_of <- function(file) {
+  root <- normalizePath(file.path(getwd(), "..", ".."))
+  paste(readLines(file.path(root, file), warn = FALSE), collapse = "\n")
+}
+
+# Body of the first observeEvent(<trigger>, { ... }) in a source string
+observer_body <- function(src, trigger) {
+  start <- regexpr(paste0("observeEvent(", trigger, ","), src, fixed = TRUE)
+  if (start < 0) return("")
+  rest <- substr(src, start, nchar(src))
+  nxt <- regexpr("\n  observeEvent(", substr(rest, 2, nchar(rest)), fixed = TRUE)
+  if (nxt < 0) rest else substr(rest, 1, nxt)
+}
+
+# --- item 2: dataset identity -------------------------------------------------
+
+mk_raw <- function(samples) list(E = matrix(0, 2, length(samples), dimnames = list(NULL, samples)))
+
+test_that("item 2: the identity belongs to the samples it was recorded for", {
+  a <- mk_raw(c("A1.d", "A2.d", "A3.d"))
+  id <- loaded_dataset_identity("/q/me/searchA/", a, "hpc_browse")
+  expect_equal(id$output_dir, "/q/me/searchA")
+  expect_equal(loaded_dataset_output_dir(id, a), "/q/me/searchA")
+  # runs excluded later: still the same dataset
+  expect_equal(loaded_dataset_output_dir(id, mk_raw(c("A1.d", "A3.d"))), "/q/me/searchA")
+  # report B uploaded without clearing: the identity no longer applies (fails closed)
+  expect_null(loaded_dataset_output_dir(id, mk_raw(c("B1.d", "B2.d"))))
+  expect_null(loaded_dataset_output_dir(id, mk_raw(c("A1.d", "B2.d"))))
+  expect_null(loaded_dataset_output_dir(id, NULL))
+  expect_null(loaded_dataset_output_dir(NULL, a))
+  expect_null(loaded_dataset_identity("", a))
+  expect_null(loaded_dataset_identity(NA, a))
+  expect_null(loaded_dataset_identity("/q/x", NULL))
+})
+
+test_that("item 2: Data Chat reads the dedicated identity, not diann_search_settings (source guard)", {
+  src <- src_of("R/server_ai.R")
+  expect_match(src, "od <- loaded_dataset_output_dir(values$loaded_dataset, values$raw_data)", fixed = TRUE)
+  expect_false(grepl("diann_search_settings$output_dir", src, fixed = TRUE))
+})
+
+test_that("item 2: upload and example loads clear the identity (source guard)", {
+  data_src <- src_of("R/server_data.R")
+  for (trig in c("input$report_file", "input$load_example")) {
+    body <- observer_body(data_src, trig)
+    expect_match(body, "values$loaded_dataset <- NULL", fixed = TRUE, info = trig)
+    expect_lt(regexpr("values$loaded_dataset <- NULL", body, fixed = TRUE),
+              regexpr("values$raw_data <-", body, fixed = TRUE))
+  }
+  expect_match(observer_body(src_of("R/server_phospho.R"), "input$load_example_phospho"),
+               "values$loaded_dataset <- NULL", fixed = TRUE)
+})
+
+test_that("item 2: every load from a search output folder records the identity (source guard)", {
+  expect_equal(lengths(regmatches(src_of("R/server_search.R"),
+                                  gregexpr("values$loaded_dataset <- loaded_dataset_identity(", src_of("R/server_search.R"), fixed = TRUE))), 3L)
+  expect_equal(lengths(regmatches(src_of("R/server_session.R"),
+                                  gregexpr("values$loaded_dataset <- loaded_dataset_identity(", src_of("R/server_session.R"), fixed = TRUE))), 3L)
+  expect_match(src_of("R/server_facility.R"), "values$loaded_dataset <- loaded_dataset_identity(job$output_dir", fixed = TRUE)
+  # every file that assigns values$raw_data also sets or clears the identity
+  root <- normalizePath(file.path(getwd(), "..", ".."))
+  for (f in list.files(file.path(root, "R"), pattern = "\\.R$", full.names = TRUE)) {
+    src <- paste(readLines(f, warn = FALSE), collapse = "\n")
+    if (grepl("values$raw_data <-", src, fixed = TRUE) || grepl("values$raw_data   <-", src, fixed = TRUE))
+      expect_match(src, "values$loaded_dataset <-", fixed = TRUE, info = basename(f))
+  }
+})
+
+# --- item 4: server-side key binding ------------------------------------------
+
+test_that("item 4: effective host ignores the path and treats an empty box as the default", {
+  expect_equal(ai_effective_host("openai_compat", ""), "llm.metabolomics.us")
+  expect_equal(ai_effective_host("openai_compat", NULL), "llm.metabolomics.us")
+  expect_equal(ai_effective_host("openai_compat", "https://llm.metabolomics.us/v2/"), "llm.metabolomics.us")
+  expect_equal(ai_effective_host("openai_compat", "https://Other.Example.org/v1"), "other.example.org")
+  expect_equal(ai_effective_host("gemini", "https://ignored.example.org/v1"), "generativelanguage.googleapis.com")
+})
+
+test_that("item 4: a key is usable only for the provider and host it was entered for", {
+  b <- ai_key_binding("openai_compat", "https://llm.metabolomics.us/v1", "sk-1234567890")
+  expect_true(ai_key_binding_ok(b, "openai_compat", "https://llm.metabolomics.us/v1"))
+  expect_true(ai_key_binding_ok(b, "openai_compat", ""))                       # empty box = same default host
+  expect_true(ai_key_binding_ok(b, "openai_compat", "https://llm.metabolomics.us/other"))
+  expect_false(ai_key_binding_ok(b, "openai_compat", "https://evil.example.org/v1"))
+  expect_false(ai_key_binding_ok(b, "gemini", "https://llm.metabolomics.us/v1"))
+  expect_false(ai_key_binding_ok(NULL, "openai_compat", ""))
+  expect_null(ai_key_binding_message(b, "openai_compat", ""))
+  msg <- ai_key_binding_message(b, "openai_compat", "https://evil.example.org/v1")
+  expect_match(msg, "llm.metabolomics.us")
+  expect_match(msg, "evil.example.org")
+  expect_match(msg, "Re-enter")
+})
+
+test_that("item 4: every AI request handler checks the binding before using the key (source guard)", {
+  ai_src <- src_of("R/server_ai.R")
+  for (trig in c("input$check_models", "input$generate_ai_summary_overview",
+                 "input$summarize_data", "input$send_chat")) {
+    body <- observer_body(ai_src, trig)
+    guard <- regexpr("if (!ai_key_usable(provider, input$ai_base_url)) return()", body, fixed = TRUE)
+    expect_gt(guard, 0, label = trig)
+    use <- regexpr("input$user_api_key, ", body, fixed = TRUE)
+    if (use > 0) expect_lt(guard, use, label = trig)
+  }
+  expect_match(observer_body(ai_src, "input$user_api_key"),
+               "values$ai_key_binding <- ai_key_binding(", fixed = TRUE)
+  comp <- observer_body(src_of("R/server_comparator.R"), "input$comparator_gemini_btn")
+  expect_lt(regexpr("ai_key_binding_message(values$ai_key_binding", comp, fixed = TRUE),
+            regexpr("ask_ai_text(", comp, fixed = TRUE))
+  # the endpoint observer compares EFFECTIVE hosts
+  expect_match(observer_body(ai_src, "input$ai_base_url"), "ai_effective_host(", fixed = TRUE)
+})
+
+# --- item 5: Gemini key on Google's own OpenAI-compatible endpoint -------------
+
+test_that("item 5: a Gemini key may go to Google's OpenAI-compatible endpoint", {
+  expect_null(ai_key_owner("openai_compat", gemini_like_key, "generativelanguage.googleapis.com"))
+  expect_equal(ai_key_owner("openai_compat", gemini_like_key, "litellm.example.org"), "gemini")
+  pre <- ai_openai_preflight(gemini_like_key, "https://generativelanguage.googleapis.com/v1beta/openai",
+                             pub, resolver = fake_resolver("142.250.72.10"))
+  expect_true(pre$ok)
+  expect_equal(pre$endpoint$host, "generativelanguage.googleapis.com")
+})
+
+test_that("item 5: elsewhere the refusal explains why and how to proceed", {
+  pre <- ai_openai_preflight(gemini_like_key, "https://litellm.example.org/v1", pub,
+                             resolver = fake_resolver("93.184.216.34"))
+  expect_false(pre$ok)
+  expect_match(pre$error, "litellm.example.org", fixed = TRUE)
+  expect_match(pre$error, "can be read and reused")
+  expect_match(pre$error, "LiteLLM")
+  expect_match(pre$error, "generativelanguage.googleapis.com/v1beta/openai", fixed = TRUE)
+  # an invalid endpoint is reported as such, before any key judgement
+  bad <- ai_openai_preflight(gemini_like_key, "https://127.0.0.1/v1", pub)
+  expect_match(bad$error, "not allowed")
+})
+
+# --- item 6: ambiguous numeric hosts ------------------------------------------
+
+test_that("item 6: IPv4 literals must be canonical dotted-decimal", {
+  expect_null(ai_parse_ipv4("012.0.0.1"))
+  expect_null(ai_parse_ipv4("1.2.3.04"))
+  expect_equal(ai_parse_ipv4("10.0.0.1"), c(10L, 0L, 0L, 1L))
+  expect_equal(ai_parse_ipv4("0.0.0.0"), c(0L, 0L, 0L, 0L))
+  expect_true(ai_host_is_numeric_form("012.0.0.1"))
+  expect_true(ai_host_is_numeric_form("0x7f.1"))
+  expect_true(ai_host_is_numeric_form("2130706433"))
+  expect_false(ai_host_is_numeric_form("dead.beef"))
+  expect_false(ai_host_is_numeric_form("llm.metabolomics.us"))
+  expect_equal(ai_raw_url_host("https://user@012.0.0.1:8443/v1"), "012.0.0.1")
+  expect_equal(ai_raw_url_host("http://[fd00::1]:80/v1"), "[fd00::1]")
+})
+
+test_that("item 6: the validator refuses ambiguous numeric hosts on every policy", {
+  for (pol in list(pub, priv)) {
+    for (u in c("https://012.0.0.1/v1", "https://0x7f.1/v1", "https://127.1/v1",
+                "https://1.2.3.4./v1", "https://2130706433/v1", "https://0177.0.0.1/v1",
+                "http://010.1.1.1:8000/v1"))
+      expect_false(ai_validate_endpoint(u, policy = pol, resolver = fake_resolver("93.184.216.34"))$ok,
+                   info = paste(u, pol$public))
+  }
+  expect_true(ai_validate_endpoint("https://dead.beef/v1", policy = pub,
+                                   resolver = fake_resolver("93.184.216.34"))$ok)
+})
+
+# --- item 7: explicit public/local override -----------------------------------
+
+test_that("item 7: DELIMP_PUBLIC_DEPLOYMENT overrides detection and fails closed", {
+  expect_true(ai_resolve_public_deployment("", detected = TRUE))
+  expect_false(ai_resolve_public_deployment("", detected = FALSE))
+  expect_false(ai_resolve_public_deployment(NULL, detected = FALSE))
+  for (v in c("1", "true", "TRUE", "yes", " on ")) expect_true(ai_resolve_public_deployment(v, FALSE), info = v)
+  for (v in c("0", "false", "No", "off")) expect_false(ai_resolve_public_deployment(v, TRUE), info = v)
+  expect_true(suppressMessages(ai_resolve_public_deployment("maybe", detected = FALSE)))
+})
+
+test_that("item 7: app.R resolves the policy once and passes it to the UI and both AI modules", {
+  app <- src_of("app.R")
+  expect_match(app, 'ai_resolve_public_deployment(Sys.getenv("DELIMP_PUBLIC_DEPLOYMENT", "")', fixed = TRUE)
+  expect_match(app, "server_ai(input, output, session, values, ai_public_deployment = ai_public_deployment)", fixed = TRUE)
+  expect_match(app, "ai_public_deployment = ai_public_deployment)", fixed = TRUE)
+  expect_false(grepl("ai_public_deployment = is_hf_space)", app, fixed = TRUE))
+  expect_match(src_of("docs/GOTCHAS.md"), "DELIMP_PUBLIC_DEPLOYMENT=1", fixed = TRUE)
+})
+
+# --- G: Claude export uses the shared evidence rule ---------------------------
+
+test_that("G: the evidence rule describes columns only when the pipeline has them", {
+  mx <- ai_evidence_rule(7, maxlfq_pipeline_descriptor()$evidence_columns, "", "MaxLFQ + limma (Moschem 2025)")
+  expect_false(grepl("NPrec", mx, fixed = TRUE))
+  expect_match(mx, "No per-protein measurement-depth statistics")
+  dpc <- ai_evidence_rule(7, dpc_pipeline_descriptor()$evidence_columns,
+                          dpc_pipeline_descriptor()$evidence_guidance, where = "The summary tables below")
+  expect_match(dpc, "^7\\. EVIDENCE STRENGTH\\. The summary tables below include NPrec and PropObs")
+  expect_false(grepl("measurement depth", ai_biomarker_criteria(character(0)), fixed = TRUE))
+  expect_match(ai_biomarker_criteria(dpc_pipeline_descriptor()$evidence_columns), "measurement depth")
+})
+
+test_that("G: the Claude export prompt uses the shared rule, not fixed text (source guard)", {
+  src <- src_of("R/server_ai.R")
+  expect_match(src, "ai_evidence_rule(7, ctx$evidence, ctx$evidence_guidance, ctx$pipeline", fixed = TRUE)
+  expect_match(src, "ai_biomarker_criteria(ctx$evidence)", fixed = TRUE)
+  expect_false(grepl("meaningful fold-change and measurement depth", src, fixed = TRUE))
+})
+
+# --- E leftover: saved error narratives ---------------------------------------
+
+test_that("E: a saved error narrative is not restored as analysis", {
+  bad <- ai_restored_narrative("API Error: {\"error\":\"raw upstream body\"}", "Google Gemini (cloud), model x")
+  expect_null(bad$narrative)
+  expect_equal(bad$source, AI_SAVED_ERROR_LABEL)
+  good <- ai_restored_narrative("## Summary\nFine.", "src")
+  expect_equal(good$narrative, "## Summary\nFine.")
+  expect_equal(good$source, "src")
+  none <- ai_restored_narrative(NULL, "src")
+  expect_null(none$narrative); expect_null(none$source)
+})
+
+test_that("E: both session-restore paths sanitise the narrative (source guard)", {
+  src <- src_of("R/server_session.R")
+  expect_equal(lengths(regmatches(src, gregexpr("ai_restored_narrative(session_data$comparator_gemini_narrative",
+                                                src, fixed = TRUE))), 2L)
+  expect_false(grepl("comparator_gemini_narrative <- session_data$comparator_gemini_narrative", src, fixed = TRUE))
+  expect_false(grepl("comparator_gemini_narrative <- session_data$comparator_gemini_narrative",
+                     gsub(" +", " ", src), fixed = TRUE))
+  expect_match(src_of("R/server_comparator.R"), "identical(values$comparator_ai_narrative_source, AI_SAVED_ERROR_LABEL)", fixed = TRUE)
+})
+
+# --- L: public docs match the payload -----------------------------------------
+
+test_that("L: the HF page and User Guide no longer misdescribe the AI payload", {
+  hf <- src_of("README_HF.md")
+  expect_false(grepl("sends per-sample expression data", hf, fixed = TRUE))
+  expect_false(grepl("must provide your own free Gemini API key", hf, fixed = TRUE))
+  guide <- src_of("USER_GUIDE.md")
+  expect_false(grepl("\"Gemini API Key\"", guide, fixed = TRUE))
+  expect_false(grepl("* **Gemini API Key:**", guide, fixed = TRUE))
+  expect_false(grepl("sends per-sample expression values for the top DE proteins", guide, fixed = TRUE))
 })

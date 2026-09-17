@@ -4289,6 +4289,32 @@ activity_current_user_ids <- function() {
   ids[!is.na(ids) & nzchar(ids) & ids != "unknown"]
 }
 
+#' Identity of the dataset loaded right now, for attributing activity-log rows.
+#'
+#' Set ONLY by loads that come from a known search output folder (HPC browse,
+#' job queue, facility history, History tab, session restore) and CLEARED by
+#' every other load (report upload, example data). It records the samples it was
+#' set for, so a load path that forgets to clear it fails closed: once
+#' raw_data's samples are not the recorded ones, the identity no longer applies.
+#' (values$diann_search_settings is NOT an identity — uploads never reset it.)
+loaded_dataset_identity <- function(output_dir, raw_data, source = "") {
+  od <- if (is.null(output_dir) || length(output_dir) != 1 || is.na(output_dir)) "" else
+    sub("/+$", "", trimws(as.character(output_dir)))
+  samples <- tryCatch(colnames(raw_data$E), error = function(e) NULL)
+  if (!nzchar(od) || length(samples) == 0) return(NULL)
+  list(output_dir = od, samples = sort(as.character(samples)), source = source)
+}
+
+#' The loaded dataset's output folder, or NULL when there is no identity or it
+#' does not belong to the raw_data currently loaded (samples must be a subset of
+#' those recorded — excluding runs keeps the identity, a different report loses it).
+loaded_dataset_output_dir <- function(identity, raw_data) {
+  if (is.null(identity) || is.null(identity$output_dir) || length(identity$samples) == 0) return(NULL)
+  current <- tryCatch(colnames(raw_data$E), error = function(e) NULL)
+  if (length(current) == 0 || !all(current %in% identity$samples)) return(NULL)
+  identity$output_dir
+}
+
 #' The user's own project name and notes for ONE loaded dataset.
 #'
 #' The activity log is shared: on HPC every user's rows are in one CSV, and on a

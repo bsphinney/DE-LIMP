@@ -1920,6 +1920,7 @@ server_search <- function(input, output, session, values, add_to_log,
           phase_done("limpa::readDIANN", t0)
 
           values$raw_data <- raw_data
+          values$loaded_dataset <- loaded_dataset_identity(dirname(selected), raw_data, "hpc_browse")
           values$uploaded_report_path <- local_report
           values$original_report_name <- basename(selected)
           values$is_example_data <- FALSE
@@ -6729,6 +6730,7 @@ server_search <- function(input, output, session, values, add_to_log,
             limpa::readDIANN(report_path, format = "parquet")))
 
           values$raw_data <- raw_data
+          values$loaded_dataset <- loaded_dataset_identity(job$output_dir, raw_data, "job_autoload")
           values$qc_stats <- get_diann_stats_r(report_path)
           values$uploaded_report_path <- report_path
           values$original_report_name <- basename(report_path)
@@ -7382,6 +7384,7 @@ server_search <- function(input, output, session, values, add_to_log,
             raw_data <- suppressMessages(suppressWarnings(
               limpa::readDIANN(report_path, format = "parquet")))
             values$raw_data <- raw_data
+            values$loaded_dataset <- loaded_dataset_identity(job$output_dir, raw_data, "job_queue")
             values$qc_stats <- get_diann_stats_r(report_path)
             values$uploaded_report_path <- report_path
             values$original_report_name <- basename(report_path)

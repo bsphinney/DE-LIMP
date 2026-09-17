@@ -5,6 +5,30 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
   # The default is the strict policy; app.R passes is_hf_space.
   ai_policy <- ai_deployment_policy(ai_public_deployment)
 
+  # --- Credential guards (review items A/4) ---
+  # Effective endpoint host last seen by the provider/endpoint observers
+  last_ai_endpoint_host <- reactiveVal(NULL)
+
+  # TRUE when the typed key may go to this provider + host; otherwise shows why
+  # not and returns FALSE. The binding is written by observeEvent(input$user_api_key).
+  ai_key_usable <- function(provider, base_url) {
+    msg <- ai_key_binding_message(values$ai_key_binding, provider, base_url)
+    if (is.null(msg)) return(TRUE)
+    showNotification(msg, type = "error", duration = 10)
+    FALSE
+  }
+
+  # One-line warning when a local install points at a plain-http endpoint
+  warn_if_plain_http <- function() {
+    if (ai_policy$public || !identical(input$ai_provider, "openai_compat")) return(invisible())
+    url <- tolower(trimws(input$ai_base_url %||% ""))
+    if (startsWith(url, "http://")) {
+      showNotification(ai_http_key_warning(ai_effective_host("openai_compat", input$ai_base_url)),
+                       type = "warning", duration = 8, id = "ai_plain_http_warning")
+    }
+    invisible()
+  }
+
   # --- Helper: Build DE data context for AI prompts ---
   build_ai_data_context <- function() {
     req(values$fit, values$y_protein)
@@ -168,6 +192,7 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
     req(values$fit, values$y_protein, input$user_api_key)
 
     provider <- input$ai_provider %||% "gemini"
+    if (!ai_key_usable(provider, input$ai_base_url)) return()
     model <- input$model_name
     source_label <- ai_source_label(provider, model, input$ai_base_url)
 
@@ -1723,7 +1748,11 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
             "constructing a biological narrative.\n",
             "6. CONTAMINANTS. In the summary tables below, Contaminant = yes marks an entry flagged by ",
             "DE-LIMP's contaminant list, and a table without that column has no flagged entries. ",
-            "Do not decide from an accession or name yourself whether a protein is a contaminant.\n\n",
+            "Do not decide from an accession or name yourself whether a protein is a contaminant.\n",
+            # Same wording as the AI Summary (helpers_ai.R); describes NPrec/PropObs only
+            # when the pipeline that ran produced them (rule #1 / #3).
+            ai_evidence_rule(7, ctx$evidence, ctx$evidence_guidance, ctx$pipeline,
+                             where = "The summary tables below"), "\n",
             "## Attached Data Files\n\n",
             "- **`DE_Results_Full.csv`** — Complete DE statistics for all ", n_total, " proteins across ",
             ctx$n_contrasts, " comparison(s). Columns: Protein.Group, logFC, AveExpr, t, P.Value, adj.P.Val, B, Contrast\n",
@@ -1755,8 +1784,8 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
             "Discuss consistency of direction (always up, always down, or mixed across comparisons).\n\n",
             "## High-Confidence Biomarker Insights\n",
             "For the most stable proteins (lowest coefficient of variation): assess their potential ",
-            "as reliable biomarkers based on the combination of low CV, significant p-value, ",
-            "meaningful fold-change and measurement depth. Discuss function, pathway involvement or ",
+            "as reliable biomarkers based on the combination of ", ai_biomarker_criteria(ctx$evidence), ". ",
+            "Discuss function, pathway involvement or ",
             "disease association ONLY for proteins whose gene name is supplied in the attached data; ",
             "where it is not, refer to the accession and say the identity was not provided. Do not ",
             "write biology you merely recognise.\n\n",
@@ -2082,6 +2111,8 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
   # endpoint (or a gateway key goes to Google) — a credential leak.
   observeEvent(input$ai_provider, {
     had_key <- nzchar(input$user_api_key %||% "")
+    last_ai_endpoint_host(ai_effective_host(input$ai_provider, input$ai_base_url))
+    warn_if_plain_http()
     updateTextInput(session, "model_name",
                     value = ai_provider_field(input$ai_provider, "default_model"),
                     placeholder = ai_provider_field(input$ai_provider, "default_model"))
@@ -2098,10 +2129,11 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
 
   # Same reasoning for the endpoint: a key typed for one endpoint must not be
   # sent to a different host just because the URL box was edited afterwards.
-  last_ai_endpoint_host <- reactiveVal(NULL)
+  # Compared on the EFFECTIVE host (ai_effective_host): emptying the box means
+  # the provider default, and editing the path of the same host changes nothing,
+  # so neither clears the key.
   observeEvent(input$ai_base_url, {
-    host <- tryCatch(httr2::url_parse(trimws(input$ai_base_url %||% ""))$hostname, error = function(e) NULL)
-    host <- if (length(host) == 1 && !is.na(host)) tolower(host) else ""
+    host <- ai_effective_host(input$ai_provider %||% "gemini", input$ai_base_url)
     prev <- last_ai_endpoint_host()
     last_ai_endpoint_host(host)
     if (!is.null(prev) && !identical(prev, host) && nzchar(input$user_api_key %||% "")) {
@@ -2109,6 +2141,16 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
       showNotification("API key cleared because the endpoint host changed. Enter the key for the new endpoint.",
                        type = "warning", duration = 6)
     }
+    warn_if_plain_http()
+  }, ignoreNULL = FALSE)
+
+  # SERVER-side binding of the key to where it was entered. The clearing above
+  # happens in the browser, one round-trip later, so an endpoint edit and a
+  # click arriving in the same flush would still carry the old key to the new
+  # host. Every request checks the binding first (ai_key_usable()).
+  observeEvent(input$user_api_key, {
+    values$ai_key_binding <- ai_key_binding(input$ai_provider %||% "gemini",
+                                            input$ai_base_url, input$user_api_key)
   }, ignoreNULL = FALSE)
 
   observeEvent(input$check_models, {
@@ -2116,6 +2158,7 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
       showNotification("Please enter a valid API Key first.", type = "error"); return()
     }
     provider <- input$ai_provider %||% "gemini"
+    if (!ai_key_usable(provider, input$ai_base_url)) return()
     withProgress(message = paste("Checking models on", ai_provider_field(provider, "label")), {
       models <- list_ai_models(input$user_api_key, provider, input$ai_base_url, policy = ai_policy)
       failed <- length(models) == 0 || (length(models) == 1 && is_ai_error(models))
@@ -2148,8 +2191,8 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
     df_de <- topTable(values$fit, coef = input$contrast_selector, number = n_max)
 
     # Proteins the user selected in a plot must be present even if they fall
-    # outside the top-N cut; format_ai_table() lists them FIRST and never trims
-    # them, because the prompt tells the model to focus on them.
+    # outside the top-N cut; format_ai_table() lists them FIRST and fills the
+    # budget with them before anything else — but never beyond the budget.
     selected <- character(0)
     if (!is.null(values$plot_selected_proteins)) {
       all_ids <- rownames(values$fit$coefficients)
@@ -2196,12 +2239,21 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
     budget <- ai_provider_field(input$ai_provider %||% "gemini", "max_payload_chars")
     tbl <- format_ai_table(df_full, max_chars = budget, pin = selected,
                            extra_cols = names(evidence))
+    sent_selected <- attr(tbl, "pinned_sent") %||% character(0)
+    n_dropped <- length(attr(tbl, "pinned_dropped"))
     message(sprintf("[DE-LIMP] AI payload: %d proteins x %d samples, %d chars (~%d tokens, budget %d)",
                     nrow(df_full), n_samples, nchar(tbl),
                     round(nchar(tbl) / ai_chars_per_token()), budget))
-    list(table = tbl, evidence = evidence,
+    if (n_dropped > 0) {
+      showNotification(sprintf(
+        "%d of your %d selected proteins were left out of this AI request to fit the %s size limit. Select fewer proteins to include them all.",
+        n_dropped, length(selected), ai_provider_field(input$ai_provider %||% "gemini", "label")),
+        type = "warning", duration = 10)
+    }
+    # The prompt's selection list names exactly the selected rows that were sent
+    list(table = as.character(tbl), evidence = evidence,
          evidence_guidance = pipeline_evidence_guidance(values$y_protein),
-         selected = selected)
+         selected = sent_selected, n_selected_omitted = n_dropped)
   }
 
   # QC table shared by both handlers
@@ -2232,7 +2284,9 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
   get_project_notes <- function() {
     none <- list(project = NULL, notes = NULL)
     if (!isTRUE(ai_policy$send_activity_notes)) return(none)
-    od <- values$diann_search_settings$output_dir
+    # The dedicated identity, never values$diann_search_settings (which survives
+    # a later report upload and would attach search A's notes to report B).
+    od <- loaded_dataset_output_dir(values$loaded_dataset, values$raw_data)
     if (is.null(od) || length(od) != 1 || is.na(od) || !nzchar(od)) return(none)
     now <- as.numeric(Sys.time())
     if (identical(project_ctx_cache$key, od) && !is.null(project_ctx_cache$value) &&
@@ -2278,6 +2332,7 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
   observeEvent(input$summarize_data, {
     req(input$user_api_key)
     provider <- input$ai_provider %||% "gemini"
+    if (!ai_key_usable(provider, input$ai_base_url)) return()
     source_label <- ai_source_label(provider, input$model_name, input$ai_base_url)
     auto_prompt <- "Analyze this dataset. Identify key quality control issues (if any) by looking at the Group QC stats. Then, summarize the main biological findings from the expression data, focusing on the most significantly differentially expressed proteins."
     values$chat_history <- append(values$chat_history, list(list(role = "user", content = "(Auto-Query: Summarize & Analyze)")))
@@ -2294,6 +2349,7 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
                                 project = pn$project, notes = pn$notes,
                                 evidence = payload$evidence,
                                 evidence_guidance = payload$evidence_guidance,
+                                n_selected_omitted = payload$n_selected_omitted,
                                 policy = ai_policy)
         if (is_ai_error(ai_reply)) {
           showNotification(paste0("AI request failed (", source_label, "): ", ai_reply),
@@ -2310,6 +2366,7 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
   observeEvent(input$send_chat, {
     req(input$chat_input, input$user_api_key)
     provider <- input$ai_provider %||% "gemini"
+    if (!ai_key_usable(provider, input$ai_base_url)) return()
     source_label <- ai_source_label(provider, input$model_name, input$ai_base_url)
     values$chat_history <- append(values$chat_history, list(list(role = "user", content = input$chat_input)))
     ai_reply <- NULL
@@ -2331,6 +2388,7 @@ server_ai <- function(input, output, session, values, ai_public_deployment = TRU
                                 project = pn$project, notes = pn$notes,
                                 evidence = payload$evidence,
                                 evidence_guidance = payload$evidence_guidance,
+                                n_selected_omitted = payload$n_selected_omitted,
                                 policy = ai_policy)
       } else {
         notice <- "Please load data and run analysis first."

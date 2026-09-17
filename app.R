@@ -475,10 +475,19 @@ local({
 # Clean up stale SSH sockets from previous sessions (prevents zombie mux blocking)
 tryCatch(ssh_cleanup_stale_sockets(), error = function(e) NULL)
 
+# AI request policy (endpoint restrictions, timeout cap, activity-log notes).
+# Public on the HF Space by default; DELIMP_PUBLIC_DEPLOYMENT=1 forces the public
+# policy on any other host (e.g. a shared Docker server), =0 forces local.
+# See docs/GOTCHAS.md. Unrecognised values fail closed (public).
+ai_public_deployment <- ai_resolve_public_deployment(Sys.getenv("DELIMP_PUBLIC_DEPLOYMENT", ""),
+                                                     detected = is_hf_space)
+message("[DE-LIMP] AI policy: ", if (ai_public_deployment) "public" else "local",
+        if (nzchar(Sys.getenv("DELIMP_PUBLIC_DEPLOYMENT", ""))) " (set by DELIMP_PUBLIC_DEPLOYMENT)" else "")
+
 ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch,
                local_diann, delimp_data_dir,
                is_core_facility, cf_config, deploy_env,
-               config, is_hive)
+               config, is_hive, ai_public_deployment = ai_public_deployment)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules
@@ -491,6 +500,11 @@ server <- function(input, output, session) {
     raw_data = NULL, metadata = NULL, fit = NULL, y_protein = NULL,
     dpc_fit = NULL, status = "Waiting...", design = NULL, qc_stats = NULL,
     plot_selected_proteins = NULL, chat_history = list(),
+    # Search output folder of the loaded dataset, bound to its samples. Set only by
+    # search/HPC/session loads, cleared by uploads (loaded_dataset_identity()).
+    loaded_dataset = NULL,
+    # Provider + endpoint host the typed API key was entered for (ai_key_binding())
+    ai_key_binding = NULL,
     current_file_uri = NULL, gsea_results = NULL,
     gsea_results_cache = list(), gsea_last_contrast = NULL, gsea_last_org_db = NULL,
     repro_log = c(
@@ -633,7 +647,7 @@ server <- function(input, output, session) {
   server_qc(input, output, session, values)
   server_viz(input, output, session, values, add_to_log, is_hf_space)
   server_gsea(input, output, session, values, add_to_log)
-  server_ai(input, output, session, values, ai_public_deployment = is_hf_space)
+  server_ai(input, output, session, values, ai_public_deployment = ai_public_deployment)
   server_xic(input, output, session, values, is_hf_space)
   server_phospho(input, output, session, values, add_to_log)
   server_search(input, output, session, values, add_to_log,
@@ -641,7 +655,7 @@ server <- function(input, output, session) {
                 local_diann, delimp_data_dir,
                 is_core_facility, cf_config, local_sbatch_path)
   server_mofa(input, output, session, values, add_to_log)
-  server_comparator(input, output, session, values, add_to_log, ai_public_deployment = is_hf_space)
+  server_comparator(input, output, session, values, add_to_log, ai_public_deployment = ai_public_deployment)
   server_facility(input, output, session, values, add_to_log,
                   is_core_facility, cf_config, search_enabled)
   server_denovo(input, output, session, values, add_to_log)

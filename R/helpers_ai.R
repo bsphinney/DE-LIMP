@@ -17,10 +17,12 @@
 #  typing the endpoint URL and API key is an anonymous visitor. Three rules follow
 #  and are enforced here rather than at call sites:
 #    1. A typed endpoint URL is validated before any request (ai_validate_endpoint):
-#       https only, no credentials/query in the URL, and on a public deployment the
-#       host must resolve to public addresses only. The validated addresses are
-#       pinned for the request and redirects are refused, so DNS cannot be swapped
-#       between the check and the connection.
+#       no credentials/query in the URL; on a public deployment https only and the
+#       host must resolve to public addresses only; on a local install plain http
+#       is also accepted to this computer / the local network / the container host
+#       (with a warning). Link-local and metadata addresses are refused everywhere.
+#       The validated addresses are pinned for the request and redirects are
+#       refused, so DNS cannot be swapped between the check and the connection.
 #    2. Upstream error bodies are never echoed. A failure becomes one short,
 #       sanitised status line (ai_error_from_condition).
 #    3. Every request has a timeout, capped on a public deployment because a
@@ -38,6 +40,10 @@ ai_providers <- function() {
       # Google's documented key format. Used ONLY to refuse sending a key that is
       # recognisably a Gemini key to any other provider's endpoint.
       key_pattern       = "^AIza[0-9A-Za-z_-]{35}$",
+      # Hosts a key of this provider may legitimately be sent to under ANOTHER
+      # provider setting, e.g. Google's own OpenAI-compatible endpoint
+      # https://generativelanguage.googleapis.com/v1beta/openai
+      key_hosts         = c("generativelanguage.googleapis.com"),
       default_model     = "gemini-2.5-flash",
       base_url          = "https://generativelanguage.googleapis.com/v1beta",
       supports_file_api = TRUE,
@@ -52,6 +58,7 @@ ai_providers <- function() {
       key_label         = "API Key",
       key_placeholder   = "sk-...",
       key_pattern       = NULL,   # gateway keys have no fixed format
+      key_hosts         = NULL,
       # Measured on the UC Davis gateway (2026-09-10): flash-next answered a
       # trivial prompt in 3s vs 35s / 67s / >90s for the other three, and
       # produced AI Summary output of equal quality. Fastest wins here because
@@ -126,6 +133,12 @@ ai_source_label <- function(provider, model = NULL, base_url = NULL) {
 # a base-image rebuild (CLAUDE.md), so that is deferred.
 AI_PUBLIC_MAX_TIMEOUT_S <- 180
 
+# Names a container uses to reach the machine it runs on. In Docker mode (the
+# recommended Windows setup) "localhost" is the container itself, so a model
+# server on the user's PC is reached as host.docker.internal.
+AI_CONTAINER_HOST_ALIASES <- c("host.docker.internal", "gateway.docker.internal",
+                               "host.containers.internal", "host.lima.internal")
+
 # `public = TRUE` is the SAFE default: a caller that forgets to say what kind of
 # deployment it is gets the strict policy, never the permissive one.
 ai_deployment_policy <- function(public = TRUE) {
@@ -137,14 +150,32 @@ ai_deployment_policy <- function(public = TRUE) {
     # SSRF targets on a public one. Link-local and cloud-metadata ranges are
     # refused everywhere.
     allow_private_endpoints = !public,
-    # Plain http only for a model server on this computer, and only locally.
-    allow_http_loopback     = !public,
+    # Plain http — the default for vLLM, llama.cpp and Ollama — only to a server
+    # on this computer, the local network, or the container host, and only on a
+    # local install (the request carries the API key unencrypted, so it is
+    # warned about). A public deployment is https-only.
+    allow_http_private      = !public,
     max_timeout_s           = if (public) AI_PUBLIC_MAX_TIMEOUT_S else Inf,
     # Activity-log notes are attributed by output folder + OS user name. On a
     # public deployment every visitor runs as the same OS user in the same HOME,
     # so no row can be attributed to the visitor in front of the screen: send none.
     send_activity_notes     = !public
   )
+}
+
+# Is this a PUBLIC deployment? DELIMP_PUBLIC_DEPLOYMENT overrides detection:
+# 1/true/yes forces the public policy, 0/false/no forces the local policy. Unset
+# or empty falls back to `detected` (app.R passes is_hf_space). Any other value
+# is treated as public — a typo must fail closed, not open.
+ai_resolve_public_deployment <- function(env_value = Sys.getenv("DELIMP_PUBLIC_DEPLOYMENT", ""),
+                                         detected = FALSE) {
+  v <- tolower(trimws(as.character(env_value %||% "")))
+  if (length(v) != 1 || is.na(v) || !nzchar(v)) return(isTRUE(detected))
+  if (v %in% c("1", "true", "yes", "on")) return(TRUE)
+  if (v %in% c("0", "false", "no", "off")) return(FALSE)
+  message("[DE-LIMP] DELIMP_PUBLIC_DEPLOYMENT='", env_value,
+          "' not recognised (use 1 or 0); applying the public AI policy")
+  TRUE
 }
 
 # The timeout actually applied to a request: the explicit override or the
@@ -155,24 +186,83 @@ ai_request_timeout <- function(provider, override = NULL, policy = ai_deployment
   min(t, policy$max_timeout_s)
 }
 
-# A key that is recognisably another provider's must not be sent here. Guards the
+# Which other provider a key recognisably belongs to (NULL if none). Guards the
 # credential leak where a Gemini key typed earlier would otherwise go out as a
-# Bearer token to a different provider's endpoint.
-ai_key_belongs_to_other_provider <- function(provider, api_key) {
-  if (is.null(api_key) || length(api_key) != 1 || is.na(api_key) || !nzchar(api_key)) return(FALSE)
-  others <- setdiff(names(ai_providers()), provider)
-  any(vapply(others, function(o) {
+# Bearer token to a different provider's endpoint. `host` is the destination:
+# a key sent to one of its own provider's hosts (Google's OpenAI-compatible
+# endpoint for a Gemini key) is not a leak.
+ai_key_owner <- function(provider, api_key, host = NULL) {
+  if (is.null(api_key) || length(api_key) != 1 || is.na(api_key) || !nzchar(api_key)) return(NULL)
+  h <- if (is.null(host) || length(host) != 1 || is.na(host)) "" else tolower(host)
+  for (o in setdiff(names(ai_providers()), provider)) {
     pat <- ai_provider_field(o, "key_pattern")
-    !is.null(pat) && grepl(pat, trimws(api_key))
-  }, logical(1)))
+    if (!is.null(pat) && grepl(pat, trimws(api_key)) &&
+        !(nzchar(h) && h %in% tolower(ai_provider_field(o, "key_hosts") %||% character(0))))
+      return(o)
+  }
+  NULL
+}
+
+ai_key_belongs_to_other_provider <- function(provider, api_key, host = NULL) {
+  !is.null(ai_key_owner(provider, api_key, host))
+}
+
+ai_foreign_key_message <- function(owner, host) {
+  owner_label <- ai_provider_field(owner, "label")
+  paste0("the API key looks like a ", owner_label, " key, so it was not sent to '", host,
+         "': a key sent to a server that does not belong to its provider can be read and reused ",
+         "by that server. To continue, enter the key issued for '", host, "' (a proxy such as ",
+         "LiteLLM normally has its own key), or choose ", owner_label, " as the AI provider",
+         if (identical(owner, "gemini"))
+           ", or use Google's OpenAI-compatible endpoint https://generativelanguage.googleapis.com/v1beta/openai" else "",
+         ".")
+}
+
+# The host a request for `provider` would actually go to: the provider's fixed
+# host for Gemini, the typed endpoint (or its registry default when empty) for
+# openai_compat. No DNS. Used to bind a typed API key to where it may be sent.
+ai_effective_host <- function(provider, base_url = NULL) {
+  prov <- if (is.null(provider) || length(provider) != 1 || is.na(provider) ||
+              !(provider %in% names(ai_providers()))) "gemini" else provider
+  u <- if (identical(prov, "openai_compat") && !is.null(base_url) && length(base_url) == 1 &&
+           !is.na(base_url) && nzchar(trimws(base_url))) trimws(base_url) else ai_provider_field(prov, "base_url")
+  h <- tryCatch(httr2::url_parse(u)$hostname, error = function(e) NULL)
+  if (length(h) != 1 || is.na(h)) "" else tolower(gsub("^\\[|\\]$", "", h))
+}
+
+# A typed key is bound to the provider + effective host current when it was
+# entered. A request may use the key only while both are unchanged; this is the
+# SERVER-side guard (the browser-side clearing can lose a race with a click).
+ai_key_binding <- function(provider, base_url, api_key) {
+  list(provider = provider %||% "gemini", host = ai_effective_host(provider, base_url),
+       has_key = !is.null(api_key) && length(api_key) == 1 && !is.na(api_key) && nzchar(api_key))
+}
+
+ai_key_binding_ok <- function(binding, provider, base_url) {
+  !is.null(binding) && identical(binding$provider, provider %||% "gemini") &&
+    identical(binding$host, ai_effective_host(provider, base_url))
+}
+
+# NULL when the key may be used for this request; otherwise the message to show.
+ai_key_binding_message <- function(binding, provider, base_url) {
+  if (ai_key_binding_ok(binding, provider, base_url)) return(NULL)
+  now <- ai_effective_host(provider, base_url)
+  paste0("Not sent: the API key was entered for ",
+         if (is.null(binding)) "an unknown endpoint" else
+           paste0(ai_provider_field(binding$provider, "label"), " (", binding$host, ")"),
+         ", but this request would go to ", ai_provider_field(provider, "label"), " (", now, "). ",
+         "Re-enter the API key for that endpoint.")
 }
 
 # ==============================================================================
 #  ENDPOINT VALIDATION (SSRF guard)
 # ==============================================================================
 
+# Canonical dotted-decimal only: no leading zeros (012 is octal 10 to curl and
+# the C resolver), no short forms (127.1), no hex (0x7f).
 ai_parse_ipv4 <- function(ip) {
-  if (length(ip) != 1 || is.na(ip) || !grepl("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$", ip)) return(NULL)
+  if (length(ip) != 1 || is.na(ip) ||
+      !grepl("^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}$", ip)) return(NULL)
   o <- as.integer(strsplit(ip, ".", fixed = TRUE)[[1]])
   if (any(o > 255L)) return(NULL)
   o
@@ -261,6 +351,25 @@ ai_ip_is_loopback <- function(ip) {
   all(v6[1:5] == 0) && v6[6] == 0xffff && (v6[7] %/% 256L) == 127
 }
 
+# TRUE for a host written as numbers (every label decimal or 0x-hex, or a
+# trailing dot) — i.e. something a URL parser or resolver may read as an IPv4
+# address in a non-obvious way.
+ai_host_is_numeric_form <- function(host) {
+  h <- tolower(host)
+  labels <- strsplit(h, ".", fixed = TRUE)[[1]]
+  length(labels) > 0 && all(grepl("^(0x[0-9a-f]*|[0-9]+)$", labels))
+}
+
+# The host exactly as typed in the URL (before any parser normalisation).
+ai_raw_url_host <- function(url) {
+  auth <- sub("^[A-Za-z][A-Za-z0-9+.-]*://", "", url)
+  if (identical(auth, url)) return("")
+  auth <- sub("[/?#].*$", "", auth)
+  auth <- sub("^.*@", "", auth)
+  if (startsWith(auth, "[")) return(sub("\\].*$", "]", auth))
+  sub(":[^:]*$", "", auth)
+}
+
 ai_default_resolver <- function(host) {
   curl::nslookup(host, ipv4_only = FALSE, multiple = TRUE, error = FALSE)
 }
@@ -291,7 +400,16 @@ ai_validate_endpoint <- function(base_url, provider = "openai_compat",
   if (length(parsed$query) > 0 || !is.null(parsed$fragment))
     return(fail("the endpoint URL must not contain a query string or #fragment."))
 
+  # The host as typed must be the host the parser returned, and a numeric host
+  # must be canonical dotted-decimal. Older httr2 parsed hosts itself while curl
+  # reads 012.0.0.1 as 10.0.0.1 and 0x7f.1 as 127.0.0.1; refusing anything
+  # ambiguous makes the check independent of the httr2 version.
+  raw_host <- tolower(ai_raw_url_host(url))
+  if (!identical(raw_host, tolower(host)))
+    return(fail("the endpoint host could not be read unambiguously. Write it as a name or as a plain IP address like 192.168.1.50."))
   host <- tolower(gsub("^\\[|\\]$", "", host))
+  if (grepl("\\.$", host) || (ai_host_is_numeric_form(host) && is.null(ai_parse_ipv4(host))))
+    return(fail("the endpoint host must be a name or a plain dotted IP address like 192.168.1.50 (no leading zeros, hex or short forms)."))
   port <- if (!is.null(parsed$port)) suppressWarnings(as.integer(parsed$port)) else
     if (scheme == "https") 443L else 80L
   if (length(port) != 1 || is.na(port) || port < 1L || port > 65535L)
@@ -313,16 +431,42 @@ ai_validate_endpoint <- function(base_url, provider = "openai_compat",
     return(fail(sprintf("the endpoint '%s' resolves to a link-local, cloud-metadata or reserved address, which is never allowed.", host)))
   }
 
+  warning <- NULL
   if (scheme == "http") {
-    loopback <- all(vapply(ips, ai_ip_is_loopback, logical(1)))
-    if (!(isTRUE(policy$allow_http_loopback) && loopback))
-      return(fail(paste("the endpoint URL must use https://. Plain http is only accepted for a model",
-                        "server on this computer (e.g. http://localhost:8000/v1) when DE-LIMP itself",
-                        "is running locally.")))
+    local_net <- all(vapply(ips, function(ip) identical(ai_ip_class(ip), "private"), logical(1)))
+    container_host <- host %in% AI_CONTAINER_HOST_ALIASES
+    if (!(isTRUE(policy$allow_http_private) && (local_net || container_host))) {
+      return(fail(if (policy$public)
+        "the endpoint URL must use https:// on this public site."
+      else paste("plain http:// is only accepted for a model server on this computer, the local network",
+                 "or the container host (e.g. http://localhost:8000/v1, http://192.168.1.50:8000/v1,",
+                 "http://host.docker.internal:11434/v1). Use https:// for anything else.")))
+    }
+    warning <- ai_http_key_warning(host)
   }
 
   list(ok = TRUE, url = url, scheme = scheme, host = host, port = port,
-       ips = ips, literal = literal)
+       ips = ips, literal = literal, warning = warning)
+}
+
+# One-line warning for a plain-http endpoint. The single wording, used by the
+# validator and by the sidebar notification.
+ai_http_key_warning <- function(host) {
+  paste0("The endpoint '", host, "' uses plain http: your API key and data are sent unencrypted ",
+         "and can be read by anyone on that network path.")
+}
+
+# Validation + credential check before any openai_compat request. Returns
+# list(ok, endpoint) or list(ok = FALSE, error). The endpoint is resolved FIRST
+# so the key check knows the destination host (item: Google's own
+# OpenAI-compatible endpoint accepts a Gemini key).
+ai_openai_preflight <- function(api_key, base_url, policy = ai_deployment_policy(),
+                                resolver = ai_default_resolver) {
+  endpoint <- ai_validate_endpoint(base_url, "openai_compat", policy, resolver)
+  if (!isTRUE(endpoint$ok)) return(list(ok = FALSE, error = endpoint$error))
+  owner <- ai_key_owner("openai_compat", api_key, endpoint$host)
+  if (!is.null(owner)) return(list(ok = FALSE, error = ai_foreign_key_message(owner, endpoint$host)))
+  list(ok = TRUE, endpoint = endpoint)
 }
 
 # Apply the guard to a request: no redirects (a validated host could otherwise
@@ -446,9 +590,17 @@ ai_flag_contaminants <- function(df, id_col = "Protein") {
 #
 # `max_chars` caps the result. Rows are dropped from the BOTTOM, which is the
 # least-significant end because callers pass a topTable() ordered by p-value —
-# so a trim costs the weakest evidence, never the strongest. Rows whose Protein
-# is in `pin` (the user's selection) are moved to the top and never trimmed:
-# the prompt tells the model to focus on them, so they must be in the table.
+# so a trim costs the weakest evidence, never the strongest.
+#
+# Rows whose Protein is in `pin` (the user's selection) are moved to the top and
+# fill the budget FIRST: the prompt tells the model to focus on them. They are
+# still bounded by `max_chars`, and each one is also charged for its entry in the
+# prompt's selection list (ai_selection_context()), so table + list fit together.
+# When a selection is given, the result carries attributes:
+#   pinned_sent    — full IDs of selected rows that are in the table
+#   pinned_dropped — full IDs of selected rows left out to fit the budget
+# The caller passes pinned_sent (and the dropped count) to ask_ai_data() so the
+# selection list names exactly what was sent, and tells the user what was not.
 format_ai_table <- function(df, sig = 3, max_chars = Inf, pin = NULL, extra_cols = character(0)) {
   core_cols <- c("Protein", "Gene", "Genes",
                  "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
@@ -477,6 +629,7 @@ format_ai_table <- function(df, sig = 3, max_chars = Inf, pin = NULL, extra_cols
   # Preserve a readable order rather than whatever the caller cbind()ed
   df <- df[, intersect(allow, keep), drop = FALSE]
 
+  full_ids <- if ("Protein" %in% names(df)) as.character(df$Protein) else rep("", nrow(df))
   if ("Protein" %in% names(df)) df$Protein <- ai_short_protein_id(df$Protein)
 
   # Round numerics; render NA as empty so the model does not read "NA" as data
@@ -499,20 +652,50 @@ format_ai_table <- function(df, sig = 3, max_chars = Inf, pin = NULL, extra_cols
   header <- paste(names(df), collapse = "\t")
   rows   <- apply(df, 1, function(r) paste(r, collapse = "\t"))
 
+  n_pin <- sum(pinned)
+  pin_idx <- seq_len(n_pin)
+  rest <- setdiff(seq_along(rows), pin_idx)
+  n_pin_keep <- n_pin
+  n_keep <- length(rest)
   if (is.finite(max_chars)) {
-    n_pin <- sum(pinned)
-    fixed <- nchar(header) + sum(nchar(rows[seq_len(n_pin)]) + 1L)
-    rest  <- setdiff(seq_along(rows), seq_len(n_pin))
-    running <- fixed + cumsum(nchar(rows[rest]) + 1L)
+    # Selected rows first, each charged for its row AND its selection-list entry
+    list_overhead <- if (n_pin > 0) nchar(ai_selection_context("X", n_omitted = 99999L)) else 0L
+    pin_cost <- nchar(rows[pin_idx]) + 1L + nchar(ai_short_protein_id(full_ids[pin_idx])) + 2L
+    running_pin <- nchar(header) + list_overhead + cumsum(pin_cost)
+    n_pin_keep <- sum(running_pin <= max_chars)
+    used <- nchar(header) + list_overhead + if (n_pin_keep > 0) running_pin[n_pin_keep] - nchar(header) - list_overhead else 0L
+    running <- used + cumsum(nchar(rows[rest]) + 1L)
     n_keep  <- sum(running <= max_chars)
-    if (n_keep < length(rest)) {
-      message(sprintf("[DE-LIMP] AI payload trimmed: %d of %d rows kept to fit %d chars (%d selected rows always kept)",
-                      n_pin + n_keep, length(rows), max_chars, n_pin))
-      rows <- rows[c(seq_len(n_pin), rest[seq_len(n_keep)])]
+    if (n_pin_keep < n_pin || n_keep < length(rest)) {
+      message(sprintf("[DE-LIMP] AI payload trimmed to fit %d chars: %d of %d selected rows and %d of %d other rows kept",
+                      max_chars, n_pin_keep, n_pin, n_keep, length(rest)))
     }
   }
+  out <- paste(c(header, rows[c(pin_idx[seq_len(n_pin_keep)], rest[seq_len(n_keep)])]), collapse = "\n")
+  if (length(pin) > 0) {
+    attr(out, "pinned_sent") <- full_ids[pin_idx[seq_len(n_pin_keep)]]
+    attr(out, "pinned_dropped") <- full_ids[pin_idx[setdiff(seq_len(n_pin), seq_len(n_pin_keep))]]
+  }
+  out
+}
 
-  paste(c(header, rows), collapse = "\n")
+# The selection block of the Data Chat prompt. `sent_ids` must be the selected
+# IDs whose rows are actually in the table (format_ai_table's pinned_sent).
+ai_selection_context <- function(sent_ids, n_omitted = 0L) {
+  shown <- unique(ai_short_protein_id(sent_ids))
+  shown <- shown[nzchar(shown)]
+  n_omitted <- suppressWarnings(as.integer(n_omitted %||% 0L))
+  if (length(n_omitted) != 1 || is.na(n_omitted)) n_omitted <- 0L
+  if (length(shown) == 0 && n_omitted == 0) return("")
+  paste0(
+    "\n!!! USER SELECTION ACTIVE !!!\n",
+    if (length(shown) > 0) paste0(
+      "Focus analysis on these specific proteins (IDs as in the Protein column; their rows ",
+      "are listed first in the DE table):\n", paste(shown, collapse = ", "), "\n") else "",
+    if (n_omitted > 0) paste0(
+      n_omitted, " further selected protein", if (n_omitted == 1) " was" else "s were",
+      " not sent because of the size limit; say so if the user asks about the whole selection.\n") else ""
+  )
 }
 
 # Column names of a table produced by format_ai_table()
@@ -737,21 +920,35 @@ ai_match_protein_ids <- function(ids, full_ids) {
 # from the pipeline descriptor (pipeline_evidence_columns() /
 # pipeline_evidence_guidance(), helpers.R) — CLAUDE.md rule #1: the prompt only
 # describes measurement-depth columns the pipeline that ran actually produced.
+# The EVIDENCE STRENGTH rule, in the one wording every DE prompt uses (AI Summary
+# and the Claude export). `evidence` / `guidance` come from
+# pipeline_evidence_columns() / pipeline_evidence_guidance() (CLAUDE.md rule #3).
+ai_evidence_rule <- function(number, evidence = NULL, guidance = "", pipeline = NULL,
+                             where = "the tables") {
+  pipe_txt <- if (!is.null(pipeline) && length(pipeline) == 1 && !is.na(pipeline) && nzchar(pipeline))
+    paste0(" (quantification pipeline: ", pipeline, ")") else ""
+  if (length(evidence) > 0) {
+    paste0(number, ". EVIDENCE STRENGTH. ", where, " include ", paste(names(evidence), collapse = " and "),
+           ": ", ai_evidence_description(evidence, guidance),
+           "Cite them when calling a result reliable or unreliable.\n")
+  } else {
+    paste0(number, ". EVIDENCE STRENGTH. No per-protein measurement-depth statistics (such as precursor ",
+           "counts) are supplied for this analysis", pipe_txt, ". Do not describe any hit as ",
+           "well or poorly measured on grounds the data does not show.\n")
+  }
+}
+
+# What a stable-biomarker assessment may weigh: measurement depth only when the
+# pipeline supplied it.
+ai_biomarker_criteria <- function(evidence = NULL) {
+  if (length(evidence) > 0) "low CV, significant p-value, meaningful fold-change and measurement depth" else
+    "low CV, significant p-value and meaningful fold-change"
+}
+
 build_ai_summary_prompt <- function(ctx, evidence = NULL, evidence_guidance = "",
                                     pipeline = NULL) {
   has_ev <- length(evidence) > 0
-  pipe_txt <- if (!is.null(pipeline) && length(pipeline) == 1 && !is.na(pipeline) && nzchar(pipeline))
-    paste0(" (quantification pipeline: ", pipeline, ")") else ""
-
-  rule5 <- if (has_ev) {
-    paste0("5. EVIDENCE STRENGTH. The tables include ", paste(names(evidence), collapse = " and "),
-           ": ", ai_evidence_description(evidence, evidence_guidance),
-           "Cite them when calling a result reliable or unreliable.\n")
-  } else {
-    paste0("5. EVIDENCE STRENGTH. No per-protein measurement-depth statistics (such as precursor ",
-           "counts) are supplied for this analysis", pipe_txt, ". Do not describe any hit as ",
-           "well or poorly measured on grounds the data below does not show.\n")
-  }
+  rule5 <- ai_evidence_rule(5, evidence, evidence_guidance, pipeline, where = "The tables")
   evidence_section <- if (has_ev) {
     paste0("For the headline hits, assess the strength of the underlying measurement (rule 5). Name any ",
            "hit whose statistics look strong but whose measurement is thin.")
@@ -803,8 +1000,7 @@ build_ai_summary_prompt <- function(ctx, evidence = NULL, evidence_guidance = ""
     "Discuss consistency of direction (always up, always down, or mixed across comparisons).\n\n",
     "## High-Confidence Biomarker Insights\n",
     "For the most stable proteins (lowest coefficient of variation): assess their potential as ",
-    "reliable biomarkers based on the combination of low CV, significant p-value",
-    if (has_ev) ", meaningful fold-change and measurement depth" else " and meaningful fold-change",
+    "reliable biomarkers based on the combination of ", ai_biomarker_criteria(evidence),
     ". Discuss biology only within rule 2.\n\n",
     "## Biological Interpretation\n",
     "Suggest what biological processes or pathways may be affected, within rule 2. ",
@@ -876,12 +1072,9 @@ ask_openai_compat <- function(system_prompt, user_prompt, api_key, model_name,
                               base_url = NULL, max_tokens = 8192,
                               timeout_s = NULL, history = list(),
                               policy = ai_deployment_policy()) {
-  if (ai_key_belongs_to_other_provider("openai_compat", api_key)) {
-    return(ai_error(paste("the API key looks like a Google Gemini key, so it was not sent to",
-                          "the OpenAI-compatible endpoint. Enter the key for that endpoint.")))
-  }
-  endpoint <- ai_validate_endpoint(base_url, "openai_compat", policy)
-  if (!isTRUE(endpoint$ok)) return(ai_error(endpoint$error))
+  pre <- ai_openai_preflight(api_key, base_url, policy)
+  if (!isTRUE(pre$ok)) return(ai_error(pre$error))
+  endpoint <- pre$endpoint
   timeout_s <- ai_request_timeout("openai_compat", timeout_s, policy)
 
   body <- list(
@@ -913,11 +1106,9 @@ ask_openai_compat <- function(system_prompt, user_prompt, api_key, model_name,
 }
 
 list_openai_compat_models <- function(api_key, base_url = NULL, policy = ai_deployment_policy()) {
-  if (ai_key_belongs_to_other_provider("openai_compat", api_key)) {
-    return(ai_error("the API key looks like a Google Gemini key, so it was not sent to the OpenAI-compatible endpoint."))
-  }
-  endpoint <- ai_validate_endpoint(base_url, "openai_compat", policy)
-  if (!isTRUE(endpoint$ok)) return(ai_error(endpoint$error))
+  pre <- ai_openai_preflight(api_key, base_url, policy)
+  if (!isTRUE(pre$ok)) return(ai_error(pre$error))
+  endpoint <- pre$endpoint
   timeout_s <- min(60, policy$max_timeout_s)
   req <- request(paste0(endpoint$url, "/models")) %>%
     req_headers("Authorization" = paste("Bearer", api_key)) %>%
@@ -965,6 +1156,7 @@ ask_ai_data <- function(user_query, data_table, qc_df, api_key, model_name,
                         timeout_s = NULL, chat_history = NULL,
                         project = NULL, notes = NULL,
                         evidence = NULL, evidence_guidance = "",
+                        n_selected_omitted = 0L,
                         policy = ai_deployment_policy()) {
 
   qc_text <- if (is.null(qc_df)) "No QC data available." else
@@ -982,17 +1174,8 @@ ask_ai_data <- function(user_query, data_table, qc_df, api_key, model_name,
     evidence_guidance <- ""
   }
 
-  selection_context <- ""
-  if (!is.null(selected_ids) && length(selected_ids) > 0) {
-    shown <- unique(ai_short_protein_id(selected_ids))
-    shown <- shown[nzchar(shown)]
-    selection_context <- paste0(
-      "\n!!! USER SELECTION ACTIVE !!!\n",
-      "Focus analysis on these specific proteins (IDs as in the Protein column; their rows ",
-      "are listed first in the DE table):\n",
-      paste(shown, collapse = ", "), "\n"
-    )
-  }
+  # `selected_ids` = the selected proteins actually present in data_table
+  selection_context <- ai_selection_context(selected_ids, n_selected_omitted)
 
   column_notes <- paste0(
     "logFC is log2 fold-change; adj.P.Val is BH-adjusted; B is the log-odds of differential ",
@@ -1088,6 +1271,16 @@ list_google_models <- function(api_key, policy = ai_deployment_policy()) {
 ai_gemini_model_ok <- function(model_name) {
   m <- gsub("^models/", "", as.character(model_name %||% ""))
   length(m) == 1 && !is.na(m) && grepl("^[A-Za-z0-9._-]+$", m)
+}
+
+# A narrative restored from a saved session. Sessions saved before 4.1.0 could
+# store a failed request ("API Error: <upstream body>") as the narrative; it is
+# not shown or exported as analysis, only reported as unavailable.
+AI_SAVED_ERROR_LABEL <- "not available (saved error)"
+ai_restored_narrative <- function(narrative, source = NULL) {
+  if (is.null(narrative)) return(list(narrative = NULL, source = NULL))
+  if (is_ai_error(narrative)) return(list(narrative = NULL, source = AI_SAVED_ERROR_LABEL))
+  list(narrative = narrative, source = source)
 }
 
 # The text of a generateContent response. Thought parts (thinking models) are

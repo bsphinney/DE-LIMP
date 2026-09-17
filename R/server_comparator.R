@@ -3,7 +3,7 @@
 #  Run Comparator — Compare two analyses of the same dataset
 #  Modes: DE-LIMP vs DE-LIMP, vs Spectronaut, vs FragPipe
 #  Called from app.R as: server_comparator(input, output, session, values, add_to_log,
-#                                           ai_public_deployment = is_hf_space)
+#                                           ai_public_deployment = ai_public_deployment)
 # ==============================================================================
 
 # --- Pure helper functions (no Shiny reactivity) ---
@@ -4275,10 +4275,17 @@ server_comparator <- function(input, output, session, values, add_to_log,
     res <- comp_results()
     req(res, input$user_api_key)
 
+    ai_provider <- input$ai_provider %||% "gemini"
+    # Server-side key binding, written by server_ai (see ai_key_binding())
+    key_msg <- ai_key_binding_message(values$ai_key_binding, ai_provider, input$ai_base_url)
+    if (!is.null(key_msg)) {
+      showNotification(key_msg, type = "error", duration = 10)
+      return()
+    }
+
     mofa_obj <- values$comparator_mofa
     prompt <- build_gemini_comparator_prompt(res, mofa_obj, values$instrument_metadata)
 
-    ai_provider <- input$ai_provider %||% "gemini"
     model <- input$model_name
     if (is.null(model) || !nzchar(trimws(model))) model <- ai_provider_field(ai_provider, "default_model")
     source_label <- ai_source_label(ai_provider, model, input$ai_base_url)
@@ -4345,7 +4352,13 @@ server_comparator <- function(input, output, session, values, add_to_log,
   # Inject AI narrative into static div (avoids bslib uiOutput disappearing bug)
   observe({
     narrative <- values$comparator_gemini_narrative
-    if (is.null(narrative)) {
+    if (is.null(narrative) && identical(values$comparator_ai_narrative_source, AI_SAVED_ERROR_LABEL)) {
+      # Restored from a session that had saved a failed request as the narrative
+      shinyjs::html("comparator_gemini_container", paste0(
+        '<div class="card mt-3"><div class="card-header"><b>AI Analysis</b></div>',
+        '<div class="card-body text-muted">', AI_SAVED_ERROR_LABEL,
+        ' \u2014 the saved session contained a failed AI request, not an analysis. Generate a new summary.</div></div>'))
+    } else if (is.null(narrative)) {
       shinyjs::html("comparator_gemini_container", "")
     } else {
       src <- values$comparator_ai_narrative_source %||% "provider and model not recorded"

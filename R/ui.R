@@ -9,7 +9,8 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      delimp_data_dir = "",
                      is_core_facility = FALSE, cf_config = NULL,
                      deploy_env = "Local",
-                     config = list(), is_hive = FALSE) {
+                     config = list(), is_hive = FALSE,
+                     ai_public_deployment = is_hf_space) {
 
   # Read app version directly so the navbar shows it without needing
   # values$app_version to round-trip through reactivity.
@@ -465,14 +466,15 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
               " API — a self-hosted vLLM or llama.cpp server, or an institutional gateway."),
             tags$p("Your data goes to that endpoint only, not to Google."),
             # Mirrors ai_deployment_policy() in helpers_ai.R
-            if (is_hf_space) tags$p(style = "margin-bottom: 0;",
+            if (ai_public_deployment) tags$p(style = "margin-bottom: 0;",
               "On this public site the endpoint must be a public https:// address; ",
               "local and private-network servers are refused, and each request is limited to ",
               AI_PUBLIC_MAX_TIMEOUT_S, " seconds. Run DE-LIMP locally to use a model server on your own machine or network. ",
-              "Changing the endpoint or the provider clears the API key.")
+              "Changing the provider or the endpoint host clears the API key.")
             else tags$p(style = "margin-bottom: 0;",
-              "Use https://, or http://localhost for a model server on this computer. ",
-              "Changing the endpoint or the provider clears the API key.")
+              "Use https://. Plain http:// is accepted for a model server on this computer, your local network ",
+              "or the Docker host (http://host.docker.internal:11434/v1) \u2014 the key is then sent unencrypted. ",
+              "Changing the provider or the endpoint host clears the API key.")
           )
         ),
 

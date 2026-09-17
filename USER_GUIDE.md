@@ -23,7 +23,7 @@ DE-LIMP helps you find which proteins are significantly different between experi
 * **R & RStudio:** Ensure you have R (version 4.5 or newer) installed.
   * **Important:** The limpa package requires R 4.5+ and Bioconductor 3.22+
   * Download R from: https://cloud.r-project.org/
-* **Gemini API Key:** Required for AI Chat features (See below).
+* **AI provider API key:** Optional — needed only for the in-app AI features. Use a free Google Gemini key (see below) or the key for an OpenAI-compatible endpoint (a self-hosted vLLM / llama.cpp / Ollama server, or an institutional gateway).
 
 ### 🔑 1.1 How to Obtain a Free Gemini API Key
 To use the "Chat with Data" features, you need a key from Google. It is free for standard use.
@@ -34,7 +34,7 @@ To use the "Chat with Data" features, you need a key from Google. It is free for
 4.  Click **"Create API key"**.
     * If asked, select "Create API key in new project".
 5.  Copy the long string of text that appears (it starts with `AIza...`).
-6.  **Paste this key** into the "Gemini API Key" box in the DE-LIMP sidebar.
+6.  In the DE-LIMP sidebar, open **AI Chat**, leave **AI Provider** on "Google Gemini (cloud)", and **paste this key** into the **API Key** box. (Changing the provider or the endpoint clears the key box, so a key is never sent to a different service.)
 
 ### 1.2 Launching the App
 1.  Open the DE-LIMP project folder in RStudio (or navigate to it in your R console).
@@ -922,21 +922,26 @@ DE-LIMP offers two complementary AI pathways:
 - **In-app AI (Google Gemini):** Quick questions and summaries powered by Google Gemini, right inside the app. This includes **AI Summary** (a one-click overview of all comparisons) and **Data Chat** (interactive Q&A about your data). Requires a free Gemini API key.
 - **Export for External AI (Output > Export Complete Analysis ZIP):** Download your complete analysis as a single .zip — DE results + QC + phospho + expression matrix + detection matrix + quartile profiles + variable proteins + methods + parameters + reproducibility log + sessionInfo + a DE-aware **PROMPT.md** + **MANIFEST.txt**. Upload the .zip to Claude, ChatGPT, or any AI assistant for deeper analysis, manuscript writing, or extended interpretation. No API key needed for the export itself.
 
-### 8.1 Setup — Google Gemini API Key
+### 8.1 Setup — AI Provider and API Key
 
-A free API key from Google is required for all AI features (AI Summary, Data Chat, Auto-Analyze).
+The AI features (AI Summary, Data Chat, Auto-Analyze, Run Comparator AI Summary) need an API key for the provider selected under **AI Chat > AI Provider** in the sidebar:
+* **Google Gemini (cloud)** — the default; a free key from Google (steps below).
+* **OpenAI-compatible endpoint** — any `/v1/chat/completions` service: a self-hosted vLLM, llama.cpp or Ollama server, or an institutional gateway. Enter its **Endpoint URL** and its key. Use `https://`; a local install also accepts plain `http://` to a server on the same computer, the local network or the Docker host (`http://host.docker.internal:11434/v1` — inside Docker, `localhost` is the container), with a warning that the key travels unencrypted. On the public Hugging Face Space only public `https://` endpoints are accepted.
+
+Getting a free Gemini key:
 
 1.  Go to **[Google AI Studio](https://aistudio.google.com/)**.
 2.  Sign in with your Google Account.
 3.  Click **"Get API key"** in the top-left corner.
 4.  Click **"Create API key"** (select "Create API key in new project" if prompted).
 5.  Copy the key (starts with `AIza...`).
-6.  Paste it into the **"Gemini API Key"** box in the DE-LIMP sidebar (under the AI Chat accordion section).
-7.  (Optional) Change the Model Name to use a specific Gemini version (default: `gemini-3-flash-preview`).
+6.  Paste it into the **API Key** box in the DE-LIMP sidebar (under the AI Chat accordion section, with **AI Provider** set to Google Gemini).
+7.  (Optional) Change the Model Name (default for Gemini: `gemini-2.5-flash`). **Check Models** lists the models your key can use.
 
 > **Privacy:**
-> - **AI Summary** sends only summary statistics to Gemini: protein names, logFC, adj.P.Val, CV metrics, and dataset dimensions. No raw expression values or sample identifiers are included.
-> - **Data Chat** sends per-sample expression values for the top DE proteins and QC metrics that include run identifiers, giving Gemini richer context for interactive Q&A.
+> - Data goes only to the provider selected in the sidebar. The **?** button next to each AI feature lists exactly what it sends.
+> - **AI Summary** sends summary statistics only: per comparison, the top significant proteins and the largest increases/decreases by fold-change (accession, gene name, log2FC, adjusted p-value, NPrec/PropObs when the quantification pipeline provides them, contaminant flag), cross-comparison proteins and the most stable proteins. No expression values, sample names, groups or QC data.
+> - **Data Chat** sends the QC table (run names, groups, precursor/protein counts, MS1 signal), DE statistics for the top proteins of the selected comparison (no per-sample expression values), your selected proteins, your messages and the last few conversation turns, and — on a local install only — the project name and notes you recorded for the loaded search.
 > - Neither feature sends file paths or server information.
 > - Google retains API data for approximately 48 hours for abuse monitoring. If you are working with clinical or patient-derived data, consult your institutional data governance office before using any AI features.
 
@@ -944,22 +949,22 @@ A free API key from Google is required for all AI features (AI Summary, Data Cha
 
 The AI Summary analyzes **all contrasts (pairwise comparisons between your experimental groups, e.g., Treatment vs. Control) simultaneously**, not just the currently selected comparison. This provides a global view of your experiment.
 
-**What data is sent to Gemini:**
-* Top differentially expressed proteins per comparison (gene names, logFC (log2 fold change -- a value of 1.0 means the protein doubled), adj.P.Val (p-value corrected for multiple testing))
-* Cross-comparison biomarkers -- proteins that are significant in two or more contrasts
-* CV-based stability metrics -- median coefficient of variation per group, percentage of proteins below 20% CV
-* Dataset dimensions (number of proteins, samples, groups, contrasts)
+**What data is sent to the selected AI provider:**
+* Per comparison: the number of significant proteins (up/down), the top significant proteins by adj.P.Val (p-value corrected for multiple testing), and separately the largest increases and decreases by logFC (log2 fold change -- a value of 1.0 means the protein doubled). Each row: accession, gene name (from the search FASTA when available), logFC, adj.P.Val, NPrec/PropObs (measurement depth, when the quantification pipeline provides them) and a contaminant flag
+* Cross-comparison biomarkers -- proteins that are significant in two or more contrasts, with their fold-changes
+* The five most stable significant proteins (lowest average CV across replicates)
 
 **What is NOT sent:**
 * Raw expression values or intensity matrices
-* Sample file names or identifiers
+* Sample file names, group assignments or QC data
+* Project names or notes
 * File paths or server information
 
 **The AI generates:**
-* Biological interpretation of the top DE proteins in each comparison
+* An overview and the key findings per comparison, naming proteins only by the gene names supplied
+* An evidence-quality check (hits whose measurement is thin, flagged contaminants)
 * Cross-comparison patterns -- proteins that change consistently across multiple contrasts
-* Pathway and functional context for the findings
-* Suggestions for follow-up experiments
+* Biological interpretation only for proteins whose identity was supplied; the model is instructed not to recall protein functions from memory
 
 #### AI Summary HTML Export
 
@@ -971,14 +976,16 @@ Click **"Export Report"** below the AI Summary to download a styled standalone H
 
 ### 8.3 Data Chat (AI Analysis Tab)
 
-The **AI Analysis** tab provides an interactive conversational interface with Google Gemini, where the AI has full awareness of your dataset context.
+The **AI Analysis** tab provides an interactive conversational interface with the AI provider selected in the sidebar (Google Gemini or an OpenAI-compatible endpoint), with your dataset's results as context.
 
 #### How It Works
 
-When you open the Data Chat, the app automatically sends Gemini:
-* QC statistics (protein counts, precursor counts, data completeness per sample)
+With each message, the app sends the selected provider:
+* The QC table (run name, group, precursor count, protein count, MS1 signal per run)
 * Top differentially expressed proteins **for the currently selected comparison** -- change the comparison selector in the DE Dashboard to explore other contrasts with the AI
-* Smart data scaling: sends 100-800 proteins depending on dataset size (smaller datasets send more complete results; larger datasets focus on the most significant)
+* Smart data scaling: sends 100-800 proteins depending on dataset size (smaller datasets send more complete results; larger datasets focus on the most significant), trimmed to the provider's size limit. Per protein: accession, gene name, logFC, AveExpr, t, P.Value, adj.P.Val, B, NPrec/PropObs when available, and a contaminant flag -- no per-sample expression values
+* Proteins you selected in the plots (listed first; if a very large selection does not fit the size limit, you are told how many were left out)
+* Your message and the last few turns of the conversation (failed replies are not re-sent)
 * When phosphoproteomics analysis is active, the top 20 phosphosites and KSEA kinase activity results are automatically included
 
 #### Using Data Chat

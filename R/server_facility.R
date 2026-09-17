@@ -572,6 +572,7 @@ server_facility <- function(input, output, session, values, add_to_log,
           limpa::readDIANN(report_path, format = "parquet")))
 
         values$raw_data <- raw_data
+        values$loaded_dataset <- loaded_dataset_identity(job$output_dir, raw_data, "facility_history")
         values$qc_stats <- get_diann_stats_r(report_path)
         values$uploaded_report_path <- report_path
         values$original_report_name <- basename(report_path)
