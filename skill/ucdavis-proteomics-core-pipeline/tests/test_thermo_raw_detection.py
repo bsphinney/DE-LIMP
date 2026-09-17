@@ -416,5 +416,108 @@ class ThermoRawCLI(_FakeParserCase):
         self.assertIn("WARNING", res.stderr)
 
 
+class ThermoRawCohortOnALoginNode(_FakeParserCase):
+    """Reading a .raw is now real work: two .NET parser processes per file that read the raw
+    (3.1-7.0 s per file on HIVE compute nodes, srun jobs 23511567 to 23515380). With the
+    old command line the parser calls died at argument parsing, so step 2 cost nothing --
+    and SKILL.md 0a drives step 2 over SSH, i.e. on the cluster login node. A 200-file cohort
+    there is ~20 min of parser I/O on a shared host, which golden rule #3 forbids. So a
+    cohort is refused on a login node BEFORE any file is read, with the way to run it on a
+    compute node."""
+
+    def setUp(self):
+        super().setUp()
+        # "this host can submit jobs" -- in its own PATH dir, so hide_parser() leaves it
+        self.sbin = os.path.join(self.tmp, "sbin")
+        os.makedirs(self.sbin)
+        with open(os.path.join(self.sbin, "sbatch"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(self.sbin, "sbatch"), 0o755)
+        os.environ["PATH"] = self.sbin + os.pathsep + os.environ["PATH"]
+        os.environ.pop("SLURM_JOB_ID", None)             # ...and is not inside a job
+
+    def cohort(self, n):
+        return [self.raw(EXPLORIS, subdir=f"batch{i:03d}") for i in range(n)]
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "detect_acquisition.py"),
+                               *args], capture_output=True, text=True, env=os.environ.copy())
+
+    def test_a_cohort_is_refused_before_any_file_is_read(self):
+        n = da.LOGIN_NODE_MAX_RAW + 1
+        res = self._run(*self.cohort(n))
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(res.stdout, "", "a refusal must not print JSON a caller could use")
+        self.assertEqual(self.calls(), [], "read raws on the login node before refusing")
+        for words in ("login", f"{n} Thermo .raw", "srun", "--allow-login-node",
+                      "SLURM_JOB_ID"):
+            self.assertIn(words, res.stderr)
+
+    def test_a_few_raws_are_read_here(self):
+        n = da.LOGIN_NODE_MAX_RAW
+        res = self._run(*self.cohort(n))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(json.loads(res.stdout)["files"]), n)
+
+    def test_only_thermo_raw_files_count_toward_the_limit(self):
+        """Bruker .d is a SQLite lookup and a Waters .raw folder is not read at all; neither
+        is what made step 2 expensive, so neither may push a mixed input over the limit."""
+        others = []
+        for i in range(da.LOGIN_NODE_MAX_RAW + 1):
+            d = os.path.join(self.tmp, f"run{i}.d")
+            os.makedirs(d)
+            others.append(d)
+        waters = os.path.join(self.tmp, "waters_run.raw")
+        os.makedirs(waters)
+        res = self._run(*others, waters, self.raw(EXPLORIS))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(json.loads(res.stdout)["files"]), len(others) + 2)
+
+    def test_without_a_parser_nothing_is_refused(self):
+        """No parser means no parser I/O: every .raw fails at once with the not-found
+        warning. Sending that through srun would only delay the message that matters."""
+        self.hide_parser()
+        self.assertTrue(da.on_cluster_login_node(), "the test must still look like a login node")
+        n = da.LOGIN_NODE_MAX_RAW + 1
+        res = self._run(*self.cohort(n))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(json.loads(res.stdout)["files"]), n)
+        self.assertIn("not found", res.stderr)
+
+    def test_inside_a_slurm_allocation_the_cohort_is_read(self):
+        os.environ["SLURM_JOB_ID"] = "23511567"
+        n = da.LOGIN_NODE_MAX_RAW + 1
+        res = self._run(*self.cohort(n))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(json.loads(res.stdout)["files"]), n)
+
+    def test_allow_login_node_reads_them_anyway(self):
+        n = da.LOGIN_NODE_MAX_RAW + 1
+        res = self._run("--allow-login-node", *self.cohort(n))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(len(payload["files"]), n, "the flag must not be read as a file")
+        self.assertEqual(payload["overall"], "DIA")
+
+    def test_without_a_scheduler_nothing_is_refused(self):
+        """A laptop or workstation is not a shared login node (golden rule 7: no cluster is
+        assumed). It gets progress lines instead."""
+        os.environ["PATH"] = os.pathsep.join(
+            d for d in os.environ["PATH"].split(os.pathsep)
+            if not os.path.exists(os.path.join(d, "sbatch")))
+        n = da.LOGIN_NODE_MAX_RAW + 1
+        res = self._run(*self.cohort(n))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(json.loads(res.stdout)["files"]), n)
+
+    def test_progress_is_reported_per_raw_on_stderr(self):
+        """Minutes of parser work with no output looks like a hang."""
+        res = self._run(*self.cohort(2))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        json.loads(res.stdout)                                  # stdout stays pure JSON
+        self.assertRegex(res.stderr, r"Thermo \.raw 1/2 .*s\b")
+        self.assertRegex(res.stderr, r"Thermo \.raw 2/2 .*s\b")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

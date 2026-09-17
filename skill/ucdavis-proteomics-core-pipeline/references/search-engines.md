@@ -27,11 +27,14 @@ on PATH. Two calls per file, in the `-option=value` form the parser's README req
 
 | call | gives | measured on HIVE (TRFP 2.0.0.0) |
 |---|---|---|
-| `-i=<raw> -m=0 -o=<tmp>` | instrument model, scan range, MS1/MS2 counts | 2.6–3.6 s on 3.5 GB raws |
+| `-i=<raw> -m=0 -o=<tmp>` | instrument model, scan range, MS1/MS2 counts | 2.6–4.8 s on 3.5 GB raws |
 | `query -i=<raw> -n=<a>-<b> -b=<tmp>/q.json` | isolation target + lower/upper offsets per MS2 scan; filter string (`MS:1000512`, or `MS:10000512` from v1.3.0–v1.4.4) | 1.1–5.8 s for 200–2000 scans |
 
-The whole `detect_acquisition.py` call took 4.2–5.7 s per file on the Exploris 480,
-Fusion Lumos and a DDA Exploris run, against ~3 min to write one full mzML.
+A `.raw` took **3.1–7.0 s** on the Exploris 480, Fusion Lumos and a DDA Exploris run
+(HIVE srun jobs 23511567, 23512661, 23513356, 23515380), at ~1 core and 286–354 MB peak RSS,
+writing a 1.2–8.8 MB query JSON to `$TMPDIR` that is deleted before the next file. Six files
+in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 12.6 s in job
+23515809. Compare ~3 min to write one full mzML.
 
 - **Which scans.** The middle of the run, 4 acquisition cycles (cycle = MS2/MS1 count
   ratio + 1, so 26 scans on a 25-window Exploris method), clamped to 200–1500 scans.
@@ -63,6 +66,15 @@ Fusion Lumos and a DDA Exploris run, against ~3 min to write one full mzML.
   (Orbitrap Astral pins 4/10 ppm; other Orbitraps still get automatic calibration unless
   their resolutions are given; Sage gets ±10 ppm for an Orbitrap, ±20 ppm when unknown).
   The per-file `reader` field records the parser command and `--version`.
+- **A cohort on a cluster login node is refused.** Before this reader worked, the two
+  parser calls died at argument parsing, so step 2 cost nothing wherever it ran. Now it is
+  the per-file cost above, and SKILL.md 0a drives step 2 over SSH — on the login node,
+  where 200 files would be ~20 min of parser I/O on a shared host (golden rule #3). With
+  `sbatch` on PATH and `SLURM_JOB_ID` unset (the test `run_search.py` uses), more than 5
+  Thermo `.raw` files are refused **before any is read**, with an `srun` line to use
+  instead; `--allow-login-node` overrides. Without a scheduler, or without a parser (each
+  `.raw` then fails at once), nothing is refused. Either way each `.raw` prints
+  `Thermo .raw k/N read in X s` on stderr.
 - **Before this was fixed** the detector called `ThermoRawFileParser metadata -i` (no
   such subcommand: exit 255 "Unexpected extra arguments") and `query -i` without `-n`
   (exit 255 "specify a valid scan range"), ignored both exits, and returned

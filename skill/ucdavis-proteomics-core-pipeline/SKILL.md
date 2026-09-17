@@ -217,6 +217,11 @@ thermorawfileparser`; set `THERMORAWFILEPARSER="dotnet …/ThermoRawFileParser.d
 is not one executable on PATH). If a `.raw` comes back `unknown` or any file has
 `warnings`, **tell the user what the warning says** — without the parser there is no
 measured precursor range and step 6b falls back to 380–980.
+Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
+on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
+with the account/partition the user can submit to); on a login node the script refuses
+such a cohort before reading anything and prints that `srun` line. Do not add
+`--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
 → detail: `references/search-engines.md`.
 
 ### 3. Ask organism + experimental design (auto-map conditions)

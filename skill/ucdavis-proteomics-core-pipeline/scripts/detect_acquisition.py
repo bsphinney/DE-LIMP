@@ -20,13 +20,18 @@ Detection per format (best-effort, with a confidence score):
               or failing => 'unknown'/low, a stated reason, and a stderr WARNING.
 
 Output: JSON to stdout. The orchestrator MUST confirm with the user whenever
-confidence != "high" before launching a multi-hour search.
+confidence != "high" before launching a multi-hour search. Warnings and per-.raw progress
+go to stderr.
 
-Usage: python3 detect_acquisition.py FILE [FILE ...]
+On a cluster login node (sbatch on PATH, SLURM_JOB_ID unset) more than LOGIN_NODE_MAX_RAW
+Thermo .raw files are refused before any is read: run it under srun, or pass
+--allow-login-node.
+
+Usage: python3 detect_acquisition.py [--allow-login-node] FILE [FILE ...]
        THERMORAWFILEPARSER="dotnet /opt/trfp/ThermoRawFileParser.dll" \
        python3 detect_acquisition.py run.raw        # parser not on PATH as one executable
 """
-import sys, os, json, glob, gzip, math, sqlite3, statistics, shutil, subprocess, shlex, tempfile
+import sys, os, json, glob, gzip, math, sqlite3, statistics, shutil, subprocess, shlex, tempfile, time
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -543,11 +548,82 @@ def classify(path):
             # the external reader and its version, when one was needed (Thermo .raw)
             "reader": reader}
 
+# ---------------------------------------------------------------------------
+# A cohort of .raw on a cluster login node.
+#
+# Reading a .raw is two parser processes that read the raw. Measured on HIVE compute nodes
+# (srun jobs 23511567, 23512661, 23513356, 23515380; TRFP 2.0.0.0, 3.5 GB raws): 3.1-7.0 s
+# per file, ~1 core (68-98% CPU), 286-354 MB peak RSS, a 1.2-8.8 MB query JSON in $TMPDIR
+# (deleted per file); 6 files in one call took 27-33 s. With the old command line the calls died at
+# argument parsing, so step 2 cost nothing -- and SKILL.md 0a drives step 2 over SSH, i.e.
+# on the login node. A 200-file cohort there is ~20 min of parser I/O on a shared host,
+# which golden rule #3 forbids. The limit is a choice, not a measurement: 5 files keeps the
+# login-node work to about half a minute. The login-node test is run_search.py's own
+# (sbatch present, not inside a SLURM job), so the two refuse on the same hosts. No
+# scheduler => no refusal: a laptop is not a shared login node, and gets progress lines
+# instead. No parser => no refusal either: each .raw fails at once with the not-found
+# warning, and a detour through srun would only delay that message.
+# ---------------------------------------------------------------------------
+LOGIN_NODE_MAX_RAW = 5
+ALLOW_LOGIN_NODE = "--allow-login-node"
+RAW_SECONDS_EACH = 7            # upper end of the per-file measurement above
+
+
+def is_thermo_raw(path):
+    p = path.rstrip("/")
+    return p.lower().endswith(".raw") and not os.path.isdir(p)     # a .raw FOLDER is Waters
+
+
+def on_cluster_login_node():
+    """sbatch present + no SLURM_JOB_ID == a submit host, not a compute node."""
+    return shutil.which("sbatch") is not None and not os.environ.get("SLURM_JOB_ID")
+
+
+def login_node_refusal(n_raw):
+    secs = n_raw * RAW_SECONDS_EACH
+    est = f"{secs} s" if secs < 120 else f"{math.ceil(secs / 60)} min"
+    minutes = max(10, math.ceil(2 * secs / 60))
+    return (
+        f"REFUSING to read {n_raw} Thermo .raw files on what looks like a cluster login/submit "
+        f"node (sbatch is on PATH and SLURM_JOB_ID is unset).\n"
+        f"  Each .raw is two ThermoRawFileParser processes reading the raw -- measured ~1 core, "
+        f"~350 MB and 3-7 s per file -- so up to ~{est} of I/O here, on a shared host "
+        f"(SKILL.md golden rule #3).\n"
+        f"  Run it on a compute node instead, e.g.:\n"
+        f"    srun --cpus-per-task=1 --mem=2G --time={minutes} python3 "
+        f"{os.path.abspath(__file__)} <the same files>\n"
+        f"  adding the --account/--partition/--qos your cluster requires "
+        f"(`sacctmgr show assoc user=$USER` lists yours),\n"
+        f"  or re-run with {ALLOW_LOGIN_NODE} to read them here anyway "
+        f"({LOGIN_NODE_MAX_RAW} or fewer need no flag).")
+
+
 def main(argv):
+    allow_login_node = ALLOW_LOGIN_NODE in argv
+    argv = [a for a in argv if a != ALLOW_LOGIN_NODE]
+    if not argv:
+        print(f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]",
+              file=sys.stderr)
+        sys.exit(2)
     files = []
     for a in argv:
         files.extend(sorted(glob.glob(a)) or [a])
-    results = [classify(f) for f in files]
+    n_raw = sum(1 for f in files if is_thermo_raw(f))
+    # Refuse BEFORE reading anything: a refusal after the first 100 files is no refusal.
+    if (n_raw > LOGIN_NODE_MAX_RAW and on_cluster_login_node() and not allow_login_node
+            and find_trfp()):
+        sys.exit(login_node_refusal(n_raw))
+    results, k = [], 0
+    for f in files:
+        if not is_thermo_raw(f):
+            results.append(classify(f))
+            continue
+        k += 1
+        t0 = time.monotonic()
+        results.append(classify(f))
+        # Seconds per file, as it happens: minutes of parser work in silence looks like a hang.
+        print(f"[detect_acquisition] Thermo .raw {k}/{n_raw} read in "
+              f"{time.monotonic() - t0:.1f} s: {f}", file=sys.stderr, flush=True)
     # stdout is JSON for the caller; problems also go to stderr, where a person sees them
     # even when a script only keeps the JSON.
     for r in results:
@@ -582,6 +658,4 @@ def main(argv):
     }, indent=2))
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("usage: detect_acquisition.py FILE [FILE ...]", file=sys.stderr); sys.exit(2)
     main(sys.argv[1:])
