@@ -39,14 +39,20 @@ timsrust's `read_all_spectra()` returns only MS2 (DIA window) spectra — no MS1
 Frame objects have `tof_indices` but NOT `mz_values`. The conversion uses the same formula as Sage/timsrust internally (from `src/converters.rs`, `Tof2MzConverter`):
 
 ```python
-import numpy as np
+import os
 import sqlite3
+from pathlib import Path
+
+import numpy as np
 
 def tof_to_mz(tof_indices, d_folder):
     """Convert raw TOF indices to m/z using the timsrust/Sage formula."""
     # Read calibration from GlobalMetadata table
     tdf_path = os.path.join(d_folder, "analysis.tdf")
-    conn = sqlite3.connect(f"file:{tdf_path}?mode=ro", uri=True)
+    # read-only AND immutable -- never a read-write open (it truncated 342 HIVE tdfs by
+    # replaying a stale -wal), and mode=ro alone still reads that -wal
+    conn = sqlite3.connect(Path(os.path.abspath(tdf_path)).as_uri() + "?mode=ro&immutable=1",
+                           uri=True)
     meta = dict(conn.execute("SELECT Key, Value FROM GlobalMetadata").fetchall())
     conn.close()
     

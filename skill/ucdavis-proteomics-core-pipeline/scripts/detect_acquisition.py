@@ -15,12 +15,24 @@ Detection per format (best-effort, with a confidence score):
   Thermo .raw not natively readable here. If ThermoRawFileParser is on PATH we
               convert a header sample; otherwise we return 'unknown' and ask.
 
-Output: JSON to stdout. The orchestrator MUST confirm with the user whenever
-confidence != "high" before launching a multi-hour search.
+Every Bruker .d is also checked for a truncated or at-risk analysis.tdf
+(bruker_tdf.tdf_integrity): WAL-mode header, a non-empty -wal/-journal beside it,
+or a frame index that ends short of analysis.tdf_bin. Anything but `ok` becomes a
+line in that file's `warnings` and sets `needs_confirmation`.
+
+Output: JSON to stdout; each file's `warnings` also go to stderr. The orchestrator
+MUST confirm with the user whenever confidence != "high" or any file has
+`warnings`, before launching a multi-hour search.
 
 Usage: python3 detect_acquisition.py FILE [FILE ...]
 """
 import sys, os, json, glob, gzip, sqlite3, statistics, shutil, subprocess
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Every analysis.tdf is opened through bruker_tdf.connect_tdf (read-only AND immutable):
+# a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
+# HIVE), and mode=ro alone reads through the stale -wal.
+from bruker_tdf import connect_tdf, tdf_integrity, integrity_warning  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -32,7 +44,7 @@ def instrument_bruker_d(path):
     if not os.path.exists(tdf):
         return None
     try:
-        con = sqlite3.connect(f"file:{tdf}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         # GlobalMetadata is a key/value table; InstrumentName holds e.g. "timsTOF Pro"
         rows = dict(cur.execute("SELECT Key, Value FROM GlobalMetadata"))
@@ -72,9 +84,9 @@ def detect_bruker_d(path):
     tdf = os.path.join(path, "analysis.tdf")
     if not os.path.exists(tdf):
         return ("unknown", "low", "no analysis.tdf in .d folder", None)
-    tmp = tdf  # read-only open
+    con = None
     try:
-        con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         tables = {r[0] for r in cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -201,18 +213,33 @@ def classify(path):
     else:
         kind, conf, why, vendor = "unknown", "low", "unrecognized extension", "?"
     instrument = detect_instrument(p)
+    # A .d whose analysis.tdf indexes only part of its tdf_bin is searched without an
+    # error -- DIA-NN reads what the index points at. Nothing downstream can tell, so it
+    # is checked here, before the engine is chosen. None for anything but a Bruker .d.
+    integrity = (tdf_integrity(p) if vendor == "Bruker"
+                 and os.path.exists(os.path.join(p, "analysis.tdf")) else None)
+    warnings = ([integrity_warning(integrity)]
+                if integrity and integrity["status"] != "ok" else [])
     return {"file": p, "vendor": vendor, "acquisition": kind,
             "confidence": conf, "reason": why, "instrument": instrument,
             # ACQUIRED precursor m/z bounds, or null when the format cannot tell
             # us. estimate_params.py searches this range instead of a hardcoded
             # 380-980 -- see its --precursor-mz-range flag.
-            "precursor_mz_range": (list(mz_range) if mz_range else None)}
+            "precursor_mz_range": (list(mz_range) if mz_range else None),
+            "tdf_integrity": integrity,
+            # every problem with this file the user must hear before a search starts
+            "warnings": warnings}
 
 def main(argv):
     files = []
     for a in argv:
         files.extend(sorted(glob.glob(a)) or [a])
     results = [classify(f) for f in files]
+    # stdout is JSON for the caller; problems also go to stderr, where a person sees them
+    # even when a script only keeps the JSON.
+    for r in results:
+        for w in r.get("warnings") or []:
+            print(f"[detect_acquisition] WARNING: {r['file']}: {w}", file=sys.stderr)
     kinds = {r["acquisition"] for r in results}
     overall = (next(iter(kinds)) if len(kinds) == 1 else "mixed")
     low_conf = [r["file"] for r in results if r["confidence"] != "high"]
@@ -234,8 +261,13 @@ def main(argv):
         "precursor_mz_range_mixed": mixed_ranges,
         "precursor_mz_range_files_without": [
             r["file"] for r in results if not r.get("precursor_mz_range")],
-        "needs_confirmation": bool(low_conf) or overall in ("mixed", "unknown") or len(instruments) > 1,
+        "needs_confirmation": (bool(low_conf) or overall in ("mixed", "unknown")
+                               or len(instruments) > 1
+                               or any(r.get("warnings") for r in results)),
         "low_confidence_files": low_conf,
+        "tdf_integrity_problem_files": [
+            r["file"] for r in results
+            if r.get("tdf_integrity") and r["tdf_integrity"]["status"] != "ok"],
         "files": results,
     }, indent=2))
 

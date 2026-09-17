@@ -28,6 +28,11 @@ Usage:
 """
 import sys, os, json, glob, sqlite3, argparse, statistics
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# analysis.tdf is opened read-only AND immutable -- see bruker_tdf.py for how a read-write
+# open truncates a tdf (the state of 342 on HIVE), and why mode=ro alone is not enough.
+from bruker_tdf import connect_tdf  # noqa: E402
+
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
 # Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06).
@@ -61,7 +66,7 @@ def bruker_meta(d):
         return None
     m = {"vendor": "Bruker", "file": os.path.basename(d.rstrip("/"))}
     try:
-        con = sqlite3.connect(f"file:{tdf}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         gm = dict(cur.execute("SELECT Key, Value FROM GlobalMetadata"))
         m["instrument"] = gm.get("InstrumentName")
