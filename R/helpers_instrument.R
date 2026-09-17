@@ -3,6 +3,41 @@
 #  Pure functions, no Shiny reactivity. Auto-sourced by app.R.
 # ==============================================================================
 
+#' SQLite URI that opens `path` read-only and immutable
+#'
+#' `?`, `#` and `%` are percent-encoded: spliced in raw they end the URI path (or start an
+#' escape) and the open would target a different name. Absolute paths only
+#' (normalizePath), as `file:///C:/...` on Windows and `file:///...` elsewhere.
+#' @param path Existing file
+#' @return Character URI for DBI::dbConnect(RSQLite::SQLite(), ...)
+sqlite_immutable_uri <- function(path) {
+  p <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  p <- gsub("%", "%25", p, fixed = TRUE)
+  p <- gsub("?", "%3F", p, fixed = TRUE)
+  p <- gsub("#", "%23", p, fixed = TRUE)
+  paste0(if (startsWith(p, "/")) "file://" else "file:///", p, "?mode=ro&immutable=1")
+}
+
+#' Open an instrument-written SQLite file (analysis.tdf, diaSettings.diasqlite) so SQLite
+#' never writes to it or beside it and never replays a -wal
+#'
+#' On UC Davis HIVE a stale mid-acquisition analysis.tdf-wal left beside a finished tdf was
+#' replayed by read-write opens and truncated 342 runs' frame index (details in
+#' skill/ucdavis-proteomics-core-pipeline/scripts/bruker_tdf.py). SQLITE_RO alone does not
+#' truncate, but it still reads such a -wal and writes a -shm beside the file; for the temp
+#' copies below that left <tmp>.tdf-shm and -wal orphans in tempdir() on every read.
+#' `immutable=1` reads the file as it is on disk and takes no locks. RSQLite accepts URI
+#' filenames from 2.2.9 (built with SQLITE_USE_URI); older versions get the plain read-only
+#' open, which is still safe here because every caller opens a copy.
+#' @param path File to open
+#' @return DBI connection
+tdf_dbconnect_ro <- function(path) {
+  if (utils::packageVersion("RSQLite") < "2.2.9") {
+    return(DBI::dbConnect(RSQLite::SQLite(), path, flags = RSQLite::SQLITE_RO))
+  }
+  DBI::dbConnect(RSQLite::SQLite(), sqlite_immutable_uri(path), flags = RSQLite::SQLITE_RO)
+}
+
 #' Parse timsTOF metadata from analysis.tdf SQLite file
 #' @param tdf_path Path to the analysis.tdf file directly
 #' @return Named list of instrument metadata, or NULL on failure
@@ -19,7 +54,7 @@ parse_timstof_from_tdf <- function(tdf_path) {
     # Copy TDF to temp for SQLite compatibility (network/SMB mounts can't do WAL/sync)
     tmp_tdf <- tempfile(fileext = ".tdf")
     file.copy(tdf_path, tmp_tdf)
-    db <- DBI::dbConnect(RSQLite::SQLite(), tmp_tdf, flags = RSQLite::SQLITE_RO)
+    db <- tdf_dbconnect_ro(tmp_tdf)
     on.exit({ DBI::dbDisconnect(db); unlink(tmp_tdf) }, add = TRUE)
 
     # Read GlobalMetadata key-value table
@@ -168,7 +203,7 @@ parse_timstof_from_tdf <- function(tdf_path) {
           # Copy to temp dir for SQLite compatibility (SMB mounts can't do WAL/sync)
           tmp_dia <- tempfile(fileext = ".sqlite")
           file.copy(dia_db_path, tmp_dia)
-          dia_db <- DBI::dbConnect(RSQLite::SQLite(), tmp_dia, flags = RSQLite::SQLITE_RO)
+          dia_db <- tdf_dbconnect_ro(tmp_dia)
           on.exit({ DBI::dbDisconnect(dia_db); unlink(tmp_dia) }, add = TRUE)
           if ("DiaWindowsSpecification" %in% DBI::dbListTables(dia_db)) {
             dia_summary <- DBI::dbGetQuery(dia_db, "
@@ -754,7 +789,7 @@ extract_tic_timstof <- function(tdf_path) {
     # Copy TDF to temp for SQLite compatibility (network/SMB mounts can't do WAL/sync)
     tmp_tdf <- tempfile(fileext = ".tdf")
     file.copy(tdf_path, tmp_tdf)
-    db <- DBI::dbConnect(RSQLite::SQLite(), tmp_tdf, flags = RSQLite::SQLITE_RO)
+    db <- tdf_dbconnect_ro(tmp_tdf)
     on.exit({ DBI::dbDisconnect(db); unlink(tmp_tdf) }, add = TRUE)
 
     if (!("Frames" %in% DBI::dbListTables(db))) return(NULL)
