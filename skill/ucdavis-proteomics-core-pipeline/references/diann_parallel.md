@@ -290,15 +290,31 @@ releases the next step. A step-4 array task that dies this way leaves no `.quant
 step 5 then builds the cross-run report from whatever survived — **a silently dropped
 sample, reported as a clean run.**
 
-Every step therefore asserts its own artefact:
+Every step therefore asserts its own artefact — and first **deletes** it, because an
+existence check cannot tell this run's file from the previous run's. Re-run a chain into
+the same `--out`, or resubmit a step as `references/watcher.md` says to, and a DIA-NN that
+exits 0 having written nothing leaves the old file for the check to find. Reproduced on
+DIA-NN 2.7.0 (HIVE, review srun 23512013): a re-run with no .NET logged `ERROR: cannot read
+.raw files`, exited 0, and left the previous `report.parquet` byte-identical.
 
-| step | asserts |
-|---|---|
-| 1 | the predicted spectral library exists and is non-empty |
-| 2 | this task's `.quant` was written to `quant_step2/` |
-| 3 | the empirical spectral library exists |
-| 4 | this task's `.quant` was written to `quant_step4/` |
-| 5 | `report.parquet` exists **and** `quant_step4/` holds exactly one `.quant` per input |
+| step | deletes first | asserts |
+|---|---|---|
+| 1 | `step1.predicted.speclib` | the predicted spectral library exists and is non-empty |
+| 1b (window measured) | `window.txt`, `window.json`, `params.resolved.cfg` and its `.tmp` | a positive-integer radius was measured, and `window.txt` and `params.resolved.cfg` are non-empty regular files |
+| 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
+| 3 | `empirical.parquet` | the empirical spectral library exists |
+| 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |
+| 5 | `report.parquet` and `report.stats.tsv` | `report.parquet` exists **and** every run in `file_list.txt` has a non-empty `.quant` in `quant_step4/` |
 
 Step 5's count check is the backstop: it is the only place that can notice a sample went
-missing several steps earlier. On failure it prints the loop that names the missing file.
+missing several steps earlier. It counts the runs in `file_list.txt`, not every `.quant` in
+the folder — a previous search's `.quant` for some other run would otherwise make up the
+number — and names each missing run (`MISSING: <file> has no final-pass .quant`).
+
+The **single-shot** search `run_search.py` writes for ≤ 5 files has the same contract: its
+library job deletes, then asserts, `diann_lib.predicted.speclib`, and its search job deletes
+`report.parquet` and `report.stats.tsv`, then asserts the report and runs
+`scripts/check_report_runs.py`, which fails unless the report holds one `Run` per input
+(→ `references/search-engines.md`). Re-measured on DIA-NN 2.7.0:
+a search over one readable `.raw`, one truncated `.raw` and one nonexistent path exited 0
+with a report holding 1 of the 3 runs.

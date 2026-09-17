@@ -293,8 +293,17 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "diann_parallel.py"),
             "--diann", cmd, "--raw-list", listing, "--fasta", fasta,
             "--out", out, "--cfg", params, "--threads-per-file", str(threads)]
+    # Chain resources are forwarded only when given, so diann_parallel.py's own defaults stay
+    # the single definition of them. They are exposed because steps 3 and 5 ask for 64 CPUs
+    # by default (--assembly-cpus), a whole node's worth that can sit pending for a long time
+    # on a busy preemptible queue, and until now the only way to ask for less was to bypass
+    # run_search.py and hand-run diann_parallel.py (FRAN pilot, publicgrp/low, 2026-09-16).
     for flag, val in (("--partition", a.partition), ("--account", a.account),
-                      ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous)):
+                      ("--qos", a.qos), ("--max-simultaneous", a.max_simultaneous),
+                      ("--libpred-cpus", getattr(a, "libpred_cpus", None)),
+                      ("--assembly-cpus", getattr(a, "assembly_cpus", None)),
+                      ("--assembly-mem", getattr(a, "assembly_mem", None)),
+                      ("--time-per-file", getattr(a, "time_per_file", None))):
         if val:
             argv += [flag, str(val)]
     res = subprocess.run(argv, capture_output=True, text=True)
@@ -310,11 +319,52 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
 
 a_globals = None   # set in main(); carries --one-step
 
+# Dropped from the cfg for the single-shot SEARCH job, because that job supplies its own:
+# --fasta-search/--predictor/--gen-spec-lib belong to the library job (in the search they would
+# re-digest the FASTA instead of using the predicted library), and --reanalyse/--matrices are
+# re-added explicitly. --rt-profiling is deliberately NOT here. It sets "the empirical library
+# generation mode to IDs, RT and IM profiling" (DIA-NN README, command-line reference), which the
+# README calls "strongly recommended for almost all workflows", and with --reanalyse this job is
+# where the empirical library is generated -- MBR's first pass "creates an empirical spectral
+# library from the data". Stripping it is not a no-op: measured on DIA-NN 2.7.0 (HIVE,
+# 2026-09-16), the search log prints "The spectral library (if generated) will retain the
+# original spectra but will include empirically-aligned RTs" with the flag and nothing without
+# it, so the library mode silently changed. The 5-step chain passes it to exactly its
+# library-building steps (2 and 3), and DE-LIMP's own single search keeps it. It was stripped
+# here since e20ae63 with no stated reason. The rest of the cfg goes through
+# diann_parallel.bash_flags(), the one emitter the chain uses too.
+SINGLE_SHOT_SEARCH_STRIP = ("--fasta-search", "--gen-spec-lib", "--predictor",
+                            "--reanalyse", "--matrices")
 
-def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
+
+def report_guard(report, listing):
+    """Bash that fails the job unless DIA-NN wrote the report AND it holds every input run.
+
+    DIA-NN exits 0 on fatal errors, so the job state alone says nothing. must_exist() is the
+    chain's own assertion; check_report_runs.py is the single-shot stand-in for the chain's
+    step-5 .quant count, which has no per-file directory to count here. It runs under the
+    interpreter that generated the job (on a cluster that path is on the shared filesystem,
+    exactly like the scripts/ directory this references), falling back to python3."""
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_report_runs.py")
+    return "\n".join([
+        _diann_parallel_mod().must_exist(report, "the report"),
+        f'PY={shlex.quote(sys.executable)}; [ -x "$PY" ] || PY=python3',
+        f'"$PY" {shlex.quote(checker)} --report {shlex.quote(report)} '
+        f'--files-list {shlex.quote(listing)}',
+    ])
+
+
+def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None):
+    """Single-shot DIA-NN. `queue` is {partition, account, qos} from the command line, handed
+    to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
+    the one the user chose."""
+    queue = queue or {}
     os.makedirs(out, exist_ok=True)
     report = os.path.join(out, "report.parquet")
     f_args = " ".join(f"--f {shlex.quote(f)}" for f in files)
+    listing = os.path.join(out, "search_input_files.txt")
+    with open(listing, "w") as fh:                    # a list file survives spaces in paths
+        fh.write("\n".join(files) + "\n")
     # DIA-NN 2.6 supports DDA via --dda (must NOT be used on DIA data). QuantUMS is
     # auto-disabled on DDA; for DDA quant DIA-NN recommends extra MS1 filtering on
     # Ms1.Global.Q.Value / Ms1.Global.Quality (see references/search-engines.md).
@@ -332,7 +382,8 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     # parallel chain's. `cfg_txt.split()` spliced raw words into bash: a `# comment` commented
     # out --f/--fasta/--out, and `--cut K*,R*` went in bare, where one matching file in the
     # output directory rewrites the digest rule. Comment-free cfgs emit the same command as
-    # before apart from that quoting (tests/test_parallel_routing_window.py pins both).
+    # before apart from that quoting and the --rt-profiling this job now keeps
+    # (SINGLE_SHOT_SEARCH_STRIP); tests/test_cfg_reader_quoting.py pins both.
     dp = _diann_parallel_mod()
     try:
         groups = dp.cfg_groups(dp.cfg_tokens(params))
@@ -346,9 +397,10 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     dnet = dotnet_env_for(files)          # .NET 8 for reading Thermo .raw, if needed
 
     lib = os.path.join(out, "diann_lib")
-    strip = ("--fasta-search", "--gen-spec-lib", "--predictor", "--reanalyse",
-             "--matrices", "--rt-profiling")
-    search_cfg = dp.bash_flags(groups, drop=strip)
+    # DIA-NN ignores the extension asked of --out-lib for a PREDICTED library and always writes
+    # <name>.predicted.speclib (README, "Output library") -- the file the search job reads.
+    predicted = lib + ".predicted.speclib"
+    search_cfg = dp.bash_flags(groups, drop=SINGLE_SHOT_SEARCH_STRIP)
     lib_cmd = (f"{cmd} --cfg {shlex.quote(params)} --fasta {shlex.quote(fasta)} "
                f"--out-lib {shlex.quote(lib)} --threads {threads}")
     search_cmd = (f"{cmd} {search_cfg} {f_args} --fasta {shlex.quote(fasta)} "
@@ -357,14 +409,31 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
     onecmd = (f"{cmd} --cfg {shlex.quote(params)} {f_args} "
               f"--fasta {shlex.quote(fasta)} --out {shlex.quote(report)} "
               f"--threads {threads}{dda}")
+    # DIA-NN exits 0 on fatal errors, so each job asserts the artefact it exists to make --
+    # the same contract every step of the 5-step chain has (references/diann_parallel.md).
+    # And each job first DELETES that artefact, because an existence check cannot tell this
+    # run's file from the previous search's in the same --out. Reproduced on HIVE, DIA-NN
+    # 2.7.0 (review srun 23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read
+    # .raw files", exited 0 and wrote nothing; the old report.parquet and report.stats.tsv
+    # were byte-identical afterwards, and both guards passed on them. The stats file goes too:
+    # it is check_report_runs.py's fallback evidence when there is no parquet reader.
+    import check_report_runs
+    report_files = (report, check_report_runs.stats_path(report))
+    lib_job = "\n".join([dp.clear_stale(predicted), lib_cmd,
+                         dp.must_exist(predicted, "the predicted spectral library")])
+    guard = report_guard(report, listing)
+    search_job = "\n".join([dp.clear_stale(*report_files), search_cmd, guard])
+    one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard])
 
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
     if libfree and sbatch:
         lib_sh = sbatch.replace(".sh", "") + "_1_lib.sh"
         srch_sh = sbatch.replace(".sh", "") + "_2_search.sh"
-        emit_sbatch(lib_sh, lib_cmd, out, threads, job="diann_libpred", preamble=dnet)
-        emit_sbatch(srch_sh, search_cmd, out, threads, job="diann_search", preamble=dnet)
+        emit_sbatch(lib_sh, lib_job, out, threads, job="diann_libpred", preamble=dnet,
+                    **queue)
+        emit_sbatch(srch_sh, search_job, out, threads, job="diann_search",
+                    preamble=dnet, **queue)
         submit = os.path.join(out, "submit.sh")
         with open(submit, "w") as fh:
             fh.write("#!/bin/bash -l\nset -euo pipefail\n"
@@ -375,17 +444,32 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
         os.chmod(submit, 0o755)
         print(f"  [sbatch] two-job chain: {lib_sh} -> {srch_sh}; submit with: bash {submit}")
         return {"engine": "diann", "report": report, "submitted": submit,
-                "mode": "two_job_libfree", "library": lib + ".predicted.speclib",
+                "mode": "two_job_libfree", "library": predicted,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
 
-    full = (lib_cmd + " && " + search_cmd) if libfree else onecmd
-    if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="diann_search", preamble=dnet)
+    if sbatch:                          # libfree + sbatch returned above, so this is onecmd
+        emit_sbatch(sbatch, one_job, out, threads, job="diann_search",
+                    preamble=dnet, **queue)
         return {"engine": "diann", "report": report, "submitted": sbatch,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
-    sh((dnet + " " if dnet else "") + full)
+    pre = (dnet + " ") if dnet else ""
+    for p in ((predicted,) if libfree else ()) + report_files:   # see clear_stale above
+        if os.path.lexists(p):
+            os.remove(p)
+    if libfree:
+        sh(pre + lib_cmd)
+        if not (os.path.exists(predicted) and os.path.getsize(predicted) > 0):
+            sys.exit(f"DIA-NN exited 0 but did not write the predicted library {predicted} "
+                     "-- check its output above for ERROR:")
+        sh(pre + search_cmd)
+    else:
+        sh(pre + onecmd)
     if not os.path.exists(report):
         sys.exit(f"DIA-NN finished but {report} is missing.")
+    ok, msg = check_report_runs.verify(report, files)
+    if not ok:
+        sys.exit(msg)
+    print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda)}
 
 
@@ -393,13 +477,13 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition=""):
 # Apache-2.0 (commercial use OK) — the open-source DIA alternative to DIA-NN,
 # whose free "Academia" build is academic/non-profit only. Library-free:
 #   alphadia -o <out> -f <raw> [-f ...] --fasta <fasta> [-c <config.yaml>]
-def run_alphadia(cmd, config, files, fasta, out, threads, sbatch):
+def run_alphadia(cmd, config, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     f_args = " ".join(f"-f {shlex.quote(f)}" for f in files)
     cfg = f"-c {shlex.quote(config)} " if config and os.path.exists(config) else ""
     full = (f"{cmd} -o {shlex.quote(out)} {f_args} --fasta {shlex.quote(fasta)} {cfg}").strip()
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="alphadia_search")
+        emit_sbatch(sbatch, full, out, threads, job="alphadia_search", **(queue or {}))
         return {"engine": "alphadia", "out": out, "submitted": sbatch, "ran": False,
                 "note": "After the job runs, re-run with --adapt-only to build report.parquet."}
     sh(full)
@@ -594,7 +678,8 @@ def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=N
     return info
 
 
-def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None, mbr=True):
+def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None, mbr=True,
+                queue=None):
     os.makedirs(out, exist_ok=True)
     bad = [f for f in files if f.rstrip("/").lower().endswith(".d")]
     if bad:
@@ -644,7 +729,7 @@ def run_radiant(tools, params, files, fasta, out, threads, sbatch, library=None,
     argv = _container_argv(tools, mounts, inner)
     full = " ".join(shlex.quote(x) for x in argv)
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="radiant_search")
+        emit_sbatch(sbatch, full, out, threads, job="radiant_search", **(queue or {}))
         return {"engine": "radiant", "out": out, "submitted": sbatch, "ran": False}
     sh(full)
     report = adapt_radiant(out)
@@ -787,14 +872,14 @@ def ensure_mzml(files, out):
     return converted
 
 
-def run_sage(cmd, params, files, fasta, out, threads, sbatch):
+def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     mzml = ensure_mzml(files, out)
     files_args = " ".join(shlex.quote(m) for m in mzml)
     full = (f"{cmd} {shlex.quote(params)} -f {shlex.quote(fasta)} -o {shlex.quote(out)} "
             f"--parquet --disable-telemetry-i-dont-want-to-improve-sage {files_args}")
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="sage_search")
+        emit_sbatch(sbatch, full, out, threads, job="sage_search", **(queue or {}))
         return {"engine": "sage", "out": out, "submitted": sbatch, "ran": False,
                 "note": "After the job runs, re-run with --adapt-only to build report.parquet."}
     sh(full)
@@ -852,7 +937,7 @@ def adapt_sage(out):
 
 
 # --------------------------------------------------------------- FragPipe -----
-def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch):
+def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     acq = bundle.get("acquisition", "DDA").upper()
     manifest = os.path.join(out, "fragpipe.fp-manifest")
@@ -887,7 +972,7 @@ def run_fragpipe(cmd, bundle, params, files, fasta, out, threads, sbatch):
     full = (f"{cmd} --headless --workflow {shlex.quote(params)} "
             f"--manifest {shlex.quote(manifest)} --workdir {shlex.quote(out)} {tools_arg}")
     if sbatch:
-        emit_sbatch(sbatch, full, out, threads, job="fragpipe_search")
+        emit_sbatch(sbatch, full, out, threads, job="fragpipe_search", **(queue or {}))
         return {"engine": "fragpipe", "out": out, "submitted": sbatch, "ran": False}
     sh(full)
     report = adapt_fragpipe(out)
@@ -1073,10 +1158,16 @@ def slurm_queue(partition=None, account=None, qos=None,
       2. genome-center-grp on `high`   (facility members: no per-job cap, not preemptible)
       3. publicgrp on `low`            (everyone else, incl. class accounts: no per-job
                                         cap either, preemptible — add --requeue)
+    A PARTIAL override (say `--partition low` alone) is completed from an association that
+    matches every field given, never from the preferred one: filling `--partition low` with
+    genome-center-grp's account and QOS wrote a header HIVE rejects ("Invalid account or
+    account/partition combination specified", srun --test-only, 2026-09-16), and `--qos
+    publicgrp-low-qos` alone on `high` gave "Invalid qos specification". When no association
+    matches, this EXITS naming the ones that exist -- there is nothing valid to fill in.
     Returns (partition, account, qos); any may be None, and a None is simply omitted
     from the script so SLURM applies its own default."""
     if partition and account:
-        return partition, account, qos
+        return partition, account, _public_low_qos(partition, account, qos)
     assoc = []
     # sacctmgr is frequently absent from PATH in a non-login shell, so look for it
     # explicitly. Failing to find it must NOT silently emit an empty queue: SLURM would
@@ -1111,13 +1202,38 @@ def slurm_queue(partition=None, account=None, qos=None,
 
     lab, pub = find("genome-center-grp", "high"), find("publicgrp", "low")
 
+    if (partition or account or qos) and assoc:
+        # An empty partition or QOS in an association means "any" (an account-wide
+        # association, or an inherited QOS list), so it matches rather than rejects: a
+        # cluster laid out differently from HIVE must not be refused on a guess.
+        def fits(a, p, q):
+            return ((not account or a == account)
+                    and (not partition or p in ("", partition))
+                    and (not qos or not q or qos in q.split(",")))
+        hits = [x for x in assoc if fits(*x)]
+        if not hits:
+            given = " ".join(f"--{k} {v}" for k, v in (("partition", partition),
+                             ("account", account), ("qos", qos)) if v)
+            sys.exit(f"[slurm_queue] no SLURM association of user "
+                     f"{os.environ.get('USER', '?')} has {given}, so SLURM would reject the "
+                     f"job. Associations (account|partition|qos): "
+                     f"{', '.join('|'.join(x) for x in assoc)}. Pass --partition/--account/"
+                     f"--qos from ONE of them, or none to have one chosen.")
+        preferred = [h for key in (("genome-center-grp", "high"), ("publicgrp", "low"))
+                     for h in hits if h[:2] == key]
+        a, p, q = (preferred or hits)[0]
+        p = partition or p or None
+        # a comma-separated QOS list names no single QOS to write; SLURM picks the default
+        q = qos or (q if q and "," not in q else None)
+        return p, a, _public_low_qos(p, a, q)
+
     # Port of DE-LIMP's select_best_partition() (R/helpers_search.R). Entitlement is
     # not the question -- UTILISATION is. The priority queue has a PER-USER CPU cap
     # (64 on HIVE), and once you are at it your own jobs queue behind each other:
     # an 18-task array on `high` starves everything else you submit (QOSGrpCpuLimit,
     # observed). publicgrp/low is preemptible but has thousands of idle CPUs, so for
     # work that is safe to preempt it starts sooner and finishes sooner.
-    if lab and pub and not partition:
+    if lab and pub and not (partition or account or qos):
         need = min(peak_cpus or 16, 16)          # at least one array task's worth
         avail = _lab_cpus_available()
         idle = _partition_idle_cpus("low")
@@ -1144,15 +1260,50 @@ def slurm_queue(partition=None, account=None, qos=None,
     # Could not detect. Do NOT fall through to the cluster default — on HIVE that is
     # `high`, which rejects non-facility accounts. publicgrp/low is submittable by
     # everyone who has any allocation at all, so it is the safe floor.
-    return partition or "low", account or "publicgrp", qos
+    if partition or account or qos:
+        print("[slurm_queue] WARNING: cannot read SLURM associations here, so the partial "
+              f"queue (partition={partition}, account={account}, qos={qos}) is completed "
+              "with publicgrp/low unchecked; read the #SBATCH header before submitting",
+              file=sys.stderr)
+    p, a = partition or "low", account or "publicgrp"
+    return p, a, _public_low_qos(p, a, qos)
+
+
+def _public_low_qos(partition, account, qos):
+    """The QOS for publicgrp on `low` when none was given.
+
+    diann_parallel.py and diatracer_parallel.py already add `publicgrp-low-qos` there ("low
+    DOES need its qos named", tests/test_hive_submission_guards.py); emit_sbatch() did not, so
+    `--partition low --account publicgrp` wrote a --qos line in the 5-step chain and none in
+    the single-shot jobs. Here, every caller gets it. `high` is left alone on purpose: a
+    facility job with no --qos is accepted and SLURM assigns genome-center-grp-high-qos
+    (measured 2026-08-25, test_high_needs_no_explicit_qos)."""
+    if not qos and partition == "low" and account == "publicgrp":
+        return "publicgrp-low-qos"
+    return qos
+
+
+def _positive_int(v):
+    """argparse type: a CPU count or an hour count of 0 is a job SLURM rejects outright."""
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {v!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
+    return n
 
 
 def emit_sbatch(path, command, out, threads, job, preamble="",
                 partition=None, account=None, qos=None, mem="64G", hours=12):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
-    slurm_queue(). `preamble` runs before the command (e.g. the DOTNET_ROOT exports
-    that let DIA-NN 2.6 read Thermo .raw)."""
+    slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
+    the command line's --partition/--account/--qos: on the 2026-09-16 FRAN pilot run_diann()
+    did not, so `--partition low --account publicgrp --qos publicgrp-low-qos` came out as
+    genome-center-grp/high in both job headers and had to be hand-edited before submission.
+    `preamble` runs before the command (e.g. the DOTNET_ROOT exports that let DIA-NN 2.6
+    read Thermo .raw)."""
     part, acct, q = slurm_queue(partition, account, qos)
     pre = (preamble + "\n") if preamble else ""
     lines = [
@@ -1166,15 +1317,19 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     if part:  lines.append(f"#SBATCH --partition={part}")
     if acct:  lines.append(f"#SBATCH --account={acct}")
     if q:     lines.append(f"#SBATCH --qos={q}")
-    # `low` is preemptible; without --requeue a preempted search is simply lost.
-    if part == "low":
+    # Preemptible queue: requeue a preempted search rather than lose it (HIVE's JobRequeue=1
+    # does this by default; another cluster's may not). The rule is
+    # diann_parallel.needs_requeue(), shared with the chain's step headers.
+    requeue = _diann_parallel_mod().needs_requeue(part, q)
+    if requeue:
         lines.append("#SBATCH --requeue")
     lines += ["set -euo pipefail", f"cd {shlex.quote(os.path.abspath(out))}", f"{pre}{command}", ""]
     script = "\n".join(lines)
     with open(path, "w") as fh:
         fh.write(script)
     print(f"  [sbatch] wrote {path} (partition={part or 'default'}, "
-          f"account={acct or 'default'}) — submit with: sbatch {path}")
+          f"account={acct or 'default'}, qos={q or 'default'}"
+          f"{', requeue' if requeue else ''}) — submit with: sbatch {path}")
 
 
 def main():
@@ -1207,17 +1362,34 @@ def main():
                     help="DIA-NN: use the 5-step SLURM chain above this many files (default 5)")
     ap.add_argument("--no-parallel", action="store_true",
                     help="force a single-shot DIA-NN search regardless of file count")
-    ap.add_argument("--partition", help="SLURM partition for the parallel chain")
-    ap.add_argument("--account", help="SLURM account for the parallel chain")
-    ap.add_argument("--qos", help="SLURM QOS for the parallel chain")
+    ap.add_argument("--partition", help="SLURM partition for every job this writes (the "
+                    "single-shot --sbatch job(s) and the parallel chain); detected if omitted")
+    ap.add_argument("--account", help="SLURM account for every job this writes")
+    ap.add_argument("--qos", help="SLURM QOS for every job this writes")
     ap.add_argument("--max-simultaneous", type=int,
                     help="cap concurrent array tasks in the parallel chain")
+    ap.add_argument("--libpred-cpus", type=_positive_int,
+                    help="parallel chain: CPUs for step 1, library prediction "
+                         "(diann_parallel.py default: 16)")
+    ap.add_argument("--assembly-cpus", type=_positive_int,
+                    help="parallel chain: CPUs for steps 3 and 5, assembly and report "
+                         "(diann_parallel.py default: 64, a whole node's worth that can "
+                         "wait a long time on a busy preemptible queue)")
+    ap.add_argument("--assembly-mem", type=_positive_int,
+                    help="parallel chain: memory in GB for steps 3 and 5 (diann_parallel.py "
+                         "default: 128); lower it with --assembly-cpus, or a smaller job "
+                         "still waits for 128 GB")
+    ap.add_argument("--time-per-file", type=_positive_int,
+                    help="parallel chain: wall-clock hours per array task in steps 2 and 4 "
+                         "(diann_parallel.py default: 2)")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
     a = ap.parse_args()
 
     global a_globals
     a_globals = a
+    # The queue the user asked for, handed to every emit_sbatch() -- see emit_sbatch().
+    queue = {"partition": a.partition, "account": a.account, "qos": a.qos}
     tools = json.load(open(a.tools))
     bundle = json.load(open(a.bundle))
     engine = pick_engine(a, bundle)
@@ -1235,6 +1407,18 @@ def main():
         if v:
             setattr(a, attr, os.path.abspath(v))
     files = [os.path.abspath(f) for f in files]
+
+    # DIA-NN names a run by its file name without the folder, so /plate1/s1.raw and
+    # /plate2/s1.raw become ONE Run: two samples merged in the report (and, in the chain, two
+    # array tasks writing the same .quant). That is knowable now, from the input list, so it
+    # stops here instead of failing check_report_runs.py after the search has run.
+    if engine == "diann" and not a.adapt_only:
+        import check_report_runs
+        dupes = check_report_runs.duplicate_run_names(files)
+        if dupes:
+            sys.exit(f"[run_search] inputs share a run name: {', '.join(dupes)}. DIA-NN names a "
+                     "run by its file name without the folder, so they would be merged into "
+                     "one Run. Rename them, or search them separately.")
 
     if a.adapt_only:
         report = {"sage": adapt_sage, "fragpipe": adapt_fragpipe,
@@ -1281,6 +1465,17 @@ def main():
             f"    ... --sbatch ./{engine}_job.sh && sbatch ./{engine}_job.sh\n"
             "  (--allow-inline overrides this, e.g. inside an salloc/srun session.)")
 
+    # These size the 5-step chain only. Said out loud when the route is single-shot, where
+    # they change nothing: the flag being accepted reads as the jobs having got smaller.
+    chain_only = [f for f, v in (("--libpred-cpus", a.libpred_cpus),
+                                 ("--assembly-cpus", a.assembly_cpus),
+                                 ("--assembly-mem", a.assembly_mem),
+                                 ("--time-per-file", a.time_per_file),
+                                 ("--max-simultaneous", a.max_simultaneous)) if v]
+    if chain_only and not use_parallel:
+        sys.stderr.write(f"[run_search] NOTE: {', '.join(chain_only)} size the 5-step chain "
+                         f"only; this search is single-shot ({why}), so they are ignored. "
+                         f"Its job(s) request --threads {a.threads} CPUs.\n")
     print(f"[run_search] engine={engine}  files={len(files)}  threads={a.threads}  "
           f"{'(5-step chain)' if use_parallel else '(emit sbatch)' if a.sbatch else '(inline)'}")
     sbatch_refused = None
@@ -1315,13 +1510,15 @@ def main():
             sbatch_refused["existing_file_moved_to"] = moved and os.path.abspath(moved)
     elif engine == "diann":
         res = run_diann(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
-                        acquisition=bundle.get("acquisition", ""))
+                        acquisition=bundle.get("acquisition", ""), queue=queue)
     elif engine == "alphadia":
-        res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+        res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
+                           queue=queue)
     elif engine == "sage":
-        res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+        res = run_sage(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch, queue=queue)
     elif engine == "fragpipe":
-        res = run_fragpipe(cmd, bundle, a.params, files, a.fasta, a.out, a.threads, a.sbatch)
+        res = run_fragpipe(cmd, bundle, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
+                           queue=queue)
     elif engine == "radiant":
         # Takes the whole tools dict: it needs the container runtime + image to build
         # bind mounts, and DIA-NN to generate the spectral library.
@@ -1335,7 +1532,7 @@ def main():
                                        a.threads, a, library=a.library)
         else:
             res = run_radiant(tools, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
-                              library=a.library, mbr=a.mbr)
+                              library=a.library, mbr=a.mbr, queue=queue)
     else:
         sys.exit(f"unknown engine {engine}")
 
