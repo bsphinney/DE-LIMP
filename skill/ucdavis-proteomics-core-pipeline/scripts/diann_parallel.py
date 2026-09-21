@@ -570,6 +570,64 @@ def must_exist(path, what):
             f'exit 1; fi')
 
 
+def clear_stale(*paths):
+    """Bash that deletes `paths` BEFORE DIA-NN runs, so must_exist() can only pass on a file
+    this run wrote.
+
+    must_exist() checks that a file is there, not that this run made it. A search re-run into
+    the same --out still has the previous run's artefacts, and a DIA-NN that exits 0 having
+    written nothing leaves them untouched. Measured on HIVE, DIA-NN 2.7.0 (review srun
+    23512013): a re-run with no DOTNET_ROOT logged "ERROR: cannot read .raw files", exited 0,
+    the old report.parquet and report.stats.tsv were unchanged by md5, and every guard passed
+    on them -- a COMPLETED job reporting results from different parameters. Deleting beats a
+    marker file checked with `-newer`: after a failed run the marker approach still leaves a
+    plausible report.parquet in --out for the DE step (or anyone listing the folder) to pick
+    up, and `-nt` compares whole seconds in some shells (macOS /bin/bash 3.2), so a fast
+    failure can look new. Paths go in double quotes, like must_exist(), so a `$VAR` in an
+    array-task path still expands -- which is also why a path handed IN has to be checked
+    first: see refuse_unsafe_path()."""
+    return "rm -f -- " + " ".join(f'"{p}"' for p in paths)
+
+
+# The double quotes clear_stale() and must_exist() put around a path are deliberate (an array
+# task's path carries $QUANT / ${SLURM_ARRAY_TASK_ID}), and bash re-reads `$`, a backtick and
+# `\` inside them. Those expansions are built by THIS generator; a path handed in on the
+# command line is not entitled to any of them. Reproduced: `--out '/tmp/x$(touch pwned)'` put
+# the substitution inside `rm -f -- "..."`, so it EXECUTED when the job ran -- and moved the rm
+# target with it. A `"` closes the quote outright. This is refused at the entry point rather
+# than quoted at the emitter, because the emitter cannot tell a path it built from one it was
+# handed, and `cd "<out>"` in submit.sh has the same hole.
+_UNSAFE_IN_PATH = re.compile(r'[$`"\\\n]')
+
+
+def refuse_unsafe_path(path, flag="--out", prog="diann_parallel"):
+    """Exit unless `path` is safe to splice into those double-quoted guards. Returns it."""
+    bad = sorted({c for c in _UNSAFE_IN_PATH.findall(path or "")})
+    if bad:
+        shown = ", ".join(repr(c) for c in bad)
+        sys.exit(f"[{prog}] REFUSING {flag} {path!r}: it contains {shown}. Every generated "
+                 f"guard puts DOUBLE quotes around a path so that an array task's $QUANT still "
+                 f"expands, so a `$(...)` in {flag} would EXECUTE when the job runs and a `\"` "
+                 f"would break the command line. Use a path without them.")
+    return path
+
+
+def needs_requeue(partition, qos):
+    """Should a job on this queue carry `#SBATCH --requeue`?
+
+    Shared by this header() and run_search.emit_sbatch(), which used to disagree (emit_sbatch
+    keyed on `partition == "low"` alone and ignored a public QOS). radiant_parallel.header()
+    (public QOS only) and diatracer_parallel.py (`low` only) still carry their own rules.
+
+    What it protects, measured on HIVE 2026-09-16 (`scontrol show partition/config`):
+    preemption is by partition (PreemptType=preempt/partition_prio; `low` PreemptMode=REQUEUE,
+    `high` OFF) and JobRequeue=1, so HIVE requeues a preempted batch job even without this
+    line. It is written anyway because JobRequeue=0 on another cluster would make a preempted
+    job simply lost. The public-QOS clause also marks publicgrp jobs on `high`, which are not
+    preempted there; on such a job the line only allows a requeue after a node failure."""
+    return (qos or "").startswith("public") or partition == "low"
+
+
 def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
     h = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
@@ -580,8 +638,7 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None):
          f"#SBATCH --account={account}"]
     if qos:
         h.append(f"#SBATCH --qos={qos}")
-    # publicgrp/low is PREEMPTIBLE: without --requeue a preempted task is simply lost.
-    if (qos or "").startswith("public") or partition == "low":
+    if needs_requeue(partition, qos):
         h.append("#SBATCH --requeue")
     h += [f"#SBATCH -o {name}_%j.log", f"#SBATCH -e {name}_%j.log"]
     if array:
@@ -638,6 +695,23 @@ def main():
         raws.extend(sorted(glob.glob(p)) or [p])
     raws = [os.path.abspath(r.rstrip("/")) for r in raws]
 
+    # DIA-NN names a run -- and this generator names its .quant -- by the file name alone, so
+    # /plate1/s1.mzML and /plate2/s1.mzML are ONE Run in the report and TWO array tasks writing
+    # the same .quant. run_search.main() refuses that before it routes anywhere, but
+    # diann_parallel.py is run directly too (this module's own docstring names that as the way
+    # to size the chain by hand), and that route had no check at all: the chain would be
+    # generated, burn its SLURM hours and merge two samples into one column. Knowable from the
+    # input list, so it stops here.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from check_report_runs import duplicate_run_names
+    dupes = duplicate_run_names(raws)
+    if dupes:
+        sys.exit(f"[diann_parallel] inputs share a run name: {', '.join(dupes)}. DIA-NN names a "
+                 "run by its file name without the folder, so they would be merged into one Run "
+                 "in the report -- and their array tasks would write the same .quant. Rename "
+                 "them, or search them separately.")
+    refuse_unsafe_path(a.out)
+
     # Detect the queue from the submitting user's SLURM associations rather than
     # assuming facility membership. genome-center-grp/high for members; publicgrp/low
     # for everyone else (incl. class accounts) — where `high` caps at 8 CPUs/job, so a
@@ -645,7 +719,9 @@ def main():
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from run_search import slurm_queue
-        a.partition, a.account, _q = slurm_queue(a.partition, a.account, None)
+        # a.qos goes in so that a partial queue (e.g. --qos alone) is completed from the
+        # association it belongs to; the detected QOS itself is still not used (see below).
+        a.partition, a.account, _q = slurm_queue(a.partition, a.account, a.qos)
         if not a.qos and a.partition == "low" and a.account == "publicgrp":
             a.qos = "publicgrp-low-qos"
     except Exception as e:
@@ -699,6 +775,7 @@ def main():
     # still in the cfg has to come out or both land on the same command line.
     flags = read_cfg_flags(a.cfg, drop=("--window",) if win_probe else ())
     D = out  # all DIA-NN intermediate/output lives here (real paths; native binary reads them directly)
+    from check_report_runs import stats_path   # one definition of <report>.stats.tsv
     report = "no_norm_report.parquet" if a.no_norm else "report.parquet"
     norm = "--no-norm" if a.no_norm else ""
     xic = xic_flag(a.cfg)          # step 4 only -- see xic_flag() docstring
@@ -745,6 +822,7 @@ def main():
         s1 = write("step1_libpred.sbatch", "\n".join([
             header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs), "",
             f'echo "Step 1/5 library prediction"; date',
+            clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
             f'{DN} --fasta {fasta} --fasta-search --predictor --gen-spec-lib \\',
             f'  --out-lib {D}/step1.speclib --out {D}/step1_lib.parquet \\',
             f'  --threads {a.libpred_cpus} {flags}',
@@ -858,10 +936,11 @@ def main():
         header("s2_firstpass", a.threads_per_file, a.mem_per_file, a.time_per_file, _pa, _aa, qos=_qa, array=array), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         tmpguard("quant_step2"),
+        'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
+        clear_stale(f'{D}/quant_step2/$QOUT'),
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
         f'  --threads {a.threads_per_file} {wflag}{flags}',
-        'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]))
 
     # Step 3 — empirical library assembly (single job, --use-quant)
@@ -869,6 +948,7 @@ def main():
         header("s3_assembly", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
         f'echo "Step 3/5 empirical library assembly"; date', tmpguard("quant_step2"),
         f'cp -r {D}/quant_step2 {D}/quant_step2_orig 2>/dev/null || true   # backup for resume',
+        clear_stale(empirical),
         f'{DN} {all_f} --fasta {fasta} --lib {predicted} --use-quant --quant-ori-names \\',
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
         f'  --temp {D}/quant_step2 --out {D}/step3_assembly.parquet \\',
@@ -893,6 +973,8 @@ def main():
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date', pick,
         tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
+        # cleared BEFORE the skip: a skipped task must leave no .quant for step 5 to count
+        clear_stale(f'{D}/quant_step4/$QUANT'),
         f'if [ ! -f "{D}/quant_step2/$QUANT" ]; then echo "SKIP: no step-2 quant for $QUANT"; exit 0; fi',
         # Splat an empty list, not an empty string: a conditional string leaves a stray
         # blank line in the generated sbatch when XICs are off.
@@ -914,6 +996,8 @@ def main():
     s5 = write("step5_report.sbatch", "\n".join([
         header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs), "",
         f'echo "Step 5/5 cross-run report"; date', tmpguard("quant_step4"),
+        # the report AND its stats file: check_report_runs.stats_path() names the latter
+        clear_stale(f'{D}/{report}', stats_path(f'{D}/{report}')),
         f'{DN} {all_f} --fasta {fasta} --lib {empirical} --use-quant --quant-ori-names \\',
         f'  --temp {D}/quant_step4 --matrices --out {D}/{report} \\',
         f'  --threads {a.assembly_cpus} {norm} {wflag}{flags}',
@@ -921,11 +1005,29 @@ def main():
         # A step-4 task that failed silently leaves no .quant, and step 5 happily
         # reports on whatever survived. Count them: fewer quants than inputs means a
         # sample was dropped, which must never pass as success.
-        f'NQ=$(ls -1 {D}/quant_step4/*.quant 2>/dev/null | wc -l | tr -d " ")',
+        #
+        # Count FILES, not input lines. This chain's names come from file_list.txt, not from
+        # `ls quant_step4/*.quant` -- a previous search's .quant for another run would
+        # otherwise make up the number for a missing one -- but a name derived per INPUT LINE
+        # re-introduces the very bug: two inputs whose basenames collide (/plate1/s1.mzML,
+        # /plate2/s1.mzML) map to ONE s1.quant, and incrementing once per line counts that
+        # single surviving file twice. `NQ=2, n=2 -> PASS` for a report in which two samples
+        # were merged into one Run. `sort -u` collapses them to the files that can actually
+        # exist, so the count falls short and the job fails -- which is what `ls | wc -l` gave
+        # before. main() refuses colliding names outright; this stays the backstop for a chain
+        # generated before that check, or whose file_list.txt was edited by hand.
+        f'QUANTS=$(while IFS= read -r f; do [ -n "$f" ] || continue; b="${{f##*/}}"; '
+        f'printf "%s\\n" "${{b%.*}}.quant"; done < "{D}/file_list.txt" | sort -u)',
+        'NQ=0; NNAMES=0',
+        'while IFS= read -r q; do [ -n "$q" ] || continue; NNAMES=$((NNAMES + 1)); '
+        f'if [ -s "{D}/quant_step4/$q" ]; then NQ=$((NQ + 1)); '
+        f'else echo "MISSING: $q -- no step-4 task wrote it" >&2; fi; done <<< "$QUANTS"',
+        f'if [ "$NNAMES" -ne {n} ]; then '
+        f'echo "FAILED: {n} inputs map to only $NNAMES distinct run names -- DIA-NN names a run '
+        f'by its file name alone, so inputs that share one are merged into a single Run. '
+        f'Rename them, or search them separately." >&2; exit 1; fi',
         f'if [ "$NQ" -ne {n} ]; then '
         f'echo "FAILED: report built from $NQ of {n} runs -- a step-4 task produced no .quant." >&2; '
-        f'echo "Find it: for f in \\$(cat {D}/file_list.txt); do b=\\$(basename \\"\\$f\\"); '
-        f'[ -f {D}/quant_step4/\\${{b%.*}}.quant ] || echo MISSING \\$b; done" >&2; '
         f'exit 1; fi',
         f'echo "OK: report built from all {n} runs"']))
 

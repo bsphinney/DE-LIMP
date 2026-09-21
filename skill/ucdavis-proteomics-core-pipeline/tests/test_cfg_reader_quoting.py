@@ -265,13 +265,15 @@ class SameAsOriginForEstimateParamsTests(unittest.TestCase):
             out.append(" ".join(shlex.quote(t) if globby.search(t) else t for t in line.split()))
         return " ".join(out)
 
+    ORIGIN_SINGLE_SHOT_STRIP = ("--fasta-search", "--gen-spec-lib", "--predictor", "--reanalyse",
+                                "--matrices", "--rt-profiling")
+
     @staticmethod
-    def origin_single_shot(cmd, params, files, fasta, out, threads, dda=""):
+    def origin_single_shot(cmd, params, files, fasta, out, threads, dda="",
+                           strip=ORIGIN_SINGLE_SHOT_STRIP):
         report = os.path.join(out, "report.parquet")
         f_args = " ".join(f"--f {shlex.quote(f)}" for f in files)
         lib = os.path.join(out, "diann_lib")
-        strip = ("--fasta-search", "--gen-spec-lib", "--predictor", "--reanalyse",
-                 "--matrices", "--rt-profiling")
         search_cfg = " ".join(t for t in open(params).read().split() if t not in strip)
         return (f"{cmd} {search_cfg} {f_args} --fasta {shlex.quote(fasta)} "
                 f"--lib {shlex.quote(lib)}.predicted.speclib --reanalyse --matrices "
@@ -290,26 +292,37 @@ class SameAsOriginForEstimateParamsTests(unittest.TestCase):
         out, fasta = os.path.join(d, "out"), os.path.join(d, "db.fasta")
         job = os.path.join(d, "job.sh")
         run_search.run_diann(fake, cfg, files, fasta, out, 8, job, acquisition="DIA")
-        new = _read(os.path.join(d, "job_2_search.sh")).rstrip("\n").splitlines()[-1]
+        # The DIA-NN line, not the job's last line: the job also clears and checks its report
+        # around it (tests/test_single_shot_sbatch.py).
+        lines = [l for l in _read(os.path.join(d, "job_2_search.sh")).splitlines()
+                 if l.startswith(fake + " ")]
+        self.assertEqual(len(lines), 1, lines)
         old = self.origin_single_shot(fake, cfg, files, fasta, out, 8)
-        return new, old
+        # The search job now KEEPS --rt-profiling: with --reanalyse it builds the empirical
+        # library that flag configures (run_search.SINGLE_SHOT_SEARCH_STRIP says why).
+        kept = self.origin_single_shot(fake, cfg, files, fasta, out, 8, strip=tuple(
+            f for f in self.ORIGIN_SINGLE_SHOT_STRIP if f != "--rt-profiling"))
+        return lines[0], old, kept
 
     def test_single_shot_command_is_byte_identical_but_for_the_quoted_glob(self):
-        """(a) the one intended difference is `K*,R*` -> `'K*,R*'`, exactly as the chain has
-        quoted it since 2.4.2. (b) bash hands DIA-NN the same argv -- and (c) with a file
-        matching the glob in the working directory, origin's bare form is rewritten while the
-        new one is not."""
+        """(a) the intended differences are `K*,R*` -> `'K*,R*'`, exactly as the chain has
+        quoted it since 2.4.2, and `--rt-profiling` kept in place. (b) bash hands DIA-NN the
+        same argv plus that one flag -- and (c) with a file matching the glob in the working
+        directory, origin's bare form is rewritten while the new one is not."""
         with tempfile.TemporaryDirectory() as d:
             fake = _fake_diann(d)
             for name, cfg in _estimate_params_cfgs(d).items():
                 with self.subTest(name):
-                    new, old = self._single_shot(d, cfg, fake)
+                    new, old, kept = self._single_shot(d, cfg, fake)
                     self.assertEqual(old.count(" K*,R* "), 1)
-                    self.assertEqual(new, old.replace(" K*,R* ", " 'K*,R*' "))
+                    self.assertNotEqual(kept, old, "estimate_params wrote no --rt-profiling")
+                    self.assertEqual(new, kept.replace(" K*,R* ", " 'K*,R*' "))
 
                     clean = os.path.join(d, f"clean-{name}")
                     os.makedirs(clean)
-                    self.assertEqual(_bash_argv(new.split(" ", 1)[1], cwd=clean),
+                    got = _bash_argv(new.split(" ", 1)[1], cwd=clean)
+                    self.assertEqual(got.count("--rt-profiling"), 1)
+                    self.assertEqual([t for t in got if t != "--rt-profiling"],
                                      _bash_argv(old.split(" ", 1)[1], cwd=clean))
 
                     trap = os.path.join(d, f"trap-{name}")
@@ -327,7 +340,7 @@ class SameAsOriginForEstimateParamsTests(unittest.TestCase):
             cfg = os.path.join(d, "c.cfg")
             _write(cfg, "--fasta-search --gen-spec-lib   # library-free\n--qvalue 0.01 # 1%\n"
                         "--mass-acc 15\n")
-            new, _ = self._single_shot(d, cfg, fake)
+            new, _, _ = self._single_shot(d, cfg, fake)
             argv = _bash_argv(new.split(" ", 1)[1], cwd=d)
             for flag in ("--qvalue", "--mass-acc", "--f", "--fasta", "--lib", "--out", "--threads"):
                 self.assertIn(flag, argv, f"{flag} was commented out of the single-shot search")
