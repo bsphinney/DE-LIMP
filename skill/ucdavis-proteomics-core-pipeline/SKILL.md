@@ -125,7 +125,7 @@ Read `recommended_mode` + `facility_software_available`, then:
   for a DIA-NN search of >5 files it routes to the 5-step chain instead — exit 3, no
   `job.sh`, run `hive_exec.sh 'bash <out>/submit.sh'`), never the login node. HIVE gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
-  `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the DIA-NN `.sif`,
+  `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
 - **HIVE = yes but NOT Core → rebuild the toolchain in your own HIVE home** (you can't
   read the group dir). Follow `references/access.md` → "Rebuild on HIVE" (run
@@ -441,9 +441,18 @@ Honor the manifest's exact version — not "latest":
 ```
 PIN_ENGINE=diann PIN_VERSION=2.6.1 bash scripts/acquire_tools.sh <platform_class>
 ```
-Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the
-existing `.sif`; on mac it uses Docker for DIA-NN. **Read `tools.json` `notes`** —
-license gates (FragPipe, Radiant) and missing-runtime warnings surface there.
+Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
+native DIA-NN build for that version (downloading it if the Core has none); on mac it uses
+Docker for DIA-NN. **Read `tools.json` `notes`** — license gates (FragPipe, Radiant) and
+missing-runtime warnings surface there. `tools.json` `versions` is the build it found,
+never `latest` and never the version that was ASKED for (`""` when it cannot tell, `env` for
+a `sage` on PATH). `run_search.py` records it as the engine version only if it is shaped
+like one — `2.6.1`, `v0.14.7` — so any other word there ends as `version: null`, not as a
+version deposited to FRAN. If `run_search.py`
+later prints an **engine version mismatch WARNING**, the version the user confirmed is not
+the one about to run — say so before submitting (both land in `search_provenance.json`). If
+it prints that the record is **`version: null`**, say that too: the search will be recorded
+and deposited with no engine version. → `references/environment.md` ("Version pinning").
 
 Radiant is a ~3 GB image pull, so it is **not** acquired unless asked for:
 ```

@@ -197,7 +197,20 @@ def main():
             if cmd:
                 versions[f"{eng}_cmd"] = cmd
     if a.engine == "sage" and (setup or {}).get("sage"):
-        versions["sage_version"] = run_capture(f"{setup['sage']} --version").strip()
+        # NOT "sage_version": `sage --version` is the binary's own claim about itself, and it
+        # can be wrong about the release it came from -- the v0.14.7 release binary prints
+        # "sage 0.14.6" (measured on HIVE 2026-09-16). Under the plain name, this file and
+        # search_provenance.json contradicted each other for the same run, with nothing to say
+        # which was which. Kept, under a name that says what it is: it is still the only thing
+        # that reports the binary actually on disk, and a disagreement with the release is
+        # itself worth seeing.
+        versions["sage_self_reported_version"] = {
+            "value": run_capture(f"{setup['sage']} --version").strip(),
+            "note": "`sage --version` as the binary prints it. This is NOT necessarily the "
+                    "release it came from: the v0.14.7 release binary prints 0.14.6. The "
+                    "release of record is `tools_versions.sage` above (read from the release "
+                    "tarball) and search_provenance.json `engine_version`.",
+        }
     open(os.path.join(env_dir, "versions.txt"), "w").write(json.dumps(versions, indent=2)); ok("tool versions")
 
     # ---- which skill produced this + how it was installed --------------------

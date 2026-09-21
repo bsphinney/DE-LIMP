@@ -18,7 +18,7 @@
 #
 # What stays special-cased (handled elsewhere / reported):
 #   - DIA-NN: license-gated, no conda. Linux -> binary (acquire_tools.sh);
-#             HIVE -> existing .sif; macOS -> Docker (see notes below).
+#             HIVE -> the Core's native builds; macOS -> Docker (see notes below).
 #
 # Outputs:
 #   ~/.proteomics-pipeline/activate.sh   <- source this; puts the env on PATH
@@ -129,11 +129,21 @@ SAGE="$(resolve sage)"
 MSCONVERT="$(resolve msconvert)"
 HAS_DOCKER=false; have docker && HAS_DOCKER=true
 HAS_APPTAINER=false; ( have apptainer || have singularity ) && HAS_APPTAINER=true
-QUOBYTE=false; [ -d /quobyte/proteomics-grp ] && QUOBYTE=true
+# The Core's shared folder on HIVE. Overridable so the DIA-NN reachability below can be
+# tested against a mocked layout, exactly as acquire_tools.sh's DIANN_HIVE_DIR is; nobody
+# else needs to set it.
+QUOBYTE_DIR="${QUOBYTE_DIR-/quobyte/proteomics-grp}"
+QUOBYTE=false; [ -n "$QUOBYTE_DIR" ] && [ -d "$QUOBYTE_DIR" ] && QUOBYTE=true
 
 # DIA-NN reachability by platform
 DIANN_PATH="diann_engine"; DIANN_READY=false; DIANN_NOTE=""
-if   $QUOBYTE && $HAS_APPTAINER; then DIANN_READY=true;  DIANN_NOTE="HIVE: reuse existing .sif (acquire_tools.sh resolves it)."
+# HIVE's DIA-NN builds are native binaries (build_<nnn>/diann-<version>/diann-linux); only
+# the older 2.3.0 is a .sif, so reusing them does not need apptainer -- that is why the
+# apptainer test that used to be here is gone. The LINUX test is not optional though:
+# /quobyte can be mounted on a Mac, where no diann-linux and no .sif can run at all. On
+# `$QUOBYTE` alone such a host reported diann.ready=true and never saw the Docker Desktop
+# instructions it actually needs.
+if   [ "$OS" = "linux" ] && $QUOBYTE; then DIANN_READY=true;  DIANN_NOTE="HIVE: reuse the Core's native DIA-NN builds under $QUOBYTE_DIR/dia-nn (acquire_tools.sh resolves the pinned version, or downloads it if the Core has none)."
 elif [ "$OS" = "linux" ];        then DIANN_READY=true;  DIANN_NOTE="Linux: acquire_tools.sh downloads the free DIA-NN Academia binary."
 elif [ "$OS" = "darwin" ] && $HAS_DOCKER; then DIANN_READY=true; DIANN_NOTE="macOS+Docker: build the image with build_diann_docker.sh, then export DIANN_DOCKER_IMAGE."
 elif [ "$OS" = "darwin" ];       then DIANN_READY=false; DIANN_NOTE="macOS: DIA-NN has NO native build. Install Docker Desktop (https://docs.docker.com/desktop/setup/install/mac-install/), then re-run setup.sh and build_diann_docker.sh."

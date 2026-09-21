@@ -9,7 +9,7 @@
 #
 #   Run a command on HIVE:
 #     bash hive_exec.sh 'sbatch ~/run/job.sh'
-#     bash hive_exec.sh 'ls -d /quobyte/proteomics-grp/dia-nn/*.sif'
+#     bash hive_exec.sh 'ls -d /quobyte/proteomics-grp/dia-nn/build_*/diann-*'
 #
 #   Copy files to/from HIVE (helpers):
 #     bash hive_exec.sh --put  ./local/path   '~/remote/path'
