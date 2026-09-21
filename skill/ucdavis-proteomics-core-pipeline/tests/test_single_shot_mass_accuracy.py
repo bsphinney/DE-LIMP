@@ -35,9 +35,17 @@ import test_step1b_mass_accuracy_probe as fx  # noqa: E402  (captured logs and t
 
 # library job (--out-lib) -> write the predicted library; one --f -> the probe fake, replaying the
 # run's captured log; several --f -> the search: write --out.
+#
+# The search writes a REPORT, not the word "report": a single-shot search now ends in
+# check_report_runs.py, which counts the runs the report holds and fails the job if any input
+# is missing (references/diann_parallel.md; the guard exists because DIA-NN exits 0 on a fatal
+# error). So the fake writes what DIA-NN writes -- a parquet with a Run column, and the
+# <stem>.stats.tsv that is the checker's fallback when the interpreter has no parquet reader.
+# tests/test_single_shot_sbatch.py fakes it the same way.
 DISPATCH = r"""#!/bin/bash
-nf=0; outlib=""; out=""; prev=""
+nf=0; outlib=""; out=""; prev=""; files=()
 for a in "$@"; do
+  [ "$prev" = --f ] && files+=("$a")
   [ "$a" = --f ] && nf=$((nf + 1))
   [ "$prev" = --out-lib ] && outlib="$a"
   [ "$prev" = --out ] && out="$a"
@@ -49,7 +57,22 @@ if [ -n "$outlib" ]; then
 fi
 if [ "$nf" -gt 1 ]; then
   [ -n "${FAKE_ARGV_LOG:-}" ] && echo "SEARCH $*" >> "$FAKE_ARGV_LOG"
-  echo report > "$out"; exit 0
+  python3 - "$out" "${files[@]}" <<'PY'
+import os, sys
+out, inputs = sys.argv[1], sys.argv[2:]
+runs = [os.path.splitext(os.path.basename(f.rstrip("/")))[0] for f in inputs]
+try:
+    import pyarrow as pa, pyarrow.parquet as pq
+    pq.write_table(pa.table({"Run": runs, "Protein.Group": ["P1"] * len(runs)}), out)
+except ImportError:
+    open(out, "wb").write(b"PAR1 placeholder: no pyarrow in this interpreter")
+stem = out[:-len(".parquet")] if out.endswith(".parquet") else out
+with open(stem + ".stats.tsv", "w") as fh:
+    fh.write("File.Name\tPrecursors.Identified\tProteins.Identified\n")
+    for f in inputs:
+        fh.write(f"{f}\t1500\t150\n")
+PY
+  exit 0
 fi
 FAKE_ARGV_LOG="${FAKE_ARGV_LOG:+$FAKE_ARGV_LOG.probe}" exec "$(dirname "$0")/probe_diann" "$@"
 """
@@ -153,6 +176,46 @@ class SingleShotMassAccTests(unittest.TestCase):
             self.assertEqual(ma["value_file"], massacc)
             self.assertEqual(ma["evidence_file"], os.path.join(out, "mass_acc.json"))
             self.assertEqual(ma["documented"], {"--mass-acc-ms1": 7})
+
+    def test_a_second_search_into_the_same_out_keeps_the_first_job_s_probe_list(self):
+        """The probe reads its file list at RUN time, so the list has to be the JOB's own.
+
+        A fixed `search_input_files.txt` meant that generating a second search into the same
+        --out rewrote the list the FIRST, still unsubmitted, job probes from: that job would
+        measure mass accuracy on the OTHER cohort's runs, pin it, and search its own runs
+        with it -- silently, since both jobs exit 0 and the value is plausible. run_diann()
+        already names report_guard()'s list after the job for exactly this reason
+        (`{stem}_input_files.txt`); the probe reads a list the same way and gets the same
+        treatment. This is the test that was missing when the shared name came back."""
+        with tempfile.TemporaryDirectory() as d:
+            raws, fasta, cfg, tools, bundle = self._setup(d)
+            p1, out = self._run_search(d, raws, fasta, cfg, tools, bundle,
+                                       "--sbatch", os.path.join(d, "first.sh"))
+            self.assertEqual(p1.returncode, 0, p1.stdout + p1.stderr)
+            first = open(os.path.join(d, "first_2_search.sh")).read()
+            list1 = re.search(r"--raw-list (\S+)", first).group(1)
+            self.assertEqual(sorted(open(list1).read().split()), sorted(raws), "fixture")
+
+            # A SECOND search, a DIFFERENT cohort, the SAME --out -- the collision the
+            # per-job name exists to prevent. Same logs, different file names and sizes.
+            other = [fx._run(d, name, size, log=fx.real_log("Ex01162023_10_TT33"))
+                     for name, size in (("Other_A", 13 * fx.GB // 10),
+                                        ("Other_B", 14 * fx.GB // 10),
+                                        ("Other_C", 15 * fx.GB // 10))]
+            p2, out2 = self._run_search(d, other, fasta, cfg, tools, bundle,
+                                        "--sbatch", os.path.join(d, "second.sh"))
+            self.assertEqual(p2.returncode, 0, p2.stdout + p2.stderr)
+            self.assertEqual(out2, out, "fixture: the two searches must share one --out")
+            second = open(os.path.join(d, "second_2_search.sh")).read()
+            list2 = re.search(r"--raw-list (\S+)", second).group(1)
+
+            self.assertNotEqual(list1, list2,
+                                "both jobs probe from ONE shared list file: the second search "
+                                "overwrites what the first one measures on")
+            self.assertEqual(sorted(open(list1).read().split()), sorted(raws),
+                             "the second search rewrote the first job's probe list -- that job "
+                             "would measure mass accuracy on the other cohort")
+            self.assertEqual(sorted(open(list2).read().split()), sorted(other))
 
     def test_inline_single_shot_measures_before_the_search(self):
         with tempfile.TemporaryDirectory() as d:

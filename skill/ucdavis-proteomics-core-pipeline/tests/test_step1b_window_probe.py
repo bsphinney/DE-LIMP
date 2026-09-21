@@ -56,9 +56,13 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
 
 import probe_window  # noqa: E402
 import diann_parallel as dp  # noqa: E402
+# Building a synthetic .d is a deliberate WRITE to an analysis.tdf, and it is named so
+# that tests/test_tdf_readonly_open.py can tell it from a reader that must never write.
+from synthetic_tdf import synthetic_tdf_write_uri  # noqa: E402
 
 PROBE = os.path.join(SCRIPTS, "probe_window.py")
 GB = 1024 ** 3
@@ -133,7 +137,8 @@ def _bruker(d, name, minutes=60.0, gb=2.4, nframes=140, indexed_frames=None):
             fh.write(struct.pack("<I", size))
         fh.truncate(total)
     k = nframes if indexed_frames is None else indexed_frames
-    con = sqlite3.connect(os.path.join(p, "analysis.tdf"))
+    con = sqlite3.connect(synthetic_tdf_write_uri(os.path.join(p, "analysis.tdf")),
+                          uri=True)
     con.execute("CREATE TABLE Frames (Id INTEGER PRIMARY KEY, Time REAL NOT NULL, "
                 "TimsId INTEGER NOT NULL, NumScans INTEGER NOT NULL)")
     con.executemany("INSERT INTO Frames VALUES (?, ?, ?, ?)",
@@ -159,7 +164,7 @@ def _stale_wal_copy(d, name):
     src = os.path.join(d, "_writer_" + name)
     os.makedirs(src)
     tdf = os.path.join(src, "analysis.tdf")
-    con = sqlite3.connect(tdf, isolation_level=None)
+    con = sqlite3.connect(synthetic_tdf_write_uri(tdf), uri=True, isolation_level=None)
     con.execute("CREATE TABLE Frames (Id INTEGER PRIMARY KEY, Time REAL NOT NULL, "
                 "TimsId INTEGER NOT NULL, NumScans INTEGER NOT NULL)")
     con.execute("INSERT INTO Frames VALUES (1, 0.1, 0, 918)")
@@ -186,7 +191,8 @@ def _frames_without_usable_time(dotd, keep_column=False):
             if keep_column else
             "Id INTEGER PRIMARY KEY, TimsId INTEGER NOT NULL, NumScans INTEGER NOT NULL")
     pick = "Id, NULL, TimsId, NumScans" if keep_column else "Id, TimsId, NumScans"
-    con = sqlite3.connect(os.path.join(dotd, "analysis.tdf"))
+    con = sqlite3.connect(synthetic_tdf_write_uri(os.path.join(dotd, "analysis.tdf")),
+                          uri=True)
     con.execute("CREATE TABLE F2 (%s)" % cols)
     con.execute("INSERT INTO F2 SELECT %s FROM Frames" % pick)
     con.execute("DROP TABLE Frames")
@@ -272,7 +278,8 @@ class BrukerIndexIntegrityTests(unittest.TestCase):
             # The fixture reproduces the hazard: a plain READ-WRITE open rewrites the copy.
             victim = os.path.join(d, "victim.d")
             shutil.copytree(p, victim)
-            con = sqlite3.connect(os.path.join(victim, "analysis.tdf"))
+            victim_tdf = os.path.join(victim, "analysis.tdf")
+            con = sqlite3.connect(synthetic_tdf_write_uri(victim_tdf), uri=True)
             con.execute("SELECT COUNT(*) FROM Frames").fetchone()
             con.close()
             self.assertNotEqual(_sha(os.path.join(victim, "analysis.tdf")), before[0])
@@ -344,7 +351,8 @@ class BrukerIndexIntegrityTests(unittest.TestCase):
         """The split must not turn a missing index into a ranking footnote."""
         with tempfile.TemporaryDirectory() as d:
             p = _bruker(d, "noframes.d", gb=0.5)
-            con = sqlite3.connect(os.path.join(p, "analysis.tdf"))
+            noframes_tdf = os.path.join(p, "analysis.tdf")
+            con = sqlite3.connect(synthetic_tdf_write_uri(noframes_tdf), uri=True)
             con.execute("DROP TABLE Frames")
             con.commit()
             con.close()

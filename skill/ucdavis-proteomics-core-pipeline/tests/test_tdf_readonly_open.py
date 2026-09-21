@@ -117,10 +117,18 @@ def python_tdf_offenders(root):
     `mode=ro` without `immutable=1` got into five scripts across two skills because each
     spelled its own sqlite3.connect. Any file that reads an analysis.tdf must open it
     through bruker_tdf.connect_tdf, or at least through a URI helper / literal that carries
-    immutable=1 -- never a bare path and never mode=ro alone."""
+    immutable=1 -- never a bare path and never mode=ro alone.
+
+    The one act that legitimately writes is BUILDING a synthetic .d for a fixture (or
+    damaging a throwaway copy of one on purpose, to prove the fixture carries the hazard).
+    It says so by name: synthetic_tdf.synthetic_tdf_write_uri(). The exemption is that
+    NAME, not the file it appears in -- it is granted per CALL, so a bare connect in the
+    very same module is still an offender, and `grep` lists every deliberate writer there
+    is. Widening ALLOW_UNSAFE_PY instead is how this guard stops being one: a per-directory
+    allowlist is exactly what failed the first time round (TestNoOtherTdfOpens)."""
     return _offenders(root, (".py",), ALLOW_UNSAFE_PY,
                       r"sqlite3\.connect\s*\((.*)",
-                      r"immutable=1|\b\w*tdf_uri\s*\(")
+                      r"immutable=1|\b\w*tdf_uri\s*\(|\bsynthetic_tdf_write_uri\s*\(")
 
 
 def r_tdf_offenders(root):
@@ -129,7 +137,10 @@ def r_tdf_offenders(root):
                       r"dbConnect\s*\((.*)",
                       r"immutable=1|\bsqlite_immutable_uri\s*\(")
 
+sys.path.insert(0, HERE)
+
 import bruker_tdf                           # noqa: E402
+from synthetic_tdf import synthetic_tdf_write_uri   # noqa: E402  (the deliberate writer)
 import detect_acquisition as da             # noqa: E402
 import make_methods                         # noqa: E402
 import run_search                           # noqa: E402
@@ -744,6 +755,14 @@ class TestNoOtherTdfOpens(unittest.TestCase):
                     'tdf = "analysis.tdf"\ncon = sqlite3.connect(tdf_uri(tdf), uri=True)\n',
                 "scripts/not_a_tdf.py":
                     'con = sqlite3.connect("results.sqlite")\n',
+                # The exemption is a NAME and it is granted per CALL: the third line here
+                # is a fixture being built and passes, the fourth is a plain read-write
+                # open in the very same file and must still be caught.
+                "scripts/fixture_writer.py":
+                    'from synthetic_tdf import synthetic_tdf_write_uri\n'
+                    'tdf = "analysis.tdf"\n'
+                    'con = sqlite3.connect(synthetic_tdf_write_uri(tdf), uri=True)\n'
+                    'sneaked = sqlite3.connect(tdf)\n',
                 "R/mode_ro_only.R":
                     'tdf <- "analysis.tdf"\ncon <- DBI::dbConnect(RSQLite::SQLite(), tdf)\n',
                 "R/fine.R":
@@ -754,9 +773,32 @@ class TestNoOtherTdfOpens(unittest.TestCase):
                     fh.write(text)
             py = python_tdf_offenders(tmp)
             self.assertEqual(sorted(o.split(":")[0] for o in py),
-                             ["scripts/bare_path.py", "scripts/mode_ro_only.py"], py)
+                             ["scripts/bare_path.py", "scripts/fixture_writer.py",
+                              "scripts/mode_ro_only.py"], py)
+            self.assertEqual([o for o in py if o.startswith("scripts/fixture_writer.py")],
+                             ["scripts/fixture_writer.py:4: sqlite3.connect(tdf)"], py)
             r = r_tdf_offenders(tmp)
             self.assertEqual([o.split(":")[0] for o in r], ["R/mode_ro_only.R"], r)
+
+    def test_the_named_fixture_writer_really_opens_a_writable_database(self):
+        """The exemption above is a NAME, so the name has to do what it says.
+
+        If synthetic_tdf_write_uri() ever stopped granting write access the fixtures would
+        break loudly -- but if it quietly started handing out a READING uri, the guard
+        would go on waving every call through while the calls did something else. Pin both
+        halves: it writes, and it is not immutable, so nothing can mistake it for the
+        reader."""
+        uri = synthetic_tdf_write_uri("/some/run.d/analysis.tdf")
+        self.assertIn("mode=rwc", uri)
+        self.assertNotIn("immutable", uri)
+        with tempfile.TemporaryDirectory() as tmp:
+            tdf = os.path.join(tmp, "analysis.tdf")
+            con = sqlite3.connect(synthetic_tdf_write_uri(tdf), uri=True)
+            con.execute("CREATE TABLE Frames (Id INTEGER PRIMARY KEY)")
+            con.execute("INSERT INTO Frames VALUES (1)")
+            con.commit()
+            con.close()
+            self.assertGreater(os.path.getsize(tdf), 0, "the fixture writer wrote nothing")
 
     def test_the_skill_scripts_here_use_the_shared_helper(self):
         for name in ("detect_acquisition.py", "make_methods.py"):
