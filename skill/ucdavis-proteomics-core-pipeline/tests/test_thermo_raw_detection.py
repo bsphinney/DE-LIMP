@@ -29,6 +29,7 @@ reason. POSIX only: the stand-in is put on PATH as an executable shell shim.
 """
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -77,7 +78,8 @@ class _FakeParserCase(unittest.TestCase):
         os.environ["PATH"] = self.bin + os.pathsep + self._env.get("PATH", "")
         os.environ["FAKE_TRFP_LOG"] = self.log
         for k in ("THERMORAWFILEPARSER", "FAKE_TRFP_FAIL", "FAKE_TRFP_GARBAGE",
-                  "FAKE_TRFP_NO_FILTER", "FAKE_TRFP_FILTER_ACCESSION", "FAKE_TRFP_SLEEP"):
+                  "FAKE_TRFP_NO_FILTER", "FAKE_TRFP_FILTER_ACCESSION", "FAKE_TRFP_SLEEP",
+                  "FAKE_TRFP_TRUNCATE", "FAKE_TRFP_STDOUT_ERROR"):
             os.environ.pop(k, None)
 
     def tearDown(self):
@@ -208,15 +210,26 @@ class ThermoRawIsReadThroughTheRealCommandLine(_FakeParserCase):
     def test_a_parser_that_reports_no_filter_string_still_classifies_from_windows(self):
         """No release omits it, but if one does the width rule alone must still carry DIA
         with its bounds, and the reason must say the flag was missing -- without blaming a
-        parser version for it."""
+        parser version for it.
+
+        Not `high`, though: with no filter string, references/search-engines.md's "none
+        flagged -> never DDA" cannot be applied at all, and on widths alone a 300 x 2 m/z
+        DIA method is indistinguishable from DDA. The verdict is then one rule short of the
+        two this detector is specified to use, and a parser build that writes no filter
+        string is one nothing here has been run against -- so the user is asked."""
         os.environ["FAKE_TRFP_NO_FILTER"] = "1"
         r = da.classify(self.raw(EXPLORIS))
-        self.assertEqual((r["acquisition"], r["confidence"]), ("DIA", "high"), r["reason"])
+        self.assertEqual((r["acquisition"], r["confidence"]), ("DIA", "medium"), r["reason"])
         self.assertEqual([round(x, 3) for x in r["precursor_mz_range"]], [350.0, 1201.0])
         self.assertIn("not available", r["reason"])
         self.assertNotIn("1.4.5", r["reason"])
+        # ...and it must be a warning, not only a line in `reason`: warnings are what the
+        # orchestrator prints and what sets needs_confirmation.
+        self.assertTrue(any("no filter string" in w and "medium" in w for w in r["warnings"]),
+                        r["warnings"])
         d = da.classify(self.raw(DDA))
         self.assertEqual(d["acquisition"], "DDA", d["reason"])
+        self.assertNotEqual(d["confidence"], "high", d["reason"])
 
     def test_reader_field_records_the_parser_version_and_command(self):
         """Which parser build read the file decides what could be read (see the filter
@@ -236,6 +249,135 @@ class ThermoRawIsReadThroughTheRealCommandLine(_FakeParserCase):
         r = da.classify(self.raw(LUMOS))
         self.assertEqual(r["acquisition"], "DIA", r["reason"])
         self.assertEqual(r["instrument"], "Orbitrap Fusion Lumos")
+
+
+class IncompleteWindowEdgesAreNeverHigh(unittest.TestCase):
+    """A range read from PART of a method is not a measured range.
+
+    classify_isolation_windows is where the mzML reader and the Thermo reader meet, so the
+    guard lives there and closes both at once. The mzML path reaches the defect with no
+    parser involved: `_iter_mzml` keeps a width whenever the two offsets are present, but an
+    edge pair only when MS:1000827 is present too, so a valid mzML whose upper windows carry
+    no isolation target yields a width for every window and edges for the lower ones alone.
+    The range then comes out clipped -- 350.0-793.0 for an Exploris method that acquired
+    350.0-1201.0 -- and estimate_params.py emits `--max-pr-mz 793` tagged "measured from the
+    acquired isolation windows". A wrong number wearing the label that exists to mean "not a
+    guess" is worse than the FALLBACK it replaced.
+    """
+
+    WIDTH, N = 35.0, 25
+
+    def method(self, n=None):
+        """(widths, centres, los, his) for a 25 x 35 m/z method acquiring 350.0-1225.0."""
+        n = self.N if n is None else n
+        centres = [350.0 + self.WIDTH / 2 + self.WIDTH * i for i in range(n)]
+        return ([self.WIDTH] * n, centres,
+                [c - self.WIDTH / 2 for c in centres], [c + self.WIDTH / 2 for c in centres])
+
+    def test_edges_for_every_window_are_a_measured_range(self):
+        widths, centres, los, his = self.method()
+        kind, conf, why, rng = da.classify_isolation_windows(widths, centres, los, his)
+        self.assertEqual((kind, conf), ("DIA", "high"), why)
+        self.assertEqual(rng, (350.0, 1225.0))
+
+    def test_edges_for_only_part_of_the_method_are_never_high(self):
+        widths, centres, los, his = self.method()
+        keep = 13                                   # the demonstrated failure: 13 of 25
+        kind, conf, why, rng = da.classify_isolation_windows(
+            widths, centres, los[:keep], his[:keep])
+        self.assertEqual(kind, "DIA", why)
+        self.assertNotEqual(conf, "high", why)
+        self.assertIn("13 of 25", why)
+        self.assertEqual(rng, (350.0, 805.0), "the clipped range, and it must not read high")
+
+    def test_a_dda_verdict_on_partial_edges_is_not_high_either(self):
+        centres = [400.0 + 0.37 * i for i in range(200)]
+        widths = [1.6] * len(centres)
+        los = [c - 0.8 for c in centres]
+        his = [c + 0.8 for c in centres]
+        full = da.classify_isolation_windows(widths, centres, los, his)
+        self.assertEqual((full[0], full[1]), ("DDA", "high"), full[2])
+        part = da.classify_isolation_windows(widths, centres, los[:50], his[:50])
+        self.assertEqual(part[0], "DDA", part[2])
+        self.assertNotEqual(part[1], "high", part[2])
+
+    def test_ms2_scans_with_no_window_cap_the_thermo_read(self):
+        """The Thermo reader counts every MS2 scan it was given (`n_ms2`); windows come only
+        from the scans that carried a target and both offsets. A shortfall between the two is
+        the same partial read, and that counter is what catches it."""
+        widths, centres, los, his = self.method()
+        w = {"widths": widths, "centres": centres, "los": los, "his": his,
+             "n_ms2": 40, "n_filter": 40, "n_dependent": 0}
+        kind, conf, why, rng = da.classify_thermo_windows(w)
+        self.assertEqual(kind, "DIA", why)
+        self.assertNotEqual(conf, "high", why)
+        self.assertIn("15 of 40 MS2 scans", why)
+
+
+class APartialTrfpAnswerIsNeverHigh(_FakeParserCase):
+    """ThermoRawFileParser can stop part way through a query and still exit 0 -- it logs a
+    processing error as a log4net ERROR line on stdout (its console appender) and the exit
+    code does not move. Given the first 13 of the Exploris method's 25 windows for a request
+    of 200 scans, the detector returned DIA/high, range 350.0-793.0, needs_confirmation
+    false, and estimate_params.py emitted `--max-pr-mz 793` tagged "measured"."""
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "detect_acquisition.py"),
+                               *args], capture_output=True, text=True, env=os.environ.copy())
+
+    def test_a_short_answer_is_not_high_and_says_how_short(self):
+        os.environ["FAKE_TRFP_TRUNCATE"] = "14"      # one MS1 + the first 13 of 25 windows
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertEqual(r["acquisition"], "DIA", r["reason"])
+        self.assertNotEqual(r["confidence"], "high", r["reason"])
+        self.assertEqual(r["precursor_mz_range"], [350.0, 793.0],
+                         "the clipped range -- what matters is that it is not sold as high")
+        self.assertTrue(any(re.search(r"14 of the \d+ scans asked for", w)
+                            for w in r["warnings"]), r["warnings"])
+
+    def test_the_cli_asks_the_user_about_a_short_answer(self):
+        os.environ["FAKE_TRFP_TRUNCATE"] = "14"
+        res = self._run(self.raw(EXPLORIS))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertTrue(payload["needs_confirmation"],
+                        "a range measured from half a method went out unconfirmed")
+        self.assertEqual(len(payload["low_confidence_files"]), 1, payload)
+        self.assertIn("WARNING", res.stderr)
+
+    def test_a_full_answer_is_still_high(self):
+        """The guard must not tax the normal read: the stand-in answers every requested scan,
+        as the parser does."""
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertEqual((r["acquisition"], r["confidence"]), ("DIA", "high"), r["reason"])
+        self.assertEqual(r["precursor_mz_range"], [350.0, 1201.0])
+        self.assertEqual(r["warnings"], [])
+
+    def test_a_query_that_logs_an_error_and_exits_0_is_not_a_result(self):
+        os.environ["FAKE_TRFP_STDOUT_ERROR"] = "query"
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertEqual((r["acquisition"], r["confidence"]), ("unknown", "low"), r["reason"])
+        self.assertIsNone(r["precursor_mz_range"])
+        self.assertIn("exited 0", r["reason"])
+        self.assertIn("file is corrupt", r["reason"])
+        self.assertIn("FALLBACK", r["reason"])
+
+    def test_a_metadata_call_that_logs_an_error_and_exits_0_is_not_an_instrument(self):
+        os.environ["FAKE_TRFP_STDOUT_ERROR"] = "metadata"
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertIsNone(r["instrument"], "an instrument read out of an errored call")
+        self.assertTrue(any("instrument" in w and "exited 0" in w for w in r["warnings"]),
+                        r["warnings"])
+
+    def test_a_slice_that_is_not_mid_run_says_so(self):
+        """Without the metadata there is no scan range to take a middle of, so the fallback
+        reads scans 1-1000: the void volume. The only warning said "instrument unknown",
+        which is about the instrument, not about which part of the run was classified."""
+        os.environ["FAKE_TRFP_FAIL"] = "metadata"
+        r = da.classify(self.raw(EXPLORIS))
+        self.assertEqual(r["acquisition"], "DIA", r["reason"])
+        self.assertTrue(any("not a mid-run slice" in w for w in r["warnings"]), r["warnings"])
+        self.assertTrue(any("START of the run" in w for w in r["warnings"]), r["warnings"])
 
 
 class DataDependentFlagOutranksWindowShape(unittest.TestCase):
@@ -275,9 +417,26 @@ class DataDependentFlagOutranksWindowShape(unittest.TestCase):
         self.assertIn("mixed", why)
         self.assertIsNotNone(rng)
 
+    def test_all_dependent_with_no_readable_windows_does_not_blame_the_widths(self):
+        """The flag alone can still decide, but the reason then said "so DDA despite the
+        window widths" when there were no window widths to be despite."""
+        w = {"widths": [], "centres": [], "los": [], "his": [],
+             "n_ms2": 12, "n_filter": 12, "n_dependent": 12}
+        kind, conf, why, rng = da.classify_thermo_windows(w)
+        self.assertEqual(kind, "DDA", why)
+        self.assertNotEqual(conf, "high", why)
+        self.assertIsNone(rng)
+        self.assertNotIn("despite the window widths", why)
+        self.assertIn("no isolation windows were readable", why)
+
     @staticmethod
-    def proxi(width, centres, cycles, filter_accession):
-        """TRFP `query` JSON as the parser writes it: an MS1, then one MS2 per window."""
+    def proxi(width, centres, cycles, filter_accession, lo_off=None, hi_off=None):
+        """TRFP `query` JSON as the parser writes it: an MS1, then one MS2 per window.
+
+        `lo_off`/`hi_off` override the symmetric half-width, because the parser reports two
+        independent offsets and a method may not centre the window on its target."""
+        lo_off = width / 2 if lo_off is None else lo_off
+        hi_off = width / 2 if hi_off is None else hi_off
         spectra = []
         for _ in range(cycles):
             spectra.append({"attributes": [
@@ -288,11 +447,27 @@ class DataDependentFlagOutranksWindowShape(unittest.TestCase):
                 spectra.append({"attributes": [
                     {"accession": "MS:1000511", "value": "2"},
                     {"accession": "MS:1000827", "value": str(c)},
-                    {"accession": "MS:1000828", "value": str(width / 2)},
-                    {"accession": "MS:1000829", "value": str(width / 2)},
+                    {"accession": "MS:1000828", "value": str(lo_off)},
+                    {"accession": "MS:1000829", "value": str(hi_off)},
                     {"accession": filter_accession,
                      "value": f"FTMS + p NSI Full ms2 {c:.4f}@hcd30.00 [150.0000-2000.0000]"}]})
         return spectra
+
+    def test_asymmetric_isolation_offsets_are_read_as_two_offsets(self):
+        """Both pilot runs report lower == upper, so nothing pinned the asymmetric case. A
+        window is target - lower .. target + upper: assuming half the width on each side
+        would move BOTH edges of this -10/+25 method by 7.5 m/z, and a range wrong by 7.5 m/z
+        at the top silently drops precursors."""
+        centres = [360.0 + 35.0 * i for i in range(25)]
+        w = da.thermo_isolation_windows(
+            self.proxi(35.0, centres, 3, "MS:1000512", lo_off=10.0, hi_off=25.0))
+        self.assertEqual(len(w["widths"]), 75)
+        self.assertEqual(w["widths"][0], 35.0, "the width is still lower + upper")
+        self.assertEqual((w["los"][0], w["his"][0]), (350.0, 385.0))
+        kind, conf, why, rng = da.classify_thermo_windows(w)
+        self.assertEqual((kind, conf), ("DIA", "high"), why)
+        self.assertEqual(rng, (350.0, 1225.0))
+        self.assertNotEqual(rng, (342.5, 1217.5), "halved the width instead of using both")
 
     def test_narrow_window_dia_is_not_called_dda_on_a_pre_1_4_5_parser(self):
         """End to end from query JSON: 300 x 2 m/z windows, nothing data-dependent, the
@@ -407,6 +582,18 @@ class ThermoRawCLI(_FakeParserCase):
         self.assertTrue(payload["needs_confirmation"])
         self.assertIsNone(payload["precursor_mz_range"])
 
+    def test_an_unknown_option_is_rejected_not_read_as_a_file(self):
+        """A near miss on the one flag fell through to the glob, matched nothing, and entered
+        files[] as itself: an "unrecognized extension" entry that turned `overall` into
+        "mixed" and asked the user to confirm a phantom input -- while the login-node guard
+        the user was trying to lift stayed on."""
+        for bad in ("--allow_login_node", "--allow-login-node=1", "--precursor-mz-range"):
+            res = self._run(bad, self.raw(EXPLORIS))
+            self.assertEqual(res.returncode, 2, f"{bad}: {res.stdout}")
+            self.assertEqual(res.stdout, "", f"{bad}: a phantom file reached the caller")
+            self.assertIn(bad, res.stderr)
+            self.assertIn(da.ALLOW_LOGIN_NODE, res.stderr)
+
     def test_cli_metadata_failure_requires_confirmation(self):
         os.environ["FAKE_TRFP_FAIL"] = "metadata"
         res = self._run(self.raw(EXPLORIS))
@@ -414,6 +601,28 @@ class ThermoRawCLI(_FakeParserCase):
         self.assertTrue(payload["needs_confirmation"],
                         "an unread instrument decides mass accuracy; the user must see it")
         self.assertIn("WARNING", res.stderr)
+
+
+class SkillMdExplainsTheNullRange(_FakeParserCase):
+    """A Thermo DDA read is the one clean result that carries no precursor m/z range: DIA,
+    high confidence, no warning, `precursor_mz_range: null`. SKILL.md 6b said only "Always
+    pass --precursor-mz-range" and never covered the null, leaving the orchestrator to guess
+    between passing nothing and treating a correct answer as a failed read."""
+
+    def test_a_thermo_dda_read_is_clean_and_has_no_range(self):
+        r = da.classify(self.raw(DDA))
+        self.assertEqual((r["acquisition"], r["confidence"]), ("DDA", "high"), r["reason"])
+        self.assertIsNone(r["precursor_mz_range"])
+        self.assertEqual(r["warnings"], [])
+
+    def test_skill_md_says_a_null_range_on_dda_is_correct(self):
+        with open(os.path.join(os.path.dirname(HERE), "SKILL.md")) as fh:
+            text = fh.read()
+        para = text.split("**Always pass `--precursor-mz-range`**", 1)
+        self.assertEqual(len(para), 2, "the --precursor-mz-range paragraph moved")
+        para = para[1].split("\n\n", 1)[0]
+        self.assertIn("`null` for a DDA run", para)
+        self.assertIn("not a failure", para)
 
 
 class ThermoRawCohortOnALoginNode(_FakeParserCase):

@@ -320,7 +320,11 @@ class MobilityFilteredExtractor:
     
     def _load_metadata(self):
         """Load scan↔1/K0 calibration and diaPASEF window definitions."""
-        con = sqlite3.connect(str(self.tdf_path))
+        # NEVER sqlite3.connect(str(self.tdf_path)): a read-write open replays a stale
+        # mid-acquisition analysis.tdf-wal into the finished file and truncates it -- 342
+        # runs on HIVE. mode=ro alone still reads that -wal; immutable=1 does not.
+        con = sqlite3.connect(self.tdf_path.resolve().as_uri() + "?mode=ro&immutable=1",
+                              uri=True)
         
         # Scan-to-1/K0 calibration
         # GlobalMetadata stores calibration coefficients

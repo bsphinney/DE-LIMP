@@ -45,7 +45,10 @@ def _read_mz_calibration(d_folder):
         return 100.0, 1700.0, 631025
 
     try:
-        conn = sqlite3.connect(f"file:{tdf_path}?mode=ro", uri=True)
+        # read-only AND immutable: a read-write open replays a stale mid-acquisition -wal into
+        # the finished tdf and truncates it (342 runs on HIVE), and mode=ro alone still reads that
+        # -wal. as_uri() percent-encodes a `#` or `?` in the path, which would end a raw URI.
+        conn = sqlite3.connect(Path(os.path.abspath(tdf_path)).as_uri() + "?mode=ro&immutable=1", uri=True)
         meta = dict(conn.execute("SELECT Key, Value FROM GlobalMetadata").fetchall())
         conn.close()
         mz_lower = float(meta.get("MzAcqRangeLower", 100.0))

@@ -22,6 +22,16 @@ Usage: python3 detect_acquisition.py FILE [FILE ...]
 """
 import sys, os, json, glob, gzip, sqlite3, statistics, shutil, subprocess
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Every analysis.tdf is opened through bruker_tdf.connect_tdf (read-only AND immutable):
+# a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
+# HIVE), and mode=ro alone reads through the stale -wal. scripts/bruker_tdf.py here is a
+# verbatim copy of the stable skill's; the two are kept byte-identical (see
+# ucdavis-proteomics-core-pipeline/tests/test_tdf_readonly_open.py). This is a SANDBOX
+# fork, but it installs from the same marketplace as the stable skill, so it is pointed
+# at real .d on real storage and gets the same helper.
+from bruker_tdf import connect_tdf  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
 # The matcher in fetch_workflows.py scores on instrument; null is allowed and
@@ -32,7 +42,7 @@ def instrument_bruker_d(path):
     if not os.path.exists(tdf):
         return None
     try:
-        con = sqlite3.connect(f"file:{tdf}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         # GlobalMetadata is a key/value table; InstrumentName holds e.g. "timsTOF Pro"
         rows = dict(cur.execute("SELECT Key, Value FROM GlobalMetadata"))
@@ -72,9 +82,8 @@ def detect_bruker_d(path):
     tdf = os.path.join(path, "analysis.tdf")
     if not os.path.exists(tdf):
         return ("unknown", "low", "no analysis.tdf in .d folder", None)
-    tmp = tdf  # read-only open
     try:
-        con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         tables = {r[0] for r in cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}

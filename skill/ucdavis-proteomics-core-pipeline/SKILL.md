@@ -211,17 +211,36 @@ python3 scripts/detect_acquisition.py /path/to/*.d /path/to/*.raw
 Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
 `instrument`. **If `needs_confirmation` is true, ask the user** before continuing
 — mixed/unknown/low-confidence must not silently pick an engine.
+**Tell the user what every file's `warnings` say** (also printed to stderr; any warning
+sets `needs_confirmation`).
 Thermo `.raw` is read through **ThermoRawFileParser** (public:
 https://github.com/compomics/ThermoRawFileParser/releases or `conda install -c bioconda
 thermorawfileparser`; set `THERMORAWFILEPARSER="dotnet …/ThermoRawFileParser.dll"` if it
-is not one executable on PATH). If a `.raw` comes back `unknown` or any file has
-`warnings`, **tell the user what the warning says** — without the parser there is no
-measured precursor range and step 6b falls back to 380–980.
+is not one executable on PATH). If a `.raw` comes back `unknown`, its `warnings` say
+why — without the parser there is no measured precursor range and step 6b falls back
+to 380–980.
 Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
 on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
 with the account/partition the user can submit to); on a login node the script refuses
 such a cohort before reading anything and prints that `srun` line. Do not add
 `--allow-login-node` yourself to get past the refusal; it is for a user who chooses that.
+For a Bruker `.d` the
+`warnings` come from `tdf_integrity`: `truncated` means `analysis.tdf` indexes only
+part of the run and a search would silently read just that part — **do not search
+that run**; find an intact copy. `stale_side_file` (a non-empty `-wal`/`-journal`
+beside a complete index, whatever the header says): **do not search it as it is** —
+an engine that opens the tdf without `immutable`, even read-only, reads a stale `-wal`
+as part of the database, and backing up `analysis.tdf` does not stop that. With the
+user's agreement, copy the side files (and any `-shm`) to a backup outside the `.d`,
+remove them from the `.d` **once acquisition has finished and nothing holds the `.d`
+open**, and re-run detection. `at_risk` (WAL-mode header, complete index, nothing beside
+it) can be searched as it is. Open any `analysis.tdf` yourself
+only with `sqlite3 "file:<tdf>?mode=ro&immutable=1"` — a read-write open (a plain
+`sqlite3 <tdf>`, for one) replays a stale `-wal` into the file and truncates it,
+which is the state the 342 truncated tdfs on HIVE were found in.
+`run_search.py` runs the same check on its own inputs and **refuses** a non-`ok` `.d`
+(`--allow-damaged-tdf` overrides) — so this is enforced even when this step is skipped,
+which is what "re-run this search" and "the paths are already known" do.
 → detail: `references/search-engines.md`.
 
 ### 3. Ask organism + experimental design (auto-map conditions)
@@ -498,6 +517,13 @@ step 2's `detect_acquisition.py` output. Without it the range falls back to
 tails, does not error, and is invisible in the results. The rationale tags the
 value `measured …` or `FALLBACK …` so you can tell which you got; if it says
 FALLBACK, say so to the user before committing to a multi-hour search.
+**`precursor_mz_range` is `null` for a DDA run, and that is correct, not a failure**
+— DDA isolation windows are the precursors the instrument happened to pick, not an
+acquired range — so omit the flag there (it only sets DIA-NN's `--min/--max-pr-mz`;
+Sage's DDA config does not use it, and a DDA file appearing in
+`precursor_mz_range_files_without` is expected). A `null` on a **DIA** input is a
+different thing: the range could not be read, the `warnings` say why, and the
+search will run on the FALLBACK unless you supply the range yourself.
 
 Always pass `--fasta-meta` (step 6's sidecar): it carries the contaminant tag, so
 the cfg gets `--cont-quant-exclude Cont_` and contaminants are identified but kept

@@ -28,6 +28,16 @@ Usage:
 """
 import sys, os, json, glob, sqlite3, argparse, statistics
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Every analysis.tdf is opened through bruker_tdf.connect_tdf (read-only AND immutable):
+# a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
+# HIVE), and mode=ro alone reads through the stale -wal. scripts/bruker_tdf.py here is a
+# verbatim copy of the stable skill's; the two are kept byte-identical (see
+# ucdavis-proteomics-core-pipeline/tests/test_tdf_readonly_open.py). This is a SANDBOX
+# fork, but it installs from the same marketplace as the stable skill, so it is pointed
+# at real .d on real storage and gets the same helper.
+from bruker_tdf import connect_tdf  # noqa: E402
+
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
 # Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06).
@@ -61,7 +71,7 @@ def bruker_meta(d):
         return None
     m = {"vendor": "Bruker", "file": os.path.basename(d.rstrip("/"))}
     try:
-        con = sqlite3.connect(f"file:{tdf}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         gm = dict(cur.execute("SELECT Key, Value FROM GlobalMetadata"))
         m["instrument"] = gm.get("InstrumentName")
