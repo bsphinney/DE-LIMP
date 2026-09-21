@@ -540,8 +540,24 @@ out of quantification and normalisation. Both the single and 5-step parallel
 DIA-NN paths read this cfg, so the flag applies to library generation *and*
 analysis. With `--contaminants none` the flag is correctly absent.
 The estimator keys mass tolerances on the instrument class from DIA-NN's
-known-good table (Astral → MS1 4/MS2 10 ppm; timsTOF → 15 ppm; unidentified →
-automatic calibration), sets DIA/DDA window mode from acquisition, and uses
+known-good table (Astral → MS1 4/MS2 10 ppm; timsTOF → 15 ppm; Orbitrap by
+resolution, 30k–240k; unidentified → automatic calibration). An **Orbitrap level
+outside 30k–240k**, e.g. a 15k MS2, is not extrapolated: the cfg omits *both*
+mass-accuracy flags (DIA-NN fixes both levels when either is given), the sidecar plans
+`measure_with_diann`, and the level that has a tier keeps it
+(`mass_accuracy_documented`, e.g. MS1 7 ppm at 120k). DIA-NN measures the missing level
+on representative runs before the search — step 1b of the parallel chain, or a probe
+inside the single-shot search job (step 7) — and the measurement is **refused unless it
+is plausible**: MS2 3–30 ppm, MS1 1.5–25 ppm, from at least 2 runs agreeing to within
+50%. What is pinned is then **max(measured, SOP)** (`estimate_params.SOP_MASS_ACC`: MS2
+20 ppm, MS1 7 ppm) — the measurement is used only where it is WIDER than the SOP,
+because a tolerance tighter than the SOP costs identifications and buys nothing.
+Both numbers are recorded; a documented level is never floored. An Orbitrap whose **resolution is unknown** is *not* measured (both levels would be,
+and a measured MS1 is what DIA-NN warns about): it falls to automatic calibration, and the
+chain declines it. Pass `--ms1-resolution/--ms2-resolution` when you know them. An `--overrides` that sets only one of
+the two flags gets the other level from the table, and is refused when the table has no value
+for it (written alone, that flag would fix the other level at 20 ppm): relay the refusal to the
+user. It sets DIA/DDA window mode from acquisition, and uses
 standard trypsin/LFQ defaults for the rest. **It prints a `rationale` tagging
 every value's provenance** — surface this to the user (and it flows into the
 methods text), so a derived default is never mistaken for a confirmed setting.
@@ -569,7 +585,8 @@ right template by data type.
   searches the spectra directly; there are no pseudo-spectra to trace).
 - **Radiant on Bruker `.d` is refused**, not adapted — the container reads only
   mzML/Parquet. It also narrows Seer's flat 20/20 ppm default using the instrument,
-  tagged `[DERIVED]` because that inference is ours, not Seer's.
+  tagged `[DERIVED]` because that inference is ours, not Seer's. A level with no documented
+  DIA-NN value (e.g. a 15k MS2) keeps the vendor 20 ppm, and the provenance says which.
 - Mass tolerances otherwise keep the **vendor's** values: FragPipe already tunes them
   per data type, and DIA-NN's ppm table describes DIA-NN's matcher. Override only
   with a stated SOP value (`--ms1-ppm/--ms2-ppm`).
@@ -770,7 +787,9 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
 - **DIA-NN search settings:** always use the **estimated cfg** (step 6b) — it encodes
   DIA-NN's official recommended per-instrument mass tolerances (timsTOF → MS1/MS2 15
   ppm; Orbitrap Astral → 4/10 ppm; Orbitrap by resolution 240k→4, 120k→7, 60k→10,
-  30k→15). Don't override these unless the user gives a validated SOP value.
+  30k→15; an Orbitrap level outside that table is measured with DIA-NN before the
+  search, never extrapolated).
+  Don't override these unless the user gives a validated SOP value.
 - **DIA-NN parallel — AUTOMATIC above 5 files.** `run_search.py` routes to the **5-step
   parallel chain** by itself whenever the run is DIA-NN with **more than 5 files** on a
   machine that has SLURM and a `--cfg` with **fixed** mass accuracy. You don't decide
@@ -782,12 +801,37 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     parallel-safe**. Steps 3/5 reuse the `.quant` files, so *anything* DIA-NN
     auto-optimises per file gets stitched together inconsistently — DIA-NN's own warning
     names **mass accuracy AND scan window**. The two are not equally recoverable:
-    - **mass accuracy — you must pin it.** DIA-NN calibrates it per run against the
-      library, so there is no one value to carry into steps 3/5. Omitted declines the
-      chain: re-run `estimate_params.py` with the **real instrument** (step 6b). `0` is
-      **not** auto — DIA-NN reads it as a literal 0 ppm tolerance and returns 0 IDs
-      (auto is the flag *omitted*) — so `0`, negative, non-numeric, or set twice with
-      different values also declines; fix the value.
+    - **mass accuracy — pinned by the cfg, or measured with DIA-NN when
+      `estimate_params.py` planned it.** For an Orbitrap with one level outside DIA-NN's table
+      (e.g. the common 15k MS2) and the other inside it, the cfg omits
+      both flags, its `<cfg>.rationale.json` says `measure_with_diann` (keep the two files
+      together), and any level that has a tier is listed under `mass_accuracy_documented`.
+      Step 1b then runs DIA-NN in automatic mode on the same representative runs as the
+      window and writes `<out>/massacc.txt` — the median `Optimised mass accuracy` (MS2) /
+      `Recommended MS1 mass accuracy setting` (MS1) for a measured level, the documented
+      value for the other (MS1 7 at 120k), each measured level floored at the SOP
+      (`max(measured, SOP)`) — which steps 2–5 and `params.resolved.cfg` get. **Tell the
+      user both numbers** when they differ: `mass_acc.measured_ms2_ppm` is what the
+      instrument measured and `mass_acc.pinned_ms2_ppm` is what the search ran at. A
+      run that does not log all of it is replaced like a run with no radius, and an
+      implausible result (MS2 outside 3–30 ppm, MS1 outside 1.5–25, runs disagreeing by
+      more than 50%, or fewer than 2 runs answering) **fails step 1b** rather than being
+      pinned. An Orbitrap of unknown resolution is not measured at all. That is the
+      *tolerance*; DIA-NN still recalibrates every run, pinned or not. A single-shot search
+      runs the same probe between its library and its search, so a machine without SLURM
+      measures it too. Steps 2–5 **refuse to start** without a valid `massacc.txt` /
+      `window.txt`. **Tell the user**: on a 120k/15k Exploris 480 cohort the measured MS2
+      (14 ppm) makes DIA-NN 2.7.0 log `WARNING: the MS2 mass accuracy setting (14 ppm)
+      deviates significantly from the value recommended (25 ppm) for the Orbitrap
+      resolution of this run (15000)` — the measurement and DIA-NN's own resolution-based
+      value disagree, and which to pin is an open question (→
+      `references/diann_parallel.md`). Every other omitted mass accuracy (no sidecar,
+      instrument not identified, only one of the two flags, `--no-probe-window`,
+      `--seed-lib`) declines the chain: re-run `estimate_params.py` with the **real
+      instrument** (step 6b). `0` is **not** auto — DIA-NN reads it as a literal 0 ppm
+      tolerance and returns 0 IDs (auto is the flag *omitted*) — so `0`, negative,
+      non-numeric, or set twice with different values also declines, plan or no plan; fix
+      the value.
     - **`--window` — the chain handles it; do nothing.** `estimate_params.py` omits it by
       design, because the radius depends on the acquisition scheme and has to be
       *measured*. **Step 1b** does that automatically: after library prediction it hands
@@ -799,7 +843,7 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       instead, because one radius is not valid for two instruments), and never a `.d` whose
       `analysis.tdf` index is
       damaged (WAL-mode header, a non-empty `-wal`/`-journal` beside it, or an index that
-      stops short of `analysis.tdf_bin`) — and pins the **median** radius into steps 2–5. A
+      stops short of `analysis.tdf_bin`) — and pins the **median** radius into steps 2–5 (and, when planned, the mass accuracy). A
       run that logs no radius is replaced by the next run nearest the median. Every probe,
       and every run left out and why, is in `<out>/window.json`; the job log names damaged
       `.d` (they are still searched — look at them). If a WAL-mode header is the *only*
@@ -808,8 +852,8 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       anyway. The job log also warns when the median run is under half the largest run left
       (a cohort that is mostly washes) and when the measured radii differ by more than 2. It never probes just the first file:
       DIA-NN's README warns auto-optimised values "depend on which run is first in the
-      list". Only once a radius is measured does it write `<out>/params.resolved.cfg`; if no
-      radius comes back (3 runs without one, missing .NET, or its time budget spent), step
+      list". Only once a radius (and a planned mass accuracy) is measured does it write
+      `<out>/params.resolved.cfg`; if none comes back (3 runs without one, missing .NET, or its time budget spent), step
       1b fails loudly and steps 2–5 never start — they sit `DependencyNeverSatisfied`, so after the
       fix resubmit step 1b **and** steps 2–5 (ids in `<out>/jobs.txt`; →
       `references/watcher.md`), not step 1b alone. An omitted `--window` therefore does **not**

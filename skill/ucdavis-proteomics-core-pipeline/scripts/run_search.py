@@ -526,6 +526,15 @@ def ensure_xic(params, out):
     extra = f"--xic {XIC_WINDOW_DEFAULT}" + ("" if "--mobilograms" in flags else " --mobilograms")
     with open(aug, "w") as fh:
         fh.write(txt.rstrip("\n") + f"\n{extra}\n")
+    # The copy is the same parameters plus XICs, so it keeps the cfg's estimate_params.py
+    # rationale: without it the mass-accuracy plan (measure_with_diann) would be lost here and the
+    # search would fall back to DIA-NN's first-run auto mode (diann_parallel.mass_acc_measure_plan).
+    # A cfg with NO sidecar must not inherit one an earlier search left in the same --out: that
+    # stale plan would have a hand-written cfg's missing mass accuracy measured instead of reported.
+    if os.path.exists(params + ".rationale.json"):
+        shutil.copyfile(params + ".rationale.json", aug + ".rationale.json")
+    elif os.path.lexists(aug + ".rationale.json"):
+        os.remove(aug + ".rationale.json")
     print(f"[run_search] cfg had no --xic; using {aug} (added: {extra}). "
           f"Every DIA-NN search extracts chromatograms.")
     return aug
@@ -623,6 +632,116 @@ def report_guard(report, listing):
     ])
 
 
+def single_shot_mass_acc(params, files, fasta, predicted, out, threads, cmd, libfree):
+    """Measure an undocumented Orbitrap mass accuracy before a single-shot search.
+
+    For a cfg estimate_params.py planned `measure_with_diann` (diann_parallel.
+    mass_acc_measure_plan: an Orbitrap level outside DIA-NN's table), the 5-step chain measures
+    it in step 1b. A single-shot search used to get DIA-NN's first-run auto mode instead -- and
+    every machine WITHOUT SLURM searches single-shot at any cohort size (parallel_decision
+    returns "no SLURM here" first). DIA-NN 2.7.0 labels that mode "use this mode for preliminary
+    analyses only", the result depends on which file sorts first, and nothing records the value
+    it chose. SKILL.md golden rule 7: HIVE is a fast path, never a requirement. probe_window.py
+    needs no SLURM, so the same probe runs here, between the library and the search: the same
+    representative runs (and replacements), the same flags step 1b gives it -- as bash words
+    after `--` -- and the same budget; the median of each measured level and the documented
+    value of the other, pinned for the search via massacc.txt. params.resolved.cfg is built in a
+    .tmp and moved into place only once the value is measured, as in step 1b.
+
+    Returns (bash lines to run before the search, the search's extra flags, mass-accuracy
+    record, resolved-params record). All empty/None when nothing is planned. When this search
+    has no library of its own to measure against -- --one-step, an external --lib, or a cfg that
+    neither predicts nor supplies one -- nothing is measured, DIA-NN optimises on the first run,
+    and it is SAID, naming which of the three it is, in the job output and in the record."""
+    dp = _diann_parallel_mod()
+    plan = dp.mass_acc_measure_plan(params)
+    if not plan:
+        return [], "", None, None
+    if not libfree:
+        # Three different reasons land here and they have three different fixes. Saying "no
+        # library to measure against" and "drop --one-step" for all of them is wrong for the
+        # commonest of them: a cfg with an external --lib HAS a library, and there is no
+        # --one-step to drop.
+        try:
+            present = {f for f, _ in dp.cfg_groups(dp.cfg_tokens(params))}
+        except dp.CfgError:
+            present = set()
+        if getattr(a_globals, "one_step", False):
+            cause = ("--one-step was given, so the library is predicted inside the search itself "
+                     "and does not exist before it")
+            fix = "Drop --one-step to measure it."
+        elif "--lib" in present:
+            cause = (f"{params} searches against a library it did not build (--lib), and this "
+                     "route measures only against the library the search predicts, so the probe "
+                     "has nothing wired up to run against")
+            fix = ("Pin --mass-acc and --mass-acc-ms1 in the cfg, or pass "
+                   "--ms1-resolution/--ms2-resolution to estimate_params.py so DIA-NN's own "
+                   "Orbitrap table can supply them.")
+        else:
+            cause = (f"{params} neither predicts a library (--fasta-search --gen-spec-lib) nor "
+                     "supplies one (--lib), so there is nothing to measure against")
+            fix = ("Add --fasta-search --gen-spec-lib to the cfg, or pin --mass-acc and "
+                   "--mass-acc-ms1 in it.")
+        why = (f"{params} plans to measure mass accuracy with DIA-NN, but {cause}. DIA-NN will "
+               "optimise it on the first run of the search instead -- 'use this mode for "
+               f"preliminary analyses only'. {fix}")
+        sys.stderr.write(f"[run_diann] NOTE: {why}\n")
+        return [], "", {"fixed": False, "measured": False, "reason": why}, None
+    q = shlex.quote
+    listing = os.path.join(out, "search_input_files.txt")
+    with open(listing, "w") as fh:                    # a list file survives spaces in paths
+        fh.write("\n".join(files) + "\n")
+    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
+    massacc = os.path.join(out, "massacc.txt")
+    evidence = os.path.join(out, "mass_acc.json")
+    resolved = os.path.join(out, "params.resolved.cfg")
+    tmp = resolved + ".tmp"
+    workdir = os.path.join(out, "mass_acc_probe")
+    documented = plan["documented"]
+    doc_args = (" " + dp.probe_mass_acc_args(documented)) if documented else ""
+    # the same flags the chain's step 1b probes with: the cfg minus the step-specific ones
+    flags = dp.read_cfg_flags(params, drop=dp.MASS_ACC_FLAGS)
+    pattern = dp.MEASURED_FILE_RE["massacc.txt"]
+    failed = (f'{{ echo "FAILED: no mass accuracy measured -- see the messages above; per-run '
+              f'evidence in {evidence}. Nothing was searched." >&2; rm -f {q(tmp)}; exit 1; }}')
+    lines = [
+        'echo "measuring mass accuracy with DIA-NN on representative runs before the search"',
+        # an earlier run's value, evidence or resolved cfg must not survive
+        f"rm -f {q(evidence)} {q(massacc)} {q(resolved)} {q(tmp)}",
+        f"rm -rf {q(workdir)}",
+        f"cp {q(params)} {q(tmp)}",
+        f"python3 {q(probe)} --diann {q(cmd)} --raw-list {q(listing)} --fasta {q(fasta)} "
+        f"--lib {q(predicted)} --threads {threads} --measure mass-acc{doc_args} "
+        f"--max-probes {dp.PROBE_CANDIDATES} --max-failures {dp.PROBE_MAX_FAILURES} "
+        f"--timeout {dp.PROBE_TIMEOUT_S} --budget {dp.PROBE_BUDGET_S} "
+        f"--workdir {q(workdir)} --write-cfg {q(tmp)} -- {flags} > {q(evidence)} || {failed}",
+        # the two flags, in exactly the shape the guard below accepts
+        "python3 -c \"import json,re,sys; m=json.load(open(sys.argv[1]))['mass_acc']['pin_as']; "
+        f"assert re.fullmatch(sys.argv[2], m); print(m)\" {q(evidence)} {q(pattern)} "
+        f"> {q(massacc)} || {failed}",
+        dp.needs_measured(massacc, "the two mass-accuracy flags",
+                          producer="the probe before this search"),
+        f"mv -f {q(tmp)} {q(resolved)}",
+        f'echo "mass accuracy = $(cat {q(massacc)}) (pinned for the search; evidence {evidence})"',
+    ]
+    record = {"fixed": True, "measured": True, "documented": documented,
+              "ms1": documented.get("--mass-acc-ms1"), "ms2": documented.get("--mass-acc"),
+              "source": "measured with DIA-NN on representative runs by the single-shot search "
+                        "job's probe before the search (probe_window.py --measure mass-acc); "
+                        "planned by estimate_params.py (measure_with_diann) for an Orbitrap level "
+                        "with no documented DIA-NN value",
+              "value_file": massacc, "evidence_file": evidence,
+              "sop_floor": dict(dp.SOP_MASS_ACC_FLAGS),
+              "floor_note": dp.floor_note(evidence, massacc),
+              "reason": "not in the cfg; measured before the search and passed to it"}
+    resolved_params = {"file": resolved, "produced": "runtime",
+                       "by": "the single-shot search's pre-search probe",
+                       "note": "written only after mass accuracy is measured, just before the "
+                               "DIA-NN search; absent until then, so a missing file after the "
+                               "search job means the measurement failed"}
+    return lines, f" $(cat {q(massacc)})", record, resolved_params
+
+
 def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", queue=None):
     """Single-shot DIA-NN. `queue` is {partition, account, qos} from the command line, handed
     to every emit_sbatch() call -- without it slurm_queue() re-detects a queue and overrides
@@ -680,7 +799,15 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     search_cfg = dp.bash_flags(groups, drop=SINGLE_SHOT_SEARCH_STRIP)
     lib_cmd = (f"{cmd} --cfg {shlex.quote(params)} --fasta {shlex.quote(fasta)} "
                f"--out-lib {shlex.quote(lib)} --threads {threads}")
-    search_cmd = (f"{cmd} {search_cfg} {f_args} --fasta {shlex.quote(fasta)} "
+    # An undocumented Orbitrap mass accuracy is measured between the library and the search
+    # (single_shot_mass_acc); `mflag` then carries the pinned flags into the search.
+    measure_lines, mflag, mass_acc, resolved_params = single_shot_mass_acc(
+        params, files, fasta, lib + ".predicted.speclib", out, threads, cmd, libfree)
+    # recorded only when there is something to say, so a pinned cfg's result is unchanged
+    ma_rec = {} if mass_acc is None else {"mass_acc": mass_acc}
+    if resolved_params:
+        ma_rec["resolved_params"] = resolved_params
+    search_cmd = (f"{cmd} {search_cfg}{mflag} {f_args} --fasta {shlex.quote(fasta)} "
                   f"--lib {shlex.quote(lib)}.predicted.speclib --reanalyse --matrices "
                   f"--out {shlex.quote(report)} --threads {threads}{dda}")
     onecmd = (f"{cmd} --cfg {shlex.quote(params)} {f_args} "
@@ -699,7 +826,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     lib_job = "\n".join([dp.clear_stale(predicted), lib_cmd,
                          dp.must_exist(predicted, "the predicted spectral library")])
     guard = report_guard(report, listing)
-    search_job = "\n".join([dp.clear_stale(*report_files), search_cmd, guard])
+    search_job = "\n".join([dp.clear_stale(*report_files), *measure_lines, search_cmd, guard])
     one_job = "\n".join([dp.clear_stale(*report_files), onecmd, guard])
 
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
@@ -709,8 +836,10 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         srch_sh = sbatch.replace(".sh", "") + "_2_search.sh"
         emit_sbatch(lib_sh, lib_job, out, threads, job="diann_libpred", preamble=dnet,
                     **queue)
-        emit_sbatch(srch_sh, search_job, out, threads, job="diann_search",
-                    preamble=dnet, **queue)
+        # The measurement belongs to the SEARCH job: a search requeued against the same library
+        # measures again rather than trusting a massacc.txt from a run it cannot vouch for.
+        emit_sbatch(srch_sh, search_job, out, threads, job="diann_search", preamble=dnet,
+                    hours=search_job_hours(measure_lines), **queue)
         submit = os.path.join(out, "submit.sh")
         with open(submit, "w") as fh:
             fh.write("#!/bin/bash -l\nset -euo pipefail\n"
@@ -722,13 +851,13 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         print(f"  [sbatch] two-job chain: {lib_sh} -> {srch_sh}; submit with: bash {submit}")
         return {"engine": "diann", "report": report, "submitted": submit,
                 "mode": "two_job_libfree", "library": predicted,
-                "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
+                "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet), **ma_rec}
 
     if sbatch:                          # libfree + sbatch returned above, so this is onecmd
-        emit_sbatch(sbatch, one_job, out, threads, job="diann_search",
-                    preamble=dnet, **queue)
+        emit_sbatch(sbatch, one_job, out, threads, job="diann_search", preamble=dnet,
+                    hours=search_job_hours(measure_lines), **queue)
         return {"engine": "diann", "report": report, "submitted": sbatch,
-                "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet)}
+                "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet), **ma_rec}
     pre = (dnet + " ") if dnet else ""
     # The sbatch route CAN only delete (clear_stale runs on a compute node, long after this
     # process is gone). Here we are the ones re-running the search, so the previous results are
@@ -752,6 +881,15 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         if not (os.path.exists(predicted) and os.path.getsize(predicted) > 0):
             sys.exit(f"DIA-NN exited 0 but did not write the predicted library {predicted} "
                      "-- check its output above for ERROR:")
+        if measure_lines:
+            # Between the library and the search, in ONE shell that stops at the first
+            # failure, so nothing is searched with an unmeasured mass accuracy.
+            try:
+                sh((dnet + "\n" if dnet else "") + "\n".join(["set -e", *measure_lines]))
+            except subprocess.CalledProcessError as e:
+                sys.exit(f"single-shot DIA-NN search stopped (exit {e.returncode}) -- see "
+                         "the messages above; nothing was searched with an unmeasured mass "
+                         "accuracy")
         sh(pre + search_cmd)
     else:
         sh(pre + onecmd)
@@ -766,7 +904,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         sys.exit(msg)
     print(f"  [run_diann] {msg}")
     return {"engine": "diann", "report": report, "ran": True, "dda": bool(dda),
-            "previous_artefacts_moved_to": moved}
+            "previous_artefacts_moved_to": moved, **ma_rec}
 
 
 # --------------------------------------------------------------- AlphaDIA -----
@@ -1627,8 +1765,28 @@ def _positive_int(v):
     return n
 
 
+# Wall clock for a search job with nothing in front of it. A job that ALSO measures mass accuracy
+# gets search_job_hours() instead -- see there.
+SEARCH_WALL_HOURS = 12
+
+
+def search_job_hours(measure_lines):
+    """Hours for a --sbatch search job, given the lines that run before the search.
+
+    The pre-search mass-accuracy probe is handed diann_parallel.PROBE_BUDGET_S, which is sized
+    against step 1b's OWN wall clock (PROBE_WALL_HOURS, 3 full probes plus an hour) -- step 1b is
+    a job of its own and nothing else runs in it. Here the same probe runs INSIDE the search job,
+    so at the default 12 h a probe that used its whole budget would have eaten 3h50 of the
+    search's wall before DIA-NN started, and a long search would be cut by SLURM with the
+    measurement done and nothing to show for it. The budget stays what step 1b proved; the job
+    gets that much more wall, so the search still has its full 12 hours."""
+    if not measure_lines:
+        return SEARCH_WALL_HOURS
+    return SEARCH_WALL_HOURS + _diann_parallel_mod().PROBE_WALL_HOURS
+
+
 def emit_sbatch(path, command, out, threads, job, preamble="",
-                partition=None, account=None, qos=None, mem="64G", hours=12):
+                partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
     slurm_queue() — unless the caller passes one, which then wins. Every caller must forward

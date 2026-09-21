@@ -37,7 +37,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from estimate_params import classify_instrument  # noqa: E402  (one ppm table)
+from estimate_params import classify_instrument, MEASURE_CLASSES  # noqa: E402  (one ppm table)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -66,6 +66,21 @@ ROUTES = {
 }
 
 DE_METHOD = {"diann": "dpc", "fragpipe": "dpc", "radiant": "dpc", "sage": "maxlfq"}
+
+# What each engine does with an Orbitrap mass-accuracy level that has no documented DIA-NN value
+# (ms1_ppm/ms2_ppm None: resolution unknown, or outside the README's 30k-240k table). Appended to
+# ppm_source, which SKILL.md tells the agent to quote when it asks the user to confirm -- so it
+# has to be true for THIS engine. It once said "measured in step 1b of the 5-step chain" for
+# Radiant and FragPipe as well, which have no step 1b and run at their vendor tolerances.
+UNDOCUMENTED_LEVEL = {
+    "diann": "DIA-NN: the missing level is measured with DIA-NN on representative runs before "
+             "the search (estimate_params.py plan measure_with_diann)",
+    "radiant": "Radiant: nothing to derive the missing level from, so its vendor 20 ppm "
+               "extraction width is kept for it",
+    "fragpipe": "FragPipe: its vendor preset tolerances are used (the DIA-NN table is not "
+                "applied to MSFragger)",
+    "sage": "Sage: its own derived tolerances are used (estimate_params.py --engine sage)",
+}
 
 # Engines configured by a whole config file rather than by flags. These are
 # generated per run by make_presets.py.
@@ -165,6 +180,22 @@ def main():
             sys.exit(f"resolve_defaults: preset generation failed:\n{r.stderr.strip()}")
         preset_prov = json.loads(r.stdout)
 
+    # An SOP --ms1-ppm/--ms2-ppm REPLACES that level in the manifest below, so ppm_source has to
+    # account for BOTH flags. Gated on --ms1-ppm alone, a site SOP that sets only --ms2-ppm left
+    # ppm_source saying MS2 "is measured with DIA-NN before the search" beside the SOP's own
+    # number -- and SKILL.md tells the agent to read this line out to the user for confirmation.
+    sop = [lvl for lvl, v in (("MS1", args.ms1_ppm), ("MS2", args.ms2_ppm)) if v is not None]
+    # What the manifest will actually carry: the SOP's number where it gave one, the table's
+    # otherwise. UNDOCUMENTED_LEVEL applies to a level that is STILL without a value -- an SOP
+    # that supplies the untabled level means nothing is left to measure, so saying it "is
+    # measured with DIA-NN before the search" beside the SOP's own number is simply false.
+    eff_ms1 = args.ms1_ppm if args.ms1_ppm is not None else ms1
+    eff_ms2 = args.ms2_ppm if args.ms2_ppm is not None else ms2
+    derived = (f"{src}; {UNDOCUMENTED_LEVEL[engine]}"
+               if cls in MEASURE_CLASSES and (eff_ms1 is None or eff_ms2 is None) else src)
+    ppm_source = ("site SOP override" if len(sop) == 2 else derived if not sop else
+                  f"{sop[0]}: site SOP override; the instrument's own values: {derived}")
+
     # Same manifest shape the old registry emitted, so downstream steps are
     # unchanged. Fields that only made sense for a remote bundle are explicit
     # about being local now rather than being filled with plausible-looking junk.
@@ -185,9 +216,9 @@ def main():
         "search": {
             "estimate_params": engine not in PRESET_ENGINES,
             "params_file": params_file,
-            "ms1_ppm": args.ms1_ppm if args.ms1_ppm is not None else ms1,
-            "ms2_ppm": args.ms2_ppm if args.ms2_ppm is not None else ms2,
-            "ppm_source": ("site SOP override" if args.ms1_ppm is not None else src),
+            "ms1_ppm": eff_ms1,
+            "ms2_ppm": eff_ms2,
+            "ppm_source": ppm_source,
             "preset_provenance": preset_prov,
         },
         "validated": {

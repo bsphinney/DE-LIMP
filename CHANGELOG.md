@@ -1,5 +1,47 @@
 # Changelog
 
+## [Skill unreleased] — Orbitrap mass accuracy
+
+### Changed — BREAKING for existing `workflow.yaml` files
+
+- **A `param_overrides` that sets only one mass-accuracy flag is now a hard error where the
+  instrument has no table value for the other level.** `{"--mass-acc": 8}` on a 120k/15k
+  Orbitrap, on an Orbitrap of unknown resolution, or on an unidentified instrument previously
+  wrote that one flag into the cfg. DIA-NN 2.7.0 fixes **both** levels as soon as either is
+  given (`Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)`, HIVE srun 23528991), so
+  the level nobody set silently ran at 20 ppm. `estimate_params.py` now exits non-zero, names
+  the missing flag, and deletes any cfg and `.rationale.json` already at `--out` so a refusal
+  leaves no stale parameter set behind. A workflow that relied on the old behaviour must give
+  **both** flags, pass `--ms1-resolution`/`--ms2-resolution` so DIA-NN's own table supplies the
+  other level, or override neither. Where both resolutions are known and inside 30k–240k the
+  other level is filled from the table automatically and nothing changes.
+
+- **An Orbitrap whose resolution is unknown is no longer measured with DIA-NN.** With no
+  resolution neither level has a documented tier, so both would have been measured — and a
+  measured MS1 is what DIA-NN itself warns about (`the MS1 mass accuracy setting (4.2 ppm)
+  deviates significantly from the value recommended (7 ppm) ... (120000)`). It falls back to
+  DIA-NN's automatic calibration, and the 5-step chain declines such a cfg as `mass_acc_unset`
+  until a value is pinned or the resolutions are passed. This is the default Thermo `.raw`
+  path, so pass `--ms1-resolution`/`--ms2-resolution` when you know them.
+
+- **A measured mass accuracy is now floored at the SOP: the pinned tolerance is
+  `max(measured, SOP)` per level** (`estimate_params.SOP_MASS_ACC`, MS2 20 ppm / MS1 7 ppm — the
+  one definition of an SOP tolerance in the skill, imported rather than re-typed). The
+  measurement is used only where it is **wider** than the SOP, which is the case the probe
+  exists for; a measured value tighter than the SOP costs identifications and buys nothing
+  (18,476 precursors at the measured 14/7 against 19,592 at 20/7 on the benchmarked cohort).
+  Both numbers are recorded — `mass_acc.measured_ms2_ppm` and `.pinned_ms2_ppm`, with `.floored`
+  per level — in `window.json` / `mass_acc.json` and in the job log, and
+  `search_provenance.json`'s `mass_acc.measured: true` now carries a `floor_note` saying it means
+  "we measured it", not "the search ran at the measured value". A level from DIA-NN's resolution
+  table is pinned as given and never floored. The floor never rescues a refused measurement.
+
+- **A measured mass accuracy is now checked before it is pinned.** MS2 must land in 3–30 ppm
+  and MS1 in 1.5–25 ppm (DIA-NN's own tiers span 4–15 and it calibrates from 25), the probed
+  runs must agree to within 50% of the median, and at least two runs must have answered.
+  Anything else fails the probe with the per-run evidence instead of pinning a number for the
+  whole cohort. Steps 2–5 re-check the band on `massacc.txt` itself.
+
 ## [4.1.0] — 2026-09-10
 
 ### Added
