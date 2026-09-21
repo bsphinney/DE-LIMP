@@ -7,7 +7,7 @@ DE-input contract.
 
 | format | how DIA/DDA is decided | instrument |
 |---|---|---|
-| Bruker `.d` | `analysis.tdf` SQLite: `DiaFrameMsMsInfo`/`DiaFrameMsMsWindowGroups` or `Frames.MsMsType==9` → DIA; `PasefFrameMsMsInfo`/`MsMsType==8` → DDA | `GlobalMetadata.InstrumentName` (e.g. "timsTOF Pro") |
+| Bruker `.d` | `analysis.tdf` SQLite, opened immutable: `DiaFrameMsMsInfo`/`DiaFrameMsMsWindowGroups` or `Frames.MsMsType==9` → DIA; `PasefFrameMsMsInfo`/`MsMsType==8` → DDA. Every `.d` also gets `tdf_integrity` (below); anything but `ok` → `warnings` | `GlobalMetadata.InstrumentName` (e.g. "timsTOF Pro") |
 | `.mzML[.gz]` | stream MS2 isolation windows: median width ≥3 Da over few centers → DIA; ≤2 Da, many centers → DDA | none (mzML rarely carries model reliably) |
 | Thermo `.raw` | ThermoRawFileParser `query` of a mid-run slice of scans → MS2 isolation windows → the **same** width/centre rule as mzML, then the filter string's data-dependent `d` flag, which outranks window shape. Parser missing or failing → `unknown`/`low` + `warnings` | ThermoRawFileParser metadata JSON, `MS:1000494` (e.g. "Orbitrap Exploris 480") |
 | `.wiff` | convert to mzML first | none |
@@ -56,13 +56,29 @@ in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 1
   at each tag, corrected in v1.4.5), and bioconda still serves 1.3.2–1.4.4, so both
   spellings are read. Read only the correct one and those builds lose the flag: a 300 ×
   2 m/z DIA method then comes back DDA/`high`, no range, no confirmation. If no filter
-  string is found at all, the width rule decides alone and the `reason` says so.
+  string is found at all, the width rule decides alone: the `reason` says so, a `warnings`
+  entry says so, and the confidence is capped at `medium` — "none flagged → never DDA"
+  cannot be applied when nothing was flagged either way, and on widths alone that same
+  300 × 2 m/z DIA method is indistinguishable from DDA.
+- **A partial read is never `high`.** A width needs only the two offsets; a window *edge*
+  needs the isolation target as well, so a file that reports one without the other yields a
+  range built from part of the method — 350.0–793.0 for the Exploris method that acquired
+  350.0–1201.0. `classify_isolation_windows` (shared with the mzML reader, which reaches
+  this with no parser involved) refuses `high` unless there is an edge pair per width; the
+  Thermo reader refuses it unless every MS2 scan in the slice yielded a window; and an
+  answer shorter than the scans asked for is a warning that caps the confidence too. A
+  wrong number tagged `measured …` by `estimate_params.py` is worse than the `FALLBACK`
+  it replaced.
 - **Failures are loud.** Parser not found, a non-zero exit (the parser's own message is
   quoted), a timeout or unreadable output → `unknown`/`low`, a `reason` that names the
   consequence (the precursor range falls back to 380–980, tagged `FALLBACK` by
   `estimate_params.py`), an entry in the file's `warnings`, and a `WARNING` line on
-  stderr. A failed metadata call alone still classifies from the query, but leaves
-  `instrument` null with a warning — and the instrument feeds `estimate_params.py`
+  stderr. **Exit 0 is not proof of an answer**: TRFP logs a processing error as a log4net
+  `ERROR` line on stdout without moving the exit code, so both calls read stdout and refuse
+  the output when one is there. A failed metadata call alone still classifies from the
+  query, but leaves `instrument` null with a warning — and, having no scan range to take a
+  middle of, it reads scans 1–1000, the start of the run rather than a mid-run slice, which
+  is its own warning — and the instrument feeds `estimate_params.py`
   (Orbitrap Astral pins 4/10 ppm; other Orbitraps still get automatic calibration unless
   their resolutions are given; Sage gets ±10 ppm for an Orbitrap, ±20 ppm when unknown).
   The per-file `reader` field records the parser command and `--version`.
@@ -79,6 +95,77 @@ in one call took 27–33 s. A busy mount stretches it: two reads took 11.1 and 1
   such subcommand: exit 255 "Unexpected extra arguments") and `query -i` without `-n`
   (exit 255 "specify a valid scan range"), ignored both exits, and returned
   `unknown`/null for every `.raw` — so every Orbitrap search got 380–980.
+
+### Bruker `analysis.tdf` integrity (`tdf_integrity`, `scripts/bruker_tdf.py`)
+
+On HIVE, 342 of 39,374 Bruker `.d` (measured 2026-09-16) had an `analysis.tdf` whose
+frame index covered only part of a complete `analysis.tdf_bin` — one run's index ended
+at 0.7% of its `tdf_bin`, and DIA-NN searched 121 cycles of it with no error. The copy
+from the instrument can leave a stale, mid-acquisition `analysis.tdf-wal` beside the
+finished file, and any **read-write** sqlite open (e.g. `sqlite3 analysis.tdf`)
+checkpoints it into the finished file and truncates it. `?mode=ro` alone does not
+truncate, but still reads the stale `-wal` and writes an `-shm` beside the tdf. The
+header does not protect a file: SQLite uses a `-wal` whenever one exists, so a finished
+1,1 file with a stale `-wal` beside it is read as the mid-acquisition database by every
+open that is not immutable.
+
+So every tdf the skill reads is opened through `bruker_tdf.connect_tdf()`
+(`file:<tdf>?mode=ro&immutable=1`), and every `.d` gets a per-file `tdf_integrity`
+(worst first):
+
+| `status` | found | what to do |
+|---|---|---|
+| `truncated` | the index ends more than `allowed_slack()` short of the end of `tdf_bin` | **first rule out a run that is still being acquired** — that index is *supposed* to be short; otherwise **do not search it**, find an intact copy (same `tdf_bin`) |
+| `bin_incomplete` | `tdf_bin` missing, or shorter than the index | wait if it is still acquiring or still copying; otherwise re-copy the `.d` |
+| `stale_side_file` | a non-empty `-wal` or `-journal` beside it (any header); index complete when read immutable | **do not search it as it is** — an engine whose sqlite open is not immutable, read-only or not, reads through a `-wal` (a `-journal` is rolled back into the file, or the file refused), and backing up `analysis.tdf` stops neither. Then, **only once acquisition has finished and nothing holds the `.d` open** — beside a live acquisition those same files are in use, not stale — and with the user's agreement, copy the side files and any `-shm` to a backup outside the `.d`, remove them from the `.d` (or search a copy of the `.d` without them), then re-check |
+| `unverified` | the index could not be read | confirm the `.d` is readable |
+| `at_risk` | SQLite header bytes 18–19 = 2 (WAL mode), nothing beside it; index complete | searchable as it is — that is a statement about the *truncation* mechanism only. While the header stays WAL, a read-write open creates `-wal`/`-shm` **inside** the raw `.d` (and a `-wal` left there is what the next reader replays), and WAL needs POSIX byte-range locks and shared memory that NFS, SMB and Quobyte do not provide, so such an open can fail outright or corrupt the file on a network mount. Never open it read-write |
+| `ok` | header 1,1, no `-wal`/`-journal`, index reaches the end of `tdf_bin` | nothing |
+
+`stale_side_file` outranks `unverified` deliberately: both stop a search, but only the
+first names a file the user can move. A `.d` can be in several of these at once, so the
+warning carries a remedy for **every** distinct status found, not just the worst — except
+`at_risk`, whose remedy is a verdict on the whole file and is dropped the moment anything
+worse is true.
+
+Anything but `ok` is a line in that file's `warnings` — the same per-file list a Thermo
+`.raw` read failure goes into — printed to stderr, and sets `needs_confirmation`. `ClosedProperly` in the
+tdf proves nothing here — 240 of the truncated files say 1. A WAL-mode header does not by
+itself mean damage, and neither does a stale side file while the finished file's index is
+complete; only the index check says `truncated`. Reproduced with SQLite on a synthetic `.d`
+(1000 frames, `-wal` captured after 10): with the `-wal` beside a 1,1 header, `mode=ro`
+sees 10 frames and a read-write open truncates the file; with the `-wal` and `-shm` moved
+out, `mode=ro` and read-write opens both see 1000 and leave the file unchanged. A WAL
+header alone is read whole by every open.
+
+Checked on HIVE (2026-09-16, real files only read, immutable): the truncated run above
+reports `truncated` (header 2,2, index at 0.74% of `tdf_bin`); two intact blank runs with
+a ~4 MB stale `-wal` beside a 1,1 header report `stale_side_file`; two sibling runs report
+`ok`. On a copy of each blank's `analysis.tdf` and `-wal`, a `mode=ro` open saw 7,052 of
+7,512 frames (index to 89.8% of `tdf_bin`) and 5,743 of 7,522 (52.5%) — what an engine
+whose sqlite open is not immutable would read.
+
+The margin is both relative and absolute:
+`allowed_slack(size) = max(SLACK_BYTES = 64 KiB, (1 − 0.999) × size)`. A relative margin
+alone was wrong at the small end — those four intact runs' indexes ended 0.8–3.5 KB short
+of their `tdf_bin` (coverage 0.99998 at worst), and 0.1% of a 3.5 MB `tdf_bin` is 3.5 KB,
+so every blank and QC injection under about that size read as `truncated`. The absolute
+floor is an order of magnitude above the largest slack ever measured, so the small end is
+decided by it and a 2.4 GB run by the 0.999. The cost is the opposite blind spot: an index
+that really does stop short inside a `tdf_bin` **smaller** than 64 KiB is not flagged —
+64 KiB is a few hundred frames of nothing, which no real acquisition is. The warning still
+gives the shortfall in bytes either way.
+
+### Where the check runs
+
+Two places, because step 2 is skippable:
+
+- `detect_acquisition.py` — every `.d` in the cohort, as a per-file `warning`.
+- `run_search.py` — every input `.d`, **before** anything is provisioned or submitted.
+  A non-`ok` status is a hard refusal naming each file and its remedy;
+  `--allow-damaged-tdf` searches them anyway and prints what it is letting through.
+  This is the gate that catches "re-run this search" / "the paths are already known",
+  which come straight to the search with no detection pass behind them.
 
 ## Parameters
 

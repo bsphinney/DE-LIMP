@@ -112,6 +112,45 @@ class TestDetectionReturnsRange(unittest.TestCase):
             self.assertAlmostEqual(rng[0], 350.0, places=1)
             self.assertAlmostEqual(rng[1], 1200.0, places=1)
 
+    def test_mzml_windows_without_a_target_are_not_a_measured_range(self):
+        """A width needs only the two offsets; an EDGE needs the isolation target as well
+        (MS:1000827). An mzML whose upper windows carry no target is still a valid mzML and
+        still yields a width for every window -- so the range is built from the lower windows
+        alone and comes out clipped. That must never read `high`: estimate_params.py would
+        tag it "measured from the acquired isolation windows"."""
+        width = 20.0
+        centres = [350.0 + width / 2 + width * i for i in range(20)]   # 350.0-750.0
+        with tempfile.TemporaryDirectory() as tmp:
+            spectra = []
+            for i, c in enumerate(centres):
+                spec = SPEC.format(i=i, tgt=c, lo=width / 2, hi=width / 2)
+                if i >= 10:                     # upper half: offsets, but no target
+                    spec = "\n".join(ln for ln in spec.splitlines()
+                                     if "MS:1000827" not in ln)
+                spectra.append(spec)
+            p = os.path.join(tmp, "half_targets.mzML")
+            with open(p, "w") as fh:
+                fh.write(MZML.format(n=len(centres), spectra="".join(spectra)))
+            kind, conf, why, rng = da.detect_mzml(p)
+        self.assertEqual(kind, "DIA", why)
+        self.assertNotEqual(conf, "high", why)
+        self.assertIn("10 of 20", why)
+        self.assertEqual(rng, (350.0, 550.0), "clipped at the last window with a target")
+
+    def test_mzml_asymmetric_offsets_are_not_assumed_symmetric(self):
+        """lower != upper is legal and the reader handles it; nothing pinned it. Halving the
+        width instead would move both edges by 7.5 m/z."""
+        with tempfile.TemporaryDirectory() as tmp:
+            centres = [360.0 + 35.0 * i for i in range(20)]
+            spectra = "".join(SPEC.format(i=i, tgt=c, lo=10.0, hi=25.0)
+                              for i, c in enumerate(centres))
+            p = os.path.join(tmp, "asymmetric.mzML")
+            with open(p, "w") as fh:
+                fh.write(MZML.format(n=len(centres), spectra=spectra))
+            kind, conf, why, rng = da.detect_mzml(p)
+        self.assertEqual((kind, conf), ("DIA", "high"), why)
+        self.assertEqual(rng, (350.0, 1050.0))     # 360-10 .. 1025+25, not 342.5 .. 1042.5
+
     def test_classify_surfaces_the_range(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = make_bruker_d(tmp)

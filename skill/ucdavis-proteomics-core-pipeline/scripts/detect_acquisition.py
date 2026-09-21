@@ -19,9 +19,15 @@ Detection per format (best-effort, with a confidence score):
               data-dependent flag -> DIA/DDA and the acquired bounds. Parser missing
               or failing => 'unknown'/low, a stated reason, and a stderr WARNING.
 
+Every Bruker .d is also checked for a truncated or at-risk analysis.tdf
+(bruker_tdf.tdf_integrity): WAL-mode header, a non-empty -wal/-journal beside it,
+or a frame index that ends short of analysis.tdf_bin. Anything but `ok` becomes a
+line in that file's `warnings` and sets `needs_confirmation`.
+
 Output: JSON to stdout. The orchestrator MUST confirm with the user whenever
-confidence != "high" before launching a multi-hour search. Warnings and per-.raw progress
-go to stderr.
+confidence != "high" or any file has `warnings` (a Thermo .raw the parser could not read,
+a Bruker analysis.tdf that is not `ok`), before launching a multi-hour search. Each file's
+`warnings` and per-.raw progress also go to stderr.
 
 On a cluster login node (sbatch on PATH, SLURM_JOB_ID unset) more than LOGIN_NODE_MAX_RAW
 Thermo .raw files are refused before any is read: run it under srun, or pass
@@ -33,6 +39,12 @@ Usage: python3 detect_acquisition.py [--allow-login-node] FILE [FILE ...]
 """
 import sys, os, json, glob, gzip, math, sqlite3, statistics, shutil, subprocess, shlex, tempfile, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Every analysis.tdf is opened through bruker_tdf.connect_tdf (read-only AND immutable):
+# a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
+# HIVE), and mode=ro alone reads through the stale -wal.
+from bruker_tdf import connect_tdf, tdf_integrity, integrity_warning  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
 # The matcher in fetch_workflows.py scores on instrument; null is allowed and
@@ -43,7 +55,7 @@ def instrument_bruker_d(path):
     if not os.path.exists(tdf):
         return None
     try:
-        con = sqlite3.connect(f"file:{tdf}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         # GlobalMetadata is a key/value table; InstrumentName holds e.g. "timsTOF Pro"
         rows = dict(cur.execute("SELECT Key, Value FROM GlobalMetadata"))
@@ -72,9 +84,9 @@ def detect_bruker_d(path):
     tdf = os.path.join(path, "analysis.tdf")
     if not os.path.exists(tdf):
         return ("unknown", "low", "no analysis.tdf in .d folder", None)
-    tmp = tdf  # read-only open
+    con = None
     try:
-        con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        con = connect_tdf(tdf)
         cur = con.cursor()
         tables = {r[0] for r in cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -147,12 +159,27 @@ def _iter_mzml(path, cap=3000):
                 el.clear()
                 if n >= cap: break
 
+def _cap_medium(conf):
+    """`high` is a claim about the READ as well as the verdict: downgrade it."""
+    return "medium" if conf == "high" else conf
+
+
 def classify_isolation_windows(widths, targets, los, his):
     """DIA vs DDA from MS2 isolation windows -> (kind, confidence, reason, range).
 
     The one definition of the width/centre rule, shared by the mzML reader and the Thermo
     .raw reader so the two formats cannot drift into classifying the same run differently.
     `targets` are window centres, `los`/`his` the ACQUIRED window edges.
+
+    A width needs only the two offsets, while an EDGE PAIR also needs the window centre
+    (MS:1000827), so `los` can cover fewer windows than `widths`: a valid mzML whose upper
+    windows carry no isolation target, or a parser that answers with the first part of the
+    scans asked for. The range is then built from a SUBSET of the method and comes out
+    clipped -- 350.0-793.0 for an Exploris method that acquired 350.0-1201.0 -- and
+    estimate_params.py would emit that as `--max-pr-mz 793` tagged "measured from the
+    acquired isolation windows". A wrong number wearing the measured label is worse than the
+    FALLBACK tag it replaces, so a partial read never carries `high`, and the reason says how
+    much of the method it saw.
     """
     if not widths:
         return ("unknown", "low", "no MS2 isolation windows found", None)
@@ -161,15 +188,21 @@ def classify_isolation_windows(widths, targets, los, his):
     distinct = len(set(targets))
     n = len(widths)
     rng = (min(los), max(his)) if los else None
+    partial = len(los) != n
+    gap = (f"; isolation window edges for only {len(los)} of {n} windows, so any range read "
+           f"from them may be clipped" if partial else "")
     if med >= 3.0 and distinct <= max(80, n // 50):
-        return ("DIA", "high" if med >= 4 else "medium",
-                f"median isolation width {med:.1f} Da over {distinct} distinct centers",
+        conf = "high" if med >= 4 else "medium"
+        return ("DIA", _cap_medium(conf) if partial else conf,
+                f"median isolation width {med:.1f} Da over {distinct} distinct centers{gap}",
                 rng)
     if med <= 2.0:
-        return ("DDA", "high" if distinct > n // 10 else "medium",
-                f"median isolation width {med:.1f} Da, {distinct} distinct precursors",
+        conf = "high" if distinct > n // 10 else "medium"
+        return ("DDA", _cap_medium(conf) if partial else conf,
+                f"median isolation width {med:.1f} Da, {distinct} distinct precursors{gap}",
                 None)
-    return ("unknown", "low", f"ambiguous: median width {med:.1f} Da, {distinct} centers", None)
+    return ("unknown", "low",
+            f"ambiguous: median width {med:.1f} Da, {distinct} centers{gap}", None)
 
 def detect_mzml(path):
     widths, targets, los, his = [], [], [], []
@@ -276,27 +309,37 @@ def _trfp_not_found():
             f"`conda install -c bioconda thermorawfileparser`), or convert the .raw to mzML")
 
 
+def _trfp_error_lines(stdout):
+    """log4net `ERROR` lines from the parser's console appender (stdout)."""
+    return [ln.strip() for ln in (stdout or "").splitlines() if " ERROR " in f" {ln} "]
+
+
 def _trfp_message(stdout, stderr):
     """The parser's own words. Usage errors go to stderr; processing errors are log4net
     `ERROR` lines on stdout (its console appender), so look in both."""
-    errs = [ln.strip() for ln in (stdout or "").splitlines() if " ERROR " in f" {ln} "]
     usage = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
-    msg = " | ".join(errs[:2] + usage[:1]) or "no message"
+    msg = " | ".join(_trfp_error_lines(stdout)[:2] + usage[:1]) or "no message"
     return msg if len(msg) <= 400 else msg[:400] + "..."
 
 
 def _run_trfp(cmd, args):
-    """(True, None) or (False, "exit N: <parser message>"). Never raises."""
+    """(True, None, stdout) or (False, "exit N: <parser message>", stdout). Never raises.
+
+    stdout comes back on SUCCESS too, because exit 0 is not proof the parser did the work:
+    a processing error is a log4net `ERROR` line on the console appender and need not move
+    the exit code (see _trfp_message). A caller that reads only the exit code accepts a
+    partial answer as a complete one.
+    """
     try:
         p = subprocess.run(cmd + args, capture_output=True, text=True, errors="replace",
                            timeout=TRFP_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, f"no answer after {TRFP_TIMEOUT_S} s"
+        return False, f"no answer after {TRFP_TIMEOUT_S} s", ""
     except OSError as e:                       # includes FileNotFoundError / PermissionError
-        return False, f"could not run {' '.join(cmd)!r}: {e}"
+        return False, f"could not run {' '.join(cmd)!r}: {e}", ""
     if p.returncode != 0:
-        return False, f"exit {p.returncode}: {_trfp_message(p.stdout, p.stderr)}"
-    return True, None
+        return False, f"exit {p.returncode}: {_trfp_message(p.stdout, p.stderr)}", p.stdout
+    return True, None, p.stdout
 
 
 _TRFP_VERSIONS = {}
@@ -329,9 +372,12 @@ def trfp_metadata(path, cmd=None):
     if not cmd:
         return None, _trfp_not_found()
     with tempfile.TemporaryDirectory(prefix="trfp_meta_") as tmp:
-        ok, why = _run_trfp(cmd, [f"-i={path}", "-m=0", f"-o={tmp}"])
+        ok, why, stdout = _run_trfp(cmd, [f"-i={path}", "-m=0", f"-o={tmp}"])
         if not ok:
             return None, f"ThermoRawFileParser metadata call failed ({why})"
+        if _trfp_error_lines(stdout):
+            return None, ("ThermoRawFileParser metadata call reported an error and still "
+                          f"exited 0 ({_trfp_message(stdout, None)})")
         hits = [f for f in os.listdir(tmp) if f.endswith("-metadata.json")]
         if not hits:
             return None, "ThermoRawFileParser metadata call wrote no *-metadata.json"
@@ -346,38 +392,70 @@ def trfp_metadata(path, cmd=None):
 
 
 def trfp_query(path, first, last, cmd):
-    """(list of PROXI spectra, None) or (None, why)."""
+    """(list of PROXI spectra, None, [notes]) or (None, why, [notes]).
+
+    `notes` are what did not stop the read but must reach the user, because they change what
+    the answer is worth: chiefly an answer SHORTER than the scans asked for. The scan range
+    is clamped to the run's own (query_scan_range), so a short answer means the parser
+    stopped early -- the first 13 of an Exploris method's 25 windows read as a complete
+    350.0-793.0 method. The caller refuses `high` on any note.
+    """
+    notes = []
     with tempfile.TemporaryDirectory(prefix="trfp_query_") as tmp:
         dest = os.path.join(tmp, "query.json")
-        ok, why = _run_trfp(cmd, ["query", f"-i={path}", f"-n={first}-{last}", f"-b={dest}"])
+        ok, why, stdout = _run_trfp(cmd, ["query", f"-i={path}", f"-n={first}-{last}",
+                                          f"-b={dest}"])
         if not ok:
-            return None, f"ThermoRawFileParser query of scans {first}-{last} failed ({why})"
+            return None, f"ThermoRawFileParser query of scans {first}-{last} failed ({why})", notes
+        if _trfp_error_lines(stdout):
+            # exit 0 with an ERROR line: the parser hit a problem, wrote what it had, and
+            # said so only on stdout. Whatever is in that file is not the slice we asked for.
+            return None, (f"ThermoRawFileParser query of scans {first}-{last} reported an "
+                          f"error and still exited 0 ({_trfp_message(stdout, None)})"), notes
         try:
             with open(dest, encoding="utf-8-sig") as fh:
                 spectra = json.load(fh)
         except (OSError, ValueError) as e:
-            return None, f"ThermoRawFileParser query output for scans {first}-{last} unreadable ({e})"
+            return None, f"ThermoRawFileParser query output for scans {first}-{last} unreadable ({e})", notes
     if not isinstance(spectra, list):
-        return None, "ThermoRawFileParser query output is not a JSON list of spectra"
-    return spectra, None
+        return None, "ThermoRawFileParser query output is not a JSON list of spectra", notes
+    asked = last - first + 1
+    if len(spectra) < asked:
+        notes.append(
+            f"ThermoRawFileParser answered the query of scans {first}-{last} with "
+            f"{len(spectra)} of the {asked} scans asked for, so only part of the requested "
+            f"slice was read: the acquisition and any precursor m/z range below come from "
+            f"that part and may miss windows the method also acquired")
+    return spectra, None, notes
 
 
 def query_scan_range(meta):
-    """(first, last) scans to query: several acquisition cycles from the middle of the run,
-    where the method is at steady state -- not the loading/wash start."""
+    """(first, last, note) scans to query: several acquisition cycles from the middle of the
+    run, where the method is at steady state -- not the loading/wash start.
+
+    `note` is None, or says that the slice is NOT mid-run after all. Without the run's own
+    scan range there is nothing to take a middle of, so the fallback reads from scan 1 --
+    the void volume -- and no other message says so: "instrument unknown" is about the
+    instrument, not about which part of the run was classified.
+    """
+    not_mid_run = (
+        f"the run's scan range was not readable from the ThermoRawFileParser metadata, so "
+        f"scans 1-{QUERY_SCANS_WITHOUT_METADATA} were read -- the START of the run (void "
+        f"volume and equilibration), not a mid-run slice at steady state. A method segment "
+        f"that differs there, or a start with no MS2 at all, is classified as the whole run")
     try:
         first, last = (int(v) for v in _cv(meta, "ScanSettings", CV_SCAN_RANGE).split(":"))
     except (AttributeError, ValueError):
-        return 1, QUERY_SCANS_WITHOUT_METADATA
+        return 1, QUERY_SCANS_WITHOUT_METADATA, not_mid_run
     if last < first:
-        return 1, QUERY_SCANS_WITHOUT_METADATA
+        return 1, QUERY_SCANS_WITHOUT_METADATA, not_mid_run
     try:
         cycle = int(_cv(meta, "MsData", CV_N_MS2)) / int(_cv(meta, "MsData", CV_N_MS1)) + 1
         want = min(QUERY_MAX_SCANS, max(QUERY_MIN_SCANS, math.ceil(QUERY_CYCLES * cycle)))
     except (TypeError, ValueError, ZeroDivisionError):
-        want = QUERY_SCANS_WITHOUT_METADATA
+        want = QUERY_SCANS_WITHOUT_METADATA      # still mid-run, just a fixed-width slice
     a = max(first, (first + last) // 2 - want // 2)
-    return a, min(last, a + want - 1)
+    return a, min(last, a + want - 1), None
 
 
 def thermo_isolation_windows(spectra):
@@ -433,26 +511,44 @@ def classify_thermo_windows(w):
     """
     kind, conf, why, rng = classify_isolation_windows(w["widths"], w["centres"],
                                                       w["los"], w["his"])
+    # Every MS2 scan the parser answered with, against the ones a window could be read from.
+    # A shortfall is the same defect classify_isolation_windows guards against for mzML --
+    # a method judged, and a range measured, from part of its windows.
+    unread = w["n_ms2"] - len(w["widths"])
+    capped = unread > 0          # things about the READ that forbid `high`, applied last so
+    if unread > 0:               # no later branch can promote a partial read back to high
+        why += (f"; {unread} of {w['n_ms2']} MS2 scans in the slice had no readable "
+                f"isolation window")
     if w["n_filter"] == 0:
-        return (kind, conf, why + "; data-dependent flag not available (the parser reported "
-                f"no filter string, {CV_FILTER} or {CV_FILTER_PRE_1_4_5})", rng)
+        # No filter string, so the instrument's own flag is unavailable and
+        # references/search-engines.md's "none flagged -> never DDA" cannot be applied: the
+        # width rule decided alone, and a 300 x 2 m/z DIA method looks exactly like DDA to
+        # it. Every shipping release writes the string (v1.3.0-v1.4.4 under the misspelled
+        # MS:10000512, v1.4.5+ correctly), so a parser that does not is one this code has
+        # never been run against. That is not a `high` answer.
+        dep = ("data-dependent flag not available (the parser reported no filter string, "
+               f"{CV_FILTER} or {CV_FILTER_PRE_1_4_5}), so the window widths decided alone")
+        return kind, _cap_medium(conf), f"{why}; {dep}", rng
     dep = f"{w['n_dependent']}/{w['n_filter']} MS2 scans flagged data-dependent"
     if w["n_dependent"] == 0 and kind != "DIA" and w["widths"]:
         # Nothing was data-dependent, so this is not DDA whatever the widths look like:
         # narrow-window DIA (2-3 m/z isolation, Astral-style) or targeted PRM. Medium, so
         # the user confirms which.
-        kind, conf, rng = "DIA", "medium", (min(w["los"]), max(w["his"]))
+        kind, conf = "DIA", "medium"
+        rng = (min(w["los"]), max(w["his"])) if w["los"] else None
         dep += " -- so not DDA despite the window widths (narrow-window DIA or PRM?)"
     elif w["n_dependent"] == w["n_filter"]:
         if kind == "DDA":
             conf = "high"                      # instrument flag and window shape agree
         else:
             kind, conf, rng = "DDA", "medium", None
-            dep += " -- so DDA despite the window widths"
+            # There is no "despite the widths" to talk about when there were no widths.
+            dep += (" -- so DDA despite the window widths" if w["widths"] else
+                    " -- so DDA on the flag alone: no isolation windows were readable")
     elif w["n_dependent"]:
         conf = "medium" if conf == "high" else conf
         dep += " -- mixed dependent and independent MS2 scans (hybrid method?)"
-    return kind, conf, f"{why}; {dep}", rng
+    return kind, (_cap_medium(conf) if capped else conf), f"{why}; {dep}", rng
 
 
 def read_thermo_raw(path):
@@ -481,14 +577,28 @@ def read_thermo_raw(path):
             out["warnings"].append("instrument unknown: ThermoRawFileParser metadata has no "
                                    f"instrument model ({CV_MODEL})")
 
-    first, last = query_scan_range(meta)
-    spectra, q_err = trfp_query(path, first, last, cmd)
+    first, last, slice_note = query_scan_range(meta)
+    if slice_note:
+        out["warnings"].append(slice_note)
+    spectra, q_err, q_notes = trfp_query(path, first, last, cmd)
     if spectra is None:
         out["reason"] = f"{q_err}: acquisition unknown and {FALLBACK_CONSEQUENCE}"
         out["warnings"].append(out["reason"])
         return out
+    out["warnings"].extend(q_notes)
 
-    kind, conf, why, rng = classify_thermo_windows(thermo_isolation_windows(spectra))
+    w = thermo_isolation_windows(spectra)
+    kind, conf, why, rng = classify_thermo_windows(w)
+    if q_notes:
+        conf = _cap_medium(conf)     # a partial answer is not a high-confidence read
+    if w["n_filter"] == 0:
+        out["warnings"].append(
+            f"ThermoRawFileParser reported no filter string ({CV_FILTER} or "
+            f"{CV_FILTER_PRE_1_4_5}) for any MS2 scan, so the instrument's own "
+            f"data-dependent flag could not be read and the isolation widths decided DIA vs "
+            f"DDA alone -- confidence is capped at medium: confirm the acquisition before "
+            f"searching, and note that a narrow-window (2-3 m/z) DIA method is "
+            f"indistinguishable from DDA on widths alone")
     if rng:
         # TRFP serialises the isolation target as a float32 -- 372.8999938964844 for the
         # Lumos method's 372.9 -- so the raw edge comes out 350.0499938964844. Near m/z 1200
@@ -537,13 +647,25 @@ def classify(path):
         kind, conf, why, vendor = "unknown", "low", "unrecognized extension", "?"
     if vendor != "Thermo":
         instrument = detect_instrument(p)
+    # A .d whose analysis.tdf indexes only part of its tdf_bin is searched without an
+    # error -- DIA-NN reads what the index points at. Nothing downstream can tell, so it
+    # is checked here, before the engine is chosen. None for anything but a Bruker .d.
+    integrity = (tdf_integrity(p) if vendor == "Bruker"
+                 and os.path.exists(os.path.join(p, "analysis.tdf")) else None)
+    if integrity and integrity["status"] != "ok":
+        # the same per-file list the Thermo reader fills: one place to look, one gate
+        warnings = warnings + [integrity_warning(integrity)]
     return {"file": p, "vendor": vendor, "acquisition": kind,
             "confidence": conf, "reason": why, "instrument": instrument,
             # ACQUIRED precursor m/z bounds, or null when the format cannot tell
             # us. estimate_params.py searches this range instead of a hardcoded
             # 380-980 -- see its --precursor-mz-range flag.
             "precursor_mz_range": (list(mz_range) if mz_range else None),
-            # every way reading this file went wrong, in words (also printed to stderr)
+            # Bruker .d only (None otherwise): bruker_tdf.tdf_integrity() of its analysis.tdf
+            "tdf_integrity": integrity,
+            # every problem with this file the user must hear before a search starts, in
+            # words: a Thermo .raw read failure or a Bruker analysis.tdf that is not ok
+            # (also printed to stderr; any one sets needs_confirmation)
             "warnings": warnings,
             # the external reader and its version, when one was needed (Thermo .raw)
             "reader": reader}
@@ -601,9 +723,21 @@ def login_node_refusal(n_raw):
 def main(argv):
     allow_login_node = ALLOW_LOGIN_NODE in argv
     argv = [a for a in argv if a != ALLOW_LOGIN_NODE]
+    usage = f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]"
     if not argv:
-        print(f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]",
-              file=sys.stderr)
+        print(usage, file=sys.stderr)
+        sys.exit(2)
+    # Anything dash-led that is not that one flag used to fall through to the glob, match
+    # nothing, and enter files[] as itself: `--allow_login_node` and `--allow-login-node=1`
+    # came back as an "unrecognized extension" file, which turned `overall` into "mixed" and
+    # asked the user to confirm a phantom input -- while the login-node guard they were
+    # trying to lift stayed on. A typo must not look like another input file.
+    unknown = [a for a in argv if a.startswith("-")]
+    if unknown:
+        print(f"detect_acquisition.py: unknown option(s): {' '.join(unknown)} "
+              f"(the only option is {ALLOW_LOGIN_NODE}; a file whose name starts with '-' "
+              f"can be passed as ./{unknown[0]})", file=sys.stderr)
+        print(usage, file=sys.stderr)
         sys.exit(2)
     files = []
     for a in argv:
@@ -654,6 +788,9 @@ def main(argv):
                                or len(instruments) > 1
                                or any(r.get("warnings") for r in results)),
         "low_confidence_files": low_conf,
+        # No top-level list of problem files: files[].warnings is the one place a problem is
+        # reported, whichever reader found it (a vendor-specific list reads "nothing wrong"
+        # whenever the problem is another vendor's). tdf status: files[].tdf_integrity.
         "files": results,
     }, indent=2))
 

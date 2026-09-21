@@ -29,12 +29,22 @@ Usage:
       --params wf/diann.cfg --fasta search.fasta --out search_out \
       --files /data/*.raw --threads 16 [--sbatch job.sh]
       [--engine diann|alphadia|sage|fragpipe|radiant]
+
+Every input Bruker .d is checked with bruker_tdf.tdf_integrity() before anything is
+provisioned or submitted, and a .d that is not `ok` is REFUSED (--allow-damaged-tdf
+searches it anyway). detect_acquisition.py checks the same thing in step 2, but a caller
+who already has the paths -- "re-run this search", "the paths are already known" -- comes
+straight here.
 """
 import sys, os, json, glob, shlex, argparse, subprocess, shutil, stat, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
 from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
+# No Bruker .d is searched before its analysis.tdf has been checked -- see bruker_tdf.py.
+from bruker_tdf import STATUSES, integrity_warning, tdf_integrity
+
+ALLOW_DAMAGED_TDF = "--allow-damaged-tdf"
 
 # The minimum an adapted report must carry for the DE step to run. The q-columns
 # are exactly the REQUIRED filter set: an adapter that emits fewer leaves limpa
@@ -45,6 +55,48 @@ DIANN_CONTRACT = ["Run", "Protein.Group", "PG.MaxLFQ"] + FDR_REQUIRED
 def sh(cmd, **kw):
     print(f"  $ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=True, **kw)
+
+
+def tdf_problems(files):
+    """Every Bruker .d in `files` whose analysis.tdf is not `ok`, worst first.
+
+    detect_acquisition.py runs the same check, but step 2 is exactly what the entry points
+    SKILL.md advertises for a bare search skip: "re-run this search", "re-search with
+    different parameters", "the paths are already known" all arrive here with the files in
+    hand and no detection pass behind them. A .d whose frame index covers part of its
+    tdf_bin is then searched with no error anywhere -- DIA-NN reads what the index points
+    at, and one HIVE run's index covered 0.7% of a 2.4 GB tdf_bin. So the gate has to be on
+    THIS path too, not only on the one the orchestrator is told to walk.
+
+    Per file this is a 100-byte header read, one indexed query and a 4-byte read -- nothing
+    that needs a compute node, and nothing next to a multi-hour search."""
+    out = []
+    for f in files:
+        p = f.rstrip("/")
+        if p.lower().endswith(".d") and os.path.isfile(os.path.join(p, "analysis.tdf")):
+            r = tdf_integrity(p)
+            if r["status"] != "ok":
+                out.append((p, r))
+    out.sort(key=lambda t: (STATUSES.index(t[1]["status"]), t[0]))
+    return out
+
+
+def refuse_damaged_tdf(files, allow):
+    """Stop before the search when any input .d is not `ok`. Prints and returns the list."""
+    bad = tdf_problems(files)
+    if not bad:
+        return bad
+    lines = [f"  {p}\n      {integrity_warning(r)}" for p, r in bad]
+    if allow:
+        print(f"[run_search] {ALLOW_DAMAGED_TDF}: searching {len(bad)} .d whose analysis.tdf "
+              f"is not `ok` anyway:\n" + "\n".join(lines), flush=True)
+        return bad
+    sys.exit(f"REFUSING to search: {len(bad)} of {len(files)} input file(s) are a Bruker .d "
+             f"whose analysis.tdf is not `ok`. A search of one of these reports no error and "
+             f"no missing data -- it silently covers only the part of the run the frame index "
+             f"still points at.\n" + "\n".join(lines) +
+             f"\n  Fix or drop those files, or re-run with {ALLOW_DAMAGED_TDF} to search them "
+             f"as they are.")
 
 
 def expand_files(patterns):
@@ -1214,6 +1266,10 @@ def main():
                     help="cap concurrent array tasks in the parallel chain")
     ap.add_argument("--adapt-only", action="store_true",
                     help="skip the search; just build report.parquet from an existing engine output dir")
+    ap.add_argument(ALLOW_DAMAGED_TDF, action="store_true",
+                    help="search a Bruker .d whose analysis.tdf is not `ok` (truncated, "
+                         "stale -wal/-journal beside it, WAL-mode header, unreadable) "
+                         "anyway; every one is printed first")
     a = ap.parse_args()
 
     global a_globals
@@ -1242,6 +1298,11 @@ def main():
                   "radiant": adapt_radiant}.get(engine, lambda o: None)(a.out)
         print(json.dumps({"engine": engine, "report": report, "ran": False, "adapt_only": True}, indent=2))
         return
+
+    # Before anything is provisioned, submitted or run: no damaged .d gets searched here.
+    # --adapt-only is above this on purpose -- it reads an engine's finished output and
+    # never touches a raw file.
+    refuse_damaged_tdf(files, a.allow_damaged_tdf)
 
     cmd = tools.get(engine)
     if not cmd:
