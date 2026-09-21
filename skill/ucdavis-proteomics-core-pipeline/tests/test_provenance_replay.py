@@ -120,5 +120,50 @@ class TestReplayFidelity(unittest.TestCase):
             self.assertEqual(differing, [], f"replay lost/changed: {differing}")
 
 
+class SageSelfReportedVersionTests(unittest.TestCase):
+    """environment/versions.txt must not present `sage --version` as THE Sage version.
+
+    The v0.14.7 Sage release binary prints "sage 0.14.6" (measured on HIVE 2026-09-16), which
+    is why acquire_tools.sh reads the release from the tarball instead. This file wrote the
+    binary's self-report under the flat name `sage_version`, so one run produced two records
+    that disagreed -- versions.txt saying 0.14.6 and search_provenance.json saying 0.14.7 --
+    with nothing on either to say which was the release and which was the binary talking.
+    """
+
+    def _versions(self, tools=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            sage = os.path.join(tmp, "sage")
+            with open(sage, "w") as fh:
+                fh.write("#!/bin/sh\necho 'sage 0.14.6'\n")
+            os.chmod(sage, 0o755)
+            setup_json = os.path.join(tmp, "setup.json")
+            with open(setup_json, "w") as fh:
+                json.dump({"sage": sage}, fh)
+            argv = [sys.executable, os.path.join(SCRIPTS, "provenance.py"),
+                    "--outdir", os.path.join(tmp, "repro"), "--engine", "sage",
+                    "--setup-json", setup_json]
+            if tools is not None:
+                tj = os.path.join(tmp, "tools.json")
+                with open(tj, "w") as fh:
+                    json.dump(tools, fh)
+                argv += ["--tools-json", tj]
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(os.path.join(tmp, "repro", "environment", "versions.txt")) as fh:
+                return json.load(fh)
+
+    def test_the_binarys_self_report_is_not_recorded_as_the_sage_version(self):
+        v = self._versions()
+        self.assertNotIn("sage_version", v, "an unqualified name reads as the release")
+        self.assertIn("sage 0.14.6", v["sage_self_reported_version"]["value"])
+
+    def test_it_carries_the_caveat_that_makes_the_disagreement_readable(self):
+        v = self._versions({"versions": {"sage": "0.14.7"}, "sage": "/opt/sage/sage"})
+        self.assertEqual(v["tools_versions"]["sage"], "0.14.7")     # the release of record
+        note = v["sage_self_reported_version"]["note"]
+        self.assertIn("0.14.6", note)
+        self.assertIn("tools_versions.sage", note)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
