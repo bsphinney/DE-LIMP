@@ -218,8 +218,9 @@ class PhosphoCfgRunsTests(unittest.TestCase):
             s1b = subprocess.run(["bash", os.path.join(out, "step1b_window.sbatch")], cwd=d,
                                  env=env, capture_output=True, text=True, timeout=120)
             self.assertEqual(s1b.returncode, 0, s1b.stdout + s1b.stderr)
-            step1, probe = _calls(env["ARGV_OUT"])
-            for label, argv in (("step 1", step1), ("step 1b probe", probe)):
+            step1, *probes = _calls(env["ARGV_OUT"])
+            self.assertEqual(len(probes), dp.PROBE_CANDIDATES)     # representative runs
+            for label, argv in [("step 1", step1)] + [("step 1b probe", pr) for pr in probes]:
                 k = argv.index("--threads") + 2
                 self.assertEqual(argv[k:], self.WANT, f"{label} handed DIA-NN different flags")
             # and the resolved cfg reads back to the same values plus the measured window
