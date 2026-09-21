@@ -126,8 +126,9 @@ class WindowIsRecoverableTests(_SlurmStub):
             self.assertIn("window", why)
 
     def test_unpinned_mass_accuracy_still_declines(self):
-        """Mass accuracy is NOT recoverable -- DIA-NN calibrates it per run against the
-        library, so there is no single value step 1b could carry forward."""
+        """Unpinned mass accuracy with no estimate_params.py plan to measure it declines. (The
+        one recoverable case -- an Orbitrap with no documented tier, measured in step 1b -- is
+        in test_orbitrap_mass_accuracy.py; this cfg has no sidecar, so it is not that case.)"""
         with tempfile.TemporaryDirectory() as d:
             use, why = _route(_cfg(d, "--qvalue 0.01\n"))
             self.assertFalse(use)

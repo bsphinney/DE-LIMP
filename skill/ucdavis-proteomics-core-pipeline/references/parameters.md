@@ -19,15 +19,57 @@ trypsin/LFQ default:
 | Instrument class | DIA-NN MS1 / MS2 | matched on |
 |---|---|---|
 | Orbitrap Astral | 4 / 10 ppm (assumes 240k MS1) | name contains "astral" |
-| Orbitrap by MS2 resolution | 240k→4, 120k→7, 60k→10, 30k→15 ppm | (when resolution is known) |
+| Orbitrap by resolution, per level | 240k→4, 120k→7, 60k→10, 30k→15 ppm; between tiers interpolated (tagged) | both MS1 and MS2 resolution known and inside 30k–240k |
 | Bruker timsTOF (dia-PASEF / ddaPASEF) | 15 / 15 ppm | name contains "tims" |
 | SCIEX TripleTOF / ZenoTOF | 20 / 20 ppm | name contains tripletof/zenotof/sciex |
-| Orbitrap, resolution unknown | **automatic calibration** (flags omitted) | generic orbitrap names |
+| Orbitrap, **one level outside 30k–240k** (e.g. 15k MS2), the other inside | that level **measured with DIA-NN before the search**, refused unless it lands in a plausible band (MS2 3–30, MS1 1.5–25 ppm) over at least 2 agreeing runs, then **floored at the SOP** (`max(measured, SOP)`, `estimate_params.SOP_MASS_ACC` = MS2 20 / MS1 7 ppm): the measurement is used only where it is wider. The level with a tier keeps it and is never floored (both flags omitted from the cfg, plan `measure_with_diann`) | both resolutions known, one outside the table |
+| Orbitrap, **resolution unknown** | **automatic calibration** — *not* measured: with no resolution both levels would be, and a measured MS1 is what DIA-NN warns about. Pass `--ms1-resolution`/`--ms2-resolution`, or pin the two flags | generic orbitrap names with no resolution (the default for a `.raw`) |
 | Instrument not detected | **automatic calibration** | fallback |
 
-Automatic calibration is DIA-NN's own recommended default — it optimises mass
-accuracy on the first run and reuses it. We fall back to it (never to a guessed
-number) whenever the instrument class can't be pinned down.
+**Outside the table nothing is extrapolated.** The old log-log fit turned the 15,000 MS2 that
+both Orbitraps in the FRAN re-search pilot acquire (Exploris 480 60k/15k and 120k/15k, Fusion
+Lumos 120k/15k) into 23.3 ppm and pinned it for the whole cohort, with nothing behind the number
+but a curve. Instead that level is **measured with DIA-NN** on the cohort's representative runs
+before the search, and pinned for it: step 1b of the 5-step chain, or a probe between the library
+and the search in a single-shot search — so a machine without SLURM measures it too
+(→ `diann_parallel.md`). The measurement is *adapted from* the README's item 6 of "Changing
+default settings", which reads in full: "run DIA-NN on several representative runs (best to use
+any suitable empirical library, as this is the quickest) with **Unrelated runs** option checked
+and review the 'Averaged recommended settings for this experiment' values reported at the end of
+the log". It is not that procedure: it uses the predicted library, one DIA-NN per run, and pins
+the median of what each run printed, not DIA-NN's averaged line (which differed: MS2 16 against
+a median of 14 on the validation cohort).
+
+**A level with a tier keeps it.** At 120k/15k the cfg's rationale records MS1 7 ppm under
+`mass_accuracy_documented` and only MS2 is measured. Measuring MS1 too pinned 4.2 ppm, and DIA-NN
+2.7.0 then warned on every pass: `the MS1 mass accuracy setting (4.2 ppm) deviates significantly
+from the value recommended (7 ppm) for the Orbitrap resolution of this run (120000)`.
+
+**Neither flag is written on its own.** DIA-NN 2.7.0 fixes BOTH levels when either is given —
+`WARNING: note the mass accuracy settings used by DIA-NN, automatic optimisation will not be
+performed as at least one of MS1/MS2 mass accuracies is user-provided`, and `--mass-acc-ms1 7`
+alone gave `Mass accuracy will be fixed to 2e-05 (MS2) and 7e-06 (MS1)` (HIVE srun 23528991) — so
+a cfg with only `--mass-acc-ms1 7` would silently search MS2 at 20 ppm. The cfg omits both; the
+measurement writes both. A search that cannot measure (`--one-step`: no library exists before the
+search) says so and leaves DIA-NN's first-run optimisation. The same holds for an SOP override
+of one flag (below): the other level is written from the table beside it, and when the table has
+no value for that level `estimate_params.py` refuses rather than write a lone flag.
+
+**An open question, with numbers.** DIA-NN 2.7.0 also has a resolution-based MS2 value for 15k
+that its README does not document: pinned at the measured 14 ppm, the search logs `WARNING: the
+MS2 mass accuracy setting (14 ppm) deviates significantly from the value recommended (25 ppm)
+for the Orbitrap resolution of this run (15000)`; at 25 ppm it is silent. On the validation run
+the wider settings report more precursors and the narrower ones about as many protein groups
+(table in `diann_parallel.md`). The skill currently pins the measurement.
+
+Automatic calibration (instrument not detected) is DIA-NN's own default — it optimises mass
+accuracy on the first run and reuses it ("use this mode for preliminary analyses only", as
+DIA-NN 2.7.0 prints). We fall back to it (never to a guessed number) whenever the instrument
+class can't be pinned down; such a cfg is not parallel-safe.
+
+Each pinned flag carries **its own level's** source: a documented 120k MS1 is never tagged with
+an interpolated or out-of-table MS2's provenance (it used to be — a documented tier read
+"EXTRAPOLATED").
 
 ### Orbitrap resolution: where it is, and where it is not
 
@@ -74,6 +116,10 @@ in the workflow (or `--var-mods ox`) to add Ox(M).
 Every emitted value is tagged in the `rationale`:
 - `data-type-default` — chosen from the instrument/acquisition (e.g. Astral → 10 ppm)
 - `auto-calibration` — left to the engine because the class couldn't be pinned
+- `measured with DIA-NN before the search` — an Orbitrap level with no documented DIA-NN value;
+  `mass_accuracy_plan: measure_with_diann` and `mass_accuracy_documented` (in the rationale and
+  at the top of the sidecar) are what `diann_parallel.mass_acc_measure_plan()` reads, for the
+  chain and the single-shot search alike
 - `universal trypsin/LFQ default`
 - `user-override (validated SOP)` — forced via the workflow's `param_overrides`
 
@@ -85,6 +131,15 @@ is never mistaken for a confirmed setting.
 Two ways, both honored:
 - `param_overrides` in the workflow.yaml (e.g. `{"--mass-acc": 8}` or
   `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged
-  `user-override`.
+  `user-override`. An override of one mass-accuracy flag is a value for that level, so
+  nothing is measured: the other level is written from DIA-NN's table (`{"--mass-acc": 8}` at
+  120k/15k gives `--mass-acc-ms1 7 --mass-acc 8`, plan `pinned`). When the table has no value
+  for the other level (outside 30k–240k, resolution unknown, instrument not identified), the
+  override is **refused** with a message naming the missing flag: written alone it would fix
+  that level at 20 ppm. Give both flags, pass the resolutions, or override neither. **This is a
+  hard exit**, and any cfg and `.rationale.json` already at `--out` are deleted with it, so a
+  refusal never leaves a stale parameter set behind for the next step to read. A `workflow.yaml`
+  whose `param_overrides` sets one mass-accuracy flag for such an instrument used to produce a
+  cfg and now fails — see the changelog entry.
 - Ship a full validated `params_file` in the workflow — used verbatim, estimation
   skipped entirely. Use this when a method is locked and must not move.
