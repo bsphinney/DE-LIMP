@@ -632,7 +632,7 @@ def report_guard(report, listing):
     ])
 
 
-def single_shot_mass_acc(params, files, fasta, predicted, out, threads, cmd, libfree):
+def single_shot_mass_acc(params, listing, fasta, predicted, out, threads, cmd, libfree):
     """Measure an undocumented Orbitrap mass accuracy before a single-shot search.
 
     For a cfg estimate_params.py planned `measure_with_diann` (diann_parallel.
@@ -647,6 +647,9 @@ def single_shot_mass_acc(params, files, fasta, predicted, out, threads, cmd, lib
     after `--` -- and the same budget; the median of each measured level and the documented
     value of the other, pinned for the search via massacc.txt. params.resolved.cfg is built in a
     .tmp and moved into place only once the value is measured, as in step 1b.
+
+    `listing` is the caller's per-job file list -- the probe reads it at RUN time, so it must
+    be the job's own, never a shared name (see the comment on it below).
 
     Returns (bash lines to run before the search, the search's extra flags, mass-accuracy
     record, resolved-params record). All empty/None when nothing is planned. When this search
@@ -688,9 +691,12 @@ def single_shot_mass_acc(params, files, fasta, predicted, out, threads, cmd, lib
         sys.stderr.write(f"[run_diann] NOTE: {why}\n")
         return [], "", {"fixed": False, "measured": False, "reason": why}, None
     q = shlex.quote
-    listing = os.path.join(out, "search_input_files.txt")
-    with open(listing, "w") as fh:                    # a list file survives spaces in paths
-        fh.write("\n".join(files) + "\n")
+    # The CALLER's list file, named after the job (run_diann: `{stem}_input_files.txt`), not a
+    # fixed search_input_files.txt of our own. This probe is generated now and read by the job
+    # later, so it has exactly the hazard report_guard()'s listing has: generating a second
+    # search into the same --out would rewrite the list the FIRST, still unsubmitted, job
+    # probes from, and that job would measure mass accuracy on the other cohort and pin it for
+    # its own runs. A job, its report guard and its probe now rise and fall together.
     probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_window.py")
     massacc = os.path.join(out, "massacc.txt")
     evidence = os.path.join(out, "mass_acc.json")
@@ -802,7 +808,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # An undocumented Orbitrap mass accuracy is measured between the library and the search
     # (single_shot_mass_acc); `mflag` then carries the pinned flags into the search.
     measure_lines, mflag, mass_acc, resolved_params = single_shot_mass_acc(
-        params, files, fasta, lib + ".predicted.speclib", out, threads, cmd, libfree)
+        params, listing, fasta, lib + ".predicted.speclib", out, threads, cmd, libfree)
     # recorded only when there is something to say, so a pinned cfg's result is unchanged
     ma_rec = {} if mass_acc is None else {"mass_acc": mass_acc}
     if resolved_params:
