@@ -80,7 +80,9 @@ any auto-fix you applied to the user.
 - **`stalled` (hung file):** `scancel <arrayjob>_<taskid>` (or the job). Retry that one file
   once on a fresh node. If it stalls again, **drop it** — it's pathological (often a file
   the facility itself re-ran). In the 5-step parallel chain, step 4 already auto-skips a
-  file with no step-2 `.quant`; just remove it from step 3/step 5's `--f` list and resume.
+  file with no step-2 `.quant`; remove it from step 3/step 5's `--f` list, and from
+  `file_list.txt` and the run count in `step5_report.sbatch` (step 5 fails on every listed
+  run without a `.quant`), and resume.
 - **Broken `afterok` after you killed/dropped an array task:** the downstream steps go
   `DependencyNeverSatisfied`. Cancel them and **resubmit steps 3→4→5 fresh, reusing the
   completed `.quant`** (don't re-run step 1/library-prediction — reuse `step1.predicted.speclib`).
