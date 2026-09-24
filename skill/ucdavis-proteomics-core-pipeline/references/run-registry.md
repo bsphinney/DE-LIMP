@@ -384,10 +384,7 @@ trimming. Over the cap, the record points at the zip and says why.
 **When the zip has no `<base>/MANIFEST.txt`** (a zip made before finalize wrote it in), the copy
 gets the session's `MANIFEST.txt`. The original zip is never modified.
 
-**Session zips made before skill 2.7.0 contain the search's `.quant` files, its predicted
-library and its XICs** whenever the search ran into `output/search/`. Their `session.py finalize
---zip` left out only `output/raw_data/` and `DATA_SUBMISSION/upload_staging/`. This was verified
-by running that finalize on a synthetic session. From 2.7.0, finalize also leaves out:
+**What `session.py finalize --zip` leaves out** (skill 2.7.0 and later):
 - every `*.quant` file, wherever it is;
 - a `quant/` folder directly under a search out dir (pruned whole);
 - every `*.predicted.speclib`.
@@ -406,7 +403,8 @@ A real 15-file Lumos chain session holds 2.44 GB under `output/search`:
 so re-running the search regenerates it. The analysis is reproduced from `report.parquet` and the
 parameters, not from either of them.
 
-Zips made before that change still hold these files, so the registry copies every zip without
+Zips made before skill 2.7.0 still hold these files: their finalize left out only
+`output/raw_data/` and `DATA_SUBMISSION/upload_staging/`. So the registry copies every zip without
 them. The empirical `*.skyline.speclib` is small and is kept. The copy moves the kept members'
 compressed bytes as they are, with no recompression, so it is disk I/O rather than CPU on a
 login node, and it is checked before it is used.
@@ -419,6 +417,18 @@ the copy records this finding, which becomes a Data Quality Note:
   zip line in the log still says what was left out.
 - Each `analysis-done` surveys the zip again and **replaces** the finding, so a clean
   re-finalized zip clears the note.
+
+**Findings are replaced by part.** Every finding is tagged with the part of the record it came
+from: `search`, `detection`, `fasta`, `analysis` or `zip`.
+- **Which parts a call re-evaluates:** `search-done` re-evaluates `search`, `detection` and
+  `fasta`. `analysis-done` also re-evaluates `analysis` and `zip`.
+- **How merge() uses that:** it drops the old findings of exactly the parts this call
+  re-evaluated, then adds what the call found. So a problem that is gone leaves the record, and
+  a finding from a part the call did not look at stays. For example, `search-done` keeps the zip
+  note.
+- **Records written before findings had a part:** a finding is inferred from its id (every
+  `session_zip_*` finding is `zip`). A finding whose part cannot be told is replaced by any
+  call that re-evaluates something.
 
 ## The directory README
 

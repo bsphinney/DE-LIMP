@@ -1387,6 +1387,43 @@ class ReviewFixes(Base):
         self.assertIn("fran_ingested", [x[2] for x in rows])
         self.assertNotIn("fran_staged", [x[2] for x in rows])
 
+    # ---- C7: findings are replaced per part, and only for the parts a call re-evaluated
+    def test_search_done_keeps_the_zip_findings(self):
+        out = make_search(self.d)
+        sess, _ = make_session(self.d, quant_in_zip=True)
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        res = self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        self.assertEqual(res["findings"], ["session_zip_trimmed"])   # search-done: no zip look
+        rec = self.read(self.only_folder(), "run_record.json")
+        self.assertEqual([f["part"] for f in rec["findings"]], ["zip"])
+        self.assertIn(".quant files", self.read(self.only_folder()))
+
+    def test_a_legacy_untagged_finding_is_replaced_by_its_part(self):
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=False)             # a clean zip
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        folder = self.only_folder()
+        path = os.path.join(folder, "run_record.json")
+        rec = json.load(open(path))
+        rec["findings"] = [{"id": "session_zip_contains_quant", "detail": "legacy: .quant held"}]
+        write(path, json.dumps(rec))                     # written before findings had a part
+        self.run_it("search-done", "--out", out)         # does not look at the zip: kept
+        self.assertEqual([f["id"] for f in self.read(folder, "run_record.json")["findings"]],
+                         ["session_zip_contains_quant"])
+        self.run_it("analysis-done", "--session", sess, "--out", out)    # re-evaluates the zip
+        self.assertEqual(self.read(folder, "run_record.json")["findings"], [])
+        self.assertNotIn("legacy: .quant held", self.read(folder))
+
+    def test_an_untagged_finding_of_unknown_part_is_replaced_by_any_evaluating_call(self):
+        out = make_search(self.d)
+        self.run_it("search-done", "--out", out)
+        path = os.path.join(self.only_folder(), "run_record.json")
+        rec = json.load(open(path))
+        rec["findings"] = [{"id": "mystery", "detail": "who raised this?"}]
+        write(path, json.dumps(rec))
+        self.run_it("search-done", "--out", out)
+        self.assertEqual(self.read(self.only_folder(), "run_record.json")["findings"], [])
+
     # ---- a re-finalized, clean zip clears the old zip's note
     def test_a_clean_refinalize_clears_the_zip_note(self):
         out = make_search(self.d)

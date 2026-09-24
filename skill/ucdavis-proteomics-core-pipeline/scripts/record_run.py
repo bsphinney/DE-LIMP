@@ -133,8 +133,11 @@ SACCT_CANDIDATES = ("/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/gene
 SECRET_NAME_RE = re.compile(
     r"token|webhook|secret|passw|credential|(^|\.)env$|^id_(rsa|dsa|ecdsa|ed25519)|"
     r"\.(pem|key|p12|pfx)$|^\.netrc$|^\.pgpass$", re.I)
-LEGACY_ZIP_IDS = ("session_zip_contains_quant", "session_zip_contains_search_intermediates",
-                  "session_zip_contains_predicted_speclib")
+# Every finding is tagged with the PART of the record that raised it. A call re-evaluates some
+# parts (search-done: search, detection, fasta; analysis-done: those plus analysis and zip), and
+# merge() drops the old findings of exactly those parts before adding the new ones -- so a problem
+# that is gone (a re-finalized, clean zip) leaves the record, and one a call did not look at stays.
+FINDING_PARTS = ("search", "detection", "fasta", "analysis", "zip")
 FASTA_RE = re.compile(r"\.(fasta|fa|faa)(\.gz)?$", re.I)
 SECRET_TEXT_RE = re.compile(
     rb"-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|hf_[A-Za-z0-9]{20,}|"
@@ -1139,7 +1142,7 @@ def new_plan(event, a):
             "identity": {"out": None, "session": None}, "user": None, "label": None,
             "date": None, "search": None, "analysis": None, "prot": None,
             "copies": [], "not_copied": [], "generated": {}, "zip": None, "links": {},
-            "findings": [], "issue_tags": list(a.issues_tag or []),
+            "findings": [], "evaluated": [], "issue_tags": list(a.issues_tag or []),
             "skill_version": a.skill_version or skill_version(),
             "by": whoami(), "host": socket.gethostname(),
             "file_cap": int(a.file_cap_mb * MB), "zip_cap": int(a.zip_cap_gb * GB),
@@ -1189,6 +1192,7 @@ def plan_search(plan, out, a, deadline):
     out = os.path.abspath(out)
     prov = load_json(os.path.join(out, "search_provenance.json")) or {}
     plan["out"] = out
+    plan["evaluated"] = sorted(set(plan.get("evaluated") or []) | {"search", "detection", "fasta"})
     plan["identity"]["out"] = os.path.realpath(out)
     # Who ran it: the owner of the search folder (on HIVE that is the HIVE account, whoever is
     # recording it -- a maintainer's backfill must not re-attribute someone's search).
@@ -1490,6 +1494,7 @@ def plan_analysis(plan, session, a, zip_cap):
     session = os.path.abspath(session)
     plan["session"] = session
     plan["identity"]["session"] = os.path.realpath(session)
+    plan["evaluated"] = sorted(set(plan.get("evaluated") or []) | {"analysis", "zip"})
     out_d = os.path.join(session, "output")
     de = load_json(os.path.join(out_d, "tables", "de_provenance.json")) or {}
     man_txt = os.path.join(session, "MANIFEST.txt")
@@ -1586,7 +1591,7 @@ def plan_analysis(plan, session, a, zip_cap):
                 comp = q["bytes_compressed"] + ps["bytes_compressed"] + fa["bytes_compressed"]
                 unp = q["bytes"] + ps["bytes"] + fa["bytes"]
                 plan["findings"].append({
-                    "id": "session_zip_trimmed", "scope": "zip", "zip": zpath,
+                    "id": "session_zip_trimmed", "part": "zip", "zip": zpath,
                     "n_quant": q["n"], "n_predicted_speclib": ps["n"], "n_fasta": fa["n"],
                     "bytes": unp,
                     "detail": (f"the session zip holds {what} ({fmt_bytes(comp)} compressed, "
@@ -2281,6 +2286,16 @@ def link_index(root, identity, folder):
 
 
 # ------------------------------------------------------------------------------ writing
+def finding_part(f):
+    """The part of the record a finding came from. Records written before findings were tagged:
+    inferred from the id (every such finding was a session_zip_* one); a finding whose part
+    cannot be told is None, which ANY re-evaluating call replaces -- never kept forever."""
+    part = f.get("part") or f.get("scope")
+    if part:
+        return part
+    return "zip" if str(f.get("id") or "").startswith("session_zip_") else None
+
+
 def merge(old, plan, folder, route_name):
     rec = dict(old or {})
     rec["schema_version"] = SCHEMA_VERSION
@@ -2331,11 +2346,9 @@ def merge(old, plan, folder, route_name):
         nc[sec] = [{"src": x["src"], "reason": x["reason"]} for x in plan["not_copied"]
                    if x["section"] == sec]
     rec["not_copied"] = nc
-    old_f = rec.get("findings") or []
-    if plan.get("analysis"):
-        # This event surveyed the zip again: what it found replaces what an older zip had (a
-        # re-finalized, smaller zip must not keep the old zip's note forever).
-        old_f = [x for x in old_f if x.get("scope") != "zip" and x.get("id") not in LEGACY_ZIP_IDS]
+    evaluated = set(plan.get("evaluated") or [])
+    old_f = [x for x in rec.get("findings") or []
+             if not (evaluated and finding_part(x) in evaluated | {None})]
     f = {x["id"]: x for x in old_f}
     f.update({x["id"]: x for x in plan.get("findings") or []})
     rec["findings"] = list(f.values())
