@@ -34,6 +34,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -546,6 +547,59 @@ class Logs(Base):
         self.assertIn("restored it to its live holder", err.getvalue())
         self.assertEqual(record_run.LOCK_TIMEOUTS, ["abc.csv"])
         self.assertEqual([f for f in os.listdir(self.d) if f.startswith("abc.csv.lock.d.")], [])
+
+    def test_a_break_that_keeps_failing_times_out_instead_of_spinning(self):
+        """FRAN auto_ingest_state._lock spun forever at 100% CPU when the stale lock's rename kept
+        failing (EACCES): every failed break `continue`d past the deadline check. Here the rename
+        always fails; the lock must give up at its wait and write unlocked."""
+        import contextlib
+        path = os.path.join(self.d, "stuck.csv")
+        lkd = path + ".lock.d"
+        os.mkdir(lkd)
+        write(os.path.join(lkd, "owner"), "A:dead:1\n")
+        os.utime(lkd, (time.time() - 3600,) * 2)
+        real_rename = os.rename
+
+        def failing_rename(src, dst):
+            if src == lkd:
+                raise PermissionError(13, "Permission denied", src)
+            return real_rename(src, dst)
+        del record_run.LOCK_TIMEOUTS[:]
+        t0 = time.monotonic()
+        with mock.patch.object(record_run.os, "rename", failing_rename), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with record_run.DirLock(path, record_run.Deadline(30), wait=0.5) as lk:
+                self.assertFalse(lk.held)
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(record_run.LOCK_TIMEOUTS, ["stuck.csv"])
+        self.assertTrue(os.path.isdir(lkd))              # never removed by a failed break
+
+    def test_an_ownerless_lock_is_broken_only_if_a_second_look_agrees(self):
+        """No owner file can mean a dead holder OR a new holder between mkdir and writing its
+        token. The breaker looks again; if an owner appeared meanwhile, the lock is left alone."""
+        import contextlib
+        path = os.path.join(self.d, "fresh.csv")
+        lkd = path + ".lock.d"
+        os.mkdir(lkd)
+        os.utime(lkd, (time.time() - 3600,) * 2)       # stale, owner-less
+
+        def new_holder_writes_token(_seconds):
+            write(os.path.join(lkd, "owner"), "C:live:2\n")
+            os.utime(lkd, None)
+        with mock.patch.object(record_run, "OWNERLESS_SECOND_LOOK_S", 0.0), \
+                mock.patch.object(record_run.time, "sleep", new_holder_writes_token), \
+                contextlib.redirect_stderr(io.StringIO()):
+            b = record_run.DirLock(path, record_run.Deadline(30), wait=0.0)
+            b._try_break("B:x", 3600)
+        self.assertEqual(record_run.DirLock.owner_of(lkd), "C:live:2")
+        # and a truly dead owner-less lock IS broken
+        shutil.rmtree(lkd)
+        os.mkdir(lkd)
+        os.utime(lkd, (time.time() - 3600,) * 2)
+        with mock.patch.object(record_run, "OWNERLESS_SECOND_LOOK_S", 0.0), \
+                contextlib.redirect_stderr(io.StringIO()):
+            record_run.DirLock(path, record_run.Deadline(30), wait=0.0)._try_break("B:x", 3600)
+        self.assertFalse(os.path.exists(lkd))
 
     def test_release_removes_only_our_own_lock(self):
         import contextlib

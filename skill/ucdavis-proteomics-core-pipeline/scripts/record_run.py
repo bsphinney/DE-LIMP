@@ -148,6 +148,7 @@ UPLOAD_DIR = ".proteomics-pipeline/record_run_upload"
 # stale-lock breaking lost 0 of 800 (FRAN ingest/auto_ingest_state.py). Waiting is bounded: past
 # it the write happens unlocked and the result says `lock_timeout` rather than losing the record.
 STALE_LOCK_S = 60
+OWNERLESS_SECOND_LOOK_S = 1.0   # an owner-less stale lock is broken only if a second look agrees
 LOCK_TIMEOUTS = []
 # The registry's own README.md, written by ensure_readme() when it is missing or carries an older
 # version marker than this. THE source: references/run-registry.md quotes it verbatim, and
@@ -476,36 +477,53 @@ class DirLock:
                 except OSError:
                     self.token = None            # held, but unmarked: see __exit__
                 return self
+            # Every path below falls through to the deadline check: a break that keeps failing
+            # (EACCES on the rename, a sticky dir, a filesystem error) must time out and write
+            # unlocked, never spin (FRAN auto_ingest_state._lock had exactly that hang).
             try:
                 age = time.time() - os.stat(self.dir).st_mtime
             except OSError:
-                continue                          # released between mkdir and stat: retry
-            if age > STALE_LOCK_S:
-                judged = self.owner_of(self.dir)
-                if self.break_hook is not None:
-                    self.break_hook(judged)
-                grave = f"{self.dir}.stale.{me.replace(':', '.')}.{time.time_ns()}"
-                try:
-                    os.rename(self.dir, grave)
-                except OSError:
-                    continue                      # someone else broke or released it first
-                if self.owner_of(grave) == judged:
-                    shutil.rmtree(grave, ignore_errors=True)
-                    say(f"broke a lock {age:.0f} s old held by {judged}: {self.dir}")
-                else:
-                    try:
-                        os.rename(grave, self.dir)
-                        say(f"the lock changed hands while being broken; restored it to its live "
-                            f"holder: {self.dir}")
-                    except OSError as e:
-                        say(f"moved a live lock aside by mistake and could not restore it ({e}); "
-                            f"it is at {grave}")
-                continue
+                age = None                        # released between mkdir and stat: retry
+            if age is not None and age > STALE_LOCK_S:
+                self._try_break(me, age)
             if time.monotonic() >= stop:
                 say(f"{self.dir} still held after {self.wait:.0f} s; writing unlocked")
                 LOCK_TIMEOUTS.append(os.path.basename(self.target))
                 return self
             time.sleep(0.05 + random.random() * 0.1)
+
+    def _try_break(self, me, age):
+        """One attempt to break a stale lock: judge -> rename -> verify. Never loops."""
+        judged = self.owner_of(self.dir)
+        if judged is None:
+            # No owner file: either its holder died before writing one, or a NEW holder is between
+            # mkdir and writing its token. Look again after a pause; break only a lock that is
+            # still owner-less and still stale.
+            time.sleep(OWNERLESS_SECOND_LOOK_S)
+            try:
+                still_stale = time.time() - os.stat(self.dir).st_mtime > STALE_LOCK_S
+            except OSError:
+                return
+            if not still_stale or self.owner_of(self.dir) is not None:
+                return
+        if self.break_hook is not None:
+            self.break_hook(judged)
+        grave = f"{self.dir}.stale.{me.replace(':', '.')}.{time.time_ns()}"
+        try:
+            os.rename(self.dir, grave)
+        except OSError:
+            return                                # someone else broke or released it first
+        if self.owner_of(grave) == judged:
+            shutil.rmtree(grave, ignore_errors=True)
+            say(f"broke a lock {age:.0f} s old held by {judged}: {self.dir}")
+        else:
+            try:
+                os.rename(grave, self.dir)
+                say(f"the lock changed hands while being broken; restored it to its live "
+                    f"holder: {self.dir}")
+            except OSError as e:
+                say(f"moved a live lock aside by mistake and could not restore it ({e}); "
+                    f"it is at {grave}")
 
     def __exit__(self, *exc):
         if self.held:
