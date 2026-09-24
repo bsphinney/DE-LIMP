@@ -1443,8 +1443,6 @@ class ReviewFixes(Base):
         self.assertNotIn(".quant files", dq)
 
 
-
-
 class FindingPartsAreDeclared(unittest.TestCase):
     """merge() replaces findings by the PART that raised them. A finding with no part is replaced
     by ANY call that re-evaluates something, and a misspelled part is never replaced -- so every
@@ -1455,9 +1453,11 @@ class FindingPartsAreDeclared(unittest.TestCase):
         parts = re.findall(r'"part":\s*"([^"]+)"', src)
         self.assertTrue(parts, "no finding declares a part")
         self.assertEqual(sorted(set(parts) - set(record_run.FINDING_PARTS)), [])
-        # every finding dict (an "id" that ends in a finding) carries a "part" beside it
-        for m in re.finditer(r'\{\s*"id":\s*"(session_[a-z_]+)"(.{0,200})', src, re.S):
-            self.assertIn('"part":', m.group(2), m.group(1))
+        # every finding the code raises -- any `findings...append({...})` -- carries a "part"
+        starts = [m.end() for m in re.finditer(r'findings"?\]?\.append\(\s*\{', src)]
+        self.assertTrue(starts, "no finding is raised anywhere")
+        for i in starts:                                # "part" within the dict's first lines
+            self.assertIn('"part":', src[i:i + 300], src[i:i + 120])
 
 
 class RunBoundedOnWindows(unittest.TestCase):
