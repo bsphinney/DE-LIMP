@@ -43,11 +43,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Version the DEFAULTS TABLE itself, so a run record can name what produced its
 # parameters without depending on a git commit in another repo.
-DEFAULTS_VERSION = "2026-08-14"
+DEFAULTS_VERSION = "2026-09-23"
 
 # Pinned engine versions. One place. Bump here, not in six files.
+# diann 2.6.1 -> 2.7.0 on 2026-09-23 (Brett). The Core's copy is
+# /quobyte/proteomics-grp/dia-nn/build_270/diann-2.7.0/, unpacked from the Academia Linux zip
+# whose sha256 matched the GitHub release asset (246ca8ba...cb223); off HIVE,
+# acquire_tools.sh downloads that same zip.
 ENGINE_VERSIONS = {
-    "diann": "2.6.1",
+    "diann": "2.7.0",
     "sage": "0.14.7",
     "fragpipe": "24.0",
     "radiant": "2.3.3",   # container release, NOT the Radiant DIA version inside

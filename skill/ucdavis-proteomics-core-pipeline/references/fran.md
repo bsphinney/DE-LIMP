@@ -29,7 +29,7 @@ their own data through this skill; their results are theirs and never enter the 
 The gate is **write permission on the drop directory**, which lives inside
 `/quobyte/proteomics-grp`. It is not a courtesy flag: a HIVE account outside `proteomics-grp`
 physically cannot create an entry there. The filesystem enforces the policy; `fran_deposit.py`
-only reports it. (Same signal `check_access.sh` reports as `proteomics_grp_access`.)
+only reports it. (Same group `check_access.sh` reports as `core_member`.)
 
 ## The three commands
 

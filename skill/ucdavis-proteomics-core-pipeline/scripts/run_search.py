@@ -813,12 +813,23 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     ma_rec = {} if mass_acc is None else {"mass_acc": mass_acc}
     if resolved_params:
         ma_rec["resolved_params"] = resolved_params
+    # --temp, always. Without it DIA-NN writes every run's .quant NEXT TO THE RAW FILE -- on
+    # HIVE that is the instrument archive (/nfs/lssc0/flinders/.../raw_data), shared by every
+    # user who searches those runs, so two searches race on the same .quant files and the
+    # archive fills with search byproducts (HIVE e2e test 2026-09-23: DIA-NN 2.7.0 job held
+    # before it ran; the FL*.raw.quant beside older HeLa raws show it had happened). The 5-step
+    # chain passes its own per step; a --temp in the cfg still wins (ensure_temp_dirs).
+    tmp_arg = ""
+    if "--temp" not in present:
+        quant_dir = os.path.join(os.path.abspath(out), "quant")
+        os.makedirs(quant_dir, exist_ok=True)           # DIA-NN aborts rather than create it
+        tmp_arg = f" --temp {shlex.quote(quant_dir)}"
     search_cmd = (f"{cmd} {search_cfg}{mflag} {f_args} --fasta {shlex.quote(fasta)} "
                   f"--lib {shlex.quote(lib)}.predicted.speclib --reanalyse --matrices "
-                  f"--out {shlex.quote(report)} --threads {threads}{dda}")
+                  f"--out {shlex.quote(report)} --threads {threads}{dda}{tmp_arg}")
     onecmd = (f"{cmd} --cfg {shlex.quote(params)} {f_args} "
               f"--fasta {shlex.quote(fasta)} --out {shlex.quote(report)} "
-              f"--threads {threads}{dda}")
+              f"--threads {threads}{dda}{tmp_arg}")
     # DIA-NN exits 0 on fatal errors, so each job asserts the artefact it exists to make --
     # the same contract every step of the 5-step chain has (references/diann_parallel.md).
     # And each job first DELETES that artefact, because an existence check cannot tell this
@@ -838,23 +849,37 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
     # TWO JOBS + dependency when emitting sbatch: the library is expensive and
     # reusable, so a failed search requeues against it instead of rebuilding.
     if libfree and sbatch:
-        lib_sh = sbatch.replace(".sh", "") + "_1_lib.sh"
-        srch_sh = sbatch.replace(".sh", "") + "_2_search.sh"
+        # ABSOLUTE paths: submit.sh lives in <out>, the job scripts beside --sbatch, and
+        # run_search.py prints `bash <out>/submit.sh` -- run from anywhere but the --sbatch
+        # folder, relative names made sbatch fail "Unable to open file job_1_lib.sh" (HIVE e2e
+        # test 2026-09-23). splitext, not replace(".sh", ""): that also ate a ".sh" inside a
+        # folder name.
+        stem = os.path.splitext(os.path.abspath(sbatch))[0]
+        lib_sh, srch_sh = stem + "_1_lib.sh", stem + "_2_search.sh"
         emit_sbatch(lib_sh, lib_job, out, threads, job="diann_libpred", preamble=dnet,
-                    **queue)
+                    submit_hint=False, **queue)
         # The measurement belongs to the SEARCH job: a search requeued against the same library
         # measures again rather than trusting a massacc.txt from a run it cannot vouch for.
         emit_sbatch(srch_sh, search_job, out, threads, job="diann_search", preamble=dnet,
-                    hours=search_job_hours(measure_lines), **queue)
-        submit = os.path.join(out, "submit.sh")
+                    hours=search_job_hours(measure_lines), submit_hint=False, **queue)
+        submit = os.path.join(os.path.abspath(out), "submit.sh")
+        jobs_txt = os.path.join(os.path.abspath(out), "jobs.txt")
+        # jobs.txt, as the 5-step chain's submit.sh writes it: `watch_run.sh --all <out>`
+        # reads it, and without one it answered failed/no_jobs_file for a healthy running
+        # search -- which step 7b says to resubmit (HIVE e2e test 2026-09-23).
         with open(submit, "w") as fh:
             fh.write("#!/bin/bash -l\nset -euo pipefail\n"
                      f"j1=$(sbatch --parsable {shlex.quote(lib_sh)})\n"
                      f"j2=$(sbatch --parsable --dependency=afterok:$j1 {shlex.quote(srch_sh)})\n"
+                     f'printf "%s\\n" "$j1" "$j2" > {shlex.quote(jobs_txt)}\n'
                      'echo "submitted: libpred=$j1 search=$j2"\n'
+                     f'echo "both job ids -> {jobs_txt}  (watch both: watch_run.sh --all '
+                     f'{os.path.abspath(out)})"\n'
                      f'echo "report will be {report}"\n')
         os.chmod(submit, 0o755)
         print(f"  [sbatch] two-job chain: {lib_sh} -> {srch_sh}; submit with: bash {submit}")
+        print(f"  [sbatch] --sbatch {sbatch} itself is NOT written for a library-free search: "
+              f"submit.sh submits both jobs.")
         return {"engine": "diann", "report": report, "submitted": submit,
                 "mode": "two_job_libfree", "library": predicted,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet), **ma_rec}
@@ -1792,7 +1817,8 @@ def search_job_hours(measure_lines):
 
 
 def emit_sbatch(path, command, out, threads, job, preamble="",
-                partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS):
+                partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS,
+                submit_hint=True):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
     slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
@@ -1826,7 +1852,10 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
         fh.write(script)
     print(f"  [sbatch] wrote {path} (partition={part or 'default'}, "
           f"account={acct or 'default'}, qos={q or 'default'}"
-          f"{', requeue' if requeue else ''}) — submit with: sbatch {path}")
+          f"{', requeue' if requeue else ''})"
+          # A script that is one link of a chain must not be advertised as submittable on its
+          # own: `sbatch job_2_search.sh` skips the afterok on the library job.
+          + (f" — submit with: sbatch {path}" if submit_hint else " — submitted by submit.sh"))
 
 
 def main():
@@ -1976,8 +2005,10 @@ def main():
             "node (sbatch is on PATH and SLURM_JOB_ID is unset).\n"
             f"  engine={engine}  files={len(files)}  threads={a.threads}\n"
             f"  parallel routing declined because: {why}\n"
-            "  Re-run with --sbatch <script> and submit it, e.g.:\n"
-            f"    ... --sbatch ./{engine}_job.sh && sbatch ./{engine}_job.sh\n"
+            "  Re-run with --sbatch <script>, then submit what it prints under "
+            "\"submit with:\", e.g.:\n"
+            f"    ... --sbatch ./{engine}_job.sh   # then: bash <out>/submit.sh, or sbatch "
+            f"./{engine}_job.sh if that one script was written\n"
             "  (--allow-inline overrides this, e.g. inside an salloc/srun session.)")
 
     # These size the 5-step chain only. Said out loud when the route is single-shot, where
@@ -2026,6 +2057,28 @@ def main():
     elif engine == "diann":
         res = run_diann(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
                         acquisition=bundle.get("acquisition", ""), queue=queue)
+        generated = {os.path.abspath(p) for p in (res.get("submitted"),) if p} \
+            if isinstance(res, dict) else set()
+        generated |= {os.path.splitext(os.path.abspath(a.sbatch or "x"))[0] + s
+                      for s in ("_1_lib.sh", "_2_search.sh")}
+        if (a.sbatch and isinstance(res, dict) and res.get("mode") == "two_job_libfree"
+                and os.path.abspath(a.sbatch) not in generated):
+            # (--sbatch naming submit.sh or one of the two job scripts would otherwise have
+            # its fresh file renamed to .stale-* -- review 2026-09-23.)
+            # --sbatch names ONE script, and a library-free search is two jobs chained by
+            # submit.sh, so that script is never written. One left over from an earlier search
+            # would be what `sbatch job.sh` resubmits -- the hazard the chain route guards
+            # against the same way: rename it, never delete it.
+            try:
+                moved = set_aside(a.sbatch)
+            except ValueError as e:
+                moved = None
+                sys.stderr.write(f"[run_search] note: {e}\n")
+            if moved:
+                res["existing_sbatch_moved_to"] = os.path.abspath(moved)
+                sys.stderr.write(f"[run_search] {a.sbatch} was left from an earlier search and "
+                                 f"does not describe this one; moved to {moved}. Submit this "
+                                 f"search with: bash {res['submitted']}\n")
     elif engine == "alphadia":
         res = run_alphadia(cmd, a.params, files, a.fasta, a.out, a.threads, a.sbatch,
                            queue=queue)
@@ -2078,7 +2131,11 @@ def main():
                        "n_files": len(files), "files": files,
                        "search_mode": "parallel_5step" if use_parallel else "single_shot",
                        "parallel_routing_reason": why,
-                       "submitted_sbatch": None if sbatch_refused else (a.sbatch or None),
+                       # what was actually written to submit -- for a library-free search
+                       # that is <out>/submit.sh, never the --sbatch name it did not write
+                       "submitted_sbatch": None if sbatch_refused else (
+                           (res.get("submitted") if isinstance(res, dict) else None)
+                           or a.sbatch or None),
                        "sbatch_refused": sbatch_refused, "result": res}, fh, indent=2)
     except Exception as e:
         sys.stderr.write(f"[run_search] could not write search_provenance.json: {e}\n")

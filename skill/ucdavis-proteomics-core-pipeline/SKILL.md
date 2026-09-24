@@ -91,6 +91,12 @@ the spine.
    works on *their* OS — never hardcode an internal `/quobyte/...` path without its
    public fallback. → `references/search-engines.md` ("Public program sources") +
    `references/install.md`.
+8. **Record every skill problem the moment it happens — `scripts/report_issue.sh`.**
+   A script that errors or answers wrongly, a documented step that did not match reality, a
+   workaround you had to invent, something you had to find or install that the skill should
+   have, the user correcting how you used the skill: record it **then**, not at the end —
+   sessions end without warning, and an unrecorded problem is one nobody fixes. Tell the user
+   in one line when you do. → "Recording skill problems" below.
 
 ## Audience: assume nothing is installed
 
@@ -117,13 +123,22 @@ Verify (don't just trust the answers):
 ```
 bash scripts/check_access.sh <hive_user> <private_key_path>
 ```
-Read `recommended_mode` + `facility_software_available`, then:
+Read `recommended_mode` + `core_member`, then:
 
 - **HIVE = yes → `hive_remote`:** drive HIVE over SSH from the local Claude Code
-  (`export HIVE_USER=… HIVE_KEY=…`; use `bash scripts/hive_exec.sh '<cmd>'`). The search
-  runs as a **SLURM job** (`run_search.py --sbatch` → `hive_exec.sh 'sbatch job.sh'`;
-  for a DIA-NN search of >5 files it routes to the 5-step chain instead — exit 3, no
-  `job.sh`, run `hive_exec.sh 'bash <out>/submit.sh'`), never the login node. HIVE gives **compute**; the Core software is separate (next).
+  (`export HIVE_USER=… HIVE_KEY=…`; use `bash scripts/hive_exec.sh '<cmd>'`). **Every
+  script runs ON HIVE through `hive_exec.sh` — the laptop needs no Python, R or engines.**
+  On Windows, Git Bash + the key is enough: `python3` there is often the Microsoft Store
+  stub (`check_access.sh` → `local_python3.usable: false` → never run a skill script
+  locally), rsync is absent (`--put/--get` fall back to scp by themselves), and
+  `HIVE_USER` is the plain UC Davis id, never the Windows `DOMAIN+user` login. If
+  `hive_ssh` is `failed`, relay `hive_ssh_error.kind` (host_key / permission_denied /
+  timeout) as `references/access.md` describes. The search runs as **SLURM jobs**, never
+  the login node: `run_search.py --sbatch job.sh`, then submit **what it prints under
+  "submit with:"** — `hive_exec.sh 'bash <out>/submit.sh'` for a DIA-NN search that
+  predicts its library from the FASTA (two jobs: library, then search — the usual case) or
+  that routed to the 5-step chain (>5 files; exit 3), `hive_exec.sh 'sbatch job.sh'` only
+  when a single `job.sh` was written. HIVE gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -155,6 +170,13 @@ Read `setup.json` and **gate on `ready_for`**:
   Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
 - `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
   `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
+- `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
+  do exactly what `thermo_raw_reader.note` says (usually `bash scripts/ensure_dotnet8.sh`
+  on the login node, which adds the .NET runtimes the Core's shared parser needs, or
+  re-run `setup.sh`, which installs bioconda's self-contained `thermorawfileparser`), then
+  `setup.sh --check` until it is true. `ready_for.dia` does not cover this: without a
+  working parser every `.raw` is `unknown` and a DIA search falls back to 380–980.
+  Irrelevant for `.d`/mzML-only input.
 
 This step is idempotent — on a machine that's already set up it just verifies and
 returns in seconds. → detail: `references/install.md`.
@@ -195,6 +217,15 @@ going — they do not need `tmux` or `screen` for this.
 Ask the user for a directory or file list if not given. Recognized: `.d` (Bruker),
 `.raw` (Thermo), `.mzML[.gz]`, `.wiff` (convert first). Glob to a concrete list.
 
+**`hive_remote`: before any upload, run `bash scripts/hive_path.sh '<path the user gave>'`.**
+A mapped drive (`T:\…`) or SMB mount (`/Volumes/proteomics/…`) is usually a Flinders or
+quobyte share that HIVE already mounts. `verified: true` → use `hive_path` in place and
+glob on HIVE (`hive_exec.sh 'ls <hive_path>'`) — upload nothing. `verified: false` → show
+`candidates` and **ask the user** where that share lives on HIVE; do not search HIVE for
+it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's own disk)
+→ `hive_exec.sh --put`, which itself refuses a source it verifies on HIVE.
+→ `references/access.md` "Data already on a network drive".
+
 ### 1b. Check for a prior analysis of this dataset
 ```
 python3 scripts/session.py find-prior --raw /path/to/*.d
@@ -213,12 +244,29 @@ Returns per-file `acquisition` (DIA/DDA/unknown) + `confidence`, plus an overall
 — mixed/unknown/low-confidence must not silently pick an engine.
 **Tell the user what every file's `warnings` say** (also printed to stderr; any warning
 sets `needs_confirmation`).
-Thermo `.raw` is read through **ThermoRawFileParser** (public:
-https://github.com/compomics/ThermoRawFileParser/releases or `conda install -c bioconda
-thermorawfileparser`; set `THERMORAWFILEPARSER="dotnet …/ThermoRawFileParser.dll"` if it
-is not one executable on PATH). If a `.raw` comes back `unknown`, its `warnings` say
-why — without the parser there is no measured precursor range and step 6b falls back
-to 380–980.
+Thermo `.raw` is read through **ThermoRawFileParser**, looked for in this order:
+`$THERMORAWFILEPARSER` (a whole command, e.g. `"dotnet …/ThermoRawFileParser.dll"`), PATH,
+the pipeline env (`setup.sh` installs bioconda's self-contained build there), then
+`$THERMORAWFILEPARSER_SHARED` (default: the UC Davis Core's
+`/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser`). Public sources:
+https://github.com/compomics/ThermoRawFileParser/releases, or `conda install -c bioconda
+thermorawfileparser`. A framework-dependent build (the Core's copy, or the release's `-net8`
+zip) needs .NET 8 with **both** Microsoft.NETCore.App and Microsoft.AspNetCore.App; the
+script finds an install that has both and hands it to the parser itself — **don't export
+DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
+and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
+scripts/ensure_dotnet8.sh` on the login node (installs both into
+`~/.proteomics-pipeline/dotnet8`; needs internet), or on HIVE `module load
+dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry under `srun`
+first — a compute node gives the same answer. Each file's `reader` records the parser, its
+version and the `DOTNET_ROOT` used. A `.raw` that is `unknown` for any other reason says
+why in its `warnings`; without a measured precursor range step 6b falls back to 380–980.
+**`orbitrap_resolution_unknown`** is non-null for Orbitrap `.raw` other than the Astral:
+the `.raw` does not carry the Orbitrap resolution as ThermoRawFileParser reads it (neither
+its metadata nor the filter strings have it — checked on a Fusion Lumos run), so **ask the
+user** for the method's MS1 and MS2 resolution (e.g. "120,000 MS1 / 30,000 MS2"; it is in
+the instrument method) and pass it in step 6b. It does not set `needs_confirmation`; ask
+anyway.
 Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
 on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
 with the account/partition the user can submit to); on a login node the script refuses
@@ -360,7 +408,7 @@ machine** fails here with a usable alternative rather than mid-search.
 **Confirm once, then run.** State the pick in one breath — data type, engine +
 version, mass accuracy + where it came from, FASTA, DE method — and get a yes:
 
-> timsTOF HT dia-PASEF → DIA-NN 2.6.1, MS1/MS2 15 ppm (DIA-NN README), mouse
+> timsTOF HT dia-PASEF → DIA-NN 2.7.0, MS1/MS2 15 ppm (DIA-NN README), mouse
 > UP000000589 + contaminants, limpa DPC-Quant + limma. Run it?
 
 Do **not** turn this into a menu. There is exactly one confirmation before compute,
@@ -439,7 +487,7 @@ Searching rat data against a human proteome silently voids the whole run.
 ### 5. Acquire the pinned engine
 Honor the manifest's exact version — not "latest":
 ```
-PIN_ENGINE=diann PIN_VERSION=2.6.1 bash scripts/acquire_tools.sh <platform_class>
+PIN_ENGINE=diann PIN_VERSION=2.7.0 bash scripts/acquire_tools.sh <platform_class>
 ```
 Reads/writes `~/.proteomics-pipeline/tools/tools.json`. On HIVE it reuses the Core's
 native DIA-NN build for that version (downloading it if the Core has none); on mac it uses
@@ -479,6 +527,12 @@ silently ignored, which is why the canonical set must come from FTP.
 
 Pass `--hive` when `uc_davis_hive` is true to reuse pre-staged proteomes +
 contaminants under `/quobyte/proteomics-grp/MRS/` instead of downloading.
+A staged copy's UniProt release is unknown (it was downloaded earlier), so
+`uniprot_release` stays empty; the sidecar records the copy's date and sha256 under
+`staged_file`, fills organism/taxid from UniProt (or, offline, from the filename taxid —
+see `organism_source`), and reports `content_inferred`, a one-per-gene check of the entry
+count against UniProt's geneCount — an inference, not a verification. `--content` is not
+applied to a staged file; if it matters, omit `--hive`.
 
 **Non-model organisms → NCBI.** UniProt reference proteomes cover a few thousand
 species; wildlife, agricultural and other non-model organisms often have an
@@ -554,7 +608,11 @@ is plausible**: MS2 3–30 ppm, MS1 1.5–25 ppm, from at least 2 runs agreeing 
 because a tolerance tighter than the SOP costs identifications and buys nothing.
 Both numbers are recorded; a documented level is never floored. An Orbitrap whose **resolution is unknown** is *not* measured (both levels would be,
 and a measured MS1 is what DIA-NN warns about): it falls to automatic calibration, and the
-chain declines it. Pass `--ms1-resolution/--ms2-resolution` when you know them. An `--overrides` that sets only one of
+chain declines it. When step 2's `orbitrap_resolution_unknown` is non-null, pass the user's
+answer as `--ms1-resolution <MS1> --ms2-resolution <MS2>`: without them mass accuracy is
+left to DIA-NN's per-run calibration (results then depend on file order), and a cohort
+that would run as the 5-step parallel chain runs as one single-node search. If the user
+does not know, say so and continue. An `--overrides` that sets only one of
 the two flags gets the other level from the table, and is refused when the table has no value
 for it (written alone, that flag would fix the other level at 20 ppm): relay the refusal to the
 user. It sets DIA/DDA window mode from acquisition, and uses
@@ -872,15 +930,24 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
       ```
       Hand it every run, not one: it picks the representative runs itself. It stops each
       DIA-NN as soon as it logs `Scan window radius set to N` (during calibration), so it
-      costs minutes per run. For `.raw`, export `DOTNET_ROOT` first (`ensure_dotnet8.sh`
-      prints it) or DIA-NN cannot open the files.
+      costs minutes per run. For `.raw`, DIA-NN needs a .NET 8 ≥ 8.0.17 — export it
+      explicitly: `export DOTNET_ROOT="$(bash scripts/ensure_dotnet8.sh | tail -1)"; export
+      PATH="$DOTNET_ROOT:$PATH"` (don't rely on `activate.sh` alone: one written before 2.5.1
+      does not export it). Without it DIA-NN cannot open the files. HIVE's
+      `dotnet-core-sdk/8.0.4` module is too old for DIA-NN (step 2's `detect_acquisition.py`
+      resolves its own .NET and needs none of this).
   - Override either way with `--no-parallel` (force one job) or `--parallel-threshold N`.
   - It **generates** the chain but does not submit it. Submit `<out>/submit.sh` (over
     `hive_exec.sh` on HIVE), then watch the **step-5** job — that's the one that writes
     `report.parquet`. → `references/diann_parallel.md`.
-- **On `hpc`:** add `--sbatch job.sh`, then `sbatch job.sh` (over `hive_exec.sh` for a
-  remote HIVE run). Re-run with `--adapt-only` afterward for Sage/FragPipe/AlphaDIA to
-  build `report.parquet`.
+- **On `hpc`:** add `--sbatch job.sh`, then submit **what `run_search.py` prints under
+  "submit with:"** (over `hive_exec.sh` for a remote HIVE run). Re-run with `--adapt-only`
+  afterward for Sage/FragPipe/AlphaDIA to build `report.parquet`.
+  - **A DIA-NN search with no `--lib`** (library predicted from the FASTA — the usual case
+    for ≤5 files) is **two jobs**, library then search, chained by **`bash
+    <out>/submit.sh`**; `job.sh` itself is not written (a `job.sh` left from an earlier
+    search is renamed `job.sh.stale-<time>`). `submit.sh` writes `<out>/jobs.txt`, so watch
+    both with `watch_run.sh --all <out>`. Exit 0 here.
   - **Except when it routed to the 5-step chain** (DIA-NN, >5 files, SLURM — i.e. most
     real cohorts). The chain generates six scripts plus its own `submit.sh`, so there is
     no single job to submit: `--sbatch` is **not** written, `run_search.py` **exits 3**
@@ -1311,10 +1378,46 @@ mean when they ask)**, `reproducibility/REPRODUCE.md` (the pinned recipe, for
 re-running the search too), and — for a re-analysis — `DIFFERENCES.md` + the
 `comparison/COMPARISON.md`.
 
+If anything was recorded with `report_issue.sh` this session, say so in one line and where
+it went (`report_issue.sh --where`), so the user knows the Core will see it.
+
 For a Core HIVE run, close with the **FRAN handover** (step 7c) in one line — that the search
 was staged for FRAN's ingest cron, or, if it was not eligible, the reason in plain words
 ("this is a collaborator account, so it stays out of the Core corpus"). Say "handed over,
 FRAN ingests on its next pass" rather than implying it is already in the corpus.
+
+## Recording skill problems (`report_issue.sh`)
+The skill is fixed from these reports. For a Core member they land in the Core's shared
+folder on HIVE, `/quobyte/proteomics-grp/skill_issues/`, one file per user per day, where the
+maintainers read them; nothing else about the session is sent anywhere.
+```
+bash scripts/report_issue.sh --title "<short name>" \
+    --what "<what happened: the exact command, the exact error text, the path>" \
+    --impact "<time, compute or storage lost, or what the result would have got wrong>" \
+    [--workaround "<what you did instead>"] [--fix "<what the skill should do>"] \
+    [--kind bug|docs|missing|agent_mistake] [--severity high|medium|low] \
+    [--step "<SKILL.md step>"] --session "<session name>"
+```
+It runs **locally** and needs only bash (Git Bash on Windows, no local Python): in
+`hive_remote` it writes to HIVE through `hive_exec.sh` by itself; on HIVE it writes directly;
+anywhere else — or if the account cannot write the Core folder — it keeps the file in
+`~/.proteomics-pipeline/issues/` and prints how to send it to the Core. It never fails the
+session. Use one `--session` for the whole session (the step-3b name, or a short tag before
+there is one).
+
+**Record:** a skill script that errors, hangs, or returns something wrong or misleading; a
+step in this file or a reference that did not match what you found; a tool, path or setting
+the skill should have found and you had to find by hand; a workaround you invented; anything
+that cost the user significant time, cluster time or storage; the user correcting the skill's
+behaviour. **Also record your own mistakes** that cost the user something (`--kind
+agent_mistake`) — telling the user setup installed a tool it had not, searching the wrong
+filesystem before asking where a drive points. **Do not record** problems with the user's
+data (a failed injection, a bad run — those belong in the analysis report) or a network blip
+that a retry fixed.
+
+Write it so someone who was not there can fix it: the exact command, the error text verbatim,
+the paths, the numbers, and what you expected instead. **Never** a password, private key or
+token (the script refuses text that looks like one).
 
 ## When something is missing
 - Anything in the env (R, limpa, Sage, pyarrow) → re-run `setup.sh`; relay its

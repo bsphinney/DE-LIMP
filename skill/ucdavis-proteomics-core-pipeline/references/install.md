@@ -31,14 +31,42 @@ creates one conda environment containing:
 | `r-arrow`, `r-dplyr`, `r-tidyr` | reading parquet + the MaxLFQ matrix builder |
 | `sage-proteomics` | the DDA search engine |
 | `proteowizard` (msconvert) | `.d`/`.raw` → mzML for Sage — **Linux only on bioconda** |
+| `thermorawfileparser` (2.0.0.dev; linux-64, osx-64, osx-arm64) | reads Thermo `.raw` for `detect_acquisition.py` (step 2): acquisition, instrument and the **acquired precursor m/z range**. Without a parser every `.raw` is `unknown` and a DIA search falls back to 380–980. bioconda's build is the **self-contained** one — it needs no .NET on the machine. Installed in a **separate, non-fatal** step after the env exists, so a platform without a build cannot take R/limpa down with it |
 
 If the conda solve drops limpa, `setup.sh` installs it via `BiocManager::install("limpa")`.
 
 Everything lands under `~/.proteomics-pipeline/`. `source activate.sh` puts it on
-PATH so `Rscript`, `python`, `sage`, `msconvert` resolve to the env. Nothing is
-installed system-wide; deleting `~/.proteomics-pipeline/` fully uninstalls it.
+PATH so `Rscript`, `python`, `sage`, `msconvert`, `ThermoRawFileParser` resolve to the env,
+and exports `DOTNET_ROOT` for `ensure_dotnet8.sh`'s .NET once that exists (a `DOTNET_ROOT`
+already set is kept). Nothing is installed system-wide; deleting `~/.proteomics-pipeline/`
+fully uninstalls it.
 
 `setup.sh --check` reports readiness without installing anything.
+
+**Thermo `.raw` readiness** — `setup.json` has `ready_for.thermo_raw` and a
+`thermo_raw_reader` object (`command`, `source`, `version`, `dotnet_needs`, `dotnet_root`,
+`note`). It asks `detect_acquisition.py --check-reader` — the same parser search and .NET
+check step 2 runs, plus one `--version`; no `.raw` is read. The parser is looked for in this
+order: `$THERMORAWFILEPARSER`, PATH, the pipeline env, then shared copies in
+`$THERMORAWFILEPARSER_SHARED` (default: the UC Davis Core's
+`/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser`; set it to your own
+site's copy, or empty for none). When it is `false`, `note` is the exact fix.
+
+**.NET 8 (only for a framework-dependent parser, and for DIA-NN on Linux).** The Core's
+shared parser, and the release's `-net8` zip run as `dotnet ThermoRawFileParser.dll`, are
+*framework-dependent*: their `ThermoRawFileParser.runtimeconfig.json` needs **both**
+`Microsoft.NETCore.App` 8 and `Microsoft.AspNetCore.App` 8. Missing, the parser exits 131
+("You must install .NET") or 150 ("You must install or update .NET"). `detect_acquisition.py`
+checks this before reading anything, and picks the first place that has both —
+`$DOTNET_ROOT`, `ensure_dotnet8.sh`'s install (`$PROTEOMICS_DOTNET_DIR`, default
+`~/.proteomics-pipeline/dotnet8`), `$DOTNET_CORE_SDK_ROOT` (HIVE: `module load
+dotnet-core-sdk/8.0.4`), the `dotnet` on PATH, .NET's default location. With none it stops
+once, up front, with the fix. `bash scripts/ensure_dotnet8.sh` (needs internet; fine on a login
+node) installs both runtimes there, and adds `AspNetCore` in place to an older NETCore-only
+install. The same install serves DIA-NN 2.6, which needs `Microsoft.NETCore.App` ≥ 8.0.17 to read
+`.raw` on Linux (HIVE's 8.0.4 module is fine for the parser but *not* for DIA-NN). Public
+source: https://dotnet.microsoft.com/download/dotnet/8.0 (the ASP.NET Core Runtime 8.0 includes
+both).
 
 ## The search engines
 
@@ -88,6 +116,18 @@ Two supported routes — pick per the user:
    Windows tool). Python + R + limpa run natively too. The skill's *orchestration
    scripts are bash*, so run them from a POSIX shell — **Git Bash** or **MSYS2** — or
    drive the engines directly per their Windows docs. Docker Desktop is a third route.
+
+**Driving HIVE from Windows (`hive_remote`) needs none of the above** — no local Python,
+R or engines; every script runs on HIVE through `hive_exec.sh`. Git Bash is enough:
+- **No rsync in Git Bash.** `hive_exec.sh --put/--get` fall back to `scp` automatically
+  (same key and options). The one thing scp can't express is a trailing slash on the
+  source (`dir/` = "copy the contents" under rsync); that is refused with a message, so
+  drop the slash.
+- **`python3` may be the Microsoft Store stub** (`...\WindowsApps\python3`), which opens
+  the Store instead of running. `check_access.sh` reports it as
+  `local_python3.usable: false`; in `hive_remote` that is fine.
+- **The HIVE username is the plain UC Davis id**, not the Windows login (`AD3+gabrig`);
+  see `references/access.md` → "Windows (Git Bash)".
 
 Public download links for every program are in `references/search-engines.md`
 ("Public program sources"), so a user on any OS can obtain them without HIVE access.

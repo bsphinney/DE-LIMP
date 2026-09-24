@@ -354,13 +354,24 @@ def main():
             f"UniProt release {fi.get('uniprot_release') or 'unrecorded'}. "
             f"Re-running now uses the CURRENT release, so counts may differ slightly; "
             f"the searched FASTA's sha256 is in checksums/.")
+        # A HIVE pre-staged copy has no knowable release (fetch_fasta.py leaves it empty on
+        # purpose), so name the copy itself: its date and hash are what identify it.
+        sf = fi.get("staged_file") or {}
+        if sf:
+            fasta_repro_note += (f" Built from a pre-staged copy ({sf.get('path', '?')}, "
+                                 f"dated {(sf.get('mtime_utc') or '?')[:10]}, sha256 "
+                                 f"{(sf.get('sha256') or '?')[:12]}...), release unknown.")
     else:
         fasta_repro_note = ("NOT RECORDED — --fasta-info was not passed to provenance.py, "
                             "so these values come from the workflow bundle's defaults and "
                             "may not be what was searched. Verify against checksums/.")
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
-        fasta_repro_content = "one_per_gene"
+        # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
+        # staged file was; it only ever names a real --content value, so it is safe here.
+        inferred = (fi or {}).get("content_inferred")
+        fasta_repro_content = inferred if inferred in ("one_per_gene", "full",
+                                                       "full_isoforms") else "one_per_gene"
         fasta_repro_note += (" NOTE: the original FASTA was supplied directly (override or "
                              "pre-staged), not downloaded — this command approximates it.")
 

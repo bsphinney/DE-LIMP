@@ -118,6 +118,9 @@ if [ "$MODE" = "slurm" ] && [ -n "$JOB" ]; then
   if printf '%s' "$reason" | grep -qiE "DependencyNeverSatisfied|launch failed"; then
     done=true; failed=true; dep_failed=true
   fi
+  # A HELD job never starts on its own either, but nothing is wrong with it: not failed (a
+  # failed job gets resubmitted, which would duplicate it), yet the orchestrator must act.
+  if printf '%s' "$reason" | grep -qE "JobHeld(User|Admin)"; then held=true; fi
 fi
 
 tail_txt=""
@@ -139,6 +142,7 @@ elif m "msconvert.*not found|requires mzML|no mzML";                            
 elif m "Disk quota exceeded|No space left";                                         then err_class="disk";          fix="Out of disk/quota. Free space or point --out elsewhere and resubmit.";
 elif m "No such file|cannot open|does not exist|not found.*(fasta|\\.d|\\.raw)";     then err_class="missing_input"; fix="An input path is wrong (fasta/raw). Re-check paths (Windows→WSL/HIVE translation) and resubmit.";
 elif [ "${dep_failed:-false}" = true ];                                              then err_class="dependency_failed"; fix="An UPSTREAM job in the chain failed, so this one is stuck PENDING with DependencyNeverSatisfied (it will NEVER run and never leave the queue). Find the failed step (sacct -j <arrayjob>), apply that step's fix, and resubmit the downstream steps reusing already-computed outputs (.quant, step1.predicted.speclib) — don't restart the whole chain.";
+elif [ "${held:-false}" = true ];                                                   then err_class="held"; fix="The job is HELD (${reason}) and will never start by itself -- do NOT resubmit it (that makes a duplicate). JobHeldUser: release it with scontrol release <jobid> once whatever it was held for is resolved. JobHeldAdmin: ask the HIVE admins why.";
 elif $failed;                                                                        then err_class="unknown_failure"; fix="Read the full log; diagnose via references/watcher.md; fix and resubmit.";
 fi
 
@@ -187,7 +191,8 @@ notes="$(python3 "$HERE/pipeline_notes.py" --stage "$stage" --index "$POLL" 2>/d
 
 STATE="$state" DONE="$done" FAILED="$failed" STALLED="$stalled" JOB="$JOB" MODE="$MODE" \
 ECLASS="$err_class" FIX="$fix" TAIL="$tail_txt" ATASKS="${array_summary:-}" \
-STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" python3 - <<'PY'
+STAGE="$stage" NDONE="${n_done:-0}" NTOTAL="${n_total:-0}" NOTES="$notes" \
+REASON="${reason:-}" ATERM="${a_term:-0}" python3 - <<'PY'
 import os, json
 n_done, n_total = int(os.environ.get("NDONE") or 0), int(os.environ.get("NTOTAL") or 0)
 stage = os.environ.get("STAGE", "single")
@@ -209,12 +214,33 @@ where = f"step {step_no}/5" if step_no else "search"
 progress["summary"] = (f"{where}: {n_done}/{n_total} files done"
                        + (f" ({progress['percent']:.0f}%)" if n_total else "")) \
     if n_total else f"{where} running"
+# A job that has not started is not searching anything. A held search (JobHeldUser) was
+# reported as "search running" / "Searching your files" (HIVE e2e test 2026-09-23). But PENDING
+# alone does not mean nothing ran: the chain's step-5 job sits PENDING (Dependency) while
+# steps 2-4 do the work, and an array can be half done with the rest queued -- those keep
+# their file count (review 2026-09-23).
+reason = os.environ.get("REASON", "").strip()
+queued = (out["state"] == "PENDING" and not out["done"] and n_done == 0
+          and int(os.environ.get("ATERM") or 0) == 0)
+if out["state"] == "PENDING" and not out["done"]:
+    if "JobHeld" in reason:
+        progress["summary"] = f"{where}: HELD ({reason}) -- will not start until released"
+    elif queued:
+        progress["summary"] = (f"{where}: waiting for earlier steps ({reason})"
+                               if reason.startswith("Dependency")
+                               else f"{where}: queued, not started yet ({reason or 'PENDING'})")
+    elif not n_total:
+        progress["summary"] = f"{where}: partly done, remaining work queued ({reason or 'PENDING'})"
 out["progress"] = progress
 try:
     out.update({k: v for k, v in json.loads(os.environ.get("NOTES") or "{}").items()
                 if k in ("doing", "why", "note", "note_source")})
 except Exception:
     pass
+if queued:
+    out["doing"] = ("Held -- the job will not start until it is released." if "JobHeld" in reason
+                    else "Waiting in the SLURM queue -- the job has not started, so nothing is "
+                         "being searched yet.")
 out["log_tail"] = os.environ["TAIL"][-1500:]
 print(json.dumps(out, indent=2))
 PY

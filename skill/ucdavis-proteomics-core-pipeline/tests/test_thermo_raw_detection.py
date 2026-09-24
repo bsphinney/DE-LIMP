@@ -81,6 +81,10 @@ class _FakeParserCase(unittest.TestCase):
                   "FAKE_TRFP_NO_FILTER", "FAKE_TRFP_FILTER_ACCESSION", "FAKE_TRFP_SLEEP",
                   "FAKE_TRFP_TRUNCATE", "FAKE_TRFP_STDOUT_ERROR"):
             os.environ.pop(k, None)
+        # the places looked after PATH: no shared copy (the Core's exists on HIVE) and no
+        # pipeline env (a developer's ~/.proteomics-pipeline may hold a real parser)
+        os.environ["THERMORAWFILEPARSER_SHARED"] = ""
+        os.environ["PROTEOMICS_PIPELINE_HOME"] = self.tmp
 
     def tearDown(self):
         os.environ.clear()

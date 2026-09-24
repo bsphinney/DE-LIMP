@@ -21,13 +21,13 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   `DIANN_DOCKER_IMAGE` to a built image, or build one from the Academia Linux zip's
   bundled Dockerfile. `acquire_tools.sh` writes a note when this is unresolved.
 - **HIVE (Proteomics Core):** DIA-NN is kept under `/quobyte/proteomics-grp/dia-nn/`
-  as **native builds** at `build_<nnn>/diann-<version>/diann-linux` — **2.5.1, 2.6.0 and
-  2.6.1** when listed on 2026-09-16 — plus one older Apptainer image, `diann_2.3.0.sif`.
-  The skill pins **2.6.1** (`resolve_defaults.py`). `acquire_tools.sh` resolves the
+  as **native builds** at `build_<nnn>/diann-<version>/diann-linux` — **2.5.1, 2.6.0,
+  2.6.1 and 2.7.0** (`build_270`, added 2026-09-23) — plus one older Apptainer image,
+  `diann_2.3.0.sif`. The skill pins **2.7.0** (`resolve_defaults.py`). `acquire_tools.sh` resolves the
   **pinned** version by looking for `build_*/diann-<version>/diann-linux` first, then a
   version-matched `.sif`, and **never silently substitutes a different version**
-  (reproducibility): a pin that is not there — the FRAN pilot's **2.7.0**, say — is
-  downloaded as the Academia Linux build into your own tools root instead. Unpinned, it
+  (reproducibility): a pin that is not there — as 2.7.0 was for the FRAN pilot, before
+  `build_270` existed — is downloaded as the Academia Linux build into your own tools root instead. Unpinned, it
   takes the highest *version* the build paths name. Either way `tools.json` records the
   version of the build it found, never `latest`. Listing it yourself is cheap and allowed
   on the login node: `ls -d /quobyte/proteomics-grp/dia-nn/build_*/diann-*`. The
@@ -41,6 +41,15 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   Docker/Apptainer.
 - DIA-NN reads `.raw`/`.d` natively from 2.1+. On Linux, `.raw` also needs a **.NET 8
   runtime ≥ 8.0.17** (`ensure_dotnet8.sh`; see `references/search-engines.md`).
+- **ThermoRawFileParser on HIVE:** the Core keeps TRFP 2.0.0.0 at
+  `/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser`, and
+  `detect_acquisition.py` uses it when no parser is set, on PATH or in the pipeline env
+  (`$THERMORAWFILEPARSER_SHARED` overrides the location). It is **framework-dependent**:
+  it needs `Microsoft.NETCore.App` 8 **and** `Microsoft.AspNetCore.App` 8, which
+  `ensure_dotnet8.sh` installs together (or `module load dotnet-core-sdk/8.0.4` for the
+  parser alone — 8.0.4 is too old for DIA-NN). bioconda's `thermorawfileparser`, which
+  `setup.sh` puts in the env, is self-contained and needs neither. Detail:
+  `references/install.md`.
 
 ## Version pinning (reproducibility)
 
@@ -70,8 +79,9 @@ For a Radiant image on mac/linux the recorded release is the image **tag**
 (`seerbio/radiant-fulcrum:2.3.3`), which is what will be pulled — but nothing here pulls it,
 so the tag is the only evidence of what is inside; the note beside it says so.
 
-The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins 2.6.1, but
-`tools.json` holds whatever was last acquired (the FRAN pilot pinned 2.7.0). Nothing forces
+The manifest and `tools.json` can still disagree — `resolve_defaults.py` pins one version,
+but `tools.json` holds whatever was last acquired (the FRAN pilot: manifest 2.6.1,
+`tools.json` 2.7.0). Nothing forces
 them to match, so `run_search.py` compares them before submitting and records both in
 `search_provenance.json` — as one `engine_version` object shaped like `scan_window` (a
 `value`, and a `source` saying in words where it came from), plus top-level `version`, which

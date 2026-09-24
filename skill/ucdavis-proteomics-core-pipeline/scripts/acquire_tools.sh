@@ -11,7 +11,7 @@
 #   Version pinning (PLAN.md §7c): the orchestrator passes the workflow bundle's
 #   engine + version so we install/resolve THAT EXACT version, not GitHub
 #   "latest". Pass via env:
-#          PIN_ENGINE=diann PIN_VERSION=2.6.1 bash acquire_tools.sh hpc   # the pin resolve_defaults.py writes
+#          PIN_ENGINE=diann PIN_VERSION=2.7.0 bash acquire_tools.sh hpc   # the pin resolve_defaults.py writes
 #   Installs are cached under <root>/<engine>/<version>/ so multiple pinned
 #   versions coexist and results stay reproducible.
 #
@@ -204,9 +204,9 @@ acquire_diann() {
     hpc)
       # On HIVE the Proteomics Core keeps DIA-NN as NATIVE builds at
       #   /quobyte/proteomics-grp/dia-nn/build_<nnn>/diann-<version>/diann-linux
-      # (2.5.1, 2.6.0, 2.6.1 on 2026-09-16) plus an older diann_2.3.0.sif. Match the
-      # PINNED version exactly -- never silently substitute a different version
-      # (reproducibility).
+      # (2.5.1, 2.6.0, 2.6.1 on 2026-09-16; 2.7.0 added 2026-09-23) plus an older
+      # diann_2.3.0.sif. Match the PINNED version exactly -- never silently substitute a
+      # different version (reproducibility).
       local DN="$DIANN_HIVE_DIR" bin="" sif="" got=""
       if [ "$ver" != "latest" ]; then
         bin="$(ls -1 "$DN"/*/diann-"$ver"/diann-linux 2>/dev/null | head -n1)"

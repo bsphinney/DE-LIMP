@@ -239,7 +239,26 @@ def main():
         kind = ("reference proteome"
                 if (fmeta.get("proteome_type") or "").strip().lower() == "reference proteome"
                 else "proteome")
-        if content_phrase is None:
+        staged = fmeta.get("staged_file") if isinstance(fmeta.get("staged_file"), dict) else None
+        if content_phrase is None and staged:
+            # 'as_staged' (--hive), from a sidecar that describes the copy (gabrig,
+            # 2026-09-23). Proteome and organism are known; the release it was cut from
+            # is not -- name the copy's date rather than invent a release, and label a
+            # composition inferred from entry counts as inferred.
+            tax = f", taxid {fmeta['taxid']}" if fmeta.get("taxid") else ""
+            sent = (f"Spectra were searched against a pre-staged copy of the UniProt "
+                    f"{fmeta.get('organism') or '____'} {kind} "
+                    f"({fmeta.get('proteome') or '____'}{tax}; copy dated "
+                    f"{(staged.get('mtime_utc') or '')[:10] or '____'}, "
+                    f"release ____ {DEF}), comprising {n_p} sequences")
+            g = (fmeta.get("content_check") or {}).get("uniprot_gene_count")
+            if fmeta.get("content_inferred") == "one_per_gene" and isinstance(g, int):
+                sent += (f"; the entry count is consistent with one canonical protein "
+                         f"sequence per gene (inferred, not verified: UniProt lists "
+                         f"{g:,} genes).")
+            else:
+                sent += f". Database composition: ____ {DEF}."
+        elif content_phrase is None:
             # 'unknown' (--path) / 'as_staged' (--hive): we did not build this database,
             # so we cannot describe its composition. Leave it tagged for the user.
             sent = (f"Spectra were searched against a supplied sequence database "

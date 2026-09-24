@@ -20,8 +20,10 @@ Two modes:
 Proteome resolution priority (cheapest / most-trusted first):
   1. --path override            -> used verbatim (e.g. a pre-staged proteome).
   2. UC Davis HIVE (--hive)     -> reuse /quobyte/proteomics-grp/MRS/ instead of
-                                   downloading.
-  3. --ncbi-accession           -> an annotated NCBI RefSeq genome assembly.
+                                   downloading. Organism/taxid come from UniProt, or
+                                   offline from the filename taxid; the release is
+                                   UNKNOWN and recorded as such (file date + sha256).
+  3. --ncbi-accession          -> an annotated NCBI RefSeq genome assembly.
   4. UniProt.
 
 NCBI (non-model organisms)
@@ -60,7 +62,8 @@ Emits JSON on stdout and writes a `<out>.meta.json` sidecar with the same conten
 plus checksums, for the reproducibility bundle.
 """
 import sys, os, re, json, argparse, glob, gzip, shutil, hashlib, zipfile
-import urllib.request, urllib.error, urllib.parse
+import urllib.request, urllib.error, urllib.parse, http.client
+from datetime import datetime, timezone
 
 HIVE_MRS = "/quobyte/proteomics-grp/MRS"
 UNIPROT_REST = "https://rest.uniprot.org"
@@ -417,15 +420,18 @@ def cmd_resolve(a):
 # --------------------------------------------------------------------------
 # fetch: proteome -> FASTA text
 # --------------------------------------------------------------------------
-def proteome_meta(proteome):
+def proteome_meta(proteome, timeout=60):
     url = f"{UNIPROT_REST}/proteomes/{proteome}?format=json"
-    data, headers = _get_json(url)
+    data, headers = _get_json(url, timeout)
     tax = data.get("taxonomy") or {}
     return {
         "superkingdom": (data.get("superkingdom") or "").lower(),
         "taxid": int(tax.get("taxonId") or 0),
         "organism": tax.get("scientificName") or "",
         "protein_count": int(data.get("proteinCount") or 0),
+        # The size of the gene-centric (one-per-gene) set -- the only yardstick for
+        # whether a pre-staged file IS that set. proteinCount is the FULL set.
+        "gene_count": int(data.get("geneCount") or 0),
         "proteome_type": data.get("proteomeType") or "",
         "uniprot_release": headers.get("x-uniprot-release", ""),
         "uniprot_release_date": headers.get("x-uniprot-release-date", ""),
@@ -501,6 +507,160 @@ def hive_proteome(proteome, content):
         return None
     # Shortest basename = the plain proteome file rather than an annotated variant.
     return sorted(clean, key=lambda p: (len(os.path.basename(p)), p))[0]
+
+
+# Staged proteomes are named after UniProt's FTP files, which carry the taxid:
+# UP000005640_9606.fasta. Parsed so the organism can still be recorded on a compute
+# node, where the proteomes API is often out of reach.
+_STAGED_NAME = re.compile(r"^(UP\d{9})_(\d+)", re.I)
+# An isoform accession (>sp|P04637-2|P53_HUMAN). A one-per-gene set has none.
+_ISOFORM_HEADER = re.compile(r"^>(?:sp|tr)\|[A-Za-z0-9]+-\d+\|")
+
+# How far a staged file's entry count may sit from UniProt's geneCount and still be
+# called one-per-gene. Measured 2026-09-23: the Core's human copy (dated 2025-04-25)
+# has 20,663 entries against today's geneCount of 20,652 -- +0.05% of release drift.
+# The smallest full-proteome/geneCount ratio among the curated model organisms is
+# Arabidopsis at 1.43x (Drosophila 1.59x, mouse 2.51x, human 7.14x). So +/-5% absorbs
+# years of drift and stays far from every full set. Yeast and E. coli sit at 1.00x:
+# their full set IS the one-per-gene set, so the call there is right either way.
+GENE_COUNT_TOLERANCE = 0.05
+
+
+def infer_staged_content(n_entries, gene_count, n_isoform=0, tol=GENE_COUNT_TOLERANCE):
+    """Does a pre-staged file LOOK like the one-per-gene set? -> content_check dict.
+
+    An inference from counts, never a verification: a reviewed-only (Swiss-Prot) set can
+    also sit near the gene count (human ~20.4k), so every place this is written labels it
+    'inferred'. Only `consistent_with_one_per_gene` may be reported as one_per_gene.
+    """
+    ratio = round(n_entries / gene_count, 4) if gene_count else None
+    if n_isoform:
+        verdict = "contains_isoforms"
+        note = (f"{n_isoform:,} of {n_entries:,} entries are isoform accessions "
+                f"(e.g. P04637-2) -- not a one-per-gene set")
+    elif ratio is None:
+        verdict = "unchecked"
+        note = (f"{n_entries:,} entries; UniProt geneCount unavailable (proteomes API "
+                f"unreachable), so the composition was not checked")
+    elif abs(ratio - 1) <= tol:
+        verdict = "consistent_with_one_per_gene"
+        note = (f"one_per_gene (inferred: {n_entries:,} entries vs UniProt geneCount "
+                f"{gene_count:,}, within {tol:.0%}; no isoform accessions)")
+    elif ratio > 1:
+        verdict = "larger_than_one_per_gene"
+        note = (f"{n_entries:,} entries vs UniProt geneCount {gene_count:,} ({ratio:.2f}x) "
+                f"-- looks like a full or isoform set, not one-per-gene")
+    else:
+        verdict = "smaller_than_one_per_gene"
+        note = (f"{n_entries:,} entries vs UniProt geneCount {gene_count:,} ({ratio:.2f}x) "
+                f"-- smaller than one-per-gene (reviewed-only, or truncated?)")
+    return {"basis": "entry count vs UniProt geneCount", "n_entries": n_entries,
+            "uniprot_gene_count": gene_count or None, "ratio": ratio, "tolerance": tol,
+            "n_isoform_entries": n_isoform, "verdict": verdict, "note": note}
+
+
+def describe_staged(proteome, path, text, content_requested):
+    """-> (meta, staged_file, content_check, warnings) for a pre-staged proteome.
+
+    Why (gabrig, 2026-09-23, human HeLa as a HIVE Core member): the --hive branch used to
+    leave `meta` empty, so reusing UP000005640_9606.fasta wrote organism "", taxid 0 and
+    no release into the sidecar -- although the proteome ID was known. make_methods.py
+    and fran_deposit.py both read organism/taxid from that sidecar.
+
+    The release is the one thing we cannot know: the file was downloaded at some earlier
+    date, and UniProt's CURRENT release header describes today's proteome, not this copy.
+    Recording it would be a fabricated provenance claim, so it stays empty and the file's
+    own date + sha256 stand in for it.
+    """
+    warnings = []
+    name = _STAGED_NAME.match(os.path.basename(path))
+    name_taxid = int(name.group(2)) if name else 0
+
+    # 1. UniProt, when reachable (a HIVE login node is; a compute node may not be). A
+    #    short timeout: a firewalled node should fall through to the offline fill, not
+    #    stall the run for a metadata lookup.
+    api, api_error = None, None
+    try:
+        api = proteome_meta(proteome, timeout=20)
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        api_error = f"{type(e).__name__}: {e}"
+    if api and (api["organism"] or api["taxid"]):
+        meta = {"organism": api["organism"], "taxid": api["taxid"],
+                "proteome_type": api["proteome_type"],
+                "organism_source": f"uniprot_api:{proteome}"}
+        gene_count = api["gene_count"]
+        if name_taxid and api["taxid"] and name_taxid != api["taxid"]:
+            warnings.append(
+                f"the staged file {path} is named for taxid {name_taxid}, but UniProt "
+                f"says {proteome} is taxid {api['taxid']} ({api['organism']}). Confirm "
+                f"which organism this database really is before searching.")
+    else:
+        # 2. Offline: the filename's taxid (stable), else the curated table's accession.
+        #    proteome_type stays empty -- "reference proteome" is UniProt's claim to
+        #    make, and methods text must not assert it on our say-so.
+        gene_count = 0
+        tx, how = name_taxid, "filename_taxid"
+        if not tx:
+            tx = next((t for t, (_n, up, _al) in ORGANISM_TAXIDS.items()
+                       if up.upper() == proteome.upper()), 0)
+            how = "curated_table_by_accession"
+        organism = ORGANISM_TAXIDS[tx][0] if tx in ORGANISM_TAXIDS else ""
+        if tx and how == "filename_taxid" and organism:
+            how = "filename_taxid+curated_table"
+        meta = {"organism": organism, "taxid": tx, "proteome_type": "",
+                "organism_source": how if tx else "none"}
+
+    headers = [ln for ln in text.splitlines() if ln.startswith(">")]
+    n_entries = sum(1 for h in headers if CONT_TAG not in h)
+    n_isoform = sum(1 for h in headers if _ISOFORM_HEADER.match(h))
+    check = infer_staged_content(n_entries, gene_count, n_isoform)
+
+    verdict = check["verdict"]
+    if content_requested == "one_per_gene" and verdict in ("larger_than_one_per_gene",
+                                                           "contains_isoforms"):
+        warnings.append(
+            f"the pre-staged {path} does not look like the one_per_gene set that was "
+            f"requested: {check['note']}. The search space is LARGER than asked for. Re-run "
+            f"without --hive to build the canonical set from UniProt FTP, or confirm this "
+            f"file with the user.")
+    elif content_requested == "one_per_gene" and verdict == "smaller_than_one_per_gene":
+        # Fewer entries than UniProt has genes: a truncated or partial copy, or a reviewed-only
+        # set. Searched silently, it loses proteins with no trace in the results (review
+        # 2026-09-23: this verdict raised no warning at all).
+        warnings.append(
+            f"the pre-staged {path} has FEWER entries than the one_per_gene set that was "
+            f"requested: {check['note']}. The search space is SMALLER than asked for -- a "
+            f"truncated, partial or reviewed-only copy. Re-run without --hive to build the "
+            f"canonical set from UniProt FTP, or confirm this file with the user.")
+    elif content_requested != "one_per_gene":
+        # hive_proteome() matches on the proteome ID alone, so --content never reaches a
+        # staged file. Say so rather than let the sidecar imply it was applied.
+        warnings.append(
+            f"--content {content_requested} was requested, but --hive reused the pre-staged "
+            f"{path} as-is ({check['note']}). --content is not applied to a staged file; "
+            f"re-run without --hive to get {content_requested}.")
+    elif verdict == "unchecked":
+        warnings.append(
+            f"could not confirm the pre-staged {path} is the one_per_gene set: "
+            f"{check['note']}. Re-run fetch on a node with internet to check it.")
+
+    mtime = datetime.fromtimestamp(os.stat(path).st_mtime, timezone.utc)
+    staged_file = {
+        "path": path,
+        # The STAGED file's hash -- the output FASTA's sha256 also covers the appended
+        # contaminants, so it cannot identify which proteome copy was used.
+        "sha256": _sha256(path),
+        "mtime_utc": mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "n_entries": n_entries,
+        # Why organism_source is not uniprot_api, when it is not.
+        "uniprot_lookup_error": api_error,
+        "release_unknown": True,
+        "release_note": (f"UniProt release not recorded: this is a pre-staged copy, file "
+                         f"dated {mtime:%Y-%m-%d} (modification time -- the closest record "
+                         f"of when it was downloaded). The live UniProt release is NOT this "
+                         f"file's release and is deliberately not written."),
+    }
+    return meta, staged_file, check, warnings
 
 
 # --------------------------------------------------------------------------
@@ -681,6 +841,7 @@ def cmd_fetch(a):
     warnings = []
     base_text = source = base_url = None
     content_used = a.content
+    staged_file = content_check = None
 
     # 1. explicit override
     if a.path:
@@ -694,7 +855,15 @@ def cmd_fetch(a):
         staged = hive_proteome(a.proteome, a.content)
         if staged:
             base_text = _read_fasta_text(staged)
+            # content_used stays the literal "as_staged": provenance.py writes it into
+            # reproduce.sh as `--content <value>`, so an inferred composition goes in its
+            # own field (content_inferred), labelled as inferred, never in this one.
             source, content_used = f"hive:{staged}", "as_staged"
+            meta, staged_file, content_check, staged_warnings = describe_staged(
+                a.proteome, staged, base_text, a.content)
+            for msg in staged_warnings:
+                _warn(msg)
+            warnings += staged_warnings
 
     # 3. NCBI RefSeq assembly (for organisms with no UniProt reference proteome)
     ncbi_info = None
@@ -739,7 +908,9 @@ def cmd_fetch(a):
         ncbi_info = {"accession": acc, "local_copy": ncbi_path}
         meta = {"organism": a.ncbi_organism or "", "taxid": a.ncbi_taxid or 0,
                 "proteome_type": "NCBI RefSeq assembly proteins (not a UniProt "
-                                 "reference proteome)"}
+                                 "reference proteome)",
+                "organism_source": ("user (--ncbi-organism/--ncbi-taxid)"
+                                    if (a.ncbi_organism or a.ncbi_taxid) else "none")}
 
     # 4. UniProt
     if base_text is None:
@@ -750,6 +921,7 @@ def cmd_fetch(a):
             meta = proteome_meta(a.proteome)
         except (urllib.error.URLError, urllib.error.HTTPError) as e:
             sys.exit(f"UniProt proteome lookup failed for {a.proteome}: {e}")
+        meta["organism_source"] = f"uniprot_api:{a.proteome}"
 
         if a.content == "one_per_gene":
             try:
@@ -858,14 +1030,26 @@ def cmd_fetch(a):
         "proteome": a.proteome,
         "organism": meta.get("organism", ""),
         "taxid": meta.get("taxid", 0),
+        # Where organism/taxid came from, so an offline fill is never mistaken for
+        # UniProt's answer: uniprot_api:<UP>, filename_taxid+curated_table, ... or none.
+        "organism_source": meta.get("organism_source", "none"),
         # Methods text must not call a strain assembly or a user-supplied file a
         # "reference proteome" -- record what it actually is.
         "proteome_type": meta.get("proteome_type", ""),
         "ncbi_assembly": ncbi_info,
         "content_requested": a.content,
         "content_used": content_used,
+        # --hive only: what the staged file's composition LOOKS like from its entry count
+        # ("one_per_gene" or null) and the evidence. Inferred, never verified.
+        "content_inferred": ("one_per_gene" if content_check and content_check["verdict"]
+                             == "consistent_with_one_per_gene" else None),
+        "content_check": content_check,
+        # Empty for a staged file, never today's release -- see describe_staged().
         "uniprot_release": meta.get("uniprot_release", ""),
         "uniprot_release_date": meta.get("uniprot_release_date", ""),
+        "staged_release_unknown": staged_file is not None,
+        # --hive only: which copy was searched (path, sha256, date) in place of a release.
+        "staged_file": staged_file,
         "n_sequences": n_base + n_contam,
         # When the base already carried contaminants we appended none, but the search
         # database still HAS them -- report them so the counts and the DIA-NN flag stay
