@@ -155,6 +155,23 @@ If an unknown key does NOT match these, `check_access.sh` does not auto-accept i
 (`hive_ssh_error.kind: host_key`). Stop and have the user confirm the key with UC Davis
 HPC support before connecting — it may have been rotated, or someone is in the way.
 
+## Core staff — submission workflow prerequisites
+Searching and delivering a **CoreOmics submission** ("search the data from submission 807",
+SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in place:
+- **A CoreOmics API token with staff access in `~/.coreomics_token` on your own computer**
+  (`chmod 600`). `fetch` and `bioshare` run locally; HIVE has no CoreOmics token.
+- **HIVE membership in `proteomics-grp`** — `locate`, `stage` and `deliver` read the Flinders
+  raw data and write the service directory and Bioshare share (`/nfs/lssc0/flinders/proteomics`).
+- **The whole scripts directory at `~/proteomics-pipeline/scripts/`** on HIVE (step 1 above) —
+  `core_submission.py` imports its neighbours, and a partial copy exits 3 asking for a re-sync.
+- For an **HT plate** instead: a STAN share token (`references/ht-submissions.md`).
+
+`hive_exec.sh` reuses one SSH connection for 10 minutes, because HIVE throttles rapid new
+connections (`HIVE_SSH_MUX=0` to disable; off automatically on native Windows). Its `--get`
+copies with `rsync -rlt`: `-a` fails with exit 23 on macOS when pulling from HIVE's setgid
+folders, even though the files arrive.
+→ runbook: `references/core-submissions.md`.
+
 ## Rebuild on HIVE (non-Core users) — exact steps, no guessing
 You have HIVE compute but not the Core's `/quobyte/proteomics-grp` software, so build
 your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`):

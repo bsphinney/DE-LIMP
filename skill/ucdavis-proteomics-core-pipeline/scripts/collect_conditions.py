@@ -62,11 +62,18 @@ def runs_from_report(path):
     return sorted(seen)
 
 
+def run_name(path):
+    """The run name a raw file gets in File.Name: its basename without the extension.
+    Defined once -- core_submission.py imports it rather than re-deriving it, so a
+    submission's conditions.csv can never disagree with one built from --from-dir."""
+    return os.path.splitext(os.path.basename(str(path).rstrip("/")))[0]
+
+
 def runs_from_dir(d, pattern):
     files = sorted(glob.glob(os.path.join(d, pattern)))
     if not files:
         sys.exit(f"No files matched {pattern} in {d}")
-    return [os.path.splitext(os.path.basename(f.rstrip("/")))[0] for f in files]
+    return [run_name(f) for f in files]
 
 
 def get_runs(a):
