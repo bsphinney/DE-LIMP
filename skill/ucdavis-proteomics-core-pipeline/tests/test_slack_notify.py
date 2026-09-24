@@ -1235,6 +1235,19 @@ class JobEndChoices(unittest.TestCase):
                          [py, "/f", "stage", "--out", "/o", "--not-qc"])
         self.assertEqual(ns._stage_argv("/f", "/o"), [py, "/f", "stage", "--out", "/o"])
 
+    def test_the_hook_builder_and_fran_deposit_stage_argv_cannot_drift(self):
+        """Two builders of one argv (architectural rule 3): the hook keeps its own so it never
+        imports fran_deposit.py inside a job, and fran_deposit.stage_argv() is the FRAN side's.
+        Both ship in this skill, so pin them to each other on every input shape."""
+        import fran_deposit as fd
+        path = os.path.abspath(fd.__file__)
+        for kw in ({}, {"name": " PROT_0793 mouse — x "}, {"name": "  "}, {"qc": True},
+                   {"qc": False}, {"fasta_meta": "/m"},
+                   {"name": "Lumos QC", "qc": True, "fasta_meta": "/m"},
+                   {"name": "HeLa study", "qc": False}):
+            self.assertEqual(ns._stage_argv(path, "/o", **kw),
+                             fd.stage_argv("/o", python=sys.executable, **kw), kw)
+
     def test_record_only_calls_have_the_same_time_bounds_as_stage(self):
         seen = []
 

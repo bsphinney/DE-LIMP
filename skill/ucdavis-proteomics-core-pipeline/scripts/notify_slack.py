@@ -907,8 +907,8 @@ def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
 def _stage_argv(fd, out, *, name=None, qc=None, fasta_meta=None):
     """`fran_deposit.py stage` argv, in exactly the shape of fran_deposit.stage_argv() (the FRAN
     side's own builder): stage --out O [--fasta-meta M] [--name N] [--qc | --not-qc]. Built here
-    rather than imported, so the hook never depends on importing fran_deposit.py; the flags
-    match (tests/test_slack_notify.py pins the shape). --qc / --not-qc / --skip exist only in
+    rather than imported, so the hook never depends on importing fran_deposit.py; a test pins
+    it to fran_deposit.stage_argv() on every input shape, so the two cannot drift. --qc / --not-qc / --skip exist only in
     the fran_deposit.py that ships with them -- an older stage rejects them, which the hook
     reports as an `error` line and nothing more."""
     argv = [sys.executable or "python3", fd, "stage", "--out", out]
