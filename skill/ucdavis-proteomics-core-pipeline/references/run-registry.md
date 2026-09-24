@@ -40,7 +40,7 @@ inside `/quobyte/proteomics-grp` (mode 2770, group `proteomics-grp`).
 |---|---|---|
 | HIVE, registry writable | `direct` | written directly (a SLURM job, a login shell, `hive_exec.sh`) |
 | HIVE, registry not writable | `not_core` | **not recorded**: `"reason": "not_core_member"` |
-| Off HIVE, HIVE login set up (`HIVE_ENV_FILE` / `hive.env`, or `HIVE_USER` + `HIVE_KEY`) | `ssh` | the script and anything that exists only here (a local session and its zip) are uploaded; HIVE writes the record (and checks the gate again); the upload is deleted |
+| Off HIVE, HIVE login set up (`HIVE_ENV_FILE` / `hive.env`, or `HIVE_USER` + `HIVE_KEY`) | `ssh` | see "The SSH route" below |
 | Anything else | `none` | not recorded: `"reason": "not_on_hive"` |
 
 **Switches:**
@@ -50,6 +50,32 @@ inside `/quobyte/proteomics-grp` (mode 2770, group `proteomics-grp`).
 - `SKILL_RUNS_DIR` is the destination on every route, including on HIVE. Tests point it at a
   temporary folder.
 - `record_run.py --where` prints the route from here and does nothing else.
+
+### The SSH route (a laptop in hive_remote mode)
+
+This is the route when `session.py finalize` runs on a laptop.
+
+1. **The Core gate is probed first**, with `hive_exec.sh 'test -w <registry> && echo ok'`. A
+   non-Core account uploads **nothing**, and the result is `not_core_member`. `merge` checks the
+   gate again on HIVE.
+2. **A dry run stops here.** It lists what it would upload and uploads nothing.
+3. **Staging.** The script, the small files and the trimmed session zip are staged. Staging
+   runs on a sub-deadline that leaves 25 s for the put, the merge and the clean-up.
+   - **Size limit:** the zip is uploaded only if it is **300 MB or less** after trimming
+     (`RECORD_RUN_SSH_ZIP_CAP_MB`).
+   - **A larger zip stays on the laptop.** The record gives its `host:path`, size and sha256,
+     and a Data Quality Note says the session zip is on the user's machine, not in the
+     registry.
+   - **A staging failure is not fatal.** A zip that cannot be staged, for example a damaged
+     one, becomes `zip_copy: {copied: false, reason}` on the same terms. The record is still
+     written.
+4. **Put, then `merge` on HIVE.** Afterwards the upload is removed in a `finally`, best effort,
+   even after a timeout or an error. Every `merge` also sweeps uploads older than 24 h in
+   `~/.proteomics-pipeline/record_run_upload/`, which catches a relay that was cut off.
+5. **Time limits.** Every HIVE call runs in its own process group, and the whole group is
+   killed at its timeout. `ssh`, or anything it runs, cannot hold the call open past its time.
+   A timeout is reported as `"reason": "timeout"`. `finalize` passes `--timeout 300` for
+   `analysis-done`, and the SIGALRM backstop is always `--timeout` + 5 s.
 
 ## When it runs
 
@@ -216,8 +242,10 @@ The notes are gathered from what the skill already produced:
   identical-to-target contaminants were removed;
 - `AUDIT.json` WARN/FAIL findings;
 - `SAMPLE_QUALITY.json` flags (a flag confounded with a group is CRITICAL);
-- `session_zip_contains_search_intermediates` (the zip held `.quant` files and/or a predicted
-  library);
+- `session_zip_trimmed`: the zip held `.quant` files and/or a predicted library (any FASTAs
+  are counted too);
+- the session zip stayed on the user's machine (over the SSH upload limit, or it could not be
+  staged);
 - every `report_issue.sh` file for the session;
 - **"CoreOmics submission: not recorded"**, when it is not.
 
@@ -342,13 +370,29 @@ the lock, append-only, with the header written only at creation.
 ## The session zip
 
 `analysis-done` copies `<session>.zip` to the folder's top level when it is under the cap: 5 GB
-by default (`--zip-cap-gb`), or 1 GB when it has to be uploaded from a laptop
-(`RECORD_RUN_SSH_ZIP_CAP_GB`). Over the cap, the record points at the zip and says why.
+by default (`--zip-cap-gb`), or 300 MB when it has to be uploaded from a laptop
+(`RECORD_RUN_SSH_ZIP_CAP_MB`; see "The SSH route"). Both caps apply to what is copied, after
+trimming. Over the cap, the record points at the zip and says why.
 
-**Session zips DO contain the search's `.quant` files, predicted library and XICs** whenever the
-search ran into `output/search/`. `session.py finalize --zip` leaves out only
-`output/raw_data/` and `DATA_SUBMISSION/upload_staging/`. This was verified by running finalize
-on a synthetic session.
+**What the copy leaves out:**
+- `*.quant`;
+- `*.predicted.speclib`;
+- FASTAs (`*.fasta`, `*.fa`, `*.faa`, `*.fasta.gz`, `*.fa.gz`). The FASTA is identified by the
+  sidecar the record copies (`input/<fasta>.meta.json`: path + md5);
+- anything named like a credential.
+
+**When the zip has no `<base>/MANIFEST.txt`** (a zip made before finalize wrote it in), the copy
+gets the session's `MANIFEST.txt`. The original zip is never modified.
+
+**Session zips made before skill 2.7.0 contain the search's `.quant` files, its predicted
+library and its XICs** whenever the search ran into `output/search/`. Their `session.py finalize
+--zip` left out only `output/raw_data/` and `DATA_SUBMISSION/upload_staging/`. This was verified
+by running that finalize on a synthetic session. From 2.7.0, finalize also leaves out:
+- every `*.quant` file, wherever it is;
+- a `quant/` folder directly under a search out dir (pruned whole);
+- every `*.predicted.speclib`.
+
+It records what it left out in `zip_excluded`. The files stay on disk.
 
 A real 15-file Lumos chain session holds 2.44 GB under `output/search`:
 
@@ -360,17 +404,21 @@ A real 15-file Lumos chain session holds 2.44 GB under `output/search`:
 
 `.quant` files are DIA-NN intermediates. `step1.predicted.speclib` is predicted from the FASTA,
 so re-running the search regenerates it. The analysis is reproduced from `report.parquet` and the
-parameters, not from either of them. `session.py finalize` (integration branch) now leaves
-`*.quant`, `quant*/` and `*.predicted.speclib` out of the zip, and records what it left out in
-`zip_excluded`.
+parameters, not from either of them.
 
-Zips made before that change still hold these files, so the registry copies every zip **without**
-its `.quant` and `*.predicted.speclib` members. The empirical `*.skyline.speclib` is small and is
-kept. The copy moves the kept members' compressed bytes as they are, with no recompression, so it
-is disk I/O rather than CPU on a login node, and it is checked before it is used. It also records
-a `session_zip_contains_search_intermediates` finding, which becomes a Data Quality Note. The note
-gives the counts and sizes, and says the original shrinks when `session.py finalize --zip` is
-re-run with a current skill version.
+Zips made before that change still hold these files, so the registry copies every zip without
+them. The empirical `*.skyline.speclib` is small and is kept. The copy moves the kept members'
+compressed bytes as they are, with no recompression, so it is disk I/O rather than CPU on a
+login node, and it is checked before it is used.
+
+**The `session_zip_trimmed` finding.** When a zip held `.quant` files or a predicted library,
+the copy records this finding, which becomes a Data Quality Note:
+- It counts the `.quant` files, the predicted libraries and any FASTAs, with their sizes.
+- It says the original shrinks when `session.py finalize --zip` is re-run with the current skill.
+- A zip that only held a FASTA gets no note, because a FASTA in a session zip is normal. The
+  zip line in the log still says what was left out.
+- Each `analysis-done` surveys the zip again and **replaces** the finding, so a clean
+  re-finalized zip clears the note.
 
 ## The directory README
 

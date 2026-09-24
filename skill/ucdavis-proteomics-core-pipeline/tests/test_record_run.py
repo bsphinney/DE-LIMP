@@ -160,7 +160,7 @@ def make_search(root, name="search_out", report=True, runs=RUNS, secrets=False, 
 
 
 def make_session(root, out=None, quant_in_zip=True, zip_secret=False, big=0, extras=True,
-                 name=SESSION):
+                 name=SESSION, fasta_in_zip=False, manifest_in_zip=False):
     """A finalized session (session.py layout) and its zip, the way finalize --zip builds it:
     everything under the session folder, including a search run into output/search."""
     sess = os.path.join(root, name)
@@ -218,6 +218,11 @@ def make_session(root, out=None, quant_in_zip=True, zip_secret=False, big=0, ext
             z.writestr("s/output/search/report-lib.parquet.skyline.speclib", "kept\n")
         if zip_secret:
             z.writestr("s/input/hive.env", "HIVE_USER=x\n")
+        if fasta_in_zip:
+            z.writestr("s/input/search.fasta", ">sp|P1|X\nPEPTIDE\n" * 400)
+            z.writestr("s/input/extra.fa.gz", os.urandom(800))
+        if manifest_in_zip:
+            z.writestr("s/MANIFEST.txt", "zipped manifest\n")
     return sess, zpath
 
 
@@ -684,12 +689,26 @@ class CoreOmics(Base):
         self.assertIn("PROT_0744 / `3cba9a067ee4`", self.read(self.only_folder()))
 
         other = os.path.join(self.d, "work")
-        write(os.path.join(other, ".core_submission.json"), json.dumps(
-            {"schema": "core_submission/1", "internal_id": "PROT_0807", "id": "99922f5337f8"}))
         sess2, _ = make_session(other, quant_in_zip=False, name="2026-09-24_Other_Study")
+        write(os.path.join(other, ".core_submission.json"), json.dumps(
+            {"schema": "core_submission/1", "internal_id": "PROT_0807", "id": "99922f5337f8",
+             "session": sess2}))
         self.run_it("analysis-done", "--session", sess2)
         f2 = [f for f in self.folders() if f.endswith("Other_Study")][0]
         self.assertIn("PROT_0807 / `99922f5337f8`", self.read(f2))
+
+    def test_a_parent_receipt_for_another_run_is_ignored(self):
+        """P1: a .core_submission.json ABOVE the session belongs to whatever lives under that
+        folder; it is used only when it names this session or search out dir."""
+        work = os.path.join(self.d, "work")
+        sess, _ = make_session(work, quant_in_zip=False, name="2026-09-24_Mine")
+        write(os.path.join(work, ".core_submission.json"), json.dumps(
+            {"schema": "core_submission/1", "internal_id": "PROT_0999", "id": "aaaaaaaaaaaa",
+             "session": os.path.join(work, "2026-09-24_Someone_Else")}))
+        self.run_it("analysis-done", "--session", sess)
+        log = self.read(self.only_folder())
+        self.assertIn("**CoreOmics submission:** not recorded", log)
+        self.assertNotIn("PROT_0999", log)
 
     def test_prot_is_never_guessed_from_a_folder_name(self):
         sess, _ = make_session(self.d, quant_in_zip=False, name="2026-09-24_PROT_0999_Smith")
@@ -814,17 +833,19 @@ class WhatIsCopied(Base):
         out = make_search(self.d)
         sess, zpath = make_session(self.d, quant_in_zip=True)
         res = self.run_it("analysis-done", "--session", sess, "--out", out)
-        self.assertEqual(res["findings"], ["session_zip_contains_search_intermediates"])
+        self.assertEqual(res["findings"], ["session_zip_trimmed"])
         folder = self.only_folder()
         self.assertFalse([f for f in self.all_files(folder) if f.endswith(".quant")])
         with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z, \
                 zipfile.ZipFile(zpath) as orig:
             self.assertIsNone(z.testzip())            # every kept member's CRC checks out
             self.assertEqual(sorted(z.namelist()), sorted(
-                n for n in orig.namelist() if not n.endswith((".quant", ".predicted.speclib"))))
+                [n for n in orig.namelist() if not n.endswith((".quant", ".predicted.speclib"))]
+                + ["s/MANIFEST.txt"]))                       # C4: added from the session
             self.assertIn("s/output/search/report-lib.parquet.skyline.speclib", z.namelist())
             for n in z.namelist():
-                self.assertEqual(z.read(n), orig.read(n))
+                if n != "s/MANIFEST.txt":
+                    self.assertEqual(z.read(n), orig.read(n))
         f = self.read(folder, "run_record.json")["findings"][0]
         self.assertEqual((f["n_quant"], f["n_predicted_speclib"]), (4, 1))
         self.assertIn("4 per-run .quant files and 1 predicted spectral library", f["detail"])
@@ -1057,6 +1078,7 @@ class SshRoute(Base):
         self.assertIn("output/HeLa50_Report.docx", files)
         with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z:
             self.assertFalse([n for n in z.namelist() if n.endswith(".quant")])
+            self.assertIn("s/MANIFEST.txt", z.namelist())            # C4 on the SSH route
 
     def test_a_non_core_account_over_ssh_is_refused(self):
         if os.geteuid() == 0:
@@ -1078,6 +1100,310 @@ class SshRoute(Base):
                           HIVE_EXEC=broken)
         self.assertEqual((res["recorded"], res["reason"]), (False, "ssh_failed"))
         self.assertIn("timed out", res["detail"])
+
+
+class ReviewFixes(Base):
+    """The independent review's fix list (C1-C6, P1-P4), one test per item."""
+
+    def ssh_setup(self):
+        self.rruns = os.path.join(self.remote, "skill_runs")
+        os.makedirs(self.rruns, exist_ok=True)
+        os.makedirs(os.path.join(self.remote, "skill_issues"), exist_ok=True)
+
+    def relay_calls(self):
+        return open(self.relay_log).read().splitlines() if os.path.exists(self.relay_log) else []
+
+    def upload_dir(self):
+        return os.path.join(self.d, record_run.UPLOAD_DIR)
+
+    # ---- C1 (a): the gate is probed before anything is uploaded
+    def test_ssh_non_core_uploads_nothing(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can write anywhere")
+        self.ssh_setup()
+        os.chmod(self.rruns, 0o550)
+        sess, _ = make_session(os.path.join(self.d, "laptop"), quant_in_zip=True)
+        res = self.run_it("analysis-done", "--session", sess, route="ssh")
+        os.chmod(self.rruns, 0o755)
+        self.assertEqual((res["recorded"], res["reason"]), (False, "not_core_member"))
+        calls = self.relay_calls()
+        self.assertEqual(len(calls), 1, calls)                  # the probe, and nothing else
+        self.assertNotIn("--put", calls[0])
+        self.assertFalse(os.path.exists(self.upload_dir()))
+
+    # ---- C1 (f): a dry run over SSH uploads nothing
+    def test_ssh_dry_run_uploads_nothing(self):
+        self.ssh_setup()
+        sess, _ = make_session(os.path.join(self.d, "laptop"), quant_in_zip=True)
+        p = self.run_raw("analysis-done", "--session", sess, "--dry-run", route="ssh")
+        res = json.loads(p.stdout)
+        self.assertEqual((res["recorded"], res["reason"]), (False, "dry_run"))
+        self.assertIn("would upload", p.stderr)
+        self.assertEqual(len(self.relay_calls()), 1)
+        self.assertFalse(os.path.exists(self.upload_dir()))
+        self.assertEqual(os.listdir(self.rruns), [])
+
+    # ---- C1 (b): a zip that cannot be staged is a note, and the record is still written
+    def test_ssh_zip_staging_failure_still_records(self):
+        self.ssh_setup()
+        sess, zpath = make_session(os.path.join(self.d, "laptop"), quant_in_zip=True)
+        raw = bytearray(open(zpath, "rb").read())
+        with zipfile.ZipFile(zpath) as z:
+            kept = [i for i in z.infolist() if not i.filename.endswith(".quant")][0]
+        raw[kept.header_offset:kept.header_offset + 4] = b"XXXX"   # central directory still valid
+        open(zpath, "wb").write(bytes(raw))
+        res = self.run_it("analysis-done", "--session", sess, "--prot", "807", route="ssh")
+        self.assertTrue(res["recorded"], res)
+        self.assertFalse(res["zip_copied"])
+        rec = self.read(self.only_folder(self.rruns), "run_record.json")
+        self.assertIn("copy failed", rec["zip_copy"]["reason"])
+        self.assertIn("the session zip is on the user's machine", self.read(
+            self.only_folder(self.rruns)))
+
+    # ---- C1 (c)+(d): the upload is removed even when the merge runs out of time
+    def test_ssh_upload_removed_when_the_merge_times_out(self):
+        self.ssh_setup()
+        slow = os.path.join(self.d, "slow_exec.sh")
+        body = open(self.fake_exec).read().replace(
+            'fi\ncmd=', 'fi\ncase "$1" in *record_run.py\\ merge*) sleep 30 ;; esac\ncmd=', 1)
+        self.assertIn("sleep 30", body)
+        write(slow, body)
+        os.chmod(slow, 0o755)
+        sess, _ = make_session(os.path.join(self.d, "laptop"), quant_in_zip=True)
+        t0 = time.monotonic()
+        res = self.run_it("analysis-done", "--session", sess, "--timeout", "8", route="ssh",
+                          HIVE_EXEC=slow)
+        # The HIVE call is cut at its own timeout (about 2 s here) because the whole process group
+        # is killed; without that, the remote `sleep` holds the pipes open and only the SIGALRM
+        # backstop (timeout + 5 = 13 s) ends it.
+        self.assertLess(time.monotonic() - t0, 8)
+        self.assertEqual((res["recorded"], res["reason"]), (False, "timeout"))
+        self.assertEqual(os.listdir(self.upload_dir()), [])
+
+    def test_merge_sweeps_uploads_older_than_a_day(self):
+        self.ssh_setup()
+        old = os.path.join(self.upload_dir(), "record_run_old")
+        fresh = os.path.join(self.upload_dir(), "record_run_fresh")
+        for d in (old, fresh):
+            os.makedirs(os.path.join(d, "files"))
+        t = time.time() - 2 * 86400
+        os.utime(old, (t, t))
+        out = make_search(os.path.join(self.remote, "searches"))
+        res = self.run_it("search-done", "--out", out.replace(self.remote, FAKE_ROOT), route="ssh")
+        self.assertTrue(res["recorded"], res)
+        self.assertEqual(sorted(os.listdir(self.upload_dir())), ["record_run_fresh"])
+
+    # ---- C1 (e): over the upload limit the zip stays on the laptop, identified
+    def test_ssh_zip_over_the_upload_limit_stays_with_its_checksum(self):
+        import hashlib
+        import socket
+        self.ssh_setup()
+        sess, zpath = make_session(os.path.join(self.d, "laptop"), quant_in_zip=True)
+        res = self.run_it("analysis-done", "--session", sess, route="ssh",
+                          RECORD_RUN_SSH_ZIP_CAP_MB="0.0001")
+        self.assertTrue(res["recorded"], res)
+        folder = self.only_folder(self.rruns)
+        zc = self.read(folder, "run_record.json")["zip_copy"]
+        self.assertEqual((zc["copied"], zc["on_host"], zc["local_path"], zc["local_bytes"]),
+                         (False, socket.gethostname(), zpath, os.path.getsize(zpath)))
+        self.assertEqual(zc["sha256"], hashlib.sha256(open(zpath, "rb").read()).hexdigest())
+        self.assertFalse([f for f in os.listdir(folder) if f.endswith(".zip")])
+        log = self.read(folder)
+        self.assertIn("the session zip is on the user's machine", log)
+        self.assertIn(zc["sha256"], log)
+
+    def test_the_sigalrm_backstop_follows_the_timeout(self):
+        import contextlib
+        calls = []
+        real_alarm = record_run.signal.alarm
+        saved = dict(os.environ)
+        record_run.signal.alarm = lambda n: calls.append(n) or 0
+        try:
+            os.environ.update(self.env("direct"))
+            os.environ.pop("RECORD_RUN", None)
+            with contextlib.redirect_stdout(io.StringIO()):
+                record_run.main(["analysis-done", "--session", "/no/such", "--timeout", "300"])
+        finally:
+            record_run.signal.alarm = real_alarm
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual((calls[0], calls[-1]), (305, 0))
+
+    # ---- C3: FASTAs never reach the registry's copy of the zip
+    def test_fastas_are_left_out_and_counted(self):
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=True, fasta_in_zip=True)
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        folder = self.only_folder()
+        with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z:
+            self.assertFalse([n for n in z.namelist() if record_run.FASTA_RE.search(n)])
+        f = self.read(folder, "run_record.json")["findings"][0]
+        self.assertEqual((f["id"], f["n_quant"], f["n_predicted_speclib"], f["n_fasta"]),
+                         ("session_zip_trimmed", 4, 1, 2))
+        self.assertIn("4 per-run .quant files, 1 predicted spectral library and 2 FASTA files",
+                      f["detail"])
+        self.assertIn("sidecar", f["detail"])
+
+    def test_a_fasta_only_zip_is_trimmed_without_a_note(self):
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=False, fasta_in_zip=True)
+        res = self.run_it("analysis-done", "--session", sess, "--out", out)
+        self.assertEqual(res["findings"], [])                  # a FASTA is not an anomaly
+        folder = self.only_folder()
+        with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z:
+            self.assertFalse([n for n in z.namelist() if record_run.FASTA_RE.search(n)])
+        self.assertIn("2 FASTA", self.read(folder))
+
+    # ---- C4: the copy carries a MANIFEST.txt
+    def test_manifest_is_added_on_the_plain_copy_path_too(self):
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=False)        # nothing to drop
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        folder = self.only_folder()
+        with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z:
+            self.assertEqual(z.read("s/MANIFEST.txt").decode(),
+                             open(os.path.join(sess, "MANIFEST.txt")).read())
+            self.assertIsNone(z.testzip())
+        self.assertTrue(self.read(folder, "run_record.json")["zip_copy"]["manifest_added"])
+        with zipfile.ZipFile(zpath) as z:                               # the original untouched
+            self.assertNotIn("s/MANIFEST.txt", z.namelist())
+
+    def test_a_zip_that_has_its_manifest_keeps_it(self):
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=True, manifest_in_zip=True)
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        with zipfile.ZipFile(os.path.join(self.only_folder(), os.path.basename(zpath))) as z:
+            self.assertEqual(z.namelist().count("s/MANIFEST.txt"), 1)
+            self.assertEqual(z.read("s/MANIFEST.txt"), b"zipped manifest\n")
+
+    # ---- C5: a second, different failure gets its own dated line
+    def test_a_different_failure_is_logged_again(self):
+        out = make_search(self.d, report=False)
+        for st, code, step in (("failed", 1, "libpred"), ("failed", 137, "search"),
+                               ("failed", 137, "search"), ("completed", 0, "search")):
+            self.run_it("search-done", "--out", out, "--status", st, "--exit-code", str(code),
+                        "--step", step)
+        md = self.master()
+        self.assertIn("FAILED (exit 1, step libpred)", md)
+        self.assertEqual(md.count("search failed (exit 137, step search)"), 1)   # not repeated
+        self.assertEqual(md.count(": search completed"), 1)
+        self.assertEqual(md.count("\n## "), 1)
+        notes = [r[6] for r in self.activity()[1] if r[2] == "search_failed"]
+        self.assertEqual([("re-recorded" in n) for n in notes], [False, False, True])
+
+    # ---- C6: copies cannot eat phase C's lock wait; the message states the real wait
+    def test_copies_leave_phase_c_time_for_its_locks(self):
+        """A zip copy that takes all the time it is given must still leave phase C's locks a real
+        wait (not a single try that falls straight through to an unlocked write)."""
+        import contextlib
+        sess, _ = make_session(os.path.join(self.d, "laptop"), quant_in_zip=False)
+        lk = os.path.join(self.runs, "data_analysis.md.lock.d")
+        os.makedirs(lk)
+        write(os.path.join(lk, "owner"), "othernode:123:1\n")         # held throughout
+        real_copy, saved = record_run.copy_file, dict(os.environ)
+
+        def slow_copy(src, dst, deadline):
+            if src.endswith(".zip"):                                    # uses its whole budget
+                while deadline.left() > 0.2:
+                    time.sleep(0.05)
+                raise TimeoutError("the --timeout was reached")
+            return real_copy(src, dst, deadline)
+        record_run.copy_file = slow_copy
+        del record_run.LOCK_TIMEOUTS[:]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            os.environ.update(self.env("direct"), RECORD_RUN_LOCK_WAIT="4")
+            os.environ.pop("RECORD_RUN", None)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                record_run.main(["analysis-done", "--session", sess, "--timeout", "14"])
+        finally:
+            record_run.copy_file = real_copy
+            os.environ.clear()
+            os.environ.update(saved)
+        res = json.loads(out.getvalue())
+        self.assertTrue(res["recorded"], res)
+        self.assertEqual(res["lock_timeout"], ["data_analysis.md"])
+        waited = re.search(r"data_analysis\.md\.lock\.d still held after (\d+\.\d) s",
+                           err.getvalue())
+        self.assertIsNotNone(waited, err.getvalue())
+        self.assertGreaterEqual(float(waited.group(1)), 3.0)          # a real wait, not one try
+
+    def test_the_timeout_message_states_the_real_wait(self):
+        import contextlib
+        path = os.path.join(self.d, "w.csv")
+        os.mkdir(path + ".lock.d")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with record_run.DirLock(path, record_run.Deadline(4)):       # wait 10, but 1 s left
+                pass
+        m = re.search(r"still held after (\d+\.\d) s", err.getvalue())
+        self.assertIsNotNone(m, err.getvalue())
+        self.assertLess(float(m.group(1)), 3)
+
+    # ---- P2: a lock that shows life while being broken is put back
+    def test_a_lock_that_shows_life_during_the_break_is_restored(self):
+        import contextlib
+        path = os.path.join(self.d, "p2.csv")
+        lkd = path + ".lock.d"
+        os.mkdir(lkd)
+        write(os.path.join(lkd, "owner"), "A:slow:1\n")
+        os.utime(lkd, (time.time() - 3600,) * 2)
+        b = record_run.DirLock(path, record_run.Deadline(30), wait=0.5)
+
+        def a_shows_life(judged):
+            b.break_hook = None
+            os.utime(lkd, None)                          # A is alive after all: fresh again
+        b.break_hook = a_shows_life
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with b:
+                self.assertFalse(b.held)
+        self.assertEqual(record_run.DirLock.owner_of(lkd), "A:slow:1")
+        self.assertIn("restored", err.getvalue())
+        self.assertEqual([f for f in os.listdir(self.d) if f.startswith("p2.csv.lock.d.")], [])
+
+    # ---- P3: search-done reads the FRAN receipt as it is now
+    def test_search_done_reads_the_fran_receipt_fresh(self):
+        out = make_search(self.d)
+        receipt = os.path.join(out, "fran_deposit.json")
+        body = open(receipt).read()
+        os.remove(receipt)
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        self.assertIn("no fran_deposit.json", self.read(self.only_folder()))
+        write(receipt, body)                              # the hook staged it after all
+        self.run_it("search-done", "--out", out, "--status", "completed", "--exit-code", "0")
+        log = self.read(self.only_folder())
+        self.assertIn("- **staged** ->", log)
+        self.assertIn("fran_staged", [r[2] for r in self.activity()[1]])
+
+    # ---- P4: an ingested receipt is logged as fran_ingested
+    def test_an_ingested_receipt_is_logged_as_ingested(self):
+        out = make_search(self.d)
+        r = json.load(open(os.path.join(out, "fran_deposit.json")))
+        r["status"] = "ingested"
+        write(os.path.join(out, "fran_deposit.json"), json.dumps(r))
+        self.run_it("search-done", "--out", out)
+        rows = self.activity()[1]
+        self.assertIn("fran_ingested", [x[2] for x in rows])
+        self.assertNotIn("fran_staged", [x[2] for x in rows])
+
+    # ---- a re-finalized, clean zip clears the old zip's note
+    def test_a_clean_refinalize_clears_the_zip_note(self):
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=True)
+        self.assertEqual(self.run_it("analysis-done", "--session", sess, "--out", out)
+                         ["findings"], ["session_zip_trimmed"])
+        with zipfile.ZipFile(zpath) as z:
+            keep = [(i, z.read(i)) for i in z.infolist()
+                    if not i.filename.endswith((".quant", ".predicted.speclib"))]
+        os.remove(zpath)
+        with zipfile.ZipFile(zpath, "w") as z:
+            for i, b in keep:
+                z.writestr(i, b)
+        self.assertEqual(self.run_it("analysis-done", "--session", sess, "--out", out)
+                         ["findings"], [])
+        dq = self.read(self.only_folder()).split("## Data Quality Notes", 1)[1].split("\n## ")[0]
+        self.assertNotIn(".quant files", dq)
 
 
 if __name__ == "__main__":

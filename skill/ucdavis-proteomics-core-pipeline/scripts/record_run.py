@@ -133,6 +133,9 @@ SACCT_CANDIDATES = ("/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/gene
 SECRET_NAME_RE = re.compile(
     r"token|webhook|secret|passw|credential|(^|\.)env$|^id_(rsa|dsa|ecdsa|ed25519)|"
     r"\.(pem|key|p12|pfx)$|^\.netrc$|^\.pgpass$", re.I)
+LEGACY_ZIP_IDS = ("session_zip_contains_quant", "session_zip_contains_search_intermediates",
+                  "session_zip_contains_predicted_speclib")
+FASTA_RE = re.compile(r"\.(fasta|fa|faa)(\.gz)?$", re.I)
 SECRET_TEXT_RE = re.compile(
     rb"-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|hf_[A-Za-z0-9]{20,}|"
     rb"Authorization: *(Token|Bearer) +[A-Za-z0-9]|xox[abprs]-[A-Za-z0-9-]{10,}|"
@@ -148,6 +151,9 @@ UPLOAD_DIR = ".proteomics-pipeline/record_run_upload"
 # stale-lock breaking lost 0 of 800 (FRAN ingest/auto_ingest_state.py). Waiting is bounded: past
 # it the write happens unlocked and the result says `lock_timeout` rather than losing the record.
 STALE_LOCK_S = 60
+PHASE_C_RESERVE_S = 12          # the record lock + both log locks, after the copies
+SSH_RESERVE_S = 25              # the put, the merge on HIVE and the clean-up, after staging
+UPLOAD_MAX_AGE_S = 24 * 3600    # merge sweeps uploads older than this (an interrupted relay)
 OWNERLESS_SECOND_LOOK_S = 1.0   # an owner-less stale lock is broken only if a second look agrees
 LOCK_TIMEOUTS = []
 # The registry's own README.md, written by ensure_readme() when it is missing or carries an older
@@ -457,7 +463,8 @@ class DirLock:
 
     def __enter__(self):
         me = f"{socket.gethostname()}:{os.getpid()}"
-        stop = time.monotonic() + max(0.0, min(self.wait, self.deadline.left() - 3))
+        t0 = time.monotonic()
+        stop = t0 + max(0.0, min(self.wait, self.deadline.left() - 3))
         while True:
             token = f"{me}:{time.time_ns()}"
             try:
@@ -487,7 +494,8 @@ class DirLock:
             if age is not None and age > STALE_LOCK_S:
                 self._try_break(me, age)
             if time.monotonic() >= stop:
-                say(f"{self.dir} still held after {self.wait:.0f} s; writing unlocked")
+                say(f"{self.dir} still held after {time.monotonic() - t0:.1f} s; writing "
+                    f"unlocked")
                 LOCK_TIMEOUTS.append(os.path.basename(self.target))
                 return self
             time.sleep(0.05 + random.random() * 0.1)
@@ -513,10 +521,16 @@ class DirLock:
             os.rename(self.dir, grave)
         except OSError:
             return                                # someone else broke or released it first
-        if self.owner_of(grave) == judged:
+        try:
+            fresh = time.time() - os.stat(grave).st_mtime <= STALE_LOCK_S
+        except OSError:
+            fresh = False
+        if self.owner_of(grave) == judged and not fresh:
             shutil.rmtree(grave, ignore_errors=True)
             say(f"broke a lock {age:.0f} s old held by {judged}: {self.dir}")
         else:
+            # Another holder, or the same one showing life since it was judged: never delete a
+            # lock that is not provably dead -- put it back and wait like anyone else.
             try:
                 os.rename(grave, self.dir)
                 say(f"the lock changed hands while being broken; restored it to its live "
@@ -738,26 +752,46 @@ def prot_from_obj(obj, depth=0):
     return found or None
 
 
+def names_this_run(obj, session, out):
+    """True when a receipt found ABOVE the session records this very session or search out dir.
+    A parent folder's receipt otherwise belongs to whatever else lives under that folder."""
+    mine = {os.path.realpath(x) for x in (session, out) if x}
+    if not isinstance(obj, dict) or not mine:
+        return False
+    for k in ("session", "session_dir", "sessions", "out", "out_dir", "search_out", "search_dir",
+              "search_outs"):
+        vals = obj.get(k)
+        for v in (vals if isinstance(vals, list) else [vals]):
+            if isinstance(v, str) and v and os.path.realpath(os.path.expanduser(v)) in mine:
+                return True
+    return False
+
+
 def find_prot(explicit, session, out):
-    """{"prot", "id", "source"} or None. --prot first; then the metadata the session keeps."""
+    """{"prot", "id", "source"} or None. --prot first; then the metadata the session keeps; then
+    a `.core_submission.json` in a folder above the session, but ONLY when that receipt names this
+    session or search out dir -- never a guess from whatever receipt happens to sit above."""
     p = parse_prot(explicit)
     if p:
         return dict(p, source="--prot")
-    cands = []
+    cands, parents = [], []
     if session and os.path.isdir(session):
         cands += sorted(glob.glob(os.path.join(session, "input", "*.json")))
         cands += [os.path.join(session, f) for f in listdir(session) if f.endswith(".json")]
-        d = session
-        for _ in range(4):                # a core_submission receipt sits in the work dir above
-            cands.append(os.path.join(d, ".core_submission.json"))
+        d = os.path.dirname(os.path.abspath(session))
+        for _ in range(3):                # a core_submission receipt sits in the work dir above
+            parents.append(os.path.join(d, ".core_submission.json"))
             d = os.path.dirname(d)
     if out and os.path.isdir(out):
         cands += [os.path.join(out, "fran_deposit.json"), os.path.join(out,
                                                                        "search_provenance.json")]
-    for c in dict.fromkeys(cands):
+    for c in dict.fromkeys(cands + parents):
         if (fsize(c) or 0) > 2 * MB:
             continue
-        found = prot_from_obj(load_json(c))
+        obj = load_json(c)
+        if c in parents and not names_this_run(obj, session, out):
+            continue
+        found = prot_from_obj(obj)
         if found:
             return {"prot": found.get("prot"), "id": found.get("id"), "source": c}
     return None
@@ -1118,7 +1152,13 @@ def add_copy(plan, src, rel, section, cap=None):
     if not src or not os.path.isfile(src):
         return
     real = os.path.realpath(src)
-    if any(c["real"] == real for c in plan["copies"] + plan["not_copied"]):
+    try:
+        st = os.stat(src)
+        ino = [st.st_dev, st.st_ino]      # one file under two spellings (case-insensitive disks)
+    except OSError:
+        ino = None
+    if any(c["real"] == real or (ino and c.get("ino") == ino)
+           for c in plan["copies"] + plan["not_copied"]):
         return
     if any(c["rel"] == rel for c in plan["copies"]):
         d, n = os.path.split(rel)
@@ -1135,7 +1175,7 @@ def add_copy(plan, src, rel, section, cap=None):
                f"RECORD_RUN_COPY_BUDGET_MB)")
     else:
         why = secret_reason(src)
-    entry = {"src": os.path.abspath(src), "real": real, "rel": rel, "bytes": size,
+    entry = {"src": os.path.abspath(src), "real": real, "ino": ino, "rel": rel, "bytes": size,
              "section": section}
     if why:
         entry["reason"] = why
@@ -1393,14 +1433,24 @@ def zip_survey(path):
     # cohort): regenerated by re-running the search, not needed to reproduce the analysis. Left out
     # like .quant -- session.py's zip leaves out both from now on; older zips still hold them.
     pred = [i for i in infos if i.filename.endswith(".predicted.speclib")]
+    # The search FASTA: hundreds of MB, and identified exactly by the sidecar the record copies
+    # (input/<name>.meta.json: path + md5), so the registry copy leaves it out too.
+    fasta = [i for i in infos if not i.is_dir() and FASTA_RE.search(i.filename)]
     xic = [i for i in infos if "_xic/" in i.filename or i.filename.endswith(".xic.parquet")]
-    drop = quant + pred + [i for i in secret if i not in quant + pred]
+    big = quant + pred + fasta
+    drop = big + [i for i in secret if i not in big]
     dropped = {id(i) for i in drop}
+    names = [i.filename for i in infos]
+    tops = {n.split("/", 1)[0] for n in names}
+    base = tops.pop() if len(tops) == 1 and all("/" in n for n in names) else ""
+    manifest_name = f"{base}/MANIFEST.txt" if base else "MANIFEST.txt"
     grp = lambda xs: {"n": len(xs), "bytes_compressed": sum(i.compress_size for i in xs),  # noqa
                       "bytes": sum(i.file_size for i in xs)}
     return {"n_entries": len(infos), "bytes": fsize(path),
             "quant": dict(grp(quant), dirs=sorted({os.path.dirname(i.filename) for i in quant})),
             "predicted_speclib": dict(grp(pred), files=[i.filename for i in pred][:10]),
+            "fasta": dict(grp(fasta), files=[i.filename for i in fasta][:10]),
+            "manifest_name": manifest_name, "has_manifest": manifest_name in names,
             "secrets": [i.filename for i in secret], "speclib": grp(spec), "xic": grp(xic),
             "drop": [i.filename for i in drop],
             "kept_bytes": sum(i.compress_size for i in infos if id(i) not in dropped)}
@@ -1525,37 +1575,46 @@ def plan_analysis(plan, session, a, zip_cap):
         try:
             sv = zip_survey(zpath)
             z.update(sv)
-            q, ps = sv["quant"], sv["predicted_speclib"]
+            q, ps, fa = sv["quant"], sv["predicted_speclib"], sv["fasta"]
             if q["n"] or ps["n"]:
-                what = " and ".join(x for x in (
+                what = and_join(x for x in (
                     f"{q['n']} per-run .quant file{'s' if q['n'] != 1 else ''}" if q["n"] else None,
                     f"{ps['n']} predicted spectral librar{'y' if ps['n'] == 1 else 'ies'}"
-                    if ps["n"] else None) if x)
-                where = sorted(set(q["dirs"]) | {os.path.dirname(f) for f in ps["files"]})
+                    if ps["n"] else None,
+                    f"{fa['n']} FASTA file{'s' if fa['n'] != 1 else ''}" if fa["n"] else None)
+                    if x)
+                comp = q["bytes_compressed"] + ps["bytes_compressed"] + fa["bytes_compressed"]
+                unp = q["bytes"] + ps["bytes"] + fa["bytes"]
                 plan["findings"].append({
-                    "id": "session_zip_contains_search_intermediates", "zip": zpath,
-                    "n_quant": q["n"], "n_predicted_speclib": ps["n"],
-                    "bytes": q["bytes"] + ps["bytes"],
-                    "detail": (f"the session zip holds {what} "
-                               f"({fmt_bytes(q['bytes_compressed'] + ps['bytes_compressed'])} "
-                               f"compressed, {fmt_bytes(q['bytes'] + ps['bytes'])} unpacked, under "
-                               f"{', '.join(where[:4])}). They are search intermediates -- the "
-                               f"analysis is reproduced from report.parquet and the parameters -- "
-                               f"and the registry copy leaves them out. To shrink the original, "
-                               f"re-run session.py finalize --zip with skill "
-                               f"{plan.get('skill_version') or 'this version'} or later, whose "
-                               f"zip leaves them out.")})
+                    "id": "session_zip_trimmed", "scope": "zip", "zip": zpath,
+                    "n_quant": q["n"], "n_predicted_speclib": ps["n"], "n_fasta": fa["n"],
+                    "bytes": unp,
+                    "detail": (f"the session zip holds {what} ({fmt_bytes(comp)} compressed, "
+                               f"{fmt_bytes(unp)} unpacked); the registry copy leaves them out. "
+                               f"The .quant files and the predicted library are search "
+                               f"intermediates -- the analysis is reproduced from report.parquet "
+                               f"and the parameters"
+                               + ("; the FASTA is identified by its copied sidecar "
+                                  "(input/<fasta>.meta.json: path + md5)" if fa["n"] else "")
+                               + f". To shrink the original, re-run session.py finalize --zip "
+                                 f"with skill {plan.get('skill_version') or 'this version'} or "
+                                 f"later, whose zip leaves out the .quant files and the "
+                                 f"predicted library.")})
             if sv["kept_bytes"] > zip_cap:
-                z["reason"] = (f"{fmt_bytes(sv['kept_bytes'])} (without .quant and the predicted "
-                               f"library) is over the "
+                z["reason"] = (f"{fmt_bytes(sv['kept_bytes'])} (without .quant, the predicted "
+                               f"library and FASTAs) is over the "
                                f"{fmt_bytes(zip_cap)} cap -- the record points at it instead")
             else:
                 z.update(copy=True, dest_rel=os.path.basename(zpath))
                 if sv["drop"]:
                     z["note"] = (f"copied without {sv['quant']['n']} .quant, "
-                                 f"{ps['n']} predicted-library and "
+                                 f"{ps['n']} predicted-library, {fa['n']} FASTA and "
                                  f"{len(sv['secrets'])} secret-named entr"
                                  f"{'y' if len(sv['secrets']) == 1 else 'ies'}")
+            # A zip made before finalize wrote MANIFEST.txt into it: the copy gets the session's.
+            man_src = os.path.join(session, "MANIFEST.txt")
+            if not sv["has_manifest"] and os.path.isfile(man_src):
+                z["manifest_src"] = man_src
         except (zipfile.BadZipFile, OSError, ValueError) as e:
             z["reason"] = f"could not read the zip: {e}"
     an["zip"] = {k: v for k, v in z.items() if k != "drop"}
@@ -1617,6 +1676,21 @@ def copy_zip_without(src, dst, drop, deadline):
         if os.path.exists(part):
             os.remove(part)
     return kept
+
+
+def and_join(items):
+    items = list(items)
+    return " and ".join(items) if len(items) < 3 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def add_manifest(zip_path, name, src):
+    """Add the session's MANIFEST.txt to a copied zip that lacks it (a zip made before finalize
+    wrote it in). The copy is the registry's own file; the original is never touched."""
+    with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
+        if name not in z.namelist():
+            z.write(src, name)
+            return True
+    return False
 
 
 # ------------------------------------------------------------------------- skill issues
@@ -1764,6 +1838,17 @@ def data_quality_notes(rec):
                                 + "; ".join(f.get("titles")[:6]), f["file"],
                         "a skill problem may have changed what ran",
                         fix="read the issue file", source="report_issue.sh"))
+    zc = rec.get("zip_copy") or {}
+    if zc.get("on_host") and not zc.get("copied"):
+        notes.append(dq(
+            "WARNING", "the session zip is on the user's machine, not in the registry",
+            f"{zc['on_host']}:{zc.get('local_path')} ({fmt_bytes(zc.get('local_bytes'))}"
+            + (f", sha256 {zc['sha256']}" if zc.get("sha256") else "") + ")",
+            "the registry holds the record and the small files, but not the package that "
+            "reproduces the analysis; if that machine is lost, so is the zip",
+            zc.get("reason"),
+            "copy the zip to HIVE (hive_exec.sh --put) and re-run record_run.py analysis-done "
+            "--session <session> --zip <its HIVE path> on HIVE", "record_run"))
     for n in rec.get("record_notes") or []:
         notes.append(dq("WARNING", n, rec.get("folder"), source="record_run"))
     p = rec.get("prot") or {}
@@ -2246,7 +2331,12 @@ def merge(old, plan, folder, route_name):
         nc[sec] = [{"src": x["src"], "reason": x["reason"]} for x in plan["not_copied"]
                    if x["section"] == sec]
     rec["not_copied"] = nc
-    f = {x["id"]: x for x in rec.get("findings") or []}
+    old_f = rec.get("findings") or []
+    if plan.get("analysis"):
+        # This event surveyed the zip again: what it found replaces what an older zip had (a
+        # re-finalized, smaller zip must not keep the old zip's note forever).
+        old_f = [x for x in old_f if x.get("scope") != "zip" and x.get("id") not in LEGACY_ZIP_IDS]
+    f = {x["id"]: x for x in old_f}
     f.update({x["id"]: x for x in plan.get("findings") or []})
     rec["findings"] = list(f.values())
     rec["skill_version"] = plan.get("skill_version") or rec.get("skill_version")
@@ -2277,7 +2367,10 @@ def master_entries(rec, event):
     out = []
     if s and (event == "search-done" or not search_logged):
         status = s.get("status") or "unknown"
-        marker = f"<!-- record_run {key} search {status} -->"
+        # A second, DIFFERENT failure (another step, another exit code) is news: its own line.
+        marker = (f"<!-- record_run {key} search {status}"
+                  + (f" exit={s.get('exit_code')} step={s.get('failing_step')}"
+                     if status == "failed" else "") + " -->")
         what = (f"{s.get('engine_label') or s.get('engine') or 'search'} "
                 f"{s.get('engine_version') or ''} search, {fmt_n(d.get('n_files'))} × "
                 f"{'/'.join(sorted(d.get('extensions') or {})) or 'files'}"
@@ -2347,7 +2440,10 @@ def activity_rows(rec, event, plan):
                                                    "SLURM", s["out_dir"], "ok", f"jobs {jobs}"])))
         if event == "search-done" and s.get("status") in ("completed", "failed"):
             res = s.get("results") or {}
-            again = f"search_{s['status']}" in rec.get("activity_logged", [])
+            # "re-recorded" only for the SAME outcome again -- a different failure is news
+            what = f"search_{s['status']}" + (f":{s.get('exit_code')}:{s.get('failing_step')}"
+                                              if s["status"] == "failed" else "")
+            again = what in rec.get("activity_logged", [])
             notes = "; ".join(x for x in (
                 f"exit {s.get('exit_code')}" if s.get("exit_code") not in (None, "") else None,
                 f"step {s.get('failing_step')}" if s.get("failing_step") else None,
@@ -2358,10 +2454,10 @@ def activity_rows(rec, event, plan):
             out.append((None, csv_row([ts_min(t.get("finished")), name,
                                        f"search_{s['status']}", tool, s["out_dir"], s["status"],
                                        notes])))
-            rec["activity_logged"].append(f"search_{s['status']}")
+            rec["activity_logged"].append(what)
         fr = s.get("fran") or {}
         if fr.get("status") in ("staged", "ingested"):
-            out.append((f"fran_{fr['status']}", csv_row([ts_min(), name, "fran_staged",
+            out.append((f"fran_{fr['status']}", csv_row([ts_min(), name, f"fran_{fr['status']}",
                                                           "fran_deposit.py", fr.get("entry"),
                                                           fr["status"],
                                                           fr.get("organism") or ""])))
@@ -2451,7 +2547,10 @@ def _execute(plan, a, deadline, route_name, root, ident):
         rec["links"] = dict(rec.get("links") or {}, **links)
         if z.get("exists"):
             rec["zip_copy"] = ({"copied": True, "rel": z["dest_rel"], "planned": True}
-                               if z.get("copy") else {"copied": False, "reason": z.get("reason")})
+                               if z.get("copy") else dict(
+                                   {"copied": False, "reason": z.get("reason")},
+                                   **{k: z[k] for k in ("on_host", "local_path", "local_bytes",
+                                                        "sha256") if z.get(k)}))
         for c in plan["copies"]:
             rec["copies"][c["rel"]] = {"from": c["src"], "bytes": c["bytes"], "planned": True}
         rec["data_quality_notes"] = data_quality_notes(rec)
@@ -2487,7 +2586,10 @@ def _execute(plan, a, deadline, route_name, root, ident):
         write_text(rec_path, json.dumps(rec, indent=2, default=str))
         write_text(os.path.join(folder, "SEARCH_LOG.md"), render_log(rec))
 
-    # ---- (B) copies, generated files and links: each written aside and renamed into place
+    # ---- (B) copies, generated files and links: each written aside and renamed into place.
+    # They run on a sub-deadline that ends PHASE_C_RESERVE_S before the main one, so a copy that
+    # uses up its time cannot leave phase C's locks a one-shot try (and the logs unlocked).
+    copy_deadline = Deadline(max(1.0, deadline.left() - PHASE_C_RESERVE_S))
     done, failed, zip_result, link_errors = {}, [], None, []
     for rel, text in (plan.get("generated") or {}).items():
         if rel in (rec.get("copies") or {}) and not rec["copies"][rel].get("generated"):
@@ -2498,7 +2600,7 @@ def _execute(plan, a, deadline, route_name, root, ident):
                      "bytes": len(text.encode()), "generated": True}
     for c in plan["copies"]:
         try:
-            copy_file(c.get("here") or c["src"], os.path.join(folder, c["rel"]), deadline)
+            copy_file(c.get("here") or c["src"], os.path.join(folder, c["rel"]), copy_deadline)
             done[c["rel"]] = {"from": c["src"], "bytes": c["bytes"], "copied_at": now_iso()}
         except (OSError, TimeoutError, Stop) as e:
             failed.append((c, f"copy failed: {e}"))
@@ -2506,13 +2608,16 @@ def _execute(plan, a, deadline, route_name, root, ident):
         dst = os.path.join(folder, z["dest_rel"])
         try:
             if z.get("here"):
-                copy_file(z["here"], dst, deadline)
+                copy_file(z["here"], dst, copy_deadline)
             elif z.get("drop"):
-                copy_zip_without(z["path"], dst, z["drop"], deadline)
+                copy_zip_without(z["path"], dst, z["drop"], copy_deadline)
             else:
-                copy_file(z["path"], dst, deadline)
+                copy_file(z["path"], dst, copy_deadline)
+            added = bool(z.get("manifest_added"))
+            if not added and z.get("manifest_src") and os.path.isfile(z["manifest_src"]):
+                added = add_manifest(dst, z["manifest_name"], z["manifest_src"])
             zip_result = {"copied": True, "rel": z["dest_rel"], "bytes": fsize(dst),
-                          "copied_at": now_iso()}
+                          "copied_at": now_iso(), "manifest_added": added}
         except (OSError, TimeoutError, ValueError, zipfile.BadZipFile, Stop) as e:
             zip_result = {"copied": False, "reason": f"copy failed: {e}"}
     for rel, target in links.items():
@@ -2578,11 +2683,98 @@ def _execute(plan, a, deadline, route_name, root, ident):
 
 
 # ------------------------------------------------------------------------ the SSH route
+def run_bounded(argv, timeout, stdin=None):
+    """subprocess.run with a timeout that really holds: the call runs in its own process group,
+    and on timeout the WHOLE group is killed. A plain run() kills only `bash`; `ssh` (or a remote
+    `sleep`) keeps the pipes open and communicate() then waits for it -- the timeout would last as
+    long as the remote command does."""
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                         start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=max(1, timeout))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def sha256_bounded(path, deadline):
+    """(hex, None) or (None, why): a checksum that gives up at the deadline rather than holding
+    up the record."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                deadline.check()
+                b = fh.read(8 * MB)
+                if not b:
+                    return h.hexdigest(), None
+                h.update(b)
+    except (OSError, TimeoutError) as e:
+        return None, str(e)
+
+
 def ship(plan, a, deadline):
-    """Upload what exists only here, plus this script and the modules it reads with, and have
-    HIVE write the record. hive_exec.sh shares one multiplexed connection across the calls."""
-    exe, user = hive_exec_path(), hive_login()
+    """The SSH route: upload what exists only here, plus this script and the modules it reads
+    with, and have HIVE write the record. In order:
+      1. probe the Core gate on HIVE -- a non-Core account uploads NOTHING (not_core_member);
+      2. a dry run stops here: it lists what it would upload, and uploads nothing;
+      3. stage the copies and the (trimmed) zip; a zip that cannot be staged, or is over the
+         upload limit, stays on this machine and the record says where (host, path, sha256);
+      4. put, run `merge` on HIVE, and ALWAYS remove the upload afterwards (best effort).
+    hive_exec.sh shares one multiplexed connection across the calls."""
+    exe, user, host = hive_exec_path(), hive_login(), socket.gethostname()
+    runs = runs_dir()
+
+    def hive(cmd, timeout):
+        return run_bounded(["bash", exe] + cmd, max(2, timeout))
+
+    try:
+        probe = (f"d={shlex.quote(runs)}; if [ -d \"$d\" ]; then test -w \"$d\" && echo ok; "
+                 f"else p=$(dirname \"$d\"); test -d \"$p\" && test -w \"$p\" && echo ok; fi")
+        p = hive([probe], min(30, deadline.left() - 2))
+        if "ok" not in (p.stdout or "").split():
+            if p.returncode in (0, 1):
+                return not_recorded("not_core_member",
+                                    f"{runs} on HIVE is not writable by {user} -- only Proteomics "
+                                    f"Core (proteomics-grp) runs are recorded; nothing was "
+                                    f"uploaded", route="ssh")
+            return not_recorded("ssh_failed", f"could not reach HIVE (exit {p.returncode}): "
+                                              f"{((p.stderr or '') + (p.stdout or '')).strip()[-200:]}",
+                                route="ssh")
+    except subprocess.TimeoutExpired as e:
+        return not_recorded("timeout", f"HIVE did not answer the gate check within "
+                                       f"{e.timeout:.0f} s", route="ssh")
+
+    z = plan.get("zip") or {}
+    cap = int(env_num("RECORD_RUN_SSH_ZIP_CAP_MB", 300) * MB)
+    if a.dry_run:
+        n, nb = len(plan["copies"]), sum(c["bytes"] or 0 for c in plan["copies"])
+        say(f"DRY RUN (ssh) -- nothing uploaded. Would upload {n} file(s), {fmt_bytes(nb)}, and "
+            f"have HIVE write {runs}/sessions/{plan.get('name')} (or update the folder this "
+            f"search already has)")
+        for c in plan["copies"]:
+            say(f"would upload {c['rel']} ({fmt_bytes(c['bytes'])}) <- {c['src']}")
+        for c in plan["not_copied"]:
+            say(f"would NOT copy {c['src']} -- {c['reason']}")
+        if z.get("exists"):
+            say("session zip: " + (
+                f"would upload {fmt_bytes(z.get('kept_bytes'))} after trimming" if z.get("copy")
+                and z.get("kept_bytes", 0) <= cap else
+                f"would stay on {host} -- {z.get('reason') or 'over the upload limit'}"))
+        return not_recorded("dry_run", "nothing uploaded; the gate check passed", route="ssh",
+                            path=f"{user}@hive:{runs}/sessions/{plan.get('name')}")
+
     stage = tempfile.mkdtemp(prefix="record_run_")
+    rd = f'"$HOME/{UPLOAD_DIR}/{os.path.basename(stage)}"'
+    # Staging runs on a sub-deadline: the put, the merge on HIVE and the clean-up need the rest.
+    stage_deadline = Deadline(max(1.0, deadline.left() - SSH_RESERVE_S))
+    put_tried = False
     try:
         sd = os.path.join(stage, "scripts")
         os.makedirs(sd)
@@ -2592,47 +2784,52 @@ def ship(plan, a, deadline):
         if os.path.isfile(pj):
             os.makedirs(os.path.join(stage, ".claude-plugin"))
             shutil.copy2(pj, os.path.join(stage, ".claude-plugin"))
-        if not a.dry_run:
-            for c in list(plan["copies"]):
-                try:
-                    copy_file(c["src"], os.path.join(stage, "files", c["rel"]), deadline)
-                except (OSError, TimeoutError) as e:
-                    plan["copies"].remove(c)
-                    plan["not_copied"].append(dict(c, reason=f"upload failed: {e}"))
-            z = plan.get("zip") or {}
-            ssh_cap = int(env_num("RECORD_RUN_SSH_ZIP_CAP_GB", 1) * GB)
-            if z.get("copy") and z.get("kept_bytes", 0) > ssh_cap:
-                z.update(copy=False, reason=(
-                    f"{fmt_bytes(z['kept_bytes'])} is over the {fmt_bytes(ssh_cap)} cap for "
-                    f"uploading from {socket.gethostname()} (RECORD_RUN_SSH_ZIP_CAP_GB); the "
-                    f"zip stays at {z['path']} on that machine"))
-            elif z.get("copy"):
-                dst = os.path.join(stage, "files", z["dest_rel"])
+        for c in list(plan["copies"]):
+            try:
+                copy_file(c["src"], os.path.join(stage, "files", c["rel"]), stage_deadline)
+            except (OSError, TimeoutError) as e:
+                plan["copies"].remove(c)
+                plan["not_copied"].append(dict(c, reason=f"upload failed: {e}"))
+        if z.get("copy") and z.get("kept_bytes", 0) > cap:
+            sha, why = sha256_bounded(z["path"], stage_deadline)
+            z.update(copy=False, on_host=host, local_path=z["path"], local_bytes=fsize(z["path"]),
+                     sha256=sha, reason=(
+                         f"{fmt_bytes(z['kept_bytes'])} after trimming is over the "
+                         f"{fmt_bytes(cap)} limit for uploading from {host} "
+                         f"(RECORD_RUN_SSH_ZIP_CAP_MB); it stays on that machine at "
+                         f"{z['path']}, sha256 {sha or 'not computed (' + str(why) + ')'}"))
+        elif z.get("copy"):
+            dst = os.path.join(stage, "files", z["dest_rel"])
+            try:
                 if z.get("drop"):
-                    copy_zip_without(z["path"], dst, z["drop"], deadline)
+                    copy_zip_without(z["path"], dst, z["drop"], stage_deadline)
                 else:
-                    copy_file(z["path"], dst, deadline)
+                    copy_file(z["path"], dst, stage_deadline)
+                if z.get("manifest_src") and os.path.isfile(z["manifest_src"]):
+                    z["manifest_added"] = add_manifest(dst, z["manifest_name"], z["manifest_src"])
+            except (OSError, TimeoutError, ValueError, zipfile.BadZipFile, Stop) as e:
+                if os.path.exists(dst):
+                    os.remove(dst)
+                z.update(copy=False, on_host=host, local_path=z["path"],
+                         local_bytes=fsize(z["path"]), reason=f"copy failed: {e}")
         with open(os.path.join(stage, "bundle.json"), "w") as fh:
-            json.dump({"plan": plan, "uploaded_from": socket.gethostname(),
+            json.dump({"plan": plan, "uploaded_from": host,
                        "args": {k: getattr(a, k, None) for k in (
                            "status", "exit_code", "name", "file_cap_mb", "zip_cap_gb", "step")}},
                       fh, indent=2, default=str)
-        rd = f'"$HOME/{UPLOAD_DIR}/{os.path.basename(stage)}"'
-        for cmd in (["bash", exe, f'mkdir -p "$HOME/{UPLOAD_DIR}"'],
-                    ["bash", exe, "--put", stage, UPLOAD_DIR]):
-            p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                               timeout=max(5, deadline.left() - 2))
-            if p.returncode != 0:
-                return not_recorded("ssh_failed", f"upload to HIVE failed (exit {p.returncode}): "
-                                                  f"{(p.stderr or '').strip()[-200:]}",
-                                    route="ssh")
+        p = hive([f'mkdir -p "$HOME/{UPLOAD_DIR}"'], deadline.left() - 10)
+        if p.returncode == 0:
+            put_tried = True
+            p = hive(["--put", stage, UPLOAD_DIR], deadline.left() - 10)
+        if p.returncode != 0:
+            return not_recorded("ssh_failed", f"upload to HIVE failed (exit {p.returncode}): "
+                                              f"{(p.stderr or '').strip()[-200:]}", route="ssh")
         env = " ".join(f"{k}={shlex.quote(os.environ[k])}" for k in (
             "SKILL_RUNS_DIR", "SKILL_ISSUES_DIR") if os.environ.get(k))
         cmd = (f"{env + ' ' if env else ''}python3 {rd}/scripts/record_run.py merge --bundle {rd} "
-               f"--remote-hop --timeout {int(max(5, deadline.left() - 4))}"
-               f"{' --dry-run' if a.dry_run else ''}; rc=$?; rm -rf {rd}; exit $rc")
-        p = subprocess.run(["bash", exe, cmd], capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL, timeout=max(5, deadline.left()))
+               f"--remote-hop --timeout {int(max(5, deadline.left() - 12))}; rc=$?; "
+               f"rm -rf {rd}; exit $rc")
+        p = hive([cmd], deadline.left() - 6)
         if p.stderr.strip():
             sys.stderr.write(p.stderr)
         res = json_tail(p.stdout, "{")
@@ -2644,8 +2841,17 @@ def ship(plan, a, deadline):
         if res.get("path"):
             res["path"] = f"{user}@hive:{res['path']}"
         return res
+    except subprocess.TimeoutExpired as e:
+        return not_recorded("timeout", f"a HIVE call ran past its {e.timeout:.0f} s limit; the "
+                                       f"upload is removed on the way out", route="ssh")
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+        if put_tried:
+            try:                                   # best effort: never leave an upload behind
+                hive([f"rm -rf {rd}"], min(8, max(2, deadline.left() + 3)))
+            except (OSError, subprocess.SubprocessError):
+                say(f"could not remove the upload {rd} on HIVE; the next merge sweeps uploads "
+                    f"older than 24 h")
 
 
 # ------------------------------------------------------------------------------ commands
@@ -2717,9 +2923,26 @@ def do_event(event, a, deadline):
     return ship(plan, a, deadline)          # ssh: HIVE reads what is only on HIVE
 
 
+def sweep_uploads(bundle):
+    """Remove uploads an interrupted relay left behind (older than a day). Only in the relay's own
+    folder, and never the upload being merged now."""
+    up = os.path.dirname(os.path.abspath(bundle))
+    if os.path.basename(up) != os.path.basename(UPLOAD_DIR):
+        return
+    for d in glob.glob(os.path.join(up, "record_run_*")):
+        try:
+            if os.path.realpath(d) != os.path.realpath(bundle) and \
+                    time.time() - os.stat(d).st_mtime > UPLOAD_MAX_AGE_S:
+                shutil.rmtree(d, ignore_errors=True)
+                say(f"removed an old upload: {d}")
+        except OSError:
+            pass
+
+
 def do_merge(a, deadline):
     """The HIVE end of the SSH route: point the uploaded copies at the upload, read what is only
     readable here, and write."""
+    sweep_uploads(a.bundle)
     b = load_json(os.path.join(a.bundle, "bundle.json")) or {}
     plan = b.get("plan")
     if not plan:
@@ -2794,10 +3017,9 @@ def do_list(a, deadline):
                        if os.environ.get(k))
         try:
             with open(_FILE) as fh:        # the list needs nothing but this file on HIVE
-                p = subprocess.run(["bash", hive_exec_path(),
-                                    f"{env + ' ' if env else ''}python3 - list --json --remote-hop"],
-                                   stdin=fh, capture_output=True, text=True,
-                                   timeout=max(10, deadline.left()))
+                p = run_bounded(["bash", hive_exec_path(),
+                                 f"{env + ' ' if env else ''}python3 - list --json --remote-hop"],
+                                max(10, deadline.left()), stdin=fh)
         except (OSError, subprocess.SubprocessError) as e:
             print(f"record_run: could not list over SSH -- {e}")
             return
@@ -2937,7 +3159,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         raise
     except BaseException as e:      # noqa: BLE001 -- never fatal, by contract
-        reason = "timeout" if isinstance(e, (TimeoutError, Stop)) else "error"
+        reason = ("timeout" if isinstance(e, (TimeoutError, Stop, subprocess.TimeoutExpired))
+                  else "error")
         print(json.dumps(not_recorded(reason, f"{type(e).__name__}: {e}")))
     finally:
         if hasattr(signal, "SIGALRM"):
