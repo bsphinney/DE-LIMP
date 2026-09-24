@@ -125,7 +125,7 @@ counted, not traversed. There is a per-file cap and a per-record copy budget.
     SEARCH_LOG.md             the run, for people
     run_record.json           the same facts, machine-readable (schema_version 2)
     README.md  MANIFEST.txt   the session's own (after finalize)
-    <session>.zip             the session zip, without per-run .quant files, when under the cap
+    <session>.zip             the session zip, without .quant or the predicted library, under the cap
     input/                    conditions.csv, <fasta>.meta.json, params.cfg + .rationale.json,
                               workflow.manifest.json, raw_files.txt -- NEVER raw data or the FASTA
     output/                   *.docx (the report of record + Methods), methods.md,
@@ -216,7 +216,7 @@ The notes are gathered from what the skill already produced:
   identical-to-target contaminants were removed;
 - `AUDIT.json` WARN/FAIL findings;
 - `SAMPLE_QUALITY.json` flags (a flag confounded with a group is CRITICAL);
-- `session_zip_contains_quant`;
+- `session_zip_contains_quant` and `session_zip_contains_predicted_speclib`;
 - every `report_issue.sh` file for the session;
 - **"CoreOmics submission: not recorded"**, when it is not.
 
@@ -357,13 +357,18 @@ A real 15-file Lumos chain session holds 2.44 GB under `output/search`:
 | `step1.predicted.speclib` | 0.69 GB |
 | XIC | 0.23 GB |
 
-`.quant` files are DIA-NN intermediates. The analysis is reproduced from `report.parquet` and the
-parameters, not from them, so `session.py finalize` is being changed to leave `*.quant` and
-`quant*/` out of the zip (it will record the count and path in `zip_excluded`). Whatever a zip
-holds, the registry copies it **without** its `.quant` members. It moves the kept
-members' compressed bytes as they are, with no recompression, so the copy is disk I/O rather
-than CPU on a login node, and it checks the copy before using it. It also records a
-`session_zip_contains_quant` finding.
+`.quant` files are DIA-NN intermediates. `step1.predicted.speclib` is predicted from the FASTA,
+so re-running the search regenerates it. The analysis is reproduced from `report.parquet` and the
+parameters, not from either of them. `session.py finalize` (integration branch) now leaves
+`*.quant`, `quant*/` and `*.predicted.speclib` out of the zip, and records what it left out in
+`zip_excluded`.
+
+Zips made before that change still hold these files, so the registry copies every zip **without**
+its `.quant` and `*.predicted.speclib` members. The empirical `*.skyline.speclib` is small and is
+kept. The copy moves the kept members' compressed bytes as they are, with no recompression, so it
+is disk I/O rather than CPU on a login node, and it is checked before it is used. It also records
+the `session_zip_contains_quant` and `session_zip_contains_predicted_speclib` findings, which
+appear as Data Quality Notes.
 
 ## The directory README
 

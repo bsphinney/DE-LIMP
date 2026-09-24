@@ -213,6 +213,8 @@ def make_session(root, out=None, quant_in_zip=True, zip_secret=False, big=0, ext
             for r in RUNS:
                 z.writestr(f"s/output/search/quant/{r}.quant", os.urandom(4096))
             z.writestr("s/output/search/quant_step2_orig/x.quant", os.urandom(512))
+            z.writestr("s/output/search/step1.predicted.speclib", os.urandom(6000))
+            z.writestr("s/output/search/report-lib.parquet.skyline.speclib", "kept\n")
         if zip_secret:
             z.writestr("s/input/hive.env", "HIVE_USER=x\n")
     return sess, zpath
@@ -754,22 +756,26 @@ class WhatIsCopied(Base):
         self.assertIn("cap", self.read(folder))
         self.assertIn("not copied", self.master())
 
-    def test_quant_is_never_copied_and_is_reported(self):
+    def test_quant_and_predicted_library_are_never_copied_and_are_reported(self):
         out = make_search(self.d)
         sess, zpath = make_session(self.d, quant_in_zip=True)
         res = self.run_it("analysis-done", "--session", sess, "--out", out)
-        self.assertEqual(res["findings"], ["session_zip_contains_quant"])
+        self.assertEqual(res["findings"], ["session_zip_contains_quant",
+                                           "session_zip_contains_predicted_speclib"])
         folder = self.only_folder()
         self.assertFalse([f for f in self.all_files(folder) if f.endswith(".quant")])
         with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z, \
                 zipfile.ZipFile(zpath) as orig:
             self.assertIsNone(z.testzip())            # every kept member's CRC checks out
-            self.assertEqual(sorted(z.namelist()),
-                             sorted(n for n in orig.namelist() if not n.endswith(".quant")))
+            self.assertEqual(sorted(z.namelist()), sorted(
+                n for n in orig.namelist() if not n.endswith((".quant", ".predicted.speclib"))))
+            self.assertIn("s/output/search/report-lib.parquet.skyline.speclib", z.namelist())
             for n in z.namelist():
                 self.assertEqual(z.read(n), orig.read(n))
-        self.assertIn("4 per-run .quant files",
-                      self.read(folder, "run_record.json")["findings"][0]["detail"])
+        det = [f["detail"] for f in self.read(folder, "run_record.json")["findings"]]
+        self.assertIn("4 per-run .quant files", det[0])
+        self.assertIn("step1.predicted.speclib", det[1])
+        self.assertIn("predicted spectral library", self.read(folder))    # a Data Quality Note
 
     def test_secrets_are_never_copied(self):
         out = make_search(self.d, secrets=True)
