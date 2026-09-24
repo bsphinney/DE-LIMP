@@ -457,9 +457,10 @@ under `mass_accuracy_documented` (MS1 7 ppm at 120k, 10 at 60k).
 `orbitrap_untabled` only). With no resolution neither level has a tier, so both would be
 measured — and a measured MS1 is the one thing the evidence below says not to pin: at 120k it
 came out at 4.2 ppm and every DIA-NN pass then warned it "deviates significantly from the value
-recommended (7 ppm)". DIA-NN reads the run's resolution itself and this skill does not. This is
-the default Thermo path (a `.raw` carries no resolution here, and a Thermo mzML usually has no
-`MS:1000800`), so it falls to `auto` — both flags omitted, DIA-NN calibrates per run — and the
+recommended (7 ppm)". Since 2.5.1 step 2 reads a `.raw`'s resolution from its scan trailer
+(`thermo_resolution.py`), so this is no longer the default Thermo path: it applies when that read
+fails (the file is then in `orbitrap_resolution_unknown`) or for a Thermo mzML with no
+`MS:1000800`. Such a run falls to `auto` — both flags omitted, DIA-NN calibrates per run — and the
 chain declines it as `mass_acc_unset` until someone pins a value or passes
 `--ms1-resolution`/`--ms2-resolution`, which reclassifies the run and gets the measurement with a
 documented MS1.

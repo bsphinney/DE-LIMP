@@ -67,8 +67,11 @@ class StagedMeta(unittest.TestCase):
         self.mrs = os.path.join(self.root, "MRS")
         os.makedirs(self.mrs)
         self.cont = os.path.join(self.root, "cont.fasta")
+        # Sequences no synthetic target contains: a contaminant that IS a target protein is
+        # dropped (test_fetch_fasta_contaminant_overlap.py), which is not what these test.
         with open(self.cont, "w") as fh:
-            fh.write(">Cont_P02768|ALBU_HUMAN\nPEPTIDEK\n>Cont_P00761|TRYP_PIG\nPEPTIDER\n")
+            fh.write(">Cont_P02768|ALBU_HUMAN\nMKWVTFISLLFLFSSAYS\n"
+                     ">Cont_P00761|TRYP_PIG\nFPTDDDDKIVGGYTCAANSIPYQVSLNSG\n")
 
     def tearDown(self):
         self._td.cleanup()

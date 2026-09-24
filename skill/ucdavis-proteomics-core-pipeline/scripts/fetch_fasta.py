@@ -61,7 +61,7 @@ CONTAMINANTS
 Emits JSON on stdout and writes a `<out>.meta.json` sidecar with the same content
 plus checksums, for the reproducibility bundle.
 """
-import sys, os, re, json, argparse, glob, gzip, shutil, hashlib, zipfile
+import sys, os, re, json, argparse, glob, gzip, shutil, hashlib, zipfile, bisect
 import urllib.request, urllib.error, urllib.parse, http.client
 from datetime import datetime, timezone
 
@@ -721,6 +721,384 @@ def resolve_contaminants(set_name, explicit_path, use_hive, workdir):
 
 
 # --------------------------------------------------------------------------
+# contaminant entries that ARE target proteins
+#
+# Why (HIVE, 2026-09-24): the Universal contaminant set carries sequences IDENTICAL to
+# target-proteome entries -- human keratins/KRTAPs/FLG, and bovine ACTB/EEF1A1/TUBB/ACTS
+# that are residue-for-residue the human (and mouse) proteins. In a real DIA-NN 2.7.0
+# HeLa search, ACTB, EEF1A1 and KRT8 came out ONLY as Cont_P60712 / Cont_P68103 /
+# Cont_P05787 protein groups, and --cont-quant-exclude Cont_ then kept them out of
+# quantification and normalisation: abundant real proteins silently lost. So a
+# contaminant entry that adds no sequence of its own is removed before the database is
+# written, and every removal is recorded in the sidecar.
+# --------------------------------------------------------------------------
+# DIA-NN's default --min-pep-len. A contaminant shorter than the shortest searchable
+# peptide yields no precursors at all, so a substring test below it proves nothing.
+MIN_CONTAINED_LEN = 7
+CONTAMINANT_TARGET_RULE = (f"identical sequence, or an exact substring (>= {MIN_CONTAINED_LEN} "
+                           f"aa) of a target entry; I and L compared as distinct residues")
+KEEP_TARGET_CONTAMINANTS_RULE = "disabled (--keep-target-contaminants)"
+# Measured 2026-09-24 against the Universal set (MRS/kg_nov, 381 entries), default --enzyme:
+# contaminant entries identical to/contained in a target entry, per proteome taxid (human
+# UP000005640, mouse UP000000589, cow UP000009136, pig UP000008227, S. aureus NCTC 8325
+# UP000008816). Used ONLY to size the warning for a sidecar written before the overlap check
+# whose FASTA can no longer be re-read -- never as a list of which proteins.
+MEASURED_TARGET_OVERLAP = {9606: 153, 10090: 31, 9913: 145, 9823: 9, 93061: 2}
+_UNIPROT_HEADER = re.compile(r"^>(?:sp|tr)\|([^|\s]+)\|(\S*)")
+_GENE_NAME = re.compile(r"\bGN=(\S+)")
+
+# The ONE exception to the rule above: the digestion enzyme(s) USED in this search are
+# reagents we added, so their autolysis peptides must stay Cont_ and out of normalisation
+# even when the enzyme is identical to a target protein (porcine trypsin on a pig search).
+# Keyed by the bare UniProt accession of the entry in the contaminant set -> enzyme family
+# (the --enzyme vocabulary); every entry was verified present in the Universal set
+# (MRS/kg_nov, Frankenfield 2022) on 2026-09-24. Deliberately NOT here: LYSC_CHICK P00698
+# (lysozyme, not Lys-C), TRY2_BOVIN Q29463 (anionic trypsin, not the reagent form),
+# Protease IV Q1WEI2 (not a proteomics reagent), pepsin B/C fragments, and the serum
+# proteases/inhibitors -- sample-derived, so they always follow the rule.
+# Only families named in --enzyme are kept. A protease that was NOT used follows the rule
+# like any other entry: Glu-C Q2FZL2 IS S. aureus NCTC 8325's own SspA (UP000008816), and
+# keeping it on a trypsin-digested S. aureus search would drop a real protein from quant.
+DIGESTION_ENZYMES = {
+    "P00761": "trypsin",        # porcine trypsin -- the Core's reagent
+    "P00760": "trypsin",        # bovine cationic trypsin
+    "P15636": "lysc",           # Achromobacter lyticus protease I
+    "Q7M135": "lysc",           # Lysobacter enzymogenes lysyl endopeptidase
+    "P0C1U8": "gluc",           # S. aureus V8 protease
+    "Q2FZL2": "gluc",           # S. aureus NCTC 8325 V8 protease (= that strain's SspA)
+    "P00766": "chymotrypsin",   # bovine chymotrypsinogen A
+    "P00767": "chymotrypsin",   # bovine chymotrypsinogen B
+    "Q9R4J4": "aspn",           # Pseudomonas fragi Asp-N
+    "P09870": "argc",           # clostripain
+    "P81054": "lysn",           # Grifola frondosa Lys-N
+    "P00791": "pepsin",         # porcine pepsin A
+}
+ENZYME_FAMILIES = tuple(sorted(set(DIGESTION_ENZYMES.values())))
+# The Core's usual digest is a trypsin/Lys-C mix, and estimate_params.py searches
+# trypsin/P (--cut K*,R*), so an unchanged command keeps exactly those reagents.
+DEFAULT_ENZYMES = "trypsin,lysc"
+
+
+def parse_enzymes(text):
+    """'trypsin,Lys-C' / 'Trypsin/Lys-C' / 'Trypsin/P' -> ('lysc', 'trypsin'). Unknown names
+    are an error, never ignored: a misspelt enzyme would silently drop its own autolysis
+    entries into quantification."""
+    # A trailing '/P' ('Trypsin/P', 'Lys-C/P', 'Asp-N/P') is the search-engine suffix for
+    # "ignore the proline rule", not a second enzyme -- strip it before '/' is read as a
+    # separator. The word boundary keeps 'trypsin/pepsin' as two enzymes.
+    text = re.sub(r"\s*/\s*p\b", "", text or "", flags=re.I)
+    names = [re.sub(r"[\s_-]", "", t).lower() for t in re.split(r"[,/]", text) if t.strip()]
+    bad = [n for n in names if n not in ENZYME_FAMILIES]
+    if not names or bad:
+        raise argparse.ArgumentTypeError(
+            f"unknown enzyme {', '.join(repr(b) for b in bad) or '(none given)'}; choose from "
+            f"{', '.join(ENZYME_FAMILIES)} (comma-separated, e.g. trypsin,lysc)")
+    return tuple(sorted(set(names)))
+
+
+def _digestion_enzyme(acc):
+    """Enzyme family if this contaminant accession (Cont_-tagged or bare) is listed, else None."""
+    bare = acc[len(CONT_TAG):] if acc.startswith(CONT_TAG) else acc
+    return DIGESTION_ENZYMES.get(bare.split("-")[0].upper())
+
+
+def _fasta_records(text):
+    """-> [(header_line, [sequence lines])], line endings kept so kept records are
+    written back byte-for-byte."""
+    recs, header, lines = [], None, []
+    for ln in text.splitlines(keepends=True):
+        if ln.startswith(">"):
+            if header is not None:
+                recs.append((header, lines))
+            header, lines = ln, []
+        elif header is not None:
+            lines.append(ln)
+    if header is not None:
+        recs.append((header, lines))
+    return recs
+
+
+def _record_seq(lines):
+    return "".join(ln.strip() for ln in lines).upper().rstrip("*")
+
+
+def _header_ids(header):
+    """-> (accession, entry name, gene). UniProt '>sp|P60709|ACTB_HUMAN ... GN=ACTB', else
+    the first token (NCBI '>XP_012345.1 keratin ...'), which is what DIA-NN reports."""
+    m = _UNIPROT_HEADER.match(header)
+    if m:
+        acc, entry = m.group(1), m.group(2)
+    else:
+        parts = header[1:].split(None, 1)
+        # '>Cont_P02768|ALBU_HUMAN' (no sp| prefix): accession | entry name.
+        acc, _, entry = (parts[0] if parts else "").partition("|")
+    g = _GENE_NAME.search(header)
+    return acc, entry, (g.group(1) if g else "")
+
+
+def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINED_LEN):
+    """-> [(index into contam_recs, record)] for every contaminant entry whose sequence is
+    IDENTICAL to a target entry, or an exact substring of one.
+
+    Why a substring is dropped too: every peptide it can yield is then also in the target,
+    except possibly its two end peptides -- and those are non-tryptic fragments of the
+    target protein (the contaminant starts/stops mid-sequence), not evidence of a separate
+    contaminant protein.
+
+    Why I and L stay distinct: the test proves redundancy at the sequence level, which is
+    what DIA-NN's protein inference sees. An I/L-only difference is a different string to
+    DIA-NN, so that entry's I/L peptides still read as unique to it; equating them would
+    remove an entry DIA-NN does not treat as redundant. Measured 2026-09-24 against the
+    Core's Universal set: exact matching finds 153 human (UP000005640, 152 identical + 1
+    substring) and 31 mouse (UP000000589) entries, and mapping I->L adds none to either.
+
+    Target entries are only read, never changed. Cont_-tagged records among the targets
+    (a database that already carries contaminants) are not targets.
+    """
+    seqs, info = [], []
+    for header, lines in target_recs:
+        if CONT_TAG in header:
+            continue
+        s = _record_seq(lines)
+        if s:
+            seqs.append(s)
+            info.append(_header_ids(header))
+    by_seq = {}
+    for i, s in enumerate(seqs):
+        by_seq.setdefault(s, []).append(i)
+    # One string, one find() per contaminant: '\n' never occurs in a sequence, so a hit
+    # can never span two entries, and bisect maps a hit offset back to its entry.
+    joined = "\n".join(seqs)
+    starts, pos = [], 0
+    for s in seqs:
+        starts.append(pos)
+        pos += len(s) + 1
+
+    out = []
+    for ci, (header, lines) in enumerate(contam_recs):
+        s = _record_seq(lines)
+        if not s:
+            continue
+        if s in by_seq:
+            hits, reason = by_seq[s], "identical"
+        elif len(s) >= min_len:
+            hits, at = [], joined.find(s)
+            while at >= 0:
+                ti = bisect.bisect_right(starts, at) - 1
+                if not hits or hits[-1] != ti:
+                    hits.append(ti)
+                at = joined.find(s, at + 1)
+            reason = "substring"
+        else:
+            hits = []
+        if not hits:
+            continue
+        c_acc, c_entry, c_gene = _header_ids(header)
+        t_acc, t_entry, t_gene = info[hits[0]]
+        out.append((ci, {
+            "cont_acc": c_acc, "cont_entry": c_entry, "cont_gene": c_gene,
+            "target_acc": t_acc, "target_entry": t_entry,
+            # The TARGET's gene: what the protein group is now called in the results, so it
+            # is the name the auditors match on.
+            "gene": t_gene,
+            "reason": reason,
+            "n_targets": len(hits),
+            # Capped: in a full/isoform database one keratin can sit inside many entries.
+            "target_accs": [info[t][0] for t in hits[:10]],
+        }))
+    return out
+
+
+def _split_enzymes(hits, enzymes_used):
+    """(index, record) matches -> (to drop, digestion enzymes kept despite the match). Only
+    an enzyme whose family is in `enzymes_used` is kept; any other protease is dropped like
+    every other target-identical entry (a dropped one carries `enzyme_not_used`)."""
+    drop, enzymes = [], []
+    for ci, rec in hits:
+        family = _digestion_enzyme(rec["cont_acc"])
+        if family and family in enzymes_used:
+            enzymes.append((ci, {**rec, "match": rec["reason"], "enzyme": family,
+                                 "reason": f"digestion enzyme used in this search ({family})"}))
+        else:
+            drop.append((ci, {**rec, "enzyme_not_used": family} if family else rec))
+    return drop, enzymes
+
+
+def drop_target_contaminants(contam_text, target_text, enzymes_used=None):
+    """-> (contam_text without the entries that are target proteins, [dropped records],
+    [digestion-enzyme records kept despite matching a target -- see DIGESTION_ENZYMES]).
+    `enzymes_used` defaults to DEFAULT_ENZYMES."""
+    used = enzymes_used if enzymes_used is not None else parse_enzymes(DEFAULT_ENZYMES)
+    recs = _fasta_records(contam_text)
+    hits, enzymes = _split_enzymes(
+        contaminants_matching_targets(recs, _fasta_records(target_text)), used)
+    if not hits:
+        return contam_text, [], [rec for _, rec in enzymes]
+    drop = {ci for ci, _ in hits}
+    kept = "".join(h + "".join(lines) for i, (h, lines) in enumerate(recs) if i not in drop)
+    return kept, [rec for _, rec in hits], [rec for _, rec in enzymes]
+
+
+def _enzyme_advice(used):
+    return (f"--enzyme was {','.join(used)}; if the digest used a different enzyme, re-run "
+            f"fetch with --enzyme <the enzymes actually used> (choices: "
+            f"{', '.join(ENZYME_FAMILIES)})")
+
+
+def _enzyme_note(enzymes, organism, used):
+    return (f"kept {len(enzymes)} digestion-enzyme contaminant entr"
+            f"{'y' if len(enzymes) == 1 else 'ies'} although identical to (or contained in) a "
+            f"{organism or 'target'} protein: "
+            + "; ".join(f"{r['cont_acc']} ({r['enzyme']}) = {r['target_acc']}"
+                        f"{' ' + r['gene'] if r['gene'] else ''}" for r in enzymes)
+            + f". The enzyme was used in this search, so its autolysis peptides stay "
+              f"{CONT_TAG} and out of normalisation -- which also means the sample's OWN copy of "
+              f"that protein is not quantified. {_enzyme_advice(used)}. Recorded under "
+              f"contaminants_kept_despite_target_match.")
+
+
+def _pair_list(records, limit=12):
+    """'Cont_P60712 (ACTB_BOVIN) = P60709 ACTB; ...' for a warning line. Non-keratins first:
+    the file order leads with a dozen KRTAPs and buries ACTB/EEF1A1, the surprising ones."""
+    records = sorted(records, key=lambda r: is_keratin_gene(r["gene"]))
+    shown = [f"{r['cont_acc']} ({r['cont_entry'] or r['cont_gene'] or '?'}) "
+             f"{'=' if r['reason'] == 'identical' else 'in'} {r['target_acc']}"
+             f"{' ' + r['gene'] if r['gene'] else ''}" for r in records[:limit]]
+    more = f"; +{len(records) - limit} more" if len(records) > limit else ""
+    return "; ".join(shown) + more
+
+
+def is_keratin_gene(gene):
+    return (gene or "").upper().startswith(("KRT", "KRTAP"))
+
+
+def target_contaminants(meta, keratin_sample=False):
+    """The ONE definition of "common contaminants that are also <organism> proteins" for
+    the auditors (audit_results.py, sample_quality.py). The source is the sidecar this
+    script wrote; nothing downstream keeps its own copy of the list.
+
+    -> {"organism", "dropped": [...], "kept_as_contaminant": [...], "genes", "accessions"}.
+    `dropped` entries were removed from the contaminant set, so those proteins are
+    QUANTIFIED under their own accession -- possible handling contamination (keratins),
+    kept in quantification. `kept_as_contaminant` entries sat inside a database used as-is,
+    so those proteins are reported only as Cont_ groups and EXCLUDED from quantification.
+    `genes`/`accessions` (upper-case) cover the dropped list only. For a keratin-matrix
+    sample (nail/hair/wool/skin/feather) keratin is the ANALYTE, so keratin records leave
+    `dropped` -- they are not possible contamination there. `kept_as_contaminant` keeps
+    them: an analyte excluded from quant is a loss either way.
+
+    `legacy_note` is set for a sidecar written BEFORE the overlap check (no
+    contaminant_target_rule, contaminants present) -- exactly the databases that lost ACTB,
+    EEF1A1 and KRT8. Those carry no list, so it is re-found in the FASTA the sidecar
+    describes (see _legacy_overlap) and returned as `kept_as_contaminant`.
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    dropped = [r for r in (meta.get("contaminants_dropped_as_target") or [])
+               if isinstance(r, dict)]
+    kept = [r for r in (meta.get("contaminants_identical_to_target_kept") or [])
+            if isinstance(r, dict)]
+    legacy_note = None
+    if _is_legacy_sidecar(meta):
+        kept, legacy_note = _legacy_overlap(meta)
+    if keratin_sample:
+        dropped = [r for r in dropped if not is_keratin_gene(r.get("gene"))]
+    genes = {r["gene"].upper() for r in dropped if r.get("gene")}
+    accs = {a.upper() for r in dropped for a in (r.get("target_accs") or [r.get("target_acc")])
+            if a}
+    return {"organism": meta.get("organism") or "", "dropped": dropped,
+            "kept_as_contaminant": kept, "genes": genes, "accessions": accs,
+            "legacy_note": legacy_note}
+
+
+def seen_only_as_cont(kept, groups):
+    """Matrix evidence for `kept_as_contaminant`: of [(protein-group accessions, label)], the
+    groups made up ONLY of Cont_ accessions that are target proteins -> ['ACTB (Cont_P60712)'].
+    A group that also names the real accession (Cont_P13645;P13645) is not lost."""
+    by = {(r.get("cont_acc") or "").upper(): r for r in kept if r.get("cont_acc")}
+    out = set()
+    for toks, label in groups:
+        toks = {t.upper() for t in toks if t}
+        hit = sorted(toks & by.keys())
+        if hit and all(t.startswith(CONT_TAG.upper()) for t in toks):
+            r = by[hit[0]]
+            out.add(f"{r.get('gene') or r.get('target_acc') or label} ({r['cont_acc']})")
+    return sorted(out)
+
+
+def lost_to_contaminants_message(tc, seen=()):
+    """The one wording, for both auditors, of "real <organism> proteins that exist in the
+    search database only as Cont_ entries". None when there is nothing to say."""
+    kept, org = tc["kept_as_contaminant"], tc["organism"] or "target-organism"
+    if not kept and not tc.get("legacy_note"):
+        return None
+    msg = tc.get("legacy_note") or (
+        f"{len(kept)} {org} protein(s) are in the search database only as identical "
+        f"{CONT_TAG} contaminant entries (the FASTA was used as-is, or built with "
+        f"--keep-target-contaminants), so they are MISSING under their own accessions: DIA-NN "
+        f"reports them only as {CONT_TAG} groups, kept out of quantification and "
+        f"normalisation. Rebuild the FASTA with fetch_fasta.py (no --path) and re-search.")
+    names = sorted({r.get("gene") or r.get("target_acc") or "?" for r in kept})
+    if names:
+        msg += f" Affected: {', '.join(names[:12])}{', ...' if len(names) > 12 else ''}."
+    if seen:
+        msg += (f" In these results they appear only as {CONT_TAG} groups: "
+                f"{', '.join(seen[:12])}{', ...' if len(seen) > 12 else ''}.")
+    return msg
+
+
+def _is_legacy_sidecar(meta):
+    """Written before the overlap check, and the database does hold contaminants."""
+    if "contaminant_target_rule" in meta:
+        return False
+    return bool(meta.get("n_contaminants_appended") or meta.get("n_contaminants_already_present")
+                or (meta.get("contaminant_set") or "none") != "none")
+
+
+def _legacy_overlap(meta):
+    """-> ([records], note) for a pre-check sidecar: the pairs re-found in the FASTA it
+    describes when that file is still there AND still the one searched (sha256), else an
+    estimate from MEASURED_TARGET_OVERLAP. note is None when the re-check finds nothing."""
+    org = meta.get("organism") or "target-organism"
+    head = ("This search database was built before fetch_fasta.py checked contaminant entries "
+            "against the target proteome")
+    tail = " Rebuild the FASTA with the current fetch_fasta.py and re-search."
+    path, sha = meta.get("fasta"), meta.get("sha256")
+    why, recs = None, None
+    if not path or not os.path.isfile(path):
+        why = f"the searched FASTA ({path or 'path not recorded'}) is no longer readable"
+    else:
+        # Caught HERE, and named: left to propagate, an unreadable FASTA reached the auditors'
+        # sidecar handler and was reported as "could not read <meta.json>" -- the wrong file.
+        try:
+            if sha and _sha256(path) != sha:
+                why = f"{path} has changed since the search (its sha256 no longer matches)"
+            else:
+                recs = _fasta_records(_read_fasta_text(path))
+        except OSError as e:
+            why = f"the searched FASTA {path} could not be read ({e})"
+    if why is None:
+        used = meta.get("digestion_enzymes_used") or parse_enzymes(DEFAULT_ENZYMES)
+        overlap, _enz = _split_enzymes(contaminants_matching_targets(
+            [r for r in recs if CONT_TAG in r[0]], recs), used)
+        kept = [rec for _, rec in overlap]
+        if not kept:
+            return [], None
+        return kept, (f"{head}: re-checked in {path} (sha256 matches the sidecar), "
+                      f"{len(kept)} of its {CONT_TAG} entries are {org} proteins, so DIA-NN "
+                      f"reported those proteins only as {CONT_TAG} groups and excluded them "
+                      f"from quantification.{tail}")
+    try:
+        est = MEASURED_TARGET_OVERLAP.get(int(meta.get("taxid") or 0))
+    except (TypeError, ValueError):
+        est = None
+    size = (f"~{est} target-identical contaminant entries for this organism with the Universal "
+            f"set (measured 2026-09-24)" if est else
+            "an unknown number of target-identical contaminant entries")
+    return [], (f"{head}, and {why}. Expect {size}: those {org} proteins are probably missing "
+                f"from quantification (reported only as {CONT_TAG} groups).{tail}")
+
+
+# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 # NCBI Datasets v2 -- the fallback when UniProt has no reference proteome.
 #
@@ -981,6 +1359,32 @@ def cmd_fetch(a):
         warnings.append(msg)
         a.contaminants = "none"
 
+    # A database used as-is cannot have its contaminant entries removed, so the
+    # target-identical ones found there stay -- and those real proteins will be reported
+    # only as Cont_ groups and kept out of quant. Find them and say so, loudly.
+    # The enzymes this search used: only these stay Cont_ despite matching a target.
+    enzymes_used = getattr(a, "enzyme", None) or parse_enzymes(DEFAULT_ENZYMES)
+    overlap_kept, enzymes_kept = [], []
+    if n_cont_in_base:
+        base_recs = _fasta_records(base_text)
+        # A digestion enzyme staying Cont_ is correct here too, so it is not a lost protein.
+        overlap, enz = _split_enzymes(contaminants_matching_targets(
+            [r for r in base_recs if CONT_TAG in r[0]], base_recs), enzymes_used)
+        overlap_kept, enzymes_kept = [rec for _, rec in overlap], [rec for _, rec in enz]
+        if overlap_kept:
+            msg = (f"the supplied database (source={source}) already contains "
+                   f"{len(overlap_kept)} '{CONT_TAG}' contaminant entries whose sequence is a "
+                   f"{meta.get('organism') or 'target'} protein: {_pair_list(overlap_kept)}. "
+                   f"They cannot be removed from a database used as-is, so DIA-NN will report "
+                   f"those proteins ONLY as {CONT_TAG} groups and --cont-quant-exclude "
+                   f"{CONT_TAG} will drop them from quantification and normalisation (ACTB, "
+                   f"EEF1A1 and KRT8 vanished this way from a HeLa search, 2026-09-24). "
+                   f"Rebuild the database instead: fetch --proteome <UPID> without --path, "
+                   f"with --contaminants universal. Full list: "
+                   f"contaminants_identical_to_target_kept in the sidecar.")
+            _warn(msg)
+            warnings.append(msg)
+
     # contaminants
     n_contam, contam_text, contam_source = 0, "", None
     if a.contaminants != "none":
@@ -998,6 +1402,67 @@ def cmd_fetch(a):
                          f"re-run with --contaminants none (recorded as a deliberate\n"
                          f"  choice) / --allow-missing-contaminants to proceed anyway.")
             msg = f"could not fetch contaminants ({e}); proceeding WITHOUT them"
+            _warn(msg)
+            warnings.append(msg)
+
+    # Remove contaminant entries that ARE target proteins (see drop_target_contaminants).
+    # Applies to every proteome source above: UniProt, --hive, NCBI and --path alike.
+    n_contam_in_set, dropped, dropped_note = n_contam, [], None
+    keep_all = getattr(a, "keep_target_contaminants", False)
+    if contam_text and keep_all:
+        # Replaying a database built before the drop existed (provenance.py passes this for
+        # an old sidecar): append the set verbatim -- but still FIND the pairs and record
+        # them, so the auditors can name the real proteins that sit only as Cont_.
+        overlap, enz = _split_enzymes(contaminants_matching_targets(
+            _fasta_records(contam_text), _fasta_records(base_text)), enzymes_used)
+        overlap_kept += [rec for _, rec in overlap]
+        enzymes_kept += [rec for _, rec in enz]
+        if overlap:
+            msg = (f"--keep-target-contaminants: kept {len(overlap)} contaminant entries whose "
+                   f"sequence is a {meta.get('organism') or 'target'} protein: "
+                   f"{_pair_list([rec for _, rec in overlap])}. DIA-NN will report those "
+                   f"proteins ONLY as {CONT_TAG} groups and --cont-quant-exclude {CONT_TAG} "
+                   f"drops them from quantification and normalisation. This reproduces a "
+                   f"database built before fetch_fasta.py removed them; omit "
+                   f"--keep-target-contaminants for the corrected database. Full list: "
+                   f"contaminants_identical_to_target_kept in the sidecar.")
+            _warn(msg)
+            warnings.append(msg)
+    elif contam_text:
+        contam_text, dropped, enz = drop_target_contaminants(contam_text, base_text,
+                                                            enzymes_used)
+        enzymes_kept += enz
+        n_contam = _count(contam_text)
+    if enzymes_kept:
+        msg = _enzyme_note(enzymes_kept, meta.get("organism"), enzymes_used)
+        _warn(msg)
+        warnings.append(msg)
+    if dropped:
+        n_ident = sum(1 for r in dropped if r["reason"] == "identical")
+        org = meta.get("organism") or "target"
+        dropped_note = (
+            f"removed {len(dropped)} of the {n_contam_in_set} '{a.contaminants}' contaminant "
+            f"entries because their sequence is a {org} protein ({n_ident} identical, "
+            f"{len(dropped) - n_ident} contained in one): {_pair_list(dropped)}. Left in, "
+            f"DIA-NN reports those proteins only as {CONT_TAG} groups and "
+            f"--cont-quant-exclude {CONT_TAG} drops them from quantification. They are now "
+            f"quantified as {org} proteins -- and so count toward normalisation. Skin/hair "
+            f"keratins among them are usually handling contamination: audit_results.py and "
+            f"sample_quality.py flag them from contaminants_dropped_as_target in this sidecar.")
+        _warn(dropped_note)
+        warnings.append(dropped_note)
+        # A protease that matched but was not in --enzyme was dropped like any sample protein
+        # (S. aureus SspA = Glu-C Q2FZL2). Right for a trypsin digest; wrong if it WAS the
+        # digest -- its autolysis would then be quantified. Its own warning, not part of the
+        # drop note, so the methods draft still lists it as something to confirm.
+        unused = sorted({f"{r['cont_acc']} ({r['enzyme_not_used']})" for r in dropped
+                         if r.get("enzyme_not_used")})
+        if unused:
+            msg = (f"{len(unused)} digestion-enzyme contaminant entr"
+                   f"{'y was' if len(unused) == 1 else 'ies were'} dropped as {org} proteins "
+                   f"because that enzyme is not in --enzyme: {', '.join(unused)}. "
+                   f"{_enzyme_advice(enzymes_used)} -- otherwise that enzyme's autolysis "
+                   f"peptides are quantified as the {org} protein.")
             _warn(msg)
             warnings.append(msg)
 
@@ -1055,7 +1520,26 @@ def cmd_fetch(a):
         # database still HAS them -- report them so the counts and the DIA-NN flag stay
         # truthful instead of claiming a contaminant-free database.
         "n_proteome": n_base - n_cont_in_base,
+        # What was actually written: the set's entries minus those dropped as target
+        # proteins. n_contaminants_in_set is the set as fetched.
         "n_contaminants_appended": n_contam,
+        "n_contaminants_in_set": n_contam_in_set,
+        "n_contaminants_dropped_as_target": len(dropped),
+        # [{cont_acc, cont_entry, cont_gene, target_acc, target_entry, gene, reason, ...}] --
+        # the source the auditors read via target_contaminants(); never copied elsewhere.
+        "contaminants_dropped_as_target": dropped,
+        "contaminants_dropped_note": dropped_note,
+        # Same record shape, for a database used as-is: found, NOT removable.
+        "contaminants_identical_to_target_kept": overlap_kept,
+        # Digestion enzymes (DIGESTION_ENZYMES) that matched a target but stay Cont_ on
+        # purpose: reason "digestion enzyme (added reagent)", match identical|substring.
+        "contaminants_kept_despite_target_match": enzymes_kept,
+        # What --enzyme said (default trypsin,lysc): decides which protease entries stay Cont_.
+        "digestion_enzymes_used": list(enzymes_used),
+        # Its PRESENCE marks a sidecar written with the overlap check; provenance.py replays a
+        # sidecar without it (or with the rule disabled) using --keep-target-contaminants.
+        "contaminant_target_rule": (KEEP_TARGET_CONTAMINANTS_RULE if keep_all
+                                    else CONTAMINANT_TARGET_RULE),
         "n_contaminants_already_present": n_cont_in_base,
         "contaminant_set": (a.contaminants if n_contam
                             else ("already_in_supplied_database" if n_cont_in_base else "none")),
@@ -1120,6 +1604,15 @@ def main():
                    help="organism name to record alongside --ncbi-accession")
     f.add_argument("--ncbi-taxid", type=int, default=0,
                    help="taxid to record alongside --ncbi-accession")
+    f.add_argument("--enzyme", type=parse_enzymes, default=DEFAULT_ENZYMES,
+                   help="digestion enzyme(s) used on these samples, comma-separated, from: "
+                        + ", ".join(ENZYME_FAMILIES) + f". Default {DEFAULT_ENZYMES} (the Core's "
+                        "trypsin/Lys-C mix). Only these enzymes' contaminant entries stay Cont_ "
+                        "when they match a target protein; any other protease is dropped then.")
+    f.add_argument("--keep-target-contaminants", action="store_true",
+                   help="do NOT remove contaminant entries identical to a target protein. Only "
+                        "for replaying a database built before that check (provenance.py adds "
+                        "it for an old sidecar); those proteins then stay Cont_ and out of quant")
     f.add_argument("--hive", action="store_true",
                    help="prefer pre-staged HIVE FASTAs (set when env is uc_davis_hive)")
     f.add_argument("--out", required=True)

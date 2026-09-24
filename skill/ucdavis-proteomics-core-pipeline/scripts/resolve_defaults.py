@@ -29,6 +29,10 @@ search. Site-specific overrides are explicit flags, not a remote lookup.
 
   python3 resolve_defaults.py --acquisition DIA --instrument "timsTOF HT" \
       --engine diann --dest ./wf [--env env.json] [--fasta db.fasta] [--threads 32]
+  Orbitrap: add --ms1-resolution 120000 --ms2-resolution 15000 [--resolution-source detected]
+  (--ms1-res/--ms2-res are the same flags). Without them a DIA-NN or Radiant search of a
+  non-Astral Orbitrap sets needs_confirmation + ask_user (exit 0). MS2 read in the ion trap
+  (step 2's ms2_ion_trap): --ms1-resolution 120000 --ms2-analyzer ITMS, no --ms2-resolution.
 """
 import argparse
 import json
@@ -37,7 +41,9 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from estimate_params import classify_instrument, MEASURE_CLASSES  # noqa: E402  (one ppm table)
+from estimate_params import (classify_instrument, MEASURE_CLASSES,  # noqa: E402  (one ppm table)
+                             add_resolution_args, resolution_args_error, resolution_source,
+                             resolution_record, resolution_question, SAGE_ITMS_FRAGMENT_DA)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -86,6 +92,19 @@ UNDOCUMENTED_LEVEL = {
     "sage": "Sage: its own derived tolerances are used (estimate_params.py --engine sage)",
 }
 
+# The same, for an MS2 read in the ion trap (class orbitrap_iontrap): there is no Orbitrap MS2
+# level to look up, and "measured with DIA-NN" would be false too -- an ion trap's fragment error
+# is Da-scale, far outside the 3-30 ppm a measurement is accepted in.
+ION_TRAP_MS2_ROUTE = {
+    "diann": "DIA-NN: neither level is pinned (either flag fixes both, and there is no MS2 "
+             "value), so mass accuracy is left to DIA-NN calibration",
+    "radiant": "Radiant: nothing to derive an ion-trap MS2 width from, so its vendor 20 ppm MS2 "
+               "extraction width (an Orbitrap-scale value) is kept",
+    "fragpipe": "FragPipe: its vendor Thermo preset tolerances are used",
+    "sage": f"Sage: fragment tolerance +/-{SAGE_ITMS_FRAGMENT_DA} Da, Sage's documented low-res "
+            "MS/MS setting (estimate_params.py --engine sage --ms2-analyzer ITMS)",
+}
+
 # Engines configured by a whole config file rather than by flags. These are
 # generated per run by make_presets.py.
 PRESET_ENGINES = {"fragpipe": ".workflow", "radiant": ".radiantConfig"}
@@ -118,8 +137,7 @@ def main():
     ap.add_argument("--engine", default="", help="force an engine; else the data-type default")
     ap.add_argument("--organism-taxid", default=None,
                     help="recorded for provenance only -- it does NOT affect any search parameter")
-    ap.add_argument("--ms1-res", type=float, default=None)
-    ap.add_argument("--ms2-res", type=float, default=None)
+    add_resolution_args(ap)
     ap.add_argument("--ms1-ppm", type=float, default=None, help="site SOP override")
     ap.add_argument("--ms2-ppm", type=float, default=None, help="site SOP override")
     ap.add_argument("--fasta", default=None)
@@ -130,7 +148,12 @@ def main():
     args = ap.parse_args()
 
     acq = args.acquisition.upper()
-    cls, ms1, ms2, label, src = classify_instrument(args.instrument, args.ms1_res, args.ms2_res)
+    r1, r2, analyzer = args.ms1_resolution, args.ms2_resolution, args.ms2_analyzer
+    bad = resolution_args_error(r2, analyzer)
+    if bad:
+        sys.exit(f"resolve_defaults: {bad}")
+    res_src = resolution_source(args.resolution_source, r1, r2, analyzer)
+    cls, ms1, ms2, label, src = classify_instrument(args.instrument, r1, r2, res_src, analyzer)
     fam = family(cls)
     routes = ROUTES[(acq, fam)]
 
@@ -174,7 +197,8 @@ def main():
         cmd = [sys.executable, os.path.join(HERE, "make_presets.py"),
                "--engine", engine, "--instrument", args.instrument,
                "--acquisition", acq, "--out", params_file]
-        for flag, val in (("--ms1-res", args.ms1_res), ("--ms2-res", args.ms2_res),
+        for flag, val in (("--ms1-res", r1), ("--ms2-res", r2), ("--ms2-analyzer", analyzer),
+                          ("--resolution-source", res_src),
                           ("--ms1-ppm", args.ms1_ppm), ("--ms2-ppm", args.ms2_ppm),
                           ("--fasta", args.fasta), ("--threads", args.threads)):
             if val is not None:
@@ -195,10 +219,18 @@ def main():
     # measured with DIA-NN before the search" beside the SOP's own number is simply false.
     eff_ms1 = args.ms1_ppm if args.ms1_ppm is not None else ms1
     eff_ms2 = args.ms2_ppm if args.ms2_ppm is not None else ms2
-    derived = (f"{src}; {UNDOCUMENTED_LEVEL[engine]}"
+    derived = (f"{src}; {ION_TRAP_MS2_ROUTE[engine]}" if cls == "orbitrap_iontrap" else
+               f"{src}; {UNDOCUMENTED_LEVEL[engine]}"
                if cls in MEASURE_CLASSES and (eff_ms1 is None or eff_ms2 is None) else src)
     ppm_source = ("site SOP override" if len(sop) == 2 else derived if not sop else
                   f"{sop[0]}: site SOP override; the instrument's own values: {derived}")
+
+    # gabrig 2026-09-23: a Fusion Lumos with no resolution exited 0 with "resolution unknown" in
+    # the manifest and nothing asked the user. Still exit 0 -- callers rely on it -- but say so
+    # on stderr and at the top of the manifest and stdout, where step 4's confirmation reads.
+    ask = resolution_question(cls, engine, r1, r2)
+    if ask:
+        sys.stderr.write(f"[resolve_defaults] NEEDS CONFIRMATION: {ask}\n")
 
     # Same manifest shape the old registry emitted, so downstream steps are
     # unchanged. Fields that only made sense for a remote bundle are explicit
@@ -211,6 +243,9 @@ def main():
         "instruments": [args.instrument] if args.instrument else [],
         "instrument_class": cls,
         "instrument_label": label,
+        "resolution": resolution_record(r1, r2, res_src, analyzer),
+        "needs_confirmation": bool(ask),
+        "ask_user": ask,
         "organism": None,
         "organism_taxid": int(args.organism_taxid) if args.organism_taxid else None,
         "engine": {"name": engine, "version": ENGINE_VERSIONS[engine]},
@@ -251,6 +286,9 @@ def main():
         "ms2_ppm": manifest["search"]["ms2_ppm"],
         "ppm_source": manifest["search"]["ppm_source"],
         "instrument_label": label,
+        "resolution": manifest["resolution"],
+        "needs_confirmation": manifest["needs_confirmation"],
+        "ask_user": ask,
         "alternatives": manifest["alternatives"],
         "notes": notes,
     }, indent=2))

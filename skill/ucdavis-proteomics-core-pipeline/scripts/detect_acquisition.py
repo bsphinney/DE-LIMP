@@ -23,9 +23,12 @@ Detection per format (best-effort, with a confidence score):
               UC Davis Core's). A framework-dependent build gets a DOTNET_ROOT that has
               every framework its runtimeconfig lists; with none, nothing is read and the
               reason (with the fix) is printed ONCE, up front.
-              An Orbitrap .raw carries no resolution: `orbitrap_resolution_unknown` in the
-              JSON lists those files -- ask the user, then estimate_params.py
-              --ms1-resolution/--ms2-resolution.
+              The Orbitrap MS1/MS2 resolution is read from the scan trailer by
+              thermo_resolution.py (Thermo's RawFileReader DLLs, via pythonnet, in a
+              subprocess); top-level ms1_resolution/ms2_resolution when every Orbitrap
+              file agrees, `resolution_mixed` when they do not, and
+              `orbitrap_resolution_unknown` for files it could not read -- ask the user
+              for those.
 
 Every Bruker .d is also checked for a truncated or at-risk analysis.tdf
 (bruker_tdf.tdf_integrity): WAL-mode header, a non-empty -wal/-journal beside it,
@@ -54,8 +57,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
 # HIVE), and mode=ro alone reads through the stale -wal.
 from bruker_tdf import connect_tdf, tdf_integrity, integrity_warning  # noqa: E402
-# The Orbitrap keyword list lives there, once (DE-LIMP rule 3): see resolution_unknown().
-from estimate_params import classify_instrument  # noqa: E402
+# The Orbitrap keyword list lives there, once (DE-LIMP rule 3): see add_resolutions().
+from estimate_params import classify_instrument, DIANN_INSTRUMENT_PPM  # noqa: E402
+# The resolution reader runs as a subprocess; only its words are shared.
+from thermo_resolution import PYTHONNET_MISSING  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -505,7 +510,11 @@ def dotnet_root_lacks(root, needs, muxer=False):
         return ["nothing installed there"]
     lacks = []
     fxr = os.path.join(root, "host", "fxr")
-    if not (os.path.isdir(fxr) and os.listdir(fxr)):
+    try:
+        has_fxr = os.path.isdir(fxr) and bool(os.listdir(fxr))
+    except OSError as e:        # an unreadable root is one that cannot start anything
+        return [f"unreadable ({type(e).__name__}: {e.strerror or e})"]
+    if not has_fxr:
         lacks.append("no host/fxr (not a .NET install)")
     if muxer and not _is_exe(os.path.join(root, "dotnet" + _EXE)):
         lacks.append("no dotnet executable")
@@ -664,15 +673,19 @@ def trfp_ready(cmd):
 
 def reader_status():
     """setup.sh's Thermo .raw readiness (setup.json `thermo_raw_reader`): the parser step 2 would
-    use, where it was found, and whether it starts. Runs `--version` only; reads no .raw."""
+    use, where it was found, and whether it starts; and `resolution_reader`, whether the
+    Orbitrap resolution can be read. Runs `--version` and the reader's `--check` only; reads no
+    .raw. `ready` is the parser's alone: without the resolution the user is asked for it."""
     cmd, source = locate_trfp()
     st = {"ready": False, "command": None, "source": source, "version": None,
           "dotnet_needs": [], "dotnet_root": None, "note": ""}
     if not cmd:
         st["note"] = _trfp_not_found().replace("so this .raw was not read",
                                                "so no .raw can be read")
+        st["resolution_reader"] = resolution_reader_status(None)
         return st
     launch, version, problem = trfp_ready(cmd)
+    st["resolution_reader"] = resolution_reader_status(launch)
     st.update(command=" ".join(launch["cmd"]), version=version,
               dotnet_needs=launch["needs"], dotnet_root=launch["dotnet_root"])
     if problem:
@@ -686,6 +699,34 @@ def reader_status():
         st["note"] = (f"ThermoRawFileParser {version} starts ({source}"
                       + (f"; DOTNET_ROOT={launch['dotnet_root']}" if launch["dotnet_root"]
                          else "") + ")")
+    return st
+
+
+def resolution_reader_status(launch):
+    """{"ready", "python", "dll_dir", "dotnet_root", "reader", "note"}: thermo_resolution.py
+    --check, run exactly as step 2 would run the reader."""
+    st = {"ready": False, "python": None, "dll_dir": None, "dotnet_root": None, "reader": None,
+          "note": ""}
+    st["python"] = py = resolution_python()
+    if not py:
+        st["note"] = PYTHONNET_MISSING
+        return st
+    st["dll_dir"], why = rawfilereader_dir(launch["cmd"] if launch else None)
+    if not why:
+        st["dotnet_root"], why = resolution_dotnet_root(launch)
+    if why:
+        st["note"] = why
+        return st
+    try:
+        p = subprocess.run([py, RES_READER, "--dll-dir", st["dll_dir"], "--check"],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=RES_TIMEOUT_BASE_S, env=_child_env(st["dotnet_root"]))
+        chk = json.loads(p.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
+        st["note"] = f"the reader's --check did not answer ({type(e).__name__}: {e})"
+        return st
+    st.update(ready=bool(chk.get("ok")), reader=chk.get("reader"),
+              note=chk.get("note") or f"reads the Orbitrap resolution with {chk.get('reader')}")
     return st
 
 
@@ -1013,7 +1054,13 @@ def classify(path):
             # (also printed to stderr; any one sets needs_confirmation)
             "warnings": warnings,
             # the external reader and its version, when one was needed (Thermo .raw)
-            "reader": reader}
+            "reader": reader,
+            # Thermo Orbitrap only (else null): read from the scan trailer by main() in
+            # batches -- see add_resolutions(). resolution_note says where from, or why not;
+            # ms2_analyzer is "FTMS" (Orbitrap), "ITMS" (ion trap: no Orbitrap resolution) or
+            # "mixed" (both: see MS2_MIXED_NOTE)
+            "ms1_resolution": None, "ms2_resolution": None, "ms2_analyzer": None,
+            "resolution_note": None}
 
 # ---------------------------------------------------------------------------
 # A cohort of .raw on a cluster login node.
@@ -1034,6 +1081,7 @@ def classify(path):
 # srun jobs to learn what a directory check on the login node already knew.
 # ---------------------------------------------------------------------------
 LOGIN_NODE_MAX_RAW = 5
+RAW_SECONDS_EACH = 7            # upper end of the per-file measurement above
 ALLOW_LOGIN_NODE = "--allow-login-node"
 CHECK_READER = "--check-reader"
 # Per-file stderr line for a parser that cannot start: the full reason is printed ONCE, up
@@ -1043,40 +1091,313 @@ CANNOT_START_SEE_ABOVE = ("not read -- ThermoRawFileParser cannot start on this 
 
 # ---------------------------------------------------------------------------
 # Orbitrap resolution. estimate_params.py pins DIA-NN's documented Orbitrap tolerances from the
-# MS1/MS2 RESOLUTION, and a .raw read here does not carry it: TRFP 2.0.0.0's metadata (-m=0
-# JSON and -m=1 text) and `query` output on a real Fusion Lumos DIA run (HIVE, 2026-09-23)
-# have no Orbitrap resolution anywhere -- ScanSettings "mass resolution" (MS:1000011) is a
-# generic 0.5, and the filter strings ("FTMS + p NSI Full ms2 368.0000@hcd35.00
-# [250.0000-746.0000]") do not state it. So an Orbitrap .raw classes as `orbitrap_generic`
-# (estimate_params.classify_instrument -- the one keyword list), DIA-NN calibrates mass
-# accuracy per run, and the 5-step parallel chain declines the cfg (gabrig's Lumos cohort).
-# Only the user has the number (it is in the instrument method), so the JSON says to ask.
-# Not a per-file `warning`: those mean "this read is suspect" and set needs_confirmation, and
-# a missing resolution is true of EVERY Orbitrap .raw -- a warning would put a confirmation on
-# every clean Orbitrap read and drown the warnings that do mean a bad read.
+# MS1/MS2 RESOLUTION; without it an Orbitrap classes as `orbitrap_generic`, DIA-NN calibrates
+# mass accuracy per run, and the 5-step parallel chain declines the cfg (gabrig 2026-09-23,
+# 15 Fusion Lumos .raw). ThermoRawFileParser never outputs it (TRFP master cf548e4: nothing in
+# metadata, mzML, MGF or `query`; its "mass resolution" MS:1000011 is a generic 0.5), but every
+# scan's trailer has it -- 'Orbitrap Resolution:' on a Fusion Lumos, 'FT Resolution:' on an
+# Exploris 480. thermo_resolution.py reads it with the RawFileReader DLLs TRFP ships, through
+# pythonnet, in ONE subprocess for all files (a CoreCLR load or crash cannot take this script
+# down). Measured on HIVE (job 23989170): three Lumos DIA runs 60000/15000, an Exploris 480 DIA
+# run 120000/15000 and a DDA run 60000/15000 -- 5 files in 18 s including the runtime start.
+# Read only for `orbitrap_generic`: an Astral's documented tolerances do not use it.
+# A file it cannot read stays in `orbitrap_resolution_unknown`, and the user is asked. Not a
+# per-file `warning`: those mean "this read is suspect" and set needs_confirmation, and a clean
+# read of acquisition and range stands whether or not the resolution came with it.
 # ---------------------------------------------------------------------------
+RES_READER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thermo_resolution.py")
+RAWFILEREADER_DIR_ENV = "THERMO_RAWFILEREADER_DIR"     # a folder holding the two DLLs below
+RAWFILEREADER_DLLS = ("ThermoFisher.CommonCore.RawFileReader.dll",
+                      "ThermoFisher.CommonCore.Data.dll")
+# The interpreter that runs the reader: must have pythonnet. Unset = this one if it does, else
+# the pipeline env's python (setup.sh installs pythonnet there). The tests point it at a
+# `python -S` wrapper so the machine's own pythonnet cannot change the answer.
+RES_PYTHON_ENV = "THERMO_RESOLUTION_PYTHON"
+# The RawFileReader DLLs target .NETCoreApp 8.0, and a SELF-CONTAINED parser's bundled runtime
+# cannot host pythonnet (hostfxr: "Initialization for self-contained components is not
+# supported", job 23989170) -- so a separate root with Microsoft.NETCore.App 8+ is needed.
+RES_DOTNET_NEEDS = [("Microsoft.NETCore.App", (8, 0, 0), True)]
+# Batches, each with its own timeout: one timeout for a whole cohort let a stall inside a .NET
+# call (where the reader's own walk budget is never checked) block for 120 + 90 s x N -- ~5 h
+# for 200 files -- and then lose every answer. A hang now costs its batch; two batches in a row
+# that hang (a stalled mount, not one bad file) stop the rest, which say so.
+RES_BATCH = 10
+RES_TIMEOUT_BASE_S = 60       # starting .NET: ~3 s measured (HIVE jobs 23989170, 23989291)
+RES_TIMEOUT_EACH_S = 30       # per file: ~3 s measured; the reader's own walk stops at 20 s
+RES_HUNG_BATCHES_STOP = 2
 RESOLUTION_ASK = (
-    "ASK the user for the MS1 and MS2 Orbitrap resolution of these runs (it is in the "
-    "instrument method, e.g. 120,000 MS1 / 30,000 MS2) and pass it to estimate_params.py as "
-    "--ms1-resolution/--ms2-resolution. ThermoRawFileParser does not report it (its metadata "
-    "'mass resolution' is a generic 0.5, and the filter strings do not state it). Without it "
-    "estimate_params.py classes the instrument orbitrap_generic: no documented DIA-NN mass "
-    "tolerance, so DIA-NN calibrates mass accuracy per run (results then depend on file order) "
-    "and the 5-step parallel chain declines the cfg -- a large cohort runs as one single-node "
-    "search. This does not set needs_confirmation; everything else above stands.")
+    "ASK the user for the Orbitrap resolution of the levels `levels` names for each of these "
+    "runs (it is in the instrument method, e.g. 120,000 MS1 / 30,000 MS2) and pass it to "
+    "estimate_params.py as --ms1-resolution/--ms2-resolution: the scan trailer could not be "
+    "read for them (`reasons`; `read_in_other_files` is what the rest of the cohort read). An "
+    "ion-trap MS2 is never asked for (see ms2_ion_trap). Without it estimate_params.py "
+    "classes the instrument orbitrap_generic: no documented DIA-NN mass tolerance, so DIA-NN "
+    "calibrates mass accuracy per run (results then depend on file order) and the 5-step "
+    "parallel chain declines the cfg -- a large cohort runs as one single-node search. This "
+    "does not set needs_confirmation; everything else above stands.")
+MS2_ION_TRAP_NOTE = (
+    "MS2 is read in the ion trap (ITMS) in these runs: only the MS1 Orbitrap resolution "
+    "applies. There is no MS2 Orbitrap resolution to ask the user for, and the MS2 mass "
+    "tolerance cannot come from DIA-NN's Orbitrap resolution table -- do not pass "
+    "--ms2-resolution for them. Pass --ms1-resolution <MS1> --ms2-analyzer ITMS "
+    "--resolution-source detected to resolve_defaults.py / estimate_params.py instead: Sage "
+    "then uses its documented low-res fragment window (+/-0.4 Da), and DIA-NN leaves both "
+    "mass-accuracy levels to its own calibration (the 5-step chain declines that). A cohort "
+    "mixing ion-trap and Orbitrap MS2 runs needs separate searches.")
+# A Tribrid decision-tree method (HCD-OT for high charge states, CID-IT for 2+) reads MS2 in
+# BOTH analyzers inside one run. Called FTMS, Sage would match the ion-trap spectra at +/-10 ppm
+# and lose them without a word; the ion-trap setting's window is the one that holds both.
+MS2_MIXED_NOTE = (
+    "MS2 is MIXED within these runs: some MS2 scans were read in the Orbitrap and some in the "
+    "ion trap (a decision-tree or dual-analyzer method; each file's resolution_note gives the "
+    "counts). One Orbitrap MS2 tolerance would lose the ion-trap spectra, so CONFIRM the method "
+    "with the user, then pass --ms1-resolution <MS1> --ms2-analyzer mixed --resolution-source "
+    "detected and no --ms2-resolution: Sage's +/-0.4 Da ion-trap window also covers the "
+    "Orbitrap fragments, and DIA-NN leaves mass accuracy to its own calibration.")
 
 
-def resolution_unknown(results):
-    """{"files", "instruments", "ask"} for Thermo files on an Orbitrap of unknown resolution,
-    or None."""
-    hits = [r for r in results if r.get("vendor") == "Thermo" and r.get("instrument")
-            and classify_instrument(r["instrument"])[0] == "orbitrap_generic"]
-    if not hits:
-        return None
-    return {"files": [r["file"] for r in hits],
-            "instruments": sorted({r["instrument"] for r in hits}),
+def _needs_resolution(r):
+    return (r.get("vendor") == "Thermo" and bool(r.get("instrument"))
+            and classify_instrument(r["instrument"])[0] == "orbitrap_generic")
+
+
+_RES_PYTHON = []
+
+def resolution_python():
+    """The interpreter to run thermo_resolution.py with, or None (no pythonnet anywhere)."""
+    if RES_PYTHON_ENV in os.environ:
+        return os.environ[RES_PYTHON_ENV] or None
+    if not _RES_PYTHON:
+        import importlib.util
+        found = sys.executable if importlib.util.find_spec("pythonnet") else None
+        env_bin = None if found else _pipeline_env_bin()
+        cand = os.path.join(env_bin, "python") if env_bin else None
+        if cand and _is_exe(cand) and os.path.realpath(cand) != os.path.realpath(sys.executable):
+            try:
+                ok = subprocess.run([cand, "-c", "import importlib.util, sys; sys.exit("
+                                     "importlib.util.find_spec('pythonnet') is None)"],
+                                    capture_output=True, timeout=60).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            found = cand if ok else None
+        _RES_PYTHON.append(found)
+    return _RES_PYTHON[0]
+
+
+def rawfilereader_dir(cmd):
+    """(folder with the RawFileReader DLLs, None) or (None, why): $THERMO_RAWFILEREADER_DIR,
+    else the folder ThermoRawFileParser runs from (every release ships the DLLs beside it --
+    the Core's copy and bioconda's bin/ alike)."""
+    cands = []
+    if os.environ.get(RAWFILEREADER_DIR_ENV):
+        cands.append(os.environ[RAWFILEREADER_DIR_ENV])
+    if cmd:
+        app = next((a for a in cmd[1:] if a.lower().endswith((".dll", ".exe"))), None)
+        cands.append(os.path.dirname(os.path.realpath(
+            app or shutil.which(cmd[0]) or cmd[0])))
+    for d in cands:
+        if all(os.path.isfile(os.path.join(d, n)) for n in RAWFILEREADER_DLLS):
+            return d, None
+    return None, (f"no {' + '.join(RAWFILEREADER_DLLS)} in "
+                  f"{' or '.join(cands) or '(nowhere to look)'}; set ${RAWFILEREADER_DIR_ENV} "
+                  f"to a folder that has them (every ThermoRawFileParser release ships them "
+                  f"beside its executable)")
+
+
+def resolution_dotnet_root(launch):
+    """(root, None) or (None, why): the parser's own root when it has one, else the first
+    candidate with Microsoft.NETCore.App 8+."""
+    if launch and launch.get("dotnet_root"):
+        return launch["dotnet_root"], None
+    tried = []
+    for where, root in dotnet_root_candidates():
+        lacks = dotnet_root_lacks(root, RES_DOTNET_NEEDS)
+        if not lacks:
+            return root, None
+        tried.append(f"{root} ({where}): {', '.join(lacks)}")
+    return None, (f"no .NET with Microsoft.NETCore.App 8+ for pythonnet to run the RawFileReader "
+                  f"DLLs on ({'; '.join(tried) or 'none found'}); a self-contained "
+                  f"ThermoRawFileParser's bundled runtime cannot host it. {_dotnet_fix()}")
+
+
+def _null_resolution(path, note):
+    return {"file": path, "ms1_resolution": None, "ms2_resolution": None,
+            "ms2_analyzer": None, "reader": None, "note": note}
+
+
+def _read_batch(py, dll_dir, root, paths):
+    """(answers by path, failure or None, timed out) for one reader subprocess."""
+    timeout = RES_TIMEOUT_BASE_S + RES_TIMEOUT_EACH_S * len(paths)
+    failure, stdout, hung = None, "", False
+    try:
+        p = subprocess.run([py, RES_READER, "--dll-dir", dll_dir, *paths], capture_output=True,
+                           text=True, errors="replace", timeout=timeout, env=_child_env(root))
+        stdout = p.stdout
+        if p.returncode not in (0, 1):
+            tail = [ln.strip() for ln in (p.stderr or "").splitlines() if ln.strip()][-1:]
+            failure = f"the reader exited {p.returncode}" + (f": {tail[0][:300]}" if tail else "")
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout or ""
+        stdout = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+        failure, hung = f"the reader gave no answer within {timeout} s", True
+    except OSError as e:
+        failure = f"could not run {py} {RES_READER}: {e}"
+    got = {}
+    for line in stdout.splitlines():        # lines already answered survive a hang or a crash
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("file") in paths:
+            got[rec["file"]] = rec
+    return got, failure, hung
+
+
+def read_resolutions(paths, launch):
+    """{path: thermo_resolution.py's object}, RES_BATCH files per subprocess. Never raises:
+    whatever stops a read becomes the `note` of the files it cost."""
+    py = resolution_python()
+    if not py:
+        return {p: _null_resolution(p, PYTHONNET_MISSING) for p in paths}
+    dll_dir, why = rawfilereader_dir(launch["cmd"] if launch else None)
+    if dll_dir:
+        root, why = resolution_dotnet_root(launch)
+    if why:
+        return {p: _null_resolution(p, why) for p in paths}
+    got, hung_in_a_row = {}, 0
+    for i in range(0, len(paths), RES_BATCH):
+        batch = paths[i:i + RES_BATCH]
+        if hung_in_a_row >= RES_HUNG_BATCHES_STOP:
+            for p in batch:
+                got[p] = _null_resolution(p, (
+                    f"not attempted: the reader hung on {hung_in_a_row} batches in a row "
+                    f"(slow or stalled storage?)"))
+            continue
+        answers, failure, hung = _read_batch(py, dll_dir, root, batch)
+        hung_in_a_row = hung_in_a_row + 1 if hung else 0
+        for p in batch:
+            got[p] = answers.get(p) or _null_resolution(
+                p, f"{failure or 'the reader did not answer'} for this file")
+    return got
+
+
+def add_resolutions(results, launch):
+    """Fill each Thermo record's ms1_resolution / ms2_resolution / resolution_note, in place."""
+    targets = []
+    for r in results:
+        if r.get("vendor") != "Thermo":
+            continue
+        if _needs_resolution(r):
+            targets.append(r)
+        elif not r.get("instrument"):
+            r["resolution_note"] = "not read: the instrument is unknown"
+        else:
+            cls = classify_instrument(r["instrument"])[0]
+            ppm = DIANN_INSTRUMENT_PPM.get(cls)
+            r["resolution_note"] = (f"not read: {r['instrument']} is {cls}"
+                                    + (f", whose documented DIA-NN tolerances (MS1 {ppm[0]} / "
+                                       f"MS2 {ppm[1]} ppm) do not use it" if ppm else ""))
+    if not targets:
+        return
+    got = read_resolutions([r["file"] for r in targets], launch)
+    for r in targets:
+        rec = got[r["file"]]
+        r["ms1_resolution"] = rec.get("ms1_resolution")
+        r["ms2_resolution"] = rec.get("ms2_resolution")
+        r["ms2_analyzer"] = rec.get("ms2_analyzer")
+        parts = []
+        if r["ms1_resolution"] or r["ms2_resolution"]:
+            parts.append(f"read from the scan trailer (MS1 {rec.get('ms1_key')} scan "
+                         f"{rec.get('ms1_scan')}, MS2 {rec.get('ms2_key')} scan "
+                         f"{rec.get('ms2_scan')}) by {rec.get('reader')}")
+        if rec.get("note"):
+            parts.append(rec["note"])
+        r["resolution_note"] = "; ".join(parts) or None
+
+
+def resolution_failed(results, why):
+    """resolution_summary()'s shape when reading failed outright: every Orbitrap file unknown,
+    with `why` as its reason. Nothing in here may raise."""
+    orbi = []
+    for r in results:
+        try:
+            is_orbi = _needs_resolution(r)
+        except Exception:
+            is_orbi = r.get("vendor") == "Thermo"
+        if is_orbi:
+            r.update(ms1_resolution=None, ms2_resolution=None, ms2_analyzer=None,
+                     resolution_note=why)
+            orbi.append(r)
+    return {"ms1_resolution": None, "ms2_resolution": None, "resolution_mixed": [],
+            "ms2_ion_trap": None,
+            "orbitrap_resolution_unknown": {
+                "files": [r["file"] for r in orbi],
+                "levels": {r["file"]: ["MS1", "MS2"] for r in orbi},
+                "instruments": sorted({str(r.get("instrument")) for r in orbi}),
+                "reasons": [why], "read_in_other_files": [], "ask": RESOLUTION_ASK}
+            if orbi else None}
+
+
+IT_MS2 = ("ITMS", "mixed")     # ms2_analyzer values with ion-trap MS2 in them
+
+
+def _ms2_value(r):
+    """MS2 as methods are compared: the resolution, or "ITMS"/"mixed" when the ion trap read
+    any of it."""
+    return r["ms2_analyzer"] if r.get("ms2_analyzer") in IT_MS2 else r.get("ms2_resolution")
+
+
+def _asked_levels(r):
+    """The levels the user must be asked for: an ion-trap MS2 has no Orbitrap resolution."""
+    return ([] if r.get("ms1_resolution") else ["MS1"]) + (
+        [] if r.get("ms2_resolution") or r.get("ms2_analyzer") in IT_MS2 else ["MS2"])
+
+
+def resolution_summary(results):
+    """The cohort's top-level resolution fields (see main())."""
+    orbi = [r for r in results if _needs_resolution(r)]
+    top = {"ms1_resolution": None, "ms2_resolution": None, "resolution_mixed": [],
+           "ms2_ion_trap": None, "orbitrap_resolution_unknown": None}
+    if not orbi:
+        return top
+    level_value = {"ms1_resolution": lambda r: r.get("ms1_resolution"),
+                   "ms2_resolution": _ms2_value}
+    for lvl, value in level_value.items():
+        vals = {value(r) for r in orbi}
+        if len(vals) == 1 and not vals & {None, *IT_MS2}:     # every Orbitrap file, one value
+            top[lvl] = vals.pop()
+    if any(len({value(r) for r in orbi} - {None}) > 1 for value in level_value.values()):
+        # Two methods in one cohort: one tolerance would be wrong for part of it. Say which
+        # files read what -- never pick one.
+        groups = {}
+        for r in orbi:
+            groups.setdefault((r.get("ms1_resolution"), r.get("ms2_resolution"),
+                               r.get("ms2_analyzer")), []).append(r["file"])
+        top["resolution_mixed"] = [
+            {"ms1_resolution": a, "ms2_resolution": b, "ms2_analyzer": c, "files": f}
+            for (a, b, c), f in sorted(groups.items(), key=lambda g: str(g[0]))]
+    itms = [r for r in orbi if r.get("ms2_analyzer") in IT_MS2]
+    if itms:
+        ms1 = {r.get("ms1_resolution") for r in itms}
+        mixed = [r["file"] for r in itms if r["ms2_analyzer"] == "mixed"]
+        top["ms2_ion_trap"] = {"files": [r["file"] for r in itms],
+                               "ms2_analyzer": {r["file"]: r["ms2_analyzer"] for r in itms},
+                               "ms1_resolution": ms1.pop() if len(ms1) == 1 else None,
+                               "note": MS2_ION_TRAP_NOTE,
+                               "mixed_files": mixed,
+                               "mixed_note": MS2_MIXED_NOTE if mixed else None}
+    unknown = [r for r in orbi if _asked_levels(r)]
+    if unknown:
+        top["orbitrap_resolution_unknown"] = {
+            "files": [r["file"] for r in unknown],
+            "levels": {r["file"]: _asked_levels(r) for r in unknown},
+            "instruments": sorted({r["instrument"] for r in unknown}),
+            "reasons": sorted({r["resolution_note"] for r in unknown if r.get("resolution_note")}),
+            "read_in_other_files": sorted({(r["ms1_resolution"], r["ms2_resolution"])
+                                           for r in orbi if not _asked_levels(r)
+                                           and r.get("ms2_analyzer") not in IT_MS2}),
             "ask": RESOLUTION_ASK}
-RAW_SECONDS_EACH = 7            # upper end of the per-file measurement above
+    return top
 
 
 def is_thermo_raw(path):
@@ -1166,6 +1487,16 @@ def main(argv):
               f"{time.monotonic() - t0:.1f} s: {f}", file=sys.stderr, flush=True)
     # stdout is JSON for the caller; problems also go to stderr, where a person sees them
     # even when a script only keeps the JSON.
+    # Resolution for the Orbitrap files, in batches, after every file has its instrument. It is
+    # an extra: whatever goes wrong in it (an unreadable .NET root raised PermissionError here and
+    # took the JSON with it) becomes a reason on the Orbitrap files, never a failed detection.
+    try:
+        if not cannot_start:
+            add_resolutions(results, launch)
+        res = resolution_summary(results)
+    except Exception as e:
+        res = resolution_failed(results, f"the resolution reader failed ({type(e).__name__}: "
+                                         f"{e}), so it was not read")
     for r in results:
         for w in r.get("warnings") or []:
             w = CANNOT_START_SEE_ABOVE if cannot_start and w == cannot_start else w
@@ -1191,13 +1522,27 @@ def main(argv):
         "precursor_mz_range_mixed": mixed_ranges,
         "precursor_mz_range_files_without": [
             r["file"] for r in results if not r.get("precursor_mz_range")],
+        # Feed straight to resolve_defaults.py / estimate_params.py as --ms1-resolution /
+        # --ms2-resolution WITH --resolution-source detected (so the manifest says the numbers
+        # came from the raw file): set when every Orbitrap .raw read the same value from its
+        # scan trailer, else null.
+        "ms1_resolution": res["ms1_resolution"],
+        "ms2_resolution": res["ms2_resolution"],
+        # [] or, when the Orbitrap files disagree, who read what -- one tolerance would be wrong
+        # for part of the cohort, so it sets needs_confirmation
+        "resolution_mixed": res["resolution_mixed"],
+        # null, or the Orbitrap files whose MS2 is ion trap -- only MS1 applies -- or MIXED
+        # Orbitrap + ion trap (mixed_files: the user confirms the method; see MS2_MIXED_NOTE)
+        "ms2_ion_trap": res["ms2_ion_trap"],
         "needs_confirmation": (bool(low_conf) or overall in ("mixed", "unknown")
                                or len(instruments) > 1
-                               or any(r.get("warnings") for r in results)),
+                               or any(r.get("warnings") for r in results)
+                               or bool(res["resolution_mixed"])
+                               or bool((res["ms2_ion_trap"] or {}).get("mixed_files"))),
         "low_confidence_files": low_conf,
-        # null, or the Thermo files on an Orbitrap whose resolution must be ASKED for before
+        # null, or the Orbitrap files whose resolution could not be read: ASK the user before
         # step 6b (see RESOLUTION_ASK) -- an instruction, not a problem with the read
-        "orbitrap_resolution_unknown": resolution_unknown(results),
+        "orbitrap_resolution_unknown": res["orbitrap_resolution_unknown"],
         # No top-level list of problem files: files[].warnings is the one place a problem is
         # reported, whichever reader found it (a vendor-specific list reads "nothing wrong"
         # whenever the problem is another vendor's). tdf status: files[].tdf_integrity.

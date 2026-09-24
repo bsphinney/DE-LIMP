@@ -1337,6 +1337,27 @@ def ensure_mzml(files, out):
     return converted
 
 
+def refuse_sage_fragment_mismatch(bundle, params):
+    """Stop before anything is generated when the Sage cfg's fragment window does not fit the MS2
+    analyzer workflow.manifest.json records (estimate_params.sage_fragment_mismatch() decides).
+    An ion-trap manifest with a ppm cfg -- --ms2-analyzer given in step 4 but not in 6b -- would
+    otherwise search every spectrum at +/-10 ppm and match almost no ion-trap fragments."""
+    import estimate_params
+    analyzer = (bundle.get("resolution") or {}).get("ms2_analyzer")
+    try:
+        with open(params) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return                      # not a readable JSON: Sage itself rejects it, with its reason
+    hit = estimate_params.sage_fragment_mismatch(
+        estimate_params.ms2_analyzer_arg(analyzer) if analyzer else None, cfg)
+    if hit and hit[0] == "refuse":
+        sys.exit(f"[run_search] REFUSED -- nothing was converted, written or submitted. "
+                 f"{params}: {hit[1]}")
+    if hit:
+        print(f"[run_search] WARNING: {params}: {hit[1]}", file=sys.stderr)
+
+
 def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     mzml = ensure_mzml(files, out)
@@ -1962,6 +1983,9 @@ def main():
                   "radiant": adapt_radiant}.get(engine, lambda o: None)(a.out)
         print(json.dumps({"engine": engine, "report": report, "ran": False, "adapt_only": True}, indent=2))
         return
+
+    if engine == "sage":
+        refuse_sage_fragment_mismatch(bundle, a.params)
 
     # Before anything is provisioned, submitted or run: no damaged .d gets searched here.
     # --adapt-only is above this on purpose -- it reads an engine's finished output and

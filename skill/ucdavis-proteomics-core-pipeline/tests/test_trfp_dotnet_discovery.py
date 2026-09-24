@@ -387,8 +387,8 @@ class OrbitrapResolutionMustBeAsked(trfp._FakeParserCase):
             self.assertIn(words, hint["ask"])
 
     def test_it_is_not_a_warning_and_does_not_ask_for_confirmation(self):
-        """A clean read stays clean: every Orbitrap .raw lacks the resolution, so a warning
-        would put a confirmation on every Orbitrap cohort."""
+        """A clean read stays clean: acquisition and range stand whether or not the resolution
+        came with them, and a warning would put a confirmation on every such Orbitrap cohort."""
         out = self._run(self.raw(trfp.EXPLORIS))
         self.assertIsNotNone(out["orbitrap_resolution_unknown"])
         self.assertFalse(out["needs_confirmation"])
@@ -404,8 +404,9 @@ class OrbitrapResolutionMustBeAsked(trfp._FakeParserCase):
         self.assertIs(da.classify_instrument, estimate_params.classify_instrument)
         self.assertEqual(estimate_params.classify_instrument("Orbitrap Fusion Lumos")[0],
                          "orbitrap_generic")
-        self.assertIsNone(da.resolution_unknown([
-            {"vendor": "Thermo", "instrument": "Orbitrap Astral", "file": "a.raw"}]),
+        self.assertIsNone(da.resolution_summary([
+            {"vendor": "Thermo", "instrument": "Orbitrap Astral", "file": "a.raw",
+             "ms1_resolution": None, "ms2_resolution": None}])["orbitrap_resolution_unknown"],
             "Astral has a documented tolerance: nothing to ask")
 
 
@@ -583,38 +584,66 @@ class SetupReportsThermoRawReadiness(setup_t.SetupCheckHarness):
 
 
 # argv logged; `create` makes an env with python + Rscript, `install` puts the parser stand-in
-# in it. Both honour only -p: a named env would land wherever a user's .condarc says.
+# and/or a pythonnet conda-meta record in it, as asked. Both honour only -p: a named env would
+# land wherever a user's .condarc says.
 FAKE_MICROMAMBA = r'''#!/bin/bash
 echo "$*" >> "$FAKE_MM_LOG"
 sub="$1"; shift
-prefix=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && prefix="$2"; shift; done
+prefix=""; pkgs=""
+while [ $# -gt 0 ]; do
+  case "$1" in -p) prefix="$2"; shift ;; -r|-c) shift ;; -*) ;; *) pkgs="$pkgs $1" ;; esac; shift
+done
 [ -n "$prefix" ] || { echo "no -p" >&2; exit 2; }
 case "$sub" in
-  create)  mkdir -p "$prefix/bin"; ln -s "$FAKE_PY" "$prefix/bin/python"
+  create)  mkdir -p "$prefix/bin" "$prefix/conda-meta"; ln -s "$FAKE_PY" "$prefix/bin/python"
            printf '#!/bin/sh\nexit 0\n' > "$prefix/bin/Rscript"; chmod +x "$prefix/bin/Rscript" ;;
   install) [ -n "${FAKE_MM_INSTALL_FAIL:-}" ] && { echo "nothing provides thermorawfileparser" >&2; exit 1; }
-           printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$FAKE_PY" "$FAKE_TRFP" > "$prefix/bin/ThermoRawFileParser"
-           chmod +x "$prefix/bin/ThermoRawFileParser" ;;
+           for p in $pkgs; do case "$p" in
+             thermorawfileparser)
+               printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$FAKE_PY" "$FAKE_TRFP" > "$prefix/bin/ThermoRawFileParser"
+               chmod +x "$prefix/bin/ThermoRawFileParser" ;;
+             pythonnet) echo '{}' > "$prefix/conda-meta/pythonnet-3.1.0-pyhd8ed1ab_0.json" ;;
+             pandas) echo '{}' > "$prefix/conda-meta/pandas-2.3.2-py311h0000000_0.json" ;;
+           esac; done ;;
 esac
 '''
 
 
+# ensure_dotnet8.sh's contract without its download: messages on stderr, the root on the LAST
+# stdout line; FAKE_ENSURE_FAIL makes it fail as it does with no internet.
+FAKE_ENSURE = r'''#!/bin/bash
+echo call >> "$FAKE_ENSURE_LOG"
+if [ -n "${FAKE_ENSURE_FAIL:-}" ]; then
+  echo "curl: (6) Could not resolve host: dot.net" >&2
+  echo "ERROR: .NET 8 install did not yield a >= 8.0.17 runtime" >&2; exit 1
+fi
+echo "reusing .NET 8 at $FAKE_ENSURE_ROOT" >&2
+echo "$FAKE_ENSURE_ROOT"
+'''
+
+
 class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
-    """setup.sh (not --check) with a stub micromamba: the parser is its own install, after the
-    env exists, into the env's prefix; idempotent; its failure costs nothing else."""
+    """setup.sh (not --check) with a stub micromamba: the parser and pythonnet are their own
+    install, after the env exists, into the env's prefix; only what is missing; its failure
+    costs nothing else."""
 
     def setUp(self):
         super().setUp()
         for tool in ("chmod", "ln"):
             os.symlink(shutil.which(tool), os.path.join(self.sys, tool))
         _exe(os.path.join(self.sys, "micromamba"), FAKE_MICROMAMBA)
+        self.ensure = _exe(os.path.join(self.d, "ensure_dotnet8_stub.sh"), FAKE_ENSURE)
+        self.ensure_log = os.path.join(self.d, "ensure.log")
+        self.dotnet_root = fake_dotnet_root(os.path.join(self.d, ".proteomics-pipeline", "dotnet8"))
         self.mm_log = os.path.join(self.d, "mm.log")
         self.prefix = os.path.join(self.home, "micromamba", "envs", "proteomics-pipeline")
 
     def setup(self, *args, **extra):
         env = {"PATH": self.sys, "HOME": self.d, "PP_HOME": self.home, "QUOBYTE_DIR": "",
                "THERMORAWFILEPARSER_SHARED": "", "PROTEOMICS_DOTNET_SYSTEM_ROOTS": "",
-               "FAKE_MM_LOG": self.mm_log, "FAKE_PY": sys.executable, "FAKE_TRFP": trfp.FAKE}
+               "FAKE_MM_LOG": self.mm_log, "FAKE_PY": sys.executable, "FAKE_TRFP": trfp.FAKE,
+               "PROTEOMICS_ENSURE_DOTNET8": self.ensure, "FAKE_ENSURE_LOG": self.ensure_log,
+               "FAKE_ENSURE_ROOT": self.dotnet_root}
         env.update(extra)
         r = subprocess.run([self.bash, setup_t.SETUP, *args], capture_output=True, text=True,
                            env=env, timeout=300)
@@ -633,7 +662,10 @@ class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
         for c in creates + installs:
             self.assertIn(f"-p {self.prefix}", c)
             self.assertNotIn(" -n ", f" {c} ")
-        self.assertIn("-c conda-forge -c bioconda thermorawfileparser", installs[0])
+        self.assertIn("-c conda-forge -c bioconda thermorawfileparser pythonnet pandas",
+                      installs[0])
+        self.assertTrue(os.path.exists(os.path.join(
+            self.prefix, "conda-meta", "pythonnet-3.1.0-pyhd8ed1ab_0.json")))
         self.assertIs(s["ready_for"]["thermo_raw"], True, s["thermo_raw_reader"])
         self.assertEqual(s["thermo_raw_reader"]["command"],
                          os.path.join(self.prefix, "bin", "ThermoRawFileParser"))
@@ -643,15 +675,64 @@ class SetupInstallsTheParserSeparately(setup_t.SetupCheckHarness):
         _s, calls = self.setup()
         self.assertEqual(len([c for c in calls if c.startswith("install")]), 1, calls)
 
+    def test_only_what_is_missing_is_installed(self):
+        """An env from before pythonnet joined the step: the parser is there, pythonnet is not."""
+        self.setup()
+        os.remove(os.path.join(self.prefix, "conda-meta", "pythonnet-3.1.0-pyhd8ed1ab_0.json"))
+        _s, calls = self.setup()
+        installs = [c for c in calls if c.startswith("install")]
+        self.assertEqual(len(installs), 2, calls)
+        self.assertTrue(installs[1].endswith("-c conda-forge -c bioconda pythonnet"), installs[1])
+
+    def test_the_resolution_reader_is_reported(self):
+        s, _calls = self.setup(THERMO_RESOLUTION_PYTHON="")
+        rr = s["thermo_raw_reader"]["resolution_reader"]
+        self.assertIs(rr["ready"], False)
+        self.assertIn("pythonnet", rr["note"])
+        self.assertIs(s["ready_for"]["thermo_raw"], True, "the parser alone decides that")
+
+    def test_an_existing_env_gets_pandas_on_a_rerun(self):
+        """gabrig #15: the HIVE env had no pandas. create_env never runs again for an env that
+        exists, so this step is how it arrives."""
+        self.setup()
+        os.remove(os.path.join(self.prefix, "conda-meta", "pandas-2.3.2-py311h0000000_0.json"))
+        _s, calls = self.setup()
+        installs = [c for c in calls if c.startswith("install")]
+        self.assertTrue(installs[-1].endswith("-c conda-forge -c bioconda pandas"), installs)
+        self.assertNotIn("pandas", [c for c in calls if c.startswith("create")][0])
+
     def test_check_installs_nothing(self):
         _s, calls = self.setup("--check")
         self.assertEqual(calls, [])
+        self.assertEqual(_lines(self.ensure_log), [], "--check ran ensure_dotnet8.sh")
+
+    def test_dotnet8_is_provisioned_and_reported(self):
+        s, _calls = self.setup()
+        self.assertEqual(_lines(self.ensure_log), ["call"])
+        self.assertEqual(s["dotnet8"]["root"], self.dotnet_root)
+        self.assertIn(self.dotnet_root, s["dotnet8"]["note"])
+        self.assertFalse(any("ensure_dotnet8.sh could not" in n for n in s["notes"]), s["notes"])
+
+    def test_a_failed_dotnet8_is_a_note_not_a_failure(self):
+        s, _calls = self.setup(FAKE_ENSURE_FAIL="1")      # setup() asserts exit 0
+        self.assertEqual(_lines(self.ensure_log), ["call"])
+        self.assertEqual(s["dotnet8"]["root"], "")
+        self.assertIn("could not provide .NET 8", s["dotnet8"]["note"])
+        self.assertTrue(any("ensure_dotnet8.sh could not provide .NET 8" in n
+                            and "DIA-NN cannot read .raw" in n for n in s["notes"]), s["notes"])
+        self.assertIs(s["ready_for"]["de"], True, "a .NET failure took something else down")
+
+    def test_a_second_run_reuses_it(self):
+        self.setup()
+        s, _calls = self.setup()
+        self.assertEqual(_lines(self.ensure_log), ["call", "call"])
+        self.assertEqual(s["dotnet8"]["root"], self.dotnet_root)
 
     def test_a_failed_parser_install_costs_nothing_else(self):
         s, _calls = self.setup(FAKE_MM_INSTALL_FAIL="1")
         self.assertIs(s["ready_for"]["de"], True, "R went down with the parser")
         self.assertIs(s["ready_for"]["thermo_raw"], False)
-        self.assertTrue(any("ThermoRawFileParser could not be installed" in n
+        self.assertTrue(any("Could not install thermorawfileparser pythonnet pandas" in n
                             for n in s["notes"]), s["notes"])
 
 

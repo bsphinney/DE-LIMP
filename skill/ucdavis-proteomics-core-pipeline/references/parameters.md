@@ -23,7 +23,7 @@ trypsin/LFQ default:
 | Bruker timsTOF (dia-PASEF / ddaPASEF) | 15 / 15 ppm | name contains "tims" |
 | SCIEX TripleTOF / ZenoTOF | 20 / 20 ppm | name contains tripletof/zenotof/sciex |
 | Orbitrap, **one level outside 30k–240k** (e.g. 15k MS2), the other inside | that level **measured with DIA-NN before the search**, refused unless it lands in a plausible band (MS2 3–30, MS1 1.5–25 ppm) over at least 2 agreeing runs, then **floored at the SOP** (`max(measured, SOP)`, `estimate_params.SOP_MASS_ACC` = MS2 20 / MS1 7 ppm): the measurement is used only where it is wider. The level with a tier keeps it and is never floored (both flags omitted from the cfg, plan `measure_with_diann`) | both resolutions known, one outside the table |
-| Orbitrap, **resolution unknown** | **automatic calibration** — *not* measured: with no resolution both levels would be, and a measured MS1 is what DIA-NN warns about. Pass `--ms1-resolution`/`--ms2-resolution`, or pin the two flags | generic orbitrap names with no resolution (the default for a `.raw`) |
+| Orbitrap, **resolution unknown** | **automatic calibration** — *not* measured: with no resolution both levels would be, and a measured MS1 is what DIA-NN warns about. Pass `--ms1-resolution`/`--ms2-resolution`, or pin the two flags | generic orbitrap names with no resolution — since 2.5.1 only when step 2 could not read it from the `.raw` scan trailer (see below) or the input is an mzML without `MS:1000800` |
 | Instrument not detected | **automatic calibration** | fallback |
 
 **Outside the table nothing is extrapolated.** The old log-log fit turned the 15,000 MS2 that
@@ -87,10 +87,18 @@ resolving power), and its `query` JSON has no resolution attribute.
 Where the numbers do live: the instrument method text (`Orbitrap Resolution = 60000`
 then `= 15000` on that Exploris; `= 120K` then `= 15K` on the Lumos) and every scan's
 trailer (`FT Resolution:` on Exploris, `Orbitrap Resolution:` on Fusion Lumos — not
-`Resolution Comp. (ppm):`). Take them from the method or the instrument operator and
-pass `--ms1-resolution`/`--ms2-resolution`. Before trusting `--from-mzml` with any
-converter, check the file: `grep -c 'MS:1000800' run.mzML` — `0` means it will pin
-nothing.
+`Resolution Comp. (ppm):`). **Since 2.5.1 step 2 reads the trailer itself:**
+`detect_acquisition.py` runs `thermo_resolution.py` (Thermo's RawFileReader DLLs via
+pythonnet) and reports `ms1_resolution`/`ms2_resolution` — verified against the embedded
+instrument method on Exploris 480 (120k/15k DIA, 60k/15k DDA) and Fusion Lumos (60k/15k)
+runs. Pass them with **`--resolution-source detected`**; numbers the user or operator gave
+go in without it (the source defaults to `user`), and values copied from an earlier cfg
+take `--resolution-source cfg`. The source is recorded — manifest `resolution.source_label`,
+the rationale's `class_label` and every mass-accuracy line say "read from the raw file (scan
+trailer)", "supplied by the user", etc. — so methods text never calls a typed-in number
+measured. (`--ms1-res`/`--ms2-res` are accepted aliases.) Before trusting `--from-mzml`
+with any converter, check the file: `grep -c 'MS:1000800' run.mzML` — `0` means it will
+pin nothing.
 
 ⚠ **Automatic calibration means OMITTING `--mass-acc`/`--mass-acc-ms1`, not
 setting them to 0.** `--mass-acc 0` fixes the tolerance at a literal 0 ppm — the

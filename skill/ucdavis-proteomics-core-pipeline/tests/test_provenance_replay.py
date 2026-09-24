@@ -120,6 +120,117 @@ class TestReplayFidelity(unittest.TestCase):
             self.assertEqual(differing, [], f"replay lost/changed: {differing}")
 
 
+class OrbitrapResolutionReplayTests(unittest.TestCase):
+    """reproduce.sh re-derived the defaults WITHOUT the Orbitrap resolution, so replaying a
+    60k/15k Fusion Lumos run reclassified it as orbitrap_generic and derived different mass
+    accuracy (review 2026-09-24). The replay now passes the recorded resolution AND its source,
+    and the rebuilt manifest must equal the original."""
+
+    def test_replay_carries_the_resolution_and_its_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = write_env(tmp)
+            wf = os.path.join(tmp, "wf")
+            base = ["--acquisition", "DIA", "--instrument", "Orbitrap Fusion Lumos",
+                    "--engine", "diann", "--organism-taxid", "9606", "--env", env]
+            subprocess.run([sys.executable, os.path.join(SCRIPTS, "resolve_defaults.py"),
+                            *base, "--ms1-resolution", "60000", "--ms2-resolution", "15000",
+                            "--resolution-source", "detected", "--dest", wf],
+                           capture_output=True, text=True, check=True)
+            out = os.path.join(tmp, "repro")
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "provenance.py"),
+                                "--outdir", out, "--workflow-manifest",
+                                os.path.join(wf, "workflow.manifest.json"),
+                                "--engine", "diann", "--acquisition", "DIA",
+                                "--instrument", "Orbitrap Fusion Lumos",
+                                "--organism-taxid", "9606"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(out, "reproduce.sh")) as fh:
+                sh = fh.read()
+            self.assertIn("--ms1-resolution 60000 --ms2-resolution 15000 "
+                          "--resolution-source detected", sh)
+            # replay exactly those flags
+            replay = os.path.join(tmp, "replay")
+            subprocess.run([sys.executable, os.path.join(SCRIPTS, "resolve_defaults.py"),
+                            *base, "--ms1-resolution", "60000", "--ms2-resolution", "15000",
+                            "--resolution-source", "detected", "--dest", replay],
+                           capture_output=True, text=True, check=True)
+
+            def load(p):
+                with open(p) as fh:
+                    d = json.load(fh)
+                d.pop("output", None)
+                (d.get("search") or {}).pop("params_file", None)
+                return d
+            a = load(os.path.join(wf, "workflow.manifest.json"))
+            b = load(os.path.join(replay, "workflow.manifest.json"))
+            self.assertEqual((a.get("resolution") or {}).get("source"), "detected")
+            self.assertEqual([k for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)], [])
+
+
+class IonTrapReplayTests(unittest.TestCase):
+    """An Orbitrap-MS1 / ion-trap-MS2 run has no MS2 resolution; --ms2-analyzer ITMS is what
+    selects its tolerances, so the replay must carry it."""
+
+    def test_replay_carries_the_ion_trap_analyzer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = write_env(tmp)
+            wf = os.path.join(tmp, "wf")
+            subprocess.run([sys.executable, os.path.join(SCRIPTS, "resolve_defaults.py"),
+                            "--acquisition", "DDA", "--instrument", "Orbitrap Fusion Lumos",
+                            "--engine", "sage", "--organism-taxid", "9606", "--env", env,
+                            "--ms1-resolution", "120000", "--ms2-analyzer", "ITMS",
+                            "--resolution-source", "detected", "--dest", wf],
+                           capture_output=True, text=True, check=True)
+            out = os.path.join(tmp, "repro")
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "provenance.py"),
+                                "--outdir", out, "--workflow-manifest",
+                                os.path.join(wf, "workflow.manifest.json"),
+                                "--engine", "sage", "--acquisition", "DDA",
+                                "--instrument", "Orbitrap Fusion Lumos",
+                                "--organism-taxid", "9606"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(out, "reproduce.sh")) as fh:
+                sh = fh.read()
+            self.assertIn("--ms1-resolution 120000 --ms2-analyzer ITMS "
+                          "--resolution-source detected", sh)
+            self.assertNotIn("--ms2-resolution", sh)
+
+
+class DigestionEnzymeReplayTests(unittest.TestCase):
+    """fetch_fasta.py --enzyme decides which protease contaminant entries stay Cont_ when they
+    match a target protein; reproduce.sh must rebuild the database with the same enzymes, and
+    fall back to the default (trypsin,lysc) for sidecars written before --enzyme existed."""
+
+    def _repro(self, tmp, fasta_info):
+        out, wf = build_bundle(tmp)
+        out2 = os.path.join(tmp, "repro2")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "provenance.py"),
+                            "--outdir", out2, "--workflow-manifest",
+                            os.path.join(wf, "workflow.manifest.json"),
+                            "--engine", "diann", "--acquisition", "DIA",
+                            "--instrument", "timsTOF HT", "--organism-taxid", "10090",
+                            "--fasta-info", json.dumps(fasta_info)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(out2, "reproduce.sh")) as fh:
+            return fh.read()
+
+    def test_non_default_enzyme_is_replayed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sh = self._repro(tmp, {"proteome": "UP000000589", "content_used": "one_per_gene",
+                                   "contaminant_set": "universal",
+                                   "digestion_enzymes_used": ["gluc"]})
+            self.assertIn("--enzyme gluc", sh)
+
+    def test_old_sidecar_replays_the_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sh = self._repro(tmp, {"proteome": "UP000000589", "content_used": "one_per_gene",
+                                   "contaminant_set": "universal"})
+            self.assertIn("--enzyme trypsin,lysc", sh)
+
+
 class SageSelfReportedVersionTests(unittest.TestCase):
     """environment/versions.txt must not present `sage --version` as THE Sage version.
 

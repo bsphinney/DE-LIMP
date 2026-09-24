@@ -16,7 +16,11 @@
 #                         sage-proteomics            (the DDA search engine)
 #                         proteowizard/msconvert     (LINUX ONLY on bioconda)
 #   - thermorawfileparser (bioconda, self-contained: reads Thermo .raw for
-#                         detect_acquisition.py) -- a separate, non-fatal install
+#                         detect_acquisition.py) + pythonnet (conda-forge: lets
+#                         thermo_resolution.py read the Orbitrap resolution) + pandas
+#                         -- one separate, non-fatal install that an existing env gets too
+#   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into ~/.proteomics-pipeline/dotnet8:
+#                         DIA-NN's .raw reader and the resolution reader both run on it
 #
 # What stays special-cased (handled elsewhere / reported):
 #   - DIA-NN: license-gated, no conda. Linux -> binary (acquire_tools.sh);
@@ -133,7 +137,7 @@ if env_ready && ! "$ENV_PREFIX/bin/Rscript" -e 'q(status=!requireNamespace("limp
   fi
 fi
 
-# ---- 2b. ThermoRawFileParser (Thermo .raw for detect_acquisition.py) --------
+# ---- 2b. ThermoRawFileParser + pythonnet + pandas: their own install ---------
 # gabrig 2026-09-23 (15 Fusion Lumos .raw, HIVE): nothing had installed a parser, step 2 read
 # every file as "not found" while setup.json said ready_for.dia, and the search would have run
 # the 380-980 FALLBACK on a method that acquired 357-1105. bioconda's build is the
@@ -141,15 +145,57 @@ fi
 # osx-64 and osx-arm64. A SEPARATE install, and not fatal: in create_env's one solve a
 # thermorawfileparser that does not resolve (no build for this platform, a channel hiccup)
 # would take R and limpa down with it.
+# pythonnet (conda-forge, noarch; deps clr_loader + cffi, no .NET) goes in the same step:
+# thermo_resolution.py uses it to read the Orbitrap MS1/MS2 resolution from the scan trailer
+# with the RawFileReader DLLs TRFP ships -- TRFP never outputs it, and without it
+# estimate_params.py cannot pin DIA-NN's documented tolerances. Its .NET is ensure_dotnet8.sh's
+# (a self-contained TRFP's bundled runtime cannot host it). Installed = its conda-meta record.
+# pandas (conda-forge) rides along: gabrig's follow-up (#15) found none in the HIVE env, and
+# ad-hoc analysis reaches for it first. Here, not in create_env, because create_env only runs
+# for a MISSING env -- this step is how an env that already exists gets it on a re-run.
 trfp_in_env() { [ -x "$ENV_PREFIX/bin/ThermoRawFileParser" ] || [ -x "$ENV_PREFIX/bin/thermorawfileparser" ]; }
-if [ -n "$CONDA" ] && env_ready && ! trfp_in_env && ! $CHECK_ONLY; then
-  say "[setup] installing ThermoRawFileParser (bioconda thermorawfileparser) into the env..."
+in_env_meta() {     # in_env_meta PKG: conda's own record of an installed package
+  local f; for f in "$ENV_PREFIX"/conda-meta/"$1"-[0-9]*.json; do [ -e "$f" ] && return 0; done
+  return 1
+}
+EXTRA_PKGS=""       # a word list, not an array: bash 3.2 + set -u and empty arrays do not mix
+trfp_in_env           || EXTRA_PKGS="$EXTRA_PKGS thermorawfileparser"
+in_env_meta pythonnet || EXTRA_PKGS="$EXTRA_PKGS pythonnet"
+in_env_meta pandas    || EXTRA_PKGS="$EXTRA_PKGS pandas"
+if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
+  say "[setup] installing$EXTRA_PKGS into the env..."
+  # shellcheck disable=SC2086  # $EXTRA_PKGS is meant to split into package names
   case "$CONDA" in      # -p for the reason create_env gives
     *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
-                   -c conda-forge -c bioconda thermorawfileparser >&2 ;;
+                   -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
     *)           "$CONDA" install -y -p "$ENV_PREFIX" \
-                   -c conda-forge -c bioconda thermorawfileparser >&2 ;;
-  esac || NOTES+=("ThermoRawFileParser could not be installed from bioconda into the env (the rest of the env is unaffected). Thermo .raw needs it: see thermo_raw_reader.note.")
+                   -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
+  esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
+fi
+
+# ---- 2c. .NET 8 (ensure_dotnet8.sh) ------------------------------------------
+# One root with Microsoft.NETCore.App >= 8.0.17 + AspNetCore serves DIA-NN's .raw reader, a
+# framework-dependent ThermoRawFileParser and the resolution reader. Left to a manual step, most
+# Thermo users met a not-ready gate at step 2 instead. Idempotent (it reuses a good root at once),
+# and not fatal: without it the note says so, and thermo_raw_reader reports what cannot run.
+# Not with --check (it downloads), and only on Linux/macOS -- under Git Bash, DIA-NN for Windows
+# reads .raw with no .NET step (references/install.md). activate.sh exports the root it made.
+# PROTEOMICS_ENSURE_DOTNET8 exists so the tests can stand a stub in for the download.
+ENSURE_DOTNET8="${PROTEOMICS_ENSURE_DOTNET8:-$SCRIPT_DIR/ensure_dotnet8.sh}"
+DOTNET8_ROOT=""; DOTNET8_NOTE="not run: setup.sh --check installs nothing"
+if ! $CHECK_ONLY; then
+  case "$OS" in
+    linux|darwin)
+      say "[setup] making sure .NET 8 is available (ensure_dotnet8.sh)..."
+      if DOTNET8_OUT="$("${BASH:-bash}" "$ENSURE_DOTNET8")" && [ -n "$DOTNET8_OUT" ]; then
+        DOTNET8_ROOT="${DOTNET8_OUT##*$'\n'}"      # its contract: the root is the LAST line
+        DOTNET8_NOTE="ensure_dotnet8.sh: .NET 8 at $DOTNET8_ROOT"
+      else
+        DOTNET8_NOTE="ensure_dotnet8.sh could not provide .NET 8 (it needs internet the first time; its own messages are on setup.sh's stderr)"
+        NOTES+=("$DOTNET8_NOTE. Until it does, DIA-NN cannot read .raw and the Orbitrap resolution cannot be read: re-run \`bash $ENSURE_DOTNET8\` where there is internet (a login node).")
+      fi ;;
+    *) DOTNET8_NOTE="not run on $OS" ;;
+  esac
 fi
 
 # ---- 3. resolve tool paths --------------------------------------------------
@@ -237,6 +283,7 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
          "$($HAS_APPTAINER && echo true || echo false)" \
          "$($QUOBYTE && echo true || echo false)"
   printf '  "diann": {"ready": %s, "note": "%s"},\n' "$($DIANN_READY && echo true || echo false)" "$(j "$DIANN_NOTE")"
+  printf '  "dotnet8": {"root": "%s", "note": "%s"},\n' "$(j "$DOTNET8_ROOT")" "$(j "$DOTNET8_NOTE")"
   printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
          "$($DE_READY && echo true || echo false)" \
          "$($DIA_READY && echo true || echo false)" \

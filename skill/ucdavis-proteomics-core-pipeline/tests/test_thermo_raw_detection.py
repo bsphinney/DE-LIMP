@@ -85,6 +85,10 @@ class _FakeParserCase(unittest.TestCase):
         # pipeline env (a developer's ~/.proteomics-pipeline may hold a real parser)
         os.environ["THERMORAWFILEPARSER_SHARED"] = ""
         os.environ["PROTEOMICS_PIPELINE_HOME"] = self.tmp
+        # no Orbitrap-resolution reader (an installed pythonnet must not start .NET here);
+        # test_orbitrap_resolution.py sets one up with fakes
+        os.environ["THERMO_RESOLUTION_PYTHON"] = ""
+        os.environ.pop("THERMO_RAWFILEREADER_DIR", None)
 
     def tearDown(self):
         os.environ.clear()

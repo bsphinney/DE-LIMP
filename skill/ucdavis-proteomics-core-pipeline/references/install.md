@@ -32,6 +32,15 @@ creates one conda environment containing:
 | `sage-proteomics` | the DDA search engine |
 | `proteowizard` (msconvert) | `.d`/`.raw` → mzML for Sage — **Linux only on bioconda** |
 | `thermorawfileparser` (2.0.0.dev; linux-64, osx-64, osx-arm64) | reads Thermo `.raw` for `detect_acquisition.py` (step 2): acquisition, instrument and the **acquired precursor m/z range**. Without a parser every `.raw` is `unknown` and a DIA search falls back to 380–980. bioconda's build is the **self-contained** one — it needs no .NET on the machine. Installed in a **separate, non-fatal** step after the env exists, so a platform without a build cannot take R/limpa down with it |
+| `pythonnet` (conda-forge, 3.1.0, noarch) | lets `thermo_resolution.py` read the **Orbitrap MS1/MS2 resolution** from each `.raw`'s scan trailer with the RawFileReader DLLs the parser ships — ThermoRawFileParser itself never outputs it, and `estimate_params.py` needs it to pin DIA-NN's documented Orbitrap tolerances. Same separate, non-fatal step as the parser; only what is missing is installed. It runs on a .NET 8 root with `Microsoft.NETCore.App` (`ensure_dotnet8.sh`'s; a self-contained parser's bundled runtime cannot host it) |
+| `pandas` (conda-forge) | ad-hoc tables in Python (a user's first reach). In the same separate step — not the main solve — so an env that already exists gets it on a re-run of `setup.sh` |
+
+`setup.sh` also runs **`ensure_dotnet8.sh`** (Linux and macOS; not with `--check`): one .NET 8
+root with `Microsoft.NETCore.App` ≥ 8.0.17 + `Microsoft.AspNetCore.App` in
+`~/.proteomics-pipeline/dotnet8`, which DIA-NN's `.raw` reader, a framework-dependent
+ThermoRawFileParser and the resolution reader all use. It reuses a good root at once. A failure
+(it needs internet the first time) is a note, not a stop; `setup.json`'s `dotnet8`
+(`root`, `note`) says what happened.
 
 If the conda solve drops limpa, `setup.sh` installs it via `BiocManager::install("limpa")`.
 
@@ -51,6 +60,13 @@ order: `$THERMORAWFILEPARSER`, PATH, the pipeline env, then shared copies in
 `$THERMORAWFILEPARSER_SHARED` (default: the UC Davis Core's
 `/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser`; set it to your own
 site's copy, or empty for none). When it is `false`, `note` is the exact fix.
+`thermo_raw_reader.resolution_reader` (`ready`, `python`, `dll_dir`, `dotnet_root`, `reader`,
+`note`) says whether the Orbitrap resolution can be read: it runs `thermo_resolution.py --check`
+(loads .NET and the two DLLs, opens no `.raw`). It does not gate `ready_for.thermo_raw` —
+without it the user is asked for the resolution instead. The DLLs are looked for in
+`$THERMO_RAWFILEREADER_DIR`, then beside the parser; the interpreter is
+`$THERMO_RESOLUTION_PYTHON`, else the one running step 2 if it has pythonnet, else the
+pipeline env's python.
 
 **.NET 8 (only for a framework-dependent parser, and for DIA-NN on Linux).** The Core's
 shared parser, and the release's `-net8` zip run as `dotnet ThermoRawFileParser.dll`, are

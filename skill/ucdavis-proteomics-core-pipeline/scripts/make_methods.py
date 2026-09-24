@@ -283,13 +283,26 @@ def main():
             sent += (" and these entries were excluded from quantification and "
                      "normalisation."
                      if fmeta.get("diann_cont_quant_exclude") else ".")
+            # fetch_fasta.py removes contaminant entries whose sequence IS a target protein
+            # (bovine ACTB = human ACTB, human keratins); a reader must know those proteins
+            # were quantified, not excluded as contaminants.
+            n_drop = fmeta.get("n_contaminants_dropped_as_target") or 0
+            if n_drop:
+                sent += (f" {n_drop} contaminant entries identical to (or contained in) "
+                         f"{fmeta.get('organism') or '____'} proteins were removed from the "
+                         f"library first, so those proteins are quantified under their own "
+                         f"accessions.")
         else:
             sent += " No contaminant database was appended."
         w(sent)
-        if fmeta.get("warnings"):
+        # The drop note is described in the sentence above -- it is a record, not
+        # something to resolve before publication.
+        build_warnings = [x for x in (fmeta.get("warnings") or [])
+                          if x != fmeta.get("contaminants_dropped_note")]
+        if build_warnings:
             w("")
             w(f"> Database build warnings (resolve before publication): "
-              f"{'; '.join(fmeta['warnings'])}")
+              f"{'; '.join(build_warnings)}")
     else:
         w(f"Spectra were searched against ____ {DEF} "
           f"(run `fetch_fasta.py` and pass `--fasta-meta <fasta>.meta.json` to fill "

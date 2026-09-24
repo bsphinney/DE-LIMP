@@ -37,7 +37,8 @@ import test_thermo_raw_detection as trfp  # noqa: E402
 import test_tdf_readonly_open as tdf      # noqa: E402
 
 FILE_KEYS = {"file", "vendor", "acquisition", "confidence", "reason", "instrument",
-             "precursor_mz_range", "tdf_integrity", "warnings", "reader"}
+             "precursor_mz_range", "tdf_integrity", "warnings", "reader",
+             "ms1_resolution", "ms2_resolution", "ms2_analyzer", "resolution_note"}
 
 
 class _MixedCohort(trfp._FakeParserCase):

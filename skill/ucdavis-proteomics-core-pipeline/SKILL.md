@@ -160,6 +160,12 @@ source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
 ```
 `setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
 limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
+It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
+`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
+DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
+and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
+so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
+`dotnet8.note` and `notes` say what did not happen.
 Sourcing `activate.sh` makes every later step use those interpreters — **source it
 in the same shell before running anything below** (or prefix later commands).
 
@@ -171,12 +177,12 @@ Read `setup.json` and **gate on `ready_for`**:
 - `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
   `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
 - `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:
-  do exactly what `thermo_raw_reader.note` says (usually `bash scripts/ensure_dotnet8.sh`
-  on the login node, which adds the .NET runtimes the Core's shared parser needs, or
-  re-run `setup.sh`, which installs bioconda's self-contained `thermorawfileparser`), then
-  `setup.sh --check` until it is true. `ready_for.dia` does not cover this: without a
-  working parser every `.raw` is `unknown` and a DIA search falls back to 380–980.
-  Irrelevant for `.d`/mzML-only input.
+  do exactly what `thermo_raw_reader.note` says (usually re-run `setup.sh`, or `bash
+  scripts/ensure_dotnet8.sh` where there is internet), then `setup.sh --check` until it is
+  true. `ready_for.dia` does not cover this: without a working parser every `.raw` is
+  `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
+- `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
+  Orbitrap resolution and the user will be asked for it; its `note` is the fix.
 
 This step is idempotent — on a machine that's already set up it just verifies and
 returns in seconds. → detail: `references/install.md`.
@@ -261,12 +267,30 @@ dotnet-core-sdk/8.0.4` in the same shell, and re-run step 2. Don't retry under `
 first — a compute node gives the same answer. Each file's `reader` records the parser, its
 version and the `DOTNET_ROOT` used. A `.raw` that is `unknown` for any other reason says
 why in its `warnings`; without a measured precursor range step 6b falls back to 380–980.
-**`orbitrap_resolution_unknown`** is non-null for Orbitrap `.raw` other than the Astral:
-the `.raw` does not carry the Orbitrap resolution as ThermoRawFileParser reads it (neither
-its metadata nor the filter strings have it — checked on a Fusion Lumos run), so **ask the
-user** for the method's MS1 and MS2 resolution (e.g. "120,000 MS1 / 30,000 MS2"; it is in
-the instrument method) and pass it in step 6b. It does not set `needs_confirmation`; ask
-anyway.
+**The Orbitrap resolution is read from the `.raw` itself.** For every Orbitrap `.raw` (not
+the Astral — its DIA-NN tolerances do not use it) `detect_acquisition.py` reads the MS1 and
+MS2 resolution from the scan trailer through `thermo_resolution.py` (Thermo's RawFileReader
+DLLs via pythonnet, in one subprocess; the key is `Orbitrap Resolution:` on a Fusion Lumos,
+`FT Resolution:` on an Exploris 480 — ThermoRawFileParser itself never outputs it). Each
+file gets `ms1_resolution`, `ms2_resolution` and a `resolution_note` naming the scans they
+came from, or why not. At the top level:
+- `ms1_resolution` / `ms2_resolution` — set only when every Orbitrap file agrees. **Pass them
+  to steps 4 and 6b with `--resolution-source detected`.**
+- `resolution_mixed` — non-empty when files disagree (e.g. 120k/15k DIA runs with a 60k/15k
+  DDA run); it sets `needs_confirmation`. **Tell the user which files read what; search the
+  groups separately or agree one setting with them — never pick one silently.**
+- `orbitrap_resolution_unknown` — only the files that could NOT be read, with `reasons`
+  (pythonnet missing, no .NET 8, no DLLs, two resolutions in one file, …), per-file `levels`
+  and `read_in_other_files`. **Ask the user for just the levels `levels` names for each of
+  those files** (it is in the instrument method), or fix the reason and re-run step 2.
+- `ms2_ion_trap` — runs whose MS2 is read in the ion trap (e.g. Fusion Lumos OT/IT DDA): only
+  the MS1 Orbitrap resolution applies. **Never ask for or pass an MS2 resolution for them**;
+  pass `--ms2-analyzer ITMS` in steps 4/6b and confirm their search settings with the user
+  (see its `note`). Files in its `mixed_files` read MS2 in BOTH analyzers (e.g. a Tribrid
+  decision-tree method); they set `needs_confirmation` — confirm the method with the user, then
+  pass `--ms2-analyzer mixed` (Sage's ±0.4 Da ion-trap window also covers the Orbitrap
+  fragments).
+A missing resolution never changes the acquisition, the range or `needs_confirmation`.
 Each `.raw` costs ~3–7 s of parser I/O (more on a busy mount). **On a cluster, run step 2 for more than 5 `.raw`
 on a compute node** (`srun --cpus-per-task=1 --mem=2G … python3 scripts/detect_acquisition.py …`,
 with the account/partition the user can submit to); on a login node the script refuses
@@ -398,6 +422,7 @@ session nests under `<prior>/reanalysis/<date>_<name>/`.
 ```
 python3 scripts/resolve_defaults.py \
     --acquisition DIA --instrument "timsTOF HT" \
+    [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
     [--engine diann] [--env env.json] [--fasta db.fasta] [--threads 32] --dest ./wf
 ```
 Writes `./wf/workflow.manifest.json` (engine + pinned version, mass accuracy and its
@@ -405,11 +430,42 @@ source, DE method) and, for FragPipe/Radiant, generates the config file itself. 
 `--env` (step 1's `detect_env.sh` output) so an engine that **cannot run on this
 machine** fails here with a usable alternative rather than mid-search.
 
+**Orbitrap resolution — pass it, and say where it came from.** For a Thermo Orbitrap other
+than the Astral, pass step 2's top-level `ms1_resolution`/`ms2_resolution` with
+`--resolution-source detected` (read from the `.raw` scan trailer). Numbers the user told
+you: omit `--resolution-source` (it defaults to `user`); copied from an earlier run's
+configuration: `--resolution-source cfg`. (`--ms1-res`/`--ms2-res` are the same flags.)
+**Ion-trap MS2:** for step 2's `ms2_ion_trap` files (common on Fusion Lumos/Eclipse OT/IT
+methods) pass `--ms1-resolution <MS1> --ms2-analyzer ITMS` and **no** `--ms2-resolution` (there
+is none; the two together are refused), and never ask the user for one. A file whose MS2 is
+read in BOTH analyzers (step 2's `mixed_files`) is `--ms2-analyzer mixed` and gets the same
+ion-trap tolerances. DIA-NN then pins
+neither mass-accuracy level (there is no Orbitrap MS2 value, and either flag fixes both), so it
+is left to DIA-NN's calibration; Sage uses its documented low-res fragment window (±0.4 Da —
+with ±10 ppm a real Sage 0.14.7 run matched nothing on ion-trap fragments). Quote the
+manifest's `ppm_source`, which says which. A cohort in which some files are ion-trap and some
+Orbitrap MS2 (`resolution_mixed`) needs either `--ms2-analyzer mixed` for all of them or
+separate searches. The
+manifest's `resolution.source_label` and `instrument_label` carry the source — quote it as
+written, and never say "read from the data" about numbers the user gave.
+
+**`needs_confirmation: true` means a question is still open, even with exit code 0.** It is
+set for an Orbitrap with no resolution on a route that uses it (DIA-NN, Radiant). Put
+`ask_user` to the user as part of the one confirmation below — get the MS1/MS2 resolution
+(or run `detect_acquisition.py`, which reads it from the `.raw`), then re-run this step with
+it. If the user does not know, say that mass accuracy is left to DIA-NN's per-run
+calibration (results then depend on file order, and a cohort that would run as the 5-step
+chain runs as one single-node search), and continue.
+
 **Confirm once, then run.** State the pick in one breath — data type, engine +
 version, mass accuracy + where it came from, FASTA, DE method — and get a yes:
 
 > timsTOF HT dia-PASEF → DIA-NN 2.7.0, MS1/MS2 15 ppm (DIA-NN README), mouse
 > UP000000589 + contaminants, limpa DPC-Quant + limma. Run it?
+
+> Exploris 480 DIA, MS1 120,000 / MS2 15,000 resolution read from the raw file (scan
+> trailer) → DIA-NN 2.7.0, MS1 7 ppm (DIA-NN table), MS2 measured on representative runs
+> before the search, human UP000005640 + contaminants, limpa DPC-Quant + limma. Run it?
 
 Do **not** turn this into a menu. There is exactly one confirmation before compute,
 and it is this one.
@@ -517,8 +573,15 @@ step 3**:
 python3 scripts/fetch_fasta.py fetch --proteome <confirmed UPID> \
     --content <one_per_gene|reviewed|reviewed_isoforms|full|full_isoforms> \
     --contaminants <universal|cell_culture|...|none> \
-    --out ./search.fasta [--hive]
+    [--enzyme trypsin,lysc] --out ./search.fasta [--hive]
 ```
+`--enzyme` names the digestion enzyme(s) actually used (trypsin, lysc, gluc, chymotrypsin,
+aspn, argc, lysn, pepsin; comma- or slash-separated — `Trypsin/P` and `Trypsin/Lys-C` work). The default `trypsin,lysc` is the Core's usual
+mix — leave it unless the user says otherwise; change it for a different digest (`--enzyme
+gluc`, `--enzyme trypsin,pepsin`). Only those enzymes' contaminant entries stay `Cont_` when
+they match a protein of the searched organism (their autolysis peptides stay out of quant);
+any other protease is treated as sample protein — which matters for organisms that make the
+enzyme themselves (S. aureus's own SspA is the Glu-C entry, quantified on a trypsin digest).
 Defaults are `--content one_per_gene` (the canonical set, from UniProt's
 reference-proteome FTP tree) and `--contaminants universal`. **Do not pass
 `--content full` casually** — for human that is 147,506 sequences instead of
@@ -558,6 +621,21 @@ bundle) and act on it:
   fallback changes the database out from under them.
 - `diann_cont_quant_exclude` → pass as `--cont-quant-exclude Cont_` to DIA-NN in
   step 7 so contaminants are identified but excluded from quant + normalisation.
+- `n_contaminants_dropped_as_target` > 0 is normal, not a failure. The universal
+  contaminant set holds sequences identical to real proteins (human keratins; bovine
+  ACTB/EEF1A1/tubulins that are residue-for-residue the human and mouse proteins). Left in,
+  DIA-NN reports those proteins ONLY as `Cont_` groups and `--cont-quant-exclude` drops them
+  from quant — ACTB, EEF1A1 and KRT8 vanished from a real HeLa search this way. `fetch`
+  removes every contaminant entry identical to (or contained in) a target entry, lists them
+  under `contaminants_dropped_as_target`, and warns (expect ~153 for human, ~31 for mouse);
+  the digestion enzyme(s) named by `--enzyme` are the exception and stay contaminants
+  (`contaminants_kept_despite_target_match`; a warning naming a protease dropped as "not in
+  --enzyme" means: if that enzyme WAS used, re-run `fetch` with it in `--enzyme`). Tell the user those proteins — skin keratins
+  included — are now quantified and count toward normalisation; step 8c flags them.
+- A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
+  and lists them under `contaminants_identical_to_target_kept` — rebuild it with
+  `--proteome` instead. The Core's staged `UP000005640_9606_plus_universal_contam.fasta`
+  has this problem: do not pass it with `--path`.
 - Contaminants that can't be fetched are a **hard stop**, not a warning. Fix the
   source or have the user explicitly choose `--contaminants none`.
 → detail: `references/environment.md` ("FASTA").
@@ -570,6 +648,7 @@ wrote their config):
 python3 scripts/estimate_params.py --engine <diann|sage> \
     --acquisition <DIA|DDA> --instrument "<detected instrument>" \
     --precursor-mz-range <LO> <HI> \
+    [--ms1-resolution <MS1> (--ms2-resolution <MS2> | --ms2-analyzer <ITMS|mixed>) [--resolution-source detected]] \
     [--var-mods ox] [--overrides '<site SOP values as JSON>'] \
     --fasta-meta ./search.fasta.meta.json \
     --out ./wf/params.<cfg|json>
@@ -608,8 +687,22 @@ is plausible**: MS2 3–30 ppm, MS1 1.5–25 ppm, from at least 2 runs agreeing 
 because a tolerance tighter than the SOP costs identifications and buys nothing.
 Both numbers are recorded; a documented level is never floored. An Orbitrap whose **resolution is unknown** is *not* measured (both levels would be,
 and a measured MS1 is what DIA-NN warns about): it falls to automatic calibration, and the
-chain declines it. When step 2's `orbitrap_resolution_unknown` is non-null, pass the user's
-answer as `--ms1-resolution <MS1> --ms2-resolution <MS2>`: without them mass accuracy is
+chain declines it. Pass the same resolution flags as step 4 — step 2's
+`ms1_resolution`/`ms2_resolution` with `--resolution-source detected`, or, for files in
+`orbitrap_resolution_unknown`, the user's answer with no `--resolution-source` (it defaults to
+`user`); for `ms2_ion_trap` files, `--ms2-analyzer ITMS` instead of `--ms2-resolution` (step 4 —
+Sage then writes `fragment_tol {"da": [-0.4, 0.4]}`, `deisotope: false` and a larger
+`bucket_size`, Sage's own low-res MS/MS settings; DIA-NN omits both mass-accuracy flags).
+**Pass the SAME `--ms2-analyzer` here as in step 4** — only this step changes Sage's config, and
+`run_search.py` refuses a Sage search whose config does not match the manifest (a ppm fragment
+window for an ion-trap MS2, or a Da window for an Orbitrap MS2) before converting or submitting
+anything. With
+them a 60k/15k Fusion Lumos becomes `orbitrap_untabled`: MS1 is pinned at
+10 ppm from DIA-NN's table and the 15k MS2 is measured by step 1b (`measure_with_diann`), so
+the 5-step chain can run. If step 2 reported `resolution_mixed`, do not pass one value for the
+whole cohort. The rationale's `class_label`, `resolution.source_label` and each mass-accuracy
+line then say where the numbers came from, and that is what the methods text quotes; if the
+sidecar still says `needs_confirmation: true`, relay `ask_user`. Without them mass accuracy is
 left to DIA-NN's per-run calibration (results then depend on file order), and a cohort
 that would run as the 5-step parallel chain runs as one single-node search. If the user
 does not know, say so and continue. An `--overrides` that sets only one of
@@ -1132,7 +1225,8 @@ of effect size.
 ### 8c. Audit the results for common mistakes (surface every issue)
 ```
 python3 scripts/audit_results.py --out AUDIT.md --conditions ./conditions.csv \
-    --de-dir ./de_results --acquisition-json /tmp/acq.json --adjp 0.05 --logfc 1
+    --de-dir ./de_results --acquisition-json /tmp/acq.json --adjp 0.05 --logfc 1 \
+    --fasta-meta ./search.fasta.meta.json
 ```
 Checks for the classic new-user pitfalls: too few/no replicates, imbalanced or
 **confounded** design, **mixed acquisition or mixed instruments** in one analysis,
@@ -1142,6 +1236,14 @@ results that are too-empty or implausibly-large (batch/normalization artefacts).
 replicate, or a batch confounded with the biology) until they resolve it — don't
 let a new user over-interpret a broken design. The findings also go into the
 report's "Audit & caveats" section. → detail: `references/audit.md`.
+`target_contaminants` lists quantified proteins whose sequence is also a common contaminant
+— **KEPT in quantification**: a possible contamination source, reported rather than
+excluded. Name any that are significant in DE, and judge them by type: skin/hair keratins
+(KRT1/2/9/10, KRTAPs, FLG) are usually handling contamination; ACTB, EEF1A1, tubulins and
+KRT8/18/19/7 in epithelial cells are usually endogenous. `contaminant_overlap` means real
+proteins are missing from quant — rebuild the FASTA and re-search. `sample_quality.py`'s
+CONTAMINANT_IDENTICAL panel uses the same list; a group-confounded result there is a STOP
+like any other panel.
 
 Then run the **biological sample-quality** check (contamination that mimics biology —
 hemolysis, tissue cross-contamination, skin) — and **read `references/anomaly-checks.md`
@@ -1151,7 +1253,8 @@ p-value-distribution shape, largest-FC-in-low-abundance, log2FC>5 artefacts, PCA
 swaps, GSEA background; plus XL-MS / phospho / non-model branches):
 ```
 python3 scripts/sample_quality.py --matrix ./de_results/Expression_Matrix.csv \
-    --conditions ./conditions.csv --report ./search_out/report.parquet --out SAMPLE_QUALITY.md
+    --conditions ./conditions.csv --report ./search_out/report.parquet --out SAMPLE_QUALITY.md \
+    --fasta-meta ./search.fasta.meta.json
 ```
 **If a contamination panel is confounded with a group, STOP** — DE may be contamination,
 not biology, and protein-level filtering will not fix it (→ `references/anomaly-checks.md`).

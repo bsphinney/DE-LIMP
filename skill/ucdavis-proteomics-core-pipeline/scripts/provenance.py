@@ -40,6 +40,8 @@ Outputs under --outdir:
 """
 import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
+from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE   # one definition, where it is written
+
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
 def skip(w, why): MANIFEST_LINES.append(f"[SKIPPED] {w} -- {why}")
@@ -318,6 +320,20 @@ def main():
     # fact about a proteomics run -- and could not say what machine it ran on.
     _tax = (wfman or {}).get("organism_taxid") or a.organism_taxid
     tax_repro = f" \\\n  --organism-taxid {int(_tax)}" if _tax else ""
+    # The Orbitrap resolution decides the instrument class and so the mass accuracy: a replay
+    # without it reclassifies a 60k/15k Lumos as orbitrap_generic and derives different
+    # tolerances. Replayed with the SOURCE it had (detected / user / cfg), so the rebuilt
+    # manifest labels the numbers the same way.
+    _res = (wfman or {}).get("resolution") or {}
+    _res_flags = [f"--{lvl}-resolution {int(float(_res[lvl]))}" for lvl in ("ms1", "ms2")
+                  if _res.get(lvl)]
+    if _res.get("ms2_analyzer") in ("ITMS", "mixed"):
+        # an ion-trap (or partly ion-trap) MS2 has no single MS2 resolution; the analyzer is
+        # what selects its tolerances
+        _res_flags.append(f"--ms2-analyzer {_res['ms2_analyzer']}")
+    if _res_flags and _res.get("source"):
+        _res_flags.append(f"--resolution-source {shlex.quote(str(_res['source']))}")
+    res_repro = (" \\\n  " + " ".join(_res_flags)) if _res_flags else ""
     raw_arg = " ".join(f"'{f}'" for f in raw_files) or "/path/to/raw/*"
 
     # Rebuild the FASTA from what actually ran (fetch_fasta.py's output), falling back
@@ -365,6 +381,27 @@ def main():
         fasta_repro_note = ("NOT RECORDED — --fasta-info was not passed to provenance.py, "
                             "so these values come from the workflow bundle's defaults and "
                             "may not be what was searched. Verify against checksums/.")
+    # The digestion enzyme(s) decide which protease contaminant entries stay Cont_ when they
+    # match a target protein, so a non-trypsin digest rebuilt with the default would produce a
+    # different database. Sidecars from before --enzyme existed lack the field; their build was
+    # the default, which is what the fallback names.
+    fasta_repro_enzyme = shlex.quote(",".join((fi or {}).get("digestion_enzymes_used")
+                                              or ["trypsin", "lysc"]))
+    # fetch_fasta.py now removes contaminant entries identical to a target protein (bovine
+    # ACTB = human ACTB ...). A sidecar with no contaminant_target_rule was written BEFORE that
+    # check, so its database still holds them; replayed as-is, today's fetch_fasta.py would
+    # build a DIFFERENT database (153 fewer human Cont_ entries). Replay it faithfully -- and
+    # a sidecar built with the check disabled (a replay of a replay) likewise.
+    _rule = fi.get("contaminant_target_rule")
+    fasta_repro_keep = ""
+    if fi and fasta_repro_contam != "none" and (not _rule or _rule == KEEP_TARGET_CONTAMINANTS_RULE):
+        fasta_repro_keep = " --keep-target-contaminants"
+        fasta_repro_note += (
+            " The original database was built before target-identical contaminants were "
+            "removed; this replays that faithfully -- drop --keep-target-contaminants to get "
+            "the corrected database." if not _rule else
+            " The original database was built with --keep-target-contaminants; this replays "
+            "that faithfully -- drop the flag to get the corrected database.")
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
@@ -395,7 +432,7 @@ fi
 #    Original defaults_version: {defaults_version}
 bash "$SKILL/scripts/detect_env.sh" > ./env.json
 python3 "$SKILL/scripts/resolve_defaults.py" --acquisition {acq_repro} \\
-  --instrument {instr_repro} --engine {engine_repro}{tax_repro} \\
+  --instrument {instr_repro} --engine {engine_repro}{tax_repro}{res_repro} \\
   --env ./env.json --dest ./wf
 
 # 3. Resolve the same engine + version.
@@ -406,7 +443,7 @@ PIN_ENGINE={a.engine or '<engine>'} PIN_VERSION={(wfman or {}).get('engine',{}).
 #    ACTUALLY searched (from fetch_fasta.py's output), not the workflow bundle's default.
 #    Original: {fasta_repro_note}
 python3 "$SKILL/scripts/fetch_fasta.py" fetch --proteome {fasta_repro_proteome} \\
-  --content {fasta_repro_content} --contaminants {fasta_repro_contam} --out ./search.fasta
+  --content {fasta_repro_content} --contaminants {fasta_repro_contam} --enzyme {fasta_repro_enzyme}{fasta_repro_keep} --out ./search.fasta
 
 # 5. Re-run the search (inputs from inputs/checksums; verify against checksums/checksums.json).
 python3 "$SKILL/scripts/run_search.py" --tools ~/.proteomics-pipeline/tools/tools.json \\

@@ -48,8 +48,11 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   it needs `Microsoft.NETCore.App` 8 **and** `Microsoft.AspNetCore.App` 8, which
   `ensure_dotnet8.sh` installs together (or `module load dotnet-core-sdk/8.0.4` for the
   parser alone — 8.0.4 is too old for DIA-NN). bioconda's `thermorawfileparser`, which
-  `setup.sh` puts in the env, is self-contained and needs neither. Detail:
-  `references/install.md`.
+  `setup.sh` puts in the env, is self-contained and needs neither. Either parser's folder holds the
+  `ThermoFisher.CommonCore.RawFileReader`/`.Data` DLLs (8.0.6, .NET 8) that
+  `thermo_resolution.py` loads through pythonnet to read the Orbitrap resolution from the
+  scan trailer — that needs a `Microsoft.NETCore.App` 8 root even with a self-contained
+  parser. Detail: `references/install.md`.
 
 ## Version pinning (reproducibility)
 
@@ -192,6 +195,21 @@ contaminant FASTA of its own** (the GUI's "Contaminants" checkbox is a
 Windows-side asset), so they must be appended here. `fetch_fasta.py` reports the
 tag as `diann_cont_quant_exclude`; pass the sidecar to `estimate_params.py
 --fasta-meta` and the flag lands in the cfg automatically.
+
+**Contaminant entries that ARE target proteins are removed.** Matching is by sequence, not
+accession: an entry identical to a target entry, or an exact substring of one (≥ 7 aa, DIA-NN's
+default minimum peptide length; I and L kept distinct), is dropped so the protein is quantified
+under its own accession, and recorded under `contaminants_dropped_as_target` (sidecar) with a
+warning and a methods sentence. The universal set holds 152 human-identical entries (human
+keratins; bovine ACTB/EEF1A1/YWHAZ/tubulins) + 1 substring, and 31 mouse-identical ones;
+left in, DIA-NN reported ACTB, EEF1A1 and KRT8 only as `Cont_` groups and
+`--cont-quant-exclude` removed them from quant (a real HeLa search, 2026-09-23: 6.9% of all
+intensity). The digestion enzyme(s) actually used (`fetch --enzyme`, default `trypsin,lysc`)
+are kept as contaminants even when they match a target protein — they are reagents — and
+recorded under `contaminants_kept_despite_target_match`; any other protease entry follows the
+normal rule (S. aureus's own SspA is identical to the Glu-C entry and stays quantified on a
+trypsin digest). The
+auditors flag the dropped proteins as "possible contamination, kept in quantification".
 
 **A failure to fetch contaminants is fatal, not a warning** — the GPM cRAP URL
 this script used previously now 404s, and the old warn-and-continue behaviour
