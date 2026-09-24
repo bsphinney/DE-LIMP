@@ -552,6 +552,38 @@ expr_df <- merge(expr_df, data.frame(Protein.Group = rownames(E), E, check.names
 utils::write.csv(expr_df, file.path(outdir, "Expression_Matrix.csv"), row.names = FALSE)
 message(sprintf("[run_de] Expression_Matrix.csv: %d proteins x %d samples", nrow(E), ncol(E)))
 
+# ---- detection matrix: measured vs inferred/missing, per protein x sample ------
+# The ONE definition of "was this value measured": QC_detected_vs_inferred.csv's totals
+# below are column sums of this matrix, and the figures read it cell by cell (DE-LIMP
+# colours each violin dot by it). dpc: precursors actually observed for that protein in
+# that run (0 = value inferred by the detection-probability model). maxlfq: 1 where the
+# matrix has a value, 0 where it is NA (missing). Rows and sample columns follow
+# Expression_Matrix.csv exactly.
+det_n <- if (method == "dpc" && exists("dat")) {
+  .prot <- as.character(dat$genes[["Protein.Group"]])
+  if (is.null(.prot) || !length(.prot)) .prot <- rownames(dat$E)
+  .cnt <- rowsum((!is.na(dat$E)) * 1L, group = .prot, reorder = TRUE)
+  .m <- matrix(NA_integer_, nrow(E), ncol(E), dimnames = dimnames(E))
+  .ii <- match(rownames(E), rownames(.cnt))
+  .m[!is.na(.ii), ] <- as.matrix(.cnt)[.ii[!is.na(.ii)], colnames(E), drop = FALSE]
+  .m
+} else {
+  .m <- (!is.na(E)) * 1L
+  dimnames(.m) <- dimnames(E)
+  .m
+}
+detection_rec <- list(
+  file = "Detection_Matrix.csv",
+  zero_means = if (method == "dpc") "inferred" else "missing",
+  values = if (method == "dpc")
+    "precursors observed for the protein in that run; 0 = value inferred by the DPC model"
+  else "1 = quantified in the MaxLFQ matrix, 0 = missing (NA)",
+  na_means = "protein not in the precursor matrix: status not recorded")
+utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
+                            det_n[match(expr_df$Protein.Group, rownames(det_n)), , drop = FALSE],
+                            check.names = FALSE),
+                 file.path(outdir, detection_rec$file), row.names = FALSE)
+
 all_sig <- list()
 for (cn in forms) {
   tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = "BH")
@@ -699,6 +731,8 @@ prov <- list(
   design = paste0("~ 0 + ", paste(formula_parts, collapse = " + ")),
   contrasts = forms, n_samples = nrow(meta), groups = as.list(table(groups)),
   significant_per_contrast = all_sig,
+  # Detection_Matrix.csv: what each 0 means depends on the pipeline -- say it here.
+  detection_matrix = detection_rec,
   R_version = as.character(getRversion()),
   packages = list(limpa = pkg_ver("limpa"), limma = pkg_ver("limma"),
                   arrow = pkg_ver("arrow"), dplyr = pkg_ver("dplyr"), tidyr = pkg_ver("tidyr")),
@@ -716,13 +750,7 @@ writeLines(jsonlite_or_manual(prov), file.path(outdir, "de_provenance.json"))
 qc_di <- NULL
 if (method == "dpc" && exists("dat") && exists("y_protein")) {
   tryCatch({
-    prot <- as.character(dat$genes[["Protein.Group"]])
-    if (is.null(prot) || !length(prot)) prot <- rownames(dat$E)
-    detm <- rowsum((!is.na(dat$E)) * 1, group = prot, reorder = TRUE) > 0
-    ii   <- match(rownames(E), rownames(detm))
-    det  <- matrix(FALSE, nrow(E), ncol(E), dimnames = list(rownames(E), colnames(E)))
-    ok   <- !is.na(ii)
-    det[ok, ] <- as.matrix(detm)[ii[ok], , drop = FALSE]
+    det <- !is.na(det_n) & det_n > 0          # from Detection_Matrix.csv -- one definition
 
     qc_di <- data.frame(
       Sample   = colnames(E),

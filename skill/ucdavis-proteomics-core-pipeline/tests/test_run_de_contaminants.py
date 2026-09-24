@@ -283,6 +283,31 @@ class RunDeRemovesContaminants(unittest.TestCase):
                 self.assertEqual(set(orig), set(again))
                 self.assertLess(max(abs(orig[k] - again[k]) for k in orig), 1e-9)
 
+    def test_detection_matrix_matches_the_expression_matrix_and_the_qc_totals(self):
+        for key in ("dpc", "maxlfq"):
+            with self.subTest(method=key):
+                out = self.out(key)
+                with open(os.path.join(out, "Expression_Matrix.csv"), newline="") as fh:
+                    em = list(csv.reader(fh))
+                with open(os.path.join(out, "Detection_Matrix.csv"), newline="") as fh:
+                    dm = list(csv.reader(fh))
+                samples = [c for c in em[0] if c not in ("Protein.Group", "Genes", "Protein.Names")]
+                self.assertEqual(dm[0], ["Protein.Group"] + samples)            # same columns
+                self.assertEqual([r[0] for r in dm[1:]], [r[0] for r in em[1:]])   # same rows
+                det = self.prov(key)["detection_matrix"]
+                self.assertEqual(det["file"], "Detection_Matrix.csv")
+                self.assertEqual(det["zero_means"], "inferred" if key == "dpc" else "missing")
+                if key == "maxlfq":      # 0 exactly where the matrix is NA
+                    ecol = {c: i for i, c in enumerate(em[0])}
+                    for er, dr in zip(em[1:], dm[1:]):
+                        for j, smp in enumerate(samples, 1):
+                            self.assertEqual(dr[j] == "0", er[ecol[smp]] in ("", "NA"))
+        rows = read_csv(os.path.join(self.out("dpc"), "Detection_Matrix.csv"))
+        qc = {r["Sample"]: int(r["Detected"])
+              for r in read_csv(os.path.join(self.out("dpc"), "QC_detected_vs_inferred.csv"))}
+        for smp, n in qc.items():
+            self.assertEqual(sum(1 for r in rows if r[smp] not in ("", "NA") and int(r[smp]) > 0), n)
+
     def test_keep_run_emits_no_filter(self):
         with open(os.path.join(self.out("keep"), "reproducibility_log.R")) as fh:
             self.assertNotIn("Remove contaminants", fh.read())

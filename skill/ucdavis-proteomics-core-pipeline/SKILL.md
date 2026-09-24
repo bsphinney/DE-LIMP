@@ -1187,7 +1187,9 @@ Use `maxlfq` when **either**:
 
 Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions) +
-`QC_contaminant_share.csv` + `contaminants_removed.csv` + **`reproducibility_log.R`**.
+`QC_contaminant_share.csv` + `contaminants_removed.csv` + `Detection_Matrix.csv` (per protein ×
+sample: precursors observed, 0 = inferred by DPC / missing for MaxLFQ, per
+`de_provenance.json` `detection_matrix`) + **`reproducibility_log.R`**.
 
 `reproducibility_log.R` is the whole analysis as plain, flat R — every value written
 out literally (report path, FDR cutoff, sample→group map, design, contrasts), runnable
