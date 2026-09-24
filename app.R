@@ -491,7 +491,8 @@ message("[DE-LIMP] AI policy: ", if (ai_public_deployment) "public" else "local"
 ui <- build_ui(is_hf_space, search_enabled, docker_available, hpc_available, local_sbatch,
                local_diann, delimp_data_dir,
                is_core_facility, cf_config, deploy_env,
-               config, is_hive, ai_public_deployment = ai_public_deployment)
+               config, is_hive, ai_public_deployment = ai_public_deployment,
+               docker_config = docker_config)
 
 # ==============================================================================
 #  SERVER LOGIC — Thin orchestrator calling R/ modules

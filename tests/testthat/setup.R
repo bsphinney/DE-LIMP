@@ -17,6 +17,15 @@ source(file.path(project_root, "R", "helpers_site.R"))
 
 # Load helpers_search.R (build_diann_flags, parse_sbatch_output, etc.)
 source(file.path(project_root, "R", "helpers_search.R"))
+# resolve_diann_image() falls back to DIANN_DOCKER_IMAGE_DEFAULT, which app.R defines (it has to:
+# docker_config is built before R/ is sourced). Take that one definition from app.R -- parsed,
+# not run -- rather than restating the tag here.
+local({
+  for (x in parse(file.path(project_root, "app.R"))) {
+    if (is.call(x) && identical(x[[1]], as.name("<-")) &&
+        identical(x[[2]], as.name("DIANN_DOCKER_IMAGE_DEFAULT"))) eval(x, globalenv())
+  }
+})
 
 # Load helpers_dda.R (build_dda_canonical_peptide, dda_blast_species,
 # build_denovo_master, contaminant/skin-hair filters) — pure functions
