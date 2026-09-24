@@ -239,7 +239,26 @@ def main():
         kind = ("reference proteome"
                 if (fmeta.get("proteome_type") or "").strip().lower() == "reference proteome"
                 else "proteome")
-        if content_phrase is None:
+        staged = fmeta.get("staged_file") if isinstance(fmeta.get("staged_file"), dict) else None
+        if content_phrase is None and staged:
+            # 'as_staged' (--hive), from a sidecar that describes the copy (gabrig,
+            # 2026-09-23). Proteome and organism are known; the release it was cut from
+            # is not -- name the copy's date rather than invent a release, and label a
+            # composition inferred from entry counts as inferred.
+            tax = f", taxid {fmeta['taxid']}" if fmeta.get("taxid") else ""
+            sent = (f"Spectra were searched against a pre-staged copy of the UniProt "
+                    f"{fmeta.get('organism') or '____'} {kind} "
+                    f"({fmeta.get('proteome') or '____'}{tax}; copy dated "
+                    f"{(staged.get('mtime_utc') or '')[:10] or '____'}, "
+                    f"release ____ {DEF}), comprising {n_p} sequences")
+            g = (fmeta.get("content_check") or {}).get("uniprot_gene_count")
+            if fmeta.get("content_inferred") == "one_per_gene" and isinstance(g, int):
+                sent += (f"; the entry count is consistent with one canonical protein "
+                         f"sequence per gene (inferred, not verified: UniProt lists "
+                         f"{g:,} genes).")
+            else:
+                sent += f". Database composition: ____ {DEF}."
+        elif content_phrase is None:
             # 'unknown' (--path) / 'as_staged' (--hive): we did not build this database,
             # so we cannot describe its composition. Leave it tagged for the user.
             sent = (f"Spectra were searched against a supplied sequence database "
@@ -264,13 +283,26 @@ def main():
             sent += (" and these entries were excluded from quantification and "
                      "normalisation."
                      if fmeta.get("diann_cont_quant_exclude") else ".")
+            # fetch_fasta.py removes contaminant entries whose sequence IS a target protein
+            # (bovine ACTB = human ACTB, human keratins); a reader must know those proteins
+            # were quantified, not excluded as contaminants.
+            n_drop = fmeta.get("n_contaminants_dropped_as_target") or 0
+            if n_drop:
+                sent += (f" {n_drop} contaminant entries identical to (or contained in) "
+                         f"{fmeta.get('organism') or '____'} proteins were removed from the "
+                         f"library first, so those proteins are quantified under their own "
+                         f"accessions.")
         else:
             sent += " No contaminant database was appended."
         w(sent)
-        if fmeta.get("warnings"):
+        # The drop note is described in the sentence above -- it is a record, not
+        # something to resolve before publication.
+        build_warnings = [x for x in (fmeta.get("warnings") or [])
+                          if x != fmeta.get("contaminants_dropped_note")]
+        if build_warnings:
             w("")
             w(f"> Database build warnings (resolve before publication): "
-              f"{'; '.join(fmeta['warnings'])}")
+              f"{'; '.join(build_warnings)}")
     else:
         w(f"Spectra were searched against ____ {DEF} "
           f"(run `fetch_fasta.py` and pass `--fasta-meta <fasta>.meta.json` to fill "

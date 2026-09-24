@@ -22,15 +22,27 @@ table (verified against the DIA-NN README, June 2026):
                                  automatic calibration -- NOT measured, because both
                                  levels would be and DIA-NN warns on a measured MS1;
                                  pass --ms1-resolution/--ms2-resolution to get a tier
+    Orbitrap MS1 / ion-trap MS2 (--ms2-analyzer ITMS, e.g. Fusion Lumos OT/IT):
+                                 no MS2 value (not an Orbitrap level); automatic
+                                 calibration, since either flag fixes both levels
     Unidentified instrument:     automatic calibration (DIA-NN's own default)
 Sage's docs give NO instrument-specific tolerances, so Sage ppm windows are
-DERIVED from the same per-instrument logic and tagged as such.
+DERIVED from the same per-instrument logic and tagged as such -- except an ion-trap
+MS2, which takes Sage's own documented low-res MS/MS fragment window (+/-0.4 Da).
 
 Usage:
   python3 estimate_params.py --engine diann --acquisition DIA \
       --instrument "Orbitrap Astral" --out diann.cfg
   python3 estimate_params.py --engine sage --acquisition DDA \
       --instrument "timsTOF Pro" --out sage_config.json [--var-mods ox]
+  python3 estimate_params.py --engine diann --acquisition DIA \
+      --instrument "Orbitrap Fusion Lumos" --ms1-resolution 120000 --ms2-resolution 15000 \
+      --resolution-source detected --out diann.cfg
+      (--ms1-res/--ms2-res are the same flags; --resolution-source is detected when the values
+       came from detect_acquisition.py, and defaults to user)
+  python3 estimate_params.py --engine sage --acquisition DDA \
+      --instrument "Orbitrap Fusion Lumos" --ms1-resolution 120000 --ms2-analyzer ITMS \
+      --resolution-source detected --out sage_config.json      # an OT/IT method: MS2 in Da
 
 Writes the engine params file to --out and prints a rationale JSON to stdout
 (one entry per setting: value + source). Pass --overrides '<json>' to force
@@ -107,9 +119,10 @@ PLAN_PINNED, MEASURE_WITH_DIANN, PLAN_AUTO = "pinned", "measure_with_diann", "au
 
 # Orbitrap classes with a level that has no documented value, measured instead.
 #
-# `orbitrap_generic` -- an Orbitrap whose RESOLUTION is unknown -- is deliberately NOT here, and
-# this is the default Thermo path: a .raw carries no resolution to this script, and a Thermo mzML
-# usually has no MS:1000800 term for read_mzml_resolution() to find either. With no resolution
+# `orbitrap_generic` -- an Orbitrap whose RESOLUTION is unknown -- is deliberately NOT here. Since
+# 2.5.1 detect_acquisition.py reads a .raw's resolution from its scan trailer and the orchestrator
+# passes it in, so this is now the fallback for a .raw whose trailer could not be read, or a Thermo
+# mzML with no MS:1000800 term for read_mzml_resolution() to find. With no resolution
 # NEITHER level has a tier, so a measure_with_diann plan would measure BOTH -- and measuring MS1
 # is the one thing this branch's own evidence says not to do. The first cut measured it and
 # pinned 4.2 ppm at 120k; every DIA-NN pass then logged "WARNING: the MS1 mass accuracy setting
@@ -219,8 +232,144 @@ def ppm_for_resolution(res):
     return ppm, f"{SRC_TABLE}, interpolated for {int(res):,} resolution"
 
 
-def classify_instrument(name, ms1_res=None, ms2_res=None):
+# Where an Orbitrap's MS1/MS2 resolution came from. The phrase goes into the class label, and
+# from there into workflow.manifest.json, <cfg>.rationale.json and every mass-accuracy rationale
+# line. gabrig 2026-09-23 (Fusion Lumos, skill 2.5.0): resolutions the user TYPED IN came out as
+# "MS1 60,000 / MS2 15,000 resolution read from the data" -- a value presented as something it
+# is not (DE-LIMP rule #2). The caller says where the numbers came from; a number given on the
+# command line is "user" unless the caller says otherwise.
+RESOLUTION_SOURCES = {
+    "detected": "read from the raw file (scan trailer)",       # detect_acquisition.py's values
+    "user": "supplied by the user",
+    "mzml": "read from the mzML (MS:1000800 resolving power)",  # estimate_params.py --from-mzml
+    "cfg": "taken from a saved configuration, not read from the data",
+}
+RESOLUTION_SOURCE_UNRECORDED = "(source not recorded)"
+
+# The MS2 of an Orbitrap-MS1 / ion-trap-MS2 method (a Fusion Lumos OT/IT DDA, say): the scan filter
+# reads "ITMS" and there is no Orbitrap resolution for MS2 at all, so DIA-NN's resolution table has
+# nothing for it. detect_acquisition.py reports it per file as `ms2_analyzer` and lists the files
+# under `ms2_ion_trap`. Before --ms2-analyzer existed, such a run got a 10 ppm Sage FRAGMENT window
+# (an ion trap needs ~0.4 Da) and, given MS1 alone, a DIA-NN label saying the resolution was unknown.
+# "mixed": a file with MS2 scans from BOTH analyzers (e.g. Orbitrap HCD + ion-trap CID in one
+# method). One cfg has one fragment window, and it has to fit the ion-trap spectra, so mixed is
+# treated as ITMS for every tolerance and labelled as mixed.
+MS2_ANALYZERS = ("FTMS", "ITMS", "mixed")
+ION_TRAP_ANALYZERS = ("ITMS", "mixed")
+ION_TRAP_MS2 = "read in the ion trap (ITMS) -- no Orbitrap-table MS2 value"
+MIXED_MS2 = ("read partly in the ion trap and partly in the Orbitrap (mixed ITMS/FTMS) -- no "
+             "one Orbitrap-table MS2 value covers it")
+
+
+def ms2_analyzer_arg(value):
+    """argparse type: FTMS/ITMS in capitals, "mixed" as detect_acquisition.py writes it."""
+    v = (value or "").strip()
+    return "mixed" if v.lower() == "mixed" else v.upper()
+
+
+def ms2_in_ion_trap(analyzer):
+    """True when some or all MS2 is read in the ion trap -- the tolerances must fit it."""
+    return analyzer in ION_TRAP_ANALYZERS
+
+
+def add_resolution_args(ap):
+    """The resolution flags, defined once for estimate_params.py, resolve_defaults.py and
+    make_presets.py. gabrig 2026-09-23: resolve_defaults.py took --ms1-res/--ms2-res and this
+    script --ms1-resolution/--ms2-resolution, so one of the two commands failed whichever
+    spelling was used. Both spellings are accepted everywhere; --ms1-resolution is canonical."""
+    for lvl in ("ms1", "ms2"):
+        ap.add_argument(f"--{lvl}-resolution", f"--{lvl}-res", dest=f"{lvl}_resolution",
+                        type=float, default=None,
+                        help=f"Orbitrap {lvl.upper()} resolving power (e.g. 120000); maps to ppm "
+                             f"via DIA-NN's table. --{lvl}-res is the same flag")
+    ap.add_argument("--ms2-analyzer", type=ms2_analyzer_arg, choices=MS2_ANALYZERS, default=None,
+                    help="where MS2 was read: FTMS = the Orbitrap, ITMS = the ion trap (step 2's "
+                         "ms2_ion_trap files), mixed = both in one file (treated as ITMS for "
+                         "tolerances). ITMS has no MS2 resolution: do not pass --ms2-resolution "
+                         "with it")
+    ap.add_argument("--resolution-source", choices=sorted(RESOLUTION_SOURCES), default=None,
+                    help="where the resolutions and --ms2-analyzer came from: detected = "
+                         "detect_acquisition.py read them from the .raw; user = the user said so "
+                         "(the default for a value given on the command line); cfg = a saved "
+                         "configuration")
+
+
+def resolution_args_error(ms2_res, ms2_analyzer):
+    """Why this combination cannot be right, or None. An ion-trap MS2 has no Orbitrap resolution,
+    so both at once means one of them is wrong -- and nothing here can tell which."""
+    if ms2_analyzer == "ITMS" and ms2_res:
+        return ("--ms2-analyzer ITMS and --ms2-resolution contradict each other: an MS2 read in "
+                "the ion trap has no Orbitrap resolution. Pass the one step 2 reported for these "
+                "files (ms2_ion_trap -> --ms2-analyzer ITMS; ms2_resolution -> --ms2-resolution).")
+    return None
+
+
+def resolution_source(given, ms1_res, ms2_res, ms2_analyzer=None):
+    """The source to record: None with nothing given, else the caller's word, else "user".
+    The analyzer shares it: detect_acquisition.py reads both from the same scan filters."""
+    if not (ms1_res or ms2_res or ms2_analyzer):
+        return None
+    return given or "user"
+
+
+def resolution_record(ms1_res, ms2_res, source, ms2_analyzer=None):
+    """The `resolution` block of the manifest and the rationale sidecar, or None."""
+    if not (ms1_res or ms2_res or ms2_analyzer):
+        return None
+    as_int = lambda v: int(v) if v and float(v).is_integer() else v  # noqa: E731
+    return {"ms1": as_int(ms1_res), "ms2": as_int(ms2_res), "ms2_analyzer": ms2_analyzer,
+            "source": source,
+            "source_label": RESOLUTION_SOURCES.get(source, RESOLUTION_SOURCE_UNRECORDED)}
+
+
+# Engines whose settings the Orbitrap resolution changes: DIA-NN (its documented mass-accuracy
+# table) and Radiant (extraction widths derived from that table by make_presets.py). NOT
+# FragPipe -- make_presets.py keeps its vendor preset tolerances either way -- and NOT Sage,
+# whose window sage_ppm() picks by instrument class. Asking for a number the route ignores
+# would be a question with no effect on the search.
+RESOLUTION_ENGINES = ("diann", "radiant")
+
+
+def resolution_question(instr_class, engine, ms1_res=None, ms2_res=None):
+    """What to ask the user when an Orbitrap's resolution is unknown and the engine uses it,
+    else None. gabrig 2026-09-23: a Fusion Lumos with no resolution got a manifest saying
+    "resolution unknown", exit 0, and no prompt -- so nobody asked. The class test is
+    classify_instrument()'s own: orbitrap_generic IS "an Orbitrap with no usable resolution"
+    (the Astral is its own class and assumes 240k).
+
+    An ion-trap MS2 (orbitrap_iontrap) is never asked for: it HAS no resolution. Its MS1 is
+    asked for only by Radiant, which narrows the MS1 extraction width from it; DIA-NN pins
+    neither level for it (either flag fixes both, and there is no MS2 value), so an MS1 answer
+    would change nothing there."""
+    if instr_class == "orbitrap_iontrap":
+        missing = "MS1" if (engine == "radiant" and not ms1_res) else ""
+    elif instr_class == "orbitrap_generic" and engine in RESOLUTION_ENGINES:
+        missing = " and ".join(lvl for lvl, v in (("MS1", ms1_res), ("MS2", ms2_res)) if not v)
+    else:
+        missing = ""
+    if not missing:
+        return None
+    levels = [lvl for lvl in ("MS1", "MS2") if lvl in missing]
+    flags = "/".join(f"--{lvl.lower()}-resolution" for lvl in levels)
+    example = " / ".join({"MS1": "120,000 MS1", "MS2": "15,000 MS2"}[lvl] for lvl in levels)
+    keep = ", keeping --ms2-analyzer ITMS" if instr_class == "orbitrap_iontrap" else ""
+    return (f"Ask the user for the Orbitrap {missing} resolution (it is in the instrument "
+            f"method, e.g. {example}), or run detect_acquisition.py, which reads it from the "
+            f".raw scan trailer. Then re-run with {flags}{keep} (add --resolution-source "
+            "detected when the values came from detect_acquisition.py). Without it DIA-NN's "
+            "documented Orbitrap mass-accuracy table cannot be applied.")
+
+
+def classify_instrument(name, ms1_res=None, ms2_res=None, res_source=None, ms2_analyzer=None):
     """Return (class, ms1_ppm, ms2_ppm, label, source). None ppm => not pinned.
+
+    `res_source` (a RESOLUTION_SOURCES key) says where ms1_res/ms2_res came from; the label
+    names it, and says "(source not recorded)" rather than guess when it is None.
+
+    `ms2_analyzer` "ITMS" -- MS2 read in the ion trap -- is class orbitrap_iontrap: the MS1 level
+    from the table as usual, and no MS2 value whatever ms2_res says (there is no Orbitrap MS2).
+    It used to be dropped: the MS1-only resolution fell through to orbitrap_generic, labelled as
+    though nothing were known.
 
     DIA-NN asks for these to be FIXED rather than auto-optimised, and not only for
     speed: "This optimisation is inherently noisy: even replicate injections may not
@@ -244,7 +393,22 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
     missing one: resolve_defaults.py writes it as the manifest's ppm_source for every engine.
     """
     n = (name or "").strip().lower()
-    # Measured resolution beats any model-name guess.
+    origin = RESOLUTION_SOURCES.get(res_source, RESOLUTION_SOURCE_UNRECORDED)
+    if ms2_in_ion_trap(ms2_analyzer):
+        p1, s1 = ppm_for_resolution(ms1_res)
+        if ms2_analyzer == "mixed":
+            ms2_label, ms2_src = "MS2 read partly in the ion trap (mixed ITMS/FTMS)", MIXED_MS2
+        else:
+            ms2_label, ms2_src = "MS2 read in the ion trap (ITMS)", ION_TRAP_MS2
+        if not ms1_res:
+            label = f"Orbitrap, {ms2_label}, {origin}; MS1 resolution unknown"
+            ms1_src = "MS1: resolution unknown"
+        else:
+            label = f"Orbitrap, MS1 {int(ms1_res):,} resolution / {ms2_label}, {origin}"
+            ms1_src = (f"MS1 {int(ms1_res):,}: {s1}" if p1 is not None else
+                       f"MS1 {int(ms1_res):,}: no documented DIA-NN value ({s1})")
+        return ("orbitrap_iontrap", p1, None, label, f"{ms1_src}; MS2: {ms2_src}")
+    # A given resolution beats any model-name guess.
     if ms1_res or ms2_res:
         p1, s1 = ppm_for_resolution(ms1_res)
         p2, s2 = ppm_for_resolution(ms2_res)
@@ -252,7 +416,7 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
             src = s1 if s1 == s2 else f"MS1: {s1}; MS2: {s2}"
             return ("orbitrap_measured", p1, p2,
                     f"Orbitrap, MS1 {int(ms1_res):,} / MS2 {int(ms2_res):,} resolution "
-                    f"read from the data", src)
+                    f"{origin}", src)
         if ms1_res and ms2_res:
             src = "; ".join(
                 f"{lvl} {int(res):,}: {s}" if p is not None else
@@ -260,7 +424,7 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
                 for lvl, res, p, s in (("MS1", ms1_res, p1, s1), ("MS2", ms2_res, p2, s2)))
             return ("orbitrap_untabled", p1, p2,
                     f"Orbitrap, MS1 {int(ms1_res):,} / MS2 {int(ms2_res):,} resolution "
-                    f"read from the data", src)
+                    f"{origin}", src)
     if not n:
         return ("unknown", None, None, "instrument not detected", "auto-calibration fallback")
     if "astral" in n:
@@ -274,6 +438,15 @@ def classify_instrument(name, ms1_res=None, ms2_res=None):
     # of the mzML) lets a documented tier pin it instead.
     if any(k in n for k in ("orbitrap", "exploris", "exactive", "fusion", "lumos",
                             "eclipse", "velos", "hf-x", "hf", "qe", "astral")):
+        # One level given: say which is known rather than "resolution unknown". Still no value
+        # for either -- a lone DIA-NN flag fixes both levels (LONE_FLAG_NOTE).
+        for have, res, miss in (("MS1", ms1_res, "MS2"), ("MS2", ms2_res, "MS1")):
+            if res:
+                return ("orbitrap_generic", None, None,
+                        f"Orbitrap, {have} {int(res):,} resolution {origin}; {miss} resolution "
+                        f"unknown -- pass --{miss.lower()}-resolution to use DIA-NN's "
+                        "documented table",
+                        f"no documented DIA-NN value ({miss} resolution unknown)")
         return ("orbitrap_generic", None, None,
                 "Orbitrap (resolution unknown -- pass --ms1-resolution/--ms2-resolution to "
                 "use DIA-NN's documented table)",
@@ -448,7 +621,12 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
                 add(flag, "measured with DIA-NN before the search (flag omitted)",
                     f"{label}: {level}: {lsrc}; {SRC_MEASURE}", render=False)
     elif plan == PLAN_AUTO:
-        auto_src = (f"{src}; flags omitted so DIA-NN auto-calibrates per run "
+        # An ion-trap MS2 lands here with MS1 known: DIA-NN fixes BOTH levels when either flag is
+        # given (LONE_FLAG_NOTE) and there is no MS2 value, so neither is written.
+        why = ("MS1 not pinned alone: DIA-NN 2.7.0 fixes BOTH levels when either flag is given, "
+               "the other at 20 ppm, and there is no MS2 value to pin with it; "
+               if instr_class == "orbitrap_iontrap" and ms1 is not None else "")
+        auto_src = (f"{src}; {why}flags omitted so DIA-NN auto-calibrates per run "
                     "(--mass-acc 0 would pin the tolerance at 0 ppm -> 0 IDs)")
         add("--mass-acc", "auto (flag omitted)", auto_src, render=False)
         add("--mass-acc-ms1", "auto (flag omitted)", auto_src, render=False)
@@ -494,7 +672,15 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     r["mass_accuracy_plan"] = tagged(plan, {
         PLAN_PINNED: "--mass-acc/--mass-acc-ms1 are in the cfg",
         MEASURE_WITH_DIANN: SRC_MEASURE,
-        PLAN_AUTO: "instrument not identified; DIA-NN optimises it itself (not parallel-safe)",
+        # It said "instrument not identified" for every auto cfg -- also for a named Orbitrap of
+        # unknown resolution, and for an ion-trap MS2, neither of which is unidentified.
+        PLAN_AUTO: {"orbitrap_iontrap": "MS2 read in the ion trap (all of it, or part: see the "
+                                        "class label) -- no Orbitrap-table MS2 value; mass "
+                                        "accuracy left to DIA-NN calibration (not parallel-safe)",
+                    "orbitrap_generic": "Orbitrap resolution unknown; DIA-NN optimises it itself "
+                                        "(not parallel-safe)",
+                    }.get(instr_class, "instrument not identified; DIA-NN optimises it itself "
+                                       "(not parallel-safe)"),
     }[plan])
     # Each level's basis, not one claim for all: a value between tiers (MS1 at 90k -> 7.5) is
     # interpolated from the table, and the gate and provenance once called it "as documented".
@@ -515,18 +701,42 @@ def sage_ppm(instr_class):
     if instr_class == "orbitrap_astral":   return (10, 10, src)   # high-res Orbitrap
     if instr_class == "timstof":           return (20, 20, src)
     if instr_class == "sciex_tof":         return (40, 40, src)
-    if instr_class == "orbitrap_generic":  return (10, 10, "high-res Orbitrap default (derived)")
+    # Every other Orbitrap class, not only orbitrap_generic: GIVING the resolution reclassifies an
+    # Orbitrap as orbitrap_measured / orbitrap_untabled, and those used to fall through to 20/20
+    # "instrument not identified" -- a wider window, and a label that was false, for the same
+    # instrument that got 10/10 when nobody knew its resolution.
+    if instr_class.startswith("orbitrap"): return (10, 10, "high-res Orbitrap default (derived)")
     return (20, 20, "safe high-res default (instrument not identified)")
 
 
-def build_sage(acq, instr_class, var_mods, overrides):
+# Ion-trap MS2 (--ms2-analyzer ITMS) in Sage. Every value is Sage's own documented low-res MS/MS
+# setting, read 2026-09-24 -- not derived, and not DIA-NN's (whose table is Orbitrap-only):
+#   https://sage-docs.vercel.app/docs/configuration/tolerance -- "For high-res MS/MS:
+#     { "fragment_tol": { "ppm": [-10, 10] } } Or for low-res MS/MS: { "fragment_tol":
+#     { "da": [-0.4, 0.4] } }"
+#   https://sage-docs.vercel.app/docs/configuration/spectra -- "Recommended settings for low-res
+#     MS/MS { "deisotope": false, "min_peaks": 15, "max_peaks": 150, "min_matched_peaks": 4,
+#     "max_fragment_charge": 2 }" (the last four are what every Sage cfg here already uses)
+#   https://sage-docs.vercel.app/docs/configuration -- bucket_size: "Use a lower value (8192) for
+#     high-res MS/MS, and higher values for low-res MS/MS", 32768 in the same example
+# The Da form is valid in the pinned 0.14.7: crates/sage/src/mass.rs has
+# `#[serde(rename_all = "lowercase")] pub enum Tolerance { Ppm(f32, f32), Da(f32, f32) }`, and
+# crates/sage-cli/src/input.rs reads `fragment_tol: Tolerance`. With a 10 ppm fragment window
+# an ion-trap spectrum (unit resolution) matches almost no fragments.
+SAGE_ITMS_FRAGMENT_DA = 0.4
+SAGE_ITMS_BUCKET_SIZE = 32768
+SRC_SAGE_LOWRES = "Sage docs' low-res MS/MS setting (sage-docs.vercel.app/docs/configuration)"
+
+
+def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
+    ion_trap = ms2_in_ion_trap(ms2_analyzer)
     UNIV = "universal trypsin/LFQ default"
     variable = {"M": [15.9949]} if (var_mods and "ox" in var_mods) else {}
     variable["["] = [42.0106]  # protein N-term acetyl is a common, cheap variable mod
     cfg = {
         "database": {
-            "bucket_size": 8192,
+            "bucket_size": SAGE_ITMS_BUCKET_SIZE if ion_trap else 8192,
             "enzyme": {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
                        "cleave_at": "KR", "restrict": "P"},
             "fragment_min_mz": 200.0, "fragment_max_mz": 1800.0,
@@ -539,9 +749,10 @@ def build_sage(acq, instr_class, var_mods, overrides):
             "fasta": "REPLACED_AT_RUNTIME.fasta",
         },
         "precursor_tol": {"ppm": [-float(prec_ppm), float(prec_ppm)]},
-        "fragment_tol":  {"ppm": [-float(frag_ppm), float(frag_ppm)]},
+        "fragment_tol": ({"da": [-SAGE_ITMS_FRAGMENT_DA, SAGE_ITMS_FRAGMENT_DA]} if ion_trap
+                         else {"ppm": [-float(frag_ppm), float(frag_ppm)]}),
         "isotope_errors": [0, 1],
-        "deisotope": True,
+        "deisotope": not ion_trap,
         "chimera": acq.upper() == "DDA",
         "wide_window": acq.upper() == "DIA",
         "predict_rt": True,
@@ -554,9 +765,19 @@ def build_sage(acq, instr_class, var_mods, overrides):
     for k, v in (overrides or {}).items():
         cfg[k] = v
 
-    rationale = {
-        "precursor_tol_ppm": tagged(prec_ppm, ppm_src),
-        "fragment_tol_ppm": tagged(frag_ppm, ppm_src),
+    rationale = {"precursor_tol_ppm": tagged(prec_ppm, ppm_src)}
+    if ion_trap:
+        it = ("MS2 read partly in the ion trap (mixed ITMS/FTMS)" if ms2_analyzer == "mixed"
+              else "MS2 read in the ion trap (ITMS)")
+        rationale.update({
+            "fragment_tol_da": tagged(SAGE_ITMS_FRAGMENT_DA, f"{it}: {SRC_SAGE_LOWRES}"),
+            "deisotope": tagged(False, f"{it}: {SRC_SAGE_LOWRES}"),
+            "bucket_size": tagged(SAGE_ITMS_BUCKET_SIZE, f"{it}: {SRC_SAGE_LOWRES} ('higher "
+                                                          "values for low-res MS/MS')"),
+        })
+    else:
+        rationale["fragment_tol_ppm"] = tagged(frag_ppm, ppm_src)
+    rationale.update({
         "wide_window": tagged(cfg["wide_window"], f"{acq.upper()} acquisition"),
         "chimera": tagged(cfg["chimera"], f"{acq.upper()} acquisition"),
         "static_mods": tagged({"C": 57.0215}, "fixed carbamidomethyl (standard)"),
@@ -565,8 +786,44 @@ def build_sage(acq, instr_class, var_mods, overrides):
             + " + protein N-term acetyl"),
         "enzyme": tagged("trypsin/P, 2 missed cleavages", UNIV),
         "lfq": tagged(True, "label-free quantification"),
-    }
+    })
     return json.dumps(cfg, indent=2) + "\n", rationale
+
+
+def sage_fragment_mismatch(ms2_analyzer, sage_cfg):
+    """("refuse" | "warn", why) when a Sage config's fragment window does not fit the MS2 analyzer
+    the manifest records, else None. run_search.py calls it before anything is generated.
+
+    SKILL.md passes --ms2-analyzer in step 4 (resolve_defaults.py -> the manifest) AND step 6b
+    (this script -> the Sage cfg); only the second changes the search. Given in step 4 and
+    forgotten in 6b, the manifest said ITMS while sage_config.json kept a +/-10 ppm fragment
+    window -- which on an ion-trap spectrum matches nothing (a +0.25 Da synthetic spectrum: 0 PSMs
+    at 10 ppm, the target at 0.4 Da; Sage 0.14.7, HIVE job 23990274)."""
+    tol = (sage_cfg or {}).get("fragment_tol") or {}
+    unit = "da" if "da" in tol else "ppm" if "ppm" in tol else None
+    rerun = ("re-run estimate_params.py --engine sage with the same --ms2-analyzer that "
+             "resolve_defaults.py was given, then run_search.py again")
+    if ms2_in_ion_trap(ms2_analyzer) and unit == "ppm":
+        return ("refuse", f"workflow.manifest.json records ms2_analyzer {ms2_analyzer} (MS2 read "
+                f"in the ion trap{' for part of the run' if ms2_analyzer == 'mixed' else ''}), "
+                f"but the Sage config's fragment_tol is {json.dumps(tol)} -- a ppm window matches "
+                f"almost no ion-trap fragments. Fix: {rerun} (--ms2-analyzer {ms2_analyzer} "
+                f"writes Sage's low-res window, fragment_tol {{\"da\": [-{SAGE_ITMS_FRAGMENT_DA}, "
+                f"{SAGE_ITMS_FRAGMENT_DA}]}}).")
+    # Refused too, not warned: estimate_params.py only writes a Da window for an ion-trap MS2, so a
+    # Da cfg beside an FTMS manifest was built for other data. On Orbitrap spectra it is ~40x
+    # Sage's documented high-res +/-10 ppm -- far more candidate matches for the scorer to reject.
+    if ms2_analyzer == "FTMS" and unit == "da":
+        return ("refuse", "workflow.manifest.json records ms2_analyzer FTMS (MS2 in the Orbitrap), "
+                f"but the Sage config's fragment_tol is {json.dumps(tol)} -- the ion-trap window. "
+                f"Fix: {rerun}; if the MS2 really is ion trap, re-run resolve_defaults.py with "
+                "--ms2-analyzer ITMS instead.")
+    if ms2_analyzer is None and unit == "da":
+        return ("warn", f"the Sage config's fragment_tol is {json.dumps(tol)} (an ion-trap window), "
+                "but workflow.manifest.json records no ms2_analyzer, so it cannot be checked "
+                "against the data. If the MS2 is ion trap, re-run resolve_defaults.py with "
+                "--ms2-analyzer ITMS so the record says so.")
+    return None
 
 
 def main():
@@ -576,10 +833,7 @@ def main():
     ap.add_argument("--instrument", default="")
     ap.add_argument("--var-mods", default="", help="comma list, e.g. 'ox' to add Ox(M)")
     ap.add_argument("--overrides", default="", help="JSON of fields to force (validated SOP)")
-    ap.add_argument("--ms1-resolution", type=float, default=0,
-                    help="Orbitrap MS1 resolving power; maps to ppm via DIA-NN's table")
-    ap.add_argument("--ms2-resolution", type=float, default=0,
-                    help="Orbitrap MS2 resolving power; maps to ppm via DIA-NN's table")
+    add_resolution_args(ap)
     ap.add_argument("--from-mzml", default="",
                     help="read both resolutions straight out of this mzML")
     ap.add_argument("--precursor-mz-range", nargs=2, type=float, metavar=("LO", "HI"),
@@ -609,13 +863,23 @@ def main():
         except json.JSONDecodeError as e:
             sys.exit(f"--overrides is not valid JSON: {e}")
 
-    r1, r2 = a.ms1_resolution, a.ms2_resolution
+    r1, r2, analyzer = a.ms1_resolution, a.ms2_resolution, a.ms2_analyzer
+    bad = resolution_args_error(r2, analyzer)
+    if bad:
+        sys.exit(f"[estimate_params] {bad}")
+    res_src = resolution_source(a.resolution_source, r1, r2, analyzer)
     if a.from_mzml and not (r1 and r2):
-        r1, r2 = read_mzml_resolution(a.from_mzml)
-        if r1:
+        m1, m2 = read_mzml_resolution(a.from_mzml)
+        if m1:      # an mzML with no MS:1000800 terms leaves the given values alone
+            # an ion-trap MS2 has no resolving power of its own; read_mzml_resolution() would
+            # hand back the MS1 value for it
+            r1, r2, res_src = m1, (None if analyzer == "ITMS" else m2), "mzml"
             print(f"[estimate_params] read resolution from {os.path.basename(a.from_mzml)}: "
-                  f"MS1 {int(r1):,} / MS2 {int(r2):,}", file=sys.stderr)
-    cls, ms1, ms2, label, src = classify_instrument(a.instrument, r1, r2)
+                  f"MS1 {int(r1):,}" + (f" / MS2 {int(r2):,}" if r2 else ""), file=sys.stderr)
+    cls, ms1, ms2, label, src = classify_instrument(a.instrument, r1, r2, res_src, analyzer)
+    ask = resolution_question(cls, a.engine, r1, r2)
+    if ask:
+        print(f"[estimate_params] NEEDS CONFIRMATION: {ask}", file=sys.stderr)
     var_mods = [v.strip().lower() for v in a.var_mods.split(",") if v.strip()]
     level_src = ((ppm_for_resolution(r1)[1], ppm_for_resolution(r2)[1])
                  if cls in ("orbitrap_measured", "orbitrap_untabled") else None)
@@ -638,7 +902,7 @@ def main():
                     pass
             sys.exit(f"[estimate_params] {e}")
     else:
-        text, rationale = build_sage(a.acquisition, cls, var_mods, overrides)
+        text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer)
 
     with open(a.out, "w") as fh:
         fh.write(text)
@@ -646,6 +910,9 @@ def main():
     out_payload = {
         "engine": a.engine, "acquisition": a.acquisition.upper(),
         "instrument": a.instrument, "instrument_class": cls, "class_label": label,
+        "resolution": resolution_record(r1, r2, res_src, analyzer),
+        # an Orbitrap with no resolution, on an engine that uses it: ask before searching
+        "needs_confirmation": bool(ask), "ask_user": ask,
         "mass_accuracy_source": src,
         # read by diann_parallel.mass_acc_measure_plan(): measure_with_diann is the ONLY way an
         # unpinned mass accuracy is accepted by the 5-step chain, and what makes the single-shot

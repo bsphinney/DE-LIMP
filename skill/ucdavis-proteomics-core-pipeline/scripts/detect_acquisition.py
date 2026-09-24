@@ -18,6 +18,17 @@ Detection per format (best-effort, with a confidence score):
               mid-run slice of scans -> isolation windows + the filter string's
               data-dependent flag -> DIA/DDA and the acquired bounds. Parser missing
               or failing => 'unknown'/low, a stated reason, and a stderr WARNING.
+              The parser is $THERMORAWFILEPARSER, else found on PATH, in the pipeline's
+              conda env, or at a shared copy ($THERMORAWFILEPARSER_SHARED, by default the
+              UC Davis Core's). A framework-dependent build gets a DOTNET_ROOT that has
+              every framework its runtimeconfig lists; with none, nothing is read and the
+              reason (with the fix) is printed ONCE, up front.
+              The Orbitrap MS1/MS2 resolution is read from the scan trailer by
+              thermo_resolution.py (Thermo's RawFileReader DLLs, via pythonnet, in a
+              subprocess); top-level ms1_resolution/ms2_resolution when every Orbitrap
+              file agrees, `resolution_mixed` when they do not, and
+              `orbitrap_resolution_unknown` for files it could not read -- ask the user
+              for those.
 
 Every Bruker .d is also checked for a truncated or at-risk analysis.tdf
 (bruker_tdf.tdf_integrity): WAL-mode header, a non-empty -wal/-journal beside it,
@@ -36,6 +47,8 @@ Thermo .raw files are refused before any is read: run it under srun, or pass
 Usage: python3 detect_acquisition.py [--allow-login-node] FILE [FILE ...]
        THERMORAWFILEPARSER="dotnet /opt/trfp/ThermoRawFileParser.dll" \
        python3 detect_acquisition.py run.raw        # parser not on PATH as one executable
+       python3 detect_acquisition.py --check-reader # setup.sh: which parser, does it start
+                                                    # (JSON; exit 0 = ready, 1 = not)
 """
 import sys, os, json, glob, gzip, math, sqlite3, statistics, shutil, subprocess, shlex, tempfile, time
 
@@ -44,6 +57,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # a read-write open truncates a tdf with a stale -wal beside it (the state of 342 tdfs on
 # HIVE), and mode=ro alone reads through the stale -wal.
 from bruker_tdf import connect_tdf, tdf_integrity, integrity_warning  # noqa: E402
+# The Orbitrap keyword list lives there, once (DE-LIMP rule 3): see add_resolutions().
+from estimate_params import classify_instrument, DIANN_INSTRUMENT_PPM  # noqa: E402
+# The resolution reader runs as a subprocess; only its words are shared.
+from thermo_resolution import PYTHONNET_MISSING  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Instrument extraction (PLAN.md §7d) — mirrors DE-LIMP R/helpers_instrument.R.
@@ -245,6 +262,17 @@ def detect_mzml(path):
 TRFP_RELEASES = "https://github.com/compomics/ThermoRawFileParser/releases"
 TRFP_ENV = "THERMORAWFILEPARSER"     # a full command, e.g. "dotnet /opt/trfp/ThermoRawFileParser.dll"
 TRFP_NAMES = ("ThermoRawFileParser", "thermorawfileparser")   # release binary / bioconda link
+# The last place looked: shared copies a site already keeps, as an os.pathsep list (empty =
+# none). gabrig 2026-09-23 (15 Fusion Lumos .raw on HIVE, a Core member): the Core has kept
+# TRFP 2.0.0.0 at the path below all along, but nothing looked there, so every file came back
+# "not found" -- acquisition unknown, and a search that would have run 380-980 on a method
+# that acquired 357-1105. Other sites set their own; the tests set it to mock the layout.
+# Never the only source: the not-found message names the public ones.
+TRFP_SHARED_ENV = "THERMORAWFILEPARSER_SHARED"
+TRFP_SHARED_DEFAULT = "/quobyte/proteomics-grp/tools/ThermoRawFileParser/ThermoRawFileParser"
+# setup.sh installs bioconda's self-contained build into the pipeline's conda env and records
+# the env in setup.json (`env_prefix`): found there even when activate.sh was not sourced.
+PIPELINE_HOME_ENV = "PROTEOMICS_PIPELINE_HOME"
 # Measured on HIVE for 3.5 GB raws: metadata 2.6-4.8 s; a query of 200-2000 scans 1.1-5.8 s
 # (10.8 s once, for the first 1000 scans of a DDA run). The metadata call walks every scan
 # header, so a slow network mount can take far longer -- but a parser that has not answered
@@ -283,9 +311,32 @@ FALLBACK_CONSEQUENCE = ("precursor m/z range NOT measured, so estimate_params.py
                         "acquired wider")
 
 
-def find_trfp():
-    """The ThermoRawFileParser command as an argv prefix, or None.
+def _pipeline_env_bin():
+    """<env_prefix>/bin of the conda env setup.sh built (read from its setup.json), or None."""
+    home = os.environ.get(PIPELINE_HOME_ENV) or os.path.expanduser("~/.proteomics-pipeline")
+    try:
+        with open(os.path.join(home, "setup.json"), encoding="utf-8") as fh:
+            prefix = json.load(fh).get("env_prefix")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return os.path.join(prefix, "bin") if isinstance(prefix, str) and prefix else None
 
+
+def _shared_trfp_paths():
+    raw = os.environ.get(TRFP_SHARED_ENV)
+    return [p for p in (TRFP_SHARED_DEFAULT if raw is None else raw).split(os.pathsep)
+            if p.strip()]
+
+
+def _is_exe(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def locate_trfp():
+    """(argv prefix, where it was found) for ThermoRawFileParser, or (None, None).
+
+    Looked for in this order: $THERMORAWFILEPARSER, PATH, the pipeline's conda env, the
+    shared copies in $THERMORAWFILEPARSER_SHARED (by default the UC Davis Core's).
     $THERMORAWFILEPARSER wins, because two public distributions are not one executable on
     PATH: the framework-dependent release is `dotnet ThermoRawFileParser.dll`, and 1.4.x on
     Linux/macOS is `mono ThermoRawFileParser.exe`.
@@ -293,20 +344,250 @@ def find_trfp():
     env = os.environ.get(TRFP_ENV, "").strip()
     if env:
         toks = shlex.split(env, posix=(os.name != "nt"))
-        return [t[1:-1] if len(t) > 1 and t[0] == t[-1] == '"' else t for t in toks]
+        return ([t[1:-1] if len(t) > 1 and t[0] == t[-1] == '"' else t for t in toks],
+                f"${TRFP_ENV}")
     for name in TRFP_NAMES:
         hit = shutil.which(name)
         if hit:
-            return [hit]
-    return None
+            return [hit], "PATH"
+    env_bin = _pipeline_env_bin()
+    for name in (TRFP_NAMES if env_bin else ()):
+        if _is_exe(os.path.join(env_bin, name)):
+            return [os.path.join(env_bin, name)], "the pipeline's conda env"
+    for path in _shared_trfp_paths():
+        if _is_exe(path):
+            return [path], f"shared copy (${TRFP_SHARED_ENV})"
+    return None, None
+
+
+def find_trfp():
+    """The ThermoRawFileParser command as an argv prefix, or None (see locate_trfp)."""
+    return locate_trfp()[0]
 
 
 def _trfp_not_found():
-    return (f"ThermoRawFileParser not found (${TRFP_ENV} is unset and neither "
-            f"{' nor '.join(TRFP_NAMES)} is on PATH), so this .raw was not read: acquisition "
+    shared = _shared_trfp_paths()
+    return (f"ThermoRawFileParser not found (${TRFP_ENV} is unset, neither "
+            f"{' nor '.join(TRFP_NAMES)} is on PATH or in the pipeline's conda env"
+            + (f", and there is no shared copy at {', '.join(shared)}" if shared else "")
+            + f"), so this .raw was not read: acquisition "
             f"and instrument unknown, and {FALLBACK_CONSEQUENCE}. Install it from "
             f"{TRFP_RELEASES} (self-contained Linux/macOS/Windows builds, or "
-            f"`conda install -c bioconda thermorawfileparser`), or convert the .raw to mzML")
+            f"`conda install -c bioconda thermorawfileparser` -- `bash scripts/setup.sh` puts "
+            f"that one in the pipeline's env), or convert the .raw to mzML")
+
+
+# ---------------------------------------------------------------------------
+# The .NET a framework-dependent parser runs on.
+#
+# TRFP 2.x ships self-contained builds (bioconda's is one: no .NET needed) AND a
+# framework-dependent one: the `-net8` zip run as `dotnet ThermoRawFileParser.dll`, or an
+# apphost beside a ThermoRawFileParser.runtimeconfig.json -- the Core's shared copy on HIVE,
+# whose runtimeconfig lists Microsoft.NETCore.App 8.0.0 AND Microsoft.AspNetCore.App 8.0.0.
+# gabrig 2026-09-23, 15 Fusion Lumos .raw: with no .NET the apphost exits 131 "You must install
+# .NET to run this application."; with ensure_dotnet8.sh's old NETCore-only install as
+# DOTNET_ROOT it exits 150 "You must install or update .NET to run this application." Both
+# came back as 15 identical per-file read failures, one srun after another.
+#
+# So the frameworks the runtimeconfig lists are checked BEFORE any file is read, against each
+# place a .NET may be (dotnet_root_candidates), by directory: <root>/shared/<name>/<x.y.z>/.
+# The first root with all of them becomes DOTNET_ROOT for the parser's own processes only.
+# With none, the parser is not started at all and the reason is given once, with the fix.
+# How the host itself resolves them (dotnet/runtime docs/design/features/sharedfx-lookup.md,
+# .NET 7+): an apphost uses $DOTNET_ROOT, else the registered/default install location; the
+# `dotnet` muxer uses ONLY its own directory and ignores DOTNET_ROOT.
+# ---------------------------------------------------------------------------
+DOTNET_DIR_ENV = "PROTEOMICS_DOTNET_DIR"          # ensure_dotnet8.sh's install location
+DOTNET_DIR_DEFAULT = "~/.proteomics-pipeline/dotnet8"
+# The host's own default locations, as an os.pathsep list. Only the tests set it (so a .NET
+# on the machine running them cannot change the answer); nobody else needs to.
+DOTNET_SYSTEM_ROOTS_ENV = "PROTEOMICS_DOTNET_SYSTEM_ROOTS"
+# `--version` exit codes that are the .NET HOST refusing to start, not the parser answering
+# (dotnet/runtime docs/design/features/host-error-codes.md)
+HOST_START_FAILURES = {131: "CoreHostLibMissingFailure: no .NET found",
+                       150: "FrameworkMissingFailure: a framework it needs is not installed"}
+_EXE = ".exe" if os.name == "nt" else ""
+
+
+def _host_default_roots():
+    """Where an apphost looks when DOTNET_ROOT is unset: the registered install location
+    (/etc/dotnet/install_location_<arch>, else install_location), then the platform default."""
+    override = os.environ.get(DOTNET_SYSTEM_ROOTS_ENV)
+    if override is not None:
+        return [p for p in override.split(os.pathsep) if p.strip()]
+    if os.name == "nt":
+        pf = os.environ.get("ProgramFiles")
+        return [os.path.join(pf, "dotnet")] if pf else []
+    import platform
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64",
+            "arm64": "arm64"}.get(platform.machine().lower())
+    roots = []
+    # the arch-specific file wins: on an arm64 Mac the plain one can name an x64 install
+    for reg in ([f"/etc/dotnet/install_location_{arch}"] if arch else []) + [
+            "/etc/dotnet/install_location"]:
+        try:
+            with open(reg, encoding="utf-8") as fh:
+                line = fh.readline().strip()
+        except OSError:
+            continue
+        if line:
+            roots.append(line)
+            break
+    roots.append("/usr/local/share/dotnet" if sys.platform == "darwin" else "/usr/share/dotnet")
+    return roots
+
+
+def dotnet_root_candidates():
+    """[(where, root)], in the order they are tried."""
+    found = []
+
+    def add(where, root):
+        if root and root not in (r for _, r in found):
+            found.append((where, root))
+
+    add("$DOTNET_ROOT", os.environ.get("DOTNET_ROOT"))
+    add(f"${DOTNET_DIR_ENV}" if os.environ.get(DOTNET_DIR_ENV) else "ensure_dotnet8.sh's install",
+        os.environ.get(DOTNET_DIR_ENV) or os.path.expanduser(DOTNET_DIR_DEFAULT))
+    # set by `module load dotnet-core-sdk/<v>` on HIVE (spack's <PACKAGE>_ROOT)
+    add("$DOTNET_CORE_SDK_ROOT", os.environ.get("DOTNET_CORE_SDK_ROOT"))
+    on_path = shutil.which("dotnet")
+    if on_path:
+        add("`dotnet` on PATH", os.path.dirname(os.path.realpath(on_path)))
+    for root in _host_default_roots():
+        add(".NET's default install location", root)
+    return found
+
+
+def _version_tuple(text):
+    try:
+        return tuple(int(x) for x in str(text).split("-", 1)[0].split(".")[:3])
+    except ValueError:
+        return None
+
+
+def dotnet_frameworks_needed(cmd):
+    """(needs, muxer, runtimeconfig path) for starting `cmd`.
+
+    needs: [(framework name, minimum version tuple, any higher major allowed)], [] when the
+    parser brings its own runtime (self-contained: `includedFrameworks`), is not a .NET app we
+    can see (mono, a wrapper script), or its runtimeconfig cannot be read -- then nothing is
+    checked and the parser's own calls say what is wrong. muxer: cmd is `dotnet <app>.dll`.
+    """
+    base = os.path.basename(cmd[0]).lower()
+    muxer = base in ("dotnet", "dotnet.exe")
+    if muxer:
+        dll = next((a for a in cmd[1:] if a.lower().endswith(".dll")), None)
+        if not dll:
+            return [], muxer, None
+        rc = dll[:-4] + ".runtimeconfig.json"
+    else:
+        real = os.path.realpath(shutil.which(cmd[0]) or cmd[0])
+        rc = (real[:-4] if real.lower().endswith(".exe") else real) + ".runtimeconfig.json"
+    try:
+        with open(rc, encoding="utf-8-sig") as fh:
+            opts = json.load(fh).get("runtimeOptions") or {}
+    except (OSError, ValueError, AttributeError):
+        return [], muxer, None
+    fws = opts.get("frameworks") or ([opts["framework"]] if opts.get("framework") else [])
+    needs = []
+    for fw in fws if isinstance(fws, list) else []:
+        want = _version_tuple(fw.get("version")) if isinstance(fw, dict) else None
+        if not (want and fw.get("name")):
+            continue
+        roll = fw.get("rollForward") or opts.get("rollForward") or ""
+        needs.append((fw["name"], want, roll in ("Major", "LatestMajor")))
+    return needs, muxer, rc
+
+
+def _need_text(need):
+    name, want, _any_major = need
+    return f"{name} {'.'.join(map(str, want))}+"
+
+
+def dotnet_root_lacks(root, needs, muxer=False):
+    """Why `root` cannot start a parser with these needs, in words; [] when it can."""
+    if not root or not os.path.isdir(root):
+        return ["nothing installed there"]
+    lacks = []
+    fxr = os.path.join(root, "host", "fxr")
+    try:
+        has_fxr = os.path.isdir(fxr) and bool(os.listdir(fxr))
+    except OSError as e:        # an unreadable root is one that cannot start anything
+        return [f"unreadable ({type(e).__name__}: {e.strerror or e})"]
+    if not has_fxr:
+        lacks.append("no host/fxr (not a .NET install)")
+    if muxer and not _is_exe(os.path.join(root, "dotnet" + _EXE)):
+        lacks.append("no dotnet executable")
+    for need in needs:
+        name, want, any_major = need
+        try:
+            have = sorted(v for v in (_version_tuple(d) for d in
+                                      os.listdir(os.path.join(root, "shared", name))) if v)
+        except OSError:
+            have = []
+        if not any(v >= want and (v[0] == want[0] or any_major) for v in have):
+            lacks.append(f"no {_need_text(need)}"
+                         + (f" (has {', '.join('.'.join(map(str, v)) for v in have)})"
+                            if have else ""))
+    return lacks
+
+
+def _dotnet_fix():
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensure_dotnet8.sh")
+    dest = os.environ.get(DOTNET_DIR_ENV) or DOTNET_DIR_DEFAULT
+    return (f"Fix, then re-run: `bash {helper}` (installs Microsoft.NETCore.App and "
+            f"Microsoft.AspNetCore.App 8.0 into {dest}, which is checked here; "
+            f"needs internet -- fine on a login node), or on UC Davis HIVE run `module load "
+            f"dotnet-core-sdk/8.0.4` in the same shell first; or use a self-contained parser, "
+            f"which needs no .NET (bioconda's `thermorawfileparser`, which `bash "
+            f"scripts/setup.sh` installs, or a Linux/macOS/Windows zip from {TRFP_RELEASES})")
+
+
+def trfp_launch(cmd):
+    """How to start this parser: {"cmd", "dotnet_root", "needs", "problem"}.
+
+    Directory checks only -- nothing is started, so it is safe before the login-node refusal.
+    `dotnet_root` goes into the parser's environment as DOTNET_ROOT (None: leave it alone). For
+    `dotnet <app>.dll`, `cmd` names the dotnet of the chosen root, because the muxer resolves
+    frameworks from its own directory whatever DOTNET_ROOT says. `problem` is the one message
+    for a parser that cannot start: every .raw gets it verbatim and none is attempted.
+    """
+    needs, muxer, rc = dotnet_frameworks_needed(cmd)
+    out = {"cmd": list(cmd), "dotnet_root": None, "needs": [_need_text(n) for n in needs],
+           "problem": None}
+    if not needs:
+        return out
+    cands = dotnet_root_candidates()
+    if muxer:
+        own = os.path.dirname(os.path.realpath(shutil.which(cmd[0]) or cmd[0]))
+        cands = [(f"the {cmd[0]} it runs under", own)] + [c for c in cands if c[1] != own]
+    tried = []
+    for where, root in cands:
+        lacks = dotnet_root_lacks(root, needs, muxer)
+        if not lacks:
+            out["dotnet_root"] = root
+            if muxer:
+                out["cmd"] = [os.path.join(root, "dotnet" + _EXE)] + list(cmd[1:])
+            return out
+        tried.append(f"{root} ({where}): {', '.join(lacks)}")
+    out["problem"] = (
+        f"ThermoRawFileParser [{' '.join(cmd)}] cannot start: it is a framework-dependent .NET "
+        f"build that needs {' and '.join(out['needs'])} ({os.path.basename(rc)}), and no .NET "
+        f"install checked has all of them -- {'; '.join(tried) or 'none found'}. Started "
+        f"anyway it exits 150 \"You must install or update .NET to run this application.\" "
+        f"(131 \"You must install .NET\" with no .NET at all), so no .raw was read: acquisition "
+        f"and instrument unknown, and {FALLBACK_CONSEQUENCE}. {_dotnet_fix()}")
+    return out
+
+
+def _child_env(dotnet_root):
+    """The parser's environment: ours, with DOTNET_ROOT set to the root that was checked."""
+    if not dotnet_root:
+        return None
+    env = dict(os.environ, DOTNET_ROOT=dotnet_root)
+    for k in ("DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64", "DOTNET_ROOT_X86", "DOTNET_ROOT(x86)"):
+        env.pop(k, None)        # an arch-specific root outranks DOTNET_ROOT in the host
+    return env
 
 
 def _trfp_error_lines(stdout):
@@ -322,7 +603,7 @@ def _trfp_message(stdout, stderr):
     return msg if len(msg) <= 400 else msg[:400] + "..."
 
 
-def _run_trfp(cmd, args):
+def _run_trfp(cmd, args, dotnet_root=None):
     """(True, None, stdout) or (False, "exit N: <parser message>", stdout). Never raises.
 
     stdout comes back on SUCCESS too, because exit 0 is not proof the parser did the work:
@@ -332,7 +613,7 @@ def _run_trfp(cmd, args):
     """
     try:
         p = subprocess.run(cmd + args, capture_output=True, text=True, errors="replace",
-                           timeout=TRFP_TIMEOUT_S)
+                           timeout=TRFP_TIMEOUT_S, env=_child_env(dotnet_root))
     except subprocess.TimeoutExpired:
         return False, f"no answer after {TRFP_TIMEOUT_S} s", ""
     except OSError as e:                       # includes FileNotFoundError / PermissionError
@@ -342,20 +623,111 @@ def _run_trfp(cmd, args):
     return True, None, p.stdout
 
 
-_TRFP_VERSIONS = {}
+_TRFP_STARTS = {}
 
-def trfp_version(cmd):
-    """`--version` output (e.g. "2.0.0.0"), cached per command; None if it will not say."""
-    key = tuple(cmd)
-    if key not in _TRFP_VERSIONS:
+def trfp_start(launch):
+    """(version or None, problem or None): `--version` run the way the reads will be, cached per
+    command + DOTNET_ROOT.
+
+    `problem` only when the parser cannot start at all -- the command cannot be executed, or the
+    .NET host refuses (HOST_START_FAILURES) where the directory check saw nothing wrong. Any
+    other failure to say a version is not a reason to skip the reads: they report for
+    themselves.
+    """
+    cmd, root = launch["cmd"], launch["dotnet_root"]
+    key = (tuple(cmd), root)
+    if key not in _TRFP_STARTS:
+        version = problem = None
         try:
             p = subprocess.run(cmd + ["--version"], capture_output=True, text=True,
-                               errors="replace", timeout=60)
+                               errors="replace", timeout=60, env=_child_env(root))
+        except subprocess.TimeoutExpired:
+            pass
+        except OSError as e:
+            problem = f"could not run {' '.join(cmd)!r}: {e}"
+        else:
             lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
-            _TRFP_VERSIONS[key] = lines[-1] if p.returncode == 0 and lines else None
-        except (OSError, subprocess.TimeoutExpired):
-            _TRFP_VERSIONS[key] = None
-    return _TRFP_VERSIONS[key]
+            if p.returncode in HOST_START_FAILURES:
+                problem = (f"`--version` exit {p.returncode} ({HOST_START_FAILURES[p.returncode]}"
+                           f"): {_trfp_message(p.stdout, p.stderr)}")
+            elif p.returncode == 0 and lines:
+                version = lines[-1]
+        if problem:
+            problem = (f"ThermoRawFileParser [{' '.join(cmd)}] cannot start"
+                       + (f" with DOTNET_ROOT={root}" if root else "")
+                       + f": {problem}. So no .raw was read: acquisition and instrument unknown, "
+                       f"and {FALLBACK_CONSEQUENCE}. {_dotnet_fix()}")
+        _TRFP_STARTS[key] = (version, problem)
+    return _TRFP_STARTS[key]
+
+
+def trfp_ready(cmd):
+    """(launch, version, problem) -- the one "can this parser start here" answer, for step 2's
+    up-front check, each .raw's read and setup.sh's readiness report alike."""
+    launch = trfp_launch(cmd)
+    if launch["problem"]:
+        return launch, None, launch["problem"]
+    version, problem = trfp_start(launch)
+    return launch, version, problem
+
+
+def reader_status():
+    """setup.sh's Thermo .raw readiness (setup.json `thermo_raw_reader`): the parser step 2 would
+    use, where it was found, and whether it starts; and `resolution_reader`, whether the
+    Orbitrap resolution can be read. Runs `--version` and the reader's `--check` only; reads no
+    .raw. `ready` is the parser's alone: without the resolution the user is asked for it."""
+    cmd, source = locate_trfp()
+    st = {"ready": False, "command": None, "source": source, "version": None,
+          "dotnet_needs": [], "dotnet_root": None, "note": ""}
+    if not cmd:
+        st["note"] = _trfp_not_found().replace("so this .raw was not read",
+                                               "so no .raw can be read")
+        st["resolution_reader"] = resolution_reader_status(None)
+        return st
+    launch, version, problem = trfp_ready(cmd)
+    st["resolution_reader"] = resolution_reader_status(launch)
+    st.update(command=" ".join(launch["cmd"]), version=version,
+              dotnet_needs=launch["needs"], dotnet_root=launch["dotnet_root"])
+    if problem:
+        st["note"] = problem
+    elif not version:
+        st["note"] = (f"ThermoRawFileParser [{st['command']}] did not report a version "
+                      f"(`--version` failed or timed out), so it may not start; step 2 "
+                      f"(detect_acquisition.py) will say why for each .raw")
+    else:
+        st["ready"] = True
+        st["note"] = (f"ThermoRawFileParser {version} starts ({source}"
+                      + (f"; DOTNET_ROOT={launch['dotnet_root']}" if launch["dotnet_root"]
+                         else "") + ")")
+    return st
+
+
+def resolution_reader_status(launch):
+    """{"ready", "python", "dll_dir", "dotnet_root", "reader", "note"}: thermo_resolution.py
+    --check, run exactly as step 2 would run the reader."""
+    st = {"ready": False, "python": None, "dll_dir": None, "dotnet_root": None, "reader": None,
+          "note": ""}
+    st["python"] = py = resolution_python()
+    if not py:
+        st["note"] = PYTHONNET_MISSING
+        return st
+    st["dll_dir"], why = rawfilereader_dir(launch["cmd"] if launch else None)
+    if not why:
+        st["dotnet_root"], why = resolution_dotnet_root(launch)
+    if why:
+        st["note"] = why
+        return st
+    try:
+        p = subprocess.run([py, RES_READER, "--dll-dir", st["dll_dir"], "--check"],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=RES_TIMEOUT_BASE_S, env=_child_env(st["dotnet_root"]))
+        chk = json.loads(p.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
+        st["note"] = f"the reader's --check did not answer ({type(e).__name__}: {e})"
+        return st
+    st.update(ready=bool(chk.get("ok")), reader=chk.get("reader"),
+              note=chk.get("note") or f"reads the Orbitrap resolution with {chk.get('reader')}")
+    return st
 
 
 def _cv(meta, section, accession):
@@ -366,13 +738,18 @@ def _cv(meta, section, accession):
     return None
 
 
-def trfp_metadata(path, cmd=None):
-    """(metadata dict, None) or (None, why)."""
-    cmd = cmd or find_trfp()
+def trfp_metadata(path, cmd=None, dotnet_root=None):
+    """(metadata dict, None) or (None, why). With no `cmd`, finds the parser and its .NET."""
     if not cmd:
-        return None, _trfp_not_found()
+        cmd = find_trfp()
+        if not cmd:
+            return None, _trfp_not_found()
+        launch, _version, problem = trfp_ready(cmd)
+        if problem:
+            return None, problem
+        cmd, dotnet_root = launch["cmd"], launch["dotnet_root"]
     with tempfile.TemporaryDirectory(prefix="trfp_meta_") as tmp:
-        ok, why, stdout = _run_trfp(cmd, [f"-i={path}", "-m=0", f"-o={tmp}"])
+        ok, why, stdout = _run_trfp(cmd, [f"-i={path}", "-m=0", f"-o={tmp}"], dotnet_root)
         if not ok:
             return None, f"ThermoRawFileParser metadata call failed ({why})"
         if _trfp_error_lines(stdout):
@@ -391,7 +768,7 @@ def trfp_metadata(path, cmd=None):
     return meta, None
 
 
-def trfp_query(path, first, last, cmd):
+def trfp_query(path, first, last, cmd, dotnet_root=None):
     """(list of PROXI spectra, None, [notes]) or (None, why, [notes]).
 
     `notes` are what did not stop the read but must reach the user, because they change what
@@ -404,7 +781,7 @@ def trfp_query(path, first, last, cmd):
     with tempfile.TemporaryDirectory(prefix="trfp_query_") as tmp:
         dest = os.path.join(tmp, "query.json")
         ok, why, stdout = _run_trfp(cmd, ["query", f"-i={path}", f"-n={first}-{last}",
-                                          f"-b={dest}"])
+                                          f"-b={dest}"], dotnet_root)
         if not ok:
             return None, f"ThermoRawFileParser query of scans {first}-{last} failed ({why})", notes
         if _trfp_error_lines(stdout):
@@ -564,10 +941,19 @@ def read_thermo_raw(path):
         out["reason"] = _trfp_not_found()
         out["warnings"].append(out["reason"])
         return out
-    version = trfp_version(cmd)
-    out["reader"] = f"ThermoRawFileParser {version or '(version unknown)'} [{' '.join(cmd)}]"
+    launch, version, problem = trfp_ready(cmd)
+    cmd, root = launch["cmd"], launch["dotnet_root"]
+    if problem:
+        # the same words main() printed once up front; the parser is not started for this file
+        out["reader"] = f"ThermoRawFileParser (cannot start) [{' '.join(cmd)}]"
+        out["reason"] = problem
+        out["warnings"].append(problem)
+        return out
+    # which .NET ran it is part of which reader it was
+    out["reader"] = (f"ThermoRawFileParser {version or '(version unknown)'} [{' '.join(cmd)}]"
+                     + (f" DOTNET_ROOT={root}" if root else ""))
 
-    meta, meta_err = trfp_metadata(path, cmd)
+    meta, meta_err = trfp_metadata(path, cmd, root)
     if meta is None:
         # Not fatal for DIA/DDA, but the instrument decides mass accuracy downstream.
         out["warnings"].append(f"instrument unknown: {meta_err}")
@@ -580,7 +966,7 @@ def read_thermo_raw(path):
     first, last, slice_note = query_scan_range(meta)
     if slice_note:
         out["warnings"].append(slice_note)
-    spectra, q_err, q_notes = trfp_query(path, first, last, cmd)
+    spectra, q_err, q_notes = trfp_query(path, first, last, cmd, root)
     if spectra is None:
         out["reason"] = f"{q_err}: acquisition unknown and {FALLBACK_CONSEQUENCE}"
         out["warnings"].append(out["reason"])
@@ -668,7 +1054,13 @@ def classify(path):
             # (also printed to stderr; any one sets needs_confirmation)
             "warnings": warnings,
             # the external reader and its version, when one was needed (Thermo .raw)
-            "reader": reader}
+            "reader": reader,
+            # Thermo Orbitrap only (else null): read from the scan trailer by main() in
+            # batches -- see add_resolutions(). resolution_note says where from, or why not;
+            # ms2_analyzer is "FTMS" (Orbitrap), "ITMS" (ion trap: no Orbitrap resolution) or
+            # "mixed" (both: see MS2_MIXED_NOTE)
+            "ms1_resolution": None, "ms2_resolution": None, "ms2_analyzer": None,
+            "resolution_note": None}
 
 # ---------------------------------------------------------------------------
 # A cohort of .raw on a cluster login node.
@@ -684,11 +1076,328 @@ def classify(path):
 # (sbatch present, not inside a SLURM job), so the two refuse on the same hosts. No
 # scheduler => no refusal: a laptop is not a shared login node, and gets progress lines
 # instead. No parser => no refusal either: each .raw fails at once with the not-found
-# warning, and a detour through srun would only delay that message.
+# warning, and a detour through srun would only delay that message. The same for a parser
+# that cannot start (trfp_launch: its .NET is missing) -- gabrig's 15 .raw went through two
+# srun jobs to learn what a directory check on the login node already knew.
 # ---------------------------------------------------------------------------
 LOGIN_NODE_MAX_RAW = 5
-ALLOW_LOGIN_NODE = "--allow-login-node"
 RAW_SECONDS_EACH = 7            # upper end of the per-file measurement above
+ALLOW_LOGIN_NODE = "--allow-login-node"
+CHECK_READER = "--check-reader"
+# Per-file stderr line for a parser that cannot start: the full reason is printed ONCE, up
+# front, and is each file's `reason` and `warnings` entry in the JSON.
+CANNOT_START_SEE_ABOVE = ("not read -- ThermoRawFileParser cannot start on this machine (the "
+                          "ERROR above says why and how to fix it)")
+
+# ---------------------------------------------------------------------------
+# Orbitrap resolution. estimate_params.py pins DIA-NN's documented Orbitrap tolerances from the
+# MS1/MS2 RESOLUTION; without it an Orbitrap classes as `orbitrap_generic`, DIA-NN calibrates
+# mass accuracy per run, and the 5-step parallel chain declines the cfg (gabrig 2026-09-23,
+# 15 Fusion Lumos .raw). ThermoRawFileParser never outputs it (TRFP master cf548e4: nothing in
+# metadata, mzML, MGF or `query`; its "mass resolution" MS:1000011 is a generic 0.5), but every
+# scan's trailer has it -- 'Orbitrap Resolution:' on a Fusion Lumos, 'FT Resolution:' on an
+# Exploris 480. thermo_resolution.py reads it with the RawFileReader DLLs TRFP ships, through
+# pythonnet, in ONE subprocess for all files (a CoreCLR load or crash cannot take this script
+# down). Measured on HIVE (job 23989170): three Lumos DIA runs 60000/15000, an Exploris 480 DIA
+# run 120000/15000 and a DDA run 60000/15000 -- 5 files in 18 s including the runtime start.
+# Read only for `orbitrap_generic`: an Astral's documented tolerances do not use it.
+# A file it cannot read stays in `orbitrap_resolution_unknown`, and the user is asked. Not a
+# per-file `warning`: those mean "this read is suspect" and set needs_confirmation, and a clean
+# read of acquisition and range stands whether or not the resolution came with it.
+# ---------------------------------------------------------------------------
+RES_READER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thermo_resolution.py")
+RAWFILEREADER_DIR_ENV = "THERMO_RAWFILEREADER_DIR"     # a folder holding the two DLLs below
+RAWFILEREADER_DLLS = ("ThermoFisher.CommonCore.RawFileReader.dll",
+                      "ThermoFisher.CommonCore.Data.dll")
+# The interpreter that runs the reader: must have pythonnet. Unset = this one if it does, else
+# the pipeline env's python (setup.sh installs pythonnet there). The tests point it at a
+# `python -S` wrapper so the machine's own pythonnet cannot change the answer.
+RES_PYTHON_ENV = "THERMO_RESOLUTION_PYTHON"
+# The RawFileReader DLLs target .NETCoreApp 8.0, and a SELF-CONTAINED parser's bundled runtime
+# cannot host pythonnet (hostfxr: "Initialization for self-contained components is not
+# supported", job 23989170) -- so a separate root with Microsoft.NETCore.App 8+ is needed.
+RES_DOTNET_NEEDS = [("Microsoft.NETCore.App", (8, 0, 0), True)]
+# Batches, each with its own timeout: one timeout for a whole cohort let a stall inside a .NET
+# call (where the reader's own walk budget is never checked) block for 120 + 90 s x N -- ~5 h
+# for 200 files -- and then lose every answer. A hang now costs its batch; two batches in a row
+# that hang (a stalled mount, not one bad file) stop the rest, which say so.
+RES_BATCH = 10
+RES_TIMEOUT_BASE_S = 60       # starting .NET: ~3 s measured (HIVE jobs 23989170, 23989291)
+RES_TIMEOUT_EACH_S = 30       # per file: ~3 s measured; the reader's own walk stops at 20 s
+RES_HUNG_BATCHES_STOP = 2
+RESOLUTION_ASK = (
+    "ASK the user for the Orbitrap resolution of the levels `levels` names for each of these "
+    "runs (it is in the instrument method, e.g. 120,000 MS1 / 30,000 MS2) and pass it to "
+    "estimate_params.py as --ms1-resolution/--ms2-resolution: the scan trailer could not be "
+    "read for them (`reasons`; `read_in_other_files` is what the rest of the cohort read). An "
+    "ion-trap MS2 is never asked for (see ms2_ion_trap). Without it estimate_params.py "
+    "classes the instrument orbitrap_generic: no documented DIA-NN mass tolerance, so DIA-NN "
+    "calibrates mass accuracy per run (results then depend on file order) and the 5-step "
+    "parallel chain declines the cfg -- a large cohort runs as one single-node search. This "
+    "does not set needs_confirmation; everything else above stands.")
+MS2_ION_TRAP_NOTE = (
+    "MS2 is read in the ion trap (ITMS) in these runs: only the MS1 Orbitrap resolution "
+    "applies. There is no MS2 Orbitrap resolution to ask the user for, and the MS2 mass "
+    "tolerance cannot come from DIA-NN's Orbitrap resolution table -- do not pass "
+    "--ms2-resolution for them. Pass --ms1-resolution <MS1> --ms2-analyzer ITMS "
+    "--resolution-source detected to resolve_defaults.py / estimate_params.py instead: Sage "
+    "then uses its documented low-res fragment window (+/-0.4 Da), and DIA-NN leaves both "
+    "mass-accuracy levels to its own calibration (the 5-step chain declines that). A cohort "
+    "mixing ion-trap and Orbitrap MS2 runs needs separate searches.")
+# A Tribrid decision-tree method (HCD-OT for high charge states, CID-IT for 2+) reads MS2 in
+# BOTH analyzers inside one run. Called FTMS, Sage would match the ion-trap spectra at +/-10 ppm
+# and lose them without a word; the ion-trap setting's window is the one that holds both.
+MS2_MIXED_NOTE = (
+    "MS2 is MIXED within these runs: some MS2 scans were read in the Orbitrap and some in the "
+    "ion trap (a decision-tree or dual-analyzer method; each file's resolution_note gives the "
+    "counts). One Orbitrap MS2 tolerance would lose the ion-trap spectra, so CONFIRM the method "
+    "with the user, then pass --ms1-resolution <MS1> --ms2-analyzer mixed --resolution-source "
+    "detected and no --ms2-resolution: Sage's +/-0.4 Da ion-trap window also covers the "
+    "Orbitrap fragments, and DIA-NN leaves mass accuracy to its own calibration.")
+
+
+def _needs_resolution(r):
+    return (r.get("vendor") == "Thermo" and bool(r.get("instrument"))
+            and classify_instrument(r["instrument"])[0] == "orbitrap_generic")
+
+
+_RES_PYTHON = []
+
+def resolution_python():
+    """The interpreter to run thermo_resolution.py with, or None (no pythonnet anywhere)."""
+    if RES_PYTHON_ENV in os.environ:
+        return os.environ[RES_PYTHON_ENV] or None
+    if not _RES_PYTHON:
+        import importlib.util
+        found = sys.executable if importlib.util.find_spec("pythonnet") else None
+        env_bin = None if found else _pipeline_env_bin()
+        cand = os.path.join(env_bin, "python") if env_bin else None
+        if cand and _is_exe(cand) and os.path.realpath(cand) != os.path.realpath(sys.executable):
+            try:
+                ok = subprocess.run([cand, "-c", "import importlib.util, sys; sys.exit("
+                                     "importlib.util.find_spec('pythonnet') is None)"],
+                                    capture_output=True, timeout=60).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            found = cand if ok else None
+        _RES_PYTHON.append(found)
+    return _RES_PYTHON[0]
+
+
+def rawfilereader_dir(cmd):
+    """(folder with the RawFileReader DLLs, None) or (None, why): $THERMO_RAWFILEREADER_DIR,
+    else the folder ThermoRawFileParser runs from (every release ships the DLLs beside it --
+    the Core's copy and bioconda's bin/ alike)."""
+    cands = []
+    if os.environ.get(RAWFILEREADER_DIR_ENV):
+        cands.append(os.environ[RAWFILEREADER_DIR_ENV])
+    if cmd:
+        app = next((a for a in cmd[1:] if a.lower().endswith((".dll", ".exe"))), None)
+        cands.append(os.path.dirname(os.path.realpath(
+            app or shutil.which(cmd[0]) or cmd[0])))
+    for d in cands:
+        if all(os.path.isfile(os.path.join(d, n)) for n in RAWFILEREADER_DLLS):
+            return d, None
+    return None, (f"no {' + '.join(RAWFILEREADER_DLLS)} in "
+                  f"{' or '.join(cands) or '(nowhere to look)'}; set ${RAWFILEREADER_DIR_ENV} "
+                  f"to a folder that has them (every ThermoRawFileParser release ships them "
+                  f"beside its executable)")
+
+
+def resolution_dotnet_root(launch):
+    """(root, None) or (None, why): the parser's own root when it has one, else the first
+    candidate with Microsoft.NETCore.App 8+."""
+    if launch and launch.get("dotnet_root"):
+        return launch["dotnet_root"], None
+    tried = []
+    for where, root in dotnet_root_candidates():
+        lacks = dotnet_root_lacks(root, RES_DOTNET_NEEDS)
+        if not lacks:
+            return root, None
+        tried.append(f"{root} ({where}): {', '.join(lacks)}")
+    return None, (f"no .NET with Microsoft.NETCore.App 8+ for pythonnet to run the RawFileReader "
+                  f"DLLs on ({'; '.join(tried) or 'none found'}); a self-contained "
+                  f"ThermoRawFileParser's bundled runtime cannot host it. {_dotnet_fix()}")
+
+
+def _null_resolution(path, note):
+    return {"file": path, "ms1_resolution": None, "ms2_resolution": None,
+            "ms2_analyzer": None, "reader": None, "note": note}
+
+
+def _read_batch(py, dll_dir, root, paths):
+    """(answers by path, failure or None, timed out) for one reader subprocess."""
+    timeout = RES_TIMEOUT_BASE_S + RES_TIMEOUT_EACH_S * len(paths)
+    failure, stdout, hung = None, "", False
+    try:
+        p = subprocess.run([py, RES_READER, "--dll-dir", dll_dir, *paths], capture_output=True,
+                           text=True, errors="replace", timeout=timeout, env=_child_env(root))
+        stdout = p.stdout
+        if p.returncode not in (0, 1):
+            tail = [ln.strip() for ln in (p.stderr or "").splitlines() if ln.strip()][-1:]
+            failure = f"the reader exited {p.returncode}" + (f": {tail[0][:300]}" if tail else "")
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout or ""
+        stdout = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+        failure, hung = f"the reader gave no answer within {timeout} s", True
+    except OSError as e:
+        failure = f"could not run {py} {RES_READER}: {e}"
+    got = {}
+    for line in stdout.splitlines():        # lines already answered survive a hang or a crash
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("file") in paths:
+            got[rec["file"]] = rec
+    return got, failure, hung
+
+
+def read_resolutions(paths, launch):
+    """{path: thermo_resolution.py's object}, RES_BATCH files per subprocess. Never raises:
+    whatever stops a read becomes the `note` of the files it cost."""
+    py = resolution_python()
+    if not py:
+        return {p: _null_resolution(p, PYTHONNET_MISSING) for p in paths}
+    dll_dir, why = rawfilereader_dir(launch["cmd"] if launch else None)
+    if dll_dir:
+        root, why = resolution_dotnet_root(launch)
+    if why:
+        return {p: _null_resolution(p, why) for p in paths}
+    got, hung_in_a_row = {}, 0
+    for i in range(0, len(paths), RES_BATCH):
+        batch = paths[i:i + RES_BATCH]
+        if hung_in_a_row >= RES_HUNG_BATCHES_STOP:
+            for p in batch:
+                got[p] = _null_resolution(p, (
+                    f"not attempted: the reader hung on {hung_in_a_row} batches in a row "
+                    f"(slow or stalled storage?)"))
+            continue
+        answers, failure, hung = _read_batch(py, dll_dir, root, batch)
+        hung_in_a_row = hung_in_a_row + 1 if hung else 0
+        for p in batch:
+            got[p] = answers.get(p) or _null_resolution(
+                p, f"{failure or 'the reader did not answer'} for this file")
+    return got
+
+
+def add_resolutions(results, launch):
+    """Fill each Thermo record's ms1_resolution / ms2_resolution / resolution_note, in place."""
+    targets = []
+    for r in results:
+        if r.get("vendor") != "Thermo":
+            continue
+        if _needs_resolution(r):
+            targets.append(r)
+        elif not r.get("instrument"):
+            r["resolution_note"] = "not read: the instrument is unknown"
+        else:
+            cls = classify_instrument(r["instrument"])[0]
+            ppm = DIANN_INSTRUMENT_PPM.get(cls)
+            r["resolution_note"] = (f"not read: {r['instrument']} is {cls}"
+                                    + (f", whose documented DIA-NN tolerances (MS1 {ppm[0]} / "
+                                       f"MS2 {ppm[1]} ppm) do not use it" if ppm else ""))
+    if not targets:
+        return
+    got = read_resolutions([r["file"] for r in targets], launch)
+    for r in targets:
+        rec = got[r["file"]]
+        r["ms1_resolution"] = rec.get("ms1_resolution")
+        r["ms2_resolution"] = rec.get("ms2_resolution")
+        r["ms2_analyzer"] = rec.get("ms2_analyzer")
+        parts = []
+        if r["ms1_resolution"] or r["ms2_resolution"]:
+            parts.append(f"read from the scan trailer (MS1 {rec.get('ms1_key')} scan "
+                         f"{rec.get('ms1_scan')}, MS2 {rec.get('ms2_key')} scan "
+                         f"{rec.get('ms2_scan')}) by {rec.get('reader')}")
+        if rec.get("note"):
+            parts.append(rec["note"])
+        r["resolution_note"] = "; ".join(parts) or None
+
+
+def resolution_failed(results, why):
+    """resolution_summary()'s shape when reading failed outright: every Orbitrap file unknown,
+    with `why` as its reason. Nothing in here may raise."""
+    orbi = []
+    for r in results:
+        try:
+            is_orbi = _needs_resolution(r)
+        except Exception:
+            is_orbi = r.get("vendor") == "Thermo"
+        if is_orbi:
+            r.update(ms1_resolution=None, ms2_resolution=None, ms2_analyzer=None,
+                     resolution_note=why)
+            orbi.append(r)
+    return {"ms1_resolution": None, "ms2_resolution": None, "resolution_mixed": [],
+            "ms2_ion_trap": None,
+            "orbitrap_resolution_unknown": {
+                "files": [r["file"] for r in orbi],
+                "levels": {r["file"]: ["MS1", "MS2"] for r in orbi},
+                "instruments": sorted({str(r.get("instrument")) for r in orbi}),
+                "reasons": [why], "read_in_other_files": [], "ask": RESOLUTION_ASK}
+            if orbi else None}
+
+
+IT_MS2 = ("ITMS", "mixed")     # ms2_analyzer values with ion-trap MS2 in them
+
+
+def _ms2_value(r):
+    """MS2 as methods are compared: the resolution, or "ITMS"/"mixed" when the ion trap read
+    any of it."""
+    return r["ms2_analyzer"] if r.get("ms2_analyzer") in IT_MS2 else r.get("ms2_resolution")
+
+
+def _asked_levels(r):
+    """The levels the user must be asked for: an ion-trap MS2 has no Orbitrap resolution."""
+    return ([] if r.get("ms1_resolution") else ["MS1"]) + (
+        [] if r.get("ms2_resolution") or r.get("ms2_analyzer") in IT_MS2 else ["MS2"])
+
+
+def resolution_summary(results):
+    """The cohort's top-level resolution fields (see main())."""
+    orbi = [r for r in results if _needs_resolution(r)]
+    top = {"ms1_resolution": None, "ms2_resolution": None, "resolution_mixed": [],
+           "ms2_ion_trap": None, "orbitrap_resolution_unknown": None}
+    if not orbi:
+        return top
+    level_value = {"ms1_resolution": lambda r: r.get("ms1_resolution"),
+                   "ms2_resolution": _ms2_value}
+    for lvl, value in level_value.items():
+        vals = {value(r) for r in orbi}
+        if len(vals) == 1 and not vals & {None, *IT_MS2}:     # every Orbitrap file, one value
+            top[lvl] = vals.pop()
+    if any(len({value(r) for r in orbi} - {None}) > 1 for value in level_value.values()):
+        # Two methods in one cohort: one tolerance would be wrong for part of it. Say which
+        # files read what -- never pick one.
+        groups = {}
+        for r in orbi:
+            groups.setdefault((r.get("ms1_resolution"), r.get("ms2_resolution"),
+                               r.get("ms2_analyzer")), []).append(r["file"])
+        top["resolution_mixed"] = [
+            {"ms1_resolution": a, "ms2_resolution": b, "ms2_analyzer": c, "files": f}
+            for (a, b, c), f in sorted(groups.items(), key=lambda g: str(g[0]))]
+    itms = [r for r in orbi if r.get("ms2_analyzer") in IT_MS2]
+    if itms:
+        ms1 = {r.get("ms1_resolution") for r in itms}
+        mixed = [r["file"] for r in itms if r["ms2_analyzer"] == "mixed"]
+        top["ms2_ion_trap"] = {"files": [r["file"] for r in itms],
+                               "ms2_analyzer": {r["file"]: r["ms2_analyzer"] for r in itms},
+                               "ms1_resolution": ms1.pop() if len(ms1) == 1 else None,
+                               "note": MS2_ION_TRAP_NOTE,
+                               "mixed_files": mixed,
+                               "mixed_note": MS2_MIXED_NOTE if mixed else None}
+    unknown = [r for r in orbi if _asked_levels(r)]
+    if unknown:
+        top["orbitrap_resolution_unknown"] = {
+            "files": [r["file"] for r in unknown],
+            "levels": {r["file"]: _asked_levels(r) for r in unknown},
+            "instruments": sorted({r["instrument"] for r in unknown}),
+            "reasons": sorted({r["resolution_note"] for r in unknown if r.get("resolution_note")}),
+            "read_in_other_files": sorted({(r["ms1_resolution"], r["ms2_resolution"])
+                                           for r in orbi if not _asked_levels(r)
+                                           and r.get("ms2_analyzer") not in IT_MS2}),
+            "ask": RESOLUTION_ASK}
+    return top
 
 
 def is_thermo_raw(path):
@@ -721,9 +1430,15 @@ def login_node_refusal(n_raw):
 
 
 def main(argv):
+    usage = (f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]\n"
+             f"       detect_acquisition.py {CHECK_READER}")
+    if argv == [CHECK_READER]:
+        # setup.sh's readiness report: which parser, and does it start. Exit 0 = ready.
+        st = reader_status()
+        print(json.dumps(st))
+        sys.exit(0 if st["ready"] else 1)
     allow_login_node = ALLOW_LOGIN_NODE in argv
     argv = [a for a in argv if a != ALLOW_LOGIN_NODE]
-    usage = f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]"
     if not argv:
         print(usage, file=sys.stderr)
         sys.exit(2)
@@ -735,18 +1450,29 @@ def main(argv):
     unknown = [a for a in argv if a.startswith("-")]
     if unknown:
         print(f"detect_acquisition.py: unknown option(s): {' '.join(unknown)} "
-              f"(the only option is {ALLOW_LOGIN_NODE}; a file whose name starts with '-' "
-              f"can be passed as ./{unknown[0]})", file=sys.stderr)
+              f"(the only option with files is {ALLOW_LOGIN_NODE}; {CHECK_READER} goes alone; "
+              f"a file whose name starts with '-' can be passed as ./{unknown[0]})",
+              file=sys.stderr)
         print(usage, file=sys.stderr)
         sys.exit(2)
     files = []
     for a in argv:
         files.extend(sorted(glob.glob(a)) or [a])
     n_raw = sum(1 for f in files if is_thermo_raw(f))
+    # Can the parser start here at all? The directory check first -- it starts nothing, so it
+    # may run before the login-node refusal -- then, if the refusal lets us through, one
+    # `--version`. Either failure is the same message for every .raw: say it ONCE, now.
+    cmd = find_trfp() if n_raw else None
+    launch = trfp_launch(cmd) if cmd else None
+    cannot_start = launch["problem"] if launch else None
     # Refuse BEFORE reading anything: a refusal after the first 100 files is no refusal.
     if (n_raw > LOGIN_NODE_MAX_RAW and on_cluster_login_node() and not allow_login_node
-            and find_trfp()):
+            and cmd and not cannot_start):
         sys.exit(login_node_refusal(n_raw))
+    if launch and not cannot_start:
+        cannot_start = trfp_start(launch)[1]
+    if cannot_start:
+        print(f"[detect_acquisition] ERROR: {cannot_start}", file=sys.stderr, flush=True)
     results, k = [], 0
     for f in files:
         if not is_thermo_raw(f):
@@ -756,12 +1482,24 @@ def main(argv):
         t0 = time.monotonic()
         results.append(classify(f))
         # Seconds per file, as it happens: minutes of parser work in silence looks like a hang.
-        print(f"[detect_acquisition] Thermo .raw {k}/{n_raw} read in "
+        print(f"[detect_acquisition] Thermo .raw {k}/{n_raw} "
+              f"{'skipped' if cannot_start else 'read'} in "
               f"{time.monotonic() - t0:.1f} s: {f}", file=sys.stderr, flush=True)
     # stdout is JSON for the caller; problems also go to stderr, where a person sees them
     # even when a script only keeps the JSON.
+    # Resolution for the Orbitrap files, in batches, after every file has its instrument. It is
+    # an extra: whatever goes wrong in it (an unreadable .NET root raised PermissionError here and
+    # took the JSON with it) becomes a reason on the Orbitrap files, never a failed detection.
+    try:
+        if not cannot_start:
+            add_resolutions(results, launch)
+        res = resolution_summary(results)
+    except Exception as e:
+        res = resolution_failed(results, f"the resolution reader failed ({type(e).__name__}: "
+                                         f"{e}), so it was not read")
     for r in results:
         for w in r.get("warnings") or []:
+            w = CANNOT_START_SEE_ABOVE if cannot_start and w == cannot_start else w
             print(f"[detect_acquisition] WARNING: {r['file']}: {w}", file=sys.stderr)
     kinds = {r["acquisition"] for r in results}
     overall = (next(iter(kinds)) if len(kinds) == 1 else "mixed")
@@ -784,10 +1522,27 @@ def main(argv):
         "precursor_mz_range_mixed": mixed_ranges,
         "precursor_mz_range_files_without": [
             r["file"] for r in results if not r.get("precursor_mz_range")],
+        # Feed straight to resolve_defaults.py / estimate_params.py as --ms1-resolution /
+        # --ms2-resolution WITH --resolution-source detected (so the manifest says the numbers
+        # came from the raw file): set when every Orbitrap .raw read the same value from its
+        # scan trailer, else null.
+        "ms1_resolution": res["ms1_resolution"],
+        "ms2_resolution": res["ms2_resolution"],
+        # [] or, when the Orbitrap files disagree, who read what -- one tolerance would be wrong
+        # for part of the cohort, so it sets needs_confirmation
+        "resolution_mixed": res["resolution_mixed"],
+        # null, or the Orbitrap files whose MS2 is ion trap -- only MS1 applies -- or MIXED
+        # Orbitrap + ion trap (mixed_files: the user confirms the method; see MS2_MIXED_NOTE)
+        "ms2_ion_trap": res["ms2_ion_trap"],
         "needs_confirmation": (bool(low_conf) or overall in ("mixed", "unknown")
                                or len(instruments) > 1
-                               or any(r.get("warnings") for r in results)),
+                               or any(r.get("warnings") for r in results)
+                               or bool(res["resolution_mixed"])
+                               or bool((res["ms2_ion_trap"] or {}).get("mixed_files"))),
         "low_confidence_files": low_conf,
+        # null, or the Orbitrap files whose resolution could not be read: ASK the user before
+        # step 6b (see RESOLUTION_ASK) -- an instruction, not a problem with the read
+        "orbitrap_resolution_unknown": res["orbitrap_resolution_unknown"],
         # No top-level list of problem files: files[].warnings is the one place a problem is
         # reported, whichever reader found it (a vendor-specific list reads "nothing wrong"
         # whenever the problem is another vendor's). tdf status: files[].tdf_integrity.

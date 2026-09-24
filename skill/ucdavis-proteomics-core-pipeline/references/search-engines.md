@@ -23,7 +23,11 @@ and the user confirms).
 parser is `$THERMORAWFILEPARSER` if set — a whole command, for the builds that are not
 one executable (`dotnet /opt/trfp/ThermoRawFileParser.dll`, or `mono
 ThermoRawFileParser.exe` for 1.4.x) — else `ThermoRawFileParser` / `thermorawfileparser`
-on PATH. Two calls per file, in the `-option=value` form the parser's README requires:
+on PATH, else the pipeline env's copy (`setup.sh` installs bioconda's self-contained build),
+else `$THERMORAWFILEPARSER_SHARED` (default: the UC Davis Core's shared copy on HIVE). A
+framework-dependent build gets a .NET 8 install with both runtimes it needs found and handed
+to it (see the .NET row below). Two calls per file, in the `-option=value` form the parser's
+README requires:
 
 | call | gives | measured on HIVE (TRFP 2.0.0.0) |
 |---|---|---|
@@ -204,9 +208,9 @@ Windows, or Linux). `setup.sh`/`acquire_tools.sh` fetch the free ones automatica
 | **AlphaDIA** | https://github.com/MannLabs/alphadia | Win, macOS, Linux | Apache-2.0 (commercial-OK); `pip install alphadia`, GPU recommended. |
 | **Radiant DIA + Fulcrum** (Seer) | https://github.com/seerbio/radiant-fulcrum-container · image `seerbio/radiant-fulcrum` | container only (multi-arch amd64+arm64) | **Thermo Orbitrap only** here (mzML/Parquet input). Needs a DIA-NN-generated library. **Apache-2.0 + Commons Clause + grant-back** — restricts selling a derived service. |
 | **FragPipe** (MSFragger/IonQuant) | https://github.com/Nesvilab/FragPipe/releases | Win, macOS, Linux | Java GUI; MSFragger/IonQuant need the user's own (free-academic) license. |
-| **ThermoRawFileParser** | https://github.com/compomics/ThermoRawFileParser/releases | Win, macOS, Linux | Reads `.raw` for `detect_acquisition.py`, and `.raw`→mzML. v2.0.0-dev: self-contained Linux/macOS/Windows zips, or the `-net8` zip run as `dotnet ThermoRawFileParser.dll` (.NET 8 runtime); `conda install -c bioconda thermorawfileparser` (Linux/macOS). 1.4.x needs Mono off Windows. Not a single executable on PATH → `export THERMORAWFILEPARSER="dotnet /path/ThermoRawFileParser.dll"`. Its mzML carries **no resolving power** (see `parameters.md`). |
+| **ThermoRawFileParser** | https://github.com/compomics/ThermoRawFileParser/releases | Win, macOS, Linux | Reads `.raw` for `detect_acquisition.py`, and `.raw`→mzML. v2.0.0-dev: self-contained Linux/macOS/Windows zips, or the `-net8` zip run as `dotnet ThermoRawFileParser.dll` (.NET 8 runtime); `conda install -c bioconda thermorawfileparser` (Linux/macOS; that build is self-contained — no .NET — and `setup.sh` installs it). 1.4.x needs Mono off Windows. Not a single executable on PATH → `export THERMORAWFILEPARSER="dotnet /path/ThermoRawFileParser.dll"`. Its mzML carries **no resolving power** (see `parameters.md`). |
 | **ProteoWizard / msconvert** | https://proteowizard.sourceforge.io/ | Windows (native); Linux/macOS via Docker | vendor→mzML; Linux via the `chambm/pwiz-...` Docker image. |
-| **.NET 8 runtime** | https://dotnet.microsoft.com/download/dotnet/8.0 · installer script https://dot.net/v1/dotnet-install.sh | Win, macOS, Linux | needed only so the **Linux** DIA-NN binary can read `.raw`; `ensure_dotnet8.sh` installs 8.0.latest. **Native Windows doesn't need it.** |
+| **.NET 8 runtime** | https://dotnet.microsoft.com/download/dotnet/8.0 · installer script https://dot.net/v1/dotnet-install.sh | Win, macOS, Linux | needed by the **Linux** DIA-NN binary to read `.raw` (Microsoft.NETCore.App ≥ 8.0.17) and by a framework-dependent ThermoRawFileParser (the Core's shared copy, the `-net8` zip), which also needs Microsoft.AspNetCore.App 8; `ensure_dotnet8.sh` installs both. **Native Windows DIA-NN doesn't need it.** |
 | **UniProt proteomes (FASTA)** | https://www.uniprot.org/proteomes/ · canonical sets: https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/ | web / REST / FTP | `fetch_fasta.py resolve` finds the ID from an organism name; `fetch` downloads it. One-per-gene comes from the **FTP** tree — REST `onePerGene` is silently ignored. |
 | **Contaminants (Hao lab, `Cont_`-tagged)** | https://github.com/HaoGroup-ProtContLib/Protein-Contaminant-Libraries-for-DDA-and-DIA-Proteomics | web | `fetch_fasta.py --contaminants <set>`. Universal + sample-type sets; JPR 2022, doi:10.1021/acs.jproteome.2c00145. (The old GPM cRAP URL now 404s — do not use it.) |
 

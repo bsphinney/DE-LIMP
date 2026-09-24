@@ -613,7 +613,9 @@ def _remedy(code):
             "fix the quoting in the cfg (every quote must be closed), then re-run",
         "mass_acc_unset":
             "pin mass accuracy: re-run estimate_params.py with the real instrument "
-            f"({table}); for an Orbitrap pass --ms1-resolution/--ms2-resolution. A plan to "
+            f"({table}); for an Orbitrap pass --ms1-resolution/--ms2-resolution (an ion-trap "
+            "MS2 has no MS2 resolution: there, pin --mass-acc/--mass-acc-ms1 from a validated "
+            "SOP instead). A plan to "
             "measure it is read from the <cfg>.rationale.json estimate_params.py writes beside "
             "the cfg -- keep the two together, and never add just one of the two flags. "
             "Left on auto it can only run as the single-shot search",

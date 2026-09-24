@@ -55,7 +55,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE instrument -> ppm table for the whole skill. Do not restate it here.
-from estimate_params import classify_instrument  # noqa: E402
+from estimate_params import (classify_instrument, add_resolution_args,  # noqa: E402
+                             resolution_args_error, resolution_source)
 
 PRESETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "presets")
 
@@ -189,8 +190,12 @@ def radiant_tolerances(cls, m1, m2, label):
     if m1 is None and m2 is None:
         return f"vendor 20/20 ppm kept -- {why}"
     kept = "MS2" if m2 is None else "MS1"
+    why_kept = ("MS2 is read in the ion trap (all of it, or part: see the label), which has no "
+                "Orbitrap-table value"
+                if cls == "orbitrap_iontrap" and kept == "MS2" else
+                f"no documented DIA-NN tolerance for this {kept} resolution")
     return (f"{'MS1' if kept == 'MS2' else 'MS2'} narrowed from the instrument; {kept} vendor "
-            f"20 ppm kept -- no documented DIA-NN tolerance for this {kept} resolution ({label})")
+            f"20 ppm kept -- {why_kept} ({label})")
 
 
 def build_radiant(args, cls, ms1, ms2, label, src, prov):
@@ -249,8 +254,7 @@ def main():
                     help="DIA-NN and Sage take flags/JSON from estimate_params.py instead")
     ap.add_argument("--instrument", default="", help="detected instrument name")
     ap.add_argument("--acquisition", default="DIA", choices=["DIA", "DDA"])
-    ap.add_argument("--ms1-res", type=float, default=None)
-    ap.add_argument("--ms2-res", type=float, default=None)
+    add_resolution_args(ap)       # --ms1-res/--ms1-resolution, and --resolution-source
     ap.add_argument("--ms1-ppm", type=float, default=None, help="override; else vendor/derived")
     ap.add_argument("--ms2-ppm", type=float, default=None, help="override; else vendor/derived")
     ap.add_argument("--fasta", default=None)
@@ -264,7 +268,16 @@ def main():
         sys.exit("make_presets: these presets are the DIA routes. DDA goes through Sage "
                  "(estimate_params.py --engine sage).")
 
-    cls, ms1, ms2, label, src = classify_instrument(args.instrument, args.ms1_res, args.ms2_res)
+    # resolve_defaults.py refuses this pair before calling here; a direct call must not get
+    # past it either
+    bad = resolution_args_error(args.ms2_resolution, args.ms2_analyzer)
+    if bad:
+        sys.exit(f"make_presets: {bad}")
+    # the source goes into the label, and so into every "keys_changed" reason below
+    cls, ms1, ms2, label, src = classify_instrument(
+        args.instrument, args.ms1_resolution, args.ms2_resolution,
+        resolution_source(args.resolution_source, args.ms1_resolution, args.ms2_resolution,
+                          args.ms2_analyzer), args.ms2_analyzer)
     prov = {"instrument": args.instrument or None, "instrument_class": cls,
             "instrument_label": label, "acquisition": args.acquisition,
             "ppm_source": src, "output": os.path.abspath(args.out)}

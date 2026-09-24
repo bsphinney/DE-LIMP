@@ -314,6 +314,11 @@ class SameAsOriginForEstimateParamsTests(unittest.TestCase):
             for name, cfg in _estimate_params_cfgs(d).items():
                 with self.subTest(name):
                     new, old, kept = self._single_shot(d, cfg, fake)
+                    # ...and one more intended difference since 2.5.1: the search names its own
+                    # --temp (<out>/quant) when the cfg has none, so DIA-NN does not write .quant
+                    # files beside the raw data (run_diann, "--temp, always").
+                    new, n_temp = re.subn(r" --temp \S+/quant$", "", new)
+                    self.assertEqual(n_temp, 1, "the single-shot search names no --temp")
                     self.assertEqual(old.count(" K*,R* "), 1)
                     self.assertNotEqual(kept, old, "estimate_params wrote no --rt-profiling")
                     self.assertEqual(new, kept.replace(" K*,R* ", " 'K*,R*' "))

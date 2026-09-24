@@ -257,11 +257,13 @@ def _fasta_lib(d):
 
 
 def _fake_dotnet_root(d):
-    """A directory ensure_dotnet8.sh accepts as a .NET 8 >= 8.0.17 install."""
+    """A directory ensure_dotnet8.sh accepts as a .NET 8 >= 8.0.17 install (it also needs
+    AspNetCore 8)."""
     root = os.path.join(d, "dotnet8")
     os.makedirs(root)
     _exe(os.path.join(root, "dotnet"),
-         '#!/bin/bash\necho "Microsoft.NETCore.App 8.0.28 [%s/shared/Microsoft.NETCore.App]"\n' % root)
+         '#!/bin/bash\necho "Microsoft.AspNetCore.App 8.0.28 [%s/shared/Microsoft.AspNetCore.App]"\n'
+         'echo "Microsoft.NETCore.App 8.0.28 [%s/shared/Microsoft.NETCore.App]"\n' % (root, root))
     return root
 
 

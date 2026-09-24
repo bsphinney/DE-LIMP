@@ -93,8 +93,10 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
 The database is the one input that can silently differ between a run and its
 "reproduction", so it is recorded explicitly rather than inferred. `fetch_fasta.py`
 writes `<fasta>.meta.json` — sha256, source URL, organism + taxid, proteome ID,
-database type (`content_used`), UniProt release, proteome vs contaminant sequence
-counts, contaminant set + citation, and any build warnings. **Always pass it as
+database type (`content_used`), UniProt release — or, for a HIVE pre-staged copy, whose
+release is unknown, `staged_file` (path, sha256, file date) plus `content_inferred` /
+`content_check` — proteome vs contaminant sequence counts, contaminant set + citation, and
+any build warnings. **Always pass it as
 `provenance.py --fasta-info "$(cat search.fasta.meta.json)"`.**
 
 `reproduce.sh` then rebuilds the database from *what actually ran*, not from the
