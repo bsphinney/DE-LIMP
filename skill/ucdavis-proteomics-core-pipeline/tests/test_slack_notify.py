@@ -148,6 +148,10 @@ with open(os.environ.get("FAKE_ORDER_LOG", os.devnull), "a") as fh:
     fh.write(json.dumps({"who": "record_run", "argv": sys.argv[1:], "t": time.time()}) + "\n")
 if os.environ.get("FAKE_RECORD_MODE") == "crash":
     sys.exit("record_run exploded")
+if os.environ.get("FAKE_RECORD_REASON"):
+    print(json.dumps({"recorded": False, "reason": os.environ["FAKE_RECORD_REASON"],
+                      "detail": "NotADirectoryError: sessions is a file"}))
+    sys.exit(0)
 print(json.dumps({"recorded": True, "path": "/runs/skill_runs.tsv"}))
 """
 
@@ -576,16 +580,19 @@ class JobTrap(unittest.TestCase):
             self.assertIn(word, self.m.bodies[-1]["text"])
             self.assertNotIn(SECRET_BIT, r.stdout + r.stderr)
 
-    def test_success_logs_then_stages_then_posts(self):
+    def test_success_stages_then_logs_then_posts(self):
+        """On success FRAN goes first, so the run record carries the real FRAN outcome (the stage
+        receipt) instead of "not staged (yet)"; then the run log; Slack last."""
         r = self._run("true\n", fran=FAKE_FRAN)
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = order_log(self.log)
-        self.assertEqual([c["who"] for c in calls], ["record_run", "fran_deposit"], calls)
-        self.assertEqual(calls[0]["argv"], ["search-done", "--out", self.out, "--status",
+        self.assertEqual([c["who"] for c in calls], ["fran_deposit", "record_run"], calls)
+        meta = os.path.join(self.sess, "input", "search.fasta.meta.json")
+        self.assertEqual(calls[0]["argv"], ["stage", "--out", self.out, "--fasta-meta", meta])
+        self.assertEqual(calls[1]["argv"], ["search-done", "--out", self.out, "--status",
                                             "completed", "--exit-code", "0",
                                             "--session", self.sess])
-        meta = os.path.join(self.sess, "input", "search.fasta.meta.json")
-        self.assertEqual(calls[1]["argv"], ["stage", "--out", self.out, "--fasta-meta", meta])
+        self.assertGreaterEqual(calls[1]["t"], calls[0]["t"])
         self.assertEqual(len(self.m.bodies), 1)
         self.assertGreater(self.m.times[0], calls[1]["t"])          # Slack last
         body = json.dumps(self.m.bodies[0])
@@ -656,7 +663,7 @@ class JobTrap(unittest.TestCase):
         r = self._run("true\n", fran=FAKE_FRAN, slack=False)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.m.bodies, [])
-        self.assertEqual([c["who"] for c in order_log(self.log)], ["record_run", "fran_deposit"])
+        self.assertEqual([c["who"] for c in order_log(self.log)], ["fran_deposit", "record_run"])
         self.assertIn("Slack: off for this job", r.stderr)
 
     def test_the_report_guard_still_decides(self):
@@ -923,7 +930,8 @@ class Finalize(unittest.TestCase):
             self.assertIs(res["run_log"]["logged"], True)
             calls = order_log(os.path.join(os.path.dirname(p["session_dir"]), "order.log"))
             self.assertEqual([c["argv"] for c in calls],
-                             [["analysis-done", "--session", p["session_dir"]]])
+                             [["analysis-done", "--timeout", "300", "--session",
+                               p["session_dir"]]])
             self.assertGreater(m.times[0], calls[0]["t"])            # logged, then posted
             self.assertIn("*Run log:* yes", json.dumps(m.bodies[0]))
             # both outcomes, run log first, are the last lines of MANIFEST.txt -- and in the zip
@@ -961,7 +969,27 @@ class Finalize(unittest.TestCase):
                     self.assertTrue(line[0].startswith("[SKIPPED]"), line)
                     self.assertIs(res["run_log"]["logged"], want)
                     self.assertIn("record_run exploded", res["run_log"]["detail"])
-                    self.assertIn("record_run.py failed", line[0])
+                    self.assertIn("record_run.py exit 1: record_run exploded", line[0])
+
+    def test_a_real_record_run_failure_is_skipped_with_its_error(self):
+        """record_run.py always exits 0; a failed record is {"recorded": false, "reason":
+        "error", "detail": "<exception>"}. That is [SKIPPED] with the text, never [INFO]."""
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            runs = os.path.join(d, "runs")
+            os.makedirs(runs)
+            write(os.path.join(runs, "sessions"), "a FILE where the sessions/ directory goes")
+            r = self._finalize(p["session_dir"], base_env(d, SKILL_RUNS_DIR=runs), "--zip",
+                               record_run=None)                       # the REAL record_run.py
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            self.assertIs(res["run_log"]["error"], True, res["run_log"])
+            line = [ln for ln in read(p["manifest_txt"]).splitlines() if "Core run log" in ln]
+            self.assertEqual(len(line), 1, line)
+            self.assertTrue(line[0].startswith("[SKIPPED]"), line)
+            self.assertIn("-- error: ", line[0])
+            self.assertRegex(line[0], r"(NotADirectoryError|FileExistsError|OSError|Errno)", line)
 
     def test_no_notify_still_logs_the_run(self):
         import test_deposit_package as tdp
@@ -1108,6 +1136,53 @@ def _race_worker(out, rounds, barrier, q):
         barrier.wait()
         wins.append(ns._array_first_failure(out))
     q.put(wins)
+
+
+class RunLogOutcomes(unittest.TestCase):
+    """record_run.py's JSON, read by its reason codes (it always exits 0)."""
+
+    def _rr(self, payload, kind="search-done"):
+        seen = {}
+
+        def fake(argv, timeout):
+            seen.update(argv=argv, timeout=timeout)
+            return 0, json.dumps(payload), ""
+        with mock.patch.object(ns, "_helper", return_value="/s/record_run.py"), \
+                mock.patch.object(ns, "_run_helper", side_effect=fake), \
+                mock.patch.dict(os.environ, {"RECORD_RUN": ""}):
+            res = ns.record_run(kind, out="/o", session="/s", status="failed", exit_code=1)
+        return res, seen
+
+    def test_failure_codes_are_errors_with_their_text(self):
+        for code in ("error", "timeout", "ssh_failed", "bad_input", "nothing_to_record",
+                     "out_not_found", "session_not_found"):
+            res, _ = self._rr({"recorded": False, "reason": code, "detail": "the text"})
+            self.assertIs(res.get("error"), True, code)
+            self.assertEqual(res["detail"], f"{code}: the text")
+            self.assertEqual(ns.run_log_manifest(res),
+                             ("SKIPPED", "Core run log", f"{code}: the text"))
+
+    def test_not_configured_off_and_unknown_are_notices(self):
+        for code in ("not_core_member", "not_on_hive"):
+            res, _ = self._rr({"recorded": False, "reason": code,
+                               "detail": "/quobyte/proteomics-grp/skill_runs is not writable"})
+            self.assertFalse(res.get("error"))
+            self.assertEqual(ns.run_log_manifest(res),
+                             ("INFO", "Core run log", "not configured for this user"))
+        res, _ = self._rr({"recorded": False, "reason": "disabled", "detail": "RECORD_RUN=off"})
+        self.assertEqual(ns.run_log_manifest(res), ("INFO", "Core run log", "off (RECORD_RUN=off)"))
+        res, _ = self._rr({"recorded": False, "reason": "dry_run", "detail": "nothing written"})
+        self.assertEqual(ns.run_log_manifest(res), ("INFO", "Core run log", "not recorded (dry_run)"))
+        res, _ = self._rr({"recorded": True, "path": "/quobyte/x"})
+        self.assertEqual(ns.run_log_manifest(res), ("OK", "Core run log", "logged"))
+
+    def test_budgets(self):
+        _, seen = self._rr({"recorded": True}, kind="search-done")
+        self.assertEqual(seen["timeout"], 60)                       # the job hook stays 60 s
+        self.assertNotIn("--timeout", seen["argv"])
+        _, seen = self._rr({"recorded": True}, kind="analysis-done")
+        self.assertEqual(seen["argv"][2:5], ["analysis-done", "--timeout", "300"])
+        self.assertGreaterEqual(seen["timeout"], 310)               # room to report its own timeout
 
 
 class ArrayMarkerRace(unittest.TestCase):

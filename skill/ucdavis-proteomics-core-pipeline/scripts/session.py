@@ -468,8 +468,10 @@ def do_finalize(a):
         # 687 MB for one 15-file Lumos session on HIVE. It is regenerated exactly from the FASTA,
         # the pinned engine and the params the zip already holds, so it carries nothing a reader
         # needs. Empirical libraries (.parquet/.speclib without "predicted") stay in.
-        speclib_label = (f"predicted spectral libraries (*.predicted.speclib; rebuilt from the "
-                         f"FASTA + params, kept on disk at {p['search_out']})")
+        # "where they are": a predicted library may sit anywhere in the session, not only in
+        # the search out dir (a seeded chain, a Radiant library dir).
+        speclib_label = ("predicted spectral libraries (*.predicted.speclib anywhere in the "
+                         "session; rebuilt from the FASTA + params, kept on disk where they are)")
         n_speclib = 0
 
         def is_search_out(d):

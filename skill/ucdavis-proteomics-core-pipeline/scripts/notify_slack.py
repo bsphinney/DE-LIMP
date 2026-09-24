@@ -39,8 +39,8 @@ When finalize runs on a laptop whose only webhook is the one on HIVE, the facts 
 this same script on HIVE through hive_exec.sh (`relay`), which posts from there.
 
     notify_slack.py search-done --out <search out dir> [--status ok|failed] [--exit-code N]
-                                      # THE JOB-END HOOK: record_run.py -> fran_deposit.py
-                                      # stage (success of the last job) -> Slack
+                                      # THE JOB-END HOOK: fran_deposit.py stage (success
+                                      # of the last job) -> record_run.py -> Slack
     notify_slack.py analysis-done --session <session dir> [--zip <session>.zip]
     notify_slack.py --test            # one short test message; prints sent / not sent
     any of them + --dry-run           # print the JSON payload, send nothing
@@ -831,7 +831,19 @@ def deliver(facts, relay_ok=False, dry_run=False):
 #: `stage` links a finished search into FRAN's drop directory (symlinks, no database, no
 #: credential) after its own eligibility check.
 RECORD_RUN_TIMEOUT_S = 60
+#: finalize's `record_run.py analysis-done`: over SSH a laptop may upload up to ~300 MB of session
+#: zip to the registry, so it gets its own budget -- passed as --timeout, with the subprocess cap
+#: a little above it so record_run.py can report its own timeout rather than be killed.
+ANALYSIS_RECORD_TIMEOUT_S = 300
+ANALYSIS_RECORD_CAP_S = ANALYSIS_RECORD_TIMEOUT_S + 10
 FRAN_STAGE_TIMEOUT_S = 300
+
+#: record_run.py's reason codes (it always exits 0 and says in JSON what happened). These mean
+#: the record was ATTEMPTED and failed -- [SKIPPED], with its text; `disabled` is the user's
+#: opt-out; not_core_member / not_on_hive mean there is no registry for this user.
+RECORD_RUN_FAILED = {"error", "timeout", "ssh_failed", "bad_input", "nothing_to_record",
+                     "out_not_found", "session_not_found"}
+RECORD_RUN_NOT_CONFIGURED = {"not_core_member", "not_on_hive"}
 
 
 def _helper(name):
@@ -878,9 +890,16 @@ def _last_line(*texts):
 
 def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
     """Log this run in the Core's central run log with record_run.py. None when this install
-    has no record_run.py; otherwise {"logged": True|False|None, "detail", "path"} (None = it ran
-    but did not say). Never raises; record_run.py always exits 0 by contract, so a non-zero exit
-    or a hang is reported as an error, never as logged."""
+    has no record_run.py; otherwise {"logged": True|False|None, "reason", "detail", "path",
+    "error", "off"}. Never raises.
+
+    record_run.py always exits 0 and reports in ONE JSON object -- {"recorded": false, "reason":
+    <code>, "detail": ...} for everything that is not a record -- so the reason code, not the
+    exit status, says whether it FAILED: a code in RECORD_RUN_FAILED is error=True with detail
+    "<reason>: <detail>" (the exception text kept, for MANIFEST's [SKIPPED] line); `disabled` is
+    off; not_core_member / not_on_hive leave error unset (the [INFO] "not configured" line). A
+    non-zero exit or a hang is an error too. search-done runs inside the job (60 s);
+    analysis-done after finalize's zip, --timeout ANALYSIS_RECORD_TIMEOUT_S."""
     rr = _helper("record_run.py")
     if not rr:
         return None
@@ -889,19 +908,31 @@ def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
     argv = [sys.executable or "python3", rr, kind]
     if kind == "search-done":
         argv += ["--out", out, "--status", status, "--exit-code", str(exit_code)]
+        cap = RECORD_RUN_TIMEOUT_S
+    else:
+        argv += ["--timeout", str(ANALYSIS_RECORD_TIMEOUT_S)]
+        cap = ANALYSIS_RECORD_CAP_S
     if session:
         argv += ["--session", session]
-    rc, so, se = _run_helper(argv, RECORD_RUN_TIMEOUT_S)
+    rc, so, se = _run_helper(argv, cap)
     if rc != 0:
         why = "did not finish" if rc is None else f"exit {rc}"
-        return {"logged": False, "error": True,
+        return {"logged": False, "error": True, "reason": "error",
                 "detail": f"record_run.py {why}: {_last_line(se, so) or 'no output'}"}
     d = _json_out(so)
     if d is None:
         return {"logged": None, "detail": _last_line(so) or None}
     logged = next((d[k] for k in ("recorded", "logged", "ok") if isinstance(d.get(k), bool)), None)
-    return {"logged": logged, "detail": d.get("reason") or d.get("detail"),
-            "path": d.get("path") or d.get("file")}
+    reason, detail = d.get("reason"), d.get("detail")
+    res = {"logged": logged, "reason": reason, "detail": detail,
+           "path": d.get("path") or d.get("file")}
+    if logged is True:
+        return res
+    if reason == "disabled":
+        return dict(res, off=True, detail=detail or "RECORD_RUN=off")
+    if reason in RECORD_RUN_FAILED:
+        return dict(res, error=True, detail=f"{reason}: {detail}" if detail else reason)
+    return res
 
 
 def _stage_argv(fd, out, *, name=None, qc=None, fasta_meta=None):
@@ -1013,10 +1044,12 @@ def run_log_manifest(run_log):
         return "INFO", part, f"off ({run_log.get('detail')})"
     if run_log.get("logged") is True:
         return "OK", part, "logged"
-    if run_log.get("error"):
-        return "SKIPPED", part, "record_run.py failed -- the finalize output has the error"
-    if run_log.get("logged") is False:
+    if run_log.get("error"):                  # attempted and failed: say what failed
+        return "SKIPPED", part, clean_text(run_log.get("detail") or "record_run.py failed")
+    if run_log.get("reason") in RECORD_RUN_NOT_CONFIGURED:
         return "INFO", part, "not configured for this user"
+    if run_log.get("logged") is False:        # a code this hook does not know: name it, no path
+        return "INFO", part, f"not recorded ({run_log.get('reason') or 'no reason given'})"
     return "INFO", part, "ran; record_run.py did not report whether it logged"
 
 
@@ -1091,10 +1124,11 @@ def search_done(out, exit_code=None, status=None, signal=None, started=None,
                 time_limit_min=None, stage=None, final=True, from_job=False, dry_run=False,
                 slack=True, fran="left_to_agent", fran_name=None, qc=None):
     """THE JOB-END HOOK: what a search job does when it ends, in this order --
-      1. record_run.py search-done   (the run log; on success and on failure)
-      2. fran_deposit.py stage        (the route's LAST job, on SUCCESS only)
+      1. fran_deposit.py stage        (the route's LAST job, on SUCCESS only)
+      2. record_run.py search-done   (the run log; on success and on failure -- after stage,
+                                      so the record carries the real FRAN outcome)
       3. the Slack post               (unless `slack` is False / SKILL_SLACK=0)
-    so the post can say what 1 and 2 did. Returns (posted?, one status line); never raises,
+    so the post can say what 1 and 2 did. On failure: record_run -> Slack. Returns (posted?, one status line); never raises,
     and nothing here can change the job's exit status.
 
     Acted on: a final job's success; any job's failure (an `afterok` chain stops there, so its
@@ -1116,13 +1150,15 @@ def search_done(out, exit_code=None, status=None, signal=None, started=None,
             return False, "nothing done: another task of this array already reported the failure"
         if not dry_run:
             session = _session_of(f["location"])
-            f["run_log"] = record_run("search-done", out=f["location"], session=session,
-                                      status="completed" if f["status"] == "ok" else "failed",
-                                      exit_code=143 if signal else (exit_code or 0))
+            # FRAN first on success: record_run.py reads the stage receipt (fran_deposit.json),
+            # so the central record shows the real FRAN outcome, not "not staged (yet)".
             if f["status"] == "ok" and final:
                 f["fran"] = _fran_step(f["location"], session, fran, fran_name, qc)
                 if f["fran"] is not None and f["fran"].get("reason") != "left_to_agent":
                     say("fran_deposit stage: " + json.dumps(f["fran"], separators=(",", ":")))
+            f["run_log"] = record_run("search-done", out=f["location"], session=session,
+                                      status="completed" if f["status"] == "ok" else "failed",
+                                      exit_code=143 if signal else (exit_code or 0))
         if slack:
             sent, msg = deliver(f, relay_ok=False, dry_run=dry_run)
         else:
@@ -1213,8 +1249,8 @@ _HEADER_LINE = re.compile(r"^(#|\s*$)")
 
 def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran=True,
                     fran_guarded=False, fran_name=None, qc=None, py=None, scripts_dir=None):
-    """A SLURM job script that runs the job-end hook (search_done: run log -> FRAN -> Slack)
-    however it ends.
+    """A SLURM job script that runs the job-end hook (search_done: FRAN stage on success ->
+    run log -> Slack) however it ends.
 
     ONE definition, used by every generator (run_search.emit_sbatch, diann_parallel.py,
     radiant_parallel.py). Everything after the shebang/#SBATCH header runs, unchanged, in a
@@ -1257,8 +1293,8 @@ def wrap_job_script(script, out, *, final, time_limit_h, stage, slack=True, fran
              + {True: " --qc", False: " --not-qc", None: ""}[plan["qc"]]
              + (f" --fran-name {shlex.quote(plan['fran_name'])}" if plan["fran_name"] else ""))
     hook = [
-        "# Job end (notify_slack.py search-done): log the run (record_run.py), hand a finished Core",
-        "# search to FRAN (fran_deposit.py stage), post to the Core's Slack channel. The work runs",
+        "# Job end (notify_slack.py search-done): hand a finished Core search to FRAN (fran_deposit.py",
+        "# stage), log the run (record_run.py), post to the Core's Slack channel. The work runs",
         "# in the ( ... ) below, which this shell waits on, so a time-limit SIGTERM is handled at",
         "# once. Nothing secret is in this file, and the job's exit status is unchanged.",
         "# references/notifications.md",
@@ -1305,7 +1341,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     s = sub.add_parser("search-done", parents=[common],
                        help="the job-end hook: a search job ended (run by the job's own trap): "
-                            "run log -> FRAN stage (on success) -> Slack")
+                            "FRAN stage (on success) -> run log -> Slack")
     s.add_argument("--out", required=True, help="the search output directory")
     s.add_argument("--status", choices=["ok", "failed"],
                    help="default: from --exit-code (0 or absent = ok)")

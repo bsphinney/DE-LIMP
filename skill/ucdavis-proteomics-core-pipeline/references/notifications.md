@@ -1,11 +1,10 @@
 # The job-end hook and Slack notifications (`notify_slack.py`)
 
 Every search job this skill writes ends by running one hook, from the compute node, however the
-job ends. It does three things, in this order:
+job ends. It does three things, in this order: FRAN, then the run log, then Slack. A failed job
+skips FRAN and goes straight to the run log and Slack.
 
-1. **Logs the run.** `record_run.py search-done` writes to the Core's run log,
-   `/quobyte/proteomics-grp/skill_runs`. It runs on success and on failure.
-2. **Hands a finished search to FRAN.** This happens only in the last job of a route that
+1. **Hands a finished search to FRAN.** This happens only in the last job of a route that
    ends with a completeness guard, and only on success. Those routes are the DIA-NN ones:
    `report_guard` in the single-shot and 2-job searches, and the quant count in step 5 of the
    chain. The job runs `fran_deposit.py stage --out <out>`, with these added when they apply:
@@ -22,6 +21,10 @@ job ends. It does three things, in this order:
      `fran: left_to_agent (no completeness guard on this route)`.
    - **Within 120 s of the job's time limit** (`squeue -h -j $SLURM_JOB_ID -o %e`), the result
      is `near_time_limit`. Otherwise `stage` may take at most the time left minus 30 s.
+2. **Logs the run.** `record_run.py search-done` writes to the Core's run log,
+   `/quobyte/proteomics-grp/skill_runs`. It runs on success and on failure. On success it runs
+   after `stage`, so the record carries the real FRAN outcome (the stage receipt) instead of
+   "not staged (yet)".
 3. **Posts to the Core's Slack channel.** The post says what steps 1 and 2 did: `Run log: yes`
    and `Staged for FRAN: yes`, or `skipped: …`. When FRAN's own ingest is unhealthy, it says
    `yes, but FRAN's ingest is unhealthy: …`.
@@ -31,7 +34,10 @@ every search reaches the run log, when the user's laptop is closed and no agent 
 alive.
 
 `session.py finalize` does the same for the analysis. After the zip, it runs
-`record_run.py analysis-done --session <dir>` and then posts "analysis complete".
+`record_run.py analysis-done --timeout 300 --session <dir>` and then posts "analysis complete".
+The 300 s budget is there because, over SSH, a laptop may upload up to ~300 MB of session zip
+to the registry. The subprocess cap is 310 s, so `record_run.py` can report its own timeout.
+The job hook's `record_run` stays at 60 s.
 
 **Every step is non-fatal.**
 - Nothing in the hook changes the job's exit status or what the report guard decided.
@@ -115,7 +121,15 @@ and of the zip's copy. Neither is an export part.
 |---|---|
 | `[OK]      Core run log -- logged` / `[OK] Slack notification (Core channel) -- sent` | done |
 | `[INFO]    Core run log -- not configured for this user`, `[INFO] Core notification -- not configured for this user`, `… -- off (--no-notify)`, `… -- off (SKILL_SLACK=0)`, `… -- off (RECORD_RUN=off)` | not configured, or opted out. A notice: the agent does **not** relay `[INFO]` lines as missing parts. |
-| `[SKIPPED] Slack notification (Core channel) -- not sent: …` / `[SKIPPED] Core run log -- record_run.py failed …` | attempted and failed |
+| `[SKIPPED] Slack notification (Core channel) -- not sent: …` / `[SKIPPED] Core run log -- error: FileExistsError: …` | attempted and failed, with the error text |
+
+`record_run.py` always exits 0 and says what happened in one JSON object. The hook reads its
+reason code:
+- `error`, `timeout`, `ssh_failed`, `bad_input`, `nothing_to_record`, `out_not_found` and
+  `session_not_found` mean it tried and failed. That is `[SKIPPED] … -- <reason>: <detail>`.
+- `disabled` is the `off (RECORD_RUN=off)` notice.
+- `not_core_member` and `not_on_hive` are `not configured for this user`.
+- An unknown code is `[INFO] … -- not recorded (<code>)`.
 
 **Two fallbacks keep the manifest sound:**
 - If the final append of `MANIFEST.txt` into the zip fails, finalize retries once with the
@@ -127,9 +141,9 @@ and of the zip's copy. Neither is an export part.
 
 | Route | Last job | Earlier jobs |
 |---|---|---|
-| DIA-NN, library-free (2 jobs) | `job_2_search.sh`: logs, posts; **stages** on success | `job_1_lib.sh`: logs + posts a failure |
-| DIA-NN, one job | the job: logs, posts; **stages** on success | — |
-| DIA-NN 5-step chain | `step5_report.sbatch`: logs, posts; **stages** on success | steps 1, 1b, 2, 3, 4: log + post a failure |
+| DIA-NN, library-free (2 jobs) | `job_2_search.sh`: **stages** on success, then logs and posts | `job_1_lib.sh`: logs + posts a failure |
+| DIA-NN, one job | the job: **stages** on success, then logs and posts | — |
+| DIA-NN 5-step chain | `step5_report.sbatch`: **stages** on success, then logs and posts | steps 1, 1b, 2, 3, 4: log + post a failure |
 | Radiant 3-step chain | `step3_fulcrum.sbatch`: logs, posts; FRAN `left_to_agent` | steps 1, 2: log + post a failure |
 | Sage / FragPipe / AlphaDIA / single Radiant | the job: logs, posts; FRAN `left_to_agent` | — |
 
