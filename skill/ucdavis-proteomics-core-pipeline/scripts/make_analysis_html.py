@@ -29,8 +29,16 @@ Usage
   python3 make_analysis_html.py --session <session dir> --out report.html
   python3 make_analysis_html.py --report AI_Analysis_Report.md --figures ./figures \\
       --tables ./tables --out report.html [--title "..."] [--quality SAMPLE_QUALITY.md]
+
+WHICH FIGURES
+-------------
+Only the figures the report is about: the images AI_Analysis_Report.md references
+(![caption](figures/x.png)), or -- when there is no report, or it references none --
+the ones figures/figures.json lists. Anything else in figures/ is NOT embedded, and one
+warning line names it: a redrawn PCA kept as pca_original_labels.png once went out as a
+29th figure beside the 28 the report described (msalemi, 2026-09-24).
 """
-import argparse, base64, csv, html, json, mimetypes, os, re, sys
+import argparse, base64, csv, html, json, mimetypes, os, re, sys, urllib.parse
 
 # QC first, then overview, then per-contrast results. Anything not listed still
 # gets rendered -- an unknown figure is shown rather than silently dropped.
@@ -43,6 +51,44 @@ FIGURE_ORDER = [
     ("pvalue", "Differential expression"),
 ]
 SECTION_ORDER = ["Quality control", "Overview", "Differential expression", "Other figures"]
+
+
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".svg", ".webp")
+# Markdown images ![alt](path "title") and inline <img src="path">.
+IMG_REF = re.compile(r"""!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^)]*["'])?\s*\)"""
+                     r"""|<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+
+
+def report_figures(md_text):
+    """Basenames of the images a Markdown report references, in order of first mention."""
+    out = []
+    for m in IMG_REF.finditer(md_text or ""):
+        ref = urllib.parse.unquote(m.group(1) or m.group(2) or "")
+        if "://" in ref or ref.startswith("data:"):
+            continue                      # remote or inline: not a file in figures/
+        name = os.path.basename(ref.split("?")[0].split("#")[0])
+        if name.lower().endswith(IMAGE_EXT) and name not in out:
+            out.append(name)
+    return out
+
+
+def select_figures(available, report_path=None, listed=None):
+    """-> (names to embed, names left out, referenced-but-missing names, source label).
+    The report decides when it references any figure; otherwise figures.json (`listed`).
+    With neither there is nothing to tell a current figure from a stale one, so all are
+    embedded and the caller says so."""
+    refs = []
+    if report_path and os.path.exists(report_path):
+        with open(report_path, encoding="utf-8", errors="replace") as fh:
+            refs = report_figures(fh.read())
+    if refs:
+        wanted, source = set(refs), os.path.basename(report_path)
+    elif listed:
+        wanted, source = set(listed), "figures.json"
+    else:
+        return list(available), [], [], None
+    return ([f for f in available if f in wanted], [f for f in available if f not in wanted],
+            sorted(wanted - set(available)), source)
 
 
 def data_uri(path):
@@ -237,7 +283,7 @@ def main():
             if not getattr(a, attr) and os.path.exists(p):
                 setattr(a, attr, p)
 
-    caps = {}
+    caps, listed = {}, []
     if a.figures and os.path.exists(os.path.join(a.figures, "figures.json")):
         try:
             fj = json.load(open(os.path.join(a.figures, "figures.json")))
@@ -246,15 +292,28 @@ def main():
                 if isinstance(e, dict):
                     k = e.get("file") or e.get("filename") or e.get("name")
                     if k:
+                        listed.append(os.path.basename(k))
                         caps[os.path.basename(k)] = e.get("caption") or e.get("title") or ""
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[make_analysis_html] WARNING: figures.json unreadable ({e}); captions and "
+                  f"its figure list are not used", file=sys.stderr)
 
-    figs = {}
+    figs, left_out, missing, fig_source = {}, [], [], None
     if a.figures and os.path.isdir(a.figures):
-        for fn in sorted(os.listdir(a.figures)):
-            if not fn.lower().endswith((".png", ".jpg", ".jpeg", ".svg", ".webp")):
-                continue
+        available = sorted(fn for fn in os.listdir(a.figures) if fn.lower().endswith(IMAGE_EXT))
+        embed, left_out, missing, fig_source = select_figures(available, a.report, listed)
+        if left_out:
+            print(f"[make_analysis_html] WARNING: {len(left_out)} image(s) in {a.figures} are not "
+                  f"referenced in {fig_source} and were NOT embedded: {', '.join(left_out)}",
+                  file=sys.stderr)
+        if missing:
+            print(f"[make_analysis_html] WARNING: {fig_source} references {len(missing)} image(s) "
+                  f"not in {a.figures}: {', '.join(missing)}", file=sys.stderr)
+        if fig_source is None and available:
+            print(f"[make_analysis_html] WARNING: no report figure references and no "
+                  f"figures.json -- embedding all {len(available)} image(s) in {a.figures}, "
+                  f"stale ones included", file=sys.stderr)
+        for fn in embed:
             sec, rank = classify(fn)
             figs.setdefault(sec, []).append((rank, fn, os.path.join(a.figures, fn)))
 
@@ -327,8 +386,9 @@ report. No network needed; copy it anywhere and double-click to open.</p>
         fh.write(doc)
     nfig = sum(len(v) for v in figs.values())
     print(json.dumps({"wrote": a.out, "bytes": os.path.getsize(a.out),
-                      "figures_embedded": nfig, "contrasts": len(de),
-                      "self_contained": True}, indent=2))
+                      "figures_embedded": nfig, "figure_list": fig_source or "all (no list)",
+                      "figures_not_embedded": left_out, "figures_missing": missing,
+                      "contrasts": len(de), "self_contained": True}, indent=2))
 
 
 if __name__ == "__main__":

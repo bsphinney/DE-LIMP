@@ -1334,6 +1334,11 @@ a report plus a `figures/` folder — silently loses every image the moment some
 copies just the report, which is exactly what people do. Tell them the filename and
 that it is the whole report.
 
+It embeds only the figures `AI_Analysis_Report.md` references (with no report, the ones
+`figures/figures.json` lists) and prints one `WARNING` naming every other image in
+`figures/` — a redrawn plot's old copy is left out, not shipped as an extra figure. Check
+that line, and reference every figure you want on the page.
+
 The page puts the **QC panels above the results** on purpose: a volcano plot is equally
 persuasive whether or not the run was any good, so a reader who meets the biology first
 has already formed a conclusion before seeing the evidence about whether to trust it.
