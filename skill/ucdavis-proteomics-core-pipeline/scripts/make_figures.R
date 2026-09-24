@@ -7,7 +7,10 @@
 #   pvalue_<contrast>.png    raw p-value distribution (calibration check)
 #   pca.png                  sample PCA, coloured by group
 #   heatmap_top.png          top differential proteins, z-scored, group-annotated
-#   qc_protein_counts.png    proteins quantified per sample (loading/QC check)
+#   qc_protein_counts.png    proteins quantified per sample (loading/QC check) -- only when the
+#                            matrix has missing values; a DPC/limpa matrix is complete, so it is
+#                            skipped and qc_detected_vs_inferred.png is the depth view instead
+#   qc_detected_vs_inferred.png  detected vs DPC-inferred proteins per sample (DPC runs)
 #
 # Inputs:  --de-dir <output/tables>  (DE_*.csv + Expression_Matrix.csv from run_de.R)
 #          --conditions conditions.csv   --outdir output/figures
@@ -117,16 +120,27 @@ if (file.exists(em_path)) {
   }
 
   # ---- QC: proteins quantified per sample ----
+  # Only when the matrix HAS missing values (e.g. MaxLFQ). A DPC/limpa matrix is complete by
+  # construction -- every protein gets a value in every run -- so every bar is identical and the
+  # plot says nothing (a 30-run limpa report shipped 30 bars of 6,112 and had to explain them
+  # away). Then the detected-vs-inferred plot below is the per-sample depth view instead.
   tryCatch({
     cnt <- data.frame(Sample = colnames(M), n = colSums(!is.na(M)),
                       Group = if (!is.null(grp)) grp else "all")
-    p <- ggplot(cnt, aes(reorder(Sample, n), n, fill = Group)) +
-      geom_col() + coord_flip() +
-      labs(title = "Proteins quantified per sample",
-           x = NULL, y = "proteins (non-missing)") + THEME
-    fn <- file.path(outdir, "qc_protein_counts.png")
-    ggsave(fn, p, width = 7, height = max(3, 0.3 * ncol(M) + 1), dpi = 200)
-    add_fig(fn, "qc", "Proteins quantified per sample — a loading/QC check. Large differences between samples (or systematic differences between groups) flag uneven input or sample-quality problems.")
+    if (length(unique(cnt$n)) <= 1) {
+      message("[figures] proteins-per-sample plot skipped: the matrix is complete (",
+              cnt$n[1], " proteins in every sample), so every bar would be identical",
+              if (file.exists(file.path(de_dir, "QC_detected_vs_inferred.csv")))
+                "; qc_detected_vs_inferred.png shows per-sample depth" else "")
+    } else {
+      p <- ggplot(cnt, aes(reorder(Sample, n), n, fill = Group)) +
+        geom_col() + coord_flip() +
+        labs(title = "Proteins quantified per sample",
+             x = NULL, y = "proteins (non-missing)") + THEME
+      fn <- file.path(outdir, "qc_protein_counts.png")
+      ggsave(fn, p, width = 7, height = max(3, 0.3 * ncol(M) + 1), dpi = 200)
+      add_fig(fn, "qc", "Proteins quantified per sample — a loading/QC check. Large differences between samples (or systematic differences between groups) flag uneven input or sample-quality problems.")
+    }
   }, error = function(e) message("[figures] QC counts failed: ", e$message))
 
   # ---- detected vs inferred (the QC view that actually works after DPC) ----
