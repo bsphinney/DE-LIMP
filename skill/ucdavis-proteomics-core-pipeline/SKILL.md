@@ -1166,23 +1166,23 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   GENERATION (step 7, `run_search.py`): `--fran-name` always, plus `--qc` for a QC run, bakes it into the job-end
   hook, so a QC run never reaches FRAN's queue. Pass the same `--name` / `--qc` / `--not-qc`
   here. A search that turns out to be QC after it was staged is withdrawn (manifest
-  `qc: true`, and `verify` says `qc_excluded`). If the rule misfires on a real experiment, use
+  `qc: true`, and `verify` says `qc_excluded`), and it stays withdrawn: a later `stage` without an explicit `--not-qc` leaves it out. If the rule misfires on a real experiment, use
   `--not-qc`.
 - **`check` first, and treat an ineligible run as normal.** `not_core_facility`,
   `not_on_hive`, `engine_unsupported` (Sage/AlphaDIA — the corpus is DIA),
-  `search_incomplete` and `qc_run` are correct outcomes, not errors. Say one line and move on
+  `search_incomplete` and `qc_run` are correct outcomes, not errors. (`search_incomplete` also covers a FragPipe or Radiant run without its completion marker, FragPipe's log `ALL JOBS DONE` or Fulcrum's `_SUCCESS`: a cancelled FragPipe run keeps its report. `not_core_facility` also covers a teaching account's coursework, `proteomics-class-NN`.) `drop_dir_not_writable` and `entry_not_writable` are permission problems, not decisions: say so in one line with the `chmod` the detail names. Nothing is recorded, so the next stage retries. Say one line and move on
   to DE — never block, retry, or ask the user to fix it.
 - **Pass `--organism`/`--taxon`.** A DIA-NN `report.parquet` has no organism column, so
   without it the corpus row is `NULL` and the search is invisible on FRAN's species page. The
   user already confirmed the organism at step 3 and it is in `<fasta>.meta.json` (read
-  automatically, but only a sidecar tied to the search's own `--fasta`). Never invent one
+  automatically, but only a sidecar tied to the search's own `--fasta`; a `--fasta-meta` that does not match it is ignored with a warning, and the search's own sidecar is used if there is one). Never invent one
   (architectural rule #2).
 - **Staged is not ingested.** Run `health` at this step: it reads FRAN's cron logs, compares
   the ingest code HIVE runs with FRAN's GitHub `main` (10 s cap, no credential), and records
   its verdict in `/quobyte/proteomics-grp/fran/ingest_health.json`. `stage` only reads
   that file; it makes no network call. When the last verdict is `stuck`, `not_running` or
-  `stale_code`, or is over 12 h old, stage's JSON carries `health_warning` (the same line is
-  on stderr). The search **is** staged. Tell the user in one line: handed over, but FRAN's
+  `stale_code` and was checked within the last 12 h, stage's JSON carries `health_warning` (the same line is
+  on stderr). An older verdict is just `unknown`, with no warning. The search **is** staged. Tell the user in one line: handed over, but FRAN's
   ingest is stuck/stale **on FRAN's side** (quote the warning). Never re-stage, retry, or
   touch FRAN's code, its HIVE copy or its database over it.
 - **`verify`:** `staged_pending_cron` is success, not failure — "handed over, the cron
@@ -1196,7 +1196,8 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   ended early): `backfill` finds them. Only when the user asks for it. Run
   `backfill --sbatch`, submit the job it writes (never walk the service trees on a login
   node), show the user the dry-run list, and run `backfill --sbatch --apply` only after they
-  say yes.
+  say yes. Searches listed `needs_agent_check` (FragPipe/Radiant with no completion marker to
+  read) are never staged by `--apply`: confirm each one finished, then `stage --out <dir>`.
 - Re-staging is safe and converges on one entry. `--no-fran` at generation, `FRAN_DEPOSIT=off`
   or `--skip` opts a run out, and the receipt records it so a later backfill honours it. → detail:
   `references/fran.md`.
