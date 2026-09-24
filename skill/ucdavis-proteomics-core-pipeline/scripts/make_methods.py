@@ -36,7 +36,7 @@ Usage:
       [--instrument "timsTOF HT" --acquisition DIA]   # used only when the raw files
                                                       # cannot be read from here
 """
-import sys, os, csv, json, glob, argparse, statistics
+import sys, os, re, csv, json, glob, argparse, statistics
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -262,59 +262,48 @@ def lc_paragraph(rep, col, is_bruker, lc_known):
     meth = rep.get("lc_method") or rep.get("lc_method_name")
     run = f" (run time {_r(rep['lc_run_min'], 1)} min)" if rep.get("lc_run_min") else ""
     evosep = "evosep" in rep["lc_system"].lower()
-    if evosep and "evotip" in (rep.get("tray_type") or "").lower():
-        s = f"Peptides were loaded onto Evotips {EVOTIP_TAG} and separated on an {system}"
-    else:
-        s = f"Peptides were separated on {'an' if system[0] in 'AEIOU' else 'a'} {system}"
-    s += (f" with the '{meth}' method{run}" if meth else " [LC method — confirm]")
-    s += f", on {column}, at a column temperature of ____ °C {NR_TAG}."
+    # The published order (literature survey, 2026-09-24): LC coupled to the timsTOF via its
+    # source; then the column and its temperature; then the LC method; then mobile phases.
+    s = (f"Peptides were loaded onto Evotips {EVOTIP_TAG} and analysed"
+         if evosep and "evotip" in (rep.get("tray_type") or "").lower() else
+         "Peptides were analysed")
+    s += f" on {'an' if system[0] in 'AEIOU' else 'a'} {system} coupled online to a " \
+         f"{rep.get('instrument') or NOT_RECORDED} mass spectrometer (Bruker Daltonics)"
+    s += (f" via a {rep['source_type']} ion source." if rep.get("source_type") and is_bruker
+          else ".")
+    s += f" Peptides were separated on {column}, at a column temperature of ____ °C {NR_TAG},"
+    spd = re.search(r"(\d+)\s*samples?\s*per\s*day", meth or "", re.I)
+    s += (f" with the {meth} ({spd.group(1)} SPD) method{run}." if spd else
+          f" with the '{meth}' method{run}." if meth else
+          f" with the LC method ____ {NR_TAG}.")
     if not evosep:
         s += (f" The gradient (time, %B, flow) was ____ {NR_TAG}: this LC method's gradient "
               "table is not read from the raw file.")
     return s + " " + phases
 
 
-def ms_paragraph(rep, v):
+def ms_paragraph(rep, v, coupled=False):
     """The Mass spectrometry paragraph for a timsTOF run, in the order published dia-PASEF
-    Methods report it: ion source, instrument and software, scan range, TIMS, window scheme
-    and cycle time, collision energy. A sentence whose values the files lack is left out, or
-    carries the blank tag `v()` gives it; nothing is filled from memory."""
+    Methods report it (literature survey, 2026-09-24): acquisition mode and scan range, TIMS,
+    window scheme, cycle time, collision energy, then source settings and software. `coupled`:
+    the LC paragraph has already named the instrument and its source. One unit form throughout,
+    "1/K₀ 0.70–1.30 V·s/cm²"; a cycle time is never called a duty cycle. A sentence whose values
+    the files lack is left out, or carries the blank tag `v()` gives it; nothing is filled from
+    memory."""
     out = []
-    src = rep.get("source_type")
-    if src:
-        bits = []
-        for key, label in (("capillary_v", "capillary voltage"), ("dry_gas", "dry gas"),
-                           ("dry_temp", "dry temperature")):
-            if rep.get(key):
-                bits.append(f"{label} {_r(rep[key]['value'], 1)} {_unit(rep[key]['unit'])}".strip())
-        out.append(f"The LC was coupled online to a {v(rep.get('instrument'))} mass spectrometer "
-                   f"(Bruker Daltonics) through a {src} ion source"
-                   + (f" ({'; '.join(bits)})" if bits else "")
-                   + f" fitted with {EMITTER_DEFAULT} {DEF}.")
-        lead = "Spectra were acquired"
-    else:
-        lead = f"Mass spectra were acquired on a {v(rep.get('instrument'))} mass spectrometer " \
-               f"(Bruker Daltonics)"
-    ctrl = rep.get("ms_control") or rep.get("control_software")
-    sw = ""
-    if ctrl or rep.get("acquisition_software_version"):
-        sw = f" with {ctrl or rep.get('acquisition_software')}"
-        if rep.get("acquisition_software_version"):
-            sw += f" (acquisition software version {rep['acquisition_software_version']})"
-        if rep.get("hystar_version"):
-            sw += f" and HyStar {rep['hystar_version']}"
-    elif rep.get("software"):
-        sw = f", operated with {rep['software']}"
     pol = f"{rep['polarity']}-ion " if rep.get("polarity") else ""
-    out.append(f"{lead}{sw} in {pol}{v(rep.get('mode'))} mode"
-               + (f" (method {rep['ms_method']})" if rep.get("ms_method") else "") + ".")
+    meth = f" (method {rep['ms_method']})" if rep.get("ms_method") else ""
+    out.append(f"The mass spectrometer was operated in {pol}{v(rep.get('mode'))} mode{meth}."
+               if coupled else
+               f"Mass spectra were acquired on a {v(rep.get('instrument'))} mass spectrometer "
+               f"(Bruker Daltonics) operated in {pol}{v(rep.get('mode'))} mode{meth}.")
     lo, hi = rep.get("mz_low"), rep.get("mz_high")
     scan = "MS1 and MS2 spectra were" if rep.get("mode") in ("dia-PASEF", "ddaPASEF") else \
         "Spectra were"
     out.append(f"{scan} recorded over m/z {v(_r(lo, 0) if lo is not None else None)}–"
                f"{v(_r(hi, 0) if hi is not None else None)}.")
     ramp, acc = rep.get("ramp_ms"), rep.get("accumulation_ms")
-    tims = (f"The trapped ion mobility (TIMS) ramp spanned 1/K₀ = "
+    tims = (f"The trapped ion mobility (TIMS) ramp spanned 1/K₀ "
             f"{v(_r(rep.get('im_low')))}–{v(_r(rep.get('im_high')))} V·s/cm²")
     if ramp and acc:
         duty = 100.0 * acc / ramp
@@ -352,28 +341,46 @@ def ms_paragraph(rep, v):
             area.append(f"m/z {_r(s['mz_lo'], 1)}–{_r(s['mz_hi'], 1)}")
         if s.get("im_lo") is not None:
             area.append(f"1/K₀ {_r(s['im_lo'])}–{_r(s['im_hi'])} V·s/cm²")
-        txt = (cyc + ("," if cyc.startswith("Each") else "") + place
-               + (f" across {' and '.join(area)}" if area else ""))
-        if rep.get("cycle_s"):
-            txt += f", for a cycle time of {rep['cycle_s']:.2f} s"
-        out.append(txt + ".")
+        out.append(cyc + ("," if cyc.startswith("Each") else "") + place
+                   + (f" across {' and '.join(area)}" if area else "") + ".")
+    if rep.get("cycle_s"):
+        out.append(f"The cycle time was {rep['cycle_s']:.2f} s.")
     ramp_ce, chk = rep.get("ce_ramp"), rep.get("ce_check") or {}
     if ramp_ce and chk.get("status") != "mismatch":
         pts = ramp_ce["points"]
         if len(pts) == 2:
             (x0, y0), (x1, y1) = pts
             out.append(f"The collision energy was ramped linearly with ion mobility from "
-                       f"{_r(y0, 1)} eV at 1/K₀ = {_r(x0)} V·s/cm² to {_r(y1, 1)} eV at "
-                       f"1/K₀ = {_r(x1)} V·s/cm².")
+                       f"{_r(y0, 1)} eV at 1/K₀ {_r(x0)} V·s/cm² to {_r(y1, 1)} eV at "
+                       f"1/K₀ {_r(x1)} V·s/cm².")
         else:
             out.append("The collision energy followed a mobility-dependent ramp through "
-                       + ", ".join(f"{_r(y, 1)} eV at 1/K₀ = {_r(x)}" for x, y in pts)
-                       + " V·s/cm².")
+                       + ", ".join(f"{_r(y, 1)} eV at 1/K₀ {_r(x)} V·s/cm²" for x, y in pts)
+                       + ".")
     elif rep.get("ce_low") is not None:
         out.append(f"Collision energies of {rep['ce_low']}–{rep['ce_high']} eV were applied "
                    "across the isolation windows"
                    + (" [they do not match the method's recorded ramp — confirm]"
                       if chk.get("status") == "mismatch" else "") + ".")
+    if rep.get("source_type"):
+        bits = [f"{label} {_r(rep[key]['value'], 1)} {_unit(rep[key]['unit'])}".strip()
+                for key, label in (("capillary_v", "a capillary voltage of"),
+                                   ("dry_gas", "a dry gas flow of"),
+                                   ("dry_temp", "a dry temperature of")) if rep.get(key)]
+        joined = (", ".join(bits[:-1]) + " and " + bits[-1]) if len(bits) > 1 else \
+            (bits[0] if bits else "")
+        out.append(f"The {rep['source_type']} source was fitted with {EMITTER_DEFAULT} {DEF}"
+                   + (f" and operated at {joined}" if joined else "") + ".")
+    ctrl = rep.get("ms_control") or rep.get("control_software")
+    if ctrl or rep.get("acquisition_software_version"):
+        sw = f"Data were acquired with {ctrl or rep.get('acquisition_software')}"
+        if rep.get("acquisition_software_version"):
+            sw += f" (acquisition software version {rep['acquisition_software_version']})"
+        if rep.get("hystar_version"):
+            sw += f" and HyStar {rep['hystar_version']}"
+        out.append(sw + ".")
+    elif rep.get("software"):
+        out.append(f"Data were acquired with {rep['software']}.")
     return " ".join(out)
 
 
@@ -979,7 +986,7 @@ def main():
     w("## Mass spectrometry")
     w("")
     if is_bruker:
-        w(ms_paragraph(rep, v))
+        w(ms_paragraph(rep, v, coupled=bool(rep.get("lc_system"))))
     else:
         acq = (a.acquisition or "").upper()
         mode = (f"{acq} mode (as detected from the data in step 2)" if acq in ("DIA", "DDA")

@@ -327,22 +327,40 @@ class Paragraphs(unittest.TestCase):
 
     def test_lc_names_the_recorded_system_and_method(self):
         self.assertIn("Evosep One LC system (Evosep Biosystems)", self.lc)
-        self.assertIn("'60 samples per day' method (run time 21 min)", self.lc)
+        self.assertIn("the 60 samples per day (60 SPD) method (run time 21 min)", self.lc)
         self.assertIn(f"loaded onto Evotips {mm.EVOTIP_TAG}", self.lc)
         self.assertNotIn("[LC system / gradient — confirm]", self.lc)
 
+    def test_lc_paragraph_in_published_order(self):
+        # literature survey 2026-09-24: LC coupled to the timsTOF via its source; column and
+        # its temperature; the LC method; mobile phases
+        order = ["Evosep One LC system", "coupled online to a timsTOF HT mass spectrometer "
+                 "(Bruker Daltonics) via a Captive Spray ion source", mm.LC_COLUMN_DEFAULT,
+                 "column temperature", "(60 SPD) method", "Mobile phase A"]
+        pos = [self.lc.find(x) for x in order]
+        self.assertNotIn(-1, pos, dict(zip(order, pos)))
+        self.assertEqual(pos, sorted(pos))
+
     def test_ms_paragraph_in_published_order(self):
-        order = ["Captive Spray ion source", "capillary voltage 1700 V", "timsControl",
-                 "dia-PASEF mode", "m/z 100–1700", "1/K₀ = 0.70–1.30 V·s/cm²",
+        order = ["dia-PASEF mode", "m/z 100–1700", "1/K₀ 0.70–1.30 V·s/cm²",
                  "85 ms each (100% duty cycle)", "one MS1 frame and 11 dia-PASEF frames",
                  "36 isolation windows of 26 Th", "25 Th spacing, 1 Th overlap",
-                 "3–4 per TIMS ramp", "m/z 299.5–1200.5", "cycle time of 1.10 s",
-                 "from 20 eV at 1/K₀ = 0.60 V·s/cm² to 65 eV at 1/K₀ = 1.60 V·s/cm²"]
+                 "3–4 per TIMS ramp", "m/z 299.5–1200.5", "The cycle time was 1.10 s.",
+                 "from 20 eV at 1/K₀ 0.60 V·s/cm² to 65 eV at 1/K₀ 1.60 V·s/cm²",
+                 "capillary voltage of 1700 V", "dry gas flow of 3 L/min",
+                 "dry temperature of 200 °C", "timsControl", "HyStar 6.3.1.8"]
         pos = [self.ms.find(x) for x in order]
         self.assertNotIn(-1, pos, dict(zip(order, pos)))
         self.assertEqual(pos, sorted(pos))
         self.assertNotIn("99.993933", self.ms)                  # the table keeps the raw value
         self.assertNotIn("≈26.3", self.ms)                      # the old per-window "ramp"
+
+    def test_one_unit_form_and_no_cycle_time_called_duty_cycle(self):
+        text = self.lc + self.ms
+        self.assertNotIn("1/K₀ =", text)
+        for m in __import__("re").finditer(r"1/K₀ [0-9.]+(–[0-9.]+)?", text):
+            self.assertTrue(text[m.end():].startswith(" V·s/cm²"), text[m.start():m.end() + 12])
+        self.assertNotRegex(text, r"duty cycle (of|was) [0-9.]+ s")
 
     def test_what_no_file_records_is_tagged(self):
         self.assertIn(f"{mm.LC_COLUMN_DEFAULT} {mm.DEF}", self.lc)
@@ -383,6 +401,53 @@ class Paragraphs(unittest.TestCase):
             lc = section(text, "Liquid chromatography")
             self.assertIn("[LC system / gradient — confirm]", lc)
             self.assertIn("36 isolation windows", section(text, "Mass spectrometry"))
+
+
+class RenderFromDict(unittest.TestCase):
+    """The paragraph writers on a plain .d-metadata dict (what bruker_meta returns)."""
+
+    REP = {"instrument": "timsTOF HT", "mode": "dia-PASEF", "polarity": "positive",
+           "mz_low": 99.993933, "mz_high": 1700.0, "im_low": 0.7, "im_high": 1.3,
+           "ramp_ms": 85.05, "accumulation_ms": 85.05, "frames_per_cycle": 12, "cycle_s": 1.1,
+           "scheme": {"n_windows": 36, "n_ramps": 11, "per_ramp": (3, 4), "width": 26.0,
+                      "spacing": 25.0, "overlap": 1.0, "mz_lo": 299.5, "mz_hi": 1200.5,
+                      "im_lo": 0.7, "im_hi": 1.3},
+           "ce_ramp": {"points": [(0.6, 20.0), (1.6, 65.0)], "advanced": False},
+           "ce_check": {"status": "ok"}, "lc_system": "Evosep One",
+           "lc_vendor": "Evosep Biosystems", "lc_method": "60 samples per day",
+           "lc_run_min": 21.0, "tray_type": "96Evotip", "source_type": "Captive Spray"}
+    COL = {"text": "PepSep MAX C18 (Bruker PepSep)", "tag": None}
+
+    @staticmethod
+    def v(x, unit="", default=None):
+        return f"____ {mm.DEF}" if x is None else f"{x}{unit}"
+
+    def test_expected_sentences(self):
+        lc = mm.lc_paragraph(self.REP, self.COL, True, True)
+        self.assertIn("analysed on an Evosep One LC system (Evosep Biosystems) coupled online to "
+                      "a timsTOF HT mass spectrometer (Bruker Daltonics) via a Captive Spray ion "
+                      "source. Peptides were separated on a PepSep MAX C18 (Bruker PepSep), at a "
+                      "column temperature of ____ °C [not recorded — confirm], with the 60 "
+                      "samples per day (60 SPD) method (run time 21 min).", lc)
+        ms = mm.ms_paragraph(self.REP, self.v, coupled=True)
+        self.assertTrue(ms.startswith("The mass spectrometer was operated in positive-ion "
+                                      "dia-PASEF mode. MS1 and MS2 spectra were recorded over "
+                                      "m/z 100–1700. The trapped ion mobility (TIMS) ramp "
+                                      "spanned 1/K₀ 0.70–1.30 V·s/cm², with ramp and "
+                                      "accumulation times of 85 ms each (100% duty cycle)."), ms)
+
+    def test_an_unknown_value_is_marked_never_filled(self):
+        rep = dict(self.REP, im_low=None, im_high=None, polarity=None, cycle_s=None,
+                   capillary_v=None, instrument=None)
+        ms = mm.ms_paragraph(rep, self.v, coupled=False)
+        self.assertIn(f"1/K₀ ____ {mm.DEF}–____ {mm.DEF} V·s/cm²", ms)
+        self.assertIn(f"on a ____ {mm.DEF} mass spectrometer", ms)
+        self.assertNotIn("positive-ion", ms)                    # polarity not recorded: omitted
+        self.assertNotIn("cycle time", ms)
+        self.assertNotIn("capillary", ms)
+        lc = mm.lc_paragraph(dict(self.REP, lc_method=None, instrument=None), self.COL, True, True)
+        self.assertIn(f"with the LC method ____ {mm.NR_TAG}.", lc)
+        self.assertIn(f"coupled online to a {mm.NOT_RECORDED} mass spectrometer", lc)
 
 
 def write_log(path, rows, fmt="csv"):
