@@ -91,6 +91,46 @@ look filtered.
 Do not read a bundle's `de.method: maxlfq` as a recommendation — it records what that
 engine's adapted output can support, not which method is better.
 
+## Contaminant filter (both paths, on by default)
+
+`run_de.R` drops every precursor that maps to a `Cont_` entry before quantification —
+any accession in `Protein.Ids` (`Protein.Group` for protein-level input), which is
+DIA-NN's own `--cont-quant-exclude` rule: a peptide shared between a sample protein and
+a contaminant entry can carry the contaminant's signal. The rule, the tag and the counting
+live in `scripts/contaminants.R` (the tag mirrors `fetch_fasta.py`'s `CONT_TAG`; a test
+asserts it).
+
+Why it exists: DIA-NN's `--cont-quant-exclude` only shapes DIA-NN's OWN quantities, and
+`run_de.R` re-quantifies from the report. On Silva08172026 (mouse brain IPs, 2026-09-24)
+all 121 `Cont_` groups — bovine serum proteins from the antibody prep — went into the DE
+and came out as hits, while the Methods said they were excluded. With the filter the same
+report loses 2,196 precursors: the 121 `Cont_` groups, plus the shared peptides of 47
+sample groups (Eno1, Aldoa, Tubb3 …); no sample group disappears.
+
+What it records, so nothing downstream restates the policy (architectural rules 1 and 2):
+- `de_provenance.json` → `contaminants`: `policy` (`removed` / `kept` / `none_present` /
+  `not_checked`), the rule and column, precursor and group counts, the share summary, and
+  the database check. `filters_applied` lists it with the other filters.
+- `methods.txt` → a `Contaminants :` block written from that record; `make_methods.py`
+  words the DE paragraph from the same record, and the DIA-NN sentence from the search
+  parameters (never from the FASTA sidecar's recommendation).
+- `contaminants_removed.csv` — every protein group that lost precursors, and whether it
+  lost all of them. `audit_results.py` reads it, so a real protein removed as `Cont_`
+  is still named.
+- `QC_contaminant_share.csv` — per run, the contaminant share of `Precursor.Quantity`
+  (measured signal; `Precursor.Normalised` only if the report lacks it — DIA-NN's
+  RT-dependent normalisation does not keep a run's signal fractions: 12.7% vs 28.3%
+  median on the same report). Written with `--keep-contaminants` too.
+- `reproducibility_log.R` removes the same rows.
+
+`--fasta-meta` (default `./search.fasta.meta.json` if present): a database built before
+`fetch_fasta.py` removed contaminant entries identical to target proteins (a sidecar with
+no `contaminant_target_rule`), or one listing `contaminants_identical_to_target_kept`,
+holds real proteins only as `Cont_` groups — the filter removes those too. The run then
+prints a `CAUTION` and records `database_risk: true`; rebuild the FASTA and re-search.
+`--keep-contaminants` keeps every `Cont_` group in the DE instead (the true contaminants
+are then tested too).
+
 ## Coverage filter (maxlfq path)
 
 `--coverage-min` (default 0.5) drops proteins quantified in fewer than that fraction

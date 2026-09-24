@@ -69,6 +69,18 @@ outdir    <- getarg("--outdir", "de_results")
 # null, not a post-hoc cut (McCarthy & Smyth 2009).
 logfc_ref <- as.numeric(getarg("--logfc", "1.0"))
 adjp_thr  <- as.numeric(getarg("--adjp", "0.05"))
+# Contaminants (Cont_-tagged entries) are REMOVED before quantification by default --
+# see contaminants.R for the rule and why. --keep-contaminants quantifies and tests them
+# with the sample proteins instead; either way de_provenance.json records which.
+keep_contaminants <- isTRUE(getarg("--keep-contaminants", FALSE))
+# fetch_fasta.py's sidecar: says whether real proteins sat in the database only as Cont_
+# entries, which the filter would then remove too. Same default as the auditors.
+fasta_meta <- getarg("--fasta-meta", NULL)
+if (isTRUE(fasta_meta)) stop("--fasta-meta needs a path (<fasta>.meta.json)")
+if (is.null(fasta_meta) && file.exists("search.fasta.meta.json"))
+  fasta_meta <- "search.fasta.meta.json"
+if (!is.null(fasta_meta) && !file.exists(fasta_meta))
+  stop("--fasta-meta ", fasta_meta, " does not exist")
 
 if (is.null(input) || is.null(meta_path))
   stop("Required: --input <report> and --metadata <conditions.csv>")
@@ -94,6 +106,14 @@ local({
          "identification-FDR columns and there is no safe default to guess.")
   source(f)
 })
+# ONE definition of the contaminant filter, shared with build_maxlfq.R.
+local({
+  f <- .sibling("contaminants.R")
+  if (is.null(f))
+    stop("contaminants.R not found next to run_de.R -- it defines the contaminant ",
+         "filter, and skipping it would leave contaminants in the DE unrecorded.")
+  source(f)
+})
 if (!method %in% c("dpc", "maxlfq"))
   stop("--method must be 'dpc' or 'maxlfq'")
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
@@ -104,9 +124,10 @@ if (!all(c("File.Name", "Group") %in% names(meta)))
   stop("metadata CSV must have at least File.Name and Group columns")
 covariates <- intersect(c("Batch", "Covariate1", "Covariate2"), names(meta))
 
-message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s",
+message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s  contaminants=%s",
                 method, q_cutoff, nrow(meta),
-                if (length(covariates)) paste(covariates, collapse = ",") else "none"))
+                if (length(covariates)) paste(covariates, collapse = ",") else "none",
+                if (keep_contaminants) "kept (--keep-contaminants)" else "removed"))
 
 # ---- build the protein-level object per pipeline ----------------------------
 # Both branches produce:  E (proteins x samples, log2), run_names (cols of E),
@@ -114,6 +135,10 @@ message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s",
 
 descriptor <- NULL
 quantums_applied <- character(0)   # populated on the dpc path; kept defined for provenance
+# Both branches set these: what the contaminant filter found (contaminants.R) and every
+# filter the run applied, in order -- recorded in de_provenance.json and methods.txt.
+cont_census <- NULL; cont_share <- NULL; cont_col <- NA_character_; cont_intensity <- NA_character_
+filters_applied <- character(0)
 
 # limpa/DPC is the DEFAULT path. It needs PRECURSOR-level input: readDIANN() keys on
 # Precursor.Id + Precursor.Normalised. DIA-NN's native report.parquet has them; the
@@ -297,8 +322,12 @@ if (method == "dpc") {
   # PG.Q.Value takes DIA-NN's own recommended 0.05 rather than the uniform
   # --q-cutoff -- see diann_q_columns.R.
   q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
+  # limpa's own annotation columns, plus the accession column(s) the contaminant filter
+  # reads. Protein.Ids is dropped again after filtering, so nothing downstream changes.
+  dpc_ann_default <- eval(formals(limpa::readDIANN)$annotation.columns)
+  dpc_ann <- unique(c(dpc_ann_default, CONTAMINANT_ID_COLUMNS))
   dat <- limpa::readDIANN(dpc_input, format = format, q.cutoffs = unname(q_cuts),
-                          q.columns = q_use)
+                          q.columns = q_use, annotation.columns = dpc_ann)
   message(sprintf("[run_de] readDIANN: %d precursors x %d runs (FDR on %s)",
                   nrow(dat$E), ncol(dat$E),
                   paste(sprintf("%s<=%.3f", q_use, q_cuts), collapse = ", ")))
@@ -322,6 +351,42 @@ if (method == "dpc") {
     message(sprintf("[run_de] note: %d metadata row(s) have no run in the report, e.g. %s",
                     length(.absent), paste(utils::head(.absent, 2), collapse = ", ")))
 
+  # ---- contaminants: out BEFORE dpcCN, or they shape the detection model and the DE ----
+  # Rows of `dat` are precursors that passed the identification filters, so the counts
+  # are exactly what limpa would have quantified. Rows left all-NA by the run subset
+  # above carry no data in the analysed runs and are not counted.
+  cont_col <- contaminant_id_column(names(dat$genes))
+  if (!is.na(cont_col)) {
+    .flag <- is_contaminant(dat$genes[[cont_col]])
+    .seen <- rowSums(!is.na(dat$E)) > 0
+    cont_census <- contaminant_census(group = dat$genes$Protein.Group[.seen],
+                                      is_cont = .flag[.seen], feature = rownames(dat$E)[.seen],
+                                      genes = dat$genes$Genes[.seen])
+    # The share is on the measured signal (Precursor.Quantity), read for exactly the
+    # precursor x run cells readDIANN kept; Precursor.Normalised -- what dat$E holds --
+    # only when the report has no Precursor.Quantity.
+    .qty <- tryCatch({
+      .cols <- c("Run", "Precursor.Id", CONTAMINANT_SHARE_COLUMNS[1])
+      .r <- if (identical(format, "parquet")) nanoparquet::read_parquet(dpc_input, col_select = .cols)
+            else data.table::fread(dpc_input, select = .cols, data.table = FALSE, showProgress = FALSE)
+      .i <- match(.r$Precursor.Id, rownames(dat$E)); .j <- match(.r$Run, colnames(dat$E))
+      .ok <- !is.na(.i) & !is.na(.j)
+      .ok[.ok] <- !is.na(dat$E[cbind(.i[.ok], .j[.ok])])
+      .m <- matrix(NA_real_, nrow(dat$E), ncol(dat$E), dimnames = dimnames(dat$E))
+      .m[cbind(.i[.ok], .j[.ok])] <- .r[[CONTAMINANT_SHARE_COLUMNS[1]]][.ok]
+      .m
+    }, error = function(e) {
+      message("[run_de] contaminant share: ", CONTAMINANT_SHARE_COLUMNS[1], " not readable (",
+              conditionMessage(e), "); using ", CONTAMINANT_SHARE_COLUMNS[2])
+      NULL
+    })
+    cont_intensity <- if (is.null(.qty)) CONTAMINANT_SHARE_COLUMNS[2] else CONTAMINANT_SHARE_COLUMNS[1]
+    cont_share <- contaminant_share(if (is.null(.qty)) 2^dat$E else .qty, .flag)
+    if (!keep_contaminants && any(.flag)) dat <- dat[!.flag, ]
+  }
+  .extra <- setdiff(names(dat$genes), dpc_ann_default)
+  if (length(.extra)) dat$genes <- dat$genes[, setdiff(names(dat$genes), .extra), drop = FALSE]
+
   dpcfit    <- limpa::dpcCN(dat)
   y_protein <- limpa::dpcQuant(dat, "Protein.Group", dpc = dpcfit)
   E         <- y_protein$E
@@ -336,6 +401,7 @@ if (method == "dpc") {
     missing_policy = "Missing precursors modelled via the detection probability curve; not imputed, not dropped.",
     citation      = "Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125; Li M, Smyth GK (2023) Bioinformatics 39(5):btad200"
   )
+  filters_applied <- c(sprintf("%s <= %g", q_use, q_cuts), quantums_applied)
 
 } else { # maxlfq
   if (!requireNamespace("arrow", quietly = TRUE) && identical(format, "parquet"))
@@ -352,12 +418,16 @@ if (method == "dpc") {
   q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
   ml <- build_maxlfq(input, format = format, q_cutoff = q_cutoff,
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
-                     keep_runs = keep_runs)
+                     keep_runs = keep_runs, drop_contaminants = !keep_contaminants)
   E         <- ml$E
   run_names <- colnames(E)
   genes     <- ml$genes
   descriptor <- ml$descriptor
   q_use     <- ml$q_columns
+  cont_census    <- ml$contaminants$census
+  cont_share     <- ml$contaminants$share
+  cont_col       <- ml$contaminants$id_column
+  cont_intensity <- ml$contaminants$intensity_column
   message(sprintf("[run_de] MaxLFQ matrix: %d proteins x %d runs (%.1f%% missing)",
                   nrow(E), ncol(E), 100 * mean(is.na(E))))
 
@@ -383,11 +453,42 @@ if (method == "dpc") {
   E <- E[keep_cov, , drop = FALSE]
   if (!is.null(genes) && nrow(genes) == length(keep_cov))
     genes <- genes[keep_cov, , drop = FALSE]
-  prev_filters <- if (is.null(descriptor$filters_applied)) character(0) else descriptor$filters_applied
-  descriptor$filters_applied <- c(prev_filters,
+  # build_maxlfq() returns its filters beside the descriptor, not inside it -- reading
+  # descriptor$filters_applied here used to drop every one of them from the record.
+  filters_applied <- c(ml$filters_applied,
     sprintf("coverage >= %d/%d non-NA samples (%.0f%%); %d proteins dropped",
             min_obs, n_samples, 100 * cov_min_frac, n_dropped))
+  descriptor$filters_applied <- filters_applied
 }
+
+# ---- the contaminant record (contaminants.R): one description, read by everything ----
+cont_risk <- if (!is.null(cont_census) && cont_census$n_precursors > 0 && !keep_contaminants)
+  contaminant_database_risk(fasta_meta, cont_census$n_groups_contaminant) else NULL
+cont_rec <- contaminant_record(cont_census, cont_share, keep_contaminants, cont_col,
+                               cont_intensity, risk = cont_risk,
+                               fasta_meta = if (is.null(fasta_meta)) NULL
+                                            else normalizePath(fasta_meta, mustWork = FALSE))
+if (method == "dpc")   # build_maxlfq() records its own contaminant step in ml$filters_applied
+  filters_applied <- c(filters_applied, switch(cont_rec$policy,
+    removed = sprintf("contaminants removed: %d precursors mapping to a %s entry (%s); %d %s protein groups",
+                      cont_rec$n_precursors, cont_rec$tag, cont_rec$id_column,
+                      cont_rec$n_protein_groups, cont_rec$tag),
+    kept = sprintf("contaminants kept (--keep-contaminants): %d %s protein groups",
+                   cont_rec$n_protein_groups, cont_rec$tag),
+    NULL))
+for (.l in contaminant_methods_lines(cont_rec)) message("[run_de] ", sub("^ +", "", .l))
+if (isTRUE(cont_rec$database_risk))
+  warning("contaminant filter: ", cont_rec$database_note, call. = FALSE)
+if (!is.null(cont_share)) {
+  .qs <- cont_share
+  .qs$Group <- meta$Group[match(.qs$Run, meta$File.Name)]
+  .qs$Intensity.Column <- cont_intensity
+  utils::write.csv(.qs[, c("Run", "Group", "Contaminant.Pct", "Contaminant.Intensity",
+                           "Total.Intensity", "Intensity.Column")],
+                   file.path(outdir, cont_rec$share_table), row.names = FALSE)
+}
+if (isTRUE(cont_rec$removed))
+  utils::write.csv(cont_census$groups, file.path(outdir, cont_rec$removed_table), row.names = FALSE)
 
 # ---- align metadata to the matrix columns -----------------------------------
 meta <- meta[match(run_names, meta$File.Name), , drop = FALSE]
@@ -499,7 +600,9 @@ if (is.null(.rs)) {
       cov_min_frac = cov_min_frac,
       meta = meta, covariates = covariates, formula_parts = formula_parts,
       forms = forms, adjp_thr = adjp_thr, logfc_ref = logfc_ref,
-      ann_cols = gene_cols, descriptor = descriptor)
+      ann_cols = gene_cols, descriptor = descriptor,
+      contaminants = cont_rec,
+      dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL)
     message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
                     length(repro_lines)))
   }, error = function(e) message("[run_de] reproducibility_log.R not written: ", e$message))
@@ -514,6 +617,9 @@ methods_txt <- c(
   sprintf("DE engine     : %s", descriptor$de_engine),
   sprintf("Missing values: %s", descriptor$missing_policy),
   sprintf("ID FDR cutoff : q <= %.3f", q_cutoff),
+  sprintf("Filters       : %s", if (length(filters_applied)) filters_applied[1] else "none"),
+  if (length(filters_applied) > 1) sprintf("                %s", filters_applied[-1]),
+  contaminant_methods_lines(cont_rec),
   if (method == "maxlfq") sprintf("Normalization : quantile (limma::normalizeBetweenArrays)") else
                           sprintf("Normalization : DPC-CN (applied within dpcCN before dpcQuant)"),
   sprintf("Design        : ~ 0 + %s", paste(formula_parts, collapse = " + ")),
@@ -584,6 +690,10 @@ prov <- list(
   # run never performed.
   eq_cutoff  = if (method == "dpc" && !any(grepl("Empirical", quantums_applied))) 0 else eq_cutoff,
   pgq_cutoff = if (method == "dpc" && !any(grepl("PG.MaxLFQ", quantums_applied))) 0 else pgq_cutoff,
+  # Every filter the run applied, in order, and what the contaminant filter did. Both are
+  # the record make_methods.py writes the Methods from -- it never assumes either.
+  filters_applied = as.list(filters_applied),
+  contaminants = cont_rec,
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
   design = paste0("~ 0 + ", paste(formula_parts, collapse = " + ")),

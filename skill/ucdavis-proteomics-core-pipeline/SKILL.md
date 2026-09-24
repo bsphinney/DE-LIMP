@@ -352,7 +352,8 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   proteins changed between my groups?" → `one_per_gene`), then say which you're
   using and why. Don't make them learn UniProt vocabulary to answer.
 - **Contaminants** — ask which set to append (they are all `Cont_`-tagged, so
-  DIA-NN's `--cont-quant-exclude Cont_` keeps them out of quant either way):
+  DIA-NN's `--cont-quant-exclude Cont_` keeps them out of its normalisation, and
+  `run_de.R` removes them before the DE either way):
   - `universal` — **default**, and what the UC Davis Core stages on HIVE. Use it
     unless the user has a reason not to.
   - sample-type matched: `cell_culture`, `mouse_tissue`, `rat_tissue`,
@@ -620,7 +621,9 @@ bundle) and act on it:
 - `warnings` non-empty → tell the user before searching; a one-per-gene→full
   fallback changes the database out from under them.
 - `diann_cont_quant_exclude` → pass as `--cont-quant-exclude Cont_` to DIA-NN in
-  step 7 so contaminants are identified but excluded from quant + normalisation.
+  step 7 so contaminants are identified but kept out of DIA-NN's normalisation. That flag
+  does NOT reach the DE, which re-quantifies from the report: `run_de.R` removes them
+  itself (step 8).
 - `n_contaminants_dropped_as_target` > 0 is normal, not a failure. The universal
   contaminant set holds sequences identical to real proteins (human keratins; bovine
   ACTB/EEF1A1/tubulins that are residue-for-residue the human and mouse proteins). Left in,
@@ -669,7 +672,7 @@ search will run on the FALLBACK unless you supply the range yourself.
 
 Always pass `--fasta-meta` (step 6's sidecar): it carries the contaminant tag, so
 the cfg gets `--cont-quant-exclude Cont_` and contaminants are identified but kept
-out of quantification and normalisation. Both the single and 5-step parallel
+out of DIA-NN's normalisation and its quantities for sample proteins. Both the single and 5-step parallel
 DIA-NN paths read this cfg, so the flag applies to library generation *and*
 analysis. With `--contaminants none` the flag is correctly absent.
 The estimator keys mass tolerances on the instrument class from DIA-NN's
@@ -1140,8 +1143,20 @@ python3 scripts/fran_deposit.py verify --out <hive search out dir>   # later: di
 ### 8. Differential expression
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet \
-    --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results
+    --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results \
+    --fasta-meta ./search.fasta.meta.json
 ```
+**Contaminants are removed before quantification, on both methods.** Every precursor that
+maps to a `Cont_` entry (any accession in `Protein.Ids` — DIA-NN's own
+`--cont-quant-exclude` rule) is dropped before limpa/limma sees it; DIA-NN's flag alone
+never reached the DE, so contaminants used to be tested and came out as hits (bovine serum
+HBB +10.5 log2 in antibody IPs). The counts land in `de_provenance.json` (`contaminants`),
+`methods.txt` and `contaminants_removed.csv`; `QC_contaminant_share.csv` gives each run's
+contaminant share of the precursor signal — report a high or group-confounded share in the
+Data Quality Notes. `--keep-contaminants` opts out (only when the user asks). Pass
+`--fasta-meta`: a database built before target-identical contaminants were removed holds
+real proteins (ACTB, EEF1A1, keratins) only as `Cont_` entries, so the filter removes them
+too — the run then prints a `CAUTION`, and the fix is to rebuild the FASTA and re-search.
 **`dpc` (limpa) is THE DEFAULT — use it unless the user asks otherwise or the data
 cannot support it.** limpa models the detection-probability curve and quantifies from
 precursor intensities directly, so it uses the whole measurement rather than a
@@ -1168,7 +1183,7 @@ Use `maxlfq` when **either**:
 
 Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions) +
-**`reproducibility_log.R`**.
+`QC_contaminant_share.csv` + `contaminants_removed.csv` + **`reproducibility_log.R`**.
 
 `reproducibility_log.R` is the whole analysis as plain, flat R — every value written
 out literally (report path, FDR cutoff, sample→group map, design, contrasts), runnable

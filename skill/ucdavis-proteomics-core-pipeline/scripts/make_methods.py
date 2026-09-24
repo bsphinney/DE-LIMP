@@ -240,7 +240,7 @@ def search_record(params=None, search_prov=None, manifest=None):
            "pep_len": None, "pr_charge": None, "pr_mz": None, "mods": [],
            "max_var_mods": None, "met_excision": False, "ms1_tol": None, "ms2_tol": None,
            "tol_note": None, "precursor_fdr": None, "library": None, "mbr": None,
-           "labelled": None, "warnings": []}
+           "labelled": None, "cont_quant_exclude": None, "warnings": []}
     if prov.get("version"):
         rec["version"] = str(prov["version"])
         rec["version_source"] = "search_provenance.json (the version that ran)"
@@ -342,6 +342,10 @@ def search_record(params=None, search_prov=None, manifest=None):
         if "--reanalyse" in flags or "--reanalyse" in cmd_words:
             rec["mbr"] = {"value": True, "source": where if "--reanalyse" in flags else
                           "search_provenance.json resolved_command"}
+        # DIA-NN's own contaminant handling, as the parameters set it -- {"value": None} when
+        # the file was read and the flag is absent. The sidecar's diann_cont_quant_exclude is
+        # only a recommendation, so it is never taken as proof that the flag ran.
+        rec["cont_quant_exclude"] = {"value": one("--cont-quant-exclude"), "source": where}
         labelled = "--channels" in flags or any(m.get("label") for m in rec["mods"])
         rec["labelled"] = {"value": labelled, "source": where + (
             " (--channels / label mods present)" if labelled else
@@ -472,6 +476,59 @@ def search_paragraph(rec, de_prov=None):
     return " ".join(s)
 
 
+def diann_contaminant_sentence(srec):
+    """What DIA-NN did with the contaminant entries, from the parameters the search ran with.
+    It used to be read off the FASTA sidecar's diann_cont_quant_exclude -- a recommendation,
+    not a record -- and worded as "excluded from quantification and normalisation" although
+    run_de.R then re-quantified them (msalemi, 2026-09-24). Empty for a non-DIA-NN search."""
+    srec = srec or {}
+    if srec.get("engine") not in (None, "diann"):
+        return ""
+    cq = srec.get("cont_quant_exclude")
+    if cq is None:
+        return (f" Whether DIA-NN's --cont-quant-exclude was set: {NOT_RECORDED} (no DIA-NN "
+                f"parameters file was read).")
+    if not cq.get("value"):
+        return (" DIA-NN's --cont-quant-exclude was not set, so contaminant peptides took part "
+                "in DIA-NN's own normalisation.")
+    tag = cq["value"]
+    return (f" In DIA-NN (--cont-quant-exclude {tag}), peptides of {tag}-tagged entries were "
+            f"excluded from normalisation and from the quantification of protein groups "
+            f"containing no {tag} entry.")
+
+
+def de_contaminant_sentence(prov):
+    """The contaminant step of the DE, from run_de.R's `contaminants` record -- never assumed.
+    A record older than the filter says so, tagged, instead of implying either answer."""
+    c = prov.get("contaminants")
+    if not isinstance(c, dict):
+        return (f"Contaminant handling in the differential-expression step: {NOT_RECORDED} "
+                f"(this DE record predates it; run_de.R versions that did not record it did not "
+                f"remove contaminants).")
+    tag = c.get("tag") or "Cont_"
+    fmt = lambda k: f"{c.get(k):,}" if isinstance(c.get(k), int) else "____"  # noqa: E731
+    policy = c.get("policy")
+    if policy == "removed":
+        out = (f"Before protein quantification, {fmt('n_precursors')} precursors mapping to a "
+               f"{tag}-tagged contaminant entry (any accession in {c.get('id_column') or '____'}, "
+               f"the rule of DIA-NN's --cont-quant-exclude) were removed, taking out "
+               f"{fmt('n_protein_groups')} contaminant protein groups, so contaminants entered "
+               f"neither normalisation, the linear model nor the multiple-testing correction.")
+        if c.get("n_sample_groups_sharing") or c.get("n_sample_groups_all_shared"):
+            out += (f" Sample protein groups sharing precursors with a contaminant entry lost "
+                    f"those precursors ({fmt('n_sample_groups_sharing')} lost some, "
+                    f"{fmt('n_sample_groups_all_shared')} lost all).")
+        return out
+    if policy == "kept":
+        return (f"Contaminant protein groups ({fmt('n_protein_groups')} {tag}-tagged groups) were "
+                f"kept in the differential-expression analysis (--keep-contaminants): they were "
+                f"quantified, normalised and tested together with the sample proteins.")
+    if policy == "none_present":
+        return f"No identified precursor mapped to a {tag}-tagged contaminant entry."
+    return (f"Contaminant filtering in the differential-expression step: {NOT_RECORDED} "
+            f"({c.get('note') or 'not checked'}).")
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -497,6 +554,7 @@ def de_paragraph(prov):
                  f"{prov['q_cutoff']:g}.")
     else:
         s.append(f"Identification q-value filter: {NOT_RECORDED}.")
+    s.append(de_contaminant_sentence(prov))
     if prov.get("design"):
         s.append(f"The linear model was {prov['design']}"
                  + (f", with contrasts {', '.join(prov['contrasts'])}"
@@ -713,16 +771,13 @@ def main():
         n_already = fmeta.get("n_contaminants_already_present") or 0
         if not n_c and n_already:
             sent += (f" The database already included {n_already} common-contaminant "
-                     f"sequences")
-            sent += (" and these entries were excluded from quantification and "
-                     "normalisation." if fmeta.get("diann_cont_quant_exclude") else ".")
+                     f"sequences.")
+            sent += diann_contaminant_sentence(srec)
         elif n_c:
             sent += (f" A common-contaminant library ({n_c} sequences; "
                      f"{fmeta.get('contaminant_set')} set of Frankenfield et al., "
-                     f"J Proteome Res 2022, 21:2104-2113) was appended")
-            sent += (" and these entries were excluded from quantification and "
-                     "normalisation."
-                     if fmeta.get("diann_cont_quant_exclude") else ".")
+                     f"J Proteome Res 2022, 21:2104-2113) was appended.")
+            sent += diann_contaminant_sentence(srec)
             # fetch_fasta.py removes contaminant entries whose sequence IS a target protein
             # (bovine ACTB = human ACTB, human keratins); a reader must know those proteins
             # were quantified, not excluded as contaminants.
@@ -764,6 +819,11 @@ def main():
         w("")
         w(de_paragraph(de_prov))
         w("")
+        cont = de_prov.get("contaminants") if isinstance(de_prov.get("contaminants"), dict) else {}
+        if cont.get("database_risk") is True and cont.get("database_note"):
+            w(f"> Contaminant filter caveat (resolve before publication): "
+              f"{cont['database_note']}")
+            w("")
 
     # parameter table (value + source)
     w("## Acquisition parameters (extracted from the raw data)" if not from_record else
