@@ -42,6 +42,20 @@
   Anything else fails the probe with the per-run evidence instead of pinning a number for the
   whole cohort. Steps 2–5 re-check the band on `massacc.txt` itself.
 
+## [4.1.1] — 2026-09-24
+
+### Fixed
+- **`~/.delimp_docker.conf`'s `diann_image` is now honoured.** The New Search "DIA-NN Docker
+  Image" box was seeded with a hardcoded `diann:2.0`, and every image check read
+  `input$docker_image_name %||% docker_config$diann_image` — so the box was never NULL and the
+  config file was never consulted. Anyone who ran `build_diann_docker.sh 2.3.2` and wrote the
+  config file it suggests still had DE-LIMP look for `diann:2.0`. The box now starts from
+  `docker_config`, and a blank box falls back to the config, then the default, instead of
+  passing `""` to `docker image inspect`.
+- The default Docker tag is spelled out once (`DIANN_DOCKER_IMAGE_DEFAULT`, `app.R`) instead of
+  five times; `check_diann_image()`'s own default said `diann:2.3.0` while every caller used
+  `diann:2.0`. The default itself is unchanged.
+
 ## [4.1.0] — 2026-09-10
 
 ### Added

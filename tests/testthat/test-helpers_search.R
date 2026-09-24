@@ -379,3 +379,28 @@ test_that("check_cluster_resources returns expected structure", {
   expect_true("group_used" %in% names(res))
   expect_true("partition_idle" %in% names(res))
 })
+
+# =============================================================================
+# resolve_diann_image -- the New Search box, then ~/.delimp_docker.conf, then the default.
+# The box used to be seeded with a hardcoded "diann:2.0" and every check read
+# `input %||% config %||% default`, so the config file build_diann_docker.sh tells users to
+# write was never consulted.
+# =============================================================================
+
+test_that("resolve_diann_image: a non-blank box wins", {
+  expect_equal(resolve_diann_image("my:img", list(diann_image = "diann:2.3.2")), "my:img")
+  expect_equal(resolve_diann_image("  my:img  ", NULL), "my:img")
+})
+
+test_that("resolve_diann_image: a blank box falls through to the config file", {
+  cfg <- list(diann_image = "diann:2.3.2")
+  for (blank in list(NULL, "", "   ", NA_character_)) {
+    expect_equal(resolve_diann_image(blank, cfg), "diann:2.3.2")
+  }
+})
+
+test_that("resolve_diann_image: no box and no usable config gives the one default", {
+  for (cfg in list(NULL, list(), list(diann_image = ""))) {
+    expect_equal(resolve_diann_image(NULL, cfg), DIANN_DOCKER_IMAGE_DEFAULT)
+  }
+})

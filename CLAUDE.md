@@ -143,4 +143,4 @@ Quick-reference fix tables live in **`docs/GOTCHAS.md`**, grouped by subsystem. 
 - HPC paths/containers: `docs/HPC_PATHS.md`. **Queue switching** (genome-center-grp/high ↔ publicgrp/low): `docs/QUEUE_SWITCHING.md`.
 
 ## Version History
-Current version: **v4.0.0** — see `VERSION` and `CHANGELOG.md` for the full history and per-release details. Unreleased work + code-audit follow-ups are tracked in `docs/TODO.md`. (Cascadia/Sage/Casanovo de novo + DDA + de novo→homology species ID merged to main in v4.0.0.)
+Current version: **v4.1.1** — see `VERSION` and `CHANGELOG.md` for the full history and per-release details. Unreleased work + code-audit follow-ups are tracked in `docs/TODO.md`. (Cascadia/Sage/Casanovo de novo + DDA + de novo→homology species ID merged to main in v4.0.0.)

@@ -10,6 +10,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                      is_core_facility = FALSE, cf_config = NULL,
                      deploy_env = "Local",
                      config = list(), is_hive = FALSE,
+                     docker_config = list(),
                      ai_public_deployment = is_hf_space) {
 
   # Read app version directly so the navbar shows it without needing
@@ -1023,7 +1024,7 @@ build_ui <- function(is_hf_space, search_enabled = FALSE,
                 class = "btn-outline-primary btn-sm w-100"),
               verbatimTextOutput("docker_output_path"),
               textInput("docker_image_name", "DIA-NN Docker Image:",
-                value = "diann:2.0")
+                value = resolve_diann_image(NULL, docker_config))
             ),
 
             # ---------- HPC backend controls ----------

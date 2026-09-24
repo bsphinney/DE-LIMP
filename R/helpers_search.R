@@ -1222,10 +1222,26 @@ check_docker_available <- function() {
        error = if (!daemon_ok) "Docker daemon not running" else NULL)
 }
 
+#' Which DIA-NN Docker image to use: the New Search text box if it holds a non-blank value,
+#' else ~/.delimp_docker.conf's diann_image, else DIANN_DOCKER_IMAGE_DEFAULT (app.R).
+#' Blank or whitespace-only values fall through, so clearing the box never passes "" to docker.
+#' @param input_value input$docker_image_name (may be NULL or "")
+#' @param config docker_config list (may be NULL)
+#' @return Character(1) image name
+resolve_diann_image <- function(input_value, config = NULL) {
+  pick <- function(x) {
+    if (is.character(x) && length(x) == 1L && !is.na(x) && nzchar(trimws(x))) trimws(x) else NULL
+  }
+  img <- pick(input_value)
+  if (is.null(img)) img <- pick(config$diann_image)
+  if (is.null(img)) img <- DIANN_DOCKER_IMAGE_DEFAULT
+  img
+}
+
 #' Check if a DIA-NN Docker image exists locally
-#' @param image_name Character — Docker image name (e.g., "diann:2.3.0")
+#' @param image_name Character — Docker image name (e.g., "diann:2.0")
 #' @return list(exists, image_name, error)
-check_diann_image <- function(image_name = "diann:2.3.0") {
+check_diann_image <- function(image_name = DIANN_DOCKER_IMAGE_DEFAULT) {
   exists <- tryCatch({
     out <- system2("docker", c("image", "inspect", image_name),
                    stdout = TRUE, stderr = TRUE)
