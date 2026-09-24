@@ -460,8 +460,11 @@ def do_finalize(a):
         # DIA-NN's per-run .quant intermediates: ~30 MB each (measured on HIVE, 28-34 MB), so
         # ~3 GB for a 100-file cohort, and nothing a reader of the zip can use. The single-shot
         # search writes them to <search out>/quant (its --temp, inside the session since #79);
-        # the 5-step chain to quant_step2/ and quant_step4/. Every *.quant file is left out, and
-        # a `quant` directory directly under a search out dir is pruned whole. They stay on disk.
+        # the 5-step chain to quant_step2/ and quant_step4/. Covered: every *.quant file anywhere
+        # in the session, plus the whole `quant` directory directly under any search out dir (the
+        # session's output/search, or a folder holding a search_provenance.json). They stay on
+        # disk where they are. The key is short on purpose: the finalize JSON carries it and the
+        # agent relays it; which files it covers is said here.
         quant_label = "DIA-NN .quant intermediates (kept on disk where they are)"
         n_quant = 0
         # The in-silico predicted library (step1.predicted.speclib, <lib>.predicted.speclib):
