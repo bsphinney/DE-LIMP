@@ -1552,8 +1552,9 @@ beside it as `methods_complete_draft.md`. Finalize then writes the **repository-
 `prepare_upload.sbatch` yourself: it reads every raw file, so the user submits it with `sbatch`
 when ready. Finalize also writes the session `README.md` (and `DIFFERENCES.md` for a re-analysis)
 and **`MANIFEST.txt`** at the session root, which lists every part as `[OK]` or `[SKIPPED] <name>
--- <reason>`. Then it zips the session, leaving out the raw data, `upload_staging/` and DIA-NN's
-`.quant` intermediates (~30 MB per run, kept on disk).
+-- <reason>`. Then it zips the session, leaving out the raw data, `upload_staging/`, DIA-NN's
+`.quant` intermediates (~30 MB per run) and the predicted spectral library (`*.predicted.speclib`,
+~0.7 GB; rebuilt from the FASTA + params). Both stay on disk; `zip_excluded` counts them.
 `--no-deposit` skips only the package. → detail: `references/deposit.md`.
 Finally it logs the run in the Core's run log (`record_run.py`) and posts **"analysis
 complete"** to the Core's Slack channel. The post carries the session, instrument, engine +

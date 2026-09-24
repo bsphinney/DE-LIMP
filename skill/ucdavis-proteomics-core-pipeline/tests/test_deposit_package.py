@@ -193,6 +193,26 @@ class ZipLeavesQuantOut(unittest.TestCase):
             for rel in ("quant/HeLa_ctrl_01.quant", "quant_step4/HeLa_trt_01.quant"):
                 self.assertTrue(os.path.isfile(os.path.join(p["search_out"], rel)))
 
+    def test_predicted_library_stays_out_but_empirical_libraries_go_in(self):
+        # 687 MB for one 15-file Lumos session; rebuilt exactly from the FASTA + params.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = dia_session(tmp)
+            write(os.path.join(p["search_out"], "step1.predicted.speclib"), "p" * 64)
+            write(os.path.join(p["search_out"], "diann_lib.predicted.speclib"), "p" * 64)
+            write(os.path.join(p["search_out"], "step3_empirical.parquet"), "e" * 64)
+            write(os.path.join(p["search_out"], "custom.speclib"), "c" * 64)
+            r = finalize(p["session_dir"], "--zip")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            names = zipfile.ZipFile(res["zip"]).namelist()
+            self.assertFalse([n for n in names if n.endswith(".predicted.speclib")], names)
+            self.assertTrue(any(n.endswith("output/search/step3_empirical.parquet") for n in names))
+            self.assertTrue(any(n.endswith("output/search/custom.speclib") for n in names))
+            label = [k for k in res["zip_excluded"] if k.startswith("predicted spectral libraries")]
+            self.assertEqual(len(label), 1, res["zip_excluded"])
+            self.assertEqual(res["zip_excluded"][label[0]], 2)
+            self.assertTrue(os.path.isfile(os.path.join(p["search_out"], "step1.predicted.speclib")))
+
 
 class FullSession(unittest.TestCase):
     @classmethod

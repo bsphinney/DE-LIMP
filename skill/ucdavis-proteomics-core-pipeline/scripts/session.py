@@ -464,6 +464,13 @@ def do_finalize(a):
         # a `quant` directory directly under a search out dir is pruned whole. They stay on disk.
         quant_label = f"DIA-NN .quant intermediates (kept on disk at {p['search_out']})"
         n_quant = 0
+        # The in-silico predicted library (step1.predicted.speclib, <lib>.predicted.speclib):
+        # 687 MB for one 15-file Lumos session on HIVE. It is regenerated exactly from the FASTA,
+        # the pinned engine and the params the zip already holds, so it carries nothing a reader
+        # needs. Empirical libraries (.parquet/.speclib without "predicted") stay in.
+        speclib_label = (f"predicted spectral libraries (*.predicted.speclib; rebuilt from the "
+                         f"FASTA + params, kept on disk at {p['search_out']})")
+        n_speclib = 0
 
         def is_search_out(d):
             return (os.path.abspath(d) == os.path.abspath(p["search_out"])
@@ -483,10 +490,14 @@ def do_finalize(a):
                     if fn.endswith(".quant"):
                         n_quant += 1
                         continue
+                    if fn.endswith(".predicted.speclib"):
+                        n_speclib += 1
+                        continue
                     if os.path.islink(full) or os.path.abspath(full) == manifest_txt:
                         continue                 # MANIFEST.txt goes in last, below
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         excluded[quant_label] = n_quant
+        excluded[speclib_label] = n_speclib
         result["zip"] = archive
         result["zip_excluded"] = excluded
 
