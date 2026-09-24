@@ -462,7 +462,7 @@ def do_finalize(a):
         # search writes them to <search out>/quant (its --temp, inside the session since #79);
         # the 5-step chain to quant_step2/ and quant_step4/. Every *.quant file is left out, and
         # a `quant` directory directly under a search out dir is pruned whole. They stay on disk.
-        quant_label = f"DIA-NN .quant intermediates (kept on disk at {p['search_out']})"
+        quant_label = "DIA-NN .quant intermediates (kept on disk where they are)"
         n_quant = 0
         # The in-silico predicted library (step1.predicted.speclib, <lib>.predicted.speclib):
         # 687 MB for one 15-file Lumos session on HIVE. It is regenerated exactly from the FASTA,

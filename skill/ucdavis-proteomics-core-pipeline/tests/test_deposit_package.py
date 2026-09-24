@@ -187,7 +187,7 @@ class ZipLeavesQuantOut(unittest.TestCase):
             self.assertFalse([n for n in names if "/output/search/quant/" in n], names)
             self.assertTrue(any(n.endswith("output/search/report.parquet") for n in names))
             self.assertTrue(any(n.endswith("output/tables/quant/notes.txt") for n in names))
-            label = f"DIA-NN .quant intermediates (kept on disk at {p['search_out']})"
+            label = "DIA-NN .quant intermediates (kept on disk where they are)"
             # 3 in quant/, plus quant_step4/HeLa_trt_01.quant and dia_session's quant_step2/a.quant
             self.assertEqual(res["zip_excluded"][label], 5)
             for rel in ("quant/HeLa_ctrl_01.quant", "quant_step4/HeLa_trt_01.quant"):
