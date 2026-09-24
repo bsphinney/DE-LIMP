@@ -6,19 +6,51 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
 
 ## What it extracts vs. defaults
 - **Extracted from the raw metadata** (shown with its source in a parameter table):
-  - Bruker `.d` → `analysis.tdf`: instrument (`GlobalMetadata.InstrumentName`),
-    acquisition software+version, acquisition mode (`Frames.MsMsType`: 9=dia-PASEF,
-    8=ddaPASEF), m/z range (`MzAcqRange*`), 1/K₀ range (`OneOverK0AcqRange*`),
-    TIMS ramp/accumulation time (`Frames`), and the dia-PASEF window scheme
-    (`DiaFrameMsMsWindows`: count, isolation width, collision-energy range).
+  - Bruker `.d`, read by `bruker_method.py`. It reads small metadata files only, never the
+    `analysis.tdf_bin`, and opens every sqlite file read-only and immutable.
+    - `analysis.tdf`: instrument and serial, acquisition software and version, MS method name,
+      acquisition date, m/z and 1/K₀ ranges, and acquisition mode (`Frames.MsMsType`: 9 =
+      dia-PASEF, 8 = ddaPASEF).
+    - `Frames`: polarity, TIMS ramp and accumulation times (duty cycle), frames per cycle and
+      cycle time (the median MS1-to-MS1 interval).
+    - `DiaFrameMsMsWindows`: window count, TIMS ramps, windows per ramp, isolation width,
+      spacing and overlap, the m/z the windows cover, and each window's collision energy.
+    - The method's settings, from the Properties of the first MS/MS frame: the ion source
+      (named by the file's own `DisplayValueText` code table), capillary voltage, dry gas, dry
+      temperature and the collision-energy ramp.
+    - `<run>.m/diaSettings.diasqlite`: each window's 1/K₀ bounds.
+    - `<run>.m/microTOFQImpacTemAcquisition.method`: the control software that wrote the
+      method.
+    - `<run>.m/hystar.method`: `ColumnInfo`, when an operator entered a column.
+    - `HyStarMetadata.xml`: the LC system, its vendor and serial, and the LC method and its
+      run time.
+    - `SampleInfo.xml`: HyStar version and the autosampler tray (e.g. `96Evotip`).
+  - The collision-energy ramp is written as a ramp only when every window's recorded energy
+    matches it at the window's 1/K₀ midpoint, to within 1 eV. Otherwise the per-window range
+    is written, tagged.
+  - A series is checked for one method. If the runs differ in instrument, MS or LC method,
+    ranges, column or window scheme, the Methods says so, above the parameter table.
   - Thermo `.raw` → identified by the **facility filename prefix** (`FL*`→Fusion
     Lumos, `Ex*`→Exploris 480); detailed parameters come from the instrument method
     (not readable here) and are flagged for confirmation.
-- **Facility defaults**, every one tagged `[facility default — confirm]` so nothing
-  is silently fabricated (DE-LIMP rule #2): the **LC column defaults to a PepSep C18
-  10 cm × 150 µm, 1.5 µm** (override with `--lc-column`), mobile phases, the
-  CaptiveSpray/PepSep emitter, and the LC system/gradient (which the raw `.d` does
-  not store — supply from lab records).
+- **The analytical column**, most authoritative first:
+  1. `--lc-column`, given by the user.
+  2. HyStar `ColumnInfo`, when an operator entered it.
+  3. `--column-log FILE`: a CSV or JSON export of STAN's `maintenance_events`. It needs
+     `event_type`, `event_date`, `column_vendor` and `column_model`, and can carry
+     `instrument`, `column_serial` and `first_run`. The latest `column_change` at or before
+     the first acquisition is used, and its install date is cited as the source. A change
+     inside the series, a change that names no column, or a log covering several instruments
+     without `--column-log-instrument` falls back to the default, with the reason printed.
+     STAN keeps this log in PG Farm, which needs credentials, so the script never connects to
+     it; export the rows and pass the file.
+  4. Otherwise the facility's standard column, from STAN's column catalogue (PepSep MAX C18,
+     10 cm × 150 µm, 1.5 µm, part 1893483), **tagged `[facility default — confirm]`**.
+- **Never in a .d, always tagged**: column temperature, emitter (the default 20 µm
+  CaptiveSpray emitter is tagged `[facility default — confirm]`), mobile phases, Evotip type,
+  loading and peptide amount, and the %B gradient of an Evosep method (its fixed, named
+  method is given instead). A non-Evosep LC's gradient table is not parsed, and is tagged
+  `[not recorded — confirm]`.
 
 With `--params` / `--search-prov` / `--workflow-manifest`, it adds a **Database search**
 paragraph and a search-parameter table (engine, the version that ran, cleavage rule, missed

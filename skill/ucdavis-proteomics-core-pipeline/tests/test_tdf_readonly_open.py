@@ -801,10 +801,13 @@ class TestNoOtherTdfOpens(unittest.TestCase):
             self.assertGreater(os.path.getsize(tdf), 0, "the fixture writer wrote nothing")
 
     def test_the_skill_scripts_here_use_the_shared_helper(self):
-        for name in ("detect_acquisition.py", "make_methods.py"):
+        # make_methods.py reads a .d only through bruker_method.py, which opens every sqlite
+        # file in the run (analysis.tdf, diaSettings.diasqlite) through the helper.
+        for name in ("detect_acquisition.py", "bruker_method.py", "make_methods.py"):
             with open(os.path.join(SCRIPTS, name), encoding="utf-8") as fh:
                 src = fh.read()
-            self.assertIn("from bruker_tdf import", src, name)
+            self.assertIn("import bruker_method" if name == "make_methods.py" else
+                          "from bruker_tdf import", src, name)
             self.assertNotRegex(src, r"sqlite3\.connect\s*\(", name)
 
     def test_the_dev_fork_uses_the_same_helper_file(self):
