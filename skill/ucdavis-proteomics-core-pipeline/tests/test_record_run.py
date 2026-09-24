@@ -1443,5 +1443,39 @@ class ReviewFixes(Base):
         self.assertNotIn(".quant files", dq)
 
 
+
+class RunBoundedOnWindows(unittest.TestCase):
+    """gabrig's laptop is Windows: no os.killpg, no signal.SIGKILL. A timed-out call must still be
+    killed (tree and all) and still raise TimeoutExpired -- not AttributeError, which the SSH
+    route reported as "error" while the upload kept running."""
+
+    def test_timeout_without_killpg_kills_the_child_and_raises_timeout(self):
+        calls = []
+        real_run = subprocess.run
+
+        def fake_run(argv, *a, **k):
+            if argv and argv[0] == "taskkill":
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0)
+            return real_run(argv, *a, **k)
+        saved = record_run.os.__dict__.pop("killpg", None)
+        try:
+            with mock.patch.object(record_run.subprocess, "run", fake_run):
+                t0 = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    record_run.run_bounded([sys.executable, "-c", "import time; time.sleep(30)"], 1)
+                self.assertLess(time.monotonic() - t0, 15)
+        finally:
+            if saved is not None:
+                record_run.os.killpg = saved
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], ["taskkill", "/T", "/F", "/PID"])
+
+    def test_timeout_with_killpg_still_raises_timeout(self):
+        t0 = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            record_run.run_bounded(["bash", "-c", "sleep 30 & sleep 30"], 1)
+        self.assertLess(time.monotonic() - t0, 15)
+
 if __name__ == "__main__":
     unittest.main()

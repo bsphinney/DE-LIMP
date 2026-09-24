@@ -524,6 +524,10 @@ class DirLock:
             os.rename(self.dir, grave)
         except OSError:
             return                                # someone else broke or released it first
+        # A lock touched since it was judged (its holder showed life) is put back. This relies on
+        # a rename keeping the directory's mtime -- true on Quobyte (checked on HIVE 2026-09-24:
+        # `mkdir t; touch -d '2 hours ago' t; mv t t.x` kept the old mtime), APFS, ext4 and xfs --
+        # otherwise no stale lock could ever be broken and every writer would go unlocked.
         try:
             fresh = time.time() - os.stat(grave).st_mtime <= STALE_LOCK_S
         except OSError:
@@ -1852,8 +1856,10 @@ def data_quality_notes(rec):
             "the registry holds the record and the small files, but not the package that "
             "reproduces the analysis; if that machine is lost, so is the zip",
             zc.get("reason"),
-            "copy the zip to HIVE (hive_exec.sh --put) and re-run record_run.py analysis-done "
-            "--session <session> --zip <its HIVE path> on HIVE", "record_run"))
+            "put the whole session folder on HIVE (hive_exec.sh --put <session folder> "
+            "<a HIVE folder>) and run record_run.py analysis-done --session <its HIVE path> on "
+            "HIVE (add --out <the search's HIVE out dir> if the session's search_provenance.json does "
+            "not name it): the record is found by that out dir and the zip is attached", "record_run"))
     for n in rec.get("record_notes") or []:
         notes.append(dq("WARNING", n, rec.get("folder"), source="record_run"))
     p = rec.get("prot") or {}
@@ -2707,13 +2713,35 @@ def run_bounded(argv, timeout, stdin=None):
     try:
         out, err = p.communicate(timeout=max(1, timeout))
     except subprocess.TimeoutExpired:
+        kill_tree(p)
         try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
+            p.communicate(timeout=10)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
-        p.communicate()
         raise
     return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def kill_tree(p):
+    """Kill a child and everything it started. POSIX: its process group (start_new_session gave it
+    one). Windows has no killpg/SIGKILL -- gabrig's laptop is Windows -- so taskkill /T takes the
+    tree (bash -> ssh) there. Best effort; never raises."""
+    if hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    else:
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        p.kill()
+    except OSError:
+        pass
 
 
 def sha256_bounded(path, deadline):

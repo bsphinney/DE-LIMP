@@ -591,6 +591,7 @@ class JobTrap(unittest.TestCase):
         self.assertEqual(calls[0]["argv"], ["stage", "--out", self.out, "--fasta-meta", meta])
         self.assertEqual(calls[1]["argv"], ["search-done", "--out", self.out, "--status",
                                             "completed", "--exit-code", "0",
+                                            "--timeout", str(ns.SEARCH_RECORD_TIMEOUT_S),
                                             "--session", self.sess])
         self.assertGreaterEqual(calls[1]["t"], calls[0]["t"])
         self.assertEqual(len(self.m.bodies), 1)
@@ -969,7 +970,9 @@ class Finalize(unittest.TestCase):
                     self.assertTrue(line[0].startswith("[SKIPPED]"), line)
                     self.assertIs(res["run_log"]["logged"], want)
                     self.assertIn("record_run exploded", res["run_log"]["detail"])
-                    self.assertIn("record_run.py exit 1: record_run exploded", line[0])
+                    self.assertIn("-- error (record_run.py exit 1) -- see the finalize output",
+                                  line[0])
+                    self.assertIn("record_run.py exit 1: record_run exploded", r.stderr)
 
     def test_a_real_record_run_failure_is_skipped_with_its_error(self):
         """record_run.py always exits 0; a failed record is {"recorded": false, "reason":
@@ -988,8 +991,11 @@ class Finalize(unittest.TestCase):
             line = [ln for ln in read(p["manifest_txt"]).splitlines() if "Core run log" in ln]
             self.assertEqual(len(line), 1, line)
             self.assertTrue(line[0].startswith("[SKIPPED]"), line)
-            self.assertIn("-- error: ", line[0])
-            self.assertRegex(line[0], r"(NotADirectoryError|FileExistsError|OSError|Errno)", line)
+            self.assertRegex(line[0], r"-- error \((NotADirectoryError|FileExistsError|OSError)\) "
+                                      r"-- see the finalize output$", line)
+            self.assertNotIn(d, line[0])                   # no path in the collaborators' zip
+            self.assertRegex(res["run_log"]["detail"], r"(NotADirectoryError|FileExistsError)")
+            self.assertIn("run log: error: ", r.stderr)     # the full text, on the terminal
 
     def test_no_notify_still_logs_the_run(self):
         import test_deposit_package as tdp
@@ -1156,11 +1162,29 @@ class RunLogOutcomes(unittest.TestCase):
     def test_failure_codes_are_errors_with_their_text(self):
         for code in ("error", "timeout", "ssh_failed", "bad_input", "nothing_to_record",
                      "out_not_found", "session_not_found"):
-            res, _ = self._rr({"recorded": False, "reason": code, "detail": "the text"})
+            res, _ = self._rr({"recorded": False, "reason": code,
+                               "detail": "PermissionError: [Errno 13] Permission denied: "
+                                         "'/quobyte/proteomics-grp/skill_runs/x' (brettsp@hive)"})
             self.assertIs(res.get("error"), True, code)
-            self.assertEqual(res["detail"], f"{code}: the text")
-            self.assertEqual(ns.run_log_manifest(res),
-                             ("SKIPPED", "Core run log", f"{code}: the text"))
+            self.assertTrue(res["detail"].startswith(f"{code}: PermissionError"), res)
+            self.assertIn("/quobyte/", res["detail"])          # the full text stays in the result
+            level, part, note = ns.run_log_manifest(res)
+            self.assertEqual((level, part), ("SKIPPED", "Core run log"))
+            self.assertEqual(note, f"{code} (PermissionError) -- see the finalize output")
+
+    def test_the_manifest_line_never_carries_a_path_user_or_host(self):
+        """MANIFEST.txt goes to collaborators in the zip: the failure's KIND only."""
+        for detail in ("error: FileExistsError: [Errno 17] File exists: "
+                       "'/quobyte/proteomics-grp/skill_runs/sessions'",
+                       "ssh_failed: brettsp@hive.hpc.ucdavis.edu: Permission denied (publickey)",
+                       "out_not_found: /quobyte/proteomics-grp/SERVICE/x/search_out",
+                       "record_run.py exit 1: Traceback ... /home/brettsp/x.py"):
+            reason = detail.split(":")[0].replace("record_run.py exit 1", "error")
+            note = ns.run_log_manifest({"logged": False, "error": True, "reason": reason,
+                                        "detail": detail})[2]
+            for leak in ("/quobyte", "/home", "brettsp", "hive.hpc", "@"):
+                self.assertNotIn(leak, note, (detail, note))
+            self.assertTrue(note.endswith("-- see the finalize output"), note)
 
     def test_not_configured_off_and_unknown_are_notices(self):
         for code in ("not_core_member", "not_on_hive"):
@@ -1179,7 +1203,9 @@ class RunLogOutcomes(unittest.TestCase):
     def test_budgets(self):
         _, seen = self._rr({"recorded": True}, kind="search-done")
         self.assertEqual(seen["timeout"], 60)                       # the job hook stays 60 s
-        self.assertNotIn("--timeout", seen["argv"])
+        i = seen["argv"].index("--timeout")                         # explicit, never inherited
+        self.assertEqual(seen["argv"][i + 1], str(ns.SEARCH_RECORD_TIMEOUT_S))
+        self.assertLess(ns.SEARCH_RECORD_TIMEOUT_S + 5, ns.RECORD_RUN_TIMEOUT_S)  # alarm < cap
         _, seen = self._rr({"recorded": True}, kind="analysis-done")
         self.assertEqual(seen["argv"][2:5], ["analysis-done", "--timeout", "300"])
         self.assertGreaterEqual(seen["timeout"], 310)               # room to report its own timeout
@@ -1339,7 +1365,8 @@ class JobEndChoices(unittest.TestCase):
             with mock.patch.object(ns, "_seconds_left", return_value=200), \
                     mock.patch.object(ns, "fran_stage", side_effect=fake_stage):
                 ns._fran_step("/x", None, mode, "N", qc)
-            self.assertEqual(seen, [(170, {"name": "N", "qc": qc, "skip": skip})])
+            self.assertEqual(seen, [(200 - 30 - ns.RECORD_RUN_TIMEOUT_S,
+                                     {"name": "N", "qc": qc, "skip": skip})])
 
     def test_the_name_and_not_qc_reach_stage(self):
         for qc, tail in ((False, ["--name", "Mouse liver KO vs WT", "--not-qc"]),
@@ -1357,7 +1384,8 @@ class JobEndChoices(unittest.TestCase):
         def fake_stage(out, session=None, timeout=None, **_):
             seen["timeout"] = timeout
             return {"staged": True, "reason": "ok"}
-        for left, want in ((200, 170), (None, ns.FRAN_STAGE_TIMEOUT_S),
+        for left, want in ((200, 200 - 30 - ns.RECORD_RUN_TIMEOUT_S), (125, 35),
+                           (None, ns.FRAN_STAGE_TIMEOUT_S),
                            (5000, ns.FRAN_STAGE_TIMEOUT_S)):
             with mock.patch.object(ns, "_seconds_left", return_value=left), \
                     mock.patch.object(ns, "fran_stage", side_effect=fake_stage):

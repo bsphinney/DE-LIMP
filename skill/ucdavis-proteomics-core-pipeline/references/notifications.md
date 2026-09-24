@@ -121,7 +121,7 @@ and of the zip's copy. Neither is an export part.
 |---|---|
 | `[OK]      Core run log -- logged` / `[OK] Slack notification (Core channel) -- sent` | done |
 | `[INFO]    Core run log -- not configured for this user`, `[INFO] Core notification -- not configured for this user`, `… -- off (--no-notify)`, `… -- off (SKILL_SLACK=0)`, `… -- off (RECORD_RUN=off)` | not configured, or opted out. A notice: the agent does **not** relay `[INFO]` lines as missing parts. |
-| `[SKIPPED] Slack notification (Core channel) -- not sent: …` / `[SKIPPED] Core run log -- error: FileExistsError: …` | attempted and failed, with the error text |
+| `[SKIPPED] Slack notification (Core channel) -- not sent: …` / `[SKIPPED] Core run log -- error (FileExistsError) -- see the finalize output` | attempted and failed. The run-log line names only the reason and the kind of failure, never the text: record_run's detail carries registry paths, users and hosts, and the zip goes to collaborators. The full text is in the finalize JSON (`run_log.detail`) and on its stderr. |
 
 `record_run.py` always exits 0 and says what happened in one JSON object. The hook reads its
 reason code:

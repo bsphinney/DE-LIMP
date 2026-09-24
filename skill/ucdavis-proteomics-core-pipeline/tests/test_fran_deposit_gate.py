@@ -23,9 +23,12 @@ import fran_deposit as fd  # noqa: E402
 def setUpModule():
     # verify() asks the LIVE corpus when this account can read a PG Farm token -- which a suite run
     # on HIVE can. fran_deposit.corpus_query() returns None before touching anything with this set.
-    global _SAVED_CORPUS_QUERY
+    global _SAVED_CORPUS_QUERY, _SAVED_DEPOSIT
     _SAVED_CORPUS_QUERY = os.environ.get("FRAN_CORPUS_QUERY")
     os.environ["FRAN_CORPUS_QUERY"] = "off"
+    # A Core member with FRAN_DEPOSIT=off in their shell must still get a passing suite: these
+    # tests set the opt-out themselves where they test it.
+    _SAVED_DEPOSIT = os.environ.pop("FRAN_DEPOSIT", None)
 
 
 def tearDownModule():
@@ -33,9 +36,12 @@ def tearDownModule():
         os.environ.pop("FRAN_CORPUS_QUERY", None)
     else:
         os.environ["FRAN_CORPUS_QUERY"] = _SAVED_CORPUS_QUERY
+    if _SAVED_DEPOSIT is not None:
+        os.environ["FRAN_DEPOSIT"] = _SAVED_DEPOSIT
 
 
 _SAVED_CORPUS_QUERY = None
+_SAVED_DEPOSIT = None
 
 
 def _load_json(path):

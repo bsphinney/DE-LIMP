@@ -831,6 +831,9 @@ def deliver(facts, relay_ok=False, dry_run=False):
 #: `stage` links a finished search into FRAN's drop directory (symlinks, no database, no
 #: credential) after its own eligibility check.
 RECORD_RUN_TIMEOUT_S = 60
+#: search-done's own --timeout, passed explicitly so a RECORD_RUN_TIMEOUT inherited into the job
+#: cannot push record_run's alarm (--timeout + 5 s) past the 60 s cap above.
+SEARCH_RECORD_TIMEOUT_S = 45
 #: finalize's `record_run.py analysis-done`: over SSH a laptop may upload up to ~300 MB of session
 #: zip to the registry, so it gets its own budget -- passed as --timeout, with the subprocess cap
 #: a little above it so record_run.py can report its own timeout rather than be killed.
@@ -907,7 +910,8 @@ def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
         return {"logged": False, "off": True, "detail": "RECORD_RUN=off"}
     argv = [sys.executable or "python3", rr, kind]
     if kind == "search-done":
-        argv += ["--out", out, "--status", status, "--exit-code", str(exit_code)]
+        argv += ["--out", out, "--status", status, "--exit-code", str(exit_code),
+                 "--timeout", str(SEARCH_RECORD_TIMEOUT_S)]
         cap = RECORD_RUN_TIMEOUT_S
     else:
         argv += ["--timeout", str(ANALYSIS_RECORD_TIMEOUT_S)]
@@ -1034,6 +1038,23 @@ def slack_manifest(sent, detail):
     return "SKIPPED", "Slack notification (Core channel)", clean_text(d)
 
 
+_FAILURE_KIND = re.compile(r"(record_run\.py (?:exit -?\d+|did not finish))"
+                           r"|([A-Za-z_][\w.]*(?:Error|Exception|Expired|Exit|Interrupt))\b")
+
+
+def _failure_note(reason, detail):
+    """MANIFEST's words for a record that was attempted and failed: the reason code and the kind
+    of failure (an exception class, or record_run.py's exit), never its text. record_run's detail
+    carries registry paths, HIVE users and hosts, and ssh's stderr -- and the zip goes to
+    collaborators. The full text stays in the finalize JSON (result["run_log"]) and on stderr."""
+    d = detail or ""
+    if reason and d.startswith(f"{reason}: "):
+        d = d[len(reason) + 2:]
+    m = _FAILURE_KIND.search(d)
+    kind = f" ({m.group(1) or m.group(2)})" if m else ""
+    return f"{reason or 'error'}{kind} -- see the finalize output"
+
+
 def run_log_manifest(run_log):
     """(level, part, note) for the central run log's MANIFEST.txt line. Never a path: the zip is
     shared with collaborators."""
@@ -1044,8 +1065,8 @@ def run_log_manifest(run_log):
         return "INFO", part, f"off ({run_log.get('detail')})"
     if run_log.get("logged") is True:
         return "OK", part, "logged"
-    if run_log.get("error"):                  # attempted and failed: say what failed
-        return "SKIPPED", part, clean_text(run_log.get("detail") or "record_run.py failed")
+    if run_log.get("error"):                  # attempted and failed: say what kind, no paths
+        return "SKIPPED", part, _failure_note(run_log.get("reason"), run_log.get("detail"))
     if run_log.get("reason") in RECORD_RUN_NOT_CONFIGURED:
         return "INFO", part, "not configured for this user"
     if run_log.get("logged") is False:        # a code this hook does not know: name it, no path
@@ -1101,7 +1122,7 @@ def _fran_step(out, session, mode, fran_name=None, qc=None):
       --qc       stage --out O [--name N] --qc   (receipt: qc_run)
       --no-fran  stage --out O [--name N] --skip (receipt: opted_out)
     Every stage call -- recording or staging -- has the same bounds: not within NEAR_LIMIT_S of
-    the job's time limit, and at most the time left minus 30 s."""
+    the job's time limit, and at most the time left minus 30 s minus record_run's budget."""
     record_only = qc is True or mode == "off"
     if not record_only and mode != "stage":
         say("fran: left_to_agent (no completeness guard on this route)")
@@ -1115,7 +1136,10 @@ def _fran_step(out, session, mode, fran_name=None, qc=None):
                               "not recorded in fran_deposit.json"}
         return {"staged": False, "reason": "near_time_limit",
                 "detail": f"{max(left, 0)} s left of the job's time limit; step 7c stages it"}
-    timeout = FRAN_STAGE_TIMEOUT_S if left is None else max(10, min(FRAN_STAGE_TIMEOUT_S, left - 30))
+    # stage runs first, then record_run (up to RECORD_RUN_TIMEOUT_S): leave it that time too, so
+    # a stage that hangs to its limit cannot push the run log into SLURM's TERM at the limit.
+    timeout = FRAN_STAGE_TIMEOUT_S if left is None else \
+        max(10, min(FRAN_STAGE_TIMEOUT_S, left - 30 - RECORD_RUN_TIMEOUT_S))
     return fran_stage(out, session, timeout=timeout, name=fran_name, qc=qc,
                       skip=record_only and qc is not True)
 

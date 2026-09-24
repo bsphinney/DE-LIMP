@@ -271,7 +271,10 @@ def _finish_hooks(a, session_dir, zip_path):
     else:
         sent, detail = notify_slack.analysis_done(session_dir, zip_path, run_log=run_log)
     sl = notify_slack.slack_manifest(sent, detail)
-    sys.stderr.write(f"[session] run log: {rl[2]}\n[session] slack: {sl[2]}\n")
+    # The terminal (the Core member's own) gets the full text; MANIFEST.txt, which travels in the
+    # zip to collaborators, gets only the reason and the kind of failure.
+    full = (run_log or {}).get("detail") if (run_log or {}).get("error") else None
+    sys.stderr.write(f"[session] run log: {full or rl[2]}\n[session] slack: {sl[2]}\n")
     return {"run_log": run_log, "slack": {"sent": bool(sent), "level": sl[0], "detail": sl[2]},
             "manifest": [rl, sl]}
 
