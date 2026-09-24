@@ -919,8 +919,8 @@ def check(a):
     bad_meta = explicit_meta_mismatch(out, a.fasta_meta)
     if bad_meta:
         r["fasta_meta_ignored"] = bad_meta
-        sys.stderr.write(f"[fran_deposit] WARNING: ignoring {bad_meta}; the organism and database "
-                         f"are left blank rather than taken from the wrong search\n")
+        sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored ({bad_meta}); the organism "
+                         f"and database are left blank rather than taken from the wrong search\n")
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
     # None, never "": FRAN's read_manifest rejects an empty search_name or organism outright
     r["organism"] = (a.organism or "").strip() or org or None

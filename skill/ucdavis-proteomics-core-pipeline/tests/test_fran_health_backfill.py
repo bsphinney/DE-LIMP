@@ -1396,7 +1396,7 @@ class ReviewFixTests(unittest.TestCase):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     c = fd.check(Args(out, fasta_meta=human + ".meta.json"))
-            self.assertIn("ignoring --fasta-meta", err.getvalue())
+            self.assertIn("--fasta-meta ignored", err.getvalue())
             self.assertIn("fasta_meta_ignored", c)
             self.assertEqual((c["organism"], c["fasta_path"]), (None, None))
             with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
@@ -1488,6 +1488,92 @@ class ReviewFixTests(unittest.TestCase):
             with open(os.path.join(d, "delimp_report.parquet"), "w") as fh:
                 fh.write("x")
             self.assertIsNone(fd.detect_engine(d)[0])
+
+
+class ReviewerReproTests(unittest.TestCase):
+    """The independent reviewer's reproduction script (scratchpad/review_fd_repro/repro.sh, A-E),
+    as unit tests: same steps, same inputs -- umask 022, a 'PAR1xxxxPAR1' report stub, sidecars in
+    fetch_fasta.py's nested {"selected": {...}} form. Each reproduced on af9e46d and must not on
+    the fixed code."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.T = self._tmp.name
+        self.drop = os.path.join(self.T, "drop", "incoming")
+        os.makedirs(self.drop)
+        self._umask = os.umask(0o022)
+        self._env = env_vars(FRAN_DROP_DIR=self.drop, FRAN_HEALTH="off", FRAN_DEPOSIT=None,
+                             FRAN_INGEST_LOG_DIR=os.path.join(self.T, "logs"))
+        self._env.__enter__()
+
+    def tearDown(self):
+        self._env.__exit__(None, None, None)
+        os.umask(self._umask)
+        self._tmp.cleanup()
+
+    def mk(self, *parts):
+        d = os.path.join(self.T, *parts)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "report.parquet"), "w") as fh:
+            fh.write("PAR1xxxxPAR1")
+        return d
+
+    def cli(self, fn, out, **kw):
+        return run_quiet(fn, Args(out, **kw))[1]
+
+    def test_A_verify_then_stage(self):
+        out = self.mk("A", "search_out")
+        self.assertEqual(self.cli(fd.verify, out)["state"], "not_staged")
+        self.assertFalse(os.path.exists(os.path.join(out, fd.RECEIPT)))
+        r = self.cli(fd.stage, out)
+        self.assertEqual((r["staged"], r["reason"]), (True, "ok"))
+
+    def test_B_withdrawal_then_name_less_stage(self):
+        out = self.mk("B", "job1", "search_out")
+        entry = self.cli(fd.stage, out)["entry"]
+        self.assertEqual(self.cli(fd.stage, out, name="Lumos QC")["withdrawn"], entry)
+        r = self.cli(fd.stage, out)
+        self.assertEqual((r["staged"], r["reason"]), (False, "qc_run"))
+        m = json.load(open(os.path.join(entry, fd.MANIFEST)))
+        self.assertEqual((m["qc"], m["exclude"]), (True, True))
+
+    def test_C_symlinked_session_search_into_a_qc_path(self):
+        real = self.mk("C", "real", "Lumos_QC_2026", "run1", "search_out")
+        os.makedirs(os.path.join(self.T, "C", "sess", "output"))
+        link = os.path.join(self.T, "C", "sess", "output", "search")
+        os.symlink(real, link)
+        r = self.cli(fd.stage, link)
+        self.assertEqual((r["staged"], r["reason"]), (False, "qc_run"))
+        self.assertIn("Lumos_QC_2026", r["qc_rule"])
+        self.assertEqual(os.listdir(self.drop), [])
+
+    def test_D_modes_under_umask_022(self):
+        entry = self.cli(fd.stage, self.mk("D", "search_out"))["entry"]
+        self.assertEqual(os.stat(entry).st_mode & 0o777, 0o775)
+        self.assertEqual(os.stat(os.path.join(entry, fd.MANIFEST)).st_mode & 0o777, 0o664)
+
+    def test_E_explicit_meta_of_another_search(self):
+        P = os.path.join(self.T, "E", "P")
+        sess_in = os.path.join(self.T, "E", "sess", "input")
+        os.makedirs(sess_in)
+        out = self.mk("E", "P", "search_mouse")
+        for fa, org, tx in ((os.path.join(P, "mouse.fasta"), "Mus musculus", 10090),
+                            (os.path.join(sess_in, "search.fasta"), "Homo sapiens", 9606)):
+            with open(fa, "w") as fh:
+                fh.write(">a\nPEPTIDEK\n")
+            with open(fa + ".meta.json", "w") as fh:
+                json.dump({"selected": {"fasta": fa, "organism": org, "taxid": tx,
+                                        "n_sequences": 1}}, fh)
+        with open(os.path.join(out, "report.log.txt"), "w") as fh:
+            fh.write(f"diann-linux --f a.d --fasta {os.path.join(P, 'mouse.fasta')} --out x\n")
+        code, r, err = run_quiet(fd.stage, Args(out, fasta_meta=os.path.join(
+            sess_in, "search.fasta.meta.json")))
+        self.assertTrue(r["staged"])
+        self.assertEqual((r["organism"], r["taxon"], r["fasta_path"]), (None, None, None))
+        self.assertIn("the search read", r["fasta_meta_ignored"])
+        self.assertIn("--fasta-meta ignored", err)
+        m = json.load(open(os.path.join(r["entry"], fd.MANIFEST)))
+        self.assertEqual((m["organism"], m["fasta_path"]), (None, None))
 
 
 # ------------------------------------------------------------------------------ backfill --
