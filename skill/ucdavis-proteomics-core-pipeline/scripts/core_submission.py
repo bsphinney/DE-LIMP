@@ -742,14 +742,34 @@ def acquisition_date(path: str, name: str | None = None) -> tuple:
         return None, "unknown"
 
 
+def _kind(c: str) -> str:
+    return "digit" if c.isdigit() else ("letter" if c.isalpha() else "other")
+
+
 def token_pattern(uid: str):
     """A unique_id as a DELIMITED, case-insensitive token. `-`, `_` and space are the same
     separator on both sides, so EB_001 finds EB-001; letters/digits may not touch either
-    end, so KG1 does not find KG13."""
+    end, so KG1 does not find KG13.
+
+    Where letters meet digits a separator may also be added or dropped: PROT_0756's sheet
+    says LRS96 and every one of its 30 runs says DIA-LRS-96 (measured on the share), so LRS96
+    finds LRS-96 and EB_001 finds EB001. Between two runs of digits, or two of letters, the
+    separator stays required -- SG-001-2 must not find SG0012."""
     parts = [p for p in re.split(r"[-_\s]+", _s(uid)) if p]
     if not parts:
         return None
-    body = r"[-_\s]+".join(re.escape(p) for p in parts)
+    optional, required = r"[-_\s]?", r"[-_\s]+"
+
+    def boundary(a: str, b: str) -> bool:
+        return {_kind(a), _kind(b)} == {"letter", "digit"}
+
+    def part(p: str) -> str:
+        return "".join((optional if i and boundary(p[i - 1], c) else "") + re.escape(c)
+                       for i, c in enumerate(p))
+
+    body = part(parts[0])
+    for prev, p in zip(parts, parts[1:]):
+        body += (r"[-_\s]*" if boundary(prev[-1], p[0]) else required) + part(p)
     return re.compile(r"(?<![A-Za-z0-9])" + body + r"(?![A-Za-z0-9])", re.I)
 
 

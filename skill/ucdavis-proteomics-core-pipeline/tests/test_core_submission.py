@@ -304,6 +304,27 @@ class TestTokens(unittest.TestCase):
             self.assertTrue(pat.search(name), name)
         self.assertTrue(cs.token_pattern("kg1").search("DIA-KG1_S3.d"))
 
+    def test_a_separator_between_letters_and_digits_is_optional(self):
+        """PROT_0756: the sheet says LRS96, every run says DIA-LRS-96."""
+        name = "08132026__60SPD_DIA-LRS-96_S3-B1_1_23630.d"
+        self.assertTrue(cs.token_pattern("LRS96").search(cs.match_space(name)))
+        self.assertTrue(cs.token_pattern("EB_001").search("x_EB001.raw"))
+        self.assertTrue(cs.token_pattern("LRS-96").search("DIA-LRS96_S3"))
+        # still delimited, and still no separator invented between two runs of digits
+        self.assertFalse(cs.token_pattern("LRS96").search("DIA-LRS-960_S3"))
+        self.assertFalse(cs.token_pattern("LRS9").search("DIA-LRS-96_S3"))
+        self.assertFalse(cs.token_pattern("SG-001-2").search("x_SG0012.raw"))
+        self.assertFalse(cs.token_pattern("KG1").search("x_KG-13.raw"))
+
+    def test_prot0756_runs_each_find_their_own_sample(self):
+        """All 30 PROT_0756 runs (names as on the share) match 1:1 with the sheet's ids."""
+        runs = {f"LRS{n}": f"08132026__60SPD_DIA-LRS-{n}_S3-A1_1_{23600 + n}.d" for n in range(96, 126)}
+        samples = [{"unique_id": u, "sample_name": u, "condition_name": "c"} for u in runs]
+        entries = [{"path": "/x/" + f, "name": f, "instrument_folder": "tTOF_HT"} for f in runs.values()]
+        rows = cs.match_samples(samples, entries, [], dt.date(2026, 7, 15), dt.date(2027, 3, 12))
+        got = {r["unique_id"]: os.path.basename(r["file"]) for r in rows if r["status"] == "matched"}
+        self.assertEqual(got, runs)
+
     def test_weak_ids(self):
         for uid in ("A5", "H10", "B2", "001", "7", ""):
             self.assertIsNotNone(cs.weak_reason(uid), uid)
