@@ -230,6 +230,10 @@ glob on HIVE (`hive_exec.sh 'ls <hive_path>'`) — upload nothing. `verified: fa
 `candidates` and **ask the user** where that share lives on HIVE; do not search HIVE for
 it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's own disk)
 → `hive_exec.sh --put`, which itself refuses a source it verifies on HIVE.
+- **Any** drive letter (`R:`, `T:`, …), UNC path (`\\server\share\…`) or SMB mount gets this
+  check first — never search `/quobyte` (or anywhere on HIVE) instead: not finding the files
+  there does not mean HIVE lacks them. `R:` was `/nfs/lssc0/flinders/proteomics`, and 70 GB
+  already on HIVE was uploaded (msalemi, 2026-09-24).
 → `references/access.md` "Data already on a network drive".
 
 ### 1b. Check for a prior analysis of this dataset
