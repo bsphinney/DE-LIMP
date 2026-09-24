@@ -16,6 +16,9 @@ Documents). The orchestrator asks the user which they want (see SKILL.md).
         reproducibility/        # the full reproducibility bundle
         AI_Analysis_Report.md   # the interpretation
         OUTPUT_FILES.md         # catalog of every file
+        methods.md / .docx      # publication Methods (ensured at finalize)
+        DATA_SUBMISSION/        # PRIDE/MassIVE deposit package (written at finalize)
+      MANIFEST.txt              # [OK]/[SKIPPED] log of what finalize produced, and why not
       scripts/                  # copy of the skill scripts actually used (self-contained)
       logs/                     # commands.log + engine logs
 
@@ -28,8 +31,9 @@ Two subcommands:
   python3 session.py init --name "HeLa QC DIA" --raw /data/HeLaQC/*.d --base ~/Documents/DataAnalysis
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
-  # at the end — write README, catalog outputs, optionally zip
-  python3 session.py finalize --dir <session_dir> [--zip]
+  # at the end — ensure the publication Methods, write the deposit package
+  # (output/DATA_SUBMISSION, see make_deposit.py), README + MANIFEST.txt, optionally zip
+  python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit]
 
 Raw MS files are NOT copied (they're huge and live elsewhere) — their paths are
 recorded in input/raw_files.txt instead.
@@ -53,28 +57,41 @@ def paths_for(session_dir):
         "input_dir": os.path.join(d, "input"),
         "conditions": os.path.join(d, "input", "conditions.csv"),
         "fasta": os.path.join(d, "input", "search.fasta"),
+        "fasta_meta": os.path.join(d, "input", "search.fasta.meta.json"),
         "workflow_dir": os.path.join(d, "input", "wf"),
+        "workflow_manifest": os.path.join(d, "input", "wf", "workflow.manifest.json"),
         "raw_list": os.path.join(d, "input", "raw_files.txt"),
         "output_dir": os.path.join(d, "output"),
         "search_out": os.path.join(d, "output", "search"),
+        "search_prov": os.path.join(d, "output", "search", "search_provenance.json"),
         "de_dir": os.path.join(d, "output", "tables"),
         "figures_dir": os.path.join(d, "output", "figures"),
         "repro_dir": os.path.join(d, "output", "reproducibility"),
         "analysis_report": os.path.join(d, "output", "AI_Analysis_Report.md"),
         "analysis_prompt": os.path.join(d, "output", "ANALYSIS_PROMPT.md"),
         "output_files_md": os.path.join(d, "output", "OUTPUT_FILES.md"),
+        "methods_md": os.path.join(d, "output", "methods.md"),
+        "methods_docx": os.path.join(d, "output", "methods.docx"),
+        "deposit_dir": os.path.join(d, "output", "DATA_SUBMISSION"),
+        "manifest_txt": os.path.join(d, "MANIFEST.txt"),
         "scripts_dir": os.path.join(d, "scripts"),
         "logs_dir": os.path.join(d, "logs"),
         "commands_log": os.path.join(d, "logs", "commands.log"),
     }
 
 
-def raw_set(session_dir):
-    """The set of raw file paths recorded for a session (for same-dataset detection)."""
+def read_raw_list(session_dir):
+    """The raw file paths recorded for a session, in the order init wrote them ([] if none)."""
     rl = paths_for(session_dir)["raw_list"]
     if not os.path.exists(rl):
-        return set()
-    return {ln.strip() for ln in open(rl) if ln.strip() and not ln.startswith("#")}
+        return []
+    with open(rl) as fh:
+        return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+
+
+def raw_set(session_dir):
+    """The set of raw file paths recorded for a session (for same-dataset detection)."""
+    return set(read_raw_list(session_dir))
 
 
 def do_find_prior(a):
@@ -237,6 +254,38 @@ def do_finalize(a):
         elif ext in ("png", "svg", "pdf", "jpg", "jpeg"):
             shutil.move(f, os.path.join(p["figures_dir"], base))
 
+    # Publication Methods + the repository-deposit package (make_deposit.py). Every part is
+    # recorded [OK] or [SKIPPED] -- with the reason -- in MANIFEST.txt at the session root, the
+    # top of the zip: a part that could not be made is visible, never silently absent
+    # (CLAUDE.md rule 4). Nothing here may stop finalize from writing the README and the zip.
+    methods_md, deposit = None, None
+    try:
+        import make_deposit
+        man = make_deposit.Manifest()
+    except Exception as e:                      # recorded below, not swallowed
+        make_deposit, man = None, None
+        import_error = f"make_deposit.py could not be loaded: {type(e).__name__}: {e}"
+    if man is not None:
+        try:
+            methods_md = make_deposit.ensure_methods(p["session_dir"], man)
+        except Exception as e:
+            man.skip("Publication methods (output/methods.md)", f"{type(e).__name__}: {e}")
+        if a.no_deposit:
+            man.skip("Deposit package (output/DATA_SUBMISSION)", "--no-deposit was given")
+        else:
+            try:
+                deposit = make_deposit.build(p["session_dir"], man, methods_md)
+            except Exception as e:
+                man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
+        man.write(p["manifest_txt"], "Session export manifest")
+    else:
+        with open(p["manifest_txt"], "w") as fh:
+            fh.write("Session export manifest\n=======================\n"
+                     f"[SKIPPED] {'Publication methods + deposit package':<50} -- "
+                     f"{import_error}\n")
+    has_deposit = os.path.isfile(os.path.join(p["deposit_dir"], "HOW_TO_SUBMIT.md"))
+    methods_rel = (os.path.relpath(methods_md, p["session_dir"]) if methods_md else None)
+
     # gather run facts for the README
     manifest = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
     prov = _load(os.path.join(p["de_dir"], "de_provenance.json")) or {}
@@ -276,6 +325,9 @@ def do_finalize(a):
         "output/reproducibility/ pinned bundle for re-running the search too (reproduce.sh, env lock, checksums)",
         "output/AI_Analysis_Report.md   the biological interpretation (read this first)",
         "output/OUTPUT_FILES.md         catalog of every file",
+        "output/methods.md (+ .docx)    publication Methods: LC-MS, search, database, DE, grant acknowledgment",
+        "output/DATA_SUBMISSION/        deposit the data in PRIDE / MassIVE -- start with HOW_TO_SUBMIT.md (.html)",
+        "MANIFEST.txt                   what this export contains, and anything skipped (with the reason)",
         "scripts/               copy of the skill scripts used",
         "logs/                  commands.log + engine logs",
         "```",
@@ -290,12 +342,33 @@ def do_finalize(a):
         "",
         f"The DE results are {', '.join(de_files) if de_files else '(none found)'}.",
         "", "## Methods",
-        "See `output/tables/methods.txt` (self-describing) and `output/AI_Analysis_Report.md`.", "",
+        (f"**For the paper:** `{methods_rel}` (Word: the `.docx` beside it) — LC-MS "
+         "acquisition, the database search (engine, pinned version, parameters, FDR), the "
+         "sequence database and contaminants, the differential-expression analysis, and the "
+         "UC Davis instrument-grant acknowledgment. Resolve every `[... — confirm]` tag before "
+         "publishing." if methods_rel else
+         "**For the paper:** no publication Methods could be written — `MANIFEST.txt` says "
+         "why; run `scripts/make_methods.py` where the raw files are readable."),
+        "",
+        "The DE step's own record is `output/tables/methods.txt`; the interpretation is "
+        "`output/AI_Analysis_Report.md`.", "",
+        "## Deposit the data (PRIDE / MassIVE)",
+        ("Journals ask for the raw data in a public repository. Everything to do that is in "
+         "`output/DATA_SUBMISSION/` — start with **`HOW_TO_SUBMIT.md`** (or double-click "
+         "`HOW_TO_SUBMIT.html`): a pre-filled SDRF sample sheet, the protocol texts, the list "
+         "of files to upload, and a SLURM script that packs and checksums the raw files on "
+         "HIVE." if has_deposit else
+         "The deposit package was not written — `MANIFEST.txt` says why."), "",
+        "## What is in this export",
+        "`MANIFEST.txt` lists every part of the Methods and deposit package as [OK], or "
+        "[SKIPPED] with the reason.", "",
     ]
     with open(p["readme"], "w") as fh:
         fh.write("\n".join(lines) + "\n")
 
-    result = {"session_dir": p["session_dir"], "readme": p["readme"], "de_files": de_files}
+    result = {"session_dir": p["session_dir"], "readme": p["readme"], "de_files": de_files,
+              "methods": methods_md, "manifest": p["manifest_txt"],
+              "deposit": deposit, "skipped": (man.n_skipped if man is not None else 1)}
 
     # re-analysis: write DIFFERENCES.md vs the parent
     parent = a.reanalysis_of
@@ -311,17 +384,21 @@ def do_finalize(a):
         # shutil.make_archive FOLLOWS symlinks, so output/raw_data (links to the raw
         # cohort) would be dereferenced and inlined — turning a 1.6 GB archive into
         # 16 GB for a 9-file .d study. Zip by hand and skip that one directory; the
-        # raw paths are still recorded in input/raw_files.txt.
+        # raw paths are still recorded in input/raw_files.txt. The deposit package's
+        # upload_staging/ (the .d archives prepare_upload.sbatch builds) is raw data too.
         import zipfile
         sdir = p["session_dir"]
         base = os.path.basename(sdir)
-        skip = os.path.join(sdir, "output", "raw_data")
+        skips = {os.path.abspath(os.path.join(sdir, "output", "raw_data")):
+                 "output/raw_data (symlinks to raw files)",
+                 os.path.abspath(os.path.join(p["deposit_dir"], "upload_staging")):
+                 "output/DATA_SUBMISSION/upload_staging (raw archives staged for upload)"}
         archive = sdir + ".zip"
-        n_skipped = 0
+        excluded = {label: 0 for label in skips.values()}
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
             for root, dirs, files in os.walk(sdir):
-                if os.path.abspath(root) == os.path.abspath(skip):
-                    n_skipped = len(files) + len(dirs)
+                if os.path.abspath(root) in skips:
+                    excluded[skips[os.path.abspath(root)]] = len(files) + len(dirs)
                     dirs[:] = []
                     continue
                 for fn in files:
@@ -330,7 +407,7 @@ def do_finalize(a):
                         continue
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         result["zip"] = archive
-        result["zip_excluded"] = {"output/raw_data (symlinks to raw files)": n_skipped}
+        result["zip_excluded"] = excluded
 
     print(json.dumps(result, indent=2))
 
@@ -437,6 +514,9 @@ def main():
     f.add_argument("--dir", required=True, help="the session directory")
     f.add_argument("--reanalysis-of", default="", help="prior session dir to diff against (auto-detected if omitted)")
     f.add_argument("--zip", action="store_true", help="also produce <session>.zip")
+    f.add_argument("--no-deposit", action="store_true",
+                   help="skip the repository-deposit package (output/DATA_SUBMISSION); the "
+                        "publication Methods are still ensured")
     f.set_defaults(func=do_finalize)
     a = ap.parse_args()
     a.func(a)

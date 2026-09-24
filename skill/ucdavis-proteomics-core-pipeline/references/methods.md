@@ -20,8 +20,23 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
   CaptiveSpray/PepSep emitter, and the LC system/gradient (which the raw `.d` does
   not store — supply from lab records).
 
-With `--de-dir`, it adds a Data-processing paragraph from the run's
-`de_provenance.json` (engine, FDR, quantification, thresholds, citation).
+With `--params` / `--search-prov` / `--workflow-manifest`, it adds a **Database search**
+paragraph and a search-parameter table (engine, the version that ran, cleavage rule, missed
+cleavages, peptide length, charge and m/z range, fixed/variable modifications, mass tolerances,
+precursor FDR, library mode, MBR), read by `search_record()` — the same reader
+`make_deposit.py` uses for the SDRF. A value in no record prints as
+`____ [not recorded — confirm]`, never as a default.
+
+With `--de-dir`, it adds a **Differential expression** paragraph from the run's
+`de_provenance.json` (pipeline, quantification, the q-value filters as applied, design,
+contrasts, significance rule, citation). Significance is stated as run_de.R applies it —
+adj.P.Val only; |log2FC| is a volcano reference line, not a filter.
+
+When the raw files cannot be read from where it runs (e.g. finalize away from the data), pass
+`--instrument` / `--acquisition` from the session record: the Methods are then written with
+those two values (sourced as the session record) and every acquisition value blank and tagged
+`[raw file not readable here — confirm]`. `session.py finalize` does this automatically —
+see `references/deposit.md`.
 
 ## Instrument grant acknowledgments (verified 2026-06)
 Picked by instrument metadata **or** facility filename prefix, from
@@ -39,8 +54,8 @@ links the source page; confirm the current wording there before publishing. To a
 an instrument, extend the `ACKS` table in `make_methods.py`.
 
 ## Output + workflow
-- `methods.md` — the drop-in prose (LC, MS, [Data processing], parameter table,
-  Acknowledgments).
+- `methods.md` — the drop-in prose (LC, MS, sequence database, [database search],
+  [differential expression], parameter tables, Acknowledgments).
 - `methods_params.json` — the extracted parameters, machine-readable.
 - Render to Word with `to_docx.py --in methods.md --out methods.docx`.
 

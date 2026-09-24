@@ -1329,29 +1329,47 @@ rather than hidden.
 → detail: `references/analysis.md`.
 
 ### 9d. Publication-ready Methods section + acknowledgment
-Generate a drop-in LC-MS/MS Methods section straight from the facility raw data,
-with the correct UC Davis Proteomics Core instrument-grant acknowledgment:
+Generate a drop-in LC-MS/MS Methods section from the facility raw data and the session's own
+records, with the correct UC Davis Proteomics Core instrument-grant acknowledgment:
 ```
 python3 scripts/make_methods.py --raw /path/to/*.d \
-    --fasta-meta ./search.fasta.meta.json \
+    --fasta-meta <session>/input/search.fasta.meta.json \
+    --params <session>/input/wf/<params_file> \
+    --search-prov <session>/output/search/search_provenance.json \
+    --workflow-manifest <session>/input/wf/workflow.manifest.json \
     --out <session>/output/methods.md --de-dir <session>/output/tables
 python3 scripts/to_docx.py --in <session>/output/methods.md \
     --out <session>/output/methods.docx
 ```
-It extracts the acquisition parameters from the raw metadata (Bruker `.d`
-`analysis.tdf`; Thermo by facility filename prefix), fills the rest from facility
-defaults **tagged `[facility default — confirm]`** (the LC column defaults to a
-PepSep C18 10 cm × 150 µm, 1.5 µm — override with `--lc-column`), builds a
-parameter table showing the source of each value, and appends the instrument's
-grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 → S10OD026918-01A1;
-timsTOF → Dr. Neil Hunter / HHMI). `--fasta-meta` writes the **Sequence database**
-paragraph journals require — organism, proteome ID, UniProt release, database type,
-entry count, and the contaminant library with its citation. Without it that
-paragraph is left blank and tagged, never filled with a guess. **Verify the draft
-against the params table and
-polish the prose; keep the acknowledgment exact** (confirm wording at the source
-URL). This can also be run standalone — just point `--raw` at facility data, no
-search/DE needed. → detail: `references/methods.md`.
+(Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet.)
+
+What it extracts, and what it only defaults:
+- It extracts the acquisition parameters from the raw metadata (Bruker `.d` `analysis.tdf`;
+  Thermo by facility filename prefix).
+- It fills the rest from facility defaults **tagged `[facility default — confirm]`**. The LC
+  column defaults to a PepSep C18 10 cm × 150 µm, 1.5 µm; override it with `--lc-column`.
+- It builds parameter tables showing the source of each value.
+- It appends the instrument's grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 →
+  S10OD026918-01A1; timsTOF → Dr. Neil Hunter / HHMI).
+
+What each input adds:
+- `--fasta-meta` writes the **Sequence database** paragraph: organism, proteome ID, UniProt
+  release, database type, entry count, and the contaminant library with its citation.
+- `--params` / `--search-prov` / `--workflow-manifest` write the **Database search** paragraph
+  from the parameters the search actually ran with: engine, the version that ran, cleavage rule,
+  missed cleavages, peptide/charge/m/z ranges, modifications, mass tolerances, precursor FDR,
+  library mode, and MBR.
+- `--de-dir` writes the **Differential expression** paragraph from `de_provenance.json`. It states
+  significance as run_de.R applies it: adj.P.Val only, with |log2FC| a volcano reference line,
+  never presented as a filter.
+
+A value in no record prints as `____ [not recorded — confirm]`, never as a guess. If the raw files
+are not readable where you run it, add `--instrument "<name>" --acquisition <DIA|DDA>` from the
+workflow manifest: the Methods are then written from the session record, with the acquisition
+values blank and tagged. **Verify the draft against the parameter tables and polish the prose;
+keep the acknowledgment exact** (confirm the wording at the source URL). This can also be run
+standalone — point `--raw` at facility data; no search or DE is needed. → detail:
+`references/methods.md`.
 
 ### 10. Reproducibility bundle (mandatory)
 Assemble the bundle that makes the whole analysis reproducible:
@@ -1468,18 +1486,38 @@ the numbers.
 ```
 python3 scripts/session.py finalize --dir <session> --zip
 ```
-This tidies `output/` (tables→`tables/`, figures→`figures/`), writes the session
-`README.md` (and `DIFFERENCES.md` for a re-analysis), and zips the session for easy
-sharing. Then summarize: data type (instrument + acquisition), engine + **pinned
-version**, mass accuracy **and its source**, the skill's `defaults_version`, FASTA
-source, DE method, and per-contrast significant counts. Point them at the
-**session folder** and its `README.md`, then `AI_Analysis_Report.md` (the
-interpretation), `OUTPUT_FILES.md` (what every file is), `tables/methods.txt`
-verbatim (the Methods paragraph — don't paraphrase), **`tables/reproducibility_log.R`
-(the analysis as plain R — say this is where the code is; it is what most people
-mean when they ask)**, `reproducibility/REPRODUCE.md` (the pinned recipe, for
-re-running the search too), and — for a re-analysis — `DIFFERENCES.md` + the
-`comparison/COMPARISON.md`.
+This tidies `output/` (tables→`tables/`, figures→`figures/`) and makes sure the session carries
+**publication Methods**: `output/methods.md` + `.docx`, covering LC-MS acquisition, the search
+(engine, pinned version, parameters, FDR), the sequence database and contaminants, the DE, and the
+instrument-grant acknowledgment. If step 9d did not write them, `make_methods.py` does it here. An
+existing `methods.md` is never overwritten; if it lacks a section, a complete draft is written
+beside it as `methods_complete_draft.md`. Finalize then writes the **repository-deposit package**
+`output/DATA_SUBMISSION/`: `HOW_TO_SUBMIT.md`/`.html`, a pre-filled SDRF `sdrf.tsv`,
+`protocols.txt`, `files_to_upload.tsv`, and `prepare_upload.sbatch`. Never run
+`prepare_upload.sbatch` yourself: it reads every raw file, so the user submits it with `sbatch`
+when ready. Finalize also writes the session `README.md` (and `DIFFERENCES.md` for a re-analysis)
+and **`MANIFEST.txt`** at the session root, which lists every part as `[OK]` or `[SKIPPED] <name>
+-- <reason>`. Last, it zips the session, leaving out the raw data and `upload_staging/`.
+`--no-deposit` skips only the package. → detail: `references/deposit.md`.
+
+**Read `MANIFEST.txt` and relay every `[SKIPPED]` line with its reason** (e.g. "the Word copy of
+the Methods was skipped: pandoc/python-docx not installed"). Then summarize: data type (instrument
++ acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill's
+`defaults_version`, FASTA source, DE method, and per-contrast significant counts. Point them at the
+**session folder** and its `README.md`, then:
+- `AI_Analysis_Report.md` (the interpretation)
+- `OUTPUT_FILES.md` (what every file is)
+- **`output/methods.md`** (the publication Methods; its `[... — confirm]` tags must be resolved
+  before publishing)
+- `tables/methods.txt` verbatim (the DE record — don't paraphrase)
+- **`tables/reproducibility_log.R`** (the analysis as plain R — say this is where the code is; it
+  is what most people mean when they ask)
+- `reproducibility/REPRODUCE.md` (the pinned recipe, for re-running the search too)
+- **`output/DATA_SUBMISSION/HOW_TO_SUBMIT.md`** (how to deposit the data in PRIDE or MassIVE from
+  HIVE). Say how many `TO-FILL` cells `sdrf.tsv` has (`deposit.sdrf_to_fill` in finalize's
+  output), and that these are facts only the user knows — tissue, disease, sex, age, what the
+  groups are — which the skill never guesses.
+- for a re-analysis, `DIFFERENCES.md` + `comparison/COMPARISON.md`.
 
 If anything was recorded with `report_issue.sh` this session, say so in one line and where
 it went (`report_issue.sh --where`), so the user knows the Core will see it.
