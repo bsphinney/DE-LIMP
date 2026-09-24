@@ -42,6 +42,26 @@ figs <- list()
 add_fig <- function(file, type, caption) figs[[length(figs) + 1]] <<- list(file = basename(file), type = type, caption = caption)
 THEME <- theme_bw(base_size = 13) + theme(panel.grid.minor = element_blank(),
                                           plot.title = element_text(face = "bold"))
+
+# Group colours: ONE definition shared by the PCA, the heatmap annotation and the violins,
+# so a group is the same colour in every figure. pheatmap's default hue wheel spaced 10
+# groups so closely that Old_JPH3 and Old_Kv21 came out as the same pink. These were picked
+# with an OKLab colour-difference check over ALL pairs (groups sit side by side in any
+# order): up to 6 groups stay apart for colour-blind readers (deltaE >= 10.7), all 10 stay
+# apart for normal vision (deltaE >= 15), and none is close to the two detection-status
+# colours below. Groups are always labelled too, so colour is never the only cue.
+GROUP_PAL <- c("#2a78d6", "#fb6ca0", "#78aa36", "#642ea4", "#2bc4ea",
+               "#83382e", "#a54d9f", "#c65e0b", "#a491fe", "#144d6e")
+group_colours <- function(lvls) {
+  n <- length(lvls)
+  cols <- GROUP_PAL[seq_len(min(n, length(GROUP_PAL)))]
+  if (n > length(GROUP_PAL)) {
+    message("[figures] ", n, " groups: colours past the ", length(GROUP_PAL),
+            "th cannot all be told apart; rely on the group labels")
+    cols <- c(cols, grDevices::hcl.colors(n - length(GROUP_PAL), "Dark 3"))
+  }
+  stats::setNames(cols, lvls)
+}
 gene_label <- function(df) {
   # Must be one value PER ROW: a bare NA makes ifelse() return a single element, and the
   # caller's rownames(H) <- ... then dies with "dimnames [1] not equal to array extent".
@@ -70,24 +90,34 @@ for (f in de_files) {
       scale_color_manual(values = c(Up = "#d6604d", Down = "#4393c3", NS = "grey75"), name = NULL) +
       geom_vline(xintercept = c(-logfc_ref, logfc_ref), linetype = "dashed", color = "grey50") +
       geom_hline(yintercept = -log10(adjp_thr), linetype = "dashed", color = "grey50") +
-      # Sit the labels at the FOOT of each line, tucked inward (hjust 0 = extend right of
-      # the left line, 1 = extend left of the right line). Anchoring them at the top
-      # collided with the repelled point labels and clipped at the panel edge.
-      annotate("text", x = c(-logfc_ref, logfc_ref), y = min(nlogp, na.rm = TRUE),
-               label = sprintf("%.3g-fold", 2^logfc_ref), hjust = c(-0.12, 1.12),
-               vjust = -0.6, size = 2.9, color = "grey40") +
+      # Label the reference lines in the MARGIN, as ticks on a secondary axis, never inside
+      # the panel: labels at the top of the lines collided with the repelled gene labels,
+      # and labels tucked inward at their foot overprinted each other ("2-fold2-fold")
+      # whenever the lines were close. check.overlap drops a label rather than overprint.
+      scale_x_continuous(sec.axis = dup_axis(name = NULL, breaks = c(-logfc_ref, logfc_ref),
+                                             labels = sprintf("%.3g×", 2^c(-logfc_ref, logfc_ref)))) +
+      scale_y_continuous(sec.axis = dup_axis(name = NULL, breaks = -log10(adjp_thr),
+                                             labels = sprintf("adj.P %.2g", adjp_thr))) +
+      guides(x.sec = guide_axis(check.overlap = TRUE)) +
+      # Two short lines: one long line ran past the device edge and was clipped.
       labs(title = paste0("Volcano — ", ct),
-           subtitle = sprintf("%d up, %d down at adj.P < %.2g; dashed lines mark %.3g-fold (reference, not a cutoff)",
-                              sum(d$sig == "Up"), sum(d$sig == "Down"), adjp_thr, 2^logfc_ref),
-           x = "log2 fold change", y = "-log10 adjusted p-value") + THEME
+           subtitle = sprintf("%d up, %d down at adj.P < %.2g (BH)\nDashed lines: %.3g-fold and adj.P %.2g (fold is a reference, not a cutoff)",
+                              sum(d$sig == "Up"), sum(d$sig == "Down"), adjp_thr, 2^logfc_ref, adjp_thr),
+           x = "log2 fold change", y = "-log10 adjusted p-value") + THEME +
+      theme(plot.title.position = "plot",
+            axis.text.x.top = element_text(color = "grey40", size = 9),
+            axis.text.y.right = element_text(color = "grey40", size = 9),
+            axis.ticks.x.top = element_line(color = "grey50"),
+            axis.ticks.y.right = element_line(color = "grey50"))
     if (has_repel && nrow(top)) p <- p + ggrepel::geom_text_repel(
       data = top, aes(label = lab), size = 3, max.overlaps = 20, show.legend = FALSE)
     fn <- file.path(outdir, sprintf("volcano_%s.png", make.names(ct)))
     ggsave(fn, p, width = 7, height = 6, dpi = 200)
     add_fig(fn, "volcano", sprintf(paste("Volcano plot for %s: log2 fold change vs significance.",
       "Coloured points are significant at adj.P < %.2g (Benjamini-Hochberg); no fold-change",
-      "filter is applied. Vertical dashed lines mark %.3g-fold for reference only, so a",
-      "coloured point inside them is a confidently measured small change, not an error."),
+      "filter is applied. Vertical dashed lines mark %.3g-fold (labelled on the top axis) for",
+      "reference only, so a coloured point inside them is a confidently measured small change,",
+      "not an error."),
       ct, adjp_thr, 2^logfc_ref))
 
     if ("P.Value" %in% names(d)) {
@@ -191,6 +221,7 @@ if (file.exists(em_path)) {
         geom_point(size = 3) +
         labs(title = "Sample PCA",
              x = sprintf("PC1 (%.1f%%)", ve[1]), y = sprintf("PC2 (%.1f%%)", ve[2])) + THEME
+      if (!is.null(grp)) p <- p + scale_color_manual(values = group_colours(levels(grp)))
       if (has_repel) p <- p + ggrepel::geom_text_repel(size = 3, show.legend = FALSE)
       fn <- file.path(outdir, "pca.png")
       ggsave(fn, p, width = 7, height = 5.5, dpi = 200)
@@ -234,6 +265,7 @@ if (file.exists(em_path)) {
       # pheatmap manages its own device; passing filename= avoids the clipped output
       # produced by wrapping it in png()/dev.off().
       pheatmap::pheatmap(H, scale = "row", annotation_col = ann,
+                         annotation_colors = if (!is.null(grp)) list(Group = group_colours(levels(grp))) else NA,
                          show_rownames = nrow(H) <= 60, show_colnames = TRUE,
                          fontsize_row = 8, fontsize_col = 9,
                          main = sprintf("Top %d differential proteins (row z-score)", nrow(H)),
