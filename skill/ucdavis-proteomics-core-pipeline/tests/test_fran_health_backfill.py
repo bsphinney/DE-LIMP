@@ -1379,6 +1379,58 @@ class ReviewFixTests(unittest.TestCase):
                 fd._in_core_group = saved
                 os.chmod(drop, 0o755)
 
+    def test_D_an_entry_that_is_a_symlink_is_replaced_never_followed(self):
+        """Re-review, DESTRUCTIVE: incoming/<name>__<hash8> as a symlink to the search dir made
+        the relink loop unlink report.parquet / report.log.txt INSIDE the real search dir, and
+        chmod it to 2775."""
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write("diann log\n")
+            os.chmod(out, 0o750)
+            drop = os.path.join(d, "incoming")
+            os.makedirs(drop)
+            entry = os.path.join(drop, fd.entry_name(out))
+            os.symlink(out, entry)                                    # a legacy bare-link entry
+            before = {f: (os.stat(os.path.join(out, f)).st_ino,
+                          open(os.path.join(out, f), "rb").read())
+                      for f in ("report.parquet", "report.log.txt")}
+            mode = os.stat(out).st_mode & 0o7777
+            r = self._stage(d, out)[1]
+            self.assertTrue(r["staged"], r.get("detail"))
+            for f, (ino, body) in before.items():
+                p = os.path.join(out, f)
+                self.assertFalse(os.path.islink(p), f)
+                self.assertEqual((os.stat(p).st_ino, open(p, "rb").read()), (ino, body), f)
+            self.assertEqual(os.stat(out).st_mode & 0o7777, mode)
+            self.assertFalse(os.path.islink(entry))
+            self.assertTrue(os.path.isdir(entry))
+            self.assertEqual(os.path.realpath(os.path.join(entry, "report.parquet")),
+                             os.path.realpath(os.path.join(out, "report.parquet")))
+            # and a withdrawal refuses to write through a symlink entry
+            os.rename(entry, entry + ".real")
+            os.symlink(out, entry)
+            done, why = fd._withdraw_qc_entry(entry, "x", "me")
+            self.assertIsNone(done)
+            self.assertIn("symlink", why)
+            self.assertFalse(os.path.exists(os.path.join(out, fd.MANIFEST)))
+
+    def test_D_entry_not_writable_is_never_listed_as_would_stage(self):
+        """do_stage's entry_not_writable result carried eligible: True, so backfill --apply listed
+        a search it had just failed to stage as would_stage."""
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "Plasma_liver2")
+            drop = os.path.join(d, "incoming")
+            os.makedirs(drop)
+            with open(os.path.join(drop, fd.entry_name(out)), "w") as fh:
+                fh.write("not a directory")                      # the entry path is occupied
+            with env_vars(FRAN_DROP_DIR=drop, FRAN_HEALTH="off"):
+                res = fd.do_stage(Args(out))
+                self.assertEqual((res["eligible"], res["staged"], res["reason"]),
+                                 (False, False, "entry_not_writable"))
+                row = fd.plan_backfill([out], apply=True, prefixes=(os.path.realpath(d) + "/",))[0]
+            self.assertEqual((row["decision"], row["reason"]), ("skip", "entry_not_writable"))
+
     # E ----------------------------------------------------------------------------------------
     def test_E_an_explicit_meta_for_another_database_is_ignored(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1398,10 +1450,17 @@ class ReviewFixTests(unittest.TestCase):
                     c = fd.check(Args(out, fasta_meta=human + ".meta.json"))
             self.assertIn("--fasta-meta ignored", err.getvalue())
             self.assertIn("fasta_meta_ignored", c)
-            self.assertEqual((c["organism"], c["fasta_path"]), (None, None))
+            # the wrong meta is dropped; the sidecar tied to the search's own --fasta decides
+            self.assertEqual((c["organism"], c["fasta_path"]), ("Mus musculus", mouse))
             with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
                 c = fd.check(Args(out, fasta_meta=mouse + ".meta.json"))
             self.assertEqual((c["organism"], c["fasta_path"]), ("Mus musculus", mouse))
+            self.assertNotIn("fasta_meta_ignored", c)
+            # ...and with no sidecar of the search's own FASTA, blank -- never the wrong one
+            os.unlink(mouse + ".meta.json")
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
+                c = fd.check(Args(out, fasta_meta=human + ".meta.json"))
+            self.assertEqual((c["organism"], c["fasta_path"]), (None, None))
 
     # F ----------------------------------------------------------------------------------------
     def test_F_coursework_is_never_staged_by_stage_or_backfill(self):
@@ -1569,11 +1628,12 @@ class ReviewerReproTests(unittest.TestCase):
         code, r, err = run_quiet(fd.stage, Args(out, fasta_meta=os.path.join(
             sess_in, "search.fasta.meta.json")))
         self.assertTrue(r["staged"])
-        self.assertEqual((r["organism"], r["taxon"], r["fasta_path"]), (None, None, None))
+        mouse = os.path.join(P, "mouse.fasta")
+        self.assertEqual((r["organism"], r["taxon"], r["fasta_path"]), ("Mus musculus", 10090, mouse))
         self.assertIn("the search read", r["fasta_meta_ignored"])
         self.assertIn("--fasta-meta ignored", err)
         m = json.load(open(os.path.join(r["entry"], fd.MANIFEST)))
-        self.assertEqual((m["organism"], m["fasta_path"]), (None, None))
+        self.assertEqual((m["organism"], m["fasta_path"]), ("Mus musculus", mouse))
 
 
 # ------------------------------------------------------------------------------ backfill --

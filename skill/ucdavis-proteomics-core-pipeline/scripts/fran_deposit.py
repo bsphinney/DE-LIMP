@@ -326,7 +326,8 @@ def explicit_meta_mismatch(out, meta):
     """Why an explicit --fasta-meta does NOT describe this search's database, or None (it matches,
     or the search's FASTA is unknown so there is nothing to check against). The same tie as for a
     sidecar found nearby: an explicit one got no check at all, so a wrong --fasta-meta put another
-    search's database (and organism) into the manifest."""
+    search's database (and organism) into the manifest. A mismatched one is dropped and the
+    sidecar tied to the search's own FASTA is used instead, if there is one."""
     used = search_fastas(os.path.abspath(out))
     if not meta or not used:
         return None
@@ -353,7 +354,7 @@ def _meta_candidates(out, explicit_meta=None):
     search's FASTA is unknown, only a LONE meta is used -- several are a guess, and a guessed
     database or organism is a claim about the data (architectural rule #2)."""
     if explicit_meta and explicit_meta_mismatch(out, explicit_meta):
-        return []                  # a mismatched explicit meta: blank, never another guess
+        explicit_meta = None       # the wrong database: dropped; the search's own sidecar decides
     cands = [explicit_meta] if explicit_meta else []
     used = search_fastas(os.path.abspath(out))
     cands += [f + ".meta.json" for f in used if os.path.isfile(f + ".meta.json")]
@@ -745,6 +746,9 @@ def _withdraw_qc_entry(entry, why, user):
     rather than deleted: the manifest gets `"qc": true, "exclude": true`, which FRAN's ingester
     honours. Nothing in the shared drop dir is removed. Returns (entry, None) when the entry is
     marked, or (None, why-not) -- a failure is reported as one, never as QC kept out."""
+    if os.path.islink(entry):
+        return None, (f"{entry} is a symlink, not a drop entry with a manifest: nothing is written "
+                      f"through it (re-stage it to get a real entry)")
     mp = os.path.join(entry, MANIFEST)
     try:
         with open(mp) as fh:
@@ -917,11 +921,14 @@ def check(a):
         return r
 
     bad_meta = explicit_meta_mismatch(out, a.fasta_meta)
+    org, tax, org_src = organism_from_meta(out, a.fasta_meta)
     if bad_meta:
         r["fasta_meta_ignored"] = bad_meta
-        sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored ({bad_meta}); the organism "
-                         f"and database are left blank rather than taken from the wrong search\n")
-    org, tax, org_src = organism_from_meta(out, a.fasta_meta)
+        sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored ({bad_meta}); "
+                         + (f"using the sidecar of the FASTA the search read ({org_src})"
+                            if org_src else "no sidecar of the FASTA the search read, so the "
+                                            "organism and database are left blank")
+                         + "\n")
     # None, never "": FRAN's read_manifest rejects an empty search_name or organism outright
     r["organism"] = (a.organism or "").strip() or org or None
     fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
@@ -1043,7 +1050,7 @@ def do_stage(a):
     # manifest was written, which is the same fact.
     staged_at = staged_by = None
     mp = os.path.join(entry, MANIFEST)
-    if os.path.isfile(mp):
+    if not os.path.islink(entry) and os.path.isfile(mp):
         try:
             with open(mp) as fh:
                 prior_man = json.load(fh)
@@ -1067,6 +1074,12 @@ def do_stage(a):
     # makedirs' mode and open() are filtered by the umask, and with a 022 umask the next Core
     # member could neither withdraw nor re-stage this entry -- the relink below died in os.unlink.
     try:
+        # An entry that is itself a SYMLINK (a legacy bare-link entry, or one pointing at the search
+        # dir) must never be followed: clearing it "relinked" report.parquet and report.log.txt
+        # INSIDE THE REAL SEARCH DIR -- unlinked, replaced by self-referential links -- and the
+        # chmod below then set the search dir to 2775. Remove the link itself; build a real entry.
+        if os.path.islink(entry):
+            os.unlink(entry)
         if os.path.isdir(entry):
             for f in os.listdir(entry):
                 fp = os.path.join(entry, f)
@@ -1085,7 +1098,7 @@ def do_stage(a):
         except OSError:
             pass                      # another member's entry: its owner already set it
     except OSError as e:
-        return {**c, "staged": False, "reason": "entry_not_writable",
+        return {**c, "eligible": False, "staged": False, "reason": "entry_not_writable",
                 "detail": f"cannot rewrite {entry} ({e.strerror or e}): it was staged by another "
                           f"account without group write. A permission problem, not a decision -- "
                           f"its owner can run: chmod -R g+w {entry}"}

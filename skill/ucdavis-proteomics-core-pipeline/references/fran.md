@@ -385,8 +385,14 @@ and is not recorded.
 the next Core member could neither withdraw nor re-stage an entry.
 
 **An explicit `--fasta-meta` must describe the search's database too.** If it does not match
-the search's own FASTA, it is ignored with a warning (`fasta_meta_ignored`) and organism and
+the search's own FASTA, it is ignored with a warning (`fasta_meta_ignored`), and the sidecar tied
+to the FASTA the search read is used instead. When there is no such sidecar, organism and
 database stay blank. They are never taken from another search.
+
+**A drop entry is never followed as a symlink.** An `incoming/<name>__<hash8>` that is itself a
+link (a legacy bare-link entry) is removed and replaced by a real entry. Clearing it through the
+link used to unlink `report.parquet` and `report.log.txt` inside the real search directory and
+chmod that directory to 2775. A withdrawal never writes through such a link either.
 
 An ineligible run is **not** a failure of the analysis. Note it in one line and carry on with
 DE — never block, retry, or ask the user to fix it.
