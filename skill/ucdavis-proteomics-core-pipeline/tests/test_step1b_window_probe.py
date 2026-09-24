@@ -56,6 +56,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 sys.path.insert(0, HERE)
 
 import probe_window  # noqa: E402
@@ -1192,7 +1193,9 @@ class Step1bChainTests(unittest.TestCase):
         return out, env, json.loads(p.stdout)
 
     def _run_step1b(self, out, env):
-        env = {k: v for k, v in env.items() if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")}
+        env = job_env(os.path.dirname(out),
+                      base={k: v for k, v in env.items()
+                            if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")})
         return subprocess.run(["bash", os.path.join(out, "step1b_window.sbatch")],
                               cwd=out, capture_output=True, text=True, env=env, timeout=240)
 

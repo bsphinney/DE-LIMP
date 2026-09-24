@@ -885,6 +885,18 @@ def main():
                          "across steps become inconsistent -- only for deliberate testing. "
                          "It does not override an INVALID value (0, negative, non-numeric, "
                          "set twice), a bad --window, or an unparseable cfg.")
+    ap.add_argument("--no-notify", action="store_true",
+                    help="no Slack post from the chain's jobs (same as SKILL_SLACK=0); the "
+                         "run log and the FRAN hand-over still happen. "
+                         "See references/notifications.md")
+    ap.add_argument("--no-fran", action="store_true",
+                    help="step 5 never hands the search to FRAN (same as FRAN_DEPOSIT=off when "
+                         "generating); step 7c can still stage it")
+    ap.add_argument("--fran-name", help="the session's descriptive name, for stage --name")
+    qcx = ap.add_mutually_exclusive_group()
+    qcx.add_argument("--qc", action="store_true",
+                     help="an instrument QC / standard run: never staged from a job")
+    qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
     a = ap.parse_args()
 
     raws = []
@@ -1014,7 +1026,23 @@ def main():
         _pa, _aa, _qa = a.partition, a.account, a.qos
         _ps, _as_, _qs = a.partition, a.account, a.qos
 
-    def write(name, body):
+    # The job-end hook (notify_slack.wrap_job_script, the one definition: run log -> FRAN ->
+    # Slack). Step 5 ends the search: it reports success and failure, and stages a finished
+    # search for FRAN. Every earlier step reports only a failure: the rest of the chain waits on
+    # it with afterok and never starts, so step 5 would never get to say anything. An array
+    # reports its first failing task only.
+    import notify_slack
+
+    def write(name, body, stage=None, hours=None, final=False):
+        if stage:
+            # final = step 5, whose quant count is the chain's completeness guard: the one step
+            # that may stage for FRAN
+            body = notify_slack.wrap_job_script(body, out, final=final, time_limit_h=hours,
+                                                stage=stage, slack=not a.no_notify,
+                                                fran=not a.no_fran, fran_guarded=final,
+                                                fran_name=a.fran_name,
+                                                qc=(True if a.qc else
+                                                    False if a.not_qc else None)).rstrip("\n")
         p = os.path.join(out, name)
         open(p, "w").write(body + "\n"); os.chmod(p, 0o755); return name
 
@@ -1033,7 +1061,8 @@ def main():
             f'{DN} --fasta {fasta} --fasta-search --predictor --gen-spec-lib \\',
             f'  --out-lib {D}/step1.speclib --out {D}/step1_lib.parquet \\',
             f'  --threads {a.libpred_cpus} {flags}',
-            must_exist(predicted, "the predicted spectral library")]))
+            must_exist(predicted, "the predicted spectral library")]),
+            stage="step 1/5 library prediction", hours=a.libpred_time)
 
     # Step 1b — measure the scan-window radius (and, when planned, mass accuracy) ONCE, so
     # steps 2-5 share it.
@@ -1167,7 +1196,8 @@ def main():
               if "window" in measure else []),
             *(['echo "mass accuracy = $M (per level: the median of the runs listed above, or the '
                'documented value; pinned for steps 2-5)"'] if mess else []),
-            f'echo "fully-resolved parameters -> {resolved_cfg}"']))
+            f'echo "fully-resolved parameters -> {resolved_cfg}"']),
+            stage=f"step 1b/5 measuring {what}", hours=PROBE_WALL_HOURS)
     # steps 2-5 read the measured values at RUNTIME so every pass uses the identical ones --
     # after checking they are there (needs_measured: a missing file expands to nothing)
     wflag = f'--window $(cat {wtxt}) ' if "window" in measure else ''
@@ -1196,7 +1226,8 @@ def main():
         f'{DN} --f "$FILE" --fasta {fasta} --lib {predicted} \\',
         f'  --temp {D}/quant_step2 --rt-profiling --gen-spec-lib --quant-ori-names \\',
         f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
-        must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]))
+        must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]),
+        stage="step 2/5 first pass (array)", hours=a.time_per_file)
 
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
@@ -1209,7 +1240,8 @@ def main():
         f'  --rt-profiling --gen-spec-lib --out-lib {empirical} \\',
         f'  --temp {D}/quant_step2 --out {D}/step3_assembly.parquet \\',
         f'  --threads {a.assembly_cpus} {wflag}{mflag}{flags}',
-        must_exist(empirical, "the empirical spectral library")]))
+        must_exist(empirical, "the empirical spectral library")]),
+        stage="step 3/5 empirical library assembly", hours=a.assembly_time)
 
     # Step 4 — final pass (array): empirical lib -> per-file .quant
     # --xic alone is not enough. DIA-NN names the XIC folder after the --out report
@@ -1246,7 +1278,8 @@ def main():
         f'{DN} --f "$FILE" --fasta {fasta} --lib "$LIBPRIV/lib.parquet" \\',
         f'  --temp {D}/quant_step4 --quant-ori-names{xic_arg}{xic_out} \\',
         f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
-        must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]))
+        must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]),
+        stage="step 4/5 final pass (array)", hours=a.time_per_file)
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
     s5 = write("step5_report.sbatch", "\n".join([
@@ -1285,7 +1318,8 @@ def main():
         f'if [ "$NQ" -ne {n} ]; then '
         f'echo "FAILED: report built from $NQ of {n} runs -- a step-4 task produced no .quant." >&2; '
         f'exit 1; fi',
-        f'echo "OK: report built from all {n} runs"']))
+        f'echo "OK: report built from all {n} runs"']),
+        stage="step 5/5 cross-run report", hours=a.assembly_time, final=True)
 
     # submit.sh — chain the steps with afterok dependencies
     sub_lines = ["#!/bin/bash", "set -euo pipefail", f'cd "{out}"',

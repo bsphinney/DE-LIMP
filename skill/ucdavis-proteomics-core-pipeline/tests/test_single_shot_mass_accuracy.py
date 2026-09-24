@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, HERE)
 sys.path.insert(0, SCRIPTS)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 
 import diann_parallel as dp  # noqa: E402
 import run_search  # noqa: E402
@@ -102,7 +103,7 @@ class SingleShotMassAccTests(unittest.TestCase):
         return raws, fasta, cfg, tools, bundle
 
     def _env(self, d):
-        env = {k: v for k, v in os.environ.items() if k != "DOTNET_ROOT"}
+        env = job_env(d, base={k: v for k, v in os.environ.items() if k != "DOTNET_ROOT"})
         root = os.path.join(d, "dotnet8")
         env.update(PROTEOMICS_DOTNET_DIR=root if os.path.isdir(root) else fx._fake_dotnet_root(d),
                    FAKE_ARGV_LOG=os.path.join(d, "argv.txt"), FAKE_SEARCH_SLEEP="0",

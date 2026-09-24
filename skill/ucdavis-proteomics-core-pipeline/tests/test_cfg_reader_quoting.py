@@ -36,6 +36,8 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 
 import diann_parallel as dp  # noqa: E402
 import run_search  # noqa: E402
@@ -209,8 +211,8 @@ class PhosphoCfgRunsTests(unittest.TestCase):
                                        capture_output=True, text=True)
                     self.assertEqual(n.returncode, 0, f"{f}: {n.stderr}")
 
-            env = dict(os.environ, ARGV_OUT=os.path.join(d, "argv"),
-                       FAKE_TOUCH=os.path.join(out, "step1.predicted.speclib"))
+            env = job_env(d, ARGV_OUT=os.path.join(d, "argv"),
+                          FAKE_TOUCH=os.path.join(out, "step1.predicted.speclib"))
             s1 = subprocess.run(["bash", os.path.join(out, "step1_libpred.sbatch")], cwd=d,
                                 env=env, capture_output=True, text=True)
             self.assertEqual(s1.returncode, 0, s1.stdout + s1.stderr)

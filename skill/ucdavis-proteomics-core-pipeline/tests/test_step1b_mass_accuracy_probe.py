@@ -49,6 +49,8 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 
 import probe_window  # noqa: E402
 
@@ -681,9 +683,9 @@ class Step1bMassAccChainTests(unittest.TestCase):
         return open(os.path.join(out, name)).read()
 
     def _run_step1b(self, d, out):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")}
-        env["FAKE_ARGV_LOG"] = os.path.join(d, "argv.txt")
+        env = job_env(d, base={k: v for k, v in os.environ.items()
+                               if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")},
+                      FAKE_ARGV_LOG=os.path.join(d, "argv.txt"))
         return subprocess.run(["bash", os.path.join(out, "step1b_window.sbatch")], cwd=out,
                               capture_output=True, text=True, env=env, timeout=240)
 
@@ -772,10 +774,11 @@ class Step1bMassAccChainTests(unittest.TestCase):
             self.assertEqual(resolved.count("--window 7"), 1, resolved)
 
     def _run_step(self, d, out, name, task=0):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")}
         argv_log = os.path.join(d, "argv_%s.txt" % name.split("_")[0])
-        env.update(FAKE_ARGV_LOG=argv_log, SLURM_ARRAY_TASK_ID=str(task), FAKE_SEARCH_SLEEP="0")
+        env = job_env(d, base={k: v for k, v in os.environ.items()
+                               if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")},
+                      FAKE_ARGV_LOG=argv_log, SLURM_ARRAY_TASK_ID=str(task),
+                      FAKE_SEARCH_SLEEP="0")
         p = subprocess.run(["bash", os.path.join(out, name)], cwd=out, capture_output=True,
                            text=True, env=env, timeout=120)
         return p, argv_log

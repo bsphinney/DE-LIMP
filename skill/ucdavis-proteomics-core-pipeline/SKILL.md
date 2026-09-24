@@ -1049,6 +1049,23 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
     mistake. The chain *is* generated — run **`bash <out>/submit.sh`**. Exit 3 here is
     that message, not a failed search; check the routing line it prints. Want one job
     script anyway? `--no-parallel`.
+- **Every search job ends with the job-end hook**, on the cluster, whether or not anyone is
+  watching. The last job:
+  - logs the run in the Core's run log (`record_run.py`);
+  - if it is a DIA-NN search that succeeded, hands it to FRAN (step 7c);
+  - posts "finished" or "FAILED" to the Core's Slack channel.
+
+  Earlier chain jobs report only a failure. The job's exit status is unchanged and no webhook
+  is ever in it. **Before submitting a Core search, tell the user in one line** that its end
+  will be posted to the Core Slack channel and staged for FRAN. **If they say not to**, pass
+  `--no-notify` (no post) and/or `--no-fran` (not to FRAN) to `run_search.py`. Pass them at
+  generation, never as environment variables, which do not reach a job in `hive_remote`.
+  **Always pass `--fran-name "<the session's descriptive name>"`**: the job-end hook hands the
+  search to FRAN under that name. Also pass **`--qc`** when the user describes the run as QC, or
+  it is an instrument QC standard (e.g. a HeLa QC series), so it is never handed to FRAN. If
+  FRAN's QC rule misfires on a real experiment whose name contains a standalone "QC", pass
+  `--not-qc` instead. This does not replace 7b: still watch the search.
+  → `references/notifications.md`.
 - Output is normalized to the **DE contract**: a DIA-NN-shaped `report.parquet`.
 → detail: `references/search-engines.md`.
 
@@ -1099,8 +1116,18 @@ once `COMPLETED` and `report.parquet` exists. → detail: `references/watcher.md
 
 ### 7c. Hand the search to FRAN — automatic, Core searches only
 Every search the **UC Davis Proteomics Core** runs on HIVE goes into
-[FRAN](https://fran.stan-proteomics.org), the Core's cross-search corpus. **Do this without
-being asked** — the user is told it happened, never prompted for it. A corpus filled only
+[FRAN](https://fran.stan-proteomics.org), the Core's cross-search corpus. **The last job of a
+DIA-NN search stages it itself** when the search finishes (the job-end hook, step 7), so it
+reaches FRAN even with the laptop closed. Its result is the `fran_deposit stage:` line in that
+job's log and `<out>/fran_deposit.json`. Some searches are **left to you**:
+- FragPipe and Radiant searches, which have no completeness guard in the job
+  (`left_to_agent`);
+- a job that ended too close to its time limit (`near_time_limit`);
+- a stage that shows `error`.
+
+For those, once the search is done, run `check` and, when eligible, `stage` below.
+`already_staged` means the job did it. **Do this without being asked**, unless the user opted
+out (`--no-fran`). The user is told it happened, never prompted for it. A corpus filled only
 with the searches somebody remembered answers "has anyone seen this peptide?" with a *no*
 that is really a *don't know*.
 
@@ -1134,8 +1161,8 @@ python3 scripts/fran_deposit.py verify --out <hive search out dir>   # later: di
 - **`verify`'s `staged_pending_cron` is success, not failure** — it means "handed over, the
   cron ingests on its next scan". Report it that way. The one state to act on is a
   `broken_links` warning: re-run `stage --force`.
-- Re-staging is safe and converges on one entry; `FRAN_DEPOSIT=off` or `--skip` opts a run
-  out. → detail: `references/fran.md`.
+- Re-staging is safe and converges on one entry. `--no-fran` at generation, `FRAN_DEPOSIT=off`
+  or `--skip` opts a run out. → detail: `references/fran.md`.
 
 ### 8. Differential expression
 ```
@@ -1497,11 +1524,19 @@ beside it as `methods_complete_draft.md`. Finalize then writes the **repository-
 `prepare_upload.sbatch` yourself: it reads every raw file, so the user submits it with `sbatch`
 when ready. Finalize also writes the session `README.md` (and `DIFFERENCES.md` for a re-analysis)
 and **`MANIFEST.txt`** at the session root, which lists every part as `[OK]` or `[SKIPPED] <name>
--- <reason>`. Last, it zips the session, leaving out the raw data and `upload_staging/`.
+-- <reason>`. Then it zips the session, leaving out the raw data, `upload_staging/` and DIA-NN's
+`.quant` intermediates (~30 MB per run, kept on disk).
 `--no-deposit` skips only the package. → detail: `references/deposit.md`.
+Finally it logs the run in the Core's run log (`record_run.py`) and posts **"analysis
+complete"** to the Core's Slack channel. The post carries the session, instrument, engine +
+version, significant proteins per contrast, and where the folder, the zip and
+`HOW_TO_SUBMIT.md` are. Neither step can fail finalize, and `--no-notify` skips only the post.
+Their outcomes are the last two lines of `MANIFEST.txt`. → `references/notifications.md`.
 
 **Read `MANIFEST.txt` and relay every `[SKIPPED]` line with its reason** (e.g. "the Word copy of
-the Methods was skipped: pandoc/python-docx not installed"). Then summarize: data type (instrument
+the Methods was skipped: pandoc/python-docx not installed"). `[INFO]` lines are notices, not
+missing parts, so do not relay them. Examples are the run log and Slack lines such as "Core
+notification -- not configured for this user". Then summarize: data type (instrument
 + acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill's
 `defaults_version`, FASTA source, DE method, and per-contrast significant counts. Point them at the
 **session folder** and its `README.md`, then:
@@ -1530,7 +1565,9 @@ FRAN ingests on its next pass" rather than implying it is already in the corpus.
 ## Recording skill problems (`report_issue.sh`)
 The skill is fixed from these reports. For a Core member they land in the Core's shared
 folder on HIVE, `/quobyte/proteomics-grp/skill_issues/`, one file per user per day, where the
-maintainers read them; nothing else about the session is sent anywhere.
+maintainers read them. A report holds only what you write in it. The Slack post at the end of
+the search or analysis counts them (`references/notifications.md`), so the Core sees them
+without anyone forwarding a file.
 ```
 bash scripts/report_issue.sh --title "<short name>" \
     --what "<what happened: the exact command, the exact error text, the path>" \
