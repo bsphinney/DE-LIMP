@@ -1319,6 +1319,122 @@ class TestEmailDraft(unittest.TestCase):
             self.assertIn("[BIOSHARE LINK", read(out))
 
 
+# ---------------------------------------------------------------------- identify --
+LRS_RUNS = [f"/data/JUL26/08132026__60SPD_DIA-LRS-{n}_S3-A1_1_{23600 + n}.d" for n in range(96, 126)]
+HEX_0756 = "0022066cd85f"
+
+
+def rec_0756(**kw):
+    return record(internal_id="PROT_0756", sid=HEX_0756, submitted="2026-07-15T16:09:50.151363-07:00",
+                  samples=[(f"LRS{n}", "c") for n in range(96, 126)], **kw)
+
+
+class TestIdentifyByName(unittest.TestCase):
+    """SKILL.md step 1: the submission is read from the names or the message, never guessed."""
+
+    def test_prot_number_in_a_folder_name(self):
+        self.assertEqual(cs.ids_in("/Data/lab/service/on_campus/Lab/PROT_0756/raw/x.d"),
+                         [("internal_id", "PROT_0756")])
+        self.assertEqual(cs.ids_in("prot-756_rerun"), [("internal_id", "PROT_0756")])
+
+    def test_12_hex_id_in_a_path(self):
+        self.assertEqual(cs.ids_in(f"/coreomics/projects/2026/07/{HEX_0756}/share/a.d"), [("id", HEX_0756)])
+
+    def test_numbers_that_are_not_ids(self):
+        # a 12-digit timestamp, an Exploris run counter, a hex-looking word with no digit, PROTEOMICS
+        for s in ("FLsep26_wa_202609090050.raw", "Ex08312026_380_JE21.raw", "/x/deadbeefcafe/a.raw",
+                  "/Volumes/proteomics/PROTEOMICS/a.d", "08132026__60SPD_DIA-LRS-96_S3-B1_1_23630.d"):
+            self.assertEqual(cs.ids_in(s), [], s)
+        self.assertEqual(cs.ids_in("submission 756 please"), [], "file-name rules for a path")
+        self.assertEqual(cs.ids_in("please search submission #756", typed=True), [("internal_id", "PROT_0756")])
+
+    def test_cli_named_none_and_ambiguous_without_a_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = child_env(tmp)
+            rc, out, p = run(["identify", "--no-lookup", "/svc/PROT_0756/raw/" + os.path.basename(LRS_RUNS[0])], env)
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_0756"), p.stderr)
+            self.assertIn("Is that right?", out["ask"])
+            self.assertIn(".submissions_db", out["never_search"])
+            rc, out, _ = run(["identify", "--no-lookup"] + LRS_RUNS, env)
+            self.assertEqual((rc, out["status"]), (2, "none"))
+            rc, out, _ = run(["identify", "--no-lookup", "/svc/PROT_0756/a.d", "--text", "or is it PROT_0757?"], env)
+            self.assertEqual((rc, out["status"]), (2, "ambiguous"))
+            self.assertEqual({c["submission"] for c in out["candidates"]}, {"PROT_0756", "PROT_0757"})
+
+    def test_no_token_asks_and_says_how_to_get_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = child_env(tmp, HOME=tmp)
+            env.pop("COREOMICS_TOKEN")
+            rc, out, _ = run(["identify"] + LRS_RUNS, env)
+            self.assertEqual((rc, out["status"]), (3, "needs_token"))
+            self.assertIn("~/.coreomics_token", out["token_help"])
+            self.assertIn("PROT", out["ask"])
+
+
+class TestIdentifyBySampleIds(unittest.TestCase):
+    def serve(self, fake, pages):
+        def listing(q, b):
+            if q.get("internal_id"):
+                hits = [r for p in pages for r in p if r["internal_id"] == q["internal_id"]]
+                return 200, {"count": len(hits), "next": None, "results": hits}
+            page = int(q.get("page", 1))
+            nxt = f"{fake.base}/submissions/?page={page + 1}" if page < len(pages) else None
+            return 200, {"count": sum(map(len, pages)), "next": nxt, "results": pages[page - 1]}
+        fake.routes[("GET", "/server/api/submissions/")] = listing
+        for p in pages:
+            for r in p:
+                fake.routes[("GET", f"/server/api/submissions/{r['id']}/")] = (lambda r: lambda q, b: (200, r))(r)
+
+    def test_prot0756_runs_name_one_submission(self):
+        other = record(internal_id="PROT_0760", sid="bbbbbbbbbbb1", submitted="2026-07-20T10:00:00-07:00",
+                       samples=[("KG1", "x"), ("A3", "y")])
+        old = record(internal_id="PROT_0600", sid="bbbbbbbbbbb2", submitted="2026-02-01T10:00:00-08:00",
+                     samples=[("LRS66", "x")])
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[other, rec_0756(), old]])
+            rc, out, p = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "matched", "PROT_0756"), p.stderr)
+            c = out["candidates"][0]
+            self.assertEqual((c["files_matched"], c["sample_ids_matched"], c["samples_on_sheet"]), (30, 30, 30))
+            self.assertIn("30 of 30", out["ask"])
+
+    def test_a_label_two_submissions_use_is_ambiguous(self):
+        """locate's ambiguous_label, in reverse: both were submitted before the runs."""
+        twin = record(internal_id="PROT_0755", sid="bbbbbbbbbbb3", submitted="2026-07-10T10:00:00-07:00",
+                      samples=[(f"LRS{n}", "c") for n in range(96, 100)])
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[rec_0756(), twin]])
+            rc, out, _ = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"]), (2, "ambiguous"))
+            self.assertEqual({f["file"] for f in out["ambiguous_files"]},
+                             {os.path.basename(x) for x in LRS_RUNS[:4]})
+            self.assertIn("PROT_0755", out["ask"])
+
+    def test_a_submission_made_after_the_runs_does_not_claim_them(self):
+        later = record(internal_id="PROT_0799", sid="bbbbbbbbbbb4", submitted="2026-09-01T10:00:00-07:00",
+                       samples=[(f"LRS{n}", "c") for n in range(96, 126)])
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[later, rec_0756()]])
+            rc, out, _ = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
+            self.assertEqual((rc, out["submission"]), (0, "PROT_0756"))
+
+    def test_weak_ids_are_no_evidence(self):
+        wells = record(internal_id="PROT_0761", sid="bbbbbbbbbbb5", submitted="2026-07-01T10:00:00-07:00",
+                       samples=[("A1", "x"), ("001", "y")])
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[wells]])
+            rc, out, _ = run(["identify", "/d/08132026__60SPD_DIA-A1_S3-A1_1_1.d", "/d/Ex08152026_001.raw"],
+                             child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"]), (2, "none"))
+
+    def test_a_prot_number_and_its_hex_id_are_merged_by_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[rec_0756()]])
+            rc, out, p = run(["identify", f"/coreomics/projects/2026/07/{HEX_0756}/share/x.d",
+                              "--text", "this is PROT_0756"], child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_0756"), p.stderr)
+
+
 # --------------------------------------------------------------------- hive_exec --
 class TestHiveExec(unittest.TestCase):
     """Connection reuse keeps rapid calls under HIVE's MaxStartups throttle; --get must not

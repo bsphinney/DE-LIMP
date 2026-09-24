@@ -23,6 +23,8 @@ a human as an exit code plus the exact question. The search and DE in between ar
 ordinary skill flow -- nothing here runs an engine.
 
 WHERE EACH SUBCOMMAND RUNS
+    identify     LOCAL    which submission is this data? PROT/hex ids in the names or the
+                          user's message, else the sample ids in the file names (token)
     fetch        LOCAL    the CoreOmics token lives on the staff member's computer
                           (~/.coreomics_token); HIVE has none
     locate       ON HIVE  reads the Flinders raw_data tree
@@ -53,9 +55,10 @@ CONFIGURATION (environment -- which is also how the tests point it at temp dirs)
     CORE_WORK_ROOT       default /quobyte/proteomics-grp/SERVICE
 
 EXIT CODES -- the orchestrator branches on these:
-    0  ok
+    0  ok. From `identify`: exactly one candidate -- confirm it with the user in one line
     2  needs a human decision, or a hard gate failed. Proposal files are still written.
        From `deliver --apply`: the delivery is NOT verified -- do not share it.
+       From `identify`: none or several candidates -- ask the user for the number
     3  CoreOmics or the filesystem is unreachable, auth failed (server detail printed), or
        the scripts directory on this machine is incomplete
     4  (locate) the files look like an HT plate -- use ht_manifest.py instead
@@ -1267,6 +1270,196 @@ def cmd_locate(a) -> int:
         note("HARD GATE FAILED -- show the staff member the proposal; nothing was staged")
         return EXIT_DECIDE
     return EXIT_OK
+
+
+# ----------------------------------------------------------------------- identify --
+# Which submission is this data? Asked at the START of a run (SKILL.md step 1), so every report
+# can carry the submission. Named ids are read only where they are written on purpose: a
+# PROT_#### token in a path or message, a 12-hex CoreOmics id, or "submission 807" typed by the
+# user. A bare number in a FILE name is never read as one -- Exploris runs carry counters
+# (Ex08312026_380_JE21). Everything else goes through the same sample-id matching as `locate`.
+PROT_TOKEN = re.compile(r"(?<![A-Za-z0-9])prot[\s_\-#]*0*(\d{1,5})(?![0-9])", re.I)
+SUBMISSION_WORD = re.compile(r"\bsubmission\s*(?:number|no\.?)?\s*#?\s*0*(\d{1,5})(?![0-9])", re.I)
+HEX_TOKEN = re.compile(r"(?<![0-9a-z])([0-9a-f]{12})(?![0-9a-z])")
+STALE_SNAPSHOT = "/quobyte/proteomics-grp/coreomics/.submissions_db"
+TOKEN_HELP = (
+    "Looking a submission up needs a CoreOmics API token with staff access, saved on THIS "
+    f"computer as {TOKEN_FILE} (chmod 600) or exported as COREOMICS_TOKEN; HIVE has none. How "
+    "to obtain one is not documented in this skill -- ask the Core's CoreOmics administrator.")
+
+
+def ids_in(text: str, typed: bool = False) -> list:
+    """[("internal_id", "PROT_0756") | ("id", "0022066cd85f"), ...] written in a path or name,
+    or -- typed=True -- in what the user wrote. A 12-hex token counts only with a letter AND a
+    digit in it: a 12-digit timestamp is not a CoreOmics id."""
+    s, hits = _s(text), []
+    for m in PROT_TOKEN.finditer(s):
+        if int(m.group(1)):
+            hits.append(("internal_id", "PROT_%04d" % int(m.group(1))))
+    if typed:
+        for m in SUBMISSION_WORD.finditer(s):
+            if int(m.group(1)):
+                hits.append(("internal_id", "PROT_%04d" % int(m.group(1))))
+    for m in HEX_TOKEN.finditer(s):
+        h = m.group(1)
+        if re.search(r"[a-f]", h) and re.search(r"\d", h):
+            hits.append(("id", h))
+    return list(dict.fromkeys(hits))
+
+
+def list_window(lo: dt.date, hi: dt.date) -> list:
+    """Submissions with `submitted` in [lo, hi], newest first, with their sample ids (the list
+    endpoint already carries them)."""
+    out, page = [], 1
+    while page <= NEIGHBOR_MAX_PAGES:
+        data = api_call("GET", "submissions/", {"lab": LAB, "page": page, "page_size": 100,
+                                                "ordering": "-submitted"})
+        results = data.get("results") if isinstance(data, dict) else data
+        if not isinstance(results, list):
+            raise ApiError(None, "unexpected submissions list payload", api_url("submissions/"))
+        oldest = None
+        for r in results:
+            d = parse_date(r.get("submitted")) if isinstance(r, dict) else None
+            if d is None:
+                continue
+            oldest = d if oldest is None or d < oldest else oldest
+            if lo <= d <= hi:
+                out.append({"internal_id": r.get("internal_id"), "id": r.get("id"), "submitted": d,
+                            "samples": sample_rows(r)})
+        if not results or (oldest is not None and oldest < lo) \
+                or not isinstance(data, dict) or not data.get("next"):
+            return out
+        page += 1
+    return out
+
+
+def attribute_files(names: list, subs: list, max_days: int) -> dict:
+    """Which submission's sample ids each raw file name carries -- `locate`'s rules run in
+    reverse. Weak ids (A3, 001) are no evidence. A file dated in its NAME counts only for a
+    submission made on or before that date and within `max_days` of it; an undated name (or a
+    modification time, which a copy resets) counts for every submission using the id. A file
+    two submissions could own is ambiguous, exactly like `locate`'s ambiguous_label."""
+    universe = []
+    for s in subs:
+        label = _s(s.get("internal_id")) or _s(s.get("id"))
+        for smp in s["samples"]:
+            uid = smp.get("unique_id")
+            pat = token_pattern(uid)
+            if pat and not weak_reason(uid):
+                universe.append({"uid": _s(uid), "norm": normkey(uid), "pattern": pat,
+                                 "sub": label, "submitted": s["submitted"]})
+    by_sub, ambiguous, loose = {}, [], []
+    for n in names:
+        e = prepare_entry({"path": n, "name": os.path.basename(_s(n).rstrip("/\\"))})
+        d = date_from_name(e["name"])
+        cands = [u for u in universe if u["norm"] in e["norm"] and u["pattern"].search(e["space"])
+                 and (d is None or u["submitted"] <= d <= u["submitted"] + dt.timedelta(days=max_days))]
+        top = max((len(u["norm"]) for u in cands), default=0)
+        owners = [u for u in cands if len(u["norm"]) == top]
+        who = sorted({u["sub"] for u in owners})
+        if len(who) == 1:
+            b = by_sub.setdefault(who[0], {"files": [], "sample_ids": set()})
+            b["files"].append(e["name"])
+            b["sample_ids"].update(u["uid"] for u in owners)
+        elif who:
+            ambiguous.append({"file": e["name"], "submissions": who, "dated": bool(d)})
+        else:
+            loose.append(e["name"])
+    return {"by_submission": by_sub, "ambiguous": ambiguous, "unattributed": loose}
+
+
+def cmd_identify(a) -> int:
+    names = list(a.paths or [])
+    if a.files_from:
+        try:
+            with open(a.files_from) as fh:
+                names += [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+        except OSError as e:
+            raise Stop(EXIT_DECIDE, {"error": f"cannot read --files-from {a.files_from}: {e.strerror}"})
+    named = {}
+    for n in names:
+        for hit in ids_in(n):
+            named.setdefault(hit, []).append(f"in the path {n}")
+    for hit in ids_in(a.text or "", typed=True):
+        named.setdefault(hit, []).append("in the user's message")
+    base = {"never_search": f"{STALE_SNAPSHOT} is a stale snapshot -- never search it for a "
+                            f"submission (a search for 0756 there matched an unrelated 2019 record)"}
+
+    def label_of(kind, key):
+        return key if kind == "internal_id" else f"CoreOmics id {key}"
+
+    if len(named) > 1 and not a.no_lookup:
+        # A PROT number and a hex id are often the same submission: look each up, and merge
+        # the ones that are. Without a token they stay separate candidates -- never assumed.
+        try:
+            api_token()
+            merged = {}
+            for (kind, key), where in named.items():
+                rec = get_submission(kind, key)
+                ident = _s(rec.get("internal_id")) or _s(rec.get("id"))
+                k = ("internal_id", ident) if ident.upper().startswith("PROT_") else ("id", ident)
+                merged.setdefault(k, []).extend(where)
+            named = merged
+        except (ApiError, Stop) as e:   # unresolved: they stay separate candidates, and it says why
+            base["lookup_error"] = e.detail if isinstance(e, ApiError) else e.payload.get("error")
+    if len(named) == 1:
+        (kind, key), where = next(iter(named.items()))
+        emit(dict(base, status="named", submission=key, kind=kind, evidence=where[:5],
+                  ask=f"This looks like CoreOmics submission {label_of(kind, key)} "
+                      f"({where[0]}). Is that right?"))
+        return EXIT_OK
+    if len(named) > 1:
+        cands = [label_of(k, v) for k, v in named]
+        emit(dict(base, status="ambiguous", candidates=[{"kind": k, "submission": v, "evidence": w[:5]}
+                                                        for (k, v), w in named.items()],
+                  ask=f"The names and message mention {', '.join(cands)} -- which submission is "
+                      f"this data from? (A PROT number and a 12-character id may be the same "
+                      f"submission; `fetch` either one to check.)"))
+        return EXIT_DECIDE
+
+    raws = [n for n in names if is_raw_name(os.path.basename(_s(n).rstrip("/\\")))] or names
+    ask_none = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
+                "PROT_0756) or the 12-character CoreOmics id.")
+    if a.no_lookup or not raws:
+        emit(dict(base, status="none", looked_up=False, ask=ask_none))
+        return EXIT_DECIDE
+    try:
+        api_token()
+    except ApiError as e:
+        emit(dict(base, status="needs_token", looked_up=False, detail=e.detail,
+                  ask=ask_none + " (No PROT number is in the names, and without a CoreOmics token "
+                                 "I cannot look it up by sample ID.)", token_help=TOKEN_HELP))
+        return EXIT_UNREACHABLE
+    dates = [d for d in (date_from_name(os.path.basename(_s(n).rstrip("/\\"))) for n in raws) if d]
+    today = dt.date.today()
+    lo = (min(dates) if dates else today - dt.timedelta(days=a.max_days)) - dt.timedelta(days=a.max_days)
+    hi = max(dates) if dates else today
+    subs = list_window(lo, hi)
+    res = attribute_files(raws, subs, a.max_days)
+    window = {"from": lo.isoformat(), "to": hi.isoformat(), "submissions_checked": len(subs),
+              "files": len(raws), "files_dated_by_name": len(dates)}
+    by = res["by_submission"]
+    sizes = {(_s(s.get("internal_id")) or _s(s.get("id"))): len(s["samples"]) for s in subs}
+    cands = [{"submission": k, "files_matched": len(v["files"]), "files": len(raws),
+              "sample_ids_matched": len(v["sample_ids"]), "samples_on_sheet": sizes.get(k),
+              "examples": v["files"][:3]} for k, v in sorted(by.items())]
+    out = dict(base, window=window, candidates=cands, ambiguous_files=res["ambiguous"][:20],
+               n_unattributed=len(res["unattributed"]), unattributed_examples=res["unattributed"][:5])
+    if len(by) == 1 and not res["ambiguous"]:
+        c = cands[0]
+        emit(dict(out, status="matched", submission=c["submission"],
+                  ask=f"These files look like CoreOmics submission {c['submission']}: "
+                      f"{c['files_matched']} of {c['files']} file names carry its sample IDs "
+                      f"({c['sample_ids_matched']} of {c['samples_on_sheet']} on its sheet). Is that right?"))
+        return EXIT_OK
+    if by or res["ambiguous"]:
+        who = sorted(set(by) | {s for f in res["ambiguous"] for s in f["submissions"]})
+        emit(dict(out, status="ambiguous",
+                  ask=f"These file names carry sample IDs from {', '.join(who)} -- which submission "
+                      f"is this data from?"))
+        return EXIT_DECIDE
+    emit(dict(out, status="none", looked_up=True, ask=ask_none))
+    return EXIT_DECIDE
 
 
 # -------------------------------------------------------------------------- stage --
@@ -2672,6 +2865,17 @@ def main(argv=None) -> int:
     f.add_argument("--neighbor-days", type=int, default=NEIGHBOR_WINDOW_DAYS,
                    help=f"record submissions within +/- this many days (default {NEIGHBOR_WINDOW_DAYS})")
     f.set_defaults(func=cmd_fetch)
+
+    idn = sub.add_parser("identify", help="LOCAL: which submission is this data? (names first, "
+                                          "then sample ids; never guesses)")
+    idn.add_argument("paths", nargs="*", help="raw files and/or their folder, as the user gave them")
+    idn.add_argument("--files-from", default=None, help="a file listing raw paths, one per line")
+    idn.add_argument("--text", default="", help="the user's message, for 'PROT_0756' / 'submission 756'")
+    idn.add_argument("--max-days", type=int, default=240,
+                     help="a run counts for a submission made up to this many days before it (default 240)")
+    idn.add_argument("--no-lookup", action="store_true",
+                     help="names only: do not ask CoreOmics which submission uses these sample ids")
+    idn.set_defaults(func=cmd_identify)
 
     lo = sub.add_parser("locate", help="ON HIVE: find each sample's raw file (writes a proposal)")
     lo.add_argument("--summary", required=True)
