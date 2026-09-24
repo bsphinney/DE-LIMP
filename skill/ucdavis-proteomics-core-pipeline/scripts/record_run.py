@@ -1856,10 +1856,11 @@ def data_quality_notes(rec):
             "the registry holds the record and the small files, but not the package that "
             "reproduces the analysis; if that machine is lost, so is the zip",
             zc.get("reason"),
-            "put the whole session folder on HIVE (hive_exec.sh --put <session folder> "
-            "<a HIVE folder>) and run record_run.py analysis-done --session <its HIVE path> on "
-            "HIVE (add --out <the search's HIVE out dir> if the session's search_provenance.json does "
-            "not name it): the record is found by that out dir and the zip is attached", "record_run"))
+            "put the session folder AND its zip (<session>.zip, beside the folder) on HIVE "
+            "(hive_exec.sh --put, into the same HIVE folder), then on HIVE run record_run.py "
+            "analysis-done --session <its HIVE path> (or pass --zip <the zip's HIVE path>; add "
+            "--out <the search's HIVE out dir> if the session's search_provenance.json does not "
+            "name it): the record is found by that out dir and the zip is attached", "record_run"))
     for n in rec.get("record_notes") or []:
         notes.append(dq("WARNING", n, rec.get("folder"), source="record_run"))
     p = rec.get("prot") or {}
