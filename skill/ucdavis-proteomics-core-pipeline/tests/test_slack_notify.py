@@ -1100,6 +1100,37 @@ echo "$FAKE_SQUEUE_END"
 """
 
 
+def _race_worker(out, rounds, barrier, q):
+    """One array task: at each round, claim the failure report for array `race<r>`."""
+    wins = []
+    for r in range(rounds):
+        os.environ["SLURM_ARRAY_JOB_ID"] = f"race{r}"
+        barrier.wait()
+        wins.append(ns._array_first_failure(out))
+    q.put(wins)
+
+
+class ArrayMarkerRace(unittest.TestCase):
+    def test_two_racing_tasks_exactly_one_wins_each_round(self):
+        """mkdir is the first-wins primitive (atomic across HIVE nodes on Quobyte, where flock
+        is not): two processes released together by a barrier, 100 rounds."""
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        rounds = 100
+        with tempfile.TemporaryDirectory() as d:
+            barrier, q = ctx.Barrier(2), ctx.Queue()
+            procs = [ctx.Process(target=_race_worker, args=(d, rounds, barrier, q))
+                     for _ in range(2)]
+            for pr in procs:
+                pr.start()
+            results = [q.get(timeout=120) for _ in procs]
+            for pr in procs:
+                pr.join(timeout=30)
+            for r in range(rounds):
+                self.assertEqual(results[0][r] + results[1][r], 1, f"round {r}")
+                self.assertTrue(os.path.isdir(os.path.join(d, f".slack_failed_race{r}")))
+
+
 class JobEndChoices(unittest.TestCase):
     """--no-fran, routes without a completeness guard, and the time-limit guard on staging."""
     setUp, tearDown = JobTrap.setUp, JobTrap.tearDown
@@ -1192,16 +1223,35 @@ class JobEndChoices(unittest.TestCase):
         self.assertIn("*Staged for FRAN:* skipped: instrument QC / standard run",
                       json.dumps(self.m.bodies[-1]))
 
-    def test_stage_argv_from_fran_deposit_is_used_when_present(self):
-        fran = FAKE_FRAN + (
-            "\n\ndef stage_argv(out, *, name=None, qc=None, fasta_meta=None, python=None):\n"
-            "    return [python, os.path.abspath(__file__), 'stage', '--out', out,\n"
-            "            '--name', name or '', '--built-by-stage-argv']\n")
-        r = self._run("true\n", fran=fran, fran_name="PROT_0793 mouse liver — mouse_tissue")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        argv = self._calls("fran_deposit")[0]["argv"]
-        self.assertEqual(argv[-3:], ["--name", "PROT_0793 mouse liver — mouse_tissue",
-                                     "--built-by-stage-argv"])
+    def test_the_stage_argv_matches_fran_deposit_stage_argv(self):
+        """The shape of fran_deposit.stage_argv() (the FRAN side's builder, on its branch):
+        stage --out O [--fasta-meta M] [--name N] [--qc | --not-qc]; a blank name dropped."""
+        py = sys.executable
+        self.assertEqual(ns._stage_argv("/s/fran_deposit.py", "/o", name=" PROT_0793 mouse — x ",
+                                        qc=True, fasta_meta="/m"),
+                         [py, "/s/fran_deposit.py", "stage", "--out", "/o", "--fasta-meta", "/m",
+                          "--name", "PROT_0793 mouse — x", "--qc"])
+        self.assertEqual(ns._stage_argv("/f", "/o", name="  ", qc=False),
+                         [py, "/f", "stage", "--out", "/o", "--not-qc"])
+        self.assertEqual(ns._stage_argv("/f", "/o"), [py, "/f", "stage", "--out", "/o"])
+
+    def test_record_only_calls_have_the_same_time_bounds_as_stage(self):
+        seen = []
+
+        def fake_stage(out, session=None, timeout=None, **kw):
+            seen.append((timeout, kw))
+            return {"staged": False, "reason": "opted_out"}
+        for qc, mode, skip in ((True, "off", False), (None, "off", True)):
+            seen.clear()
+            with mock.patch.object(ns, "_seconds_left", return_value=60), \
+                    mock.patch.object(ns, "fran_stage", side_effect=fake_stage):
+                r = ns._fran_step("/x", None, mode, "N", qc)
+            self.assertEqual(seen, [])                           # under NEAR_LIMIT_S: not called
+            self.assertIn("not recorded", r["detail"])
+            with mock.patch.object(ns, "_seconds_left", return_value=200), \
+                    mock.patch.object(ns, "fran_stage", side_effect=fake_stage):
+                ns._fran_step("/x", None, mode, "N", qc)
+            self.assertEqual(seen, [(170, {"name": "N", "qc": qc, "skip": skip})])
 
     def test_the_name_and_not_qc_reach_stage(self):
         for qc, tail in ((False, ["--name", "Mouse liver KO vs WT", "--not-qc"]),

@@ -13,8 +13,9 @@ job ends. It does three things, in this order:
    - `--name "<--fran-name>"`;
    - `--qc` / `--not-qc`.
 
-   The argv comes from `fran_deposit.stage_argv()` when that `fran_deposit.py` has it (THE
-   definition), otherwise the same shape built here. `stage` makes its own eligibility check.
+   The argv is built in exactly the shape of `fran_deposit.stage_argv()`, and a test pins it.
+   It is built here rather than imported, so the hook never has to import `fran_deposit.py`.
+   `stage` makes its own eligibility check.
    Its one-line JSON result goes into the job log. The hook does not stage in these cases, and
    step 7c's check + stage does it instead:
    - **Every other route** (Radiant, FragPipe, Sage, AlphaDIA) logs
@@ -48,7 +49,7 @@ Core's Slack channel and handed to FRAN. If the user says not to, the agent pass
 | What | How | Effect |
 |---|---|---|
 | No Slack post | `run_search.py … --no-notify` (or `SKILL_SLACK=0` when generating); `finalize --no-notify` | The job carries `--no-slack`. The run is still logged and staged. |
-| No FRAN hand-over | `run_search.py … --no-fran` (or `FRAN_DEPOSIT=off` when generating) | The job carries `--no-fran`. On success it runs `stage --out <out> --skip`, which stages nothing but records `opted_out` in `<out>/fran_deposit.json`, so a later `fran_deposit.py backfill` leaves the search alone. The post says `skipped: off for this search`. Step 7c must then not stage it either. |
+| No FRAN hand-over | `run_search.py … --no-fran` (or `FRAN_DEPOSIT=off` when generating) | The job carries `--no-fran`. On success it runs `stage --out <out> [--name …] --skip`, with the same time bounds as any stage, which stages nothing but records `opted_out` in `<out>/fran_deposit.json`, so a later `fran_deposit.py backfill` leaves the search alone. The post says `skipped: off for this search`. Step 7c must then not stage it either. |
 | An instrument QC / standard run | `run_search.py … --qc` | The job never stages it. On success it runs `stage --out <out> --name … --qc`, which stages nothing and records the QC decision, so a later stage or backfill honours it. The post says `skipped: instrument QC / standard run`. The decision is made at generation, because a QC session named without a "QC" token would otherwise be staged by the hook before the agent's own `stage --name "... QC"`. |
 | FRAN's name for the search | `run_search.py … --fran-name "<the session's descriptive name>"` (always) | Passed to the job's `stage --name`. `--not-qc` (the user said it is not a QC run, whatever its name) is passed through to `stage` as well. |
 | The run log | — | It always runs where `record_run.py` is installed, which is what makes it complete. |
@@ -136,7 +137,9 @@ A job that another job waits on (`afterok`) reports its failure because the chai
 An array reports only its first failing task. That task claims the directory
 `<out>/.slack_failed_<array job id>` with `mkdir`, and the other tasks see it. `mkdir` is the
 primitive measured to be atomic across HIVE nodes on Quobyte: `flock` lost 578 of 800 updates
-between 2 nodes, and `mkdir` lost 0.
+between 2 nodes, and `mkdir` lost 0. The hook's own marker was tested the same way on
+2026-09-24: two tasks on different nodes raced over 200 rounds, and each round had exactly one
+winner.
 
 **Nothing is done:**
 - For a job stopped by SIGTERM before its time limit (a `scancel`, or a preemption that is

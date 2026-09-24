@@ -905,17 +905,12 @@ def record_run(kind, *, out=None, session=None, status=None, exit_code=None):
 
 
 def _stage_argv(fd, out, *, name=None, qc=None, fasta_meta=None):
-    """`fran_deposit.py stage` argv: fran_deposit.stage_argv() -- THE definition, in the
-    fran_deposit.py that has it -- else the same shape built here, for an install whose
-    fran_deposit.py predates it."""
-    try:
-        import fran_deposit
-        build = getattr(fran_deposit, "stage_argv", None)
-    except Exception:
-        build = None
-    if callable(build):
-        return build(out, name=name, qc=qc, fasta_meta=fasta_meta,
-                     python=sys.executable or "python3")
+    """`fran_deposit.py stage` argv, in exactly the shape of fran_deposit.stage_argv() (the FRAN
+    side's own builder): stage --out O [--fasta-meta M] [--name N] [--qc | --not-qc]. Built here
+    rather than imported, so the hook never depends on importing fran_deposit.py; the flags
+    match (tests/test_slack_notify.py pins the shape). --qc / --not-qc / --skip exist only in
+    the fran_deposit.py that ships with them -- an older stage rejects them, which the hook
+    reports as an `error` line and nothing more."""
     argv = [sys.executable or "python3", fd, "stage", "--out", out]
     if fasta_meta:
         argv += ["--fasta-meta", fasta_meta]
@@ -1064,37 +1059,32 @@ def _seconds_left():
     return int((end - datetime.datetime.now()).total_seconds())
 
 
-#: A record-only stage call (--qc, --skip) stages nothing and takes about a second; it still
-#: needs this much of the job's time left, and gets at most RECORD_ONLY_TIMEOUT_S.
-RECORD_ONLY_MIN_LEFT_S = 30
-RECORD_ONLY_TIMEOUT_S = 60
-
-
 def _fran_step(out, session, mode, fran_name=None, qc=None):
     """The FRAN part of the job-end hook, for a final job that succeeded.
 
-    --qc and --no-fran never stage anything, on any route -- but they still CALL stage
-    (`--qc` / `--skip`), which records the decision in <out>/fran_deposit.json: a QC run or an
-    opted-out search found later by `fran_deposit.py backfill` is then left alone."""
-    if qc is True or mode == "off":
-        left = _seconds_left()
-        if left is not None and left < RECORD_ONLY_MIN_LEFT_S:
-            return {"staged": False, "reason": "qc_run" if qc is True else "opted_out",
-                    "detail": f"{max(left, 0)} s left: not recorded in fran_deposit.json"}
-        timeout = RECORD_ONLY_TIMEOUT_S if left is None else \
-            max(5, min(RECORD_ONLY_TIMEOUT_S, left - 15))
-        return fran_stage(out, session, timeout=timeout, name=fran_name, qc=qc,
-                          skip=(qc is not True))
-    if mode != "stage":
+    --qc and --no-fran never stage anything, on any route -- but they still CALL stage, which
+    records the decision in <out>/fran_deposit.json, so a QC run or an opted-out search found
+    later by `fran_deposit.py backfill` is left alone:
+      --qc       stage --out O [--name N] --qc   (receipt: qc_run)
+      --no-fran  stage --out O [--name N] --skip (receipt: opted_out)
+    Every stage call -- recording or staging -- has the same bounds: not within NEAR_LIMIT_S of
+    the job's time limit, and at most the time left minus 30 s."""
+    record_only = qc is True or mode == "off"
+    if not record_only and mode != "stage":
         say("fran: left_to_agent (no completeness guard on this route)")
         return {"staged": False, "reason": "left_to_agent",
                 "detail": "no completeness guard on this route; step 7c stages it after its check"}
     left = _seconds_left()
     if left is not None and left < NEAR_LIMIT_S:
+        if record_only:
+            return {"staged": False, "reason": "qc_run" if qc is True else "opted_out",
+                    "detail": f"{max(left, 0)} s left of the job's time limit: the decision was "
+                              "not recorded in fran_deposit.json"}
         return {"staged": False, "reason": "near_time_limit",
                 "detail": f"{max(left, 0)} s left of the job's time limit; step 7c stages it"}
     timeout = FRAN_STAGE_TIMEOUT_S if left is None else max(10, min(FRAN_STAGE_TIMEOUT_S, left - 30))
-    return fran_stage(out, session, timeout=timeout, name=fran_name, qc=qc)
+    return fran_stage(out, session, timeout=timeout, name=fran_name, qc=qc,
+                      skip=record_only and qc is not True)
 
 
 def search_done(out, exit_code=None, status=None, signal=None, started=None,
