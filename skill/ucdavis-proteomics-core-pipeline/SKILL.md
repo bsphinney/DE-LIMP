@@ -1108,6 +1108,14 @@ flight does not. Common auto-fixes (→ `references/watcher.md` playbook):
   **reusing completed `.quant` and `step1.predicted.speclib`** — never restart the whole
   cohort; broken `afterok` after a killed task → resubmit steps 3→4→5 fresh.
 - OOM → raise `--mem`; timeout → raise `--time`; missing temp dir → `mkdir -p` first.
+- **A failed search is recorded in the Core run registry. When the chain dies before its last
+  job, record it yourself.** A job that SLURM kills (OOM, TIMEOUT, node failure, `scancel`)
+  never runs its own job-end hook. The jobs queued after it never start at all. So whenever the
+  watcher reports `failed`, run this on HIVE, then fix and resubmit. Recording again is safe:
+  it updates the same record.
+  `python3 scripts/record_run.py search-done --out <search out dir> --status failed
+  [--exit-code <N>] [--step <failed step's job name>]`.
+  → `references/run-registry.md`
 
 **Every search — single-shot or parallel array — must run under this watch loop.** Stop
 and tell the user only after 2 failed auto-fixes of the same class (dropping 1 pathological
