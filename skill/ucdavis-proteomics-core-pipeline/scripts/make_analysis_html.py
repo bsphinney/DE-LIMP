@@ -40,6 +40,7 @@ FIGURE_ORDER = [
     ("pca", "Overview"),
     ("heatmap_top", "Overview"),
     ("volcano", "Differential expression"),
+    ("violin_top", "Differential expression"),
     ("pvalue", "Differential expression"),
 ]
 SECTION_ORDER = ["Quality control", "Overview", "Differential expression", "Other figures"]
