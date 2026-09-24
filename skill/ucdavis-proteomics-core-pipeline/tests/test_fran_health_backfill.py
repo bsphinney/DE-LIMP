@@ -28,6 +28,35 @@ sys.path.insert(0, SCRIPTS)
 
 import fran_deposit as fd  # noqa: E402
 
+
+def setUpModule():
+    # verify() asks the LIVE corpus when this account can read a PG Farm token -- which a suite run
+    # on HIVE can. fran_deposit.corpus_query() returns None before touching anything with this set.
+    global _SAVED_CORPUS_QUERY
+    _SAVED_CORPUS_QUERY = os.environ.get("FRAN_CORPUS_QUERY")
+    os.environ["FRAN_CORPUS_QUERY"] = "off"
+
+
+def tearDownModule():
+    if _SAVED_CORPUS_QUERY is None:
+        os.environ.pop("FRAN_CORPUS_QUERY", None)
+    else:
+        os.environ["FRAN_CORPUS_QUERY"] = _SAVED_CORPUS_QUERY
+
+
+_SAVED_CORPUS_QUERY = None
+
+
+def _load_json(path):
+    """json.load with the file closed (no ResourceWarning)."""
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _read(path, mode="r"):
+    with open(path, mode) as fh:
+        return fh.read()
+
 # The QC name rule reads the last three components of a search dir's path, which in these tests
 # include a random temp name. tempfile draws from [a-z0-9_], so "tmpx_qc_1" would make a test's
 # search a "QC run" about once in 20,000 names. Without "_" in the alphabet the rule cannot fire on
@@ -666,7 +695,7 @@ class StagedAtTests(unittest.TestCase):
     def _stage(self, d, out, **kw):
         with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
             code, res, _ = run_quiet(fd.stage, Args(out, **kw))
-        return res, json.load(open(os.path.join(res["entry"], fd.MANIFEST)))
+        return res, _load_json(os.path.join(res["entry"], fd.MANIFEST))
 
     def test_staged_at_is_iso_utc_and_every_old_key_is_still_there(self):
         with tempfile.TemporaryDirectory() as d:
@@ -865,7 +894,7 @@ class QcRuleTests(unittest.TestCase):
             self.assertEqual(res["reason"], "qc_run")
             self.assertIn("--not-qc", res["detail"])
             self.assertEqual(res["withdrawn"], first["entry"])
-            man = json.load(open(os.path.join(first["entry"], fd.MANIFEST)))
+            man = _load_json(os.path.join(first["entry"], fd.MANIFEST))
             self.assertEqual((man["qc"], man["exclude"]), (True, True))
             self.assertIn("Lumos QC", man["qc_rule"])
             self.assertEqual(man["output_dir"], os.path.realpath(out))    # nothing else lost
@@ -889,7 +918,7 @@ class QcRuleTests(unittest.TestCase):
             out = self._session(d, "HeLa_digest_timecourse", conditions=True)
             res = self._stage(d, out, name="HeLa digest timecourse")
             self.assertTrue(res["staged"], res.get("detail"))
-            man = json.load(open(os.path.join(res["entry"], fd.MANIFEST)))
+            man = _load_json(os.path.join(res["entry"], fd.MANIFEST))
             self.assertIs(man["qc"], False)
             self.assertTrue(man["qc_rule"].startswith("not QC"))
 
@@ -910,7 +939,7 @@ class QcRuleTests(unittest.TestCase):
             self.assertEqual(self._stage(d, out)["reason"], "qc_run")
             res = self._stage(d, out, not_qc=True)
             self.assertTrue(res["staged"], res.get("detail"))
-            man = json.load(open(os.path.join(res["entry"], fd.MANIFEST)))
+            man = _load_json(os.path.join(res["entry"], fd.MANIFEST))
             self.assertEqual((man["qc"], man["qc_rule"]), (False, "user override"))
 
     def test_qc_flag_excludes_a_normal_name(self):
@@ -1009,7 +1038,7 @@ class QcRuleTests(unittest.TestCase):
                 rec["qc_rule"] = "not QC: legacy"
                 with open(os.path.join(qc_out, fd.RECEIPT), "w") as fh:
                     json.dump(rec, fh)
-                man = json.load(open(os.path.join(entry_qc2, fd.MANIFEST)))
+                man = _load_json(os.path.join(entry_qc2, fd.MANIFEST))
                 man.pop("qc"), man.pop("qc_rule")
                 with open(os.path.join(entry_qc2, fd.MANIFEST), "w") as fh:
                     json.dump(man, fh)
@@ -1023,7 +1052,7 @@ class QcRuleTests(unittest.TestCase):
                 self.assertEqual(dry[staged_qc]["reason"], "already_staged")
                 self.assertEqual(dry[t.skill]["decision"], "would_stage")
                 fd.plan_backfill(found, apply=True, prefixes=(pre,))
-            man = json.load(open(os.path.join(entry_qc2, fd.MANIFEST)))
+            man = _load_json(os.path.join(entry_qc2, fd.MANIFEST))
             self.assertEqual((man["qc"], man["exclude"]), (True, True))
             self.assertEqual(fd.read_receipt(qc_out)["status"], "qc_run")
 
@@ -1261,7 +1290,7 @@ class ReviewFixTests(unittest.TestCase):
             for kw in ({}, {"force": True}):                             # plain stage, twice
                 r = self._stage(d, out, **kw)[1]
                 self.assertEqual(r["reason"], "qc_run", r.get("detail"))
-                man = json.load(open(os.path.join(entry, fd.MANIFEST)))
+                man = _load_json(os.path.join(entry, fd.MANIFEST))
                 self.assertEqual((man["qc"], man["exclude"]), (True, True))
             # only an EXPLICIT --not-qc turns it back
             r = self._stage(d, out, not_qc=True)[1]
@@ -1344,7 +1373,7 @@ class ReviewFixTests(unittest.TestCase):
             self.assertNotIn("now marked", r["detail"])
             self.assertIsNone(r.get("withdrawn"))
             self.assertIn("withdraw_failed", fd.read_receipt(out))
-            self.assertIs(json.load(open(os.path.join(entry, fd.MANIFEST)))["qc"], False)
+            self.assertIs(_load_json(os.path.join(entry, fd.MANIFEST))["qc"], False)
 
     def test_D_restaging_an_unwritable_entry_is_reported_not_a_crash(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1393,7 +1422,7 @@ class ReviewFixTests(unittest.TestCase):
             entry = os.path.join(drop, fd.entry_name(out))
             os.symlink(out, entry)                                    # a legacy bare-link entry
             before = {f: (os.stat(os.path.join(out, f)).st_ino,
-                          open(os.path.join(out, f), "rb").read())
+                          _read(os.path.join(out, f), "rb"))
                       for f in ("report.parquet", "report.log.txt")}
             mode = os.stat(out).st_mode & 0o7777
             r = self._stage(d, out)[1]
@@ -1401,7 +1430,7 @@ class ReviewFixTests(unittest.TestCase):
             for f, (ino, body) in before.items():
                 p = os.path.join(out, f)
                 self.assertFalse(os.path.islink(p), f)
-                self.assertEqual((os.stat(p).st_ino, open(p, "rb").read()), (ino, body), f)
+                self.assertEqual((os.stat(p).st_ino, _read(p, "rb")), (ino, body), f)
             self.assertEqual(os.stat(out).st_mode & 0o7777, mode)
             self.assertFalse(os.path.islink(entry))
             self.assertTrue(os.path.isdir(entry))
@@ -1549,6 +1578,54 @@ class ReviewFixTests(unittest.TestCase):
             self.assertIsNone(fd.detect_engine(d)[0])
 
 
+class CorpusQueryGuardTests(unittest.TestCase):
+    """No test may ever query the live FRAN database (FRAN's own suite once did)."""
+
+    def test_the_switch_returns_before_the_token_is_even_looked_at(self):
+        import builtins
+        import subprocess
+        tokens = {os.path.expanduser(t) for t in fd.TOKEN_CANDIDATES if t}
+
+        def guard(real):
+            def f(path, *a, **kw):
+                if os.path.expanduser(str(path)) in tokens:
+                    raise AssertionError(f"touched the PG Farm token path {path}")
+                return real(path, *a, **kw)
+            return f
+
+        def no_subprocess(*a, **kw):
+            raise AssertionError("corpus_query started a subprocess")
+        patches = [(builtins, "open"), (os.path, "exists"), (os.path, "isfile"), (os, "access"),
+                   (subprocess, "run")]
+        saved = [(m, n, getattr(m, n)) for m, n in patches]
+        try:
+            builtins.open, os.path.exists = guard(saved[0][2]), guard(saved[1][2])
+            os.path.isfile, os.access = guard(saved[2][2]), guard(saved[3][2])
+            subprocess.run = no_subprocess
+            with env_vars(FRAN_CORPUS_QUERY="off"):
+                self.assertIsNone(fd.corpus_query("/some/search_out", "/drop/entry"))
+            # the guard is live: without the switch, the lookup reaches the token path
+            with env_vars(FRAN_CORPUS_QUERY=None, FRAN_INGEST_DIR=tempfile.gettempdir(),
+                          FRAN_INGEST_PYTHON=sys.executable):
+                saved_dirs, saved_py = fd.INGEST_DIRS, fd.PY_CANDIDATES
+                fd.INGEST_DIRS, fd.PY_CANDIDATES = [tempfile.gettempdir()], [sys.executable]
+                try:
+                    with self.assertRaises(AssertionError):
+                        fd.corpus_query("/some/search_out", "/drop/entry")
+                finally:
+                    fd.INGEST_DIRS, fd.PY_CANDIDATES = saved_dirs, saved_py
+        finally:
+            for m, n, f in saved:
+                setattr(m, n, f)
+
+    def test_every_fran_test_module_switches_it_off(self):
+        for mod in ("test_fran_deposit_gate.py", "test_fran_manifest_fasta.py",
+                    "test_fran_health_backfill.py"):
+            src = _read(os.path.join(HERE, mod))
+            self.assertIn('os.environ["FRAN_CORPUS_QUERY"] = "off"', src, mod)
+            self.assertIn("def setUpModule", src, mod)
+
+
 class ReviewerReproTests(unittest.TestCase):
     """The independent reviewer's reproduction script (scratchpad/review_fd_repro/repro.sh, A-E),
     as unit tests: same steps, same inputs -- umask 022, a 'PAR1xxxxPAR1' report stub, sidecars in
@@ -1593,7 +1670,7 @@ class ReviewerReproTests(unittest.TestCase):
         self.assertEqual(self.cli(fd.stage, out, name="Lumos QC")["withdrawn"], entry)
         r = self.cli(fd.stage, out)
         self.assertEqual((r["staged"], r["reason"]), (False, "qc_run"))
-        m = json.load(open(os.path.join(entry, fd.MANIFEST)))
+        m = _load_json(os.path.join(entry, fd.MANIFEST))
         self.assertEqual((m["qc"], m["exclude"]), (True, True))
 
     def test_C_symlinked_session_search_into_a_qc_path(self):
@@ -1632,7 +1709,7 @@ class ReviewerReproTests(unittest.TestCase):
         self.assertEqual((r["organism"], r["taxon"], r["fasta_path"]), ("Mus musculus", 10090, mouse))
         self.assertIn("the search read", r["fasta_meta_ignored"])
         self.assertIn("--fasta-meta ignored", err)
-        m = json.load(open(os.path.join(r["entry"], fd.MANIFEST)))
+        m = _load_json(os.path.join(r["entry"], fd.MANIFEST))
         self.assertEqual((m["organism"], m["fasta_path"]), ("Mus musculus", mouse))
 
 
@@ -1795,7 +1872,7 @@ class PlanTests(unittest.TestCase):
             rows = self._plan(t, apply=True)
             self.assertEqual(rows[t.session]["decision"], "staged")
             entry = rows[t.session]["entry"]
-            man = json.load(open(os.path.join(entry, fd.MANIFEST)))
+            man = _load_json(os.path.join(entry, fd.MANIFEST))
             self.assertEqual(man["search_name"], "sess")          # not "search"
             self.assertIn("backfill", man["search_name_source"])
             self.assertEqual(man["output_dir"], os.path.realpath(t.session))
@@ -1833,7 +1910,7 @@ class SbatchTests(unittest.TestCase):
                 partition, account, qos = "high", "genome-center-grp", "genome-center-grp-high-qos"
                 sbatch_minutes = 30
             _, res, _ = run_quiet(lambda: fd.jout(fd.write_backfill_sbatch(A())))
-            body = open(res["sbatch"]).read()
+            body = _read(res["sbatch"])
             self.assertIn("#SBATCH --partition=high", body)
             self.assertIn("#SBATCH --account=genome-center-grp", body)
             self.assertIn("#SBATCH --time=30", body)

@@ -23,6 +23,35 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
 import fran_deposit as fd  # noqa: E402
+
+
+def setUpModule():
+    # verify() asks the LIVE corpus when this account can read a PG Farm token -- which a suite run
+    # on HIVE can. fran_deposit.corpus_query() returns None before touching anything with this set.
+    global _SAVED_CORPUS_QUERY
+    _SAVED_CORPUS_QUERY = os.environ.get("FRAN_CORPUS_QUERY")
+    os.environ["FRAN_CORPUS_QUERY"] = "off"
+
+
+def tearDownModule():
+    if _SAVED_CORPUS_QUERY is None:
+        os.environ.pop("FRAN_CORPUS_QUERY", None)
+    else:
+        os.environ["FRAN_CORPUS_QUERY"] = _SAVED_CORPUS_QUERY
+
+
+_SAVED_CORPUS_QUERY = None
+
+
+def _load_json(path):
+    """json.load with the file closed (no ResourceWarning)."""
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _read(path, mode="r"):
+    with open(path, mode) as fh:
+        return fh.read()
 from fetch_fasta import _count_entries  # noqa: E402  -- the ONE definition; fran_deposit imports it
 
 # 3 entries; the middle '>' is placed so a naive per-chunk count would still see it, while
@@ -79,7 +108,7 @@ class FastaInManifest(unittest.TestCase):
     def test_the_helpers_are_imported_not_copied(self):
         """One definition. The chunk-boundary counter is exactly the logic you do not want two
         copies of -- a bug fixed in one would silently survive in the other."""
-        src = open(os.path.join(SCRIPTS, "fran_deposit.py")).read()
+        src = _read(os.path.join(SCRIPTS, "fran_deposit.py"))
         self.assertNotIn("def _count_entries(", src)
         self.assertIn("from fetch_fasta import", src)
 

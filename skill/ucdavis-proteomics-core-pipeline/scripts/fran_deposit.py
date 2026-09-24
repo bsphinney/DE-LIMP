@@ -94,6 +94,7 @@ written into `fran_manifest.json` for the cron to pass to `corpus_ingest.py`. Ne
 an unresolved organism stays absent from the manifest rather than being guessed.
 
 Overrides: FRAN_DROP_DIR, FRAN_DEPOSIT=off, DELIMP_PG_TOKEN_FILE (verify only),
+FRAN_CORPUS_QUERY=off (verify never asks the database -- set by every test that runs it),
 FRAN_INGEST_DIR, FRAN_INGEST_LOG_DIR, FRAN_HEALTH=off (stage does not even read the status
 file), FRAN_HEALTH_FILE (where `health` writes it and `stage` reads it; default
 /quobyte/proteomics-grp/fran/ingest_health.json), FRAN_HEALTH_CACHE.
@@ -339,7 +340,7 @@ def explicit_meta_mismatch(out, meta):
     mf = _meta_fasta(meta)
     if mf and (mf in reals or os.path.basename(mf) in names):
         return None
-    return (f"--fasta-meta {meta} describes {mf or sib or 'an unknown FASTA'}, but the search read "
+    return (f"{meta} describes {mf or sib or 'an unknown FASTA'}, but the search read "
             f"{', '.join(used)}")
 
 
@@ -924,7 +925,7 @@ def check(a):
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
     if bad_meta:
         r["fasta_meta_ignored"] = bad_meta
-        sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored ({bad_meta}); "
+        sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored: {bad_meta}; "
                          + (f"using the sidecar of the FASTA the search read ({org_src})"
                             if org_src else "no sidecar of the FASTA the search read, so the "
                                             "organism and database are left blank")
@@ -1255,7 +1256,13 @@ def corpus_query(out, entry=None):
     Asked under BOTH names the search can have in the corpus: its real directory, and the drop
     entry. FRAN's auto_ingest passes realpath(<the dir it scanned>) as --output-dir, and a drop
     entry is a real directory, so a staged search is recorded under incoming/<entry> -- a lookup
-    by the real search dir alone would never find one."""
+    by the real search dir alone would never find one.
+
+    FRAN_CORPUS_QUERY=off returns None before anything is looked up: no ingest dir, no python, no
+    token file, no database. Every test module that calls verify() sets it -- a suite run on HIVE
+    as an account that can read the PG Farm token would otherwise SELECT from the live corpus."""
+    if os.environ.get("FRAN_CORPUS_QUERY", "").strip().lower() in ("off", "0", "no", "false"):
+        return None
     ing = first_readable(INGEST_DIRS, isdir=True)
     py = first_readable(PY_CANDIDATES, executable=True)
     tok = first_readable(TOKEN_CANDIDATES)

@@ -105,6 +105,8 @@ class JobEnvGuard(unittest.TestCase):
             self.assertNotIn(k, env)
         self.assertEqual((env["SKILL_SLACK"], env["FRAN_DEPOSIT"], env["RECORD_RUN"]),
                          ("0", "off", "off"))
+        # never the live FRAN database, even on HIVE as an account that can read the token
+        self.assertEqual((env["FRAN_HEALTH"], env["FRAN_CORPUS_QUERY"]), ("off", "off"))
         self.assertEqual(env["SKILL_RUNS_DIR"], "/tmp/t/skill_runs")
         self.assertEqual(env["FRAN_DROP_DIR"], "/tmp/t/fran_drop")
         self.assertEqual(env["HIVE_ENV_FILE"], "/nonexistent/hive.env")

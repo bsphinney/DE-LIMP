@@ -27,7 +27,8 @@ def job_env(tmpdir, base=None, **extra):
     and FRAN drop directory pointed inside `tmpdir` in case anything ignores its switch."""
     env = {k: v for k, v in (os.environ if base is None else base).items()
            if not k.startswith(_DROPPED_PREFIXES)}
-    env.update(SKILL_SLACK="0", FRAN_DEPOSIT="off", FRAN_HEALTH="off", RECORD_RUN="off",
+    env.update(SKILL_SLACK="0", FRAN_DEPOSIT="off", FRAN_HEALTH="off", FRAN_CORPUS_QUERY="off",
+               RECORD_RUN="off",
                SKILL_RUNS_DIR=os.path.join(tmpdir, "skill_runs"),
                FRAN_DROP_DIR=os.path.join(tmpdir, "fran_drop"),
                HIVE_ENV_FILE="/nonexistent/hive.env")

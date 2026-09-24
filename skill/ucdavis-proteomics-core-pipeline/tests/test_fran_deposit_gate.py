@@ -19,6 +19,35 @@ sys.path.insert(0, SCRIPTS)
 
 import fran_deposit as fd  # noqa: E402
 
+
+def setUpModule():
+    # verify() asks the LIVE corpus when this account can read a PG Farm token -- which a suite run
+    # on HIVE can. fran_deposit.corpus_query() returns None before touching anything with this set.
+    global _SAVED_CORPUS_QUERY
+    _SAVED_CORPUS_QUERY = os.environ.get("FRAN_CORPUS_QUERY")
+    os.environ["FRAN_CORPUS_QUERY"] = "off"
+
+
+def tearDownModule():
+    if _SAVED_CORPUS_QUERY is None:
+        os.environ.pop("FRAN_CORPUS_QUERY", None)
+    else:
+        os.environ["FRAN_CORPUS_QUERY"] = _SAVED_CORPUS_QUERY
+
+
+_SAVED_CORPUS_QUERY = None
+
+
+def _load_json(path):
+    """json.load with the file closed (no ResourceWarning)."""
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _read(path, mode="r"):
+    with open(path, mode) as fh:
+        return fh.read()
+
 # fran_deposit's QC name rule reads the last three path components, i.e. the random temp name here;
 # without "_" in tempfile's alphabet it can never read one as "..._qc_..." (see
 # test_fran_health_backfill.py).
@@ -207,7 +236,7 @@ class StagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out, entry = self._stage(d, "diann")
             self.assertNotIn("search_provenance.json", os.listdir(entry))
-            man = json.load(open(os.path.join(entry, fd.MANIFEST)))
+            man = _load_json(os.path.join(entry, fd.MANIFEST))
             self.assertEqual(man["search_provenance"]["engine"], "diann")
 
     def test_the_manifest_carries_what_the_cron_cannot_derive(self):
@@ -216,7 +245,7 @@ class StagingTests(unittest.TestCase):
         under the drop path would record where the handover was, not where the search is."""
         with tempfile.TemporaryDirectory() as d:
             out, entry = self._stage(d, organism="Homo sapiens", taxon=9606, name="MyRun")
-            man = json.load(open(os.path.join(entry, fd.MANIFEST)))
+            man = _load_json(os.path.join(entry, fd.MANIFEST))
             self.assertEqual(man["organism"], "Homo sapiens")
             self.assertEqual(man["taxon"], 9606)
             self.assertEqual(man["output_dir"], os.path.realpath(out))
@@ -227,7 +256,7 @@ class StagingTests(unittest.TestCase):
     def test_an_unknown_organism_is_absent_not_guessed(self):
         with tempfile.TemporaryDirectory() as d:
             out, entry = self._stage(d)
-            self.assertIsNone(json.load(open(os.path.join(entry, fd.MANIFEST)))["organism"])
+            self.assertIsNone(_load_json(os.path.join(entry, fd.MANIFEST))["organism"])
 
     def test_xic_from_the_PARALLEL_chain_is_found_and_flattened(self):
         """The layout that actually bites. The 5-step chain is the DEFAULT route above 5 files,
