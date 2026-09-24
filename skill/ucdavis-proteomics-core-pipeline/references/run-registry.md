@@ -421,7 +421,8 @@ the copy records this finding, which becomes a Data Quality Note:
 **Findings are replaced by part.** Every finding is tagged with the part of the record it came
 from: `search`, `detection`, `fasta`, `analysis` or `zip`.
 - **Which parts a call re-evaluates:** `search-done` re-evaluates `search`, `detection` and
-  `fasta`. `analysis-done` also re-evaluates `analysis` and `zip`.
+  `fasta`. `analysis-done` re-evaluates `analysis` and `zip`, and also the three search parts when it
+  can read the search (locally, or on HIVE when a laptop's record is merged there).
 - **How merge() uses that:** it drops the old findings of exactly the parts this call
   re-evaluated, then adds what the call found. So a problem that is gone leaves the record, and
   a finding from a part the call did not look at stays. For example, `search-done` keeps the zip

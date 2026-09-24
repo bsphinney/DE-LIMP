@@ -1444,6 +1444,22 @@ class ReviewFixes(Base):
 
 
 
+
+class FindingPartsAreDeclared(unittest.TestCase):
+    """merge() replaces findings by the PART that raised them. A finding with no part is replaced
+    by ANY call that re-evaluates something, and a misspelled part is never replaced -- so every
+    finding the code raises must carry a part from FINDING_PARTS."""
+
+    def test_every_finding_literal_names_a_declared_part(self):
+        src = open(record_run.__file__, encoding="utf-8").read()
+        parts = re.findall(r'"part":\s*"([^"]+)"', src)
+        self.assertTrue(parts, "no finding declares a part")
+        self.assertEqual(sorted(set(parts) - set(record_run.FINDING_PARTS)), [])
+        # every finding dict (an "id" that ends in a finding) carries a "part" beside it
+        for m in re.finditer(r'\{\s*"id":\s*"(session_[a-z_]+)"(.{0,200})', src, re.S):
+            self.assertIn('"part":', m.group(2), m.group(1))
+
+
 class RunBoundedOnWindows(unittest.TestCase):
     """gabrig's laptop is Windows: no os.killpg, no signal.SIGKILL. A timed-out call must still be
     killed (tree and all) and still raise TimeoutExpired -- not AttributeError, which the SSH
