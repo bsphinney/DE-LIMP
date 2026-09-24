@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""The session's README.html / README.md / AGENTS.md, and "where this lives on HIVE".
+
+Brett, 2026-09-24: collaborators cannot read a .md, an AI agent handed the folder needs a guide
+to it, and nothing said where the files and the raw data are on HIVE. A real hive_remote session
+(Silva08172026) had a README that named no HIVE path and claimed an input/raw_files.txt that did
+not exist -- the raw paths were only in output/search/file_list.txt and search_provenance.json.
+
+What these tests pin:
+  * README.html is valid, self-contained (inline CSS, no script, no external asset) and has the
+    same sections as README.md -- both rendered from one source
+  * AGENTS.md is generated from the records: a DPC and a MaxLFQ provenance each come out in
+    their own words, and neither names the other pipeline
+  * HIVE locations resolve for an R:-style drive, /Volumes/proteomics, a UNC path and /quobyte,
+    through hive_shares.tsv (the table hive_path.sh reads too); unknown -> "not recorded"
+  * input/raw_files.txt is written from the search's record when missing, and the README never
+    claims it exists when it does not
+  * finalize puts README.html + AGENTS.md in the zip and MANIFEST.txt, and rewrites them with the
+    registry record's path when the run-log hook creates it
+stdlib only, no network.
+"""
+import csv
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
+from html.parser import HTMLParser
+from unittest import mock
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
+
+import session                                      # noqa: E402
+import session_docs                                 # noqa: E402
+import share_map                                    # noqa: E402
+import make_deposit                                 # noqa: E402
+import test_deposit_package as tdp                  # noqa: E402
+from job_env import job_env                         # noqa: E402
+
+PY = sys.executable
+DPC = dict(tdp.DE_PROV, significance_rule="adj.P.Val < adjp (BH); no fold-change filter",
+           significant_per_contrast={"Treated-Control": 7}, groups={"Control": 2, "Treated": 1},
+           n_samples=3)
+# build_maxlfq.R's descriptor, as run_de.R writes it into de_provenance.json
+MAXLFQ = {"pipeline_id": "maxlfq", "display_label": "MaxLFQ + limma",
+          "rollup_method": "DIA-NN PG.MaxLFQ",
+          "de_engine": "limma::lmFit -> contrasts.fit -> eBayes (NA-tolerant per row)",
+          "missing_policy": "NAs left in place; limma drops them per row. All-missing-in-one-"
+                            "condition proteins are on/off calls.",
+          "citation": "Quantification: DIA-NN MaxLFQ (Demichev et al. 2020, Nat Methods 17:41). "
+                      "DE: limma (Ritchie et al. 2015, NAR 43:e47).",
+          "method": "maxlfq", "adjp": 0.05, "logfc": 1, "logfc_role": "reference_line_only",
+          "significance_rule": "adj.P.Val < adjp (BH); no fold-change filter",
+          "design": "~ 0 + groups + Batch", "contrasts": ["Treated-Control"],
+          "significant_per_contrast": {"Treated-Control": 3}}
+ROWS = [{"server": "128.120.208.24", "share": "proteomics",
+         "hive": "/nfs/lssc0/flinders/proteomics", "mac": "/Volumes/proteomics",
+         "windows": "\\\\128.120.208.24\\proteomics"},
+        {"server": "*", "share": "proteomics-grp", "hive": "/quobyte/proteomics-grp",
+         "mac": "/Volumes/proteomics-grp", "windows": None}]
+FLINDERS = "/nfs/lssc0/flinders/proteomics"
+
+
+def write(path, text):
+    tdp.write(path, text)
+
+
+def read(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def sections_md(text):
+    return [ln[3:].strip() for ln in text.splitlines() if ln.startswith("## ")]
+
+
+class H2s(HTMLParser):
+    """Collects <h2> texts and checks the page is well-formed and self-contained."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.bad, self.h2, self.cur, self.external, self.tags = [], 0, [], None, [], set()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag)
+        a = dict(attrs)
+        if tag in ("script", "link", "img", "iframe") or (a.get("src") or "").startswith("http"):
+            self.external.append((tag, a))
+        if tag not in ("meta", "br"):
+            self.stack.append(tag)
+        if tag == "h2":
+            self.cur = ""
+
+    def handle_endtag(self, tag):
+        if self.stack and self.stack[-1] == tag:
+            self.stack.pop()
+        else:
+            self.bad += 1
+        if tag == "h2":
+            self.h2.append(self.cur.strip())
+            self.cur = None
+
+    def handle_data(self, data):
+        if self.cur is not None:
+            self.cur += data
+
+
+class Locations(unittest.TestCase):
+    """share_map: the one table, both directions."""
+
+    def loc(self, path, resolver=None):
+        return share_map.locate(path, ROWS, resolver=resolver, here_is_hive=False)
+
+    def test_the_table_file_is_what_both_sides_read(self):
+        rows = share_map.load_table()
+        self.assertEqual(rows, ROWS)
+        with open(os.path.join(SCRIPTS, "hive_path.sh")) as fh:
+            sh = fh.read()
+        self.assertIn('SHARES="$HERE/hive_shares.tsv"', sh)
+        self.assertNotIn("128.120.208.24/proteomics)", sh, "the table must not live in the script")
+
+    def test_mac_mount(self):
+        r = self.loc("/Volumes/proteomics/Data/lab/service/x")
+        self.assertEqual(r["hive"], f"{FLINDERS}/Data/lab/service/x")
+        self.assertEqual(r["windows"], "\\\\128.120.208.24\\proteomics\\Data\\lab\\service\\x")
+        self.assertEqual(r["mac"], "/Volumes/proteomics/Data/lab/service/x")
+
+    def test_drive_letter_through_hive_path_sh(self):
+        calls = []
+
+        def resolver(p):                  # hive_path.sh --no-verify: R: is \\128.120.208.24\proteomics
+            calls.append(p)
+            return "128.120.208.24", "proteomics", "Data/lab/service/P1"
+        r = self.loc("R:\\Data\\lab\\service\\P1", resolver)
+        self.assertEqual(calls, ["R:\\Data\\lab\\service\\P1"])
+        self.assertEqual(r["hive"], f"{FLINDERS}/Data/lab/service/P1")
+        self.assertEqual(r["windows"], "\\\\128.120.208.24\\proteomics\\Data\\lab\\service\\P1")
+
+    def test_unc_and_quobyte(self):
+        self.assertEqual(self.loc("\\\\128.120.208.24\\proteomics\\Data\\x")["hive"],
+                         f"{FLINDERS}/Data/x")
+        q = self.loc("/quobyte/proteomics-grp/SERVICE/a")
+        self.assertEqual(q["hive"], "/quobyte/proteomics-grp/SERVICE/a")
+        self.assertEqual(q["mac"], "/Volumes/proteomics-grp/SERVICE/a")
+        self.assertIsNone(q["windows"], "the proteomics-grp Windows server is not recorded")
+
+    def test_unknown_is_not_recorded_never_a_guess(self):
+        r = self.loc("/Users/someone/data", resolver=lambda p: None)
+        self.assertIsNone(r["hive"])
+        self.assertTrue(r["how"].startswith("not recorded"))
+        # hive_path.sh's fallback would GUESS /nfs/lssc0/flinders/<share>; share_map does not
+        r = self.loc("S:\\x", resolver=lambda p: ("10.0.0.9", "labshare", "x"))
+        self.assertIsNone(r["hive"])
+        self.assertIn("not recorded", r["how"])
+
+    def test_hive_path_sh_reads_the_table(self):
+        """A copy of hive_path.sh next to an edited table maps the new share -- no ssh."""
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(os.path.join(SCRIPTS, "hive_path.sh"), d)
+            with open(os.path.join(d, "hive_shares.tsv"), "w") as fh:
+                fh.write("#server\tshare\thive_path\tmac_mount\twindows_unc\n"
+                         "srv9\tlabshare\t/quobyte/lab\t/Volumes/labshare\t\\\\srv9\\labshare\n")
+            r = subprocess.run(["bash", os.path.join(d, "hive_path.sh"), "--no-verify",
+                                "\\\\srv9\\labshare\\runs\\a"], capture_output=True, text=True,
+                               timeout=60, env=dict(os.environ, HIVE_EXEC="false"))
+            j = json.loads(r.stdout)
+            self.assertEqual(j["candidates"], ["/quobyte/lab/runs/a"])
+            self.assertIs(j["known_share"], True)
+            self.assertIs(j["verified"], False)
+            self.assertIn("--no-verify", j["how"])
+
+
+class RawList(unittest.TestCase):
+    def test_written_from_search_provenance_when_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            os.remove(p["raw_list"])
+            files = ["/quobyte/proteomics-grp/SERVICE/lab/raw/a.d",
+                     "/quobyte/proteomics-grp/SERVICE/lab/raw/b.d"]
+            sp = json.loads(read(p["search_prov"]))
+            write(p["search_prov"], json.dumps(dict(sp, files=files)))
+            level, note = session_docs.ensure_raw_list(p)
+            self.assertEqual(level, "OK")
+            self.assertIn("search_provenance.json", note)
+            self.assertEqual(session.read_raw_list(p["session_dir"]), files)
+
+    def test_written_from_file_list_and_never_claimed_when_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            os.remove(p["raw_list"])
+            level, note = session_docs.ensure_raw_list(p)
+            self.assertEqual(level, "SKIPPED")               # no record anywhere
+            f = session_docs.gather(p["session_dir"])
+            md = session_docs.readme_md(f)
+            self.assertNotIn("raw_files.txt (where the raw data are)", md)
+            self.assertRegex(md, r"\| Raw data \| not recorded \|")
+            write(os.path.join(p["search_out"], "file_list.txt"), "/quobyte/x/r1.d\n/quobyte/x/r2.d\n")
+            self.assertEqual(session_docs.ensure_raw_list(p)[0], "OK")
+            self.assertEqual(session.read_raw_list(p["session_dir"]),
+                             ["/quobyte/x/r1.d", "/quobyte/x/r2.d"])
+
+
+class Agents(unittest.TestCase):
+    def build(self, d, prov, qc=False):
+        p = tdp.dia_session(d)
+        os.remove(os.path.join(p["de_dir"], "DE_Treated_vs_Control.csv"))
+        write(os.path.join(p["de_dir"], "de_provenance.json"), json.dumps(prov))
+        write(os.path.join(p["de_dir"], "DE_x_Treated.Control.csv"),
+              '"Protein.Group","Genes","logFC","AveExpr","t","P.Value","adj.P.Val","B","Mystery"\n')
+        write(os.path.join(p["de_dir"], "Expression_Matrix.csv"),
+              '"Protein.Group","Genes","s1","s2","s3"\n')
+        if qc:
+            write(os.path.join(p["de_dir"], "QC_detected_vs_inferred.csv"),
+                  "Sample,Group,Detected,Inferred,Total,PctDetected,PctInferred\n"
+                  "s1,Control,80,20,100,80,20\ns2,Treated,60,40,100,60,40\n")
+        return p
+
+    def test_dpc_in_its_own_words(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, DPC, qc=True)
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("DPC-Quant + limma (limpa)", text)
+            self.assertIn(DPC["missing_policy"], text)
+            self.assertNotIn("MaxLFQ", text)
+            self.assertIn("Inferred is not measured", text)
+            self.assertIn("(20–40% of values per sample)", text)
+            self.assertIn("reference line on the volcano only", text)
+            self.assertIn("Treated-Control = 7", text)
+            self.assertIn("`Mystery` — no description recorded", text)
+            self.assertIn("`adj.P.Val` — Benjamini-Hochberg adjusted p-value", text)
+
+    def test_maxlfq_in_its_own_words(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, MAXLFQ)
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("MaxLFQ + limma", text)
+            self.assertIn("DIA-NN PG.MaxLFQ", text)
+            self.assertIn("on/off calls", text)
+            self.assertIn("covariates: Batch", text)
+            for wrong in ("DPC", "limpa", "Inferred is not measured"):
+                self.assertNotIn(wrong, text, wrong)
+
+    def test_no_threshold_claimed_that_was_not_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            prov = {k: v for k, v in DPC.items() if k not in ("significance_rule", "logfc_role")}
+            p = self.build(d, prov)
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("whether a fold-change filter was applied is not recorded", text)
+            self.assertNotIn("reference line on the volcano only", text)
+
+    def test_pull_down_controls_by_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            prov = dict(DPC, groups={"Old_IgG": 3, "Old_RyR": 3},
+                        contrasts=["Old_RyR-Old_IgG"])
+            p = self.build(d, prov)
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("Pull-down controls, by group name: Old_IgG", text)
+            self.assertIn("enrichment over that control", text)
+            p2 = self.build(os.path.join(d, "b"), DPC)          # Control/Treated: no IP claim
+            self.assertNotIn("enrichment", session_docs.agents_md(
+                session_docs.gather(p2["session_dir"])))
+
+    def test_significant_counts_from_an_old_repr_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, dict(DPC, significant_per_contrast="{'Treated-Control': 11}"))
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("| Treated-Control | 11 |", md)
+
+
+class Readme(unittest.TestCase):
+    def test_html_is_self_contained_and_matches_the_md(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            session_docs.write_docs(p["session_dir"])
+            md = read(p["readme"])
+            page = read(os.path.join(p["session_dir"], "README.html"))
+            h = H2s()
+            h.feed(page)
+            self.assertEqual((h.stack, h.bad), ([], 0))
+            self.assertEqual(h.external, [])
+            self.assertIn("style", h.tags)
+            self.assertIn('<meta charset="utf-8">', page)
+            self.assertEqual(h.h2, sections_md(md))
+            for s in ("Start here", "Summary", "Where this lives on HIVE", "Reproduce",
+                      "Methods", "Deposit the data (PRIDE / MassIVE)"):
+                self.assertIn(s, h.h2)
+            self.assertIn('href="AGENTS.md"', page)
+            self.assertIn('href="output/tables/"', page)
+            self.assertNotIn("Open `README.html`", page.replace("<code>", "`").replace(
+                "</code>", "`"))
+            self.assertIn("Open `README.html`", md)
+
+    def test_links_only_to_files_that_exist(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            write(os.path.join(p["output_dir"], "Analysis_Report.html"), "<html></html>")
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            for target in re.findall(r"\]\(([^)]+)\)", md):
+                self.assertTrue(os.path.exists(os.path.join(p["session_dir"], target)), target)
+            self.assertIn("(output/Analysis_Report.html)", md)
+
+    def test_relative_links_render_and_schemes_do_not(self):
+        s = make_deposit._inline("[r](output/a%20b.html) [x](javascript:alert(1)) [w](https://a.b)")
+        self.assertIn('<a href="output/a%20b.html">r</a>', s)
+        self.assertNotIn('href="javascript', s)
+        self.assertIn('<a href="https://a.b">w</a>', s)
+
+
+class Finalize(unittest.TestCase):
+    def run_finalize(self, p, hooks=None):
+        args = type("A", (), dict(dir=p["session_dir"], zip=True, no_deposit=True,
+                                  no_notify=True, reanalysis_of=""))()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, job_env(os.path.dirname(p["session_dir"])),
+                             clear=True), redirect_stdout(out), redirect_stderr(io.StringIO()):
+            if hooks is None:
+                session.do_finalize(args)
+            else:
+                with mock.patch.object(session, "_finish_hooks", return_value=hooks):
+                    session.do_finalize(args)
+        return json.loads(out.getvalue())
+
+    def test_docs_in_the_zip_and_the_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            write(p["output_files_md"], "# Output files — what each one is\n")
+            res = self.run_finalize(p)
+            self.assertEqual(res["zip_docs"], "added")
+            base = os.path.basename(p["session_dir"])
+            with zipfile.ZipFile(res["zip"]) as z:
+                names = z.namelist()
+                for n in ("README.md", "README.html", "AGENTS.md", "MANIFEST.txt"):
+                    self.assertEqual(names.count(f"{base}/{n}"), 1, n)
+            man = read(p["manifest_txt"])
+            for part in ("README.html", "AGENTS.md", "input/raw_files.txt"):
+                self.assertRegex(man, rf"\[OK\]\s+{re.escape(part)}")
+            files_md = read(p["output_files_md"])
+            self.assertIn("`README.html`", files_md)
+            self.assertIn("`AGENTS.md`", files_md)
+            self.run_finalize(p)                                  # re-finalize: one block
+            self.assertEqual(read(p["output_files_md"]).count("written at finalize: BEGIN"),
+                             1)
+            md = read(p["readme"])
+            self.assertIn("[MANIFEST.txt](MANIFEST.txt)", md)
+
+    def test_registry_path_from_the_hook_is_written_in(self):
+        reg = "/quobyte/proteomics-grp/skill_runs/sessions/2026-09-24_demo"
+        hooks = {"run_log": {"logged": True, "path": reg}, "slack": {"sent": False,
+                 "level": "INFO", "detail": "off"},
+                 "manifest": [("OK", "Core run log", "logged")]}
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            res = self.run_finalize(p, hooks)
+            self.assertIn(reg, read(p["readme"]))
+            self.assertIn(reg, read(os.path.join(p["session_dir"], "AGENTS.md")))
+            with zipfile.ZipFile(res["zip"]) as z:
+                base = os.path.basename(p["session_dir"])
+                self.assertIn(reg, z.read(f"{base}/README.html").decode())
+
+    def test_docs_subcommand_as_a_copy(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            real = "/Volumes/proteomics/Data/lab/service/x/2026-09-24_demo"
+            r = subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "docs", "--dir",
+                                p["session_dir"], "--as", real], capture_output=True, text=True,
+                               env=job_env(d))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            md = read(p["readme"])
+            self.assertIn(f"`{FLINDERS}/Data/lab/service/x/2026-09-24_demo`", md)
+            self.assertFalse(os.path.exists(p["manifest_txt"]), "docs must not write MANIFEST")
+            self.assertNotIn("[MANIFEST.txt]", md)
+
+
+class RegistryLocate(unittest.TestCase):
+    def test_locate_reads_the_index_only(self):
+        import record_run
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            runs = os.path.join(d, "skill_runs")
+            folder = os.path.join(runs, "sessions", "2026-09-24_demo")
+            os.makedirs(folder)
+            ident = {"session": os.path.realpath(p["session_dir"])}
+            write(os.path.join(folder, "run_record.json"), json.dumps({"identity": ident}))
+            os.makedirs(os.path.join(runs, ".index"))
+            with mock.patch.dict(os.environ, {"SKILL_RUNS_DIR": runs, "RECORD_RUN": "on"}):
+                self.assertIsNone(record_run.locate(p["session_dir"]))
+                os.symlink(os.path.relpath(folder, os.path.join(runs, ".index")),
+                           os.path.join(runs, ".index",
+                                        f"session_{record_run.key16(ident['session'])}"))
+                before = sorted(os.listdir(runs))
+                self.assertEqual(record_run.locate(p["session_dir"]), folder)
+                self.assertEqual(sorted(os.listdir(runs)), before, "locate() never writes")
+                r = subprocess.run([PY, os.path.join(SCRIPTS, "record_run.py"), "locate",
+                                    "--session", p["session_dir"]], capture_output=True,
+                                   text=True, timeout=60)
+                self.assertEqual(json.loads(r.stdout), {"located": folder})
+            with mock.patch.dict(os.environ, {"SKILL_RUNS_DIR": runs, "RECORD_RUN": "off"}):
+                self.assertIsNone(record_run.locate(p["session_dir"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

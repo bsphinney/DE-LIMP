@@ -76,6 +76,15 @@ CATALOG = [
     (r"^methods_params\.json$", "Analysis report", "Acquisition parameters extracted from the raw data for the Methods section."),
     (r"^ANALYSIS_PROMPT\.md$", "Analysis report", "The analysis brief the agent followed to write the report."),
     (r"^OUTPUT_FILES\.md$", "Analysis report", "This file — the catalog of all outputs."),
+    (r"^README\.html$", "Analysis report",
+     "START HERE: the session README as a web page (double-click it) — summary, links to the "
+     "report, Methods and tables, and where everything lives on HIVE."),
+    (r"^README\.md$", "Analysis report", "The same README as plain text (Markdown)."),
+    (r"^AGENTS\.md$", "Analysis report",
+     "For an AI agent given this folder: the study, which file is authoritative for what, the "
+     "table columns, the traps, and what it must not do."),
+    (r"^raw_files\.txt$", "Inputs",
+     "Where the raw data files are (full paths); raw data is never copied into the session."),
 ]
 
 CATEGORY_ORDER = ["Analysis report", "Differential expression", "Search output",
@@ -94,6 +103,31 @@ def describe(basename):
         if re.match(pat, basename):
             return cat, desc
     return "Other", "unrecognized output (no description available)"
+
+
+FINALIZE_BEGIN = "<!-- written at finalize: BEGIN -->"
+FINALIZE_END = "<!-- written at finalize: END -->"
+
+
+def add_finalize_files(output_files_md, files, root):
+    """Add the files session.py finalize writes after this catalog was made (README.html,
+    AGENTS.md, ...) to OUTPUT_FILES.md, described by the same CATALOG. Re-running replaces the
+    block. Returns the number of files listed."""
+    with open(output_files_md, encoding="utf-8") as fh:
+        text = fh.read()
+    if FINALIZE_BEGIN in text:
+        head, _, rest = text.partition(FINALIZE_BEGIN)
+        text = head.rstrip("\n") + "\n" + rest.partition(FINALIZE_END)[2].lstrip("\n")
+    rows = []
+    for f in files:
+        if os.path.isfile(f):
+            _, desc = describe(os.path.basename(f))
+            rows.append(f"| `{os.path.relpath(f, root)}` | {human(os.path.getsize(f))} | {desc} |")
+    block = [FINALIZE_BEGIN, "## Written when the session was finalized", "",
+             "| File | Size | What it is |", "|---|---|---|", *rows, "", FINALIZE_END]
+    with open(output_files_md, "w", encoding="utf-8") as fh:
+        fh.write(text.rstrip("\n") + "\n\n" + "\n".join(block) + "\n")
+    return len(rows)
 
 
 def collect(paths):

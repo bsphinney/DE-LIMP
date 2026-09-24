@@ -143,6 +143,12 @@ class Manifest:
         t = f" ({elapsed:.1f}s)" if elapsed is not None else ""
         self.lines.append(f"[OK]      {name:<50}{t}" + (f" -- {note}" if note else ""))
 
+    def info(self, name, note):
+        """A notice that is not an export part -- the orchestrator does not relay it as missing
+        (session._append_manifest's [INFO])."""
+        note = " ".join(str(note).split())
+        self.lines.append(f"[INFO]    {name:<50} -- {note[:200]}")
+
     def skip(self, name, why):
         why = " ".join(str(why).split())
         if len(why) > 200:
@@ -1217,6 +1223,10 @@ def _inline(s):
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*([^*\s][^*]*)\*(?![\w*])", r"<em>\1</em>", s)
     s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
+    # a link to a file beside the page (README.html -> output/methods.docx): relative, never a
+    # scheme (so never javascript:) and never //host
+    s = re.sub(r"\[([^\]]+)\]\(((?![A-Za-z][A-Za-z0-9+.-]*:|/)[^)\s]+)\)",
+               r'<a href="\2">\1</a>', s)
     s = re.sub(r"(?<![\"'>=])(https?://[^\s<)]+[^\s<).,;])", r'<a href="\1">\1</a>', s)
     return s
 
@@ -1305,7 +1315,7 @@ def md_to_html(md, title):
            "pre{background:#f1f3f7;padding:10px;overflow-x:auto}pre code{background:none}"
            "table{border-collapse:collapse;margin:.6em 0;font-size:13px;display:block;"
            "overflow-x:auto}th,td{border:1px solid #d8dee8;padding:4px 8px;text-align:left;"
-           "vertical-align:top}th{background:#eef2f7}blockquote{border-left:4px solid #9fb4cc;"
+           "vertical-align:top}td code{word-break:break-all}th{background:#eef2f7}blockquote{border-left:4px solid #9fb4cc;"
            "margin:.8em 0;padding:.2em 1em;background:#f7f9fc}")
     return (f"<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
             f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"

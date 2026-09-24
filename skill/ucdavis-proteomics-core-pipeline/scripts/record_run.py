@@ -19,6 +19,7 @@ plus a line in an append-only master log and rows in an activity log.
   # the registry, from every run_record.json (the logs are for people; this is the index)
   python3 record_run.py list [--since 2026-09-01] [--user gabrig] [--status failed] [--tsv|--json]
   python3 record_run.py --where        # which route and destination from here, and nothing else
+  python3 record_run.py locate --session <dir>   # the record already holding it, read-only, here
   ... --dry-run                        # what it would write, written nowhere (preview on stderr)
 
 stdout is ONE JSON object -- {"recorded": true, "path": "<session folder>", ...} or
@@ -34,7 +35,8 @@ Layout (DataAnalysis "Session Structure"):
                             who/when/status, data, engine + version, key parameters and their
                             sources, headline results, where everything is, FRAN, skill issues
       run_record.json       the same, machine-readable (schema_version)
-      README.md             the session README (after finalize)
+      README.md / .html     the session README (after finalize), and AGENTS.md, its guide for
+                            an AI agent handed the folder
       <session>.zip         the session zip, minus per-run .quant files, when under the cap
       input/                conditions.csv, FASTA sidecar, params + rationale, raw_files.txt -- never
                             raw data
@@ -1548,7 +1550,7 @@ def plan_analysis(plan, session, a, zip_cap):
                               "not run on this session")
 
     # ---- copies, mirroring the session: top level, input/, output/, scripts/
-    for rel in ("README.md", "MANIFEST.txt", "DIFFERENCES.md"):
+    for rel in ("README.md", "README.html", "AGENTS.md", "MANIFEST.txt", "DIFFERENCES.md"):
         add_copy(plan, os.path.join(session, rel), rel, "analysis")
     inp = os.path.join(session, "input")
     for f in listdir(inp):
@@ -2245,6 +2247,26 @@ def find_record(root, identity):
                 if state != "ok" or same_identity(rec, identity):
                     return tgt                # the index is the claim; a bad record is not a miss
     return None
+
+
+def locate(session):
+    """The registry folder already holding this session's record, looked up READ-ONLY from here,
+    the way a re-record finds it (find_record: the .index link of the session and of its search
+    out dir). None when there is none yet, or the registry is not readable from this machine --
+    nothing is written and nothing goes over ssh. session.py puts it in the session README."""
+    if disabled() or not session or not os.path.isdir(session):
+        return None
+    root = runs_dir()
+    if not (os.path.isdir(root) and os.access(root, os.R_OK | os.X_OK)):
+        return None
+    ident = {"session": os.path.realpath(session), "out": None}
+    out = session_search_out(session, None)
+    if out and os.path.isdir(out):
+        ident["out"] = os.path.realpath(out)
+    try:
+        return find_record(root, ident)
+    except OSError:
+        return None
 
 
 def claim_folder(root, base, identity, dry_run):
@@ -3105,7 +3127,7 @@ def build_parser():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--where", action="store_true",
                     help="print where a record would go from here, and nothing else")
-    sub = ap.add_subparsers(dest="cmd", metavar="{search-done,analysis-done,list}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{search-done,analysis-done,list,locate}")
 
     def common(p):
         p.add_argument("--dry-run", action="store_true",
@@ -3163,6 +3185,9 @@ def build_parser():
     ls.add_argument("--json", action="store_true")
     ls.add_argument("--timeout", type=float, default=120)
     ls.add_argument("--remote-hop", action="store_true", help=argparse.SUPPRESS)
+    lc = sub.add_parser("locate", help="the registry folder already holding a session's record, "
+                                       "read-only and from here only: {\"located\": path|null}")
+    lc.add_argument("--session", required=True)
     return ap
 
 
@@ -3174,6 +3199,12 @@ def main(argv=None):
     if not a.cmd:
         build_parser().print_usage(sys.stderr)
         print(json.dumps(not_recorded("bad_input", "no command given")))
+        return 0
+    if a.cmd == "locate":                      # read-only; disabled -> null, like no record
+        try:
+            print(json.dumps({"located": locate(a.session)}))
+        except Exception as e:                  # noqa: BLE001 -- never fatal, by contract
+            print(json.dumps({"located": None, "error": f"{type(e).__name__}: {e}"}))
         return 0
     if a.cmd != "list" and disabled():
         # The kill switch: before any read, write or SSH attempt.

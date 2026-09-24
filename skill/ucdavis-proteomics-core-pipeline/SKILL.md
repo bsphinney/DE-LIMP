@@ -1560,9 +1560,12 @@ beside it as `methods_complete_draft.md`. Finalize then writes the **repository-
 `output/DATA_SUBMISSION/`: `HOW_TO_SUBMIT.md`/`.html`, a pre-filled SDRF `sdrf.tsv`,
 `protocols.txt`, `files_to_upload.tsv`, and `prepare_upload.sbatch`. Never run
 `prepare_upload.sbatch` yourself: it reads every raw file, so the user submits it with `sbatch`
-when ready. Finalize also writes the session `README.md` (and `DIFFERENCES.md` for a re-analysis)
-and **`MANIFEST.txt`** at the session root, which lists every part as `[OK]` or `[SKIPPED] <name>
--- <reason>`. Then it zips the session, leaving out the raw data, `upload_staging/`, DIA-NN's
+when ready. Finalize also writes, at the session root, **`README.html`** (the page collaborators
+open: summary, links, and where the folder, raw data, search output and FASTA are on HIVE with
+their Windows/Mac paths), the same text as `README.md`, **`AGENTS.md`** (a guide for an AI agent
+given the folder), `input/raw_files.txt` if it was missing, `DIFFERENCES.md` for a re-analysis,
+and **`MANIFEST.txt`**, which lists every part as `[OK]` or `[SKIPPED] <name> -- <reason>`
+(→ `references/outputs.md`). Then it zips the session, leaving out the raw data, `upload_staging/`, DIA-NN's
 `.quant` intermediates (~30 MB per run) and the predicted spectral library (`*.predicted.speclib`,
 ~0.7 GB; rebuilt from the FASTA + params). Both stay on disk; `zip_excluded` counts them.
 `--no-deposit` skips only the package. → detail: `references/deposit.md`.
@@ -1578,7 +1581,8 @@ missing parts, so do not relay them. Examples are the run log and Slack lines su
 notification -- not configured for this user". Then summarize: data type (instrument
 + acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill's
 `defaults_version`, FASTA source, DE method, and per-contrast significant counts. Point them at the
-**session folder** and its `README.md`, then:
+**session folder** and its **`README.html`** — tell collaborators to open that (double-click);
+`AGENTS.md` is for an AI assistant they hand the folder to. Then:
 - `AI_Analysis_Report.md` (the interpretation)
 - `OUTPUT_FILES.md` (what every file is)
 - **`output/methods.md`** (the publication Methods; its `[... — confirm]` tags must be resolved

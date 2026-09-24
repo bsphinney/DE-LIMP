@@ -16,7 +16,10 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 ## Session layout (`session.py`)
 ```
 <YYYY-MM-DD>_<DescriptiveName>/    # inside the raw-data folder, or under <base>/sessions/
-  README.md                 # what this was + where everything is (written at finalize)
+  README.html               # OPEN THIS: summary, links, where it all lives on HIVE (finalize)
+  README.md                 # the same content as text (one source: session_docs.py)
+  AGENTS.md                 # a guide to the folder for an AI agent, from the session's records
+  MANIFEST.txt              # every finalize part as [OK] / [SKIPPED] <reason> / [INFO]
   input/                    # conditions.csv, search.fasta, params.*, wf/workflow.manifest.json,
                             #   raw_files.txt (raw data is referenced, NOT copied — too large)
   output/
@@ -39,8 +42,33 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 - `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior>]`
   makes the folders and prints a `paths` map; **route every step's
   `--out`/`--outdir`/`--dest` into those paths**.
-- `session.py finalize --dir <session> [--zip]` writes `README.md`, moves any loose
-  tables/figures into their subdirs, and (for a re-analysis) writes `DIFFERENCES.md`.
+- `session.py finalize --dir <session> [--zip]` writes `README.md` + `README.html` +
+  `AGENTS.md`, moves any loose tables/figures into their subdirs, and (for a re-analysis)
+  writes `DIFFERENCES.md`. `session.py docs --dir <session> [--as <real location>]` writes only
+  the three documents (e.g. for a session finalized before they existed, or a copy of one).
+
+### README.html, README.md and AGENTS.md (`session_docs.py`)
+- **README.html** is what collaborators open: one self-contained page (inline CSS, no external
+  assets) rendered from the same text as README.md by make_deposit's Markdown renderer, with links
+  to the analysis report, the Word files, `HOW_TO_SUBMIT.html` and the tables. A double-clicked
+  page opened from inside a zip loses its links (Windows extracts only that file): unzip first.
+- **AGENTS.md** is for an AI agent given the folder: the study (organism, groups, contrasts,
+  instrument, engine + version), which file is authoritative for what, the columns of `DE_*.csv`
+  / `Expression_Matrix.csv` / `QC_detected_vs_inferred.csv`, the traps (significance as
+  `de_provenance.json` records it, inferred vs measured values, contaminants, pull-down controls
+  by group name), the AUDIT / SAMPLE_QUALITY notes, how to reproduce, and what not to do. The
+  pipeline is described in `de_provenance.json`'s own words -- never a description written here.
+- **"Where this lives on HIVE"** (both): the session folder, the session the analysis ran in when
+  this is a copy, the raw data folder(s) + file count, the search output, the FASTA the search
+  read, the Core run-registry record and the FRAN hand-off entry -- each as its HIVE path and its
+  Windows (`\\128.120.208.24\proteomics\...`) and Mac (`/Volumes/proteomics/...`) equivalent.
+  Which share is which HIVE path is `scripts/hive_shares.tsv`, the one table `hive_path.sh` also
+  reads (`share_map.py` is the Python side). Anything the records do not give is "not recorded".
+- **input/raw_files.txt** is written at finalize when missing (a hive_remote session is initialised
+  without `--raw`), from `search_provenance.json` `files`, else `output/search/file_list.txt`.
+- The registry record is looked up read-only before the zip (`record_run.locate()`); when the
+  run-log hook creates it, the three documents are rewritten with its path and go into the zip
+  after the hook, like `MANIFEST.txt`.
 
 ## Re-analysis of the same dataset
 Re-running the same raw data (different engine, version, parameters, FASTA, or
