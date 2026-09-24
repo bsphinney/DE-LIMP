@@ -18,6 +18,16 @@ inline instead of shipping the prompt to an external API.
 4. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
    plain-language description, grouped by purpose.
 
+## The CoreOmics submission (Core data)
+When `submission_report.py attach` has stored the submission in the session,
+`make_analysis_html.py` opens the report with a **Submission** section by default: the PROT id
+linked to CoreOmics, PI, submitter, date, organism and UniProt as specified, the description
+as written, experiment type, proteins or peptides and who prepared them, buffer, beads,
+normalisation, the analysis requested, the sample sheet, and the record's Data Quality Notes.
+The record is allowlisted — no email, phone, billing or internal field can reach the page.
+`analysis_prompt.py --submission <session>` quotes the same record in the brief, so the
+report describes the samples in the submitter's words and adds nothing they did not state.
+
 ## Report sections (faithful to DE-LIMP's export prompt)
 Overview · QC Assessment (if QC present) · Key Findings Per Comparison ·
 Cross-Comparison Biomarkers · High-Confidence Biomarker Insights · Pathway/GSEA

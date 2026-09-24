@@ -79,6 +79,10 @@ def paths_for(session_dir):
         "scripts_dir": os.path.join(d, "scripts"),
         "logs_dir": os.path.join(d, "logs"),
         "commands_log": os.path.join(d, "logs", "commands.log"),
+        # the CoreOmics submission this session answers (submission_report.py attach)
+        "session_json": os.path.join(d, "session.json"),
+        "submission_record": os.path.join(d, "input", "submission.json"),
+        "submission_samples": os.path.join(d, "input", "samples.tsv"),
     }
 
 
@@ -300,6 +304,19 @@ def _zip_manifest(zip_path, arcname, text, pre_hook):
         return f"MISSING: {first}; retry: {type(e).__name__}: {e}"
 
 
+def _submission_line(p):
+    """The README's CoreOmics submission line (submission_report.py), or None when the session
+    has none. A record that is there but unreadable is said so, not left out."""
+    if not (os.path.isfile(p["submission_record"]) or os.path.isfile(p["session_json"])):
+        return None
+    try:
+        import submission_report
+        rec = submission_report.load(p["session_dir"])
+    except Exception as e:
+        return f"CoreOmics submission: could not be read ({type(e).__name__}: {e})"
+    return submission_report.one_line(rec) if rec else None
+
+
 def do_finalize(a):
     p = paths_for(a.dir)
     if not os.path.isdir(p["session_dir"]):
@@ -363,10 +380,12 @@ def do_finalize(a):
     q = manifest.get("query") or {}
 
     de_files = sorted(os.path.basename(f) for f in glob.glob(os.path.join(p["de_dir"], "DE_*.csv")))
+    sub = _submission_line(p)
     lines = [
         f"# {os.path.basename(p['session_dir'])}", "",
         "Proteomics search + differential expression, run by the ucdavis-proteomics-core-pipeline skill.", "",
         "## Summary",
+        *([f"- {sub}"] if sub else []),
         f"- Organism (taxid): {q.get('organism_taxid', '?')}",
         f"- Acquisition / instrument: {q.get('acquisition', '?')} / {q.get('instrument') or '?'}",
         f"- Search engine: {engine} {eng_ver}".rstrip(),

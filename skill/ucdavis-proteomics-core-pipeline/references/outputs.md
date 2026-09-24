@@ -18,7 +18,10 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 <YYYY-MM-DD>_<DescriptiveName>/    # inside the raw-data folder, or under <base>/sessions/
   README.md                 # what this was + where everything is (written at finalize)
   input/                    # conditions.csv, search.fasta, params.*, wf/workflow.manifest.json,
-                            #   raw_files.txt (raw data is referenced, NOT copied — too large)
+                            #   raw_files.txt (raw data is referenced, NOT copied — too large),
+                            #   submission.json + samples.tsv (Core data: the CoreOmics record,
+                            #   allowlisted — submission_report.py attach)
+  session.json              # session metadata; `coreomics` names the submission (Core data)
   output/
     search/                 # the normalized search report.parquet (+ search_provenance.json, logs)
     tables/                 # DE_*.csv, Expression_Matrix.csv, methods.txt, sessionInfo.txt,

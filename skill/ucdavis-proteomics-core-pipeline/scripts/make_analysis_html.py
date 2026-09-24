@@ -224,6 +224,8 @@ def main():
     ap.add_argument("--title", default="Proteomics Analysis Report")
     ap.add_argument("--adjp", type=float, default=0.05)
     ap.add_argument("--logfc", type=float, default=1.0)
+    ap.add_argument("--submission", help="CoreOmics submission to show (a record file or fetch's "
+                                         "folder); default: the one attached to --session")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -309,6 +311,15 @@ def main():
 
     if not body:
         sys.exit("[make_analysis_html] nothing to render — check --session/--report/--figures")
+
+    # The CoreOmics submission this run answers goes first. The record and its rendering
+    # (allowlisted: never a contact or billing field) live in submission_report.py.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import submission_report
+    submission = submission_report.html_section(a.submission, a.session)
+    if submission:
+        toc.insert(0, '<li><a href="#submission">Submission</a></li>')
+        body[:0] = ['<h2 id="submission">Submission</h2>', submission]
 
     doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

@@ -32,6 +32,7 @@ call back as an **exit code plus the exact question**. It never runs a search en
 
 | step | runs | why there |
 |---|---|---|
+| `identify` | **local** | reads names offline; a sample-id lookup needs the CoreOmics token |
 | `fetch` | **local** | the CoreOmics token is on the staff member's computer; `~/.coreomics_token` does **not** exist on HIVE (checked) |
 | `locate` | **HIVE** | reads the Flinders `raw_data` tree |
 | `stage` | **HIVE** | writes links into the service directory |
@@ -47,7 +48,9 @@ Every subcommand prints one JSON object to stdout and notes to stderr. `stage`, 
 ## What staff need first
 
 - **A CoreOmics API token with staff access**, saved on **their own computer** as
-  `~/.coreomics_token` (`chmod 600`), or exported as `COREOMICS_TOKEN`. Not on HIVE.
+  `~/.coreomics_token` (`chmod 600`), or exported as `COREOMICS_TOKEN`. Not on HIVE. How to
+  obtain one is not documented here yet: ask the Core's CoreOmics administrator. Without it,
+  `identify` still reads ids in names and the agent asks the rest (section 0).
 - **A HIVE account in `proteomics-grp`.** The service directory is
   `gc-prot-core-user:proteomics-grp`, mode `2775`.
 - **The whole scripts directory on HIVE at `~/proteomics-pipeline/scripts/`**
@@ -71,6 +74,60 @@ Environment overrides (the tests use them; staff never need to): `COREOMICS_BASE
 HIVE path, so `share_dir` in the summary and Bioshare's `link_to_path` are always built with
 forward slashes from `/nfs/lssc0/flinders/proteomics`. A staff member on Windows, or with the
 root pointed at an SMB mount, still registers the right path.
+
+## 0. `identify` — which submission is this data? (local)
+
+Every report carries its submission, so the number is settled at SKILL.md step 1 — for any
+Core data, not only a staff "search submission 807" run. Never guessed:
+
+```
+python3 scripts/core_submission.py identify <raw files or folder> --text "<the user's message>"
+```
+
+1. **Named ids.** A `PROT_####` token (`PROT_0756`, `prot-756`) or a 12-character CoreOmics id
+   (with a letter and a digit — a 12-digit timestamp is not one) anywhere in the paths, or
+   "submission 756" / `#756` in the message. A bare number in a FILE name never counts: Exploris
+   runs carry counters (`Ex08312026_380_JE21`). Several different ids → looked up (token) and
+   merged when they are the same submission, else `ambiguous`.
+2. **Sample ids (token).** Otherwise it lists the submissions made up to 240 days before the
+   runs (`--max-days`) and matches their sample ids in the file names with `locate`'s rules run
+   in reverse: delimited tokens, the timsTOF sample field only, the longest id owns a run, weak
+   ids (`A3`, `001`) are no evidence, and a run counts only for a submission made on or before
+   the date in its name. Two submissions that could own one run → `ambiguous` (`locate`'s
+   `ambiguous_label`). A name with no date matches every submission using the id.
+
+| exit | status | what to do |
+|---|---|---|
+| 0 | `named`, `matched` | confirm in one line — the JSON's `ask` (`matched` says how many files and sheet ids it covers) |
+| 2 | `none`, `ambiguous` | ask the user for the number — the JSON's `ask` |
+| 3 | `needs_token` | ask for the number, relay `token_help`; ask the key facts and `attach --given` (below) |
+
+**Never search `/quobyte/proteomics-grp/coreomics/.submissions_db`.** It is a stale snapshot
+(March 2026), and a free-text search for `0756` there matched an unrelated 2019 record.
+
+**The record goes into the session once** (SKILL.md step 3b):
+```
+python3 scripts/submission_report.py attach --session <S> --record ~/core/PROT_0756
+python3 scripts/submission_report.py attach --session <S> --given \
+    '{"internal_id": "PROT_0756", "organism": "mouse", "prot_or_pep": "peptides", "sample_prep": "lab"}'
+```
+`input/submission.json` holds an **allowlisted** copy (identity, PI name/department/institution,
+submitter name, submitted date, organism, UniProt, description, experiment type, proteins or
+peptides, sample prep, buffer, beads, normalisation, analysis requested, the sample sheet) —
+never an email, phone, payment, PPMS, contact or internal field; free text is scrubbed of
+anything shaped like an email or phone number. `session.json` says `coreomics: {internal_id,
+id, url, source}`. From there the report's **Submission** section (`make_analysis_html.py`),
+the Methods' **Sample preparation** (`make_methods.py --submission`), the analysis brief
+(`analysis_prompt.py --submission`), the session README and `record_run.py`'s PROT lookup all
+read that one record. `--given` records are labelled "given by the user" everywhere.
+
+`submission_report.py notes --session <S>` lists the **Data Quality Notes** it finds: organism
+blank or disagreeing with the FASTA searched; UniProt blank (the Core chose the database); sheet
+ids with no raw file, and raw files with no sheet id; conditions analysed that pool or split the
+sheet's; beads blank on an affinity experiment; a form that contradicts itself about who
+prepared the samples; and **pairing** — PROT_0756's names are `Old - JPH3 - Mouse 1`: every mouse
+gave all five IPs (JPH3, JPH4, Kv2.1, RyR, IgG) and mice 1–3 are Old, 4–6 Young, so samples from
+one mouse are not independent, and the note says whether the design analysed carries the mouse.
 
 ## 1. `fetch` — the submission, its neighbours, its shares (local)
 
@@ -329,11 +386,13 @@ for d in tables figures; do bash scripts/hive_exec.sh --get "$S/output/$d" ~/cor
 bash scripts/hive_exec.sh --get "$S/output/search/report.parquet" ~/core/PROT_0807/session/output/search/
 for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
 ```
-Then locally: write `AI_Analysis_Report.md`; `make_analysis_html.py --session
-~/core/PROT_0807/session --submission ~/core/PROT_0807/submission_summary.json --sample-files
-~/core/PROT_0807/sample_files.tsv --out ~/core/PROT_0807/session/output/Analysis_Report.html`
-(a header card and a Samples appendix, never an email address); `to_docx.py` for the report and
-methods. **Push the finished files back before delivering** — `deliver` copies from `$S`:
+Attach the submission to `$S` right after `init` (`submission_report.py attach --session "$S"
+--record ~/core/PROT_0807`, on HIVE, after `--put`ting fetch's `submission.json` there), and pull
+`$S/session.json` and `$S/input/{submission.json,samples.tsv,raw_files.txt,conditions.csv,
+search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.md`;
+`make_analysis_html.py --session ~/core/PROT_0807/session --out
+~/core/PROT_0807/session/output/Analysis_Report.html` (its Submission section comes from the
+attached record, never an email address); `to_docx.py` for the report and methods. **Push the finished files back before delivering** — `deliver` copies from `$S`:
 ```
 for f in AI_Analysis_Report.md AI_Analysis_Report.docx Analysis_Report.html methods.md methods.docx; do
   bash scripts/hive_exec.sh --put ~/core/PROT_0807/session/output/$f "$S/output/"; done

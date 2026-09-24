@@ -30,6 +30,8 @@ Usage:
       [--de-dir output/tables]      # optional: adds a Differential-expression paragraph
       [--instrument "timsTOF HT" --acquisition DIA]   # used only when the raw files
                                                       # cannot be read from here
+      [--submission <session dir>]  # its CoreOmics submission (submission_report.py):
+                                    # adds Sample preparation -- who prepared the samples
 """
 import sys, os, json, glob, sqlite3, argparse, statistics
 
@@ -521,6 +523,29 @@ def de_paragraph(prov):
     return " ".join(s)
 
 
+def sample_prep_lines(rec, sr):
+    """The Sample preparation section, from the CoreOmics submission (`sr` is
+    submission_report). Who prepared the samples is sr.prepared_by()'s reading of the form.
+    When the submitting lab sent peptides, every step before LC-MS/MS was theirs: the prose
+    says so and carries no placeholder the Core could never fill. Nothing the form does not
+    state is added -- its own words are quoted, in a note for the author, not in the prose."""
+    who, why = sr.prepared_by(rec)
+    src = (f"CoreOmics submission {sr.label(rec)}" if rec["source"] == sr.SOURCE_COREOMICS
+           else f"submission {sr.label(rec)}, details given by the user")
+    if who == "lab":
+        lines = [f"Samples were prepared by the submitting laboratory and provided to the UC Davis "
+                 f"Proteomics Core as peptides ready for LC-MS/MS ({src})."]
+        said = [f"{k} “{rec[f]}”" for k, f in (("buffer", "buffer"), ("beads", "beads"))
+                if rec.get(f)]
+        lines += ["", "*Describe the preparation from the submitting laboratory's own protocol."
+                  + (f" As submitted: {'; '.join(said)}." if said else "") + "*"]
+        return lines
+    if who == "core":
+        return [f"Samples were prepared by the UC Davis Proteomics Core ({src}); protocol: "
+                f"{NOT_RECORDED}."]
+    return [f"Who prepared the samples is not recorded: {why} ({src}). {NOT_RECORDED}"]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--raw", nargs="+", required=True, help="raw file paths/globs (.d or .raw)")
@@ -536,6 +561,8 @@ def main():
     ap.add_argument("--instrument", help="instrument as the session recorded it; used ONLY when "
                                          "the raw files cannot be read from here")
     ap.add_argument("--acquisition", help="DIA/DDA as the session recorded it (step 2 detection)")
+    ap.add_argument("--submission", help="the session dir (or a record) holding its CoreOmics "
+                                         "submission: writes the Sample preparation section")
     a = ap.parse_args()
 
     fmeta = None
@@ -617,6 +644,16 @@ def main():
           + (" and the search and analysis records" if (srec.get("engine") or de_prov)
              else "") + ".*")
     w("")
+    if a.submission:
+        import submission_report
+        rec, _session = submission_report.resolve(a.submission)
+        if rec is None:
+            sys.exit(f"--submission: no CoreOmics submission is attached to {a.submission}")
+        w("## Sample preparation")
+        w("")
+        for line in sample_prep_lines(rec, submission_report):
+            w(line)
+        w("")
     w("## Liquid chromatography")
     w("")
     w(f"Peptides were separated by reversed-phase nano-LC on a {a.lc_column} "

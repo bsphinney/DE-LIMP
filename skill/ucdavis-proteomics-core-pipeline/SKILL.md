@@ -236,6 +236,24 @@ it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's 
 → `hive_exec.sh --put`, which itself refuses a source it verifies on HIVE.
 → `references/access.md` "Data already on a network drive".
 
+**Core data? Name its CoreOmics submission now — never guess it.** Every report carries the
+submission (PI, organism, sample sheet, who prepared the samples), so find it before step 2.
+On the user's computer:
+```
+python3 scripts/core_submission.py identify <raw files or folder> --text "<the user's message>"
+```
+It reads a `PROT_####` or 12-character CoreOmics id in the paths or the message, else matches
+the sample IDs in the file names against recent submissions by `locate`'s rules (weak ids are
+no evidence; a label two submissions share is ambiguous). Exit **0** → confirm its `ask` in
+one line. Exit **2** → ask for the number with its `ask`. Exit **3** (no CoreOmics token) →
+ask for the number and relay `token_help`; without a token, also ask the key facts (PI,
+organism, UniProt, proteins or peptides and who prepared them, buffer, beads, sample sheet)
+and record them with `submission_report.py attach --given` (step 3b) — labelled "given by the
+user", never as the CoreOmics record. **Never search
+`/quobyte/proteomics-grp/coreomics/.submissions_db`**: a stale snapshot, where a search for
+0756 matched an unrelated 2019 record. No submission (not Core data) → carry on without.
+With the number: `core_submission.py fetch <number> --out ~/core/PROT_####` (step 1c.1).
+
 ### 1a. Core HT submission? Ask STAN for the file list — never glob a plate
 If the user gives a **submission number** instead of a folder ("search 0793", "run the HT
 plate"), the file list comes from STAN, not from a directory listing. **Do not glob.** A
@@ -289,6 +307,7 @@ locally and on HIVE (`~/core/PROT_0807`).
    python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
    bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
    bash scripts/hive_exec.sh --put ~/core/PROT_0807/submission_summary.json '~/core/PROT_0807/'
+   bash scripts/hive_exec.sh --put ~/core/PROT_0807/submission.json '~/core/PROT_0807/'
    ```
 2. **Locate the raw files — on HIVE** (writes `files.txt`, `sample_files.tsv`, `locate.json`),
    then pull the proposal back for the local steps:
@@ -315,6 +334,8 @@ locally and on HIVE (`~/core/PROT_0807`).
    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
        --name PROT_0807 --base <work_dir> --raw $(cat ~/core/PROT_0807/files.txt)'
    S=<the session dir it printed>
+   bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/submission_report.py attach \
+       --session $S --record ~/core/PROT_0807"
    ```
    - **Conditions (local):** `core_submission.py conditions --summary
      ~/core/PROT_0807/submission_summary.json --sample-files ~/core/PROT_0807/sample_files.tsv
@@ -331,12 +352,14 @@ locally and on HIVE (`~/core/PROT_0807`).
      for d in tables figures; do bash scripts/hive_exec.sh --get "$S/output/$d" ~/core/PROT_0807/session/output/; done
      bash scripts/hive_exec.sh --get "$S/output/search/report.parquet" ~/core/PROT_0807/session/output/search/
      for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
+     mkdir -p ~/core/PROT_0807/session/input
+     bash scripts/hive_exec.sh --get "$S/session.json" ~/core/PROT_0807/session/
+     for f in submission.json samples.tsv raw_files.txt conditions.csv search.fasta.meta.json; do bash scripts/hive_exec.sh --get "$S/input/$f" ~/core/PROT_0807/session/input/; done
      ```
    - **Step 8d always fires** — this is a collaborator deliverable.
    - **Step 9 (local):** write `AI_Analysis_Report.md`, then `make_analysis_html.py --session
-     ~/core/PROT_0807/session --submission ~/core/PROT_0807/submission_summary.json
-     --sample-files ~/core/PROT_0807/sample_files.tsv --out
-     ~/core/PROT_0807/session/output/Analysis_Report.html`, and `to_docx.py` for the report and
+     ~/core/PROT_0807/session --out ~/core/PROT_0807/session/output/Analysis_Report.html` (the
+     Submission section comes from the attached record), and `to_docx.py` for the report and
      `methods.md`.
    - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`:
      ```
@@ -531,6 +554,19 @@ python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
 python3 scripts/session.py init --name "<short study name>" --raw /path/to/*.d \
     --base ~/Documents/DataAnalysis
 ```
+**Core data with a CoreOmics submission (step 1)? Attach it now**, where the session lives:
+```
+python3 scripts/submission_report.py attach --session <session> --record ~/core/PROT_0756   # fetch's folder
+python3 scripts/submission_report.py attach --session <session> --given '{"internal_id": "PROT_0756", ...}'  # no token
+```
+It stores ONE allowlisted record (`input/submission.json` + `session.json`; never an email,
+phone or billing field). The report's Submission section, the Methods' Sample preparation,
+the analysis brief and the run log all read it, and its `notes` are Data Quality Notes for
+the report: organism vs the FASTA, blank UniProt, sheet IDs vs raw files, conditions vs the
+design analysed, and pairing in the sheet (e.g. every mouse under all five IPs — samples from
+one mouse are not independent). Re-run `submission_report.py notes --session <S>` once the
+FASTA and `conditions.csv` exist.
+
 The output's `placement` tells you which was used. **Use the printed `paths` map for
 every later step** — put
 `conditions.csv` and the FASTA in `paths.input_dir`, search output in
@@ -1485,8 +1521,11 @@ python3 scripts/analysis_prompt.py --out ANALYSIS_PROMPT.md \
   --de-dir ./de_results --report ./search_out/report.parquet \
   --conditions ./conditions.csv --figures-dir ./figures [--qc ./QC_Metrics.csv] \
   --engine <engine> --acquisition <DIA|DDA> --instrument "<name>" \
-  --workflow-manifest ./wf/workflow.manifest.json
+  --workflow-manifest ./wf/workflow.manifest.json [--submission <session>]
 ```
+With a CoreOmics submission attached (step 3b), pass `--submission <session>`: the brief then
+quotes the record and its Data Quality Notes. Describe the samples in the submitter's words
+and add nothing they did not state ("cross-linked" must not become "chemically cross-linked").
 Then **read `ANALYSIS_PROMPT.md` and every data file + figure it lists, and write a
 complete `AI_Analysis_Report.md`** with ALL its OUTPUT sections (Overview, QC, Key
 Findings Per Comparison, Cross-Comparison Biomarkers, High-Confidence Biomarkers,
@@ -1540,11 +1579,16 @@ python3 scripts/make_methods.py --raw /path/to/*.d \
     --params <session>/input/wf/<params_file> \
     --search-prov <session>/output/search/search_provenance.json \
     --workflow-manifest <session>/input/wf/workflow.manifest.json \
-    --out <session>/output/methods.md --de-dir <session>/output/tables
+    --out <session>/output/methods.md --de-dir <session>/output/tables \
+    [--submission <session>]
 python3 scripts/to_docx.py --in <session>/output/methods.md \
     --out <session>/output/methods.docx
 ```
-(Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet.)
+(Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet, passing
+`--submission` itself when one is attached.) `--submission` adds **Sample preparation** from
+the CoreOmics record: when the lab sent peptides it says the submitting laboratory prepared
+them, with no Core-side placeholder; when the Core prepared them the protocol stays a tagged
+blank to fill.
 
 What it extracts, and what it only defaults:
 - It extracts the acquisition parameters from the raw metadata (Bruker `.d` `analysis.tdf`;

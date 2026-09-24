@@ -783,6 +783,9 @@ def find_prot(explicit, session, out):
         return dict(p, source="--prot")
     cands, parents = [], []
     if session and os.path.isdir(session):
+        # session.json first: submission_report.py attach records the PROT number AND the hex id
+        # there, where input/submission.json alone would give only the PROT number.
+        cands.append(os.path.join(session, "session.json"))
         cands += sorted(glob.glob(os.path.join(session, "input", "*.json")))
         cands += [os.path.join(session, f) for f in listdir(session) if f.endswith(".json")]
         d = os.path.dirname(os.path.abspath(session))

@@ -746,8 +746,11 @@ def build_protocols(methods_md):
                    "the methods line above")
     with open(methods_md, encoding="utf-8") as fh:
         sec = md_sections(fh.read())
-    sample = [SAMPLE_PREP_TO_FILL] + [_plain(sec[h]) for h in ("Liquid chromatography",
-                                                              "Mass spectrometry") if h in sec]
+    # make_methods writes Sample preparation only from a CoreOmics submission; when the lab
+    # sent peptides it has no placeholder, so none is added here either.
+    prep = _plain(sec["Sample preparation"]) if sec.get("Sample preparation") else SAMPLE_PREP_TO_FILL
+    sample = [prep] + [_plain(sec[h]) for h in ("Liquid chromatography",
+                                                "Mass spectrometry") if h in sec]
     data = [_plain(sec[h]) for h in ("Sequence database", "Database search",
                                      "Differential expression") if h in sec]
     if not data:
@@ -1347,7 +1350,9 @@ def methods_command(f, out):
                       ("--workflow-manifest", f["wf_path"]),
                       ("--instrument", next(iter(f["wf"].get("instruments") or []), None)
                        or (f["run_manifest"].get("query") or {}).get("instrument")),
-                      ("--acquisition", f["acquisition"])):
+                      ("--acquisition", f["acquisition"]),
+                      ("--submission", f["p"]["session_dir"]
+                       if os.path.isfile(f["p"]["submission_record"]) else None)):
         if val:
             cmd += [flag, str(val)]
     return cmd
