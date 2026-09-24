@@ -1189,7 +1189,8 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   ingests on its next scan"; if its `cron.verdict` is `stuck`, add that FRAN's cron is stuck.
   `qc_excluded` is a QC run kept out, as intended. `ingest_failed` means the cron tried and
   failed: give its one-line reason, say it is FRAN-side, and do not re-stage. The one state to act on is a `broken_links` warning:
-  re-run `stage --force`. Without a corpus token (the usual case) `verify` answers from the
+  re-run `stage --force` with the same `--name` (and `--qc` / `--not-qc`) the search was staged
+  with. Without a corpus token (the usual case) `verify` answers from the
   cron's logs.
 - **Searches that were never handed over** (before staging was automatic, or a session that
   ended early): `backfill` finds them. Only when the user asks for it. Run
