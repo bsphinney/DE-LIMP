@@ -31,6 +31,50 @@ The gate is **write permission on the drop directory**, which lives inside
 physically cannot create an entry there. The filesystem enforces the policy; `fran_deposit.py`
 only reports it. (Same group `check_access.sh` reports as `core_member`.)
 
+### QC runs are never handed over
+
+A QC run (a HeLa series watching an instrument) is not a customer search, and FRAN keeps QC
+out of the corpus, as it does STAN. FRAN's scanner can only recognise QC by path, and a drop
+entry has no QC path, so the skill decides. There is **one** definition,
+`fran_deposit.is_qc_run(out, session)`, used by `check`, `stage` and `backfill`. Its twin in
+FRAN is `ingest/find_uningested.py` `policy_exclusion` / `qc_reason` / `QC_NAME_RE`: change one,
+change the other. The precedence is FRAN's; the first match wins:
+
+1. **Explicit QC:** `stage --qc`, or `"qc": true` in the session's `session.json` (or
+   `input/session.json`, `input/wf/workflow.manifest.json`).
+2. **FRAN's DEFAULT_EXCLUDES trees:** `/quobyte/proteomics-grp/STAN/`, `…/hela_qcs/`,
+   `…/brett/v1_smoke`, `…/brett/glendon/` and `/Data/lab/ToFEvoQC/`. These win **even over
+   `--not-qc`**: FRAN refuses anything there, so staging it would only queue a refusal.
+3. **Explicit not-QC:** `--not-qc`, or `"qc": false` in session metadata.
+4. **FRAN's name rule** `(?i)(?<![a-z0-9])qc(?![a-z])`, applied to the search name
+   (`--name`), the session's name (its README title and folder) and the last three
+   components of the out dir path. It catches `chkLUppm_HeLa50_2026 Lumos QC`, `QC_run_01`,
+   `hela_qc_2` and `Exploris QC2`. It keeps `HeLa_digest_timecourse`, `aqc_buffer_study`,
+   `QCM_study` and `Plasma_liver2`, the same pinned vectors as FRAN. "HeLa" alone is **not**
+   QC.
+
+A QC run gets reason `qc_run`, with a `why` in FRAN's wording, e.g. `QC run: excluded by policy
+(search_name 'chkLUppm_HeLa50_2026 Lumos QC' matches QC_NAME_RE)`. The receipt records it. `--not-qc` corrects a
+false positive, and the refusal says so. Every staged manifest carries `"qc": false` plus
+`"qc_rule": "<why>"` (`"user override"` for `--not-qc`), so FRAN's ingester sees that a
+decision was made.
+
+**Decide at generation, not afterwards.** On 2026-09-23 the QC session was called
+`2026-09-23_chkLUppm_HeLa50_2026`, with no QC token and no `conditions.csv`. "Lumos QC" only
+arrived later, with the agent's `--name`. But the job-end hook stages the moment the search
+ends, and FRAN's cron (every 4 h) can ingest before a later `stage` says otherwise. So the name
+and the QC decision are baked into the hook when the job is written. `run_search.py` /
+`diann_parallel.py` / `radiant_parallel.py` take `--fran-name "<descriptive name>"` and
+`--qc` / `--not-qc`, and the hook's argv comes from the one helper, `fran_deposit.stage_argv()`.
+A QC run named at generation never reaches the drop dir. An explicit `--qc`/`--not-qc` is
+recorded in the receipt, and a later stage without a flag honours it rather than overturning it.
+
+**Withdrawal is the backstop.** When a later `stage` still finds that a staged search is QC, it
+**withdraws** it: the entry's manifest gets `"qc": true, "exclude": true`, which FRAN's ingester
+skips at ingest time. Nothing in the shared drop dir is deleted, and `verify` then reports
+`qc_excluded`. A generator's `--no-fran` should run `stage --skip`, so the opt-out is recorded
+and `backfill` never picks the search up later.
+
 ## The three commands
 
 All run **on HIVE** — in `hive_remote` mode through `hive_exec.sh`, like every other
@@ -47,13 +91,155 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py
 
 # 3. later — did the cron take it?
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py verify --out <hive search out dir>'
+
+# is FRAN's cron actually taking what is staged?  (reads logs; login-node safe, ~5 s)
+bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py health'
 ```
 
-`verify` returns one of three states. **`staged_pending_cron` is a success**, not a failure —
-it is the expected state for the minutes or hours between the run finishing and the cron's
-next scan. Report it as "handed to FRAN; it ingests on the next pass". The only bad state is
-a `broken_links` warning: an entry whose targets have moved looks staged but the cron will
-skip it in silence. Re-run `stage --force`.
+`verify` returns one of five states:
+
+| state | meaning | say |
+|---|---|---|
+| `ingested` | the corpus has it (database, cron marker, or the cron's log: `OK` or `SKIPPED-DUPLICATE`) | "in FRAN" |
+| `staged_pending_cron` | handed over, not reached yet. **A success**, the normal state for hours after a run | "handed to FRAN; it ingests on the next pass" — and if `cron.verdict` is `stuck`/`not_running`, add that FRAN's cron is stuck, which is FRAN-side |
+| `ingest_failed` | the cron tried this entry and it failed; `detail` has the reason from its log | the reason, in one line. FRAN-side: do **not** re-stage |
+| `qc_excluded` | a QC run whose entry is marked `qc: true` | "a QC run, kept out of FRAN" |
+| `not_staged` | no entry | why `check` refused |
+
+Without a corpus token (the usual case), `verify` answers from the cron's own logs rather than
+the database. `broken_links` is the one entry problem to act on: an entry whose targets have
+moved looks staged but the cron will skip it in silence. Re-run `stage --force`.
+
+## Staged is not ingested — `health`
+
+Staging puts the search where FRAN's cron looks. Whether the cron gets to it is a separate
+fact, and for a week it was false while everything looked fine. After 2026-09-17 13:55 the
+cron ran every 4 h, each run a COMPLETED SLURM job, and ingested nothing in 41 runs in a row.
+The recent ones all ended `0 ingested, 3 duplicate-skipped, 2 failed, ~181 still queued`. The
+same five `FRAN_reports` exports sort first, fail or duplicate, are never marked done, and are
+picked again next run, so nothing behind them moves. None of the skill's drop entries appeared
+in a single log. (Two of those searches were in FRAN anyway: FRAN's queue ingested them by
+their real paths on 2026-09-08.) `health` is how this becomes visible from the skill's side.
+
+It is read-only and needs no credential. It reads what the cron itself writes
+(`/quobyte/proteomics-grp/de-limp/fran_refresh/logs/auto_ingest_<jobid>.out` and
+`auto_ingest_submit.log`), lists the drop dir, and compares FRAN's ingest code on HIVE with
+GitHub `main`:
+
+| part | answers | verdicts |
+|---|---|---|
+| `progress` | last run, last run that ingested anything, consecutive runs without an ingest, queue size, whether the cron is still submitting | `healthy` · `stuck` (≥ 3 runs in a row ingested nothing while work was queued; a run that died counts) · `not_running` (no run, or no submission, for > 12 h) · `unknown` |
+| `incoming` | each drop entry: age, who staged it and when, broken links, what the logs say (`ingested` / `failed` / `never_reached`), and whether it is a QC run not yet marked (`qc_unmarked`) | `starved` when an entry has gone unreached for > 48 h, even if the cron is ingesting *other* searches |
+| `ingest_code` | each ingest file's md5 on HIVE vs `main`: `current`, `stale` (matches an older commit: *which one, from when*), `local_modification` (matches none of that file's recent commits), `missing`, `not_on_main`, `unknown` | `stale` if any file is stale or missing, or a file on FRAN's own refuse list (`corpus_ingest.py`, `spectronaut_to_corpus.py`, `diann_to_corpus.py`, `versions.py`) differs at all · `modified` · `current` |
+
+Overall `verdict`: `healthy` · `stuck` · `not_running` · `stale_code` · `unknown`, plus a one-line
+`summary`. The ingest-code check fetches file content from raw.githubusercontent.com (no API
+quota) and uses GitHub's commits API only for a file that differs. That API allows 60 requests
+an hour per address, shared by everyone on a login node, so answers are cached in
+`~/.cache/ucdavis-proteomics-core-pipeline/fran_health.json` and a rate limit is remembered
+until it resets. No network gives `unknown`, never an error. FRAN's own staleness guard
+(`publish_manifest.py`, content md5s in PG Farm) needs a database credential, so the skill does
+not read it.
+
+**`stage` never runs this check.** It runs inside every search job, on a compute node, within
+the job's time limit, so it must not reach GitHub or the database, or scan 170 logs on a network
+mount. Instead `health` writes its verdict to **`/quobyte/proteomics-grp/fran/ingest_health.json`**
+(`checked_at` in UTC, `verdict`, a one-line `summary`; group-writable, replaced atomically). It
+sits in the drop dir's parent, never inside `incoming/`, where nothing but drop entries belongs.
+`FRAN_HEALTH_FILE` moves it.
+`stage` only reads that file, and gives up on the read after 2 s. What it adds to its JSON:
+
+| status file | `stage` adds |
+|---|---|
+| verdict `stuck` / `not_running` / `stale_code`, checked < 12 h ago | `fran_health` + `health_warning` (the summary); the same line on stderr |
+| `healthy` or `unknown`, checked < 12 h ago | `fran_health` only |
+| older than 12 h | `health_warning: "FRAN ingest health unknown (last checked <when>)"` |
+| missing, unreadable, or a read that does not finish | nothing |
+
+The search **is** staged either way. Health never changes stage's exit status, and stdout
+stays one JSON object. `FRAN_HEALTH=off` skips even the read. The file is only as fresh as
+the last `health` run: the agent runs it at step 7c, and the cron line below keeps it current.
+
+The GitHub check sends no credential. It tolerates the rate limit, and it is bounded: all of
+it runs in daemon threads under a 10 s deadline. That also covers a DNS lookup that hangs,
+which a socket timeout does not.
+
+**`health --alert` pages about one thing only:** what FRAN's own runner cannot see about
+itself. That is FRAN's ingest code on HIVE being `stale` or `modified` against GitHub `main`,
+or missing a file the runner imports. A stuck cron, entries that are never reached, and
+manifest-vs-search FASTA mismatches are alerted by FRAN's runner itself (FRAN branch
+`fix/auto-ingest-starvation`, 78374dc + 2163070). Paging on them here as well would be a
+duplicate page, so they go only into the verdict file and the printed report (`alert_reason`
+says what would page). The alert goes through `scripts/notify_slack.py` when that module is
+installed (a no-op otherwise). The same alert is not re-posted within 24 h. The webhook is
+that module's business and is never read or printed here.
+
+**Suggested schedule** (in the deploy bundle, for Brett's OK; not installed). Add to brettsp's
+crontab, half an hour after FRAN's own `23 */4` submit, on the login node. It reads logs and
+a few small files, plus at most 10 s of GitHub:
+
+```cron
+# FRAN ingest health for the skill: refreshes /quobyte/proteomics-grp/fran/ingest_health.json
+# (read by every search job's stage) and pages only if HIVE's ingest code drifts from GitHub main.
+53 */4 * * * flock -n /tmp/fran_skill_health.lock bash -lc "python3 $HOME/proteomics-pipeline/scripts/fran_deposit.py health --alert > /dev/null" >> /quobyte/proteomics-grp/de-limp/fran_refresh/logs/skill_health_cron.log 2>&1
+```
+
+What to do with an unhealthy answer: **nothing on the search**. Tell the user in one line that
+the search is safely staged and that FRAN's ingest is stuck/stale on FRAN's side (quote the
+summary), and carry on. Do not re-stage, and do not touch FRAN's code, its HIVE copy, or the
+database.
+
+## Backfill — searches that were never staged
+
+Staging became automatic partway through the skill's life, and a session that ended early
+never reached step 7c, so some Core searches on HIVE were never handed over. FRAN's cron scans
+only `incoming/` and `FRAN_reports/`, never the service trees, so it will not find them by
+itself.
+
+```bash
+# on HIVE: write the job (dry run), then submit it -- never walk NFS on a login node
+python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch
+sbatch ~/fran_backfill/fran_backfill_<stamp>.sbatch
+# read ~/fran_backfill/fran_backfill_<jobid>.json; then, if the list is right:
+python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch --apply
+```
+
+- **Where it looks:** `/quobyte/proteomics-grp/SERVICE`, `/nfs/lssc0/flinders/proteomics/Data/lab/service`,
+  and `~/proteomics-pipeline` of each non-teaching `proteomics-grp` member (`--no-homes` to skip).
+  `--roots` replaces the trees; `--list <file>` checks named out dirs instead (up to 10 are fine
+  on a login node). Checkpoint sessions (`.recovery.json`) found on the way add the search out dir
+  they point at.
+- **How it walks:** breadth-first, `--max-depth 9` (a Flinders session's `output/search` sits at
+  depth 8), a shared `--time-budget` (default 1200 s, split across roots), no symlink ever
+  followed, raw-data containers (`.d`, `.raw`, `.wiff`, ...) pruned, and the trees FRAN's own
+  scanner excludes (STAN QC, QC watchers, smoke tests, scratch) skipped. A walk outside SLURM is
+  refused unless `--allow-login-node`. A walk that runs out of time says `truncated`.
+- **What counts as this skill's search**, from file names alone: `search_provenance.json`,
+  `fran_deposit.json`, the 5-step chain's SLURM logs (`s1_libpred_<job>.log`,
+  `s5_report_<job>.log`), `step3_fulcrum.sbatch`. `search_provenance.json` alone is not enough:
+  in hive_remote mode `run_search.py` writes it on the laptop, and a real parallel search on HIVE
+  had none. The DE-LIMP app writes the same `step*_*.sbatch` names but its jobs are
+  `diann_<name>_<step>`, so its searches are `not_a_skill_search`.
+- **Who is handed over:** a search inside `/quobyte/proteomics-grp/` or
+  `/nfs/lssc0/flinders/proteomics/`, or owned by a non-teaching Core member. Anything else is
+  `not_core_facility`.
+- **QC runs are listed on their own** under `excluded_qc_run`, never staged. The rule is the
+  same `is_qc_run`, applied to the folder name and to any analysis name an earlier `stage`
+  recorded. An `--qc`/`--not-qc` recorded by an earlier stage wins. A QC run that is already in
+  the drop dir shows `would_withdraw`, and `--apply` marks its manifest `qc: true`.
+- **Skipped, with the same reason codes as `check`,** plus two of backfill's own:
+  `not_a_skill_search`, and `already_ingested` when the cron's logs show FRAN ingested the
+  search by *any* route. FRAN's queue ingested some skill searches by their real paths with no
+  receipt, and staging those again would only feed the duplicate guard. A recorded `opted_out`
+  is honoured: `stage --skip` / `FRAN_DEPOSIT=off` now writes it into the receipt.
+- **With `--apply`,** each eligible search goes through the same `stage` code. The search name
+  is derived from the folder (for `<session>/output/search`, the session's name), and the
+  manifest says so in `search_name_source`. The organism and database come only from a
+  `<fasta>.meta.json` that can be tied to the search (below); with no sidecar they stay absent.
+
+The report lists `would_stage` (engine, organism, name, report size and date), `skipped` with
+reasons, the walk statistics, and the cron's current verdict. Staging into a stuck cron only
+adds to its queue, so it is worth a look before `--apply`.
 
 ## What gets linked
 
@@ -125,6 +311,27 @@ The user already confirmed the organism at step 3, and `fetch_fasta.py` wrote it
 invent one: an unknown organism is **absent** from the manifest, not guessed (architectural
 rule #2).
 
+**Which sidecar is read.** It has to be tied to the FASTA the search actually used: `fasta` in
+`search_provenance.json`, or `--fasta` on the command line DIA-NN echoes at the top of
+`report.log.txt`. The old rule took the first `*.fasta.meta.json` near the search in sort order,
+and `PROT_0793/` holds human, mouse and mouse+contaminant sidecars side by side. The mouse
+search's manifest recorded the **human** database (seen in the drop dir, 2026-09-24). Now:
+
+- the search's own FASTA + `.meta.json`, then a nearby sidecar whose file name or recorded
+  `fasta` matches it. Nearby means the search dir, its parent, `<parent>/input/`, and for a
+  session's `output/search` the session's `input/`.
+- if the search's FASTA cannot be found, a **lone** nearby sidecar is used. Two or more is a
+  guess, so organism and database stay absent.
+- `fasta_path` is **the file the search read**, whenever the search names it. The md5 and
+  entry count come from the sidecar. A sidecar records wherever `fetch_fasta.py` first wrote the
+  FASTA, and in the drop dir on 2026-09-24 that differed three ways, all with identical md5s:
+  a laptop `/Users/...` path (hive_remote), and the user's staging copy
+  `~/proteomics-pipeline/staging/search.fasta`, which the next session overwrites (twice), where
+  the search read `<session>/input/search.fasta`.
+
+A sidecar that itself records `organism: ""` (PROT_0793's human one does) gives no organism.
+That is honest, not a bug.
+
 ## Why `check` refuses (stable codes, never an exception)
 
 | reason | meaning |
@@ -135,12 +342,30 @@ rule #2).
 | `engine_unsupported` | Sage (DDA) and AlphaDIA have no FRAN corpus adapter. The corpus is DIA |
 | `no_drop_dir` | the drop directory does not exist and could not be created |
 | `already_staged` | a receipt exists; `--force` to re-stage |
-| `opted_out` | `FRAN_DEPOSIT=off` or `--skip` |
+| `opted_out` | `FRAN_DEPOSIT=off` or `--skip` — recorded in the receipt so `backfill` honours it |
+| `qc_run` | a QC run (see *QC runs are never handed over*); `--not-qc` if the rule is wrong |
+| `not_a_skill_search` | `backfill` only: a search this skill did not run |
+| `already_ingested` | `backfill` only: the cron's logs show FRAN already has it |
 
 An ineligible run is **not** a failure of the analysis. Note it in one line and carry on with
 DE — never block, retry, or ask the user to fix it.
 
+`stage` records the three *decisions* (`opted_out`, `not_core_facility`, `qc_run`) in
+`<out>/fran_deposit.json` so that a `backfill` months later, run by someone else, does not
+hand the search over anyway. Neither blocks an explicit `stage`, and neither overwrites a
+receipt that says the search is staged or ingested.
+
 ## Idempotency
+
+Every manifest carries **`staged_at`**, the ISO-8601 UTC time the search was first handed over,
+plus `staged_by`. FRAN's runner orders the drop box oldest-first by it (its fallback is the entry
+directory's mtime, which every re-stage resets). A re-stage keeps the original `staged_at` and
+`staged_by` and adds `restaged_at` / `restaged_by`. An entry staged before the field existed
+gets the time its manifest was written. All other manifest keys are unchanged. Every manifest `stage` writes passes a copy of FRAN's own
+`read_manifest` validation (tests/test_fran_health_backfill.py `FranManifestContractTests`):
+`fran_manifest_version` 1, `qc`/`exclude` JSON booleans, `staged_at` ISO 8601, and
+`search_name`/`organism` either a non-empty string or absent. An empty `--name ""` is written as
+absent, because FRAN rejects `""` as malformed.
 
 The entry name is deterministic — `<search dir name>__<8 hex of its real path>` — so
 re-staging reuses the same path rather than presenting the cron with a second candidate that
@@ -150,6 +375,10 @@ staging twice.
 
 The manifest's `output_dir` is the **real** search directory, so `corpus_ingest.py --output-dir`
 keys idempotency and provenance on where the search actually lives, not on the handover path.
+FRAN's `auto_ingest.py` does not read the manifest yet (checked on `main`, 2026-09-24). It
+passes `realpath(<the dir it scanned>)` as `--output-dir`, and a drop entry is a real
+directory, so a staged search lands in the corpus under `incoming/<entry>`. `verify`'s
+database lookup therefore asks under both names.
 
 ## Follow-ups
 - **XIC storage.** Every DIA-NN search extracts chromatograms — `--xic` is forced by

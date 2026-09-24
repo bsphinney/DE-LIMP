@@ -19,6 +19,11 @@ sys.path.insert(0, SCRIPTS)
 
 import fran_deposit as fd  # noqa: E402
 
+# fran_deposit's QC name rule reads the last three path components, i.e. the random temp name here;
+# without "_" in tempfile's alphabet it can never read one as "..._qc_..." (see
+# test_fran_health_backfill.py).
+tempfile._RandomNameSequence.characters = "abcdefghijklmnopqrstuvwxyz0123456789"
+
 
 class Args:
     """argparse-shaped stand-in."""
