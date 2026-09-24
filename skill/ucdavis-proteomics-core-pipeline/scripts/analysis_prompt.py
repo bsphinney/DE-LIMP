@@ -144,6 +144,14 @@ def main():
         w("Placement: volcano + p-value figures in **Key Findings Per Comparison**; PCA + "
           "per-sample counts in **QC Assessment**; the heatmap in **Cross-Comparison "
           "Biomarkers** or **Biological Interpretation**.")
+        if any(f.get("type") == "violin" for f in figs):
+            w(f"Place each `{fdir_rel}/violin_top_<contrast>.png` in that comparison's section, "
+              "right after its volcano, with one line on how to read it: filled points were "
+              "measured in that run, hollow points were not (inferred, or missing under MaxLFQ). "
+              "Name every protein its subtitle flags as never measured in one group: that fold "
+              "change is a detection event (seen in one group, not the other), not a measured "
+              "magnitude, so do not quote its size as an effect. If the figure says detection "
+              "status was not recorded, say so; never describe those points as measured.")
         w("")
 
     w("## OUTPUT — write `" + a.report_out + "` with ALL of these sections (markdown)")

@@ -1208,7 +1208,10 @@ Rscript scripts/make_figures.R --de-dir ./de_results --conditions ./conditions.c
     --outdir ./figures --adjp 0.05 --logfc 1
 ```
 Produces publication-quality volcano (per contrast), PCA, heatmap of top proteins,
-p-value distributions, and a per-sample protein-count QC plot, plus `figures.json`
+p-value distributions, a per-sample protein-count QC plot, and per-contrast
+top-protein violins (`violin_top_<contrast>.png`: each run's point filled if measured,
+hollow if inferred; a group never measured makes that fold change a detection event),
+plus `figures.json`
 (captions). These get embedded in the report.
 
 **Significance is `adj.P.Val` alone — there is no fold-change cutoff anywhere in this
