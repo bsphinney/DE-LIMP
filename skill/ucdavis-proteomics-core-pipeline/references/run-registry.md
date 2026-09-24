@@ -216,7 +216,8 @@ The notes are gathered from what the skill already produced:
   identical-to-target contaminants were removed;
 - `AUDIT.json` WARN/FAIL findings;
 - `SAMPLE_QUALITY.json` flags (a flag confounded with a group is CRITICAL);
-- `session_zip_contains_quant` and `session_zip_contains_predicted_speclib`;
+- `session_zip_contains_search_intermediates` (the zip held `.quant` files and/or a predicted
+  library);
 - every `report_issue.sh` file for the session;
 - **"CoreOmics submission: not recorded"**, when it is not.
 
@@ -367,8 +368,9 @@ Zips made before that change still hold these files, so the registry copies ever
 its `.quant` and `*.predicted.speclib` members. The empirical `*.skyline.speclib` is small and is
 kept. The copy moves the kept members' compressed bytes as they are, with no recompression, so it
 is disk I/O rather than CPU on a login node, and it is checked before it is used. It also records
-the `session_zip_contains_quant` and `session_zip_contains_predicted_speclib` findings, which
-appear as Data Quality Notes.
+a `session_zip_contains_search_intermediates` finding, which becomes a Data Quality Note. The note
+gives the counts and sizes, and says the original shrinks when `session.py finalize --zip` is
+re-run with a current skill version.
 
 ## The directory README
 

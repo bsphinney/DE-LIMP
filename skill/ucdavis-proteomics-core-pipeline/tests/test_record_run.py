@@ -814,8 +814,7 @@ class WhatIsCopied(Base):
         out = make_search(self.d)
         sess, zpath = make_session(self.d, quant_in_zip=True)
         res = self.run_it("analysis-done", "--session", sess, "--out", out)
-        self.assertEqual(res["findings"], ["session_zip_contains_quant",
-                                           "session_zip_contains_predicted_speclib"])
+        self.assertEqual(res["findings"], ["session_zip_contains_search_intermediates"])
         folder = self.only_folder()
         self.assertFalse([f for f in self.all_files(folder) if f.endswith(".quant")])
         with zipfile.ZipFile(os.path.join(folder, os.path.basename(zpath))) as z, \
@@ -826,10 +825,29 @@ class WhatIsCopied(Base):
             self.assertIn("s/output/search/report-lib.parquet.skyline.speclib", z.namelist())
             for n in z.namelist():
                 self.assertEqual(z.read(n), orig.read(n))
-        det = [f["detail"] for f in self.read(folder, "run_record.json")["findings"]]
-        self.assertIn("4 per-run .quant files", det[0])
-        self.assertIn("step1.predicted.speclib", det[1])
-        self.assertIn("predicted spectral library", self.read(folder))    # a Data Quality Note
+        f = self.read(folder, "run_record.json")["findings"][0]
+        self.assertEqual((f["n_quant"], f["n_predicted_speclib"]), (4, 1))
+        self.assertIn("4 per-run .quant files and 1 predicted spectral library", f["detail"])
+        self.assertIn("re-run session.py finalize --zip with skill", f["detail"])
+        dq = self.read(folder).split("## Data Quality Notes", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("4 per-run .quant files and 1 predicted spectral library", dq)
+
+    def test_the_zip_cap_counts_only_what_is_copied(self):
+        """A zip over the cap only because of its .quant and predicted library is still copied."""
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=True)
+        with zipfile.ZipFile(zpath) as z:
+            kept = sum(i.compress_size for i in z.infolist()
+                       if not i.filename.endswith((".quant", ".predicted.speclib")))
+            spec = sum(i.compress_size for i in z.infolist()
+                       if i.filename.endswith(".predicted.speclib"))
+        cap = kept + spec / 2              # fits only if the predicted library is not counted
+        self.assertLess(kept, cap)
+        self.assertLess(cap, kept + spec)
+        self.run_it("analysis-done", "--session", sess, "--out", out,
+                    "--zip-cap-gb", str(cap / (1 << 30)))
+        rec = self.read(self.only_folder(), "run_record.json")
+        self.assertTrue(rec["zip_copy"]["copied"], rec["zip_copy"])
 
     def test_secrets_are_never_copied(self):
         out = make_search(self.d, secrets=True)

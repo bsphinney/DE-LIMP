@@ -1525,28 +1525,26 @@ def plan_analysis(plan, session, a, zip_cap):
         try:
             sv = zip_survey(zpath)
             z.update(sv)
-            if sv["quant"]["n"]:
+            q, ps = sv["quant"], sv["predicted_speclib"]
+            if q["n"] or ps["n"]:
+                what = " and ".join(x for x in (
+                    f"{q['n']} per-run .quant file{'s' if q['n'] != 1 else ''}" if q["n"] else None,
+                    f"{ps['n']} predicted spectral librar{'y' if ps['n'] == 1 else 'ies'}"
+                    if ps["n"] else None) if x)
+                where = sorted(set(q["dirs"]) | {os.path.dirname(f) for f in ps["files"]})
                 plan["findings"].append({
-                    "id": "session_zip_contains_quant", "zip": zpath,
-                    "detail": (f"the session zip holds {sv['quant']['n']} per-run .quant files "
-                               f"({fmt_bytes(sv['quant']['bytes_compressed'])} compressed, "
-                               f"{fmt_bytes(sv['quant']['bytes'])} unpacked) under "
-                               f"{', '.join(sv['quant']['dirs'][:4])}. session.py finalize --zip "
-                               f"leaves out only output/raw_data and upload_staging, so a search "
-                               f"run into output/search carries its .quant into the zip. They "
-                               f"were left out of the registry's copy.")})
-            ps = sv["predicted_speclib"]
-            if ps["n"]:
-                plan["findings"].append({
-                    "id": "session_zip_contains_predicted_speclib", "zip": zpath,
-                    "detail": (f"the session zip holds {ps['n']} predicted spectral librar"
-                               f"{'y' if ps['n'] == 1 else 'ies'} "
-                               f"({fmt_bytes(ps['bytes_compressed'])} compressed, "
-                               f"{fmt_bytes(ps['bytes'])} unpacked: "
-                               f"{', '.join(ps['files'][:3])}). DIA-NN predicts it from the FASTA, "
-                               f"so re-running the search regenerates it; it is not needed to "
-                               f"reproduce the analysis. Left out of the registry's copy (newer "
-                               f"session.py zips leave it out too).")})
+                    "id": "session_zip_contains_search_intermediates", "zip": zpath,
+                    "n_quant": q["n"], "n_predicted_speclib": ps["n"],
+                    "bytes": q["bytes"] + ps["bytes"],
+                    "detail": (f"the session zip holds {what} "
+                               f"({fmt_bytes(q['bytes_compressed'] + ps['bytes_compressed'])} "
+                               f"compressed, {fmt_bytes(q['bytes'] + ps['bytes'])} unpacked, under "
+                               f"{', '.join(where[:4])}). They are search intermediates -- the "
+                               f"analysis is reproduced from report.parquet and the parameters -- "
+                               f"and the registry copy leaves them out. To shrink the original, "
+                               f"re-run session.py finalize --zip with skill "
+                               f"{plan.get('skill_version') or 'this version'} or later, whose "
+                               f"zip leaves them out.")})
             if sv["kept_bytes"] > zip_cap:
                 z["reason"] = (f"{fmt_bytes(sv['kept_bytes'])} (without .quant and the predicted "
                                f"library) is over the "
