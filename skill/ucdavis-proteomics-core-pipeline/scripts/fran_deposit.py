@@ -72,9 +72,13 @@ permission on the directory is the enforcement, not a flag in this file.
   opted_out            FRAN_DEPOSIT=off, or --skip
   qc_run               a QC run (is_qc_run: --qc/--not-qc, session `qc`, FRAN's QC trees, or
                        FRAN's QC name rule). Never staged; one staged earlier is marked qc: true
-`backfill` adds two of its own, for a directory it found but will not hand over:
+`backfill` adds three of its own, for a directory it found but will not hand over:
   not_a_skill_search   a search this skill did not run (e.g. a DE-LIMP app search)
   already_ingested     the cron's logs show FRAN already ingested it (by any route)
+  needs_agent_check    a FragPipe/Radiant search with no completion marker to read
+Not decisions, so never recorded -- permission problems, reported and retried next time:
+  drop_dir_not_writable  a proteomics-grp member cannot write the drop dir
+  entry_not_writable     the entry was staged by another account without group write
 
 Set `FRAN_DEPOSIT=off` (or pass `--skip`) to keep a run out of FRAN. `stage` writes that
 decision into the receipt (`status: opted_out`), so a later `backfill` honours it instead of
@@ -175,11 +179,14 @@ UNSUPPORTED = {"sage": "Sage is DDA; the FRAN corpus is a DIA corpus",
 # `report.tsv`, so testing "fragpipe first" against the report candidates would relabel every
 # DIA-NN 1.9 search (report.tsv, no parquet) as FragPipe. Order and specificity both matter —
 # FragPipe's tree CONTAINS a DIA-NN report, so it must be tested first and only on markers unique
-# to it. Mirrors FRAN's own ENGINE_MARKERS so both ends agree on what a directory is.
+# to it. TWIN: FRAN ingest/find_uningested.py ENGINE_MARKERS (c4838fe), so both ends agree on what
+# a directory is -- with ONE deliberate difference: FRAN also lists search_provenance.json under
+# Radiant, but run_search.py writes that file for EVERY engine, and detect_engine() reads its
+# `engine` field before sniffing, so it is never a marker here. delimp_report.parquet is a Radiant
+# REPORT location (ENGINE_REPORTS, as corpus_ingest's candidates) but not a marker on either side.
 DETECT_MARKERS = [
     ("fragpipe", ("dia-quant-output/report.tsv", "fragpipe.fp-manifest")),
-    ("radiant",  ("radiant_results/fulcrum-results", "fulcrum-results/_SUCCESS",
-                  "delimp_report.parquet")),
+    ("radiant",  ("radiant_results/fulcrum-results", "fulcrum-results/_SUCCESS")),
     ("diann",    ("report.parquet", "report.tsv")),
 ]
 
@@ -239,6 +246,48 @@ def detect_engine(out):
     return None, None, "no engine could be determined"
 
 
+def completion_marker(out, engine, report):
+    """(done, evidence) for engines whose report can exist before the search FINISHED.
+      done True   the engine's own completion marker is there
+      done False  its marker is missing, or its log says it was cancelled: a partial search
+      done None   no reliable marker for this layout -- an agent must confirm it finished
+    DIA-NN needs none here: every skill route writes the report last, behind must_exist().
+
+    Found by LOOKING at every Radiant and FragPipe output under the Core trees on HIVE (read-only
+    find, job 23992239, 2026-09-24):
+      FragPipe  16 workdirs; dia-quant-output/report.tsv exists in ALL of them, including 2 whose
+                log says "Cancelling N remaining tasks" and 3 that never finished -- so a report
+                is no evidence at all. The newest log_<date>.txt in the workdir ends "ALL JOBS
+                DONE IN <n> MINUTES" in the 11 that finished, and in none of the other 5.
+      Fulcrum   20 fulcrum-results/ dirs, all carrying _SUCCESS: the Spark output committer's
+                marker, written only once the parquet write commits (FRAN's ENGINE_MARKERS use it
+                too). A Radiant search with only delimp_report.parquet has no such marker."""
+    if engine == "radiant":
+        if report and os.path.isdir(report) and os.path.basename(report.rstrip("/")) == "fulcrum-results":
+            ok = os.path.isfile(os.path.join(report, "_SUCCESS"))
+            return ok, (f"{report}/_SUCCESS present" if ok else
+                        f"{report} has no _SUCCESS: the Fulcrum write never committed")
+        return None, (f"Radiant output without fulcrum-results/ ({os.path.basename(report or '')}): "
+                      f"no completion marker to check")
+    if engine == "fragpipe":
+        logs = sorted(glob.glob(os.path.join(out, "log_*.txt")))    # log_YYYY-MM-DD_HH-MM-SS.txt
+        if not logs:
+            return None, f"no FragPipe log_*.txt in {out}: no completion marker to check"
+        try:
+            with open(logs[-1], "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 8192))
+                tail = fh.read().decode(errors="replace")
+        except OSError as e:
+            return None, f"cannot read {logs[-1]} ({e.strerror or e})"
+        if "ALL JOBS DONE" in tail:
+            return True, f"{logs[-1]} ends ALL JOBS DONE"
+        return False, (f"{logs[-1]} has no ALL JOBS DONE"
+                       + (" (it was cancelled)" if "remaining tasks" in tail else "")
+                       + ": FragPipe did not finish, whatever is in dia-quant-output/")
+    return True, None
+
+
 def find_report(out, engine):
     for c in ENGINE_REPORTS.get(engine, ()):
         p = os.path.join(out, c)
@@ -273,6 +322,26 @@ def search_fastas(out):
     return tuple(dict.fromkeys(found))
 
 
+def explicit_meta_mismatch(out, meta):
+    """Why an explicit --fasta-meta does NOT describe this search's database, or None (it matches,
+    or the search's FASTA is unknown so there is nothing to check against). The same tie as for a
+    sidecar found nearby: an explicit one got no check at all, so a wrong --fasta-meta put another
+    search's database (and organism) into the manifest."""
+    used = search_fastas(os.path.abspath(out))
+    if not meta or not used:
+        return None
+    names = {os.path.basename(f) for f in used}
+    reals = {os.path.realpath(f) for f in used}
+    sib = meta[:-len(".meta.json")] if meta.endswith(".meta.json") else None
+    if sib and (os.path.realpath(sib) in reals or os.path.basename(sib) in names):
+        return None
+    mf = _meta_fasta(meta)
+    if mf and (mf in reals or os.path.basename(mf) in names):
+        return None
+    return (f"--fasta-meta {meta} describes {mf or sib or 'an unknown FASTA'}, but the search read "
+            f"{', '.join(used)}")
+
+
 def _meta_candidates(out, explicit_meta=None):
     """The <fasta>.meta.json files that describe THIS search's database, best first.
 
@@ -283,6 +352,8 @@ def _meta_candidates(out, explicit_meta=None):
     used when it can be tied to a FASTA the search really used (search_fastas), and when the
     search's FASTA is unknown, only a LONE meta is used -- several are a guess, and a guessed
     database or organism is a claim about the data (architectural rule #2)."""
+    if explicit_meta and explicit_meta_mismatch(out, explicit_meta):
+        return []                  # a mismatched explicit meta: blank, never another guess
     cands = [explicit_meta] if explicit_meta else []
     used = search_fastas(os.path.abspath(out))
     cands += [f + ".meta.json" for f in used if os.path.isfile(f + ".meta.json")]
@@ -500,6 +571,10 @@ def write_receipt(out, data):
     try:
         with open(p, "w") as fh:
             json.dump(data, fh, indent=2)
+        try:
+            os.chmod(p, 0o664)        # the next Core member's stage/verify rewrites it
+        except OSError:
+            pass
         return p
     except OSError as e:
         # A receipt we could not write is a resume hazard, not a failure of the deposit -- report
@@ -530,6 +605,16 @@ FRAN_DEFAULT_EXCLUDES = ("/quobyte/proteomics-grp/STAN/", "/quobyte/proteomics-g
                          "/quobyte/proteomics-grp/brett/v1_smoke",
                          "/quobyte/proteomics-grp/brett/glendon/", "/Data/lab/ToFEvoQC/")
 QC_OVERRIDE = "user override"          # the qc_rule a --not-qc stage writes beside "qc": false
+# FRAN's _excludes_path (find_uningested.py, c4838fe): the laptop's SMB spelling of the group share
+# is mapped to HIVE's before DEFAULT_EXCLUDES is tested, and a trailing "/" lets a root itself match.
+_SMB_PREFIX, _HIVE_PREFIX = "/Volumes/proteomics-grp", "/quobyte/proteomics-grp"
+
+
+def _excludes_path(path):
+    s = str(path or "").replace("\\", "/").rstrip("/")
+    if s == _SMB_PREFIX or s.startswith(_SMB_PREFIX + "/"):
+        s = _HIVE_PREFIX + s[len(_SMB_PREFIX):]
+    return s + "/"
 # Session metadata that can carry an explicit `"qc": true|false` for a whole session.
 SESSION_QC_FILES = ("session.json", os.path.join("input", "session.json"),
                     os.path.join("input", "wf", "workflow.manifest.json"))
@@ -583,15 +668,20 @@ def is_qc_run(out, session=None, *, names=(), override=None):
     `why` mirrors FRAN's reason text: "QC run: excluded by policy (<what matched>)". It goes into
     the receipt, and for a staged search into the manifest's `qc_rule`."""
     out = os.path.abspath(out)
+    # FRAN judges the manifest's output_dir, which is realpath(out): the path components the name
+    # rule reads must be the REAL ones, or a symlinked search dir escapes the rule here and is
+    # excluded there. DEFAULT_EXCLUDES is tested on both spellings.
+    real = os.path.realpath(out)
     session = session or session_for(out)
     marker, src = _session_qc_marker(session) if session else (None, None)
     if override is True:
         return True, "QC run: excluded by policy (qc: true, user override)"
     if marker is True:
         return True, f"QC run: excluded by policy (session metadata qc: true, {src})"
-    for p in dict.fromkeys((out, os.path.realpath(out))):
+    for p in dict.fromkeys((out, real)):
+        norm = _excludes_path(p)
         for root in FRAN_DEFAULT_EXCLUDES:
-            if root in p + "/":
+            if root in norm:
                 return True, f"QC run: excluded by policy (output_dir is under {root} (DEFAULT_EXCLUDES))"
     if override is False:
         return False, QC_OVERRIDE
@@ -601,36 +691,75 @@ def is_qc_run(out, session=None, *, names=(), override=None):
     if session:
         labelled += [("session_name", n) for n in (_session_title(session),
                                                    os.path.basename(session)) if n]
-    labelled += [("output_dir", c) for c in [x for x in out.split("/") if x][-3:]]
+    labelled += [("output_dir", c) for c in [x for x in real.split("/") if x][-3:]]
     for field, text in labelled:
         if QC_NAME_RE.search(text):
             return True, f"QC run: excluded by policy ({field} {text!r} matches QC_NAME_RE)"
     return False, "not QC: no qc marker, not under a FRAN excluded tree, no QC token in the names or path"
 
 
+def _recorded_qc(receipt, manifest):
+    """The QC decision an earlier stage left behind: (True, why) | (False, why) | (None, None).
+
+    A withdrawal must STAY a withdrawal. A later plain `stage --out X` (no --name, no flag) used to
+    re-stage a withdrawn QC run with qc: false -- which FRAN honours -- so the run got ingested
+    after all. A qc_run receipt, or a staged manifest saying qc/exclude: true, is therefore QC
+    until someone says --not-qc explicitly. A recorded --not-qc ("user override") is not-QC."""
+    if receipt.get("status") == "qc_run":
+        return True, (f"QC run: excluded by policy (recorded by {receipt.get('decided_by') or '?'} "
+                      f"at {receipt.get('at') or '?'}: {receipt.get('qc_rule') or 'qc_run'})")
+    if manifest.get("qc") is True or manifest.get("exclude") is True:
+        return True, (f"QC run: excluded by policy (its staged manifest says qc: true: "
+                      f"{manifest.get('qc_rule') or 'no reason recorded'})")
+    if QC_OVERRIDE in (receipt.get("qc_rule"), manifest.get("qc_rule")):
+        return False, QC_OVERRIDE
+    return None, None
+
+
+def decide_qc(out, *, names=(), override=None, receipt=None, manifest=None):
+    """THE QC decision for one search, for stage and backfill alike: an explicit flag, else what
+    an earlier stage recorded, else is_qc_run's rule. (is_qc_run still puts FRAN's excluded trees
+    above any not-QC decision.)"""
+    if override is None:
+        rec, why = _recorded_qc(receipt or {}, manifest or {})
+        if rec is True:
+            return True, why
+        override = rec
+    return is_qc_run(out, names=names, override=override)
+
+
+def _write_json_group(path, data):
+    """Write JSON atomically and leave it group-writable (0664), whatever the umask. Anything the
+    skill writes under incoming/ must be rewritable by the NEXT Core member: with a 022 umask a
+    manifest came out 0644, and another member's withdrawal then failed."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o664)
+    os.replace(tmp, path)
+
+
 def _withdraw_qc_entry(entry, why, user):
     """A QC run that was staged BEFORE it was known to be QC -- the job-end hook stages without
     the analysis name, and "Lumos QC" may only arrive with the agent's --name later -- is marked
     rather than deleted: the manifest gets `"qc": true, "exclude": true`, which FRAN's ingester
-    honours. Nothing in the shared drop dir is removed. Returns the entry marked, or None."""
+    honours. Nothing in the shared drop dir is removed. Returns (entry, None) when the entry is
+    marked, or (None, why-not) -- a failure is reported as one, never as QC kept out."""
     mp = os.path.join(entry, MANIFEST)
     try:
         with open(mp) as fh:
             man = json.load(fh)
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as e:
+        return None, f"cannot read {mp} ({type(e).__name__}: {getattr(e, 'strerror', None) or e})"
     if man.get("qc") is True and man.get("exclude") is True:
-        return entry
+        return entry, None
     man.update(qc=True, exclude=True, qc_rule=why, withdrawn_by=user,
                withdrawn_at=_utc_now())
     try:
-        tmp = f"{mp}.{os.getpid()}.tmp"
-        with open(tmp, "w") as fh:
-            json.dump(man, fh, indent=2)
-        os.replace(tmp, mp)
-    except OSError:
-        return None
-    return entry
+        _write_json_group(mp, man)
+    except OSError as e:
+        return None, f"cannot rewrite {mp} ({e.strerror or e})"
+    return entry, None
 
 
 def _utc_now():
@@ -654,25 +783,32 @@ def check(a):
     # staged before it was known to be QC is withdrawn by stage() (see _withdraw_qc_entry).
     override = (True if getattr(a, "qc", False) else
                 False if getattr(a, "not_qc", False) else None)
-    if override is None:
-        # An explicit decision an EARLIER stage recorded outlives it. The job-end hook stages with
-        # the --qc / --not-qc baked in at generation time; the agent's later stage at step 7c may
-        # carry no flag, and must not quietly overturn what the user said.
-        prior_man = {}
-        try:
-            with open(os.path.join(os.environ.get("FRAN_DROP_DIR", DROP_DIR), entry_name(out),
-                                   MANIFEST)) as fh:
-                prior_man = json.load(fh)
-        except (OSError, ValueError):
-            pass
-        override = _recorded_qc_override(read_receipt(out) or {}, prior_man)
-    qc, why = is_qc_run(out, names=[a.name] if a.name else (), override=override)
+    # A decision an EARLIER stage recorded outlives it (decide_qc): the job-end hook stages with
+    # the --qc / --not-qc baked in at generation time, and neither the agent's later flagless stage
+    # nor a plain `stage --out X` may quietly overturn it -- least of all a withdrawal.
+    prior_man = {}
+    try:
+        with open(os.path.join(os.environ.get("FRAN_DROP_DIR", DROP_DIR), entry_name(out),
+                               MANIFEST)) as fh:
+            prior_man = json.load(fh)
+    except (OSError, ValueError):
+        pass
+    name = (a.name or "").strip() or None
+    qc, why = decide_qc(out, names=[name] if name else (), override=override,
+                        receipt=read_receipt(out) or {}, manifest=prior_man)
     r["qc"], r["qc_rule"] = qc, why
     if qc:
-        r.update(reason="qc_run", entry=os.path.join(os.environ.get("FRAN_DROP_DIR", DROP_DIR),
-                                                     entry_name(out)),
+        r.update(reason="qc_run", name=name,
+                 entry=os.path.join(os.environ.get("FRAN_DROP_DIR", DROP_DIR), entry_name(out)),
                  detail=f"QC run ({why}): QC runs are not handed to FRAN. If this is NOT a QC "
                         f"run, stage it with --not-qc.")
+        return r
+    # Coursework is never Core work: ONE rule (_teaching_reason) for stage and backfill alike, so
+    # the job-end hook of a teaching account (proteomics-class-NN, members of proteomics-grp and so
+    # able to write the drop dir) never stages a class exercise.
+    teach = _teaching_reason(out, r["user"])
+    if teach:
+        r.update(reason="not_core_facility", core_member=False, detail=teach)
         return r
     # The Core gate. Not a flag: the write credential lives under this directory, so a HIVE user
     # outside proteomics-grp physically cannot deposit. Collaborators' searches stay theirs.
@@ -704,6 +840,20 @@ def check(a):
         r.update(reason="search_incomplete",
                  detail=f"no non-empty report in {out}. A failed or zero-ID search must never be "
                         f"deposited -- fix the search first (references/watcher.md).")
+        return r
+    # A non-empty report is not a finished search for FragPipe or Radiant (completion_marker).
+    done, evidence = completion_marker(out, engine, report)
+    r["completion"] = {"done": done, "evidence": evidence}
+    if done is False:
+        r.update(reason="search_incomplete",
+                 detail=f"{evidence}. A partial search must never be deposited.")
+        return r
+    # No marker to read. The agent stages only after watching the job to COMPLETED (step 7c), so
+    # its stage goes ahead; an unattended backfill has no such witness and does not guess.
+    if done is None and getattr(a, "require_completion_marker", False):
+        r.update(reason="needs_agent_check",
+                 detail=f"{evidence}. backfill cannot tell a finished search from a partial one "
+                        f"here: an agent confirms it finished, then runs stage --out {out}")
         return r
 
     # Checked BEFORE the corpus environment, and deliberately: "this search is already in" is
@@ -741,6 +891,7 @@ def check(a):
     elif not os.path.isdir(drop):
         try:
             os.makedirs(drop, mode=0o2775, exist_ok=True)
+            os.chmod(drop, 0o2775)        # makedirs' mode is filtered by the umask
         except OSError as e:
             r.update(reason="no_drop_dir",
                      detail=f"FRAN's drop directory {drop} does not exist and could not be created "
@@ -750,11 +901,26 @@ def check(a):
     # inside /quobyte/proteomics-grp, so a HIVE account outside proteomics-grp cannot write here.
     # A collaborator's search physically cannot be staged.
     if not os.access(gate, os.W_OK | os.X_OK):
-        r.update(reason="not_core_facility",
-                 detail=f"{drop} is not writable by {r['user']}, so this is not a Proteomics Core "
-                        f"run. Collaborator searches are never handed to the Core corpus.")
+        # Not writable means "not a Core member" ONLY when the account really is outside the group.
+        # A member who cannot write it has hit a permission problem -- reported, never recorded as
+        # a decision, or the search would be locked out of FRAN by a transient fault.
+        member = _in_core_group()
+        r["core_member"] = member
+        if member:
+            r.update(reason="drop_dir_not_writable",
+                     detail=f"{r['user']} is in {GROUP_NAME} but cannot write {gate}: a permission "
+                            f"problem, not a decision. Fix it (chmod 2775 {gate}) and stage again.")
+        else:
+            r.update(reason="not_core_facility",
+                     detail=f"{drop} is not writable by {r['user']}, so this is not a Proteomics "
+                            f"Core run. Collaborator searches are never handed to the Core corpus.")
         return r
 
+    bad_meta = explicit_meta_mismatch(out, a.fasta_meta)
+    if bad_meta:
+        r["fasta_meta_ignored"] = bad_meta
+        sys.stderr.write(f"[fran_deposit] WARNING: ignoring {bad_meta}; the organism and database "
+                         f"are left blank rather than taken from the wrong search\n")
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
     # None, never "": FRAN's read_manifest rejects an empty search_name or organism outright
     r["organism"] = (a.organism or "").strip() or org or None
@@ -826,22 +992,35 @@ def _record_decision(a, c):
     if (c.get("reason") not in DECISION_STATUS or getattr(a, "dry_run", False)
             or not out or not os.path.isdir(out)):
         return
+    # "Not a Core member" is recorded only when the account is KNOWN to be outside the group (or is
+    # a teaching account). When membership cannot be read, the refusal stands for this call only.
+    if c["reason"] == "not_core_facility" and c.get("core_member") is not False:
+        return
     prior = read_receipt(out) or {}
     rec = {"status": c["reason"], "search_dir": out, "decided_by": c.get("user"),
            "at": datetime.datetime.now().isoformat(timespec="seconds"), "detail": c.get("detail")}
     if c["reason"] == "qc_run":
         rec["qc_rule"] = c.get("qc_rule")
+        rec["search_name"] = c.get("name") or prior.get("search_name")
         # Staged before anyone knew it was QC (the job-end hook stages without the analysis name):
         # withdraw it by marking the manifest, which FRAN's ingester honours.
-        if c.get("entry") and os.path.isdir(c["entry"]) and _withdraw_qc_entry(
-                c["entry"], c.get("qc_rule"), c.get("user")):
-            c["withdrawn"] = rec["withdrawn_entry"] = c["entry"]
-            c["detail"] += (f" It had already been staged; {c['entry']}/{MANIFEST} is now marked "
-                            f"qc: true, so FRAN's ingester skips it.")
+        if c.get("entry") and os.path.isdir(c["entry"]):
+            done, err = _withdraw_qc_entry(c["entry"], c.get("qc_rule"), c.get("user"))
+            if done:
+                c["withdrawn"] = rec["withdrawn_entry"] = c["entry"]
+                c["detail"] += (f" It had already been staged; {c['entry']}/{MANIFEST} is now "
+                                f"marked qc: true, so FRAN's ingester skips it.")
+            else:
+                c["withdraw_failed"] = rec["withdraw_failed"] = err
+                c["detail"] = (f"withdraw FAILED: {err}. This QC run ({c.get('qc_rule')}) is "
+                               f"STILL STAGED at {c['entry']} and FRAN may ingest it. A Core member "
+                               f"who can write {c['entry']}/{MANIFEST} must run: python3 "
+                               f"{os.path.abspath(__file__)} stage --out {shlex.quote(out)} --qc")
         if prior.get("status") == "ingested":
             c["detail"] += " It is ALREADY in FRAN's corpus; taking it out is a FRAN-side step."
             return                   # never overwrite the record that it IS in FRAN
-    if prior.get("status") in BLOCKING_STATUS and not c.get("withdrawn"):
+    if (prior.get("status") in BLOCKING_STATUS and not c.get("withdrawn")
+            and not (c["reason"] == "qc_run" and c.get("withdraw_failed"))):
         return                       # never overwrite the record that it IS in FRAN
     write_receipt(out, rec)
 
@@ -884,19 +1063,32 @@ def do_stage(a):
     # Re-staging must converge, not accumulate: an entry from an earlier attempt may hold links to
     # files the search has since replaced (a resumed chain rewrites report.parquet). Relink from
     # scratch rather than leaving a stale mixture of both runs.
-    if os.path.isdir(entry):
-        for f in os.listdir(entry):
-            fp = os.path.join(entry, f)
-            if os.path.islink(fp) or os.path.isfile(fp):
-                os.unlink(fp)
-            elif f == "report_xic" and os.path.isdir(fp):
-                # A real directory of links we built. Clear it too: a re-run that dropped a
-                # pathological file would otherwise leave that file's trace behind forever.
-                for g in os.listdir(fp):
-                    os.unlink(os.path.join(fp, g))
-                os.rmdir(fp)
-    else:
-        os.makedirs(entry, mode=0o2775, exist_ok=True)
+    # Everything under incoming/ is made group-writable EXPLICITLY (2775 dirs, 0664 files):
+    # makedirs' mode and open() are filtered by the umask, and with a 022 umask the next Core
+    # member could neither withdraw nor re-stage this entry -- the relink below died in os.unlink.
+    try:
+        if os.path.isdir(entry):
+            for f in os.listdir(entry):
+                fp = os.path.join(entry, f)
+                if os.path.islink(fp) or os.path.isfile(fp):
+                    os.unlink(fp)
+                elif f == "report_xic" and os.path.isdir(fp):
+                    # A real directory of links we built. Clear it too: a re-run that dropped a
+                    # pathological file would otherwise leave that file's trace behind forever.
+                    for g in os.listdir(fp):
+                        os.unlink(os.path.join(fp, g))
+                    os.rmdir(fp)
+        else:
+            os.makedirs(entry, mode=0o2775, exist_ok=True)
+        try:
+            os.chmod(entry, 0o2775)
+        except OSError:
+            pass                      # another member's entry: its owner already set it
+    except OSError as e:
+        return {**c, "staged": False, "reason": "entry_not_writable",
+                "detail": f"cannot rewrite {entry} ({e.strerror or e}): it was staged by another "
+                          f"account without group write. A permission problem, not a decision -- "
+                          f"its owner can run: chmod -R g+w {entry}"}
 
     linked = []
     # Normalise the chromatograms into ONE `report_xic/` directory of links, whatever layout the
@@ -909,6 +1101,7 @@ def do_stage(a):
     if xf:
         xdir = os.path.join(entry, "report_xic")
         os.makedirs(xdir, exist_ok=True)
+        os.chmod(xdir, 0o2775)
         for name, src in xf:
             dst = os.path.join(xdir, name)
             if not os.path.lexists(dst):
@@ -973,8 +1166,7 @@ def do_stage(a):
         "suggested_ingest": suggested_ingest(c),
         "suggested_ingest_shell": " ".join(shlex.quote(x) for x in suggested_ingest(c)),
     }
-    with open(os.path.join(entry, MANIFEST), "w") as fh:
-        json.dump(manifest, fh, indent=2)
+    _write_json_group(os.path.join(entry, MANIFEST), manifest)
 
     receipt = {"status": "staged", "search_dir": out, "entry": entry, "engine": c["engine"],
                "organism": c.get("organism"), "taxon": c.get("taxon"),
@@ -1150,8 +1342,21 @@ def verify(a):
         r["detail"] += (f" WARNING: {len(r['broken_links'])} link(s) point at files that no longer "
                         f"exist — the cron will skip this entry. Re-run `stage --force`.")
 
-    receipt = read_receipt(out) or {"search_dir": out}
-    receipt["status"] = "ingested" if r["ingested"] else receipt.get("status", "staged")
+    # verify only RECORDS what it found. It never invents a "staged" receipt: written for a search
+    # that was never staged, that receipt made stage answer already_staged and backfill skip the
+    # search for ever. No receipt, nothing staged, nothing ingested -> nothing is written.
+    prior = read_receipt(out)
+    if r["ingested"]:
+        status = "ingested"
+    elif prior and prior.get("status"):
+        status = prior["status"]
+    elif r["staged"]:
+        status = "staged"                  # the entry exists; only its receipt was missing
+    else:
+        r["receipt"] = None
+        jout(r)
+    receipt = prior or {"search_dir": out}
+    receipt["status"] = status
     receipt["verified"] = {k: r[k] for k in ("state", "entry", "ingested") if k in r}
     if log and log.get("outcome"):
         receipt["verified"]["log"] = {k: log.get(k) for k in ("outcome", "when", "log")}
@@ -1888,7 +2093,8 @@ def write_health_status(h, drop=None):
 def read_health_status(now=None, drop=None, timeout_s=HEALTH_READ_TIMEOUT_S):
     """(fran_health, warning) from the status file, or (None, None) when it is missing,
     unreadable, or the read does not finish within `timeout_s` -- then stage says nothing.
-    Older than HEALTH_STALE_H: verdict unknown, and the warning says when it was last checked."""
+    Older than HEALTH_STALE_H: verdict unknown and NO warning (the summary says when it was last
+    checked). Only a fresh unhealthy verdict warns."""
     box = {}
 
     def work():
@@ -1912,8 +2118,10 @@ def read_health_status(now=None, drop=None, timeout_s=HEALTH_READ_TIMEOUT_S):
         checked = None
     when = _when(checked) if checked else "at an unknown time"
     if checked is None or now - checked > HEALTH_STALE_H * 3600:
-        msg = f"FRAN ingest health unknown (last checked {when})"
-        return {"verdict": "unknown", "summary": msg, "checked_at": rec.get("checked_at")}, msg
+        # Old news is not bad news: a stale verdict is UNKNOWN, with no warning -- exactly like a
+        # missing file -- so the job's Slack post does not call a healthy FRAN unhealthy.
+        return {"verdict": "unknown", "checked_at": rec.get("checked_at"),
+                "summary": f"FRAN ingest health unknown (last checked {when})"}, None
     fh = {"verdict": rec["verdict"], "summary": rec.get("summary"), "checked_at": rec["checked_at"]}
     return fh, (rec.get("summary") if rec["verdict"] in UNHEALTHY else None)
 
@@ -2168,17 +2376,46 @@ def member_home_roots(members):
     return list(dict.fromkeys(roots))
 
 
-def core_search(out, members, prefixes=CORE_PREFIXES):
-    """(is_core, why). A search is the Core's if it lives in a Core tree, or if a non-teaching
-    member of proteomics-grp owns it. Anything else is a collaborator's and is never handed over."""
-    real = os.path.realpath(out)
-    if any(real.startswith(p) for p in prefixes):
-        return True, "in a Core tree"
+def _owner(path):
     try:
         import pwd                                                          # noqa: PLC0415
-        owner = pwd.getpwuid(os.stat(real).st_uid).pw_name
+        return pwd.getpwuid(os.stat(path).st_uid).pw_name
     except (ImportError, KeyError, OSError):
-        owner = None
+        return None
+
+
+def _teaching_reason(out, user=None):
+    """Why a search is coursework, or None: the account running the skill, or the account that
+    owns the search, is a teaching account (TEACHING_ACCOUNT). ONE rule for stage and backfill."""
+    for who, acct in (("run by", user), ("owned by", _owner(os.path.realpath(out)))):
+        if acct and TEACHING_ACCOUNT.search(acct):
+            return (f"{who} teaching account {acct}: coursework is never handed to the Core "
+                    f"corpus (FRAN keeps teaching data out)")
+    return None
+
+
+def _in_core_group():
+    """True / False when this account's proteomics-grp membership can be read, else None."""
+    try:
+        import grp                                                          # noqa: PLC0415
+        g = grp.getgrnam(GROUP_NAME)
+    except (ImportError, KeyError, OSError):
+        return None
+    return (g.gr_gid in os.getgroups() or os.getgid() == g.gr_gid
+            or getpass.getuser() in g.gr_mem)
+
+
+def core_search(out, members, prefixes=CORE_PREFIXES):
+    """(is_core, why). Coursework never is (_teaching_reason). Otherwise a search is the Core's if
+    it lives in a Core tree, or if a non-teaching member of proteomics-grp owns it. Anything else
+    is a collaborator's and is never handed over."""
+    real = os.path.realpath(out)
+    teach = _teaching_reason(out)
+    if teach:
+        return False, teach
+    if any(real.startswith(p) for p in prefixes):
+        return True, "in a Core tree"
+    owner = _owner(real)
     if owner and members and owner in members:
         return True, f"owned by Core member {owner}"
     return False, (f"outside the Core trees and owned by {owner or 'an unknown account'}, who is "
@@ -2205,17 +2442,7 @@ class _StageArgs:
         self.name_source = "derived from the folder name by `fran_deposit.py backfill`"
         self.skip = self.force = self.qc = self.not_qc = False
         self.organism = self.taxon = self.fasta_meta = None
-
-
-def _recorded_qc_override(receipt, manifest):
-    """An explicit --qc / --not-qc an earlier stage recorded (True / False), else None."""
-    for rule, said_qc in ((receipt.get("qc_rule"), receipt.get("status") == "qc_run"),
-                          (manifest.get("qc_rule"), manifest.get("qc") is True)):
-        if rule == QC_OVERRIDE:
-            return False
-        if rule and "user override" in rule and said_qc:
-            return True
-    return None
+        self.require_completion_marker = True     # unattended: no marker, no stage
 
 
 def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=None):
@@ -2263,9 +2490,8 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=
                     man = json.load(fh)
             except (OSError, ValueError):
                 pass
-        recorded = _recorded_qc_override(prior, man)
         names = [n for n in (derive_name(d), man.get("search_name"), prior.get("search_name")) if n]
-        qc, qwhy = is_qc_run(d, names=names, override=recorded)
+        qc, qwhy = decide_qc(d, names=names, receipt=prior, manifest=man)
         if qc:
             qrow = {**row, "decision": "excluded", "reason": "qc_run", "detail": qwhy}
             if os.path.isdir(entry) and not (man.get("qc") is True and man.get("exclude") is True):
@@ -2317,6 +2543,9 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=
             pass
         if res.get("staged"):
             rows.append({**row, **keep, "decision": "staged", "reason": "ok"})
+        elif res.get("reason") == "needs_agent_check":
+            rows.append({**row, **keep, "decision": "skip", "reason": "needs_agent_check",
+                         "detail": res.get("detail")})
         elif res.get("eligible"):
             rows.append({**row, **keep, "decision": "would_stage", "reason": "ok"})
         else:

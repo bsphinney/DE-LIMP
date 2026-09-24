@@ -549,13 +549,18 @@ class StageHealthTests(unittest.TestCase):
             self.assertNotIn("health_warning", res)
             self.assertNotIn("WARNING", err)
 
-    def test_a_stale_verdict_is_unknown_and_says_when(self):
-        with tempfile.TemporaryDirectory() as d:
-            self._status(os.path.join(d, "incoming"), "healthy", age_h=13)
-            code, res, err = self._stage(d)
-            self.assertTrue(res["staged"])
-            self.assertEqual(res["fran_health"]["verdict"], "unknown")
-            self.assertIn("health unknown (last checked", res["health_warning"])
+    def test_a_stale_verdict_is_unknown_and_silent(self):
+        """Old news is not bad news: a >12 h verdict must not make the job's Slack post call FRAN
+        unhealthy. Same as a missing file, plus the date it was last checked."""
+        for verdict in ("healthy", "stuck"):
+            with tempfile.TemporaryDirectory() as d:
+                self._status(os.path.join(d, "incoming"), verdict, age_h=13)
+                code, res, err = self._stage(d)
+                self.assertTrue(res["staged"])
+                self.assertEqual(res["fran_health"]["verdict"], "unknown")
+                self.assertIn("last checked", res["fran_health"]["summary"])
+                self.assertNotIn("health_warning", res)
+                self.assertNotIn("WARNING", err)
 
     def test_no_status_file_or_a_broken_one_says_nothing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1233,6 +1238,256 @@ class MetaSelectionTests(unittest.TestCase):
             with open(os.path.join(out, "report.log.txt"), "w") as fh:
                 fh.write(f"diann-linux --fasta {real} --out report.parquet\n")
             self.assertEqual(fd.fasta_from_meta(out), (real, "abc", 1))
+
+
+class ReviewFixTests(unittest.TestCase):
+    """The independent review's FIX-FIRST list (items A-I). Each test is the reproduction."""
+
+    def _session(self, d, title, **kw):
+        return QcRuleTests._session(self, d, title, **kw)
+
+    def _stage(self, d, out, **kw):
+        with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
+            return run_quiet(fd.stage, Args(out, **kw))
+
+    # B ----------------------------------------------------------------------------------------
+    def test_B_a_withdrawal_survives_a_later_plain_stage(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "2026-09-23_chkLUppm_HeLa50_2026")
+            entry = self._stage(d, out)[1]["entry"]                       # the hook: no name
+            w = self._stage(d, out, name="chkLUppm_HeLa50_2026 Lumos QC")[1]
+            self.assertEqual(w["withdrawn"], entry)
+            self.assertEqual(fd.read_receipt(out)["search_name"], "chkLUppm_HeLa50_2026 Lumos QC")
+            for kw in ({}, {"force": True}):                             # plain stage, twice
+                r = self._stage(d, out, **kw)[1]
+                self.assertEqual(r["reason"], "qc_run", r.get("detail"))
+                man = json.load(open(os.path.join(entry, fd.MANIFEST)))
+                self.assertEqual((man["qc"], man["exclude"]), (True, True))
+            # only an EXPLICIT --not-qc turns it back
+            r = self._stage(d, out, not_qc=True)[1]
+            self.assertTrue(r["staged"], r.get("detail"))
+            self.assertEqual(r["qc_rule"], "user override")
+
+    # A ----------------------------------------------------------------------------------------
+    def test_A_verify_never_invents_a_staged_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"),
+                          FRAN_INGEST_LOG_DIR=os.path.join(d, "nologs")):
+                v = run_quiet(fd.verify, Args(out))[1]
+                self.assertEqual(v["state"], "not_staged")
+                self.assertIsNone(v["receipt"])
+                self.assertIsNone(fd.read_receipt(out))
+                self.assertTrue(fd.check(Args(out))["eligible"])       # not already_staged
+
+    def test_A_verify_of_a_staged_entry_without_a_receipt_records_staged(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            self._stage(d, out)
+            os.unlink(os.path.join(out, fd.RECEIPT))
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"),
+                          FRAN_INGEST_LOG_DIR=os.path.join(d, "nologs")):
+                run_quiet(fd.verify, Args(out))
+            self.assertEqual(fd.read_receipt(out)["status"], "staged")
+
+    # C ----------------------------------------------------------------------------------------
+    def test_C_the_name_rule_reads_the_real_path_like_fran(self):
+        """FRAN judges output_dir = realpath(out). A symlinked search dir whose real home is a
+        QC path must be QC here too."""
+        with tempfile.TemporaryDirectory() as d:
+            real = search_dir(os.path.join(d, "instr", "QC_run_01"), "search_out")
+            link_parent = os.path.join(d, "lab", "proj")
+            os.makedirs(link_parent)
+            link = os.path.join(link_parent, "search_out")
+            os.symlink(real, link)
+            q, why = fd.is_qc_run(link)
+            self.assertTrue(q, why)
+            self.assertIn("QC_run_01", why)
+
+    def test_C_the_smb_spelling_is_mapped_to_hive(self):
+        q, why = fd.is_qc_run("/Volumes/proteomics-grp/brett/glendon/sweep/search_out",
+                              override=False)
+        self.assertTrue(q)
+        self.assertIn("/quobyte/proteomics-grp/brett/glendon/", why)
+        self.assertEqual(fd._excludes_path("/Volumes/proteomics-grp/brett/glendon"),
+                         "/quobyte/proteomics-grp/brett/glendon/")
+
+    # D ----------------------------------------------------------------------------------------
+    def test_D_a_022_umask_still_leaves_the_entry_group_writable(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            os.makedirs(os.path.join(out, "report_xic"))
+            with open(os.path.join(out, "report_xic", "a.xic.parquet"), "w") as fh:
+                fh.write("x")
+            old = os.umask(0o022)
+            try:
+                entry = self._stage(d, out)[1]["entry"]
+            finally:
+                os.umask(old)
+            mode = lambda p: os.stat(p).st_mode & 0o777               # noqa: E731
+            self.assertEqual(mode(entry), 0o775)
+            self.assertEqual(mode(os.path.join(entry, "report_xic")), 0o775)
+            self.assertEqual(mode(os.path.join(entry, fd.MANIFEST)), 0o664)
+            self.assertEqual(mode(os.path.join(out, fd.RECEIPT)), 0o664)
+
+    def test_D_a_failed_withdrawal_says_so_and_never_claims_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "2026-09-23_HeLa50")
+            entry = self._stage(d, out)[1]["entry"]
+            os.chmod(entry, 0o555)                                        # not ours to rewrite
+            try:
+                r = self._stage(d, out, qc=True)[1]
+            finally:
+                os.chmod(entry, 0o775)
+            self.assertEqual(r["reason"], "qc_run")
+            self.assertTrue(r["detail"].startswith("withdraw FAILED:"), r["detail"])
+            self.assertNotIn("now marked", r["detail"])
+            self.assertIsNone(r.get("withdrawn"))
+            self.assertIn("withdraw_failed", fd.read_receipt(out))
+            self.assertIs(json.load(open(os.path.join(entry, fd.MANIFEST)))["qc"], False)
+
+    def test_D_restaging_an_unwritable_entry_is_reported_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            entry = self._stage(d, out)[1]["entry"]
+            os.chmod(entry, 0o555)
+            try:
+                code, r, err = self._stage(d, out, force=True)
+            finally:
+                os.chmod(entry, 0o775)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(r["reason"], "entry_not_writable")
+
+    def test_D_a_permission_error_is_never_recorded_as_not_core(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            drop = os.path.join(d, "incoming")
+            os.makedirs(drop)
+            os.chmod(drop, 0o555)
+            saved = fd._in_core_group
+            try:
+                for member, reason, recorded in ((None, "not_core_facility", False),
+                                                 (True, "drop_dir_not_writable", False),
+                                                 (False, "not_core_facility", True)):
+                    fd._in_core_group = lambda m=member: m
+                    r = self._stage(d, out)[1]
+                    self.assertEqual(r["reason"], reason, member)
+                    rec = fd.read_receipt(out)
+                    self.assertEqual(bool(rec and rec.get("status") == "not_core_facility"),
+                                     recorded, member)
+            finally:
+                fd._in_core_group = saved
+                os.chmod(drop, 0o755)
+
+    # E ----------------------------------------------------------------------------------------
+    def test_E_an_explicit_meta_for_another_database_is_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            mouse = os.path.join(d, "mouse.fasta")
+            human = os.path.join(d, "human.fasta")
+            for fa, org, tx in ((mouse, "Mus musculus", 10090), (human, "Homo sapiens", 9606)):
+                with open(fa, "w") as fh:
+                    fh.write(">a\nPEPTIDEK\n")
+                with open(fa + ".meta.json", "w") as fh:
+                    json.dump({"fasta": fa, "organism": org, "taxid": tx, "n_sequences": 1}, fh)
+            out = search_dir(os.path.join(d, "s"), "search_out", prov=False)
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"diann-linux --f a.d --fasta {mouse} --out report.parquet\n")
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    c = fd.check(Args(out, fasta_meta=human + ".meta.json"))
+            self.assertIn("ignoring --fasta-meta", err.getvalue())
+            self.assertIn("fasta_meta_ignored", c)
+            self.assertEqual((c["organism"], c["fasta_path"]), (None, None))
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
+                c = fd.check(Args(out, fasta_meta=mouse + ".meta.json"))
+            self.assertEqual((c["organism"], c["fasta_path"]), ("Mus musculus", mouse))
+
+    # F ----------------------------------------------------------------------------------------
+    def test_F_coursework_is_never_staged_by_stage_or_backfill(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            saved = fd.getpass.getuser
+            fd.getpass.getuser = lambda: "proteomics-class-07"
+            try:
+                r = self._stage(d, out)[1]
+            finally:
+                fd.getpass.getuser = saved
+            self.assertEqual(r["reason"], "not_core_facility")
+            self.assertIn("teaching account proteomics-class-07", r["detail"])
+            self.assertEqual(fd.read_receipt(out)["status"], "not_core_facility")
+            saved_owner = fd._owner
+            fd._owner = lambda p: "proteomics-class-03"
+            try:
+                core, why = fd.core_search(out, {"brettsp"}, prefixes=(os.path.realpath(d) + "/",))
+            finally:
+                fd._owner = saved_owner
+            self.assertFalse(core)
+            self.assertIn("coursework", why)
+
+    # G ----------------------------------------------------------------------------------------
+    def _fragpipe(self, d, log_tail):
+        out = os.path.join(d, "fp_out")
+        os.makedirs(os.path.join(out, "dia-quant-output"))
+        with open(os.path.join(out, "dia-quant-output", "report.tsv"), "w") as fh:
+            fh.write("x" * 64)                  # present in every FragPipe run, finished or not
+        with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+            json.dump({"engine": "fragpipe"}, fh)
+        if log_tail is not None:
+            with open(os.path.join(out, "log_2026-06-10_22-23-44.txt"), "w") as fh:
+                fh.write("DIA-Quant run DIA-NN: 4.91 minutes\n" + log_tail)
+        return out
+
+    def test_G_a_cancelled_fragpipe_run_is_incomplete_despite_its_report(self):
+        """Real on HIVE: glendon/fragpipe_bigdog_dia_FULL215 was cancelled and still has
+        dia-quant-output/report.tsv."""
+        with tempfile.TemporaryDirectory() as d:
+            out = self._fragpipe(d, "~~~~~~~~~~~~~~~~~~~~\nCancelling 5 remaining tasks\n")
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
+                c = fd.check(Args(out))
+            self.assertEqual(c["reason"], "search_incomplete")
+            self.assertIn("cancelled", c["detail"])
+        with tempfile.TemporaryDirectory() as d:
+            out = self._fragpipe(d, "=====ALL JOBS DONE IN 9.5 MINUTES=====\n")
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
+                self.assertTrue(fd.check(Args(out))["eligible"])
+
+    def test_G_fulcrum_without_success_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d, "rad", engine="radiant")
+            fr = os.path.join(out, "radiant_results", "fulcrum-results")
+            os.makedirs(fr)
+            with open(os.path.join(fr, "part-00000.snappy.parquet"), "w") as fh:
+                fh.write("x" * 64)
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
+                self.assertEqual(fd.check(Args(out))["reason"], "search_incomplete")
+                open(os.path.join(fr, "_SUCCESS"), "w").close()
+                self.assertTrue(fd.check(Args(out))["eligible"])
+
+    def test_G_no_marker_the_agent_may_stage_but_backfill_never_does(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._fragpipe(d, None)                                 # no FragPipe log
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
+                c = fd.check(Args(out))
+                self.assertTrue(c["eligible"])                            # the agent watched it
+                self.assertIsNone(c["completion"]["done"])
+                for apply in (False, True):
+                    row = fd.plan_backfill([out], apply=apply,
+                                           prefixes=(os.path.realpath(d) + "/",))[0]
+                    self.assertEqual((row["decision"], row["reason"]),
+                                     ("skip", "needs_agent_check"), apply)
+            self.assertFalse(os.path.exists(os.path.join(d, "incoming", fd.entry_name(out))))
+
+    # I ----------------------------------------------------------------------------------------
+    def test_I_detection_markers_match_frans_engine_markers(self):
+        self.assertEqual(fd.DETECT_MARKERS, [
+            ("fragpipe", ("dia-quant-output/report.tsv", "fragpipe.fp-manifest")),
+            ("radiant", ("radiant_results/fulcrum-results", "fulcrum-results/_SUCCESS")),
+            ("diann", ("report.parquet", "report.tsv"))])
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "delimp_report.parquet"), "w") as fh:
+                fh.write("x")
+            self.assertIsNone(fd.detect_engine(d)[0])
 
 
 # ------------------------------------------------------------------------------ backfill --

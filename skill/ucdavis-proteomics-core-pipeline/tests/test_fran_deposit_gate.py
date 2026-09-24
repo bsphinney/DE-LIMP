@@ -49,10 +49,15 @@ def search_dir(root, engine="diann", empty=False):
             fh.write(body)
         with open(os.path.join(d, "report.tsv"), "w") as fh:
             fh.write(body)
+        # A FINISHED FragPipe run: its workdir log ends like this (fran_deposit.completion_marker)
+        with open(os.path.join(d, "log_2026-08-21_14-05-39.txt"), "w") as fh:
+            fh.write("Finalizer Task: 0.01 minutes\n=====ALL JOBS DONE IN 50.9 MINUTES=====\n")
     elif engine == "radiant":
         os.makedirs(os.path.join(d, "radiant_results", "fulcrum-results"), exist_ok=True)
         with open(os.path.join(d, "radiant_results", "fulcrum-results", "part-0.parquet"), "w") as f:
             f.write(body)
+        # ...and a finished Fulcrum write: Spark's commit marker
+        open(os.path.join(d, "radiant_results", "fulcrum-results", "_SUCCESS"), "w").close()
     # run_search.py writes this for EVERY engine
     with open(os.path.join(d, "search_provenance.json"), "w") as fh:
         json.dump({"engine": engine, "version": "9.9"}, fh)

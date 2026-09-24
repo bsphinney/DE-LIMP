@@ -48,7 +48,9 @@ change the other. The precedence is FRAN's; the first match wins:
 3. **Explicit not-QC:** `--not-qc`, or `"qc": false` in session metadata.
 4. **FRAN's name rule** `(?i)(?<![a-z0-9])qc(?![a-z])`, applied to the search name
    (`--name`), the session's name (its README title and folder) and the last three
-   components of the out dir path. It catches `chkLUppm_HeLa50_2026 Lumos QC`, `QC_run_01`,
+   components of the out dir's **real** path. FRAN judges `output_dir`, which is the realpath,
+   so a symlinked search dir must not escape the rule here. DEFAULT_EXCLUDES is tested on both
+   spellings, with `/Volumes/proteomics-grp` mapped to `/quobyte/proteomics-grp` as FRAN does. It catches `chkLUppm_HeLa50_2026 Lumos QC`, `QC_run_01`,
    `hela_qc_2` and `Exploris QC2`. It keeps `HeLa_digest_timecourse`, `aqc_buffer_study`,
    `QCM_study` and `Plasma_liver2`, the same pinned vectors as FRAN. "HeLa" alone is **not**
    QC.
@@ -72,8 +74,16 @@ recorded in the receipt, and a later stage without a flag honours it rather than
 **Withdrawal is the backstop.** When a later `stage` still finds that a staged search is QC, it
 **withdraws** it: the entry's manifest gets `"qc": true, "exclude": true`, which FRAN's ingester
 skips at ingest time. Nothing in the shared drop dir is deleted, and `verify` then reports
-`qc_excluded`. A generator's `--no-fran` should run `stage --skip`, so the opt-out is recorded
-and `backfill` never picks the search up later.
+`qc_excluded`.
+
+- **A withdrawal sticks.** A `qc_run` receipt, or a staged manifest that says `qc: true`, means
+  QC for every later `stage` until someone passes `--not-qc` explicitly. A plain `stage --out X`
+  used to re-stage a withdrawn run with `qc: false`, which FRAN honours.
+- **A withdrawal that fails says so.** For example, the entry was staged by another account
+  without group write. The result then starts `withdraw FAILED: <why>`, names the entry that is
+  still staged, and never claims the run was kept out.
+- **`--no-fran` should run `stage --skip`,** so the opt-out is recorded and `backfill` never
+  picks the search up later.
 
 ## The three commands
 
@@ -104,7 +114,7 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/fran_deposit.py
 | `staged_pending_cron` | handed over, not reached yet. **A success**, the normal state for hours after a run | "handed to FRAN; it ingests on the next pass" — and if `cron.verdict` is `stuck`/`not_running`, add that FRAN's cron is stuck, which is FRAN-side |
 | `ingest_failed` | the cron tried this entry and it failed; `detail` has the reason from its log | the reason, in one line. FRAN-side: do **not** re-stage |
 | `qc_excluded` | a QC run whose entry is marked `qc: true` | "a QC run, kept out of FRAN" |
-| `not_staged` | no entry | why `check` refused |
+| `not_staged` | no entry | why `check` refused. `verify` writes **no** receipt then: an invented `staged` receipt used to make `stage` say `already_staged` and `backfill` skip the search for ever |
 
 Without a corpus token (the usual case), `verify` answers from the cron's own logs rather than
 the database. `broken_links` is the one entry problem to act on: an entry whose targets have
@@ -153,7 +163,7 @@ sits in the drop dir's parent, never inside `incoming/`, where nothing but drop 
 |---|---|
 | verdict `stuck` / `not_running` / `stale_code`, checked < 12 h ago | `fran_health` + `health_warning` (the summary); the same line on stderr |
 | `healthy` or `unknown`, checked < 12 h ago | `fran_health` only |
-| older than 12 h | `health_warning: "FRAN ingest health unknown (last checked <when>)"` |
+| older than 12 h | `fran_health: {verdict: "unknown", summary: "… (last checked <when>)"}`, and **no** warning: old news is not bad news |
 | missing, unreadable, or a read that does not finish | nothing |
 
 The search **is** staged either way. Health never changes stage's exit status, and stdout
@@ -222,7 +232,19 @@ python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch --apply
   `diann_<name>_<step>`, so its searches are `not_a_skill_search`.
 - **Who is handed over:** a search inside `/quobyte/proteomics-grp/` or
   `/nfs/lssc0/flinders/proteomics/`, or owned by a non-teaching Core member. Anything else is
-  `not_core_facility`.
+  `not_core_facility`. **Coursework never is.** A search run by, or owned by, a teaching account
+  (`proteomics-class-NN`) is refused by `backfill` and by `stage` alike, through one rule
+  (`_teaching_reason`). That matters because those accounts are in `proteomics-grp` and can
+  write the drop dir, so their job-end hook could otherwise stage a class exercise.
+- **A finished search, not just a report.** For FragPipe and Radiant a report exists before
+  the search has finished. On HIVE, 16 of 16 FragPipe workdirs had `dia-quant-output/report.tsv`,
+  including two cancelled runs. So `check` requires the engine's own marker. For FragPipe that
+  is the newest workdir `log_*.txt` ending `ALL JOBS DONE IN <n> MINUTES` (all 11 finished runs
+  had it; none of the 5 unfinished did). For Radiant it is `_SUCCESS` in `fulcrum-results/` (the
+  Spark commit marker, on 20 of 20). A missing or cancelled marker is `search_incomplete`.
+  Where there is no marker to read (no FragPipe log; a Radiant search with only
+  `delimp_report.parquet`), the agent's own `stage` goes ahead, because it watched the job
+  finish. `backfill` reports `needs_agent_check` instead, and `--apply` never stages it.
 - **QC runs are listed on their own** under `excluded_qc_run`, never staged. The rule is the
   same `is_qc_run`, applied to the folder name and to any analysis name an earlier `stage`
   recorded. An `--qc`/`--not-qc` recorded by an earlier stage wins. A QC run that is already in
@@ -298,7 +320,10 @@ If a search genuinely has no XICs (a cfg from before this was enforced), `check`
 search directory — so linking it would relabel every staged DIA-NN and FragPipe search as
 Radiant. Its full contents go into the manifest instead. Verified against FRAN's own
 `detect_engine()` on real staged entries: DIA-NN → `diann`, FragPipe → `fragpipe`, Radiant →
-`radiant`.
+`radiant`. The skill's own file-sniff markers (`DETECT_MARKERS`, used when there is no
+provenance) are FRAN's `ENGINE_MARKERS` (c4838fe) minus `search_provenance.json`.
+`delimp_report.parquet` is a Radiant *report location* on both sides, but a *marker* on
+neither.
 
 ## Pass the organism — it is the one thing only the skill knows
 
@@ -338,7 +363,7 @@ That is honest, not a bug.
 |---|---|
 | `not_core_facility` | the drop directory is not writable → a collaborator's run. **Correct behaviour, not an error.** Do not work around it. |
 | `not_on_hive` | the search directory does not exist here — you are not on HIVE, or the path is the local one |
-| `search_incomplete` | no report, or a zero-byte one. A failed or zero-ID search must never be ingested |
+| `search_incomplete` | no report, a zero-byte one, or FragPipe/Radiant without its completion marker (a cancelled FragPipe run keeps its report). A failed or partial search must never be ingested |
 | `engine_unsupported` | Sage (DDA) and AlphaDIA have no FRAN corpus adapter. The corpus is DIA |
 | `no_drop_dir` | the drop directory does not exist and could not be created |
 | `already_staged` | a receipt exists; `--force` to re-stage |
@@ -346,6 +371,22 @@ That is honest, not a bug.
 | `qc_run` | a QC run (see *QC runs are never handed over*); `--not-qc` if the rule is wrong |
 | `not_a_skill_search` | `backfill` only: a search this skill did not run |
 | `already_ingested` | `backfill` only: the cron's logs show FRAN already has it |
+| `needs_agent_check` | `backfill` only: FragPipe/Radiant with no completion marker to read; never staged unattended |
+| `drop_dir_not_writable` | a `proteomics-grp` member cannot write the drop dir: a permission problem, reported and never recorded |
+| `entry_not_writable` | the entry was staged by another account without group write: reported, never a crash |
+
+`not_core_facility` is recorded in the receipt only when the account is **known** to be
+outside `proteomics-grp`, or is a teaching account. A member who cannot write the drop dir gets
+`drop_dir_not_writable`. When membership cannot be read, the refusal stands for that call only
+and is not recorded.
+
+**Permissions.** Everything the skill creates under `incoming/` is set explicitly to `2775`
+(dirs) and `0664` (manifests), and receipts to `0664`, whatever the umask. With a `022` umask
+the next Core member could neither withdraw nor re-stage an entry.
+
+**An explicit `--fasta-meta` must describe the search's database too.** If it does not match
+the search's own FASTA, it is ignored with a warning (`fasta_meta_ignored`) and organism and
+database stay blank. They are never taken from another search.
 
 An ineligible run is **not** a failure of the analysis. Note it in one line and carry on with
 DE — never block, retry, or ask the user to fix it.
