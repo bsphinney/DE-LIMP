@@ -1144,25 +1144,53 @@ physically cannot stage. Run the check and believe it.
 # on HIVE (hive_remote → through hive_exec.sh), once the search is COMPLETED and verified
 python3 scripts/fran_deposit.py check --out <hive search out dir>
 python3 scripts/fran_deposit.py stage --out <hive search out dir> \
-    --organism "<the organism the user CONFIRMED>" --taxon <taxid> --name "<analysis name>"
+    --organism "<the organism the user CONFIRMED>" --taxon <taxid> --name "<analysis name>" \
+    [--qc | --not-qc]
 python3 scripts/fran_deposit.py verify --out <hive search out dir>   # later: did the cron take it?
+python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at all? (reads its logs)
 ```
 - Works for all three DIA routes — **DIA-NN, FragPipe, Radiant/Fulcrum** — and links each
   engine's own quant of record. DIA-NN `--xic` chromatograms (`report_xic/`) ride along when
   the search produced them.
+- **QC runs are never handed over** (reason `qc_run`). The rule is FRAN's own, applied to the
+  analysis name, the session name and the out-dir path: a `QC` token catches
+  "chkLUppm_HeLa50_2026 Lumos QC", while "HeLa" alone is NOT QC. The decision is made at
+  GENERATION (step 7, `run_search.py`): `--fran-name` always, plus `--qc` for a QC run, bakes it into the job-end
+  hook, so a QC run never reaches FRAN's queue. Pass the same `--name` / `--qc` / `--not-qc`
+  here. A search that turns out to be QC after it was staged is withdrawn (manifest
+  `qc: true`, and `verify` says `qc_excluded`). If the rule misfires on a real experiment, use
+  `--not-qc`.
 - **`check` first, and treat an ineligible run as normal.** `not_core_facility`,
-  `not_on_hive`, `engine_unsupported` (Sage/AlphaDIA — the corpus is DIA) and
-  `search_incomplete` are correct outcomes, not errors. Say one line and move on to DE —
-  never block, retry, or ask the user to fix it.
+  `not_on_hive`, `engine_unsupported` (Sage/AlphaDIA — the corpus is DIA),
+  `search_incomplete` and `qc_run` are correct outcomes, not errors. Say one line and move on
+  to DE — never block, retry, or ask the user to fix it.
 - **Pass `--organism`/`--taxon`.** A DIA-NN `report.parquet` has no organism column, so
   without it the corpus row is `NULL` and the search is invisible on FRAN's species page. The
   user already confirmed the organism at step 3 and it is in `<fasta>.meta.json` (read
-  automatically). Never invent one (architectural rule #2).
-- **`verify`'s `staged_pending_cron` is success, not failure** — it means "handed over, the
-  cron ingests on its next scan". Report it that way. The one state to act on is a
-  `broken_links` warning: re-run `stage --force`.
+  automatically, but only a sidecar tied to the search's own `--fasta`). Never invent one
+  (architectural rule #2).
+- **Staged is not ingested.** Run `health` at this step: it reads FRAN's cron logs, compares
+  the ingest code HIVE runs with FRAN's GitHub `main` (10 s cap, no credential), and records
+  its verdict in `/quobyte/proteomics-grp/fran/ingest_health.json`. `stage` only reads
+  that file; it makes no network call. When the last verdict is `stuck`, `not_running` or
+  `stale_code`, or is over 12 h old, stage's JSON carries `health_warning` (the same line is
+  on stderr). The search **is** staged. Tell the user in one line: handed over, but FRAN's
+  ingest is stuck/stale **on FRAN's side** (quote the warning). Never re-stage, retry, or
+  touch FRAN's code, its HIVE copy or its database over it.
+- **`verify`:** `staged_pending_cron` is success, not failure — "handed over, the cron
+  ingests on its next scan"; if its `cron.verdict` is `stuck`, add that FRAN's cron is stuck.
+  `qc_excluded` is a QC run kept out, as intended. `ingest_failed` means the cron tried and
+  failed: give its one-line reason, say it is FRAN-side, and do not re-stage. The one state to act on is a `broken_links` warning:
+  re-run `stage --force`. Without a corpus token (the usual case) `verify` answers from the
+  cron's logs.
+- **Searches that were never handed over** (before staging was automatic, or a session that
+  ended early): `backfill` finds them. Only when the user asks for it. Run
+  `backfill --sbatch`, submit the job it writes (never walk the service trees on a login
+  node), show the user the dry-run list, and run `backfill --sbatch --apply` only after they
+  say yes.
 - Re-staging is safe and converges on one entry. `--no-fran` at generation, `FRAN_DEPOSIT=off`
-  or `--skip` opts a run out. → detail: `references/fran.md`.
+  or `--skip` opts a run out, and the receipt records it so a later backfill honours it. → detail:
+  `references/fran.md`.
 
 ### 8. Differential expression
 ```
@@ -1561,6 +1589,8 @@ For a Core HIVE run, close with the **FRAN handover** (step 7c) in one line — 
 was staged for FRAN's ingest cron, or, if it was not eligible, the reason in plain words
 ("this is a collaborator account, so it stays out of the Core corpus"). Say "handed over,
 FRAN ingests on its next pass" rather than implying it is already in the corpus.
+If `stage` returned a `health_warning`, add it to that line: the search is handed over, but
+FRAN's ingest is stuck (or its code is stale) on FRAN's side.
 
 ## Recording skill problems (`report_issue.sh`)
 The skill is fixed from these reports. For a Core member they land in the Core's shared
