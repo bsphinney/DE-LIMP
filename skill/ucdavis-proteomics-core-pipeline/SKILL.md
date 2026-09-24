@@ -1364,18 +1364,18 @@ specific proteins, never fabricate. Make it thorough and expert, like the DE-LIM
 AI export. The brief takes its pipeline description from `de_provenance.json`, so
 the report stays correct for whichever engine/method ran.
 
-Then produce **both** delivery formats — a single self-contained HTML page and a
-Word document. Both are required; neither is optional.
+Then produce the report of record — ONE self-contained HTML page:
 
 ```
-# 1. HTML — the DEFAULT deliverable. QC panels + figures + text in ONE file.
+# QC panels + figures + text in ONE file: the report of record.
 python3 scripts/make_analysis_html.py --session <session> \
     --title "<study name>" --out <session>/output/Analysis_Report.html
-
-# 2. Word — for circulation and track-changes
-python3 scripts/to_docx.py --in <session>/output/AI_Analysis_Report.md \
-    --out <session>/output/AI_Analysis_Report.docx
 ```
+
+**Do not make a Word copy of the report** (Brett, 2026-09-24: Word mangled the figures —
+the heatmap did not display in `AI_Analysis_Report.docx`). The Methods stay in Word
+(step 9d: people paste and edit them in manuscripts). An older session that already has an
+`AI_Analysis_Report.docx` keeps it; just do not point anyone at it.
 
 **Point the user at the HTML first.** Every figure is inlined as a data URI, so it is
 one file that opens by double-clicking in any browser on Windows, macOS or Linux, with
@@ -1466,7 +1466,7 @@ Catalog everything the run produced so the user knows what each file is:
 python3 scripts/make_report.py --out OUTPUT_FILES.md \
   --search-out ./search_out --de-dir ./de_results --repro ./reproducibility \
   --extra ./conditions.csv ./search.fasta ./wf ./figures ./AUDIT.md \
-          ./AI_Analysis_Report.md ./AI_Analysis_Report.docx
+          ./AI_Analysis_Report.md ./Analysis_Report.html
 ```
 `OUTPUT_FILES.md` lists every file (figures, audit, search/DE outputs, the bundle)
 with its size and a plain-language description, grouped by purpose, and flags
@@ -1521,8 +1521,8 @@ python3 scripts/make_comparison_report.py --out <session>/output/comparison_repo
   --qc "EngineA:<sessionA>/output/tables/QC_detected_vs_inferred.csv" \
   --qc "EngineB:<sessionB>/output/tables/QC_detected_vs_inferred.csv" \
   --instrument "<detected instrument>" --title "<A> vs <B>"
-python3 scripts/to_docx.py --in <...>/COMPARISON_REPORT.md --out <...>/COMPARISON_REPORT.docx
 ```
+(No Word copy of the comparison report: the HTML/Markdown it writes is the report.)
 **Read `references/cross-tool-comparison.md` BEFORE interpreting the output** — it holds
 the design rules (both engines through the same DE pipeline; name every uncontrolled
 difference) and the interpretation patterns a bake-off keeps producing: more precursors

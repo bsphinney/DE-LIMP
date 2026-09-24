@@ -31,7 +31,7 @@ The orchestrator asks where results should live (SKILL.md step 3b):
     figures/                # volcano / PCA / heatmap / p-value / QC PNGs + figures.json
     reproducibility/        # the pinned bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
     AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
-    AI_Analysis_Report.docx # the same report as a Word document
+    Analysis_Report.html    # THE report of record: one self-contained page (no Word copy)
     AUDIT.md                # results audit — common-mistake checks (PASS/WARN/FAIL)
     OUTPUT_FILES.md         # catalog of every file
     comparison/             # (re-analyses) COMPARISON.md + concordance CSVs

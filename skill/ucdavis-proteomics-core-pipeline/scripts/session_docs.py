@@ -434,7 +434,6 @@ def readme_md(f, for_html=False):
     start = []
     for key, text, what in (
             ("report_html", "Analysis report", " — figures, QC and the interpretation in one page"),
-            ("report_docx", "Analysis report (Word)", ""),
             ("methods_docx", "Methods for the paper (Word)", ""),
             ("methods_md", "Methods for the paper (text)", ""),
             ("tables", "Results tables", " — one `DE_*.csv` per comparison, "

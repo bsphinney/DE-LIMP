@@ -30,7 +30,7 @@ Usage
       [--qc "LabelB:<sessionB>/output/tables/QC_detected_vs_inferred.csv"] \\
       [--instrument "timsTOF HT"] [--title "..."]
 
-Then: python3 to_docx.py --in <out>/COMPARISON_REPORT.md --out <out>/COMPARISON_REPORT.docx
+No Word copy: the report is COMPARISON_REPORT.html (Word mangled figures, 2026-09-24).
 """
 import argparse, csv, html, json, os, sys
 
@@ -192,7 +192,7 @@ def main():
         "searches": labels, "contrasts": [c["contrast"] for c in conc],
         "qc_panels": list(qc),
         "next": ["Fill every TODO(model) block in the markdown from the data — do not invent numbers.",
-                 f"python3 to_docx.py --in {md_path} --out {os.path.join(a.out,'COMPARISON_REPORT.docx')}"],
+                 f"Point the user at {html_path} -- the report (no Word copy is made)."],
     }, indent=2))
 
 
