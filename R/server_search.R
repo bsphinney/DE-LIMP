@@ -141,7 +141,7 @@ server_search <- function(input, output, session, values, add_to_log,
   # Docker image status
   output$docker_image_status <- renderUI({
     if (!docker_available) return(NULL)
-    img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
+    img <- resolve_diann_image(input$docker_image_name, docker_config)
     result <- check_diann_image(img)
 
     if (result$exists) {
@@ -4666,7 +4666,7 @@ server_search <- function(input, output, session, values, add_to_log,
         errors <- c(errors, "DIA-NN binary not found on PATH.")
       }
     } else if (backend == "docker") {
-      img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
+      img <- resolve_diann_image(input$docker_image_name, docker_config)
       img_check <- check_diann_image(img)
       if (!img_check$exists) {
         errors <- c(errors, sprintf(
@@ -4995,7 +4995,7 @@ server_search <- function(input, output, session, values, add_to_log,
 
     } else if (backend == "docker") {
       # --- Docker submission ---
-      img <- input$docker_image_name %||% docker_config$diann_image %||% "diann:2.0"
+      img <- resolve_diann_image(input$docker_image_name, docker_config)
       cpus <- input$docker_cpus %||% 8
       mem_gb <- input$docker_mem_gb %||% 32
 

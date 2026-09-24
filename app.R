@@ -1,6 +1,6 @@
 # ==============================================================================
 #  DE-LIMP: Differential Expression & Limpa Proteomics App
-#  Version: 4.1.0  (canonical source: ./VERSION — bump both together)
+#  Version: 4.1.1  (canonical source: ./VERSION — bump both together)
 #  (Formerly LIMP-D)
 #  Status: Production Ready (Hugging Face Compatible v1.2)
 # ==============================================================================
@@ -290,8 +290,12 @@ local_sbatch <- nzchar(local_sbatch_path)
 hpc_available <- !is_hf_space && (local_sbatch || nzchar(Sys.which("ssh")))
 
 # Docker backend detection
+# The ONE place the default DIA-NN Docker tag is spelled out. It matches the default build of
+# build_diann_docker.sh. ~/.delimp_docker.conf (below) overrides it; the New Search text box
+# starts from docker_config, and resolve_diann_image() falls back through both.
+DIANN_DOCKER_IMAGE_DEFAULT <- "diann:2.0"
 docker_available <- FALSE
-docker_config <- list(diann_image = "diann:2.0")
+docker_config <- list(diann_image = DIANN_DOCKER_IMAGE_DEFAULT)
 if (!is_hf_space && nzchar(Sys.which("docker"))) {
   docker_available <- tryCatch({
     system2("docker", "info", stdout = TRUE, stderr = TRUE)
