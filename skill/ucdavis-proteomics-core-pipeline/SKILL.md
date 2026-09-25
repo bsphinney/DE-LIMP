@@ -1440,10 +1440,17 @@ python3 scripts/to_docx.py --in <session>/output/methods.md \
 (Step 12's `finalize` runs this for you when `output/methods.md` does not exist yet.)
 
 What it extracts, and what it only defaults:
-- It extracts the acquisition parameters from the raw metadata (Bruker `.d` `analysis.tdf`;
-  Thermo by facility filename prefix).
-- It fills the rest from facility defaults **tagged `[facility default — confirm]`**. The LC
-  column defaults to a PepSep C18 10 cm × 150 µm, 1.5 µm; override it with `--lc-column`.
+- It extracts the acquisition parameters from the raw metadata (Thermo by facility filename
+  prefix). From a Bruker `.d` it reads the LC system, its method and run time, the ion source
+  and its settings, the TIMS ramp, the dia-PASEF window scheme, the cycle time and the
+  collision-energy ramp. It writes them in the order published timsTOF Methods use.
+- The analytical column comes from `--lc-column`, else from HyStar's ColumnInfo, else from
+  `--column-log`. That flag takes an export of STAN's column-change log, and the column in place
+  at the first acquisition is used. With none of these, the facility's standard column (PepSep
+  MAX C18, 10 cm × 150 µm, 1.5 µm) is printed **tagged `[facility default — confirm]`**.
+  STAN keeps that log in PG Farm, which needs credentials, so the script never connects to it.
+- It tags what no file records: column temperature, emitter, mobile phases, Evotip loading and
+  peptide amount.
 - It builds parameter tables showing the source of each value.
 - It appends the instrument's grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 →
   S10OD026918-01A1; timsTOF → Dr. Neil Hunter / HHMI).
