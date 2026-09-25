@@ -164,6 +164,7 @@ close, or the detective story into the caveat.
 - **Hosts:** Maya (cell biologist), Leo (statistician)
 - **Voices:** Maya=Kore, Leo=Charon          (optional; Gemini prebuilt voices, these are the defaults)
 - **Say voices:** Maya=Samantha, Leo=Daniel  (optional; macOS `say`, these are the defaults)
+- **Styles:** Maya: curious and energetic; Leo: calm, precise and dryly funny  (optional; how each host sounds on Gemini)
 - **Written by:** <model>, <date>, from <the sources>
 
 ## Pronunciation
@@ -250,18 +251,34 @@ python3 scripts/make_podcast.py link $S/output
   asks.
 - **Gemini** needs `google-genai` (`python3 -m pip install google-genai`); the tool says so if
   it is missing.
-  - Model names are read from the API: a pro TTS model first, then
-    `gemini-2.5-flash-preview-tts`, then any other TTS model.
-  - A model that is missing, out of quota, or throttled twice before its first chunk hands
-    over to the next.
-  - Once a model has made a chunk, the episode stays on it, because a second model's voices
-    sound different. If that model runs out of quota partway through, render stops, names the
-    chunk and keeps the cache. Re-run later to resume, or pass `--model <other>` to re-render
-    every chunk with that model.
+  - **Model order.** Names are read from the API (`models.list`), never assumed: a pro TTS
+    model, then `gemini-3.8-flash-tts`, then `gemini-2.5-flash-preview-tts`. Any other TTS
+    model (a preview or lite one) is used only with `--model`.
+  - **Two APIs, chosen from the model name**
+    (<https://ai.google.dev/gemini-api/docs/speech-generation>):
+    - 2.x models take one text prompt through `generate_content`.
+    - Gemini 3 and later take `interactions.create`: one text part per turn, annotated with
+      its speaker and that host's style, and `speech_config` `{"mode": "conversational",
+      "speakers": [...]}`. The audio comes back as base64 WAV. `generate_content` fails on
+      these models with a 400 ("must specify speaker names for each part").
+    - Each host's style comes from an optional `Styles:` header line, for example
+      `Styles: Maya: curious and energetic; Leo: calm, precise and dryly funny` (these are the
+      defaults).
+  - **Handing over.** Before a model has made its first chunk, it hands over to the next if it
+    is missing, has no quota, or rejects the request.
+  - **One model per episode.** Once a model has made a chunk, the episode stays on it, because
+    a second model's voices sound different. If that model runs out of its daily quota
+    partway through, render stops, names the chunk and keeps the cache. Re-run later to
+    resume, or pass `--model <other>` to re-render every chunk with that model.
+  - **Rate limits.** A 429 on a per-minute quota, or one that carries a `retryDelay`, is waited
+    out, not fatal. Render reads the delay and the quota id from the error details, prints
+    `[render] rate-limited, waiting Ns`, sleeps the delay + 5 s, and retries the same chunk,
+    up to 10 times. A daily quota (`…PerDay…`) stops the render with the resume message.
+  - **Pacing.** Requests to one model are spaced at least 20 s apart (`--min-interval`).
   - An episode is one request per segment (a segment over 500 words is split at turn
-    boundaries), so about 8–12 requests. Google does not publish the free-tier TTS limits.
-    They are per Cloud project and shown at <https://aistudio.google.com/rate-limit>. A small
-    daily quota can stop a render partway; it resumes on the next run.
+    boundaries), so about 8–12 requests, and at least 3–4 minutes with pacing. Google does not
+    publish the free-tier TTS limits. They are per Cloud project and shown at
+    <https://aistudio.google.com/rate-limit>.
 - **say** (macOS) uses one voice per host (Samantha and Daniel by default), runs offline and
   needs no key. A 22-minute episode rendered in about 2 minutes.
 - **Re-runs are cheap.** Every chunk is cached as `podcast/.cache/<sha256>.wav`, keyed on its

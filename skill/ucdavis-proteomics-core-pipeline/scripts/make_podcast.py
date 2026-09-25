@@ -63,7 +63,10 @@ HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
 GEMINI_VOICES = ("Kore", "Charon")                 # first host, second host
 SAY_VOICES = ("Samantha", "Daniel")                # installed on macOS by default (say -v '?')
 FALLBACK_TTS_MODEL = "gemini-2.5-flash-preview-tts"
-KNOWN_TTS_MODELS = ("gemini-2.5-pro-preview-tts", FALLBACK_TTS_MODEL)
+KNOWN_TTS_MODELS = ("gemini-2.5-pro-preview-tts", "gemini-3.8-flash-tts", FALLBACK_TTS_MODEL)
+HOST_STYLES = ("curious and energetic", "calm, precise and dryly funny")   # first, second host
+MIN_INTERVAL = 20.0                                 # s between requests to one Gemini model
+RATE_WAITS = 10                                     # per-minute 429 waits allowed per chunk
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "podcast", "gemini_key")
 
@@ -122,7 +125,8 @@ SPELLED_NUMBER = re.compile(
     r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b", re.I)
 
 _SECRETS = []
-_sleep = time.sleep                                 # tests replace this
+_sleep = time.sleep                                 # tests replace these two
+_now = time.monotonic
 
 
 # ----------------------------------------------------------------------------- small helpers
@@ -138,7 +142,7 @@ def scrub(text):
         if k:
             s = s.replace(k, "[key]")
     s = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "[key]", s)
-    return re.sub(r"(?i)\b(key|api_key|x-goog-api-key)=([^&\s\"']+)", r"\1=[key]", s)
+    return re.sub(r"(?i)\b(key|api_key|x-goog-api-key)=([^&\s\"'()]+)", r"\1=[key]", s)
 
 
 def sha256_bytes(b):
@@ -265,6 +269,13 @@ def parse_script(path):
         return v
     s.gemini_voices = voices(head.get("voices") or head.get("gemini voices"), GEMINI_VOICES,
                              host_voice)
+    # "Styles: Maya: curious and energetic; Leo: calm, precise and dryly funny" -- how each host
+    # sounds (Gemini 3 TTS takes it per turn; the 2.x prompt line uses it too)
+    s.styles = {}
+    for part in (head.get("styles") or "").split(";"):
+        m = re.match(r"\s*([A-Za-z][A-Za-z .'\-]*?)\s*[=:]\s*(.+?)\s*$", part)
+        if m and m.group(1).lower() in names:
+            s.styles[names[m.group(1).lower()]] = m.group(2)
     s.say_voices = voices(head.get("say voices"), SAY_VOICES)
 
     secs = {}
@@ -899,20 +910,38 @@ class SwitchModel(Exception):
 
 
 class GeminiTTS(object):
-    """Gemini multi-speaker TTS, one call per chunk. Model names are read from the API
-    (models.list), never assumed: a pro TTS model first, then gemini-2.5-flash-preview-tts, then
-    any other TTS model. A model missing (404) or out of quota before it has made a chunk hands
-    over to the next; once a model has made a chunk the episode stays on it, because a second
-    model's voices sound different."""
+    """Gemini multi-speaker TTS, one request per chunk. Model names are read from the API
+    (models.list), never assumed. Default order: a pro TTS model, then gemini-3.8-flash-tts,
+    then gemini-2.5-flash-preview-tts. A model missing (404), without quota, or rejecting the
+    request before it has made a chunk hands over to the next. Once a model has made a chunk
+    the episode stays on it, because a second model's voices sound different.
+
+    Two APIs, chosen from the model name (https://ai.google.dev/gemini-api/docs/speech-generation,
+    read 2026-09-25):
+      2.x   models.generate_content: one text prompt ("TTS the following conversation ...:" +
+            "Maya: ..." lines) and a MultiSpeakerVoiceConfig. Returns raw 24 kHz PCM.
+      3.x+  interactions.create: one text part per turn, each annotated with speech_metadata
+            {speaker, style}; speech_config {"mode": "conversational", "speakers": [...]}.
+            Returns base64 audio/wav. generate_content fails on these models with 400
+            "Multi-speaker generation requests must specify speaker names for each part".
+
+    Rate limits: a 429 on a per-minute quota (no "PerDay" quotaId), or one carrying a
+    retryDelay, waits that long + 5 s and retries the same chunk, up to RATE_WAITS times. A
+    daily or zero quota stops the render with the resume message. Requests to one model are
+    at least --min-interval seconds apart (default 20)."""
     name, cloud = "gemini", True
 
     def __init__(self, s, a):
         self.hosts = [h for h, _ in s.hosts]
         self.voices = dict(s.gemini_voices)
+        self.styles = {h: s.styles.get(h) or HOST_STYLES[min(i, len(HOST_STYLES) - 1)]
+                       for i, h in enumerate(self.hosts)}
+        # The 2.x prompt's opening line. Unchanged from the first release, so a resumed render
+        # finds its cached chunks (the cache key hashes this text).
         self.style = s.style or (
             f"TTS the following conversation between {self.hosts[0]} and {self.hosts[1]}, two "
-            f"hosts of a lively, natural science podcast. {self.hosts[0]} sounds curious and "
-            f"energetic; {self.hosts[1]} sounds calm, precise and dryly funny")
+            f"hosts of a lively, natural science podcast. {self.hosts[0]} sounds "
+            f"{self.styles[self.hosts[0]]}; {self.hosts[1]} sounds {self.styles[self.hosts[1]]}")
         try:
             from google import genai
             from google.genai import types
@@ -925,7 +954,15 @@ class GeminiTTS(object):
         self.user_models = list(a.model or [])
         self.candidates = self.user_models or self.discover()
         self.model = self.candidates[0]
+        self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
+        self.last_call = {}
         self.produced, self.models_used, self.warnings = 0, [], []
+
+    @staticmethod
+    def api(model):
+        """'interactions' for Gemini 3 and later TTS models, 'generate_content' for 2.x."""
+        m = re.match(r"(?:models/)?gemini-(\d+)", model or "")
+        return "interactions" if m and int(m.group(1)) >= 3 else "generate_content"
 
     def discover(self):
         try:
@@ -946,9 +983,14 @@ class GeminiTTS(object):
             m = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
             return float(m.group(1)) if m else 0.0
         pro = sorted((n for n in names if "-pro" in n), key=ver, reverse=True)
-        rest = sorted((n for n in names if "-pro" not in n and n != FALLBACK_TTS_MODEL),
-                      key=lambda n: ("lite" in n, -ver(n)))
-        return pro + [FALLBACK_TTS_MODEL] + rest
+        # the 3.x flash model the docs show for multi-speaker: not a preview, not lite
+        flash3 = sorted((n for n in names if self.api(n) == "interactions" and "-flash" in n
+                         and "lite" not in n and "preview" not in n), key=ver, reverse=True)
+        out = pro + flash3[:1] + [FALLBACK_TTS_MODEL]
+        other = [n for n in names if n not in out]
+        if other:
+            log(f"[render] other TTS models, used only with --model: {', '.join(other)}")
+        return out
 
     def prepare(self, chunks, speak, cache_dir):
         """Stay on the model the cache was made with: resuming must not mix voices."""
@@ -967,8 +1009,22 @@ class GeminiTTS(object):
     def prompt(self, chunk, speak):
         return self.style + ":\n\n" + "\n".join(f"{t.speaker}: {speak(t.text)}" for t in chunk.turns)
 
+    def parts(self, chunk, speak):
+        """The 3.x input: one text part per turn, annotated with its speaker and style."""
+        return [{"type": "text", "text": speak(t.text),
+                 "annotations": [{"type": "speech_metadata", "speaker": t.speaker,
+                                  "style": self.styles[t.speaker]}]} for t in chunk.turns]
+
+    def speech_config(self):
+        return {"mode": "conversational",
+                "speakers": [{"speaker": h, "voice": self.voices[h]} for h in self.hosts]}
+
     def payload(self, chunk, speak, model=None):
-        return {"backend": "gemini", "model": model or self.model, "rate": RATE,
+        model = model or self.model
+        if self.api(model) == "interactions":
+            return {"backend": "gemini", "api": "interactions", "model": model, "rate": RATE,
+                    "speech_config": self.speech_config(), "parts": self.parts(chunk, speak)}
+        return {"backend": "gemini", "model": model, "rate": RATE,
                 "voices": [[h, self.voices[h]] for h in self.hosts],
                 "text": self.prompt(chunk, speak)}
 
@@ -995,6 +1051,39 @@ class GeminiTTS(object):
         why = [str(getattr(c, "finish_reason", "")) for c in (getattr(r, "candidates", None) or [])]
         raise RenderError(f"the response held no audio (finish reason: {', '.join(why) or 'none'})")
 
+    @staticmethod
+    def interaction_audio(r):
+        """interaction.output_audio.data: base64 audio/wav (24 kHz mono 16-bit) by default;
+        the RIFF header is read, not spliced, so the rate comes from the file itself."""
+        out = getattr(r, "output_audio", None)
+        data = getattr(out, "data", None) if out is not None else None
+        if not data:
+            raise RenderError(f"the interaction held no audio (status: "
+                              f"{getattr(r, 'status', None) or 'not given'})")
+        if isinstance(data, str):
+            data = base64.b64decode(data)
+        elif isinstance(data, (bytes, bytearray)) and not bytes(data[:4]) == b"RIFF":
+            try:
+                data = base64.b64decode(data, validate=True)
+            except (ValueError, TypeError):
+                pass
+        mime = getattr(out, "mime_type", None) or ""
+        rate = getattr(out, "sample_rate", None)
+        if rate and "rate=" not in str(mime):
+            mime = f"{mime};rate={rate}"
+        return decode_audio(bytes(data), str(mime))
+
+    def request(self, chunk, speak):
+        if self.api(self.model) == "interactions":
+            r = self.client.interactions.create(
+                model=self.model, input=[{"type": "user_input", "content": self.parts(chunk, speak)}],
+                response_format={"type": "audio"},
+                generation_config={"speech_config": self.speech_config()})
+            return self.interaction_audio(r)
+        r = self.client.models.generate_content(model=self.model, contents=self.prompt(chunk, speak),
+                                                config=self.config())
+        return self.audio(r)
+
     def _has_next(self):
         return (self.model in self.candidates
                 and self.candidates.index(self.model) + 1 < len(self.candidates))
@@ -1005,24 +1094,31 @@ class GeminiTTS(object):
         self.model = self.candidates[self.candidates.index(self.model) + 1]
         return True
 
+    def _pace(self):
+        """Keep requests to one model at least min_interval seconds apart."""
+        last = self.last_call.get(self.model)
+        if last is not None:
+            gap = self.min_interval - (_now() - last)
+            if gap > 0.5:
+                log(f"[render] pacing: {gap:.0f}s before the next request to {self.model}")
+                _sleep(gap)
+        self.last_call[self.model] = _now()
+
     def synth(self, chunk, speak, label):
-        prompt, attempts, retried_len, throttled = self.prompt(chunk, speak), 0, False, 0
+        errors, waits, retried_len = 0, 0, False
         while True:
-            attempts += 1
+            self._pace()
             try:
-                r = self.client.models.generate_content(model=self.model, contents=prompt,
-                                                        config=self.config())
-                pcm = self.audio(r)
+                pcm = self.request(chunk, speak)
             except Exception as e:
-                kind, msg, delay = classify(e)
-                throttled += kind == "rate"
-                if kind == "rate" and not self.produced and throttled >= 2 and self._has_next():
-                    kind = "exhausted"        # throttled twice before its first chunk: hand over
-                if kind in ("missing", "exhausted") and not self.produced:
+                err = error_info(e)
+                kind, msg = err["kind"], err["msg"]
+                if kind in ("missing", "exhausted", "rejected") and not self.produced:
                     was = self.model
                     if self._advance():
-                        log(f"[render] {was}: {'not available' if kind == 'missing' else 'no quota'}"
-                            f" ({msg[:160]}); trying {self.model}")
+                        why = {"missing": "not available", "exhausted": "no quota",
+                               "rejected": "request rejected"}[kind]
+                        log(f"[render] {was}: {why} ({msg[:200]}); trying {self.model}")
                         raise SwitchModel()
                     raise RenderError(
                         f"{label}: no Gemini TTS model could be used (tried "
@@ -1031,16 +1127,30 @@ class GeminiTTS(object):
                         "(finished chunks are cached), use a paid-tier key, or --tts say.")
                 if kind == "exhausted":
                     raise RenderError(
-                        f"{label}: {self.model} is out of quota ({msg[:200]}). The chunks already "
-                        f"made are cached: re-run the same command later to resume with "
-                        f"{self.model}, or pass --model <another> to render EVERY chunk with that "
-                        "model (voices differ between models, so one episode never mixes them).")
-                limit = 6 if kind == "rate" else 4
-                if kind == "fatal" or attempts >= limit:
-                    raise RenderError(f"{label} failed after {attempts} attempt(s) on "
+                        f"{label}: {self.model} is out of its daily quota ({err['quota'] or msg[:200]}"
+                        f"). The chunks already made are cached: re-run the same command later "
+                        f"to resume with {self.model}, or pass --model <another> to render EVERY "
+                        "chunk with that model (voices differ between models, so one episode "
+                        "never mixes them).")
+                if kind == "rate":
+                    waits += 1
+                    if waits > RATE_WAITS:
+                        raise RenderError(
+                            f"{label}: still rate-limited on {self.model} after {RATE_WAITS} "
+                            f"waits ({err['quota'] or msg[:200]}). The chunks already made are "
+                            "cached; re-run the same command to resume.")
+                    wait = (err["delay"] if err["delay"] is not None else 60.0) + 5.0
+                    log(f"[render] rate-limited, waiting {wait:.0f}s ({label}, {self.model}"
+                        + (f", {err['quota']}" if err["quota"] else "") + f"; wait {waits} of "
+                        f"{RATE_WAITS})")
+                    _sleep(wait)
+                    continue
+                errors += 1
+                if kind in ("fatal", "rejected") or errors >= 4:
+                    raise RenderError(f"{label} failed after {errors} error(s) on "
                                       f"{self.model}: {msg[:300]}. The chunks already made are "
                                       "cached; re-run the same command to resume.")
-                wait = delay if delay else min(60.0, 5.0 * 2 ** (attempts - 1))
+                wait = err["delay"] if err["delay"] is not None else min(60.0, 5.0 * 2 ** (errors - 1))
                 log(f"[render] {label}: {kind} error on {self.model} ({msg[:120]}); retrying in "
                     f"{wait:.0f} s")
                 _sleep(wait)
@@ -1060,28 +1170,79 @@ class GeminiTTS(object):
             return pcm
 
 
-def classify(e):
-    """-> (kind, scrubbed message, retry delay or None). kind: missing | exhausted (a daily or
-    zero quota) | rate (per-minute) | fatal (key or request) | transient."""
+def _error_details(e):
+    """The structured part of an SDK error: google-genai's APIError keeps the response JSON in
+    .details; the interactions client's errors keep it in .body."""
+    out = []
+    for attr in ("details", "body", "response_json"):
+        v = getattr(e, attr, None)
+        if isinstance(v, (bytes, bytearray)):
+            v = v.decode("utf-8", "replace")
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                pass
+        if v is not None and not callable(v):
+            out.append(v)
+    return out
+
+
+def _seconds(v):
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*s?\s*$", str(v))
+    return float(m.group(1)) if m else None
+
+
+def error_info(e):
+    """-> {kind, msg, delay, quota}. kind: missing | exhausted (daily or zero quota) | rate
+    (per-minute, or any 429 that gives a retryDelay) | rejected (400: the request does not fit
+    this model) | fatal (key, permission) | transient. The retry delay and the quota come from
+    google.rpc.RetryInfo / QuotaFailure in the error details when present, else from the text."""
     msg = scrub(f"{type(e).__name__}: {e}")
-    code = getattr(e, "code", None)
-    if not isinstance(code, int):
-        m = re.search(r"\b(4\d\d|5\d\d)\b", msg)
+    code = next((c for c in (getattr(e, "code", None), getattr(e, "status_code", None))
+                 if isinstance(c, int)), None)
+    found = {"ids": [], "values": [], "delay": None}
+
+    def walk(x):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if k == "quotaId" and isinstance(v, str):
+                    found["ids"].append(v)
+                elif k == "quotaValue":
+                    found["values"].append(str(v))
+                elif k == "retryDelay" and found["delay"] is None:
+                    found["delay"] = _seconds(v)
+                else:
+                    walk(v)
+        elif isinstance(x, (list, tuple)):
+            for v in x:
+                walk(v)
+    details = _error_details(e)
+    walk(details)
+    text = msg + " " + scrub(json.dumps(details, default=str))[:6000]
+    if code is None:
+        m = re.search(r"\b(4\d\d|5\d\d)\b", text)
         code = int(m.group(1)) if m else None
-    delay = None
-    m = re.search(r"retry(?:Delay)?['\"]?\s*(?:in|:)?\s*['\"]?(\d+(?:\.\d+)?)\s*s", msg, re.I)
-    if m:
-        delay = min(max(float(m.group(1)), 2.0), 90.0)
-    if code == 404 or "NOT_FOUND" in msg:
-        return "missing", msg, delay
-    if code == 429 or "RESOURCE_EXHAUSTED" in msg:
-        if re.search(r"per ?day|PerDay|daily|limit:\s*0\b", msg, re.I):
-            return "exhausted", msg, delay
-        return "rate", msg, delay
-    if code in (400, 401, 403) or re.search(r"PERMISSION_DENIED|INVALID_ARGUMENT|API key not "
-                                            r"valid|UNAUTHENTICATED", msg):
-        return "fatal", msg, delay
-    return "transient", msg, delay
+    if found["delay"] is None:
+        m = re.search(r"retry(?:Delay)?['\"]?\s*(?:in|:)?\s*['\"]?(\d+(?:\.\d+)?)\s*s", text, re.I)
+        found["delay"] = float(m.group(1)) if m else None
+    if found["delay"] is not None:
+        found["delay"] = min(max(found["delay"], 1.0), 300.0)
+    quota = ", ".join(dict.fromkeys(found["ids"]))
+    info = {"msg": msg, "delay": found["delay"], "quota": quota}
+    if code == 404 or "NOT_FOUND" in text:
+        return dict(info, kind="missing")
+    if code == 429 or "RESOURCE_EXHAUSTED" in text:
+        zero = "0" in found["values"] or re.search(r"limit:\s*0\b", text)
+        daily = (any("perday" in q.lower() for q in found["ids"]) if found["ids"] else
+                 bool(re.search(r"per ?day|daily", text, re.I)) and found["delay"] is None)
+        return dict(info, kind="exhausted" if zero or daily else "rate")
+    if code in (401, 403) or re.search(r"PERMISSION_DENIED|API key not valid|UNAUTHENTICATED",
+                                       text):
+        return dict(info, kind="fatal")
+    if code == 400 or "INVALID_ARGUMENT" in text:
+        return dict(info, kind="rejected")
+    return dict(info, kind="transient")
 
 
 def read_key():
@@ -1681,6 +1842,8 @@ def main(argv=None):
                         "note of who agreed and when (recorded in podcast.json)")
     r.add_argument("--model", action="append", help="Gemini TTS model(s) to use, in order "
                                                     "(default: read from the API)")
+    r.add_argument("--min-interval", type=float, default=MIN_INTERVAL,
+                   help="seconds between requests to one Gemini model (default %(default)s)")
     r.add_argument("--keep-wav", action="store_true")
     r.add_argument("--unchecked", action="store_true",
                    help="render without a passing check.txt (recorded in podcast.json)")

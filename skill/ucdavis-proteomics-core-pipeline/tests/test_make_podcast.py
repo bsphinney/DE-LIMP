@@ -16,6 +16,7 @@ puts ONE Listen card near the top of the report however often it runs, and the r
 and session_docs.py keep it.
 """
 import array
+import base64
 import contextlib
 import io
 import json
@@ -27,6 +28,7 @@ import sys
 import tempfile
 import types
 import unittest
+import wave
 import zipfile
 from unittest import mock
 
@@ -491,7 +493,9 @@ class Render(Workspace):
 def fake_genai(behaviour, models=("gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts",
                                   "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"),
                list_error=None):
-    """google.genai stand-ins: `behaviour(model, contents, config)` returns PCM bytes or raises."""
+    """google.genai stand-ins. `behaviour(model, contents, config)` returns PCM bytes or raises.
+    generate_content (2.x) passes the prompt text as `contents`; interactions.create (3.x) passes
+    its `input` list, and the fake answers the way the docs describe: base64 audio/wav."""
     google, genai, gt = (types.ModuleType("google"), types.ModuleType("google.genai"),
                          types.ModuleType("google.genai.types"))
 
@@ -501,7 +505,7 @@ def fake_genai(behaviour, models=("gemini-2.5-pro-preview-tts", "gemini-2.5-flas
     for n in ("GenerateContentConfig", "SpeechConfig", "MultiSpeakerVoiceConfig",
               "SpeakerVoiceConfig", "VoiceConfig", "PrebuiltVoiceConfig"):
         setattr(gt, n, Cfg)
-    log = {"clients": 0, "calls": []}
+    log = {"clients": 0, "calls": [], "apis": []}
 
     class Models(object):
         def list(self):
@@ -513,30 +517,72 @@ def fake_genai(behaviour, models=("gemini-2.5-pro-preview-tts", "gemini-2.5-flas
 
         def generate_content(self, model, contents, config):
             log["calls"].append((model, contents, config))
+            log["apis"].append("generate_content")
             data = behaviour(model, contents, config)
             part = types.SimpleNamespace(inline_data=types.SimpleNamespace(
                 data=data, mime_type="audio/L16;codec=pcm;rate=24000"))
             return types.SimpleNamespace(candidates=[types.SimpleNamespace(
                 content=types.SimpleNamespace(parts=[part]), finish_reason="STOP")])
 
+    class Interactions(object):
+        def create(self, model, input, response_format, generation_config, **kw):
+            log["calls"].append((model, input, {"response_format": response_format,
+                                                "generation_config": generation_config}))
+            log["apis"].append("interactions")
+            pcm = behaviour(model, input, generation_config)
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(pcm)
+            return types.SimpleNamespace(status="completed", output_audio=types.SimpleNamespace(
+                data=base64.b64encode(buf.getvalue()).decode("ascii"), mime_type="audio/wav"))
+
     class Client(object):
         def __init__(self, api_key):
             log["clients"] += 1
             self.models = Models()
+            self.interactions = Interactions()
     genai.Client, genai.types, google.genai = Client, gt, genai
     return {"google": google, "google.genai": genai, "google.genai.types": gt}, log
 
 
 def pcm_for(contents):
-    words = len(contents.split("\n\n", 1)[-1].split())
+    if isinstance(contents, list):                                # interactions input
+        words = sum(len(p["text"].split()) for turn in contents for p in turn["content"])
+    else:
+        words = len(contents.split("\n\n", 1)[-1].split())
     n = int(mp.RATE * words * 60.0 / mp.WPM / 2)
     return (array.array("h", [900, -900]) * n).tobytes()
 
 
 class ApiError(Exception):
-    def __init__(self, code, msg):
+    """Shaped like the SDK's errors: generate_content's APIError has .code and .details (the
+    response JSON); the interactions client's has .status_code and .body."""
+
+    def __init__(self, code, msg, details=None, style="genai"):
         super().__init__(f"{code} {msg}")
-        self.code = code
+        if style == "genai":
+            self.code, self.details = code, details
+        else:
+            self.status_code, self.body = code, details
+
+
+def rpc_error(quota_id, delay=None, value="10"):
+    """A 429 body the way Google sends it: QuotaFailure + RetryInfo in error.details."""
+    det = [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [{"quotaMetric": "generativelanguage.googleapis.com/"
+                                           "generate_content_free_tier_requests",
+                            "quotaId": quota_id, "quotaValue": value}]}]
+    if delay is not None:
+        det.append({"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay})
+    return {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                      "message": "You exceeded your current quota.", "details": det}}
+
+
+PER_MINUTE = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+PER_DAY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
 
 
 class Gemini(Workspace):
@@ -585,23 +631,30 @@ class Gemini(Workspace):
         rc, out, err, log = self.render(behaviour, "--cloud-ok", "Brett, 2026-09-25")
         self.assertEqual(rc, 0, err)
         tried = [m for m, _, _ in log["calls"]]
+        # read from the API: pro first, then the 3.8 flash model (never a preview or lite one)
         self.assertEqual(tried[:3], ["gemini-9-pro-tts", "gemini-2.5-pro-preview-tts",
-                                     "gemini-2.5-flash-preview-tts"])  # read from the API
+                                     "gemini-3.8-flash-tts"])
+        self.assertEqual(log["apis"][:3], ["interactions", "generate_content",   # 9 >= 3
+                                           "interactions"])
         man = json.loads(read(os.path.join(self.pod, "podcast.json")))
-        self.assertEqual(man["tts"]["model"], "gemini-2.5-flash-preview-tts")
-        self.assertEqual(man["tts"]["models_used"], ["gemini-2.5-flash-preview-tts"])
+        self.assertEqual(man["tts"]["model"], "gemini-3.8-flash-tts")
+        self.assertEqual(man["tts"]["models_used"], ["gemini-3.8-flash-tts"])
         self.assertEqual(man["cloud_tts_consent"], "Brett, 2026-09-25")
         self.assertIn("[key]", err)                                   # scrubbed, not dropped
         self.assert_no_key_anywhere(out, err)
         # what was sent: the transcript's turns (spoken form) as the two hosts, nothing else
         _, contents, cfg = log["calls"][-1]
-        self.assertIn("Leo: Ryr2 tops the RyR pulldown", contents)
-        self.assertIn("K V two point one", contents)
-        self.assertNotIn("Contact-site interactomes", contents)       # no report text
-        voices = {v.speaker: v.voice_config.prebuilt_voice_config.voice_name
-                  for v in cfg.speech_config.multi_speaker_voice_config.speaker_voice_configs}
-        self.assertEqual(voices, {"Maya": "Kore", "Leo": "Charon"})
-        self.assertEqual(cfg.response_modalities, ["AUDIO"])
+        parts = contents[0]["content"]
+        self.assertEqual(contents[0]["type"], "user_input")
+        self.assertIn("Ryr2 tops the RyR pulldown", parts[0]["text"])
+        self.assertEqual(parts[0]["annotations"], [{"type": "speech_metadata", "speaker": "Leo",
+                                                   "style": "calm, precise and dryly funny"}])
+        self.assertTrue(any("K V two point one" in p["text"] for p in parts))
+        self.assertNotIn("Contact-site interactomes", json.dumps(contents))   # no report text
+        self.assertEqual(cfg["response_format"], {"type": "audio"})
+        self.assertEqual(cfg["generation_config"], {"speech_config": {
+            "mode": "conversational", "speakers": [{"speaker": "Maya", "voice": "Kore"},
+                                                   {"speaker": "Leo", "voice": "Charon"}]}})
 
     def test_a_failure_names_the_chunk_keeps_the_cache_and_resumes_on_the_same_model(self):
         state = {"n": 0}
@@ -615,7 +668,7 @@ class Gemini(Workspace):
                                                                      "gemini-2.5-flash-preview-tts"))
         self.assertEqual(rc, 1)
         self.assertIn("chunk 2/2", err)
-        self.assertIn("out of quota", err)
+        self.assertIn("out of its daily quota", err)
         self.assert_no_key_anywhere(out, err)
         self.assertEqual(len(os.listdir(os.path.join(self.pod, ".cache"))), 1)
         first = log["calls"][0][0]
@@ -643,10 +696,184 @@ class Gemini(Workspace):
         self.assertEqual(log["calls"][0][0], mp.KNOWN_TTS_MODELS[0])
         self.assert_no_key_anywhere(out, err)
 
+    def clock(self):
+        """A fake clock that sleeping advances: waits and pacing become exact numbers."""
+        t, slept = [1000.0], []
+
+        def sleep(sec):
+            slept.append(round(sec, 3))
+            t[0] += sec
+        self.nosleep.stop()
+        patches = [mock.patch.object(mp, "_sleep", sleep), mock.patch.object(mp, "_now", lambda: t[0])]
+        for q in patches:
+            q.start()
+        self.addCleanup(lambda: [q.stop() for q in patches] and None)
+        self.addCleanup(self.nosleep.start)
+        return slept
+
+    def test_per_minute_429_waits_retry_delay_plus_5_and_keeps_the_model(self):
+        slept = self.clock()
+        state = {"n": 0}
+
+        def limited(model, contents, config):
+            state["n"] += 1
+            if state["n"] in (1, 2):
+                raise ApiError(429, f"RESOURCE_EXHAUSTED key={FAKE_KEY}",
+                               rpc_error(PER_MINUTE, "7s"))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(limited, "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err.count("[render] rate-limited, waiting 12s"), 2)
+        self.assertIn(PER_MINUTE, err)
+        self.assertEqual(slept.count(12.0), 2)                        # retryDelay 7 s + 5 s
+        self.assertEqual({m for m, _, _ in log["calls"]}, {"gemini-2.5-flash-preview-tts"})
+        self.assertEqual(len(log["calls"]), 4)                        # 2 waits, then 2 chunks
+        self.assert_no_key_anywhere(out, err)
+
+    def test_the_interactions_error_shape_is_read_too(self):
+        slept = self.clock()
+        state = {"n": 0}
+
+        def limited(model, contents, config):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise ApiError(429, "Too Many Requests", rpc_error(PER_MINUTE, "30s"),
+                               style="interactions")
+            return pcm_for(contents)
+        rc, out, err, log = self.render(limited, "--cloud-ok", "--model", "gemini-3.8-flash-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("rate-limited, waiting 35s", err)
+        self.assertIn(35.0, slept)
+
+    def test_rate_limit_waits_are_capped_per_chunk(self):
+        self.clock()
+
+        def always(model, contents, config):
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(PER_MINUTE, "10s"))
+        rc, out, err, log = self.render(always, "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(log["calls"]), mp.RATE_WAITS + 1)
+        self.assertIn(f"still rate-limited on gemini-2.5-flash-preview-tts after {mp.RATE_WAITS} "
+                      "waits", err)
+        self.assertIn("re-run the same command to resume", err)
+
+    def test_a_daily_quota_stops_with_the_resume_message_and_no_wait(self):
+        slept = self.clock()
+        state = {"n": 0}
+
+        def daily(model, contents, config):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(PER_DAY, "20s"))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(daily, "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 1)
+        self.assertIn("chunk 2/2", err)
+        self.assertIn("out of its daily quota (" + PER_DAY, err)
+        self.assertIn("re-run the same command later to resume", err)
+        self.assertNotIn("rate-limited", err)
+        self.assertEqual([x for x in slept if x != 20.0], [])         # pacing only, no 25 s wait
+        self.assertEqual(len(os.listdir(os.path.join(self.pod, ".cache"))), 1)
+
+    def test_a_text_only_429_uses_its_retry_in(self):
+        slept = self.clock()
+        state = {"n": 0}
+
+        def limited(model, contents, config):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 36.15s.")
+            return pcm_for(contents)
+        rc, out, err, log = self.render(limited, "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("rate-limited, waiting 41s", err)
+
+    def test_requests_to_one_model_are_paced(self):
+        slept = self.clock()
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(slept, [20.0])                               # before the 2nd request
+        self.assertIn("pacing: 20s before the next request", err)
+        slept[:] = []
+        shutil.rmtree(os.path.join(self.pod, ".cache"))
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts", "--min-interval", "0")
+        self.assertEqual((rc, slept), (0, []))
+
+    def test_3x_models_use_interactions_with_per_turn_speakers_and_styles(self):
+        write(self.script, read(self.script).replace(
+            "Voices: Maya=Kore, Leo=Charon",
+            "Voices: Maya=Kore, Leo=Charon\nStyles: Maya: excited, fast; Leo: deadpan"))
+        self.assertEqual(self.check(read(self.script))[0], 0)
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        "gemini-3.8-flash-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(log["apis"], ["interactions", "interactions"])
+        parts = [p for _, inp, _ in log["calls"] for p in inp[0]["content"]]
+        self.assertEqual(len(parts), 7)                               # one part per turn
+        self.assertEqual({p["annotations"][0]["speaker"]: p["annotations"][0]["style"]
+                          for p in parts}, {"Maya": "excited, fast", "Leo": "deadpan"})
+        self.assertTrue(all(set(p) == {"type", "text", "annotations"} for p in parts))
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertEqual(man["tts"]["model"], "gemini-3.8-flash-tts")
+        # the WAV header is read, not spoken: audio length = the PCM the fake made
+        speech = sum(len(pcm_for([{"content": [p]}])) // 2 for p in parts) / float(mp.RATE)
+        self.assertGreater(man["duration_s"], speech)
+        self.assertLess(man["duration_s"], speech + 6)
+
+    def test_a_rejected_request_before_the_first_chunk_hands_over(self):
+        def reject_3x(model, contents, config):
+            if model.startswith("gemini-3"):
+                raise ApiError(400, "INVALID_ARGUMENT Multi-speaker generation requests must "
+                                    "specify speaker names for each part in the contents.")
+            return pcm_for(contents)
+        rc, out, err, log = self.render(reject_3x, "--cloud-ok", "--model", "gemini-3.8-flash-tts",
+                                        "--model", "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("gemini-3.8-flash-tts: request rejected", err)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertEqual(man["tts"]["models_used"], ["gemini-2.5-flash-preview-tts"])
+
+    def test_2x_models_keep_generate_content(self):
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(log["apis"], ["generate_content", "generate_content"])
+        _, contents, cfg = log["calls"][-1]
+        self.assertTrue(contents.startswith("TTS the following conversation between Maya and Leo, "
+                                            "two hosts of a lively, natural science podcast. Maya "
+                                            "sounds curious and energetic; Leo sounds calm, "
+                                            "precise and dryly funny:\n\nLeo: Ryr2 tops"))
+        voices = {v.speaker: v.voice_config.prebuilt_voice_config.voice_name
+                  for v in cfg.speech_config.multi_speaker_voice_config.speaker_voice_configs}
+        self.assertEqual(voices, {"Maya": "Kore", "Leo": "Charon"})
+        self.assertEqual(cfg.response_modalities, ["AUDIO"])
+
+    def test_error_info(self):
+        e = mp.error_info(ApiError(429, "x", rpc_error(PER_MINUTE, "37s")))
+        self.assertEqual((e["kind"], e["delay"], e["quota"]), ("rate", 37.0, PER_MINUTE))
+        e = mp.error_info(ApiError(429, "x", json.dumps(rpc_error(PER_DAY, "20s")), "interactions"))
+        self.assertEqual((e["kind"], e["quota"]), ("exhausted", PER_DAY))
+        self.assertEqual(mp.error_info(ApiError(429, "x", rpc_error(PER_MINUTE, value="0")))["kind"],
+                         "exhausted")                                  # a zero quota never refills
+        self.assertEqual(mp.error_info(ApiError(429, "x", rpc_error(PER_MINUTE)))["kind"], "rate")
+        self.assertEqual(mp.error_info(ApiError(404, "NOT_FOUND"))["kind"], "missing")
+        self.assertEqual(mp.error_info(ApiError(400, "INVALID_ARGUMENT"))["kind"], "rejected")
+        self.assertEqual(mp.error_info(ApiError(403, "PERMISSION_DENIED"))["kind"], "fatal")
+        self.assertEqual(mp.error_info(RuntimeError("503 UNAVAILABLE"))["kind"], "transient")
+        self.assertEqual(mp.GeminiTTS.api("gemini-3.8-flash-tts"), "interactions")
+        self.assertEqual(mp.GeminiTTS.api("models/gemini-3.1-flash-tts-preview"), "interactions")
+        self.assertEqual(mp.GeminiTTS.api("gemini-2.5-pro-preview-tts"), "generate_content")
+
     def test_scrub(self):
         mp._SECRETS.append("sekrit-value")
-        s = mp.scrub(f"a sekrit-value b {FAKE_KEY} ?key=abc&x=1")
-        self.assertEqual(s, "a [key] b [key] ?key=[key]&x=1")
+        s = mp.scrub(f"a sekrit-value b {FAKE_KEY} ?key=abc&x=1 (key=def)")
+        self.assertEqual(s, "a [key] b [key] ?key=[key]&x=1 (key=[key])")
 
 
 # -------------------------------------------------------------------------------------- link
