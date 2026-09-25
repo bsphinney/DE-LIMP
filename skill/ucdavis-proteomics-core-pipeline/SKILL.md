@@ -1364,18 +1364,18 @@ specific proteins, never fabricate. Make it thorough and expert, like the DE-LIM
 AI export. The brief takes its pipeline description from `de_provenance.json`, so
 the report stays correct for whichever engine/method ran.
 
-Then produce **both** delivery formats — a single self-contained HTML page and a
-Word document. Both are required; neither is optional.
+Then produce the report of record — ONE self-contained HTML page:
 
 ```
-# 1. HTML — the DEFAULT deliverable. QC panels + figures + text in ONE file.
+# QC panels + figures + text in ONE file: the report of record.
 python3 scripts/make_analysis_html.py --session <session> \
     --title "<study name>" --out <session>/output/Analysis_Report.html
-
-# 2. Word — for circulation and track-changes
-python3 scripts/to_docx.py --in <session>/output/AI_Analysis_Report.md \
-    --out <session>/output/AI_Analysis_Report.docx
 ```
+
+**Do not make a Word copy of the report** (Brett, 2026-09-24: Word mangled the figures —
+the heatmap did not display in `AI_Analysis_Report.docx`). The Methods stay in Word
+(step 9d: people paste and edit them in manuscripts). An older session that already has an
+`AI_Analysis_Report.docx` keeps it; just do not point anyone at it.
 
 **Point the user at the HTML first.** Every figure is inlined as a data URI, so it is
 one file that opens by double-clicking in any browser on Windows, macOS or Linux, with
@@ -1466,7 +1466,7 @@ Catalog everything the run produced so the user knows what each file is:
 python3 scripts/make_report.py --out OUTPUT_FILES.md \
   --search-out ./search_out --de-dir ./de_results --repro ./reproducibility \
   --extra ./conditions.csv ./search.fasta ./wf ./figures ./AUDIT.md \
-          ./AI_Analysis_Report.md ./AI_Analysis_Report.docx
+          ./AI_Analysis_Report.md ./Analysis_Report.html
 ```
 `OUTPUT_FILES.md` lists every file (figures, audit, search/DE outputs, the bundle)
 with its size and a plain-language description, grouped by purpose, and flags
@@ -1521,8 +1521,8 @@ python3 scripts/make_comparison_report.py --out <session>/output/comparison_repo
   --qc "EngineA:<sessionA>/output/tables/QC_detected_vs_inferred.csv" \
   --qc "EngineB:<sessionB>/output/tables/QC_detected_vs_inferred.csv" \
   --instrument "<detected instrument>" --title "<A> vs <B>"
-python3 scripts/to_docx.py --in <...>/COMPARISON_REPORT.md --out <...>/COMPARISON_REPORT.docx
 ```
+(No Word copy of the comparison report: the HTML/Markdown it writes is the report.)
 **Read `references/cross-tool-comparison.md` BEFORE interpreting the output** — it holds
 the design rules (both engines through the same DE pipeline; name every uncontrolled
 difference) and the interpretation patterns a bake-off keeps producing: more precursors
@@ -1560,9 +1560,12 @@ beside it as `methods_complete_draft.md`. Finalize then writes the **repository-
 `output/DATA_SUBMISSION/`: `HOW_TO_SUBMIT.md`/`.html`, a pre-filled SDRF `sdrf.tsv`,
 `protocols.txt`, `files_to_upload.tsv`, and `prepare_upload.sbatch`. Never run
 `prepare_upload.sbatch` yourself: it reads every raw file, so the user submits it with `sbatch`
-when ready. Finalize also writes the session `README.md` (and `DIFFERENCES.md` for a re-analysis)
-and **`MANIFEST.txt`** at the session root, which lists every part as `[OK]` or `[SKIPPED] <name>
--- <reason>`. Then it zips the session, leaving out the raw data, `upload_staging/`, DIA-NN's
+when ready. Finalize also writes, at the session root, **`README.html`** (the page collaborators
+open: summary, links, and where the folder, raw data, search output and FASTA are on HIVE with
+their Windows/Mac paths), the same text as `README.md`, **`AGENTS.md`** (a guide for an AI agent
+given the folder), `input/raw_files.txt` if it was missing, `DIFFERENCES.md` for a re-analysis,
+and **`MANIFEST.txt`**, which lists every part as `[OK]` or `[SKIPPED] <name> -- <reason>`
+(→ `references/outputs.md`). Then it zips the session, leaving out the raw data, `upload_staging/`, DIA-NN's
 `.quant` intermediates (~30 MB per run) and the predicted spectral library (`*.predicted.speclib`,
 ~0.7 GB; rebuilt from the FASTA + params). Both stay on disk; `zip_excluded` counts them.
 `--no-deposit` skips only the package. → detail: `references/deposit.md`.
@@ -1578,8 +1581,10 @@ missing parts, so do not relay them. Examples are the run log and Slack lines su
 notification -- not configured for this user". Then summarize: data type (instrument
 + acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill's
 `defaults_version`, FASTA source, DE method, and per-contrast significant counts. Point them at the
-**session folder** and its `README.md`, then:
-- `AI_Analysis_Report.md` (the interpretation)
+**session folder** and its **`README.html`** — tell collaborators to open that (double-click);
+`AGENTS.md` is for an AI assistant they hand the folder to. Then:
+- **`output/Analysis_Report.html`** (the report of record: QC, figures and the interpretation in
+  one page; README.html links it first)
 - `OUTPUT_FILES.md` (what every file is)
 - **`output/methods.md`** (the publication Methods; its `[... — confirm]` tags must be resolved
   before publishing)

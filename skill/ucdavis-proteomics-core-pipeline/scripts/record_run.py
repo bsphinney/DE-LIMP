@@ -19,6 +19,7 @@ plus a line in an append-only master log and rows in an activity log.
   # the registry, from every run_record.json (the logs are for people; this is the index)
   python3 record_run.py list [--since 2026-09-01] [--user gabrig] [--status failed] [--tsv|--json]
   python3 record_run.py --where        # which route and destination from here, and nothing else
+  python3 record_run.py locate --session <dir>   # the record already holding it, read-only, here
   ... --dry-run                        # what it would write, written nowhere (preview on stderr)
 
 stdout is ONE JSON object -- {"recorded": true, "path": "<session folder>", ...} or
@@ -34,11 +35,13 @@ Layout (DataAnalysis "Session Structure"):
                             who/when/status, data, engine + version, key parameters and their
                             sources, headline results, where everything is, FRAN, skill issues
       run_record.json       the same, machine-readable (schema_version)
-      README.md             the session README (after finalize)
+      README.md / .html     the session README (after finalize), and AGENTS.md, its guide for
+                            an AI agent handed the folder
       <session>.zip         the session zip, minus per-run .quant files, when under the cap
       input/                conditions.csv, FASTA sidecar, params + rationale, raw_files.txt -- never
                             raw data
-      output/               *.docx (the report of record), methods.md, AUDIT/SAMPLE_QUALITY, tables/,
+      output/               Analysis_Report.html (the report of record), methods.docx + .md,
+                            AUDIT/SAMPLE_QUALITY, tables/,
                             small figures/, and search/ (provenance, stats, engine + SLURM logs,
                             FRAN receipt, and a LINK to report.parquet)
       scripts/              commands.log, reproduce.sh, REPRODUCE.md
@@ -162,7 +165,7 @@ LOCK_TIMEOUTS = []
 # The registry's own README.md, written by ensure_readme() when it is missing or carries an older
 # version marker than this. THE source: references/run-registry.md quotes it verbatim, and
 # tests/test_record_run.py fails when the two differ. Raise README_VERSION with any edit.
-README_VERSION = 1
+README_VERSION = 2
 README_TEXT = """# Skill run registry
 
 Every search the `ucdavis-proteomics-core-pipeline` skill runs for the UC Davis Proteomics Core,
@@ -178,10 +181,11 @@ is finalized. Laid out like the Core's DataAnalysis sessions.
   session (else `<date>_<search folder name>`; a different search wanting the same name gets
   `_2`). Start with `SEARCH_LOG.md`: the CoreOmics submission, Data Quality Notes, status, engine
   and the version that ran, key parameters and where each came from, results, and where every
-  output is. Beside it: `run_record.json` (the same, machine-readable), the session `README.md`
-  and zip, `input/` (conditions, FASTA sidecar, parameters, `raw_files.txt`), `output/` (the
-  Word report of record, Methods, tables, `search/` logs and a link to `report.parquet`) and
-  `scripts/` (commands, reproduce script).
+  output is. Beside it: `run_record.json` (the same, machine-readable), the session's
+  `README.html` / `README.md` and `AGENTS.md`, its zip, `input/` (conditions, FASTA sidecar,
+  parameters, `raw_files.txt`), `output/` (the report of record `Analysis_Report.html`, the
+  Methods in Word, tables, `search/` logs and a link to `report.parquet`) and `scripts/`
+  (commands, reproduce script).
 - `.index/` -- how recording the same search again finds its folder (by the search folder's real
   path, not its name). Leave it alone.
 - `*.lock.d` -- a writer's lock, held for a second or two; one older than 60 s is broken
@@ -1514,6 +1518,10 @@ def plan_analysis(plan, session, a, zip_cap):
         man_txt = None
     dep = os.path.join(out_d, "DATA_SUBMISSION")
     docx = [os.path.join(out_d, f) for f in listdir(out_d) if f.lower().endswith(".docx")]
+    # The report of record is the HTML report (2026-09-24: Word mangled its figures, so the skill
+    # no longer makes a report .docx). It is listed and copied FIRST; the Methods .docx stays,
+    # and an older session's report .docx is still copied, after it.
+    html_report = first_existing([os.path.join(out_d, "Analysis_Report.html")])
     audit = load_json(first_existing([os.path.join(out_d, "AUDIT.json"),
                                       os.path.join(session, "AUDIT.json")])) or {}
     sq = load_json(first_existing([os.path.join(out_d, "SAMPLE_QUALITY.json"),
@@ -1527,7 +1535,12 @@ def plan_analysis(plan, session, a, zip_cap):
                                          "q_cutoff", "logfc", "adjp")} if de else None,
           "manifest": {"file": man_txt, "n_ok": ok, "skipped": skipped} if man_txt else None,
           "docx": [{"file": d, "kind": "Methods (Word)" if "method" in os.path.basename(d).lower()
-                    else "Report (Word)"} for d in docx],
+                    else "Report (Word, older copy)"} for d in docx],
+          "deliverables": ([{"file": html_report, "kind": "Report of record (HTML)"}]
+                           if html_report else [])
+                          + [{"file": d, "kind": "Methods (Word)"
+                              if "method" in os.path.basename(d).lower()
+                              else "Report (Word, older copy)"} for d in docx],
           "methods_md": first_existing([os.path.join(out_d, "methods.md"),
                                         os.path.join(out_d, "METHODS.md")]),
           "data_submission": dep if os.path.isdir(dep) else None,
@@ -1548,7 +1561,7 @@ def plan_analysis(plan, session, a, zip_cap):
                               "not run on this session")
 
     # ---- copies, mirroring the session: top level, input/, output/, scripts/
-    for rel in ("README.md", "MANIFEST.txt", "DIFFERENCES.md"):
+    for rel in ("README.md", "README.html", "AGENTS.md", "MANIFEST.txt", "DIFFERENCES.md"):
         add_copy(plan, os.path.join(session, rel), rel, "analysis")
     inp = os.path.join(session, "input")
     for f in listdir(inp):
@@ -1558,7 +1571,7 @@ def plan_analysis(plan, session, a, zip_cap):
     for f in listdir(os.path.join(inp, "wf")):
         if f.endswith((".json", ".cfg")) or f.startswith("params."):
             add_copy(plan, os.path.join(inp, "wf", f), f"input/{f}", "analysis")
-    for d in docx:                                     # the deliverable of record, first
+    for d in ([html_report] if html_report else []) + docx:    # the report of record first
         add_copy(plan, d, f"output/{os.path.basename(d)}", "analysis")
     for f in ("methods.md", "METHODS.md", "AI_Analysis_Report.md", "OUTPUT_FILES.md", "AUDIT.md",
               "AUDIT.json", "SAMPLE_QUALITY.md", "SAMPLE_QUALITY.json", "QC_Report.html"):
@@ -2098,7 +2111,7 @@ def render_analysis(rec, an):
     de = an.get("de") or {}
     L = ["", f"## Analysis -- finalized {an.get('finalized') or '?'}",
          f"- **Session:** `{an.get('session')}`"]
-    for d in an.get("docx") or []:
+    for d in an.get("deliverables") or an.get("docx") or []:   # older records: docx only
         L.append(f"- **{d['kind']}:** `output/{os.path.basename(d['file'])}`"
                  f" (original `{d['file']}`)")
     if de:
@@ -2245,6 +2258,26 @@ def find_record(root, identity):
                 if state != "ok" or same_identity(rec, identity):
                     return tgt                # the index is the claim; a bad record is not a miss
     return None
+
+
+def locate(session):
+    """The registry folder already holding this session's record, looked up READ-ONLY from here,
+    the way a re-record finds it (find_record: the .index link of the session and of its search
+    out dir). None when there is none yet, or the registry is not readable from this machine --
+    nothing is written and nothing goes over ssh. session.py puts it in the session README."""
+    if disabled() or not session or not os.path.isdir(session):
+        return None
+    root = runs_dir()
+    if not (os.path.isdir(root) and os.access(root, os.R_OK | os.X_OK)):
+        return None
+    ident = {"session": os.path.realpath(session), "out": None}
+    out = session_search_out(session, None)
+    if out and os.path.isdir(out):
+        ident["out"] = os.path.realpath(out)
+    try:
+        return find_record(root, ident)
+    except OSError:
+        return None
 
 
 def claim_folder(root, base, identity, dry_run):
@@ -2418,7 +2451,7 @@ def master_entries(rec, event):
     if event == "analysis-done" and an:
         marker = f"<!-- record_run {key} analysis {an.get('finalized') or 'complete'} -->"
         body = []
-        for x in an.get("docx") or []:              # the report of record comes first
+        for x in an.get("deliverables") or an.get("docx") or []:   # report of record first
             body.append(f"- **{x['kind']}:** `{folder}output/{os.path.basename(x['file'])}`")
         sig = (an.get("de") or {}).get("significant_per_contrast") or {}
         if sig:
@@ -3105,7 +3138,7 @@ def build_parser():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--where", action="store_true",
                     help="print where a record would go from here, and nothing else")
-    sub = ap.add_subparsers(dest="cmd", metavar="{search-done,analysis-done,list}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{search-done,analysis-done,list,locate}")
 
     def common(p):
         p.add_argument("--dry-run", action="store_true",
@@ -3163,6 +3196,9 @@ def build_parser():
     ls.add_argument("--json", action="store_true")
     ls.add_argument("--timeout", type=float, default=120)
     ls.add_argument("--remote-hop", action="store_true", help=argparse.SUPPRESS)
+    lc = sub.add_parser("locate", help="the registry folder already holding a session's record, "
+                                       "read-only and from here only: {\"located\": path|null}")
+    lc.add_argument("--session", required=True)
     return ap
 
 
@@ -3174,6 +3210,12 @@ def main(argv=None):
     if not a.cmd:
         build_parser().print_usage(sys.stderr)
         print(json.dumps(not_recorded("bad_input", "no command given")))
+        return 0
+    if a.cmd == "locate":                      # read-only; disabled -> null, like no record
+        try:
+            print(json.dumps({"located": locate(a.session)}))
+        except Exception as e:                  # noqa: BLE001 -- never fatal, by contract
+            print(json.dumps({"located": None, "error": f"{type(e).__name__}: {e}"}))
         return 0
     if a.cmd != "list" and disabled():
         # The kill switch: before any read, write or SSH attempt.

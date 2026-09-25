@@ -6,7 +6,9 @@ analyzed; pass --base to put it in a central location instead (e.g. the user's
 Documents). The orchestrator asks the user which they want (see SKILL.md).
 
     <YYYY-MM-DD>_<DescriptiveName>/    # next to the raw files, or under <base>/sessions/
-      README.md                 # what this analysis was + where everything is
+      README.html               # OPEN THIS: what the analysis was, links, where it lives on HIVE
+      README.md                 # the same, as text (both rendered from one source: session_docs.py)
+      AGENTS.md                 # a guide to the folder for an AI agent, from the session's records
       input/                    # conditions, FASTA, params, workflow manifest, raw-file list
       output/
         search/                 # the normalized search report (+ engine logs)
@@ -22,7 +24,7 @@ Documents). The orchestrator asks the user which they want (see SKILL.md).
       scripts/                  # copy of the skill scripts actually used (self-contained)
       logs/                     # commands.log + engine logs
 
-Two subcommands:
+Subcommands:
 
   # at the start — make the folders, get paths.
   #   default (results live with the raw data):
@@ -37,8 +39,12 @@ Two subcommands:
   # (notify_slack.py)
   python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit] [--no-notify]
 
+  # README.md + README.html + AGENTS.md alone (e.g. for a session finalized before they existed)
+  python3 session.py docs --dir <session_dir>
+
 Raw MS files are NOT copied (they're huge and live elsewhere) — their paths are
-recorded in input/raw_files.txt instead.
+recorded in input/raw_files.txt instead (finalize writes it from the search's record when a
+session was initialised without --raw).
 """
 import sys, os, json, re, glob, shutil, argparse, datetime
 
@@ -300,6 +306,103 @@ def _zip_manifest(zip_path, arcname, text, pre_hook):
         return f"MISSING: {first}; retry: {type(e).__name__}: {e}"
 
 
+LATE_DOCS = ("README.md", "README.html", "AGENTS.md")
+
+
+def _registry_lookup(session_dir, in_finalize=True):
+    """(the Core run-registry folder already holding this session, or None; why not). Read-only
+    and local: record_run.locate() -- never an ssh call from here."""
+    # A subprocess, like every other call into record_run.py: nothing it does -- or a broken
+    # copy of it -- can reach this process.
+    import subprocess
+    rr = os.path.join(os.path.dirname(os.path.abspath(__file__)), "record_run.py")
+    if not os.path.isfile(rr):
+        return None, "record_run.py is not installed here"
+    try:
+        r = subprocess.run([sys.executable, rr, "locate", "--session", session_dir],
+                           capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+        got = json.loads((r.stdout.strip().splitlines() or ["{}"])[-1])
+    except Exception as e:                      # reported in the README line, not swallowed
+        return None, f"lookup failed ({type(e).__name__})"
+    if not isinstance(got, dict) or "located" not in got:
+        return None, "lookup failed (record_run.py gave no answer)"
+    path = got.get("located")
+    if path:
+        return path, None
+    if in_finalize:
+        return None, ("no record found from where finalize ran -- the 'Core run log' line of "
+                      "MANIFEST.txt says whether this run was recorded")
+    return None, "no record found from this machine (the registry is on HIVE)"
+
+
+def _write_docs(session_docs, p, man, registry, registry_note, ok_lines=True, pending=(),
+                located_at=None):
+    """README.md + README.html + AGENTS.md (session_docs.py). Never fatal. With a Manifest each
+    file is its own [OK]/[SKIPPED] line; without one the lines come back in "manifest" (the
+    [OK] ones only when ok_lines -- a re-render after the hook reports failures only)."""
+    out = {"written": {}, "manifest": []}
+    if session_docs is None:
+        why = "session_docs.py could not be loaded"
+        (man.skip("README / AGENTS.md", why) if man is not None
+         else out["manifest"].append(("SKIPPED", "README / AGENTS.md", why)))
+        return out
+    rec = man
+    if rec is None:
+        class _Lines:                           # the same [OK]/[SKIPPED] outcome, as tuples
+            def section(self, name, fn):
+                try:
+                    fn()
+                    if ok_lines:
+                        out["manifest"].append(("OK", name, "written"))
+                    return True
+                except Exception as e:
+                    out["manifest"].append(("SKIPPED", name, f"{type(e).__name__}: {e}"))
+                    return False
+        rec = _Lines()
+    try:
+        out["written"] = session_docs.write_docs(p["session_dir"], rec, registry, registry_note,
+                                                 pending=pending, located_at=located_at)
+    except Exception as e:                      # gather() itself failed: say so, keep going
+        why = f"{type(e).__name__}: {e}"
+        (man.skip("README / AGENTS.md", why) if man is not None
+         else out["manifest"].append(("SKIPPED", "README / AGENTS.md", why)))
+        return out
+    try:
+        import make_report
+        listed = [os.path.join(p["session_dir"], n) for n in LATE_DOCS + ("MANIFEST.txt",)]
+        listed.append(p["raw_list"])
+        if os.path.isfile(p["output_files_md"]) and man is not None:
+            n = make_report.add_finalize_files(p["output_files_md"], listed, p["session_dir"])
+            man.ok("OUTPUT_FILES.md: files written at finalize", f"{n} listed")
+        elif man is not None:
+            man.info("OUTPUT_FILES.md: files written at finalize",
+                     "no output/OUTPUT_FILES.md (step 11 was not run)")
+    except Exception as e:
+        if man is not None:
+            man.skip("OUTPUT_FILES.md: files written at finalize", f"{type(e).__name__}: {e}")
+    return out
+
+
+def _zip_docs(zip_path, session_dir):
+    """Add README.md, README.html and AGENTS.md to the zip (after the run-log hook). Returns
+    "added", or what went wrong -- recorded in MANIFEST.txt, which goes in after."""
+    import zipfile
+    base = os.path.basename(session_dir)
+    missing = []
+    try:
+        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
+            for n in LATE_DOCS:
+                full = os.path.join(session_dir, n)
+                if os.path.isfile(full):
+                    z.write(full, os.path.join(base, n))
+                else:
+                    missing.append(n)
+    except Exception as e:
+        return f"not added: {type(e).__name__}: {e}"
+    return "added" if not missing else f"added; not written, so not in the zip: {', '.join(missing)}"
+
+
 def do_finalize(a):
     p = paths_for(a.dir)
     if not os.path.isdir(p["session_dir"]):
@@ -322,6 +425,15 @@ def do_finalize(a):
     # recorded [OK] or [SKIPPED] -- with the reason -- in MANIFEST.txt at the session root, the
     # top of the zip: a part that could not be made is visible, never silently absent
     # (CLAUDE.md rule 4). Nothing here may stop finalize from writing the README and the zip.
+    # input/raw_files.txt first: a hive_remote session is initialised without --raw, so it has
+    # none, and the deposit package, README and AGENTS.md all read it. Written from the search's
+    # own record of what it read (session_docs.raw_record).
+    try:
+        import session_docs
+        raw_list = session_docs.ensure_raw_list(p)
+    except Exception as e:                      # recorded below, not swallowed
+        session_docs = None
+        raw_list = ("SKIPPED", f"session_docs.py could not run: {type(e).__name__}: {e}")
     methods_md, deposit = None, None
     try:
         import make_deposit
@@ -330,6 +442,8 @@ def do_finalize(a):
         make_deposit, man = None, None
         import_error = f"make_deposit.py could not be loaded: {type(e).__name__}: {e}"
     if man is not None:
+        (man.ok if raw_list[0] == "OK" else man.skip)("input/raw_files.txt (where the raw data are)",
+                                                       raw_list[1])
         try:
             methods_md = make_deposit.ensure_methods(p["session_dir"], man)
         except Exception as e:
@@ -341,96 +455,23 @@ def do_finalize(a):
                 deposit = make_deposit.build(p["session_dir"], man, methods_md)
             except Exception as e:
                 man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
+    registry, registry_note = _registry_lookup(p["session_dir"])
+    docs = _write_docs(session_docs, p, man, registry, registry_note,
+                       pending=("manifest",))        # MANIFEST.txt is written right below
+    if man is not None:
         man.write(p["manifest_txt"], "Session export manifest")
     else:
         with open(p["manifest_txt"], "w") as fh:
             fh.write("Session export manifest\n=======================\n"
                      f"[SKIPPED] {'Publication methods + deposit package':<50} -- "
                      f"{import_error}\n")
-    has_deposit = os.path.isfile(os.path.join(p["deposit_dir"], "HOW_TO_SUBMIT.md"))
-    methods_rel = (os.path.relpath(methods_md, p["session_dir"]) if methods_md else None)
-
-    # gather run facts for the README
-    manifest = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
-    prov = _load(os.path.join(p["de_dir"], "de_provenance.json")) or {}
-    wfman = _load(os.path.join(p["workflow_dir"], "workflow.manifest.json")) or {}
-    engine = (manifest.get("engine") or (wfman.get("engine", {}) or {}).get("name") or "?")
-    eng_ver = (wfman.get("engine", {}) or {}).get("version", "")
-    reg = manifest.get("registry") or wfman.get("registry") or {}
-    method = prov.get("method") or (wfman.get("de", {}) or {}).get("method", "?")
-    sig = prov.get("significant_per_contrast") or {}
-    contrasts = prov.get("contrasts") or []
-    q = manifest.get("query") or {}
+        for level, part, note in docs["manifest"]:
+            _append_manifest(p["manifest_txt"], level, part, note)
 
     de_files = sorted(os.path.basename(f) for f in glob.glob(os.path.join(p["de_dir"], "DE_*.csv")))
-    lines = [
-        f"# {os.path.basename(p['session_dir'])}", "",
-        "Proteomics search + differential expression, run by the ucdavis-proteomics-core-pipeline skill.", "",
-        "## Summary",
-        f"- Organism (taxid): {q.get('organism_taxid', '?')}",
-        f"- Acquisition / instrument: {q.get('acquisition', '?')} / {q.get('instrument') or '?'}",
-        f"- Search engine: {engine} {eng_ver}".rstrip(),
-        f"- DE method: {method}",
-        f"- Contrasts: {', '.join(contrasts) if contrasts else '?'}",
-    ]
-    if sig:
-        lines.append("- Significant proteins per contrast: "
-                     + ", ".join(f"{k}={v}" for k, v in sig.items()))
-    if reg.get("commit"):
-        lines.append(f"- Validated workflow: {reg.get('repo','')} @ `{reg['commit']}`")
-    lines += [
-        "", "## Where everything is",
-        "```",
-        "input/                 conditions.csv, search.fasta, params, workflow manifest, raw_files.txt",
-        "output/search/         normalized search report (DE input)",
-        "output/tables/         DE results (DE_*.csv), methods.txt, sessionInfo.txt, de_provenance.json,",
-        "                       reproducibility_log.R  <-- the analysis as plain R",
-        "output/figures/        plots",
-        "output/reproducibility/ pinned bundle for re-running the search too (reproduce.sh, env lock, checksums)",
-        "output/AI_Analysis_Report.md   the biological interpretation (read this first)",
-        "output/OUTPUT_FILES.md         catalog of every file",
-        "output/methods.md (+ .docx)    publication Methods: LC-MS, search, database, DE, grant acknowledgment",
-        "output/DATA_SUBMISSION/        deposit the data in PRIDE / MassIVE -- start with HOW_TO_SUBMIT.md (.html)",
-        "MANIFEST.txt                   what this export contains, and anything skipped (with the reason)",
-        "scripts/               copy of the skill scripts used",
-        "logs/                  commands.log + engine logs",
-        "```",
-        "", "## Reproduce",
-        "**The analysis, as code:** `output/tables/reproducibility_log.R` — the whole "
-        "differential-expression analysis in plain R with every value written out. "
-        "Read it to see what was done, or `Rscript` it to redo it with nothing but R "
-        "and limpa/limma.",
-        "",
-        "**The whole run, pinned** (search included, takes hours): "
-        "`output/reproducibility/REPRODUCE.md`.",
-        "",
-        f"The DE results are {', '.join(de_files) if de_files else '(none found)'}.",
-        "", "## Methods",
-        (f"**For the paper:** `{methods_rel}` (Word: the `.docx` beside it) — LC-MS "
-         "acquisition, the database search (engine, pinned version, parameters, FDR), the "
-         "sequence database and contaminants, the differential-expression analysis, and the "
-         "UC Davis instrument-grant acknowledgment. Resolve every `[... — confirm]` tag before "
-         "publishing." if methods_rel else
-         "**For the paper:** no publication Methods could be written — `MANIFEST.txt` says "
-         "why; run `scripts/make_methods.py` where the raw files are readable."),
-        "",
-        "The DE step's own record is `output/tables/methods.txt`; the interpretation is "
-        "`output/AI_Analysis_Report.md`.", "",
-        "## Deposit the data (PRIDE / MassIVE)",
-        ("Journals ask for the raw data in a public repository. Everything to do that is in "
-         "`output/DATA_SUBMISSION/` — start with **`HOW_TO_SUBMIT.md`** (or double-click "
-         "`HOW_TO_SUBMIT.html`): a pre-filled SDRF sample sheet, the protocol texts, the list "
-         "of files to upload, and a SLURM script that packs and checksums the raw files on "
-         "HIVE." if has_deposit else
-         "The deposit package was not written — `MANIFEST.txt` says why."), "",
-        "## What is in this export",
-        "`MANIFEST.txt` lists every part of the Methods and deposit package as [OK], or "
-        "[SKIPPED] with the reason.", "",
-    ]
-    with open(p["readme"], "w") as fh:
-        fh.write("\n".join(lines) + "\n")
-
-    result = {"session_dir": p["session_dir"], "readme": p["readme"], "de_files": de_files,
+    result = {"session_dir": p["session_dir"], "readme": p["readme"],
+              "readme_html": docs["written"].get("readme_html"),
+              "agents": docs["written"].get("agents"), "de_files": de_files,
               "methods": methods_md, "manifest": p["manifest_txt"],
               "deposit": deposit, "skipped": (man.n_skipped if man is not None else 1)}
 
@@ -460,6 +501,9 @@ def do_finalize(a):
         archive = sdir + ".zip"
         excluded = {label: 0 for label in skips.values()}
         manifest_txt = os.path.abspath(p["manifest_txt"])
+        # README.md, README.html and AGENTS.md go in after the run-log hook too: they name the
+        # Core registry record, which record_run.py may only create then.
+        late = {os.path.abspath(os.path.join(sdir, n)) for n in LATE_DOCS}
         # DIA-NN's per-run .quant intermediates: ~30 MB each (measured on HIVE, 28-34 MB), so
         # ~3 GB for a 100-file cohort, and nothing a reader of the zip can use. The single-shot
         # search writes them to <search out>/quant (its --temp, inside the session since #79);
@@ -501,8 +545,9 @@ def do_finalize(a):
                     if fn.endswith(".predicted.speclib"):
                         n_speclib += 1
                         continue
-                    if os.path.islink(full) or os.path.abspath(full) == manifest_txt:
-                        continue                 # MANIFEST.txt goes in last, below
+                    if os.path.islink(full) or os.path.abspath(full) == manifest_txt \
+                            or os.path.abspath(full) in late:
+                        continue                 # MANIFEST.txt and the docs go in last, below
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         excluded[quant_label] = n_quant
         excluded[speclib_label] = n_speclib
@@ -518,6 +563,17 @@ def do_finalize(a):
         pre_hook = None
     hooks = _finish_hooks(a, p["session_dir"], result.get("zip"))
     result["run_log"], result["slack"] = hooks["run_log"], hooks["slack"]
+    rl = hooks["run_log"] or {}
+    if rl.get("logged") is True and rl.get("path") and rl["path"] != registry:
+        # the registry record exists now: name it in README / AGENTS (the registry's own copy of
+        # the README, taken during the hook, is the one written above)
+        again = _write_docs(session_docs, p, None, rl["path"], None, ok_lines=False)
+        hooks["manifest"] = again["manifest"] + hooks["manifest"]
+    if a.zip:
+        how = _zip_docs(result["zip"], p["session_dir"])
+        result["zip_docs"] = how
+        if how != "added":
+            hooks["manifest"].insert(0, ("SKIPPED", "README / AGENTS.md in the zip", how))
     for level, part, note in hooks["manifest"]:
         try:
             _append_manifest(p["manifest_txt"], level, part, note)
@@ -536,6 +592,23 @@ def do_finalize(a):
             sys.stderr.write(f"[session] MANIFEST.txt in the zip: {result['zip_manifest']}\n")
 
     print(json.dumps(result, indent=2))
+
+
+def do_docs(a):
+    """README.md + README.html + AGENTS.md for a session, e.g. one finalized before they existed.
+    Touches nothing else: no MANIFEST.txt line, no zip, no run log."""
+    p = paths_for(a.dir)
+    if not os.path.isdir(p["session_dir"]):
+        sys.exit(f"session dir not found: {p['session_dir']}")
+    import session_docs
+    raw = session_docs.ensure_raw_list(p)
+    registry, note = _registry_lookup(p["session_dir"], in_finalize=False)
+    docs = _write_docs(session_docs, p, None, registry, note,
+                       located_at=os.path.abspath(a.as_path) if a.as_path else None)
+    print(json.dumps({"session_dir": p["session_dir"], "raw_files": {"level": raw[0],
+                      "note": raw[1]}, "registry": registry, **docs["written"],
+                      "parts": [{"level": l, "part": n, "note": t} for l, n, t in
+                                docs["manifest"]]}, indent=2))
 
 
 def _facts(session_dir):
@@ -647,6 +720,13 @@ def main():
                    help="do not post 'analysis complete' to the Core's Slack channel (same as "
                         "SKILL_SLACK=0; see references/notifications.md)")
     f.set_defaults(func=do_finalize)
+    d = sub.add_parser("docs", help="(re)write README.md, README.html and AGENTS.md -- and "
+                                    "input/raw_files.txt if missing -- without finalizing")
+    d.add_argument("--dir", required=True, help="the session directory")
+    d.add_argument("--as", dest="as_path", default="",
+                   help="where the session really is, when --dir is a copy of it (the README's "
+                        "'Where this lives on HIVE' table is then about that location)")
+    d.set_defaults(func=do_docs)
     a = ap.parse_args()
     a.func(a)
 

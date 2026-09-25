@@ -143,6 +143,12 @@ class Manifest:
         t = f" ({elapsed:.1f}s)" if elapsed is not None else ""
         self.lines.append(f"[OK]      {name:<50}{t}" + (f" -- {note}" if note else ""))
 
+    def info(self, name, note):
+        """A notice that is not an export part -- the orchestrator does not relay it as missing
+        (session._append_manifest's [INFO])."""
+        note = " ".join(str(note).split())
+        self.lines.append(f"[INFO]    {name:<50} -- {note[:200]}")
+
     def skip(self, name, why):
         why = " ".join(str(why).split())
         if len(why) > 200:
@@ -1217,18 +1223,52 @@ def _inline(s):
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*([^*\s][^*]*)\*(?![\w*])", r"<em>\1</em>", s)
     s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
+    # a link to a file beside the page (README.html -> output/methods.docx): relative, never a
+    # scheme (so never javascript:) and never //host
+    s = re.sub(r"\[([^\]]+)\]\(((?![A-Za-z][A-Za-z0-9+.-]*:|/)[^)\s]+)\)",
+               r'<a href="\2">\1</a>', s)
     s = re.sub(r"(?<![\"'>=])(https?://[^\s<)]+[^\s<).,;])", r'<a href="\1">\1</a>', s)
     return s
 
 
-def md_to_html(md, title):
-    """Enough Markdown for HOW_TO_SUBMIT.md: headings, paragraphs, lists, tables, code blocks,
-    block quotes. Stdlib only, so the .html opens anywhere by double-click."""
-    out, para, lst, table, code = [], [], None, [], None
+# The pages' look, in ONE place: README.html and HOW_TO_SUBMIT.html. Deliberately minimal --
+# the markup is semantic (header / nav / section / aside.callout / table) so a shared stylesheet
+# (scripts/report_style.py, on another branch) can replace this constant without restructuring.
+PAGE_CSS = (
+    "body{font:15px/1.55 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:980px;"
+    "margin:2em auto;padding:0 16px;color:#1d2330;background:#fff}"
+    "h1,h2{color:#1b3a5c}h2{border-bottom:1px solid #d8dee8;padding-bottom:.2em;"
+    "margin-top:1.8em}code{background:#f1f3f7;padding:1px 4px;border-radius:3px}"
+    "pre{background:#f1f3f7;padding:10px;overflow-x:auto}pre code{background:none}"
+    "table{border-collapse:collapse;margin:.6em 0;font-size:13px;display:block;"
+    "overflow-x:auto}th,td{border:1px solid #d8dee8;padding:4px 8px;text-align:left;"
+    "vertical-align:top}td code{word-break:break-all}th{background:#eef2f7}"
+    "blockquote,aside.callout{border-left:4px solid #9fb4cc;margin:.8em 0;padding:.2em 1em;"
+    "background:#f7f9fc}aside.callout.warning{border-left-color:#d9822b;background:#fff8ef}")
+CALLOUT = {"NOTE": "note", "TIP": "note", "IMPORTANT": "warning", "WARNING": "warning",
+           "CAUTION": "warning"}
+
+
+def md_to_html(md, title, semantic=False, nav=("Start here",)):
+    """Enough Markdown for HOW_TO_SUBMIT.md and README: headings, paragraphs, lists, tables,
+    code blocks, block quotes -- and GitHub alerts (`> [!NOTE]` / `> [!WARNING]` ...) as
+    <aside class="callout note|warning">. With `semantic`, what precedes the first `##` is the
+    <header>, each `##` part a <section>, and a part titled in `nav` a <nav>. Stdlib only, so the
+    .html opens anywhere by double-click; the look is PAGE_CSS."""
+    out, para, lst, table, code, quote = [], [], None, [], None, []
     lines = md.splitlines()
 
     def flush():
-        nonlocal para, lst, table
+        nonlocal para, lst, table, quote
+        if quote:
+            m = re.match(r"^\[!([A-Z]+)\]\s*(.*)$", quote[0])
+            if m and m.group(1) in CALLOUT:
+                body = " ".join(x for x in [m.group(2)] + quote[1:] if x)
+                out.append(f'<aside class="callout {CALLOUT[m.group(1)]}">'
+                           f"<p>{_inline(body)}</p></aside>")
+            else:
+                out.append("<blockquote>" + _inline(" ".join(quote)) + "</blockquote>")
+            quote = []
         if para:
             out.append("<p>" + _inline(" ".join(para)) + "</p>")
             para = []
@@ -1271,14 +1311,17 @@ def md_to_html(md, title):
             out.append(f"<h{n}>{_inline(m.group(2))}</h{n}>")
             continue
         if s.startswith("|"):
-            if para or lst:
+            if para or lst or quote:
                 flush()
             table.append(s)
             continue
         if s.startswith(">"):
-            flush()
-            out.append("<blockquote>" + _inline(s.lstrip("> ")) + "</blockquote>")
+            if para or lst or table:
+                flush()
+            quote.append(s[1:].strip())
             continue
+        if quote:
+            flush()
         m = re.match(r"^(\d+)\.\s+(.*)$", s) or re.match(r"^[-*]\s+(.*)$", s)
         if m and not ln.startswith("   "):
             tag = "ol" if s[0].isdigit() else "ul"
@@ -1298,18 +1341,22 @@ def md_to_html(md, title):
             flush()
         para.append(s)
     flush()
-    css = ("body{font:15px/1.55 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:"
-           "980px;margin:2em auto;padding:0 16px;color:#1d2330;background:#fff}"
-           "h1,h2{color:#1b3a5c}h2{border-bottom:1px solid #d8dee8;padding-bottom:.2em;"
-           "margin-top:1.8em}code{background:#f1f3f7;padding:1px 4px;border-radius:3px}"
-           "pre{background:#f1f3f7;padding:10px;overflow-x:auto}pre code{background:none}"
-           "table{border-collapse:collapse;margin:.6em 0;font-size:13px;display:block;"
-           "overflow-x:auto}th,td{border:1px solid #d8dee8;padding:4px 8px;text-align:left;"
-           "vertical-align:top}th{background:#eef2f7}blockquote{border-left:4px solid #9fb4cc;"
-           "margin:.8em 0;padding:.2em 1em;background:#f7f9fc}")
+    if semantic:
+        blocks, cur, tag = [], [], "header"
+        for el in out:
+            if el.startswith("<h2>"):
+                if cur:
+                    blocks.append(f"<{tag}>" + "\n".join(cur) + f"</{tag}>")
+                title_txt = re.sub(r"<[^>]+>", "", el)
+                tag, cur = ("nav" if html.unescape(title_txt) in nav else "section"), [el]
+            else:
+                cur.append(el)
+        if cur:
+            blocks.append(f"<{tag}>" + "\n".join(cur) + f"</{tag}>")
+        out = blocks
     return (f"<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
             f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            f"<title>{html.escape(title)}</title><style>{css}</style></head><body>\n"
+            f"<title>{html.escape(title)}</title><style>{PAGE_CSS}</style></head><body>\n"
             + "\n".join(out) + "\n</body></html>\n")
 
 

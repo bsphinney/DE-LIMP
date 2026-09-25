@@ -7,7 +7,8 @@ the results. Faithful, complete port of DE-LIMP's "Export Prompt for Claude"
 In DE-LIMP the prompt is shipped to an external Claude/Gemini. Here the agent IS
 Claude (Claude Code / Desktop), so this writes ANALYSIS_PROMPT.md and the agent
 reads it + the data files + the figures and writes a complete, figure-rich,
-expert AI_Analysis_Report.md (then to_docx.py also saves it as Word).
+expert AI_Analysis_Report.md (then make_analysis_html.py renders it into
+Analysis_Report.html, the report of record; no Word copy of the report is made).
 
 The pipeline self-description and the educational/stats sections are chosen from
 the actual engine + DE method (from de_provenance.json), never hardcoded (rule #1).
@@ -135,7 +136,7 @@ def main():
         w("## Figures — embed and interpret each one")
         w(f"These publication-quality figures were generated for you in `{fdir_rel}/`. "
           "**Embed every figure** in the relevant section using markdown image syntax "
-          f"(e.g. `![caption]({fdir_rel}/<file>)`) so it renders in the Word document, "
+          f"(e.g. `![caption]({fdir_rel}/<file>)`) so it renders in the HTML report, "
           "and **write an expert interpretation of what each shows for THIS dataset** — "
           "not a generic caption. Available figures:")
         for fig in figs:
@@ -263,7 +264,8 @@ def main():
     w("---")
     w("Reference specific proteins from the CSVs to support every claim. Embed every figure. "
       "Do not invent data, pathways, or citations you cannot ground in the attached files or "
-      "established biology. After writing the report, it will also be saved as a Word document.")
+      "established biology. After writing the report, it is rendered into "
+      "Analysis_Report.html (the report of record).")
     w("")
 
     with open(a.out, "w") as fh:
@@ -278,7 +280,8 @@ def main():
         "has_qc": has_qc, "has_gsea": has_gsea,
         "next": f"Read {a.out} + the data files + figures, then write {a.report_out} "
                 f"(ALL sections, embed all {len(figs)} figures, expert interpretation), "
-                "then convert it to .docx with to_docx.py.",
+                "then render it with make_analysis_html.py into Analysis_Report.html "
+                "(no Word copy of the report).",
     }, indent=2))
 
 

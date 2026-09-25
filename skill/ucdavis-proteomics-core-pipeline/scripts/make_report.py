@@ -71,11 +71,25 @@ CATALOG = [
     (r"^commands\.log$", "Inputs", "Verbatim log of every command the run executed (audit trail)."),
 
     (r"^AI_Analysis_Report\.md$", "Analysis report", "The biological + QC interpretation of the results (the AI analysis)."),
-    (r"^AI_Analysis_Report\.docx$", "Analysis report", "The analysis report as a Word document (same content as the .md)."),
+    (r"^Analysis_Report\.html$", "Analysis report",
+     "THE REPORT: QC panels, figures and the interpretation in one self-contained page "
+     "(double-click it)."),
+    (r"^AI_Analysis_Report\.docx$", "Analysis report",
+     "An older Word copy of the analysis report, from before the skill stopped making one "
+     "(Word mangled the figures); Analysis_Report.html is the report."),
     (r"^methods\.md$|^methods\.docx$", "Analysis report", "Publication-ready LC-MS/MS Methods section (from raw metadata) + instrument grant acknowledgment."),
     (r"^methods_params\.json$", "Analysis report", "Acquisition parameters extracted from the raw data for the Methods section."),
     (r"^ANALYSIS_PROMPT\.md$", "Analysis report", "The analysis brief the agent followed to write the report."),
     (r"^OUTPUT_FILES\.md$", "Analysis report", "This file — the catalog of all outputs."),
+    (r"^README\.html$", "Analysis report",
+     "START HERE: the session README as a web page (double-click it) — summary, links to the "
+     "report, Methods and tables, and where everything lives on HIVE."),
+    (r"^README\.md$", "Analysis report", "The same README as plain text (Markdown)."),
+    (r"^AGENTS\.md$", "Analysis report",
+     "For an AI agent given this folder: the study, which file is authoritative for what, the "
+     "table columns, the traps, and what it must not do."),
+    (r"^raw_files\.txt$", "Inputs",
+     "Where the raw data files are (full paths); raw data is never copied into the session."),
 ]
 
 CATEGORY_ORDER = ["Analysis report", "Differential expression", "Search output",
@@ -94,6 +108,31 @@ def describe(basename):
         if re.match(pat, basename):
             return cat, desc
     return "Other", "unrecognized output (no description available)"
+
+
+FINALIZE_BEGIN = "<!-- written at finalize: BEGIN -->"
+FINALIZE_END = "<!-- written at finalize: END -->"
+
+
+def add_finalize_files(output_files_md, files, root):
+    """Add the files session.py finalize writes after this catalog was made (README.html,
+    AGENTS.md, ...) to OUTPUT_FILES.md, described by the same CATALOG. Re-running replaces the
+    block. Returns the number of files listed."""
+    with open(output_files_md, encoding="utf-8") as fh:
+        text = fh.read()
+    if FINALIZE_BEGIN in text:
+        head, _, rest = text.partition(FINALIZE_BEGIN)
+        text = head.rstrip("\n") + "\n" + rest.partition(FINALIZE_END)[2].lstrip("\n")
+    rows = []
+    for f in files:
+        if os.path.isfile(f):
+            _, desc = describe(os.path.basename(f))
+            rows.append(f"| `{os.path.relpath(f, root)}` | {human(os.path.getsize(f))} | {desc} |")
+    block = [FINALIZE_BEGIN, "## Written when the session was finalized", "",
+             "| File | Size | What it is |", "|---|---|---|", *rows, "", FINALIZE_END]
+    with open(output_files_md, "w", encoding="utf-8") as fh:
+        fh.write(text.rstrip("\n") + "\n\n" + "\n".join(block) + "\n")
+    return len(rows)
 
 
 def collect(paths):
@@ -158,7 +197,8 @@ def main():
         lines.append("")
     lines.append("## Where to start")
     lines.append("")
-    lines.append("- **`AI_Analysis_Report.md`** — read this first: the biological interpretation.")
+    lines.append("- **`Analysis_Report.html`** — read this first: the report (QC, figures and the "
+                 "interpretation in one page; the text alone is `AI_Analysis_Report.md`).")
     lines.append("- **`de_results/DE_*.csv`** — the differentially expressed proteins per comparison.")
     lines.append("- **`de_results/methods.txt`** — the Methods paragraph for your paper.")
     lines.append("- **`de_results/reproducibility_log.R`** — the analysis as plain R. "

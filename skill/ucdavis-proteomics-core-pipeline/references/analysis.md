@@ -12,9 +12,10 @@ inline instead of shipping the prompt to an external API.
 2. **The agent reads the brief and the data files and writes `AI_Analysis_Report.md`.**
    It computes significant proteins, up/down splits, cross-comparison overlaps, and
    lowest-CV proteins from the CSVs — citing specific proteins, never fabricating.
-3. `to_docx.py` saves the report **also as `AI_Analysis_Report.docx`** (pandoc, with
-   a python-docx fallback so the Word file is always produced). Both `.md` and
-   `.docx` are required outputs.
+3. `make_analysis_html.py` renders it into **`Analysis_Report.html`** — the report of
+   record: one self-contained page (figures inlined). No Word copy of the report is made
+   any more (Word mangled the figures, 2026-09-24); the Methods stay in Word
+   (`methods.docx`). An older session's `AI_Analysis_Report.docx` is left in place.
 4. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
    plain-language description, grouped by purpose.
 

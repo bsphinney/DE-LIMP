@@ -5,12 +5,17 @@
 #
 #   bash hive_path.sh 'T:\Data\lab\service\PROT_0807'           # Windows mapped drive
 #   bash hive_path.sh /Volumes/proteomics/Data/lab/service/x     # macOS SMB mount
+#   bash hive_path.sh --no-verify <path>     # the mapping only: no ssh, verified stays false
+#                                            # (share_map.py uses this for a session README)
 #
 # gabrig 2026-09-23: the raw folder was T:\Data\lab\service\..., and T: is
 # \\128.120.208.24\proteomics -- the Flinders share HIVE mounts at
 # /nfs/lssc0/flinders/proteomics. Nothing mapped one to the other, so the agent searched
 # /quobyte, decided the files were not on HIVE, and uploaded 7.1 GB that already was
 # (~20 min). Which share a path lives on is knowable locally; look it up before uploading.
+#
+# Which share is which HIVE path comes from hive_shares.tsv beside this script -- the one table,
+# also read by share_map.py.
 #
 # Prints one JSON object:
 #   local, unc_or_mount_source, server, share, rest    what the path resolved to
@@ -29,8 +34,11 @@
 # =============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+NO_VERIFY=false
+if [ "${1:-}" = "--no-verify" ]; then NO_VERIFY=true; shift; fi
 IN="${1:-}"
-[ -n "$IN" ] || { echo "usage: hive_path.sh <local path>" >&2; exit 2; }
+[ -n "$IN" ] || { echo "usage: hive_path.sh [--no-verify] <local path>" >&2; exit 2; }
+SHARES="$HERE/hive_shares.tsv"
 NAMES_MAX=50
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) WIN=true ;; *) WIN=false ;; esac
 
@@ -168,12 +176,21 @@ add() {
   BASES+=("$1"); RESTS+=("$2")
 }
 if [ -n "$SHARE" ]; then
-  lc="$(lower "$SHARE")"
-  case "$(lower "$SERVER")/$lc" in
-    128.120.208.24/proteomics) add /nfs/lssc0/flinders/proteomics "$REST" ;;   # the Flinders proteomics share
-    */proteomics-grp)          add /quobyte/proteomics-grp "$REST" ;;          # the Core's quobyte group dir
-    *)                         add "/nfs/lssc0/flinders/$lc" "$REST"; add "/quobyte/$lc" "$REST" ;;
-  esac
+  lc="$(lower "$SHARE")" key="$(lower "$SERVER")/$(lower "$SHARE")" known=false
+  if [ -f "$SHARES" ]; then
+    # server<TAB>share<TAB>hive_path<TAB>...: the pattern is left unquoted so `*` matches any server
+    while IFS=$'\t' read -r t_srv t_share t_hive _t_rest; do
+      case "$t_srv" in ''|'#'*) continue ;; esac
+      pat="$(lower "$t_srv")/$(lower "$t_share")"
+      # shellcheck disable=SC2254
+      case "$key" in $pat) add "$t_hive" "$REST"; known=true; break ;; esac
+    done < "$SHARES"
+  else
+    HOW="${HOW:+$HOW; }$SHARES is missing, so no share is known"
+  fi
+  # A share not in the table: try where HIVE usually mounts one -- a guess, which is why step 3
+  # must verify it before it is used.
+  $known || { add "/nfs/lssc0/flinders/$lc" "$REST"; add "/quobyte/$lc" "$REST"; }
 fi
 
 # ---- 3. verify: the same file size, or the same top-level names, on HIVE ----
@@ -196,6 +213,8 @@ fi
 HIVE_PATH="" VERIFIED=false
 if [ ${#BASES[@]} -eq 0 ]; then
   :
+elif $NO_VERIFY; then
+  HOW="$HOW; --no-verify: mapped, not checked on HIVE"
 elif [ -z "$KIND" ]; then
   HOW="$HOW; cannot read $LOCAL_FS here, so there is nothing to compare -- not verified"
 else
@@ -265,6 +284,7 @@ cat <<JSON
   "rest": $(js "$REST"),
   "hive_path": $([ -n "$HIVE_PATH" ] && js "$HIVE_PATH" || echo null),
   "candidates": [$cands],
+  "known_share": ${known:-false},
   "verified": $VERIFIED,
   "how": $(js "$HOW")
 }
