@@ -181,5 +181,47 @@ class DidTheCheckRun(Base):
         self.assertFalse(res["panel_organisms_verified"])
 
 
+class ConfoundTest(unittest.TestCase):
+    """Silva08172026 (10 groups x 3) flagged all three panels "CONFOUNDED WITH GROUP": the old
+    rule compared the highest and lowest of 10 noisy group means, whose spread grows with the
+    number of groups. The permutation F-test asks whether the labels explain the score."""
+
+    @staticmethod
+    def design(values, per_group=3):
+        samples = [f"S{i}" for i in range(len(values))]
+        z = sq.zscore(dict(zip(samples, values)), samples)
+        return z, {s: f"G{i // per_group}" for i, s in enumerate(samples)}, samples
+
+    def test_ten_noise_groups_are_not_confounded(self):
+        import random
+        rng = random.Random(7)
+        z, gmap, samples = self.design([rng.gauss(0, 1) for _ in range(30)])
+        means = {}
+        for s in samples:
+            means.setdefault(gmap[s], []).append(z[s])
+        gap = max(sum(v) / 3 for v in means.values()) - min(sum(v) / 3 for v in means.values())
+        self.assertGreaterEqual(gap, 1.5)            # the old rule's trigger
+        confounded, detail, p = sq.confound_check(z, gmap, samples, 1.5)
+        self.assertFalse(confounded, detail)
+        self.assertGreater(p, sq.CONFOUND_P)
+        self.assertIn("permutation F-test across 10 groups", detail)
+
+    def test_a_real_group_effect_is_flagged(self):
+        import random
+        rng = random.Random(3)
+        vals = [rng.gauss(0, 1) + (2.5 if (i // 3) % 2 else 0) for i in range(30)]
+        confounded, detail, p = sq.confound_check(*self.design(vals), 1.5)
+        self.assertTrue(confounded, detail)
+        self.assertLess(p, sq.CONFOUND_P)
+
+    def test_three_vs_three_falls_back_to_separation(self):
+        # 20 labellings: no test can reach 1%, so complete separation is reported instead.
+        confounded, detail, p = sq.confound_check(*self.design([0.1, 0.2, 0.0, 2.1, 2.3, 2.2]), 1.5)
+        self.assertIsNone(p)
+        self.assertTrue(confounded)
+        self.assertIn("too few samples for a test", detail)
+        self.assertAlmostEqual(sq._min_p([3, 3]), 0.1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

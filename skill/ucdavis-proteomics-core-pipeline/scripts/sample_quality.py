@@ -53,7 +53,7 @@ Usage:
 
 Reads/writes plain files; stdlib only (pyarrow optional, just for --report).
 """
-import sys, os, csv, json, math, argparse, re
+import sys, os, csv, json, math, argparse, random, re
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
@@ -277,25 +277,79 @@ def _stem(x):
     return b.lower()
 
 
-def confound_check(z, gmap, samples, thr):
-    """Return (confounded: bool, detail) -- is the panel score separated by group with
-    little overlap? That is the danger signal: DE may be contamination, not biology."""
+# Is a panel score confounded with group? A permutation test of the one-way between-group
+# F statistic: how often does a random relabelling of the samples (same group sizes) put at
+# least as much of the panel's variation between groups as the real labels do?
+# Why not the old rule (flag when the highest and lowest GROUP MEANS differ by >= --z SD and
+# barely overlap): with k groups it compares the extremes of k noisy means, and their spread
+# grows with k even when nothing differs -- the expected range of 10 means is ~3.1 standard
+# errors against ~1.1 for 2. Silva08172026 (10 groups x 3) flagged all three panels that way
+# (gaps 1.55-2.74). The test's null distribution comes from the design itself, so k, group
+# sizes and non-normal scores are all accounted for. 1% because three panels are tested.
+CONFOUND_P = 0.01
+N_PERM = 9999
+
+
+def _between(values, labels):
+    """sum over groups of (group sum)^2 / group size -- monotone in the one-way F for fixed
+    data, so permutations can be compared on it directly."""
+    sums, sizes = {}, {}
+    for v, g in zip(values, labels):
+        sums[g] = sums.get(g, 0.0) + v
+        sizes[g] = sizes.get(g, 0) + 1
+    return sum(sums[g] ** 2 / sizes[g] for g in sums)
+
+
+def _min_p(sizes):
+    """Smallest p-value any relabelling can give: 1 / number of distinct partitions."""
+    labellings = math.factorial(sum(sizes))
+    for n in sizes:
+        labellings //= math.factorial(n)
+    sym = 1
+    for n in set(sizes):
+        sym *= math.factorial(sizes.count(n))
+    return sym / labellings
+
+
+def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925):
+    """Return (confounded: bool, detail, p) -- does the panel score differ between groups
+    more than relabelling the samples at random would? That is the danger signal: DE may be
+    contamination, not biology. p is None when the design is too small for any relabelling
+    to reach CONFOUND_P (3 vs 3: 1 in 10); then complete separation of the extreme groups
+    by >= thr is reported instead, labelled as such."""
     if not gmap:
-        return False, "no conditions.csv -- group-confounding not assessed"
-    groups = {}
+        return False, "no conditions.csv -- group-confounding not assessed", None
+    vals, labs = [], []
     for s in samples:
         if s in gmap and z.get(s) is not None:
-            groups.setdefault(gmap[s], []).append(z[s])
+            vals.append(z[s])
+            labs.append(gmap[s])
+    groups = {}
+    for v, g in zip(vals, labs):
+        groups.setdefault(g, []).append(v)
     if len(groups) < 2:
-        return False, "fewer than 2 groups with panel data"
+        return False, "fewer than 2 groups with panel data", None
     means = {g: sum(v) / len(v) for g, v in groups.items()}
-    hi = max(means, key=means.get); lo = min(means, key=means.get)
-    gap = means[hi] - means[lo]
-    overlap = max(min(groups[hi]), min(groups[lo])) <= min(max(groups[hi]), max(groups[lo]))  # crude
-    # strong signal: group means differ by > ~1.5 SD of z (i.e. > thr) AND ranges barely overlap
-    separated = (gap >= thr) and (min(groups[hi]) > max(groups[lo]) - 0.25 * gap)
     detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n={len(groups[g])})" for g in sorted(means))
-    return bool(separated), f"{detail}  [gap {gap:+.2f}]"
+    sizes = [len(v) for v in groups.values()]
+    if _min_p(sizes) > CONFOUND_P:
+        hi = max(means, key=means.get); lo = min(means, key=means.get)
+        gap = means[hi] - means[lo]
+        separated = gap >= thr and min(groups[hi]) > max(groups[lo])
+        return bool(separated), (f"{detail}  [too few samples for a test (best possible p "
+                                 f"{_min_p(sizes):.2g}); extreme groups "
+                                 f"{'completely separated' if separated else 'overlap'}, "
+                                 f"gap {gap:+.2f}]"), None
+    obs = _between(vals, labs)
+    rng = random.Random(seed)
+    perm, ge = list(labs), 0
+    for _ in range(n_perm):
+        rng.shuffle(perm)
+        if _between(vals, perm) >= obs - 1e-9:
+            ge += 1
+    p = (ge + 1) / (n_perm + 1)
+    return p < CONFOUND_P, (f"{detail}  [permutation F-test across {len(groups)} groups: "
+                            f"p = {p:.2g}, {n_perm:,} relabellings; flagged at p < {CONFOUND_P}]"), p
 
 
 def detected_depth(report):
@@ -382,7 +436,7 @@ def main():
         per, nhit, matched, cont_hits = panel_scores(rows, samples, genes, removed)
         z = zscore(per, samples)
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
-        confounded, detail = confound_check(z, gmap, samples, a.z)
+        confounded, detail, confound_p = confound_check(z, gmap, samples, a.z)
         expected = a.keratin_sample and name == "EPIDERMIS"
         kept = name == TARGET_PANEL
         if kept or expected:
@@ -393,6 +447,7 @@ def main():
                          "contaminant_matches": cont_hits,
                          "z": {s: (round(z[s], 2) if z[s] is not None else None) for s in samples},
                          "elevated_samples": elevated, "group_confounded": confounded,
+                         "confound_p": confound_p,
                          "group_detail": detail, "expected_analyte": expected,
                          "kept_in_quantification": kept}
         why = (f" These are {org} proteins that are also common-contaminant sequences: possible "

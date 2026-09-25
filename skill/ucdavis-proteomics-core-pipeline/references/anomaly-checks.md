@@ -99,7 +99,12 @@ already removed (read from `contaminants_removed.csv` via `de_provenance.json`).
 in the Data Quality Notes as a reagent/handling contamination, not as hemolysis.
 
 It scores each panel per sample (z across samples) and checks whether the score is
-**confounded with group**. Two hard-won lessons it encodes:
+**confounded with group** — a permutation test of the one-way between-group F statistic
+(9,999 relabellings, flagged at p < 0.01; `confound_p` in the JSON). It replaced a rule that
+compared only the highest and lowest group means, whose spread grows with the number of
+groups: on a 10-group design it flagged every panel by chance. With too few samples for any
+relabelling to reach 1% (3 vs 3), complete separation of the extreme groups is reported
+instead, and labelled so. Two hard-won lessons it encodes:
 - **A contamination panel that separates the groups is the danger signal** — DE between
   those groups may be the contamination gradient. **Protein-level marker removal does NOT
   fix a confounded contrast** (dropping muscle markers once *increased* the DE count); the
