@@ -174,6 +174,102 @@ class FigureSelection(unittest.TestCase):
         self.assertEqual(mah.report_figures(md), ["pca.png", "my fig.png", "v.png", "z.svg"])
 
 
+class IdenticalBarsLeftOut(unittest.TestCase):
+    """A DPC/limpa matrix is complete by construction, so "proteins quantified per sample" is
+    a row of identical bars (Silva08172026: 30 x 6,112). Brett flagged it twice: an old
+    figures/ folder and the narrative written against it kept bringing it back."""
+
+    REPORT = ("# T\n\n## QC Assessment\n\n![PCA](figures/pca.png)\n\n**PCA.** Keep this.\n\n"
+              "![Proteins quantified per sample](figures/qc_protein_counts.png)\n\n"
+              "**Proteins per sample.** Every bar is identical (6,112) by design.\n"
+              "The real depth is the next figure.\n\n"
+              "![Detected vs inferred](figures/qc_detected_vs_inferred.png)\n\n"
+              "**Detected vs inferred.** Keep this too.\n")
+
+    def build(self, prov, em=None):
+        with tempfile.TemporaryDirectory() as s:
+            out = os.path.join(s, "output")
+            figs, tables = os.path.join(out, "figures"), os.path.join(out, "tables")
+            os.makedirs(figs)
+            os.makedirs(tables)
+            for f in ("pca.png", "qc_protein_counts.png", "qc_detected_vs_inferred.png"):
+                with open(os.path.join(figs, f), "wb") as fh:
+                    fh.write(png_bytes(f))           # the stale plot really is on disk
+            with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
+                json.dump(prov, fh)
+            if em:
+                with open(os.path.join(tables, "Expression_Matrix.csv"), "w") as fh:
+                    fh.write(em)
+            with open(os.path.join(out, "AI_Analysis_Report.md"), "w") as fh:
+                fh.write(self.REPORT)
+            html_out = os.path.join(out, "Analysis_Report.html")
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                                "--session", s, "--out", html_out, "--no-pdf"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(html_out, encoding="utf-8") as fh:
+                page = fh.read()
+            with open(os.path.join(out, "Analysis_Report.md"), encoding="utf-8") as fh:
+                md = fh.read()
+            return json.loads(r.stdout), page, md, r.stderr
+
+    def test_dpc_drops_the_plot_and_its_paragraph_everywhere(self):
+        res, page, md, err = self.build({"pipeline_id": "dpc", "method": "dpc", "adjp": 0.05})
+        self.assertEqual(res["figures_suppressed"], ["qc_protein_counts.png"])
+        self.assertNotIn(b64("qc_protein_counts.png"), page)
+        self.assertEqual(page.count("<img"), 2)
+        for doc in (page, md):
+            self.assertNotIn("qc_protein_counts", doc)
+            self.assertNotIn("Proteins per sample.", doc)
+            self.assertNotIn("The real depth is the next figure.", doc)   # whole paragraph
+            self.assertIn("Keep this.", doc)
+            self.assertIn("Keep this too.", doc)
+        self.assertEqual([int(x) for x in re.findall(r'id="fig-(\d+)"', page)], [1, 2])
+        self.assertEqual(re.findall(r"^!\[Figure (\d+)\.", md, re.M), ["1", "2"])
+        self.assertIn("left out qc_protein_counts.png and the report paragraph", err)
+
+    def test_identical_counts_in_the_matrix_decide_too(self):
+        em = "Protein.Group,Genes,S1,S2\nP1,A,1,2\nP2,B,3,4\n"          # complete
+        res, page, _, _ = self.build({"pipeline_id": "maxlfq", "method": "maxlfq"}, em)
+        self.assertEqual(res["figures_suppressed"], ["qc_protein_counts.png"])
+
+    def test_a_matrix_with_holes_keeps_the_plot(self):
+        em = "Protein.Group,Genes,S1,S2\nP1,A,1,\nP2,B,3,4\n"           # S1 has 1, S2 has 2
+        res, page, md, _ = self.build({"pipeline_id": "maxlfq", "method": "maxlfq"}, em)
+        self.assertEqual(res["figures_suppressed"], [])
+        self.assertIn(b64("qc_protein_counts.png"), page)
+        self.assertIn("Proteins per sample.", md)
+
+    def test_only_the_describing_paragraph_goes(self):
+        md = ("![x](figures/qc_protein_counts.png)\n\nThe next paragraph is about something "
+              "else.\n")
+        text, gone, n = mah.drop_suppressed(md, ("qc_protein_counts",))
+        self.assertEqual((gone, n), (["qc_protein_counts.png"], 0))
+        self.assertIn("something else", text)
+        self.assertNotIn("qc_protein_counts", text)
+
+    def test_the_analysis_brief_does_not_ask_for_it(self):
+        with tempfile.TemporaryDirectory() as s:
+            figs = os.path.join(s, "figures")
+            os.makedirs(figs)
+            with open(os.path.join(figs, "figures.json"), "w") as fh:
+                json.dump([{"file": "qc_protein_counts.png", "type": "qc", "caption": "c"},
+                           {"file": "pca.png", "type": "pca", "caption": "p"}], fh)
+            with open(os.path.join(s, "de_provenance.json"), "w") as fh:
+                json.dump({"pipeline_id": "dpc", "method": "dpc"}, fh)
+            out = os.path.join(s, "brief.md")
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "analysis_prompt.py"),
+                                "--out", out, "--de-dir", s, "--figures-dir", figs],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out) as fh:
+                brief = fh.read()
+        self.assertNotIn("`figures/qc_protein_counts.png` (qc)", brief)
+        self.assertIn("`figures/pca.png`", brief)
+        self.assertIn("Do NOT embed, reference or describe a proteins-quantified-per-sample plot",
+                      brief)
+
+
 class Restyle(unittest.TestCase):
     """report_style.py: one self-contained look -- no fetched fonts/CSS/JS, working contents
     links, a real dark mode, print styles, and callouts for what a PI must not miss."""
