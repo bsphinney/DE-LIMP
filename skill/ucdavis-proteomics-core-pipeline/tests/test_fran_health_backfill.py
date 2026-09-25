@@ -107,8 +107,12 @@ def run_log(start, ingested=0, dup=0, failed=0, queued=0, items=(), skips=(), ca
 
 class Env:
     """A fake HIVE: log dir, submit log, drop dir, all under one temp root, wired in by env."""
-    def __init__(self, root):
+    def __init__(self, root, now=NOW):
+        # Every mtime and the submit line are relative to `now`: NOW for tests that hand
+        # fran_deposit the same `now`; time.time() for tests of the CLI entry points (health,
+        # verify), which read the real clock -- a fixed date there goes stale the next day.
         self.root = root
+        self.now = now
         self.logs = os.path.join(root, "logs")
         self.drop = os.path.join(root, "incoming")
         os.makedirs(self.logs)
@@ -121,14 +125,14 @@ class Env:
         with open(p, "w") as fh:
             fh.write(text)
         if age_h is not None:
-            os.utime(p, (NOW - age_h * H, NOW - age_h * H))
+            os.utime(p, (self.now - age_h * H, self.now - age_h * H))
         return p
 
     def submit(self, age_h=0.2, line="Submitted batch job 23990862"):
         p = os.path.join(self.logs, fd.SUBMIT_LOG)
         with open(p, "w") as fh:
-            fh.write(f"2026-09-24 12:23:03 {line}\n")
-        os.utime(p, (NOW - age_h * H, NOW - age_h * H))
+            fh.write(f"{ts(self.now - age_h * H - 420)} {line}\n")
+        os.utime(p, (self.now - age_h * H, self.now - age_h * H))
 
     def entry(self, name, age_h=100, output_dir=None):
         d = os.path.join(self.drop, name)
@@ -136,7 +140,7 @@ class Env:
         with open(os.path.join(d, fd.MANIFEST), "w") as fh:
             json.dump({"output_dir": output_dir or f"/real/{name}", "engine": "diann",
                        "staged_by": "brettsp"}, fh)
-        os.utime(d, (NOW - age_h * H, NOW - age_h * H))
+        os.utime(d, (self.now - age_h * H, self.now - age_h * H))
         return d
 
 
@@ -649,10 +653,10 @@ class StageHealthTests(unittest.TestCase):
 
     def test_health_writes_the_file_stage_reads(self):
         with tempfile.TemporaryDirectory() as d:
-            e = Env(d)
-            e.log(run_log(NOW - 170 * H, ingested=4, queued=198))
+            e = Env(d, now=time.time())          # fd.health reads the real clock
+            e.log(run_log(e.now - 170 * H, ingested=4, queued=198))
             for k in (3, 2, 1):
-                e.log(run_log(time.time() - k * 4 * H, dup=3, failed=2, queued=181))
+                e.log(run_log(e.now - k * 4 * H, dup=3, failed=2, queued=181))
             e.submit(age_h=0)
 
             class A:
@@ -1060,7 +1064,7 @@ class QcRuleTests(unittest.TestCase):
 class VerifyFromLogsTests(unittest.TestCase):
     def _staged(self, d):
         out = search_dir(d)
-        e = Env(os.path.join(d, "hive"))
+        e = Env(os.path.join(d, "hive"), now=time.time())    # fd.verify reads the real clock
         with env_vars(FRAN_DROP_DIR=e.drop, FRAN_HEALTH="off"):
             run_quiet(fd.stage, Args(out))
         return out, e, os.path.join(e.drop, fd.entry_name(out))
@@ -1072,7 +1076,7 @@ class VerifyFromLogsTests(unittest.TestCase):
     def test_ingested_per_the_cron_log(self):
         with tempfile.TemporaryDirectory() as d:
             out, e, entry = self._staged(d)
-            e.log(run_log(time.time() - H, ingested=1, items=[("diann", entry, "ok")]))
+            e.log(run_log(e.now - H, ingested=1, items=[("diann", entry, "ok")]))
             r = self._verify(out, e)
             self.assertEqual(r["state"], "ingested", r)
             self.assertTrue(r["ingested"])
@@ -1081,7 +1085,7 @@ class VerifyFromLogsTests(unittest.TestCase):
     def test_failed_per_the_cron_log(self):
         with tempfile.TemporaryDirectory() as d:
             out, e, entry = self._staged(d)
-            e.log(run_log(time.time() - H, failed=1, items=[("diann", entry, "fail")]))
+            e.log(run_log(e.now - H, failed=1, items=[("diann", entry, "fail")]))
             r = self._verify(out, e)
             self.assertEqual(r["state"], "ingest_failed", r)
             self.assertIn("No precursor records parsed", r["detail"])
@@ -1090,9 +1094,8 @@ class VerifyFromLogsTests(unittest.TestCase):
     def test_pending_says_when_the_cron_is_stuck(self):
         with tempfile.TemporaryDirectory() as d:
             out, e, entry = self._staged(d)
-            now = time.time()
             for k in (3, 2, 1):
-                e.log(run_log(now - k * 4 * H, dup=3, failed=2, queued=181))
+                e.log(run_log(e.now - k * 4 * H, dup=3, failed=2, queued=181))
             e.submit(age_h=0)
             r = self._verify(out, e)
             self.assertEqual(r["state"], "staged_pending_cron")
