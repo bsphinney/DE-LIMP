@@ -26,7 +26,8 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   plain R, runnable with just R + limpa/limma (point users here
                             #   when they ask for "the code")
     figures/                # volcano / top-protein violins / PCA / heatmap / p-value / QC PNGs
-                            #   + figures.json (captions)
+                            #   + figures.json (captions) + sample_labels.csv (the short
+                            #   sample names on the plots -> their full run names)
     reproducibility/        # the pinned bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
     AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
     AI_Analysis_Report.docx # the same report as a Word document

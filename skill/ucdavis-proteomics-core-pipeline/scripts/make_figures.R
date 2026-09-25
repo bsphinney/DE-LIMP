@@ -82,6 +82,48 @@ gene_label <- function(df) {
   ifelse(is.na(g) | g == "", df$Protein.Group, g)
 }
 
+# Short sample names for figure labels. Raw run names ("08132026__60SPD_DIA-LRS-124_S3-F4_1_23659")
+# took ~40% of the heatmap and buried the PCA in text. ONE definition for every figure that
+# names samples; the full <-> short mapping goes to sample_labels.csv so nothing is ambiguous.
+#   1. a Label (or Sample) column in conditions.csv, when the user supplied one;
+#   2. otherwise derived: drop the tokens every run shares at the start and at the end, keep
+#      the shortest leading stretch of what remains that tells the runs apart, and keep the
+#      last shared token when that would leave a bare number ("LRS-124", not "124");
+#   3. any label that comes out empty or not unique falls back to the full run name.
+short_sample_names <- function(runs, meta = NULL) {
+  runs <- as.character(runs)
+  lab_col <- if (!is.null(meta)) intersect(c("Label", "Sample"), names(meta))[1] else NA
+  if (!is.na(lab_col)) {
+    lab <- trimws(as.character(meta[[lab_col]][match(runs, meta$File.Name)]))
+    src <- rep(paste("conditions.csv", lab_col), length(runs))
+  } else {
+    src <- rep("derived from the run name", length(runs))
+    tk <- lapply(runs, function(r) {
+      m <- gregexpr("[^_. -]+", r)[[1]]
+      if (m[1] < 0) return(list(s = 1L, e = nchar(r), t = r))
+      s <- as.integer(m); e <- s + attr(m, "match.length") - 1L
+      list(s = s, e = e, t = substring(r, s, e))
+    })
+    n_tok <- vapply(tk, function(x) length(x$t), 1L)
+    shared <- function(pick) length(unique(vapply(tk, pick, ""))) == 1
+    a <- 0L                                   # tokens shared at the start (keep >= 1 per run)
+    while (a < min(n_tok) - 1L && shared(function(x) x$t[a + 1L])) a <- a + 1L
+    b <- 0L                                   # tokens shared at the end
+    while (a + b < min(n_tok) - 1L && shared(function(x) x$t[length(x$t) - b])) b <- b + 1L
+    for (L in seq_len(max(n_tok - a - b))) {
+      last <- pmin(a + L, n_tok - b)
+      lab <- vapply(seq_along(runs), function(k) substring(runs[k], tk[[k]]$s[a + 1L], tk[[k]]$e[last[k]]), "")
+      if (!anyDuplicated(lab)) break
+    }
+    if (a > 0L && all(grepl("^[0-9]", lab)))  # a bare number says little: keep its shared label
+      lab <- vapply(seq_along(runs), function(k) substring(runs[k], tk[[k]]$s[a], tk[[k]]$e[last[k]]), "")
+  }
+  bad <- is.na(lab) | !nzchar(lab) | duplicated(lab) | duplicated(lab, fromLast = TRUE)
+  lab[bad] <- runs[bad]
+  src[bad] <- "full run name (label empty or not unique)"
+  data.frame(File.Name = runs, Label = make.unique(lab), Source = src, stringsAsFactors = FALSE)
+}
+
 de_files <- list.files(de_dir, pattern = "^DE_.*\\.csv$", full.names = TRUE)
 contrast_of <- function(f) sub("\\.csv$", "", sub("^DE_[^_]+_", "", basename(f)))
 
@@ -250,6 +292,12 @@ if (file.exists(em_path)) {
     g <- meta$Group[match(colnames(M), meta$File.Name)]
     if (all(!is.na(g))) grp <- factor(g)
   }
+  # short sample labels for every figure that names samples (see short_sample_names)
+  sl <- short_sample_names(colnames(M), meta)
+  slab <- stats::setNames(sl$Label, sl$File.Name)
+  short_of <- function(x) ifelse(is.na(slab[x]), x, slab[x])
+  utils::write.csv(sl, file.path(outdir, "sample_labels.csv"), row.names = FALSE)
+  LABELS_NOTE <- " Samples are labelled with short names; sample_labels.csv maps each one to its run file."
 
   # ---- QC: proteins quantified per sample ----
   # Only when the matrix HAS missing values (e.g. MaxLFQ). A DPC/limpa matrix is complete by
@@ -257,7 +305,7 @@ if (file.exists(em_path)) {
   # plot says nothing (a 30-run limpa report shipped 30 bars of 6,112 and had to explain them
   # away). Then the detected-vs-inferred plot below is the per-sample depth view instead.
   tryCatch({
-    cnt <- data.frame(Sample = colnames(M), n = colSums(!is.na(M)),
+    cnt <- data.frame(Sample = short_of(colnames(M)), n = colSums(!is.na(M)),
                       Group = if (!is.null(grp)) grp else "all")
     if (length(unique(cnt$n)) <= 1) {
       message("[figures] proteins-per-sample plot skipped: the matrix is complete (",
@@ -271,7 +319,7 @@ if (file.exists(em_path)) {
              x = NULL, y = "proteins (non-missing)") + THEME
       fn <- file.path(outdir, "qc_protein_counts.png")
       ggsave(fn, p, width = 7, height = max(3, 0.3 * ncol(M) + 1), dpi = 200)
-      add_fig(fn, "qc", "Proteins quantified per sample — a loading/QC check. Large differences between samples (or systematic differences between groups) flag uneven input or sample-quality problems.")
+      add_fig(fn, "qc", paste0("Proteins quantified per sample — a loading/QC check. Large differences between samples (or systematic differences between groups) flag uneven input or sample-quality problems.", LABELS_NOTE))
     }
   }, error = function(e) message("[figures] QC counts failed: ", e$message))
 
@@ -285,6 +333,7 @@ if (file.exists(em_path)) {
     if (file.exists(qcf)) {
       q <- utils::read.csv(qcf, stringsAsFactors = FALSE, check.names = FALSE)
       q <- q[order(q$Detected), ]
+      q$Sample <- short_of(q$Sample)
       long <- rbind(
         data.frame(Sample = q$Sample, n = q$Detected, Kind = "Detected"),
         data.frame(Sample = q$Sample, n = q$Inferred, Kind = "Inferred"))
@@ -300,7 +349,7 @@ if (file.exists(em_path)) {
         ggplot2::theme(legend.position = "top")
       fn2 <- file.path(outdir, "qc_detected_vs_inferred.png")
       ggsave(fn2, p2, width = 9, height = max(3, 0.34 * nrow(q) + 1.6), dpi = 200)
-      add_fig(fn2, "qc", sprintf("Detected vs inferred proteins per sample (%.0f%%-%.0f%% detected). Detected means at least one precursor was actually observed in that run; inferred means the value came from the DPC detection-probability model. Samples with a large inferred fraction contribute weaker evidence, and fold-changes for proteins inferred in one whole group should be read as detection events rather than magnitudes.", min(q$PctDetected), max(q$PctDetected)))
+      add_fig(fn2, "qc", sprintf("Detected vs inferred proteins per sample (%.0f%%-%.0f%% detected). Detected means at least one precursor was actually observed in that run; inferred means the value came from the DPC detection-probability model. Samples with a large inferred fraction contribute weaker evidence, and fold-changes for proteins inferred in one whole group should be read as detection events rather than magnitudes.%s", min(q$PctDetected), max(q$PctDetected), LABELS_NOTE))
     }
   }, error = function(e) message("[figures] detected/inferred QC failed: ", e$message))
 
@@ -317,7 +366,7 @@ if (file.exists(em_path)) {
     if (ncol(Mi) >= 3 && nrow(Mi) >= 5) {
       pc <- prcomp(t(Mi), scale. = TRUE)
       ve <- round(100 * pc$sdev^2 / sum(pc$sdev^2), 1)
-      pdf <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2], Sample = colnames(Mi),
+      pdf <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2], Sample = short_of(colnames(Mi)),
                         Group = if (!is.null(grp)) grp else "all")
       p <- ggplot(pdf, aes(PC1, PC2, color = Group, label = Sample)) +
         geom_point(size = 3) +
@@ -327,7 +376,7 @@ if (file.exists(em_path)) {
       if (has_repel) p <- p + ggrepel::geom_text_repel(size = 3, show.legend = FALSE)
       fn <- file.path(outdir, "pca.png")
       ggsave(fn, p, width = 7, height = 5.5, dpi = 200)
-      add_fig(fn, "pca", "Principal-component analysis of samples (top 2 PCs). Replicates of the same group should cluster; clear separation between groups indicates a strong global difference, while an outlier sample stands apart.")
+      add_fig(fn, "pca", paste0("Principal-component analysis of samples (top 2 PCs). Replicates of the same group should cluster; clear separation between groups indicates a strong global difference, while an outlier sample stands apart.", LABELS_NOTE))
     }
   }, error = function(e) message("[figures] PCA failed: ", e$message))
 
@@ -362,6 +411,7 @@ if (file.exists(em_path)) {
     lab <- ifelse(nchar(lab) > 16, paste0(substr(lab, 1, 15), "~"), lab)
     rownames(H) <- make.unique(lab)
     fn <- file.path(outdir, "heatmap_top.png")
+    colnames(H) <- short_of(colnames(H))
     ann <- if (!is.null(grp)) data.frame(Group = grp, row.names = colnames(H)) else NA
     if (has_pheat) {
       # pheatmap manages its own device; passing filename= avoids the clipped output
@@ -379,7 +429,7 @@ if (file.exists(em_path)) {
                      margins = c(8, 8), main = sprintf("Top %d differential proteins", nrow(H)))
       grDevices::dev.off()
     }
-    add_fig(fn, "heatmap", sprintf("Heatmap of the top %d differential proteins (row z-scored log2 abundance), samples annotated by group. Reveals which proteins drive the group separation and whether replicates behave consistently.", nrow(H)))
+    add_fig(fn, "heatmap", sprintf("Heatmap of the top %d differential proteins (row z-scored log2 abundance), samples annotated by group. Reveals which proteins drive the group separation and whether replicates behave consistently.%s", nrow(H), LABELS_NOTE))
   }, error = function(e) message("[figures] heatmap failed: ", e$message))
 
   # ---- top-protein violins, one figure per contrast ----
