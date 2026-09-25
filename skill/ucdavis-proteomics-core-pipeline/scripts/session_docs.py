@@ -239,6 +239,34 @@ def submission_line(p):
     return submission_report.one_line(rec) if rec else None
 
 
+def _submission_facts(p):
+    """Who prepared the samples and the record's data-quality notes, from the attached CoreOmics
+    record -- submission_report's readings (prepared_by, quality_notes), never re-derived here.
+    None when there is no record; {"error"} when it cannot be read."""
+    if not os.path.isfile(p["submission_record"]):
+        return None
+    try:
+        import submission_report as sr
+        rec = sr.load(p["session_dir"])
+        if not rec:
+            return None
+        who, why = sr.prepared_by(rec)
+        return {"who": who, "why": why, "peptides": sr.sent_as_peptides(rec),
+                "notes": [n["text"] for n in sr.quality_notes(rec, p["session_dir"])]}
+    except Exception as e:                      # said in AGENTS.md, not dropped
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _de_contaminants(de):
+    """The DE's contaminant step in make_methods' words (de_contaminant_sentence reads run_de.R's
+    `contaminants` record -- the one description of it), or None when make_methods is absent."""
+    try:
+        from make_methods import de_contaminant_sentence
+    except Exception:
+        return None
+    return de_contaminant_sentence(de)
+
+
 def gather(session_dir, registry=None, registry_note=None, pending=(), located_at=None):
     """Every fact the three documents state, read from the session. `registry`: the Core
     run-registry folder of this session, when known (record_run.locate() or its result).
@@ -259,6 +287,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
 
     # --- the study
     f["submission"] = submission_line(p)
+    f["submission_facts"] = _submission_facts(p)
     f["organism"] = fm.get("organism") or None
     f["taxid"] = fm.get("taxid") or wf.get("organism_taxid") or q.get("organism_taxid")
     f["instrument"] = q.get("instrument") or next(iter(wf.get("instruments") or []), None)
@@ -294,6 +323,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
 
     # --- files that exist (links are only ever to these)
     out = p["output_dir"]
+    cont = de.get("contaminants") if isinstance(de.get("contaminants"), dict) else {}
     f["files"] = {k: v for k, v in {
         "report_html": os.path.join(out, "Analysis_Report.html"),
         "report_pdf": os.path.join(out, "Analysis_Report.pdf"),
@@ -306,6 +336,13 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         "tables": p["de_dir"] if glob.glob(os.path.join(p["de_dir"], "*")) else None,
         "expr": os.path.join(p["de_dir"], "Expression_Matrix.csv"),
         "qc_di": os.path.join(p["de_dir"], "QC_detected_vs_inferred.csv"),
+        "det_matrix": os.path.join(p["de_dir"], (de.get("detection_matrix") or {}).get(
+            "file") or "Detection_Matrix.csv"),
+        "cont_removed": os.path.join(p["de_dir"], cont["removed_table"])
+        if cont.get("removed_table") else None,
+        "cont_share": os.path.join(p["de_dir"], cont["share_table"])
+        if cont.get("share_table") else None,
+        "submission": p["submission_record"],
         "methods_txt": os.path.join(p["de_dir"], "methods.txt"),
         "de_prov": os.path.join(p["de_dir"], "de_provenance.json"),
         "repro_R": os.path.join(p["de_dir"], "reproducibility_log.R"),
@@ -558,8 +595,14 @@ def agents_md(f):
                    ("The Methods text of the DE (verbatim, do not paraphrase)", "methods_txt"),
                    ("DE results, one table per contrast", None),
                    ("Protein abundance per sample (log2)", "expr"),
-                   ("Which values were measured vs inferred, per sample", "qc_di"),
+                   ("Which values were measured vs inferred, per protein and sample",
+                    "det_matrix"),
+                   ("How many values were measured vs inferred, per sample", "qc_di"),
+                   ("The contaminant protein groups removed before the DE", "cont_removed"),
+                   ("Each run's contaminant share of the signal (QC)", "cont_share"),
                    ("Samples and their groups", "conditions"),
+                   ("The CoreOmics submission: sample sheet, who prepared the samples, the "
+                    "description as written (contacts and billing left out)", "submission"),
                    ("Search engine, the version that ran, exact command", "search_prov"),
                    ("Search parameters as run", "params"),
                    ("Precursor-level search results", "report"),
@@ -601,6 +644,14 @@ def agents_md(f):
         L += ["", "`QC_detected_vs_inferred.csv`: "
               + "; ".join(f"`{c}` = {QC_COLUMNS.get(c, 'no description recorded')}" for c in hdr)]
 
+    dm = de.get("detection_matrix") if isinstance(de.get("detection_matrix"), dict) else {}
+    if files.get("det_matrix"):
+        L += ["", f"`{os.path.basename(files['det_matrix'])}`: `Protein.Group`, then one column "
+                  "per sample (the rows and columns of `Expression_Matrix.csv`). Values: "
+                  f"{dm.get('values') or NOT_RECORDED}; 0 = {dm.get('zero_means') or NOT_RECORDED}"
+                  + (f"; empty = {dm['na_means']}" if dm.get("na_means") else "")
+                  + " (de_provenance.json `detection_matrix`)."]
+
     L += ["", "## Traps — read before you compute anything", ""]
     role = de.get("logfc_role")
     if de:
@@ -623,21 +674,49 @@ def agents_md(f):
             pct = []
         span = f" ({min(pct):g}–{max(pct):g}% of values per sample)" if pct else ""
         L.append(f"- **Inferred is not measured.** `Expression_Matrix.csv` has a value in "
-                 f"cells where no precursor was observed{span}; `QC_detected_vs_inferred.csv` "
+                 f"cells where no precursor was observed{span}; "
+                 + (f"`{os.path.basename(files['det_matrix'])}` marks every cell, "
+                    if files.get("det_matrix") else "")
+                 + "`QC_detected_vs_inferred.csv` "
                  "counts them per sample and `PropObs` per protein. Never report an inferred "
                  "value as a detection, and never use non-empty cell counts as depth — a "
                  "\"0% missing\" in the audit reflects this filled matrix, not detection.")
     fm = f["fm"]
-    if fm.get("n_contaminants_appended") or fm.get("n_contaminants_already_present"):
+    cont = de.get("contaminants") if isinstance(de.get("contaminants"), dict) else {}
+    if fm.get("n_contaminants_appended") or fm.get("n_contaminants_already_present") or cont:
         n = (fm.get("n_contaminants_appended") or 0) + (fm.get("n_contaminants_already_present")
                                                         or 0)
-        tag = fm.get("diann_cont_quant_exclude")
-        L.append(f"- **Contaminants:** the database holds {n} contaminant sequences"
-                 + (f" ({fm.get('contaminant_set')} set)" if fm.get("contaminant_set") else "")
-                 + (f"; their protein IDs start with `{tag}` and the search kept them out of "
-                    "quantification and normalisation" if tag else "")
-                 + ". A protein you expect but cannot find may be listed under a contaminant "
+        tag = fm.get("diann_cont_quant_exclude") or cont.get("tag")
+        db = (f"the database holds {n} contaminant sequences"
+              + (f" ({fm.get('contaminant_set')} set)" if fm.get("contaminant_set") else "")
+              + (f", protein IDs starting `{tag}`" if tag else "") + ". " if n else "")
+        de_step = _de_contaminants(de) if de else None
+        L.append(f"- **Contaminants:** {db}"
+                 + (f"{de_step} " if de_step else "")
+                 + ("A `Cont_` protein in the DE tables is contamination, not biology. "
+                    if cont.get("policy") == "kept" or (de and not cont) else "")
+                 + "A protein you expect but cannot find may be listed under a contaminant "
                    "entry.")
+        if cont.get("database_risk") is True and cont.get("database_note"):
+            L.append(f"  - **Caveat:** {cont['database_note']}")
+    sf = f.get("submission_facts")
+    if sf:
+        if sf.get("error"):
+            L.append(f"- **The CoreOmics submission** (`input/submission.json`) could not be read "
+                     f"({sf['error']}); do not describe the samples from memory.")
+        else:
+            who = {"lab": "the submitting lab prepared the samples"
+                          + (" and sent peptides" if sf["peptides"] else "")
+                          + ": do not describe extraction, reduction, alkylation or digestion as "
+                            "work the Core did",
+                   "core": "the Core prepared the samples; the protocol belongs to the Methods "
+                           "(`methods.md`)"}.get(sf["who"], f"who prepared the samples is not "
+                                                            f"clear ({sf['why']}): say so, do "
+                                                            f"not guess")
+            L.append("- **The samples, in the submitter's words:** `input/submission.json` is the "
+                     "submission as recorded (its `source`: the CoreOmics form, or facts the user "
+                     "gave). Describe the samples only as it does and add no detail it does not "
+                     f"state; {who}.")
     if f["controls"] and f["contrasts"]:
         vs = [c for c in f["contrasts"] if any(re.search(rf"(^|-){re.escape(g)}$", c)
                                                for g in f["controls"])]
@@ -661,7 +740,11 @@ def agents_md(f):
     if f["quality_notes"]:
         L.append("- Sample quality (`output/SAMPLE_QUALITY.md`):")
         L += [f"  - {n}" for n in f["quality_notes"]]
-    if not (f["audit_overall"] or f["audit_notes"] or f["quality_notes"]):
+    sub_notes = (f.get("submission_facts") or {}).get("notes") or []
+    if sub_notes:
+        L.append("- CoreOmics submission (`input/submission.json`, submission_report.py):")
+        L += [f"  - {n}" for n in sub_notes]
+    if not (f["audit_overall"] or f["audit_notes"] or f["quality_notes"] or sub_notes):
         L.append("- No AUDIT or SAMPLE_QUALITY record in this folder.")
 
     L += ["", "## Reproduce", ""]

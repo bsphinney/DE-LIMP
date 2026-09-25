@@ -224,6 +224,43 @@ class Agents(unittest.TestCase):
                   "s1,Control,80,20,100,80,20\ns2,Treated,60,40,100,60,40\n")
         return p
 
+    def test_the_records_the_other_branches_added(self):
+        """Detection_Matrix.csv, run_de.R's contaminant record and the CoreOmics submission are
+        all named in AGENTS.md, each in its own record's words."""
+        cont = {"policy": "removed", "removed": True, "tag": "Cont_", "id_column": "Protein.Ids",
+                "n_precursors": 812, "n_protein_groups": 23, "n_sample_groups_sharing": 4,
+                "n_sample_groups_all_shared": 1, "share_table": "QC_contaminant_share.csv",
+                "removed_table": "contaminants_removed.csv", "database_risk": True,
+                "database_note": "CANARY database note"}
+        det = {"file": "Detection_Matrix.csv", "zero_means": "inferred",
+               "values": "precursors observed for the protein in that run",
+               "na_means": "protein not in the precursor matrix"}
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, dict(DPC, contaminants=cont, detection_matrix=det), qc=True)
+            for n in ("Detection_Matrix.csv", "contaminants_removed.csv",
+                      "QC_contaminant_share.csv"):
+                write(os.path.join(p["de_dir"], n), "x\n")
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("| Which values were measured vs inferred, per protein and sample | "
+                          "`output/tables/Detection_Matrix.csv` |", text)
+            self.assertIn("0 = inferred", text)
+            self.assertIn("`Detection_Matrix.csv` marks every cell", text)
+            self.assertIn("`output/tables/contaminants_removed.csv`", text)
+            self.assertIn("`output/tables/QC_contaminant_share.csv`", text)
+            self.assertIn("812 precursors", text)                  # make_methods' sentence
+            self.assertIn("**Caveat:** CANARY database note", text)
+            self.assertNotIn("kept them out of quantification", text)
+            self.assertNotIn("input/submission.json", text)        # no record, no line
+
+            import submission_report
+            submission_report.attach(p["session_dir"], {"internal_id": "PROT_0001",
+                                                        "sample_prep": "lab",
+                                                        "prot_or_pep": "peptides"})
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("`input/submission.json` |", text)
+            self.assertIn("the submitting lab prepared the samples and sent peptides", text)
+            self.assertIn("- CoreOmics submission: PROT_0001", text)
+
     def test_dpc_in_its_own_words(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.build(d, DPC, qc=True)
