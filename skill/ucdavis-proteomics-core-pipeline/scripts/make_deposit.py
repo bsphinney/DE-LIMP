@@ -143,11 +143,13 @@ class Manifest:
         t = f" ({elapsed:.1f}s)" if elapsed is not None else ""
         self.lines.append(f"[OK]      {name:<50}{t}" + (f" -- {note}" if note else ""))
 
-    def info(self, name, note):
-        """A notice that is not an export part -- the orchestrator does not relay it as missing
-        (session._append_manifest's [INFO])."""
-        note = " ".join(str(note).split())
-        self.lines.append(f"[INFO]    {name:<50} -- {note[:200]}")
+    def info(self, name, why):
+        """A notice, not an export part: not made, and not a failure either (e.g. no browser to
+        print the PDF) -- says why and what to do instead. Not counted as skipped, and the
+        orchestrator does not relay it as missing (session._append_manifest's [INFO]). Not cut
+        short like a [SKIPPED] reason: the note ends with what to do."""
+        why = " ".join(str(why).split())
+        self.lines.append(f"[INFO]    {name:<50} -- {why}")
 
     def skip(self, name, why):
         why = " ".join(str(why).split())
@@ -176,7 +178,7 @@ class Manifest:
         with open(path, "w") as fh:
             fh.write(f"{title}\n{'=' * len(title)}\n"
                      f"Written {datetime.datetime.now().isoformat(timespec='seconds')} by "
-                     f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why.\n\n"
+                     f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why; [INFO] = not produced, not a failure, and what to do instead.\n\n"
                      + "\n".join(self.lines) + "\n")
         return path
 

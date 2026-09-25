@@ -115,6 +115,8 @@ figure.fig img{display:block;width:100%;height:auto;border-radius:4px}
 figure.fig figcaption{font-size:.9rem;color:var(--muted);margin:.7rem .2rem .1rem;line-height:1.5}
 figure.fig .fignum{font-weight:700;color:var(--fg);margin-right:.35rem}
 figure.fig .figt{color:var(--fg);font-weight:600}
+figure.fig .figdata{display:block;margin-top:.45rem;padding-top:.45rem;border-top:1px dashed var(--line);font-variant-numeric:tabular-nums}
+details{margin:.6rem 0}details > summary{cursor:pointer;padding:.35rem 0}
 .figmissing{margin:1.2rem 0;padding:.75rem 1rem;border:1.5px dashed var(--warning);border-radius:10px;color:var(--warning);background:var(--warning-bg);font-size:.92rem;max-width:52rem}
 .figref{color:var(--muted);font-size:.92rem}
 /* lightbox */
@@ -149,15 +151,26 @@ footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--mute
   figure.fig{padding:.5rem}
 }
 @media print{
-  :root{--bg:#fff;--surface:#fff;--shadow:none}
+  /* Light tokens for paper whatever the screen's theme: (0,2,0) and later in the sheet, so
+     they beat both dark rules -- a dark-mode reader's printout is not grey on white. */
+  :root:not([data-print]),:root[data-theme]{
+    --bg:#fff;--surface:#fff;--surface-2:#f2f4f7;--fg:#111;--muted:#444;--line:#cfd5dc;
+    --accent:#1d4fa3;--accent-weak:#eef3fb;--header-bg:#fff;--header-fg:#111;--header-muted:#444;
+    --info:#1d4fa3;--info-bg:#eef3fb;--warning:#8a4a06;--warning-bg:#fdf3e4;--critical:#a01d12;
+    --critical-bg:#fdecea;--zebra:#f6f7f9;--shadow:none;color-scheme:light}
+  @page{margin:14mm 12mm}
   body{background:#fff;color:#000;font-size:11pt}
   .toc,.toggle,.lb,.skip{display:none !important}
   .layout{display:block;padding:0;max-width:none}
-  .band{background:#fff;color:#000;border-bottom:2px solid #000;padding:0 0 .8rem}
+  .band{background:#fff;color:#000;border-bottom:2px solid #000;padding:0 0 .8rem;margin-bottom:.8rem}
+  .band h1{padding-right:0}
   .band .subtitle,.facts b{color:#333}
   .facts li{border-color:#999;background:#fff}
-  figure.fig,.callout,.tile,table,tr{break-inside:avoid}
-  h2,h3{break-after:avoid}
+  figure.fig,.callout,.tile,tr,.figmissing{break-inside:avoid}
+  figure.fig{max-width:none;box-shadow:none}
+  figure.fig img{max-height:22cm;width:auto;max-width:100%;margin:0 auto}
+  main p,main li{orphans:3;widows:3}
+  h2,h3,details > summary{break-after:avoid}
   .tablewrap{max-height:none;overflow:visible;box-shadow:none}
   thead th{position:static}
   .callout,.figmissing,.tile.key,tbody tr:nth-child(even) td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
@@ -245,13 +258,15 @@ def callout(kind, body_html, title=None):
     return f'<div class="callout {kind}" role="note">{head}{body_html}</div>'
 
 
-def figure_card(n, uri, alt, title_html="", caption_html=""):
+def figure_card(n, uri, alt, title_html="", caption_html="", summary_html=""):
     sep = " &mdash; " if title_html and caption_html else ""
     return (f'<figure class="fig" id="fig-{n}">'
             f'<button class="imgbox" type="button" aria-label="Enlarge figure {n}">'
             f'<img src="{uri}" alt="{esc(alt)}"></button>'
             f'<figcaption><span class="fignum">Figure {n}.</span>'
-            f'<span class="figt">{title_html}</span>{sep}{caption_html}</figcaption></figure>')
+            f'<span class="figt">{title_html}</span>{sep}{caption_html}'
+            + (f'<span class="figdata"><b>Data:</b> {summary_html}</span>' if summary_html else "")
+            + "</figcaption></figure>")
 
 
 def note(text):

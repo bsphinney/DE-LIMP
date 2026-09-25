@@ -322,6 +322,27 @@ class Readme(unittest.TestCase):
             first = [ln for ln in md.splitlines() if ln.startswith("- [")][0]
             self.assertIn("Analysis_Report.html", first)             # the report, linked first
 
+    def test_the_report_pdf_and_text_twin(self):
+        """make_analysis_html writes Analysis_Report.pdf and .md beside the HTML: the README
+        links both, AGENTS.md names both, and an HTML with no PDF says how to make one."""
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            write(os.path.join(p["output_dir"], "Analysis_Report.html"), "<html></html>")
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("not made (no browser where the report was built)", md)
+            self.assertNotIn("(output/Analysis_Report.pdf)", md)
+            write(os.path.join(p["output_dir"], "Analysis_Report.pdf"), "%PDF-1.4")
+            write(os.path.join(p["output_dir"], "Analysis_Report.md"), "# twin")
+            f = session_docs.gather(p["session_dir"])
+            md = session_docs.readme_md(f)
+            self.assertIn("[Analysis report (PDF)](output/Analysis_Report.pdf)", md)
+            self.assertIn("[Analysis report (plain text)](output/Analysis_Report.md)", md)
+            self.assertIn("for NotebookLM or other AI notebooks", md)
+            self.assertNotIn("not made (no browser", md)
+            agents = session_docs.agents_md(f)
+            self.assertIn("`output/Analysis_Report.md`", agents)
+            self.assertIn("`output/Analysis_Report.pdf`", agents)
+
     def test_relative_links_render_and_schemes_do_not(self):
         s = make_deposit._inline("[r](output/a%20b.html) [x](javascript:alert(1)) [w](https://a.b)")
         self.assertIn('<a href="output/a%20b.html">r</a>', s)

@@ -914,18 +914,29 @@ def one_line(rec):
     return f"CoreOmics submission: {ident} (source: {rec['source']})"
 
 
-def html_section(source=None, session=None):
-    """The report's Submission section, or "" when the run has no submission. A record that
-    exists but cannot be read is shown as such rather than left out."""
+def report_section(source=None, session=None):
+    """The report's Submission section -- {"html", "md", "label"} -- or None when the run has
+    no submission. html and md say the same thing (the HTML report and its Markdown twin). A
+    record that exists but cannot be read is shown as such rather than left out; its label is
+    then None, so no header names a submission nobody could read."""
     try:
         rec, sess = resolve(source, session)
     except RecordError as e:
         import report_style
-        return report_style.callout("warning", f"<p>The submission record could not be read: "
-                                               f"{_h(e)}</p>")
+        msg = f"The submission record could not be read: {e}"
+        return {"html": report_style.callout("warning", f"<p>{_h(msg)}</p>"),
+                "md": f"> **Warning.** {msg}", "label": None}
     if rec is None:
-        return ""
-    return render_html(rec, quality_notes(rec, sess))
+        return None
+    notes = quality_notes(rec, sess)
+    return {"html": render_html(rec, notes),
+            "md": render_markdown(rec, notes, heading="").lstrip("\n"), "label": label(rec)}
+
+
+def html_section(source=None, session=None):
+    """The report's Submission section as HTML, or "" when the run has no submission."""
+    sec = report_section(source, session)
+    return sec["html"] if sec else ""
 
 
 # --------------------------------------------------------------------------- CLI --

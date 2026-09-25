@@ -296,6 +296,8 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     out = p["output_dir"]
     f["files"] = {k: v for k, v in {
         "report_html": os.path.join(out, "Analysis_Report.html"),
+        "report_pdf": os.path.join(out, "Analysis_Report.pdf"),
+        "report_twin": os.path.join(out, "Analysis_Report.md"),
         "report_docx": os.path.join(out, "AI_Analysis_Report.docx"),
         "report_md": p["analysis_report"],
         "methods_docx": p["methods_docx"], "methods_md": p["methods_md"],
@@ -449,6 +451,13 @@ def readme_md(f, for_html=False):
     start = []
     for key, text, what in (
             ("report_html", "Analysis report", " — figures, QC and the interpretation in one page"),
+            ("report_pdf", "Analysis report (PDF)", " — the full report with figures, for NotebookLM "
+                                                    "or printing (the HTML through its print "
+                                                    "stylesheet)"),
+            ("report_twin", "Analysis report (plain text)",
+             " — the full report as plain text, for NotebookLM or other AI notebooks: the same "
+             "sections as the HTML, with each figure's caption and the numbers it shows written "
+             "out, and the top proteins per contrast"),
             ("methods_docx", "Methods for the paper (Word)", ""),
             ("methods_md", "Methods for the paper (text)", ""),
             ("tables", "Results tables", " — one `DE_*.csv` per comparison, "
@@ -460,6 +469,9 @@ def readme_md(f, for_html=False):
         link = _link(f, key, text)
         if link:
             start.append(f"- {link}{what}")
+    if files.get("report_html") and not files.get("report_pdf"):
+        start.append("- `output/Analysis_Report.pdf` — not made (no browser where the report was "
+                     "built): open `Analysis_Report.html`, Print, Save as PDF")
     if not files.get("agents"):
         start.append("- `AGENTS.md` — for an AI assistant: give it this file with the folder")
     L += ["", "## Start here", "", *start]
@@ -557,6 +569,9 @@ def agents_md(f):
                    ("Pitfall audit", "audit"), ("Sample quality / contamination", "quality"),
                    ("Publication Methods (LC-MS + search + DE + acknowledgment)", "methods_md"),
                    ("The report of record (QC, figures, interpretation)", "report_html"),
+                   ("The same report as plain text: sections, figure captions and the numbers "
+                    "each figure shows, top proteins per contrast", "report_twin"),
+                   ("The same report as a PDF with its figures", "report_pdf"),
                    ("What this export contains, and what is missing", "manifest"),
                    ("The DE as runnable R", "repro_R"),
                    ("Re-running everything", "reproduce_md")):

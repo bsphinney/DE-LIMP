@@ -2027,8 +2027,8 @@ def cmd_conditions(a) -> int:
 # ------------------------------------------------------------------------ deliver --
 # No AI_Analysis_Report.docx: Analysis_Report.html is the report of record, and an older
 # session's Word copy (Word mangled its figures) is kept there but never handed out.
-DELIVER_FILES = (("Analysis_Report.html", True),
-                 ("AI_Analysis_Report.md", False), ("methods.md", False), ("methods.docx", False),
+DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
+                 ("Analysis_Report.md", False), ("AI_Analysis_Report.md", False), ("methods.md", False), ("methods.docx", False),
                  ("OUTPUT_FILES.md", False), ("AUDIT.md", False), ("SAMPLE_QUALITY.md", False))
 DELIVER_DIRS = ("tables", "figures", "reproducibility")
 SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv", "report.gg_matrix.tsv",
@@ -2320,7 +2320,10 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
         L += ["## What is in this folder", "", "| item | what it is |", "|---|---|"]
         desc = (
             ("Analysis_Report.html", "the full report: quality control, figures and interpretation (open first)"),
-            ("AI_Analysis_Report.md", "the same analysis as plain text"),
+            ("Analysis_Report.pdf", "the same report with its figures as a PDF, for printing or NotebookLM"),
+            ("Analysis_Report.md", "the same report as plain text, with each figure's caption and numbers "
+                                   "written out, for NotebookLM or other AI notebooks"),
+            ("AI_Analysis_Report.md", "the interpretation alone, as plain text"),
             ("methods.md", "a Methods section ready to adapt for a manuscript, with the instrument acknowledgment"),
             ("methods.docx", "the Methods section as a Word document"),
             ("tables/", tables_description(delivered)),
@@ -2925,6 +2928,7 @@ def cmd_email_draft(a) -> int:
             L += ["", "The folder also contains:"]
             for name, text in (("tables", "the result tables"),
                                ("figures", "every figure as an image file"),
+                               ("Analysis_Report.pdf", "the report as a PDF, for printing"),
                                ("methods.md", "a Methods section you can adapt for a manuscript"),
                                ("reproducibility", "a full record of the software and settings used"),
                                ("search", "the search engine output")):

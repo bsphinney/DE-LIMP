@@ -371,7 +371,7 @@ locally and on HIVE (`~/core/PROT_0807`).
      (step 9: no Word copy of the report).
    - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`:
      ```
-     for f in AI_Analysis_Report.md Analysis_Report.html methods.md methods.docx; do
+     for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf methods.md methods.docx; do
        bash scripts/hive_exec.sh --put ~/core/PROT_0807/session/output/$f "$S/output/"; done
      ```
 8. **Deliver, share, draft the email** — step 12b.
@@ -1599,6 +1599,20 @@ does the page fall back to galleries of `figures.json`'s figures. The look (head
 the study facts, stat tiles, contents rail, figure cards with click-to-enlarge, callouts for
 the audit / data-quality / expert-review sections, dark mode, print styles) lives in
 `scripts/report_style.py`, shared by the skill's HTML pages — restyle there, not per page.
+
+The same run also writes **`Analysis_Report.md`** beside the HTML: the full report as plain
+text, for NotebookLM or other AI notebooks. It is rendered from the same assembled sections
+(same headings, callouts as labelled blockquotes), and because those tools read text, not
+images, each figure carries its caption plus a data summary from the tables (volcano: counts
+and the top 5 by adj.P), with a top-20 protein table per contrast. Offer it to users who
+want to "ask questions of the report".
+
+And **`Analysis_Report.pdf`**: the same HTML printed through its print stylesheet by a
+headless Chrome/Chromium/Edge (`scripts/html_to_pdf.py`) — the full report with figures, for
+NotebookLM (which reads a PDF's images too) or printing. No browser (usual on HIVE) is not an
+error: the run says so, and `session.py finalize` — on the laptop in hive_remote — makes it
+then, recording `[OK]` or `[INFO]` (with the by-hand route: open the HTML, Print, Save as PDF)
+in MANIFEST.txt.
 
 The page puts the **QC panels above the results** on purpose: a volcano plot is equally
 persuasive whether or not the run was any good, so a reader who meets the biology first

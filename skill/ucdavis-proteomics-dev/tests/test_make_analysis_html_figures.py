@@ -68,7 +68,8 @@ class FigureSelection(unittest.TestCase):
         out = os.path.join(self.session, "report.html")
         base = ["--session", self.session] if session else ["--figures", self.figs]
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
-                            *base, "--out", out, *args], capture_output=True, text=True)
+                            *base, "--out", out, "--no-pdf", *args],
+                           capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(out, encoding="utf-8") as fh:
             return json.loads(r.stdout), fh.read(), r.stderr
@@ -117,7 +118,8 @@ class FigureSelection(unittest.TestCase):
                    f"![c]({outside})\n\n![d](figures/pca.png)\n")
         res, page, _ = self.build()
         self.assertEqual(res["figures_embedded"], 1)
-        self.assertEqual(len(res["figures_rejected"]) + len(res["figures_missing"]), 3)
+        self.assertEqual(res["figures_rejected"], ["https://example.org/x.png"])
+        self.assertEqual(res["figures_missing"], ["secret.png"])     # both refs, one file
         self.assertNotIn("https://example.org", page.split("<body")[1].split("figure not embedded")[0])
 
     def test_no_h2_title_appears_twice(self):
@@ -201,7 +203,8 @@ class Restyle(unittest.TestCase):
                      "## Expert Review Notes\n\n- **Critical:** something\n")
         out = os.path.join(s, "r.html")
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
-                            "--session", s, "--submission", "PROT_0001", "--out", out],
+                            "--session", s, "--submission", "PROT_0001", "--out", out,
+                            "--no-pdf"],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         with open(out, encoding="utf-8") as fh:
@@ -231,7 +234,12 @@ class Restyle(unittest.TestCase):
         self.assertIn(':root[data-theme="dark"]{', p)
         self.assertRegex(p, r"body\{[^}]*background:var\(--bg\)")
         self.assertRegex(p, r"figure\.fig \.imgbox\{[^}]*background:#fff")   # plots stay on white
-        self.assertRegex(p, r"@media print\{[^@]*\.toc[^}]*display:none")
+        pr = p[p.index("@media print{"):]
+        self.assertRegex(pr, r"\.toc,\.toggle,\.lb[^}]*display:none")        # rail, lightbox hidden
+        # paper gets the light tokens even when the reader's screen is dark
+        self.assertIn(':root:not([data-print]),:root[data-theme]{', pr)
+        self.assertRegex(pr, r"--header-bg:#fff;[^}]*--fg:#111|--fg:#111;[^}]*--header-bg:#fff")
+        self.assertRegex(pr, r"figure\.fig,[^{]*\{break-inside:avoid")
 
     def test_header_tiles_callouts_and_figure_cards(self):
         p = self.page

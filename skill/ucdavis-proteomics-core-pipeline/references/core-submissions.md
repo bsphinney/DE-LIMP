@@ -404,7 +404,7 @@ search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.
 ~/core/PROT_0807/session/output/Analysis_Report.html` (its Submission section comes from the
 attached record, never an email address); `to_docx.py` for the Methods only (no Word copy of the report). **Push the finished files back before delivering** — `deliver` copies from `$S`:
 ```
-for f in AI_Analysis_Report.md Analysis_Report.html methods.md methods.docx; do
+for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf methods.md methods.docx; do
   bash scripts/hive_exec.sh --put ~/core/PROT_0807/session/output/$f "$S/output/"; done
 ```
 **Step 8d's expert review always runs**: the result goes to a collaborator.
@@ -449,7 +449,8 @@ submissions) have
 **dereferenced**:
 
 - `Analysis_Report.html` — **required**; exit 2 without it
-- `AI_Analysis_Report.md`, `methods.md/.docx`, `OUTPUT_FILES.md`, `AUDIT.md`,
+- `Analysis_Report.pdf` and `Analysis_Report.md` (the report's PDF and plain-text twin),
+  `AI_Analysis_Report.md`, `methods.md/.docx`, `OUTPUT_FILES.md`, `AUDIT.md`,
   `SAMPLE_QUALITY.md`
 - `tables/`, `figures/`, `reproducibility/`
 - from `search/`: `report.parquet`, `report.pg_matrix.tsv`, `report.pr_matrix.tsv`,
