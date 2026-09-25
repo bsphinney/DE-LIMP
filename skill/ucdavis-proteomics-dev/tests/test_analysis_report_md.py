@@ -83,7 +83,8 @@ class MarkdownTwin(unittest.TestCase):
                      "1. **Something.**\n   - detail\n")
         cls.html_path = os.path.join(out, "Analysis_Report.html")
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
-                            "--session", s, "--submission", "PROT_0001", "--out", cls.html_path],
+                            "--session", s, "--submission", "PROT_0001", "--out", cls.html_path,
+                            "--no-pdf"],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         cls.res = json.loads(r.stdout)

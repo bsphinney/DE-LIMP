@@ -1357,6 +1357,13 @@ images, each figure carries its caption plus a data summary from the tables (vol
 and the top 5 by adj.P), with a top-20 protein table per contrast. Offer it to users who
 want to "ask questions of the report".
 
+And **`Analysis_Report.pdf`**: the same HTML printed through its print stylesheet by a
+headless Chrome/Chromium/Edge (`scripts/html_to_pdf.py`) — the full report with figures, for
+NotebookLM (which reads a PDF's images too) or printing. No browser (usual on HIVE) is not an
+error: the run says so, and `session.py finalize` — on the laptop in hive_remote — makes it
+then, recording `[OK]` or `[INFO]` (with the by-hand route: open the HTML, Print, Save as PDF)
+in MANIFEST.txt.
+
 The page puts the **QC panels above the results** on purpose: a volcano plot is equally
 persuasive whether or not the run was any good, so a reader who meets the biology first
 has already formed a conclusion before seeing the evidence about whether to trust it.

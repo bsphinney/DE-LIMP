@@ -188,6 +188,12 @@ class FullSession(unittest.TestCase):
                      "HOW_TO_SUBMIT.html"):
             self.assertTrue(any(part in ln for ln in lines), part)
 
+    def test_report_pdf_is_recorded_as_info_without_a_report(self):
+        # no output/Analysis_Report.html in this session: not a failure, and it says why
+        lines = manifest_lines(self.p)
+        self.assertTrue(any(ln.startswith("[INFO]    Report PDF") and "has not run" in ln
+                            for ln in lines), lines)
+
     def test_package_files_exist(self):
         for n in ("HOW_TO_SUBMIT.md", "HOW_TO_SUBMIT.html", "sdrf.tsv", "protocols.txt",
                   "files_to_upload.tsv", "prepare_upload.sbatch"):

@@ -277,6 +277,23 @@ def do_finalize(a):
                 deposit = make_deposit.build(p["session_dir"], man, methods_md)
             except Exception as e:
                 man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
+        # The report PDF (html_to_pdf.py): made here when step 9 ran where no browser was --
+        # in hive_remote, on HIVE -- or the HTML changed since. [INFO], never fatal.
+        html_rep = os.path.join(p["output_dir"], "Analysis_Report.html")
+        pdf_rep = os.path.join(p["output_dir"], "Analysis_Report.pdf")
+        if not os.path.isfile(html_rep):
+            man.info("Report PDF (output/Analysis_Report.pdf)",
+                     "no output/Analysis_Report.html to print -- step 9 (make_analysis_html.py) "
+                     "has not run")
+        elif os.path.isfile(pdf_rep) and os.path.getmtime(pdf_rep) >= os.path.getmtime(html_rep):
+            man.ok("Report PDF (output/Analysis_Report.pdf)", "made from the current HTML")
+        else:
+            try:
+                import html_to_pdf
+                ok, note = html_to_pdf.convert(html_rep, pdf_rep)
+            except Exception as e:                  # recorded, never swallowed
+                ok, note = False, f"{type(e).__name__}: {e}"
+            (man.ok if ok else man.info)("Report PDF (output/Analysis_Report.pdf)", note)
         man.write(p["manifest_txt"], "Session export manifest")
     else:
         with open(p["manifest_txt"], "w") as fh:

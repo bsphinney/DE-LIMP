@@ -143,6 +143,12 @@ class Manifest:
         t = f" ({elapsed:.1f}s)" if elapsed is not None else ""
         self.lines.append(f"[OK]      {name:<50}{t}" + (f" -- {note}" if note else ""))
 
+    def info(self, name, why):
+        """Not made, and not a failure either (e.g. no browser to print the PDF): says why
+        and what to do instead. Not counted as skipped."""
+        why = " ".join(str(why).split())
+        self.lines.append(f"[INFO]    {name:<50} -- {why}")
+
     def skip(self, name, why):
         why = " ".join(str(why).split())
         if len(why) > 200:
@@ -170,7 +176,7 @@ class Manifest:
         with open(path, "w") as fh:
             fh.write(f"{title}\n{'=' * len(title)}\n"
                      f"Written {datetime.datetime.now().isoformat(timespec='seconds')} by "
-                     f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why.\n\n"
+                     f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why; [INFO] = not produced, not a failure, and what to do instead.\n\n"
                      + "\n".join(self.lines) + "\n")
         return path
 
