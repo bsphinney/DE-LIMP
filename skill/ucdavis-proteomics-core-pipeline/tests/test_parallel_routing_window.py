@@ -40,6 +40,8 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 
 import run_search  # noqa: E402
 import diann_parallel as dp  # noqa: E402
@@ -397,8 +399,8 @@ class Step1bRunsTests(unittest.TestCase):
 
     def _run_step1b(self, d, out):
         log = os.path.join(d, "probed.txt")
-        env = {k: v for k, v in os.environ.items() if k != "DOTNET_ROOT"}
-        env["FAKE_DIANN_LOG"] = log
+        env = job_env(d, base={k: v for k, v in os.environ.items() if k != "DOTNET_ROOT"},
+                      FAKE_DIANN_LOG=log)
         p = subprocess.run(["bash", os.path.join(out, "step1b_window.sbatch")], cwd=out,
                            env=env, capture_output=True, text=True, timeout=120)
         probed = _read(log).split() if os.path.exists(log) else []

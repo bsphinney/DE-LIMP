@@ -33,6 +33,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 sys.path.insert(0, HERE)
 
 import make_deposit as md                            # noqa: E402
@@ -143,8 +144,12 @@ def dia_session(root, conditions=True, de=True, fasta=True, raw_reachable=True):
 
 
 def finalize(sd, *extra):
+    # job_env: finalize logs the run (record_run.py) and posts "analysis complete" to the Core's
+    # Slack channel, and a test must never do either (or ssh to HIVE to relay the post).
+    # test_slack_notify.py covers both, against fakes.
     return subprocess.run([PY, os.path.join(SCRIPTS, "session.py"), "finalize", "--dir", sd,
-                           *extra], capture_output=True, text=True)
+                           *extra], capture_output=True, text=True,
+                          env=job_env(os.path.dirname(sd)))
 
 
 def read_sdrf(path):
@@ -161,6 +166,52 @@ def col(header, rows, name, nth=0):
 def manifest_lines(p):
     with open(p["manifest_txt"]) as fh:
         return [ln for ln in fh.read().splitlines() if ln.startswith("[")]
+
+
+class ZipLeavesQuantOut(unittest.TestCase):
+    """DIA-NN's per-run .quant intermediates (~30 MB each on HIVE) live inside the session since
+    the single-shot search's --temp moved to <search out>/quant: ~3 GB of zip for 100 runs."""
+
+    def test_quant_files_and_the_quant_dir_stay_out_of_the_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = dia_session(tmp)
+            for rel in ("quant/HeLa_ctrl_01.quant", "quant/HeLa_ctrl_02.quant",
+                        "quant/nested/extra.bin", "quant_step4/HeLa_trt_01.quant"):
+                write(os.path.join(p["search_out"], rel), "q" * 64)
+            write(os.path.join(p["de_dir"], "quant", "notes.txt"), "not DIA-NN's")  # kept
+            r = finalize(p["session_dir"], "--zip")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            names = zipfile.ZipFile(res["zip"]).namelist()
+            self.assertFalse([n for n in names if n.endswith(".quant")], names)
+            self.assertFalse([n for n in names if "/output/search/quant/" in n], names)
+            self.assertTrue(any(n.endswith("output/search/report.parquet") for n in names))
+            self.assertTrue(any(n.endswith("output/tables/quant/notes.txt") for n in names))
+            label = "DIA-NN .quant intermediates (kept on disk where they are)"
+            # 3 in quant/, plus quant_step4/HeLa_trt_01.quant and dia_session's quant_step2/a.quant
+            self.assertEqual(res["zip_excluded"][label], 5)
+            for rel in ("quant/HeLa_ctrl_01.quant", "quant_step4/HeLa_trt_01.quant"):
+                self.assertTrue(os.path.isfile(os.path.join(p["search_out"], rel)))
+
+    def test_predicted_library_stays_out_but_empirical_libraries_go_in(self):
+        # 687 MB for one 15-file Lumos session; rebuilt exactly from the FASTA + params.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = dia_session(tmp)
+            write(os.path.join(p["search_out"], "step1.predicted.speclib"), "p" * 64)
+            write(os.path.join(p["search_out"], "diann_lib.predicted.speclib"), "p" * 64)
+            write(os.path.join(p["search_out"], "step3_empirical.parquet"), "e" * 64)
+            write(os.path.join(p["search_out"], "custom.speclib"), "c" * 64)
+            r = finalize(p["session_dir"], "--zip")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            res = json.loads(r.stdout)
+            names = zipfile.ZipFile(res["zip"]).namelist()
+            self.assertFalse([n for n in names if n.endswith(".predicted.speclib")], names)
+            self.assertTrue(any(n.endswith("output/search/step3_empirical.parquet") for n in names))
+            self.assertTrue(any(n.endswith("output/search/custom.speclib") for n in names))
+            label = [k for k in res["zip_excluded"] if k.startswith("predicted spectral libraries")]
+            self.assertEqual(len(label), 1, res["zip_excluded"])
+            self.assertEqual(res["zip_excluded"][label[0]], 2)
+            self.assertTrue(os.path.isfile(os.path.join(p["search_out"], "step1.predicted.speclib")))
 
 
 class FullSession(unittest.TestCase):
@@ -289,6 +340,7 @@ class FullSession(unittest.TestCase):
     def test_prep_script_refuses_outside_slurm(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("SLURM_")}
         env.pop("RUN_HERE", None)
+        # job_env: not a search job (the deposit prep script has no job-end hook)
         r = subprocess.run(["bash", os.path.join(self.pkg, "prepare_upload.sbatch")],
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 2)
@@ -360,6 +412,7 @@ class RunningThePrepScript(unittest.TestCase):
             env = {k: v for k, v in os.environ.items() if not k.startswith("SLURM_")}
             env["RUN_HERE"] = "1"
             script = os.path.join(p["deposit_dir"], "prepare_upload.sbatch")
+            # job_env: not a search job (the deposit prep script has no job-end hook)
             r = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
             stage = os.path.join(p["deposit_dir"], "upload_staging")

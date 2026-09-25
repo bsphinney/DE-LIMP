@@ -125,6 +125,18 @@ def main():
     # present in all 18 runs vs DIA-NN's 70.1%. Use --no-mbr to reproduce Seer's default.
     ap.add_argument("--mbr", action=argparse.BooleanOptionalAction, default=True,
                     help="match-between-runs (default: on, for parity with the DIA-NN two-pass chain)")
+    ap.add_argument("--no-notify", action="store_true",
+                    help="no Slack post from the chain's jobs (same as SKILL_SLACK=0); the "
+                         "run log and the FRAN hand-over still happen. "
+                         "See references/notifications.md")
+    ap.add_argument("--no-fran", action="store_true",
+                    help="accepted for symmetry: this chain never stages for FRAN from a job "
+                         "(no completeness guard); step 7c does")
+    ap.add_argument("--fran-name", help="the session's descriptive name, for stage --name")
+    qcx = ap.add_mutually_exclusive_group()
+    qcx.add_argument("--qc", action="store_true",
+                     help="an instrument QC / standard run: never staged from a job")
+    qcx.add_argument("--not-qc", action="store_true", help="not a QC run: passed on to stage")
     a = ap.parse_args()
 
     files = [ln.strip() for ln in open(a.raw_list) if ln.strip()]
@@ -189,7 +201,22 @@ def main():
     q = dict(partition=part, account=acct, qos=qos)
     q_array = dict(partition=part_a, account=acct_a, qos=qos_a)
 
-    def write(name, text):
+    # The job-end hook (notify_slack.wrap_job_script, the one definition: run log -> FRAN ->
+    # Slack): step 3 ends the search and reports success or failure (and stages a finished
+    # search for FRAN); steps 1 and 2 report only a failure, because the steps after them wait
+    # on afterok and would never start to say so. The array reports its first failure only.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import notify_slack
+
+    def write(name, text, stage=None, hours=None, final=False):
+        if stage:
+            # never fran_guarded: step 3 checks only a file COUNT, not a complete report, so a
+            # finished Radiant search is left to step 7c's check + stage
+            text = notify_slack.wrap_job_script(text, out, final=final, time_limit_h=hours,
+                                                stage=stage, slack=not a.no_notify,
+                                                fran=not a.no_fran, fran_name=a.fran_name,
+                                                qc=(True if a.qc else
+                                                    False if a.not_qc else None)).rstrip("\n")
         p = os.path.join(D, name)
         with open(p, "w") as fh:
             fh.write(text + "\n")
@@ -214,7 +241,7 @@ def main():
             f'if [ ! -s {shlex.quote(lib)} ]; then',
             f'  echo "expected {os.path.basename(lib)}; DIA-NN wrote:"; ls -la {shlex.quote(D)}',
             f'  exit 1',
-            f'fi']))
+            f'fi']), stage="step 1/3 library prediction", hours=a.libpred_time)
 
     # ---- step 2: one RadiantDIA per file (array) --------------------------------
     n = len(files)
@@ -240,7 +267,8 @@ def main():
         f'echo "Step 2/3 Radiant search, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         pick,
         f'{prefix} RadiantDIA {cp(lib)} {cp(a.fasta)} {cp(a.config)} "$FILE" '
-        f'--output-folder {cres}/{rsub}']))
+        f'--output-folder {cres}/{rsub}']),
+        stage="step 2/3 Radiant search (array)", hours=a.time_per_file)
 
     # ---- step 3: ONE Fulcrum job over all per-file results ----------------------
     # reuse_existing is what makes this a rescoring pass rather than a re-search.
@@ -289,7 +317,8 @@ def main():
         f'echo "found $N per-file result(s), expected {n}"',
         f'if [ "$N" -lt {n} ]; then echo "MISSING per-file results — not rescoring a '
         f'partial set"; exit 1; fi',
-        f'{prefix} fulcrum -v --toml-file {cres}/fulcrum_rescore.toml']))
+        f'{prefix} fulcrum -v --toml-file {cres}/fulcrum_rescore.toml']),
+        stage="step 3/3 Fulcrum rescoring", hours=a.fulcrum_time, final=True)
 
     print(json.dumps({
         "mode": "radiant_parallel_3step",

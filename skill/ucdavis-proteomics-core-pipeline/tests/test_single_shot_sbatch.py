@@ -40,6 +40,8 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
+from job_env import job_env  # noqa: E402  (env for running job scripts)
 
 import diann_parallel  # noqa: E402
 import run_search  # noqa: E402
@@ -153,8 +155,7 @@ class _Workspace:
         return os.path.join(self.d, "diann_job_2_search.sh")
 
     def run_job(self, script, **env):
-        e = dict(os.environ, FAKE_PY=sys.executable)
-        e.update({k: str(v) for k, v in env.items()})
+        e = job_env(self.d, FAKE_PY=sys.executable, **env)
         return subprocess.run(["bash", script], capture_output=True, text=True, env=e)
 
     def run_inline(self, **env):

@@ -32,8 +32,10 @@ Two subcommands:
   #   -> prints JSON with every canonical path + "placement"; route later steps into them
 
   # at the end — ensure the publication Methods, write the deposit package
-  # (output/DATA_SUBMISSION, see make_deposit.py), README + MANIFEST.txt, optionally zip
-  python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit]
+  # (output/DATA_SUBMISSION, see make_deposit.py), README + MANIFEST.txt, optionally zip,
+  # then log the run (record_run.py) and post "analysis complete" to the Core's Slack channel
+  # (notify_slack.py)
+  python3 session.py finalize --dir <session_dir> [--zip] [--no-deposit] [--no-notify]
 
 Raw MS files are NOT copied (they're huge and live elsewhere) — their paths are
 recorded in input/raw_files.txt instead.
@@ -236,6 +238,68 @@ def _load(path):
     except Exception: return None
 
 
+def _append_manifest(path, level, name, note):
+    """One more line in MANIFEST.txt, in make_deposit.Manifest's layout: [OK] made or sent,
+    [SKIPPED] attempted and failed, [INFO] a notice that is not an export part (the orchestrator
+    does not relay it as missing). The note is flattened to one line -- a \r or \n in an error
+    would otherwise start a line that is not a MANIFEST entry."""
+    note = " ".join(str(note).replace("\r", " ").replace("\n", " ").split())
+    if len(note) > 200:
+        note = note[:197] + "..."
+    with open(path, "a") as fh:
+        fh.write(f"{'[' + level + ']':<10}{name:<50} -- {note}\n")
+
+
+def _finish_hooks(a, session_dir, zip_path):
+    """After the zip: log the run in the Core's run log (record_run.py analysis-done, when this
+    install has it), then post "analysis complete" to the Core's Slack channel -- in that order,
+    so the post can say whether the run was logged. Never fatal (notify_slack.py rule 1).
+    Returns {"run_log", "slack": {"sent", "level", "detail"}, "manifest": [(level, part, note)]};
+    the words are notify_slack's (run_log_manifest / slack_manifest), which never name a path or
+    a group -- the zip goes to collaborators."""
+    try:
+        import notify_slack
+    except Exception as e:                      # recorded, never swallowed
+        why = f"notify_slack.py could not be loaded: {type(e).__name__}"
+        sys.stderr.write(f"[session] {why}\n")
+        return {"run_log": None, "slack": {"sent": False, "level": "SKIPPED", "detail": why},
+                "manifest": [("SKIPPED", "Core run log + Slack notification", why)]}
+    run_log = notify_slack.record_run("analysis-done", session=session_dir)
+    rl = notify_slack.run_log_manifest(run_log)
+    if a.no_notify:
+        sent, detail = False, "--no-notify was given"
+    else:
+        sent, detail = notify_slack.analysis_done(session_dir, zip_path, run_log=run_log)
+    sl = notify_slack.slack_manifest(sent, detail)
+    # The terminal (the Core member's own) gets the full text; MANIFEST.txt, which travels in the
+    # zip to collaborators, gets only the reason and the kind of failure.
+    full = (run_log or {}).get("detail") if (run_log or {}).get("error") else None
+    sys.stderr.write(f"[session] run log: {full or rl[2]}\n[session] slack: {sl[2]}\n")
+    return {"run_log": run_log, "slack": {"sent": bool(sent), "level": sl[0], "detail": sl[2]},
+            "manifest": [rl, sl]}
+
+
+def _zip_manifest(zip_path, arcname, text, pre_hook):
+    """Put MANIFEST.txt into the zip LAST. If that fails, retry once with the manifest as it was
+    before the run-log/Slack lines: a zip with no MANIFEST.txt at all would be a regression
+    (CLAUDE.md rule 4 -- a missing part must be visible). Returns what happened, for the result."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(arcname, text)
+        return "added"
+    except Exception as e:
+        first = f"{type(e).__name__}: {e}"
+    if pre_hook is None:
+        return f"MISSING: {first}; no earlier copy of MANIFEST.txt to fall back on"
+    try:
+        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(arcname, pre_hook)
+        return f"added without the run-log/Slack lines ({first})"
+    except Exception as e:
+        return f"MISSING: {first}; retry: {type(e).__name__}: {e}"
+
+
 def do_finalize(a):
     p = paths_for(a.dir)
     if not os.path.isdir(p["session_dir"]):
@@ -395,19 +459,81 @@ def do_finalize(a):
                  "output/DATA_SUBMISSION/upload_staging (raw archives staged for upload)"}
         archive = sdir + ".zip"
         excluded = {label: 0 for label in skips.values()}
+        manifest_txt = os.path.abspath(p["manifest_txt"])
+        # DIA-NN's per-run .quant intermediates: ~30 MB each (measured on HIVE, 28-34 MB), so
+        # ~3 GB for a 100-file cohort, and nothing a reader of the zip can use. The single-shot
+        # search writes them to <search out>/quant (its --temp, inside the session since #79);
+        # the 5-step chain to quant_step2/ and quant_step4/. Covered: every *.quant file anywhere
+        # in the session, plus the whole `quant` directory directly under any search out dir (the
+        # session's output/search, or a folder holding a search_provenance.json). They stay on
+        # disk where they are. The key is short on purpose: the finalize JSON carries it and the
+        # agent relays it; which files it covers is said here.
+        quant_label = "DIA-NN .quant intermediates (kept on disk where they are)"
+        n_quant = 0
+        # The in-silico predicted library (step1.predicted.speclib, <lib>.predicted.speclib):
+        # 687 MB for one 15-file Lumos session on HIVE. It is regenerated exactly from the FASTA,
+        # the pinned engine and the params the zip already holds, so it carries nothing a reader
+        # needs. Empirical libraries (.parquet/.speclib without "predicted") stay in.
+        # "where they are": a predicted library may sit anywhere in the session, not only in
+        # the search out dir (a seeded chain, a Radiant library dir).
+        speclib_label = ("predicted spectral libraries (*.predicted.speclib anywhere in the "
+                         "session; rebuilt from the FASTA + params, kept on disk where they are)")
+        n_speclib = 0
+
+        def is_search_out(d):
+            return (os.path.abspath(d) == os.path.abspath(p["search_out"])
+                    or os.path.isfile(os.path.join(d, "search_provenance.json")))
+
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
             for root, dirs, files in os.walk(sdir):
                 if os.path.abspath(root) in skips:
                     excluded[skips[os.path.abspath(root)]] = len(files) + len(dirs)
                     dirs[:] = []
                     continue
+                if is_search_out(root) and "quant" in dirs:
+                    dirs.remove("quant")
+                    n_quant += sum(len(fs) for _, _, fs in os.walk(os.path.join(root, "quant")))
                 for fn in files:
                     full = os.path.join(root, fn)
-                    if os.path.islink(full):
+                    if fn.endswith(".quant"):
+                        n_quant += 1
                         continue
+                    if fn.endswith(".predicted.speclib"):
+                        n_speclib += 1
+                        continue
+                    if os.path.islink(full) or os.path.abspath(full) == manifest_txt:
+                        continue                 # MANIFEST.txt goes in last, below
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
+        excluded[quant_label] = n_quant
+        excluded[speclib_label] = n_speclib
         result["zip"] = archive
         result["zip_excluded"] = excluded
+
+    # The run log and Slack go once everything they point at exists -- after the zip. Their
+    # outcomes are the last two lines of MANIFEST.txt, so the zip's copy (added now) says them.
+    try:
+        with open(p["manifest_txt"]) as fh:
+            pre_hook = fh.read()
+    except OSError:
+        pre_hook = None
+    hooks = _finish_hooks(a, p["session_dir"], result.get("zip"))
+    result["run_log"], result["slack"] = hooks["run_log"], hooks["slack"]
+    for level, part, note in hooks["manifest"]:
+        try:
+            _append_manifest(p["manifest_txt"], level, part, note)
+        except Exception as e:
+            sys.stderr.write(f"[session] could not record '{part}' in MANIFEST.txt: {e}\n")
+    if a.zip:
+        try:
+            with open(p["manifest_txt"]) as fh:
+                text = fh.read()
+        except OSError:
+            text = pre_hook
+        result["zip_manifest"] = _zip_manifest(
+            result["zip"], os.path.join(os.path.basename(p["session_dir"]), "MANIFEST.txt"),
+            text if text is not None else "", pre_hook)
+        if result["zip_manifest"] != "added":
+            sys.stderr.write(f"[session] MANIFEST.txt in the zip: {result['zip_manifest']}\n")
 
     print(json.dumps(result, indent=2))
 
@@ -517,6 +643,9 @@ def main():
     f.add_argument("--no-deposit", action="store_true",
                    help="skip the repository-deposit package (output/DATA_SUBMISSION); the "
                         "publication Methods are still ensured")
+    f.add_argument("--no-notify", action="store_true",
+                   help="do not post 'analysis complete' to the Core's Slack channel (same as "
+                        "SKILL_SLACK=0; see references/notifications.md)")
     f.set_defaults(func=do_finalize)
     a = ap.parse_args()
     a.func(a)

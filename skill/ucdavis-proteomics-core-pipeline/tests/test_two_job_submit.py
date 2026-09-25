@@ -30,6 +30,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, HERE)
 
 import test_single_shot_mass_accuracy as ss  # noqa: E402  (fake DIA-NN + cohort fixtures)
+from job_env import job_env  # noqa: E402  (env for running generated scripts)
 
 FAKE_SBATCH = r"""#!/bin/bash
 for last; do :; done
@@ -69,8 +70,8 @@ class TwoJobSubmit(unittest.TestCase):
             fake = os.path.join(d, "fakebin")
             os.makedirs(fake)
             ss.fx._exe(os.path.join(fake, "sbatch"), FAKE_SBATCH)
-            env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""),
-                       SB_COUNTER=os.path.join(d, "counter"))
+            env = job_env(d, PATH=fake + os.pathsep + os.environ.get("PATH", ""),
+                          SB_COUNTER=os.path.join(d, "counter"))
             elsewhere = tempfile.mkdtemp(dir=d)
             r = subprocess.run(["bash", submit], capture_output=True, text=True, env=env,
                                cwd=elsewhere, timeout=60)

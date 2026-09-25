@@ -564,6 +564,7 @@ def run_diann_parallel(cmd, params, files, fasta, out, threads, a):
                       ("--time-per-file", getattr(a, "time_per_file", None))):
         if val:
             argv += [flag, str(val)]
+    argv += _job_end_argv(a)
     res = subprocess.run(argv, capture_output=True, text=True)
     if res.stderr:
         sys.stderr.write(res.stderr)
@@ -857,11 +858,13 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
         stem = os.path.splitext(os.path.abspath(sbatch))[0]
         lib_sh, srch_sh = stem + "_1_lib.sh", stem + "_2_search.sh"
         emit_sbatch(lib_sh, lib_job, out, threads, job="diann_libpred", preamble=dnet,
-                    submit_hint=False, **queue)
+                    submit_hint=False, notify="fail",
+                    stage="library prediction (job 1 of 2)", **queue)
         # The measurement belongs to the SEARCH job: a search requeued against the same library
         # measures again rather than trusting a massacc.txt from a run it cannot vouch for.
         emit_sbatch(srch_sh, search_job, out, threads, job="diann_search", preamble=dnet,
-                    hours=search_job_hours(measure_lines), submit_hint=False, **queue)
+                    hours=search_job_hours(measure_lines), submit_hint=False,
+                    stage="search (job 2 of 2)", fran_guarded=True, **queue)
         submit = os.path.join(os.path.abspath(out), "submit.sh")
         jobs_txt = os.path.join(os.path.abspath(out), "jobs.txt")
         # jobs.txt, as the 5-step chain's submit.sh writes it: `watch_run.sh --all <out>`
@@ -886,7 +889,7 @@ def run_diann(cmd, params, files, fasta, out, threads, sbatch, acquisition="", q
 
     if sbatch:                          # libfree + sbatch returned above, so this is onecmd
         emit_sbatch(sbatch, one_job, out, threads, job="diann_search", preamble=dnet,
-                    hours=search_job_hours(measure_lines), **queue)
+                    hours=search_job_hours(measure_lines), fran_guarded=True, **queue)
         return {"engine": "diann", "report": report, "submitted": sbatch,
                 "ran": False, "dda": bool(dda), "raw_dotnet": bool(dnet), **ma_rec}
     pre = (dnet + " ") if dnet else ""
@@ -1132,6 +1135,7 @@ def run_radiant_parallel(tools, params, files, fasta, out, threads, a, library=N
             argv += [flag, str(val)]
     if getattr(a, "mbr", False):
         argv.append("--mbr")
+    argv += _job_end_argv(a)
     res = subprocess.run(argv, capture_output=True, text=True)
     if res.stderr:
         sys.stderr.write(res.stderr)
@@ -1837,9 +1841,37 @@ def search_job_hours(measure_lines):
     return SEARCH_WALL_HOURS + _diann_parallel_mod().PROBE_WALL_HOURS
 
 
+def _qc_choice(a):
+    """--qc -> True, --not-qc -> False, neither -> None (FRAN's stage decides from the names)."""
+    return True if getattr(a, "qc", False) else False if getattr(a, "not_qc", False) else None
+
+
+def _job_end_argv(a):
+    """The job-end choices as flags for the chain generators (diann/radiant_parallel.py)."""
+    argv = (["--no-notify"] if getattr(a, "no_notify", False) else []) + \
+           (["--no-fran"] if getattr(a, "no_fran", False) else [])
+    if getattr(a, "fran_name", None):
+        argv += ["--fran-name", a.fran_name]
+    qc = _qc_choice(a)
+    return argv + ({True: ["--qc"], False: ["--not-qc"], None: []}[qc])
+
+
+def _job_end_plan(a, engine):
+    """The job-end hook's plan for this search (notify_slack.job_end_plan), for the record."""
+    try:
+        import notify_slack
+        return notify_slack.job_end_plan(slack=not getattr(a, "no_notify", False),
+                                         fran=not getattr(a, "no_fran", False),
+                                         fran_guarded=(engine == "diann"),
+                                         fran_name=getattr(a, "fran_name", None),
+                                         qc=_qc_choice(a))
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def emit_sbatch(path, command, out, threads, job, preamble="",
                 partition=None, account=None, qos=None, mem="64G", hours=SEARCH_WALL_HOURS,
-                submit_hint=True):
+                submit_hint=True, notify="final", stage="search", fran_guarded=False):
     """Emit a minimal SLURM script (login-node-safe). Orchestrator submits it.
     The queue is DETECTED from the submitting user's own SLURM associations — see
     slurm_queue() — unless the caller passes one, which then wins. Every caller must forward
@@ -1847,7 +1879,15 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
     did not, so `--partition low --account publicgrp --qos publicgrp-low-qos` came out as
     genome-center-grp/high in both job headers and had to be hand-edited before submission.
     `preamble` runs before the command (e.g. the DOTNET_ROOT exports that let DIA-NN 2.6
-    read Thermo .raw)."""
+    read Thermo .raw).
+
+    `notify` is the job-end hook (notify_slack.wrap_job_script: run log -> FRAN -> Slack):
+    "final" for the job that ends the search (success and failure; FRAN on success), "fail" for
+    a job another waits on with afterok (a failure only -- the search stops there), None for no
+    hook. --no-notify / SKILL_SLACK=0 at generation switch off only the Slack post; --no-fran /
+    FRAN_DEPOSIT=off at generation, the FRAN hand-over. `fran_guarded`: this job ends with a
+    completeness guard (report_guard), so a finished search may be staged for FRAN from the job;
+    without one it is left to step 7c."""
     part, acct, q = slurm_queue(partition, account, qos)
     pre = (preamble + "\n") if preamble else ""
     lines = [
@@ -1869,6 +1909,13 @@ def emit_sbatch(path, command, out, threads, job, preamble="",
         lines.append("#SBATCH --requeue")
     lines += ["set -euo pipefail", f"cd {shlex.quote(os.path.abspath(out))}", f"{pre}{command}", ""]
     script = "\n".join(lines)
+    if notify:
+        import notify_slack
+        script = notify_slack.wrap_job_script(
+            script, os.path.abspath(out), final=(notify == "final"), time_limit_h=hours,
+            stage=stage, slack=not getattr(a_globals, "no_notify", False),
+            fran=not getattr(a_globals, "no_fran", False), fran_guarded=fran_guarded,
+            fran_name=getattr(a_globals, "fran_name", None), qc=_qc_choice(a_globals))
     with open(path, "w") as fh:
         fh.write(script)
     print(f"  [sbatch] wrote {path} (partition={part or 'default'}, "
@@ -1905,6 +1952,22 @@ def main():
                     help="Radiant: match-between-runs / two-pass (default: on, for "
                          "parity with the DIA-NN two-pass chain). --no-mbr = single-pass.")
     ap.add_argument("--sbatch", help="emit an sbatch script at this path instead of running inline")
+    ap.add_argument("--no-notify", action="store_true",
+                    help="no Slack post from the generated job(s) when the search ends or "
+                         "fails (same as SKILL_SLACK=0). The jobs still log the run and hand a "
+                         "finished Core search to FRAN; see references/notifications.md")
+    ap.add_argument("--no-fran", action="store_true",
+                    help="never hand this search to FRAN from its jobs (same as FRAN_DEPOSIT=off "
+                         "when generating; baked into the job, because a hive_remote shell's "
+                         "environment does not reach it)")
+    ap.add_argument("--fran-name",
+                    help="the session's descriptive name: FRAN's corpus name for this search, "
+                         "handed to the job's `fran_deposit.py stage --name`")
+    qc = ap.add_mutually_exclusive_group()
+    qc.add_argument("--qc", action="store_true",
+                    help="an instrument QC / standard run: the job never stages it for FRAN")
+    qc.add_argument("--not-qc", action="store_true",
+                    help="not a QC run, whatever its name (passed on to stage as --not-qc)")
     ap.add_argument("--parallel-threshold", type=int, default=5,
                     help="DIA-NN: use the 5-step SLURM chain above this many files (default 5)")
     ap.add_argument("--no-parallel", action="store_true",
@@ -2146,6 +2209,11 @@ def main():
             json.dump({"engine": engine, "version": ver_rec["value"],
                        "engine_version": ver_rec, "resolved_command": cmd,
                        "params_file": a.params,
+                       # read back by notify_slack.py (instrument + acquisition in the post)
+                       "bundle": os.path.abspath(a.bundle),
+                       # what the jobs' end hook will do, as baked into them at generation
+                       # (only DIA-NN routes have a completeness guard to stage from)
+                       "job_end_hook": _job_end_plan(a, engine),
                        "resolved_params_file": (rp or {}).get("file") or a.params,
                        "resolved_params_produced": ((rp or {}).get("produced")
                                                     or "before the search (the params file as given)"),

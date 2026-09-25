@@ -171,6 +171,7 @@ class Harness(unittest.TestCase):
         return e
 
     def run_script(self, script, *args, **env):
+        # job_env: not a search job (copies of the skill's own hive_exec.sh / hive_path.sh)
         return subprocess.run(["bash", script, *args], capture_output=True, text=True,
                               env=self.env(**env), cwd=self.d, timeout=60)
 
