@@ -116,8 +116,9 @@ def make_search(root, name="search_out", report=True, runs=RUNS, secrets=False, 
             "n_contaminants_appended": 381, "n_contaminants_already_present": 0,
             "contaminant_set": "universal", "diann_cont_quant_exclude": "Cont_",
             "digestion_enzymes_used": ["trypsin", "lysc"]}
-    if clean_db:
+    if clean_db:        # a current sidecar: both rules (fetch_fasta.py 2.8.0 on)
         meta["contaminant_target_rule"] = "drop contaminants identical to a target protein"
+        meta["min_unique_peptides"] = 2
     write(fasta + ".meta.json", json.dumps(meta))
     write(os.path.join(out, "search_provenance.json"), json.dumps({
         "engine": "diann", "version": "2.7.0",

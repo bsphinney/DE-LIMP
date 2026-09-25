@@ -1435,8 +1435,11 @@ HBB +10.5 log2 in antibody IPs). The counts land in `de_provenance.json` (`conta
 contaminant share of the precursor signal — report a high or group-confounded share in the
 Data Quality Notes. `--keep-contaminants` opts out (only when the user asks). Pass
 `--fasta-meta`: a database built before target-identical contaminants were removed holds
-real proteins (ACTB, EEF1A1, keratins) only as `Cont_` entries, so the filter removes them
-too — the run then prints a `CAUTION`, and the fix is to rebuild the FASTA and re-search.
+real proteins (ACTB, EEF1A1, keratins) only as `Cont_` entries, and one built by the identity
+rule alone (fetch_fasta.py before 2.8.0) still holds near-identical ones (bovine EEF1A1 and
+YWHAZ for mouse), so the filter removes those proteins too — the run then prints a `CAUTION`
+naming them, AUDIT.md names them from the searched FASTA, and the fix is to rebuild the FASTA
+with fetch_fasta.py from 2.8.0 on and re-search. Tell the collaborator which proteins.
 **`dpc` (limpa) is THE DEFAULT — use it unless the user asks otherwise or the data
 cannot support it.** limpa models the detection-probability curve and quantifies from
 precursor intensities directly, so it uses the whole measurement rather than a

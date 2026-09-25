@@ -1168,10 +1168,12 @@ def target_contaminants(meta, keratin_sample=False):
     `dropped` -- they are not possible contamination there. `kept_as_contaminant` keeps
     them: an analyte excluded from quant is a loss either way.
 
-    `legacy_note` is set for a sidecar written BEFORE the overlap check (no
-    contaminant_target_rule, contaminants present) -- exactly the databases that lost ACTB,
-    EEF1A1 and KRT8. Those carry no list, so it is re-found in the FASTA the sidecar
-    describes (see _legacy_overlap) and returned as `kept_as_contaminant`.
+    `legacy_note` is set for a database built by an older rule (sidecar_state): "legacy",
+    written BEFORE the overlap check -- exactly the databases that lost ACTB, EEF1A1 and KRT8
+    -- or "identity_only", built by the identity rule alone, which kept the near-identical
+    entries (bovine EEF1A1 / YWHAZ against mouse). Neither carries the list, so it is
+    re-found in the FASTA the sidecar describes (_legacy_overlap / _identity_only_overlap)
+    and returned as `kept_as_contaminant`. `state` is sidecar_state(meta).
     """
     meta = meta if isinstance(meta, dict) else {}
     dropped = [r for r in (meta.get("contaminants_dropped_as_target") or [])
@@ -1179,8 +1181,12 @@ def target_contaminants(meta, keratin_sample=False):
     kept = [r for r in (meta.get("contaminants_identical_to_target_kept") or [])
             if isinstance(r, dict)]
     legacy_note = None
-    if _is_legacy_sidecar(meta):
+    state = sidecar_state(meta)
+    if state == "legacy":
         kept, legacy_note = _legacy_overlap(meta)
+    elif state == "identity_only":
+        near, legacy_note = _identity_only_overlap(meta)
+        kept = kept + near
     if keratin_sample:
         dropped = [r for r in dropped if not is_keratin_gene(r.get("gene"))]
     genes = {r["gene"].upper() for r in dropped if r.get("gene")}
@@ -1188,7 +1194,7 @@ def target_contaminants(meta, keratin_sample=False):
             if a}
     return {"organism": meta.get("organism") or "", "dropped": dropped,
             "kept_as_contaminant": kept, "genes": genes, "accessions": accs,
-            "legacy_note": legacy_note}
+            "legacy_note": legacy_note, "state": state}
 
 
 def seen_only_as_cont(kept, groups):
@@ -1228,12 +1234,102 @@ def lost_to_contaminants_message(tc, seen=()):
     return msg
 
 
+def sidecar_state(meta):
+    """Which rule built the database a sidecar describes -- the ONE definition; contaminants.R's
+    sidecar_state() mirrors it (tests/test_run_de_contaminants.py keeps them equal):
+      "legacy"         no contaminant_target_rule: built before the overlap check;
+      "identity_only"  the rule, but no min_unique_peptides (before skill 2.8.0) or 0: built by
+                       the identity rule alone, so near-identical entries (bovine EEF1A1 /
+                       YWHAZ vs mouse) are still Cont_ entries;
+      "current"        both rules, --keep-target-contaminants (its kept list says what), or a
+                       database that holds no contaminants."""
+    meta = meta if isinstance(meta, dict) else {}
+    if not bool(meta.get("n_contaminants_appended") or meta.get("n_contaminants_already_present")
+                or (meta.get("contaminant_set") or "none") != "none"):
+        return "current"
+    if "contaminant_target_rule" not in meta:
+        return "legacy"
+    if meta.get("contaminant_target_rule") == KEEP_TARGET_CONTAMINANTS_RULE:
+        return "current"
+    return "identity_only" if not meta.get("min_unique_peptides") else "current"
+
+
 def _is_legacy_sidecar(meta):
     """Written before the overlap check, and the database does hold contaminants."""
-    if "contaminant_target_rule" in meta:
-        return False
-    return bool(meta.get("n_contaminants_appended") or meta.get("n_contaminants_already_present")
-                or (meta.get("contaminant_set") or "none") != "none")
+    return sidecar_state(meta) == "legacy"
+
+
+# The advice both older-database notes end with (contaminants.R's REBUILD_ADVICE is its R twin).
+REBUILD_ADVICE = ("Rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core "
+                  "rebuilds its shared MRS human and mouse FASTAs with it) and re-search.")
+NEAR_IDENTICAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "near_identical_contaminants.json")
+
+
+def near_identical_measured(meta):
+    """(n, named, date) for this organism and contaminant set from
+    near_identical_contaminants.json (shared with contaminants.R), or None."""
+    try:
+        with open(NEAR_IDENTICAL_FILE, encoding="utf-8") as fh:
+            m = json.load(fh)
+        if (meta.get("contaminant_set") or "") != m.get("contaminant_set"):
+            return None
+        e = m["by_taxid"].get(str(int(meta.get("taxid") or 0)))
+        return (e["n"], e["named"], m.get("measured")) if e else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _recheck(meta):
+    """(the searched FASTA's records, None) when it is still there AND still the one searched
+    (sha256), else (None, why not)."""
+    path, sha = meta.get("fasta"), meta.get("sha256")
+    if not path or not os.path.isfile(path):
+        return None, f"the searched FASTA ({path or 'path not recorded'}) is no longer readable"
+    # Caught HERE, and named: left to propagate, an unreadable FASTA reached the auditors'
+    # sidecar handler and was reported as "could not read <meta.json>" -- the wrong file.
+    try:
+        if sha and _sha256(path) != sha:
+            return None, f"{path} has changed since the search (its sha256 no longer matches)"
+        return _fasta_records(_read_fasta_text(path)), None
+    except OSError as e:
+        return None, f"the searched FASTA {path} could not be read ({e})"
+
+
+def _overlap_now(meta, recs):
+    """The contaminant entries of `recs` today's rule drops (both rules; the digestion enzymes
+    the search used stay contaminants, as at build time)."""
+    used = meta.get("digestion_enzymes_used") or parse_enzymes(DEFAULT_ENZYMES)
+    overlap, _enz = _split_enzymes(contaminants_matching_targets(
+        [r for r in recs if CONT_TAG in r[0]], recs), used)
+    return [rec for _, rec in overlap]
+
+
+def _identity_only_overlap(meta):
+    """-> ([records], note) for a database built by the identity rule alone: the near-identical
+    entries re-found in the FASTA it describes when that file is still the one searched, else
+    the measured set (near_identical_contaminants.json). note is None when the re-check finds
+    nothing."""
+    org = meta.get("organism") or "target-organism"
+    head = ("This search database was built by fetch_fasta.py's identity rule alone (before "
+            "skill 2.8.0, or with --min-unique-peptides 0): contaminant entries identical to "
+            f"{org} proteins were removed, near-identical ones were not")
+    lost = (f"so DIA-NN reported those {org} proteins only as {CONT_TAG} groups and excluded "
+            f"them from quantification, and run_de.R's contaminant filter removes {CONT_TAG} "
+            f"groups from the DE.")
+    recs, why = _recheck(meta)
+    if why is None:
+        near = [r for r in _overlap_now(meta, recs) if r.get("reason") == "shared_peptides"]
+        if not near:
+            return [], None
+        return near, (f"{head}. Re-checked in {meta.get('fasta')} (sha256 matches the sidecar): "
+                      f"{len(near)} of its {CONT_TAG} entries share peptides with {org} proteins "
+                      f"and have too few of their own for the search to tell them apart, {lost} "
+                      f"{REBUILD_ADVICE}")
+    m = near_identical_measured(meta)
+    size = (f"with the {meta.get('contaminant_set')} set, {m[0]} such entries ({m[1]}; measured "
+            f"{m[2]})" if m else "an unknown number of such entries")
+    return [], (f"{head}, and {why}. Expect {size}: {lost} {REBUILD_ADVICE}")
 
 
 def _legacy_overlap(meta):
@@ -1243,26 +1339,11 @@ def _legacy_overlap(meta):
     org = meta.get("organism") or "target-organism"
     head = ("This search database was built before fetch_fasta.py checked contaminant entries "
             "against the target proteome")
-    tail = " Rebuild the FASTA with the current fetch_fasta.py and re-search."
-    path, sha = meta.get("fasta"), meta.get("sha256")
-    why, recs = None, None
-    if not path or not os.path.isfile(path):
-        why = f"the searched FASTA ({path or 'path not recorded'}) is no longer readable"
-    else:
-        # Caught HERE, and named: left to propagate, an unreadable FASTA reached the auditors'
-        # sidecar handler and was reported as "could not read <meta.json>" -- the wrong file.
-        try:
-            if sha and _sha256(path) != sha:
-                why = f"{path} has changed since the search (its sha256 no longer matches)"
-            else:
-                recs = _fasta_records(_read_fasta_text(path))
-        except OSError as e:
-            why = f"the searched FASTA {path} could not be read ({e})"
+    tail = " " + REBUILD_ADVICE
+    path = meta.get("fasta")
+    recs, why = _recheck(meta)
     if why is None:
-        used = meta.get("digestion_enzymes_used") or parse_enzymes(DEFAULT_ENZYMES)
-        overlap, _enz = _split_enzymes(contaminants_matching_targets(
-            [r for r in recs if CONT_TAG in r[0]], recs), used)
-        kept = [rec for _, rec in overlap]
+        kept = _overlap_now(meta, recs)
         if not kept:
             return [], None
         return kept, (f"{head}: re-checked in {path} (sha256 matches the sidecar), "

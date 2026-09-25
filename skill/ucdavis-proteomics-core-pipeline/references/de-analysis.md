@@ -225,9 +225,16 @@ What it records, so nothing downstream restates the policy (architectural rules 
 
 `--fasta-meta` (default `./search.fasta.meta.json` if present): a database built before
 `fetch_fasta.py` removed contaminant entries identical to target proteins (a sidecar with
-no `contaminant_target_rule`), or one listing `contaminants_identical_to_target_kept`,
-holds real proteins only as `Cont_` groups — the filter removes those too. The run then
-prints a `CAUTION` and records `database_risk: true`; rebuild the FASTA and re-search.
+no `contaminant_target_rule`), one built by the identity rule alone (the rule but no
+`min_unique_peptides`: fetch_fasta.py before skill 2.8.0, which kept near-identical entries
+such as bovine EEF1A1 and YWHAZ for mouse), or one listing
+`contaminants_identical_to_target_kept`, holds real proteins only as `Cont_` groups — the
+filter removes those too. The run then prints a `CAUTION` and records `database_risk: true`
+with a note naming the set; `audit_results.py --fasta-meta` re-checks the searched FASTA and
+names the proteins. The states are `sidecar_state()` in `fetch_fasta.py`, mirrored in
+`contaminants.R` (a test keeps them equal). Rebuild the FASTA with fetch_fasta.py from skill
+2.8.0 or later (the Core rebuilds its shared MRS human and mouse FASTAs with it) and
+re-search.
 `--keep-contaminants` keeps every `Cont_` group in the DE instead (the true contaminants
 are then tested too).
 

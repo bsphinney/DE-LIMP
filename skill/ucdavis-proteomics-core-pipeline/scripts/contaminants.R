@@ -19,9 +19,10 @@
 # all 121 Cont_ protein groups, removes no sample protein group entirely, and trims
 # conserved shared peptides from 47 sample protein groups (Eno1, Aldoa, Tubb3 ...).
 #
-# The tag mirrors fetch_fasta.py's CONT_TAG, and sidecar_is_legacy() mirrors its
-# _is_legacy_sidecar(); tests/test_run_de_contaminants.py asserts both, so a drift is
-# a test failure rather than two filters that disagree.
+# The tag mirrors fetch_fasta.py's CONT_TAG, sidecar_state() its sidecar_state(), and
+# KEEP_TARGET_CONTAMINANTS_RULE / REBUILD_ADVICE its constants of those names;
+# tests/test_run_de_contaminants.py asserts all of them, so a drift is a test failure
+# rather than two filters that disagree.
 # =============================================================================
 
 CONTAMINANT_TAG <- "Cont_"
@@ -103,22 +104,52 @@ contaminant_share <- function(intensity, is_cont, run = NULL) {
              stringsAsFactors = FALSE)
 }
 
-# Mirror of fetch_fasta._is_legacy_sidecar(): written before fetch_fasta.py removed
-# contaminant entries identical to target proteins, and the database holds contaminants.
-sidecar_is_legacy <- function(meta) {
-  if ("contaminant_target_rule" %in% names(meta)) return(FALSE)
+KEEP_TARGET_CONTAMINANTS_RULE <- "disabled (--keep-target-contaminants)"
+REBUILD_ADVICE <- paste0("Rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core ",
+                         "rebuilds its shared MRS human and mouse FASTAs with it) and re-search.")
+
+# Mirror of fetch_fasta.sidecar_state(): which rule built the search database.
+#   "legacy"         no contaminant_target_rule: built before the overlap check
+#   "identity_only"  the rule but no (or a 0) min_unique_peptides: built by the identity rule
+#                    alone, so near-identical entries (bovine EEF1A1 / YWHAZ vs mouse) remain
+#   "current"        both rules, --keep-target-contaminants, or no contaminants at all
+sidecar_state <- function(meta) {
   truthy <- function(x) !is.null(x) && length(x) == 1 && !is.na(x) &&
     !identical(x, FALSE) && !identical(x, 0L) && !identical(x, 0) && !identical(x, "")
   cs <- meta[["contaminant_set"]]
-  truthy(meta[["n_contaminants_appended"]]) || truthy(meta[["n_contaminants_already_present"]]) ||
-    (truthy(cs) && !identical(cs, "none"))
+  holds <- truthy(meta[["n_contaminants_appended"]]) ||
+    truthy(meta[["n_contaminants_already_present"]]) || (truthy(cs) && !identical(cs, "none"))
+  if (!holds) return("current")
+  if (!("contaminant_target_rule" %in% names(meta))) return("legacy")
+  if (identical(meta[["contaminant_target_rule"]], KEEP_TARGET_CONTAMINANTS_RULE)) return("current")
+  if (truthy(meta[["min_unique_peptides"]])) "current" else "identity_only"
+}
+sidecar_is_legacy <- function(meta) identical(sidecar_state(meta), "legacy")
+
+# The measured near-identical set for this organism and contaminant set
+# (near_identical_contaminants.json beside this file, shared with fetch_fasta.py), or NULL.
+near_identical_measured <- function(meta) {
+  f <- grep("^--file=", commandArgs(), value = TRUE)[1]
+  dirs <- c(if (exists(".script_dir")) get(".script_dir"),
+            if (!is.na(f)) dirname(normalizePath(sub("^--file=", "", f), mustWork = FALSE)),
+            getwd())
+  p <- file.path(dirs, "near_identical_contaminants.json")
+  p <- p[file.exists(p)][1]
+  if (is.na(p) || !requireNamespace("jsonlite", quietly = TRUE)) return(NULL)
+  m <- tryCatch(jsonlite::fromJSON(p, simplifyVector = FALSE), error = function(e) NULL)
+  tax <- suppressWarnings(as.integer(meta[["taxid"]]))
+  if (is.null(m) || !identical(meta[["contaminant_set"]], m$contaminant_set) ||
+      length(tax) != 1 || is.na(tax)) return(NULL)
+  e <- m$by_taxid[[sprintf("%d", tax)]]
+  if (is.null(e)) NULL else list(n = e$n, named = e$named, measured = m$measured)
 }
 
 # Does removing the Cont_ groups also remove real proteins of the searched organism?
-# It does when the database carries contaminant entries IDENTICAL to target proteins:
-# DIA-NN then reports those proteins (ACTB, EEF1A1, keratins ...) only as Cont_ groups.
-# The sidecar records that -- a legacy sidecar (built before the overlap check), or a
-# non-empty contaminants_identical_to_target_kept list. -> list(checked, risk, note):
+# It does when the database carries contaminant entries IDENTICAL (or near-identical) to
+# target proteins: DIA-NN then reports those proteins (ACTB, EEF1A1, YWHAZ, keratins ...)
+# only as Cont_ groups. The sidecar records that -- a legacy or identity-only sidecar
+# (sidecar_state), or a non-empty contaminants_identical_to_target_kept list.
+# -> list(checked, risk, note):
 # risk NA when the check could not run (note says why), FALSE when the sidecar is clean.
 contaminant_database_risk <- function(sidecar, n_groups_removed) {
   if (is.null(sidecar) || !nzchar(sidecar))
@@ -141,23 +172,34 @@ contaminant_database_risk <- function(sidecar, n_groups_removed) {
       if (is.character(r[[k]]) && length(r[[k]]) == 1 && nzchar(r[[k]])) return(r[[k]])
     "?"
   }, character(1)))
-  why <- if (sidecar_is_legacy(meta))
-    sprintf(paste0("the search database was built before fetch_fasta.py removed ",
-                   "contaminant entries identical to %s proteins (no contaminant_target_rule ",
-                   "in %s)"), org, basename(sidecar))
-  else if (length(kept))
-    sprintf("%d %s protein(s) are in the search database only as identical %s entries (%s)",
-            length(kept), org, CONTAMINANT_TAG,
-            paste(utils::head(genes, 12), collapse = ", "))
-  else NULL
-  if (is.null(why)) return(list(checked = TRUE, risk = FALSE, note = NULL))
+  state <- sidecar_state(meta)
+  near <- if (identical(state, "identity_only")) near_identical_measured(meta) else NULL
+  why <- c(
+    if (identical(state, "legacy"))
+      sprintf(paste0("the search database was built before fetch_fasta.py removed ",
+                     "contaminant entries identical to %s proteins (no contaminant_target_rule ",
+                     "in %s)"), org, basename(sidecar)),
+    if (length(kept))
+      sprintf("%d %s protein(s) are in the search database only as identical %s entries (%s)",
+              length(kept), org, CONTAMINANT_TAG,
+              paste(utils::head(genes, 12), collapse = ", ")),
+    if (identical(state, "identity_only"))
+      sprintf(paste0("the search database was built by fetch_fasta.py's identity rule alone ",
+                     "(before skill 2.8.0, or --min-unique-peptides 0: %s has ",
+                     "contaminant_target_rule but no min_unique_peptides), so contaminant ",
+                     "entries NEAR-identical to %s proteins stayed in it%s"),
+              basename(sidecar), org,
+              if (is.null(near)) "" else sprintf(" -- with the %s set, %d of them: %s (measured %s)",
+                                                 meta[["contaminant_set"]], near$n, near$named,
+                                                 near$measured)))
+  if (!length(why)) return(list(checked = TRUE, risk = FALSE, note = NULL))
+  why <- paste(why, collapse = "; and ")
   list(checked = TRUE, risk = TRUE, note = sprintf(paste0(
     "%s, so some of the %d %s protein groups removed here are probably real %s proteins ",
     "(DIA-NN reports them only as %s groups), now missing from the DE. ",
-    "audit_results.py --fasta-meta %s names them. Rebuild the FASTA with the current ",
-    "fetch_fasta.py and re-search, or re-run with --keep-contaminants to test them together ",
-    "with the true contaminants."),
-    why, n_groups_removed, CONTAMINANT_TAG, org, CONTAMINANT_TAG, sidecar))
+    "audit_results.py --fasta-meta %s names them. %s Or re-run with --keep-contaminants to ",
+    "test them together with the true contaminants."),
+    why, n_groups_removed, CONTAMINANT_TAG, org, CONTAMINANT_TAG, sidecar, REBUILD_ADVICE))
 }
 
 # The record run_de.R writes into de_provenance.json ("contaminants") -- the ONE

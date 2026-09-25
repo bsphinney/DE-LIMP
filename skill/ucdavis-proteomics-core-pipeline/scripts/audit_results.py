@@ -225,8 +225,9 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
     em_rows = read_csv(em_path) if em_path and os.path.exists(em_path) else []
 
     # Real proteins that exist only as Cont_ entries: a database used as-is, one built with
-    # --keep-target-contaminants, or one built BEFORE the overlap check (legacy sidecar --
-    # the databases that lost ACTB/EEF1A1/KRT8). The matrix makes it concrete where it can.
+    # --keep-target-contaminants, one built BEFORE the overlap check (legacy sidecar -- the
+    # databases that lost ACTB/EEF1A1/KRT8), or one built by the identity rule alone (near-
+    # identical entries: bovine EEF1A1/YWHAZ vs mouse). The matrix makes it concrete where it can.
     kept = tc["kept_as_contaminant"]
     seen = seen_only_as_cont(kept, [(_tokens(r.get("Protein.Group")), r.get("Genes") or "?")
                                     for r in em_rows])
@@ -244,6 +245,7 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
                       "contaminants too.")
         add(findings, "contaminant_overlap", "WARN", msg,
             {"fasta_meta": meta_path, "legacy_database": bool(tc.get("legacy_note")),
+             "database_state": tc.get("state"),
              "genes": sorted({r.get("gene") or r.get("target_acc") or "?" for r in kept}),
              "seen_only_as_cont": seen, "removed_by_de_filter": gone})
 

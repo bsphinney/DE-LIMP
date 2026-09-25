@@ -144,7 +144,7 @@ class ContaminantNotSample(Base):
         rows = MOUSE_ROWS + [["Cont_P02070", "HBB", "HBB_BOVIN"] + FLAT]
         res, _ = self.run_sq(rows, "--fasta-meta", meta)
         f = next(x for x in res["flags"] if x.startswith("HEMOLYSIS: 1 `Cont_`"))
-        self.assertIn("predates the target-identical contaminant check", f)
+        self.assertIn("built by an older contaminant rule", f)
 
     def test_keratin_sample_keratins_are_not_called_not_sample(self):
         rows = [["Cont_P04264", "KRT1", "K2C1_HUMAN"] + FLAT, ["P15924", "DSP", "DESP_HUMAN"] + FLAT,

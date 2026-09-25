@@ -706,6 +706,48 @@ class Auditors(unittest.TestCase):
         self.assertFalse([x for x in a["findings"] if "could not read" in x["message"]
                           and meta_path in x["message"]])
 
+    def test_identity_only_sidecar_names_the_near_identical_proteins(self):
+        """Built by the identity rule alone (the rule, no min_unique_peptides -- fetch_fasta.py
+        before 2.8.0): the near-identical entries stayed, so a 1-residue GAPDH twin took GAPDH's
+        peptides. Re-checked in the searched FASTA, the auditor names the protein and the fix."""
+        meta = self.legacy_meta(TARGET + cont("E1", swap(GAPDH, 7)),
+                                contaminant_target_rule=ff.contaminant_target_rule(0))
+        self.assertEqual(ff.sidecar_state(meta), "identity_only")
+        f = self.finding(self.audit("--fasta-meta", self.write_meta(meta)), "contaminant_overlap")
+        self.assertEqual(f["status"], "WARN")
+        self.assertEqual(f["detail"]["database_state"], "identity_only")
+        self.assertIn("identity rule alone", f["message"])
+        self.assertIn("1 of its Cont_ entries share peptides with Homo sapiens proteins",
+                      f["message"])
+        self.assertIn("Affected: GAPDH", f["message"])
+        self.assertIn(ff.REBUILD_ADVICE, f["message"])
+        self.assertEqual(f["detail"]["genes"], ["GAPDH"])
+
+    def test_identity_only_sidecar_without_its_fasta_names_the_measured_set(self):
+        meta = self.legacy_meta(contaminant_target_rule=ff.contaminant_target_rule(0),
+                                organism="Mus musculus", taxid=10090)
+        tc = ff.target_contaminants(meta)
+        self.assertEqual((tc["state"], tc["kept_as_contaminant"]), ("identity_only", []))
+        for part in ("identity rule alone", "no longer readable", "10 such entries",
+                     "bovine EEF1A1 and YWHAZ", "run_de.R's contaminant filter removes",
+                     ff.REBUILD_ADVICE):
+            self.assertIn(part, tc["legacy_note"])
+
+    def test_sidecar_states(self):
+        base = {"contaminant_set": "universal", "n_contaminants_appended": 381}
+        rule = ff.contaminant_target_rule()
+        for meta, want in (({}, "current"), ({"contaminant_set": "none"}, "current"),
+                           (base, "legacy"),
+                           (dict(base, contaminant_target_rule=rule), "identity_only"),
+                           (dict(base, contaminant_target_rule=rule, min_unique_peptides=0),
+                            "identity_only"),
+                           (dict(base, contaminant_target_rule=rule, min_unique_peptides=2),
+                            "current"),
+                           (dict(base, contaminant_target_rule=ff.KEEP_TARGET_CONTAMINANTS_RULE),
+                            "current")):
+            self.assertEqual(ff.sidecar_state(meta), want, meta)
+            self.assertEqual(ff._is_legacy_sidecar(meta), want == "legacy")
+
     def test_old_sidecar_without_contaminants_is_not_flagged(self):
         meta = {"organism": "Homo sapiens", "taxid": 9606, "contaminant_set": "none",
                 "n_contaminants_appended": 0}

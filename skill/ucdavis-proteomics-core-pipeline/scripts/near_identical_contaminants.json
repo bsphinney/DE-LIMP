@@ -1,0 +1,11 @@
+{
+  "_about": "Contaminant entries the identity rule kept but the peptide rule drops (fetch_fasta.py, MIN_UNIQUE_PEPTIDES = 2 in estimate_params.DIANN_DIGEST, skill 2.8.0): what a database built by the identity rule alone still holds as Cont_ entries although the search cannot tell them apart from a target protein. Measured 2026-09-25 on the Universal set (MRS/kg_nov, 381 entries), from the feat/skill-fasta-near-identity measurements (references/environment.md). ONE definition, read by fetch_fasta.py and contaminants.R to size and name the warning when the searched FASTA cannot be re-checked -- never a list of what a given database holds.",
+  "contaminant_set": "universal",
+  "measured": "2026-09-25",
+  "by_taxid": {
+    "9606": {"organism": "Homo sapiens", "n": 8,
+             "named": "entries named KRT34, KRTAP10-4 and KRTAP4-7, bovine TBA1D and TPM2, and three sheep KRB2 keratins"},
+    "10090": {"organism": "Mus musculus", "n": 10,
+              "named": "bovine EEF1A1 and YWHAZ (each one residue from the mouse protein), bovine TBA1D, four human KRTAPs and three sheep KRB2 keratins"}
+  }
+}

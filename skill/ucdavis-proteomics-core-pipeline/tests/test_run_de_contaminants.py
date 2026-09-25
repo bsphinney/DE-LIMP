@@ -93,7 +93,11 @@ write.csv(data.frame(File.Name = runs, Group = grp), file.path(OUT, "conditions.
 LEGACY_SIDECAR = {"organism": "Mus musculus", "taxid": 10090, "n_contaminants_appended": 381,
                   "contaminant_set": "universal", "diann_cont_quant_exclude": "Cont_"}
 CLEAN_SIDECAR = dict(LEGACY_SIDECAR, contaminant_target_rule=ff.CONTAMINANT_TARGET_RULE,
+                     min_unique_peptides=ff.MIN_UNIQUE_PEPTIDES,
                      contaminants_dropped_as_target=[], contaminants_identical_to_target_kept=[])
+# fetch_fasta.py before 2.8.0: the identity rule alone -- the rule, no min_unique_peptides.
+IDENTITY_SIDECAR = dict(LEGACY_SIDECAR, contaminant_target_rule=ff.contaminant_target_rule(0),
+                        contaminants_dropped_as_target=[], contaminants_identical_to_target_kept=[])
 
 
 def read_csv(path):
@@ -108,10 +112,43 @@ class RMirrorsAgreeWithFetchFasta(unittest.TestCase):
         self.assertIsNotNone(m, "CONTAMINANT_TAG not found in contaminants.R")
         self.assertEqual(m.group(1), ff.CONT_TAG)
 
+    def test_constants_are_fetch_fastas(self):
+        with open(CONT_R) as fh:
+            r = fh.read()
+        keep = re.search(r'^KEEP_TARGET_CONTAMINANTS_RULE\s*<-\s*"([^"]+)"', r, re.M)
+        self.assertEqual(keep.group(1), ff.KEEP_TARGET_CONTAMINANTS_RULE)
+        adv = re.search(r'^REBUILD_ADVICE\s*<-\s*paste0\(((?:\s*"[^"]*",?)+)\)', r, re.M)
+        self.assertEqual("".join(re.findall(r'"([^"]*)"', adv.group(1))), ff.REBUILD_ADVICE)
+
+    def test_sidecar_state_matches(self):
+        """contaminants.R's sidecar_state() is fetch_fasta.sidecar_state(), case for case."""
+        if not r_has("jsonlite"):
+            self.skipTest("needs Rscript + jsonlite")
+        cases = [LEGACY_SIDECAR, CLEAN_SIDECAR, IDENTITY_SIDECAR, {}, {"contaminant_set": "none"},
+                 {"contaminant_set": None, "n_contaminants_appended": 0},
+                 {"n_contaminants_already_present": 12},
+                 {"contaminant_target_rule": None, "n_contaminants_appended": 5},
+                 {"contaminant_set": "cell_culture"},
+                 dict(IDENTITY_SIDECAR, min_unique_peptides=0),
+                 dict(IDENTITY_SIDECAR, min_unique_peptides=None),
+                 dict(IDENTITY_SIDECAR, min_unique_peptides=3),
+                 dict(LEGACY_SIDECAR, contaminant_target_rule=ff.KEEP_TARGET_CONTAMINANTS_RULE)]
+        self.assertEqual({ff.sidecar_state(c) for c in cases}, {"legacy", "identity_only", "current"})
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, c in enumerate(cases):
+                paths.append(os.path.join(tmp, f"{i}.json"))
+                with open(paths[-1], "w") as fh:
+                    json.dump(c, fh)
+            out = rscript(f'source("{CONT_R}"); for (p in c({", ".join(repr(p) for p in paths)})) '
+                          'cat(sidecar_state(jsonlite::fromJSON(p, simplifyVector = FALSE)), "\\n")'
+                          .replace("'", '"'))
+        self.assertEqual(out.split(), [ff.sidecar_state(c) for c in cases])
+
     def test_legacy_rule_matches(self):
         if not r_has("jsonlite"):
             self.skipTest("needs Rscript + jsonlite")
-        cases = [LEGACY_SIDECAR, CLEAN_SIDECAR, {}, {"contaminant_set": "none"},
+        cases = [LEGACY_SIDECAR, CLEAN_SIDECAR, IDENTITY_SIDECAR, {}, {"contaminant_set": "none"},
                  {"contaminant_set": None, "n_contaminants_appended": 0},
                  {"n_contaminants_already_present": 12},
                  {"contaminant_target_rule": None, "n_contaminants_appended": 5},
@@ -144,7 +181,8 @@ class RunDeRemovesContaminants(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
         rscript(f'OUT <- "{cls.tmp}"\n' + SYNTH_R)
-        for name, meta in (("legacy.json", LEGACY_SIDECAR), ("clean.json", CLEAN_SIDECAR)):
+        for name, meta in (("legacy.json", LEGACY_SIDECAR), ("clean.json", CLEAN_SIDECAR),
+                           ("identity.json", IDENTITY_SIDECAR)):
             with open(os.path.join(cls.tmp, name), "w") as fh:
                 json.dump(meta, fh)
         cls.runs = {}
@@ -154,7 +192,9 @@ class RunDeRemovesContaminants(unittest.TestCase):
                           ("legacy", ["--method", "dpc", "--fasta-meta",
                                       os.path.join(cls.tmp, "legacy.json")]),
                           ("clean", ["--method", "dpc", "--fasta-meta",
-                                     os.path.join(cls.tmp, "clean.json")])):
+                                     os.path.join(cls.tmp, "clean.json")]),
+                          ("identity", ["--method", "dpc", "--fasta-meta",
+                                        os.path.join(cls.tmp, "identity.json")])):
             out = os.path.join(cls.tmp, key)
             p = subprocess.run(["Rscript", os.path.join(SCRIPTS, "run_de.R"),
                                 "--input", os.path.join(cls.tmp, "report.parquet"),
@@ -249,6 +289,20 @@ class RunDeRemovesContaminants(unittest.TestCase):
         self.assertIn("real Mus musculus proteins", c["database_note"])
         self.assertIn("CAUTION:", self.methods("legacy"))
         self.assertIn("contaminant filter:", self.runs["legacy"][0].stderr)   # R warning
+
+    def test_identity_only_database_risk_names_the_near_identical_set(self):
+        """A FASTA built by the identity rule alone (fetch_fasta.py before 2.8.0) kept bovine
+        EEF1A1 / YWHAZ as Cont_ entries: for mouse, DIA-NN reports Eef1a1 / Ywhaz only as those,
+        and removing the Cont_ groups takes them out of the DE -- a CAUTION, with the fix."""
+        c = self.prov("identity")["contaminants"]
+        self.assertTrue(c["database_checked"])
+        self.assertTrue(c["database_risk"])
+        for part in ("identity rule alone", "NEAR-identical to Mus musculus proteins",
+                     "with the universal set, 10 of them: bovine EEF1A1 and YWHAZ",
+                     "now missing from the DE", "audit_results.py --fasta-meta",
+                     ff.REBUILD_ADVICE):
+            self.assertIn(part, c["database_note"])
+        self.assertIn("CAUTION:", self.methods("identity"))
 
     def test_clean_sidecar_carries_no_risk(self):
         c = self.prov("clean")["contaminants"]

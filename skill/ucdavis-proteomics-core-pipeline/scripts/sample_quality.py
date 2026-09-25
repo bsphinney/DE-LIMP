@@ -510,7 +510,7 @@ def main():
             msg += (f". Except: {', '.join(own)} -- identical to {org} proteins in this database, "
                     f"so possibly the sample's own (see the database note).")
         elif (tc or {}).get("legacy_note"):
-            msg += (". Caveat: this database predates the target-identical contaminant check, so a "
+            msg += (". Caveat: this database was built by an older contaminant rule, so a "
                     f"{CONT_TAG} marker may be the sample's own protein (see the database note).")
         flags.append(msg)
 

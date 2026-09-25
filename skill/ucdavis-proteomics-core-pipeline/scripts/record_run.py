@@ -1032,6 +1032,20 @@ def parameters(out, prov, params_file, manifest_path, rationale):
     return p
 
 
+def _database_state(merged):
+    """(fetch_fasta.sidecar_state(): which contaminant rule built the database -- the one
+    definition; for an identity-only database, the measured near-identical set for this
+    organism, fetch_fasta.near_identical_measured(), or None). (None, None) when fetch_fasta.py
+    cannot be loaded here (never fatal)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import sidecar_state, near_identical_measured
+    except Exception:                                   # noqa: BLE001
+        return None, None
+    state = sidecar_state(merged)
+    return state, (near_identical_measured(merged) if state == "identity_only" else None)
+
+
 def fasta_facts(meta_path):
     m = load_json(meta_path)
     if not isinstance(m, dict):
@@ -1039,6 +1053,7 @@ def fasta_facts(meta_path):
     sel = m.get("selected") if isinstance(m.get("selected"), dict) else m
     g = lambda k: sel.get(k) if sel.get(k) is not None else m.get(k)  # noqa: E731
     sf = g("staged_file") or {}
+    merged = dict(m, **{k: v for k, v in sel.items() if v is not None}) if sel is not m else m
     return {"meta_file": meta_path, "fasta": g("fasta"), "organism": g("organism"),
             "taxid": g("taxid"), "organism_source": g("organism_source"),
             "proteome": g("proteome"), "proteome_type": g("proteome_type"),
@@ -1057,6 +1072,8 @@ def fasta_facts(meta_path):
             "contaminant_citation": g("contaminant_citation"),
             "cont_quant_exclude": g("diann_cont_quant_exclude"),
             "digestion_enzymes_used": g("digestion_enzymes_used"),
+            "min_unique_peptides": g("min_unique_peptides"),
+            **dict(zip(("database_state", "near_identical_measured"), _database_state(merged))),
             "warnings": g("warnings") or []}
 
 
@@ -1835,16 +1852,37 @@ def data_quality_notes(rec):
                         "removes them from quant", "the universal contaminant set holds bovine/"
                         "human/mouse proteins identical to real ones",
                         None, "FASTA sidecar"))
-    if fa and fa.get("n_contaminants_appended") and not fa.get("contaminant_target_rule"):
+    state = fa.get("database_state") if fa else None
+    if state is None and fa:            # fetch_fasta.py not loadable: the rule-key test alone
+        state = ("legacy" if fa.get("n_contaminants_appended")
+                 and not fa.get("contaminant_target_rule") else None)
+    if state == "legacy":
         notes.append(dq(
             "WARNING", "legacy database: built before contaminants identical to a target protein "
                        "were removed", fa.get("meta_file"),
             "a contaminant entry identical to a real protein (bovine ACTB = human ACTB, ...) takes "
             "its peptides; --cont-quant-exclude Cont_ then drops them from quant and "
-            "normalisation, so real proteins go missing without an error",
+            "normalisation, and run_de.R removes Cont_ groups from the DE, so real proteins go "
+            "missing without an error",
             "the FASTA sidecar has no contaminant_target_rule: fetch_fasta.py predates the check",
-            "rebuild the FASTA with the current fetch_fasta.py and re-search, or run "
-            "check_contaminant_competition.py on the pg_matrix", "FASTA sidecar"))
+            "rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core rebuilds "
+            "its shared MRS human and mouse FASTAs with it) and re-search; AUDIT.md names the "
+            "proteins", "FASTA sidecar"))
+    elif state == "identity_only":
+        notes.append(dq(
+            "WARNING", "database built by the identity rule alone: contaminants near-identical to "
+                       "a target protein were left in"
+                       + (" (with the {} set, {} such entries: {}; measured {})".format(
+                           fa.get("contaminant_set"), *fa["near_identical_measured"])
+                          if fa.get("near_identical_measured") else ""), fa.get("meta_file"),
+            "a contaminant entry the search cannot tell apart from a real protein (bovine EEF1A1 "
+            "and YWHAZ are one residue from the mouse proteins) takes its peptides; DIA-NN "
+            "reports that protein only as a Cont_ group and run_de.R removes it from the DE",
+            "the FASTA sidecar has contaminant_target_rule but no min_unique_peptides: "
+            "fetch_fasta.py before skill 2.8.0 (or --min-unique-peptides 0)",
+            "rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core rebuilds "
+            "its shared MRS human and mouse FASTAs with it) and re-search; AUDIT.md names the "
+            "proteins", "FASTA sidecar"))
     if not fa and s:
         notes.append(dq("WARNING", "no FASTA sidecar, so the organism and database are not "
                                    "recorded", s.get("out_dir"), source="record_run"))
