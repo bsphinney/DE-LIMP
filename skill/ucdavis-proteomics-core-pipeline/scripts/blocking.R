@@ -108,9 +108,16 @@ block_choose_effect <- function(requested, block, design, structure, block_col,
   if (is.null(asg)) asg <- rep(1L, ncol(design))           # no term map: all group columns
   term_cols <- function(k) design[, asg == k, drop = FALSE]  # 1 = groups, 1 + i = covariates[i]
   groups_ok <- full_rank(cbind(term_cols(1L), bcols))
+  # Absorbed = ALL of the covariate's columns lie in the span of groups + block (adding them
+  # adds no rank). Rank-deficient is not enough: a 3-level Batch can be PARTLY aliased --
+  # nested for some subjects, confounded with treatment within others (S1-2 both runs in
+  # b1; S3-6 Ctrl in b2, Trt in b3) -- and dropping it would move logFC by up to 4.1
+  # (blocksim/absorb.R). Such a covariate is kept; the fixed design is then rank-deficient,
+  # so auto goes random and a forced fixed stops.
+  rank_gb <- qr(cbind(term_cols(1L), bcols))$rank
   nests_in <- if (groups_ok) Filter(function(cv)
-    !full_rank(cbind(term_cols(1L), bcols, term_cols(1L + match(cv, covariates)))), covariates)
-    else character(0)
+    qr(cbind(term_cols(1L), bcols, term_cols(1L + match(cv, covariates))))$rank == rank_gb,
+    covariates) else character(0)
   keep <- setdiff(covariates, nests_in)
   dfix <- cbind(design[, asg %in% c(1L, 1L + match(keep, covariates)), drop = FALSE], bcols)
   crossed <- groups_ok && full_rank(dfix)

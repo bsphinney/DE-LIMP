@@ -581,6 +581,35 @@ class BlockRecordWarnings(unittest.TestCase):
           in_batch_random <- block_choose_effect("random", bp, dpb, stb, "Patient", "batch")
           forced_nested <- tryCatch(block_choose_effect("fixed", b2, d2, list(), "Mouse"),
                                     error = function(e) conditionMessage(e))
+          # blocksim/absorb.R: only a covariate wholly inside groups + subject is absorbed
+          subj <- rep(sprintf("S%d", 1:6), 2); grp <- factor(rep(c("Ctrl", "Trt"), each = 6))
+          mk <- function(batch) {{
+            d <- model.matrix(~ 0 + groups + Batch, data = list(groups = grp, Batch = factor(batch)))
+            colnames(d) <- sub("^groups", "", colnames(d)); d }}
+          absorb_cases <- list(
+            nested_2lvl  = rep(c("b1", "b1", "b1", "b2", "b2", "b2"), 2),
+            partial_2lvl = c(rep("b1", 9), rep("b2", 3)),
+            partial_3lvl = c("b1", "b1", "b2", "b2", "b2", "b2", "b1", "b1", "b3", "b3", "b3", "b3"))
+          set.seed(9); ya <- matrix(rnorm(200 * 12), 200)
+          absorb <- lapply(absorb_cases, function(batch) {{
+            d <- mk(batch); cmx <- limma::makeContrasts(contrasts = "Trt-Ctrl", levels = d)
+            e <- block_choose_effect("auto", subj, d, block_contrast_structure(subj, grp, cmx),
+                                     "Subject", "Batch")
+            full <- cbind(d, block_fixed_columns(subj, "Subject"))
+            # a fixed fit that dropped Batch must be the SAME model as keeping it
+            same <- if (e$effect == "fixed") {{
+              f1 <- limma::lmFit(ya, e$design)
+              # lmFit prints the aliased (non-estimable) column to stdout: keep it out of the JSON
+              invisible(capture.output(f2 <- suppressWarnings(limma::lmFit(ya, full))))
+              c1 <- limma::contrasts.fit(f1, limma::makeContrasts(contrasts = "Trt-Ctrl", levels = e$design))
+              c2 <- limma::contrasts.fit(f2, limma::makeContrasts(contrasts = "Trt-Ctrl", levels = full))
+              max(abs(c1$coefficients - c2$coefficients))
+            }} else NA
+            forced <- tryCatch({{ block_choose_effect("fixed", subj, d, list(), "Subject", "Batch"); "ok" }},
+                               error = function(err) conditionMessage(err))
+            list(effect = e$effect, absorbed = I(e$absorbed), choice = e$choice,
+                 batch_kept = any(grepl("^Batch", colnames(e$design))), max_diff = same, forced = forced)
+          }})
           effects <- list(paired = eff(bp, gp, cmp, dp),
                           nested_within = eff(b2, g2, cm2[, 1, drop = FALSE], d2),
                           paired_forced_random = eff(bp, gp, cmp, dp, "random"))
@@ -593,7 +622,8 @@ class BlockRecordWarnings(unittest.TestCase):
                                                     absorbed = I(in_batch$absorbed),
                                                     ncol = ncol(in_batch$design)),
                                     in_batch_random = in_batch_random$choice,
-                                    forced_nested = forced_nested), auto_unbox = TRUE))'''))
+                                    forced_nested = forced_nested, absorb = absorb),
+                               auto_unbox = TRUE, na = "null"))'''))
 
     def test_clean_estimate_has_no_warning(self):
         self.assertEqual(self.res["n_ok"], 0)
@@ -631,6 +661,26 @@ class BlockRecordWarnings(unittest.TestCase):
         self.assertIn("Patient is nested in covariate batch", self.res["in_batch_random"])
         self.assertIn("requested random", self.res["in_batch_random"])
         self.assertIn("--block-effect fixed: Mouse is nested in the groups", self.res["forced_nested"])
+
+    def test_only_a_wholly_nested_covariate_is_absorbed(self):
+        a = self.res["absorb"]
+        # nested_2lvl: each subject's pair in one batch -> absorbed, and exactly the same model
+        self.assertEqual((a["nested_2lvl"]["effect"], a["nested_2lvl"]["absorbed"]), ("fixed", ["Batch"]))
+        self.assertFalse(a["nested_2lvl"]["batch_kept"])
+        self.assertLess(a["nested_2lvl"]["max_diff"], 1e-10)
+        # partial_2lvl: Batch not in the span of groups + subject -> kept, still fixed
+        self.assertEqual((a["partial_2lvl"]["effect"], a["partial_2lvl"]["absorbed"]), ("fixed", []))
+        self.assertTrue(a["partial_2lvl"]["batch_kept"])
+        self.assertLess(a["partial_2lvl"]["max_diff"], 1e-10)
+        # partial_3lvl: PARTLY aliased (confounded with treatment inside S3-6) -> NOT absorbed;
+        # the fixed design is rank-deficient, so auto goes random and forced fixed stops
+        p3 = a["partial_3lvl"]
+        self.assertEqual((p3["effect"], p3["absorbed"]), ("random", []))
+        self.assertTrue(p3["batch_kept"])
+        self.assertIn("nested in the groups and covariates together", p3["choice"])
+        self.assertIn("--block-effect fixed: Subject is nested in the groups and covariates together",
+                      p3["forced"])
+        self.assertEqual(a["nested_2lvl"]["forced"], "ok")
 
     def test_contrast_structure(self):
         # M1 has both an Old IgG and an Old Bait IP, M3/M4 only one each -> partial
