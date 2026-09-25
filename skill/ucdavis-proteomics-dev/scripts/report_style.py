@@ -253,7 +253,10 @@ def section(anchor, title_html, content, kind=None):
     """An h2 section. With `kind`, its content sits in a callout of that severity -- for the
     sections a PI must not miss (data-quality notes, audit, expert review)."""
     body = callout(kind, content) if kind else content
-    return (f'<section id="sec-{anchor}"{' class="callout-sec"' if kind else ""}>'
+    # not inlined into the f-string: a quote of the f-string's own kind inside {} needs
+    # Python 3.12, and macOS's /usr/bin/python3 is 3.9
+    cls = ' class="callout-sec"' if kind else ""
+    return (f'<section id="sec-{anchor}"{cls}>'
             f'<h2 id="{anchor}">{title_html}</h2>{body}</section>')
 
 
