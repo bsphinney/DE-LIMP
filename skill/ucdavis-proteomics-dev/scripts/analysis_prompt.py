@@ -97,6 +97,21 @@ def main():
         w(f"- Missing values: {missing_policy}")
     if citation:
         w(f"- Citation: {citation}")
+    # run_de.R's contaminant record -- stated as recorded, never assumed.
+    cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
+    if cont.get("policy") == "removed":
+        w(f"- Contaminants: {cont.get('n_precursors')} precursors mapping to a {cont.get('tag')} "
+          f"entry were removed before quantification ({cont.get('n_protein_groups')} contaminant "
+          f"protein groups); they are NOT in the DE tables or the expression matrix.")
+    elif cont.get("policy") == "kept":
+        w(f"- Contaminants: KEPT (--keep-contaminants) — {cont.get('n_protein_groups')} "
+          f"{cont.get('tag')} protein groups are in the DE tables; call any that are "
+          f"significant contamination, not biology.")
+    elif prov and not cont:
+        w("- Contaminants: not recorded by this DE run (older run_de.R, which did NOT remove "
+          "them) — any `Cont_` protein in the DE tables is contamination, not biology.")
+    if cont.get("database_risk") is True:
+        w(f"- **Contaminant-filter caveat (say this in the report):** {cont.get('database_note')}")
     w(f"- Significance rule: adj.P.Val < {adjp} (Benjamini-Hochberg) — the adjusted p-value "
       f"ALONE (ID FDR q ≤ {q_cut}). **No fold-change filter is applied.** |log2FC| = {lfc} "
       f"({2**float(lfc):.3g}-fold) is drawn on the volcano as a reference line only.")
@@ -115,6 +130,13 @@ def main():
           "AveExpr, t, P.Value, adj.P.Val (BH), B, gene annotation.")
     w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample.")
     w("- `tables/methods.txt`, `tables/de_provenance.json` — methods + exact versions.")
+    if cont.get("share_table"):
+        w(f"- `tables/{cont['share_table']}` — per-run contaminant share of "
+          f"{cont.get('intensity_column')} (QC): report a high or group-confounded share in "
+          f"Data Quality Notes.")
+    if cont.get("removed_table"):
+        w(f"- `tables/{cont['removed_table']}` — the protein groups the contaminant filter "
+          f"removed (or trimmed) before quantification.")
     if a.conditions:
         w(f"- `{a.conditions}` — experimental design (File.Name → Group [+ Batch/Covariates]).")
     if has_qc:

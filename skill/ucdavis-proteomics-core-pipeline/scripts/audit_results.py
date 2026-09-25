@@ -183,6 +183,20 @@ def _tokens(cell):
     return {t.strip().upper() for t in (cell or "").split(";") if t.strip()}
 
 
+def removed_contaminant_groups(de_dir):
+    """-> (record, rows): run_de.R's contaminant record and the protein groups its filter
+    removed. The filter takes Cont_ groups out of Expression_Matrix.csv, so a real protein
+    that sat in the database only as a Cont_ entry is visible only in this table now."""
+    try:
+        with open(os.path.join(de_dir or "", "de_provenance.json")) as fh:
+            rec = json.load(fh).get("contaminants") or {}
+    except (OSError, ValueError):
+        return {}, []
+    table = rec.get("removed_table") if rec.get("removed") else None
+    path = os.path.join(de_dir, table) if table else None
+    return rec, (read_csv(path) if path and os.path.exists(path) else [])
+
+
 def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, keratin_sample=False):
     """Proteins that are both a <organism> protein and a common contaminant.
 
@@ -218,10 +232,20 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
                                     for r in em_rows])
     msg = lost_to_contaminants_message(tc, seen)
     if msg:
+        rec, removed = removed_contaminant_groups(de_dir)
+        gone = seen_only_as_cont(kept, [(_tokens(r.get("Protein.Group")), r.get("Genes") or "?")
+                                        for r in removed])
+        if rec.get("removed"):
+            msg += (f" run_de.R's contaminant filter then removed every {rec.get('tag') or 'Cont_'}"
+                    f" group from the DE ({rec.get('n_protein_groups')} groups, listed in "
+                    f"{rec.get('removed_table')})"
+                    + (f", among them {', '.join(gone[:12])}" if gone else "")
+                    + "; --keep-contaminants keeps them, at the price of testing the true "
+                      "contaminants too.")
         add(findings, "contaminant_overlap", "WARN", msg,
             {"fasta_meta": meta_path, "legacy_database": bool(tc.get("legacy_note")),
              "genes": sorted({r.get("gene") or r.get("target_acc") or "?" for r in kept}),
-             "seen_only_as_cont": seen})
+             "seen_only_as_cont": seen, "removed_by_de_filter": gone})
 
     if not tc["dropped"]:
         return

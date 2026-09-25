@@ -4,7 +4,7 @@
 # PG.MaxLFQ to a protein x run matrix, log2-transforms, and quantile-normalizes
 # with limma::normalizeBetweenArrays (the DE-LIMP default for the MaxLFQ path).
 #
-# Returns: list(E, genes, descriptor, n_obs, filters_applied).
+# Returns: list(E, genes, descriptor, n_obs, filters_applied, contaminants).
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 || (length(a) == 1 && is.na(a))) b else a
 
@@ -21,9 +21,20 @@ if (!exists("DIANN_FDR_REQUIRED")) local({
   stop("diann_q_columns.R not found next to build_maxlfq.R -- it defines the ",
        "identification-FDR columns and there is no safe default to guess.")
 })
+# ONE definition of the contaminant filter (shared with run_de.R's dpc path).
+if (!exists("CONTAMINANT_TAG")) local({
+  d <- local({
+    f <- grep("^--file=", commandArgs(), value = TRUE)[1]
+    if (is.na(f)) getwd() else dirname(normalizePath(sub("^--file=", "", f), mustWork = FALSE))
+  })
+  for (p in c(file.path(d, "contaminants.R"), "contaminants.R"))
+    if (file.exists(p)) { source(p); return(invisible()) }
+  stop("contaminants.R not found next to build_maxlfq.R -- it defines the contaminant filter.")
+})
 
 build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
-                         eq_cutoff = 0, pgq_cutoff = 0, keep_runs = NULL) {
+                         eq_cutoff = 0, pgq_cutoff = 0, keep_runs = NULL,
+                         drop_contaminants = TRUE) {
   stopifnot(requireNamespace("dplyr", quietly = TRUE),
             requireNamespace("tidyr", quietly = TRUE))
 
@@ -41,8 +52,11 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
   # not because applying them is discretionary. They MUST be listed here as well
   # as filtered on: filtering an arrow dataset on a column select() dropped
   # returns ZERO ROWS silently -- the defect that broke MaxLFQ in the DE-LIMP app.
+  # Precursor.Id, the accession columns and the share intensity feed the contaminant
+  # census and filter (contaminants.R); an adapted protein-level report lacks most of them.
   optional <- c("Empirical.Quality", "PG.MaxLFQ.Quality", "Genes", "Protein.Names",
-                DIANN_FDR_OPTIONAL)
+                DIANN_FDR_OPTIONAL, CONTAMINANT_ID_COLUMNS, "Precursor.Id",
+                CONTAMINANT_SHARE_COLUMNS)
   miss <- setdiff(needed, cols)
   if (length(miss)) stop("MaxLFQ: missing required columns: ", paste(miss, collapse = ", "))
 
@@ -90,6 +104,36 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
 
   rows <- if (identical(format, "parquet")) dplyr::collect(flt) else as.data.frame(flt)
   if (!nrow(rows)) stop("MaxLFQ: no rows survived the filters. Loosen QuantUMS cutoffs.")
+
+  # Contaminants: counted on the rows that passed the filters above, then removed before
+  # the matrix is built -- so they never reach quantile normalisation, lmFit or BH.
+  cont <- list(census = NULL, share = NULL, id_column = contaminant_id_column(names(rows)),
+               intensity_column = NA_character_)
+  if (!is.na(cont$id_column)) {
+    .flag <- is_contaminant(rows[[cont$id_column]])
+    .feat <- if ("Precursor.Id" %in% names(rows)) rows$Precursor.Id else NULL
+    cont$census <- contaminant_census(group = rows$Protein.Group, is_cont = .flag,
+                                      feature = .feat, genes = rows$Genes)
+    .sc <- intersect(CONTAMINANT_SHARE_COLUMNS, names(rows))[1]
+    if (!is.na(.sc)) {
+      cont$intensity_column <- .sc
+      cont$share <- contaminant_share(rows[[.sc]], .flag, run = rows$Run)
+    }
+    if (any(.flag)) {
+      if (drop_contaminants) {
+        rows <- rows[!.flag, , drop = FALSE]
+        filters_applied <- c(filters_applied, sprintf(
+          "contaminants removed: %d %s mapping to a %s entry (%s); %d %s protein groups",
+          cont$census$n_precursors, if (is.null(.feat)) "rows" else "precursors",
+          CONTAMINANT_TAG, cont$id_column, cont$census$n_groups_contaminant, CONTAMINANT_TAG))
+        if (!nrow(rows)) stop("MaxLFQ: every row maps to a contaminant entry.")
+      } else {
+        filters_applied <- c(filters_applied, sprintf(
+          "contaminants kept (--keep-contaminants): %d %s protein groups",
+          cont$census$n_groups_contaminant, CONTAMINANT_TAG))
+      }
+    }
+  }
 
   # one PG.MaxLFQ per (Protein.Group, Run): DIA-NN broadcasts it across precursor rows.
   # Assert the broadcast rather than trust it — if it fails, max() silently biases the
@@ -150,6 +194,7 @@ build_maxlfq <- function(report_path, format = "parquet", q_cutoff = 0.01,
 
   list(
     E = E, genes = genes, n_obs = n_obs, filters_applied = filters_applied,
+    contaminants = cont,
     # The q-value columns actually filtered on. Recorded rather than assumed so the
     # emitted reproducibility script names the same columns this run used -- older
     # reports lack PG.Q.Value / Global.*, and hard-coding them would emit a script

@@ -81,8 +81,30 @@ python3 scripts/sample_quality.py --matrix de_results/Expression_Matrix.csv \
   produced 3,045 "DE" proteins that were contamination, not biology.
 - **EPIDERMIS** (skin/hair squames).
 
+The panels are human gene symbols matched case-insensitively, which covers mouse and rat
+for every marker except the adult globins (mouse `Hba`/`Hbb-bs`/`Hbb-b1`…, rat
+`Hba-a*`/`Hbb-b1`/`Hbbl1`): those come from `PANEL_ORTHOLOGS`, keyed on the organism's taxid
+(from `--fasta-meta`, or `--taxid`). Read each panel's `status`:
+- `assessed` — markers matched; the z scores mean something.
+- `none_detected` — this panel matched nothing but others did, for an organism whose names
+  are verified: a real absence at the depth reached.
+- `not_run` — **no** panel matched anything: the gene names did not match (no Genes
+  column, or an organism the table does not cover). "0 detected" then says nothing about
+  contamination — say the check could not run, never "no contamination".
+- `none_detected_unverified` — an organism outside human/mouse/rat: may be a naming mismatch.
+
+`Cont_`-tagged markers (bovine serum haemoglobin from an antibody prep, skin keratins) are
+listed as **contaminant, not sample** and never scored — including the ones `run_de.R`
+already removed (read from `contaminants_removed.csv` via `de_provenance.json`). Report them
+in the Data Quality Notes as a reagent/handling contamination, not as hemolysis.
+
 It scores each panel per sample (z across samples) and checks whether the score is
-**confounded with group**. Two hard-won lessons it encodes:
+**confounded with group** — a permutation test of the one-way between-group F statistic
+(9,999 relabellings, flagged at p < 0.01; `confound_p` in the JSON). It replaced a rule that
+compared only the highest and lowest group means, whose spread grows with the number of
+groups: on a 10-group design it flagged every panel by chance. With too few samples for any
+relabelling to reach 1% (3 vs 3), complete separation of the extreme groups is reported
+instead, and labelled so. Two hard-won lessons it encodes:
 - **A contamination panel that separates the groups is the danger signal** — DE between
   those groups may be the contamination gradient. **Protein-level marker removal does NOT
   fix a confounded contrast** (dropping muscle markers once *increased* the DE count); the
