@@ -41,7 +41,7 @@ Outputs under --outdir:
 import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
 # one definition each, where it is written
-from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES
+from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sidecar_state
 
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
@@ -395,7 +395,11 @@ def main():
     # a sidecar built with the check disabled (a replay of a replay) likewise.
     _rule = fi.get("contaminant_target_rule")
     fasta_repro_keep = ""
-    if fi and fasta_repro_contam != "none" and (not _rule or _rule == KEEP_TARGET_CONTAMINANTS_RULE):
+    # Which rule built the database: fetch_fasta.sidecar_state(), the one definition (legacy /
+    # identity_only / current). A database this replay rebuilds without contaminants has none.
+    _state = sidecar_state(fi) if fi and fasta_repro_contam != "none" else "current"
+    if _state == "legacy" or (fi and fasta_repro_contam != "none"
+                              and _rule == KEEP_TARGET_CONTAMINANTS_RULE):
         fasta_repro_keep = " --keep-target-contaminants"
         fasta_repro_note += (
             " The original database was built before target-identical contaminants were "
@@ -403,20 +407,21 @@ def main():
             "the corrected database." if not _rule else
             " The original database was built with --keep-target-contaminants; this replays "
             "that faithfully -- drop the flag to get the corrected database.")
-    # A sidecar with the rule but no min_unique_peptides was built with the identity rule
-    # alone, before the peptide rule (near-identical entries: bovine EEF1A1 vs mouse). Today's
-    # fetch_fasta.py would drop more; --min-unique-peptides 0 rebuilds that database. A
-    # recorded non-default threshold is replayed as recorded.
-    if fi and fasta_repro_contam != "none" and _rule and _rule != KEEP_TARGET_CONTAMINANTS_RULE:
-        _k = fi.get("min_unique_peptides")
-        if _k is None:
-            fasta_repro_keep += " --min-unique-peptides 0"
-            fasta_repro_note += (
-                " The original database was built before near-identical contaminants were "
-                "removed; this replays that faithfully -- drop --min-unique-peptides 0 to get "
-                "the corrected database.")
-        elif _k != MIN_UNIQUE_PEPTIDES:
-            fasta_repro_keep += f" --min-unique-peptides {int(_k)}"
+    # Built by the identity rule alone (sidecar_state "identity_only": the rule, no
+    # min_unique_peptides -- before the peptide rule, so near-identical entries such as bovine
+    # EEF1A1 vs mouse stayed). Today's fetch_fasta.py would drop more; --min-unique-peptides 0
+    # rebuilds that database. A recorded threshold other than the default (0 included) is
+    # replayed as recorded.
+    _k = fi.get("min_unique_peptides")
+    if _state == "identity_only" and _k is None:
+        fasta_repro_keep += " --min-unique-peptides 0"
+        fasta_repro_note += (
+            " The original database was built before near-identical contaminants were "
+            "removed; this replays that faithfully -- drop --min-unique-peptides 0 to get "
+            "the corrected database.")
+    elif (_state != "legacy" and _k is not None and _k != MIN_UNIQUE_PEPTIDES and
+          _rule != KEEP_TARGET_CONTAMINANTS_RULE and fasta_repro_contam != "none"):
+        fasta_repro_keep += f" --min-unique-peptides {int(_k)}"
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a

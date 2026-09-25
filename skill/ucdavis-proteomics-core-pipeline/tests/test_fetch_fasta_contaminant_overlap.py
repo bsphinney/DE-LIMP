@@ -858,6 +858,31 @@ class KeepTargetContaminants(unittest.TestCase):
         sh = self.repro({**self.BASE, "contaminant_set": "none", "n_contaminants_appended": 0})
         self.assertNotIn("--keep-target-contaminants", self.fetch_line(sh))
 
+    def test_replay_flags_follow_sidecar_state(self):
+        """provenance.py decides the replay from fetch_fasta.sidecar_state() (rule 3). The flags
+        for each state are what the inline check gave before -- compared, old against new, on
+        all of these shapes when the switch was made."""
+        B = self.BASE
+        rule = ff.CONTAMINANT_TARGET_RULE
+        for info, state, flags in (
+                (B, "legacy", ["--keep-target-contaminants"]),
+                ({**B, "contaminant_target_rule": ff.contaminant_target_rule(0)}, "identity_only",
+                 ["--min-unique-peptides 0"]),
+                ({**B, "contaminant_target_rule": rule, "min_unique_peptides": 0}, "identity_only",
+                 ["--min-unique-peptides 0"]),
+                ({**B, "contaminant_target_rule": rule, "min_unique_peptides": 2}, "current", []),
+                ({**B, "contaminant_target_rule": rule, "min_unique_peptides": 3}, "current",
+                 ["--min-unique-peptides 3"]),
+                ({**B, "contaminant_target_rule": ff.KEEP_TARGET_CONTAMINANTS_RULE}, "current",
+                 ["--keep-target-contaminants"])):
+            with self.subTest(state=state, info=info.get("min_unique_peptides")):
+                self.assertEqual(ff.sidecar_state(info), state)
+                line = self.fetch_line(self.repro(info))
+                got = [f for f in ("--keep-target-contaminants", "--min-unique-peptides 0",
+                                   "--min-unique-peptides 2", "--min-unique-peptides 3")
+                       if f in line]
+                self.assertEqual(got, flags)
+
 
 class EnzymeNames(unittest.TestCase):
     def test_slash_forms(self):
