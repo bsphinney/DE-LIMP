@@ -87,8 +87,8 @@ class FigureSelection(unittest.TestCase):
         # at its position: between the paragraphs around the reference
         self.assertLess(page.index("BEFORE-PCA"), page.index(b64("pca.png")))
         self.assertLess(page.index(b64("pca.png")), page.index("AFTER-PCA"))
-        self.assertIn("Figure 1.</strong> PCA of the samples", page)
-        self.assertIn("Figure 2.</strong> Volcano — B vs A", page)
+        self.assertIn('Figure 1.</span><span class="figt">PCA of the samples', page)
+        self.assertIn('Figure 2.</span><span class="figt">Volcano — B vs A', page)
 
     def test_unreferenced_image_is_left_out_with_one_warning(self):
         self.write("AI_Analysis_Report.md", REPORT)
@@ -159,14 +159,93 @@ class FigureSelection(unittest.TestCase):
                      "P3,3.0,0.2\nP4,0.1,0.049\n")
         self.write("AI_Analysis_Report.md", "# T\n\nText.\n")
         _, page, _ = self.build()
-        row = re.search(r"<td>B vs A</td>(.*?)</tr>", page).group(1)
-        self.assertEqual(re.findall(r"<td>([\d,]+)</td>", row), ["4", "2", "1", "3"])
+        tile = re.search(r'<div class="v">(\d+)</div><div class="l">B vs A</div>'
+                         r'<div class="s">(.*?)</div>', page)
+        self.assertIsNotNone(tile, "no stat tile for the contrast")
+        self.assertEqual(tile.group(1), "3")                        # 0.3-log2FC counts, 3.0 does not
+        self.assertEqual(re.findall(r"(\d+) (?:up|down)", tile.group(2)), ["2", "1"])
         self.assertIn("no fold-change filter", page)
 
     def test_reference_parser(self):
         md = ('![a](figures/pca.png) ![b](<figures/my%20fig.png> "t") <IMG SRC="figures/v.png"> '
               '![again](./figures/pca.png) ![remote](https://x.org/y.png) ![c](figs/z.svg?v=2)')
         self.assertEqual(mah.report_figures(md), ["pca.png", "my fig.png", "v.png", "z.svg"])
+
+
+class Restyle(unittest.TestCase):
+    """report_style.py: one self-contained look -- no fetched fonts/CSS/JS, working contents
+    links, a real dark mode, print styles, and callouts for what a PI must not miss."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._td = tempfile.TemporaryDirectory()
+        s = cls._td.name
+        figs = os.path.join(s, "output", "figures")
+        tables = os.path.join(s, "output", "tables")
+        os.makedirs(figs)
+        os.makedirs(tables)
+        with open(os.path.join(figs, "pca.png"), "wb") as fh:
+            fh.write(png_bytes("pca.png"))
+        with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
+            json.dump({"adjp": 0.05, "n_samples": 6, "groups": {"A": 3, "B": 3},
+                       "contrasts": ["B-A"], "display_label": "DPC-Quant + limma (limpa)"}, fh)
+        with open(os.path.join(tables, "DE_dpc_B.A.csv"), "w") as fh:
+            fh.write("Protein.Group,logFC,adj.P.Val\nP1,1,0.01\n")
+        with open(os.path.join(tables, "QC_detected_vs_inferred.csv"), "w") as fh:
+            fh.write("Sample,Group,Detected,Inferred,Total,PctDetected,PctInferred\n"
+                     "S1,A,40,60,100,40,60\nS2,B,80,20,100,80,20\n")
+        with open(os.path.join(s, "output", "AI_Analysis_Report.md"), "w") as fh:
+            fh.write("# Study\n\n*Standfirst.*\n\n## Overview\n\n![PCA](figures/pca.png)\n\n"
+                     "| Protein | logFC |\n|---|---|\n| P1 | 1.5 |\n| P2 | -0.3 |\n\n"
+                     "## Data Quality Notes\n\n1. one\n\n- detail\n\n2. two\n\n"
+                     "## Expert Review Notes\n\n- **Critical:** something\n")
+        out = os.path.join(s, "r.html")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                            "--session", s, "--submission", "PROT_0001", "--out", out],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        with open(out, encoding="utf-8") as fh:
+            cls.page = fh.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._td.cleanup()
+
+    def test_self_contained(self):
+        p = self.page
+        self.assertNotRegex(p, r"<link\b")
+        self.assertNotRegex(p, r"<script[^>]+\bsrc=")
+        self.assertNotRegex(p, r"@import|@font-face")
+        self.assertNotRegex(p, r"url\(\s*['\"]?(https?:)?//")
+        self.assertNotRegex(p, r"(?:src|href)=[\"']?(https?:)?//")
+
+    def test_toc_links_resolve(self):
+        ids = set(re.findall(r'\bid="([^"]+)"', self.page))
+        hrefs = re.findall(r'href="#([^"]+)"', self.page)
+        self.assertGreaterEqual(len(hrefs), 4)
+        self.assertEqual([h for h in hrefs if h not in ids], [])
+
+    def test_dark_mode_tokens_and_print_styles(self):
+        p = self.page
+        self.assertRegex(p, r"@media \(prefers-color-scheme:dark\)\{:root:not\(\[data-theme=\"light\"\]\)\{\s*--bg:")
+        self.assertIn(':root[data-theme="dark"]{', p)
+        self.assertRegex(p, r"body\{[^}]*background:var\(--bg\)")
+        self.assertRegex(p, r"figure\.fig \.imgbox\{[^}]*background:#fff")   # plots stay on white
+        self.assertRegex(p, r"@media print\{[^@]*\.toc[^}]*display:none")
+
+    def test_header_tiles_callouts_and_figure_cards(self):
+        p = self.page
+        self.assertIn("<b>Submission</b>PROT_0001", p)
+        self.assertIn('class="tiles"', p)
+        self.assertIn("Some values are inferred, not measured", p)          # 60% inferred -> warning
+        self.assertRegex(p, r'callout warning[^>]*>.*?Some values are inferred', )
+        self.assertRegex(p, r'id="data-quality-notes">Data Quality Notes</h2><div class="callout warning')
+        self.assertRegex(p, r'id="expert-review-notes">Expert Review Notes</h2><div class="callout critical')
+        self.assertIn('class="imgbox"', p)
+        self.assertIn('id="lb"', p)                                          # the lightbox
+        self.assertIn('<ol start="2">', p)                                   # numbering survives
+        self.assertIn('<td class="num">-0.3</td>', p)                       # numbers right-aligned
+        self.assertIn("<p class=\"subtitle\"><em>Standfirst.</em></p>", p)
 
 
 if __name__ == "__main__":

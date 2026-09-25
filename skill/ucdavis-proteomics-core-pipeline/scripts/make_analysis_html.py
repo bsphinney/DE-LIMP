@@ -38,7 +38,10 @@ Usage
   python3 make_analysis_html.py --report AI_Analysis_Report.md --figures ./figures \\
       --tables ./tables --out report.html [--title "..."] [--quality SAMPLE_QUALITY.md]
 """
-import argparse, base64, csv, html, json, mimetypes, os, re, sys, urllib.parse
+import argparse, base64, csv, datetime, html, json, mimetypes, os, re, sys, urllib.parse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
 
 # Galleries (no report only): QC first, then overview, then per-contrast results.
 FIGURE_ORDER = [
@@ -154,18 +157,14 @@ class Figures:
         self.embedded.append(os.path.basename(path))
         return self.figure(self.n, uri, alt, self.caps.get(os.path.basename(path)), section)
 
-    # presentation -- overridden by report_style when the page is styled
     @staticmethod
     def note(text):
-        return f'<div class="figmissing" role="note">{html.escape(text)}</div>'
+        return rs.note(text)
 
     @staticmethod
     def figure(n, uri, alt, caption, section=None):
-        cls = " class='qc'" if section == "Quality control" else ""
-        title = md_inline(alt) if alt else ""
-        cap = (" &mdash; " + md_inline(caption)) if caption and alt else md_inline(caption or "")
-        return (f'<figure id="fig-{n}"{cls}><img src="{uri}" alt="{html.escape(alt or caption or "")}">'
-                f"<figcaption><strong>Figure {n}.</strong> {title}{cap}</figcaption></figure>")
+        return rs.figure_card(n, uri, alt or caption or "", md_inline(alt) if alt else "",
+                              md_inline(caption) if caption else "")
 
 
 def md_inline(t, figs=None):
@@ -265,16 +264,20 @@ def md_to_html(md, figs=None, used=None, drop_h1=False):
             out.append("<ul>" + "".join(f"<li>{md_inline(x, figs)}</li>" for x in items) + "</ul>")
             continue
         if re.match(r"^\s*\d+[.)]\s+", ln):
+            # keep the Markdown's own number: a list broken up by nested bullets must go on
+            # 2, 3, ... instead of restarting at 1 after every break
+            start = int(re.match(r"^\s*(\d+)", ln).group(1))
             items = []
             while i < n and re.match(r"^\s*\d+[.)]\s+", lines[i]):
                 items.append(re.sub(r"^\s*\d+[.)]\s+", "", lines[i])); i += 1
-            out.append("<ol>" + "".join(f"<li>{md_inline(x, figs)}</li>" for x in items) + "</ol>")
+            out.append((f'<ol start="{start}">' if start != 1 else "<ol>")
+                       + "".join(f"<li>{md_inline(x, figs)}</li>" for x in items) + "</ol>")
             continue
         if ln.strip().startswith(">"):
             q = []
             while i < n and lines[i].strip().startswith(">"):
                 q.append(re.sub(r"^\s*>\s?", "", lines[i])); i += 1
-            out.append(f"<blockquote>{md_inline(' '.join(q), figs)}</blockquote>")
+            out.append(rs.callout("info", f"<p>{md_inline(' '.join(q), figs)}</p>"))
             continue
         if not ln.strip():
             i += 1
@@ -288,13 +291,7 @@ def md_to_html(md, figs=None, used=None, drop_h1=False):
 
 
 def table_html(head, body, figs=None):
-    t = ['<div class="tablewrap"><table><thead><tr>']
-    t += [f"<th>{md_inline(c)}</th>" for c in head]
-    t.append("</tr></thead><tbody>")
-    for r in body:
-        t.append("<tr>" + "".join(f"<td>{md_inline(c, figs)}</td>" for c in r) + "</tr>")
-    t.append("</tbody></table></div>")
-    return "".join(t)
+    return rs.table([md_inline(c) for c in head], [[md_inline(c, figs) for c in r] for r in body])
 
 
 def significance_rule(tables_dir, default_adjp=0.05):
@@ -320,7 +317,9 @@ def de_summary(tables_dir, adjp=0.05):
     if not tables_dir or not os.path.isdir(tables_dir):
         return rows
     for fn in sorted(os.listdir(tables_dir)):
-        m = re.match(r"^DE_(\w+)_(.+)\.csv$", fn)
+        # The method is one lowercase word (dpc, maxlfq): \w+ also ate the contrast's first
+        # word, so "DE_dpc_Old_JPH3.Old_IgG.csv" read as method "dpc_Old", contrast "JPH3...".
+        m = re.match(r"^DE_([a-z0-9]+)_(.+)\.csv$", fn)
         if not m:
             continue
         up = dn = tot = 0
@@ -346,56 +345,127 @@ def de_summary(tables_dir, adjp=0.05):
     return rows
 
 
-CSS = """
-:root{--bg:#fff;--fg:#16191d;--mut:#5b6470;--line:#e2e6eb;--card:#f7f9fb;--accent:#2a78d6;--warn:#b4531a}
-@media (prefers-color-scheme:dark){:root{--bg:#14171a;--fg:#e8eaed;--mut:#9aa4b0;--line:#2b3138;--card:#1b1f24;--accent:#5fa3f0;--warn:#e08c4e}}
-:root[data-theme=dark]{--bg:#14171a;--fg:#e8eaed;--mut:#9aa4b0;--line:#2b3138;--card:#1b1f24;--accent:#5fa3f0;--warn:#e08c4e}
-:root[data-theme=light]{--bg:#fff;--fg:#16191d;--mut:#5b6470;--line:#e2e6eb;--card:#f7f9fb;--accent:#2a78d6;--warn:#b4531a}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;overflow-x:hidden}
-.wrap{max-width:60rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
-h1{font-size:1.9rem;line-height:1.25;margin:0 0 .3rem}
-h2{font-size:1.35rem;margin:2.6rem 0 .8rem;padding-bottom:.35rem;border-bottom:2px solid var(--line)}
-h3{font-size:1.08rem;margin:1.8rem 0 .5rem}
-p,li{color:var(--fg)}
-code{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:.1em .35em;font-size:.88em}
-pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem;overflow-x:auto}
-pre code{background:none;border:0;padding:0}
-blockquote{margin:1rem 0;padding:.6rem 1rem;border-left:3px solid var(--accent);background:var(--card);color:var(--mut)}
-.sub{color:var(--mut);margin:.2rem 0 0}
-.tablewrap{overflow-x:auto;margin:1rem 0}
-table{border-collapse:collapse;width:100%;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-weight:600;color:var(--mut);font-size:.82rem;text-transform:uppercase;letter-spacing:.03em}
-figure{margin:1.6rem 0;padding:1rem;background:var(--card);border:1px solid var(--line);border-radius:10px}
-figure img{width:100%;height:auto;display:block;border-radius:6px;background:#fff}
-figcaption{color:var(--mut);font-size:.9rem;margin-top:.7rem}
-.qc{border-left:3px solid var(--accent)}
-.banner{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:.9rem 1.1rem;margin:1.4rem 0;font-size:.94rem}
-.toc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin:1.6rem 0}
-.toc ul{margin:.4rem 0 0;padding-left:1.1rem}
-.toc a{color:var(--accent);text-decoration:none}
-.toc a:hover{text-decoration:underline}
-.toggle{position:fixed;top:1rem;right:1rem;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:.4rem .7rem;font-size:.85rem;cursor:pointer;z-index:9}
-.figmissing{margin:1.2rem 0;padding:.7rem 1rem;border:1px dashed var(--warn);border-radius:8px;color:var(--warn);font-size:.92rem}
-.figref{color:var(--mut);font-size:.92rem}
-@media print{.toggle{display:none}figure{break-inside:avoid}}
-"""
-
-JS = """
-(function(){
- var b=document.getElementById('tt');
- function cur(){var a=document.documentElement.getAttribute('data-theme');
-  if(a)return a;return matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';}
- function set(t){document.documentElement.setAttribute('data-theme',t);
-  b.textContent=t==='dark'?'\\u2600 Light':'\\u263e Dark';}
- set(cur()); b.addEventListener('click',function(){set(cur()==='dark'?'light':'dark');});
-})();
-"""
+ENGINE_LABEL = {"diann": "DIA-NN", "sage": "Sage", "fragpipe": "FragPipe", "radiant": "Radiant",
+                "alphadia": "AlphaDIA"}
 
 
 def norm_title(t):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or "")).strip().lower())
+
+
+def _load(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def session_facts(a, prov):
+    """The header band's study facts, each read from a record of the run -- a fact no record
+    holds is left out, never filled in (architectural rule 2)."""
+    s = os.path.abspath(a.session) if a.session else None
+    man = _load(os.path.join(s, "input", "wf", "workflow.manifest.json")) if s else {}
+    fmeta = _load(os.path.join(s, "input", "search.fasta.meta.json")) if s else {}
+    sprov = _load(os.path.join(s, "output", "search", "search_provenance.json")) if s else {}
+    sub = a.submission or man.get("submission") or man.get("submission_id")
+    if not sub and s and os.path.exists(os.path.join(s, "README.md")):
+        with open(os.path.join(s, "README.md"), encoding="utf-8", errors="replace") as fh:
+            m = re.search(r"\bPROT_\d{3,5}\b", fh.read())
+        sub = m.group(0) if m else None
+    org = fmeta.get("organism") or man.get("organism")
+    tax = fmeta.get("taxid") or man.get("organism_taxid")
+    eng = (sprov.get("engine") or (man.get("engine") or {}).get("name") or "").lower()
+    ver = sprov.get("version") or (man.get("engine") or {}).get("version")
+    return [("Submission", sub),
+            ("Organism", f"{org} (taxid {tax})" if org and tax else org),
+            ("Instrument", ", ".join(man.get("instruments") or []) or None),
+            ("Search", " ".join(x for x in (ENGINE_LABEL.get(eng, eng), str(ver) if ver else "") if x) or None),
+            ("DE", prov.get("display_label")),
+            ("Report generated", datetime.date.today().isoformat())]
+
+
+def _make_names(c):
+    """R's make.names -- how run_de.R turned a contrast into its DE_<method>_<name>.csv."""
+    n = re.sub(r"[^A-Za-z0-9._]", ".", c)
+    return n if re.match(r"^([A-Za-z]|\.(?!\d))", n) else "X" + n
+
+
+def glance(de, prov, adjp, adjp_src, tables):
+    """"Results at a glance": design tiles, a tile per contrast, and the inferred-values caveat."""
+    label = {_make_names(c): c for c in prov.get("contrasts") or []}
+    tiles = []
+    if isinstance(prov.get("n_samples"), int):
+        tiles.append((prov["n_samples"], "samples", None, "key"))
+    if isinstance(prov.get("groups"), dict):
+        tiles.append((len(prov["groups"]), "groups", None, "key"))
+    if de:
+        tiles.append((len(de), "contrasts", None, "key"))
+        tiles.append((max(r["tested"] for r in de), "proteins tested", None, "key"))
+    out = [rs.stat_tiles(tiles)] if tiles else []
+    if de:
+        order = list(label)                       # the run's own contrast order
+        rows = sorted(de, key=lambda r: (order.index(r["file"][len(f"DE_{r['method']}_"):-4])
+                                         if r["file"][len(f"DE_{r['method']}_"):-4] in order
+                                         else len(order), r["file"]))
+        per = []
+        for r in rows:
+            raw = r["file"][len(f"DE_{r['method']}_"):-4]
+            name = label.get(raw, r["contrast"]).replace("-", " vs ").replace("_", " ")
+            per.append((r["up"] + r["down"], name,
+                        f"&#9650;&thinsp;{r['up']:,} up &nbsp;&#9660;&thinsp;{r['down']:,} down",
+                        None))
+        out.append(rs.stat_tiles(per, heading=f"Significant proteins per contrast "
+                                              f"(adj. p < {adjp:g})"))
+        out.append(f"<p class='lead'>Counted directly from the DE tables: significant = adjusted "
+                   f"p &lt; {adjp:g} (Benjamini&ndash;Hochberg; {adjp_src}), the only rule the DE "
+                   f"applied &mdash; no fold-change filter. Up / down = sign of the fold "
+                   f"change.</p>")
+    qc = os.path.join(tables or "", "QC_detected_vs_inferred.csv")
+    if os.path.exists(qc):
+        try:
+            with open(qc, newline="") as fh:
+                pct = [float(r["PctInferred"]) for r in csv.DictReader(fh)]
+        except (OSError, KeyError, ValueError) as e:
+            pct = []
+            print(f"[make_analysis_html] WARNING: {qc} unreadable ({e}); the inferred-values "
+                  f"note is left out", file=sys.stderr)
+        if pct:
+            pct.sort()
+            med = pct[len(pct) // 2]
+            dm = os.path.exists(os.path.join(tables, "Detection_Matrix.csv"))
+            out.append(rs.callout(
+                "warning" if pct[-1] >= 50 else "info",
+                f"<p>limpa's detection-probability model gives every protein a value in every "
+                f"sample. Where no precursor of a protein was observed, that value is a model "
+                f"estimate, not a measurement: {pct[0]:.0f}&ndash;{pct[-1]:.0f}% of each sample's "
+                f"protein values (median {med:.0f}%) are inferred here "
+                f"(<code>QC_detected_vs_inferred.csv</code>). Weigh a large fold change carried by "
+                f"inferred values accordingly"
+                + (" &mdash; <code>Detection_Matrix.csv</code> marks every value." if dm else ".")
+                + "</p>",
+                title="Some values are inferred, not measured"))
+    return "".join(out)
+
+
+def severity(title, content):
+    """Callout severity for the sections a PI must not miss; None for ordinary sections."""
+    t = norm_title(title)
+    txt = html.unescape(re.sub(r"<[^>]+>", " ", content))
+    crit = "⛔" in txt or re.search(r"\bFAIL\b|\bcritical\b|CONFOUNDED", txt, re.I)
+    if (t in SUPERSEDED_BY["audit"] or "audit" in t or t in SUPERSEDED_BY["quality"]
+            or "quality notes" in t or "expert review" in t or "caveat" in t):
+        return "critical" if crit else "warning"
+    return None
+
+
+def split_sections(report_html):
+    """-> (content before the first h2, [(anchor, title_html, content)])."""
+    parts = re.split(r'<h2 id="([^"]+)">(.*?)</h2>', report_html)
+    pre, secs = parts[0], []
+    for i in range(1, len(parts), 3):
+        secs.append((parts[i], parts[i + 1], parts[i + 2]))
+    return pre, secs
 
 
 def main():
@@ -408,6 +478,8 @@ def main():
     ap.add_argument("--quality", help="SAMPLE_QUALITY.md")
     ap.add_argument("--audit", help="AUDIT.md")
     ap.add_argument("--title", help="page title (default: the report's own # heading)")
+    ap.add_argument("--submission", help="Core submission ID for the header, e.g. PROT_0756 "
+                                         "(default: from the session record, else omitted)")
     ap.add_argument("--adjp", type=float, default=0.05,
                     help="only when the tables carry no de_provenance.json (its adjp wins)")
     ap.add_argument("--out", required=True)
@@ -423,6 +495,7 @@ def main():
             if not getattr(a, attr) and os.path.exists(p):
                 setattr(a, attr, p)
     has_report = bool(a.report and os.path.exists(a.report))
+    prov = _load(os.path.join(a.tables, "de_provenance.json")) if a.tables else {}
 
     caps, listed = {}, []
     if a.figures and os.path.exists(os.path.join(a.figures, "figures.json")):
@@ -446,15 +519,8 @@ def main():
     root = os.path.abspath(a.session) if a.session else base
     figs = Figures(base, root, a.figures, caps)
 
-    used, body, toc = set(), [], []
-
-    def sect(title, content):
-        aid = anchor(title, used)
-        toc.append(f'<li><a href="#{aid}">{html.escape(title)}</a></li>')
-        body.append(f'<h2 id="{aid}">{html.escape(title)}</h2>')
-        body.append(content)
-
-    report_html, heads, h1 = "", [], None
+    used, sections = set(), []          # sections: (anchor, title_html, content, kind)
+    md, report_html, heads, h1 = "", "", [], None
     if has_report:
         with open(a.report, encoding="utf-8", errors="replace") as fh:
             md = fh.read()
@@ -465,17 +531,9 @@ def main():
 
     adjp, adjp_src = significance_rule(a.tables, a.adjp)
     de = de_summary(a.tables, adjp)
-    if de:
-        t = ["<p class='sub'>Counted directly from the DE tables: significant = adjusted "
-             f"p &lt; {adjp:g} (Benjamini&ndash;Hochberg; {adjp_src}), the only rule the DE "
-             "applied &mdash; no fold-change filter. Higher / lower = sign of the fold change.</p>",
-             "<div class='tablewrap'><table><thead><tr><th>Contrast</th><th>Proteins tested</th>"
-             "<th>Higher</th><th>Lower</th><th>Total changed</th></tr></thead><tbody>"]
-        for r in de:
-            t.append(f"<tr><td>{html.escape(r['contrast'])}</td><td>{r['tested']:,}</td>"
-                     f"<td>{r['up']:,}</td><td>{r['down']:,}</td><td>{r['up']+r['down']:,}</td></tr>")
-        t.append("</tbody></table></div>")
-        sect("Results at a glance", "".join(t))
+    g = glance(de, prov, adjp, adjp_src, a.tables)
+    if g:
+        sections.append((anchor("Results at a glance", used), "Results at a glance", g, None))
 
     left_out = []
     if not has_report:
@@ -489,12 +547,12 @@ def main():
                 continue
             parts = []
             if sec == "Quality control":
-                parts.append("<div class='banner'>Read these first. They decide how much weight "
-                             "the results below can carry &mdash; a volcano plot looks equally "
-                             "convincing whether or not the run was any good.</div>")
+                parts.append(rs.callout("info", "<p>Read these first. They decide how much weight "
+                                        "the results below can carry &mdash; a volcano plot looks "
+                                        "equally convincing whether or not the run was any good.</p>"))
             for _, fn in sorted(gal[sec]):
                 parts.append(figs.render("", fn, section=sec))
-            sect(sec, "".join(parts))
+            sections.append((anchor(sec, used), html.escape(sec), "".join(parts), None))
         left_out = [f for f in available if f not in set(listed)]
         why = "not listed in figures.json" if listed else "no report and no figures.json"
     else:
@@ -510,15 +568,17 @@ def main():
         if report_h2 & (SUPERSEDED_BY[key] | {norm_title(title)}):
             continue                    # the report has its own -- never show it twice
         with open(path, encoding="utf-8", errors="replace") as fh:
-            sect(title, md_to_html(fh.read(), None, used=used, drop_h1=True)[0])
+            content = md_to_html(fh.read(), None, used=used, drop_h1=True)[0]
+        sections.append((anchor(title, used), html.escape(title), content,
+                         severity(title, content)))
 
+    pre = ""
     if has_report:
-        for lvl, aid, text in heads:
-            if lvl == 2:
-                toc.append(f'<li><a href="#{aid}">{md_inline(text)}</a></li>')
-        body.append(report_html)
+        pre, rsecs = split_sections(report_html)
+        for aid, title_html, content in rsecs:
+            sections.append((aid, title_html, content, severity(title_html, content)))
 
-    if not body:
+    if not sections and not pre.strip():
         sys.exit("[make_analysis_html] nothing to render — check --session/--report/--figures")
 
     if left_out:
@@ -534,17 +594,19 @@ def main():
               file=sys.stderr)
 
     title = a.title or (html.unescape(re.sub(r"[*`]", "", h1)) if h1 else "Proteomics Analysis Report")
-    doc = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html.escape(title)}</title><style>{CSS}</style></head>
-<body><button class="toggle" id="tt">Dark</button><div class="wrap">
-<h1>{html.escape(title)}</h1>
-<p class="sub">Self-contained &mdash; every figure is embedded, so this one file is the whole
-report. No network needed; copy it anywhere and double-click to open.</p>
-<div class="toc"><strong>Contents</strong><ul>{''.join(toc)}</ul></div>
-{''.join(body)}
-</div><script>{JS}</script></body></html>"""
+    # A single short paragraph before the first section is the report's own standfirst.
+    subtitle = None
+    m = re.fullmatch(r"\s*<p>(.*?)</p>\s*", pre, re.S)
+    if m and len(m.group(1)) < 600:
+        subtitle, pre = m.group(1), ""
+    body = (f'<div class="lead">{pre}</div>' if pre.strip() else "") + "".join(
+        rs.section(aid, t, c, k) for aid, t, c, k in sections)
+    doc = rs.page(title, body, toc=[(aid, t) for aid, t, _, _ in sections],
+                  facts=session_facts(a, prov), subtitle=subtitle,
+                  footer=(f"Self-contained: all {figs.n} figure(s) are embedded, so this one file is "
+                          f"the whole report &mdash; no network needed; copy it anywhere and "
+                          f"double-click to open. Generated by the UC Davis Proteomics Core "
+                          f"pipeline skill (make_analysis_html.py). Click a figure to enlarge it."))
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as fh:

@@ -1325,7 +1325,7 @@ Word document. Both are required; neither is optional.
 
 ```
 # 1. HTML — the DEFAULT deliverable. QC panels + figures + text in ONE file.
-python3 scripts/make_analysis_html.py --session <session> \
+python3 scripts/make_analysis_html.py --session <session> [--submission PROT_<n>] \
     --title "<study name>" --out <session>/output/Analysis_Report.html
 
 # 2. Word — for circulation and track-changes
@@ -1345,7 +1345,10 @@ figure at that spot in the text (caption from `figures.json` when there is one).
 report does not reference are left out, with one `WARNING` naming them — a redrawn plot's old
 copy is not shipped; a referenced image that is missing shows as a visible "figure missing"
 note. So reference every figure you want, where you discuss it. Only with no report at all
-does the page fall back to galleries of `figures.json`'s figures.
+does the page fall back to galleries of `figures.json`'s figures. The look (header band with
+the study facts, stat tiles, contents rail, figure cards with click-to-enlarge, callouts for
+the audit / data-quality / expert-review sections, dark mode, print styles) lives in
+`scripts/report_style.py`, shared by the skill's HTML pages — restyle there, not per page.
 
 The page puts the **QC panels above the results** on purpose: a volcano plot is equally
 persuasive whether or not the run was any good, so a reader who meets the biology first
