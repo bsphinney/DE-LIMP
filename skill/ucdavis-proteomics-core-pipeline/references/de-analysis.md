@@ -158,6 +158,31 @@ limpa/limma. It is built from the objects that ran, for the same reason `methods
 is: a hand-written recipe drifts, a generated one can't. Point users at it whenever
 they ask what was done or want the code. → `references/reproducibility.md`.
 
+## Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
+One figure per contrast: the top `--violin-top` proteins (default 8), ranked by
+`adj.P.Val` then `|logFC|`, as small multiples. Each panel shows the contrast's groups as
+violins (reference group on the left), one point per run, the group mean as a bar, an
+arrow from the reference mean to the compared mean (red = higher, blue = lower), and the
+model's log2FC + adjusted p (`n.s.` when not significant; non-significant panels are shown
+as context only). Other groups are left out on purpose: `heatmap_top.png` already shows
+the top proteins across every group.
+
+**Each point is marked measured or not** (DE-LIMP's expression-grid violin):
+filled teal = at least one precursor observed in that run; hollow amber = no precursor
+observed. Read it from `Detection_Matrix.csv` (Protein.Group + one column per run, named
+as in `Expression_Matrix.csv`; values = precursors observed, 0 = not observed). What a 0
+means comes from `de_provenance.json` (`detection_matrix.zero_means` if present, else
+`pipeline_id`): **Inferred** under DPC-Quant (the value exists but was modelled), **Missing**
+under MaxLFQ (no value exists, so nothing is drawn). A label under a violin counts its
+measured runs, shown only when not every run was measured.
+
+**Say this when you describe the figure:** a group labelled *all inferred* (0 measured
+runs) makes that protein's fold change a **detection event**, since it is seen in one group and
+not the other, not a measured magnitude. The subtitle names every such protein; confirm
+them before building on the size of the change. With no `Detection_Matrix.csv` (older
+runs) the points carry no status, the subtitle says detection status was not recorded, and
+no status legend is drawn. Never describe those points as measured.
+
 ## Citations (verified June 2026)
 - **limpa / DPC:** Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125;
   Li M, Smyth GK (2023) Bioinformatics 39(5):btad200. (DE-LIMP's

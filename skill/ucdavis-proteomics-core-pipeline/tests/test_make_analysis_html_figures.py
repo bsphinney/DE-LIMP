@@ -174,6 +174,14 @@ class FigureSelection(unittest.TestCase):
         self.assertEqual(mah.report_figures(md), ["pca.png", "my fig.png", "v.png", "z.svg"])
 
 
+class Galleries(unittest.TestCase):
+    def test_top_protein_violins_sit_with_the_de_figures(self):
+        """make_figures.R's violin_top_<contrast>.png belongs beside the volcano on the
+        no-report page, not under "Other figures"."""
+        self.assertEqual(mah.classify("violin_top_B.A.png")[0], "Differential expression")
+        self.assertLess(mah.classify("volcano_B.A.png")[1], mah.classify("violin_top_B.A.png")[1])
+
+
 class Restyle(unittest.TestCase):
     """report_style.py: one self-contained look -- no fetched fonts/CSS/JS, working contents
     links, a real dark mode, print styles, and callouts for what a PI must not miss."""

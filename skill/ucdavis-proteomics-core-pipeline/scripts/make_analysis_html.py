@@ -51,6 +51,7 @@ FIGURE_ORDER = [
     ("pca", "Overview"),
     ("heatmap_top", "Overview"),
     ("volcano", "Differential expression"),
+    ("violin_top", "Differential expression"),     # make_figures.R's top-protein violins
     ("pvalue", "Differential expression"),
 ]
 SECTION_ORDER = ["Quality control", "Overview", "Differential expression", "Other figures"]

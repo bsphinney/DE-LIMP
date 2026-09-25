@@ -31,7 +31,9 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   de_provenance.json, and reproducibility_log.R — the analysis as
                             #   plain R, runnable with just R + limpa/limma (point users here
                             #   when they ask for "the code")
-    figures/                # volcano / PCA / heatmap / p-value / QC PNGs + figures.json
+    figures/                # volcano / top-protein violins / PCA / heatmap / p-value / QC PNGs
+                            #   + figures.json (captions) + sample_labels.csv (the short
+                            #   sample names on the plots -> their full run names)
     reproducibility/        # the pinned bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
     AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
     Analysis_Report.html    # THE report of record: one self-contained page (no Word copy)
