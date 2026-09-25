@@ -812,6 +812,26 @@ class WhatIsCopied(Base):
         self.assertIn(f"Reproducibility / zip:** `sessions/{SESSION}/{os.path.basename(zpath)}`",
                       entry)
 
+    def test_the_podcast_the_listen_card_points_at_is_copied(self):
+        # podcast-reviewer 2026-09-25: the record kept Analysis_Report.html and its Listen card
+        # but not output/podcast/, so the card was dead in the registry.
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=False)
+        pod = os.path.join(sess, "output", "podcast")
+        write(os.path.join(pod, "podcast.json"), json.dumps(
+            {"audio": "podcast.m4a", "transcript": "transcript.html", "duration_s": 60}))
+        for f in ("podcast.m4a", "podcast.wav", "transcript.html", "podcast_script.md",
+                  "check.txt"):
+            write(os.path.join(pod, f), "x" * 100)
+        write(os.path.join(pod, ".cache", "abc.wav"), "scratch")
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        files = set(self.all_files(self.only_folder()))
+        for f in ("podcast.m4a", "transcript.html", "podcast_script.md", "check.txt",
+                  "podcast.json"):
+            self.assertIn(f"output/podcast/{f}", files)
+        self.assertNotIn("output/podcast/podcast.wav", files)          # the .m4a is the audio
+        self.assertFalse([f for f in files if ".cache" in f], files)
+
     def test_big_files_are_skipped_with_a_note(self):
         out = make_search(self.d)
         write(os.path.join(out, "report.log.txt"), "DIA-NN 2.7.0\n" + "x" * 5000)

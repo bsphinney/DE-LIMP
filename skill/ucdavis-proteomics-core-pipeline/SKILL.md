@@ -1484,14 +1484,20 @@ empirical Bayes) with their own data. **You write the script** from the report, 
 render it and link it:
 ```
 python3 scripts/make_podcast.py check <session>/output/podcast/podcast_script.md \
-    --source <session>/output/AI_Analysis_Report.md <session>/output/AUDIT.md --forbid-name "<people>"
+    --source <session>/output/AI_Analysis_Report.md <session>/output/methods.md \
+             <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
 python3 scripts/make_podcast.py render <session>/output/podcast/podcast_script.md --tts say
 python3 scripts/make_podcast.py link <session>/output
 ```
-Every number and gene symbol must be in the report or listed under "Claims beyond the report".
-Render refuses until the check passes. `--tts gemini` sends the transcript (never the report)
-to Google. It sends nothing without `--cloud-ok`: on a free-tier key Google may use the text,
-so use a paid-tier key or `--tts say` for unpublished data, and record the user's consent.
+`check` matches tokens, not meaning. It fails a number, symbol-like word or capitalised name
+that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
+missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch
+a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
+false sentence built from true tokens, so read the script against the report yourself. Render
+and link refuse until the check passes for the current script and sources. `--tts gemini` sends
+the transcript (never the report) to Google, and nothing without `--cloud-ok` (`--cloud-ok no`
+is a refusal). On a free-tier key Google may use the text, so use a paid-tier key or `--tts say`
+for unpublished data, and record the user's consent.
 → detail (the brief, the file format, privacy): `references/podcast.md`.
 
 ### 10. Reproducibility bundle (mandatory)

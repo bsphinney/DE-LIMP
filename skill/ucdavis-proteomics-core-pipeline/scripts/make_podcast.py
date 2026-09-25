@@ -8,28 +8,32 @@ following references/podcast.md. This script never writes a word of the conversa
 CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
 
   check  SCRIPT.md --source FILE [FILE ...] [--forbid-name NAME ...]
-         -> check.txt beside the script; exit 1 on any FAIL. Every number in the transcript
-            must be in the sources; every gene/protein-symbol-like token must be in the sources
-            or listed under "Claims beyond the report"; the AI disclosure is in the first 3
-            turns; the required sections are there; no forbidden name appears; length is
-            reported (words, turns, segments, minutes at 150 wpm).
+         -> check.txt beside the script; exit 1 on any FAIL. Token by token, not meaning:
+            numbers (only unsigned counts of 10 or less are exempt; sign kept), symbol-like
+            words and capitalised words mid-sentence must be in the sources or listed under
+            "Claims beyond the report"; quantities in words fail; Pronunciation rows may only
+            re-spell; the AI disclosure is in the first 3 turns; no host claims a specialty; no
+            forbidden name appears anywhere shown or sent. check.txt lists what it cannot catch.
   render SCRIPT.md [--out DIR] --tts gemini|say [--cloud-ok [NOTE]] [--model M] [--keep-wav]
          -> DIR/podcast.m4a (podcast.wav when neither afconvert nor ffmpeg is present),
             transcript.html, podcast.json, podcast_script.md. Refuses unless check.txt says PASS
-            for this exact script (--unchecked overrides; podcast.json then says so). Every chunk
-            is cached as DIR/.cache/<sha256>.wav, so a re-run resumes and editing one line
-            re-synthesizes only its chunk. --dry-run prints what would be spoken and exits.
+            for this exact script and unchanged sources (--unchecked overrides; podcast.json
+            then says so). Every chunk is cached as DIR/.cache/<sha256>.wav, so a re-run resumes
+            and editing one line re-synthesizes only its chunk; unused chunks are pruned after
+            a successful render. --dry-run prints what would be spoken and exits.
   link   OUTDIR
          -> a "Listen" card near the top of OUTDIR/Analysis_Report.html, a line near the top of
             the Markdown report, an entry in README.html / README.md and AGENTS.md. Idempotent:
             the card sits between <!-- podcast:start --> and <!-- podcast:end --> and is replaced
-            on a re-run. A file that is not there is skipped with [INFO].
+            on a re-run. A file that is not there is skipped with [INFO]. Refuses while the
+            check does not hold (--unchecked overrides); reprints an older Analysis_Report.pdf.
+            The hooks the report calls never raise: a bad podcast.json is one [WARN].
 
 Privacy: only the final transcript (the turns, after pronunciation substitutions) ever leaves
 the machine -- never the report -- and only with --tts gemini AND --cloud-ok (explicit consent,
 recorded in podcast.json). --tts say (macOS) is offline. The Gemini key is read from
-GEMINI_API_KEY or ~/.config/podcast/gemini_key; it is never printed or logged and is scrubbed
-from every error message.
+GEMINI_API_KEY or ~/.config/ucdavis-proteomics/gemini_key; it is never printed or logged and is
+scrubbed from every error message (notify_slack.redact: the skill's one list of secret patterns).
 
 Stdlib only at import time: google-genai is imported by the gemini backend alone. No numpy and
 no ffmpeg requirement -- audio is assembled with array/wave; afconvert (macOS) or ffmpeg, when
@@ -57,6 +61,9 @@ import urllib.parse
 import wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
 
 SHOW = "Signal to Noise"
 HOSTS = (("Maya", "cell biologist"), ("Leo", "statistician"))
@@ -68,7 +75,7 @@ HOST_STYLES = ("curious and energetic", "calm, precise and dryly funny")   # fir
 MIN_INTERVAL = 20.0                                 # s between requests to one Gemini model
 RATE_WAITS = 10                                     # per-minute 429 waits allowed per chunk
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
-KEY_FILE = os.path.join("~", ".config", "podcast", "gemini_key")
+KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
 
 RATE = 24000                                        # Hz, 16-bit mono throughout
 WPM = 150                                           # spoken words per minute, for estimates
@@ -120,9 +127,44 @@ TEACHING = [
 # The close tells them what to do next: which file to open, how to tier hits, what to validate.
 NEXT_STEPS = r"\.(?:html|csv|md|pdf)\b|Analysis[_ ]Report|PropObs|\bvalidat|\btier"
 
+# A quantity said in words cannot be checked against the sources: numbers over ten, their
+# plurals and -fold forms, N-fold, dozen(s), twice, half. A phrase listed under "Claims beyond the
+# report" is allowed (an arithmetic gloss, say).
 SPELLED_NUMBER = re.compile(
-    r"\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
-    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b", re.I)
+    r"\b(?:(?:eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)"
+    r"(?:s|[- ]?fold)?"
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)[- ]?fold"
+    r"|(?:a\s+)?dozens?|twice|half|halves)\b", re.I)
+# A host must not claim a real research specialty ("I study membrane contact sites in neurons"):
+# it lends the synthetic voice an authority it does not have. "I'm the biologist of the pair".
+SPECIALTY = re.compile(r"\bI(?:'m| am)?\s+(?:study|studied|research|specialise|specialize|"
+                       r"work on|run a lab)\b|\b(?:in\s+)?my\s+(?:lab|research|thesis|postdoc|"
+                       r"PhD)\b|\bas an?\s+(?:neuroscientist|biochemist|cell biologist|"
+                       r"statistician|professor|expert)\b", re.I)
+# Said in check.txt, the brief and SKILL.md: the check matches tokens, not meaning.
+CANNOT_CATCH = (
+    "small integers: an unsigned count of 10 or less (\"4 baits\") is not checked",
+    "context: a real number or protein attached to the wrong protein, contrast, group or "
+    "figure passes",
+    "relational words: \"higher\", \"more than\", \"most\", \"only\", \"the top hit\" are "
+    "not checked",
+    "false statements built from true numbers and true names",
+    "lowercase symbols (\"gapdh\") and lowercase respellings in the Pronunciation table",
+    "meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact",
+)
+# --cloud-ok with one of these means no.
+NO_CONSENT = {"", "false", "no", "n", "0", "none", "null", "off", "declined", "decline",
+              "refused", "refuse"}
+# Words a spoken form may use to say a digit (Pronunciation rows): each maps to the digits it
+# stands for, which the written form must contain.
+NUMBER_WORDS = {"zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+                "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+                "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+                "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+                "nineteen": "19", "twenty": "2", "thirty": "3", "forty": "4", "fifty": "5",
+                "sixty": "6", "seventy": "7", "eighty": "8", "ninety": "9", "hundred": "",
+                "thousand": "", "million": ""}
 
 _SECRETS = []
 _sleep = time.sleep                                 # tests replace these two
@@ -134,15 +176,29 @@ def log(msg):
     print(scrub(msg), file=sys.stderr, flush=True)
 
 
+def _never_raise(default):
+    """For the hooks the report of record calls (make_analysis_html.py, session_docs.py): any
+    error is reported as a [WARN] and the report goes on without the podcast."""
+    def wrap(fn):
+        def inner(*args, **kw):
+            try:
+                return fn(*args, **kw)
+            except Exception as e:
+                log(f"[WARN] podcast left out of the report ({fn.__name__}: {type(e).__name__}: {e})")
+                return default(*args) if callable(default) else default
+        inner.__name__, inner.__doc__ = fn.__name__, fn.__doc__
+        return inner
+    return wrap
+
+
 def scrub(text):
-    """Remove every API key from a string: the one read at run time, and anything shaped like a
-    Google key or a key= URL parameter."""
+    """Every secret out of a string: the key read at run time, and every secret-shaped substring
+    in notify_slack's list (Google API keys, key=..., tokens, webhooks, private keys)."""
     s = str(text)
     for k in _SECRETS:
         if k:
-            s = s.replace(k, "[key]")
-    s = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "[key]", s)
-    return re.sub(r"(?i)\b(key|api_key|x-goog-api-key)=([^&\s\"'()]+)", r"\1=[key]", s)
+            s = s.replace(k, REDACTED)
+    return _redact(s)
 
 
 def sha256_bytes(b):
@@ -208,6 +264,7 @@ def _cells(row):
     return [p.replace("\\|", "|").strip().strip("`").strip() for p in parts]
 
 
+@_never_raise(lambda text, *rest: text)
 def strip_block(text):
     """The text without any <!-- podcast:start --> ... <!-- podcast:end --> block (and the line
     breaks around it), so a report that carries a Listen line reads as it did before."""
@@ -414,25 +471,42 @@ def normalize_numbers(t):
 
 
 class Num(object):
-    """kind: plain | sci | pow10. value: the absolute value. dec: decimals written (the
-    mantissa's, for sci)."""
+    """kind: plain | sci | pow10. value: the absolute value. sign: '-', '+' or None as written
+    (a plain number only). dec: decimals written (the mantissa's, for sci). quant: followed by
+    %, percent, fold or x, so a measurement even when small."""
 
-    def __init__(self, text, value, kind, dec):
+    def __init__(self, text, value, kind, dec, sign=None, quant=False):
         self.text, self.value, self.kind, self.dec = text, value, kind, dec
+        self.sign, self.quant = sign, quant
+
+    def cls(self):
+        return "-" if self.sign == "-" else "+"
 
 
 def _decimals(s):
     return len(s.split(".", 1)[1]) if "." in s else 0
 
 
+# "-1.3", "(−0.9)", "minus 1.3" are negative; "LRS-124" and "10-20" are not (a letter or a digit
+# before the hyphen).
+_SIGN_BEFORE = re.compile(r"(?:(?<![A-Za-z0-9_.])([+-])|\b(minus|negative|plus)\s+)$", re.I)
+_QUANT_AFTER = re.compile(r"\s*(?:%|percent\b|-?\s*fold\b|×|x\b)", re.I)
+
+
 def numbers_in(text):
     out = []
-    for m in _NUM.finditer(normalize_numbers(text)):
+    t = normalize_numbers(text)
+    for m in _NUM.finditer(t):
         g = m.groupdict()
         try:
             if g["p"] is not None:
                 p = g["p"]
-                out.append(Num(p, abs(D(p)), "plain", _decimals(p)))
+                sm = _SIGN_BEFORE.search(t[max(0, m.start() - 16):m.start()])
+                sign = None
+                if sm:
+                    sign = sm.group(1) or ("+" if sm.group(2).lower() == "plus" else "-")
+                out.append(Num((sign or "") + p if sign == "-" else p, abs(D(p)), "plain",
+                               _decimals(p), sign, bool(_QUANT_AFTER.match(t, m.end()))))
                 continue
             mant = g["m1"] or g["m2"] or "1"
             e = g["e1"] or g["e2"] or g["e3"]
@@ -458,10 +532,13 @@ def _rounded(v, d):
 
 class NumberBook(object):
     """Every number in the sources, and what it may legitimately be spoken as: itself, rounded
-    to fewer decimals (never to an integer), or -- for a p-value -- its order of magnitude."""
+    to fewer decimals (never to an integer), or -- for a p-value -- its order of magnitude. A
+    number spoken with a sign must match the sign in the sources (-2.68 is not +2.68); one
+    spoken without a sign ("fell by 1.3") matches either."""
 
     def __init__(self):
-        self.exact, self.rounded, self.sci_rounded, self.exponents = set(), {}, {}, set()
+        self.abs, self.signed, self.sci_rounded, self.exponents = set(), set(), {}, set()
+        self.rounded, self.rounded_signed = {}, {}
         self.mantissas = {}                     # 5.65 -> "5.65e-10": for a helpful message
 
     def add_text(self, text):
@@ -470,7 +547,8 @@ class NumberBook(object):
 
     def add(self, n):
         v = n.value
-        self.exact.add(v)
+        self.abs.add(v)
+        self.signed.add((n.cls(), v))
         if not v:
             return
         if n.kind != "plain" or v < D("0.01"):
@@ -483,17 +561,23 @@ class NumberBook(object):
                     self.sci_rounded.setdefault(d, set()).add((k, r))
         if n.kind == "plain":
             for d in range(1, n.dec):
-                self.rounded.setdefault(d, set()).update(_rounded(v, d))
+                for r in _rounded(v, d):
+                    self.rounded.setdefault(d, set()).add(r)
+                    self.rounded_signed.setdefault(d, set()).add((n.cls(), r))
 
     def verdict(self, n):
-        """-> 'trivial' | 'exact' | 'rounded' | 'magnitude' | None (not in the sources)."""
+        """-> 'trivial' | 'exact' | 'rounded' | 'magnitude' | None (not in the sources). Only an
+        unsigned integer of 10 or less that is not a percentage, a fold or a multiple is
+        trivial (a count in speech: "4 baits")."""
         v = n.value
-        if n.kind == "plain" and n.dec == 0 and (v <= 10 or (v <= 100 and v % 10 == 0)):
+        if n.kind == "plain" and n.dec == 0 and v <= 10 and n.sign is None and not n.quant:
             return "trivial"
-        if v in self.exact:
+        if (v in self.abs) if n.sign is None else ((n.cls(), v) in self.signed):
             return "exact"
-        if n.kind == "plain" and n.dec >= 1 and v in self.rounded.get(n.dec, ()):
-            return "rounded"
+        if n.kind == "plain" and n.dec >= 1:
+            if ((v in self.rounded.get(n.dec, ())) if n.sign is None else
+                    ((n.cls(), v) in self.rounded_signed.get(n.dec, ()))):
+                return "rounded"
         if n.kind in ("sci", "pow10") and v:
             k, mant = _sci(v)
             md = max(0, -mant.normalize().as_tuple().exponent)
@@ -505,12 +589,15 @@ class NumberBook(object):
 
 
 # ----------------------------------------------------------------------------- symbol check
-_SYM = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?:\.\d+)*")
+_SYM = re.compile(r"(?<![A-Za-z0-9α-ωΑ-Ω])[A-Za-zα-ωΑ-Ω][A-Za-z0-9α-ωΑ-Ω]*(?:\.\d+)*")
+_TITLE = re.compile(r"^[A-Z][a-z]+$")
 
 
 def is_symbol(tok):
     if tok.lower() in GENERIC_TOKENS:
         return False
+    if re.search(r"[α-ωΑ-Ω]", tok):
+        return True                                   # TNF-α, PKCδ, Gβγ
     if any(c.isdigit() for c in tok):
         return True                                   # Jph3, Kv2.1, FKBP12.6, C1qa, RYR2
     if len(tok) >= 3 and tok.isupper():
@@ -519,29 +606,78 @@ def is_symbol(tok):
 
 
 def symbol_found(tok, hay):
-    """Case-insensitive, as a whole token on the left; a token ending in a digit must not run
-    on into more digits (Kcnb2 is not Kcnb20), one ending in a letter may (RyR -> RyR2)."""
+    """Case-insensitive, as a whole token. One ending in a digit must not run on into more
+    digits (Kcnb2 is not Kcnb20); one ending in a letter must not run on into more letters (SOD
+    is not sodium, APP is not applied) but may take a plural or digits (RyR -> RyRs, RyR2)."""
     t = tok.lower()
-    tail = r"(?![0-9])" if t[-1].isdigit() else ""
-    if re.search(r"(?<![a-z0-9])" + re.escape(t) + tail, hay):
+    tail = r"(?![0-9])" if t[-1].isdigit() else r"(?:e?s)?(?![a-zα-ω])"
+    if re.search(r"(?<![a-z0-9α-ω])" + re.escape(t) + tail, hay):
         return True
     return len(t) > 3 and t.endswith("s") and symbol_found(tok[:-1], hay)
 
 
+def title_tokens(text):
+    """Capitalised words that do not start a sentence: Gapdh, Western, a person, a place. The
+    first word of a sentence (after . ! ? or the start of the turn) is not one."""
+    for m in re.finditer(r"(?<![A-Za-z0-9'’_α-ωΑ-Ω])([A-Z][a-z]+)(?![A-Za-z0-9α-ωΑ-Ω])", text):
+        pre = re.sub(r"[\s\"“”‘’'(\[*_]+$", "", text[:m.start()])
+        if pre and pre[-1] not in ".!?…":
+            yield m.group(1)
+
+
+def pronunciation_problems(written, spoken):
+    """What a Pronunciation row must not do: the spoken form is sent to the voices and never
+    checked against the report, so it may only re-spell the written form. Digits (or number
+    words) it adds, and symbols or capitalised words that are not a spelling of the written
+    form, are problems. A lowercase respelling ("teck R" for Tecr) cannot be judged."""
+    probs = []
+    wdig = re.sub(r"\D", "", written)
+    for d in re.findall(r"\d+", spoken):
+        if d not in written:
+            probs.append(f"digits {d} are not in the written form")
+    for w in re.findall(r"[A-Za-z]+", spoken):
+        v = NUMBER_WORDS.get(w.lower())
+        if v is None:
+            continue
+        if not wdig:
+            probs.append(f"'{w}' adds a number the written form does not have")
+        elif any(c not in wdig for c in v):
+            probs.append(f"'{w}' is not a digit of {written!r}")
+    for m in _SYM.finditer(spoken):
+        tok = m.group(0)
+        if not (is_symbol(tok) or _TITLE.match(tok) or (len(tok) == 1 and tok.isupper())):
+            continue
+        if tok.lower() not in written.lower():
+            probs.append(f"'{tok}' is not a spelling of {written!r}")
+    return probs
+
+
 # ----------------------------------------------------------------------------- sources
-def load_source(path):
-    """-> (sha256, text) with the parts that are not prose removed: embedded images (a base64
-    blob is full of digit runs), script/style, tags, and any podcast block."""
+def source_text(path):
+    """A source as check hashes it: its text without any podcast block, so `link` adding its
+    Listen line to the report does not make the check stale."""
     with open(path, "rb") as fh:
-        raw = fh.read()
-    t = strip_block(raw.decode("utf-8", errors="replace"))
+        return strip_block(fh.read().decode("utf-8", errors="replace"))
+
+
+def source_sha(text):
+    """The hash check records for a source: its source_text with whitespace runs collapsed, so
+    the blank lines around a removed Listen block do not count as an edit."""
+    return sha256_bytes(re.sub(r"\s+", " ", text).strip().encode("utf-8"))
+
+
+def load_source(path):
+    """-> (source_sha, text) with the parts that are not prose removed: embedded images (a
+    base64 blob is full of digit runs), script/style, tags, and any podcast block."""
+    t = source_text(path)
+    sha = source_sha(t)
     t = re.sub(r"data:[\w/+.\-]+;base64,[A-Za-z0-9+/=]+", " ", t)
     if os.path.splitext(path)[1].lower() in (".html", ".htm"):
         t = re.sub(r"(?is)<(script|style)\b.*?</\1\s*>", " ", t)
         t = re.sub(r"(?s)<!--.*?-->", " ", t)
         t = re.sub(r"<[^>]+>", " ", t)
         t = html.unescape(t)
-    return sha256_bytes(raw), t
+    return sha, t
 
 
 # ----------------------------------------------------------------------------- check
@@ -571,8 +707,8 @@ def check(s, sources, forbid=()):
     claims_hay = normalize_numbers(s.claims_text).lower()
     disclosed = NumberBook()
     disclosed.add_text(s.claims_text)
-    if len(book.exact) > 20000:
-        warns.append(f"the sources hold {len(book.exact):,} distinct numbers: a large numeric "
+    if len(book.abs) > 20000:
+        warns.append(f"the sources hold {len(book.abs):,} distinct numbers: a large numeric "
                      "table makes the number check weak -- pass the report's text (e.g. "
                      "AI_Analysis_Report.md, AUDIT.md), not the DE tables")
 
@@ -597,8 +733,16 @@ def check(s, sources, forbid=()):
                              + (f" (they have {hint}: say the power of ten too)" if hint else "")
                              + f" -- {_ctx(t.text, n.text)}")
         for m in SPELLED_NUMBER.finditer(t.text):
-            fails.append(f"{where}: spelled-out number '{m.group(0)}' -- write numbers as digits "
-                         "so they can be checked (the pronunciation step handles speech)")
+            if re.search(r"\b" + re.escape(m.group(0).lower()) + r"\b", s.claims_text.lower()):
+                infos.append(f"{where}: '{m.group(0)}' is listed under Claims beyond the report")
+                continue
+            fails.append(f"{where}: quantity in words '{m.group(0)}' -- write it as digits that "
+                         "are in the sources (the pronunciation step handles speech), or list the "
+                         "phrase under Claims beyond the report if it is your own gloss")
+        for m in SPECIALTY.finditer(t.text):
+            fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
+                         "specialty (it lends a synthetic voice false authority); say \"I'm the "
+                         "biologist of the pair\" or \"I'm the statistician\"")
 
     seen = {}
     for i, t in enumerate(turns, 1):
@@ -618,6 +762,36 @@ def check(s, sources, forbid=()):
                      "the sources -- use the report's own spelling, list it under Claims beyond "
                      "the report, or (if it is emphasis) write it in lowercase or *italics*")
 
+    # Capitalised words mid-sentence (Gapdh, Actb, Western, a person): symbol-like in speech but
+    # not caught above. Allowed: in the sources, in the claims, a host's name, the show's name.
+    allowed = {h.lower() for h, _ in s.hosts} | {w.lower() for w in re.findall(r"[A-Za-z]+",
+                                                                                s.show or "")}
+    caps = {}
+    for i, t in enumerate(turns, 1):
+        for tok in title_tokens(t.text):
+            if tok.lower() not in allowed and tok.lower() not in GENERIC_TOKENS and tok not in caps:
+                caps[tok] = (i, t)
+    for tok, (i, t) in caps.items():
+        where = f"turn {i} (line {t.line}, {t.speaker.upper()})"
+        if symbol_found(tok, hay):
+            continue
+        if symbol_found(tok, claims_hay):
+            infos.append(f"{where}: {tok} is not in the sources; it is listed under Claims beyond "
+                         "the report")
+            continue
+        fails.append(f"{where}: {tok} is capitalised mid-sentence and is not in the sources, the "
+                     "claims, a host's name or the show's name -- a gene, a person or a place the "
+                     "report does not mention? Use the report's spelling, list it under Claims "
+                     "beyond the report, or lowercase it if it is an ordinary word")
+
+    # Pronunciation rows: the spoken form goes to the voices unchecked, so it may only re-spell.
+    pron = []
+    for w, sp in s.pronunciation:
+        probs = pronunciation_problems(w, sp)
+        pron.append((w, sp, probs))
+        for pr in probs:
+            fails.append(f"pronunciation {w!r} -> {sp!r}: {pr}")
+
     if turns and not any(DISCLOSURE_RE.search(t.text) for t in turns[:3]):
         fails.append("no AI disclosure in the first 3 turns: one host must say, early and plainly, "
                      "that this is an AI-generated discussion (e.g. 'AI-generated')")
@@ -627,11 +801,15 @@ def check(s, sources, forbid=()):
         if not name:
             continue
         rx = re.compile(r"(?<![A-Za-z])" + re.escape(name) + r"(?![A-Za-z])", re.I)
-        hits = [f"turn {i} (line {t.line})" for i, t in enumerate(turns, 1) if rx.search(t.text)]
-        if s.title and rx.search(s.title):
+        hits = [f"header '{k}'" for k, v in s.header.items() if rx.search(v)]
+        if s.title and rx.search(s.title) and not any(h == "header 'title'" for h in hits):
             hits.insert(0, "the title")
+        hits += [f"turn {i} (line {t.line})" for i, t in enumerate(turns, 1) if rx.search(t.text)]
         if rx.search(s.claims_text):
             hits.append("Claims beyond the report")
+        hits += [f"pronunciation {w!r} -> {sp!r}" for w, sp in s.pronunciation
+                 if rx.search(w) or rx.search(sp)]
+        hits += [f"the style for {h}" for h, st in s.styles.items() if rx.search(st)]
         if hits:
             fails.append(f"forbidden name {name!r} appears in: {', '.join(hits)}")
 
@@ -664,7 +842,7 @@ def check(s, sources, forbid=()):
         elif words and by.get(h, 0) < 0.35 * words:
             warns.append(f"{h} speaks only {100.0 * by[h] / words:.0f}% of the words")
     return {"status": "FAIL" if fails else "PASS", "fails": fails, "warns": warns,
-            "infos": infos, "stats": stats}
+            "infos": infos, "stats": stats, "pron": pron}
 
 
 def _ctx(text, token):
@@ -692,10 +870,18 @@ def check_report(s, res, sources, forbid):
     for title, items in (("FAIL", res["fails"]), ("WARN", res["warns"]), ("INFO", res["infos"])):
         if items:
             L += ["", title] + [f"- {x}" for x in items]
+    rows = res.get("pron") or []
+    L += ["", f"PRONUNCIATION ({len(rows)} row(s) from the script, applied to speech only; the "
+              "built-in defaults are not listed)"]
+    L += [f"- {w} -> {sp}" + (f"   [FAIL: {'; '.join(pr)}]" if pr else "") for w, sp, pr in rows]
     if res["status"] == "PASS":
-        L += ["", "Every number and symbol in the transcript is in the sources or disclosed. This "
-                  "checks tokens, not meaning: a sentence built from real numbers can still say "
-                  "something the report does not. Read it against the report once more."]
+        L += ["", "PASS means: every number (except unsigned counts of 10 or less), every "
+                  "symbol-like token and every capitalised word mid-sentence in the transcript was "
+                  "found in the sources or is listed under Claims beyond the report; the AI "
+                  "disclosure is spoken early; no forbidden name appears; every pronunciation row "
+                  "only re-spells its written form. It does NOT mean the script is right."]
+    L += ["", "What check cannot catch -- read the script against the report for these:"]
+    L += [f"- {x}" for x in CANNOT_CATCH]
     return "\n".join(L) + "\n"
 
 
@@ -726,7 +912,10 @@ def cmd_check(a):
 
 
 def read_check(s):
-    """-> (status, sources, problem) from the check.txt beside the script."""
+    """-> (status, sources, problem) from the check.txt beside the script. The check holds only
+    while the script AND every source are unchanged: a source is re-hashed as check hashed it
+    (source_text: its text without a podcast block), so link's Listen line does not count as a
+    change and a regenerated or edited report does."""
     path = os.path.join(os.path.dirname(s.path), "check.txt")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -741,23 +930,35 @@ def read_check(s):
         return (status.group(1) if status else None), srcs, "check.txt does not say PASS"
     if not sha or sha.group(1) != s.sha256:
         return "STALE", srcs, "the script changed after check.txt was written"
+    if not srcs:
+        return "STALE", srcs, "check.txt names no source"
+    for src in srcs:
+        try:
+            now = source_sha(source_text(src["file"]))
+        except OSError:
+            return "STALE", srcs, f"source {src['file']} is missing"
+        if now != src["sha256"]:
+            return "STALE", srcs, (f"source {os.path.basename(src['file'])} changed after "
+                                   "check.txt was written")
     return "PASS", srcs, None
 
 
 # ----------------------------------------------------------------------------- audio
 def _arr(data):
+    """Native-order 16-bit samples: what the wave module reads and writes (it converts to and
+    from a WAV file's little-endian itself, on a big-endian host too)."""
     a = array.array("h")
     a.frombytes(data[: len(data) // 2 * 2])
-    if sys.byteorder == "big":
-        a.byteswap()
     return a
 
 
-def _bytes(a):
+def _arr_le(data):
+    """Raw little-endian 16-bit PCM (Gemini's audio/L16) as native samples: the one place that
+    swaps, and only on a big-endian host."""
+    a = _arr(data)
     if sys.byteorder == "big":
-        a = array.array("h", a)
         a.byteswap()
-    return a.tobytes()
+    return a
 
 
 def silence(sec):
@@ -786,7 +987,7 @@ def decode_audio(data, mime=""):
         with wave.open(io.BytesIO(data), "rb") as w:
             return _from_wave(w)
     m = re.search(r"rate=(\d+)", mime or "")
-    return resample(_arr(data), int(m.group(1)) if m else RATE)
+    return resample(_arr_le(data), int(m.group(1)) if m else RATE)
 
 
 def _from_wave(w):
@@ -810,7 +1011,7 @@ def write_wav(path, a):
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(RATE)
-        w.writeframes(_bytes(a))
+        w.writeframes(a.tobytes())
     os.replace(tmp, path)
 
 
@@ -1376,7 +1577,13 @@ def cmd_render(a):
             "report files>` and fix every flagged line first (or pass --unchecked, which "
             "podcast.json then records).")
         return 2
-    if backend_cls.cloud and not a.cloud_ok:
+    consent = a.cloud_ok
+    refused = isinstance(consent, str) and consent.strip().lower() in NO_CONSENT
+    if refused:
+        consent = False
+    if backend_cls.cloud and not consent:
+        if refused:
+            log(f"[render] not sending anything: --cloud-ok {a.cloud_ok!r} is a refusal.")
         log(f"[render] not sending anything. --tts {a.tts} sends the transcript -- {words:,} "
             f"words of the turns, after pronunciation substitutions; never the report -- to "
             f"Google's Gemini API. On a free-tier key Google may use it to improve its products "
@@ -1392,11 +1599,15 @@ def cmd_render(a):
     log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
         f"with {backend.name}")
 
-    pieces, n_cached, n_new = [], 0, 0
+    # Each chunk: <key>.wav, and <key>.json with the warnings made when it was synthesized, so
+    # a resumed render still reports them.
+    pieces, n_cached, n_new, used, warnings = [], 0, 0, set(), []
     for i, c in enumerate(chunks, 1):
         label = f"chunk {i}/{len(chunks)} (segment {c.seg + 1})"
         while True:
-            path = os.path.join(cache, cache_key(backend, c, speak) + ".wav")
+            key = cache_key(backend, c, speak)
+            path = os.path.join(cache, key + ".wav")
+            side = os.path.join(cache, key + ".json")
             if os.path.isfile(path):
                 try:
                     pcm = read_wav(path)
@@ -1404,19 +1615,30 @@ def cmd_render(a):
                     backend.produced += 1
                     if backend.model not in backend.models_used:
                         backend.models_used.append(backend.model)
+                    try:
+                        with open(side, encoding="utf-8") as fh:
+                            warnings += [str(w) for w in (json.load(fh).get("warnings") or [])]
+                    except (OSError, ValueError, AttributeError):
+                        pass                             # a chunk cached with no warnings
                     log(f"[render] {label}: cached")
                     break
                 except (wave.Error, EOFError, OSError, ValueError):
                     os.remove(path)
+            before = len(backend.warnings)
             try:
                 pcm = backend.synth(c, speak, label)
             except SwitchModel:
                 continue
+            new_w = backend.warnings[before:]
             write_wav(path, pcm)
+            with open(side, "w", encoding="utf-8") as fh:
+                json.dump({"label": label, "model": backend.model, "warnings": new_w}, fh)
+            warnings += new_w
             n_new += 1
             backend.produced += 1
             log(f"[render] {label}: {len(pcm) / float(RATE):.0f} s from {backend.model}")
             break
+        used.add(key)
         pieces.append((c.seg, pcm))
 
     audio = array.array("h")
@@ -1461,7 +1683,7 @@ def cmd_render(a):
                 "what_was_sent": ("the transcript turns after pronunciation substitutions, plus "
                                   "one style line; not the report" if backend.cloud else
                                   "nothing (offline)")},
-        "cloud_tts_consent": (a.cloud_ok if backend.cloud else False),
+        "cloud_tts_consent": (consent if backend.cloud else False),
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
         "check": {"status": status or "not run", "file": "check.txt",
@@ -1471,7 +1693,7 @@ def cmd_render(a):
         "chunks": len(chunks), "chunks_cached": n_cached, "chunks_synthesized": n_new,
         "duration_s": duration, "created": now_iso(), "ai_generated": True,
         "audio": audio_name, "encoder": tool, "transcript": "transcript.html",
-        "warnings": backend.warnings,
+        "warnings": warnings,
         "made_by": "make_podcast.py (UC Davis Proteomics Core pipeline skill)",
     }
     with open(os.path.join(out, "podcast.json"), "w", encoding="utf-8") as fh:
@@ -1485,8 +1707,26 @@ def cmd_render(a):
                       "chunks_cached": n_cached, "chunks_synthesized": n_new,
                       "transcript": os.path.join(out, "transcript.html"),
                       "manifest": os.path.join(out, "podcast.json"),
-                      "warnings": backend.warnings}, indent=2))
+                      "cache_pruned": prune_cache(cache, used),
+                      "warnings": warnings}, indent=2))
     return 0
+
+
+def prune_cache(cache, used):
+    """After a successful render: remove every cached chunk (and stray *.part) this script no
+    longer uses -- an edited line's old chunk, another model's chunks. -> number removed."""
+    n = 0
+    for f in os.listdir(cache):
+        if f.split(".", 1)[0] in used and not f.endswith(".part"):
+            continue
+        try:
+            os.remove(os.path.join(cache, f))
+            n += 1
+        except OSError as e:
+            log(f"[WARN] could not remove {f} from the cache: {e}")
+    if n:
+        log(f"[render] removed {n} cached file(s) this script no longer uses")
+    return n
 
 
 # ----------------------------------------------------------------------------- pages
@@ -1583,13 +1823,50 @@ CARD_CSS = (
     "print-color-adjust:exact}}")
 
 
-def load_manifest(outdir):
+_FILE_RX = {"audio": r"^[A-Za-z0-9_.\-]+\.(?:m4a|wav)$", "transcript": r"^[A-Za-z0-9_.\-]+\.html$",
+            "script": r"^[A-Za-z0-9_.\-]+\.md$"}
+_WARNED = set()
+
+
+def manifest_problem(outdir):
+    """-> (manifest, None) for a usable podcast/podcast.json; (None, None) when there is none;
+    (None, why) when it exists but cannot be used -- unreadable, truncated, or a field of the
+    wrong type (a Listen card built from it would crash or point anywhere)."""
+    path = os.path.join(outdir, "podcast", "podcast.json")
+    if not os.path.exists(path):
+        return None, None
     try:
-        with open(os.path.join(outdir, "podcast", "podcast.json"), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             man = json.load(fh)
-        return man if isinstance(man, dict) and man.get("audio") else None
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as e:
+        return None, f"{path}: not readable JSON ({type(e).__name__}: {e})"
+    if not isinstance(man, dict):
+        return None, f"{path}: not a JSON object"
+    for k, rx in _FILE_RX.items():
+        v = man.get(k)
+        if k == "audio" and v is None:
+            return None, f"{path}: no 'audio' file name"
+        if v is not None and not (isinstance(v, str) and re.match(rx, v)):
+            return None, f"{path}: '{k}' must be a plain file name in podcast/, got {v!r}"
+    d = man.get("duration_s")
+    if d is not None and (isinstance(d, bool) or not isinstance(d, (int, float)) or d < 0):
+        return None, f"{path}: 'duration_s' must be a number of seconds, got {d!r}"
+    for k in ("show", "title"):
+        if man.get(k) is not None and not isinstance(man[k], str):
+            return None, f"{path}: '{k}' must be text, got {man[k]!r}"
+    if man.get("check") is not None and not isinstance(man["check"], dict):
+        return None, f"{path}: 'check' must be an object"
+    return man, None
+
+
+def load_manifest(outdir):
+    """The manifest, or None. An invalid one is reported once (a [WARN] naming the file and the
+    reason) and left out: the optional podcast never stops the report of record."""
+    man, why = manifest_problem(outdir)
+    if why and why not in _WARNED:
+        _WARNED.add(why)
+        log(f"[WARN] podcast.json exists but is invalid, so the podcast is left out: {why}")
+    return man
 
 
 def _paths(outdir, base, man):
@@ -1602,6 +1879,7 @@ def _name(man):
     return f"{man.get('show') or SHOW} — {man.get('title') or 'Untitled'}"
 
 
+@_never_raise("")
 def listen_card_html(outdir, base_dir=None):
     """The "Listen" card (with its markers) for a page in `base_dir` (default: `outdir`, where
     Analysis_Report.html sits). '' when `outdir` has no podcast/podcast.json."""
@@ -1623,6 +1901,7 @@ def listen_card_html(outdir, base_dir=None):
             f"report)</p></aside>{END}")
 
 
+@_never_raise("")
 def listen_md(outdir, base_dir=None):
     man = load_manifest(outdir)
     if not man:
@@ -1634,6 +1913,7 @@ def listen_md(outdir, base_dir=None):
                       END])
 
 
+@_never_raise("")
 def readme_item_md(outdir, base_dir):
     """The README "Start here" bullet, paths relative to `base_dir`. '' without a podcast.
     session_docs.py and `link` both use this, so the wording lives here only."""
@@ -1646,6 +1926,7 @@ def readme_item_md(outdir, base_dir):
             f"([transcript]({href(tr)}))")
 
 
+@_never_raise([])
 def agents_md_lines(outdir, base_dir):
     """AGENTS.md's section on the podcast. [] without a podcast."""
     man = load_manifest(outdir)
@@ -1700,6 +1981,7 @@ def _html_slot(doc):
     return 0
 
 
+@_never_raise(lambda text, *rest: text)
 def add_listen_card(doc, outdir):
     """`doc` with the Listen card near the top; unchanged when `outdir` has no podcast. The
     hook make_analysis_html.py calls, so regenerating the report keeps the card."""
@@ -1707,6 +1989,7 @@ def add_listen_card(doc, outdir):
     return _upsert(doc, card, _html_slot)[0] if card else doc
 
 
+@_never_raise(lambda text, *rest: text)
 def add_listen_md(md, outdir):
     """The Markdown twin of add_listen_card: `md` with the Listen line under its title;
     unchanged when `outdir` has no podcast. For a writer of Analysis_Report.md."""
@@ -1755,11 +2038,26 @@ def _agents_slot(text):
 
 def cmd_link(a):
     out = os.path.abspath(a.outdir)
-    man = load_manifest(out)
+    man, why = manifest_problem(out)
+    if why:
+        log(f"[link] podcast.json exists but is invalid: {why}. Re-render, or fix the file.")
+        return 2
     if not man:
         log(f"[link] no podcast/podcast.json under {out}: render first, and point link at the "
             "folder that holds Analysis_Report.html and podcast/")
         return 2
+    # The Listen card vouches for the episode: link only while the check still holds.
+    script = os.path.join(out, "podcast", man.get("script") or "podcast_script.md")
+    stale = (read_check(parse_script(script))[2] if os.path.isfile(script) else
+             f"no {os.path.basename(script)} beside podcast.json")
+    overridden = bool((man.get("check") or {}).get("overridden"))
+    if stale and not (a.unchecked or overridden):
+        log(f"[link] refusing: {stale}. Re-run `make_podcast.py check` (and `render`, if the "
+            "script changed) so the episode matches the report, or pass --unchecked.")
+        return 2
+    if stale:
+        log(f"[WARN] linking an episode whose check does not hold: {stale}"
+            + (" (rendered with --unchecked)" if overridden else " (--unchecked)"))
     done = []
 
     def edit(path, fn, what):
@@ -1860,6 +2158,9 @@ def main(argv=None):
                    help="print the chunks as they would be spoken; send nothing")
     k = sub.add_parser("link", help="link the podcast into the report, README and AGENTS.md")
     k.add_argument("outdir", help="the folder with Analysis_Report.html and podcast/")
+    k.add_argument("--unchecked", action="store_true",
+                   help="link although the script's check no longer holds (the report or the "
+                        "script changed since)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()

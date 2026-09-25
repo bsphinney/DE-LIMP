@@ -96,6 +96,18 @@ def read(path):
         return fh.read()
 
 
+def checked_podcast(out, source, **manifest):
+    """out/podcast/ as render leaves it: a script whose check PASSES against `source`, and a
+    podcast.json naming it -- what link needs before it vouches for an episode."""
+    pod = os.path.join(out, "podcast")
+    script = os.path.join(pod, "podcast_script.md")
+    write(script, script_text())
+    rc, o, e = run("check", script, "--source", source)
+    assert rc == 0, read(os.path.join(pod, "check.txt"))
+    write(os.path.join(pod, "podcast.json"), json.dumps(dict(MANIFEST, **manifest)))
+    return script
+
+
 def run(*argv):
     """make_podcast.main(argv) -> (rc, stdout, stderr)."""
     out, err = io.StringIO(), io.StringIO()
@@ -271,7 +283,7 @@ class Check(Workspace):
     def test_spelled_out_numbers_fail(self):
         rc, txt = self.check(script_text().replace("30 IPs", "Thirty IPs"))
         self.assertEqual(rc, 1)
-        self.assertIn("spelled-out number 'Thirty'", txt)
+        self.assertIn("quantity in words 'Thirty'", txt)
 
     def test_required_sections(self):
         text = script_text().replace("## Pronunciation", "## Notes")
@@ -303,14 +315,15 @@ class Check(Workspace):
         book.add_text("6,112 proteins; −1.3; 5.2×10⁻¹⁵; 3.407e3; p = 0.004")
         v = lambda s: [book.verdict(n) for n in mp.numbers_in(s)]       # noqa: E731
         self.assertEqual(v("6112"), ["exact"])
-        self.assertEqual(v("-1.3 and 1.3 and +1.3"), ["exact"] * 3)
+        self.assertEqual(v("-1.3 and 1.3 and +1.3"), ["exact", "exact", None])   # sign kept
         self.assertEqual(v("5e-15"), ["rounded"])
         self.assertEqual(v("5.2 times 10 to the minus 15"), ["exact"])
         self.assertEqual(v("10 to the minus 15"), ["magnitude"])
         self.assertEqual(v("10^-3"), ["magnitude"])                   # p = 0.004
         self.assertEqual(v("3407"), ["exact"])
         self.assertEqual(v("6113"), [None])
-        self.assertEqual(v("7 and 40 and 100"), ["trivial"] * 3)
+        self.assertEqual(v("7 and 40 and 100"), ["trivial", None, None])   # no round-tens pass
+        self.assertEqual(v("5% and 3-fold and 2x and 4 fold"), [None] * 4)   # never exempt
         self.assertEqual(v("Kv2.1 FKBP12.6 log2"), [])                # symbols, not numbers
         self.assertEqual([(n.kind, str(n.value)) for n in mp.numbers_in("p of 5.2e-15.")],
                          [("sci", "5.2E-15")])                        # not "5.2" and "15"
@@ -419,7 +432,7 @@ class Render(Workspace):
         self.assertEqual(man["sources"][0]["file"], os.path.abspath(self.report))
         self.assertEqual(man["check"]["status"], "PASS")
         self.assertGreater(man["duration_s"], 3)
-        self.assertEqual(len(os.listdir(os.path.join(self.pod, ".cache"))), 2)
+        self.assertEqual(len([f for f in os.listdir(os.path.join(self.pod, ".cache")) if f.endswith(".wav")]), 2)
         # speech gets the substitutions; the transcript keeps the written form
         spoken = " ".join(x for c in FakeTTS.calls for x in c)
         self.assertIn("K V two point one", spoken)
@@ -640,7 +653,7 @@ class Gemini(Workspace):
         self.assertEqual(man["tts"]["model"], "gemini-3.8-flash-tts")
         self.assertEqual(man["tts"]["models_used"], ["gemini-3.8-flash-tts"])
         self.assertEqual(man["cloud_tts_consent"], "Brett, 2026-09-25")
-        self.assertIn("[key]", err)                                   # scrubbed, not dropped
+        self.assertIn("[redacted]", err)                              # scrubbed, not dropped
         self.assert_no_key_anywhere(out, err)
         # what was sent: the transcript's turns (spoken form) as the two hosts, nothing else
         _, contents, cfg = log["calls"][-1]
@@ -670,7 +683,7 @@ class Gemini(Workspace):
         self.assertIn("chunk 2/2", err)
         self.assertIn("out of its daily quota", err)
         self.assert_no_key_anywhere(out, err)
-        self.assertEqual(len(os.listdir(os.path.join(self.pod, ".cache"))), 1)
+        self.assertEqual(len([f for f in os.listdir(os.path.join(self.pod, ".cache")) if f.endswith(".wav")]), 1)
         first = log["calls"][0][0]
         # next day: every model works again; the cached chunk is reused, chunk 2 on the SAME model
         rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok",
@@ -776,7 +789,7 @@ class Gemini(Workspace):
         self.assertIn("re-run the same command later to resume", err)
         self.assertNotIn("rate-limited", err)
         self.assertEqual([x for x in slept if x != 20.0], [])         # pacing only, no 25 s wait
-        self.assertEqual(len(os.listdir(os.path.join(self.pod, ".cache"))), 1)
+        self.assertEqual(len([f for f in os.listdir(os.path.join(self.pod, ".cache")) if f.endswith(".wav")]), 1)
 
     def test_the_quota_id_leads_every_error_line(self):
         long = "You exceeded your current quota, please check your plan and billing details. " * 5
@@ -895,8 +908,12 @@ class Gemini(Workspace):
 
     def test_scrub(self):
         mp._SECRETS.append("sekrit-value")
-        s = mp.scrub(f"a sekrit-value b {FAKE_KEY} ?key=abc&x=1 (key=def)")
-        self.assertEqual(s, "a [key] b [key] ?key=[key]&x=1 (key=[key])")
+        s = mp.scrub(f"a sekrit-value b {FAKE_KEY} ?key=abc&x=1 (key=def) AQ.Ab8RN6abcdefghij"
+                     "klmnopqrstu")
+        self.assertEqual(s, "a [redacted] b [redacted] ?key=[redacted]&x=1 (key=[redacted]) "
+                            "[redacted]")
+        import notify_slack                                           # the one list, shared
+        self.assertEqual(notify_slack.redact(f"{FAKE_KEY} key=zz"), "[redacted] key=[redacted]")
 
 
 # -------------------------------------------------------------------------------------- link
@@ -913,7 +930,7 @@ REPORT_HTML = ('<!doctype html><html><head><title>R</title></head><body>'
 class Link(Workspace):
     def setUp(self):
         super().setUp()
-        write(os.path.join(self.pod, "podcast.json"), json.dumps(MANIFEST))
+        checked_podcast(self.out, self.report)
         write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)
         write(os.path.join(self.d, "README.html"),
               '<main class="doc"><nav><h2>Start here</h2><ul><li><a href="output/Analysis_Report'
@@ -1011,7 +1028,9 @@ class Link(Workspace):
         self.assertIn("[INFO] README.html: not there; skipped", out)
         self.assertIn("[OK] output/Analysis_Report.html: Listen card added", out)
         os.remove(os.path.join(self.pod, "podcast.json"))
-        self.assertEqual(run("link", self.out)[0], 2)
+        rc, out, err = run("link", self.out)
+        self.assertEqual(rc, 2)
+        self.assertIn("render first", err)
 
 
 class ReportGenerator(Workspace):
@@ -1030,7 +1049,9 @@ class ReportGenerator(Workspace):
         write(self.report, "# Study\n\nA one-line standfirst.\n\n## Overview\n\nText 6,112.\n")
         page = self.make_report()
         self.assertNotIn(mp.START, page)                              # no podcast, no card
-        write(os.path.join(self.pod, "podcast.json"), json.dumps(MANIFEST))
+        src = os.path.join(self.d, "source_report.md")
+        write(src, REPORT)
+        checked_podcast(self.out, src)
         self.assertEqual(run("link", self.out)[0], 0)
         self.assertEqual(run("link", self.out)[0], 0)
         page = read(os.path.join(self.out, "Analysis_Report.html"))
@@ -1045,6 +1066,236 @@ class ReportGenerator(Workspace):
         self.assertIn('<p class="subtitle">A one-line standfirst.</p>', page)   # still the standfirst
 
 
+class ReviewFixes(Workspace):
+    """podcast-reviewer, 2026-09-25 (FIX-FIRST on ddc959b): each hole it found stays shut."""
+
+    def check_txt(self, text, *extra, source=None):
+        write(self.script, text)
+        rc, out, err = run("check", self.script, "--source", source or self.report, *extra)
+        return rc, read(os.path.join(self.pod, "check.txt"))
+
+    # 1 -- the Pronunciation table went to the voices unchecked
+    def test_pronunciation_rows_may_only_respell(self):
+        rows = [("10.6", "40.2"), ("Ryr2", "Gapdh"), ("Jph3", "Michelle's favourite protein"),
+                ("C1qa", "C one Q A")]
+        rc, txt = self.check_txt(script_text(pron=rows), "--forbid-name", "Michelle")
+        self.assertEqual(rc, 1)
+        self.assertIn("pronunciation '10.6' -> '40.2': digits 40 are not in the written form",
+                      txt)
+        self.assertIn("pronunciation 'Ryr2' -> 'Gapdh': 'Gapdh' is not a spelling of 'Ryr2'", txt)
+        self.assertIn("'Michelle' is not a spelling of 'Jph3'", txt)
+        self.assertIn("forbidden name 'Michelle' appears in: pronunciation 'Jph3'", txt)
+        listed = txt.split("PRONUNCIATION (")[1].split("What check cannot")[0]
+        for w, sp in rows:                                       # every row is listed
+            self.assertIn(f"- {w} -> {sp}", listed)
+        self.assertNotIn("C one Q A   [FAIL", listed)
+
+    def test_forbidden_names_cover_what_is_shown_or_sent(self):
+        text = script_text(header=[
+            "# Signal to Noise", "Title: T", "Hosts: Maya (cell biologist), Leo (statistician)",
+            "Sources: notes from Dana Smith", "Styles: Maya: bright; Leo: like Dana, dry"])
+        rc, txt = self.check_txt(text, "--forbid-name", "Dana")
+        self.assertEqual(rc, 1)
+        self.assertIn("forbidden name 'Dana' appears in: header 'sources', header 'styles', "
+                      "the style for Leo", txt)
+
+    # 2 -- a letter-ending symbol prefix-matched ordinary words
+    def test_invented_acronyms_do_not_match_inside_words(self):
+        src = os.path.join(self.d, "words.md")
+        write(src, REPORT + "\nsodium applied architecture synaptic junction\n")
+        seg = [("MAYA", "An AI-generated test: SOD, APP, ARC, SYN and JUN all moved."),
+               ("LEO", "And RyR and IgGs are fine.")]
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"), source=src)
+        self.assertEqual(rc, 1)
+        for tok in ("SOD", "APP", "ARC", "SYN", "JUN"):
+            self.assertIn(f"{tok} looks like a gene/protein symbol", txt)
+        self.assertNotIn("RyR looks like", txt)
+        self.assertNotIn("IgGs looks like", txt)
+
+    # 3 -- capitalised words and Greek letters
+    def test_capitalised_words_mid_sentence_are_checked(self):
+        seg = [("MAYA", "Welcome to Signal to Noise, an AI-generated show. I'm Maya."),
+               ("LEO", "The Gapdh band and Actb held, then Myc and Kras rose, and TNF-α too."),
+               ("MAYA", "Maya here again, with Leo and the Old mice.")]
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="- Myc is named from memory."))
+        self.assertEqual(rc, 1)
+        for tok in ("Gapdh", "Actb", "Kras"):
+            self.assertIn(f"{tok} is capitalised mid-sentence and is not in the sources", txt)
+        self.assertIn("Myc is not in the sources; it is listed under Claims", txt)
+        self.assertIn("α looks like a gene/protein symbol", txt)
+        for ok in ("Signal", "Noise", "Maya", "Leo", "Welcome", "Old"):
+            self.assertNotIn(f"{ok} is capitalised", txt)
+        src = os.path.join(self.d, "greek.md")
+        write(src, REPORT + "\nTNF-α rose; Gapdh, Actb and Kras were flat.\n")
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="- Myc is named from memory."),
+                                 source=src)
+        self.assertEqual(rc, 0, txt)
+
+    # 4 -- numbers: no round tens, %, fold, spelled quantities, the sign
+    def test_numbers_are_strict(self):
+        seg = [("MAYA", "An AI-generated test. It rose 20 percent, or 5%, about 7-fold."),
+               ("LEO", "Thousands of proteins, a hundredfold, a dozen, twice, half of them."),
+               ("MAYA", "Jph3 went up +1.3, which is not what the report says.")]
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"))
+        self.assertEqual(rc, 1)
+        for n in ("number 20 ", "number 5 ", "number 7 ", "number 1.3 "):
+            self.assertIn(n, txt)
+        for w in ("Thousands", "hundredfold", "a dozen", "twice", "half"):
+            self.assertIn(f"quantity in words '{w}'", txt)
+        rc, txt = self.check_txt(script_text(segs=([("MAYA", "An AI-generated test: about half "
+                                                                "of it, and Jph3 fell -1.3."),
+                                                       ("LEO", "The report says so.")],),
+                                             claims="- 'about half' is my gloss."))
+        self.assertEqual(rc, 0, txt)
+        self.assertIn("'half' is listed under Claims beyond the report", txt)
+
+    def test_check_txt_says_what_pass_means_and_cannot_catch(self):
+        rc, txt = self.check_txt(script_text())
+        self.assertEqual(rc, 0, txt)
+        self.assertIn("It does NOT mean the script is right.", txt)
+        self.assertNotIn("Every number and symbol in the transcript is in the sources", txt)
+        for x in mp.CANNOT_CATCH:
+            self.assertIn(x, txt)
+
+    def test_a_host_may_not_claim_a_real_specialty(self):
+        seg = [("MAYA", "An AI-generated show. I study membrane contact sites in neurons."),
+               ("LEO", "And in my lab we count things. I'm the statistician.")]
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"))
+        self.assertEqual(rc, 1)
+        self.assertIn("'I study' -- a host must not claim a real research specialty", txt)
+        self.assertIn("'in my lab'", txt)
+        self.assertNotIn("'I'm the statistician'", txt)
+
+    # 5 -- the optional podcast never stops the report of record
+    def test_a_bad_manifest_never_stops_the_report(self):
+        for bad in ('{"audio": "podcast.m4a", "duration_s": "1140"}', '{"audio": "podc',
+                    '{"audio": "../../etc/passwd"}', '[1, 2]'):
+            write(os.path.join(self.pod, "podcast.json"), bad)
+            mp._WARNED.clear()
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(mp.add_listen_card("<main>x</main>", self.out), "<main>x</main>")
+                self.assertEqual(mp.readme_item_md(self.out, self.d), "")
+                self.assertEqual(mp.agents_md_lines(self.out, self.d), [])
+            self.assertIn("[WARN] podcast.json exists but is invalid", err.getvalue())
+            self.assertEqual(err.getvalue().count("[WARN]"), 1)          # said once
+            rc, o, e = run("link", self.out)
+            self.assertEqual(rc, 2)
+            self.assertIn("podcast.json exists but is invalid:", e)
+            self.assertNotIn("render first", e)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
+                            "--session", self.d, "--out",
+                            os.path.join(self.out, "Analysis_Report.html")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("podcast.json exists but is invalid", r.stderr)
+        self.assertNotIn(mp.START, read(os.path.join(self.out, "Analysis_Report.html")))
+
+    def test_a_hook_that_fails_leaves_the_report_alone(self):
+        checked_podcast(self.out, self.report)
+        err = io.StringIO()
+        with mock.patch.object(mp, "_paths", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(mp.add_listen_card("<main>x</main>", self.out), "<main>x</main>")
+            self.assertEqual(mp.add_listen_md("# T\n", self.out), "# T\n")
+            self.assertEqual(mp.readme_item_md(self.out, self.d), "")
+        self.assertIn("[WARN] podcast left out of the report (listen_card_html: RuntimeError: "
+                      "boom)", err.getvalue())
+
+    # 6 -- a "no" is not consent
+    def test_a_refusal_word_is_not_consent(self):
+        write(self.script, script_text())
+        run("check", self.script, "--source", self.report)
+        for no in ("false", "No", "0", "none", "declined", ""):
+            mods, log = fake_genai(lambda m, c, k: pcm_for(c))
+            with mock.patch.dict(sys.modules, mods), \
+                    mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY}):
+                rc, out, err = run("render", self.script, "--tts", "gemini", "--cloud-ok", no)
+            self.assertEqual((rc, log["clients"]), (2, 0), no)
+            self.assertIn("not sending anything", err)
+
+    # 7 -- the key file lives with the skill's other config
+    def test_key_file_location(self):
+        home = os.path.join(self.d, "home")
+        write(os.path.join(home, ".config", "podcast", "gemini_key"), "old-place-key")
+        env = {k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"}
+        env["HOME"] = home
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(mp.RenderError):
+                mp.read_key()                                         # no legacy path
+            path = os.path.join(home, ".config", "ucdavis-proteomics", "gemini_key")
+            write(path, "new-place-key\n")
+            os.chmod(path, 0o600)
+            self.assertEqual(mp.read_key(), "new-place-key")
+        self.assertIn("new-place-key", mp._SECRETS)
+
+    # 10 -- a check holds only while the script AND the sources are unchanged
+    def test_a_changed_source_makes_the_check_stale(self):
+        mp.BACKENDS["fake"] = FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        checked_podcast(self.out, self.report)
+        write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)
+        self.assertEqual(run("link", self.out)[0], 0)                  # link's own edit is fine
+        self.assertEqual(run("link", self.out)[0], 0)
+        write(self.report, read(self.report).replace("412", "413").replace("215", "216"))
+        rc, out, err = run("link", self.out)
+        self.assertEqual(rc, 2)
+        self.assertIn("source AI_Analysis_Report.md changed after check.txt was written", err)
+        rc, out, err = run("render", self.script, "--tts", "fake")
+        self.assertEqual(rc, 2)
+        self.assertIn("source AI_Analysis_Report.md changed", err)
+        rc, out, err = run("link", self.out, "--unchecked")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[WARN] linking an episode whose check does not hold", err)
+        os.remove(self.report)
+        self.assertIn("is missing", run("link", self.out)[2])
+
+    # 12 -- only raw PCM is byte-swapped; the wave module handles WAV files itself
+    def test_only_raw_pcm_is_byteswapped(self):
+        a = array.array("h", [1, -2, 300])
+        path = os.path.join(self.d, "t.wav")
+        mp.write_wav(path, a)
+        with mock.patch.object(mp, "_arr_le", wraps=mp._arr_le) as le:
+            self.assertEqual(list(mp.read_wav(path)), [1, -2, 300])
+            self.assertEqual(le.call_count, 0)
+            raw = b"".join(int(x).to_bytes(2, "little", signed=True) for x in (1, -2, 300))
+            self.assertEqual(list(mp.decode_audio(raw, "audio/L16;rate=24000")), [1, -2, 300])
+            self.assertEqual(le.call_count, 1)
+        with mock.patch.object(mp.sys, "byteorder", "big"):
+            self.assertEqual(list(mp._arr(a.tobytes())), [1, -2, 300])     # never swapped
+            self.assertNotEqual(list(mp._arr_le(a.tobytes())), [1, -2, 300])
+
+    # 13 -- warnings survive a resume; the cache keeps only what the script uses
+    def test_warnings_persist_and_the_cache_is_pruned(self):
+        class Warny(FakeTTS):
+            def synth(self, chunk, speak, label):
+                self.warnings.append(f"{label}: odd length")
+                return FakeTTS.synth(self, chunk, speak, label)
+        mp.BACKENDS["warny"] = Warny
+        self.addCleanup(mp.BACKENDS.pop, "warny", None)
+        enc = mock.patch.object(mp, "encode_aac", return_value=(None, "test"))
+        enc.start()
+        self.addCleanup(enc.stop)
+        self.assertEqual(self.check()[0], 0)
+        run("render", self.script, "--tts", "warny")
+        write(os.path.join(self.pod, ".cache", "stray.wav.part"), "x")
+        rc, out, err = run("render", self.script, "--tts", "warny")      # all cached
+        self.assertEqual(rc, 0, err)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertEqual(man["chunks_cached"], 2)
+        self.assertEqual(man["warnings"], ["chunk 1/2 (segment 1): odd length",
+                                           "chunk 2/2 (segment 2): odd length"])
+        self.assertFalse(os.path.exists(os.path.join(self.pod, ".cache", "stray.wav.part")))
+        before = set(os.listdir(os.path.join(self.pod, ".cache")))
+        write(self.script, read(self.script).replace("77 of them", "77 of those"))
+        self.assertEqual(self.check(read(self.script))[0], 0)
+        rc, out, err = run("render", self.script, "--tts", "warny")
+        self.assertEqual(json.loads(out)["cache_pruned"], 2)               # old wav + json
+        after = set(os.listdir(os.path.join(self.pod, ".cache")))
+        self.assertEqual(len(after), 4)
+        self.assertEqual(len(before & after), 2)                          # chunk 1 kept
+
+
 class SessionFiles(unittest.TestCase):
     """session_docs.py lists the podcast itself (so finalize keeps it), link then adds nothing,
     and the session zip carries the podcast but not its TTS cache."""
@@ -1056,9 +1307,12 @@ class SessionFiles(unittest.TestCase):
             p = tdp.dia_session(d)
             pod = os.path.join(p["output_dir"], "podcast")
             write(os.path.join(p["output_dir"], "Analysis_Report.html"), REPORT_HTML)
-            write(os.path.join(pod, "podcast.json"), json.dumps(MANIFEST))
-            for f in ("podcast.m4a", "transcript.html", "podcast_script.md", "check.txt"):
+            src = os.path.join(p["output_dir"], "podcast_source.md")
+            write(src, REPORT)
+            checked_podcast(p["output_dir"], src)
+            for f in ("podcast.m4a", "transcript.html", "podcast.wav"):
                 write(os.path.join(pod, f), "x" * 2000)
+            write(os.path.join(p["output_dir"], "tables", "half.csv.part"), "partial")
             for i in range(3):
                 write(os.path.join(pod, ".cache", f"{i:064x}.wav"), "w" * 100)
             session_docs.write_docs(p["session_dir"])
@@ -1082,8 +1336,9 @@ class SessionFiles(unittest.TestCase):
             names = zipfile.ZipFile(res["zip"]).namelist()
             self.assertTrue(any(n.endswith("output/podcast/podcast.m4a") for n in names))
             self.assertFalse([n for n in names if "/.cache/" in n], names)
-            self.assertEqual(res["zip_excluded"]["output/podcast/.cache (TTS scratch, kept on "
-                                                  "disk)"], 3)
+            self.assertFalse([n for n in names if n.endswith((".part", "podcast.wav"))], names)
+            import scratch_files
+            self.assertEqual(res["zip_excluded"][scratch_files.LABEL], 5)   # 3 + .part + .wav
             readme = read(p["readme"])                                   # finalize rewrote it
             self.assertEqual(readme.count("(output/podcast/podcast.m4a)"), 1)
 
@@ -1094,8 +1349,11 @@ class SessionFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             write(os.path.join(d, "podcast", "podcast.json"), "{}")
             write(os.path.join(d, "podcast", ".cache", "a.wav"), "w")
-            self.assertEqual([os.path.basename(f) for f in make_report.collect([d])],
-                             ["podcast.json"])
+            write(os.path.join(d, "podcast", "podcast.m4a"), "m")
+            write(os.path.join(d, "podcast", "podcast.wav"), "w")
+            write(os.path.join(d, "x.csv.part"), "p")
+            self.assertEqual(sorted(os.path.basename(f) for f in make_report.collect([d])),
+                             ["podcast.json", "podcast.m4a"])
 
 
 if __name__ == "__main__":

@@ -122,9 +122,13 @@ def say(msg):
         pass
 
 
-#: What report_issue.sh refuses to write to a shared folder, plus a database DSN with a password
-#: and the webhook itself. Redacted, not refused: an alert with "[redacted]" in it still tells the
-#: channel something went wrong. The reviewer posted a webhook through send_alert().
+#: What report_issue.sh refuses to write to a shared folder, plus a database DSN with a password,
+#: the webhook itself and Google API keys. Redacted, not refused: an alert with "[redacted]" in it
+#: still tells the channel something went wrong. The reviewer posted a webhook through
+#: send_alert(). THE skill's one list of secret-shaped strings: make_podcast.py imports it. It
+#: lives here, not in a module of its own, because the relay pipes this file alone to HIVE's
+#: python (`python3 - relay`), where no sibling module can be imported.
+REDACTED = "[redacted]"
 _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY[\s\S]*"),       # a header with no dashes after it
@@ -135,6 +139,9 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)password\s*[:=]\s*\S+"),
     re.compile(r"(?i)postgres(?:ql)?://[^\s:/@]+:[^\s@]+@"),
     re.compile(r"(?i)https?://hooks\.slack\.com/services/\S+"),
+    re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),                    # a Google API key
+    re.compile(r"\bAQ\.[0-9A-Za-z_\-]{20,}"),                  # a Google API key, newer format
+    re.compile(r"(?i)(?<=key=)[^&\s\"'()]+"),                   # key=..., api_key=... in a URL
 ]
 
 
@@ -142,7 +149,7 @@ def redact(text):
     """Every secret-shaped substring of `text` replaced with [redacted]."""
     out = str(text)
     for pat in _SECRET_PATTERNS:
-        out = pat.sub("[redacted]", out)
+        out = pat.sub(REDACTED, out)
     return out
 
 

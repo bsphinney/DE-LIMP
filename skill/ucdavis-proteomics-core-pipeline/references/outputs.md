@@ -92,9 +92,14 @@ the Markdown report's title, and entries in README and AGENTS.md. Each addition 
 `podcast/podcast.json` exists, so regenerating the report or re-finalizing keeps them. An
 `Analysis_Report.pdf` older than the edited HTML is reprinted by `link` (html_to_pdf.py), or
 flagged with an `[INFO]` line saying how to reprint it.
-`podcast/.cache/` (per-chunk TTS audio, ~60 MB for 20 min) is kept on disk for resuming. The
-session zip leaves it out (`zip_excluded`), and `make_report.py` does not list it. Never deposit
-it.
+`podcast/.cache/` (per-chunk TTS audio, ~60 MB for 20 min) is kept on disk for resuming.
+`scripts/scratch_files.py` is the one rule for scratch: every `.cache` folder, every `*.part`
+file, and `podcast.wav` beside `podcast.m4a`. The session zip leaves them out (`zip_excluded`)
+and `make_report.py` does not list them. Never deposit them. The run-registry record
+(`record_run.py`) copies what the Listen card points at: the audio `podcast.json` names,
+`transcript.html`, `podcast_script.md`, `check.txt` and `podcast.json`. A `podcast.json` that is
+unreadable or has a wrong field never stops the report: it is reported as a `[WARN]` and the
+report, README and AGENTS.md are made without the podcast.
 
 ## Re-analysis of the same dataset
 Re-running the same raw data (different engine, version, parameters, FASTA, or
