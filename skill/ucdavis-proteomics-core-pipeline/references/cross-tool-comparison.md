@@ -120,7 +120,7 @@ method, and a future chart must re-derive them the same way:
 - Self-contained: no CDN, no external fonts, inline SVG. It has to open from a file path
   on a cluster with no browser network access.
 
-## Deliver both formats
+## Deliver the HTML
 
-HTML for exploration, `.docx` for circulation — `to_docx.py` handles the conversion and
-resolves relative figure paths, so images actually embed rather than silently vanishing.
+`COMPARISON_REPORT.html` is the report: one self-contained page. No Word copy is made — Word
+mangled the figures (2026-09-24) — and `COMPARISON_REPORT.md` is the same text for editing.
