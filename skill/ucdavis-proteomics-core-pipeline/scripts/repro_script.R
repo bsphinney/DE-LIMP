@@ -58,6 +58,9 @@ write_repro_script <- function(path,
                                # run_de.R's contaminant record (contaminants.R). NULL = the
                                # run applied no contaminant filter, so none is emitted.
                                contaminants = NULL,
+                               # run_de.R's blocking record (blocking.R). NULL or
+                               # applied = FALSE = samples were fitted as independent.
+                               block = NULL,
                                # readDIANN annotation.columns the dpc run used (limpa's
                                # defaults + the accession column the filter reads).
                                dpc_annotation_columns = NULL,
@@ -83,6 +86,9 @@ write_repro_script <- function(path,
     sprintf("#     (%s -- DIA-NN's --cont-quant-exclude rule). They must not enter", cont_col),
     "#     normalisation, the model or the BH correction.") else NULL
   eq_on   <- !is.na(eq_cutoff)  && eq_cutoff  > 0
+  # The random blocking factor, emitted from the record so the script fits the same model.
+  blk_on  <- isTRUE(block$applied)
+  blk_col <- if (blk_on) block$column else NULL
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
 
   L <- c(
@@ -131,8 +137,9 @@ write_repro_script <- function(path,
 
   # ---- experimental design ----------------------------------------------------
   L <- c(L,
-    .hdr(sprintf("Experimental design (%d samples%s)", nrow(meta),
-                 if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "")),
+    .hdr(sprintf("Experimental design (%d samples%s%s)", nrow(meta),
+                 if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "",
+                 if (blk_on) sprintf(", block: %s", blk_col) else "")),
     .rmap("group_map", meta$File.Name, meta$Group))
 
   df_cols <- "Group = unname(group_map)"
@@ -142,8 +149,11 @@ write_repro_script <- function(path,
     df_cols <- paste0(df_cols, sprintf(", %s = unname(%s)", cv, mapname))
   }
   L <- c(L,
-    sprintf("metadata <- data.frame(File.Name = names(group_map), %s, stringsAsFactors = FALSE)", df_cols),
-    "")
+    sprintf("metadata <- data.frame(File.Name = names(group_map), %s, stringsAsFactors = FALSE)", df_cols))
+  if (blk_on) L <- c(L,
+    .rmap("block_map", meta$File.Name, meta[[blk_col]]),
+    sprintf("metadata[[%s]] <- unname(block_map)", .rq(blk_col)))
+  L <- c(L, "")
 
   # ---- quantification ---------------------------------------------------------
   if (is_dpc) {
@@ -258,13 +268,28 @@ write_repro_script <- function(path,
   L <- c(L,
     sprintf("design <- model.matrix(~ 0 + %s)", paste(formula_parts, collapse = " + ")),
     "colnames(design) <- sub('^groups', '', colnames(design))",
+    if (blk_on) c(
+    sprintf("# %s is a RANDOM blocking factor, not a term in the design: samples sharing a %s", blk_col, blk_col),
+    "# are fitted as correlated (limma duplicateCorrelation -> lmFit(block =, correlation =)).",
+    sprintf("block <- metadata[[%s]]", .rq(blk_col))) else NULL,
     "")
 
   # ---- fit --------------------------------------------------------------------
   L <- c(L,
     "# --- 5. Fit the model and test the contrasts ---------------------------------",
-    if (is_dpc) "fit <- limpa::dpcDE(y_protein, design, plot = FALSE)"
-    else        "fit <- limma::lmFit(E, design)",
+    if (!blk_on) {
+      if (is_dpc) "fit <- limpa::dpcDE(y_protein, design, plot = FALSE)"
+      else        "fit <- limma::lmFit(E, design)"
+    } else if (is_dpc) c(
+      "# dpcDE passes block to voomaLmFitWithImputation, which estimates the within-block",
+      "# correlation with the vooma weights (printed as 'Final intra-block correlation').",
+      sprintf("# The original run estimated %s.", .rnum(round(block$consensus_correlation, 6))),
+      "fit <- limpa::dpcDE(y_protein, design, plot = FALSE, block = block)")
+    else c(
+      "dc <- limma::duplicateCorrelation(E, design, block = block)",
+      sprintf("dc$consensus.correlation   # the original run estimated %s",
+              .rnum(round(block$consensus_correlation, 6))),
+      "fit <- limma::lmFit(E, design, block = block, correlation = dc$consensus.correlation)"),
     sprintf("contrast_matrix <- limma::makeContrasts(contrasts = %s, levels = design)", .rvec(forms)),
     "fit <- limma::contrasts.fit(fit, contrast_matrix)",
     "fit <- limma::eBayes(fit)",

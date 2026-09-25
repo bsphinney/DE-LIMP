@@ -529,6 +529,25 @@ def de_contaminant_sentence(prov):
             f"({c.get('note') or 'not checked'}).")
 
 
+def de_block_sentence(prov):
+    """The random blocking factor (run_de.R --block), from its `block` record. None when the
+    run fitted samples as independent -- or predates --block, which could only do that."""
+    b = prov.get("block")
+    if not isinstance(b, dict) or not b.get("applied"):
+        return None
+    col = b.get("column") or NOT_RECORDED
+    rho = b.get("consensus_correlation")
+    rho_s = f"{rho:.3f}" if isinstance(rho, (int, float)) else NOT_RECORDED
+    n_est, n_all = b.get("n_proteins_estimated"), b.get("n_proteins")
+    over = (f", estimated from {n_est:,} of {n_all:,} proteins"
+            if isinstance(n_est, int) and isinstance(n_all, int) else "")
+    levels = f" ({b['n_blocks']} levels)" if isinstance(b.get("n_blocks"), int) else ""
+    return (f"Samples sharing a {col} were modelled as correlated rather than independent: {col}"
+            f"{levels} was fitted as a random blocking factor, with a consensus within-{col} "
+            f"correlation of {rho_s} (limma duplicateCorrelation{over}) used in the linear-model "
+            f"fit ({b.get('fit') or NOT_RECORDED}).")
+
+
 def de_paragraph(prov):
     """The Differential-expression paragraph, from run_de.R's de_provenance.json. Significance
     is described exactly as run_de.R applied it: an adjusted-p cutoff, with |log2FC| only a
@@ -556,9 +575,15 @@ def de_paragraph(prov):
         s.append(f"Identification q-value filter: {NOT_RECORDED}.")
     s.append(de_contaminant_sentence(prov))
     if prov.get("design"):
+        # A record written before run_de.R listed contrasts holds a lone contrast as a bare
+        # string; joining that would spell it out character by character.
+        cons = prov.get("contrasts")
+        cons = [cons] if isinstance(cons, str) else (cons or [])
         s.append(f"The linear model was {prov['design']}"
-                 + (f", with contrasts {', '.join(prov['contrasts'])}"
-                    if prov.get("contrasts") else "") + ".")
+                 + (f", with contrasts {', '.join(cons)}" if cons else "") + ".")
+    blk = de_block_sentence(prov)
+    if blk:
+        s.append(blk)
     eng = prov.get("de_engine")
     adjp = prov.get("adjp")
     sig = (f"adj.P.Val < {adjp:g}" if isinstance(adjp, (int, float)) else
