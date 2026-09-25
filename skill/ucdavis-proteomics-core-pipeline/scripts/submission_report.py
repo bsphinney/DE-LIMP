@@ -547,17 +547,25 @@ def _read_conditions(p):
 
 
 def _de_design(p):
-    """(columns the DE models besides Group, a block column or None, de_provenance or None).
-    From de_provenance.json when the DE has run; before that, the columns run_de.R reads from
-    conditions.csv (collect_conditions.COV_COLS). A `block` key in de_provenance names a
-    column the DE blocked on (random effect / duplicateCorrelation)."""
+    """(columns the design models besides Group, the column the DE blocked on or None,
+    de_provenance or None). From de_provenance.json when the DE has run; before that, the
+    columns run_de.R reads from conditions.csv without --block (collect_conditions.COV_COLS).
+    The block is run_de.R's record: `block_column` exists exactly when the design is blocked
+    (block.applied); `block` is an object, and {"applied": false} is an UNblocked run -- never
+    read its truthiness."""
     prov = _read_json(os.path.join(p["de_dir"], "de_provenance.json"))
     if isinstance(prov, dict) and cs._s(prov.get("design")).startswith("~"):
         terms = [x.strip() for x in prov["design"].split("~", 1)[1].split("+")]
-        block = prov.get("block") if isinstance(prov.get("block"), str) else None
-        return [x for x in terms if x not in ("0", "1", "groups", "")], block, prov
+        b = prov.get("block")
+        block = cs._s(prov.get("block_column")) or (
+            cs._s(b.get("column")) if isinstance(b, dict) and b.get("applied") is True else "")
+        return [x for x in terms if x not in ("0", "1", "groups", "")], block or None, prov
     import collect_conditions
     return list(collect_conditions.COV_COLS), None, None
+
+
+def _plural(noun):
+    return {"mouse": "mice", "fish": "fish"}.get(noun, noun + "s")
 
 
 # ------------------------------------------------------------------ quality notes --
@@ -625,14 +633,42 @@ def _model_sentence(rec, u, p):
                  if r["File.Name"] in unit_of_run}
         return len(pairs) == len({x[0] for x in pairs}) == len({x[1] for x in pairs}) > 1
 
+    b = (prov or {}).get("block")
+    b = b if isinstance(b, dict) else {}
+    other = ""
     if block and carries(block):
-        return f"The analysis blocked on the {noun} (“{block}”)."
+        if b.get("effect") == "fixed":
+            return (f"The analysis modelled the {noun} (“{block}”) as a fixed effect (--block), so "
+                    f"every comparison is made within each {noun}.")
+        rho = b.get("consensus_correlation")
+        between = [c for c, k in (b.get("contrast_structure") or {}).items() if k == "between"]
+        return (f"The analysis blocked on the {noun} (“{block}”, a random effect"
+                + (f"; consensus within-{noun} correlation {rho:.2f}"
+                   if isinstance(rho, (int, float)) else "") + ")."
+                + (f" {len(between)} comparison(s) ({_examples(between, 3)}) set different "
+                   f"{_plural(noun)} against each other: their evidence is the number of "
+                   f"{_plural(noun)}, not of samples." if between else ""))
+    if block:
+        other = f"The analysis blocked on “{block}”, which does not identify the {noun}. "
     fixed = [c for c in cols if carries(c)]
     if fixed:
-        return f"The design analysed includes the {noun} as “{fixed[0]}”, a fixed effect."
+        return other + f"The design analysed includes the {noun} as “{fixed[0]}”, a fixed effect."
     if prov:
-        return (f"The design analysed ({prov['design']}) has no term for the {noun}, so it treated "
-                f"the {prov.get('n_samples') or len(rows or [])} samples as independent.")
+        if "block" not in prov:
+            return (f"Whether the analysis modelled the {noun} is not recorded: its "
+                    f"de_provenance.json predates run_de.R's --block, and the design "
+                    f"({prov['design']}) has no term for the {noun}.")
+        given = f" ({b['note']})" if b.get("column") and b.get("note") else ""
+        return (other + f"The design analysed ({prov['design']}) has no term for the {noun}, so "
+                f"it treated the {prov.get('n_samples') or len(rows or [])} samples as "
+                f"independent{given}.")
+    import collect_conditions
+    subj = [h for h in (rows[0] if rows else {}) if collect_conditions.subject_header(h)
+            and carries(h)]
+    if subj:
+        return (f"input/conditions.csv carries the {noun} as “{subj[0]}”: the DE models it only "
+                f"when run with --block {subj[0]}; without it, it treats the samples as "
+                f"independent.")
     return (f"No column the DE reads from input/conditions.csv (Group, {', '.join(cols)}) "
             f"identifies the {noun}, so as set up it will treat the samples as independent.")
 
@@ -643,7 +679,7 @@ def _pairing_note(rec, p):
     if not u:
         return None
     noun, cap = u["noun"], u["noun"].capitalize()
-    plural = {"mouse": "mice", "fish": "fish"}.get(noun, noun + "s")
+    plural = _plural(noun)
     order = ("within", "unclear", "between", "mixed")
     facs = sorted(u["factors"], key=lambda f: order.index(f["kind"]))
     paired = any(f["kind"] == "within" for f in facs)

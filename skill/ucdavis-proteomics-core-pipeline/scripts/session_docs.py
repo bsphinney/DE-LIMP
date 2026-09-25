@@ -267,6 +267,16 @@ def _de_contaminants(de):
     return de_contaminant_sentence(de)
 
 
+def _de_block(de):
+    """The DE's blocking factor in make_methods' words (de_block_sentence reads run_de.R's
+    `block` record), or None when the run fitted samples as independent."""
+    try:
+        from make_methods import de_block_sentence
+    except Exception:
+        return None
+    return de_block_sentence(de)
+
+
 def gather(session_dir, registry=None, registry_note=None, pending=(), located_at=None):
     """Every fact the three documents state, read from the session. `registry`: the Core
     run-registry folder of this session, when known (record_run.locate() or its result).
@@ -584,6 +594,10 @@ def agents_md(f):
         terms = design_terms(de["design"])
         L.append(f"- Design: `{de['design']}`" + (f" — covariates: {', '.join(terms[1:])}"
                                                   if len(terms) > 1 else ""))
+    blk = _de_block(de) if de else None
+    if blk:
+        L.append(f"- Blocking: {blk}")
+        L += [f"  - **Caveat:** {w}" for w in (de["block"].get("warnings") or [])]
     if de.get("input"):
         L.append(f"- The DE read `{os.path.basename(str(de['input']))}` "
                  "(de_provenance.json `input`).")

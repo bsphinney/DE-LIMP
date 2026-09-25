@@ -58,6 +58,12 @@ write_repro_script <- function(path,
                                # run_de.R's contaminant record (contaminants.R). NULL = the
                                # run applied no contaminant filter, so none is emitted.
                                contaminants = NULL,
+                               # run_de.R's blocking record (blocking.R). NULL or
+                               # applied = FALSE = samples were fitted as independent.
+                               block = NULL,
+                               # contrast -> "blocked" | "independent": the fit each DE table
+                               # was reported from (--block-scope). NULL = from block's record.
+                               contrast_model = NULL,
                                # readDIANN annotation.columns the dpc run used (limpa's
                                # defaults + the accession column the filter reads).
                                dpc_annotation_columns = NULL,
@@ -83,6 +89,13 @@ write_repro_script <- function(path,
     sprintf("#     (%s -- DIA-NN's --cont-quant-exclude rule). They must not enter", cont_col),
     "#     normalisation, the model or the BH correction.") else NULL
   eq_on   <- !is.na(eq_cutoff)  && eq_cutoff  > 0
+  # The random blocking factor, emitted from the record so the script fits the same model.
+  blk_on  <- isTRUE(block$applied)
+  blk_col <- if (blk_on) block$column else NULL
+  if (is.null(contrast_model) && blk_on) contrast_model <- unlist(block$contrast_model)
+  # --block-scope within with between-block contrasts: a second, independent fit reports them
+  two_fits <- blk_on && any(contrast_model == "independent")
+  blk_fixed <- blk_on && identical(block$effect, "fixed")
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
 
   L <- c(
@@ -131,8 +144,9 @@ write_repro_script <- function(path,
 
   # ---- experimental design ----------------------------------------------------
   L <- c(L,
-    .hdr(sprintf("Experimental design (%d samples%s)", nrow(meta),
-                 if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "")),
+    .hdr(sprintf("Experimental design (%d samples%s%s)", nrow(meta),
+                 if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "",
+                 if (blk_on) sprintf(", block: %s", blk_col) else "")),
     .rmap("group_map", meta$File.Name, meta$Group))
 
   df_cols <- "Group = unname(group_map)"
@@ -142,8 +156,11 @@ write_repro_script <- function(path,
     df_cols <- paste0(df_cols, sprintf(", %s = unname(%s)", cv, mapname))
   }
   L <- c(L,
-    sprintf("metadata <- data.frame(File.Name = names(group_map), %s, stringsAsFactors = FALSE)", df_cols),
-    "")
+    sprintf("metadata <- data.frame(File.Name = names(group_map), %s, stringsAsFactors = FALSE)", df_cols))
+  if (blk_on) L <- c(L,
+    .rmap("block_map", meta$File.Name, meta[[blk_col]]),
+    sprintf("metadata[[%s]] <- unname(block_map)", .rq(blk_col)))
+  L <- c(L, "")
 
   # ---- quantification ---------------------------------------------------------
   if (is_dpc) {
@@ -258,16 +275,49 @@ write_repro_script <- function(path,
   L <- c(L,
     sprintf("design <- model.matrix(~ 0 + %s)", paste(formula_parts, collapse = " + ")),
     "colnames(design) <- sub('^groups', '', colnames(design))",
+    if (blk_fixed) c(
+    sprintf("# %s is crossed with the groups and every contrast compares samples within one %s:", blk_col, blk_col),
+    "# it is a FIXED effect -- extra design columns, the exact paired analysis.",
+    sprintf("block <- metadata[[%s]]", .rq(blk_col)),
+    "block_f <- factor(block)",
+    "block_cols <- model.matrix(~ block_f)[, -1, drop = FALSE]",
+    sprintf("colnames(block_cols) <- make.names(paste0(%s, '_', levels(block_f)[-1]))", .rq(blk_col)),
+    "design <- cbind(design, block_cols)")
+    else if (blk_on) c(
+    sprintf("# %s is a RANDOM blocking factor, not a term in the design: samples sharing a %s", blk_col, blk_col),
+    "# are fitted as correlated (limma duplicateCorrelation -> lmFit(block =, correlation =)).",
+    sprintf("block <- metadata[[%s]]", .rq(blk_col))) else NULL,
     "")
 
   # ---- fit --------------------------------------------------------------------
   L <- c(L,
     "# --- 5. Fit the model and test the contrasts ---------------------------------",
-    if (is_dpc) "fit <- limpa::dpcDE(y_protein, design, plot = FALSE)"
-    else        "fit <- limma::lmFit(E, design)",
+    if (!blk_on || blk_fixed) {
+      if (is_dpc) "fit <- limpa::dpcDE(y_protein, design, plot = FALSE)"
+      else        "fit <- limma::lmFit(E, design)"
+    } else if (is_dpc) c(
+      "# dpcDE passes block to voomaLmFitWithImputation, which estimates the within-block",
+      "# correlation with the vooma weights (printed as 'Final intra-block correlation').",
+      sprintf("# The original run estimated %s.", .rnum(round(block$consensus_correlation, 6))),
+      "fit <- limpa::dpcDE(y_protein, design, plot = FALSE, block = block)")
+    else c(
+      "dc <- limma::duplicateCorrelation(E, design, block = block)",
+      sprintf("dc$consensus.correlation   # the original run estimated %s",
+              .rnum(round(block$consensus_correlation, 6))),
+      "fit <- limma::lmFit(E, design, block = block, correlation = dc$consensus.correlation)"),
     sprintf("contrast_matrix <- limma::makeContrasts(contrasts = %s, levels = design)", .rvec(forms)),
     "fit <- limma::contrasts.fit(fit, contrast_matrix)",
     "fit <- limma::eBayes(fit)",
+    if (two_fits) c(
+    "",
+    sprintf("# --- 5b. Between-%s contrasts: the same data fitted with samples independent ---", blk_col),
+    sprintf("# (--block-scope %s). They compare different %s levels with at most one sample", block$scope, blk_col),
+    "# per level, so there is no pairing to model -- and one consensus correlation would",
+    sprintf("# understate their variance for proteins with strong %s-to-%s variation.", blk_col, blk_col),
+    if (is_dpc) "fit_independent <- limpa::dpcDE(y_protein, design, plot = FALSE)"
+    else        "fit_independent <- limma::lmFit(E, design)",
+    "fit_independent <- limma::eBayes(limma::contrasts.fit(fit_independent, contrast_matrix))",
+    .rmap("contrast_model", names(contrast_model), contrast_model)) else NULL,
     "")
 
   # ---- results ----------------------------------------------------------------
@@ -307,7 +357,9 @@ write_repro_script <- function(path,
     "write.csv(expr, file.path(outdir, 'Expression_Matrix.csv'), row.names = FALSE)",
     "",
     sprintf("for (cn in %s) {", .rvec(forms)),
-    "  tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = 'BH')",
+    if (two_fits)
+    "  tt <- limma::topTable(if (contrast_model[[cn]] == 'blocked') fit else fit_independent,\n                        coef = cn, number = Inf, adjust.method = 'BH')"
+    else "  tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = 'BH')",
     "  tt$Protein.Group <- rownames(tt)",
     if (has_ann) c(
     "  miss <- setdiff(names(ann), c('Protein.Group', names(tt)))   # don't duplicate columns",

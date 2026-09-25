@@ -160,6 +160,15 @@ def main():
           "them) — any `Cont_` protein in the DE tables is contamination, not biology.")
     if cont.get("database_risk") is True:
         w(f"- **Contaminant-filter caveat (say this in the report):** {cont.get('database_note')}")
+    # run_de.R's block record (--block): make_methods' sentence is its one description.
+    blk = prov.get("block") if isinstance(prov.get("block"), dict) else {}
+    if blk.get("applied") is True:
+        from make_methods import de_block_sentence
+        w(f"- Blocking: {de_block_sentence(prov)}")
+        for warn in blk.get("warnings") or []:
+            w(f"- **Blocking caveat (say this in Data Quality Notes):** {warn}")
+    elif blk.get("column") and blk.get("note"):
+        w(f"- Blocking: none used — {blk['note']}")
     w(f"- Significance rule: adj.P.Val < {adjp} (Benjamini-Hochberg) — the adjusted p-value "
       f"ALONE (ID FDR q ≤ {q_cut}). **No fold-change filter is applied.** |log2FC| = {lfc} "
       f"({2**float(lfc):.3g}-fold) is drawn on the volcano as a reference line only.")

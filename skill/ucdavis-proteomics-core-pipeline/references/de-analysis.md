@@ -8,9 +8,10 @@ in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked by the bundle's
 ```
 Rscript scripts/run_de.R --input report.parquet --metadata conditions.csv \
         --method {dpc|maxlfq} --outdir de_results \
-        [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--logfc 1.0] [--adjp 0.05]
+        [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--logfc 1.0] [--adjp 0.05] \
+        [--block Mouse [--block-scope within|all]]
 ```
-`metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2]`. `File.Name` must
+`metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
 the first factor level.
 
@@ -54,6 +55,105 @@ Protein.Names`). `run_search.py` produces this for non-DIA-NN engines.
 **Rank-checked before fitting** (`qr(design)$rank`); fails on confounded covariates
 or empty groups. Groups with <2 replicates have no within-group variance — warn the
 user at the design step (`collect_conditions.py --validate` flags singletons).
+
+## Paired / repeated designs — `--block <column>`
+When several samples come from one source — the IPs cut from one mouse brain, the
+biopsies from one patient, before/after samples from one animal — they are correlated,
+and fitting them as independent throws the pairing away. Put the unit in its own
+`conditions.csv` column (e.g. `Mouse`) and pass `--block Mouse`.
+
+**Fixed or random — `--block-effect auto|fixed|random` (default `auto`, recorded as
+`block.effect` / `block.effect_choice`).**
+- **Crossed + every contrast within one block → fixed.** Before/after in the same patient,
+  treated vs control in the same donor: the block is crossed with the groups (it stays
+  full rank as design columns) and every contrast compares samples of one subject. The
+  fixed subject effect (`~ 0 + groups + Patient`) is the exact paired analysis. Simulated
+  (6 patients × 2 conditions, blocksim/paired.R): fixed type I 0.050 and power 0.95 at
+  every per-protein correlation; the random effect's type I drifts 0.078 → 0.010 and its
+  power falls to 0.76 as the correlation goes 0.05 → 0.85, because one consensus
+  correlation is applied to every protein.
+- **Otherwise → random**, the way limma fits multi-level experiments: one consensus
+  within-block correlation estimated across all proteins by `duplicateCorrelation()`, used
+  by `lmFit(block =, correlation =)`. This is the nested case (mice within age, PROT_0756):
+  a fixed mouse term would be aliased with the age groups and between-mouse contrasts need
+  the random effect. `--block-effect fixed` on a nested block stops before quantification.
+- **Nested in a covariate, not the groups** (each patient's pre/post pair run in one
+  `Batch`): the fixed subject effect absorbs that covariate — its columns are sums of the
+  subject's — so the fixed fit leaves it out (`block.absorbed_covariates`, a `Dropped from
+  the design` line in `methods.txt`, the Methods sentence, the repro script). Every message
+  names what the block is aliased with: the groups, or covariate X.
+
+- **dpc**: `limpa::dpcDE(y, design, block = b)`. `dpcDE` passes `...` to
+  `voomaLmFitWithImputation()`, which takes `block` natively: it estimates the
+  correlation with the vooma precision weights, refits, recomputes the weights and
+  re-estimates it (limpa prints "First/Final intra-block correlation"), then fits
+  `lmFit(block, correlation, weights)` (limpa 1.4.0 source). **maxlfq**:
+  `duplicateCorrelation(E, design, block)` → `lmFit(E, design, block, correlation)`.
+- **Nested is fine, fixed-and-random is not.** The block may sit inside a fixed factor
+  (mice 1–3 Old, 4–6 Young; groups `Old_JPH3 … Young_IgG`): within-mouse contrasts
+  (bait vs IgG) gain power, between-mouse contrasts (Old vs Young) are judged on the
+  number of mice — see `--block-scope` below. Do NOT also put the block in the design: a column named
+  `Batch`/`Covariate1`/`Covariate2` is a fixed covariate, so `--block Covariate1` stops
+  with an error — rename the column (e.g. `Mouse`). `collect_conditions.py --map` keeps
+  a Mouse / Animal / Subject / Patient / Donor column under its own name and reports it
+  as `block_column` (other extra columns still become `Covariate1/2`). As a fixed
+  covariate nested in the groups the subject makes the design rank-deficient; run_de.R
+  then stops up front and points at `--block`.
+- **`--block-scope within|all` — which contrasts the blocked fit reports (default
+  `within`).** One run fits both models on the one quantification (the slow part is not
+  repeated) and reports each contrast from its fit:
+  - `within`: a contrast **between** blocks that uses **at most one sample per block**
+    (Old_JPH3 vs Young_JPH3: 3 mice vs 3 mice, one IP each) comes from the fit with
+    samples independent; every other contrast — within-block, partial, and between-block
+    contrasts that pool several samples per block — from the blocked fit. If any block
+    holds two samples of one group (technical replicates of a mouse), everything comes
+    from the blocked fit.
+  - **A between-block contrast on the blocked fit is NOT a remedy, only the lesser evil.**
+    Pooled over baits (Old vs Young over all IPs) it cannot use the independent fit —
+    unblocked it is pseudo-replicated (simulated type I 0.07–0.36) — but the blocked fit
+    is itself anti-conservative for proteins with strong mouse effects (type I 0.10 / 0.22
+    at per-protein correlation 0.6 / 0.85, nominal 0.05; blocksim/between.R). Every such
+    contrast gets a `block.warnings` entry and a `CAUTION` in `methods.txt`. Define
+    between-block contrasts one sample per block (per bait) instead. (A block-level
+    analysis — one score per mouse, then a two-sample test — cut it to 0.08 at 0.85 in
+    simulation; a follow-up.)
+  - `all`: every contrast from the blocked fit.
+
+  **Why `within` is the default** (PROT_0756: 6 mice × 5 IPs, consensus correlation
+  0.17). A one-sample-per-mouse age contrast has no pairing to model, and in a balanced
+  design the independent fit's variance is unbiased for every protein. The blocked fit
+  applies ONE consensus correlation to all proteins, so it understates the between-mouse
+  variance for proteins with strong mouse-to-mouse variation: the blocked/independent SE
+  ratio on the age contrasts was 1.04 at per-protein correlation ≤ 0 and 0.86 at > 0.6
+  (ideal: 1), matching what the design predicts to within 0.015. The 77 age calls only
+  the blocked fit made were those proteins (median per-protein correlation 0.44 vs 0.14
+  overall — red-cell, complement, tRNA-synthetase proteins that vary animal to animal).
+  On the bait-vs-IgG contrasts the blocked fit is the right model: +14–58% calls, none
+  lost, top hits and fold changes unchanged.
+
+  Recorded: `block.effect` (+ `effect_choice`), `block.scope`, `block.contrast_model` (`{"<contrast>": "blocked" |
+  "independent"}`, beside `contrast_structure`), `block.contrast_model_rule`;
+  `de_tables` (each `DE_*.csv`, its model, its significant count); the `Blocking` lines
+  of `methods.txt`; the console line of each contrast (`[blocked fit]`); the Methods
+  sentence. `block.applied` stays true while the blocked fit reports ≥ 1 contrast, and
+  `block_column` is present exactly then. The DE-LIMP session's `fit` holds each contrast's
+  reporting fit column by column (`fit$contrast_model`; moderated F dropped) with
+  `fit_independent` beside it; `reproducibility_log.R` fits both and picks per contrast.
+- **Stops** (before quantification): column missing or blank for a sample, the column
+  is `Group`/`File.Name`/a covariate, the block is encoded in the design (its levels
+  coincide with the groups), or a block holds one analysed sample.
+- **Warns** (`CAUTION` in `methods.txt`, `block.warnings` in `de_provenance.json`): a
+  consensus correlation ≤ 0 (blocking gains nothing — check the assignments), fewer than
+  50 proteins with an estimate, the two limpa passes disagreeing by > 0.1, or only 2
+  blocks.
+- **Recorded**: `de_provenance.json` `block` — column, levels and sizes, consensus
+  correlation (and limpa's first-pass one), proteins estimated, per-protein quartiles,
+  estimator, fit, and each contrast labelled `within` / `between` / `partial`; the
+  `de_engine` label gains `; block = Mouse (…)`; `methods.txt` has a `Blocking` line (an
+  unblocked run says `none -- samples modelled as independent`); `make_methods.py`
+  writes the sentence from the record; `reproducibility_log.R` refits it.
+- With no `--block`, `run_de.R` prints a note when a metadata column recurs across
+  groups (the same Mouse in several conditions) — the hint to ask the user.
 
 ## Method choice — limpa/DPC is the default
 
@@ -153,7 +253,7 @@ hardcode a description of what ran**, and hand `methods.txt` to the user verbati
 `run_de.R` also writes **`reproducibility_log.R`** (via `repro_script.R`): the same
 analysis emitted as flat, literal R — the report path, the q-cutoff and the q-columns
 it was actually applied to, any QuantUMS pre-filter, the sample→group map, the
-covariates, the design, the contrasts. Runnable with `Rscript`, needing only R and
+covariates, the blocking factor (if any), the design, the contrasts. Runnable with `Rscript`, needing only R and
 limpa/limma. It is built from the objects that ran, for the same reason `methods.txt`
 is: a hand-written recipe drifts, a generated one can't. Point users at it whenever
 they ask what was done or want the code. → `references/reproducibility.md`.

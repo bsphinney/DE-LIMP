@@ -581,16 +581,65 @@ class TestNotes(unittest.TestCase):
         mouse = lambda u: sheet()[u].split("Mouse")[1].strip()        # noqa: E731
         with tempfile.TemporaryDirectory() as tmp:
             s = self.session(tmp, batch=mouse, extra_col="Mouse")
-            self.assertIn("No column the DE reads", notes_by_id(sr.load(s), s)["pairing"],
-                          "run_de.R ignores a column called Mouse")
+            self.assertIn("input/conditions.csv carries the mouse as \u201cMouse\u201d: the DE models "
+                          "it only when run with --block Mouse", notes_by_id(sr.load(s), s)["pairing"],
+                          "run_de.R reads a Mouse column only with --block")
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, prov={"design": "~ 0 + groups", "n_samples": 30,
+                                        "block": {"applied": False,
+                                                  "note": "no --block: samples modelled as independent"}})
+            n = notes_by_id(sr.load(s), s)["pairing"]
+            self.assertIn("The design analysed (~ 0 + groups) has no term for the mouse, so it "
+                          "treated the 30 samples as independent.", n)
+            self.assertNotIn("blocked", n, "{'applied': false} is an unblocked run, not a block")
+
+    # run_de.R's block record (feat/skill-de-block, blocking.R block_record): `block` is an
+    # object, `block_column` exists only when the design is blocked.
+    BLOCKED_RANDOM = {"design": "~ 0 + groups", "n_samples": 30, "block_column": "Mouse",
+                      "block": {"applied": True, "column": "Mouse", "effect": "random",
+                                "consensus_correlation": 0.412,
+                                "contrast_structure": {"Old_JPH3-Old_IgG": "within",
+                                                       "Old_JPH3-Young_JPH3": "between"}}}
+
+    def test_a_random_block_on_the_mouse(self):
+        mouse = lambda u: sheet()[u].split("Mouse")[1].strip()        # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, batch=mouse, extra_col="Mouse", prov=self.BLOCKED_RANDOM)
+            n = notes_by_id(sr.load(s), s)["pairing"]
+            self.assertIn("blocked on the mouse (\u201cMouse\u201d, a random effect; consensus "
+                          "within-mouse correlation 0.41).", n)
+            self.assertIn("1 comparison(s) (Old_JPH3-Young_JPH3) set different mice against each "
+                          "other: their evidence is the number of mice", n)
+            self.assertNotIn("samples as independent", n)
+
+    def test_a_fixed_block_on_the_mouse(self):
+        mouse = lambda u: sheet()[u].split("Mouse")[1].strip()        # noqa: E731
+        prov = {"design": "~ 0 + groups + Mouse", "n_samples": 30, "block_column": "Mouse",
+                "block": {"applied": True, "column": "Mouse", "effect": "fixed",
+                          "consensus_correlation": None}}
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, batch=mouse, extra_col="Mouse", prov=prov)
+            self.assertIn("modelled the mouse (\u201cMouse\u201d) as a fixed effect (--block), so "
+                          "every comparison is made within each mouse",
+                          notes_by_id(sr.load(s), s)["pairing"])
+
+    def test_a_record_from_before_block_says_not_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = self.session(tmp, prov={"design": "~ 0 + groups", "n_samples": 30})
-            self.assertIn("The design analysed (~ 0 + groups) has no term for the mouse, so it "
-                          "treated the 30 samples as independent", notes_by_id(sr.load(s), s)["pairing"])
+            n = notes_by_id(sr.load(s), s)["pairing"]
+            self.assertIn("Whether the analysis modelled the mouse is not recorded", n)
+            self.assertNotIn("treated the 30 samples as independent", n)
+
+    def test_block_given_but_every_contrast_between_mice(self):
+        prov = {"design": "~ 0 + groups", "n_samples": 30,
+                "block": {"applied": False, "column": "Mouse",
+                          "note": "--block Mouse given, but every contrast compares different "
+                                  "Mouse levels"}}
         with tempfile.TemporaryDirectory() as tmp:
-            s = self.session(tmp, batch=mouse, extra_col="Mouse",
-                             prov={"design": "~ 0 + groups", "n_samples": 30, "block": "Mouse"})
-            self.assertIn("blocked on the mouse (\u201cMouse\u201d)", notes_by_id(sr.load(s), s)["pairing"])
+            s = self.session(tmp, prov=prov)
+            n = notes_by_id(sr.load(s), s)["pairing"]
+            self.assertIn("treated the 30 samples as independent (--block Mouse given, but every "
+                          "contrast compares different Mouse levels).", n)
 
     def test_blank_uniprot_is_a_note(self):
         self.assertIn("uniprot_blank", notes_by_id(sr.sanitize(fixture())))

@@ -313,6 +313,46 @@ class Agents(unittest.TestCase):
             self.assertIn("| Treated-Control | 11 |", md)
 
 
+class BlockRecord(unittest.TestCase):
+    """run_de.R --block (feat/skill-de-block): AGENTS.md and the analysis brief state the block in
+    make_methods.de_block_sentence()'s words and carry its warnings (review C3); an unblocked
+    record ({"applied": false}) adds nothing."""
+    BLOCK = {"applied": True, "column": "Mouse", "effect": "random", "n_blocks": 6,
+             "consensus_correlation": 0.412, "n_proteins_estimated": 900, "n_proteins": 1000,
+             "fit": "limma lmFit(block=, correlation=)",
+             "contrast_model": {"Treated-Control": "blocked"},
+             "warnings": ["CANARY between-mouse contrasts are anti-conservative"]}
+
+    def brief(self, d, prov):
+        with open(os.path.join(d, "de_provenance.json"), "w") as fh:
+            json.dump(prov, fh)
+        out = os.path.join(d, "brief.md")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "analysis_prompt.py"),
+                            "--out", out, "--de-dir", d], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return read(out)
+
+    def test_agents_and_brief_state_the_block_and_its_warnings(self):
+        prov = dict(DPC, block=self.BLOCK, block_column="Mouse")
+        with tempfile.TemporaryDirectory() as d:
+            p = Agents().build(d, prov)
+            text = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("- Blocking: Samples sharing a Mouse were modelled as correlated", text)
+            self.assertIn("**Caveat:** CANARY between-mouse contrasts", text)
+            b = self.brief(p["de_dir"], prov)
+            self.assertIn("- Blocking: Samples sharing a Mouse were modelled as correlated", b)
+            self.assertIn("**Blocking caveat (say this in Data Quality Notes):** CANARY", b)
+
+    def test_an_unblocked_record_adds_nothing(self):
+        prov = dict(DPC, block={"applied": False,
+                                "note": "no --block: samples modelled as independent"})
+        with tempfile.TemporaryDirectory() as d:
+            p = Agents().build(d, prov)
+            self.assertNotIn("Blocking", session_docs.agents_md(
+                session_docs.gather(p["session_dir"])))
+            self.assertNotIn("Blocking", self.brief(p["de_dir"], prov))
+
+
 class Readme(unittest.TestCase):
     def test_html_is_self_contained_and_matches_the_md(self):
         with tempfile.TemporaryDirectory() as d:
