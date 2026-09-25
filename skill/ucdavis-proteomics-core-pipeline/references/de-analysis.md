@@ -8,9 +8,10 @@ in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked by the bundle's
 ```
 Rscript scripts/run_de.R --input report.parquet --metadata conditions.csv \
         --method {dpc|maxlfq} --outdir de_results \
-        [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--logfc 1.0] [--adjp 0.05]
+        [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--logfc 1.0] [--adjp 0.05] \
+        [--block Mouse]
 ```
-`metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2]`. `File.Name` must
+`metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
 the first factor level.
 
@@ -54,6 +55,46 @@ Protein.Names`). `run_search.py` produces this for non-DIA-NN engines.
 **Rank-checked before fitting** (`qr(design)$rank`); fails on confounded covariates
 or empty groups. Groups with <2 replicates have no within-group variance — warn the
 user at the design step (`collect_conditions.py --validate` flags singletons).
+
+## Paired / repeated designs — `--block <column>`
+When several samples come from one source — the IPs cut from one mouse brain, the
+biopsies from one patient, before/after samples from one animal — they are correlated,
+and fitting them as independent throws the pairing away. Put the unit in its own
+`conditions.csv` column (e.g. `Mouse`) and pass `--block Mouse`. It is fitted the way
+limma fits multi-level experiments: a **random effect**, with one consensus
+within-block correlation estimated across all proteins by `duplicateCorrelation()` and
+used by `lmFit(block =, correlation =)`.
+
+- **dpc**: `limpa::dpcDE(y, design, block = b)`. `dpcDE` passes `...` to
+  `voomaLmFitWithImputation()`, which takes `block` natively: it estimates the
+  correlation with the vooma precision weights, refits, recomputes the weights and
+  re-estimates it (limpa prints "First/Final intra-block correlation"), then fits
+  `lmFit(block, correlation, weights)` (limpa 1.4.0 source). **maxlfq**:
+  `duplicateCorrelation(E, design, block)` → `lmFit(E, design, block, correlation)`.
+- **Nested is fine, fixed-and-random is not.** The block may sit inside a fixed factor
+  (mice 1–3 Old, 4–6 Young; groups `Old_JPH3 … Young_IgG`): within-mouse contrasts
+  (bait vs IgG) gain power, between-mouse contrasts (Old vs Young) are still judged on
+  the number of mice. Do NOT also put the block in the design: a column named
+  `Batch`/`Covariate1`/`Covariate2` is a fixed covariate, so `--block Covariate1` stops
+  with an error — rename the column (e.g. `Mouse`). `collect_conditions.py` turns
+  unrecognised extra columns into `Covariate1/2`, so a sample sheet's Mouse column
+  lands there: rename it before DE. (As a fixed covariate nested in the groups it makes
+  the design rank-deficient anyway.)
+- **Stops** (before quantification): column missing or blank for a sample, the column
+  is `Group`/`File.Name`/a covariate, the block is encoded in the design (its levels
+  coincide with the groups), or a block holds one analysed sample.
+- **Warns** (`CAUTION` in `methods.txt`, `block.warnings` in `de_provenance.json`): a
+  consensus correlation ≤ 0 (blocking gains nothing — check the assignments), fewer than
+  50 proteins with an estimate, the two limpa passes disagreeing by > 0.1, or only 2
+  blocks.
+- **Recorded**: `de_provenance.json` `block` — column, levels and sizes, consensus
+  correlation (and limpa's first-pass one), proteins estimated, per-protein quartiles,
+  estimator, fit, and each contrast labelled `within` / `between` / `partial`; the
+  `de_engine` label gains `; block = Mouse (…)`; `methods.txt` has a `Blocking` line (an
+  unblocked run says `none -- samples modelled as independent`); `make_methods.py`
+  writes the sentence from the record; `reproducibility_log.R` refits it.
+- With no `--block`, `run_de.R` prints a note when a metadata column recurs across
+  groups (the same Mouse in several conditions) — the hint to ask the user.
 
 ## Method choice — limpa/DPC is the default
 
@@ -153,7 +194,7 @@ hardcode a description of what ran**, and hand `methods.txt` to the user verbati
 `run_de.R` also writes **`reproducibility_log.R`** (via `repro_script.R`): the same
 analysis emitted as flat, literal R — the report path, the q-cutoff and the q-columns
 it was actually applied to, any QuantUMS pre-filter, the sample→group map, the
-covariates, the design, the contrasts. Runnable with `Rscript`, needing only R and
+covariates, the blocking factor (if any), the design, the contrasts. Runnable with `Rscript`, needing only R and
 limpa/limma. It is built from the objects that ran, for the same reason `methods.txt`
 is: a hand-written recipe drifts, a generated one can't. Point users at it whenever
 they ask what was done or want the code. → `references/reproducibility.md`.

@@ -36,7 +36,15 @@ The agent confirms each with the user, finalizes `conditions.csv`, then runs
 `--validate` against the search report before DE.
 
 ## The finished metadata
-`conditions.csv` columns: `File.Name,Group[,Batch,Covariate1,Covariate2]`.
+`conditions.csv` columns: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`.
+
+**Samples from the same animal / patient?** (five IPs from one mouse brain, paired
+before/after samples.) Ask. If so, keep that unit in its own column under its own name
+(`Mouse`, `Patient`) — not Batch/Covariate1/Covariate2, which are fitted as fixed
+effects — and run DE with `--block Mouse` (`references/de-analysis.md`, "Paired /
+repeated designs"). `--map` currently files extra sample-sheet columns under
+Covariate1/2, so rename it there. run_de.R prints a note when a column recurs across
+groups and no `--block` was given.
 `File.Name` must equal the Run names in the search report. `--validate` checks
 column presence, blank groups, singleton groups, and that the report runs and
 metadata rows line up exactly.

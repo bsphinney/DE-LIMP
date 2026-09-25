@@ -1148,8 +1148,17 @@ python3 scripts/fran_deposit.py verify --out <hive search out dir>   # later: di
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet \
     --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results \
-    --fasta-meta ./search.fasta.meta.json
+    --fasta-meta ./search.fasta.meta.json [--block Mouse]
 ```
+**Several samples from one animal / patient → `--block <column>`.** IPs cut from the same
+mouse brain, or before/after samples from one subject, are correlated; without `--block`
+they are fitted as independent and the pairing is lost. Give the unit its own
+`conditions.csv` column (`Mouse` — not Batch/Covariate1/2, which are fixed effects) and
+pass `--block Mouse`: a random effect via limma `duplicateCorrelation` (limpa's `dpcDE`
+takes it natively). The block may be nested in a group (mice within age). The consensus
+correlation lands in `de_provenance.json` (`block`) and `methods.txt`. run_de.R prints a
+note when a column looks like one and `--block` is missing — ask the user.
+→ `references/de-analysis.md`, "Paired / repeated designs".
 **Contaminants are removed before quantification, on both methods.** Every precursor that
 maps to a `Cont_` entry (any accession in `Protein.Ids` — DIA-NN's own
 `--cont-quant-exclude` rule) is dropped before limpa/limma sees it; DIA-NN's flag alone
