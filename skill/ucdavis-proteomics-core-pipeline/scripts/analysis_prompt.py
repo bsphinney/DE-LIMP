@@ -159,7 +159,8 @@ def main():
         w("- Contaminants: not recorded by this DE run (older run_de.R, which did NOT remove "
           "them) — any `Cont_` protein in the DE tables is contamination, not biology.")
     if cont.get("database_risk") is True:
-        w(f"- **Contaminant-filter caveat (say this in the report):** {cont.get('database_note')}")
+        w(f"- **Contaminant-filter caveat (say this in Data Quality Notes, naming the proteins):** "
+          f"{cont.get('database_note')}")
     # run_de.R's block record (--block): make_methods' sentence is its one description.
     blk = prov.get("block") if isinstance(prov.get("block"), dict) else {}
     if blk.get("applied") is True:

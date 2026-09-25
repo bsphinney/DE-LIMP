@@ -1046,6 +1046,16 @@ def _database_state(merged):
     return state, (near_identical_measured(merged) if state == "identity_only" else None)
 
 
+def _rebuild_advice():
+    """fetch_fasta.REBUILD_ADVICE -- the one wording of the fix for an older database."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import REBUILD_ADVICE
+        return REBUILD_ADVICE
+    except Exception:                                   # noqa: BLE001
+        return "Rebuild the FASTA with this release's fetch_fasta.py and re-search."
+
+
 def fasta_facts(meta_path):
     m = load_json(meta_path)
     if not isinstance(m, dict):
@@ -1865,9 +1875,7 @@ def data_quality_notes(rec):
             "normalisation, and run_de.R removes Cont_ groups from the DE, so real proteins go "
             "missing without an error",
             "the FASTA sidecar has no contaminant_target_rule: fetch_fasta.py predates the check",
-            "rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core rebuilds "
-            "its shared MRS human and mouse FASTAs with it) and re-search; AUDIT.md names the "
-            "proteins", "FASTA sidecar"))
+            _rebuild_advice() + " AUDIT.md names the proteins.", "FASTA sidecar"))
     elif state == "identity_only":
         notes.append(dq(
             "WARNING", "database built by the identity rule alone: contaminants near-identical to "
@@ -1880,9 +1888,7 @@ def data_quality_notes(rec):
             "reports that protein only as a Cont_ group and run_de.R removes it from the DE",
             "the FASTA sidecar has contaminant_target_rule but no min_unique_peptides: "
             "fetch_fasta.py before skill 2.8.0 (or --min-unique-peptides 0)",
-            "rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core rebuilds "
-            "its shared MRS human and mouse FASTAs with it) and re-search; AUDIT.md names the "
-            "proteins", "FASTA sidecar"))
+            _rebuild_advice() + " AUDIT.md names the proteins.", "FASTA sidecar"))
     if not fa and s:
         notes.append(dq("WARNING", "no FASTA sidecar, so the organism and database are not "
                                    "recorded", s.get("out_dir"), source="record_run"))

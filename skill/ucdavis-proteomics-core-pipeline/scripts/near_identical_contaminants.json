@@ -3,9 +3,15 @@
   "contaminant_set": "universal",
   "measured": "2026-09-25",
   "by_taxid": {
-    "9606": {"organism": "Homo sapiens", "n": 8,
-             "named": "entries named KRT34, KRTAP10-4 and KRTAP4-7, bovine TBA1D and TPM2, and three sheep KRB2 keratins"},
-    "10090": {"organism": "Mus musculus", "n": 10,
-              "named": "bovine EEF1A1 and YWHAZ (each one residue from the mouse protein), bovine TBA1D, four human KRTAPs and three sheep KRB2 keratins"}
+    "9606": {
+      "organism": "Homo sapiens",
+      "n": 8,
+      "named": "entries named KRT34, KRTAP10-4 and KRTAP4-7, bovine TUBA1D and TPM2, and three sheep KRB2 keratins"
+    },
+    "10090": {
+      "organism": "Mus musculus",
+      "n": 10,
+      "named": "bovine EEF1A1, YWHAZ and TUBA1D (EEF1A1 and YWHAZ each one residue from the mouse protein), four human KRTAPs and three sheep KRB2 keratins"
+    }
   }
 }

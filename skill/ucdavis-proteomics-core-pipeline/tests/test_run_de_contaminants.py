@@ -298,7 +298,7 @@ class RunDeRemovesContaminants(unittest.TestCase):
         self.assertTrue(c["database_checked"])
         self.assertTrue(c["database_risk"])
         for part in ("identity rule alone", "NEAR-identical to Mus musculus proteins",
-                     "with the universal set, 10 of them: bovine EEF1A1 and YWHAZ",
+                     "with the universal set, 10 of them: bovine EEF1A1, YWHAZ and TUBA1D",
                      "now missing from the DE", "audit_results.py --fasta-meta",
                      ff.REBUILD_ADVICE):
             self.assertIn(part, c["database_note"])

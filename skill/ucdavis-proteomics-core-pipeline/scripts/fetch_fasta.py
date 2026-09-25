@@ -1260,8 +1260,9 @@ def _is_legacy_sidecar(meta):
 
 
 # The advice both older-database notes end with (contaminants.R's REBUILD_ADVICE is its R twin).
-REBUILD_ADVICE = ("Rebuild the FASTA with fetch_fasta.py from skill 2.8.0 or later (the Core "
-                  "rebuilds its shared MRS human and mouse FASTAs with it) and re-search.")
+REBUILD_ADVICE = ("Rebuild the FASTA with this release's fetch_fasta.py (skill 2.8.0 or later) "
+                  "and re-search; the Core's shared MRS human and mouse FASTAs are being rebuilt "
+                  "with it.")
 NEAR_IDENTICAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "near_identical_contaminants.json")
 

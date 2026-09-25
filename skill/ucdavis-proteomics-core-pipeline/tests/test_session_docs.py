@@ -313,6 +313,35 @@ class Agents(unittest.TestCase):
             self.assertIn("| Treated-Control | 11 |", md)
 
 
+def run_brief(test, d, prov):
+    """analysis_prompt.py's brief for a DE folder holding `prov` as de_provenance.json."""
+    with open(os.path.join(d, "de_provenance.json"), "w") as fh:
+        json.dump(prov, fh)
+    out = os.path.join(d, "brief.md")
+    r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "analysis_prompt.py"),
+                        "--out", out, "--de-dir", d], capture_output=True, text=True)
+    test.assertEqual(r.returncode, 0, r.stderr)
+    return read(out)
+
+
+class DatabaseCaveat(unittest.TestCase):
+    """run_de.R's database_note (an older FASTA: legacy or identity rule only) is a caveat in the
+    report brief and in AGENTS.md, as the block warnings are."""
+
+    def test_brief_and_agents_carry_the_database_note(self):
+        cont = {"policy": "removed", "removed": True, "tag": "Cont_", "n_precursors": 10,
+                "n_protein_groups": 3, "database_checked": True, "database_risk": True,
+                "database_note": "CANARY identity rule alone: bovine EEF1A1, YWHAZ and TUBA1D"}
+        prov = dict(DPC, contaminants=cont)
+        with tempfile.TemporaryDirectory() as d:
+            p = Agents().build(d, prov)
+            agents = session_docs.agents_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("**Caveat:** CANARY identity rule alone", agents)
+            b = run_brief(self, p["de_dir"], prov)
+            self.assertIn("**Contaminant-filter caveat (say this in Data Quality Notes, naming "
+                          "the proteins):** CANARY identity rule alone", b)
+
+
 class BlockRecord(unittest.TestCase):
     """run_de.R --block (feat/skill-de-block): AGENTS.md and the analysis brief state the block in
     make_methods.de_block_sentence()'s words and carry its warnings (review C3); an unblocked
@@ -324,13 +353,7 @@ class BlockRecord(unittest.TestCase):
              "warnings": ["CANARY between-mouse contrasts are anti-conservative"]}
 
     def brief(self, d, prov):
-        with open(os.path.join(d, "de_provenance.json"), "w") as fh:
-            json.dump(prov, fh)
-        out = os.path.join(d, "brief.md")
-        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "analysis_prompt.py"),
-                            "--out", out, "--de-dir", d], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return read(out)
+        return run_brief(self, d, prov)
 
     def test_agents_and_brief_state_the_block_and_its_warnings(self):
         prov = dict(DPC, block=self.BLOCK, block_column="Mouse")

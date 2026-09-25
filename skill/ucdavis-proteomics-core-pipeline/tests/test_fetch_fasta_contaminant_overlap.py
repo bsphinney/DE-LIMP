@@ -729,7 +729,7 @@ class Auditors(unittest.TestCase):
         tc = ff.target_contaminants(meta)
         self.assertEqual((tc["state"], tc["kept_as_contaminant"]), ("identity_only", []))
         for part in ("identity rule alone", "no longer readable", "10 such entries",
-                     "bovine EEF1A1 and YWHAZ", "run_de.R's contaminant filter removes",
+                     "bovine EEF1A1, YWHAZ and TUBA1D", "run_de.R's contaminant filter removes",
                      ff.REBUILD_ADVICE):
             self.assertIn(part, tc["legacy_note"])
 

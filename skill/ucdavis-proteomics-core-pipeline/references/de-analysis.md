@@ -232,9 +232,9 @@ such as bovine EEF1A1 and YWHAZ for mouse), or one listing
 filter removes those too. The run then prints a `CAUTION` and records `database_risk: true`
 with a note naming the set; `audit_results.py --fasta-meta` re-checks the searched FASTA and
 names the proteins. The states are `sidecar_state()` in `fetch_fasta.py`, mirrored in
-`contaminants.R` (a test keeps them equal). Rebuild the FASTA with fetch_fasta.py from skill
-2.8.0 or later (the Core rebuilds its shared MRS human and mouse FASTAs with it) and
-re-search.
+`contaminants.R` (a test keeps them equal). Rebuild the FASTA with this release's
+fetch_fasta.py (skill 2.8.0 or later) and re-search; the Core's shared MRS human and mouse
+FASTAs are being rebuilt with it.
 `--keep-contaminants` keeps every `Cont_` group in the DE instead (the true contaminants
 are then tested too).
 
