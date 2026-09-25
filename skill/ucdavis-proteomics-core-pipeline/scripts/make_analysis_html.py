@@ -121,12 +121,14 @@ class Figures:
     twin resolve every reference through it, so they give the same figure the same number,
     caption and data summary, and report the same missing / rejected files."""
 
-    def __init__(self, base_dir, root, figures_dir=None, captions=None, summarize=None):
+    def __init__(self, base_dir, root, figures_dir=None, captions=None, summarize=None,
+                 suppress=()):
         self.base, self.root, self.figdir = base_dir, root, figures_dir
         self.caps = captions or {}
         self.summarize = summarize or (lambda name: None)
+        self.suppress = tuple(suppress)          # figure-name prefixes that say nothing here
         self.n, self.entries = 0, {}
-        self.embedded, self.missing, self.rejected = [], [], []
+        self.embedded, self.missing, self.rejected, self.suppressed = [], [], [], []
 
     def _locate(self, ref):
         rel = _clean(ref)
@@ -141,6 +143,10 @@ class Figures:
     def resolve(self, alt, ref):
         """-> entry dict. The first sight of a file numbers it; later sights return it."""
         name = os.path.basename(_clean(ref)) or ref
+        if self.suppress and name.startswith(self.suppress):
+            if name not in self.suppressed:
+                self.suppressed.append(name)
+            return {"status": "suppressed", "name": name}
         if _external(ref):
             key, e = ("x", ref), {"status": "rejected", "name": name,
                                   "text": f"figure not embedded (not a file in this session): {ref}"}
@@ -170,6 +176,8 @@ class Figures:
 
     def html(self, alt, ref, emitted):
         e = self.resolve(alt, ref)
+        if e["status"] == "suppressed":
+            return ""
         if e["status"] != "ok":
             return rs.note(e["text"])
         n = e["n"]
@@ -185,6 +193,8 @@ class Figures:
         """The Markdown twin of a figure: NotebookLM and the like read text, not images, so
         the caption and a data summary taken from the tables travel with the reference."""
         e = self.resolve(alt, ref)
+        if e["status"] == "suppressed":
+            return ""
         if e["status"] != "ok":
             return f"> **Note:** {e['text']}"
         n = e["n"]
@@ -452,6 +462,75 @@ def fmt_p(p):
     return f"{p:.3g}" if p >= 1e-3 else f"{p:.2e}"
 
 
+# Figures that say nothing when the expression matrix is complete by construction: every
+# bar of "proteins quantified per sample" is the same number (Silva08172026: 30 bars of
+# 6,112). make_figures.R no longer draws it then, but an older figures/ folder -- and the
+# narrative written against it -- still can; Brett flagged it twice (2026-09-25).
+SUPPRESS_WHEN_COMPLETE = ("qc_protein_counts",)
+_COUNTS_PARAGRAPH = re.compile(r"^\s*\*\*\s*Proteins?\s+(?:quantified\s+)?per\s+sample\b", re.I)
+
+
+def matrix_complete(tables_dir, prov):
+    """-> (complete, why). make_figures.R's test -- every sample has the same number of
+    non-missing proteins in Expression_Matrix.csv -- and, when that file is not at hand,
+    the pipeline itself: a DPC-Quant (limpa) matrix is complete by construction."""
+    em = os.path.join(tables_dir or "", "Expression_Matrix.csv")
+    if os.path.exists(em):
+        try:
+            with open(em, newline="") as fh:
+                rd = csv.reader(fh)
+                head = next(rd)
+                cols = [i for i, h in enumerate(head)
+                        if h not in ("Protein.Group", "Genes", "Protein.Names")]
+                n = [0] * len(cols)
+                for rec in rd:
+                    for k, i in enumerate(cols):
+                        if i < len(rec) and rec[i] not in ("", "NA", "NaN"):
+                            n[k] += 1
+            if n:
+                return (len(set(n)) == 1,
+                        f"every sample has {n[0]:,} proteins in Expression_Matrix.csv"
+                        if len(set(n)) == 1 else None)
+        except (OSError, StopIteration, csv.Error):
+            pass
+    if (prov.get("pipeline_id") or prov.get("method")) == "dpc":
+        return True, "a DPC-Quant (limpa) matrix gives every protein a value in every sample"
+    return False, None
+
+
+def drop_suppressed(md, prefixes):
+    """The report text without references to suppressed figures, and without a paragraph
+    right after one that only describes that plot (it opens "**Proteins per sample.**" or
+    "**Proteins quantified per sample**"). Anything else is left exactly as written.
+    -> (text, [suppressed figure names], paragraphs dropped)."""
+    if not prefixes:
+        return md, [], 0
+    out, after, dropping, names, n_par = [], False, False, [], 0
+    for ln in md.splitlines():
+        if dropping:
+            if ln.strip():
+                continue
+            dropping = False
+        hits = [m for m in IMG_REF.finditer(ln)
+                if os.path.basename(_clean(_ref(m)[1])).startswith(prefixes)]
+        if hits:
+            for m in reversed(hits):
+                nm = os.path.basename(_clean(_ref(m)[1]))
+                if nm not in names:
+                    names.append(nm)
+                ln = ln[:m.start()] + ln[m.end():]
+            after = True
+            if not ln.strip():
+                continue
+        elif after and ln.strip():
+            after = False
+            if _COUNTS_PARAGRAPH.match(ln):
+                dropping, n_par = True, n_par + 1
+                continue
+        out.append(ln)
+    return "\n".join(out) + ("\n" if md.endswith("\n") else ""), names, n_par
+
+
 def figure_summary(name, tables, qc_path, em_path):
     """A short factual summary of the data a figure draws, taken from the tables -- never a
     number that is not in them. None for figures without one (PCA, heatmap)."""
@@ -559,6 +638,9 @@ def build_page(a, prov, tables, figs, md_text, used):
     if md_text is None:
         gal = {}
         for fn in a._listed:
+            if figs.suppress and fn.startswith(figs.suppress):
+                figs.resolve("", fn)               # recorded as suppressed
+                continue
             sec, rank = classify(fn)
             gal.setdefault(sec, []).append((rank, fn))
         for sec in SECTION_ORDER:
@@ -789,6 +871,8 @@ def md_expand(text, figs, emitted, md_dir):
 
 
 def _fig_word(e):
+    if e["status"] == "suppressed":
+        return ""
     return f"Figure {e['n']}" if e["status"] == "ok" else f"[{e['text']}]"
 
 
@@ -922,13 +1006,19 @@ def main():
     # Images resolve relative to the report's folder and must stay inside the session.
     base = os.path.dirname(os.path.abspath(a.report)) if has_report else (a.figures or ".")
     root = os.path.abspath(a.session) if a.session else base
+    complete, complete_why = matrix_complete(a.tables, prov)
     figs = Figures(base, root, a.figures, caps,
-                   summarize=lambda nm: figure_summary(nm, tables, qc, em))
+                   summarize=lambda nm: figure_summary(nm, tables, qc, em),
+                   suppress=SUPPRESS_WHEN_COMPLETE if complete else ())
 
-    md_text = None
+    md_text = md_orig = None
+    n_par = 0
     if has_report:
         with open(a.report, encoding="utf-8", errors="replace") as fh:
-            md_text = fh.read()
+            md_text = md_orig = fh.read()
+        # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
+        md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
+        figs.suppressed += [g for g in gone if g not in figs.suppressed]
     used = set()
     h1, subtitle, sections = build_page(a, prov, tables, figs, md_text, used)
     if not sections and not subtitle and md_text is None:
@@ -950,15 +1040,21 @@ def main():
                        os.path.dirname(os.path.abspath(md_out)))
 
     if has_report:
-        referenced = set(report_figures(md_text))
+        referenced = set(report_figures(md_orig))
         left_out = [f for f in available if f not in set(figs.embedded) and f not in referenced]
         why = f"not referenced in {os.path.basename(a.report)}"
     else:
-        left_out = [f for f in available if f not in set(a._listed)]
+        left_out = [f for f in available if f not in set(a._listed)
+                    and not (figs.suppress and f.startswith(figs.suppress))]
         why = "not listed in figures.json" if a._listed else "no report and no figures.json"
     if left_out:
         print(f"[make_analysis_html] WARNING: {len(left_out)} image(s) in {a.figures} are "
               f"{why} and were NOT embedded: {', '.join(left_out)}", file=sys.stderr)
+    if figs.suppressed:
+        print(f"[make_analysis_html] left out {', '.join(figs.suppressed)}"
+              + (f" and the report paragraph describing it" if has_report and n_par else "")
+              + f": {complete_why}, so every bar is the same number; "
+              f"qc_detected_vs_inferred.png is the per-sample depth view", file=sys.stderr)
     if figs.missing:
         print(f"[make_analysis_html] WARNING: {len(figs.missing)} referenced image(s) are "
               f"missing and are shown as a 'figure missing' note: {', '.join(figs.missing)}",
@@ -988,7 +1084,7 @@ def main():
                       "figures_embedded": figs.n,
                       "figure_list": os.path.basename(a.report) if has_report else "figures.json",
                       "figures_not_embedded": left_out, "figures_missing": figs.missing,
-                      "figures_rejected": figs.rejected,
+                      "figures_rejected": figs.rejected, "figures_suppressed": figs.suppressed,
                       "contrasts": len(tables.contrasts), "self_contained": True}, indent=2))
 
 

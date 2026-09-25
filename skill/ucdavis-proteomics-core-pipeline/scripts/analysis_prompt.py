@@ -23,6 +23,10 @@ Usage:
 """
 import sys, os, json, glob, argparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ONE test for "the matrix is complete by construction", shared with the HTML report.
+from make_analysis_html import matrix_complete, SUPPRESS_WHEN_COMPLETE  # noqa: E402
+
 
 def load(path):
     try:
@@ -107,6 +111,13 @@ def main():
         if isinstance(fj, list):
             figs = fj
         fdir_rel = os.path.basename(a.figures_dir.rstrip("/")) or "figures"
+
+    # A complete-by-construction matrix (DPC/limpa) makes "proteins quantified per sample" a
+    # row of identical bars: never ask the writer to embed or describe it -- make_analysis_html
+    # drops it, and a paragraph written about it, anyway (the same test, one definition).
+    complete, complete_why = matrix_complete(a.de_dir, prov)
+    if complete:
+        figs = [f for f in figs if not str(f.get("file", "")).startswith(SUPPRESS_WHEN_COMPLETE)]
 
     has_qc = bool(a.qc and os.path.exists(a.qc))
     has_gsea = bool(a.gsea and os.path.exists(a.gsea))
@@ -204,7 +215,8 @@ def main():
             w(f"- `{fdir_rel}/{fig.get('file')}` ({fig.get('type')}) — {fig.get('caption')}")
         w("")
         w("Placement: volcano + p-value figures in **Key Findings Per Comparison**; PCA + "
-          "per-sample counts in **QC Assessment**; the heatmap in **Cross-Comparison "
+          + ("detected-vs-inferred" if complete else "per-sample counts")
+          + " in **QC Assessment**; the heatmap in **Cross-Comparison "
           "Biomarkers** or **Biological Interpretation**.")
         if any(f.get("type") == "violin" for f in figs):
             w(f"Place each `{fdir_rel}/violin_top_<contrast>.png` in that comparison's section, "
@@ -214,6 +226,11 @@ def main():
               "change is a detection event (seen in one group, not the other), not a measured "
               "magnitude, so do not quote its size as an effect. If the figure says detection "
               "status was not recorded, say so; never describe those points as measured.")
+        if complete:
+            w(f"Do NOT embed, reference or describe a proteins-quantified-per-sample plot "
+              f"(`qc_protein_counts.png`): {complete_why}, so every sample shows the same "
+              f"count and the plot says nothing. Per-sample depth is the *detected* part of "
+              f"`qc_detected_vs_inferred.png`.")
         w("")
 
     w("## OUTPUT — write `" + a.report_out + "` with ALL of these sections (markdown)")
@@ -226,7 +243,9 @@ def main():
       "depth (proteins quantified), and scope.")
     w("")
     w("### QC Assessment")
-    w("Evaluate technical quality. Use the PCA and per-sample protein-count figures, and "
+    w("Evaluate technical quality. Use the PCA and "
+      + ("detected-vs-inferred (per-sample depth)" if complete else "per-sample protein-count")
+      + " figures, and "
       "the QC metrics if present. Comment on consistency of identifications across "
       "replicates and groups, whether replicates cluster, and flag any outlier samples or "
       "systematic biases (e.g. a group quantifying far fewer proteins). State clearly "
