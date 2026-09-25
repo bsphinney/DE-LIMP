@@ -149,6 +149,20 @@ class FigureSelection(unittest.TestCase):
         self.assertEqual(res["figures_embedded"], 0)
         self.assertEqual(page.count("<img"), 0)
 
+    def test_results_at_a_glance_counts_adj_p_only(self):
+        tables = os.path.join(self.out_dir, "tables")
+        os.makedirs(tables)
+        with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
+            json.dump({"adjp": 0.05, "logfc": 1, "logfc_role": "reference_line_only"}, fh)
+        with open(os.path.join(tables, "DE_dpc_B.A.csv"), "w") as fh:
+            fh.write("Protein.Group,logFC,adj.P.Val\nP1,0.3,0.01\nP2,-2.0,0.01\n"
+                     "P3,3.0,0.2\nP4,0.1,0.049\n")
+        self.write("AI_Analysis_Report.md", "# T\n\nText.\n")
+        _, page, _ = self.build()
+        row = re.search(r"<td>B vs A</td>(.*?)</tr>", page).group(1)
+        self.assertEqual(re.findall(r"<td>([\d,]+)</td>", row), ["4", "2", "1", "3"])
+        self.assertIn("no fold-change filter", page)
+
     def test_reference_parser(self):
         md = ('![a](figures/pca.png) ![b](<figures/my%20fig.png> "t") <IMG SRC="figures/v.png"> '
               '![again](./figures/pca.png) ![remote](https://x.org/y.png) ![c](figs/z.svg?v=2)')

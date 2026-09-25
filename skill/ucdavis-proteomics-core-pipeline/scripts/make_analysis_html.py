@@ -297,10 +297,25 @@ def table_html(head, body, figs=None):
     return "".join(t)
 
 
-def de_summary(tables_dir, adjp=0.05, logfc=1.0):
-    """Count significant proteins per contrast. Read from the DE CSVs rather than
-    re-stating whatever the prose claimed -- if the two disagree, the reader can
-    see it."""
+def significance_rule(tables_dir, default_adjp=0.05):
+    """-> (adjp, source). The cutoff the DE actually applied, from de_provenance.json --
+    significance is the adjusted p-value alone there (run_de.R: "adj.P.Val < adjp (BH); no
+    fold-change filter"), so it is here too."""
+    try:
+        with open(os.path.join(tables_dir or "", "de_provenance.json")) as fh:
+            adjp = json.load(fh).get("adjp")
+        if isinstance(adjp, (int, float)):
+            return float(adjp), "de_provenance.json"
+    except (OSError, ValueError):
+        pass
+    return default_adjp, "--adjp"
+
+
+def de_summary(tables_dir, adjp=0.05):
+    """Count significant proteins per contrast: adj.P.Val < adjp ONLY, split by the sign of
+    the fold change. Read from the DE CSVs rather than re-stating whatever the prose claimed
+    -- if the two disagree, the reader can see it. It used to also require |log2FC| >= 1,
+    the volcano reference line, re-imposing a fold-change filter the DE never applied."""
     rows = []
     if not tables_dir or not os.path.isdir(tables_dir):
         return rows
@@ -319,10 +334,12 @@ def de_summary(tables_dir, adjp=0.05, logfc=1.0):
                         p, lf = float(p), float(lf)
                     except (TypeError, ValueError):
                         continue
-                    if p < adjp and abs(lf) >= logfc:
+                    if p < adjp:
                         up += lf > 0
                         dn += lf < 0
-        except Exception:
+        except (OSError, csv.Error) as e:
+            print(f"[make_analysis_html] WARNING: {fn} unreadable ({e}); left out of the "
+                  f"results summary", file=sys.stderr)
             continue
         rows.append({"contrast": m.group(2).replace(".", " vs "), "method": m.group(1),
                      "tested": tot, "up": up, "down": dn, "file": fn})
@@ -391,8 +408,8 @@ def main():
     ap.add_argument("--quality", help="SAMPLE_QUALITY.md")
     ap.add_argument("--audit", help="AUDIT.md")
     ap.add_argument("--title", help="page title (default: the report's own # heading)")
-    ap.add_argument("--adjp", type=float, default=0.05)
-    ap.add_argument("--logfc", type=float, default=1.0)
+    ap.add_argument("--adjp", type=float, default=0.05,
+                    help="only when the tables carry no de_provenance.json (its adjp wins)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -446,10 +463,12 @@ def main():
         report_html, heads, h1 = md_to_html(md, figs, used=used, drop_h1=True)
     report_h2 = {norm_title(t) for lvl, _, t in heads if lvl == 2}
 
-    de = de_summary(a.tables, a.adjp, a.logfc)
+    adjp, adjp_src = significance_rule(a.tables, a.adjp)
+    de = de_summary(a.tables, adjp)
     if de:
-        t = ["<p class='sub'>Counted directly from the DE tables at adjusted "
-             f"p &lt; {a.adjp} and |log2 fold change| &ge; {a.logfc}.</p>",
+        t = ["<p class='sub'>Counted directly from the DE tables: significant = adjusted "
+             f"p &lt; {adjp:g} (Benjamini&ndash;Hochberg; {adjp_src}), the only rule the DE "
+             "applied &mdash; no fold-change filter. Higher / lower = sign of the fold change.</p>",
              "<div class='tablewrap'><table><thead><tr><th>Contrast</th><th>Proteins tested</th>"
              "<th>Higher</th><th>Lower</th><th>Total changed</th></tr></thead><tbody>"]
         for r in de:
