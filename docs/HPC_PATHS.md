@@ -39,7 +39,8 @@ apptainer exec --bind /quobyte:/quobyte \
 | Species | Path |
 |---------|------|
 | Human (HeLa) | `/quobyte/proteomics-grp/MRS/UP000005640_9606.fasta` |
-| Human + contaminants | `/quobyte/proteomics-grp/MRS/UP000005640_9606_plus_universal_contam.fasta` |
+| Human + contaminants (current, 2026-09) | `/quobyte/proteomics-grp/MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta` — UniProt 2026_03 one-per-gene (20,652) + 220 `Cont_`-tagged Universal contaminants (Frankenfield 2022), built by skill 2.8.0 `fetch_fasta.py`, which removed the 161 contaminant entries that are, or cannot be told apart from, human proteins. Sidecar `.fasta.meta.json` beside it; predicted library `UP000005640_9606_plus_universal_contam_2026-09.predicted.speclib` (DIA-NN 2.7.0). Build scripts + logs: `/quobyte/proteomics-grp/claude/mrs_rebuild_2026-09-25/` |
+| Human + contaminants (Sep 2025, superseded) | `/quobyte/proteomics-grp/MRS/UP000005640_9606_plus_universal_contam.fasta` + its DIA-NN 2.2.0 `.predicted.speclib` — kept only because old searches point at them. Its 381 `Cont_` entries include 153 identical to human proteins (bovine ACTB/EEF1A1/tubulins, human keratins), which DIA-NN then reports only as `Cont_` groups and keeps out of quantification. Do not use it for new searches. |
 | Bovine | `/quobyte/proteomics-grp/de-limp/fasta/UP000009136_bos_taurus.fasta` |
 | Chicken | `/quobyte/proteomics-grp/de-limp/fasta/UP000000539_gallus_gallus.fasta` |
 | Porcine | `/quobyte/proteomics-grp/de-limp/fasta/UP000008227_sus_scrofa.fasta` |

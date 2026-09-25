@@ -816,8 +816,12 @@ bundle) and act on it:
   included — are now quantified and count toward normalisation; step 8c flags them.
 - A `--path` database that already contains `Cont_` entries cannot be fixed: `fetch` warns
   and lists them under `contaminants_identical_to_target_kept` — rebuild it with
-  `--proteome` instead. The Core's staged `UP000005640_9606_plus_universal_contam.fasta`
-  has this problem: do not pass it with `--path`.
+  `--proteome` instead. The Core's Sep-2025 `MRS/UP000005640_9606_plus_universal_contam.fasta`
+  (kept only for old searches' provenance) has this problem: do not pass it with `--path`.
+  Its rebuild, `MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`, was made by this
+  `fetch` (sidecar beside it, state `current`) with a DIA-NN 2.7.0
+  `..._2026-09.predicted.speclib`, for searches run outside the skill. Inside the skill keep
+  building the database with `fetch --proteome`.
 - Contaminants that can't be fetched are a **hard stop**, not a warning. Fix the
   source or have the user explicitly choose `--contaminants none`.
 → detail: `references/environment.md` ("FASTA").
