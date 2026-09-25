@@ -98,7 +98,11 @@ CATALOG = [
     (r"^podcast\.json$", "Analysis report",
      "How the podcast was made: TTS service and model, voices, consent, the script's checksum."),
     (r"^check\.txt$", "Analysis report",
-     "The podcast script's fidelity check (every number and symbol against the report)."),
+     "The podcast script's token check against the report (numbers, symbols, names)."),
+    (r"^verify\.txt$", "Analysis report",
+     "The podcast audio heard back by an ASR: word match, dropped spans, numbers misread."),
+    (r"^verify_transcript\.txt$", "Analysis report",
+     "What the ASR heard in the podcast audio (for verify.txt)."),
     (r"^raw_files\.txt$", "Inputs",
      "Where the raw data files are (full paths); raw data is never copied into the session."),
 ]

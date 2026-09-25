@@ -1487,8 +1487,13 @@ python3 scripts/make_podcast.py check <session>/output/podcast/podcast_script.md
     --source <session>/output/AI_Analysis_Report.md <session>/output/methods.md \
              <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
 python3 scripts/make_podcast.py render <session>/output/podcast/podcast_script.md --tts say
+python3 scripts/make_podcast.py verify <session>/output/podcast/podcast_script.md --cloud-ok "<who, when>"
 python3 scripts/make_podcast.py link <session>/output
 ```
+`verify` has Gemini transcribe the rendered audio and compares it with the script. It reports
+the word match ratio, dropped spans and numbers the voice misread, and names the segments to
+listen to. It runs by itself after a consented `--tts gemini` render, and it sends the audio,
+so it needs `--cloud-ok` too.
 `check` matches tokens, not meaning. It fails a number, symbol-like word or capitalised name
 that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
 missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch

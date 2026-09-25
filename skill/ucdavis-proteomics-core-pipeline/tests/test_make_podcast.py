@@ -39,6 +39,9 @@ sys.path.insert(0, HERE)
 
 import make_podcast as mp  # noqa: E402
 
+VERIFY_AUDIO = mp._verify_audio          # the real ones; Verify patches the module attributes
+ENCODE_AAC = mp.encode_aac
+
 FAKE_KEY = "AIzaSyFAKE0123456789abcdefghijklmnopqrs"   # shaped like a key; not one
 
 REPORT = """# Contact-site interactomes in Old and Young mouse brain
@@ -504,8 +507,9 @@ class Render(Workspace):
 
 # ------------------------------------------------------------------------------ gemini (fake)
 def fake_genai(behaviour, models=("gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts",
-                                  "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"),
-               list_error=None):
+                                  "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts",
+                                  "gemini-2.5-flash", "gemini-3.8-flash"),
+               list_error=None, transcribe=None):
     """google.genai stand-ins. `behaviour(model, contents, config)` returns PCM bytes or raises.
     generate_content (2.x) passes the prompt text as `contents`; interactions.create (3.x) passes
     its `input` list, and the fake answers the way the docs describe: base64 audio/wav."""
@@ -518,7 +522,13 @@ def fake_genai(behaviour, models=("gemini-2.5-pro-preview-tts", "gemini-2.5-flas
     for n in ("GenerateContentConfig", "SpeechConfig", "MultiSpeakerVoiceConfig",
               "SpeakerVoiceConfig", "VoiceConfig", "PrebuiltVoiceConfig"):
         setattr(gt, n, Cfg)
-    log = {"clients": 0, "calls": [], "apis": []}
+
+    class Part(object):
+        @staticmethod
+        def from_bytes(data, mime_type):
+            return types.SimpleNamespace(data=data, mime_type=mime_type)
+    gt.Part = Part
+    log = {"clients": 0, "calls": [], "apis": [], "asr": []}
 
     class Models(object):
         def list(self):
@@ -529,6 +539,9 @@ def fake_genai(behaviour, models=("gemini-2.5-pro-preview-tts", "gemini-2.5-flas
                                                               supported_actions=["generateContent"])]
 
         def generate_content(self, model, contents, config):
+            if "tts" not in model:                               # verify: a text model
+                log["asr"].append((model, contents, config))
+                return types.SimpleNamespace(text=transcribe(model, contents))
             log["calls"].append((model, contents, config))
             log["apis"].append("generate_content")
             data = behaviour(model, contents, config)
@@ -616,8 +629,8 @@ class Gemini(Workspace):
 
     def render(self, behaviour, *extra, **kw):
         mods, log = fake_genai(behaviour, **kw)
-        with mock.patch.dict(sys.modules, mods):
-            rc, out, err = run("render", self.script, "--tts", "gemini", *extra)
+        with mock.patch.dict(sys.modules, mods):                 # verify has its own tests
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", *extra)
         return rc, out, err, log
 
     def assert_no_key_anywhere(self, *texts):
@@ -1294,6 +1307,160 @@ class ReviewFixes(Workspace):
         after = set(os.listdir(os.path.join(self.pod, ".cache")))
         self.assertEqual(len(after), 4)
         self.assertEqual(len(before & after), 2)                          # chunk 1 kept
+
+
+class Verify(Workspace):
+    """verify: the ASR round trip that answers "the agent cannot hear the audio". Mocked: the
+    fake transcriber returns what the test says was heard."""
+
+    def setUp(self):
+        super().setUp()
+        for q in (mock.patch.dict(os.environ, {"GEMINI_API_KEY": FAKE_KEY}),
+                  mock.patch.object(mp, "_sleep", lambda sec: None),
+                  mock.patch.object(mp, "encode_aac", return_value=(None, "test")),
+                  mock.patch.object(mp, "_verify_audio",
+                                    return_value=(b"AAC-BYTES", "audio/aac", "16 kHz mono AAC 32 kbps"))):
+            q.start()
+            self.addCleanup(q.stop)
+        mp.BACKENDS["fake"] = FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        FakeTTS.calls = []
+        self.assertEqual(self.check()[0], 0)
+        self.written = "\n".join(t.text for t in mp.parse_script(self.script).turns())
+
+    def verify(self, heard, *extra, **kw):
+        mods, log = fake_genai(lambda m, c, k: pcm_for(c), transcribe=heard, **kw)
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("verify", self.script, *extra)
+        return rc, out, err, log
+
+    def test_nothing_is_sent_without_consent(self):
+        run("render", self.script, "--tts", "fake")
+        for extra in ((), ("--cloud-ok", "no")):
+            rc, out, err, log = self.verify(lambda m, c: self.written, *extra)
+            self.assertEqual((rc, log["clients"], log["asr"]), (2, 0, []))
+            self.assertIn("verify sends the rendered AUDIO", err)
+
+    def test_a_clean_round_trip(self):
+        run("render", self.script, "--tts", "fake")
+        rc, out, err, log = self.verify(lambda m, c: self.written, "--cloud-ok", "Brett")
+        self.assertEqual(rc, 0, err)
+        model, contents, cfg = log["asr"][0]
+        self.assertEqual(model, "gemini-2.5-flash")
+        self.assertEqual((contents[0].data, contents[0].mime_type), (b"AAC-BYTES", "audio/aac"))
+        self.assertEqual(contents[1], "Transcribe verbatim. Write numbers as digits.")
+        v = json.loads(read(os.path.join(self.pod, "podcast.json")))["verify"]
+        self.assertEqual((v["status"], v["gaps"], v["numbers_not_heard"]), ("OK", [], []))
+        self.assertGreaterEqual(v["ratio"], 0.93)
+        self.assertEqual(v["model"], "gemini-2.5-flash")
+        self.assertEqual(v["cloud_consent"], "Brett")
+        txt = read(os.path.join(self.pod, "verify.txt"))
+        self.assertIn("Podcast audio check (ASR round trip): OK", txt)
+        self.assertEqual(read(os.path.join(self.pod, "verify_transcript.txt")).strip(),
+                         self.written.strip())
+
+    def test_gaps_and_misheard_numbers_name_their_segments(self):
+        run("render", self.script, "--tts", "fake")
+        html_path = os.path.join(self.out, "Analysis_Report.html")
+        write(html_path, REPORT_HTML)
+        dropped = SEG2[3][1]                                     # a whole turn, 20+ words
+        heard = self.written.replace("215 proteins", "251 proteins").replace(dropped, "")
+        rc, out, err, log = self.verify(lambda m, c: heard, "--cloud-ok")
+        self.assertEqual(rc, 0, err)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        v = man["verify"]
+        self.assertEqual(v["status"], "WARN")
+        self.assertEqual([g["segment"] for g in v["gaps"]], [2])
+        self.assertGreaterEqual(v["gaps"][0]["words"], mp.VERIFY_GAP)
+        nh = {m["number"]: m for m in v["numbers_not_heard"]}
+        self.assertIn("251 proteins", nh["215"]["context"])        # a misread, in context
+        self.assertEqual(nh["215"]["segment"], 2)
+        self.assertEqual(v["segments_to_check"], [2])
+        self.assertIn("[WARN] verify: word match ratio", err)
+        self.assertIn("listen to segment(s) 2", err)
+        txt = read(os.path.join(self.pod, "verify.txt"))
+        for want in ("GAPS", "NUMBERS NOT HEARD", "SEGMENTS TO LISTEN TO: 2",
+                     "add a Pronunciation row", "render --redo 2"):
+            self.assertIn(want, txt)
+        self.assertEqual(read(html_path), REPORT_HTML)             # the report is never touched
+        self.assertEqual(man["audio"], "podcast.wav")              # the manifest is kept whole
+
+    def test_a_missing_model_falls_back_to_a_3x_flash(self):
+        run("render", self.script, "--tts", "fake")
+
+        def heard(model, contents):
+            if model == "gemini-2.5-flash":
+                raise ApiError(404, "NOT_FOUND")
+            return self.written
+        rc, out, err, log = self.verify(heard, "--cloud-ok")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([m for m, _, _ in log["asr"]], ["gemini-2.5-flash", "gemini-3.8-flash"])
+
+    def test_a_gemini_render_verifies_itself_and_a_failure_never_fails_it(self):
+        def ok(model, contents):
+            return self.written
+        mods, log = fake_genai(lambda m, c, k: pcm_for(c), transcribe=ok)
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--cloud-ok", "B",
+                               "--model", "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(log["asr"]), 1)
+        self.assertIn("verify", json.loads(read(os.path.join(self.pod, "podcast.json"))))
+
+        def boom(model, contents):
+            raise ApiError(403, f"PERMISSION_DENIED key={FAKE_KEY}")
+        mods, log = fake_genai(lambda m, c, k: pcm_for(c), transcribe=boom)
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--cloud-ok", "B",
+                               "--model", "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 0, err)                              # the render stands
+        self.assertIn("[WARN] verify skipped", err)
+        self.assertNotIn(FAKE_KEY, err)
+        self.assertNotIn("verify", json.loads(read(os.path.join(self.pod, "podcast.json"))))
+
+        mods, log = fake_genai(lambda m, c, k: pcm_for(c), transcribe=ok)
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--cloud-ok", "B",
+                               "--model", "gemini-2.5-flash-preview-tts", "--no-verify")
+        self.assertEqual((rc, log["asr"]), (0, []))
+
+    def test_redo_remakes_only_the_named_segments(self):
+        run("render", self.script, "--tts", "fake")
+        FakeTTS.calls = []
+        rc, out, err = run("render", self.script, "--tts", "fake", "--redo", "2")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(FakeTTS.calls), 1)
+        self.assertIn("Ryr2 tops", FakeTTS.calls[0][0])            # segment 2's first turn
+
+    def test_without_an_encoder_the_16k_wav_is_sent(self):
+        path = os.path.join(self.d, "a.wav")
+        mp.write_wav(path, array.array("h", [1000, -1000]) * mp.RATE)       # 2 s at 24 kHz
+        with mock.patch.object(mp.shutil, "which", return_value=None):
+            data, mime, how = VERIFY_AUDIO(path, self.d)
+        self.assertEqual(mime, "audio/wav")
+        with wave.open(io.BytesIO(data)) as w:
+            self.assertEqual((w.getframerate(), w.getnchannels()), (16000, 1))
+            self.assertAlmostEqual(w.getnframes() / 16000.0, 2.0, delta=0.01)
+
+    @unittest.skipUnless(shutil.which("afconvert") or shutil.which("ffmpeg"), "no AAC encoder")
+    def test_the_audio_is_sent_as_16k_aac(self):
+        wav = os.path.join(self.d, "e.wav")
+        mp.write_wav(wav, array.array("h", [1000, -1000]) * (mp.RATE * 3))
+        m4a = os.path.join(self.d, "e.m4a")
+        self.assertIsNotNone(ENCODE_AAC(wav, m4a)[0])
+        data, mime, how = VERIFY_AUDIO(m4a, self.d)
+        self.assertEqual((mime, how), ("audio/aac", "16 kHz mono AAC 32 kbps"))
+        self.assertEqual(data[0], 0xFF)                            # an ADTS frame sync
+        self.assertEqual(data[1] & 0xF0, 0xF0)
+
+    def test_verify_tokens(self):
+        t = lambda x: [w for w, _, _ in mp.verify_tokens(x)]              # noqa: E731
+        self.assertEqual(t("five thousand and twenty-four"), ["5024"])
+        self.assertEqual(t("forty six and twelve"), ["46", "and", "12"])
+        self.assertEqual(t("zero four two one"), ["0421"])
+        self.assertEqual(t("K V two point one, IgG and I G G, a test"),
+                         ["kv", "2.1", "igg", "and", "igg", "a", "test"])
+        self.assertEqual(t("fell minus 1.3 to 6,112"), ["fell", "1.3", "to", "6112"])
 
 
 class SessionFiles(unittest.TestCase):

@@ -40,9 +40,10 @@ ones, not wrong sentences (see "What check cannot catch" below).
 
 ## Privacy and consent (read before any cloud voice)
 
-Only the **transcript** ever leaves the machine: the turns, after pronunciation substitutions,
-plus one line of voice direction. The report, tables and figures are never sent. Even so, the
-transcript describes unpublished client data.
+Two things can leave the machine, and nothing else: the **transcript** (render: the turns,
+after pronunciation substitutions, plus one line of voice direction) and the **rendered
+audio** (verify: downsampled, for transcription). The report, tables and figures are never
+sent. Even so, both describe unpublished client data, so both need the consent below.
 
 What Google's Gemini API terms say (checked 2026-09-25 at
 <https://ai.google.dev/gemini-api/terms>; "Effective March 23, 2026", page last updated
@@ -280,10 +281,13 @@ python3 scripts/make_podcast.py check $P/podcast_script.md \
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts say --dry-run | less
 # 3. render: offline ...
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts say
-#    ... or Gemini voices, with the user's consent recorded
+#    ... or Gemini voices, with the user's consent recorded (verify runs at the end)
 python3 scripts/make_podcast.py render $P/podcast_script.md --tts gemini \
     --cloud-ok "<who agreed>, <date>, <paid|free> key"
-# 4. link it into the report, README and AGENTS.md (safe to re-run)
+# 4. verify: the ASR round trip (automatic after a consented gemini render; by hand after say)
+python3 scripts/make_podcast.py verify $P/podcast_script.md --cloud-ok "<who agreed>, <date>"
+#    -> $P/verify.txt. Listen to every segment it names; fix, re-render, verify again.
+# 5. link it into the report, README and AGENTS.md (safe to re-run)
 python3 scripts/make_podcast.py link $S/output
 ```
 
@@ -328,6 +332,37 @@ python3 scripts/make_podcast.py link $S/output
     boundaries), so about 8–12 requests, and at least 3–4 minutes with pacing. Google does not
     publish the free-tier TTS limits. They are per Cloud project and shown at
     <https://aistudio.google.com/rate-limit>.
+- **Verify: the audio heard back.** You cannot listen, so `verify` has a Gemini text model
+  transcribe the rendered episode and compares that with the spoken script (the text after
+  pronunciation).
+  - The audio goes to Google downsampled to 16 kHz mono AAC at 32 kbps (about 6 MB for 24
+    min), through a 16 kHz WAV (afconvert needs one; ffmpeg works too). The transcriber is
+    `gemini-2.5-flash`, falling back to the newest 3.x flash text model, with the prompt
+    "Transcribe verbatim. Write numbers as digits."
+  - Both texts are normalised to words: spelled-out numbers become digits ("five thousand and
+    twenty-four" -> 5024), and spelled-out letters are joined ("I G G" -> igg). They are then
+    compared with difflib (`autojunk=False`).
+  - It reports the word match ratio; every script span of 6+ words not heard (dropped or
+    garbled audio); and every number in the script that is not in the transcript, with ±60
+    characters of the transcript where it should be. That context tells a voice's misread
+    from the ASR's mishearing. Counts of 10 or less are not listed.
+  - It writes `verify.txt`, `verify_transcript.txt` and a `verify` block in `podcast.json`
+    (ratio, gaps, numbers_not_heard, segments_to_check, model). It WARNs when the ratio is
+    below 0.93, or when there is a gap or a number not heard, and names the segments to
+    listen to.
+  - It runs at the end of every `render --tts gemini` given `--cloud-ok` (`--no-verify`
+    skips it). It never fails the render and never touches the report. It **sends the
+    audio** to Google, so the same consent rules apply: nothing without `--cloud-ok`.
+  - Calibration: on the PROT_0756 episode the ratio was 0.969 with no gaps, and one real
+    misread was found: the voice said "5,244" for "5,024". A perfectly heard episode still
+    scores about 0.97, because a respelled symbol ("rye R 2") is not written the way the
+    ASR writes it ("Ryr2").
+  - **Fixing what it finds.** A misread number gets a Pronunciation row that spells it out,
+    for example `| 5,024 | five thousand and twenty-four |`. Then re-run `check` and
+    `render`: only the chunk with that line is re-made. Dropped or garbled audio with the
+    text unchanged: `render --redo <segment> ...` re-makes just those segments. Then `verify`
+    again. The ASR can mishear too, so a flagged line is a place to listen, not proof of a
+    fault, and a clean result is not a listen.
 - **say** (macOS) uses one voice per host (Samantha and Daniel by default), runs offline and
   needs no key. A 22-minute episode rendered in about 2 minutes.
 - **Re-runs are cheap.** Every chunk is cached as `podcast/.cache/<sha256>.wav`, keyed on its
@@ -359,7 +394,8 @@ python3 scripts/make_podcast.py link $S/output
 `podcast.m4a`, `podcast_script.md` (the script with its claims ledger), `transcript.html`
 (disclosure, player, transcript, claims, how it was made), `podcast.json` (show, title, hosts
 and voices, TTS backend and exact model, consent, script sha256, sources with their sha256,
-words, duration, `ai_generated: true`) and `check.txt`.
+words, duration, `ai_generated: true`, and the `verify` block), `check.txt`, and after verify
+`verify.txt` and `verify_transcript.txt`.
 
 `.cache/` is scratch. So is any `*.part` file, and `podcast.wav` when `podcast.m4a` sits beside it
 (`render --keep-wav`). One rule (`scripts/scratch_files.py`) keeps all three out of the session
@@ -368,9 +404,11 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
 
 ## Known limitations
 
-- **You cannot hear the audio.** Pronunciation, pacing and any clipped turn are unverified until
-  a person listens. Say so when you hand it over, and ask for a listen before it is shared.
-  A Gemini render warns when a chunk's audio is far shorter or longer than its text implies.
+- **You cannot hear the audio.** `verify` hears it back through an ASR and catches dropped
+  audio and misread numbers. It does not catch pronunciation, pacing or tone, and the ASR can
+  mishear, so ask for a person to listen before it is shared, and say so when you hand it
+  over. A Gemini render also warns when a chunk's audio is far shorter or longer than its text
+  implies.
 - **Synthetic voices.** There are no real interruptions or laughter. Gemini voices a whole
   segment at once, so it flows better than one call per turn.
 - **Figures only through the report**, or through the PNGs you looked at.

@@ -83,6 +83,9 @@ and the report and tables stay authoritative.
 - `podcast.json`: show, title, hosts and voices, TTS backend and exact model, cloud consent,
   script sha256, sources with their sha256, words, duration, `ai_generated: true`.
 - `check.txt`: the fidelity check the render was gated on.
+- `verify.txt`, `verify_transcript.txt`: the ASR round trip (`make_podcast.py verify`) -- word
+  match ratio, spans not heard, numbers not heard with transcript context, segments to listen
+  to; its result is also the `verify` block in `podcast.json`.
 
 `make_podcast.py link <session>/output` adds a "Listen" card near the top of
 `Analysis_Report.html` (hidden when printed, which prints the file name instead), a line under

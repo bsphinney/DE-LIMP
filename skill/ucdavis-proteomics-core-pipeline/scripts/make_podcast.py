@@ -21,6 +21,12 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             then says so). Every chunk is cached as DIR/.cache/<sha256>.wav, so a re-run resumes
             and editing one line re-synthesizes only its chunk; unused chunks are pruned after
             a successful render. --dry-run prints what would be spoken and exits.
+  verify SCRIPT.md --cloud-ok NOTE [--out DIR] [--model M]
+         -> the ASR round trip: Gemini transcribes the rendered audio (16 kHz AAC 32 kbps) and
+            difflib compares it with the spoken script. verify.txt, verify_transcript.txt and a
+            `verify` block in podcast.json: word match ratio, spans of 6+ words not heard,
+            numbers not heard (with transcript context), segments to listen to. Runs by itself
+            after a consented --tts gemini render (--no-verify skips); never fails the render.
   link   OUTDIR
          -> a "Listen" card near the top of OUTDIR/Analysis_Report.html, a line near the top of
             the Markdown report, an entry in README.html / README.md and AGENTS.md. Idempotent:
@@ -29,9 +35,9 @@ CHECKS the script, RENDERS it to audio and LINKS the audio into the outputs.
             check does not hold (--unchecked overrides); reprints an older Analysis_Report.pdf.
             The hooks the report calls never raise: a bad podcast.json is one [WARN].
 
-Privacy: only the final transcript (the turns, after pronunciation substitutions) ever leaves
-the machine -- never the report -- and only with --tts gemini AND --cloud-ok (explicit consent,
-recorded in podcast.json). --tts say (macOS) is offline. The Gemini key is read from
+Privacy: only the final transcript (render: the turns, after pronunciation substitutions) and
+the rendered audio (verify, downsampled) ever leave the machine -- never the report -- and only
+with --cloud-ok (explicit consent, recorded in podcast.json). --tts say (macOS) is offline. The Gemini key is read from
 GEMINI_API_KEY or ~/.config/ucdavis-proteomics/gemini_key; it is never printed or logged and is
 scrubbed from every error message (notify_slack.redact: the skill's one list of secret patterns).
 
@@ -44,6 +50,7 @@ import array
 import base64
 import datetime
 import decimal
+import difflib
 import hashlib
 import html
 import io
@@ -1005,12 +1012,12 @@ def read_wav(path):
         return _from_wave(w)
 
 
-def write_wav(path, a):
+def write_wav(path, a, rate=RATE):
     tmp = path + ".part"
     with wave.open(tmp, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
-        w.setframerate(RATE)
+        w.setframerate(rate)
         w.writeframes(a.tobytes())
     os.replace(tmp, path)
 
@@ -1596,6 +1603,15 @@ def cmd_render(a):
     os.makedirs(cache, exist_ok=True)
     backend = backend_cls(s, a)
     backend.prepare(chunks, speak, cache)
+    redo = set(getattr(a, "redo", None) or [])
+    for c in chunks:                              # re-make these segments, text unchanged
+        if c.seg + 1 in redo:
+            for ext in (".wav", ".json"):
+                f = os.path.join(cache, cache_key(backend, c, speak) + ext)
+                if os.path.exists(f):
+                    os.remove(f)
+    if redo:
+        log(f"[render] re-making segment(s) {', '.join(str(x) for x in sorted(redo))}")
     log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
         f"with {backend.name}")
 
@@ -1709,6 +1725,15 @@ def cmd_render(a):
                       "manifest": os.path.join(out, "podcast.json"),
                       "cache_pruned": prune_cache(cache, used),
                       "warnings": warnings}, indent=2))
+    # The ASR round trip. It sends the audio, so only under this render's cloud consent. It
+    # never fails the render and never touches the report.
+    if backend.cloud and consent and not getattr(a, "no_verify", False):
+        try:
+            run_verify(s.path if os.path.dirname(s.path) == out else script_copy, out,
+                       getattr(a, "verify_model", None), consent)
+        except Exception as e:
+            log(f"[WARN] verify skipped: {scrub(e)} (the render is fine; run "
+                f"`make_podcast.py verify {script_copy} --cloud-ok ...` to retry)")
     return 0
 
 
@@ -1727,6 +1752,361 @@ def prune_cache(cache, used):
     if n:
         log(f"[render] removed {n} cached file(s) this script no longer uses")
     return n
+
+
+# ----------------------------------------------------------------------------- verify
+VERIFY_PROMPT = "Transcribe verbatim. Write numbers as digits."
+VERIFY_TEXT_MODEL = "gemini-2.5-flash"            # then the newest 3.x flash text model
+VERIFY_RATIO = 0.93                               # WARN below this word match ratio
+VERIFY_GAP = 6                                    # a script span this long not heard is a gap
+VERIFY_INLINE_MAX = 18 * 1024 * 1024              # Gemini takes ~20 MB of inline data
+_VTOK = re.compile(r"\d[\d,]*(?:\.\d+)?|[A-Za-z]+(?:'[A-Za-z]+)?")
+_UNITS = {w: str(i) for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+    "fifteen sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: str(10 * i) for i, w in enumerate(
+    "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
+
+
+class VerifyError(Exception):
+    pass
+
+
+def verify_tokens(text):
+    """-> [(word, start, end)]: text as comparable words. Lowercase; numbers without thousands
+    separators; number words as digits ("forty six" -> 46, "two point one" -> 2.1); "minus"
+    and "plus" dropped (the transcript writes -1.3); runs of capital single letters with only
+    spaces between them joined ("K V" -> kv, "J P H 3" -> jph 3), so a spelled-out symbol and
+    the transcript's IgG meet."""
+    words = []
+    for m in _VTOK.finditer(text or ""):
+        w = m.group(0)
+        words.append([w.replace(",", "") if w[0].isdigit() else w.lower(), m.start(), m.end()])
+    out = _spoken_numbers(words)
+    merged = []
+    for t in out:
+        if (len(merged) >= 2 and merged[-1][0] == "point" and merged[-2][0].isdigit()
+                and t[0].isdigit()):
+            merged[-2:] = [[merged[-2][0] + "." + t[0], merged[-2][1], t[2]]]
+        else:
+            merged.append(t)
+    merged = [t for t in merged if t[0] not in ("minus", "plus")]
+    joined, run = [], []
+
+    def flush():
+        if len(run) >= 2:
+            joined.append(["".join(r[0] for r in run), run[0][1], run[-1][2]])
+        else:
+            joined.extend(run)
+        run[:] = []
+    for t in merged:
+        letter = len(t[0]) == 1 and t[0].isalpha() and text[t[1]].isupper()
+        if letter and (not run or not text[run[-1][2]:t[1]].strip()):
+            run.append(t)
+            continue
+        flush()
+        if letter:
+            run.append(t)
+        else:
+            joined.append(t)
+    flush()
+    return [tuple(t) for t in joined]
+
+
+_MULT = {"hundred": 100, "thousand": 1000, "million": 1000000}
+
+
+def _spoken_numbers(words):
+    """Runs of number words as one number, the way a transcript that "writes numbers as digits"
+    has them: "five thousand and twenty four" -> 5024, "forty six" -> 46, "twelve" -> 12. Units
+    read one by one ("zero seven five six") are a digit string, 0756."""
+    out, i = [], 0
+    isnum = lambda w: w in _UNITS or w in _TENS or w in _MULT        # noqa: E731
+    while i < len(words):
+        if not isnum(words[i][0]):
+            out.append(words[i])
+            i += 1
+            continue
+        j, run = i, []
+        while j < len(words) and (isnum(words[j][0]) or (      # "hundred and five"
+                words[j][0] == "and" and run and run[-1] in _MULT and j + 1 < len(words)
+                and isnum(words[j + 1][0]))):
+            if words[j][0] != "and":
+                run.append(words[j][0])
+            j += 1
+        if any(w in _MULT or w in _TENS for w in run):
+            total = cur = 0
+            for w in run:
+                if w in _MULT:
+                    cur = max(cur, 1) * _MULT[w]
+                    if _MULT[w] >= 1000:
+                        total, cur = total + cur, 0
+                else:
+                    cur += int(_TENS.get(w) or _UNITS[w])
+            val = str(total + cur)
+        else:
+            val = "".join(_UNITS[w] for w in run)
+        out.append([val, words[i][1], words[j - 1][2]])
+        i = j
+    return out
+
+
+def compare_audio_text(s, speak, transcript):
+    """The spoken script (after pronunciation) against what the ASR heard.
+    -> dict: ratio, gaps (script spans of >= VERIFY_GAP words not heard), numbers_not_heard
+    (each with +-60 characters of the transcript where it should have been), segments."""
+    stoks, smeta = [], []
+    for si, seg in enumerate(s.segments):
+        for t in seg:
+            for w, _, _ in verify_tokens(speak(t.text)):
+                stoks.append(w)
+                smeta.append((si + 1, t.line))
+    tt = verify_tokens(transcript)
+    ttoks = [w for w, _, _ in tt]
+    sm = difflib.SequenceMatcher(None, stoks, ttoks, autojunk=False)
+    ops = sm.get_opcodes()
+    matched = sum(i2 - i1 for tag, i1, i2, _, _ in ops if tag == "equal")
+
+    def heard_at(i):
+        """The transcript character offset aligned with script word i."""
+        for tag, i1, i2, j1, j2 in ops:
+            if i1 <= i < i2 or (i1 == i2 == i):
+                j = j1 + (i - i1) if tag == "equal" else j1
+                j = min(j, len(tt) - 1)
+                return tt[j][1] if tt else 0
+        return len(transcript)
+
+    def around(off):
+        a, b = max(0, off - 60), min(len(transcript), off + 60)
+        return ("…" if a else "") + transcript[a:b].replace("\n", " ") + ("…" if b < len(transcript) else "")
+
+    gaps = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag in ("delete", "replace") and i2 - i1 >= VERIFY_GAP:
+            gaps.append({"segment": smeta[i1][0], "line": smeta[i1][1], "words": i2 - i1,
+                         "script": " ".join(stoks[i1:i2])[:300],
+                         "heard": " ".join(ttoks[j1:j2])[:300]})
+
+    heard = {n.value for n in numbers_in(transcript)}
+    missing, seen = [], set()
+    first_tok = {}
+    for k, meta in enumerate(smeta):
+        first_tok.setdefault(meta[1], k)
+    for si, seg in enumerate(s.segments):
+        for t in seg:
+            for n in numbers_in(t.text):
+                if (n.kind == "plain" and n.dec == 0 and n.value <= 10 and n.sign is None
+                        and not n.quant) or n.value in heard or (t.line, n.value) in seen:
+                    continue
+                seen.add((t.line, n.value))
+                start = first_tok.get(t.line, 0)
+                digits = str(n.value)
+                k = next((k for k in range(start, len(stoks)) if smeta[k][1] == t.line and
+                          stoks[k] == digits), start)
+                missing.append({"number": n.text, "segment": si + 1, "line": t.line,
+                                "context": around(heard_at(k))})
+    segs = sorted({g["segment"] for g in gaps} | {m["segment"] for m in missing})
+    ratio = round(sm.ratio(), 3)
+    return {"ratio": ratio, "coverage": round(matched / float(len(stoks)), 3) if stoks else 0.0,
+            "words_script": len(stoks), "words_heard": len(ttoks), "gaps": gaps,
+            "numbers_not_heard": missing, "segments_to_check": segs,
+            "status": "WARN" if (ratio < VERIFY_RATIO or gaps or missing) else "OK"}
+
+
+def _verify_audio(audio, tmp):
+    """The episode as Gemini will take it inline: 16 kHz mono, then AAC at 32 kbps (ADTS,
+    audio/aac) through afconvert or ffmpeg -- via a 16 kHz WAV, which afconvert needs. Without
+    an encoder, the 16 kHz WAV itself when it fits. -> (bytes, mime, description)."""
+    wav16 = os.path.join(tmp, "verify16k.wav")
+    if audio.lower().endswith(".wav"):
+        write_wav(wav16, resample(read_wav(audio), RATE, 16000), rate=16000)
+    else:
+        for cmd in (["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", audio, wav16],
+                    ["ffmpeg", "-y", "-loglevel", "error", "-i", audio, "-ar", "16000", "-ac",
+                     "1", wav16]):
+            if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True,
+                                                       timeout=900).returncode == 0:
+                break
+        else:
+            raise VerifyError(f"cannot decode {os.path.basename(audio)}: neither afconvert nor "
+                              "ffmpeg worked")
+    aac = os.path.join(tmp, "verify.aac")
+    for cmd in (["afconvert", "-f", "adts", "-d", "aac", "-b", "32000", wav16, aac],
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", wav16, "-c:a", "aac", "-b:a", "32k",
+                 "-f", "adts", aac]):
+        if (shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True,
+                                                    timeout=900).returncode == 0
+                and os.path.isfile(aac) and os.path.getsize(aac) > 1000):
+            with open(aac, "rb") as fh:
+                return fh.read(), "audio/aac", "16 kHz mono AAC 32 kbps"
+    if os.path.getsize(wav16) <= VERIFY_INLINE_MAX:
+        with open(wav16, "rb") as fh:
+            return fh.read(), "audio/wav", "16 kHz mono WAV (no AAC encoder)"
+    raise VerifyError("no AAC encoder, and the 16 kHz WAV is too large to send inline")
+
+
+class Transcriber(object):
+    """A Gemini TEXT model transcribes the audio: gemini-2.5-flash, then the newest 3.x flash
+    text model models.list offers. Same key, scrubbing and rate-limit handling as rendering."""
+
+    def __init__(self, models=None):
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            raise VerifyError("the verify step needs the google-genai package: python3 -m pip "
+                              "install google-genai")
+        self.types = types
+        self.client = genai.Client(api_key=read_key())
+        self.candidates = list(models or []) or self.discover()
+
+    def discover(self):
+        names = []
+        try:
+            for m in self.client.models.list():
+                n = (getattr(m, "name", "") or "").split("/")[-1]
+                acts = getattr(m, "supported_actions", None) or []
+                if (re.match(r"^gemini-3(?:\.\d+)?-flash$", n) and
+                        (not acts or "generateContent" in acts)):
+                    names.append(n)
+        except Exception as e:
+            log(f"[WARN] could not list the Gemini models ({scrub(e)[:160]})")
+        names.sort(key=lambda n: float(re.search(r"gemini-(\d+(?:\.\d+)?)", n).group(1)),
+                   reverse=True)
+        return [VERIFY_TEXT_MODEL] + names[:1]
+
+    def transcribe(self, data, mime):
+        last = None
+        for model in self.candidates:
+            waits = errors = 0
+            while True:
+                try:
+                    r = self.client.models.generate_content(
+                        model=model, contents=[self.types.Part.from_bytes(data=data, mime_type=mime),
+                                               VERIFY_PROMPT],
+                        config=self.types.GenerateContentConfig(temperature=0))
+                    text = getattr(r, "text", None)
+                    if not text:
+                        raise VerifyError("the response held no text")
+                    return text, model
+                except Exception as e:
+                    err = error_info(e)
+                    last = f"{model}: {why_line(err)}"
+                    if err["kind"] == "rate" and waits < 5:
+                        waits += 1
+                        wait = (err["delay"] if err["delay"] is not None else 60.0) + 5.0
+                        log(f"[verify] rate-limited, waiting {wait:.0f}s ({model})")
+                        _sleep(wait)
+                        continue
+                    if err["kind"] == "transient" and errors < 2:
+                        errors += 1
+                        _sleep(5.0 * errors)
+                        continue
+                    if err["kind"] == "fatal":
+                        raise VerifyError(last)
+                    log(f"[verify] {last}; trying the next model")
+                    break
+        raise VerifyError(f"no model could transcribe the audio (last: {last})")
+
+
+def verify_report(res, audio, how, size, model):
+    L = [f"Podcast audio check (ASR round trip): {res['status']}",
+         f"audio: {audio} (sent to Google as {how}, {size / 1e6:.1f} MB)",
+         f"transcribed by: {model} (\"{VERIFY_PROMPT}\")",
+         f"checked: {now_iso()}",
+         f"word match ratio: {res['ratio']} (difflib, normalised words; WARN below {VERIFY_RATIO})"
+         f" · script words: {res['words_script']:,} · heard: {res['words_heard']:,} · "
+         f"script words matched: {res['coverage']:.1%}"]
+    if res["gaps"]:
+        L += ["", f"GAPS: script spans of {VERIFY_GAP}+ words not heard (dropped or garbled "
+                  "audio, or an ASR slip)"]
+        L += [f"- segment {g['segment']}, line {g['line']} ({g['words']} words): "
+              f"\"{g['script']}\" -- heard: \"{g['heard'] or '(nothing)'}\"" for g in res["gaps"]]
+    if res["numbers_not_heard"]:
+        L += ["", "NUMBERS NOT HEARD (a count of 10 or less is not listed) -- the transcript "
+                  "where each should be, to tell a TTS misread from an ASR mishearing"]
+        L += [f"- {m['number']} (segment {m['segment']}, line {m['line']}): \"{m['context']}\""
+              for m in res["numbers_not_heard"]]
+    if res["segments_to_check"]:
+        segs = " ".join(str(x) for x in res["segments_to_check"])
+        L += ["", f"SEGMENTS TO LISTEN TO: {segs}",
+              "A number the voice misread: add a Pronunciation row for it (e.g. | 5,024 | five "
+              "thousand and twenty-four |), re-run check, then render -- only that chunk is "
+              "re-made. Dropped or garbled audio with the text unchanged: render --redo "
+              f"{segs}. Then verify again."]
+    L += ["", "The ASR can mishear too: a flagged line is a place to listen, not proof of an "
+              "audio fault. A clean result is not a listen either."]
+    return "\n".join(L) + "\n"
+
+
+def run_verify(script_path, out=None, models=None, consent=True):
+    """Transcribe the rendered audio and compare it with the spoken script. Writes
+    verify.txt, verify_transcript.txt and a `verify` block in podcast.json. -> the result dict.
+    Raises VerifyError when it cannot run; never touches the report."""
+    s = parse_script(script_path)
+    out = os.path.abspath(out or os.path.dirname(s.path))
+    mpath = os.path.join(out, "podcast.json")
+    try:
+        with open(mpath, encoding="utf-8") as fh:
+            man = json.load(fh)
+        audio = man["audio"]
+        if not (isinstance(audio, str) and re.match(_FILE_RX["audio"], audio)):
+            raise ValueError(f"'audio' is {audio!r}")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise VerifyError(f"no usable podcast.json in {out} ({type(e).__name__}: {e}): render "
+                          "first")
+    apath = os.path.join(out, audio)
+    if not os.path.isfile(apath):
+        raise VerifyError(f"{audio} is not in {out}")
+    with tempfile.TemporaryDirectory() as td:
+        data, mime, how = _verify_audio(apath, td)
+    if len(data) > VERIFY_INLINE_MAX:
+        raise VerifyError(f"the downsampled audio is {len(data) / 1e6:.0f} MB, over the "
+                          "inline limit")
+    log(f"[verify] sending {len(data) / 1e6:.1f} MB ({how}) for transcription")
+    text, model = Transcriber(models).transcribe(data, mime)
+    res = compare_audio_text(s, pronouncer(s.pronunciation), text)
+    res.update(model=model, audio_sent=how, created=now_iso(), cloud_consent=consent,
+               report="verify.txt", transcript="verify_transcript.txt")
+    with open(os.path.join(out, "verify_transcript.txt"), "w", encoding="utf-8") as fh:
+        fh.write(text.rstrip() + "\n")
+    with open(os.path.join(out, "verify.txt"), "w", encoding="utf-8") as fh:
+        fh.write(verify_report(res, audio, how, len(data), model))
+    man["verify"] = res
+    tmp = mpath + ".part"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, mpath)
+    if res["status"] == "WARN":
+        log(f"[WARN] verify: word match ratio {res['ratio']}, {len(res['gaps'])} gap(s), "
+            f"{len(res['numbers_not_heard'])} number(s) not heard -- listen to segment(s) "
+            f"{', '.join(str(x) for x in res['segments_to_check']) or '(none named)'}; see "
+            f"{os.path.join(out, 'verify.txt')}")
+    else:
+        log(f"[verify] word match ratio {res['ratio']}, no gaps, every number heard")
+    return res
+
+
+def cmd_verify(a):
+    consent = a.cloud_ok
+    if isinstance(consent, str) and consent.strip().lower() in NO_CONSENT:
+        consent = False
+    if not consent:
+        log(f"[verify] not sending anything. verify sends the rendered AUDIO (downsampled) to "
+            f"Google's Gemini API for transcription. On a free-tier key Google may use it to "
+            f"improve its products and human reviewers may hear it ({TERMS_URL}). Once the user "
+            f"has agreed, re-run with --cloud-ok \"who agreed, when\".")
+        return 2
+    try:
+        res = run_verify(a.script, a.out, a.model, consent)
+    except (VerifyError, RenderError) as e:
+        log(f"[verify] could not verify: {scrub(e)}")
+        return 1
+    print(json.dumps({k: res[k] for k in ("status", "ratio", "coverage", "words_script",
+                                          "words_heard", "segments_to_check", "model")},
+                     indent=2))
+    return 0
 
 
 # ----------------------------------------------------------------------------- pages
@@ -2154,8 +2534,21 @@ def main(argv=None):
     r.add_argument("--keep-wav", action="store_true")
     r.add_argument("--unchecked", action="store_true",
                    help="render without a passing check.txt (recorded in podcast.json)")
+    r.add_argument("--redo", type=int, nargs="+", metavar="SEGMENT",
+                   help="re-make these segments (numbered from 1) although their text is "
+                        "unchanged: audio that verify or a listener found dropped or garbled")
+    r.add_argument("--no-verify", action="store_true",
+                   help="skip the ASR round trip that follows a --tts gemini render")
+    r.add_argument("--verify-model", action="append", help="text model(s) for verify")
     r.add_argument("--dry-run", action="store_true",
                    help="print the chunks as they would be spoken; send nothing")
+    v = sub.add_parser("verify", help="transcribe the rendered audio and compare it with the "
+                                      "spoken script (sends the audio to Google)")
+    v.add_argument("script")
+    v.add_argument("--out", help="the folder with podcast.json (default: the script's folder)")
+    v.add_argument("--cloud-ok", nargs="?", const=True, default=False,
+                   help="consent to send the audio to Gemini for transcription")
+    v.add_argument("--model", action="append", help="text model(s) to transcribe with")
     k = sub.add_parser("link", help="link the podcast into the report, README and AGENTS.md")
     k.add_argument("outdir", help="the folder with Analysis_Report.html and podcast/")
     k.add_argument("--unchecked", action="store_true",
@@ -2166,7 +2559,8 @@ def main(argv=None):
         ap.print_help()
         return 2
     try:
-        return {"check": cmd_check, "render": cmd_render, "link": cmd_link}[a.cmd](a)
+        return {"check": cmd_check, "render": cmd_render, "verify": cmd_verify,
+                "link": cmd_link}[a.cmd](a)
     except RenderError as e:
         log(f"[{a.cmd}] {e}")
         return 1
