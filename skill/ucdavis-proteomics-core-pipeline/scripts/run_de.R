@@ -35,6 +35,10 @@
 # --block <column>: samples sharing a value of that column (the mouse several IPs came
 #   from, the patient several biopsies came from) are fitted as correlated -- a random
 #   effect via limma's duplicateCorrelation. See blocking.R.
+# --block-scope within|all (default within): which contrasts the blocked fit reports.
+#   within: contrasts inside a block (bait vs IgG in the same mice) come from the blocked
+#   fit, contrasts BETWEEN blocks (Old vs Young mice) from the same data fitted without it;
+#   all: every contrast from the blocked fit. blocking.R says why.
 # =============================================================================
 
 suppressWarnings(suppressMessages({
@@ -84,6 +88,12 @@ fasta_meta <- getarg("--fasta-meta", NULL)
 # random effect -- blocking.R has the model and why. Unset = samples are independent.
 block_col <- getarg("--block", NULL)
 if (isTRUE(block_col)) stop("--block needs a metadata column name (e.g. --block Mouse)")
+block_scope <- getarg("--block-scope", NULL)
+if (!is.null(block_scope) && is.null(block_col))
+  stop("--block-scope needs --block <column>")
+if (is.null(block_scope)) block_scope <- "within"
+if (!block_scope %in% c("within", "all"))
+  stop("--block-scope must be 'within' (default) or 'all'")
 if (isTRUE(fasta_meta)) stop("--fasta-meta needs a path (<fasta>.meta.json)")
 if (is.null(fasta_meta) && file.exists("search.fasta.meta.json"))
   fasta_meta <- "search.fasta.meta.json"
@@ -586,10 +596,14 @@ message("[run_de] contrasts: ", paste(forms, collapse = ", "))
 cmat <- limma::makeContrasts(contrasts = forms, levels = design)
 
 # ---- fit --------------------------------------------------------------------
+# The fit with samples as independent. With --block it is still needed for the contrasts
+# --block-scope within reports from it (between-block ones); it reuses the quantification.
+fit_independent <- function()
+  if (method == "dpc") limpa::dpcDE(y_protein, design, plot = FALSE) else limma::lmFit(E, design)
 block_rec <- block_none_record()
+fit_ind <- NULL
 if (is.null(block)) {
-  fit <- if (method == "dpc") limpa::dpcDE(y_protein, design, plot = FALSE)
-         else limma::lmFit(E, design)
+  fit_ind <- fit_independent()
 } else if (method == "dpc") {
   # dpcDE(y, design, plot, ...) hands `block` to voomaLmFitWithImputation(), which
   # estimates the correlation with the vooma weights twice and fits lmFit(block =,
@@ -611,8 +625,8 @@ if (is.null(block)) {
     warning(sprintf("--block: recomputed consensus correlation %.4f differs from limpa's %.4f",
                     .dc$consensus.correlation, .rho), call. = FALSE)
   block_rec <- block_record(block_col, block, method, .rho, .dc$atanh.correlations, nrow(E),
-                            first_pass = .pass[["first"]],
-                            structure = block_contrast_structure(block, groups, cmat))
+                            first_pass = .pass[["first"]], groups = groups, cmat = cmat,
+                            scope = block_scope)
 } else {
   .dc <- limma::duplicateCorrelation(E, design, block = block)
   if (!is.finite(.dc$consensus.correlation))
@@ -621,18 +635,28 @@ if (is.null(block)) {
                         "that is what emptied the matrix."), block_col))
   fit <- limma::lmFit(E, design, block = block, correlation = .dc$consensus.correlation)
   block_rec <- block_record(block_col, block, method, .dc$consensus.correlation,
-                            .dc$atanh.correlations, nrow(E),
-                            structure = block_contrast_structure(block, groups, cmat))
+                            .dc$atanh.correlations, nrow(E), groups = groups, cmat = cmat,
+                            scope = block_scope)
 }
-if (isTRUE(block_rec$applied)) {
+# Which fit reports each contrast: block.contrast_model, the one definition.
+contrast_model <- if (is.null(block)) {
+  setNames(rep("independent", length(forms)), forms)
+} else unlist(block_rec$contrast_model)[forms]
+if (!is.null(block)) {
+  .fit_blocked <- limma::eBayes(limma::contrasts.fit(fit, cmat))
+  if (any(contrast_model == "independent"))
+    fit_ind <- fit_independent()
   descriptor$de_engine <- paste0(descriptor$de_engine, block_engine_suffix(block_rec))
-  message(sprintf("[run_de] --block %s: %d levels; consensus within-%s correlation %.3f (%d of %d proteins estimated)",
-                  block_col, block_rec$n_blocks, block_col, block_rec$consensus_correlation,
-                  block_rec$n_proteins_estimated, block_rec$n_proteins))
+  message(sprintf("[run_de] --block %s (scope %s): %d levels; consensus within-%s correlation %.3f (%d of %d proteins estimated)",
+                  block_col, block_scope, block_rec$n_blocks, block_col,
+                  block_rec$consensus_correlation, block_rec$n_proteins_estimated,
+                  block_rec$n_proteins))
   for (.w in unlist(block_rec$warnings)) warning("--block: ", .w, call. = FALSE)
 }
-fit <- limma::contrasts.fit(fit, cmat)
-fit <- limma::eBayes(fit)
+if (!is.null(fit_ind)) fit_ind <- limma::eBayes(limma::contrasts.fit(fit_ind, cmat))
+# One fit object whose columns are each contrast's reporting fit (block_merge_fits), so the
+# DE tables and the DE-LIMP session read the same numbers.
+fit <- if (is.null(block)) fit_ind else block_merge_fits(.fit_blocked, fit_ind, contrast_model)
 
 # ---- write per-contrast results ---------------------------------------------
 gene_cols <- intersect(c("Genes", "Protein.Names"), names(genes))
@@ -687,6 +711,7 @@ utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
                  file.path(outdir, detection_rec$file), row.names = FALSE)
 
 all_sig <- list()
+de_tables <- list()   # per DE table: its file and which fit it was reported from
 for (cn in forms) {
   tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = "BH")
   tt$Protein.Group <- rownames(tt)
@@ -703,8 +728,10 @@ for (cn in forms) {
   sig <- subset(tt, !is.na(adj.P.Val) & adj.P.Val < adjp_thr)
   all_sig[[cn]] <- nrow(sig)
   n_beyond <- sum(abs(sig$logFC) >= logfc_ref, na.rm = TRUE)   # descriptive, not a filter
-  message(sprintf("[run_de] %-20s  %d proteins, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s",
-                  cn, nrow(tt), nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn)))
+  message(sprintf("[run_de] %-20s  %d proteins, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s%s",
+                  cn, nrow(tt), nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn),
+                  if (is.null(block)) "" else sprintf("  [%s fit]", contrast_model[[cn]])))
+  de_tables[[cn]] <- list(file = basename(fn), model = contrast_model[[cn]], n_significant = nrow(sig))
 }
 
 # ---- the analysis as plain R ------------------------------------------------
@@ -735,7 +762,7 @@ if (is.null(.rs)) {
       meta = meta, covariates = covariates, formula_parts = formula_parts,
       forms = forms, adjp_thr = adjp_thr, logfc_ref = logfc_ref,
       ann_cols = gene_cols, descriptor = descriptor,
-      contaminants = cont_rec, block = block_rec,
+      contaminants = cont_rec, block = block_rec, contrast_model = contrast_model,
       dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL)
     message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
                     length(repro_lines)))
@@ -839,6 +866,9 @@ prov <- list(
   # string, which readers then iterated character by character ("B, -, A").
   contrasts = as.list(forms), n_samples = nrow(meta), groups = as.list(table(groups)),
   significant_per_contrast = all_sig,
+  # Each DE_*.csv and the fit it came from: "blocked", or "independent" (samples fitted as
+  # independent -- every table of an unblocked run, between-block ones under --block-scope within).
+  de_tables = de_tables,
   # Detection_Matrix.csv: what each 0 means depends on the pipeline -- say it here.
   detection_matrix = detection_rec,
   R_version = as.character(getRversion()),
@@ -892,6 +922,10 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
       raw_data     = dat,
       metadata     = meta,
       fit          = fit,
+      # --block-scope within: `fit` holds each contrast's reporting fit column by column
+      # (fit$contrast_model); the independent fit whole, for anything needing a
+      # consistent per-protein variance (s2.post) on its contrasts.
+      fit_independent = if (!is.null(block) && any(contrast_model == "independent")) fit_ind else NULL,
       y_protein    = y_protein,
       dpc_fit      = if (exists("dpcfit")) dpcfit else NULL,
       design       = design,

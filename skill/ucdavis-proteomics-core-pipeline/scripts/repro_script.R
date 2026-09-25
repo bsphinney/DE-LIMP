@@ -61,6 +61,9 @@ write_repro_script <- function(path,
                                # run_de.R's blocking record (blocking.R). NULL or
                                # applied = FALSE = samples were fitted as independent.
                                block = NULL,
+                               # contrast -> "blocked" | "independent": the fit each DE table
+                               # was reported from (--block-scope). NULL = from block's record.
+                               contrast_model = NULL,
                                # readDIANN annotation.columns the dpc run used (limpa's
                                # defaults + the accession column the filter reads).
                                dpc_annotation_columns = NULL,
@@ -89,6 +92,9 @@ write_repro_script <- function(path,
   # The random blocking factor, emitted from the record so the script fits the same model.
   blk_on  <- isTRUE(block$applied)
   blk_col <- if (blk_on) block$column else NULL
+  if (is.null(contrast_model) && blk_on) contrast_model <- unlist(block$contrast_model)
+  # --block-scope within with between-block contrasts: a second, independent fit reports them
+  two_fits <- blk_on && any(contrast_model == "independent")
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
 
   L <- c(
@@ -293,6 +299,16 @@ write_repro_script <- function(path,
     sprintf("contrast_matrix <- limma::makeContrasts(contrasts = %s, levels = design)", .rvec(forms)),
     "fit <- limma::contrasts.fit(fit, contrast_matrix)",
     "fit <- limma::eBayes(fit)",
+    if (two_fits) c(
+    "",
+    sprintf("# --- 5b. Between-%s contrasts: the same data fitted with samples independent ---", blk_col),
+    sprintf("# (--block-scope %s). They compare different %s levels with at most one sample", block$scope, blk_col),
+    "# per level, so there is no pairing to model -- and one consensus correlation would",
+    sprintf("# understate their variance for proteins with strong %s-to-%s variation.", blk_col, blk_col),
+    if (is_dpc) "fit_independent <- limpa::dpcDE(y_protein, design, plot = FALSE)"
+    else        "fit_independent <- limma::lmFit(E, design)",
+    "fit_independent <- limma::eBayes(limma::contrasts.fit(fit_independent, contrast_matrix))",
+    .rmap("contrast_model", names(contrast_model), contrast_model)) else NULL,
     "")
 
   # ---- results ----------------------------------------------------------------
@@ -332,7 +348,9 @@ write_repro_script <- function(path,
     "write.csv(expr, file.path(outdir, 'Expression_Matrix.csv'), row.names = FALSE)",
     "",
     sprintf("for (cn in %s) {", .rvec(forms)),
-    "  tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = 'BH')",
+    if (two_fits)
+    "  tt <- limma::topTable(if (contrast_model[[cn]] == 'blocked') fit else fit_independent,\n                        coef = cn, number = Inf, adjust.method = 'BH')"
+    else "  tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = 'BH')",
     "  tt$Protein.Group <- rownames(tt)",
     if (has_ann) c(
     "  miss <- setdiff(names(ann), c('Protein.Group', names(tt)))   # don't duplicate columns",

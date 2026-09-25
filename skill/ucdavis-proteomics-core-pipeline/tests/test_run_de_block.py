@@ -104,7 +104,15 @@ make(file.path(OUT, "nested"), TRUE)
 '''
 
 TRUE_HITS = {f"P{i:05d}" for i in range(1, 41)}
-NESTED_CONTRASTS = "Old_Bait-Old_IgG,Young_Bait-Young_IgG,Old_Bait-Young_Bait,Old_IgG-Young_IgG"
+# within-subject (bait vs IgG), between with one sample per subject (Old vs Young for one
+# IP type), and between POOLING two samples per subject (Old vs Young over both IP types --
+# unblocked, that one would be pseudo-replicated)
+POOLED = "(Old_Bait+Old_IgG)/2-(Young_Bait+Young_IgG)/2"
+NESTED_CONTRASTS = ",".join(["Old_Bait-Old_IgG", "Young_Bait-Young_IgG", "Old_Bait-Young_Bait",
+                             "Old_IgG-Young_IgG", POOLED])
+NESTED_MODEL = {"Old_Bait-Old_IgG": "blocked", "Young_Bait-Young_IgG": "blocked",
+                "Old_Bait-Young_Bait": "independent", "Old_IgG-Young_IgG": "independent",
+                POOLED: "blocked"}
 
 
 def read_csv(path):
@@ -130,8 +138,24 @@ class RunDeBlock(unittest.TestCase):
             "dpc_block":   ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject"]),
             "ml":          ("paired", "conditions.csv", ["--method", "maxlfq"]),
             "ml_block":    ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject"]),
+            # --block-scope within (the default), all, and no block at all -- same contrasts
             "nested":      ("nested", "conditions.csv", ["--method", "dpc", "--block", "Subject",
                                                          "--contrasts", NESTED_CONTRASTS]),
+            "nested_all":  ("nested", "conditions.csv", ["--method", "dpc", "--block", "Subject",
+                                                         "--block-scope", "all",
+                                                         "--contrasts", NESTED_CONTRASTS]),
+            "nested_plain": ("nested", "conditions.csv", ["--method", "dpc",
+                                                          "--contrasts", NESTED_CONTRASTS]),
+            "nested_ml":   ("nested", "conditions.csv", ["--method", "maxlfq", "--block", "Subject",
+                                                         "--contrasts", NESTED_CONTRASTS]),
+            "nested_ml_all": ("nested", "conditions.csv", ["--method", "maxlfq", "--block", "Subject",
+                                                           "--block-scope", "all",
+                                                           "--contrasts", NESTED_CONTRASTS]),
+            "nested_ml_plain": ("nested", "conditions.csv", ["--method", "maxlfq",
+                                                             "--contrasts", NESTED_CONTRASTS]),
+            "scope_alone": ("paired", "conditions.csv", ["--method", "dpc", "--block-scope", "all"]),
+            "scope_bad":   ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject",
+                                                         "--block-scope", "between"]),
             "conflict":    ("nested", "conditions_cov.csv", ["--method", "dpc", "--block", "Covariate1"]),
             # the subject as a FIXED covariate, nested in the groups: rank-deficient
             "fixed":       ("nested", "conditions_cov.csv", ["--method", "dpc"]),
@@ -216,6 +240,9 @@ class RunDeBlock(unittest.TestCase):
                 self.assertTrue(b["fit"].startswith(fit), b["fit"])
                 self.assertIn("duplicateCorrelation", b["estimator"])
                 self.assertEqual(b["contrast_structure"], {"B-A": "within"})
+                self.assertEqual(b["scope"], "within")
+                self.assertEqual(b["contrast_model"], {"B-A": "blocked"})
+                self.assertEqual(p["de_tables"]["B-A"]["model"], "blocked")
                 self.assertEqual(b["warnings"], [])
                 # the fixed part of the model is unchanged: Subject is not a design term
                 self.assertEqual(p["design"], "~ 0 + groups")
@@ -238,7 +265,8 @@ class RunDeBlock(unittest.TestCase):
         txt = self.methods("dpc_block")
         self.assertIn("Blocking      : Subject as a random effect (6 levels, 2 samples each)", txt)
         self.assertIn(f"consensus within-Subject correlation {rho:.3f}", txt)
-        self.assertIn("Within-Subject contrasts: B-A", txt)
+        self.assertIn("Within-Subject contrasts, blocked fit: B-A", txt)
+        self.assertIn("Scope: all contrasts from the blocked fit (scope within)", txt)
         self.assertNotIn("CAUTION", txt)
 
     def test_make_methods_sentence_reads_the_record(self):
@@ -248,6 +276,7 @@ class RunDeBlock(unittest.TestCase):
         self.assertIn(f"{p['block']['consensus_correlation']:.3f}", para)
         self.assertIn("limpa::dpcDE(block =)", para)
         self.assertIn("with contrasts B-A.", para)
+        self.assertIn("All contrasts were reported from this fit.", para)
         self.assertNotIn("blocking factor", mm.de_paragraph(self.prov("dpc")))
         # a record from before --block existed: no sentence, nothing assumed
         old = dict(p); old.pop("block")
@@ -259,14 +288,70 @@ class RunDeBlock(unittest.TestCase):
         self.assertEqual(p["design"], "~ 0 + groups")
         self.assertEqual(p["block"]["contrast_structure"],
                          {"Old_Bait-Old_IgG": "within", "Young_Bait-Young_IgG": "within",
-                          "Old_Bait-Young_Bait": "between", "Old_IgG-Young_IgG": "between"})
+                          "Old_Bait-Young_Bait": "between", "Old_IgG-Young_IgG": "between",
+                          POOLED: "between"})
         self.assertGreater(p["block"]["consensus_correlation"], 0.5)
         txt = self.methods("nested")
-        self.assertIn("Within-Subject contrasts: Old_Bait-Old_IgG, Young_Bait-Young_IgG", txt)
-        self.assertIn("Between-Subject contrasts (judged on the Subject levels, not the samples): "
-                      "Old_Bait-Young_Bait, Old_IgG-Young_IgG", txt)
-        for cn in ("Old_Bait.Old_IgG", "Old_Bait.Young_Bait"):
-            self.assertTrue(os.path.exists(os.path.join(self.out("nested"), f"DE_dpc_{cn}.csv")))
+        self.assertIn("Within-Subject contrasts, blocked fit: Old_Bait-Old_IgG, Young_Bait-Young_IgG", txt)
+        self.assertIn("Between-Subject contrasts, independent fit (judged on the Subject levels, "
+                      "not the samples): Old_Bait-Young_Bait, Old_IgG-Young_IgG", txt)
+        self.assertIn(f"Between-Subject contrasts, blocked fit (judged on the Subject levels, "
+                      f"not the samples): {POOLED}", txt)
+        self.assertIn("Scope: between-Subject contrasts using at most one sample per Subject from "
+                      "the fit with samples independent, all others from the blocked fit "
+                      "(scope within)", txt)
+        for t in p["de_tables"].values():
+            self.assertTrue(os.path.exists(os.path.join(self.out("nested"), t["file"])))
+
+    # -- --block-scope: one run, each contrast from its fit ----------------------------------
+    def test_scope_within_picks_the_fit_per_contrast(self):
+        for key in ("nested", "nested_ml"):
+            with self.subTest(run=key):
+                p = self.prov(key)
+                b = p["block"]
+                self.assertEqual(b["scope"], "within")
+                self.assertTrue(b["applied"])                 # it still reports within contrasts
+                self.assertEqual(p["block_column"], "Subject")
+                self.assertEqual(b["contrast_model"], NESTED_MODEL)
+                self.assertEqual({cn: t["model"] for cn, t in p["de_tables"].items()}, NESTED_MODEL)
+                self.assertIn("between-Subject contrasts using at most one sample per Subject "
+                              "from the fit with samples independent", p["de_engine"])
+                self.assertIn("at most one sample per Subject", b["contrast_model_rule"])
+        all_ = self.prov("nested_all")["block"]
+        self.assertEqual(all_["scope"], "all")
+        self.assertEqual(set(all_["contrast_model"].values()), {"blocked"})
+        self.assertEqual({t["model"] for t in self.prov("nested_plain")["de_tables"].values()},
+                         {"independent"})
+
+    def test_scope_within_tables_equal_the_separate_runs(self):
+        cols = ("logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+        for key, blocked, plain in (("nested", "nested_all", "nested_plain"),
+                                    ("nested_ml", "nested_ml_all", "nested_ml_plain")):
+            p = self.prov(key)
+            for cn, t in p["de_tables"].items():
+                with self.subTest(run=key, contrast=cn, model=t["model"]):
+                    ref = blocked if t["model"] == "blocked" else plain
+                    a = {r["Protein.Group"]: r for r in read_csv(os.path.join(self.out(key), t["file"]))}
+                    b = {r["Protein.Group"]: r for r in read_csv(os.path.join(self.out(ref), t["file"]))}
+                    self.assertEqual(set(a), set(b))
+                    for k in a:
+                        for c in cols:
+                            self.assertAlmostEqual(float(a[k][c]), float(b[k][c]), places=8,
+                                                   msg=f"{k} {c}")
+
+    def test_make_methods_names_the_fit_per_contrast(self):
+        para = mm.de_paragraph(self.prov("nested"))
+        self.assertIn(f"This fit reported Old_Bait-Old_IgG, Young_Bait-Young_IgG, {POOLED};", para)
+        self.assertIn("Old_Bait-Young_Bait, Old_IgG-Young_IgG -- contrasts between different "
+                      "Subject levels using at most one sample per Subject -- were reported from "
+                      "the same data fitted with samples as independent", para)
+        # a blocked record from before --block-scope: which fit reported what is not assumed
+        old = self.prov("dpc_block"); old["block"].pop("contrast_model")
+        self.assertIn("not recorded", mm.de_paragraph(old))
+
+    def test_block_scope_arguments(self):
+        self.assertIn("--block-scope needs --block", self.failed("scope_alone"))
+        self.assertIn("--block-scope must be 'within' (default) or 'all'", self.failed("scope_bad"))
 
     # -- what must stop ------------------------------------------------------------------
     def test_block_that_is_also_a_covariate_stops(self):
@@ -293,23 +378,28 @@ class RunDeBlock(unittest.TestCase):
 
     # -- reproducible ----------------------------------------------------------------------
     def test_reproducibility_log_refits_the_blocked_model(self):
-        for key, de in (("dpc_block", "DE_dpc_B.A.csv"), ("ml_block", "DE_maxlfq_B.A.csv")):
+        # paired: one blocked fit; nested: the blocked fit AND the independent one (scope within)
+        for key in ("dpc_block", "ml_block", "nested", "nested_ml"):
             with self.subTest(run=key):
                 out = self.out(key)
                 with open(os.path.join(out, "reproducibility_log.R")) as fh:
                     src = fh.read()
                 self.assertIn("block <- metadata[['Subject']]", src)
                 self.assertIn("block = block", src)
+                if key.startswith("nested"):
+                    self.assertIn("fit_independent <- limma::eBayes(", src)
+                    self.assertIn("'Old_Bait-Young_Bait' = 'independent'", src)
                 p = subprocess.run(["Rscript", "reproducibility_log.R"], capture_output=True,
                                    text=True, cwd=out)
                 self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-                a = {r["Protein.Group"]: r for r in read_csv(os.path.join(out, de))}
-                b = {r["Protein.Group"]: r for r in
-                     read_csv(os.path.join(out, "de_results_rerun", de))}
-                self.assertEqual(set(a), set(b))
-                for k in a:
-                    for col in ("logFC", "P.Value"):
-                        self.assertAlmostEqual(float(a[k][col]), float(b[k][col]), places=8)
+                for t in self.prov(key)["de_tables"].values():
+                    a = {r["Protein.Group"]: r for r in read_csv(os.path.join(out, t["file"]))}
+                    b = {r["Protein.Group"]: r for r in
+                         read_csv(os.path.join(out, "de_results_rerun", t["file"]))}
+                    self.assertEqual(set(a), set(b))
+                    for k in a:
+                        for col in ("logFC", "P.Value"):
+                            self.assertAlmostEqual(float(a[k][col]), float(b[k][col]), places=8)
 
 
 @unittest.skipUnless(r_has("limma", "jsonlite"), "needs Rscript + limma/jsonlite")
@@ -335,8 +425,18 @@ class BlockRecordWarnings(unittest.TestCase):
           cm <- limma::makeContrasts(contrasts = c("Old_Bait-Old_IgG", "Old_Bait-Young_Bait"),
                                      levels = design)
           st <- block_contrast_structure(blk, g, cm)
-          cat(jsonlite::toJSON(list(warn = warn, structure = st, n_ok = length(r$ok$warnings)),
-                               auto_unbox = TRUE))'''))
+          # the reporting-fit rule: 3 mice per age, one Bait + one IgG IP each
+          g2 <- factor(rep(c("Old_IgG", "Old_Bait", "Young_IgG", "Young_Bait"), each = 3))
+          b2 <- c("M1", "M2", "M3", "M1", "M2", "M3", "M4", "M5", "M6", "M4", "M5", "M6")
+          d2 <- model.matrix(~ 0 + g2); colnames(d2) <- levels(g2)
+          cm2 <- limma::makeContrasts(contrasts = c("Old_Bait-Old_IgG", "Old_Bait-Young_Bait",
+            "(Old_Bait+Old_IgG)/2-(Young_Bait+Young_IgG)/2"), levels = d2)
+          b3 <- b2; b3[2] <- "M1"   # M1 now holds two Old_IgG samples: a technical replicate
+          models <- list(within = block_contrast_model(b2, g2, cm2, "within"),
+                         all = block_contrast_model(b2, g2, cm2, "all"),
+                         reps = block_contrast_model(b3, g2, cm2, "within"))
+          cat(jsonlite::toJSON(list(warn = warn, structure = st, n_ok = length(r$ok$warnings),
+                                    models = models), auto_unbox = TRUE))'''))
 
     def test_clean_estimate_has_no_warning(self):
         self.assertEqual(self.res["n_ok"], 0)
@@ -350,6 +450,14 @@ class BlockRecordWarnings(unittest.TestCase):
         self.assertTrue(any("unstable" in w and "two estimation passes" in w
                             for w in self.res["warn"]["moving"]))
         self.assertTrue(any("only 2 Mouse levels" in w for w in self.res["warn"]["two"]))
+
+    def test_reporting_fit_rule(self):
+        m = self.res["models"]
+        self.assertEqual(m["within"], {"Old_Bait-Old_IgG": "blocked", "Old_Bait-Young_Bait": "independent",
+                                       "(Old_Bait+Old_IgG)/2-(Young_Bait+Young_IgG)/2": "blocked"})
+        self.assertEqual(set(m["all"].values()), {"blocked"})
+        # a subject with two samples in one group pseudo-replicates the independent fit too
+        self.assertEqual(set(m["reps"].values()), {"blocked"})
 
     def test_contrast_structure(self):
         # M1 has both an Old IgG and an Old Bait IP, M3/M4 only one each -> partial

@@ -1160,6 +1160,14 @@ pass `--block Mouse`: a random effect via limma `duplicateCorrelation` (limpa's 
 takes it natively). The block may be nested in a group (mice within age). The consensus
 correlation lands in `de_provenance.json` (`block`) and `methods.txt`. run_de.R prints a
 note when a column looks like one and `--block` is missing — ask the user.
+`--block-scope within` (the default) reports within-mouse contrasts (bait vs IgG) from the
+blocked fit and between-mouse contrasts that use one sample per mouse (Old vs Young for
+one bait) from the fit with samples independent — one run, both fits, one record
+(`block.contrast_model`). Blocking cannot add information to a 3-vs-3-mice comparison, and
+its single consensus correlation understates between-mouse variance for proteins that
+vary strongly animal to animal (PROT_0756: SE 0.86× where it should be 1×; the 77
+blocked-only age calls were blood/complement proteins). `--block-scope all` puts every
+contrast on the blocked fit. State n per group in mice, not IPs.
 → `references/de-analysis.md`, "Paired / repeated designs".
 **Contaminants are removed before quantification, on both methods.** Every precursor that
 maps to a `Cont_` entry (any accession in `Protein.Ids` — DIA-NN's own

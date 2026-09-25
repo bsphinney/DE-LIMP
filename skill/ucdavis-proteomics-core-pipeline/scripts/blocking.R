@@ -26,6 +26,26 @@
 #           lmFit(y, design, block, correlation, weights). Nothing to re-implement.
 #   maxlfq  duplicateCorrelation(E, design, block = b) -> lmFit(E, design, block =,
 #           correlation =). One pass: this path fits without precision weights.
+#
+# WHICH contrasts the blocked fit reports (--block-scope, default "within"):
+#   within  a contrast BETWEEN blocks that uses at most one sample per block (Old vs Young
+#           mice for one bait: 3 vs 3 mice, one IP each) comes from the same quantification
+#           fitted with samples as independent; every other contrast -- within, partial, or
+#           between but pooling several samples per block (Old vs Young over all baits,
+#           which WOULD be pseudo-replicated unblocked) -- from the blocked fit. If any
+#           block holds two samples of one group, the independent fit's variance is itself
+#           pseudo-replicated, so every contrast comes from the blocked fit.
+#   all     every contrast from the blocked fit.
+# Why "within" is the default (PROT_0756, 6 mice x 5 IPs, consensus correlation 0.17): a
+# between-block contrast that already uses one sample per block (each bait, 3 vs 3 mice)
+# has no pseudo-replication to correct, and in a balanced design the independent fit's
+# variance is unbiased for every protein. The blocked fit applies ONE consensus
+# correlation to all proteins, so for proteins with strong block-to-block variation it
+# understates the between-block variance: blocked/independent SE ratio 0.86 at per-protein
+# correlation > 0.6 (1.04 at <= 0), matching the value the design predicts to 0.015 -- and
+# the 77 Old-vs-Young calls only the blocked fit made were exactly those proteins (median
+# correlation 0.44 vs 0.14 overall: red-cell, complement, tRNA-synthetase proteins). For
+# within-block contrasts the blocked fit is the right model: +14-58% calls, none lost.
 # =============================================================================
 
 # Warning thresholds -- they only decide whether the run says CAUTION; the fit never
@@ -120,7 +140,9 @@ block_contrast_structure <- function(block, groups, cmat) {
 # The ONE record of the blocking step: de_provenance.json's `block`, methods.txt's
 # Blocking line, the de_engine label and make_methods.py's sentence all read it.
 block_record <- function(block_col, block, method, consensus, atanh_per_protein, n_proteins,
-                         first_pass = NULL, structure = NULL) {
+                         first_pass = NULL, groups = NULL, cmat = NULL, scope = "within") {
+  structure <- if (!is.null(cmat)) block_contrast_structure(block, groups, cmat) else NULL
+  model <- if (!is.null(cmat)) block_contrast_model(block, groups, cmat, scope) else NULL
   arho <- atanh_per_protein[is.finite(atanh_per_protein)]
   q <- if (length(arho)) tanh(stats::quantile(arho, c(0.25, 0.5, 0.75), names = FALSE))
        else rep(NA_real_, 3)
@@ -147,8 +169,15 @@ block_record <- function(block_col, block, method, consensus, atanh_per_protein,
     warn <- c(warn, sprintf(paste0(
       "only %d %s levels: each protein's between-%s variance rests on %d degree(s) of freedom, ",
       "so the per-protein estimates are very noisy."), nb, block_col, block_col, nb - 1))
+  # applied = the blocked fit reports at least one contrast -- what readers of the record
+  # ask ("does the design carry the block?"). All-between under "within" = it reports none.
+  used <- !length(model) || any(unlist(model) == "blocked")
   list(
-    applied = TRUE, column = block_col, n_blocks = nb,
+    applied = used, column = block_col, scope = scope,
+    note = if (!used) sprintf(paste0("--block %s given, but every contrast compares different %s ",
+                                     "levels: all were reported from the independent fit ",
+                                     "(--block-scope within)"), block_col, block_col) else NULL,
+    n_blocks = nb,
     block_sizes = as.list(table(block)),
     consensus_correlation = consensus,
     first_pass_correlation = first_pass,
@@ -156,24 +185,84 @@ block_record <- function(block_col, block, method, consensus, atanh_per_protein,
     per_protein_correlation = list(q25 = q[1], median = q[2], q75 = q[3]),
     estimator = BLOCK_ESTIMATOR, fit = BLOCK_FIT[[method]],
     contrast_structure = structure,
+    contrast_model = model,
+    contrast_model_rule = if (identical(scope, "all")) "all: every contrast from the blocked fit"
+      else paste0("within: a contrast comparing different ", block_col, " levels with at most one ",
+                  "sample per ", block_col, " is reported from the fit with samples independent; ",
+                  "every other contrast from the blocked fit",
+                  if (block_reps_within_group(block, groups))
+                    sprintf(paste0(" (here every contrast: some %s holds two samples of one group, ",
+                                   "which the independent fit would pseudo-replicate)"), block_col)
+                  else ""),
     warnings = as.list(warn))
+}
+
+# Does any block hold two samples of the same group (technical replicates of one mouse)?
+# Then even the independent fit's pooled variance is pseudo-replicated.
+block_reps_within_group <- function(block, groups)
+  !is.null(groups) && anyDuplicated(paste(block, as.character(groups), sep = "\r")) > 0
+
+# The fit that reports each contrast: "blocked" or "independent" (see the header). Under
+# "within", independent only for a between-block contrast that takes at most one sample
+# from each block, in a design with no block holding two samples of one group.
+block_contrast_model <- function(block, groups, cmat, scope) {
+  st <- block_contrast_structure(block, groups, cmat)
+  g <- as.character(groups)
+  reps <- block_reps_within_group(block, groups)
+  out <- list()
+  for (cn in colnames(cmat)) {
+    used <- g %in% rownames(cmat)[cmat[, cn] != 0]
+    one_each <- !anyDuplicated(block[used])
+    out[[cn]] <- if (identical(scope, "within") && identical(st[[cn]], "between") &&
+                     one_each && !reps) "independent" else "blocked"
+  }
+  out
+}
+
+# One fit object whose contrast columns come from each contrast's reporting fit, so
+# topTable() on it returns exactly that fit's table (it reads coefficients,
+# stdev.unscaled, t, p.value, lods and Amean -- identical Amean in both fits). The
+# per-protein variance fields (sigma, s2.post, df.total) stay the blocked fit's, so the
+# moderated F -- which would mix the two -- is dropped; the session keeps the independent
+# fit whole beside it.
+block_merge_fits <- function(fit_blocked, fit_independent, model) {
+  ind <- names(model)[model == "independent"]
+  if (!length(ind)) { fit_blocked$contrast_model <- model; return(fit_blocked) }
+  stopifnot(identical(rownames(fit_blocked$coefficients), rownames(fit_independent$coefficients)))
+  out <- fit_blocked
+  for (el in c("coefficients", "stdev.unscaled", "t", "p.value", "lods"))
+    out[[el]][, ind] <- fit_independent[[el]][, ind]
+  out$F <- NULL; out$F.p.value <- NULL
+  out$contrast_model <- model
+  out
 }
 
 block_none_record <- function()
   list(applied = FALSE, note = "no --block: samples modelled as independent")
 
+# How the contrasts split between the fits, in one phrase for labels and methods.
+block_scope_phrase <- function(rec) {
+  m <- unlist(rec$contrast_model)
+  if (!any(m == "independent")) return(sprintf("all contrasts from the blocked fit (scope %s)", rec$scope))
+  sprintf(paste0("between-%s contrasts using at most one sample per %s from the fit with ",
+                 "samples independent, all others from the blocked fit (scope %s)"),
+          rec$column, rec$column, rec$scope)
+}
+
 # Appended to the descriptor's de_engine so every reader of that label (methods.txt,
 # de_provenance.json, the AI brief) sees the blocking too.
 block_engine_suffix <- function(rec) {
   if (!isTRUE(rec$applied)) return("")
-  sprintf("; block = %s (random effect, consensus correlation %.3f)",
-          rec$column, rec$consensus_correlation)
+  sprintf("; block = %s (random effect, consensus correlation %.3f; %s)",
+          rec$column, rec$consensus_correlation, block_scope_phrase(rec))
 }
 
 block_methods_lines <- function(rec) {
   pad <- "                "
-  if (!isTRUE(rec$applied))
+  if (!isTRUE(rec$applied) && is.null(rec$column))
     return("Blocking      : none -- samples modelled as independent (no --block)")
+  if (!isTRUE(rec$applied))
+    return(sprintf("Blocking      : none used -- %s", rec$note))
   sz <- unlist(rec$block_sizes)
   sz_txt <- if (length(unique(sz)) == 1) sprintf("%d samples each", sz[1])
             else sprintf("%d-%d samples each", min(sz), max(sz))
@@ -188,12 +277,19 @@ block_methods_lines <- function(rec) {
       sprintf("%sfirst-pass estimate %.3f", pad, rec$first_pass_correlation),
     sprintf("%sEstimator: %s", pad, rec$estimator),
     sprintf("%sFit: %s", pad, rec$fit),
-    if (length(st)) vapply(c("within", "between", "partial"), function(k)
-      if (any(st == k)) sprintf("%s%s-%s contrasts%s: %s", pad, tools::toTitleCase(k), rec$column,
-                                if (k == "between") sprintf(" (judged on the %s levels, not the samples)",
-                                                            rec$column) else "",
-                                paste(names(st)[st == k], collapse = ", ")) else NA_character_,
-      character(1)) else NULL,
+    sprintf("%sScope: %s", pad, block_scope_phrase(rec)),
+    if (length(st)) {
+      md <- unlist(rec$contrast_model)[names(st)]
+      unlist(lapply(c("within", "partial", "between", "other"), function(k)
+        vapply(c("blocked", "independent"), function(m) {
+          hit <- names(st)[st == k & md == m]
+          if (!length(hit)) return(NA_character_)
+          sprintf("%s%s contrasts, %s fit%s: %s", pad,
+                  if (k == "other") "Other" else paste0(tools::toTitleCase(k), "-", rec$column), m,
+                  if (k == "between") sprintf(" (judged on the %s levels, not the samples)", rec$column) else "",
+                  paste(hit, collapse = ", "))
+        }, character(1))))
+    } else NULL,
     if (length(rec$warnings)) sprintf("%sCAUTION: %s", pad, unlist(rec$warnings)))
   out[!is.na(out)]
 }

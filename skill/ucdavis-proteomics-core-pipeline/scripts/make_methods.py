@@ -542,10 +542,26 @@ def de_block_sentence(prov):
     over = (f", estimated from {n_est:,} of {n_all:,} proteins"
             if isinstance(n_est, int) and isinstance(n_all, int) else "")
     levels = f" ({b['n_blocks']} levels)" if isinstance(b.get("n_blocks"), int) else ""
-    return (f"Samples sharing a {col} were modelled as correlated rather than independent: {col}"
-            f"{levels} was fitted as a random blocking factor, with a consensus within-{col} "
-            f"correlation of {rho_s} (limma duplicateCorrelation{over}) used in the linear-model "
-            f"fit ({b.get('fit') or NOT_RECORDED}).")
+    out = (f"Samples sharing a {col} were modelled as correlated rather than independent: {col}"
+           f"{levels} was fitted as a random blocking factor, with a consensus within-{col} "
+           f"correlation of {rho_s} (limma duplicateCorrelation{over}) used in the linear-model "
+           f"fit ({b.get('fit') or NOT_RECORDED}).")
+    # Which fit reported each contrast (--block-scope): stated from the record, per contrast.
+    model = b.get("contrast_model") if isinstance(b.get("contrast_model"), dict) else None
+    if model is None:
+        return out + (f" Which contrasts were reported from the blocked fit: {NOT_RECORDED} "
+                      f"(this DE record predates --block-scope; that version reported all of them "
+                      f"from it).")
+    ind = [c for c, m in model.items() if m == "independent"]
+    blk = [c for c, m in model.items() if m == "blocked"]
+    if not ind:
+        return out + " All contrasts were reported from this fit."
+    return out + ((f" This fit reported {', '.join(blk)};" if blk else "")
+                  + f" {', '.join(ind)} -- contrasts between different {col} levels using at most "
+                  f"one sample per {col} -- were reported from the same data fitted with samples "
+                  f"as independent, since there is no pairing to model and a single consensus "
+                  f"correlation can understate their variance for proteins with strong "
+                  f"{col}-to-{col} variation.")
 
 
 def de_paragraph(prov):

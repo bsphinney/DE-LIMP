@@ -9,7 +9,7 @@ in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked by the bundle's
 Rscript scripts/run_de.R --input report.parquet --metadata conditions.csv \
         --method {dpc|maxlfq} --outdir de_results \
         [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--logfc 1.0] [--adjp 0.05] \
-        [--block Mouse]
+        [--block Mouse [--block-scope within|all]]
 ```
 `metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
@@ -73,14 +73,46 @@ used by `lmFit(block =, correlation =)`.
   `duplicateCorrelation(E, design, block)` → `lmFit(E, design, block, correlation)`.
 - **Nested is fine, fixed-and-random is not.** The block may sit inside a fixed factor
   (mice 1–3 Old, 4–6 Young; groups `Old_JPH3 … Young_IgG`): within-mouse contrasts
-  (bait vs IgG) gain power, between-mouse contrasts (Old vs Young) are still judged on
-  the number of mice. Do NOT also put the block in the design: a column named
+  (bait vs IgG) gain power, between-mouse contrasts (Old vs Young) are judged on the
+  number of mice — see `--block-scope` below. Do NOT also put the block in the design: a column named
   `Batch`/`Covariate1`/`Covariate2` is a fixed covariate, so `--block Covariate1` stops
   with an error — rename the column (e.g. `Mouse`). `collect_conditions.py --map` keeps
   a Mouse / Animal / Subject / Patient / Donor column under its own name and reports it
   as `block_column` (other extra columns still become `Covariate1/2`). As a fixed
   covariate nested in the groups the subject makes the design rank-deficient; run_de.R
   then stops up front and points at `--block`.
+- **`--block-scope within|all` — which contrasts the blocked fit reports (default
+  `within`).** One run fits both models on the one quantification (the slow part is not
+  repeated) and reports each contrast from its fit:
+  - `within`: a contrast **between** blocks that uses **at most one sample per block**
+    (Old_JPH3 vs Young_JPH3: 3 mice vs 3 mice, one IP each) comes from the fit with
+    samples independent; every other contrast — within-block, partial, and between-block
+    contrasts that pool several samples per block (Old vs Young over all baits, which
+    *would* be pseudo-replicated unblocked) — from the blocked fit. If any block holds two
+    samples of one group (technical replicates of a mouse), everything comes from the
+    blocked fit.
+  - `all`: every contrast from the blocked fit.
+
+  **Why `within` is the default** (PROT_0756: 6 mice × 5 IPs, consensus correlation
+  0.17). A one-sample-per-mouse age contrast has no pairing to model, and in a balanced
+  design the independent fit's variance is unbiased for every protein. The blocked fit
+  applies ONE consensus correlation to all proteins, so it understates the between-mouse
+  variance for proteins with strong mouse-to-mouse variation: the blocked/independent SE
+  ratio on the age contrasts was 1.04 at per-protein correlation ≤ 0 and 0.86 at > 0.6
+  (ideal: 1), matching what the design predicts to within 0.015. The 77 age calls only
+  the blocked fit made were those proteins (median per-protein correlation 0.44 vs 0.14
+  overall — red-cell, complement, tRNA-synthetase proteins that vary animal to animal).
+  On the bait-vs-IgG contrasts the blocked fit is the right model: +14–58% calls, none
+  lost, top hits and fold changes unchanged.
+
+  Recorded: `block.scope`, `block.contrast_model` (`{"<contrast>": "blocked" |
+  "independent"}`, beside `contrast_structure`), `block.contrast_model_rule`;
+  `de_tables` (each `DE_*.csv`, its model, its significant count); the `Blocking` lines
+  of `methods.txt`; the console line of each contrast (`[blocked fit]`); the Methods
+  sentence. `block.applied` stays true while the blocked fit reports ≥ 1 contrast, and
+  `block_column` is present exactly then. The DE-LIMP session's `fit` holds each contrast's
+  reporting fit column by column (`fit$contrast_model`; moderated F dropped) with
+  `fit_independent` beside it; `reproducibility_log.R` fits both and picks per contrast.
 - **Stops** (before quantification): column missing or blank for a sample, the column
   is `Group`/`File.Name`/a covariate, the block is encoded in the design (its levels
   coincide with the groups), or a block holds one analysed sample.
