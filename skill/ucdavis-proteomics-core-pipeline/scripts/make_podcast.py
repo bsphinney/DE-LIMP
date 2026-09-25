@@ -1955,8 +1955,19 @@ class VerifyError(Exception):
     pass
 
 
+# Letter/digit boundaries, except inside 5e-15 and a 3k / 2M suffix.
+_LETTER_DIGIT = re.compile(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])(?![eE][+\-−]?\d)"
+                           r"(?![kKMB](?![A-Za-z]))")
+
+
+def split_letters_digits(text):
+    """"LRS124" -> "LRS 124", "KCNB1" -> "KCNB 1"; 5e-15 and 3k stay whole."""
+    return _LETTER_DIGIT.sub(" ", text or "")
+
+
 def verify_tokens(text):
-    """-> [(word, start, end)]: text as comparable words. Lowercase; numbers without thousands
+    """-> [(word, start, end)]: text as comparable words, split at letter/digit boundaries
+    ("LRS124" and "LRS-124" are both lrs 124, "KCNB1" is kcnb 1). Lowercase; numbers without thousands
     separators; number words as digits ("forty six" -> 46, "two point one" -> 2.1); "minus"
     and "plus" dropped (the transcript writes -1.3); runs of capital single letters with only
     spaces between them joined ("K V" -> kv, "J P H 3" -> jph 3), so a spelled-out symbol and
@@ -2078,7 +2089,11 @@ def compare_audio_text(s, speak, transcript):
                          "script": " ".join(stoks[i1:i2])[:300],
                          "heard": " ".join(ttoks[j1:j2])[:300]})
 
-    heard = {n.value for n in numbers_in(transcript)}
+    # An ASR writes "LRS124" where the script says "LRS-124": a number glued to letters is
+    # still heard. Both texts' words were split at letter/digit boundaries by verify_tokens;
+    # the heard numbers are read from the transcript split the same way, and unsplit.
+    heard = ({n.value for n in numbers_in(transcript)} |
+             {n.value for n in numbers_in(split_letters_digits(transcript))})
     missing, seen = [], set()
     first_tok = {}
     for k, meta in enumerate(smeta):

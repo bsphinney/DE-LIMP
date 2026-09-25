@@ -374,10 +374,13 @@ python3 scripts/make_podcast.py link $S/output
   - It runs at the end of every `render --tts gemini` given `--cloud-ok` (`--no-verify`
     skips it). It never fails the render and never touches the report. It **sends the
     audio** to Google, so the same consent rules apply: nothing without `--cloud-ok`.
-  - Calibration: on the PROT_0756 episode the ratio was 0.969 with no gaps, and one real
-    misread was found: the voice said "5,244" for "5,024". A perfectly heard episode still
-    scores about 0.97, because a respelled symbol ("rye R 2") is not written the way the
-    ASR writes it ("Ryr2").
+  - Calibration, PROT_0756: a first render scored 0.969 with no gaps and found one real
+    misread (the voice said "5,244" for "5,024"), which a Pronunciation row fixed. The clean
+    26-minute episode on gemini-3.8-flash-tts then scored ratio 0.965, coverage 0.957, 0 gaps,
+    no numbers flagged. A perfectly heard episode scores about 0.96-0.97, not 1: a respelled
+    symbol ("rye R 2") is not written the way the ASR writes it ("Ryr2").
+  - A number glued to letters is still heard: both texts are split at letter/digit
+    boundaries ("LRS124" and "LRS-124" are both "lrs 124"), except inside 5e-15 and 3k.
   - **Fixing what it finds.** A misread number gets a Pronunciation row that spells it out,
     for example `| 5,024 | five thousand and twenty-four |`. Then re-run `check` and
     `render`: only the chunk with that line is re-made. Dropped or garbled audio with the

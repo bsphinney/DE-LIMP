@@ -1638,6 +1638,26 @@ class Verify(Workspace):
         self.assertEqual(data[0], 0xFF)                            # an ADTS frame sync
         self.assertEqual(data[1] & 0xF0, 0xF0)
 
+    def test_a_number_glued_to_letters_is_heard_and_a_misread_still_is_not(self):
+        # Michelle's 26-min episode, 2026-09-25: the ASR wrote "LRS124" / "LRS125" for the
+        # script's "LRS-124" / "LRS-125", and verify flagged 124 and 125 four times.
+        path = os.path.join(self.pod, "glued.md")
+        write(path, script_text(segs=([("MAYA", "An AI-generated show. The thinnest runs were "
+                                                "LRS-124 and LRS-125, with 5,024 proteins."),
+                                       ("LEO", "KCNB1 came along too.")],), claims="None"))
+        s = mp.parse_script(path)
+        sp = mp.pronouncer(s.pronunciation)
+        ok = mp.compare_audio_text(s, sp, "An AI generated show. The thinnest runs were LRS124 "
+                                          "and LRS125, with 5,024 proteins. KCNB 1 came along too.")
+        self.assertEqual(ok["numbers_not_heard"], [])
+        self.assertEqual(ok["status"], "OK")
+        bad = mp.compare_audio_text(s, sp, "An AI generated show. The thinnest runs were LRS124 "
+                                           "and LRS125, with 5,244 proteins. KCNB1 came along too.")
+        self.assertEqual([m["number"] for m in bad["numbers_not_heard"]], ["5024"])
+        self.assertIn("5,244 proteins", bad["numbers_not_heard"][0]["context"])
+        self.assertEqual(mp.split_letters_digits("LRS124 KCNB1 5e-15 3k 2x"),
+                         "LRS 124 KCNB 1 5e-15 3k 2 x")
+
     def test_verify_tokens(self):
         t = lambda x: [w for w, _, _ in mp.verify_tokens(x)]              # noqa: E731
         self.assertEqual(t("five thousand and twenty-four"), ["5024"])
@@ -1646,6 +1666,8 @@ class Verify(Workspace):
         self.assertEqual(t("K V two point one, IgG and I G G, a test"),
                          ["kv", "2.1", "igg", "and", "igg", "a", "test"])
         self.assertEqual(t("fell minus 1.3 to 6,112"), ["fell", "1.3", "to", "6112"])
+        self.assertEqual(t("LRS124 and LRS-124, KCNB1"), ["lrs", "124", "and", "lrs", "124",
+                                                         "kcnb", "1"])
 
 
 class SessionFiles(unittest.TestCase):
