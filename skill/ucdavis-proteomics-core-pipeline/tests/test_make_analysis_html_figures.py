@@ -117,7 +117,8 @@ class FigureSelection(unittest.TestCase):
                    f"![c]({outside})\n\n![d](figures/pca.png)\n")
         res, page, _ = self.build()
         self.assertEqual(res["figures_embedded"], 1)
-        self.assertEqual(len(res["figures_rejected"]) + len(res["figures_missing"]), 3)
+        self.assertEqual(res["figures_rejected"], ["https://example.org/x.png"])
+        self.assertEqual(res["figures_missing"], ["secret.png"])     # both refs, one file
         self.assertNotIn("https://example.org", page.split("<body")[1].split("figure not embedded")[0])
 
     def test_no_h2_title_appears_twice(self):

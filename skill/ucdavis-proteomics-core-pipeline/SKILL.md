@@ -1350,6 +1350,13 @@ the study facts, stat tiles, contents rail, figure cards with click-to-enlarge, 
 the audit / data-quality / expert-review sections, dark mode, print styles) lives in
 `scripts/report_style.py`, shared by the skill's HTML pages — restyle there, not per page.
 
+The same run also writes **`Analysis_Report.md`** beside the HTML: the full report as plain
+text, for NotebookLM or other AI notebooks. It is rendered from the same assembled sections
+(same headings, callouts as labelled blockquotes), and because those tools read text, not
+images, each figure carries its caption plus a data summary from the tables (volcano: counts
+and the top 5 by adj.P), with a top-20 protein table per contrast. Offer it to users who
+want to "ask questions of the report".
+
 The page puts the **QC panels above the results** on purpose: a volcano plot is equally
 persuasive whether or not the run was any good, so a reader who meets the biology first
 has already formed a conclusion before seeing the evidence about whether to trust it.

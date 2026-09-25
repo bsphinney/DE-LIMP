@@ -72,6 +72,8 @@ CATALOG = [
 
     (r"^AI_Analysis_Report\.md$", "Analysis report", "The biological + QC interpretation of the results (the AI analysis)."),
     (r"^AI_Analysis_Report\.docx$", "Analysis report", "The analysis report as a Word document (same content as the .md)."),
+    (r"^Analysis_Report\.html$", "Analysis report", "The whole report as ONE self-contained web page: QC, figures in place, results, caveats. Open this first."),
+    (r"^Analysis_Report\.md$", "Analysis report", "The full report as plain text, for NotebookLM or other AI notebooks: same sections as the HTML, each figure's caption and the numbers it shows written out, top proteins per contrast."),
     (r"^methods\.md$|^methods\.docx$", "Analysis report", "Publication-ready LC-MS/MS Methods section (from raw metadata) + instrument grant acknowledgment."),
     (r"^methods_params\.json$", "Analysis report", "Acquisition parameters extracted from the raw data for the Methods section."),
     (r"^ANALYSIS_PROMPT\.md$", "Analysis report", "The analysis brief the agent followed to write the report."),

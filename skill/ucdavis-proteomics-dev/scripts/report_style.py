@@ -114,6 +114,8 @@ figure.fig img{display:block;width:100%;height:auto;border-radius:4px}
 figure.fig figcaption{font-size:.9rem;color:var(--muted);margin:.7rem .2rem .1rem;line-height:1.5}
 figure.fig .fignum{font-weight:700;color:var(--fg);margin-right:.35rem}
 figure.fig .figt{color:var(--fg);font-weight:600}
+figure.fig .figdata{display:block;margin-top:.45rem;padding-top:.45rem;border-top:1px dashed var(--line);font-variant-numeric:tabular-nums}
+details{margin:.6rem 0}details > summary{cursor:pointer;padding:.35rem 0}
 .figmissing{margin:1.2rem 0;padding:.75rem 1rem;border:1.5px dashed var(--warning);border-radius:10px;color:var(--warning);background:var(--warning-bg);font-size:.92rem;max-width:52rem}
 .figref{color:var(--muted);font-size:.92rem}
 /* lightbox */
@@ -139,6 +141,7 @@ footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--mute
 }
 @media print{
   :root{--bg:#fff;--surface:#fff;--shadow:none}
+  details > *{display:block}
   body{background:#fff;color:#000;font-size:11pt}
   .toc,.toggle,.lb,.skip{display:none !important}
   .layout{display:block;padding:0;max-width:none}
@@ -219,13 +222,15 @@ def callout(kind, body_html, title=None):
     return f'<div class="callout {kind}" role="note">{head}{body_html}</div>'
 
 
-def figure_card(n, uri, alt, title_html="", caption_html=""):
+def figure_card(n, uri, alt, title_html="", caption_html="", summary_html=""):
     sep = " &mdash; " if title_html and caption_html else ""
     return (f'<figure class="fig" id="fig-{n}">'
             f'<button class="imgbox" type="button" aria-label="Enlarge figure {n}">'
             f'<img src="{uri}" alt="{esc(alt)}"></button>'
             f'<figcaption><span class="fignum">Figure {n}.</span>'
-            f'<span class="figt">{title_html}</span>{sep}{caption_html}</figcaption></figure>')
+            f'<span class="figt">{title_html}</span>{sep}{caption_html}'
+            + (f'<span class="figdata"><b>Data:</b> {summary_html}</span>' if summary_html else "")
+            + "</figcaption></figure>")
 
 
 def note(text):
