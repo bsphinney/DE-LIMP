@@ -523,6 +523,12 @@ def do_finalize(a):
         speclib_label = ("predicted spectral libraries (*.predicted.speclib anywhere in the "
                          "session; rebuilt from the FASTA + params, kept on disk where they are)")
         n_speclib = 0
+        # make_podcast.py's per-chunk TTS cache: ~48 KB per second of speech (~60 MB for a 20-min
+        # episode), scratch for resuming a render. The podcast itself (podcast.m4a, transcript,
+        # script, check.txt, podcast.json) goes in.
+        podcast_label = "output/podcast/.cache (TTS scratch, kept on disk)"
+        podcast_cache = os.path.abspath(os.path.join(p["output_dir"], "podcast", ".cache"))
+        n_podcast = 0
 
         def is_search_out(d):
             return (os.path.abspath(d) == os.path.abspath(p["search_out"])
@@ -537,6 +543,10 @@ def do_finalize(a):
                 if is_search_out(root) and "quant" in dirs:
                     dirs.remove("quant")
                     n_quant += sum(len(fs) for _, _, fs in os.walk(os.path.join(root, "quant")))
+                if os.path.abspath(os.path.join(root, ".cache")) == podcast_cache and \
+                        ".cache" in dirs:
+                    dirs.remove(".cache")
+                    n_podcast += sum(len(fs) for _, _, fs in os.walk(podcast_cache))
                 for fn in files:
                     full = os.path.join(root, fn)
                     if fn.endswith(".quant"):
@@ -551,6 +561,8 @@ def do_finalize(a):
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         excluded[quant_label] = n_quant
         excluded[speclib_label] = n_speclib
+        if n_podcast:
+            excluded[podcast_label] = n_podcast
         result["zip"] = archive
         result["zip_excluded"] = excluded
 

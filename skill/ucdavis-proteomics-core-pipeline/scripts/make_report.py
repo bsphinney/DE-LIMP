@@ -88,6 +88,17 @@ CATALOG = [
     (r"^AGENTS\.md$", "Analysis report",
      "For an AI agent given this folder: the study, which file is authoritative for what, the "
      "table columns, the traps, and what it must not do."),
+    (r"^podcast\.(m4a|wav)$", "Analysis report",
+     "OPTIONAL: an AI-generated audio discussion of the report (synthetic voices; the report is "
+     "the record). make_podcast.py."),
+    (r"^podcast_script\.md$", "Analysis report",
+     "The podcast's script, with its 'Claims beyond the report' ledger (what it says that the "
+     "report does not)."),
+    (r"^transcript\.html$", "Analysis report", "The podcast transcript as a web page."),
+    (r"^podcast\.json$", "Analysis report",
+     "How the podcast was made: TTS service and model, voices, consent, the script's checksum."),
+    (r"^check\.txt$", "Analysis report",
+     "The podcast script's fidelity check (every number and symbol against the report)."),
     (r"^raw_files\.txt$", "Inputs",
      "Where the raw data files are (full paths); raw data is never copied into the session."),
 ]
@@ -143,7 +154,8 @@ def collect(paths):
         if os.path.isfile(p):
             seen[os.path.abspath(p)] = p
         else:
-            for dp, _, fns in os.walk(p):
+            for dp, dns, fns in os.walk(p):
+                dns[:] = [d for d in dns if d != ".cache"]      # scratch (make_podcast.py)
                 for fn in fns:
                     fp = os.path.join(dp, fn)
                     seen[os.path.abspath(fp)] = fp

@@ -1474,6 +1474,23 @@ keep the acknowledgment exact** (confirm the wording at the source URL). This ca
 standalone — point `--raw` at facility data; no search or DE is needed. → detail:
 `references/methods.md`.
 
+### 9e. Optional: an audio discussion of the results
+Once the report is final, you may **offer** (never make by default) a ~20-min two-host audio
+discussion: Maya, a cell biologist, and Leo, a statistician, on "Signal to Noise". It is
+linked from a "Listen" card at the top of `Analysis_Report.html`. **You write the script**
+from the report, then check it, render it and link it:
+```
+python3 scripts/make_podcast.py check <session>/output/podcast/podcast_script.md \
+    --source <session>/output/AI_Analysis_Report.md <session>/output/AUDIT.md --forbid-name "<people>"
+python3 scripts/make_podcast.py render <session>/output/podcast/podcast_script.md --tts say
+python3 scripts/make_podcast.py link <session>/output
+```
+Every number and gene symbol must be in the report or listed under "Claims beyond the report".
+Render refuses until the check passes. `--tts gemini` sends the transcript (never the report)
+to Google. It sends nothing without `--cloud-ok`: on a free-tier key Google may use the text,
+so use a paid-tier key or `--tts say` for unpublished data, and record the user's consent.
+→ detail (the brief, the file format, privacy): `references/podcast.md`.
+
 ### 10. Reproducibility bundle (mandatory)
 Assemble the bundle that makes the whole analysis reproducible:
 ```
@@ -1635,6 +1652,8 @@ notification -- not configured for this user". Then summarize: data type (instru
   output), and that these are facts only the user knows — tissue, disease, sex, age, what the
   groups are — which the skill never guesses.
 - for a re-analysis, `DIFFERENCES.md` + `comparison/COMPARISON.md`.
+- if one was made (9e), `output/podcast/podcast.m4a`: say it is AI-generated, that you could
+  not listen to it, and that someone should before it is shared.
 
 If anything was recorded with `report_issue.sh` this session, say so in one line and where
 it went (`report_issue.sh --where`), so the user knows the Core will see it.
