@@ -8,12 +8,15 @@ genuine ambiguities.
 1. **In words** — "the first three are control, the last three treated", "A* are
    wild-type, B* are knockout". The agent reads the real run list and turns this
    into an intent JSON: `{"groups": {"control": [...], "treated": [...]}}` or
-   `{"mapping": {"<sample>": "<group>"}}`.
+   `{"mapping": {"<sample>": "<group>"}}`. If they said which animal / patient each
+   sample came from, add `"subjects": {"<sample>": "<subject>"}, "subject_column": "Mouse"`.
 2. **A file** — any CSV/TSV they already have. Column names are auto-detected:
    sample column from {File.Name, filename, run, sample, sample name, name, raw,
    id}; group from {group, condition, treatment, class, type, cohort, phenotype};
-   batch from {batch, block, plate, run order}. Up to two further columns become
-   Covariate1/Covariate2.
+   batch from {batch, block, plate, run order}; a subject column from {mouse, mice,
+   animal, rat, subject, patient, donor, individual, participant, pair} (an `id` / `no` /
+   `number` suffix allowed: `Mouse ID`, `animal_no`) is kept **under its own name**
+   (`Mouse ID` → `Mouse_ID`). Up to two further columns become Covariate1/Covariate2.
 
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):
@@ -42,9 +45,11 @@ The agent confirms each with the user, finalizes `conditions.csv`, then runs
 before/after samples.) Ask. If so, keep that unit in its own column under its own name
 (`Mouse`, `Patient`) — not Batch/Covariate1/Covariate2, which are fitted as fixed
 effects — and run DE with `--block Mouse` (`references/de-analysis.md`, "Paired /
-repeated designs"). `--map` currently files extra sample-sheet columns under
-Covariate1/2, so rename it there. run_de.R prints a note when a column recurs across
-groups and no `--block` was given.
+repeated designs"). `--map` keeps a subject column under its own name and reports it
+as `block_column`; `block_suggested` is true when every run has a subject and every
+subject holds ≥ 2 runs (all singletons = a sample id, not a block). Ambiguities add
+`subject_conflicting_runs`, `runs_without_subject` and `single_run_subjects`. run_de.R
+prints a note when a column recurs across groups and no `--block` was given.
 `File.Name` must equal the Run names in the search report. `--validate` checks
 column presence, blank groups, singleton groups, and that the report runs and
 metadata rows line up exactly.

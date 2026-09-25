@@ -846,6 +846,11 @@ prov <- list(
                   arrow = pkg_ver("arrow"), dplyr = pkg_ver("dplyr"), tidyr = pkg_ver("tidyr")),
   input = normalizePath(input, mustWork = FALSE), metadata = normalizePath(meta_path, mustWork = FALSE)
 )
+# The block's column name at the top level too, for readers that only need "was the design
+# blocked, and on what" (the submission workflow). Present ONLY when blocked; `block` is the
+# full record either way (applied = FALSE says independence was modelled).
+if (isTRUE(block_rec$applied))
+  prov <- append(prov, list(block_column = block_rec$column), after = which(names(prov) == "block"))
 writeLines(jsonlite_or_manual(prov), file.path(outdir, "de_provenance.json"))
 
 # ---- detected vs inferred QC ------------------------------------------------

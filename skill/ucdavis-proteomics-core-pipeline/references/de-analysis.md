@@ -76,10 +76,11 @@ used by `lmFit(block =, correlation =)`.
   (bait vs IgG) gain power, between-mouse contrasts (Old vs Young) are still judged on
   the number of mice. Do NOT also put the block in the design: a column named
   `Batch`/`Covariate1`/`Covariate2` is a fixed covariate, so `--block Covariate1` stops
-  with an error — rename the column (e.g. `Mouse`). `collect_conditions.py` turns
-  unrecognised extra columns into `Covariate1/2`, so a sample sheet's Mouse column
-  lands there: rename it before DE. (As a fixed covariate nested in the groups it makes
-  the design rank-deficient anyway.)
+  with an error — rename the column (e.g. `Mouse`). `collect_conditions.py --map` keeps
+  a Mouse / Animal / Subject / Patient / Donor column under its own name and reports it
+  as `block_column` (other extra columns still become `Covariate1/2`). As a fixed
+  covariate nested in the groups the subject makes the design rank-deficient; run_de.R
+  then stops up front and points at `--block`.
 - **Stops** (before quantification): column missing or blank for a sample, the column
   is `Group`/`File.Name`/a covariate, the block is encoded in the design (its levels
   coincide with the groups), or a block holds one analysed sample.

@@ -390,7 +390,9 @@ proceeding — `unassigned_runs` (a raw file no condition matched), `conflicting
 with no matching file), `multi_match_identifiers` (one label hit several files —
 usually fine, e.g. a replicate prefix), and `singleton_groups` (<2 replicates → no
 within-group variance). Do **not** start a search while any run is unassigned or
-conflicting. Finalize the CSV, then validate it:
+conflicting. A subject column (Mouse, Animal, Subject, Patient, Donor…) is kept under
+its own name; when the output has `"block_suggested": true`, run DE with
+`--block <block_column>` (step 8). Finalize the CSV, then validate it:
 ```
 python3 scripts/collect_conditions.py --validate conditions.csv --against report.parquet
 ```

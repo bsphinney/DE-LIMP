@@ -206,6 +206,7 @@ class RunDeBlock(unittest.TestCase):
                 b = p["block"]
                 self.assertTrue(b["applied"])
                 self.assertEqual(b["column"], "Subject")
+                self.assertEqual(p["block_column"], "Subject")   # top-level, for simple readers
                 self.assertEqual(b["n_blocks"], 6)
                 self.assertEqual(b["block_sizes"], {f"S{i}": 2 for i in range(1, 7)})
                 self.assertGreater(b["consensus_correlation"], 0.5)
@@ -226,6 +227,7 @@ class RunDeBlock(unittest.TestCase):
     def test_unblocked_run_says_independent(self):
         b = self.prov("dpc")["block"]
         self.assertFalse(b["applied"])
+        self.assertNotIn("block_column", self.prov("dpc"))   # present only when blocked
         self.assertIn("Blocking      : none", self.methods("dpc"))
         self.assertNotIn("block", self.prov("dpc")["de_engine"])
         # ... and points at the column that looks like a blocking unit
