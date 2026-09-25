@@ -50,11 +50,15 @@ def write_inputs(d, missing):
 
 @unittest.skipUnless(have_r_ggplot(), "Rscript with ggplot2 not available")
 class ProteinCountsPlot(unittest.TestCase):
-    def run_figures(self, missing):
+    def run_figures(self, missing, stale=False):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         tables = write_inputs(d, missing)
         out = os.path.join(d, "figs")
+        if stale:                                  # a copy left behind by an earlier run
+            os.makedirs(out)
+            with open(os.path.join(out, "qc_protein_counts.png"), "wb") as fh:
+                fh.write(b"stale")
         r = subprocess.run(["Rscript", SCRIPT, "--de-dir", tables,
                             "--conditions", os.path.join(d, "conditions.csv"), "--outdir", out],
                            capture_output=True, text=True, timeout=300)
@@ -69,6 +73,20 @@ class ProteinCountsPlot(unittest.TestCase):
         self.assertNotIn("qc_protein_counts.png", listed)
         self.assertIn("proteins-per-sample plot skipped", log)
         self.assertIn("pca.png", listed)                 # the other figures are unaffected
+
+    def test_a_stale_copy_is_removed_when_the_plot_is_skipped(self):
+        out, listed, log = self.run_figures(missing=False, stale=True)
+        self.assertFalse(os.path.exists(os.path.join(out, "qc_protein_counts.png")))
+        self.assertNotIn("qc_protein_counts.png", listed)
+        self.assertIn("removed stale qc_protein_counts.png", log)
+
+    def test_a_stale_copy_is_replaced_when_the_plot_is_drawn(self):
+        out, listed, log = self.run_figures(missing=True, stale=True)
+        path = os.path.join(out, "qc_protein_counts.png")
+        with open(path, "rb") as fh:
+            self.assertTrue(fh.read(8).startswith(b"\x89PNG"))   # regenerated, not the stale bytes
+        self.assertIn("qc_protein_counts.png", listed)
+        self.assertNotIn("removed stale", log)
 
     def test_a_matrix_with_missing_values_keeps_the_plot(self):
         out, listed, _ = self.run_figures(missing=True)

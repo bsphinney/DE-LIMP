@@ -356,6 +356,12 @@ if (file.exists(em_path)) {
               cnt$n[1], " proteins in every sample), so every bar would be identical",
               if (file.exists(file.path(de_dir, "QC_detected_vs_inferred.csv")))
                 "; qc_detected_vs_inferred.png shows per-sample depth" else "")
+      # A copy left by an earlier run would otherwise survive a re-render and be read as
+      # current (Silva08172026's re-rendered report showed the identical-bar plot again).
+      # Only this exact file, which this script owns, is removed.
+      stale <- file.path(outdir, "qc_protein_counts.png")
+      if (file.exists(stale) && file.remove(stale))
+        message("[figures] removed stale qc_protein_counts.png from an earlier run in ", outdir)
     } else {
       p <- ggplot(cnt, aes(reorder(Sample, n), n, fill = Group)) +
         geom_col() + coord_flip() +
