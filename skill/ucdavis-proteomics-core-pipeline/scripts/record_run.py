@@ -1812,7 +1812,8 @@ def data_quality_notes(rec):
         notes.append(dq("WARNING", str(w), fa.get("meta_file"), source="FASTA sidecar"))
     if fa.get("n_contaminants_dropped_as_target"):
         notes.append(dq("NOTE", f"{fa['n_contaminants_dropped_as_target']} contaminant entries "
-                                f"were identical to a target protein and were dropped",
+                                f"matched a target protein (identical, or too few peptides of "
+                                f"their own) and were dropped",
                         fa.get("meta_file"),
                         "left in, they take the target's peptides and --cont-quant-exclude "
                         "removes them from quant", "the universal contaminant set holds bovine/"
@@ -2033,7 +2034,7 @@ def render_search(s):
                   f"not recorded (pre-staged copy dated {fa['staged_file_date']})"
                   if fa.get("staged_file_date") else "not recorded")),
               f"- **Contaminants:** {fmt_n(nc)} ({fa.get('contaminant_set') or 'none'})"
-              + (f", {fa['n_contaminants_dropped_as_target']} dropped as identical to a target "
+              + (f", {fa['n_contaminants_dropped_as_target']} dropped as matching a target "
                  f"protein" if fa.get("n_contaminants_dropped_as_target") else "")
               + (f"; excluded from quantification with `--cont-quant-exclude "
                  f"{fa['cont_quant_exclude']}`" if fa.get("cont_quant_exclude") else "")

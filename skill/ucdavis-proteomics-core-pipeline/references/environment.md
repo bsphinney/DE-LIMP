@@ -204,7 +204,25 @@ warning and a methods sentence. The universal set holds 152 human-identical entr
 keratins; bovine ACTB/EEF1A1/YWHAZ/tubulins) + 1 substring, and 31 mouse-identical ones;
 left in, DIA-NN reported ACTB, EEF1A1 and KRT8 only as `Cont_` groups and
 `--cont-quant-exclude` removed them from quant (a real HeLa search, 2026-09-23: 6.9% of all
-intensity). The digestion enzyme(s) actually used (`fetch --enzyme`, default `trypsin,lysc`)
+intensity).
+
+**So are entries the search cannot tell apart from a target protein.** Identity misses the
+near-identical ones: bovine EF1A1 and 1433Z each differ from the MOUSE protein by one residue,
+and in a 30-run mouse-brain search (PROT_0756, DIA-NN 2.6.1) both were `Cont_`-only groups in
+every run while mouse Eef1a1 had no protein group at all. `fetch` therefore also digests every
+contaminant and target entry with the search's own digest (`estimate_params.DIANN_DIGEST`:
+`--cut K*,R*`, 1 missed cleavage, 7–30 aa, N-terminal Met excision; I and L equal) and drops a
+contaminant that shares a peptide with a target but has fewer than `--min-unique-peptides`
+(default 2) peptides of its own that do not overlap one another — missed-cleavage variants of
+one residue difference count once. Each record carries `n_unique_peptides` (that count),
+`n_unique_peptides_all`, `n_shared_peptides` and the target sharing the most peptides. Measured
+2026-09-25 on the Universal set: human UP000005640 161 dropped (8 by peptide: KRT34, KRTAP10-4,
+KRTAP4-7, TBA1D_BOVIN, TPM2_BOVIN, three sheep KRB2), mouse UP000000589 41 (10 by peptide:
+EF1A1_BOVIN, 1433Z_BOVIN, TBA1D_BOVIN, four human KRTAPs, three sheep KRB2). An entry with
+2+ own peptides stays a contaminant (bovine ENO1, LDHB, GSN, CAP1 against mouse). The sidecar
+records `min_unique_peptides` and `contaminant_digest`; a sidecar with the rule but without
+`min_unique_peptides` was built by the identity rule alone, and `reproduce.sh` replays it with
+`--min-unique-peptides 0`. The digestion enzyme(s) actually used (`fetch --enzyme`, default `trypsin,lysc`)
 are kept as contaminants even when they match a target protein — they are reagents — and
 recorded under `contaminants_kept_despite_target_match`; any other protease entry follows the
 normal rule (S. aureus's own SspA is identical to the Glu-C entry and stays quantified on a

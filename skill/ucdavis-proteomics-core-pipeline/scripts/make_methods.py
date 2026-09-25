@@ -727,7 +727,16 @@ def main():
             # (bovine ACTB = human ACTB, human keratins); a reader must know those proteins
             # were quantified, not excluded as contaminants.
             n_drop = fmeta.get("n_contaminants_dropped_as_target") or 0
-            if n_drop:
+            # min_unique_peptides > 0: built with the peptide rule too (near-identical
+            # entries such as bovine EEF1A1 vs mouse). Absent: the identity rule alone.
+            k = fmeta.get("min_unique_peptides") or 0
+            if n_drop and k:
+                sent += (f" {n_drop} contaminant entries that the search could not tell apart "
+                         f"from {fmeta.get('organism') or '____'} proteins (identical or "
+                         f"contained sequence, or fewer than {k} peptides of their own) were "
+                         f"removed from the library first, so those proteins are quantified "
+                         f"under their own accessions.")
+            elif n_drop:
                 sent += (f" {n_drop} contaminant entries identical to (or contained in) "
                          f"{fmeta.get('organism') or '____'} proteins were removed from the "
                          f"library first, so those proteins are quantified under their own "
