@@ -100,6 +100,23 @@ PRONOUNCE = [
 GENERIC_TOKENS = {"ai", "ok", "dna", "rna", "mrna", "pcr", "pdf", "html", "csv", "png", "tv",
                   "phd", "fyi", "usa"}
 
+# The listener is the collaborator who submitted the samples; one job of the episode is to teach
+# how proteomics works with their own data (references/podcast.md). check warns -- never fails --
+# on a topic the transcript never touches: not every analysis has MBR or dia-PASEF.
+TEACHING = [
+    ("what LC-MS/MS does", r"\bLC-?MS|mass spec|chromatograph|\bpeptides?\b"),
+    ("DIA / dia-PASEF", r"\bDIA\b|dia-?PASEF|data[- ]independent"),
+    ("precursors vs protein groups", r"precursor|protein groups?\b"),
+    ("what 1% FDR means", r"\bFDR\b|false discovery"),
+    ("library-free search / match-between-runs",
+     r"library[- ]free|match(?:ing)?[- ]between[- ]runs|\bMBR\b|spectral librar"),
+    ("detected vs inferred values", r"\binferred\b|detection[- ]probability|PropObs"),
+    ("empirical Bayes", r"empirical Bayes|borrow\w* (?:strength|information)|moderated t"),
+    ("multiple testing", r"multiple[- ]testing|Benjamini|adjusted p|\bFDR\b"),
+]
+# The close tells them what to do next: which file to open, how to tier hits, what to validate.
+NEXT_STEPS = r"\.(?:html|csv|md|pdf)\b|Analysis[_ ]Report|PropObs|\bvalidat|\btier"
+
 SPELLED_NUMBER = re.compile(
     r"\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
     r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b", re.I)
@@ -606,6 +623,16 @@ def check(s, sources, forbid=()):
             hits.append("Claims beyond the report")
         if hits:
             fails.append(f"forbidden name {name!r} appears in: {', '.join(hits)}")
+
+    said = "\n".join(t.text for t in turns)
+    missing = [name for name, rx in TEACHING if not re.search(rx, said, re.I)]
+    if turns and missing:
+        warns.append("the collaborator is never taught: " + "; ".join(missing) + " (the 'How "
+                     "proteomics works, with your data' segment; skip what does not apply here)")
+    tail = "\n".join(t.text for seg in s.segments[-2:] for t in seg)
+    if turns and not re.search(NEXT_STEPS, tail, re.I):
+        warns.append("the last two segments never say what to do with this: which file to open, "
+                     "how to tier hits by PropObs, what to validate first")
 
     words = sum(t.words for t in turns)
     by = {}
@@ -1609,9 +1636,29 @@ def cmd_link(a):
         edit(os.path.join(root, "README.html"), readme_html, "file-list entry")
         edit(os.path.join(root, "README.md"), readme_md, "file-list entry")
         edit(os.path.join(root, "AGENTS.md"), agents, "podcast section")
+    done.append(refresh_pdf(os.path.join(out, "Analysis_Report.html")))
     for level, path, note in done:
         print(f"[{level}] {rel(path, os.path.dirname(out))}: {note}")
     return 0
+
+
+def refresh_pdf(html_path):
+    """Analysis_Report.pdf is printed from the HTML (html_to_pdf.py, where the skill has it):
+    once link has put the card in the HTML, an older PDF lacks it. Reprint it; the card's print
+    style shows the audio's file name in place of the player. -> (level, path, note)"""
+    pdf = os.path.splitext(html_path)[0] + ".pdf"
+    if not os.path.isfile(pdf):
+        return "INFO", pdf, "no PDF beside the report; nothing to reprint"
+    if not os.path.isfile(html_path) or os.path.getmtime(pdf) >= os.path.getmtime(html_path):
+        return "OK", pdf, "up to date with the HTML"
+    how = "open Analysis_Report.html in a browser, Print, Save as PDF"
+    try:
+        import html_to_pdf
+    except ImportError:
+        return "INFO", pdf, f"older than the HTML, so it has no Listen card; to reprint it, {how}"
+    ok, note = html_to_pdf.convert(html_path, pdf)
+    return (("OK", pdf, f"reprinted with the Listen card ({note})") if ok else
+            ("INFO", pdf, f"older than the HTML and NOT reprinted: {note}"))
 
 
 # ----------------------------------------------------------------------------- main

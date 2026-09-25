@@ -1475,10 +1475,13 @@ standalone — point `--raw` at facility data; no search or DE is needed. → de
 `references/methods.md`.
 
 ### 9e. Optional: an audio discussion of the results
-Once the report is final, you may **offer** (never make by default) a ~20-min two-host audio
-discussion: Maya, a cell biologist, and Leo, a statistician, on "Signal to Noise". It is
-linked from a "Listen" card at the top of `Analysis_Report.html`. **You write the script**
-from the report, then check it, render it and link it:
+When you deliver the final report to a collaborator, **offer** (never make by default) a ~20-min
+two-host audio discussion: Maya, a cell biologist, and Leo, a statistician, on "Signal to
+Noise". It is linked from a "Listen" card at the top of `Analysis_Report.html`. It is for the
+person who submitted the samples. It tells them what their data say and how their samples were
+measured and analysed, and it teaches how proteomics works (LC-MS/MS, DIA, FDR, inferred values,
+empirical Bayes) with their own data. **You write the script** from the report, then check it,
+render it and link it:
 ```
 python3 scripts/make_podcast.py check <session>/output/podcast/podcast_script.md \
     --source <session>/output/AI_Analysis_Report.md <session>/output/AUDIT.md --forbid-name "<people>"

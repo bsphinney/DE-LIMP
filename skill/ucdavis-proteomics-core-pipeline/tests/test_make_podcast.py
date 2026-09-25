@@ -162,6 +162,54 @@ class Parse(Workspace):
         self.assertTrue(any("NADIA" in m and "not one of the hosts" in m for m in msgs), msgs)
 
 
+class RealFormat(Workspace):
+    """tests/fixtures/podcast/format_v1_script.md copies, line for line, the layout of the first
+    real Signal to Noise script (PROT_0756, 2026-09-25): bold header bullets, hosts separated by
+    '·' with the voice in the parentheses, a Pronunciation table with a digits row, a Claims
+    section with prose, nested bullets and no '## Transcript' heading, blank lines between turns,
+    10 segments. The study itself is synthetic (the real one is unpublished client data)."""
+    FIX = os.path.join(HERE, "fixtures", "podcast")
+
+    def test_parses_exactly(self):
+        s = mp.parse_script(os.path.join(self.FIX, "format_v1_script.md"))
+        self.assertEqual(s.problems, [])
+        self.assertEqual(s.hosts, [("Maya", "cell biologist"), ("Leo", "statistician")])
+        self.assertEqual(s.gemini_voices, {"Maya": "Kore", "Leo": "Charon"})
+        self.assertEqual(s.show, "Signal to Noise")
+        self.assertTrue(s.title.startswith("Who stays with the chaperone?"))
+        self.assertTrue(s.author.startswith("a test author"))
+        self.assertEqual(len(s.segments), 10)
+        self.assertEqual(s.turns()[0].speaker, "Maya")
+        self.assertIn(("0421", "zero four two one"), s.pronunciation)
+        self.assertEqual(len(s.pronunciation), 12)
+        self.assertEqual(len(s.claims), 8)                    # nested bullets are claims too
+        self.assertTrue(any(c.startswith("a 1% FDR means") for c in s.claims))
+        self.assertFalse(any("TRANSCRIPT" in c or "**MAYA" in c for c in s.claims))
+
+    def test_passes_check_teaches_and_closes(self):
+        os.makedirs(self.pod, exist_ok=True)
+        shutil.copy(os.path.join(self.FIX, "format_v1_script.md"), self.script)
+        rc, out, err = run("check", self.script, "--source",
+                           os.path.join(self.FIX, "synthetic_report.md"))
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 0, txt)
+        self.assertNotIn("never taught", txt)
+        self.assertNotIn("what to do with this", txt)
+        self.assertIn("segments: 10", txt)
+        rc, out, err = run("render", self.script, "--tts", "say", "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Maya: Leo, picture a yeast cell", out)
+        self.assertIn("submission zero four two one", out)
+        self.assertIn("adjusted p of 3.1 times 10 to the minus 12.", out)
+        self.assertIn("D I A N N 2.6.1", out)
+
+    def test_teaching_and_close_warnings(self):
+        rc, txt = self.check()                                # the short script teaches little
+        self.assertIn("the collaborator is never taught:", txt)
+        self.assertIn("what LC-MS/MS does", txt)
+        self.assertIn("the last two segments never say what to do with this", txt)
+
+
 # ------------------------------------------------------------------------------------ check
 class Check(Workspace):
     def test_a_clean_script_passes(self):
@@ -674,6 +722,36 @@ class Link(Workspace):
                          mp.add_listen_md(REPORT, self.out).split("## Overview")[0].split(mp.START)[1])
         self.assertEqual(mp.strip_block(once).replace("\n\n\n", "\n\n"), md)
         self.assertEqual(mp.add_listen_md(md, self.d), md)             # no podcast: unchanged
+
+    def test_an_older_pdf_is_reprinted_or_flagged(self):
+        html_path = os.path.join(self.out, "Analysis_Report.html")
+        pdf = os.path.join(self.out, "Analysis_Report.pdf")
+        write(pdf, "%PDF old")
+        os.utime(pdf, (1, 1))                                 # older than the HTML
+        with mock.patch.dict(sys.modules, {"html_to_pdf": None}):     # not on this branch
+            rc, out, err = run("link", self.out)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[INFO] output/Analysis_Report.pdf: older than the HTML, so it has no "
+                      "Listen card; to reprint it, open Analysis_Report.html in a browser", out)
+        calls = []
+
+        def convert(h, p, **kw):
+            calls.append((h, p))
+            self.assertIn(mp.START, read(h))                  # printed AFTER the card went in
+            write(p, "%PDF new")
+            return True, "3 pages, printed by fake"
+        fake = types.ModuleType("html_to_pdf")
+        fake.convert = convert
+        os.utime(pdf, (1, 1))
+        with mock.patch.dict(sys.modules, {"html_to_pdf": fake}):
+            rc, out, err = run("link", self.out)
+            self.assertIn("[OK] output/Analysis_Report.pdf: reprinted with the Listen card", out)
+            self.assertEqual(calls, [(html_path, pdf)])
+            rc, out, err = run("link", self.out)              # up to date now: not reprinted
+        self.assertEqual(len(calls), 1)
+        self.assertIn("up to date with the HTML", out)
+        os.remove(pdf)
+        self.assertIn("no PDF beside the report", run("link", self.out)[1])
 
     def test_missing_files_are_info_and_no_podcast_is_an_error(self):
         for f in ("README.html", "README.md", "AGENTS.md"):

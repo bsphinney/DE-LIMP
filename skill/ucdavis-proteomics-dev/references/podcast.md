@@ -6,6 +6,15 @@ through ONE finished analysis. It sits beside the report, and a "Listen" card ne
 read. `scripts/make_podcast.py` then checks it against the report, turns it into audio, and
 links it in. It never writes a word of the conversation.
 
+**Who it is for: the collaborator who submitted the samples.** The episode has three jobs:
+
+1. **What their data say**: the findings, how confident to be in each, and the caveats.
+2. **How their samples were measured and analysed**: the instrument, the acquisition, the
+   search, the database and the DE model, in their own study's terms.
+3. **How proteomics works, taught with their data as the examples**, so they can read their
+   own report. A biologist who has never run a mass spectrometer should finish the episode
+   knowing what a precursor, a protein group and a 1% FDR are.
+
 Why it is built this way: when a model wrote the script from the report, it passed a number
 check and still made things up ("limpa is our Core's custom extension to limma"; "Kcnb2, the
 Kv2.1 beta subunit"). It also ran 30 minutes and read like a lecture. You have read the report,
@@ -16,9 +25,11 @@ every gene-like symbol against the report.
 
 - **Only after the report is final**: `Analysis_Report.html` is written, and any expert-review
   or data-quality changes are in. A podcast of a draft goes stale.
-- **Ask; never make one by default.** Offer it in one line, for example: "Want a ~20-min audio
-  discussion of these results (AI-generated, synthetic voices) linked at the top of the
-  report?" Make it only on a yes.
+- **When you deliver the results to a collaborator**, offer it in one line. Never make one by
+  default. For example: "Want a ~20-min audio discussion of these results for the lab
+  (AI-generated, synthetic voices), linked at the top of the report? It also explains how the
+  measurement and the statistics work, using their data." Make it only on a yes. Cloud voices
+  need consent too (next section).
 - If the analysis is preliminary (a v1 with a v2 planned), say so in the disclosure turn.
 
 ## Privacy and consent (read before any cloud voice)
@@ -78,16 +89,41 @@ warns outside 2,200–3,600.
    …, our voices are synthetic, and the written report is the record" (plus "preliminary" if it
    is). `check` fails without the words "AI-generated" in one of the first 3 turns.
 3. **The design**: samples, groups, controls, replicates, and why that design.
-4. **Did the experiment work?** The positive controls: the bait tops its own pulldown, known
+4. **How proteomics works, with your data** (required: one full segment, early). Walk their
+   samples through the pipeline, using this run's own numbers (runs, precursors, protein
+   groups, FDR), taken from the report and the methods:
+   - what LC-MS/MS does: digestion to peptides, chromatography, the mass spectrometer;
+   - DIA and, on a timsTOF, dia-PASEF, versus DDA;
+   - precursors versus protein groups, and why proteins come as groups;
+   - what a 1% FDR means, and the target-decoy idea;
+   - library-free search and match-between-runs;
+   - detected versus inferred values (the detection-probability model, PropObs);
+   - empirical Bayes (why n = 3 is workable);
+   - multiple testing (adjusted p).
+
+   Teach the ones that apply to this analysis and skip the rest (for example, MBR for a DDA
+   run without it). The general explanations are claims beyond the report, so list them there.
+   `check` warns about any of these topics the transcript never mentions.
+5. **Did the experiment work?** The positive controls: the bait tops its own pulldown, known
    partners appear, and the QC shows the runs are sound.
-5. **The findings, in the report's own order**, with the report's numbers.
-6. **The main caveat or confound** the report raises.
-7. **A data-quality "detective story"**, if the report has one (a contaminant, a thin run, a
+6. **The findings, in the report's own order**, with the report's numbers and how confident to
+   be in each.
+7. **The main caveat or confound** the report raises.
+8. **A data-quality "detective story"**, if the report has one (a contaminant, a thin run, a
    batch).
-8. **A stats "nerd moment"**: one idea explained well, for example inferred values and the
-   detection-probability model, empirical Bayes with n = 3, blocking, or FDR.
-9. **Lightning round**: one follow-up experiment each.
-10. **Verdict and sign-off.**
+9. **A stats "nerd moment"**: one idea from segment 4 taken deeper on a real hit, for example
+   an inferred value behind a big fold change, empirical Bayes with n = 3, or blocking.
+10. **Lightning round**: one follow-up experiment each.
+11. **What to do with this, then the sign-off** (short):
+    - which files to open: `Analysis_Report.html` first, then the `DE_*.csv` tables;
+    - how to tier hits by PropObs (measured in most samples = solid; mostly inferred = follow
+      up);
+    - what to validate first.
+
+    `check` warns when the last two segments never point at a file, PropObs or validation.
+
+Merge neighbours to stay within 6–10 segments. For example, fold the lightning round into the
+close, or the detective story into the caveat.
 
 ## Fidelity rules (the check enforces the mechanical half)
 
@@ -188,7 +224,8 @@ warns outside 2,200–3,600.
 S=<session>; P=$S/output/podcast
 # 1. write $P/podcast_script.md (above), then check it until it passes
 python3 scripts/make_podcast.py check $P/podcast_script.md \
-    --source $S/output/AI_Analysis_Report.md $S/output/AUDIT.md $S/output/SAMPLE_QUALITY.md \
+    --source $S/output/AI_Analysis_Report.md $S/output/methods.md $S/output/AUDIT.md \
+             $S/output/SAMPLE_QUALITY.md \
     --forbid-name "<PI full name>" "<submitter full name>" "<first names>"
 #    -> $P/check.txt. Fix every FAIL line, re-run until PASS. Read the WARN lines.
 # 2. preview what will be spoken (sends nothing)
@@ -204,7 +241,8 @@ python3 scripts/make_podcast.py link $S/output
 
 - **Sources.** Pass the report text you wrote from: `AI_Analysis_Report.md` (or the report's
   `Analysis_Report.md` twin, or `Analysis_Report.html`, whose embedded images and scripts are
-  ignored), `AUDIT.md`, `SAMPLE_QUALITY.md`, and any other document you drew on. Do **not**
+  ignored), `methods.md` (the teaching segment's instrument, search and FDR numbers come from
+  it), `AUDIT.md`, `SAMPLE_QUALITY.md`, and any other document you drew on. Do **not**
   pass the DE tables. With thousands of numbers in the sources, almost any number would match
   something; `check` warns when that happens.
 - **Render refuses** unless `check.txt` says PASS for this exact script (its sha256).
@@ -241,6 +279,9 @@ python3 scripts/make_podcast.py link $S/output
     is replaced on a re-run.
   - `make_analysis_html.py` and `session.py finalize` keep the card and the entries on their
     own whenever `podcast/podcast.json` exists.
+  - If an `Analysis_Report.pdf` is older than the HTML, link reprints it with `html_to_pdf.py`
+    where the skill has it, so the PDF shows the card's print text (the audio's file name).
+    Otherwise it prints an `[INFO]` line saying how to reprint it by hand.
 
 ## What ends up in `output/podcast/`
 

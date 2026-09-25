@@ -89,7 +89,9 @@ and the report and tables stay authoritative.
 the Markdown report's title, and entries in README and AGENTS.md. Each addition sits between
 `<!-- podcast:start -->` / `<!-- podcast:end -->` and is replaced on a re-run.
 `make_analysis_html.py` and `session_docs.py` add the same card and entries on their own when
-`podcast/podcast.json` exists, so regenerating the report or re-finalizing keeps them.
+`podcast/podcast.json` exists, so regenerating the report or re-finalizing keeps them. An
+`Analysis_Report.pdf` older than the edited HTML is reprinted by `link` (html_to_pdf.py), or
+flagged with an `[INFO]` line saying how to reprint it.
 `podcast/.cache/` (per-chunk TTS audio, ~60 MB for 20 min) is kept on disk for resuming. The
 session zip leaves it out (`zip_excluded`), and `make_report.py` does not list it. Never deposit
 it.
