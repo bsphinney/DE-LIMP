@@ -17,31 +17,30 @@ That last property is the one that matters operationally: ONE file to copy. A
 report that references ./figures/pca.png silently loses every figure the moment
 someone copies just the report, which is exactly what people do.
 
-QC PANELS COME FIRST, ABOVE THE RESULTS
----------------------------------------
-Deliberate. A volcano plot is persuasive whether or not the run was any good, so a
-reader who meets the biology first has already formed a conclusion by the time
-they reach the evidence about whether to trust it. Detected-vs-inferred and the
-per-sample protein counts decide how much weight the DE table can carry, so they
-are placed where they get read.
+FIGURES SIT WHERE THE TEXT DISCUSSES THEM
+-----------------------------------------
+Each `![alt](figures/x.png)` in AI_Analysis_Report.md becomes an embedded, numbered
+figure AT THAT POSITION -- the alt text is its title, figures.json's caption (when
+there is one) its caption. The report used to print those references as literal
+Markdown (28 of them on Silva08172026, 2026-09-24) while dumping every image in
+figures/ into galleries at the top, a stale pca_original_labels.png included.
+  * an image the report does not reference is NOT embedded; one warning line names it;
+  * a referenced image that is missing becomes a visible "figure missing: <file>" note
+    (and a warning) -- never raw Markdown;
+  * only paths inside the session are embedded -- no URLs, no ../ escapes;
+  * the galleries appear only when there is no report at all (the quick pre-analysis
+    page), and then list figures.json's figures only.
+The tool's own "Sample quality notes" / "Audit & caveats" sections are left out when
+the report already has that section, so no heading appears twice.
 
 Usage
   python3 make_analysis_html.py --session <session dir> --out report.html
   python3 make_analysis_html.py --report AI_Analysis_Report.md --figures ./figures \\
       --tables ./tables --out report.html [--title "..."] [--quality SAMPLE_QUALITY.md]
-
-WHICH FIGURES
--------------
-Only the figures the report is about: the images AI_Analysis_Report.md references
-(![caption](figures/x.png)), or -- when there is no report, or it references none --
-the ones figures/figures.json lists. Anything else in figures/ is NOT embedded, and one
-warning line names it: a redrawn PCA kept as pca_original_labels.png once went out as a
-29th figure beside the 28 the report described (msalemi, 2026-09-24).
 """
 import argparse, base64, csv, html, json, mimetypes, os, re, sys, urllib.parse
 
-# QC first, then overview, then per-contrast results. Anything not listed still
-# gets rendered -- an unknown figure is shown rather than silently dropped.
+# Galleries (no report only): QC first, then overview, then per-contrast results.
 FIGURE_ORDER = [
     ("qc_detected_vs_inferred", "Quality control"),
     ("qc_protein_counts", "Quality control"),
@@ -52,43 +51,44 @@ FIGURE_ORDER = [
 ]
 SECTION_ORDER = ["Quality control", "Overview", "Differential expression", "Other figures"]
 
-
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".svg", ".webp")
-# Markdown images ![alt](path "title") and inline <img src="path">.
-IMG_REF = re.compile(r"""!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^)]*["'])?\s*\)"""
-                     r"""|<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+# Markdown images ![alt](path "title") -> groups 1 (alt), 2 (path); inline <img src="path">
+# -> group 3 (path).
+IMG_REF = re.compile(r"""!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^)]*["'])?\s*\)"""
+                     r"""|<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>""", re.I)
+_ALT_ATTR = re.compile(r"""\balt\s*=\s*["']([^"']*)["']""", re.I)
+# The tool's own sections, and the report headings that already cover them.
+SUPERSEDED_BY = {"quality": {"sample quality notes", "sample quality", "data quality notes"},
+                 "audit": {"audit & caveats", "audit and caveats", "audit"}}
+
+
+def _ref(m):
+    """(alt, path) of an IMG_REF match."""
+    if m.group(2) is not None:
+        return m.group(1), m.group(2)
+    a = _ALT_ATTR.search(m.group(0))
+    return (a.group(1) if a else ""), m.group(3)
+
+
+def _clean(ref):
+    return urllib.parse.unquote(ref).split("?")[0].split("#")[0]
+
+
+def _external(ref):
+    return "://" in ref or ref.startswith(("data:", "//", "mailto:"))
 
 
 def report_figures(md_text):
     """Basenames of the images a Markdown report references, in order of first mention."""
     out = []
     for m in IMG_REF.finditer(md_text or ""):
-        ref = urllib.parse.unquote(m.group(1) or m.group(2) or "")
-        if "://" in ref or ref.startswith("data:"):
+        ref = _ref(m)[1]
+        if _external(ref):
             continue                      # remote or inline: not a file in figures/
-        name = os.path.basename(ref.split("?")[0].split("#")[0])
+        name = os.path.basename(_clean(ref))
         if name.lower().endswith(IMAGE_EXT) and name not in out:
             out.append(name)
     return out
-
-
-def select_figures(available, report_path=None, listed=None):
-    """-> (names to embed, names left out, referenced-but-missing names, source label).
-    The report decides when it references any figure; otherwise figures.json (`listed`).
-    With neither there is nothing to tell a current figure from a stale one, so all are
-    embedded and the caller says so."""
-    refs = []
-    if report_path and os.path.exists(report_path):
-        with open(report_path, encoding="utf-8", errors="replace") as fh:
-            refs = report_figures(fh.read())
-    if refs:
-        wanted, source = set(refs), os.path.basename(report_path)
-    elif listed:
-        wanted, source = set(listed), "figures.json"
-    else:
-        return list(available), [], [], None
-    return ([f for f in available if f in wanted], [f for f in available if f not in wanted],
-            sorted(wanted - set(available)), source)
 
 
 def data_uri(path):
@@ -105,7 +105,83 @@ def classify(name):
     return "Other figures", len(FIGURE_ORDER)
 
 
-def md_inline(t):
+def _inside(path, root):
+    root = os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+class Figures:
+    """Turns image references into numbered, embedded figures, and keeps the ledger the
+    warnings are written from. One instance per page, so numbering runs through it."""
+
+    def __init__(self, base_dir, root, figures_dir=None, captions=None):
+        self.base, self.root, self.figdir = base_dir, root, figures_dir
+        self.caps = captions or {}
+        self.n, self.by_path = 0, {}
+        self.embedded, self.missing, self.rejected = [], [], []
+
+    def _locate(self, ref):
+        rel = _clean(ref)
+        cand = [os.path.realpath(rel if os.path.isabs(rel) else os.path.join(self.base, rel))]
+        if self.figdir:           # --figures given apart from --report: look there by name
+            cand.append(os.path.realpath(os.path.join(self.figdir, os.path.basename(rel))))
+        inside = [c for c in cand if _inside(c, self.root) or
+                  (self.figdir and _inside(c, self.figdir))]
+        return next((c for c in inside if os.path.isfile(c)), None), bool(inside)
+
+    def render(self, alt, ref, section=None):
+        name = os.path.basename(_clean(ref)) or ref
+        if _external(ref):
+            self.rejected.append(ref)
+            return self.note(f"figure not embedded (not a file in this session): {ref}")
+        path, allowed = self._locate(ref)
+        if not allowed:
+            self.rejected.append(ref)
+            return self.note(f"figure not embedded (outside the session folder): {ref}")
+        if path is None:
+            self.missing.append(name)
+            return self.note(f"figure missing: {name}")
+        if path in self.by_path:
+            n = self.by_path[path]
+            return f'<p class="figref">(See <a href="#fig-{n}">Figure {n}</a>.)</p>'
+        try:
+            uri = data_uri(path)
+        except OSError as e:
+            self.missing.append(name)
+            return self.note(f"figure missing: {name} (unreadable: {e})")
+        self.n += 1
+        self.by_path[path] = self.n
+        self.embedded.append(os.path.basename(path))
+        return self.figure(self.n, uri, alt, self.caps.get(os.path.basename(path)), section)
+
+    # presentation -- overridden by report_style when the page is styled
+    @staticmethod
+    def note(text):
+        return f'<div class="figmissing" role="note">{html.escape(text)}</div>'
+
+    @staticmethod
+    def figure(n, uri, alt, caption, section=None):
+        cls = " class='qc'" if section == "Quality control" else ""
+        title = md_inline(alt) if alt else ""
+        cap = (" &mdash; " + md_inline(caption)) if caption and alt else md_inline(caption or "")
+        return (f'<figure id="fig-{n}"{cls}><img src="{uri}" alt="{html.escape(alt or caption or "")}">'
+                f"<figcaption><strong>Figure {n}.</strong> {title}{cap}</figcaption></figure>")
+
+
+def md_inline(t, figs=None):
+    """Inline Markdown. Image references become figures (via `figs`) and never reach the
+    page as text; without `figs` they are dropped to their alt text."""
+    out, last = [], 0
+    for m in IMG_REF.finditer(t or ""):
+        out.append(_inline_text(t[last:m.start()]))
+        alt, ref = _ref(m)
+        out.append(figs.render(alt, ref) if figs else html.escape(alt))
+        last = m.end()
+    out.append(_inline_text((t or "")[last:]))
+    return "".join(out)
+
+
+def _inline_text(t):
     t = html.escape(t)
     t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
     t = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
@@ -113,11 +189,43 @@ def md_inline(t):
     return t
 
 
-def md_to_html(md):
+def _para(text, figs):
+    """A paragraph, split around its images: text runs stay <p>, each image becomes a
+    block figure at its position."""
+    out, buf, last = [], [], 0
+    for m in IMG_REF.finditer(text):
+        buf.append(text[last:m.start()])
+        chunk = "".join(buf).strip()
+        if chunk:
+            out.append(f"<p>{md_inline(chunk)}</p>")
+        buf = []
+        out.append(figs.render(*_ref(m)) if figs else html.escape(_ref(m)[0]))
+        last = m.end()
+    rest = ("".join(buf) + text[last:]).strip()
+    if rest:
+        out.append(f"<p>{md_inline(rest)}</p>")
+    return "\n".join(out)
+
+
+def anchor(title, used):
+    base = re.sub(r"[^a-z0-9]+", "-", html.unescape(re.sub(r"<[^>]+>", "", title)).lower()).strip("-") or "section"
+    a, i = base, 2
+    while a in used:
+        a, i = f"{base}-{i}", i + 1
+    used.add(a)
+    return a
+
+
+def md_to_html(md, figs=None, used=None, drop_h1=False):
     """Enough Markdown for the report the model writes: headings, lists, tables,
-    fenced code, blockquotes. Not a general converter -- deliberately small so it
-    has no dependencies to install on a cluster."""
-    out, lines, i, n = [], md.splitlines(), 0, len(md.splitlines())
+    fenced code, blockquotes, images. Not a general converter -- deliberately small so it
+    has no dependencies to install on a cluster.
+    -> (html, [(level, id, text)], h1 text or None). With drop_h1 the first level-1
+    heading is returned as the title instead of rendered."""
+    used = used if used is not None else set()
+    out, heads, h1 = [], [], None
+    lines = md.splitlines()
+    i, n = 0, len(lines)
     while i < n:
         ln = lines[i]
         if ln.startswith("```"):
@@ -130,9 +238,14 @@ def md_to_html(md):
             continue
         m = re.match(r"^(#{1,6})\s+(.*)", ln)
         if m:
-            lvl = len(m.group(1))
-            out.append(f"<h{lvl}>{md_inline(m.group(2))}</h{lvl}>")
+            lvl, text = len(m.group(1)), m.group(2).strip()
             i += 1
+            if lvl == 1 and drop_h1 and h1 is None:
+                h1 = text
+                continue
+            aid = anchor(text, used)
+            heads.append((lvl, aid, text))
+            out.append(f'<h{lvl} id="{aid}">{md_inline(text)}</h{lvl}>')
             continue
         # table: header row, separator, body
         if ln.strip().startswith("|") and i + 1 < n and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
@@ -143,31 +256,25 @@ def md_to_html(md):
             body = []
             while i < n and lines[i].strip().startswith("|"):
                 body.append(cells(lines[i])); i += 1
-            t = ['<div class="tablewrap"><table><thead><tr>']
-            t += [f"<th>{md_inline(c)}</th>" for c in head]
-            t.append("</tr></thead><tbody>")
-            for r in body:
-                t.append("<tr>" + "".join(f"<td>{md_inline(c)}</td>" for c in r) + "</tr>")
-            t.append("</tbody></table></div>")
-            out.append("".join(t))
+            out.append(table_html(head, body, figs))
             continue
         if re.match(r"^\s*[-*+]\s+", ln):
             items = []
             while i < n and re.match(r"^\s*[-*+]\s+", lines[i]):
                 items.append(re.sub(r"^\s*[-*+]\s+", "", lines[i])); i += 1
-            out.append("<ul>" + "".join(f"<li>{md_inline(x)}</li>" for x in items) + "</ul>")
+            out.append("<ul>" + "".join(f"<li>{md_inline(x, figs)}</li>" for x in items) + "</ul>")
             continue
         if re.match(r"^\s*\d+[.)]\s+", ln):
             items = []
             while i < n and re.match(r"^\s*\d+[.)]\s+", lines[i]):
                 items.append(re.sub(r"^\s*\d+[.)]\s+", "", lines[i])); i += 1
-            out.append("<ol>" + "".join(f"<li>{md_inline(x)}</li>" for x in items) + "</ol>")
+            out.append("<ol>" + "".join(f"<li>{md_inline(x, figs)}</li>" for x in items) + "</ol>")
             continue
         if ln.strip().startswith(">"):
             q = []
             while i < n and lines[i].strip().startswith(">"):
                 q.append(re.sub(r"^\s*>\s?", "", lines[i])); i += 1
-            out.append(f"<blockquote>{md_inline(' '.join(q))}</blockquote>")
+            out.append(f"<blockquote>{md_inline(' '.join(q), figs)}</blockquote>")
             continue
         if not ln.strip():
             i += 1
@@ -176,8 +283,18 @@ def md_to_html(md):
         while i < n and lines[i].strip() and not re.match(r"^(#{1,6}\s|```|\s*[-*+]\s|\s*\d+[.)]\s|\s*>)", lines[i]) \
                 and not lines[i].strip().startswith("|"):
             para.append(lines[i]); i += 1
-        out.append(f"<p>{md_inline(' '.join(para))}</p>")
-    return "\n".join(out)
+        out.append(_para(" ".join(para), figs))
+    return "\n".join(out), heads, h1
+
+
+def table_html(head, body, figs=None):
+    t = ['<div class="tablewrap"><table><thead><tr>']
+    t += [f"<th>{md_inline(c)}</th>" for c in head]
+    t.append("</tr></thead><tbody>")
+    for r in body:
+        t.append("<tr>" + "".join(f"<td>{md_inline(c, figs)}</td>" for c in r) + "</tr>")
+    t.append("</tbody></table></div>")
+    return "".join(t)
 
 
 def de_summary(tables_dir, adjp=0.05, logfc=1.0):
@@ -243,6 +360,8 @@ figcaption{color:var(--mut);font-size:.9rem;margin-top:.7rem}
 .toc a{color:var(--accent);text-decoration:none}
 .toc a:hover{text-decoration:underline}
 .toggle{position:fixed;top:1rem;right:1rem;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:.4rem .7rem;font-size:.85rem;cursor:pointer;z-index:9}
+.figmissing{margin:1.2rem 0;padding:.7rem 1rem;border:1px dashed var(--warn);border-radius:8px;color:var(--warn);font-size:.92rem}
+.figref{color:var(--mut);font-size:.92rem}
 @media print{.toggle{display:none}figure{break-inside:avoid}}
 """
 
@@ -258,6 +377,10 @@ JS = """
 """
 
 
+def norm_title(t):
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or "")).strip().lower())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -267,7 +390,7 @@ def main():
     ap.add_argument("--tables", help="DE tables dir")
     ap.add_argument("--quality", help="SAMPLE_QUALITY.md")
     ap.add_argument("--audit", help="AUDIT.md")
-    ap.add_argument("--title", default="Proteomics Analysis Report")
+    ap.add_argument("--title", help="page title (default: the report's own # heading)")
     ap.add_argument("--adjp", type=float, default=0.05)
     ap.add_argument("--logfc", type=float, default=1.0)
     ap.add_argument("--out", required=True)
@@ -282,6 +405,7 @@ def main():
             p = os.path.join(o, fn)
             if not getattr(a, attr) and os.path.exists(p):
                 setattr(a, attr, p)
+    has_report = bool(a.report and os.path.exists(a.report))
 
     caps, listed = {}, []
     if a.figures and os.path.exists(os.path.join(a.figures, "figures.json")):
@@ -297,84 +421,106 @@ def main():
         except Exception as e:
             print(f"[make_analysis_html] WARNING: figures.json unreadable ({e}); captions and "
                   f"its figure list are not used", file=sys.stderr)
+    available = (sorted(fn for fn in os.listdir(a.figures) if fn.lower().endswith(IMAGE_EXT))
+                 if a.figures and os.path.isdir(a.figures) else [])
 
-    figs, left_out, missing, fig_source = {}, [], [], None
-    if a.figures and os.path.isdir(a.figures):
-        available = sorted(fn for fn in os.listdir(a.figures) if fn.lower().endswith(IMAGE_EXT))
-        embed, left_out, missing, fig_source = select_figures(available, a.report, listed)
-        if left_out:
-            print(f"[make_analysis_html] WARNING: {len(left_out)} image(s) in {a.figures} are not "
-                  f"referenced in {fig_source} and were NOT embedded: {', '.join(left_out)}",
-                  file=sys.stderr)
-        if missing:
-            print(f"[make_analysis_html] WARNING: {fig_source} references {len(missing)} image(s) "
-                  f"not in {a.figures}: {', '.join(missing)}", file=sys.stderr)
-        if fig_source is None and available:
-            print(f"[make_analysis_html] WARNING: no report figure references and no "
-                  f"figures.json -- embedding all {len(available)} image(s) in {a.figures}, "
-                  f"stale ones included", file=sys.stderr)
-        for fn in embed:
-            sec, rank = classify(fn)
-            figs.setdefault(sec, []).append((rank, fn, os.path.join(a.figures, fn)))
+    # Images resolve relative to the report's folder and must stay inside the session.
+    base = os.path.dirname(os.path.abspath(a.report)) if has_report else (a.figures or ".")
+    root = os.path.abspath(a.session) if a.session else base
+    figs = Figures(base, root, a.figures, caps)
 
-    body, toc = [], []
+    used, body, toc = set(), [], []
 
-    def sect(anchor, title):
-        toc.append(f'<li><a href="#{anchor}">{html.escape(title)}</a></li>')
-        body.append(f'<h2 id="{anchor}">{html.escape(title)}</h2>')
+    def sect(title, content):
+        aid = anchor(title, used)
+        toc.append(f'<li><a href="#{aid}">{html.escape(title)}</a></li>')
+        body.append(f'<h2 id="{aid}">{html.escape(title)}</h2>')
+        body.append(content)
+
+    report_html, heads, h1 = "", [], None
+    if has_report:
+        with open(a.report, encoding="utf-8", errors="replace") as fh:
+            md = fh.read()
+        # Rendered first: its headings decide which tool sections are redundant, and its
+        # ids are reserved in `used` so the tool's sections can never collide with them.
+        report_html, heads, h1 = md_to_html(md, figs, used=used, drop_h1=True)
+    report_h2 = {norm_title(t) for lvl, _, t in heads if lvl == 2}
 
     de = de_summary(a.tables, a.adjp, a.logfc)
     if de:
-        sect("summary", "Results at a glance")
-        body.append(
-            f"<p class='sub'>Counted directly from the DE tables at adjusted "
-            f"p &lt; {a.adjp} and |log2 fold change| &ge; {a.logfc}.</p>")
-        t = ["<div class='tablewrap'><table><thead><tr><th>Contrast</th><th>Proteins tested</th>"
+        t = ["<p class='sub'>Counted directly from the DE tables at adjusted "
+             f"p &lt; {a.adjp} and |log2 fold change| &ge; {a.logfc}.</p>",
+             "<div class='tablewrap'><table><thead><tr><th>Contrast</th><th>Proteins tested</th>"
              "<th>Higher</th><th>Lower</th><th>Total changed</th></tr></thead><tbody>"]
         for r in de:
             t.append(f"<tr><td>{html.escape(r['contrast'])}</td><td>{r['tested']:,}</td>"
                      f"<td>{r['up']:,}</td><td>{r['down']:,}</td><td>{r['up']+r['down']:,}</td></tr>")
         t.append("</tbody></table></div>")
-        body.append("".join(t))
+        sect("Results at a glance", "".join(t))
 
-    # QC before results: see module docstring.
-    for sec in SECTION_ORDER:
-        if sec not in figs:
-            continue
-        anchor = re.sub(r"[^a-z0-9]+", "-", sec.lower()).strip("-")
-        sect(anchor, sec)
-        if sec == "Quality control":
-            body.append("<div class='banner'>Read these first. They decide how much weight the "
-                        "results below can carry &mdash; a volcano plot looks equally convincing "
-                        "whether or not the run was any good.</div>")
-        for _, fn, path in sorted(figs[sec]):
-            cap = caps.get(fn) or os.path.splitext(fn)[0].replace("_", " ")
-            cls = " class='qc'" if sec == "Quality control" else ""
-            try:
-                uri = data_uri(path)
-            except Exception as e:
-                body.append(f"<p class='sub'>[could not embed {html.escape(fn)}: {html.escape(str(e))}]</p>")
+    left_out = []
+    if not has_report:
+        # The quick pre-analysis page: galleries of figures.json's figures only.
+        gal = {}
+        for fn in listed:
+            sec, rank = classify(fn)
+            gal.setdefault(sec, []).append((rank, fn))
+        for sec in SECTION_ORDER:
+            if sec not in gal:
                 continue
-            body.append(f"<figure{cls}><img src='{uri}' alt='{html.escape(cap)}'>"
-                        f"<figcaption>{md_inline(cap)}</figcaption></figure>")
+            parts = []
+            if sec == "Quality control":
+                parts.append("<div class='banner'>Read these first. They decide how much weight "
+                             "the results below can carry &mdash; a volcano plot looks equally "
+                             "convincing whether or not the run was any good.</div>")
+            for _, fn in sorted(gal[sec]):
+                parts.append(figs.render("", fn, section=sec))
+            sect(sec, "".join(parts))
+        left_out = [f for f in available if f not in set(listed)]
+        why = "not listed in figures.json" if listed else "no report and no figures.json"
+    else:
+        shown = set(figs.embedded)
+        referenced = set(report_figures(md))
+        left_out = [f for f in available if f not in shown and f not in referenced]
+        why = f"not referenced in {os.path.basename(a.report)}"
 
-    for path, title, anchor in ((a.quality, "Sample quality notes", "quality"),
-                                (a.audit, "Audit &amp; caveats", "audit"),
-                                (a.report, "Analysis", "analysis")):
-        if path and os.path.exists(path):
-            toc.append(f'<li><a href="#{anchor}">{title}</a></li>')
-            body.append(f'<h2 id="{anchor}">{title}</h2>')
-            body.append(md_to_html(open(path, encoding="utf-8", errors="replace").read()))
+    for path, title, key in ((a.quality, "Sample quality notes", "quality"),
+                             (a.audit, "Audit & caveats", "audit")):
+        if not (path and os.path.exists(path)):
+            continue
+        if report_h2 & (SUPERSEDED_BY[key] | {norm_title(title)}):
+            continue                    # the report has its own -- never show it twice
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            sect(title, md_to_html(fh.read(), None, used=used, drop_h1=True)[0])
+
+    if has_report:
+        for lvl, aid, text in heads:
+            if lvl == 2:
+                toc.append(f'<li><a href="#{aid}">{md_inline(text)}</a></li>')
+        body.append(report_html)
 
     if not body:
         sys.exit("[make_analysis_html] nothing to render — check --session/--report/--figures")
 
+    if left_out:
+        print(f"[make_analysis_html] WARNING: {len(left_out)} image(s) in {a.figures} are "
+              f"{why} and were NOT embedded: {', '.join(left_out)}", file=sys.stderr)
+    if figs.missing:
+        print(f"[make_analysis_html] WARNING: {len(figs.missing)} referenced image(s) are "
+              f"missing and are shown as a 'figure missing' note: {', '.join(figs.missing)}",
+              file=sys.stderr)
+    if figs.rejected:
+        print(f"[make_analysis_html] WARNING: {len(figs.rejected)} image reference(s) point "
+              f"outside the session and were not embedded: {', '.join(figs.rejected)}",
+              file=sys.stderr)
+
+    title = a.title or (html.unescape(re.sub(r"[*`]", "", h1)) if h1 else "Proteomics Analysis Report")
     doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html.escape(a.title)}</title><style>{CSS}</style></head>
+<title>{html.escape(title)}</title><style>{CSS}</style></head>
 <body><button class="toggle" id="tt">Dark</button><div class="wrap">
-<h1>{html.escape(a.title)}</h1>
+<h1>{html.escape(title)}</h1>
 <p class="sub">Self-contained &mdash; every figure is embedded, so this one file is the whole
 report. No network needed; copy it anywhere and double-click to open.</p>
 <div class="toc"><strong>Contents</strong><ul>{''.join(toc)}</ul></div>
@@ -384,10 +530,11 @@ report. No network needed; copy it anywhere and double-click to open.</p>
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as fh:
         fh.write(doc)
-    nfig = sum(len(v) for v in figs.values())
     print(json.dumps({"wrote": a.out, "bytes": os.path.getsize(a.out),
-                      "figures_embedded": nfig, "figure_list": fig_source or "all (no list)",
-                      "figures_not_embedded": left_out, "figures_missing": missing,
+                      "figures_embedded": figs.n,
+                      "figure_list": os.path.basename(a.report) if has_report else "figures.json",
+                      "figures_not_embedded": left_out, "figures_missing": figs.missing,
+                      "figures_rejected": figs.rejected,
                       "contrasts": len(de), "self_contained": True}, indent=2))
 
 

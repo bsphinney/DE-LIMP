@@ -1340,10 +1340,12 @@ a report plus a `figures/` folder — silently loses every image the moment some
 copies just the report, which is exactly what people do. Tell them the filename and
 that it is the whole report.
 
-It embeds only the figures `AI_Analysis_Report.md` references (with no report, the ones
-`figures/figures.json` lists) and prints one `WARNING` naming every other image in
-`figures/` — a redrawn plot's old copy is left out, not shipped as an extra figure. Check
-that line, and reference every figure you want on the page.
+Each `![caption](figures/x.png)` in `AI_Analysis_Report.md` becomes a numbered, embedded
+figure at that spot in the text (caption from `figures.json` when there is one). Images the
+report does not reference are left out, with one `WARNING` naming them — a redrawn plot's old
+copy is not shipped; a referenced image that is missing shows as a visible "figure missing"
+note. So reference every figure you want, where you discuss it. Only with no report at all
+does the page fall back to galleries of `figures.json`'s figures.
 
 The page puts the **QC panels above the results** on purpose: a volcano plot is equally
 persuasive whether or not the run was any good, so a reader who meets the biology first
