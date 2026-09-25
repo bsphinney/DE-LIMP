@@ -1231,20 +1231,9 @@ def _inline(s):
     return s
 
 
-# The pages' look, in ONE place: README.html and HOW_TO_SUBMIT.html. Deliberately minimal --
-# the markup is semantic (header / nav / section / aside.callout / table) so a shared stylesheet
-# (scripts/report_style.py, on another branch) can replace this constant without restructuring.
-PAGE_CSS = (
-    "body{font:15px/1.55 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:980px;"
-    "margin:2em auto;padding:0 16px;color:#1d2330;background:#fff}"
-    "h1,h2{color:#1b3a5c}h2{border-bottom:1px solid #d8dee8;padding-bottom:.2em;"
-    "margin-top:1.8em}code{background:#f1f3f7;padding:1px 4px;border-radius:3px}"
-    "pre{background:#f1f3f7;padding:10px;overflow-x:auto}pre code{background:none}"
-    "table{border-collapse:collapse;margin:.6em 0;font-size:13px;display:block;"
-    "overflow-x:auto}th,td{border:1px solid #d8dee8;padding:4px 8px;text-align:left;"
-    "vertical-align:top}td code{word-break:break-all}th{background:#eef2f7}"
-    "blockquote,aside.callout{border-left:4px solid #9fb4cc;margin:.8em 0;padding:.2em 1em;"
-    "background:#f7f9fc}aside.callout.warning{border-left-color:#d9822b;background:#fff8ef}")
+# The pages' look is report_style.py's (document()), shared with Analysis_Report.html: the
+# markup here stays semantic (header / nav / section / aside.callout / table) and the style
+# lives there, once.
 CALLOUT = {"NOTE": "note", "TIP": "note", "IMPORTANT": "warning", "WARNING": "warning",
            "CAUTION": "warning"}
 
@@ -1254,7 +1243,7 @@ def md_to_html(md, title, semantic=False, nav=("Start here",)):
     code blocks, block quotes -- and GitHub alerts (`> [!NOTE]` / `> [!WARNING]` ...) as
     <aside class="callout note|warning">. With `semantic`, what precedes the first `##` is the
     <header>, each `##` part a <section>, and a part titled in `nav` a <nav>. Stdlib only, so the
-    .html opens anywhere by double-click; the look is PAGE_CSS."""
+    .html opens anywhere by double-click; the look is report_style.document()'s."""
     out, para, lst, table, code, quote = [], [], None, [], None, []
     lines = md.splitlines()
 
@@ -1354,10 +1343,10 @@ def md_to_html(md, title, semantic=False, nav=("Start here",)):
         if cur:
             blocks.append(f"<{tag}>" + "\n".join(cur) + f"</{tag}>")
         out = blocks
-    return (f"<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
-            f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            f"<title>{html.escape(title)}</title><style>{PAGE_CSS}</style></head><body>\n"
-            + "\n".join(out) + "\n</body></html>\n")
+    # imported here, not at the top: session.py loads this module for the Methods and the
+    # deposit too, and those must not depend on the stylesheet being present
+    import report_style
+    return report_style.document(title, "\n".join(out))
 
 
 def write_html(out):

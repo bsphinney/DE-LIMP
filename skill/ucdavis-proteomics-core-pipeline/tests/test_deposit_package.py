@@ -397,8 +397,12 @@ class FullSession(unittest.TestCase):
 
         p = P()
         with open(os.path.join(self.pkg, "HOW_TO_SUBMIT.html"), encoding="utf-8") as fh:
-            p.feed(fh.read())
+            page = fh.read()
+        p.feed(page)
         self.assertEqual((p.stack, p.bad), ([], 0))
+        import report_style                    # the one look, shared with the analysis report
+        self.assertIn(report_style.CSS + report_style.DOC_CSS, page)
+        self.assertNotIn("<script", page)
 
 
 class RunningThePrepScript(unittest.TestCase):

@@ -288,7 +288,11 @@ class Readme(unittest.TestCase):
             self.assertEqual((h.stack, h.bad), ([], 0))
             self.assertEqual(h.external, [])
             self.assertIn("style", h.tags)
-            # semantic structure, so a shared stylesheet can replace PAGE_CSS later
+            # the look is report_style.py's, shared with Analysis_Report.html (one design
+            # system), over semantic markup
+            import report_style
+            self.assertIn(report_style.CSS + report_style.DOC_CSS, page)
+            self.assertIn('<main class="doc" id="main">', page)
             for tag in ("header", "nav", "section", "aside", "table"):
                 self.assertIn(tag, h.tags, tag)
             self.assertIn('<aside class="callout note">', page)

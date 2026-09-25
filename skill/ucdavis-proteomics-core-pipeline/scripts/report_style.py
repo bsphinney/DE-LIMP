@@ -1,13 +1,14 @@
 """
 report_style.py -- the ONE look for every HTML page the skill writes.
 
-Analysis_Report.html (make_analysis_html.py) uses it now; README.html and HOW_TO_SUBMIT.html
-are meant to move onto it too, so a restyle happens here once, not in three copies.
+Analysis_Report.html (make_analysis_html.py) is a page(); README.html and HOW_TO_SUBMIT.html
+(make_deposit.md_to_html) are a document(), so a restyle happens here once, not in three copies.
 
 Everything is inline -- no fonts, CSS or JS fetched from anywhere -- so a page opens by
 double-click from a zip or a network share, on Windows too, with no network. Stdlib only.
 
   page(title, body, toc=..., facts=..., subtitle=...)   the whole document
+  document(title, body)                                  a plain Markdown page, no script
   header_band(title, facts, subtitle)                    study facts under the title
   stat_tiles([(value, label, sub, kind)])                "results at a glance"
   callout(kind, body, title=None)                        info / warning / critical
@@ -154,6 +155,21 @@ footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--mute
 }
 """
 
+
+# A plain document page (document()): Markdown rendered as header / nav / section /
+# aside.callout / table by make_deposit.md_to_html -- no header band, contents rail or script.
+# Everything else (tokens, dark mode, type, code, callouts, tables, print) is CSS above.
+DOC_CSS = r"""
+main.doc{max-width:60rem;margin:0 auto;padding:1.5rem 1rem 3rem}
+main.doc > header{border-bottom:3px solid var(--accent);padding-bottom:.4rem;margin-bottom:1.2rem}
+main.doc h1{font-size:clamp(1.45rem,1.1rem + 1.6vw,2.15rem);line-height:1.2;margin:.4rem 0 .5rem;letter-spacing:-.01em}
+main.doc > nav{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:0 1.1rem .4rem;margin:1.2rem 0;box-shadow:var(--shadow)}
+main.doc > nav h2{border-bottom:0;margin-top:.9rem}
+main.doc table{display:block;overflow-x:auto;width:max-content;max-width:100%;margin:1rem 0 1.3rem;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+main.doc td code{word-break:break-all}
+@media print{main.doc{max-width:none;padding:0}main.doc > nav{box-shadow:none}main.doc table{display:table;overflow:visible}}
+"""
+
 JS = r"""
 (function(){
  var root=document.documentElement,b=document.getElementById('theme');
@@ -278,3 +294,14 @@ def page(title, body, toc=(), facts=(), subtitle=None, footer=None):
 {f'<footer class="foot">{footer}</footer>' if footer else ''}
 <div class="lb" id="lb" role="dialog" aria-label="Enlarged figure"></div>
 <script>{JS}</script></body></html>"""
+
+
+def document(title, body):
+    """A plain document page: README.html, HOW_TO_SUBMIT.html. `body` is Markdown already
+    rendered to header / nav / section / aside.callout / table (make_deposit.md_to_html). The
+    same CSS as page() plus DOC_CSS; no script, so dark mode follows the system setting."""
+    return (f"<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+            f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<meta name=\"color-scheme\" content=\"light dark\">"
+            f"<title>{esc(title)}</title><style>{CSS}{DOC_CSS}</style></head><body>\n"
+            f"<main class=\"doc\" id=\"main\">\n{body}\n</main>\n</body></html>\n")
