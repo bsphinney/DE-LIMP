@@ -21,7 +21,10 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   AGENTS.md                 # a guide to the folder for an AI agent, from the session's records
   MANIFEST.txt              # every finalize part as [OK] / [SKIPPED] <reason> / [INFO]
   input/                    # conditions.csv, search.fasta, params.*, wf/workflow.manifest.json,
-                            #   raw_files.txt (raw data is referenced, NOT copied — too large)
+                            #   raw_files.txt (raw data is referenced, NOT copied — too large),
+                            #   submission.json + samples.tsv (Core data: the CoreOmics record,
+                            #   allowlisted — submission_report.py attach)
+  session.json              # session metadata; `coreomics` names the submission (Core data)
   output/
     search/                 # the normalized search report.parquet (+ search_provenance.json, logs)
     tables/                 # DE_*.csv, Expression_Matrix.csv, methods.txt, sessionInfo.txt,

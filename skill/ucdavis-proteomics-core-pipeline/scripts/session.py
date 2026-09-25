@@ -85,6 +85,10 @@ def paths_for(session_dir):
         "scripts_dir": os.path.join(d, "scripts"),
         "logs_dir": os.path.join(d, "logs"),
         "commands_log": os.path.join(d, "logs", "commands.log"),
+        # the CoreOmics submission this session answers (submission_report.py attach)
+        "session_json": os.path.join(d, "session.json"),
+        "submission_record": os.path.join(d, "input", "submission.json"),
+        "submission_samples": os.path.join(d, "input", "samples.tsv"),
     }
 
 

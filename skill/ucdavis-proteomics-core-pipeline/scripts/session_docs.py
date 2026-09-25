@@ -13,7 +13,7 @@ records -- and input/raw_files.txt when a session does not have one.
 
 Everything comes from files in the session: search_provenance.json, de_provenance.json,
 methods.txt, the FASTA sidecar, conditions.csv, figures.json, AUDIT / SAMPLE_QUALITY,
-MANIFEST.txt, fran_deposit.json. The pipeline is described in de_provenance.json's own words --
+MANIFEST.txt, fran_deposit.json, the attached CoreOmics submission (submission_report.py). The pipeline is described in de_provenance.json's own words --
 name, roll-up, missing-value policy, significance rule -- never from memory here (CLAUDE.md rule
 1), and a location that cannot be determined is "not recorded", never a guess (rule 2). Where a
 path is on HIVE, and how a collaborator browses to it from Windows or a Mac, is share_map.py
@@ -226,6 +226,19 @@ def design_terms(design):
             if t.strip() and t.strip() not in ("0", "1")]
 
 
+def submission_line(p):
+    """The CoreOmics submission line (submission_report.py attach), or None when the session
+    has none. A record that is there but unreadable is said so, not left out."""
+    if not (os.path.isfile(p["submission_record"]) or os.path.isfile(p["session_json"])):
+        return None
+    try:
+        import submission_report
+        rec = submission_report.load(p["session_dir"])
+    except Exception as e:
+        return f"CoreOmics submission: could not be read ({type(e).__name__}: {e})"
+    return submission_report.one_line(rec) if rec else None
+
+
 def gather(session_dir, registry=None, registry_note=None, pending=(), located_at=None):
     """Every fact the three documents state, read from the session. `registry`: the Core
     run-registry folder of this session, when known (record_run.locate() or its result).
@@ -245,6 +258,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     has = lambda path: os.path.exists(path)
 
     # --- the study
+    f["submission"] = submission_line(p)
     f["organism"] = fm.get("organism") or None
     f["taxid"] = fm.get("taxid") or wf.get("organism_taxid") or q.get("organism_taxid")
     f["instrument"] = q.get("instrument") or next(iter(wf.get("instruments") or []), None)
@@ -404,7 +418,8 @@ def summary_lines(f):
     org = (f"{f['organism']} (taxid {f['taxid']})" if f["organism"] else
            f"taxid {f['taxid']}" if f["taxid"] else NOT_RECORDED)
     eng = f"{f['engine']} {f['engine_version'] or ''}".strip() if f["engine"] else NOT_RECORDED
-    L = [f"- Organism: {org}",
+    L = ([f"- {f['submission']}"] if f.get("submission") else []) + [
+         f"- Organism: {org}",
          f"- Instrument / acquisition: {f['instrument'] or NOT_RECORDED} / "
          f"{f['acquisition'] or NOT_RECORDED}",
          f"- Search engine: {eng}" + (f" ({f['engine_version_src']})"

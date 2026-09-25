@@ -199,9 +199,13 @@ class Restyle(unittest.TestCase):
                      "| Protein | logFC |\n|---|---|\n| P1 | 1.5 |\n| P2 | -0.3 |\n\n"
                      "## Data Quality Notes\n\n1. one\n\n- detail\n\n2. two\n\n"
                      "## Expert Review Notes\n\n- **Critical:** something\n")
+        # the header's Submission fact is the attached record's label (submission_report.py)
+        import submission_report
+        os.makedirs(os.path.join(s, "input"))
+        submission_report.attach(s, {"internal_id": "PROT_0001"})
         out = os.path.join(s, "r.html")
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
-                            "--session", s, "--submission", "PROT_0001", "--out", out],
+                            "--session", s, "--out", out],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         with open(out, encoding="utf-8") as fh:

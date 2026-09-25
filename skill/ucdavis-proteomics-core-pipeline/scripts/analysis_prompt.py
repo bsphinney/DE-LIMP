@@ -31,6 +31,40 @@ def load(path):
         return None
 
 
+def submission_brief(w, source):
+    """The CoreOmics submission, quoted for the writer: the report must describe the samples in
+    the submitter's words. A report once turned the record's "cross-linked" into "chemically
+    cross-linked"; every added word like that is a claim about the lab's samples nobody made."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import submission_report as sr
+    rec, session = sr.resolve(source)
+    if rec is None:
+        return
+    who, why = sr.prepared_by(rec)
+    w(f"## The submission ({sr.label(rec)}) — quote it, add nothing")
+    w("The HTML report opens with this record (make_analysis_html.py renders it from the "
+      "session). Wherever you describe the samples, how they were prepared or what the study "
+      "is, use the submission's own words and add no detail it does not state (if it says "
+      "\"cross-linked\", do not write \"chemically cross-linked\"). Never copy a contact or "
+      "billing detail into the report.")
+    w({"lab": "- **The submitting lab prepared the samples"
+              + (" and sent peptides" if sr.sent_as_peptides(rec) else "") + ".** Any Sample "
+              "Preparation note must say so; do not describe extraction, reduction, alkylation "
+              "or digestion as work the Core did.",
+       "core": "- **The Core prepared the samples.** Their protocol belongs in the Methods "
+               "(methods.md); do not invent one here."}.get(
+        who, f"- **Who prepared the samples is not clear** ({why}). Say so; do not guess."))
+    notes = sr.quality_notes(rec, session)
+    if notes:
+        w("- The HTML report's Submission section already lists these notes, so do not copy "
+          "them. In **Data Quality Notes**, say what each one means for THESE results (e.g. "
+          "whether paired samples were analysed as independent):")
+        for n in notes:
+            w(f"  - {n['text']}")
+    w("")
+    w(sr.render_markdown(rec, (), heading="### The record, as submitted"))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="ANALYSIS_PROMPT.md")
@@ -45,6 +79,8 @@ def main():
     ap.add_argument("--instrument", default="")
     ap.add_argument("--workflow-manifest")
     ap.add_argument("--report-out", default="AI_Analysis_Report.md")
+    ap.add_argument("--submission", help="the session dir: its CoreOmics submission "
+                                         "(submission_report.py) is quoted in the brief")
     a = ap.parse_args()
 
     prov = load(os.path.join(a.de_dir, "de_provenance.json")) or {}
@@ -124,6 +160,9 @@ def main():
     w("- The exact, self-describing methods text is in `tables/methods.txt` — do not "
       "contradict it or invent a different pipeline.")
     w("")
+
+    if a.submission:
+        submission_brief(w, a.submission)
 
     w("## Attached data files — read these")
     for f in de_files:

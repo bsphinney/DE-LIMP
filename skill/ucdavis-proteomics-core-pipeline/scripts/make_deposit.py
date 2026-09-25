@@ -752,8 +752,11 @@ def build_protocols(methods_md):
                    "the methods line above")
     with open(methods_md, encoding="utf-8") as fh:
         sec = md_sections(fh.read())
-    sample = [SAMPLE_PREP_TO_FILL] + [_plain(sec[h]) for h in ("Liquid chromatography",
-                                                              "Mass spectrometry") if h in sec]
+    # make_methods writes Sample preparation only from a CoreOmics submission; when the lab
+    # sent peptides it has no placeholder, so none is added here either.
+    prep = _plain(sec["Sample preparation"]) if sec.get("Sample preparation") else SAMPLE_PREP_TO_FILL
+    sample = [prep] + [_plain(sec[h]) for h in ("Liquid chromatography",
+                                                "Mass spectrometry") if h in sec]
     data = [_plain(sec[h]) for h in ("Sequence database", "Database search",
                                      "Differential expression") if h in sec]
     if not data:
@@ -1363,6 +1366,8 @@ def write_html(out):
 # ------------------------------------------------------------------------- methods --
 def required_sections(f):
     need = ["Liquid chromatography", "Mass spectrometry", "Sequence database"]
+    if os.path.isfile(f["p"]["submission_record"]):
+        need.insert(0, "Sample preparation")    # a methods.md from before the submission was attached
     if f["srec"].get("engine") or f["params"] or f["search_prov_path"]:
         need.append("Database search")
     if f["de_prov"]:
@@ -1383,7 +1388,9 @@ def methods_command(f, out):
                       ("--workflow-manifest", f["wf_path"]),
                       ("--instrument", next(iter(f["wf"].get("instruments") or []), None)
                        or (f["run_manifest"].get("query") or {}).get("instrument")),
-                      ("--acquisition", f["acquisition"])):
+                      ("--acquisition", f["acquisition"]),
+                      ("--submission", f["p"]["session_dir"]
+                       if os.path.isfile(f["p"]["submission_record"]) else None)):
         if val:
             cmd += [flag, str(val)]
     return cmd

@@ -132,6 +132,16 @@ tbody tr:last-child td{border-bottom:0}
 td.num,th.num{text-align:right;white-space:nowrap}
 blockquote{margin:1rem 0;padding:.6rem 1rem;border-left:4px solid var(--info);background:var(--info-bg);border-radius:8px}
 footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--muted);font-size:.82rem}
+/* the CoreOmics submission (submission_report.render_html): the form as a definition list */
+.subm .sub,.subm dt,.subm .blank{color:var(--muted)}
+.subm dl{display:grid;grid-template-columns:max-content 1fr;gap:.3rem 1.2rem;margin:.8rem 0;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:.9rem 1.2rem;max-width:calc(var(--measure) + 4rem)}
+.subm dt{font-size:.85rem}
+.subm dd{margin:0;white-space:pre-line}
+.subm blockquote{white-space:pre-line}
+.subm ol.sheet{columns:17rem;column-gap:1.6rem;padding-left:0;list-style:none;font-size:.9rem}
+.subm ol.sheet li{break-inside:avoid}
+.subm ol.sheet code{margin-right:.5rem}
+@media (max-width:40rem){.subm dl{grid-template-columns:1fr}}
 @media (max-width:600px){
   .band{padding:1.4rem 1rem 1.2rem}
   .tile .v{font-size:1.45rem}

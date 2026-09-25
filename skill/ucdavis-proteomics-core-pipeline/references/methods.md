@@ -59,6 +59,15 @@ precursor FDR, library mode, MBR), read by `search_record()` — the same reader
 `make_deposit.py` uses for the SDRF. A value in no record prints as
 `____ [not recorded — confirm]`, never as a default.
 
+With `--submission <session>` (a CoreOmics submission attached by `submission_report.py`),
+it adds a **Sample preparation** section from the record, through `prepared_by()`, the one
+reading of the form. When the lab sent peptides, it says the submitting laboratory prepared
+them and carries no Core-side placeholder; the form's own words (buffer, beads) go in a note
+for the author, not into the prose, so nothing is added that the form does not state. When the
+Core prepared them, the protocol is `____ [not recorded — confirm]`. `make_deposit.py` passes
+the flag itself, and its PRIDE sample-processing protocol uses this section instead of its
+TO-FILL.
+
 With `--de-dir`, it adds a **Differential expression** paragraph from the run's
 `de_provenance.json` (pipeline, quantification, the q-value filters as applied, design,
 contrasts, significance rule, citation). Significance is stated as run_de.R applies it —
