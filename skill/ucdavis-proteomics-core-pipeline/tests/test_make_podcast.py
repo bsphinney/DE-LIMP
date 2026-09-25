@@ -772,11 +772,34 @@ class Gemini(Workspace):
                                         "gemini-2.5-flash-preview-tts")
         self.assertEqual(rc, 1)
         self.assertIn("chunk 2/2", err)
-        self.assertIn("out of its daily quota (" + PER_DAY, err)
+        self.assertIn("out of its daily quota (quota " + PER_DAY + "; retry in 20s;", err)
         self.assertIn("re-run the same command later to resume", err)
         self.assertNotIn("rate-limited", err)
         self.assertEqual([x for x in slept if x != 20.0], [])         # pacing only, no 25 s wait
         self.assertEqual(len(os.listdir(os.path.join(self.pod, ".cache"))), 1)
+
+    def test_the_quota_id_leads_every_error_line(self):
+        long = "You exceeded your current quota, please check your plan and billing details. " * 5
+
+        def pro_limited(model, contents, config):
+            if "pro" in model:
+                raise ApiError(429, long, rpc_error(PER_DAY, "20s"))
+            return pcm_for(contents)
+        rc, out, err, log = self.render(pro_limited, "--cloud-ok", "--model",
+                                        "gemini-2.5-pro-preview-tts", "--model",
+                                        "gemini-3.8-flash-tts")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"gemini-2.5-pro-preview-tts: no quota (quota {PER_DAY}; retry in 20s; "
+                      "ApiError: 429 You exceeded", err)
+
+        def all_limited(model, contents, config):
+            raise ApiError(429, long, rpc_error(PER_DAY))
+        shutil.rmtree(os.path.join(self.pod, ".cache"))
+        rc, out, err, log = self.render(all_limited, "--cloud-ok", "--model",
+                                        "gemini-2.5-pro-preview-tts", "--model",
+                                        "gemini-3.8-flash-tts")
+        self.assertEqual(rc, 1)
+        self.assertIn(f"last: quota {PER_DAY}; ApiError: 429", err)
 
     def test_a_text_only_429_uses_its_retry_in(self):
         slept = self.clock()

@@ -1118,17 +1118,17 @@ class GeminiTTS(object):
                     if self._advance():
                         why = {"missing": "not available", "exhausted": "no quota",
                                "rejected": "request rejected"}[kind]
-                        log(f"[render] {was}: {why} ({msg[:200]}); trying {self.model}")
+                        log(f"[render] {was}: {why} ({why_line(err)}); trying {self.model}")
                         raise SwitchModel()
                     raise RenderError(
                         f"{label}: no Gemini TTS model could be used (tried "
-                        f"{', '.join(self.candidates)}; last: {msg[:200]}). Quotas are per Cloud "
+                        f"{', '.join(self.candidates)}; last: {why_line(err)}). Quotas are per Cloud "
                         "project (see https://aistudio.google.com/rate-limit): re-run later "
                         "(finished chunks are cached), use a paid-tier key, or --tts say.")
                 if kind == "exhausted":
                     raise RenderError(
-                        f"{label}: {self.model} is out of its daily quota ({err['quota'] or msg[:200]}"
-                        f"). The chunks already made are cached: re-run the same command later "
+                        f"{label}: {self.model} is out of its daily quota ({why_line(err)}). "
+                        f"The chunks already made are cached: re-run the same command later "
                         f"to resume with {self.model}, or pass --model <another> to render EVERY "
                         "chunk with that model (voices differ between models, so one episode "
                         "never mixes them).")
@@ -1137,7 +1137,7 @@ class GeminiTTS(object):
                     if waits > RATE_WAITS:
                         raise RenderError(
                             f"{label}: still rate-limited on {self.model} after {RATE_WAITS} "
-                            f"waits ({err['quota'] or msg[:200]}). The chunks already made are "
+                            f"waits ({why_line(err)}). The chunks already made are "
                             "cached; re-run the same command to resume.")
                     wait = (err["delay"] if err["delay"] is not None else 60.0) + 5.0
                     log(f"[render] rate-limited, waiting {wait:.0f}s ({label}, {self.model}"
@@ -1148,10 +1148,10 @@ class GeminiTTS(object):
                 errors += 1
                 if kind in ("fatal", "rejected") or errors >= 4:
                     raise RenderError(f"{label} failed after {errors} error(s) on "
-                                      f"{self.model}: {msg[:300]}. The chunks already made are "
+                                      f"{self.model}: {why_line(err, 300)}. The chunks already made are "
                                       "cached; re-run the same command to resume.")
                 wait = err["delay"] if err["delay"] is not None else min(60.0, 5.0 * 2 ** (errors - 1))
-                log(f"[render] {label}: {kind} error on {self.model} ({msg[:120]}); retrying in "
+                log(f"[render] {label}: {kind} error on {self.model} ({why_line(err, 120)}); retrying in "
                     f"{wait:.0f} s")
                 _sleep(wait)
                 continue
@@ -1168,6 +1168,15 @@ class GeminiTTS(object):
             if self.model not in self.models_used:
                 self.models_used.append(self.model)
             return pcm
+
+
+def why_line(err, n=200):
+    """An error for a log line with the useful part first: the quota id and the retry delay,
+    which the SDK's message buries after a long preamble, then the message itself."""
+    parts = [f"quota {err['quota']}"] if err.get("quota") else []
+    if err.get("delay") is not None:
+        parts.append(f"retry in {err['delay']:g}s")
+    return "; ".join(parts + [err["msg"][:n]])
 
 
 def _error_details(e):
