@@ -250,7 +250,7 @@ class TestCanonicalProjectDir(unittest.TestCase):
         """Rule 3: the Flinders share's HIVE path is hive_shares.tsv's (share_map.py, which
         hive_path.sh also reads) -- core_submission keeps no second copy of it."""
         import share_map
-        row = next(r for r in share_map.load_table() if r["share"] == cs.FLINDERS_SHARE)
+        row = next(r for r in share_map.load_table() if r["share"] == share_map.FLINDERS_SHARE)
         self.assertEqual(cs.server_flinders_root(), row["hive"])
         with mock.patch.object(cs.share_map, "load_table", return_value=[dict(row, hive="/x/fl")]):
             self.assertEqual(cs.server_project_dir(HEX, "2025-03-10T15:02:53-07:00"),

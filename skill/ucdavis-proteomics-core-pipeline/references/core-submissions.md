@@ -73,7 +73,9 @@ Environment overrides (the tests use them; staff never need to): `COREOMICS_BASE
 **Server-side paths never come from `CORE_FLINDERS_ROOT`.** Bioshare knows a share only by its
 HIVE path, so `share_dir` in the summary and Bioshare's `link_to_path` are always built with
 forward slashes from `/nfs/lssc0/flinders/proteomics`. A staff member on Windows, or with the
-root pointed at an SMB mount, still registers the right path.
+root pointed at an SMB mount, still registers the right path. That HIVE path, and the
+`Data/raw_data` and `Data/lab/service` trees under it, are defined once: `scripts/hive_shares.tsv`
+and `share_map.py`, which `fran_deposit.py`'s backfill reads too.
 
 ## 0. `identify` — which submission is this data? (local)
 

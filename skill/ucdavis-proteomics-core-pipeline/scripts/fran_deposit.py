@@ -2407,10 +2407,35 @@ def health(a):
 # Where Core searches live. The Quobyte SERVICE tree and the Flinders service tree hold the facility's
 # customer work; ~/proteomics-pipeline is the skill's install on HIVE (verified 2026-09-24 to hold
 # only presets/, references/, scripts/ for brettsp -- kept so a member's sessions there are found).
-BACKFILL_ROOTS = ["/quobyte/proteomics-grp/SERVICE",
-                  "/nfs/lssc0/flinders/proteomics/Data/lab/service"]
-# A search whose real path is inside one of these is a Core search whatever account ran it.
-CORE_PREFIXES = (GROUP_ROOT + "/", "/nfs/lssc0/flinders/proteomics/")
+# The Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map.py), read
+# when a backfill needs them -- never a second copy here.
+QUOBYTE_SERVICE = GROUP_ROOT + "/SERVICE"
+
+
+def _flinders():
+    """(the Flinders share's HIVE path, share_map) -- SystemExit when the table cannot say: a
+    backfill that silently skipped the Flinders tree would under-report."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import share_map
+        root = share_map.hive_root(share_map.FLINDERS_SHARE)
+    except (ImportError, OSError) as e:
+        raise SystemExit(f"[fran_deposit] share_map.py / hive_shares.tsv could not be read "
+                         f"({type(e).__name__}: {e}); sync the whole scripts/ directory")
+    if not root:
+        raise SystemExit("[fran_deposit] hive_shares.tsv has no HIVE path for the Flinders share")
+    return root.rstrip("/"), share_map
+
+
+def backfill_roots():
+    """The Core trees a backfill walks: Quobyte's SERVICE tree and Flinders' service tree."""
+    root, sm = _flinders()
+    return [QUOBYTE_SERVICE, "/".join((root,) + sm.FLINDERS_SERVICE)]
+
+
+def core_prefixes():
+    """A search whose real path is inside one of these is a Core search whatever account ran it."""
+    return (GROUP_ROOT + "/", _flinders()[0] + "/")
 GROUP_NAME = "proteomics-grp"
 # The group also holds ~30 teaching accounts (proteomics-class-NN). Their work is coursework, not
 # facility searches, and FRAN deliberately keeps teaching data out of the corpus.
@@ -2590,10 +2615,11 @@ def _in_core_group():
             or getpass.getuser() in g.gr_mem)
 
 
-def core_search(out, members, prefixes=CORE_PREFIXES):
+def core_search(out, members, prefixes=None):
     """(is_core, why). Coursework never is (_teaching_reason). Otherwise a search is the Core's if
     it lives in a Core tree, or if a non-teaching member of proteomics-grp owns it. Anything else
     is a collaborator's and is never handed over."""
+    prefixes = core_prefixes() if prefixes is None else prefixes
     real = os.path.realpath(out)
     teach = _teaching_reason(out)
     if teach:
@@ -2630,7 +2656,7 @@ class _StageArgs:
         self.require_completion_marker = True     # unattended: no marker, no stage
 
 
-def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=None):
+def plan_backfill(dirs, apply=False, members=None, prefixes=None, runs=None):
     """Classify each candidate directory; with apply=True, stage the eligible ones.
 
     Decision order, cheapest and most decisive first: a search this skill did not run, a search
@@ -2642,6 +2668,7 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=
     2026-09-08 FRAN's own queue ingested PROT_0793/search_mouse and search_hela by their real paths,
     and neither has a receipt -- staging them again would only put two duplicates in front of the
     cron's duplicate guard."""
+    prefixes = core_prefixes() if prefixes is None else prefixes      # read once, not per dir
     drop = os.environ.get("FRAN_DROP_DIR", DROP_DIR)
     seen, rows = set(), []
     for d in dirs:
@@ -2747,7 +2774,7 @@ def login_guard(a, n_list, env=None):
     walking = bool(a.roots) or not a.list
     if not walking and n_list <= LOGIN_LIST_MAX:
         return None
-    what = (f"walk {', '.join(a.roots or BACKFILL_ROOTS)}" if walking
+    what = (f"walk {', '.join(a.roots or backfill_roots())}" if walking
             else f"check {n_list} directories")
     return {"action": "backfill", "refused": "login_node",
             "detail": f"This would {what} over NFS, and that is not allowed on a HIVE login node. "
@@ -2836,7 +2863,7 @@ def backfill(a):
     members = core_members()
     walk_roots = []
     if a.roots or not a.list:
-        walk_roots = list(a.roots or BACKFILL_ROOTS)
+        walk_roots = list(a.roots or backfill_roots())
         if not a.no_homes and not a.roots:
             walk_roots += member_home_roots(members)
     found, sessions, stats = discover(walk_roots, a.max_depth, a.time_budget) if walk_roots \
@@ -2910,8 +2937,9 @@ def main():
                    help="skip the GitHub comparison of FRAN's ingest code (no network)")
     b = ap.add_argument_group("backfill")
     b.add_argument("--roots", action="append", default=None,
-                   help=f"walk these instead of the Core trees (default: {', '.join(BACKFILL_ROOTS)} "
-                        f"and members' ~/proteomics-pipeline); repeatable")
+                   help=f"walk these instead of the Core trees (default: {QUOBYTE_SERVICE}, "
+                        f"Flinders' service tree from hive_shares.tsv, and members' "
+                        f"~/proteomics-pipeline); repeatable")
     b.add_argument("--list", default=None, help="file of search out dirs, one per line")
     b.add_argument("--apply", action="store_true", help="stage what is eligible (default: dry run)")
     b.add_argument("--max-depth", type=int, default=WALK_MAX_DEPTH)

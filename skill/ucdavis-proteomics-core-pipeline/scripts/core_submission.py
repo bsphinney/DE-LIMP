@@ -100,9 +100,6 @@ except ImportError:         # a partial copy of scripts/: server_flinders_root()
     share_map = None
 
 DEFAULT_BASE_URL = "https://ucdavis.coreomics.com/server/api"
-# The Flinders share's name in hive_shares.tsv, the one table of which share is which HIVE path
-# (share_map.py; hive_path.sh reads it too). server_flinders_root() reads its HIVE path there.
-FLINDERS_SHARE = "proteomics"
 DEFAULT_WORK_ROOT = "/quobyte/proteomics-grp/SERVICE"
 TOKEN_FILE = "~/.coreomics_token"
 LAB = "PROTEOMICS"
@@ -200,17 +197,22 @@ def server_flinders_root() -> str:
     """The HIVE path of the Flinders share -- the only spelling Bioshare accepts in link_to_path
     (existing shares: /nfs/lssc0/flinders/proteomics/coreomics/projects/2026/08/<id>/share).
     From hive_shares.tsv, never a second copy of it here."""
+    sm = _share_map()
     try:
-        rows = (share_map or sibling("share_map")).load_table()
+        hive = sm.hive_root(sm.FLINDERS_SHARE)
     except OSError as e:
         raise Stop(EXIT_UNREACHABLE, {"error": f"hive_shares.tsv could not be read: {e}",
                                       "hint": SYNC_HINT})
-    hive = next((r["hive"] for r in rows if r["share"] == FLINDERS_SHARE and r["hive"]), None)
     if not hive:
         raise Stop(EXIT_UNREACHABLE, {"error": f"hive_shares.tsv has no HIVE path for the "
-                                               f"'{FLINDERS_SHARE}' (Flinders) share",
+                                               f"'{sm.FLINDERS_SHARE}' (Flinders) share",
                                       "hint": SYNC_HINT})
     return hive
+
+
+def _share_map():
+    """share_map.py: which share is which HIVE path, and the Flinders trees (one definition)."""
+    return share_map or sibling("share_map")
 
 
 def flinders_root() -> str:
@@ -219,11 +221,11 @@ def flinders_root() -> str:
 
 
 def raw_root() -> str:
-    return os.path.join(flinders_root(), "Data", "raw_data")
+    return os.path.join(flinders_root(), *_share_map().FLINDERS_RAW)
 
 
 def service_root() -> str:
-    return os.path.join(flinders_root(), "Data", "lab", "service")
+    return os.path.join(flinders_root(), *_share_map().FLINDERS_SERVICE)
 
 
 def work_root() -> str:

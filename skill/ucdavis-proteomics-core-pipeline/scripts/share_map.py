@@ -26,6 +26,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 TABLE = os.path.join(HERE, "hive_shares.tsv")
 HIVE_ROOTS = ("/quobyte/", "/nfs/lssc0/")
+# The Core's Flinders share, by its name in the table, and the trees inside it the skill works in.
+# ONE place: core_submission.py (raw files, service folders, Bioshare shares) and fran_deposit.py
+# (which searches are the Core's, where the backfill walks) read them here.
+FLINDERS_SHARE = "proteomics"
+FLINDERS_RAW = ("Data", "raw_data")              # instrument raw files
+FLINDERS_SERVICE = ("Data", "lab", "service")    # the Core's service folders
 
 
 def load_table(path=TABLE):
@@ -39,6 +45,13 @@ def load_table(path=TABLE):
             rows.append({k: (v if v and v != "-" else None) for k, v in
                          zip(("server", "share", "hive", "mac", "windows"), f)})
     return rows
+
+
+def hive_root(share, rows=None):
+    """The HIVE path of `share` in the table, or None when it records none."""
+    rows = load_table() if rows is None else rows
+    return next((r["hive"] for r in rows
+                 if (r["share"] or "").lower() == share.lower() and r["hive"]), None)
 
 
 def _match(server, share, rows):

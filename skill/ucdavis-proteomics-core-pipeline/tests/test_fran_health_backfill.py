@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
@@ -2090,6 +2091,37 @@ class SbatchTests(unittest.TestCase):
             self.assertIn("DRY RUN", body)
             self.assertEqual(res["mode"], "dry_run")
 
+
+
+class CoreTreesFromTheShareTable(unittest.TestCase):
+    """Rule 3: the Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map),
+    the same definitions core_submission uses -- fran_deposit keeps no copy of them."""
+
+    def test_backfill_roots_and_core_prefixes_follow_the_table(self):
+        import share_map
+        root = share_map.hive_root(share_map.FLINDERS_SHARE)
+        self.assertTrue(root.startswith("/"))
+        self.assertEqual(fd.backfill_roots(),
+                         [fd.GROUP_ROOT + "/SERVICE", root + "/Data/lab/service"])
+        self.assertEqual(fd.core_prefixes(), (fd.GROUP_ROOT + "/", root + "/"))
+        rows = [dict(r, hive="/x/flinders") if r["share"] == share_map.FLINDERS_SHARE else r
+                for r in share_map.load_table()]
+        with mock.patch.object(share_map, "load_table", return_value=rows):
+            self.assertEqual(fd.backfill_roots()[1], "/x/flinders/Data/lab/service")
+            self.assertEqual(fd.core_prefixes()[1], "/x/flinders/")
+            self.assertEqual(fd.core_search("/x/flinders/Data/lab/service/a/search", set()),
+                             (True, "in a Core tree"))
+
+    def test_the_same_service_tree_as_core_submission(self):
+        import core_submission as cs
+        with mock.patch.dict(os.environ, {"CORE_FLINDERS_ROOT": ""}):
+            self.assertEqual(cs.service_root(), fd.backfill_roots()[1])
+
+    def test_no_flinders_row_stops_the_backfill_instead_of_skipping_the_tree(self):
+        import share_map
+        with mock.patch.object(share_map, "load_table", return_value=[]):
+            with self.assertRaises(SystemExit):
+                fd.backfill_roots()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

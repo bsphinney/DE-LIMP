@@ -214,7 +214,8 @@ sbatch ~/fran_backfill/fran_backfill_<stamp>.sbatch
 python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch --apply
 ```
 
-- **Where it looks:** `/quobyte/proteomics-grp/SERVICE`, `/nfs/lssc0/flinders/proteomics/Data/lab/service`,
+- **Where it looks:** `/quobyte/proteomics-grp/SERVICE`, `/nfs/lssc0/flinders/proteomics/Data/lab/service`
+  (the Flinders path from `hive_shares.tsv` via `share_map.py`, as `core_submission.py` reads it),
   and `~/proteomics-pipeline` of each non-teaching `proteomics-grp` member (`--no-homes` to skip).
   `--roots` replaces the trees; `--list <file>` checks named out dirs instead (up to 10 are fine
   on a login node). Checkpoint sessions (`.recovery.json`) found on the way add the search out dir
