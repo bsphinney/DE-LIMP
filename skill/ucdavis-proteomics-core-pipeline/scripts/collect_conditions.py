@@ -14,8 +14,11 @@ runs — never guessed.
 metadata CSV schema:  File.Name,Group[,Batch,Covariate1,Covariate2][,<subject column>]
   File.Name must match the Run names in the DIA-NN report (or raw basenames).
   A subject / animal column (Mouse, Animal, Subject, Patient, Donor ...) is kept UNDER ITS
-  OWN NAME -- never filed as Batch/Covariate1/2, which run_de.R fits as fixed effects. When
-  several runs share a subject (five IPs from one mouse), run DE with --block <that name>.
+  OWN NAME when its values look like one (>= 3 subjects, not just the groups relabelled, and
+  -- where subjects span groups -- genuinely repeating across them); run DE with
+  --block <that name>. A header that says "subject" over values that do not (Subject = M/F,
+  Patient = Yes/No, Donor identical to Group) is NOT trusted: it stays a covariate and
+  --map asks for confirmation (subject_ambiguous). --subject-column <header> confirms one.
 
 Modes:
   # list the real run names the agent must map to
@@ -56,6 +59,33 @@ def subject_header(h):
     """True when a column header names the animal / subject / patient samples came from."""
     n = norm(h)
     return n in SUBJECT_HEADERS or re.sub(r"(id|no|num|number)$", "", n) in SUBJECT_HEADERS
+
+
+def subject_assessment(subject_of, group_of):
+    """Why a subject column's VALUES do not look like the animal / patient runs came from
+    (empty list = they do). The header alone is not evidence: 'Subject' can hold sex,
+    'Patient' yes/no, 'Donor' the group itself -- and a wrong block silently drops that
+    factor from the model."""
+    runs = [r for r in subject_of if r in group_of]
+    subjects = {subject_of[r] for r in runs}
+    reasons = []
+    if len(subjects) < 3:
+        reasons.append(f"only {len(subjects)} distinct value(s) ({', '.join(sorted(subjects))}): "
+                       f"a category such as sex or yes/no, not an animal / patient identifier")
+    groups_of = defaultdict(set)
+    subjects_of = defaultdict(set)
+    for r in runs:
+        groups_of[subject_of[r]].add(group_of[r])
+        subjects_of[group_of[r]].add(subject_of[r])
+    if runs and all(len(g) == 1 for g in groups_of.values()) and \
+            all(len(v) == 1 for v in subjects_of.values()):
+        reasons.append("its values are the groups relabelled (one value per group): as a block "
+                       "it would be the grouping itself")
+    spanning = [k for k, g in groups_of.items() if len(g) > 1]
+    if spanning and len(spanning) * 2 < len(groups_of):
+        reasons.append(f"only {len(spanning)} of {len(groups_of)} values recur across groups: "
+                       f"not a subject measured under several conditions")
+    return reasons
 
 
 def column_name(h):
@@ -113,9 +143,11 @@ def match_to_runs(identifier, runs, run_norms):
 
 
 # ---------------------------------------------------------- conditions source --
-def parse_conditions_file(path):
+def parse_conditions_file(path, subject_column=None):
     """Parse an uploaded CSV/TSV: detect sample + group (+batch/covariate) columns
-    however they're named. Returns list of dicts: {sample, group, extras{}}."""
+    however they're named. Returns (list of {sample, group, extras{}, subject},
+    subject column name, subject confirmed?). subject_column: the header the user confirmed
+    as the animal / patient ("none" = detect nothing)."""
     delim = "\t" if path.lower().endswith((".tsv", ".txt")) else None
     with open(path, newline="") as fh:
         sample = fh.read(4096); fh.seek(0)
@@ -128,7 +160,16 @@ def parse_conditions_file(path):
         scol = next((h for h in headers if hmap[h] in {norm(x) for x in SAMPLE_HEADERS}), None)
         gcol = next((h for h in headers if hmap[h] in {norm(x) for x in GROUP_HEADERS}), None)
         bcol = next((h for h in headers if hmap[h] in {norm(x) for x in BATCH_HEADERS}), None)
-        subj = next((h for h in headers if h not in (scol, gcol, bcol) and h and subject_header(h)), None)
+        confirmed = bool(subject_column) and subject_column.lower() != "none"
+        if confirmed:
+            subj = next((h for h in headers if h == subject_column or norm(h) == norm(subject_column)), None)
+            if subj is None:
+                sys.exit(json.dumps({"error": f"--subject-column {subject_column!r}: no such column",
+                                     "headers": headers}))
+        elif subject_column:        # "none": the user said there is no subject column
+            subj = None
+        else:
+            subj = next((h for h in headers if h not in (scol, gcol, bcol) and h and subject_header(h)), None)
         if scol is None or gcol is None:
             sys.exit(json.dumps({"error": "could not find sample and group columns",
                                  "headers": headers,
@@ -149,7 +190,7 @@ def parse_conditions_file(path):
                     extras[COV_COLS[i + 1]] = row[h].strip()
             out.append({"sample": s, "group": g, "extras": extras,
                         "subject": (row.get(subj) or "").strip() if subj else ""})
-        return out, (column_name(subj) if subj else None)
+        return out, (column_name(subj) if subj else None), confirmed
 
 
 def intent_from_json(blob):
@@ -170,11 +211,12 @@ def intent_from_json(blob):
     subjects = d.get("subjects") or {}
     for item in out:
         item["subject"] = str(subjects.get(item["sample"], "")).strip()
-    return out, (column_name(d.get("subject_column") or "Subject") if subjects else None)
+    # subjects the agent took from the user's own words count as confirmed
+    return out, (column_name(d.get("subject_column") or "Subject") if subjects else None), bool(subjects)
 
 
 # ----------------------------------------------------------------------- map --
-def do_map(out_path, runs, intent, subject_col=None):
+def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False):
     run_norms = [norm(r) for r in runs]
     run_groups = defaultdict(set)      # run -> {groups}
     run_extras = {}                    # run -> extras
@@ -213,6 +255,24 @@ def do_map(out_path, runs, intent, subject_col=None):
     subject_conflicts = {r: sorted(v) for r, v in run_subject.items() if len(v) > 1}
     if not run_subject:
         subject_col = None
+    # Do the VALUES look like the animal / patient each run came from? Unconfirmed and they
+    # do not: keep the column as a covariate (the old behaviour) and ask, rather than
+    # suggest a --block that would silently drop the factor from the model.
+    subj_reasons = subject_assessment(subject_of, assigned) if subject_col else []
+    ambiguous = bool(subject_col and subj_reasons and not subject_confirmed)
+    subject_ambiguous = None
+    if ambiguous:
+        slot = next((c for c in COV_COLS[1:] if c not in cov_used), None)
+        subject_ambiguous = {"column": subject_col, "reasons": subj_reasons,
+                             "written_as": slot,
+                             "to_confirm": f"if {subject_col} really is the animal / patient each "
+                                           f"run came from, re-run --map with --subject-column "
+                                           f"'{subject_col}'; otherwise leave it as a covariate"}
+        if slot:
+            for r, v in subject_of.items():
+                run_extras.setdefault(r, {})[slot] = v
+            cov_used = sorted(set(cov_used) | {slot}, key=COV_COLS.index)
+        subject_col = None
     cols = ["File.Name", "Group"] + cov_used + ([subject_col] if subject_col else [])
     with open(out_path, "w", newline="") as fh:
         w = csv.writer(fh); w.writerow(cols)
@@ -227,14 +287,16 @@ def do_map(out_path, runs, intent, subject_col=None):
     sizes = Counter(assigned.values())
     singletons = [g for g, c in sizes.items() if c < 2]
     # --block needs every subject to hold >= 2 runs (run_de.R stops otherwise). All
-    # singletons = the column is a sample id, not a blocking unit: no --block.
-    subj_sizes = Counter(subject_of.values())
+    # singletons = the column is a sample id, not a blocking unit: no --block. The groups
+    # relabelled can never be a block (run_de.R stops on it), confirmed or not.
+    subj_sizes = Counter(subject_of.values()) if subject_col else Counter()
     subj_single = sorted(k for k, c in subj_sizes.items() if c < 2)
-    block_ok = bool(subject_col and subj_sizes and not subj_single
+    relabelled = any("groups relabelled" in x for x in subj_reasons)
+    block_ok = bool(subject_col and subj_sizes and not subj_single and not relabelled
                     and len(subject_of) == len(runs) and not subject_conflicts)
     subj_partial = bool(subject_col and subj_single and len(subj_single) < len(subj_sizes))
     subj_missing = [r for r in runs if subject_col and r not in subject_of and r not in subject_conflicts]
-    needs_conf = bool(unassigned or conflicting or unmatched or singletons
+    needs_conf = bool(unassigned or conflicting or unmatched or singletons or ambiguous
                       or subject_conflicts or subj_partial or (subject_col and subj_missing))
     print(json.dumps({
         "proposed_csv": os.path.abspath(out_path),
@@ -251,11 +313,14 @@ def do_map(out_path, runs, intent, subject_col=None):
                 "runs_without_subject": subj_missing,
                 "single_run_subjects": subj_single if subj_partial else []}
                if subject_col else {}),
+            **({"subject_ambiguous": subject_ambiguous} if subject_ambiguous else {}),
         },
         # The column naming the animal / subject each run came from, kept under its own
-        # name. block_suggested: every run has one and every subject holds >= 2 runs.
+        # name. block_suggested: every run has one, every subject holds >= 2 runs, and the
+        # values look like subjects (or the user confirmed them).
         "block_column": subject_col,
         "block_suggested": block_ok,
+        "subject_confirmed": bool(subject_col and subject_confirmed),
         "subjects": dict(subj_sizes) if subject_col else {},
         "needs_confirmation": needs_conf,
         "guidance": "Confirm every item under 'ambiguities' with the user, then finalize "
@@ -315,6 +380,9 @@ def main():
     ap.add_argument("--glob", default="*.raw")
     ap.add_argument("--runs", help="comma-separated run names (alternative to --from-*)")
     ap.add_argument("--covariates", default="", help="comma list for --emit-template, e.g. Batch,Covariate1")
+    ap.add_argument("--subject-column", help="--map --from-file: the header the user CONFIRMED names the "
+                    "animal / patient each run came from (kept under its own name for --block); "
+                    "'none' = there is no such column")
     ap.add_argument("--validate")
     ap.add_argument("--against", help="report to validate File.Name against")
     a = ap.parse_args()
@@ -324,10 +392,12 @@ def main():
         print(json.dumps({"n_runs": len(runs), "runs": runs}, indent=2))
     elif a.map_out:
         runs = get_runs(a)
-        if a.from_file:      intent, subject_col = parse_conditions_file(a.from_file)
-        elif a.mapping_json: intent, subject_col = intent_from_json(a.mapping_json)
+        if a.from_file:
+            intent, subject_col, confirmed = parse_conditions_file(a.from_file, a.subject_column)
+        elif a.mapping_json:
+            intent, subject_col, confirmed = intent_from_json(a.mapping_json)
         else: sys.exit("--map needs --from-file (uploaded file) or --mapping-json (agent intent)")
-        do_map(a.map_out, runs, intent, subject_col)
+        do_map(a.map_out, runs, intent, subject_col, confirmed)
     elif a.emit_template:
         names = get_runs(a)
         covs = [c.strip() for c in a.covariates.split(",") if c.strip()]

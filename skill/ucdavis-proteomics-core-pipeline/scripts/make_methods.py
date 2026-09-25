@@ -542,6 +542,11 @@ def de_block_sentence(prov):
     over = (f", estimated from {n_est:,} of {n_all:,} proteins"
             if isinstance(n_est, int) and isinstance(n_all, int) else "")
     levels = f" ({b['n_blocks']} levels)" if isinstance(b.get("n_blocks"), int) else ""
+    if b.get("effect") == "fixed":
+        return (f"Samples sharing a {col} were paired: {col}{levels} was included in the linear "
+                f"model as a fixed effect ({prov.get('design') or NOT_RECORDED}), since it is "
+                f"crossed with the groups and every contrast compares samples within one {col} "
+                f"-- the exact paired analysis.")
     out = (f"Samples sharing a {col} were modelled as correlated rather than independent: {col}"
            f"{levels} was fitted as a random blocking factor, with a consensus within-{col} "
            f"correlation of {rho_s} (limma duplicateCorrelation{over}) used in the linear-model "

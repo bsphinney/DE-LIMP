@@ -5,6 +5,12 @@ PROT_0756 (Dickson lab, Silva08172026): 30 IPs from 6 mouse brains, one JPH3/JPH
 RyR/IgG IP per mouse, mice 1-3 Old and 4-6 Young. Every bait-vs-IgG contrast compares IPs
 from the same mice, but run_de.R fitted all 30 as independent samples.
 
+Review (5d3c61f, FIX-FIRST): C2 a crossed paired design is fitted with a FIXED subject
+effect (the exact paired analysis; blocksim/paired.R), the random effect kept for nested
+designs; C3 a between-block contrast on the blocked fit carries a CAUTION; C4 all-between
+runs carry nothing of the blocked fit; C5 the all-between path is pinned here.
+NOTE: CI runs Python only and skips every R-invoking test here -- run them locally.
+
 Guards (end to end on synthetic DIA-NN reports; skip without R + limpa/limma/statmod/...):
   * a paired design where subjects differ a lot: blocking finds the true changes the
     unblocked fit misses, on dpc and maxlfq;
@@ -110,6 +116,7 @@ TRUE_HITS = {f"P{i:05d}" for i in range(1, 41)}
 POOLED = "(Old_Bait+Old_IgG)/2-(Young_Bait+Young_IgG)/2"
 NESTED_CONTRASTS = ",".join(["Old_Bait-Old_IgG", "Young_Bait-Young_IgG", "Old_Bait-Young_Bait",
                              "Old_IgG-Young_IgG", POOLED])
+BETWEEN_ONLY = "Old_Bait-Young_Bait,Old_IgG-Young_IgG"
 NESTED_MODEL = {"Old_Bait-Old_IgG": "blocked", "Young_Bait-Young_IgG": "blocked",
                 "Old_Bait-Young_Bait": "independent", "Old_IgG-Young_IgG": "independent",
                 POOLED: "blocked"}
@@ -135,9 +142,22 @@ class RunDeBlock(unittest.TestCase):
         cls.runs = {}
         plans = {
             "dpc":         ("paired", "conditions.csv", ["--method", "dpc"]),
+            # paired + crossed, one within contrast: auto picks the FIXED subject effect
             "dpc_block":   ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject"]),
             "ml":          ("paired", "conditions.csv", ["--method", "maxlfq"]),
             "ml_block":    ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject"]),
+            # ... and the random effect when asked for
+            "dpc_block_random": ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject",
+                                                              "--block-effect", "random"]),
+            "ml_block_random": ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject",
+                                                             "--block-effect", "random"]),
+            # nested: a fixed subject is aliased with the age groups
+            "fixed_nested": ("nested", "conditions.csv", ["--method", "dpc", "--block", "Subject",
+                                                          "--block-effect", "fixed",
+                                                          "--contrasts", NESTED_CONTRASTS]),
+            # every contrast between subjects, one sample each: the block reports nothing (C4/C5)
+            "between_only": ("nested", "conditions.csv", ["--method", "dpc", "--block", "Subject",
+                                                          "--contrasts", BETWEEN_ONLY]),
             # --block-scope within (the default), all, and no block at all -- same contrasts
             "nested":      ("nested", "conditions.csv", ["--method", "dpc", "--block", "Subject",
                                                          "--contrasts", NESTED_CONTRASTS]),
@@ -198,8 +218,10 @@ class RunDeBlock(unittest.TestCase):
     # -- the point of it ----------------------------------------------------------------
     def test_blocking_increases_power(self):
         for plain, blocked, de in (("dpc", "dpc_block", "DE_dpc_B.A.csv"),
-                                   ("ml", "ml_block", "DE_maxlfq_B.A.csv")):
-            with self.subTest(method=plain):
+                                   ("ml", "ml_block", "DE_maxlfq_B.A.csv"),
+                                   ("dpc", "dpc_block_random", "DE_dpc_B.A.csv"),
+                                   ("ml", "ml_block_random", "DE_maxlfq_B.A.csv")):
+            with self.subTest(run=blocked):
                 s0 = significant(os.path.join(self.out(plain), de))
                 s1 = significant(os.path.join(self.out(blocked), de))
                 self.assertGreater(len(s1 & TRUE_HITS), len(s0 & TRUE_HITS) + 10,
@@ -222,14 +244,48 @@ class RunDeBlock(unittest.TestCase):
         self.assertLess(max(abs(a[k] - b[k]) for k in shared), 1e-6)
 
     # -- the record ---------------------------------------------------------------------
+    def test_paired_crossed_design_gets_the_fixed_effect(self):
+        for key, fit in (("dpc_block", "limpa::dpcDE(y, design + fixed block columns)"),
+                         ("ml_block", "limma::lmFit(E, design + fixed block columns)")):
+            with self.subTest(run=key):
+                p = self.prov(key)
+                b = p["block"]
+                self.assertTrue(b["applied"])
+                self.assertEqual(p["block_column"], "Subject")
+                self.assertEqual(b["effect"], "fixed")
+                self.assertIn("auto -- auto would be fixed: Subject is crossed with the groups",
+                              b["effect_choice"])
+                self.assertEqual(p["design"], "~ 0 + groups + Subject")   # a design term now
+                self.assertIsNone(b["consensus_correlation"])
+                self.assertTrue(b["fit"].startswith(fit), b["fit"])
+                self.assertEqual(b["contrast_model"], {"B-A": "blocked"})
+                self.assertEqual(b["warnings"], [])
+                self.assertIn("block = Subject (fixed effect", p["de_engine"])
+                txt = self.methods(key)
+                self.assertIn("Blocking      : Subject as a FIXED effect (6 levels, 2 samples each)", txt)
+                self.assertIn("Design        : ~ 0 + groups + Subject", txt)
+                self.assertNotIn("consensus within-Subject correlation", txt)
+                para = mm.de_paragraph(p)
+                self.assertIn("Subject (6 levels) was included in the linear model as a fixed effect "
+                              "(~ 0 + groups + Subject)", para)
+
+    def test_fixed_effect_needs_a_crossed_block(self):
+        err = self.failed("fixed_nested")
+        self.assertIn("--block-effect fixed: Subject is nested in the groups", err)
+        # auto on the nested design stays random, and says why
+        self.assertEqual(self.prov("nested")["block"]["effect"], "random")
+        self.assertIn("nested in the groups", self.prov("nested")["block"]["effect_choice"])
+
     def test_provenance_records_the_block(self):
-        for key, fit in (("dpc_block", "limpa::dpcDE(block =)"),
-                         ("ml_block", "limma::duplicateCorrelation(E, design, block =)")):
+        for key, fit in (("dpc_block_random", "limpa::dpcDE(block =)"),
+                         ("ml_block_random", "limma::duplicateCorrelation(E, design, block =)")):
             with self.subTest(run=key):
                 p = self.prov(key)
                 b = p["block"]
                 self.assertTrue(b["applied"])
                 self.assertEqual(b["column"], "Subject")
+                self.assertEqual(b["effect"], "random")
+                self.assertIn("requested random", b["effect_choice"])
                 self.assertEqual(p["block_column"], "Subject")   # top-level, for simple readers
                 self.assertEqual(b["n_blocks"], 6)
                 self.assertEqual(b["block_sizes"], {f"S{i}": 2 for i in range(1, 7)})
@@ -249,7 +305,7 @@ class RunDeBlock(unittest.TestCase):
                 self.assertIn("block = Subject", p["de_engine"])
                 self.assertEqual(p["contrasts"], ["B-A"])   # a list even when there is one
         # dpc: limpa estimates twice; both are kept
-        self.assertIsInstance(self.prov("dpc_block")["block"]["first_pass_correlation"], float)
+        self.assertIsInstance(self.prov("dpc_block_random")["block"]["first_pass_correlation"], float)
 
     def test_unblocked_run_says_independent(self):
         b = self.prov("dpc")["block"]
@@ -261,8 +317,8 @@ class RunDeBlock(unittest.TestCase):
         self.assertIn("pass --block Subject", self.runs["dpc"][0].stderr)
 
     def test_methods_txt_states_the_block(self):
-        rho = self.prov("dpc_block")["block"]["consensus_correlation"]
-        txt = self.methods("dpc_block")
+        rho = self.prov("dpc_block_random")["block"]["consensus_correlation"]
+        txt = self.methods("dpc_block_random")
         self.assertIn("Blocking      : Subject as a random effect (6 levels, 2 samples each)", txt)
         self.assertIn(f"consensus within-Subject correlation {rho:.3f}", txt)
         self.assertIn("Within-Subject contrasts, blocked fit: B-A", txt)
@@ -270,7 +326,7 @@ class RunDeBlock(unittest.TestCase):
         self.assertNotIn("CAUTION", txt)
 
     def test_make_methods_sentence_reads_the_record(self):
-        p = self.prov("dpc_block")
+        p = self.prov("dpc_block_random")
         para = mm.de_paragraph(p)
         self.assertIn("Subject (6 levels) was fitted as a random blocking factor", para)
         self.assertIn(f"{p['block']['consensus_correlation']:.3f}", para)
@@ -302,6 +358,49 @@ class RunDeBlock(unittest.TestCase):
                       "(scope within)", txt)
         for t in p["de_tables"].values():
             self.assertTrue(os.path.exists(os.path.join(self.out("nested"), t["file"])))
+
+    def test_between_contrast_on_the_blocked_fit_is_cautioned(self):
+        # C3: the pooled age contrast has to use the blocked fit -- and says it is
+        # anti-conservative for proteins with strong subject effects
+        w = self.prov("nested")["block"]["warnings"]
+        self.assertEqual(len(w), 1, w)
+        self.assertIn(f"{POOLED} compares different Subject levels but is reported from the blocked fit", w[0])
+        self.assertIn("anti-conservative", w[0])
+        self.assertIn(f"CAUTION: {POOLED} compares different Subject levels", self.methods("nested"))
+        self.assertIn("anti-conservative", self.runs["nested"][0].stderr)
+        # --block-scope all puts the one-sample-per-subject age contrasts there too
+        w_all = " ".join(self.prov("nested_all")["block"]["warnings"])
+        self.assertIn("Old_Bait-Young_Bait, Old_IgG-Young_IgG, " + POOLED, w_all)
+        self.assertIn("(--block-scope all)", w_all)
+        # within-only runs carry no such caution
+        self.assertEqual(self.prov("dpc_block_random")["block"]["warnings"], [])
+
+    def test_all_between_path(self):
+        # C5: every contrast between subjects, one sample each -> all from the independent fit
+        p = self.prov("between_only")
+        b = p["block"]
+        self.assertFalse(b["applied"])
+        self.assertNotIn("block_column", p)
+        self.assertEqual(set(b["contrast_model"].values()), {"independent"})
+        self.assertIn("every contrast compares different Subject levels", b["note"])
+        self.assertNotIn("block", p["de_engine"])
+        self.assertIn("Blocking      : none used -- --block Subject given, but every contrast "
+                      "compares different Subject levels", self.methods("between_only"))
+        self.assertNotIn("blocking factor", mm.de_paragraph(p))
+        for cn, t in p["de_tables"].items():
+            with self.subTest(contrast=cn):
+                self.assertEqual(t["model"], "independent")
+                a = read_csv(os.path.join(self.out("between_only"), t["file"]))
+                b_ = {r["Protein.Group"]: r for r in read_csv(os.path.join(self.out("nested_plain"), t["file"]))}
+                self.assertEqual({r["Protein.Group"] for r in a}, set(b_))
+                for r in a:
+                    for c in ("logFC", "t", "P.Value", "adj.P.Val", "B"):
+                        self.assertAlmostEqual(float(r[c]), float(b_[r["Protein.Group"]][c]), places=10)
+        # C4: the session fit is the independent fit -- no blocked correlation or s2.post
+        out = rscript(f'''
+          s <- readRDS("{os.path.join(self.out("between_only"), "DE-LIMP_session.rds")}")
+          cat(is.null(s$fit$correlation), is.null(s$fit$block), all(s$fit$contrast_model == "independent"), "\\n")''')
+        self.assertEqual(out.split(), ["TRUE", "TRUE", "TRUE"])
 
     # -- --block-scope: one run, each contrast from its fit ----------------------------------
     def test_scope_within_picks_the_fit_per_contrast(self):
@@ -346,7 +445,7 @@ class RunDeBlock(unittest.TestCase):
                       "Subject levels using at most one sample per Subject -- were reported from "
                       "the same data fitted with samples as independent", para)
         # a blocked record from before --block-scope: which fit reported what is not assumed
-        old = self.prov("dpc_block"); old["block"].pop("contrast_model")
+        old = self.prov("dpc_block_random"); old["block"].pop("contrast_model")
         self.assertIn("not recorded", mm.de_paragraph(old))
 
     def test_block_scope_arguments(self):
@@ -379,13 +478,17 @@ class RunDeBlock(unittest.TestCase):
     # -- reproducible ----------------------------------------------------------------------
     def test_reproducibility_log_refits_the_blocked_model(self):
         # paired: one blocked fit; nested: the blocked fit AND the independent one (scope within)
-        for key in ("dpc_block", "ml_block", "nested", "nested_ml"):
+        for key in ("dpc_block", "ml_block", "dpc_block_random", "nested", "nested_ml"):
             with self.subTest(run=key):
                 out = self.out(key)
                 with open(os.path.join(out, "reproducibility_log.R")) as fh:
                     src = fh.read()
                 self.assertIn("block <- metadata[['Subject']]", src)
-                self.assertIn("block = block", src)
+                if key in ("dpc_block", "ml_block"):          # fixed: design columns
+                    self.assertIn("design <- cbind(design, block_cols)", src)
+                    self.assertNotIn("block = block", src)
+                else:
+                    self.assertIn("block = block", src)
                 if key.startswith("nested"):
                     self.assertIn("fit_independent <- limma::eBayes(", src)
                     self.assertIn("'Old_Bait-Young_Bait' = 'independent'", src)
@@ -432,11 +535,19 @@ class BlockRecordWarnings(unittest.TestCase):
           cm2 <- limma::makeContrasts(contrasts = c("Old_Bait-Old_IgG", "Old_Bait-Young_Bait",
             "(Old_Bait+Old_IgG)/2-(Young_Bait+Young_IgG)/2"), levels = d2)
           b3 <- b2; b3[2] <- "M1"   # M1 now holds two Old_IgG samples: a technical replicate
+          eff <- function(block, g, cm, d, req = "auto")
+            block_choose_effect(req, block, d, block_contrast_structure(block, g, cm), "Mouse")$effect
+          gp <- factor(rep(c("Ctrl", "Trt"), each = 4)); bp <- rep(c("P1", "P2", "P3", "P4"), 2)
+          dp <- model.matrix(~ 0 + gp); colnames(dp) <- levels(gp)
+          cmp <- limma::makeContrasts(contrasts = "Trt-Ctrl", levels = dp)
+          effects <- list(paired = eff(bp, gp, cmp, dp),
+                          nested_within = eff(b2, g2, cm2[, 1, drop = FALSE], d2),
+                          paired_forced_random = eff(bp, gp, cmp, dp, "random"))
           models <- list(within = block_contrast_model(b2, g2, cm2, "within"),
                          all = block_contrast_model(b2, g2, cm2, "all"),
                          reps = block_contrast_model(b3, g2, cm2, "within"))
           cat(jsonlite::toJSON(list(warn = warn, structure = st, n_ok = length(r$ok$warnings),
-                                    models = models), auto_unbox = TRUE))'''))
+                                    models = models, effects = effects), auto_unbox = TRUE))'''))
 
     def test_clean_estimate_has_no_warning(self):
         self.assertEqual(self.res["n_ok"], 0)
@@ -458,6 +569,12 @@ class BlockRecordWarnings(unittest.TestCase):
         self.assertEqual(set(m["all"].values()), {"blocked"})
         # a subject with two samples in one group pseudo-replicates the independent fit too
         self.assertEqual(set(m["reps"].values()), {"blocked"})
+
+    def test_fixed_or_random(self):
+        # crossed paired + every contrast within -> fixed; nested (mice within age) -> random
+        # even for a within contrast (P2, a fixed nested effect, is a follow-up); forced wins
+        self.assertEqual(self.res["effects"], {"paired": "fixed", "nested_within": "random",
+                                               "paired_forced_random": "random"})
 
     def test_contrast_structure(self):
         # M1 has both an Old IgG and an Old Bait IP, M3/M4 only one each -> partial

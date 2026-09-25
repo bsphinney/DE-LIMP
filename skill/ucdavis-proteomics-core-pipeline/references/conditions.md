@@ -16,7 +16,12 @@ genuine ambiguities.
    batch from {batch, block, plate, run order}; a subject column from {mouse, mice,
    animal, rat, subject, patient, donor, individual, participant, pair} (an `id` / `no` /
    `number` suffix allowed: `Mouse ID`, `animal_no`) is kept **under its own name**
-   (`Mouse ID` → `Mouse_ID`). Up to two further columns become Covariate1/Covariate2.
+   (`Mouse ID` → `Mouse_ID`) — but only when its VALUES look like subjects: ≥ 3 of them,
+   not the groups relabelled, and (where they span groups) recurring across them. A
+   `Subject` of M/F, a `Patient` of Yes/No or a `Donor` identical to the group stays a
+   covariate and is reported as `subject_ambiguous` for the user to confirm
+   (`--subject-column <header>`; `--subject-column none` turns detection off). Up to two
+   further columns become Covariate1/Covariate2.
 
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):
@@ -43,11 +48,14 @@ The agent confirms each with the user, finalizes `conditions.csv`, then runs
 
 **Samples from the same animal / patient?** (five IPs from one mouse brain, paired
 before/after samples.) Ask. If so, keep that unit in its own column under its own name
-(`Mouse`, `Patient`) — not Batch/Covariate1/Covariate2, which are fitted as fixed
-effects — and run DE with `--block Mouse` (`references/de-analysis.md`, "Paired /
-repeated designs"). `--map` keeps a subject column under its own name and reports it
-as `block_column`; `block_suggested` is true when every run has a subject and every
-subject holds ≥ 2 runs (all singletons = a sample id, not a block). Ambiguities add
+(`Mouse`, `Patient`) and run DE with `--block Mouse` (`references/de-analysis.md`,
+"Paired / repeated designs"). `run_de.R` then fits it as a **fixed** effect when it is
+crossed with the groups and every contrast is within one subject (before/after in the same
+patient: the exact paired analysis), and as a **random** effect when it is nested in a
+group (mice within age). `--map` keeps a subject column under its own name and reports it
+as `block_column`; `block_suggested` is true when every run has a subject, every subject
+holds ≥ 2 runs (all singletons = a sample id, not a block) and the values look like
+subjects or were confirmed (`subject_confirmed`). Ambiguities add
 `subject_conflicting_runs`, `runs_without_subject` and `single_run_subjects`. run_de.R
 prints a note when a column recurs across groups and no `--block` was given.
 `File.Name` must equal the Run names in the search report. `--validate` checks

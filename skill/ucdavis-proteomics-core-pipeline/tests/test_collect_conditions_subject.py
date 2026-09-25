@@ -7,6 +7,12 @@ Covariate1; nested in the Old/Young groups that made the design rank-deficient, 
 pairing could not be passed to run_de.R --block. Now a column named for the unit samples
 come from (Mouse, Animal, Subject, Patient, Donor ...) is written as that column, and the
 --map report names it and says whether --block applies.
+
+The header alone is not trusted (review C1): a 'Subject' of M/F, a 'Patient' of Yes/No or a
+'Donor' that is the Group relabelled would silently drop that factor from the model as a
+block. Their VALUES must look like subjects -- >= 3 of them, not the groups relabelled, and
+recurring across groups where they span them -- or the column stays a covariate and --map
+asks (subject_ambiguous) until --subject-column confirms it.
 """
 import csv
 import json
@@ -25,12 +31,12 @@ import collect_conditions as cc   # noqa: E402
 RUNS = [f"08132026_DIA-LRS-{n}_S3" for n in range(96, 106)]
 
 
-def run_map(tmp, sheet_rows, header, **kw):
+def run_map(tmp, sheet_rows, header, runs=RUNS, extra=(), **kw):
     sheet = os.path.join(tmp, "sheet.csv")
     with open(sheet, "w", newline="") as fh:
         w = csv.writer(fh); w.writerow(header); w.writerows(sheet_rows)
     out = os.path.join(tmp, "conditions.csv")
-    args = ["python3", SCRIPT, "--map", out, "--runs", ",".join(RUNS)]
+    args = ["python3", SCRIPT, "--map", out, "--runs", ",".join(runs), *extra]
     args += ["--mapping-json", kw["mapping_json"]] if "mapping_json" in kw else ["--from-file", sheet]
     p = subprocess.run(args, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
@@ -109,6 +115,76 @@ class SubjectColumnKeptUnderItsOwnName(unittest.TestCase):
         self.assertEqual(list(out[0]), ["File.Name", "Group", "Mouse"])
         self.assertEqual(rep["block_column"], "Mouse")
         self.assertTrue(rep["block_suggested"])
+
+    # -- review C1: a subject header over values that are not subjects ----------------
+    def assert_ambiguous(self, rep, out, header, reason, slot):
+        self.assertIsNone(rep["block_column"])
+        self.assertFalse(rep["block_suggested"])
+        self.assertTrue(rep["needs_confirmation"])
+        amb = rep["ambiguities"]["subject_ambiguous"]
+        self.assertEqual(amb["column"], header)
+        self.assertTrue(any(reason in r for r in amb["reasons"]), amb["reasons"])
+        self.assertEqual(amb["written_as"], slot)
+        self.assertIn(f"--subject-column '{header}'", amb["to_confirm"])
+        self.assertNotIn(header, out[0])                      # not written as a block column
+        self.assertIn(slot, out[0])                           # kept, as a covariate
+        self.assertNotIn("--block", rep["guidance"])
+
+    def test_subject_that_is_sex_is_not_a_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, header = ip_sheet("Subject")
+            for i, r in enumerate(rows):
+                r[-1] = "M" if i % 2 == 0 else "F"
+            rep, out = run_map(tmp, rows, header)
+        self.assert_ambiguous(rep, out, "Subject", "only 2 distinct value(s) (F, M)", "Covariate2")
+        self.assertEqual({r["Covariate2"] for r in out}, {"M", "F"})
+
+    def test_patient_yes_no_is_not_a_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, header = ip_sheet("Patient")
+            for i, r in enumerate(rows):
+                r[-1] = "Yes" if i < 3 or i > 7 else "No"
+            rep, out = run_map(tmp, rows, header)
+        self.assert_ambiguous(rep, out, "Patient", "only 2 distinct value(s)", "Covariate2")
+
+    def test_donor_that_is_the_group_is_not_a_block(self):
+        runs = [f"R{i:02d}" for i in range(1, 10)]
+        rows = [[f"R{i:02d}", g, f"D_{g}"] for i, g in zip(range(1, 10), ["A", "B", "C"] * 3)]
+        with tempfile.TemporaryDirectory() as tmp:
+            rep, out = run_map(tmp, rows, ["sample", "group", "Donor"], runs=runs)
+        self.assert_ambiguous(rep, out, "Donor", "the groups relabelled", "Covariate1")
+
+    def test_confirmed_subject_column_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, header = ip_sheet("Subject")
+            for i, r in enumerate(rows):
+                r[-1] = "M" if i % 2 == 0 else "F"
+            rep, out = run_map(tmp, rows, header, extra=["--subject-column", "Subject"])
+        self.assertEqual(rep["block_column"], "Subject")
+        self.assertTrue(rep["subject_confirmed"])
+        self.assertIn("Subject", out[0])
+        self.assertNotIn("subject_ambiguous", rep["ambiguities"])
+
+    def test_subject_column_none_turns_detection_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, header = ip_sheet()
+            rep, out = run_map(tmp, rows, header, extra=["--subject-column", "none"])
+        self.assertIsNone(rep["block_column"])
+        self.assertEqual(list(out[0]), ["File.Name", "Group", "Batch", "Covariate1", "Covariate2"])
+
+    def test_assessment_directly(self):
+        grp = {f"r{i}": g for i, g in enumerate("AABBCC")}
+        self.assertEqual(cc.subject_assessment({f"r{i}": s for i, s in enumerate("123123")}, grp), [])
+        # one subject per group and one group per subject: the groups relabelled
+        relab = {"r0": "1", "r1": "1", "r2": "2", "r3": "2", "r4": "3", "r5": "3"}
+        self.assertTrue(any("relabelled" in x for x in cc.subject_assessment(relab, grp)))
+        # nested replicates (two subjects per group, two runs each) are a valid block
+        grp2 = {f"r{i}": g for i, g in enumerate("AAAABBBB")}
+        reps = {f"r{i}": s for i, s in enumerate("11223344")}
+        self.assertEqual(cc.subject_assessment(reps, grp2), [])
+        # most values confined to one group, one crossing: not a subject design
+        few = {f"r{i}": s for i, s in enumerate("11234156")}
+        self.assertTrue(any("recur across groups" in x for x in cc.subject_assessment(few, grp2)))
 
     def test_no_subject_column_no_change(self):
         with tempfile.TemporaryDirectory() as tmp:

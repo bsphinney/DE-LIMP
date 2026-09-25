@@ -46,6 +46,24 @@
 # the 77 Old-vs-Young calls only the blocked fit made were exactly those proteins (median
 # correlation 0.44 vs 0.14 overall: red-cell, complement, tRNA-synthetase proteins). For
 # within-block contrasts the blocked fit is the right model: +14-58% calls, none lost.
+#
+# FIXED or RANDOM (--block-effect, default "auto"; review C2, blocksim/paired.R).
+# When the block is CROSSED with the groups (it stays full rank as a fixed term) and every
+# contrast compares samples within one block -- before/after in the same patient -- the
+# fixed subject effect IS the exact paired analysis: type I 0.050 and power 0.95 at every
+# per-protein correlation. The random effect drifts (type I 0.078 -> 0.010 from
+# correlation 0.05 to 0.85, power 0.96 -> 0.76) because one consensus correlation is
+# applied to every protein. So auto = fixed there; random (duplicateCorrelation) stays for
+# nested / multi-level designs such as PROT_0756 (mice within age), where a fixed mouse
+# term is aliased with the age groups and between-mouse contrasts need the random effect.
+#
+# POOLED between-block contrasts (review C3, blocksim/between.R): a contrast between blocks
+# that averages several samples per block (Old vs Young over all baits) can only come from
+# the blocked fit -- unblocked it is pseudo-replicated (type I 0.07-0.36) -- but the
+# blocked fit is itself anti-conservative for proteins with strong block effects (type I
+# 0.10 / 0.22 at per-protein correlation 0.6 / 0.85 for a nominal 0.05). Such a contrast is
+# reported from the blocked fit WITH a CAUTION; define between-block contrasts one sample
+# per block (per bait), which scope "within" reports from the independent fit.
 # =============================================================================
 
 # Warning thresholds -- they only decide whether the run says CAUTION; the fit never
@@ -62,6 +80,45 @@ BLOCK_FIT <- list(
                "the vooma precision weights, re-estimated after the weights are recomputed, ",
                "then lmFit(block =, correlation =, weights =)"),
   maxlfq = "limma::duplicateCorrelation(E, design, block =) -> lmFit(E, design, block =, correlation =)")
+BLOCK_FIT_FIXED <- list(
+  dpc = "limpa::dpcDE(y, design + fixed block columns) -> voomaLmFitWithImputation (no block argument)",
+  maxlfq = "limma::lmFit(E, design + fixed block columns)")
+
+# The block as fixed design columns (treatment coding; the first level is absorbed by the
+# group means). One definition: run_de.R fits them, repro_script.R emits the same code.
+block_fixed_columns <- function(block, block_col) {
+  f <- factor(block)
+  z <- stats::model.matrix(~ f)[, -1, drop = FALSE]
+  colnames(z) <- make.names(paste0(block_col, "_", levels(f)[-1]))
+  z
+}
+
+# Fixed or random (header, review C2). auto: fixed when the block is crossed with the groups
+# (the design stays full rank with it as fixed columns) AND every contrast is within one
+# block; random otherwise. A requested "fixed" that the design cannot carry stops.
+block_choose_effect <- function(requested, block, design, structure, block_col) {
+  dfix <- cbind(design, block_fixed_columns(block, block_col))
+  crossed <- qr(dfix)$rank == ncol(dfix)
+  st <- unlist(structure)
+  all_within <- length(st) > 0 && all(st == "within")
+  auto <- if (crossed && all_within) "fixed" else "random"
+  effect <- if (identical(requested, "auto")) auto else requested
+  if (identical(effect, "fixed") && !crossed)
+    stop(sprintf(paste0("--block-effect fixed: %s is nested in the groups (as fixed columns it is ",
+                        "aliased with them -- mice within age), so it cannot be a fixed effect here. ",
+                        "Use --block-effect random (the default for this design)."), block_col),
+         call. = FALSE)
+  why <- if (crossed && all_within)
+    sprintf("%s is crossed with the groups and every contrast is within one %s: the fixed effect is the exact paired analysis",
+            block_col, block_col)
+  else if (!crossed)
+    sprintf("%s is nested in the groups (aliased as a fixed term): random effect", block_col)
+  else sprintf("not every contrast is within one %s: random effect", block_col)
+  list(effect = effect,
+       choice = sprintf("%s -- auto would be %s: %s", if (identical(requested, "auto")) "auto"
+                        else paste("requested", requested), auto, why),
+       design = if (identical(effect, "fixed")) dfix else design)
+}
 
 # The checks that need only conditions.csv -- run before quantification, which can take
 # an hour, so a wrong column fails in seconds.
@@ -140,14 +197,18 @@ block_contrast_structure <- function(block, groups, cmat) {
 # The ONE record of the blocking step: de_provenance.json's `block`, methods.txt's
 # Blocking line, the de_engine label and make_methods.py's sentence all read it.
 block_record <- function(block_col, block, method, consensus, atanh_per_protein, n_proteins,
-                         first_pass = NULL, groups = NULL, cmat = NULL, scope = "within") {
+                         first_pass = NULL, groups = NULL, cmat = NULL, scope = "within",
+                         effect = "random", effect_choice = NULL) {
   structure <- if (!is.null(cmat)) block_contrast_structure(block, groups, cmat) else NULL
   model <- if (!is.null(cmat)) block_contrast_model(block, groups, cmat, scope) else NULL
+  fixed <- identical(effect, "fixed")
+  if (fixed && length(model)) model <- lapply(model, function(x) "blocked")
   arho <- atanh_per_protein[is.finite(atanh_per_protein)]
   q <- if (length(arho)) tanh(stats::quantile(arho, c(0.25, 0.5, 0.75), names = FALSE))
        else rep(NA_real_, 3)
   nb <- length(unique(block))
   warn <- character(0)
+  if (!fixed) {
   if (!is.finite(consensus) || consensus <= 0)
     warn <- c(warn, sprintf(paste0(
       "the consensus within-%s correlation is %s (<= 0): samples sharing a %s are no more ",
@@ -169,24 +230,47 @@ block_record <- function(block_col, block, method, consensus, atanh_per_protein,
     warn <- c(warn, sprintf(paste0(
       "only %d %s levels: each protein's between-%s variance rests on %d degree(s) of freedom, ",
       "so the per-protein estimates are very noisy."), nb, block_col, block_col, nb - 1))
+  # A between-block contrast on the blocked fit: its single consensus correlation understates
+  # the between-block variance of proteins with strong block effects (review C3).
+  bb <- names(structure)[unlist(structure) == "between" & unlist(model)[names(structure)] == "blocked"]
+  if (length(bb))
+    warn <- c(warn, sprintf(paste0(
+      "%s compare%s different %s levels but %s reported from the blocked fit (%s). Its single ",
+      "consensus correlation understates the between-%s variance of proteins with strong ",
+      "%s-to-%s variation, so these p-values are anti-conservative for exactly those proteins ",
+      "(simulated type I error 0.10 / 0.22 at per-protein correlation 0.6 / 0.85, nominal 0.05). ",
+      "Prefer between-%s contrasts that use one sample per %s (e.g. per bait), which ",
+      "--block-scope within reports from the fit with samples independent."),
+      paste(bb, collapse = ", "), if (length(bb) == 1) "s" else "", block_col,
+      if (length(bb) == 1) "is" else "are",
+      if (identical(scope, "all")) "--block-scope all"
+      else "the fit with samples independent would pseudo-replicate it: several samples per level",
+      block_col, block_col, block_col, block_col, block_col))
+  }
   # applied = the blocked fit reports at least one contrast -- what readers of the record
   # ask ("does the design carry the block?"). All-between under "within" = it reports none.
   used <- !length(model) || any(unlist(model) == "blocked")
   list(
     applied = used, column = block_col, scope = scope,
+    # "fixed": a block term in the design (the exact paired analysis); "random":
+    # duplicateCorrelation. effect_choice says why (block_choose_effect).
+    effect = effect, effect_choice = effect_choice,
     note = if (!used) sprintf(paste0("--block %s given, but every contrast compares different %s ",
                                      "levels: all were reported from the independent fit ",
                                      "(--block-scope within)"), block_col, block_col) else NULL,
     n_blocks = nb,
     block_sizes = as.list(table(block)),
-    consensus_correlation = consensus,
-    first_pass_correlation = first_pass,
-    n_proteins = n_proteins, n_proteins_estimated = length(arho),
-    per_protein_correlation = list(q25 = q[1], median = q[2], q75 = q[3]),
-    estimator = BLOCK_ESTIMATOR, fit = BLOCK_FIT[[method]],
+    consensus_correlation = if (fixed) NULL else consensus,
+    first_pass_correlation = if (fixed) NULL else first_pass,
+    n_proteins = n_proteins, n_proteins_estimated = if (fixed) NULL else length(arho),
+    per_protein_correlation = if (fixed) NULL else list(q25 = q[1], median = q[2], q75 = q[3]),
+    estimator = if (fixed) sprintf("none: %s is a fixed effect (one coefficient per level)", block_col)
+                else BLOCK_ESTIMATOR,
+    fit = if (fixed) BLOCK_FIT_FIXED[[method]] else BLOCK_FIT[[method]],
     contrast_structure = structure,
     contrast_model = model,
-    contrast_model_rule = if (identical(scope, "all")) "all: every contrast from the blocked fit"
+    contrast_model_rule = if (fixed) sprintf("fixed %s effect: every contrast from that fit", block_col)
+      else if (identical(scope, "all")) "all: every contrast from the blocked fit"
       else paste0("within: a contrast comparing different ", block_col, " levels with at most one ",
                   "sample per ", block_col, " is reported from the fit with samples independent; ",
                   "every other contrast from the blocked fit",
@@ -226,6 +310,8 @@ block_contrast_model <- function(block, groups, cmat, scope) {
 # moderated F -- which would mix the two -- is dropped; the session keeps the independent
 # fit whole beside it.
 block_merge_fits <- function(fit_blocked, fit_independent, model) {
+  # every contrast independent: nothing of the blocked fit (s2.post, correlation) may ride along
+  if (!any(model == "blocked")) { fit_independent$contrast_model <- model; return(fit_independent) }
   ind <- names(model)[model == "independent"]
   if (!length(ind)) { fit_blocked$contrast_model <- model; return(fit_blocked) }
   stopifnot(identical(rownames(fit_blocked$coefficients), rownames(fit_independent$coefficients)))
@@ -242,6 +328,8 @@ block_none_record <- function()
 
 # How the contrasts split between the fits, in one phrase for labels and methods.
 block_scope_phrase <- function(rec) {
+  if (identical(rec$effect, "fixed"))
+    return(sprintf("all contrasts from the fit with %s as a fixed effect", rec$column))
   m <- unlist(rec$contrast_model)
   if (!any(m == "independent")) return(sprintf("all contrasts from the blocked fit (scope %s)", rec$scope))
   sprintf(paste0("between-%s contrasts using at most one sample per %s from the fit with ",
@@ -253,6 +341,9 @@ block_scope_phrase <- function(rec) {
 # de_provenance.json, the AI brief) sees the blocking too.
 block_engine_suffix <- function(rec) {
   if (!isTRUE(rec$applied)) return("")
+  if (identical(rec$effect, "fixed"))
+    return(sprintf("; block = %s (fixed effect: crossed with the groups, every contrast within one %s)",
+                   rec$column, rec$column))
   sprintf("; block = %s (random effect, consensus correlation %.3f; %s)",
           rec$column, rec$consensus_correlation, block_scope_phrase(rec))
 }
@@ -268,10 +359,13 @@ block_methods_lines <- function(rec) {
             else sprintf("%d-%d samples each", min(sz), max(sz))
   st <- unlist(rec$contrast_structure)
   pc <- rec$per_protein_correlation
-  out <- c(sprintf("Blocking      : %s as a random effect (%d levels, %s)", rec$column, rec$n_blocks, sz_txt),
-    sprintf("%sconsensus within-%s correlation %.3f, from %d of %d proteins", pad, rec$column,
+  fixed <- identical(rec$effect, "fixed")
+  out <- c(sprintf("Blocking      : %s as a %s effect (%d levels, %s)", rec$column,
+                   if (fixed) "FIXED" else "random", rec$n_blocks, sz_txt),
+    if (!is.null(rec$effect_choice)) sprintf("%sEffect: %s", pad, rec$effect_choice),
+    if (!fixed) sprintf("%sconsensus within-%s correlation %.3f, from %d of %d proteins", pad, rec$column,
             rec$consensus_correlation, rec$n_proteins_estimated, rec$n_proteins),
-    if (is.finite(pc$median))
+    if (!fixed && is.finite(pc$median))
       sprintf("%s(per-protein median %.2f, IQR %.2f to %.2f)", pad, pc$median, pc$q25, pc$q75),
     if (!is.null(rec$first_pass_correlation) && is.finite(rec$first_pass_correlation))
       sprintf("%sfirst-pass estimate %.3f", pad, rec$first_pass_correlation),

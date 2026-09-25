@@ -390,9 +390,12 @@ proceeding — `unassigned_runs` (a raw file no condition matched), `conflicting
 with no matching file), `multi_match_identifiers` (one label hit several files —
 usually fine, e.g. a replicate prefix), and `singleton_groups` (<2 replicates → no
 within-group variance). Do **not** start a search while any run is unassigned or
-conflicting. A subject column (Mouse, Animal, Subject, Patient, Donor…) is kept under
-its own name; when the output has `"block_suggested": true`, run DE with
-`--block <block_column>` (step 8). Finalize the CSV, then validate it:
+conflicting. A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
+like subjects (≥ 3, not the groups relabelled, recurring across groups) is kept under its
+own name; when the output has `"block_suggested": true`, run DE with
+`--block <block_column>` (step 8). A subject-named column whose values do not (Subject =
+M/F, Patient = Yes/No) stays a covariate and comes back as `subject_ambiguous` — ask, and
+re-run with `--subject-column <header>` only if the user confirms it. Finalize the CSV, then validate it:
 ```
 python3 scripts/collect_conditions.py --validate conditions.csv --against report.parquet
 ```
@@ -1155,19 +1158,23 @@ Rscript scripts/run_de.R --input ./search_out/report.parquet \
 **Several samples from one animal / patient → `--block <column>`.** IPs cut from the same
 mouse brain, or before/after samples from one subject, are correlated; without `--block`
 they are fitted as independent and the pairing is lost. Give the unit its own
-`conditions.csv` column (`Mouse` — not Batch/Covariate1/2, which are fixed effects) and
-pass `--block Mouse`: a random effect via limma `duplicateCorrelation` (limpa's `dpcDE`
-takes it natively). The block may be nested in a group (mice within age). The consensus
-correlation lands in `de_provenance.json` (`block`) and `methods.txt`. run_de.R prints a
-note when a column looks like one and `--block` is missing — ask the user.
-`--block-scope within` (the default) reports within-mouse contrasts (bait vs IgG) from the
-blocked fit and between-mouse contrasts that use one sample per mouse (Old vs Young for
-one bait) from the fit with samples independent — one run, both fits, one record
-(`block.contrast_model`). Blocking cannot add information to a 3-vs-3-mice comparison, and
-its single consensus correlation understates between-mouse variance for proteins that
-vary strongly animal to animal (PROT_0756: SE 0.86× where it should be 1×; the 77
-blocked-only age calls were blood/complement proteins). `--block-scope all` puts every
-contrast on the blocked fit. State n per group in mice, not IPs.
+`conditions.csv` column (`Mouse` — not Batch/Covariate1/2) and pass `--block Mouse`.
+`run_de.R` picks the model (`--block-effect auto`, recorded as `block.effect`):
+- **Crossed paired design** (before/after in the same patient; every contrast within one
+  subject): a **fixed** subject effect (`~ 0 + groups + Patient`) — the exact paired
+  analysis (type I 0.050 and power 0.95 at every per-protein correlation, where the
+  random effect drifts 0.078 → 0.010 and loses power to 0.76).
+- **Nested / multi-level** (mice within age, as PROT_0756): a **random** effect via limma
+  `duplicateCorrelation` (limpa's `dpcDE` takes it natively). `--block-scope within` (the
+  default) reports within-mouse contrasts (bait vs IgG) from the blocked fit and
+  between-mouse contrasts that use one sample per mouse (Old vs Young for one bait) from
+  the fit with samples independent — one run, one record (`block.contrast_model`). The
+  single consensus correlation understates between-mouse variance for proteins that vary
+  strongly animal to animal (PROT_0756: SE 0.86× where it should be 1×), so a
+  between-mouse contrast that must use the blocked fit (pooled over baits, or
+  `--block-scope all`) carries a `CAUTION` — define age contrasts per bait instead.
+State n per group in mice, not IPs. run_de.R prints a note when a column looks like a
+block and `--block` is missing — ask the user.
 → `references/de-analysis.md`, "Paired / repeated designs".
 **Contaminants are removed before quantification, on both methods.** Every precursor that
 maps to a `Cont_` entry (any accession in `Protein.Ids` — DIA-NN's own

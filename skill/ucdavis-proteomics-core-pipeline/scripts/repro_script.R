@@ -95,6 +95,7 @@ write_repro_script <- function(path,
   if (is.null(contrast_model) && blk_on) contrast_model <- unlist(block$contrast_model)
   # --block-scope within with between-block contrasts: a second, independent fit reports them
   two_fits <- blk_on && any(contrast_model == "independent")
+  blk_fixed <- blk_on && identical(block$effect, "fixed")
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
 
   L <- c(
@@ -274,7 +275,15 @@ write_repro_script <- function(path,
   L <- c(L,
     sprintf("design <- model.matrix(~ 0 + %s)", paste(formula_parts, collapse = " + ")),
     "colnames(design) <- sub('^groups', '', colnames(design))",
-    if (blk_on) c(
+    if (blk_fixed) c(
+    sprintf("# %s is crossed with the groups and every contrast compares samples within one %s:", blk_col, blk_col),
+    "# it is a FIXED effect -- extra design columns, the exact paired analysis.",
+    sprintf("block <- metadata[[%s]]", .rq(blk_col)),
+    "block_f <- factor(block)",
+    "block_cols <- model.matrix(~ block_f)[, -1, drop = FALSE]",
+    sprintf("colnames(block_cols) <- make.names(paste0(%s, '_', levels(block_f)[-1]))", .rq(blk_col)),
+    "design <- cbind(design, block_cols)")
+    else if (blk_on) c(
     sprintf("# %s is a RANDOM blocking factor, not a term in the design: samples sharing a %s", blk_col, blk_col),
     "# are fitted as correlated (limma duplicateCorrelation -> lmFit(block =, correlation =)).",
     sprintf("block <- metadata[[%s]]", .rq(blk_col))) else NULL,
@@ -283,7 +292,7 @@ write_repro_script <- function(path,
   # ---- fit --------------------------------------------------------------------
   L <- c(L,
     "# --- 5. Fit the model and test the contrasts ---------------------------------",
-    if (!blk_on) {
+    if (!blk_on || blk_fixed) {
       if (is_dpc) "fit <- limpa::dpcDE(y_protein, design, plot = FALSE)"
       else        "fit <- limma::lmFit(E, design)"
     } else if (is_dpc) c(

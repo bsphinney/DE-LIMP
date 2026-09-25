@@ -39,6 +39,9 @@
 #   within: contrasts inside a block (bait vs IgG in the same mice) come from the blocked
 #   fit, contrasts BETWEEN blocks (Old vs Young mice) from the same data fitted without it;
 #   all: every contrast from the blocked fit. blocking.R says why.
+# --block-effect auto|fixed|random (default auto): auto fits the block as a FIXED effect
+#   when it is crossed with the groups and every contrast is within one block (a paired
+#   design: the exact analysis), and as a random effect otherwise (nested / multi-level).
 # =============================================================================
 
 suppressWarnings(suppressMessages({
@@ -94,6 +97,12 @@ if (!is.null(block_scope) && is.null(block_col))
 if (is.null(block_scope)) block_scope <- "within"
 if (!block_scope %in% c("within", "all"))
   stop("--block-scope must be 'within' (default) or 'all'")
+block_effect_req <- getarg("--block-effect", NULL)
+if (!is.null(block_effect_req) && is.null(block_col))
+  stop("--block-effect needs --block <column>")
+if (is.null(block_effect_req)) block_effect_req <- "auto"
+if (!block_effect_req %in% c("auto", "fixed", "random"))
+  stop("--block-effect must be 'auto' (default), 'fixed' or 'random'")
 if (isTRUE(fasta_meta)) stop("--fasta-meta needs a path (<fasta>.meta.json)")
 if (is.null(fasta_meta) && file.exists("search.fasta.meta.json"))
   fasta_meta <- "search.fasta.meta.json"
@@ -186,6 +195,10 @@ if (!is.null(block_col)) {
   block_validate_column(meta, block_col, covariates)
   block_check(trimws(as.character(meta[[block_col]])), build_design(meta, covariates)$design,
               block_col)
+  # a requested fixed effect the design cannot carry (block nested in the groups) stops here
+  if (identical(block_effect_req, "fixed"))
+    block_choose_effect("fixed", trimws(as.character(meta[[block_col]])),
+                        build_design(meta, covariates)$design, list(), block_col)
 } else {
   .cand <- block_candidates(meta, covariates)
   if (length(.cand))
@@ -602,8 +615,20 @@ fit_independent <- function()
   if (method == "dpc") limpa::dpcDE(y_protein, design, plot = FALSE) else limma::lmFit(E, design)
 block_rec <- block_none_record()
 fit_ind <- NULL
+# Fixed or random block (blocking.R: block_choose_effect). A fixed block is extra design
+# columns, so the design and contrast matrix the fit uses change with it.
+.eff <- if (!is.null(block))
+  block_choose_effect(block_effect_req, block, design,
+                      block_contrast_structure(block, groups, cmat), block_col) else NULL
 if (is.null(block)) {
   fit_ind <- fit_independent()
+} else if (identical(.eff$effect, "fixed")) {
+  design <- .eff$design
+  cmat <- limma::makeContrasts(contrasts = forms, levels = design)
+  fit <- fit_independent()          # samples independent GIVEN the block columns
+  block_rec <- block_record(block_col, block, method, NA_real_, numeric(0), nrow(E),
+                            groups = groups, cmat = cmat, scope = block_scope,
+                            effect = "fixed", effect_choice = .eff$choice)
 } else if (method == "dpc") {
   # dpcDE(y, design, plot, ...) hands `block` to voomaLmFitWithImputation(), which
   # estimates the correlation with the vooma weights twice and fits lmFit(block =,
@@ -626,7 +651,7 @@ if (is.null(block)) {
                     .dc$consensus.correlation, .rho), call. = FALSE)
   block_rec <- block_record(block_col, block, method, .rho, .dc$atanh.correlations, nrow(E),
                             first_pass = .pass[["first"]], groups = groups, cmat = cmat,
-                            scope = block_scope)
+                            scope = block_scope, effect_choice = .eff$choice)
 } else {
   .dc <- limma::duplicateCorrelation(E, design, block = block)
   if (!is.finite(.dc$consensus.correlation))
@@ -636,7 +661,7 @@ if (is.null(block)) {
   fit <- limma::lmFit(E, design, block = block, correlation = .dc$consensus.correlation)
   block_rec <- block_record(block_col, block, method, .dc$consensus.correlation,
                             .dc$atanh.correlations, nrow(E), groups = groups, cmat = cmat,
-                            scope = block_scope)
+                            scope = block_scope, effect_choice = .eff$choice)
 }
 # Which fit reports each contrast: block.contrast_model, the one definition.
 contrast_model <- if (is.null(block)) {
@@ -647,16 +672,23 @@ if (!is.null(block)) {
   if (any(contrast_model == "independent"))
     fit_ind <- fit_independent()
   descriptor$de_engine <- paste0(descriptor$de_engine, block_engine_suffix(block_rec))
-  message(sprintf("[run_de] --block %s (scope %s): %d levels; consensus within-%s correlation %.3f (%d of %d proteins estimated)",
-                  block_col, block_scope, block_rec$n_blocks, block_col,
-                  block_rec$consensus_correlation, block_rec$n_proteins_estimated,
-                  block_rec$n_proteins))
+  message(if (identical(block_rec$effect, "fixed"))
+    sprintf("[run_de] --block %s: %d levels, FIXED effect (%s)", block_col, block_rec$n_blocks,
+            block_rec$effect_choice)
+  else sprintf("[run_de] --block %s (scope %s): %d levels; consensus within-%s correlation %.3f (%d of %d proteins estimated)",
+               block_col, block_scope, block_rec$n_blocks, block_col,
+               block_rec$consensus_correlation, block_rec$n_proteins_estimated,
+               block_rec$n_proteins))
   for (.w in unlist(block_rec$warnings)) warning("--block: ", .w, call. = FALSE)
 }
 if (!is.null(fit_ind)) fit_ind <- limma::eBayes(limma::contrasts.fit(fit_ind, cmat))
 # One fit object whose columns are each contrast's reporting fit (block_merge_fits), so the
 # DE tables and the DE-LIMP session read the same numbers.
 fit <- if (is.null(block)) fit_ind else block_merge_fits(.fit_blocked, fit_ind, contrast_model)
+
+# The fitted design as text: a fixed block is a design term, a random one is not.
+design_label <- paste0("~ 0 + ", paste(c(formula_parts,
+                       if (identical(block_rec$effect, "fixed")) block_col), collapse = " + "))
 
 # ---- write per-contrast results ---------------------------------------------
 gene_cols <- intersect(c("Genes", "Protein.Names"), names(genes))
@@ -783,7 +815,7 @@ methods_txt <- c(
   contaminant_methods_lines(cont_rec),
   if (method == "maxlfq") sprintf("Normalization : quantile (limma::normalizeBetweenArrays)") else
                           sprintf("Normalization : DPC-CN (applied within dpcCN before dpcQuant)"),
-  sprintf("Design        : ~ 0 + %s", paste(formula_parts, collapse = " + ")),
+  sprintf("Design        : %s", design_label),
   block_methods_lines(block_rec),
   sprintf("Contrasts     : %s", paste(forms, collapse = ", ")),
   sprintf("Significance  : adj.P.Val < %.3g (Benjamini-Hochberg), moderated t-test of", adjp_thr),
@@ -858,7 +890,7 @@ prov <- list(
   contaminants = cont_rec,
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
-  design = paste0("~ 0 + ", paste(formula_parts, collapse = " + ")),
+  design = design_label,
   # The random blocking factor (--block), if any: column, consensus correlation, how it
   # was estimated and fitted, and which contrasts are within vs between blocks.
   block = block_rec,

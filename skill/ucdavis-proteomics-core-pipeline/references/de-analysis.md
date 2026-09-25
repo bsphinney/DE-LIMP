@@ -60,10 +60,23 @@ user at the design step (`collect_conditions.py --validate` flags singletons).
 When several samples come from one source — the IPs cut from one mouse brain, the
 biopsies from one patient, before/after samples from one animal — they are correlated,
 and fitting them as independent throws the pairing away. Put the unit in its own
-`conditions.csv` column (e.g. `Mouse`) and pass `--block Mouse`. It is fitted the way
-limma fits multi-level experiments: a **random effect**, with one consensus
-within-block correlation estimated across all proteins by `duplicateCorrelation()` and
-used by `lmFit(block =, correlation =)`.
+`conditions.csv` column (e.g. `Mouse`) and pass `--block Mouse`.
+
+**Fixed or random — `--block-effect auto|fixed|random` (default `auto`, recorded as
+`block.effect` / `block.effect_choice`).**
+- **Crossed + every contrast within one block → fixed.** Before/after in the same patient,
+  treated vs control in the same donor: the block is crossed with the groups (it stays
+  full rank as design columns) and every contrast compares samples of one subject. The
+  fixed subject effect (`~ 0 + groups + Patient`) is the exact paired analysis. Simulated
+  (6 patients × 2 conditions, blocksim/paired.R): fixed type I 0.050 and power 0.95 at
+  every per-protein correlation; the random effect's type I drifts 0.078 → 0.010 and its
+  power falls to 0.76 as the correlation goes 0.05 → 0.85, because one consensus
+  correlation is applied to every protein.
+- **Otherwise → random**, the way limma fits multi-level experiments: one consensus
+  within-block correlation estimated across all proteins by `duplicateCorrelation()`, used
+  by `lmFit(block =, correlation =)`. This is the nested case (mice within age, PROT_0756):
+  a fixed mouse term would be aliased with the age groups and between-mouse contrasts need
+  the random effect. `--block-effect fixed` on a nested block stops before quantification.
 
 - **dpc**: `limpa::dpcDE(y, design, block = b)`. `dpcDE` passes `...` to
   `voomaLmFitWithImputation()`, which takes `block` natively: it estimates the
@@ -87,10 +100,18 @@ used by `lmFit(block =, correlation =)`.
   - `within`: a contrast **between** blocks that uses **at most one sample per block**
     (Old_JPH3 vs Young_JPH3: 3 mice vs 3 mice, one IP each) comes from the fit with
     samples independent; every other contrast — within-block, partial, and between-block
-    contrasts that pool several samples per block (Old vs Young over all baits, which
-    *would* be pseudo-replicated unblocked) — from the blocked fit. If any block holds two
-    samples of one group (technical replicates of a mouse), everything comes from the
-    blocked fit.
+    contrasts that pool several samples per block — from the blocked fit. If any block
+    holds two samples of one group (technical replicates of a mouse), everything comes
+    from the blocked fit.
+  - **A between-block contrast on the blocked fit is NOT a remedy, only the lesser evil.**
+    Pooled over baits (Old vs Young over all IPs) it cannot use the independent fit —
+    unblocked it is pseudo-replicated (simulated type I 0.07–0.36) — but the blocked fit
+    is itself anti-conservative for proteins with strong mouse effects (type I 0.10 / 0.22
+    at per-protein correlation 0.6 / 0.85, nominal 0.05; blocksim/between.R). Every such
+    contrast gets a `block.warnings` entry and a `CAUTION` in `methods.txt`. Define
+    between-block contrasts one sample per block (per bait) instead. (A block-level
+    analysis — one score per mouse, then a two-sample test — cut it to 0.08 at 0.85 in
+    simulation; a follow-up.)
   - `all`: every contrast from the blocked fit.
 
   **Why `within` is the default** (PROT_0756: 6 mice × 5 IPs, consensus correlation
@@ -105,7 +126,7 @@ used by `lmFit(block =, correlation =)`.
   On the bait-vs-IgG contrasts the blocked fit is the right model: +14–58% calls, none
   lost, top hits and fold changes unchanged.
 
-  Recorded: `block.scope`, `block.contrast_model` (`{"<contrast>": "blocked" |
+  Recorded: `block.effect` (+ `effect_choice`), `block.scope`, `block.contrast_model` (`{"<contrast>": "blocked" |
   "independent"}`, beside `contrast_structure`), `block.contrast_model_rule`;
   `de_tables` (each `DE_*.csv`, its model, its significant count); the `Blocking` lines
   of `methods.txt`; the console line of each contrast (`[blocked fit]`); the Methods
