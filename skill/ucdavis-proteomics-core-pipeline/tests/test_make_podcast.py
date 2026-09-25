@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -803,9 +804,9 @@ class Gemini(Workspace):
                                         "gemini-2.5-flash-preview-tts")
         self.assertEqual(rc, 1)
         self.assertEqual(len(log["calls"]), mp.RATE_WAITS + 1)
-        self.assertIn(f"still rate-limited on gemini-2.5-flash-preview-tts after {mp.RATE_WAITS} "
+        self.assertIn(f"gemini-2.5-flash-preview-tts is still rate-limited after {mp.RATE_WAITS} "
                       "waits", err)
-        self.assertIn("re-run the same command to resume", err)
+        self.assertIn("re-run the same command later to resume", err)
 
     def test_a_daily_quota_stops_with_the_resume_message_and_no_wait(self):
         slept = self.clock()
@@ -940,6 +941,116 @@ class Gemini(Workspace):
         self.assertEqual(mp.GeminiTTS.api("gemini-3.8-flash-tts"), "interactions")
         self.assertEqual(mp.GeminiTTS.api("models/gemini-3.1-flash-tts-preview"), "interactions")
         self.assertEqual(mp.GeminiTTS.api("gemini-2.5-pro-preview-tts"), "generate_content")
+
+    # --- podcast-reviewer follow-ups, 2026-09-25 (PASS on c16e77d)
+    def test_a_resume_or_redo_never_hands_over_or_prunes_the_other_models_chunks(self):
+        models = ("gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts")
+
+        def pro_dead(m, c, k):
+            if "pro" in m:
+                raise ApiError(404, "NOT_FOUND")
+            return pcm_for(c)
+        rc, out, err, log = self.render(pro_dead, "--cloud-ok", models=models)
+        self.assertEqual(rc, 0, err)                              # made on flash
+        cache = os.path.join(self.pod, ".cache")
+        flash_chunks = {f for f in os.listdir(cache) if f.endswith(".wav")}
+
+        def flash_daily(m, c, k):                                 # next day: flash is out
+            if "flash" in m:
+                raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(PER_DAY))
+            return pcm_for(c)
+        rc, out, err, log = self.render(flash_daily, "--cloud-ok", "--redo", "1", models=models)
+        self.assertEqual(rc, 1)
+        self.assertEqual({m for m, _, _ in log["calls"]}, {"gemini-2.5-flash-preview-tts"})
+        self.assertIn("made this episode's cached chunks, so the render stays on it", err)
+        left = {f for f in os.listdir(cache) if f.endswith(".wav")}
+        self.assertEqual(len(left), 1)                            # segment 2's chunk survives
+        self.assertTrue(left < flash_chunks)
+        # an explicit --model re-renders everything on it, and only then drops flash's chunks
+        rc, out, err, log = self.render(lambda m, c, k: pcm_for(c), "--cloud-ok", "--model",
+                                        "gemini-2.5-pro-preview-tts", models=models)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(read(os.path.join(self.pod, "podcast.json")))["tts"]["model"],
+                         "gemini-2.5-pro-preview-tts")
+        self.assertFalse({f for f in os.listdir(cache) if f.endswith(".wav")} & flash_chunks)
+
+    def test_an_unreadable_answer_is_not_retried(self):
+        state = {"n": 0}
+
+        def junk(model, contents, config):
+            state["n"] += 1
+            return b"not audio at all"
+
+        mods, log = fake_genai(junk)
+        real = mods["google.genai"].Client
+
+        class WavClient(real):                                  # generate_content says audio/wav
+            def __init__(self, api_key):
+                real.__init__(self, api_key)
+                gc = self.models.generate_content
+
+                def generate_content(model, contents, config):
+                    r = gc(model, contents, config)
+                    r.candidates[0].content.parts[0].inline_data.mime_type = "audio/wav"
+                    return r
+                self.models.generate_content = generate_content
+        mods["google.genai"].Client = WavClient
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify",
+                               "--cloud-ok", "--model", "gemini-2.5-flash-preview-tts")
+        self.assertEqual(rc, 1)
+        self.assertEqual(state["n"], 1)                           # one billed request, no more
+        self.assertIn("could not be read", err)
+        self.assertIn("not retried", err)
+
+    def test_a_streaming_or_extensible_wav_header_is_read(self):
+        pcm = array.array("h", [700, -700] * 24000).tobytes()
+        fmt_ext = (struct.pack("<HHIIHH", 0xFFFE, 1, 24000, 48000, 2, 16) + struct.pack("<HHI", 22, 16, 4)
+                   + b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71")
+        for fmt, size in ((struct.pack("<HHIIHH", 1, 1, 24000, 48000, 2, 16), 0),
+                          (fmt_ext, len(pcm))):
+            body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + \
+                struct.pack("<I", size) + pcm
+            a = mp.parse_wav_bytes(b"RIFF" + struct.pack("<I", 0) + body)
+            self.assertAlmostEqual(len(a) / float(mp.RATE), 2.0, delta=0.001)
+        with self.assertRaises(ValueError):
+            mp.decode_audio(b"\x00\x01" * 100, "audio/wav")          # wav without RIFF: never PCM
+        r = types.SimpleNamespace(output_audio=types.SimpleNamespace(
+            data=base64.encodebytes(b"RIFF" + struct.pack("<I", 0) + body), mime_type="audio/wav",
+            sample_rate=None))
+        self.assertAlmostEqual(len(mp.GeminiTTS.interaction_audio(r)) / float(mp.RATE), 2.0,
+                               delta=0.001)                          # line-wrapped base64 bytes
+
+    def test_an_old_sdk_without_interactions_drops_the_3x_models(self):
+        mods, log = fake_genai(lambda m, c, k: pcm_for(c))
+        real = mods["google.genai"].Client
+
+        class OldClient(object):
+            def __init__(self, api_key):
+                self.models = real(api_key).models
+        mods["google.genai"].Client = OldClient
+        with mock.patch.dict(sys.modules, mods):
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", "--cloud-ok")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("has no client.interactions", err)
+            self.assertIn("pip install -U google-genai", err)
+            self.assertNotIn("gemini-3.8-flash-tts", [m for m, _, _ in log["calls"]])
+            rc, out, err = run("render", self.script, "--tts", "gemini", "--no-verify", "--cloud-ok",
+                               "--model", "gemini-3.8-flash-tts")
+            self.assertEqual(rc, 1)
+            self.assertIn("pip install -U google-genai", err)
+
+    def test_an_overall_rate_limit_budget_stops_the_render(self):
+        slept = self.clock()
+
+        def limited(model, contents, config):
+            raise ApiError(429, "RESOURCE_EXHAUSTED", rpc_error(PER_MINUTE, "55s"))
+        rc, out, err, log = self.render(limited, "--cloud-ok", "--model",
+                                        "gemini-2.5-flash-preview-tts", "--rate-wait-budget", "2")
+        self.assertEqual(rc, 1)
+        self.assertEqual(slept.count(60.0), 2)                    # 2 x 60 s fit in 2 min
+        self.assertIn("would pass --rate-wait-budget (2 min)", err)
+        self.assertIn("re-run the same command later to resume", err)
 
     def test_scrub(self):
         mp._SECRETS.append("sekrit-value")

@@ -320,16 +320,27 @@ python3 scripts/make_podcast.py link $S/output
     - Each host's style comes from an optional `Styles:` header line, for example
       `Styles: Maya: curious and energetic; Leo: calm, precise and dryly funny` (these are the
       defaults).
-  - **Handing over.** Before a model has made its first chunk, it hands over to the next if it
-    is missing, has no quota, or rejects the request.
+  - **Handing over.** On a fresh render, a model that is missing, has no quota, or rejects the
+    request before it has made its first chunk hands over to the next.
   - **One model per episode.** Once a model has made a chunk, the episode stays on it, because
-    a second model's voices sound different. If that model runs out of its daily quota
-    partway through, render stops, names the chunk and keeps the cache. Re-run later to
-    resume, or pass `--model <other>` to re-render every chunk with that model.
+    a second model's voices sound different. A resume (chunks already in the cache) and
+    `--redo` are pinned to the model that made the cache: they never hand over. If that model
+    is out of quota, render stops, names the chunk and keeps the cache. Re-run later to
+    resume, or pass `--model <other>` to re-render every chunk with that model. Only an
+    explicit `--model` render prunes another model's cached chunks.
+  - Gemini 3 TTS needs a google-genai with `client.interactions` (2.25.0 has it). With an older
+    one the 3.x models are left out, and render says to run `python3 -m pip install -U
+    google-genai`.
+  - **Unreadable audio is not retried.** An answer is parsed once; audio that cannot be read
+    stops the chunk, because asking again would be billed again. The RIFF header is parsed by
+    hand, so WAVE_FORMAT_EXTENSIBLE and streaming (size 0) headers work on Python 3.9 too. An
+    empty answer is asked once more.
   - **Rate limits.** A 429 on a per-minute quota, or one that carries a `retryDelay`, is waited
     out, not fatal. Render reads the delay and the quota id from the error details, prints
     `[render] rate-limited, waiting Ns`, sleeps the delay + 5 s, and retries the same chunk,
-    up to 10 times. A daily quota (`…PerDay…`) stops the render with the resume message.
+    up to 10 times. All the waits in one render are capped by `--rate-wait-budget` (default 30
+    min), after which it stops with the resume message, as it does at once for a daily quota
+    (`…PerDay…`).
   - **Pacing.** Requests to one model are spaced at least 20 s apart (`--min-interval`).
   - An episode is one request per segment (a segment over 500 words is split at turn
     boundaries), so about 8–12 requests, and at least 3–4 minutes with pacing. Google does not

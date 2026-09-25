@@ -48,6 +48,7 @@ present, encodes the AAC.
 import argparse
 import array
 import base64
+import binascii
 import datetime
 import decimal
 import difflib
@@ -59,6 +60,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -81,6 +83,7 @@ KNOWN_TTS_MODELS = ("gemini-2.5-pro-preview-tts", "gemini-3.8-flash-tts", FALLBA
 HOST_STYLES = ("curious and energetic", "calm, precise and dryly funny")   # first, second host
 MIN_INTERVAL = 20.0                                 # s between requests to one Gemini model
 RATE_WAITS = 10                                     # per-minute 429 waits allowed per chunk
+RATE_WAIT_BUDGET_MIN = 30.0                         # rate-limit waits allowed per render, minutes
 TERMS_URL = "https://ai.google.dev/gemini-api/terms"
 KEY_FILE = os.path.join("~", ".config", "ucdavis-proteomics", "gemini_key")
 
@@ -1018,13 +1021,52 @@ def resample(a, src, dst=RATE):
     return out
 
 
+def parse_wav_bytes(data):
+    """A RIFF/WAVE byte string -> array('h') at RATE, parsed by hand rather than with the wave
+    module. It takes PCM and WAVE_FORMAT_EXTENSIBLE with a PCM sub-format, which Python 3.9's
+    wave module refuses. A data chunk whose size is 0 or 0xFFFFFFFF (a streaming header), or
+    runs past the end, is read to the end. 16-bit only; the first channel of several. Raises
+    ValueError for anything else."""
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError("not a RIFF/WAVE file")
+    pos, fmt = 12, None
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        body = pos + 8
+        if cid == b"fmt ":
+            if body + 16 > len(data):
+                raise ValueError("truncated fmt chunk")
+            tag, ch, rate, _, _, bits = struct.unpack("<HHIIHH", data[body:body + 16])
+            if tag == 0xFFFE and size >= 40 and body + 26 <= len(data):
+                tag = struct.unpack("<H", data[body + 24:body + 26])[0]   # the sub-format
+            fmt = (tag, ch, rate, bits)
+        elif cid == b"data":
+            if fmt is None:
+                raise ValueError("data chunk before fmt")
+            tag, ch, rate, bits = fmt
+            if tag != 1 or bits != 16 or not ch or not rate:
+                raise ValueError(f"not 16-bit PCM (format {tag:#x}, {bits}-bit, {ch} channel(s))")
+            end = len(data) if size in (0, 0xFFFFFFFF) or body + size > len(data) else body + size
+            pcm = data[body:end]
+            a = _arr_le(pcm[: len(pcm) // (2 * ch) * (2 * ch)])
+            return resample(a[::ch] if ch > 1 else a, rate)
+        if size in (0xFFFFFFFF,):
+            break
+        pos = body + size + (size & 1)                       # chunks are word-aligned
+    raise ValueError("no data chunk")
+
+
 def decode_audio(data, mime=""):
-    """PCM or WAV bytes -> array('h') at RATE. Gemini returns raw 16-bit little-endian PCM
-    ("audio/L16;codec=pcm;rate=24000")."""
+    """Audio bytes -> array('h') at RATE: a RIFF/WAVE file (parse_wav_bytes), or raw 16-bit
+    little-endian PCM when the mime type says so (Gemini 2.x: "audio/L16;codec=pcm;rate=24000").
+    Anything else -- audio/wav without a RIFF header included -- is a ValueError, never read as
+    PCM."""
     if data[:4] == b"RIFF":
-        with wave.open(io.BytesIO(data), "rb") as w:
-            return _from_wave(w)
-    m = re.search(r"rate=(\d+)", mime or "")
+        return parse_wav_bytes(data)
+    mime = (mime or "").lower()
+    if "wav" in mime or not re.search(r"l16|pcm", mime):
+        raise ValueError(f"not a RIFF file and not raw PCM (mime type {mime or 'not given'})")
+    m = re.search(r"rate=(\d+)", mime)
     return resample(_arr_le(data), int(m.group(1)) if m else RATE)
 
 
@@ -1148,6 +1190,10 @@ class SwitchModel(Exception):
     pass
 
 
+class EmptyAudio(RenderError):
+    """A response with no audio in it: retried once, unlike an unreadable one."""
+
+
 class GeminiTTS(object):
     """Gemini multi-speaker TTS, one request per chunk. Model names are read from the API
     (models.list), never assumed. Default order: a pro TTS model, then gemini-3.8-flash-tts,
@@ -1194,7 +1240,22 @@ class GeminiTTS(object):
         self.candidates = self.user_models or self.discover()
         self.model = self.candidates[0]
         self.min_interval = float(getattr(a, "min_interval", MIN_INTERVAL))
+        self.wait_budget = 60.0 * float(getattr(a, "rate_wait_budget", RATE_WAIT_BUDGET_MIN))
+        self.waited = 0.0
+        self.pinned = False                  # set by prepare() / --redo: no model hand-over
         self.last_call = {}
+        if not hasattr(self.client, "interactions"):
+            three = [m for m in self.candidates if self.api(m) == "interactions"]
+            if three and len(three) == len(self.candidates):
+                raise RenderError(f"{', '.join(three)} need client.interactions, which this "
+                                  "google-genai does not have: python3 -m pip install -U "
+                                  "google-genai")
+            if three:
+                self.candidates = [m for m in self.candidates if m not in three]
+                self.model = self.candidates[0]
+                log(f"[WARN] this google-genai has no client.interactions, which Gemini 3 TTS "
+                    f"needs: leaving out {', '.join(three)}. To use them: python3 -m pip install "
+                    "-U google-genai")
         self.produced, self.models_used, self.warnings = 0, [], []
 
     @staticmethod
@@ -1243,6 +1304,7 @@ class GeminiTTS(object):
             self.candidates.remove(best)
             self.candidates.insert(0, best)
             self.model = best
+            self.pinned = True                   # a resume never hands over to other voices
             log(f"[render] resuming with {best}: {have[best]} of {len(chunks)} chunk(s) cached")
 
     def prompt(self, chunk, speak):
@@ -1288,7 +1350,7 @@ class GeminiTTS(object):
                         data = base64.b64decode(data)
                     return decode_audio(data, getattr(d, "mime_type", "") or "")
         why = [str(getattr(c, "finish_reason", "")) for c in (getattr(r, "candidates", None) or [])]
-        raise RenderError(f"the response held no audio (finish reason: {', '.join(why) or 'none'})")
+        raise EmptyAudio(f"the response held no audio (finish reason: {', '.join(why) or 'none'})")
 
     @staticmethod
     def interaction_audio(r):
@@ -1297,15 +1359,16 @@ class GeminiTTS(object):
         out = getattr(r, "output_audio", None)
         data = getattr(out, "data", None) if out is not None else None
         if not data:
-            raise RenderError(f"the interaction held no audio (status: "
-                              f"{getattr(r, 'status', None) or 'not given'})")
+            raise EmptyAudio(f"the interaction held no audio (status: "
+                             f"{getattr(r, 'status', None) or 'not given'})")
         if isinstance(data, str):
-            data = base64.b64decode(data)
-        elif isinstance(data, (bytes, bytearray)) and not bytes(data[:4]) == b"RIFF":
-            try:
-                data = base64.b64decode(data, validate=True)
-            except (ValueError, TypeError):
-                pass
+            data = data.encode("ascii", "replace")
+        data = bytes(data)
+        if data[:4] != b"RIFF" and re.fullmatch(rb"[A-Za-z0-9+/=\s]+", data):
+            try:                                         # base64, line-wrapped or not
+                data = base64.b64decode(data, validate=False)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError(f"the audio is not valid base64 ({e})")
         mime = getattr(out, "mime_type", None) or ""
         rate = getattr(out, "sample_rate", None)
         if rate and "rate=" not in str(mime):
@@ -1313,15 +1376,19 @@ class GeminiTTS(object):
         return decode_audio(bytes(data), str(mime))
 
     def request(self, chunk, speak):
+        """One billed request; the answer is parsed by parse(), outside the retry loop."""
         if self.api(self.model) == "interactions":
-            r = self.client.interactions.create(
+            return self.client.interactions.create(
                 model=self.model, input=[{"type": "user_input", "content": self.parts(chunk, speak)}],
                 response_format={"type": "audio"},
                 generation_config={"speech_config": self.speech_config()})
-            return self.interaction_audio(r)
-        r = self.client.models.generate_content(model=self.model, contents=self.prompt(chunk, speak),
-                                                config=self.config())
-        return self.audio(r)
+        return self.client.models.generate_content(model=self.model,
+                                                   contents=self.prompt(chunk, speak),
+                                                   config=self.config())
+
+    def parse(self, r):
+        return (self.interaction_audio(r) if self.api(self.model) == "interactions" else
+                self.audio(r))
 
     def _has_next(self):
         return (self.model in self.candidates
@@ -1343,16 +1410,24 @@ class GeminiTTS(object):
                 _sleep(gap)
         self.last_call[self.model] = _now()
 
+    def _stop(self, label, err, why):
+        return RenderError(
+            f"{label}: {self.model} {why} ({why_line(err)}). The chunks already made are "
+            f"cached: re-run the same command later to resume with {self.model}, or pass "
+            "--model <another> to render EVERY chunk with that model (voices differ between "
+            "models, so one episode never mixes them).")
+
     def synth(self, chunk, speak, label):
-        errors, waits, retried_len = 0, 0, False
+        errors, waits, empty, retried_len = 0, 0, 0, False
         while True:
             self._pace()
             try:
-                pcm = self.request(chunk, speak)
+                r = self.request(chunk, speak)
             except Exception as e:
                 err = error_info(e)
-                kind, msg = err["kind"], err["msg"]
-                if kind in ("missing", "exhausted", "rejected") and not self.produced:
+                kind = err["kind"]
+                if kind in ("missing", "exhausted", "rejected") and not self.produced \
+                        and not self.pinned:
                     was = self.model
                     if self._advance():
                         why = {"missing": "not available", "exhausted": "no quota",
@@ -1364,21 +1439,23 @@ class GeminiTTS(object):
                         f"{', '.join(self.candidates)}; last: {why_line(err)}). Quotas are per Cloud "
                         "project (see https://aistudio.google.com/rate-limit): re-run later "
                         "(finished chunks are cached), use a paid-tier key, or --tts say.")
+                if kind in ("missing", "exhausted", "rejected") and self.pinned and not self.produced:
+                    raise self._stop(label, err, "made this episode's cached chunks, so the "
+                                                 "render stays on it, but it failed")
                 if kind == "exhausted":
-                    raise RenderError(
-                        f"{label}: {self.model} is out of its daily quota ({why_line(err)}). "
-                        f"The chunks already made are cached: re-run the same command later "
-                        f"to resume with {self.model}, or pass --model <another> to render EVERY "
-                        "chunk with that model (voices differ between models, so one episode "
-                        "never mixes them).")
+                    raise self._stop(label, err, "is out of its daily quota")
                 if kind == "rate":
                     waits += 1
-                    if waits > RATE_WAITS:
-                        raise RenderError(
-                            f"{label}: still rate-limited on {self.model} after {RATE_WAITS} "
-                            f"waits ({why_line(err)}). The chunks already made are "
-                            "cached; re-run the same command to resume.")
                     wait = (err["delay"] if err["delay"] is not None else 60.0) + 5.0
+                    if waits > RATE_WAITS:
+                        raise self._stop(label, err, f"is still rate-limited after {RATE_WAITS} "
+                                                     "waits for this chunk")
+                    if self.waited + wait > self.wait_budget:
+                        raise self._stop(label, err, f"has cost {self.waited / 60:.0f} min of "
+                                                     f"rate-limit waits, and the next "
+                                                     f"{wait:.0f} s would pass --rate-wait-budget "
+                                                     f"({self.wait_budget / 60:g} min)")
+                    self.waited += wait
                     log(f"[render] rate-limited, waiting {wait:.0f}s ({label}, {self.model}"
                         + (f", {err['quota']}" if err["quota"] else "") + f"; wait {waits} of "
                         f"{RATE_WAITS})")
@@ -1394,6 +1471,20 @@ class GeminiTTS(object):
                     f"{wait:.0f} s")
                 _sleep(wait)
                 continue
+            # Parsed outside the retry: the same answer to the same request would be billed again.
+            try:
+                pcm = self.parse(r)
+            except EmptyAudio as e:
+                empty += 1
+                if empty > 1:
+                    raise RenderError(f"{label}: {self.model} returned no audio twice ({e}); the "
+                                      "chunks already made are cached")
+                log(f"[WARN] {label}: {e}; asking once more")
+                continue
+            except (ValueError, struct.error, binascii.Error, EOFError) as e:
+                raise RenderError(f"{label}: {self.model} answered with audio that could not be "
+                                  f"read ({type(e).__name__}: {e}); not retried, since the same "
+                                  "request would be billed again")
             dur, expect = len(pcm) / float(RATE), chunk.words * 60.0 / WPM
             if expect > 5 and not 0.45 <= dur / expect <= 2.5:
                 note = (f"{label}: {dur:.0f} s of audio for about {expect:.0f} s of text on "
@@ -1643,6 +1734,8 @@ def cmd_render(a):
                     os.remove(f)
     if redo:
         log(f"[render] re-making segment(s) {', '.join(str(x) for x in sorted(redo))}")
+        if hasattr(backend, "pinned") and not getattr(a, "model", None):
+            backend.pinned = True                 # the re-made chunks join the others' voices
     log(f"[render] {len(chunks)} chunk(s), {words:,} words -> about {words / float(WPM):.0f} min "
         f"with {backend.name}")
 
@@ -1754,7 +1847,8 @@ def cmd_render(a):
                       "chunks_cached": n_cached, "chunks_synthesized": n_new,
                       "transcript": os.path.join(out, "transcript.html"),
                       "manifest": os.path.join(out, "podcast.json"),
-                      "cache_pruned": prune_cache(cache, used),
+                      "cache_pruned": prune_cache(cache, used, backend.model,
+                                                  explicit=bool(getattr(a, "model", None))),
                       "warnings": warnings}, indent=2))
     # The ASR round trip. It sends the audio, so only under this render's cloud consent. It
     # never fails the render and never touches the report.
@@ -1768,12 +1862,26 @@ def cmd_render(a):
     return 0
 
 
-def prune_cache(cache, used):
-    """After a successful render: remove every cached chunk (and stray *.part) this script no
-    longer uses -- an edited line's old chunk, another model's chunks. -> number removed."""
-    n = 0
-    for f in os.listdir(cache):
-        if f.split(".", 1)[0] in used and not f.endswith(".part"):
+def prune_cache(cache, used, model, explicit=False):
+    """After a successful render: remove cached chunks this script no longer uses (an edited
+    line's old chunk) and stray *.part files. A chunk made by another model -- or one with no
+    record of its model -- is kept unless this render ran on an explicit --model: those chunks
+    may still be the rest of an episode that is being resumed. -> number removed."""
+    n, files, made_by = 0, sorted(os.listdir(cache)), {}
+    for f in files:                                   # every chunk's model, before any delete
+        if f.endswith(".json"):
+            try:
+                with open(os.path.join(cache, f), encoding="utf-8") as fh:
+                    made_by[f.split(".", 1)[0]] = json.load(fh).get("model")
+            except (OSError, ValueError, AttributeError):
+                pass
+    for f in files:
+        stem = f.split(".", 1)[0]
+        if f.endswith(".part"):
+            pass
+        elif stem in used:
+            continue
+        elif not explicit and made_by.get(stem) != model:
             continue
         try:
             os.remove(os.path.join(cache, f))
@@ -2560,6 +2668,10 @@ def main(argv=None):
                         "note of who agreed and when (recorded in podcast.json)")
     r.add_argument("--model", action="append", help="Gemini TTS model(s) to use, in order "
                                                     "(default: read from the API)")
+    r.add_argument("--rate-wait-budget", type=float, default=RATE_WAIT_BUDGET_MIN,
+                   metavar="MIN", help="minutes of rate-limit waiting allowed in one render "
+                                       "before it stops with the resume message (default "
+                                       "%(default)s)")
     r.add_argument("--min-interval", type=float, default=MIN_INTERVAL,
                    help="seconds between requests to one Gemini model (default %(default)s)")
     r.add_argument("--keep-wav", action="store_true")
