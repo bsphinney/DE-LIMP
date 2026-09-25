@@ -106,8 +106,8 @@ contaminant_share <- function(intensity, is_cont, run = NULL) {
 
 KEEP_TARGET_CONTAMINANTS_RULE <- "disabled (--keep-target-contaminants)"
 REBUILD_ADVICE <- paste0("Rebuild the FASTA with this release's fetch_fasta.py (skill 2.8.0 or later) ",
-                         "and re-search; the Core's shared MRS human and mouse FASTAs are being rebuilt ",
-                         "with it.")
+                         "and re-search; the Core's shared human+contaminant FASTA was rebuilt with it ",
+                         "on 2026-09-25 (MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta).")
 
 # Mirror of fetch_fasta.sidecar_state(): which rule built the search database.
 #   "legacy"         no contaminant_target_rule: built before the overlap check

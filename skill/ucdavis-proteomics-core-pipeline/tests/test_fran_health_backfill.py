@@ -1660,8 +1660,9 @@ class FastaFromSearchTests(unittest.TestCase):
                           c["organism_evidence"]["proteome_id_in_filename"])
 
     def test_untagged_contaminants_still_resolve_at_the_majority(self):
-        """The real Siegel FASTA: universal contaminants appended WITHOUT the Cont_ tag,
-        OX=9606 on 98.9% of entries."""
+        """Universal contaminants appended WITHOUT the Cont_ tag (a hand-built FASTA) count as
+        targets; the majority still holds -- 98.9% even over all 21,044 entries of the Sep-2025
+        MRS human+contaminant file (which does tag its contaminants Cont_)."""
         with tempfile.TemporaryDirectory() as d:
             fa = self._fasta(os.path.join(d, "legacy.fasta"),
                              [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(99)]

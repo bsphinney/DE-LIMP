@@ -521,10 +521,12 @@ _PROTEOME_ID = re.compile(r"UP\d{9}")
 def organism_from_headers(path, cont_tag=None):
     """(organism, taxid, evidence, why-not) from the FASTA's own UniProt headers: OX= tallied over
     the target entries (a Cont_-tagged contaminant is not a target). One taxon must hold at least
-    HEADER_MAJORITY of them; otherwise nothing is claimed and why-not says what was found. A legacy
-    FASTA whose appended contaminants are NOT Cont_-tagged still resolves when the majority holds:
-    MRS/UP000005640_9606_plus_universal_contam.fasta is OX=9606 on 20,814 of 21,044 entries (98.9%),
-    the rest bovine/mouse contaminants."""
+    HEADER_MAJORITY of them; otherwise nothing is claimed and why-not says what was found. A FASTA
+    whose appended contaminants are NOT Cont_-tagged (a hand-built one) counts them as targets and
+    still resolves when the majority holds: over ALL 21,044 entries of the Sep-2025
+    MRS/UP000005640_9606_plus_universal_contam.fasta, OX=9606 is on 20,814 (98.9%). (That file does
+    tag its 381 contaminants Cont_, so they are excluded; its defect is the 153 of them identical
+    to human proteins.)"""
     cont_tag = cont_tag or _cont_tag()
     ox, names = collections.Counter(), collections.defaultdict(collections.Counter)
     tag = cont_tag.encode() if cont_tag else None

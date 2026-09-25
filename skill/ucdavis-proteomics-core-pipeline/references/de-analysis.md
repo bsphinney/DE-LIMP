@@ -233,8 +233,9 @@ filter removes those too. The run then prints a `CAUTION` and records `database_
 with a note naming the set; `audit_results.py --fasta-meta` re-checks the searched FASTA and
 names the proteins. The states are `sidecar_state()` in `fetch_fasta.py`, mirrored in
 `contaminants.R` (a test keeps them equal). Rebuild the FASTA with this release's
-fetch_fasta.py (skill 2.8.0 or later) and re-search; the Core's shared MRS human and mouse
-FASTAs are being rebuilt with it.
+fetch_fasta.py (skill 2.8.0 or later) and re-search; the Core's shared human+contaminant FASTA
+was rebuilt with it on 2026-09-25 (`MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`,
+docs/HPC_PATHS.md).
 `--keep-contaminants` keeps every `Cont_` group in the DE instead (the true contaminants
 are then tested too).
 

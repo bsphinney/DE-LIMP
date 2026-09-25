@@ -369,11 +369,14 @@ everything:
 - **Organism and taxon from the file's UniProt headers, never its name.** `OX=` is tallied over
   the target entries (`Cont_`-tagged contaminants excluded). One taxon must hold at least 95% of
   them; the name comes from that taxon's `OS=`. `organism_source` says so, e.g. `FASTA headers
-  (OX=9606 in 20,814 of 21,044 target entries) via search log --fasta (report.log.txt)`.
+  (OX=9606 in <n> of <m> target entries) via search log --fasta (report.log.txt)`.
   `organism_evidence` holds the tally, and records a proteome id found in the filename
   (`UP000005640`) as supporting evidence only.
-- The legacy MRS FASTA appends its contaminants **without** the `Cont_` tag. The majority still
-  holds, at 98.9%.
+- A FASTA whose appended contaminants are **not** `Cont_`-tagged (a hand-built one) counts them
+  as targets, and the majority still holds: over all 21,044 entries of the Sep-2025 MRS
+  human+contaminant file, OX=9606 is on 20,814 (98.9%). That file itself **does** tag its 381
+  contaminants `Cont_`; its defect is the 153 of them identical to human proteins (superseded by
+  `MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`, docs/HPC_PATHS.md).
 - **Nothing is claimed when the file can't answer.** If no taxon reaches 95%, the headers carry
   no `OX=`, the file isn't readable, or the search read two FASTAs, organism (and for the last
   two, the database) stays blank, and `organism_unresolved` says why.
