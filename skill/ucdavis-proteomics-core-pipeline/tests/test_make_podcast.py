@@ -1054,12 +1054,11 @@ class Gemini(Workspace):
 
     def test_scrub(self):
         mp._SECRETS.append("sekrit-value")
-        s = mp.scrub(f"a sekrit-value b {FAKE_KEY} ?key=abc&x=1 (key=def) AQ.Ab8RN6abcdefghij"
-                     "klmnopqrstu")
-        self.assertEqual(s, "a [redacted] b [redacted] ?key=[redacted]&x=1 (key=[redacted]) "
-                            "[redacted]")
+        s = mp.scrub(f"a sekrit-value b {FAKE_KEY} ?key=Ab12Cd34Ef56Gh78Ij90&x=1 (key=def) "
+                     "AQ.Ab8RN6abcdefghijklmnopqrstu")
+        self.assertEqual(s, "a [redacted] b [redacted] ?key=[redacted]&x=1 (key=def) [redacted]")
         import notify_slack                                           # the one list, shared
-        self.assertEqual(notify_slack.redact(f"{FAKE_KEY} key=zz"), "[redacted] key=[redacted]")
+        self.assertEqual(notify_slack.redact(f"{FAKE_KEY} key=zz"), "[redacted] key=zz")
 
 
 # -------------------------------------------------------------------------------------- link
@@ -1226,8 +1225,7 @@ class ReviewFixes(Workspace):
                 ("C1qa", "C one Q A")]
         rc, txt = self.check_txt(script_text(pron=rows), "--forbid-name", "Michelle")
         self.assertEqual(rc, 1)
-        self.assertIn("pronunciation '10.6' -> '40.2': digits 40 are not in the written form",
-                      txt)
+        self.assertIn("pronunciation '10.6' -> '40.2': says the digits 402, not 106 in order", txt)
         self.assertIn("pronunciation 'Ryr2' -> 'Gapdh': 'Gapdh' is not a spelling of 'Ryr2'", txt)
         self.assertIn("'Michelle' is not a spelling of 'Jph3'", txt)
         self.assertIn("forbidden name 'Michelle' appears in: pronunciation 'Jph3'", txt)
@@ -1244,6 +1242,59 @@ class ReviewFixes(Workspace):
         self.assertEqual(rc, 1)
         self.assertIn("forbidden name 'Dana' appears in: header 'sources', header 'styles', "
                       "the style for Leo", txt)
+
+    def test_pronunciation_digits_must_read_in_order(self):
+        rows = [("2.68", "two point eight six"), ("10.6", "sixty one"), ("Kcnj12", "K C N J 21"),
+                ("0756", "zero seven five six"), ("Cep250", "sep two fifty"),
+                ("FKBP12.6", "F K B P twelve point six"), ("Hsp104", "H S P one oh four")]
+        for w, sp in rows:
+            probs = mp.pronunciation_problems(w, sp)
+            self.assertEqual(bool(probs), w in ("2.68", "10.6", "Kcnj12"), (w, sp, probs))
+        self.assertEqual(mp.pronunciation_problems("2.68", "two point eight six"),
+                         ["says the digits 286, not 268 in order"])
+        self.assertEqual(mp.pronunciation_problems("Kcnj12", "K C N J"), ["drops the digits 12"])
+
+    def test_sentence_initial_capitals_are_listed_not_failed(self):
+        seg = [("MAYA", "An AI-generated show. Gapdh went up. The gel ran well."),
+               ("LEO", "Welcome back. Actb too, said the report.")]
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"))
+        self.assertEqual(rc, 0, txt)
+        info = [ln for ln in txt.splitlines() if "capitalised at the start of a sentence" in ln]
+        self.assertEqual(len(info), 1)
+        for tok in ("Gapdh (turn 1)", "Actb (turn 2)", "Welcome (turn 2)"):
+            self.assertIn(tok, info[0])
+        self.assertNotIn("The (turn", info[0])                    # in the sources
+        self.assertIn("a capitalised word that starts a sentence", txt)   # CANNOT_CATCH
+
+    def test_a_quantity_phrase_stops_at_sentence_and_cell_boundaries(self):
+        seg = [("MAYA", "An AI-generated show: half of the runs were thin."),
+               ("LEO", "So the report says.")]
+        for src_text in ("Recall dropped by half. Of the runs, 3 were thin.",
+                         "| Metric | half |\n| of the runs | 3 |"):
+            src = os.path.join(self.d, "b.md")
+            write(src, REPORT + "\n" + src_text + "\n")
+            rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"), source=src)
+            self.assertEqual(rc, 1, src_text)
+            self.assertIn("quantity in words 'half of the runs' is not in the sources", txt)
+        write(src, REPORT + "\nFewer than half of the runs were thin.\n")
+        self.assertEqual(self.check_txt(script_text(segs=(seg,), claims="None"), source=src)[0], 0)
+        seg2 = [("MAYA", "An AI-generated show: it dropped by half. Of the runs, few were thin."),
+                ("LEO", "So the report says.")]
+        rc, txt = self.check_txt(script_text(segs=(seg2,), claims="None"), source=src)
+        self.assertIn("quantity in words 'half' is not in the sources", txt)   # no anchor
+
+    def test_suffixed_numbers_and_hyphenated_symbols_are_checked(self):
+        seg = [("MAYA", "An AI-generated show: roughly 3k proteins and 2M spectra."),
+               ("LEO", "And IL-6 went up, with COVID-19 samples.")]
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"))
+        self.assertEqual(rc, 1)
+        for want in ("number 3k is not in the sources", "number 2M is not in the sources",
+                     "IL-6 looks like a gene/protein symbol", "COVID-19 looks like"):
+            self.assertIn(want, txt)
+        src = os.path.join(self.d, "k.md")
+        write(src, REPORT + "\nAbout 3,000 proteins, 2,000,000 spectra, IL-6 and COVID-19.\n")
+        rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"), source=src)
+        self.assertEqual(rc, 0, txt)
 
     # 2 -- a letter-ending symbol prefix-matched ordinary words
     def test_invented_acronyms_do_not_match_inside_words(self):
@@ -1359,6 +1410,7 @@ class ReviewFixes(Workspace):
                 rc, out, err = run("render", self.script, "--tts", "gemini", "--cloud-ok", no)
             self.assertEqual((rc, log["clients"]), (2, 0), no)
             self.assertIn("not sending anything", err)
+            self.assertIn("verify then sends the rendered AUDIO", err)
 
     # 7 -- the key file lives with the skill's other config
     def test_key_file_location(self):

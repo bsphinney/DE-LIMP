@@ -1575,11 +1575,13 @@ def plan_analysis(plan, session, a, zip_cap):
         add_copy(plan, d, f"output/{os.path.basename(d)}", "analysis")
     # The optional podcast (make_podcast.py): the report's Listen card links podcast/<file>, so
     # the record keeps what the card points at -- the audio podcast.json names, the transcript,
-    # the script with its claims ledger, the check, the manifest. Never .cache (scratch).
+    # the script with its claims ledger, the check, the manifest, and verify's report and what
+    # it heard. Never .cache (scratch).
     pod = os.path.join(out_d, "podcast")
     pman = load_json(os.path.join(pod, "podcast.json")) or {}
     for f in [pman.get("audio"), pman.get("transcript") or "transcript.html",
-              "podcast_script.md", "check.txt", "podcast.json"]:
+              "podcast_script.md", "check.txt", "podcast.json", "verify.txt",
+              "verify_transcript.txt"]:
         if isinstance(f, str) and f and os.path.basename(f) == f:
             add_copy(plan, os.path.join(pod, f), f"output/podcast/{f}", "analysis")
     for f in ("methods.md", "METHODS.md", "AI_Analysis_Report.md", "OUTPUT_FILES.md", "AUDIT.md",

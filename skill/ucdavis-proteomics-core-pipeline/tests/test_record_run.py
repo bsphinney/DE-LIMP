@@ -821,13 +821,13 @@ class WhatIsCopied(Base):
         write(os.path.join(pod, "podcast.json"), json.dumps(
             {"audio": "podcast.m4a", "transcript": "transcript.html", "duration_s": 60}))
         for f in ("podcast.m4a", "podcast.wav", "transcript.html", "podcast_script.md",
-                  "check.txt"):
+                  "check.txt", "verify.txt", "verify_transcript.txt"):
             write(os.path.join(pod, f), "x" * 100)
         write(os.path.join(pod, ".cache", "abc.wav"), "scratch")
         self.run_it("analysis-done", "--session", sess, "--out", out)
         files = set(self.all_files(self.only_folder()))
         for f in ("podcast.m4a", "transcript.html", "podcast_script.md", "check.txt",
-                  "podcast.json"):
+                  "podcast.json", "verify.txt", "verify_transcript.txt"):
             self.assertIn(f"output/podcast/{f}", files)
         self.assertNotIn("output/podcast/podcast.wav", files)          # the .m4a is the audio
         self.assertFalse([f for f in files if ".cache" in f], files)

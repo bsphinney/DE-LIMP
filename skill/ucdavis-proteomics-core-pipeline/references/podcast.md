@@ -166,6 +166,7 @@ Claims section):
 - **Numbers**, kept as digits in the transcript (215, 6,112, 5e-15, −1.3):
   - An integer must match exactly: "29%" does not match a report's "29.4%". Only an unsigned
     count of 10 or less ("4 baits") is exempt, and never one followed by %, percent, fold or ×.
+    "3k", "6K", "2M" and "1B" are 3,000, 6,000, 2,000,000 and 1,000,000,000, and are checked.
   - A decimal may be rounded to fewer places: 10.6 matches 10.62.
   - A sign must match: "−2.68" does not match "+2.68". An unsigned number ("fell by 1.3")
     matches either.
@@ -173,24 +174,28 @@ Claims section):
     power of ten ("10 to the minus 15" for 5.2e-15) is accepted as an order of magnitude.
 - **Quantities in words** -- numbers over ten and their plurals and -fold forms ("thousands",
   "hundredfold"), "tenfold", "a dozen", "twice", "half" -- pass only as the report's own
-  phrase. The phrase is the word, any little words after it, and the next content word, and
-  it is matched after normalising. "Half of the runs" passes when the report says "fewer than
+  phrase. The phrase is the word, any little words after it, and the next content word, within
+  one sentence, and it is matched after normalising, within one sentence or table cell of the
+  sources. "Half of the runs" passes when the report says "fewer than
   half of the runs"; "half the proteins were inferred" fails when it does not. Otherwise use
   the report's digits, or list your phrase as a claim.
 - **Symbols** -- anything with digits, three or more capitals, inner capitals or a Greek letter
-  (Jph3, FKBP12.6, SERCA, IgG, TNF-α) -- must be spelled as the report spells them (case does
-  not matter). A symbol is a whole word: SOD does not match "sodium". Do not write ordinary
+  (Jph3, FKBP12.6, SERCA, IgG, TNF-α), and a capitalised name joined to a number by a hyphen
+  (IL-6, COVID-19) -- must be spelled as the report spells them (case does not matter). A symbol is a whole word: SOD does not match "sodium". Do not write ordinary
   words in ALL CAPS for emphasis; use *italics*.
 - **Capitalised words mid-sentence** (Gapdh, Actb, a person, a place) must be in the sources,
-  the claims, a host's name or the show's name.
+  the claims, a host's name or the show's name. A capitalised word that starts a sentence
+  cannot be told from an ordinary one ("Gapdh went up." / "The gel ran."), so it is not
+  failed; `check.txt` lists the ones not in the sources as INFO -- read that line.
 - **Names**: no person's name except the hosts; the lab name ("the Dickson lab") is the most
   you may use. Pass people's full and first names to `check --forbid-name` (the PI, the
   submitter, lab members, Core staff). They are searched in the transcript, the header lines,
   the claims, the styles and the Pronunciation table.
 - **Pronunciation rows** go to the voices without being checked against the report, so a row
-  may only re-spell its written form. A spoken form that adds digits or number words the
-  written form lacks, or a capitalised word or symbol that is not part of it (`Ryr2 → Gapdh`),
-  fails. Every row is listed in `check.txt`. Write phonetic respellings in lowercase ("teck R").
+  may only re-spell its written form. Its digits -- numerals and number words, read the way
+  people say them ("sep two fifty" is 250) -- must be the written form's digits in the same
+  order, so `2.68 → two point eight six` fails. A capitalised word or symbol that is not part
+  of the written form (`Ryr2 → Gapdh`) fails too. Every row is listed in `check.txt`. Write phonetic respellings in lowercase ("teck R").
 - **The disclosure** ("AI-generated") is in one of the first 3 turns, and **no host claims a
   real specialty**.
 
@@ -203,6 +208,8 @@ Read the script against the report for these; a PASS says nothing about them:
 - relational words: "higher", "more than", "most", "only", "the top hit";
 - false statements built from true numbers and true names;
 - lowercase symbols ("gapdh") and lowercase respellings in the Pronunciation table;
+- a capitalised word that starts a sentence ("Gapdh went up."): the INFO line lists them;
+- numbers with a unit other than %, fold, ×, k, M and B ("3 kDa", "2 µg");
 - meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact.
 
 ## The script file (`<session>/output/podcast/podcast_script.md`)

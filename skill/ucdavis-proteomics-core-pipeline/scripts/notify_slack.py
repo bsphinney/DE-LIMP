@@ -141,7 +141,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)https?://hooks\.slack\.com/services/\S+"),
     re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),                    # a Google API key
     re.compile(r"\bAQ\.[0-9A-Za-z_\-]{20,}"),                  # a Google API key, newer format
-    re.compile(r"(?i)(?<=key=)[^&\s\"'()]+"),                   # key=..., api_key=... in a URL
+    re.compile(r"(?i)(?<=key=)[A-Za-z0-9_.\-]{20,}"),           # a key-shaped key=... value
 ]
 
 

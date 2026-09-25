@@ -152,16 +152,22 @@ _QUANT_FILLER = {"of", "the", "a", "an", "as", "than", "more", "less", "many", "
                  "this", "that"}
 
 
+# Where a phrase ends: the end of a sentence or clause, a table cell, a line.
+_BOUNDARY = re.compile(r"[.!?;:](?=\s|$)|\||\n")
+
+
 def _words_norm(text):
-    """Lowercase words, anything else a single space, padded: for whole-phrase search."""
-    return " " + " ".join(re.findall(r"[a-z0-9]+", (text or "").lower())) + " "
+    """Lowercase words, anything else a single space, padded, with " # " at every sentence,
+    clause, table-cell or line boundary: a phrase is searched within one stretch of prose."""
+    parts = (" ".join(re.findall(r"[a-z0-9]+", p)) for p in _BOUNDARY.split((text or "").lower()))
+    return " " + " # ".join(p for p in parts if p) + " "
 
 
 def quantity_phrase(text, m):
     """The phrase a quantity word stands in: the word, any little words after it, and the next
-    content word -- "hundreds of times", "half of the runs", "thousands of proteins". None at
-    the end of a sentence (nothing to anchor it)."""
-    rest = re.findall(r"[a-z0-9]+", text[m.end():].lower())
+    content word -- "hundreds of times", "half of the runs", "thousands of proteins" -- within
+    its sentence. None when the sentence ends first (nothing to anchor it)."""
+    rest = re.findall(r"[a-z0-9]+", _BOUNDARY.split(text[m.end():].lower())[0])
     tail = []
     for w in rest[:6]:
         tail.append(w)
@@ -185,6 +191,10 @@ CANNOT_CATCH = (
     "not checked",
     "false statements built from true numbers and true names",
     "lowercase symbols (\"gapdh\") and lowercase respellings in the Pronunciation table",
+    "a capitalised word that starts a sentence (\"Gapdh went up.\"): check.txt lists the ones "
+    "not in the sources as INFO, to read",
+    "numbers with a unit or suffix other than %, fold, x, k, M and B (\"3 kDa\", \"2 µg\") are "
+    "matched as plain numbers, and a count of 10 or less with one is not checked",
     "meaning: a caveat the report makes can be dropped, and speculation can be spoken as fact",
 )
 # --cloud-ok with one of these means no.
@@ -525,6 +535,9 @@ def _decimals(s):
 # before the hyphen).
 _SIGN_BEFORE = re.compile(r"(?:(?<![A-Za-z0-9_.])([+-])|\b(minus|negative|plus)\s+)$", re.I)
 _QUANT_AFTER = re.compile(r"\s*(?:%|percent\b|-?\s*fold\b|×|x\b)", re.I)
+# 3k, 6K, 2M, 1B: the suffix multiplies, and the number is a measurement, never a count.
+_SUFFIX = re.compile(r"([kKMB])(?![A-Za-z0-9])")
+_SUFFIX_X = {"k": 1000, "K": 1000, "M": 1000000, "B": 1000000000}
 
 
 def numbers_in(text):
@@ -539,6 +552,12 @@ def numbers_in(text):
                 sign = None
                 if sm:
                     sign = sm.group(1) or ("+" if sm.group(2).lower() == "plus" else "-")
+                sx = _SUFFIX.match(t, m.end())
+                if sx:
+                    v = abs(D(p)) * _SUFFIX_X[sx.group(1)]
+                    out.append(Num(p + sx.group(1), v, "plain", max(0, -v.normalize().as_tuple().exponent),
+                                   sign, True))
+                    continue
                 out.append(Num((sign or "") + p if sign == "-" else p, abs(D(p)), "plain",
                                _decimals(p), sign, bool(_QUANT_AFTER.match(t, m.end()))))
                 continue
@@ -625,6 +644,9 @@ class NumberBook(object):
 # ----------------------------------------------------------------------------- symbol check
 _SYM = re.compile(r"(?<![A-Za-z0-9α-ωΑ-Ω])[A-Za-zα-ωΑ-Ω][A-Za-z0-9α-ωΑ-Ω]*(?:\.\d+)*")
 _TITLE = re.compile(r"^[A-Z][a-z]+$")
+# A capitalised name, a hyphen and a number: IL-6, COVID-19. "IL" alone is too short to be a
+# symbol and "6" alone is a trivial count, so the pair is checked whole.
+_HYPHEN_SYM = re.compile(r"(?<![A-Za-z0-9\-])[A-Z][A-Za-z]{0,7}-\d+[A-Za-zα-ω]?(?![A-Za-z0-9])")
 
 
 def is_symbol(tok):
@@ -650,33 +672,39 @@ def symbol_found(tok, hay):
     return len(t) > 3 and t.endswith("s") and symbol_found(tok[:-1], hay)
 
 
-def title_tokens(text):
-    """Capitalised words that do not start a sentence: Gapdh, Western, a person, a place. The
-    first word of a sentence (after . ! ? or the start of the turn) is not one."""
+def title_tokens(text, initial=False):
+    """Capitalised words that do not start a sentence: Gapdh, Western, a person, a place. With
+    initial=True, the ones that do (after . ! ? or at the start of the turn), which check lists
+    but cannot judge: "Gapdh went up." and "The gel ran." look the same."""
     for m in re.finditer(r"(?<![A-Za-z0-9'’_α-ωΑ-Ω])([A-Z][a-z]+)(?![A-Za-z0-9α-ωΑ-Ω])", text):
         pre = re.sub(r"[\s\"“”‘’'(\[*_]+$", "", text[:m.start()])
-        if pre and pre[-1] not in ".!?…":
+        starts = not pre or pre[-1] in ".!?…"
+        if starts == initial:
             yield m.group(1)
+
+
+def spoken_digits(spoken):
+    """The digits a spoken form says, in order: numerals as written, number words read the way
+    verify reads them ("two point eight six" -> 286, "sep two fifty" -> 250, "zero seven five
+    six" -> 0756, "oh" as 0)."""
+    words = [[("zero" if w.lower() == "oh" else w.lower()), 0, 0]
+             for w in re.findall(r"[A-Za-z]+|\d+", spoken or "")]
+    return "".join(c for t in _spoken_numbers(words) for c in t[0] if c.isdigit())
 
 
 def pronunciation_problems(written, spoken):
     """What a Pronunciation row must not do: the spoken form is sent to the voices and never
-    checked against the report, so it may only re-spell the written form. Digits (or number
-    words) it adds, and symbols or capitalised words that are not a spelling of the written
-    form, are problems. A lowercase respelling ("teck R" for Tecr) cannot be judged."""
+    checked against the report, so it may only re-spell the written form. Its digits -- numerals
+    and number words, read in order -- must be the written form's digits in the same order
+    (2.68 is not "two point eight six"), and a symbol or capitalised word in it must be part of
+    the written form. A lowercase respelling ("teck R" for Tecr) cannot be judged."""
     probs = []
     wdig = re.sub(r"\D", "", written)
-    for d in re.findall(r"\d+", spoken):
-        if d not in written:
-            probs.append(f"digits {d} are not in the written form")
-    for w in re.findall(r"[A-Za-z]+", spoken):
-        v = NUMBER_WORDS.get(w.lower())
-        if v is None:
-            continue
-        if not wdig:
-            probs.append(f"'{w}' adds a number the written form does not have")
-        elif any(c not in wdig for c in v):
-            probs.append(f"'{w}' is not a digit of {written!r}")
+    sdig = spoken_digits(spoken)
+    if sdig != wdig:
+        probs.append(f"adds the number {sdig}, which the written form does not have" if not wdig
+                     else f"drops the digits {wdig}" if not sdig
+                     else f"says the digits {sdig}, not {wdig} in order")
     for m in _SYM.finditer(spoken):
         tok = m.group(0)
         if not (is_symbol(tok) or _TITLE.match(tok) or (len(tok) == 1 and tok.isupper())):
@@ -791,6 +819,9 @@ def check(s, sources, forbid=()):
             tok = m.group(0)
             if is_symbol(tok) and tok not in seen:
                 seen[tok] = (i, t)
+        for m in _HYPHEN_SYM.finditer(t.text):             # IL-6, COVID-19, LRS-124
+            if m.group(0) not in seen:
+                seen[m.group(0)] = (i, t)
     for tok, (i, t) in seen.items():
         where = f"turn {i} (line {t.line}, {t.speaker.upper()})"
         if symbol_found(tok, hay):
@@ -812,6 +843,16 @@ def check(s, sources, forbid=()):
         for tok in title_tokens(t.text):
             if tok.lower() not in allowed and tok.lower() not in GENERIC_TOKENS and tok not in caps:
                 caps[tok] = (i, t)
+    initial = {}
+    for i, t in enumerate(turns, 1):
+        for tok in title_tokens(t.text, initial=True):
+            if (tok.lower() not in allowed and tok not in initial and tok not in caps
+                    and not symbol_found(tok, hay) and not symbol_found(tok, claims_hay)):
+                initial[tok] = i
+    if initial:
+        infos.append(f"capitalised at the start of a sentence, so not checked, and not in the "
+                     f"sources ({len(initial)}): " + ", ".join(f"{k} (turn {v})" for k, v in
+                                                              initial.items()))
     for tok, (i, t) in caps.items():
         where = f"turn {i} (line {t.line}, {t.speaker.upper()})"
         if symbol_found(tok, hay):
@@ -1585,7 +1626,8 @@ def error_info(e):
 
 
 def read_key():
-    """The Gemini key: GEMINI_API_KEY, else ~/.config/podcast/gemini_key. Never printed."""
+    """The Gemini key: GEMINI_API_KEY, else ~/.config/ucdavis-proteomics/gemini_key. Never
+    printed."""
     key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     path = os.path.expanduser(KEY_FILE)
     if not key and os.path.isfile(path):
@@ -1715,7 +1757,8 @@ def cmd_render(a):
             log(f"[render] not sending anything: --cloud-ok {a.cloud_ok!r} is a refusal.")
         log(f"[render] not sending anything. --tts {a.tts} sends the transcript -- {words:,} "
             f"words of the turns, after pronunciation substitutions; never the report -- to "
-            f"Google's Gemini API. On a free-tier key Google may use it to improve its products "
+            f"Google's Gemini API, and verify then sends the rendered AUDIO (downsampled) for "
+            f"transcription. On a free-tier key Google may use both to improve its products "
             f"and human reviewers may read it ({TERMS_URL}). Once the user has agreed, re-run "
             f"with --cloud-ok (optionally --cloud-ok \"who agreed, when\"), or use --tts say "
             f"(offline, macOS).")
@@ -1821,8 +1864,9 @@ def cmd_render(a):
                 "models_used": backend.models_used, "sample_rate": RATE,
                 "sent_to_cloud": bool(backend.cloud),
                 "what_was_sent": ("the transcript turns after pronunciation substitutions, plus "
-                                  "one style line; not the report" if backend.cloud else
-                                  "nothing (offline)")},
+                                  "one style line; then, for verify (unless --no-verify), the "
+                                  "rendered audio downsampled to 16 kHz; never the report"
+                                  if backend.cloud else "nothing (offline)")},
         "cloud_tts_consent": (consent if backend.cloud else False),
         "script": "podcast_script.md", "script_sha256": s.sha256,
         "script_author": s.author,
@@ -1957,8 +2001,10 @@ _MULT = {"hundred": 100, "thousand": 1000, "million": 1000000}
 
 def _spoken_numbers(words):
     """Runs of number words as one number, the way a transcript that "writes numbers as digits"
-    has them: "five thousand and twenty four" -> 5024, "forty six" -> 46, "twelve" -> 12. Units
-    read one by one ("zero seven five six") are a digit string, 0756."""
+    has them. Read the way people say numbers: "five thousand and twenty four" -> 5024, "forty
+    six" -> 46, "two fifty" -> 250, "nineteen ninety" -> 1990, and digit by digit, "zero seven
+    five six" -> 0756. A tens word takes a following unit; any other pair of number words
+    without a multiplier between them starts a new group of digits."""
     out, i = [], 0
     isnum = lambda w: w in _UNITS or w in _TENS or w in _MULT        # noqa: E731
     while i < len(words):
@@ -1973,19 +2019,25 @@ def _spoken_numbers(words):
             if words[j][0] != "and":
                 run.append(words[j][0])
             j += 1
-        if any(w in _MULT or w in _TENS for w in run):
-            total = cur = 0
-            for w in run:
-                if w in _MULT:
-                    cur = max(cur, 1) * _MULT[w]
-                    if _MULT[w] >= 1000:
-                        total, cur = total + cur, 0
-                else:
-                    cur += int(_TENS.get(w) or _UNITS[w])
-            val = str(total + cur)
-        else:
-            val = "".join(_UNITS[w] for w in run)
-        out.append([val, words[i][1], words[j - 1][2]])
+        groups, total, cur, last = [], 0, None, None
+        for w in run:
+            if w in _MULT:
+                cur = (cur or 1) * _MULT[w]
+                if _MULT[w] >= 1000:
+                    total, cur = total + cur, 0
+                last = "mult"
+                continue
+            v = int(_TENS.get(w) or _UNITS[w])
+            if last == "tens" and v < 10:
+                cur, last = cur + v, "unit"                   # forty six
+                continue
+            if last in ("unit", "teen", "tens"):              # two | fifty, seven | five
+                groups.append(str(total + (cur or 0)))
+                total, cur = 0, None
+            cur = (cur or 0) + v
+            last = "tens" if w in _TENS else ("teen" if v >= 10 else "unit")
+        groups.append(str(total + (cur or 0)))
+        out.append(["".join(groups), words[i][1], words[j - 1][2]])
         i = j
     return out
 

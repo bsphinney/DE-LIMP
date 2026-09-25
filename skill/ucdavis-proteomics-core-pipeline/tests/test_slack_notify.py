@@ -1450,6 +1450,21 @@ class ScriptAndPayloadSafety(unittest.TestCase):
             finally:
                 m.close()
 
+    def test_key_is_redacted_only_when_it_looks_like_a_key(self):
+        # the key= pattern (added for make_podcast's Google keys) must not eat ordinary text
+        self.assertEqual(ns.redact("sort key=value, lookup key=protein_id"),
+                         "sort key=value, lookup key=protein_id")
+        self.assertEqual(ns.redact("GET /v1/models?key=Ab12Cd34Ef56Gh78Ij90Kl&x=1"),
+                         "GET /v1/models?key=[redacted]&x=1")
+        with tempfile.TemporaryDirectory() as d:
+            m = Mock("ok")
+            try:
+                with env_patch(d, SKILL_SLACK_WEBHOOK=m.url):
+                    self.assertTrue(ns.send_alert("dedupe by key=value failed", title="FRAN"))
+                    self.assertIn("key=value", json.dumps(m.bodies[-1]))
+            finally:
+                m.close()
+
     def test_job_end_error_tails_are_redacted_in_the_post_and_the_log(self):
         t = JobTrap("test_exit_codes_are_kept_and_reported")
         t.setUp()
