@@ -171,9 +171,12 @@ Claims section):
     matches either.
   - A p-value keeps its power of ten: say "5.65 times 10 to the minus 10", not "5.65". A bare
     power of ten ("10 to the minus 15" for 5.2e-15) is accepted as an order of magnitude.
-- **Quantities in words** fail, because they cannot be verified: numbers over ten and their
-  plurals and -fold forms ("thousands", "hundredfold"), "tenfold", "a dozen", "twice", "half".
-  Use the report's digits, or list your phrase as a claim.
+- **Quantities in words** -- numbers over ten and their plurals and -fold forms ("thousands",
+  "hundredfold"), "tenfold", "a dozen", "twice", "half" -- pass only as the report's own
+  phrase. The phrase is the word, any little words after it, and the next content word, and
+  it is matched after normalising. "Half of the runs" passes when the report says "fewer than
+  half of the runs"; "half the proteins were inferred" fails when it does not. Otherwise use
+  the report's digits, or list your phrase as a claim.
 - **Symbols** -- anything with digits, three or more capitals, inner capitals or a Greek letter
   (Jph3, FKBP12.6, SERCA, IgG, TNF-α) -- must be spelled as the report spells them (case does
   not matter). A symbol is a whole word: SOD does not match "sodium". Do not write ordinary

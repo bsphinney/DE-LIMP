@@ -14,14 +14,16 @@ timsTOF HT, dia-PASEF, 44 minute gradient. DIA-NN 2.6.1, library-free search wit
 match-between-runs, 1% precursor FDR: 41,236 precursors mapped to 3,412 protein groups. DE with
 limpa (DPC-Quant) and limma; significant = adjusted p < 0.05 (Benjamini–Hochberg), no
 fold-change filter. 18–41% of the values per sample are inferred (median 27%), not measured;
-PropObs gives the observed fraction per protein. Empirical Bayes moderates the variances.
+PropObs gives the observed fraction per protein. Empirical Bayes moderates the variances: limma
+borrows variance information across thousands of proteins.
 
 ## Key findings
 
-Hsp104 is the top hit in its own pulldown (log2FC 9.84, adj.P 3.1e-12). Ssa1 tops its pulldown
+Hsp104 is the top hit in its own pulldown (log2FC 9.84, adj.P 3.1e-12), hundreds of times more
+than in IgG. Ssa1 tops its pulldown
 (log2FC 8.27, adj.P 7.4e-11). Early Hsp104 vs IgG: 412 significant (367 up). Late Hsp104 vs IgG:
 158 significant. Sis1 and Ydj1 co-purify with Ssa1. Hsp26 and Hsp42 rise in Late Hsp104
-pulldowns (log2FC 2.35 and 1.92).
+pulldowns (log2FC 2.35 and 1.92); Hsp42 was detected in fewer than half of the runs.
 
 ## Caveats
 

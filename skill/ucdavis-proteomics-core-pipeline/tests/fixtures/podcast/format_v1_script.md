@@ -72,7 +72,7 @@ Nothing in the transcript states a fact that is not in the sources. Everything b
 
 **MAYA:** First question any biologist asks. Did the pulldowns work?
 
-**LEO:** Yes. Hsp104 is the top hit in its own pulldown, log2FC 9.84, adjusted p of 3.1e-12. Ssa1 tops its pulldown too.
+**LEO:** Yes. Hsp104 is the top hit in its own pulldown, log2FC 9.84, adjusted p of 3.1e-12, hundreds of times more than in IgG. Ssa1 tops its pulldown too.
 
 **MAYA:** The is-the-phone-plugged-in check.
 
@@ -96,7 +96,7 @@ Nothing in the transcript states a fact that is not in the sources. Everything b
 
 **MAYA:** Did anything late survive?
 
-**LEO:** Hsp26 and Hsp42 rise in the Late Hsp104 pulldowns, log2FC 2.35 and 1.92. Leads, not conclusions.
+**LEO:** Hsp26 and Hsp42 rise in the Late Hsp104 pulldowns, log2FC 2.35 and 1.92, and Hsp42 was seen in fewer than half of the runs. Leads, not conclusions.
 
 ---
 
@@ -108,7 +108,7 @@ Nothing in the transcript states a fact that is not in the sources. Everything b
 
 **MAYA:** Nerd moment. Go.
 
-**LEO:** Between 18 and 41 percent of each sample's values are inferred, median 27 percent. The detection-probability model fills in what was never observed. And empirical Bayes borrows information across proteins, which is why 4 replicates are workable. Then Benjamini-Hochberg turns the p-values into adjusted p, because we tested 3,412 proteins at once.
+**LEO:** Between 18 and 41 percent of each sample's values are inferred, median 27 percent. The detection-probability model fills in what was never observed. And empirical Bayes borrows variance information across thousands of proteins, which is why 4 replicates are workable. Then Benjamini-Hochberg turns the p-values into adjusted p, because we tested 3,412 proteins at once.
 
 ---
 

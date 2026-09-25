@@ -143,6 +143,30 @@ SPELLED_NUMBER = re.compile(
     r"(?:s|[- ]?fold)?"
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)[- ]?fold"
     r"|(?:a\s+)?dozens?|twice|half|halves)\b", re.I)
+# Little words between a quantity word and the word it counts: "half OF THE runs".
+_QUANT_FILLER = {"of", "the", "a", "an", "as", "than", "more", "less", "many", "much", "to",
+                 "in", "on", "at", "by", "for", "all", "our", "their", "its", "these", "those",
+                 "this", "that"}
+
+
+def _words_norm(text):
+    """Lowercase words, anything else a single space, padded: for whole-phrase search."""
+    return " " + " ".join(re.findall(r"[a-z0-9]+", (text or "").lower())) + " "
+
+
+def quantity_phrase(text, m):
+    """The phrase a quantity word stands in: the word, any little words after it, and the next
+    content word -- "hundreds of times", "half of the runs", "thousands of proteins". None at
+    the end of a sentence (nothing to anchor it)."""
+    rest = re.findall(r"[a-z0-9]+", text[m.end():].lower())
+    tail = []
+    for w in rest[:6]:
+        tail.append(w)
+        if w not in _QUANT_FILLER:
+            return " ".join(re.findall(r"[a-z0-9]+", m.group(0).lower()) + tail)
+    return None
+
+
 # A host must not claim a real research specialty ("I study membrane contact sites in neurons"):
 # it lends the synthetic voice an authority it does not have. "I'm the biologist of the pair".
 SPECIALTY = re.compile(r"\bI(?:'m| am)?\s+(?:study|studied|research|specialise|specialize|"
@@ -711,6 +735,7 @@ def check(s, sources, forbid=()):
         book.add_text(text)
         hay.append(normalize_numbers(text).lower())
     hay = "\n".join(hay)
+    phrases = _words_norm(hay)
     claims_hay = normalize_numbers(s.claims_text).lower()
     disclosed = NumberBook()
     disclosed.add_text(s.claims_text)
@@ -740,12 +765,18 @@ def check(s, sources, forbid=()):
                              + (f" (they have {hint}: say the power of ten too)" if hint else "")
                              + f" -- {_ctx(t.text, n.text)}")
         for m in SPELLED_NUMBER.finditer(t.text):
+            # The report's own phrase is fine: "fewer than half of the runs" in the sources lets
+            # "half of the runs" through, not "half the proteins were inferred".
+            ph = quantity_phrase(t.text, m)
+            if ph and f" {ph} " in phrases:
+                continue
             if re.search(r"\b" + re.escape(m.group(0).lower()) + r"\b", s.claims_text.lower()):
                 infos.append(f"{where}: '{m.group(0)}' is listed under Claims beyond the report")
                 continue
-            fails.append(f"{where}: quantity in words '{m.group(0)}' -- write it as digits that "
-                         "are in the sources (the pronunciation step handles speech), or list the "
-                         "phrase under Claims beyond the report if it is your own gloss")
+            fails.append(f"{where}: quantity in words '{ph or m.group(0)}' is not in the sources "
+                         "-- use the report's own phrase or its digits (the pronunciation step "
+                         "handles speech), or list it under Claims beyond the report if it is "
+                         "your own gloss")
         for m in SPECIALTY.finditer(t.text):
             fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
                          "specialty (it lends a synthetic voice false authority); say \"I'm the "

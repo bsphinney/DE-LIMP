@@ -217,8 +217,30 @@ class RealFormat(Workspace):
         self.assertEqual(rc, 0, err)
         self.assertIn("Maya: Leo, picture a yeast cell", out)
         self.assertIn("submission zero four two one", out)
-        self.assertIn("adjusted p of 3.1 times 10 to the minus 12.", out)
+        self.assertIn("adjusted p of 3.1 times 10 to the minus 12,", out)
         self.assertIn("D I A N N 2.6.1", out)
+
+    def test_the_reports_own_quantity_phrases_pass(self):
+        # PROT_0756 v1 (2026-09-25) failed on "hundreds of times", "half of the runs" and
+        # "thousands of proteins", all three verbatim in its report. The fixture carries the
+        # same phrasings in the synthetic study's wording.
+        os.makedirs(self.pod, exist_ok=True)
+        shutil.copy(os.path.join(self.FIX, "format_v1_script.md"), self.script)
+        src = os.path.join(self.FIX, "synthetic_report.md")
+        rc, out, err = run("check", self.script, "--source", src)
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 0, txt)
+        for ph in ("hundreds of times", "half of the runs", "thousands of proteins"):
+            self.assertIn(ph, read(self.script))
+            self.assertNotIn(f"'{ph}'", txt)
+        # the same word in a phrase the report does not have still fails
+        write(self.script, read(self.script).replace(
+            "and Hsp42 was seen in fewer than half of the runs",
+            "and half the proteins were inferred"))
+        rc, out, err = run("check", self.script, "--source", src)
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 1)
+        self.assertIn("quantity in words 'half the proteins' is not in the sources", txt)
 
     def test_teaching_and_close_warnings(self):
         rc, txt = self.check()                                # the short script teaches little
@@ -286,7 +308,7 @@ class Check(Workspace):
     def test_spelled_out_numbers_fail(self):
         rc, txt = self.check(script_text().replace("30 IPs", "Thirty IPs"))
         self.assertEqual(rc, 1)
-        self.assertIn("quantity in words 'Thirty'", txt)
+        self.assertIn("quantity in words 'thirty ips' is not in the sources", txt)
 
     def test_required_sections(self):
         text = script_text().replace("## Pronunciation", "## Notes")
@@ -1153,8 +1175,8 @@ class ReviewFixes(Workspace):
         self.assertEqual(rc, 1)
         for n in ("number 20 ", "number 5 ", "number 7 ", "number 1.3 "):
             self.assertIn(n, txt)
-        for w in ("Thousands", "hundredfold", "a dozen", "twice", "half"):
-            self.assertIn(f"quantity in words '{w}'", txt)
+        for w in ("thousands of proteins", "hundredfold", "a dozen", "twice", "half of them"):
+            self.assertIn(f"quantity in words '{w}", txt)
         rc, txt = self.check_txt(script_text(segs=([("MAYA", "An AI-generated test: about half "
                                                                 "of it, and Jph3 fell -1.3."),
                                                        ("LEO", "The report says so.")],),
