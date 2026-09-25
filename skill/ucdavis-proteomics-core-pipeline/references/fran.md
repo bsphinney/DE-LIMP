@@ -357,6 +357,28 @@ search's manifest recorded the **human** database (seen in the drop dir, 2026-09
 A sidecar that itself records `organism: ""` (PROT_0793's human one does) gives no organism.
 That is honest, not a bug.
 
+**No sidecar at all: read the FASTA the search names** (`fasta_from_search`). A search whose
+FASTA has no sidecar (a hand-run DIA-NN, or `MRS/UP000005640_9606_plus_universal_contam.fasta`
+behind the Siegel searches) still says exactly which database it read: `fasta` in
+`search_provenance.json`, or `--fasta` in its `report.log.txt`. That file then supplies
+everything:
+
+- `fasta_path`, plus `fasta_md5` and `fasta_n_proteins` from fetch_fasta's own helpers, and
+  `fasta_source` saying where the path was named.
+- **Organism and taxon from the file's UniProt headers, never its name.** `OX=` is tallied over
+  the target entries (`Cont_`-tagged contaminants excluded). One taxon must hold at least 95% of
+  them; the name comes from that taxon's `OS=`. `organism_source` says so, e.g. `FASTA headers
+  (OX=9606 in 20,814 of 21,044 target entries) via search log --fasta (report.log.txt)`.
+  `organism_evidence` holds the tally, and records a proteome id found in the filename
+  (`UP000005640`) as supporting evidence only.
+- The legacy MRS FASTA appends its contaminants **without** the `Cont_` tag. The majority still
+  holds, at 98.9%.
+- **Nothing is claimed when the file can't answer.** If no taxon reaches 95%, the headers carry
+  no `OX=`, the file isn't readable, or the search read two FASTAs, organism (and for the last
+  two, the database) stays blank, and `organism_unresolved` says why.
+- An explicit `--organism`/`--taxon` still wins. If it disagrees with the headers, that is
+  recorded as `organism_warning` and printed on stderr, never silently resolved.
+
 ## Why `check` refuses (stable codes, never an exception)
 
 | reason | meaning |

@@ -300,17 +300,18 @@ def find_report(out, engine):
 _FASTA_ARG = re.compile(r"--fasta\s+(\"[^\"]+\"|'[^']+'|\S+)")
 
 
-def search_fastas(out):
+def search_fastas(out, with_source=False):
     """The FASTA path(s) this search actually used: `fasta` in search_provenance.json, then every
     `--fasta` on the engine command line DIA-NN echoes at the top of its log. Read from the head
     of the log only (2 MB): a 399-file command line puts `--fasta` ~60 KB in, and the rest of a
-    log is the search itself. Empty when neither says -- which is the caller's cue not to guess."""
+    log is the search itself. Empty when neither says -- which is the caller's cue not to guess.
+    with_source=True returns ((path, where-it-was-named), ...) instead of paths."""
     found = []
     try:
         with open(os.path.join(out, "search_provenance.json")) as fh:
             p = json.load(fh)
         if isinstance(p, dict) and p.get("fasta"):
-            found.append(str(p["fasta"]))
+            found.append((str(p["fasta"]), "search_provenance.json fasta"))
     except (OSError, ValueError):
         pass
     for log in ("report.log.txt", "dia-quant-output/report.log.txt"):
@@ -319,8 +320,11 @@ def search_fastas(out):
                 head = fh.read(2 << 20)
         except OSError:
             continue
-        found += [m.strip("\"'") for m in _FASTA_ARG.findall(head)]
-    return tuple(dict.fromkeys(found))
+        found += [(m.strip("\"'"), f"search log --fasta ({log})") for m in _FASTA_ARG.findall(head)]
+    uniq = {}
+    for path, src in found:
+        uniq.setdefault(path, src)
+    return tuple(uniq.items()) if with_source else tuple(uniq)
 
 
 def explicit_meta_mismatch(out, meta):
@@ -491,6 +495,112 @@ def _fasta_helpers():
                          f"fetch_fasta.py ({type(e).__name__}: {e}); recording the database "
                          f"path without md5/entry count\n")
         return None
+
+
+def _cont_tag():
+    """fetch_fasta.CONT_TAG ("Cont_"): the contaminant tag DIA-NN's --cont-quant-exclude keys on."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import CONT_TAG
+        return CONT_TAG
+    except Exception:                                               # noqa: BLE001
+        return None                 # unknown: organism_from_headers then treats no entry as one
+
+
+# When NO sidecar is tied to the search's FASTA, the FASTA itself still answers "which database,
+# which organism" -- directly: its path is on the search's own command line, and UniProt headers
+# carry OX= (taxon) and OS= (organism) on every entry. Brett, 2026-09-25, of the Siegel searches
+# (human blood, human UniProt): "this should be directly queryable from the search logs". Never
+# from the FILENAME: a proteome id in a name (UP000005640) is recorded as supporting evidence only.
+HEADER_MAJORITY = 0.95     # one taxon on >= 95% of the TARGET entries, or no organism is claimed
+_OX = re.compile(r"\bOX=(\d+)")
+_OS = re.compile(r"\bOS=(.+?)(?=\s+[A-Z]{2}=|$)")
+_PROTEOME_ID = re.compile(r"UP\d{9}")
+
+
+def organism_from_headers(path, cont_tag=None):
+    """(organism, taxid, evidence, why-not) from the FASTA's own UniProt headers: OX= tallied over
+    the target entries (a Cont_-tagged contaminant is not a target). One taxon must hold at least
+    HEADER_MAJORITY of them; otherwise nothing is claimed and why-not says what was found. A legacy
+    FASTA whose appended contaminants are NOT Cont_-tagged still resolves when the majority holds:
+    MRS/UP000005640_9606_plus_universal_contam.fasta is OX=9606 on 20,814 of 21,044 entries (98.9%),
+    the rest bovine/mouse contaminants."""
+    cont_tag = cont_tag or _cont_tag()
+    ox, names = collections.Counter(), collections.defaultdict(collections.Counter)
+    tag = cont_tag.encode() if cont_tag else None
+    n_target = n_cont = 0
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                if not line.startswith(b">"):
+                    continue
+                if tag and line[1:].startswith(tag):
+                    n_cont += 1
+                    continue
+                h = line[1:].decode("utf-8", "replace").strip()
+                n_target += 1
+                m = _OX.search(h)
+                if m:
+                    ox[m.group(1)] += 1
+                    o = _OS.search(h)
+                    if o:
+                        names[m.group(1)][o.group(1).strip()] += 1
+    except OSError as e:
+        return None, None, {}, f"cannot read {path} ({e.strerror or e})"
+    ev = {"target_entries": n_target, "contaminant_entries": n_cont,
+          "contaminant_tag": cont_tag, "ox_tally": dict(ox.most_common(4))}
+    if not n_target:
+        return None, None, ev, f"{path} has no target entries"
+    if not ox:
+        return None, None, ev, f"no OX= in the target headers of {path} (not UniProt-format)"
+    top, k = ox.most_common(1)[0]
+    ev.update(ox_top=int(top), ox_top_entries=k)
+    if k / n_target < HEADER_MAJORITY:
+        return None, None, ev, (f"no clear majority taxon: OX={top} on {k:,} of {n_target:,} target "
+                                f"entries ({k / n_target:.1%} < {HEADER_MAJORITY:.0%})")
+    org = names[top].most_common(1)[0][0] if names[top] else None
+    return org, int(top), ev, None
+
+
+def fasta_from_search(out):
+    """The database of a search with NO tied sidecar, from the FASTA the search itself names
+    (search_fastas: its provenance / its log's --fasta): path, md5, entry count (fetch_fasta's
+    helpers), and organism + taxon from the headers (organism_from_headers). A dict whose `why`
+    says what could not be established; nothing is ever guessed."""
+    res = {"fasta_path": None, "fasta_md5": None, "fasta_n_proteins": None, "organism": None,
+           "taxon": None, "organism_source": None, "why": None}
+    named = search_fastas(os.path.abspath(out), with_source=True)
+    readable = [(p, src) for p, src in named if os.path.isfile(p) and os.access(p, os.R_OK)]
+    distinct = {os.path.realpath(p): (p, src) for p, src in readable}
+    if not named:
+        res["why"] = ("the search names no FASTA (no `fasta` in search_provenance.json, no --fasta "
+                      "in report.log.txt)")
+        return res
+    if not distinct:
+        res["why"] = f"no FASTA the search names is readable here: {', '.join(p for p, _ in named)}"
+        return res
+    if len(distinct) > 1:
+        res["why"] = (f"the search read {len(distinct)} FASTA files "
+                      f"({', '.join(p for p, _ in distinct.values())}); one database path cannot "
+                      f"describe it")
+        return res
+    path, src = next(iter(distinct.values()))
+    res.update(fasta_path=path, fasta_source=src)
+    helpers = _fasta_helpers()
+    if helpers:
+        res["fasta_md5"], res["fasta_n_proteins"] = helpers[0](path), helpers[1](path)
+    org, tax, ev, why = organism_from_headers(path)
+    pid = _PROTEOME_ID.search(os.path.basename(path))
+    if pid:
+        ev["proteome_id_in_filename"] = pid.group(0) + " (supporting evidence only, never the source)"
+    res["organism_evidence"] = ev
+    if tax:
+        res.update(organism=org, taxon=tax,
+                   organism_source=(f"FASTA headers (OX={tax} in {ev['ox_top_entries']:,} of "
+                                    f"{ev['target_entries']:,} target entries) via {src}"))
+    else:
+        res["why"] = why
+    return res
 
 
 def entry_name(out):
@@ -923,6 +1033,28 @@ def check(a):
 
     bad_meta = explicit_meta_mismatch(out, a.fasta_meta)
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
+    fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
+    if fp is None:
+        # No sidecar tied to the search's FASTA: read the FASTA the search itself names.
+        hdr = fasta_from_search(out)
+        fp, fmd5, fn = hdr["fasta_path"], hdr["fasta_md5"], hdr["fasta_n_proteins"]
+        if fp:
+            r["fasta_source"] = hdr.get("fasta_source")
+            r["organism_evidence"] = hdr.get("organism_evidence")
+        if org is None and hdr["taxon"]:
+            org, tax, org_src = hdr["organism"], hdr["taxon"], hdr["organism_source"]
+        elif org is None:
+            r["organism_unresolved"] = hdr["why"]
+        # The user's --organism/--taxon still wins; a disagreement with the headers is SAID.
+        hx = hdr["taxon"]
+        if hx and ((a.taxon and int(a.taxon) != hx) or (
+                a.organism and not a.taxon and hdr["organism"]
+                and a.organism.strip().lower() != hdr["organism"].lower())):
+            r["organism_warning"] = (f"--organism {a.organism!r} / --taxon {a.taxon} disagree with "
+                                     f"the FASTA's own headers: {hdr['organism_source']} "
+                                     f"({hdr['organism']})")
+            sys.stderr.write(f"[fran_deposit] WARNING: {r['organism_warning']}; the value you gave "
+                             f"is used\n")
     if bad_meta:
         r["fasta_meta_ignored"] = bad_meta
         sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored: {bad_meta}; "
@@ -932,7 +1064,6 @@ def check(a):
                          + "\n")
     # None, never "": FRAN's read_manifest rejects an empty search_name or organism outright
     r["organism"] = (a.organism or "").strip() or org or None
-    fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
     r["fasta_path"], r["fasta_md5"], r["fasta_n_proteins"] = fp, fmd5, fn
     r["taxon"] = a.taxon or tax
     r["organism_source"] = "--organism (given)" if a.organism else org_src
@@ -1158,6 +1289,10 @@ def do_stage(a):
         "fasta_path": c.get("fasta_path"),
         "fasta_md5": c.get("fasta_md5"),
         "fasta_n_proteins": c.get("fasta_n_proteins"),
+        # Where the two came from when no sidecar did (fasta_from_search), and anything that could
+        # not be established or that disagrees -- recorded, never silently resolved.
+        **{k: c[k] for k in ("fasta_source", "organism_evidence", "organism_unresolved",
+                             "organism_warning") if c.get(k)},
         "xic": c["xic"],
         "linked": linked,
         "staged_by": staged_by,

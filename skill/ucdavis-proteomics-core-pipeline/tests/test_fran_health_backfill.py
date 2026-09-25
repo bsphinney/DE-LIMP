@@ -14,6 +14,7 @@ No network and no HIVE: logs are synthetic in FRAN's exact format (checked again
 auto_ingest.py on 2026-09-24), GitHub is a fake fetcher, and the service tree is a temp dir.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -1515,11 +1516,13 @@ class ReviewFixTests(unittest.TestCase):
                 c = fd.check(Args(out, fasta_meta=mouse + ".meta.json"))
             self.assertEqual((c["organism"], c["fasta_path"]), ("Mus musculus", mouse))
             self.assertNotIn("fasta_meta_ignored", c)
-            # ...and with no sidecar of the search's own FASTA, blank -- never the wrong one
+            # ...and with no sidecar of the search's own FASTA: that FASTA's path from the search's
+            # own --fasta, its organism from its headers (none here) -- never the wrong meta's
             os.unlink(mouse + ".meta.json")
             with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
                 c = fd.check(Args(out, fasta_meta=human + ".meta.json"))
-            self.assertEqual((c["organism"], c["fasta_path"]), (None, None))
+            self.assertEqual((c["organism"], c["fasta_path"]), (None, mouse))
+            self.assertIn("no OX=", c["organism_unresolved"])
 
     # F ----------------------------------------------------------------------------------------
     def test_F_coursework_is_never_staged_by_stage_or_backfill(self):
@@ -1606,6 +1609,139 @@ class ReviewFixTests(unittest.TestCase):
             with open(os.path.join(d, "delimp_report.parquet"), "w") as fh:
                 fh.write("x")
             self.assertIsNone(fd.detect_engine(d)[0])
+
+
+class FastaFromSearchTests(unittest.TestCase):
+    """No sidecar tied to the search's FASTA: the database comes from the search's own --fasta, and
+    the organism from that FILE's UniProt headers -- never from its name (Brett, 2026-09-25, on the
+    Siegel searches: "this should be directly queryable from the search logs")."""
+
+    @staticmethod
+    def _fasta(path, entries):
+        """entries: [(accession, OS, OX)]; OS/OX None -> a header without them."""
+        with open(path, "w") as fh:
+            for acc, os_, ox in entries:
+                tail = f" OS={os_} OX={ox} GN=G PE=1 SV=1" if ox else ""
+                fh.write(f">{acc} Protein{tail}\nPEPTIDEK\n")
+        return path
+
+    def _search(self, d, fasta, via="log"):
+        out = search_dir(os.path.join(d, "lab"), "search_out", prov=False)
+        if via == "log":
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"diann-linux --f a.d --fasta {fasta} --out report.parquet\n")
+        return out
+
+    def _check(self, d, out, **kw):
+        err = io.StringIO()
+        with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")), contextlib.redirect_stderr(err):
+            return fd.check(Args(out, **kw)), err.getvalue()
+
+    def test_the_organism_comes_from_the_headers_not_the_filename(self):
+        """The name says UP000005640 (human); the headers say mouse. The headers win."""
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "UP000005640_9606_plus_contam.fasta"),
+                             [(f"sp|Q{i}|X_MOUSE", "Mus musculus", 10090) for i in range(40)]
+                             + [("Cont_P02769", "Bos taurus", 9913)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["taxon"]), ("Mus musculus", 10090))
+            self.assertEqual(c["organism_source"],
+                             "FASTA headers (OX=10090 in 40 of 40 target entries) via search log "
+                             "--fasta (report.log.txt)")
+            self.assertEqual(c["fasta_path"], fa)
+            self.assertEqual(c["fasta_md5"], hashlib.md5(_read(fa, "rb")).hexdigest())  # noqa: S324
+            self.assertEqual(c["fasta_n_proteins"], 41)
+            self.assertEqual(c["organism_evidence"]["contaminant_entries"], 1)
+            self.assertIn("supporting evidence only",
+                          c["organism_evidence"]["proteome_id_in_filename"])
+
+    def test_untagged_contaminants_still_resolve_at_the_majority(self):
+        """The real Siegel FASTA: universal contaminants appended WITHOUT the Cont_ tag,
+        OX=9606 on 98.9% of entries."""
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "legacy.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(99)]
+                             + [("sp|P02769|ALBU_BOVIN", "Bos taurus", 9913)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["taxon"]), ("Homo sapiens", 9606))
+            self.assertIn("OX=9606 in 99 of 100 target entries", c["organism_source"])
+
+    def test_a_mixed_taxon_fasta_claims_no_organism_and_says_why(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "mix.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(10)]
+                             + [(f"sp|Q{i}|X_MOUSE", "Mus musculus", 10090) for i in range(10)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["taxon"]), (None, None))
+            self.assertEqual(c["fasta_path"], fa)                  # the database is still known
+            self.assertIn("no clear majority", c["organism_unresolved"])
+
+    def test_the_user_wins_and_a_disagreement_is_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "human.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(20)])
+            out = self._search(d, fa)
+            c, err = self._check(d, out, organism="Mus musculus", taxon=10090)
+            self.assertEqual((c["organism"], c["taxon"]), ("Mus musculus", 10090))
+            self.assertEqual(c["organism_source"], "--organism (given)")
+            self.assertIn("OX=9606", c["organism_warning"])
+            self.assertIn("disagree with the FASTA's own headers", err)
+            c, err = self._check(d, out, organism="Homo sapiens", taxon=9606)
+            self.assertNotIn("organism_warning", c)
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
+                res = run_quiet(fd.stage, Args(out, organism="Mus musculus", taxon=10090))[1]
+            man = _load_json(os.path.join(res["entry"], fd.MANIFEST))
+            self.assertIn("OX=9606", man["organism_warning"])
+            self.assertEqual(man["fasta_path"], fa)
+
+    def test_no_readable_file_is_blank_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            c, _ = self._check(d, self._search(d, os.path.join(d, "gone.fasta")))
+            self.assertEqual((c["organism"], c["fasta_path"], c["fasta_md5"]), (None, None, None))
+            self.assertIn("no FASTA the search names is readable", c["organism_unresolved"])
+
+    def test_non_uniprot_headers_claim_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "custom.fasta"), [(f"contig{i}", None, None)
+                                                              for i in range(5)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["fasta_path"]), (None, fa))
+            self.assertIn("no OX=", c["organism_unresolved"])
+
+    def test_a_laptop_path_in_provenance_and_the_hive_path_in_the_log(self):
+        """hive_remote: provenance names the laptop copy, the log the file read on HIVE."""
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "dog.fasta"),
+                             [(f"sp|P{i}|X_CANLF", "Canis lupus familiaris", 9615) for i in range(10)])
+            out = self._search(d, fa)
+            with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+                json.dump({"engine": "diann", "fasta": "/Users/someone/sessions/x/dog.fasta"}, fh)
+            c, _ = self._check(d, out)
+            self.assertEqual((c["fasta_path"], c["taxon"]), (fa, 9615))
+            self.assertIn("search log --fasta", c["fasta_source"])
+
+    def test_two_readable_fastas_cannot_be_one_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self._fasta(os.path.join(d, "a.fasta"), [("sp|P1|A_HUMAN", "Homo sapiens", 9606)])
+            b = self._fasta(os.path.join(d, "b.fasta"), [("sp|P2|B_HUMAN", "Homo sapiens", 9606)])
+            out = search_dir(os.path.join(d, "lab"), "search_out", prov=False)
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"diann-linux --fasta {a} --fasta {b} --out report.parquet\n")
+            c, _ = self._check(d, out)
+            self.assertEqual((c["fasta_path"], c["organism"]), (None, None))
+            self.assertIn("2 FASTA files", c["organism_unresolved"])
+
+    def test_the_manifest_still_passes_frans_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "human.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(20)])
+            out = self._search(d, fa)
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
+                res = run_quiet(fd.stage, Args(out))[1]
+            m, why = fran_read_manifest(res["entry"], "diann")
+            self.assertIsNone(why, why)
+            self.assertEqual((m["organism"], m["taxon"], m["fasta_path"]),
+                             ("Homo sapiens", "9606", fa))
 
 
 class CorpusQueryGuardTests(unittest.TestCase):
