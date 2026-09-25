@@ -288,6 +288,11 @@ class Readme(unittest.TestCase):
             self.assertEqual((h.stack, h.bad), ([], 0))
             self.assertEqual(h.external, [])
             self.assertIn("style", h.tags)
+            # semantic structure, so a shared stylesheet can replace PAGE_CSS later
+            for tag in ("header", "nav", "section", "aside", "table"):
+                self.assertIn(tag, h.tags, tag)
+            self.assertIn('<aside class="callout note">', page)
+            self.assertIn("<nav><h2>Start here</h2>", page)
             self.assertIn('<meta charset="utf-8">', page)
             self.assertEqual(h.h2, sections_md(md))
             for s in ("Start here", "Summary", "Where this lives on HIVE", "Reproduce",
@@ -307,6 +312,11 @@ class Readme(unittest.TestCase):
             for target in re.findall(r"\]\(([^)]+)\)", md):
                 self.assertTrue(os.path.exists(os.path.join(p["session_dir"], target)), target)
             self.assertIn("(output/Analysis_Report.html)", md)
+            write(os.path.join(p["output_dir"], "AI_Analysis_Report.docx"), "old")   # older session
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            self.assertNotIn("AI_Analysis_Report.docx", md)          # kept, never pointed at
+            first = [ln for ln in md.splitlines() if ln.startswith("- [")][0]
+            self.assertIn("Analysis_Report.html", first)             # the report, linked first
 
     def test_relative_links_render_and_schemes_do_not(self):
         s = make_deposit._inline("[r](output/a%20b.html) [x](javascript:alert(1)) [w](https://a.b)")

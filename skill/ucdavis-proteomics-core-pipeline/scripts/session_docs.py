@@ -391,7 +391,7 @@ def locations_table(f):
            if t["server"] and t["server"] != "*" and t["mac"]]
     return "\n".join(
         ["| What | On HIVE | Windows | Mac | How it was found |", "|---|---|---|---|---|", *rows,
-         "", "To browse there: on **Windows**, paste the Windows path into File Explorer's "
+         "", "> [!NOTE]", "> To browse there: on **Windows**, paste the Windows path into File Explorer's "
              "address bar (a PC that maps the share to a drive letter, e.g. `R:`, has the same "
              "folders below that letter). On a **Mac**, Finder → Go → Connect to Server"
          + (f" ({', '.join(smb)})" if smb else "") + ", then open the Mac path. On **HIVE**, "
@@ -541,6 +541,7 @@ def agents_md(f):
                    ("Figure captions", "figures_json"),
                    ("Pitfall audit", "audit"), ("Sample quality / contamination", "quality"),
                    ("Publication Methods (LC-MS + search + DE + acknowledgment)", "methods_md"),
+                   ("The report of record (QC, figures, interpretation)", "report_html"),
                    ("What this export contains, and what is missing", "manifest"),
                    ("The DE as runnable R", "repro_R"),
                    ("Re-running everything", "reproduce_md")):
@@ -657,7 +658,7 @@ def agents_md(f):
 
 def _render_html(md, title):
     import make_deposit                               # the one Markdown -> HTML renderer
-    return make_deposit.md_to_html(md, title)
+    return make_deposit.md_to_html(md, title, semantic=True)
 
 
 def write_docs(session_dir, man=None, registry=None, registry_note=None, pending=(),

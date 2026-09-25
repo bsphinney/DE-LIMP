@@ -71,7 +71,12 @@ CATALOG = [
     (r"^commands\.log$", "Inputs", "Verbatim log of every command the run executed (audit trail)."),
 
     (r"^AI_Analysis_Report\.md$", "Analysis report", "The biological + QC interpretation of the results (the AI analysis)."),
-    (r"^AI_Analysis_Report\.docx$", "Analysis report", "The analysis report as a Word document (same content as the .md)."),
+    (r"^Analysis_Report\.html$", "Analysis report",
+     "THE REPORT: QC panels, figures and the interpretation in one self-contained page "
+     "(double-click it)."),
+    (r"^AI_Analysis_Report\.docx$", "Analysis report",
+     "An older Word copy of the analysis report, from before the skill stopped making one "
+     "(Word mangled the figures); Analysis_Report.html is the report."),
     (r"^methods\.md$|^methods\.docx$", "Analysis report", "Publication-ready LC-MS/MS Methods section (from raw metadata) + instrument grant acknowledgment."),
     (r"^methods_params\.json$", "Analysis report", "Acquisition parameters extracted from the raw data for the Methods section."),
     (r"^ANALYSIS_PROMPT\.md$", "Analysis report", "The analysis brief the agent followed to write the report."),
@@ -192,7 +197,8 @@ def main():
         lines.append("")
     lines.append("## Where to start")
     lines.append("")
-    lines.append("- **`AI_Analysis_Report.md`** — read this first: the biological interpretation.")
+    lines.append("- **`Analysis_Report.html`** — read this first: the report (QC, figures and the "
+                 "interpretation in one page; the text alone is `AI_Analysis_Report.md`).")
     lines.append("- **`de_results/DE_*.csv`** — the differentially expressed proteins per comparison.")
     lines.append("- **`de_results/methods.txt`** — the Methods paragraph for your paper.")
     lines.append("- **`de_results/reproducibility_log.R`** — the analysis as plain R. "

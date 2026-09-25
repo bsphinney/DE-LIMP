@@ -172,7 +172,8 @@ def make_session(root, out=None, quant_in_zip=True, zip_secret=False, big=0, ext
     write(os.path.join(sess, "output", "tables", "methods.txt"), "DE methods\n")
     write(os.path.join(sess, "output", "tables", "DE_B-A.csv"), "protein,logFC\nP1,2\n")
     write(os.path.join(sess, "output", "methods.md"), "# Methods\n")
-    write(os.path.join(sess, "output", "HeLa50_Report.docx"), "PK-docx-report")
+    write(os.path.join(sess, "output", "Analysis_Report.html"), "<html>report</html>")
+    write(os.path.join(sess, "output", "HeLa50_Report.docx"), "PK-docx-report")   # an older copy
     write(os.path.join(sess, "output", "METHODS.docx"), "PK-docx-methods")
     write(os.path.join(sess, "output", "DATA_SUBMISSION", "HOW_TO_SUBMIT.md"), "# How\n")
     write(os.path.join(sess, "output", "reproducibility", "REPRODUCE.md"), "# Reproduce\n")
@@ -787,7 +788,7 @@ class Readme(Base):
 
 
 class WhatIsCopied(Base):
-    def test_the_session_is_mirrored_and_the_docx_listed_first(self):
+    def test_the_session_is_mirrored_and_the_html_report_listed_first(self):
         out = make_search(self.d)
         sess, zpath = make_session(self.d, quant_in_zip=False)
         self.run_it("analysis-done", "--session", sess, "--out", out)
@@ -795,7 +796,8 @@ class WhatIsCopied(Base):
         files = set(self.all_files(folder))
         for want in ("README.md", "MANIFEST.txt", os.path.basename(zpath),
                      "input/conditions.csv", "input/raw_files.txt",
-                     "output/HeLa50_Report.docx", "output/METHODS.docx", "output/methods.md",
+                     "output/Analysis_Report.html", "output/HeLa50_Report.docx",
+                     "output/METHODS.docx", "output/methods.md",
                      "output/tables/DE_B-A.csv", "output/tables/methods.txt",
                      "output/DATA_SUBMISSION/HOW_TO_SUBMIT.md", "scripts/commands.log",
                      "scripts/REPRODUCE.md", "scripts/reproduce.sh"):
@@ -803,9 +805,10 @@ class WhatIsCopied(Base):
         with open(os.path.join(folder, "input", "raw_files.txt")) as fh:
             self.assertIn("/nfs/x/A1.raw", fh.read())                # the session's own list
         entry = self.master().split(": analysis complete", 1)[1]
-        first = [ln for ln in entry.splitlines() if ln.startswith("- ")][0]
-        self.assertIn("Report (Word)", first)
-        self.assertIn(f"sessions/{SESSION}/output/HeLa50_Report.docx", first)
+        bullets = [ln for ln in entry.splitlines() if ln.startswith("- ")]
+        self.assertIn("Report of record (HTML)", bullets[0])
+        self.assertIn(f"sessions/{SESSION}/output/Analysis_Report.html", bullets[0])
+        self.assertTrue(any("Methods (Word)" in b for b in bullets[1:]), bullets)
         self.assertIn(f"Reproducibility / zip:** `sessions/{SESSION}/{os.path.basename(zpath)}`",
                       entry)
 

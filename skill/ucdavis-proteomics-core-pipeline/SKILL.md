@@ -1583,7 +1583,8 @@ notification -- not configured for this user". Then summarize: data type (instru
 `defaults_version`, FASTA source, DE method, and per-contrast significant counts. Point them at the
 **session folder** and its **`README.html`** — tell collaborators to open that (double-click);
 `AGENTS.md` is for an AI assistant they hand the folder to. Then:
-- `AI_Analysis_Report.md` (the interpretation)
+- **`output/Analysis_Report.html`** (the report of record: QC, figures and the interpretation in
+  one page; README.html links it first)
 - `OUTPUT_FILES.md` (what every file is)
 - **`output/methods.md`** (the publication Methods; its `[... — confirm]` tags must be resolved
   before publishing)

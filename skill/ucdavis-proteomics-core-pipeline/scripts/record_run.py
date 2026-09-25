@@ -40,7 +40,8 @@ Layout (DataAnalysis "Session Structure"):
       <session>.zip         the session zip, minus per-run .quant files, when under the cap
       input/                conditions.csv, FASTA sidecar, params + rationale, raw_files.txt -- never
                             raw data
-      output/               *.docx (the report of record), methods.md, AUDIT/SAMPLE_QUALITY, tables/,
+      output/               Analysis_Report.html (the report of record), methods.docx + .md,
+                            AUDIT/SAMPLE_QUALITY, tables/,
                             small figures/, and search/ (provenance, stats, engine + SLURM logs,
                             FRAN receipt, and a LINK to report.parquet)
       scripts/              commands.log, reproduce.sh, REPRODUCE.md
@@ -164,7 +165,7 @@ LOCK_TIMEOUTS = []
 # The registry's own README.md, written by ensure_readme() when it is missing or carries an older
 # version marker than this. THE source: references/run-registry.md quotes it verbatim, and
 # tests/test_record_run.py fails when the two differ. Raise README_VERSION with any edit.
-README_VERSION = 1
+README_VERSION = 2
 README_TEXT = """# Skill run registry
 
 Every search the `ucdavis-proteomics-core-pipeline` skill runs for the UC Davis Proteomics Core,
@@ -180,10 +181,11 @@ is finalized. Laid out like the Core's DataAnalysis sessions.
   session (else `<date>_<search folder name>`; a different search wanting the same name gets
   `_2`). Start with `SEARCH_LOG.md`: the CoreOmics submission, Data Quality Notes, status, engine
   and the version that ran, key parameters and where each came from, results, and where every
-  output is. Beside it: `run_record.json` (the same, machine-readable), the session `README.md`
-  and zip, `input/` (conditions, FASTA sidecar, parameters, `raw_files.txt`), `output/` (the
-  Word report of record, Methods, tables, `search/` logs and a link to `report.parquet`) and
-  `scripts/` (commands, reproduce script).
+  output is. Beside it: `run_record.json` (the same, machine-readable), the session's
+  `README.html` / `README.md` and `AGENTS.md`, its zip, `input/` (conditions, FASTA sidecar,
+  parameters, `raw_files.txt`), `output/` (the report of record `Analysis_Report.html`, the
+  Methods in Word, tables, `search/` logs and a link to `report.parquet`) and `scripts/`
+  (commands, reproduce script).
 - `.index/` -- how recording the same search again finds its folder (by the search folder's real
   path, not its name). Leave it alone.
 - `*.lock.d` -- a writer's lock, held for a second or two; one older than 60 s is broken
@@ -1516,6 +1518,10 @@ def plan_analysis(plan, session, a, zip_cap):
         man_txt = None
     dep = os.path.join(out_d, "DATA_SUBMISSION")
     docx = [os.path.join(out_d, f) for f in listdir(out_d) if f.lower().endswith(".docx")]
+    # The report of record is the HTML report (2026-09-24: Word mangled its figures, so the skill
+    # no longer makes a report .docx). It is listed and copied FIRST; the Methods .docx stays,
+    # and an older session's report .docx is still copied, after it.
+    html_report = first_existing([os.path.join(out_d, "Analysis_Report.html")])
     audit = load_json(first_existing([os.path.join(out_d, "AUDIT.json"),
                                       os.path.join(session, "AUDIT.json")])) or {}
     sq = load_json(first_existing([os.path.join(out_d, "SAMPLE_QUALITY.json"),
@@ -1529,7 +1535,12 @@ def plan_analysis(plan, session, a, zip_cap):
                                          "q_cutoff", "logfc", "adjp")} if de else None,
           "manifest": {"file": man_txt, "n_ok": ok, "skipped": skipped} if man_txt else None,
           "docx": [{"file": d, "kind": "Methods (Word)" if "method" in os.path.basename(d).lower()
-                    else "Report (Word)"} for d in docx],
+                    else "Report (Word, older copy)"} for d in docx],
+          "deliverables": ([{"file": html_report, "kind": "Report of record (HTML)"}]
+                           if html_report else [])
+                          + [{"file": d, "kind": "Methods (Word)"
+                              if "method" in os.path.basename(d).lower()
+                              else "Report (Word, older copy)"} for d in docx],
           "methods_md": first_existing([os.path.join(out_d, "methods.md"),
                                         os.path.join(out_d, "METHODS.md")]),
           "data_submission": dep if os.path.isdir(dep) else None,
@@ -1560,7 +1571,7 @@ def plan_analysis(plan, session, a, zip_cap):
     for f in listdir(os.path.join(inp, "wf")):
         if f.endswith((".json", ".cfg")) or f.startswith("params."):
             add_copy(plan, os.path.join(inp, "wf", f), f"input/{f}", "analysis")
-    for d in docx:                                     # the deliverable of record, first
+    for d in ([html_report] if html_report else []) + docx:    # the report of record first
         add_copy(plan, d, f"output/{os.path.basename(d)}", "analysis")
     for f in ("methods.md", "METHODS.md", "AI_Analysis_Report.md", "OUTPUT_FILES.md", "AUDIT.md",
               "AUDIT.json", "SAMPLE_QUALITY.md", "SAMPLE_QUALITY.json", "QC_Report.html"):
@@ -2100,7 +2111,7 @@ def render_analysis(rec, an):
     de = an.get("de") or {}
     L = ["", f"## Analysis -- finalized {an.get('finalized') or '?'}",
          f"- **Session:** `{an.get('session')}`"]
-    for d in an.get("docx") or []:
+    for d in an.get("deliverables") or an.get("docx") or []:   # older records: docx only
         L.append(f"- **{d['kind']}:** `output/{os.path.basename(d['file'])}`"
                  f" (original `{d['file']}`)")
     if de:
@@ -2440,7 +2451,7 @@ def master_entries(rec, event):
     if event == "analysis-done" and an:
         marker = f"<!-- record_run {key} analysis {an.get('finalized') or 'complete'} -->"
         body = []
-        for x in an.get("docx") or []:              # the report of record comes first
+        for x in an.get("deliverables") or an.get("docx") or []:   # report of record first
             body.append(f"- **{x['kind']}:** `{folder}output/{os.path.basename(x['file'])}`")
         sig = (an.get("de") or {}).get("significant_per_contrast") or {}
         if sig:
