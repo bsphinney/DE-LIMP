@@ -94,30 +94,57 @@ block_fixed_columns <- function(block, block_col) {
 }
 
 # Fixed or random (header, review C2). auto: fixed when the block is crossed with the groups
-# (the design stays full rank with it as fixed columns) AND every contrast is within one
-# block; random otherwise. A requested "fixed" that the design cannot carry stops.
-block_choose_effect <- function(requested, block, design, structure, block_col) {
-  dfix <- cbind(design, block_fixed_columns(block, block_col))
-  crossed <- qr(dfix)$rank == ncol(dfix)
+# (full rank beside the group columns) AND every contrast is within one block; random
+# otherwise. A covariate the block is nested in (each patient's pre/post pair run in one
+# Batch) is ABSORBED by a fixed block -- its columns are sums of the block's -- so the
+# fixed fit drops it, and says so (`absorbed`). What the block is aliased with is named:
+# the groups, or covariate X. A requested "fixed" that the groups alias stops.
+# `covariates` are the design's covariate terms, in model.matrix order (attr "assign").
+block_choose_effect <- function(requested, block, design, structure, block_col,
+                                covariates = character(0)) {
+  bcols <- block_fixed_columns(block, block_col)
+  full_rank <- function(X) qr(X)$rank == ncol(X)
+  asg <- attr(design, "assign")
+  if (is.null(asg)) asg <- rep(1L, ncol(design))           # no term map: all group columns
+  term_cols <- function(k) design[, asg == k, drop = FALSE]  # 1 = groups, 1 + i = covariates[i]
+  groups_ok <- full_rank(cbind(term_cols(1L), bcols))
+  nests_in <- if (groups_ok) Filter(function(cv)
+    !full_rank(cbind(term_cols(1L), bcols, term_cols(1L + match(cv, covariates)))), covariates)
+    else character(0)
+  keep <- setdiff(covariates, nests_in)
+  dfix <- cbind(design[, asg %in% c(1L, 1L + match(keep, covariates)), drop = FALSE], bcols)
+  crossed <- groups_ok && full_rank(dfix)
+  aliased_with <- if (!groups_ok) "the groups"
+                  else if (!crossed) "the groups and covariates together"
+                  else NULL
   st <- unlist(structure)
   all_within <- length(st) > 0 && all(st == "within")
   auto <- if (crossed && all_within) "fixed" else "random"
   effect <- if (identical(requested, "auto")) auto else requested
   if (identical(effect, "fixed") && !crossed)
-    stop(sprintf(paste0("--block-effect fixed: %s is nested in the groups (as fixed columns it is ",
-                        "aliased with them -- mice within age), so it cannot be a fixed effect here. ",
-                        "Use --block-effect random (the default for this design)."), block_col),
+    stop(sprintf(paste0("--block-effect fixed: %s is nested in %s (as fixed columns it is aliased ",
+                        "with them%s), so it cannot be a fixed effect here. Use --block-effect ",
+                        "random (the default for this design)."),
+                 block_col, aliased_with, if (!groups_ok) " -- mice within age" else ""),
          call. = FALSE)
+  nest_txt <- if (length(nests_in))
+    sprintf("%s is nested in covariate %s (each %s sits in one %s)", block_col,
+            paste(nests_in, collapse = " / "), block_col, paste(nests_in, collapse = " / ")) else NULL
   why <- if (crossed && all_within)
-    sprintf("%s is crossed with the groups and every contrast is within one %s: the fixed effect is the exact paired analysis",
-            block_col, block_col)
+    paste0(sprintf("%s is crossed with the groups and every contrast is within one %s: the fixed effect is the exact paired analysis",
+                   block_col, block_col),
+           if (length(nests_in)) sprintf("; %s, so its fixed effect absorbs %s, which is dropped from the design",
+                                         nest_txt, paste(nests_in, collapse = " / ")) else "")
   else if (!crossed)
-    sprintf("%s is nested in the groups (aliased as a fixed term): random effect", block_col)
-  else sprintf("not every contrast is within one %s: random effect", block_col)
+    sprintf("%s is nested in %s (aliased as a fixed term): random effect", block_col, aliased_with)
+  else paste0(sprintf("not every contrast is within one %s: random effect", block_col),
+              if (length(nests_in)) sprintf(" (%s)", nest_txt) else "")
+  fixed <- identical(effect, "fixed")
   list(effect = effect,
        choice = sprintf("%s -- auto would be %s: %s", if (identical(requested, "auto")) "auto"
                         else paste("requested", requested), auto, why),
-       design = if (identical(effect, "fixed")) dfix else design)
+       absorbed = if (fixed) nests_in else character(0),
+       design = if (fixed) dfix else design)
 }
 
 # The checks that need only conditions.csv -- run before quantification, which can take
@@ -198,7 +225,7 @@ block_contrast_structure <- function(block, groups, cmat) {
 # Blocking line, the de_engine label and make_methods.py's sentence all read it.
 block_record <- function(block_col, block, method, consensus, atanh_per_protein, n_proteins,
                          first_pass = NULL, groups = NULL, cmat = NULL, scope = "within",
-                         effect = "random", effect_choice = NULL) {
+                         effect = "random", effect_choice = NULL, absorbed = character(0)) {
   structure <- if (!is.null(cmat)) block_contrast_structure(block, groups, cmat) else NULL
   model <- if (!is.null(cmat)) block_contrast_model(block, groups, cmat, scope) else NULL
   fixed <- identical(effect, "fixed")
@@ -255,6 +282,8 @@ block_record <- function(block_col, block, method, consensus, atanh_per_protein,
     # "fixed": a block term in the design (the exact paired analysis); "random":
     # duplicateCorrelation. effect_choice says why (block_choose_effect).
     effect = effect, effect_choice = effect_choice,
+    # covariates a fixed block absorbed and the fit therefore dropped (block_choose_effect)
+    absorbed_covariates = as.list(absorbed),
     note = if (!used) sprintf(paste0("--block %s given, but every contrast compares different %s ",
                                      "levels: all were reported from the independent fit ",
                                      "(--block-scope within)"), block_col, block_col) else NULL,
@@ -363,6 +392,9 @@ block_methods_lines <- function(rec) {
   out <- c(sprintf("Blocking      : %s as a %s effect (%d levels, %s)", rec$column,
                    if (fixed) "FIXED" else "random", rec$n_blocks, sz_txt),
     if (!is.null(rec$effect_choice)) sprintf("%sEffect: %s", pad, rec$effect_choice),
+    if (length(rec$absorbed_covariates))
+      sprintf("%sDropped from the design: %s (absorbed by the fixed %s effect)", pad,
+              paste(unlist(rec$absorbed_covariates), collapse = ", "), rec$column),
     if (!fixed) sprintf("%sconsensus within-%s correlation %.3f, from %d of %d proteins", pad, rec$column,
             rec$consensus_correlation, rec$n_proteins_estimated, rec$n_proteins),
     if (!fixed && is.finite(pc$median))

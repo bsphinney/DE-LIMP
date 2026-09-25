@@ -154,6 +154,38 @@ class SubjectColumnKeptUnderItsOwnName(unittest.TestCase):
             rep, out = run_map(tmp, rows, ["sample", "group", "Donor"], runs=runs)
         self.assert_ambiguous(rep, out, "Donor", "the groups relabelled", "Covariate1")
 
+    def test_ambiguous_subject_with_no_free_slot_says_it_was_not_written(self):
+        # two other extra columns fill Covariate1/2: the ambiguous subject cannot be kept as a
+        # covariate -- the report must say so, not drop it silently
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, header = ip_sheet("Subject")
+            for i, r in enumerate(rows):
+                r[-1] = "M" if i % 2 == 0 else "F"
+                r.insert(4, f"T{i % 3}")
+            header = header[:4] + ["Tissue"] + header[4:]
+            rep, out = run_map(tmp, rows, header)
+        amb = rep["ambiguities"]["subject_ambiguous"]
+        self.assertIsNone(amb["written_as"])
+        self.assertFalse(amb["written"])
+        self.assertIn("it was NOT written, because both covariate slots are taken "
+                      "(Covariate1 = Sex, Covariate2 = Tissue)", amb["to_confirm"])
+        self.assertIn("--subject-column 'Subject' to keep it as the block", amb["to_confirm"])
+        self.assertNotIn("Subject", out[0])
+        self.assertEqual(rep["covariate_columns"], {"Batch": "batch", "Covariate1": "Sex",
+                                                    "Covariate2": "Tissue"})
+        self.assertTrue(rep["needs_confirmation"])
+
+    def test_more_than_two_extra_columns_are_reported_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, header = ip_sheet()
+            rows = [r[:4] + [f"T{i % 3}", f"L{i % 2}"] for i, r in enumerate(rows)]
+            rep, out = run_map(tmp, rows, header[:4] + ["Tissue", "Lane"])
+        self.assertEqual(list(out[0]), ["File.Name", "Group", "Batch", "Covariate1", "Covariate2"])
+        nw = rep["ambiguities"]["columns_not_written"]
+        self.assertEqual(nw["columns"], ["Lane"])
+        self.assertIn("NOT written", nw["why"])
+        self.assertTrue(rep["needs_confirmation"])
+
     def test_confirmed_subject_column_is_kept(self):
         with tempfile.TemporaryDirectory() as tmp:
             rows, header = ip_sheet("Subject")

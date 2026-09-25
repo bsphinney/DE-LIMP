@@ -146,8 +146,10 @@ def match_to_runs(identifier, runs, run_norms):
 def parse_conditions_file(path, subject_column=None):
     """Parse an uploaded CSV/TSV: detect sample + group (+batch/covariate) columns
     however they're named. Returns (list of {sample, group, extras{}, subject},
-    subject column name, subject confirmed?). subject_column: the header the user confirmed
-    as the animal / patient ("none" = detect nothing)."""
+    subject column name, subject confirmed?, columns{}). subject_column: the header the user
+    confirmed as the animal / patient ("none" = detect nothing). columns: which header fills
+    each covariate slot, and the extra headers that did NOT fit (conditions.csv has two
+    covariate slots) -- reported, never dropped silently."""
     delim = "\t" if path.lower().endswith((".tsv", ".txt")) else None
     with open(path, newline="") as fh:
         sample = fh.read(4096); fh.seek(0)
@@ -176,6 +178,9 @@ def parse_conditions_file(path, subject_column=None):
                                  "hint": "rename a column to 'sample'/'file' and 'group'/'condition', "
                                          "or have the agent pass --mapping-json instead"}))
         other = [h for h in headers if h not in (scol, gcol, bcol, subj) and h]
+        columns = {"sources": {**({"Batch": bcol} if bcol else {}),
+                               **{COV_COLS[i + 1]: h for i, h in enumerate(other[:2])}},
+                   "not_written": other[2:]}
         out = []
         for row in rd:
             s = (row.get(scol) or "").strip()
@@ -190,7 +195,7 @@ def parse_conditions_file(path, subject_column=None):
                     extras[COV_COLS[i + 1]] = row[h].strip()
             out.append({"sample": s, "group": g, "extras": extras,
                         "subject": (row.get(subj) or "").strip() if subj else ""})
-        return out, (column_name(subj) if subj else None), confirmed
+        return out, (column_name(subj) if subj else None), confirmed, columns
 
 
 def intent_from_json(blob):
@@ -212,11 +217,12 @@ def intent_from_json(blob):
     for item in out:
         item["subject"] = str(subjects.get(item["sample"], "")).strip()
     # subjects the agent took from the user's own words count as confirmed
-    return out, (column_name(d.get("subject_column") or "Subject") if subjects else None), bool(subjects)
+    return (out, (column_name(d.get("subject_column") or "Subject") if subjects else None),
+            bool(subjects), {"sources": {}, "not_written": []})
 
 
 # ----------------------------------------------------------------------- map --
-def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False):
+def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, columns=None):
     run_norms = [norm(r) for r in runs]
     run_groups = defaultdict(set)      # run -> {groups}
     run_extras = {}                    # run -> extras
@@ -260,15 +266,25 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False):
     # suggest a --block that would silently drop the factor from the model.
     subj_reasons = subject_assessment(subject_of, assigned) if subject_col else []
     ambiguous = bool(subject_col and subj_reasons and not subject_confirmed)
+    columns = columns or {"sources": {}, "not_written": []}
+    sources = dict(columns["sources"])
     subject_ambiguous = None
     if ambiguous:
         slot = next((c for c in COV_COLS[1:] if c not in cov_used), None)
-        subject_ambiguous = {"column": subject_col, "reasons": subj_reasons,
-                             "written_as": slot,
-                             "to_confirm": f"if {subject_col} really is the animal / patient each "
-                                           f"run came from, re-run --map with --subject-column "
-                                           f"'{subject_col}'; otherwise leave it as a covariate"}
+        taken = ", ".join(f"{c} = {sources[c]}" for c in COV_COLS[1:] if c in sources)
+        subject_ambiguous = {
+            "column": subject_col, "reasons": subj_reasons, "written_as": slot,
+            "written": bool(slot),
+            "to_confirm": (f"if {subject_col} really is the animal / patient each run came from, "
+                           f"re-run --map with --subject-column '{subject_col}' to keep it as the "
+                           f"block; otherwise it stays " +
+                           (f"a covariate ({slot})." if slot else
+                            f"OUT of conditions.csv: it was NOT written, because both covariate "
+                            f"slots are taken ({taken}) and conditions.csv has only two. To keep "
+                            f"it as a covariate instead, remove one of those columns from the "
+                            f"sample sheet and re-run --map."))}
         if slot:
+            sources[slot] = subject_col
             for r, v in subject_of.items():
                 run_extras.setdefault(r, {})[slot] = v
             cov_used = sorted(set(cov_used) | {slot}, key=COV_COLS.index)
@@ -297,6 +313,7 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False):
     subj_partial = bool(subject_col and subj_single and len(subj_single) < len(subj_sizes))
     subj_missing = [r for r in runs if subject_col and r not in subject_of and r not in subject_conflicts]
     needs_conf = bool(unassigned or conflicting or unmatched or singletons or ambiguous
+                      or columns["not_written"]
                       or subject_conflicts or subj_partial or (subject_col and subj_missing))
     print(json.dumps({
         "proposed_csv": os.path.abspath(out_path),
@@ -314,7 +331,18 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False):
                 "single_run_subjects": subj_single if subj_partial else []}
                if subject_col else {}),
             **({"subject_ambiguous": subject_ambiguous} if subject_ambiguous else {}),
+            # extra sample-sheet columns beyond the two covariate slots: named, never dropped silently
+            **({"columns_not_written": {
+                "columns": columns["not_written"],
+                "why": "conditions.csv carries Batch plus two covariates (Covariate1/2); these "
+                       "extra columns did not fit and were NOT written",
+                "fix": "if one matters to the model, remove a less important column from the "
+                       "sample sheet (or pass the animal / patient column with "
+                       "--subject-column so it is kept under its own name) and re-run --map"}}
+               if columns["not_written"] else {}),
         },
+        # which sample-sheet header each covariate slot holds
+        "covariate_columns": sources,
         # The column naming the animal / subject each run came from, kept under its own
         # name. block_suggested: every run has one, every subject holds >= 2 runs, and the
         # values look like subjects (or the user confirmed them).
@@ -393,11 +421,11 @@ def main():
     elif a.map_out:
         runs = get_runs(a)
         if a.from_file:
-            intent, subject_col, confirmed = parse_conditions_file(a.from_file, a.subject_column)
+            intent, subject_col, confirmed, columns = parse_conditions_file(a.from_file, a.subject_column)
         elif a.mapping_json:
-            intent, subject_col, confirmed = intent_from_json(a.mapping_json)
+            intent, subject_col, confirmed, columns = intent_from_json(a.mapping_json)
         else: sys.exit("--map needs --from-file (uploaded file) or --mapping-json (agent intent)")
-        do_map(a.map_out, runs, intent, subject_col, confirmed)
+        do_map(a.map_out, runs, intent, subject_col, confirmed, columns)
     elif a.emit_template:
         names = get_runs(a)
         covs = [c.strip() for c in a.covariates.split(",") if c.strip()]

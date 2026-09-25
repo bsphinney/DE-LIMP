@@ -21,7 +21,10 @@ genuine ambiguities.
    `Subject` of M/F, a `Patient` of Yes/No or a `Donor` identical to the group stays a
    covariate and is reported as `subject_ambiguous` for the user to confirm
    (`--subject-column <header>`; `--subject-column none` turns detection off). Up to two
-   further columns become Covariate1/Covariate2.
+   further columns become Covariate1/Covariate2 (`covariate_columns` says which header
+   went where). Anything that does not fit is NAMED, never dropped silently:
+   `columns_not_written` lists extra columns beyond the two slots, and an ambiguous subject
+   column with no free slot says `"written": false` and how to keep it.
 
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):

@@ -77,6 +77,11 @@ and fitting them as independent throws the pairing away. Put the unit in its own
   by `lmFit(block =, correlation =)`. This is the nested case (mice within age, PROT_0756):
   a fixed mouse term would be aliased with the age groups and between-mouse contrasts need
   the random effect. `--block-effect fixed` on a nested block stops before quantification.
+- **Nested in a covariate, not the groups** (each patient's pre/post pair run in one
+  `Batch`): the fixed subject effect absorbs that covariate — its columns are sums of the
+  subject's — so the fixed fit leaves it out (`block.absorbed_covariates`, a `Dropped from
+  the design` line in `methods.txt`, the Methods sentence, the repro script). Every message
+  names what the block is aliased with: the groups, or covariate X.
 
 - **dpc**: `limpa::dpcDE(y, design, block = b)`. `dpcDE` passes `...` to
   `voomaLmFitWithImputation()`, which takes `block` natively: it estimates the

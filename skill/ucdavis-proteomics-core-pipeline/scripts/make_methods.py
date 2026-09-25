@@ -543,10 +543,13 @@ def de_block_sentence(prov):
             if isinstance(n_est, int) and isinstance(n_all, int) else "")
     levels = f" ({b['n_blocks']} levels)" if isinstance(b.get("n_blocks"), int) else ""
     if b.get("effect") == "fixed":
+        absorbed = [str(x) for x in (b.get("absorbed_covariates") or [])]
         return (f"Samples sharing a {col} were paired: {col}{levels} was included in the linear "
                 f"model as a fixed effect ({prov.get('design') or NOT_RECORDED}), since it is "
                 f"crossed with the groups and every contrast compares samples within one {col} "
-                f"-- the exact paired analysis.")
+                f"-- the exact paired analysis."
+                + (f" {', '.join(absorbed)} was left out of the design: every {col} sits in one "
+                   f"{' / '.join(absorbed)}, so the {col} effect absorbs it." if absorbed else ""))
     out = (f"Samples sharing a {col} were modelled as correlated rather than independent: {col}"
            f"{levels} was fitted as a random blocking factor, with a consensus within-{col} "
            f"correlation of {rho_s} (limma duplicateCorrelation{over}) used in the linear-model "

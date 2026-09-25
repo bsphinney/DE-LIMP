@@ -198,7 +198,7 @@ if (!is.null(block_col)) {
   # a requested fixed effect the design cannot carry (block nested in the groups) stops here
   if (identical(block_effect_req, "fixed"))
     block_choose_effect("fixed", trimws(as.character(meta[[block_col]])),
-                        build_design(meta, covariates)$design, list(), block_col)
+                        build_design(meta, covariates)$design, list(), block_col, covariates)
 } else {
   .cand <- block_candidates(meta, covariates)
   if (length(.cand))
@@ -619,16 +619,21 @@ fit_ind <- NULL
 # columns, so the design and contrast matrix the fit uses change with it.
 .eff <- if (!is.null(block))
   block_choose_effect(block_effect_req, block, design,
-                      block_contrast_structure(block, groups, cmat), block_col) else NULL
+                      block_contrast_structure(block, groups, cmat), block_col, covariates) else NULL
 if (is.null(block)) {
   fit_ind <- fit_independent()
 } else if (identical(.eff$effect, "fixed")) {
   design <- .eff$design
+  # a covariate the block is nested in is absorbed by it and left out of the fixed design:
+  # the design label, methods and repro script describe the model that ran
+  covariates <- setdiff(covariates, .eff$absorbed)
+  formula_parts <- setdiff(formula_parts, .eff$absorbed)
   cmat <- limma::makeContrasts(contrasts = forms, levels = design)
   fit <- fit_independent()          # samples independent GIVEN the block columns
   block_rec <- block_record(block_col, block, method, NA_real_, numeric(0), nrow(E),
                             groups = groups, cmat = cmat, scope = block_scope,
-                            effect = "fixed", effect_choice = .eff$choice)
+                            effect = "fixed", effect_choice = .eff$choice,
+                            absorbed = .eff$absorbed)
 } else if (method == "dpc") {
   # dpcDE(y, design, plot, ...) hands `block` to voomaLmFitWithImputation(), which
   # estimates the correlation with the vooma weights twice and fits lmFit(block =,

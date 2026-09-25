@@ -101,6 +101,10 @@ make <- function(OUT, nested) {
   write.csv(transform(meta, Covariate1 = Subject), file.path(OUT, "conditions_cov.csv"), row.names = FALSE)
   # a block that is just the grouping under another name
   write.csv(transform(meta, Cage = Group), file.path(OUT, "conditions_cage.csv"), row.names = FALSE)
+  # each subject's pair run in one batch: the subject is nested in the Batch covariate
+  write.csv(transform(meta, Batch = c(b1 = "b1", b2 = "b1", b3 = "b2", b4 = "b2", b5 = "b3",
+                                      b6 = "b3")[paste0("b", sub("S", "", Subject))]),
+            file.path(OUT, "conditions_batch.csv"), row.names = FALSE)
   # one subject left with a single sample
   m1 <- meta; m1$Subject[12] <- "S7"
   write.csv(m1, file.path(OUT, "conditions_single.csv"), row.names = FALSE)
@@ -146,6 +150,8 @@ class RunDeBlock(unittest.TestCase):
             "dpc_block":   ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject"]),
             "ml":          ("paired", "conditions.csv", ["--method", "maxlfq"]),
             "ml_block":    ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject"]),
+            # the pairs run in batches: the fixed subject absorbs Batch
+            "dpc_block_batch": ("paired", "conditions_batch.csv", ["--method", "dpc", "--block", "Subject"]),
             # ... and the random effect when asked for
             "dpc_block_random": ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject",
                                                               "--block-effect", "random"]),
@@ -268,6 +274,32 @@ class RunDeBlock(unittest.TestCase):
                 para = mm.de_paragraph(p)
                 self.assertIn("Subject (6 levels) was included in the linear model as a fixed effect "
                               "(~ 0 + groups + Subject)", para)
+
+    def test_fixed_subject_absorbs_a_covariate_it_is_nested_in(self):
+        p = self.prov("dpc_block_batch")
+        b = p["block"]
+        self.assertEqual(b["effect"], "fixed")
+        self.assertEqual(b["absorbed_covariates"], ["Batch"])
+        self.assertIn("Subject is nested in covariate Batch (each Subject sits in one Batch)",
+                      b["effect_choice"])
+        self.assertIn("absorbs Batch, which is dropped from the design", b["effect_choice"])
+        self.assertEqual(p["design"], "~ 0 + groups + Subject")
+        txt = self.methods("dpc_block_batch")
+        self.assertIn("Dropped from the design: Batch (absorbed by the fixed Subject effect)", txt)
+        self.assertIn("Batch was left out of the design: every Subject sits in one Batch",
+                      mm.de_paragraph(p))
+        # the same model as the plain fixed-subject run, so the same table
+        a = {r["Protein.Group"]: r for r in read_csv(os.path.join(self.out("dpc_block_batch"), "DE_dpc_B.A.csv"))}
+        c = {r["Protein.Group"]: r for r in read_csv(os.path.join(self.out("dpc_block"), "DE_dpc_B.A.csv"))}
+        self.assertEqual(set(a), set(c))
+        for k in a:
+            for col in ("logFC", "t", "P.Value"):
+                self.assertAlmostEqual(float(a[k][col]), float(c[k][col]), places=10)
+        # and its repro script leaves Batch out of the design too
+        with open(os.path.join(self.out("dpc_block_batch"), "reproducibility_log.R")) as fh:
+            src = fh.read()
+        self.assertIn("design <- model.matrix(~ 0 + groups)", src)
+        self.assertNotIn("Batch <- factor", src)
 
     def test_fixed_effect_needs_a_crossed_block(self):
         err = self.failed("fixed_nested")
@@ -540,6 +572,15 @@ class BlockRecordWarnings(unittest.TestCase):
           gp <- factor(rep(c("Ctrl", "Trt"), each = 4)); bp <- rep(c("P1", "P2", "P3", "P4"), 2)
           dp <- model.matrix(~ 0 + gp); colnames(dp) <- levels(gp)
           cmp <- limma::makeContrasts(contrasts = "Trt-Ctrl", levels = dp)
+          # pre/post pairs in batches: Patient nested in the Batch covariate
+          batch <- factor(rep(c("b1", "b1", "b2", "b2"), 2))
+          dpb <- model.matrix(~ 0 + gp + batch); colnames(dpb)[1:2] <- levels(gp)
+          cmb <- limma::makeContrasts(contrasts = "Trt-Ctrl", levels = dpb)
+          stb <- block_contrast_structure(bp, gp, cmb)
+          in_batch <- block_choose_effect("auto", bp, dpb, stb, "Patient", "batch")
+          in_batch_random <- block_choose_effect("random", bp, dpb, stb, "Patient", "batch")
+          forced_nested <- tryCatch(block_choose_effect("fixed", b2, d2, list(), "Mouse"),
+                                    error = function(e) conditionMessage(e))
           effects <- list(paired = eff(bp, gp, cmp, dp),
                           nested_within = eff(b2, g2, cm2[, 1, drop = FALSE], d2),
                           paired_forced_random = eff(bp, gp, cmp, dp, "random"))
@@ -547,7 +588,12 @@ class BlockRecordWarnings(unittest.TestCase):
                          all = block_contrast_model(b2, g2, cm2, "all"),
                          reps = block_contrast_model(b3, g2, cm2, "within"))
           cat(jsonlite::toJSON(list(warn = warn, structure = st, n_ok = length(r$ok$warnings),
-                                    models = models, effects = effects), auto_unbox = TRUE))'''))
+                                    models = models, effects = effects,
+                                    in_batch = list(effect = in_batch$effect, choice = in_batch$choice,
+                                                    absorbed = I(in_batch$absorbed),
+                                                    ncol = ncol(in_batch$design)),
+                                    in_batch_random = in_batch_random$choice,
+                                    forced_nested = forced_nested), auto_unbox = TRUE))'''))
 
     def test_clean_estimate_has_no_warning(self):
         self.assertEqual(self.res["n_ok"], 0)
@@ -575,6 +621,16 @@ class BlockRecordWarnings(unittest.TestCase):
         # even for a within contrast (P2, a fixed nested effect, is a follow-up); forced wins
         self.assertEqual(self.res["effects"], {"paired": "fixed", "nested_within": "random",
                                                "paired_forced_random": "random"})
+
+    def test_names_what_the_block_is_aliased_with(self):
+        ib = self.res["in_batch"]
+        self.assertEqual(ib["effect"], "fixed")
+        self.assertEqual(ib["absorbed"], ["batch"])
+        self.assertEqual(ib["ncol"], 2 + 3)                       # groups + Patient, no batch
+        self.assertIn("Patient is nested in covariate batch", ib["choice"])
+        self.assertIn("Patient is nested in covariate batch", self.res["in_batch_random"])
+        self.assertIn("requested random", self.res["in_batch_random"])
+        self.assertIn("--block-effect fixed: Mouse is nested in the groups", self.res["forced_nested"])
 
     def test_contrast_structure(self):
         # M1 has both an Old IgG and an Old Bait IP, M3/M4 only one each -> partial
