@@ -59,7 +59,7 @@ def planted():
     return r
 
 
-def make_session(tmp, raws=None, conditions=None, fasta=None):
+def make_session(tmp, raws=None, conditions=None, fasta=None, extra_col="Batch", prov=None):
     s = os.path.join(tmp, "2026-09-24_PROT_0756")
     os.makedirs(os.path.join(s, "input"))
     os.makedirs(os.path.join(s, "output"))
@@ -69,12 +69,16 @@ def make_session(tmp, raws=None, conditions=None, fasta=None):
     if conditions is not None:
         with open(os.path.join(s, "input", "conditions.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["File.Name", "Group"] + (["Batch"] if any(len(r) > 2 for r in conditions) else []))
+            w.writerow(["File.Name", "Group"] + ([extra_col] if any(len(r) > 2 for r in conditions) else []))
             for row in conditions:
                 w.writerow(row)
     if fasta is not None:
         with open(os.path.join(s, "input", "search.fasta.meta.json"), "w") as fh:
             json.dump(fasta, fh)
+    if prov is not None:
+        os.makedirs(os.path.join(s, "output", "tables"))
+        with open(os.path.join(s, "output", "tables", "de_provenance.json"), "w") as fh:
+            json.dump(prov, fh)
     return s
 
 
@@ -143,6 +147,50 @@ class TestAllowlist(unittest.TestCase):
                              "phone": "530-555-0142"})
         self.assertClean(json.dumps(given), "facts given by the user")
         self.assertEqual((given["internal_id"], given["source"]), ("PROT_0756", sr.SOURCE_USER))
+
+    def test_every_phone_form_is_removed(self):
+        for phone in ("(530)555-0100", "+15305550100", "5305550100", "530-5550100", "530.555.0100",
+                      "+1 (530) 555-0100", "1 530 555 0100", "+44 20 7946 0958", "+49 30 901820",
+                      "tel: 555-0100", "Phone 752-1234"):
+            got = sr.clean(f"call {phone} today")
+            self.assertEqual(got, "call [phone removed] today", phone)
+
+    def test_quantities_dates_and_names_are_not_phones(self):
+        for text in ("dilutions 100-200-3000 ug", "50 mM Ammonium Bicarbonate", "Cat#10004D",
+                     "sent 2026-07-15", "Kv2.1", "pH 7.4, 150 mM NaCl", "LRS-100", "30 samples"):
+            self.assertEqual(sr.clean(text), text)
+
+    def test_links_are_only_coreomics_and_uniprot_pages(self):
+        for url in ("https://x.example/?e=a@b.co", "https://ucdavis.coreomics.com/submissions/x)",
+                    "javascript:alert(1)", "http://ucdavis.coreomics.com/submissions/0022066cd85f"):
+            self.assertIsNone(sr._url(url), url)
+        r = fixture()
+        r["submission_data"]["uniprot"] = "https://evil.example/UP000000589"
+        self.assertNotIn("href='https://evil", sr.render_html(sr.sanitize(r)))
+        r["submission_data"]["uniprot"] = "https://www.uniprot.org/proteomes/UP000000589"
+        self.assertIn("href='https://www.uniprot.org/proteomes/UP000000589'", sr.render_html(sr.sanitize(r)))
+
+    def test_attach_sanitizes_whatever_it_is_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            sr.attach(s, planted())                      # the RAW record, not sanitized first
+            with open(os.path.join(s, "input", "submission.json")) as fh:
+                self.assertClean(fh.read(), "input/submission.json")
+
+    def test_odd_shapes_neither_leak_nor_pass_as_blank(self):
+        r = fixture()
+        r["pi_first_name"] = {"email": "canary.pi@example.org", "first": "Alex"}
+        r["submission_data"]["uniprot"] = {"link": "x"}
+        rec = sr.sanitize(r)
+        self.assertEqual(rec["pi"]["name"], "Example")
+        self.assertIsNone(rec["uniprot"], "a non-text answer is missing, not 'left blank'")
+        self.assertNotIn("uniprot_blank", notes_by_id(rec))
+
+    def test_a_record_from_the_summary_says_what_the_summary_lacks(self):
+        summary = {"schema": "core_submission/1", "internal_id": "PROT_0756", "id": "0022066cd85f",
+                   "samples": []}
+        page = sr.render_html(sr.sanitize(summary))
+        self.assertIn("not in submission_summary.json", page)
 
     def test_sanitize_is_idempotent(self):
         rec = sr.sanitize(fixture())
@@ -292,7 +340,8 @@ class TestPreparedBy(unittest.TestCase):
         core = sr.sanitize({"sample_prep": "I want the proteomics core to prepare my samples"})
         self.assertEqual(sr.prepared_by(core)[0], "core")
         self.assertEqual(sr.prepared_by(sr.sanitize({"prot_or_pep": "peptides"}))[0], "lab")
-        self.assertEqual(sr.prepared_by(sr.sanitize({"prot_or_pep": "Intact Proteins"}))[0], "core")
+        self.assertIsNone(sr.prepared_by(sr.sanitize({"prot_or_pep": "Intact Proteins"}))[0],
+                          "intact proteins do not say who extracted them")
         self.assertEqual(sr.prepared_by(sr.sanitize({}))[0], None)
 
     def test_a_contradictory_form_is_not_resolved_by_guessing(self):
@@ -322,6 +371,40 @@ class TestMethods(unittest.TestCase):
             self.assertNotIn("confirm]", sec, "no Core-side placeholder the Core could never fill")
             self.assertNotIn("chemically", sec)
             self.assertIn("“The samples are in 50 mM Ammonium Bicarbonate", sec)
+
+    def test_peptides_only_when_the_form_says_peptides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            sr.attach(s, {"internal_id": "PROT_0756", "sample_prep": "lab"})
+            sec = self.methods(s)
+            self.assertIn("prepared by the submitting laboratory", sec)
+            self.assertNotIn("peptides", sec)
+            self.assertIn("details given by the user", sec)
+
+    def test_multi_line_buffer_text_stays_out_of_the_pride_protocol(self):
+        import make_deposit
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            r = fixture()
+            r["submission_data"]["buffer"] = "50 mM ABC\nwashed in RIPA *twice*"
+            attach_fixture(s, r)
+            sec = self.methods(s)
+            note = [ln for ln in sec.splitlines() if "own protocol" in ln]
+            self.assertEqual(len(note), 1)
+            self.assertIn("\u201c50 mM ABC washed in RIPA twice\u201d", note[0])
+            sample, _ = make_deposit.build_protocols(os.path.join(s, "output", "methods.md"))
+            self.assertNotIn("RIPA", sample)
+            self.assertNotIn("own protocol", sample)
+
+    def test_a_methods_file_from_before_the_attach_is_not_enough(self):
+        import make_deposit
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp)
+            f = {"p": session_mod.paths_for(s), "srec": {}, "params": None, "search_prov_path": None,
+                 "de_prov": None}
+            self.assertNotIn("Sample preparation", make_deposit.required_sections(f))
+            attach_fixture(s)
+            self.assertIn("Sample preparation", make_deposit.required_sections(f))
 
     def test_core_prepared_samples_keep_a_placeholder_for_the_core(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,6 +448,7 @@ class TestMethods(unittest.TestCase):
             with open(out) as fh:
                 brief = fh.read()
             self.assertIn("## The submission (PROT_0756) — quote it, add nothing", brief)
+            self.assertIn("already lists these notes, so do not copy them", brief)
             self.assertIn("The submitting lab prepared the samples and sent peptides", brief)
             self.assertIn("Pairing in the sample sheet", brief)
 
@@ -372,9 +456,10 @@ class TestMethods(unittest.TestCase):
 # ------------------------------------------------------------------------- notes --
 class TestNotes(unittest.TestCase):
     def session(self, tmp, raws=tuple(RUNS.values()), groups=by_age_and_ip, batch=None,
-                fasta=({"organism": "Mus musculus", "taxid": 10090},)):
+                fasta=({"organism": "Mus musculus", "taxid": 10090},), extra_col="Batch", prov=None):
         conds = [[RUNS[u], groups(u)] + ([batch(u)] if batch else []) for u in RUNS]
-        s = make_session(tmp, raws=list(raws), conditions=conds, fasta=fasta[0] if fasta else None)
+        s = make_session(tmp, raws=list(raws), conditions=conds, fasta=fasta[0] if fasta else None,
+                         extra_col=extra_col, prov=prov)
         attach_fixture(s)
         return s
 
@@ -383,11 +468,13 @@ class TestNotes(unittest.TestCase):
             s = self.session(tmp)
             n = notes_by_id(sr.load(s), s)
             self.assertIn("pairing", n)
-            for part in ("carries the mouse the sample came from (Mouse 1–6)",
+            for part in ("carry the mouse each sample came from (Mouse 1–6)",
                          "Each mouse gave samples under all 5 of JPH3, JPH4, Kv2.1, RyR, IgG",
                          "within-mouse (paired)", "Old vs Young differs between mice "
                          "(Old: Mouse 1–3; Young: Mouse 4–6)", "10 groups of 3",
-                         "has no column for the mouse, so the model treated all 30 samples as independent"):
+                         "No column the DE reads from input/conditions.csv (Group, Batch, Covariate1, "
+                         "Covariate2) identifies the mouse, so as set up it will treat the samples as "
+                         "independent"):
                 self.assertIn(part, n["pairing"])
             self.assertEqual(set(n) & {"conditions_differ", "sheet_ids_without_raw",
                                        "raw_without_sheet_id", "organism_mismatch"}, set())
@@ -395,7 +482,82 @@ class TestNotes(unittest.TestCase):
     def test_a_design_column_that_carries_the_mouse_is_recognised(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = self.session(tmp, batch=lambda u: "m" + sheet()[u].split("Mouse")[1].strip())
-            self.assertIn("carries the mouse as “Batch”", notes_by_id(sr.load(s), s)["pairing"])
+            self.assertIn("includes the mouse as “Batch”, a fixed effect",
+                          notes_by_id(sr.load(s), s)["pairing"])
+
+    def test_restarted_numbering_is_not_read_as_pairing(self):
+        """Old Mouse 1-3 and Young Mouse 1-3: are they six mice or three? The sheet cannot say."""
+        for fmt in ("{age} - Mouse {n}", "Mouse {n} - {age}"):
+            r = fixture()
+            r["submission_data"]["samples"] = [
+                {"unique_id": f"S{i}", "sample_name": f"S{i}", "condition_name": fmt.format(age=age, n=n)}
+                for i, (age, n) in enumerate([(a, n) for a in ("Old", "Young") for n in (1, 2, 3)])]
+            n = notes_by_id(sr.sanitize(r))
+            self.assertIn("does not say whether Mouse 1 under Old and under Young is the same mouse",
+                          n["pairing"], fmt)
+            self.assertNotIn("(paired)", n["pairing"])
+            self.assertNotIn("not independent", n["pairing"])
+
+    def test_one_sample_per_mouse_is_no_pairing(self):
+        r = fixture()
+        r["submission_data"]["samples"] = [
+            {"unique_id": f"S{n}", "sample_name": "", "condition_name": f"{'Old' if n < 4 else 'Young'} - Mouse {n}"}
+            for n in range(1, 7)]
+        self.assertNotIn("pairing", notes_by_id(sr.sanitize(r)))
+
+    def test_replicate_indexes_are_replicate_groups(self):
+        for fmt in ("{g} - Rep {n}", "{g} {n}", "{g}_{n}"):
+            r = fixture()
+            r["submission_data"]["samples"] = [
+                {"unique_id": f"S{g}{n}", "sample_name": "", "condition_name": fmt.format(g=g, n=n)}
+                for g in ("Control", "Treated") for n in (1, 2, 3)]
+            rec = sr.sanitize(r)
+            n = notes_by_id(rec)
+            self.assertNotIn("sheet_conditions_unique", n, fmt)
+            self.assertNotIn("pairing", n, fmt)
+            self.assertEqual(set(sr.sheet_groups(rec).values()), {"Control", "Treated"}, fmt)
+
+    def test_a_sample_outside_the_pattern_keeps_the_pairing_note(self):
+        r = fixture()
+        r["submission_data"]["samples"].append({"unique_id": "LRS200", "sample_name": "LRS200",
+                                                "condition_name": "Pool"})
+        n = notes_by_id(sr.sanitize(r))
+        self.assertIn("1 sample(s) do not follow this naming and are not part of this reading (LRS200)",
+                      n["pairing"])
+        self.assertNotIn("sheet_conditions_unique", n)
+
+    def test_a_reinjected_sample_is_not_left_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conds = [[RUNS[u], by_age_and_ip(u)] for u in RUNS]
+            conds.append(["08202026__60SPD_DIA-LRS-96_rerun_S3-A1_1_23999", by_age_and_ip("LRS96")])
+            s = make_session(tmp, conditions=conds)
+            attach_fixture(s)
+            self.assertNotIn("conditions_differ", notes_by_id(sr.load(s), s))
+
+    def test_a_run_carrying_two_sheet_ids_says_nothing_about_groups(self):
+        r = fixture()
+        r["submission_data"]["samples"] = [
+            {"unique_id": u, "sample_name": "", "condition_name": c}
+            for u, c in (("AB12", "Old"), ("CD34", "Young"), ("EF56", "Old"), ("GH78", "Young"))]
+        with tempfile.TemporaryDirectory() as tmp:
+            s = make_session(tmp, conditions=[["x_AB12_CD34", "Old"], ["x_EF56", "Old"], ["x_GH78", "Young"]])
+            attach_fixture(s, r)
+            self.assertNotIn("conditions_differ", notes_by_id(sr.load(s), s))
+
+    def test_only_columns_the_de_models_count_as_carrying_the_mouse(self):
+        mouse = lambda u: sheet()[u].split("Mouse")[1].strip()        # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, batch=mouse, extra_col="Mouse")
+            self.assertIn("No column the DE reads", notes_by_id(sr.load(s), s)["pairing"],
+                          "run_de.R ignores a column called Mouse")
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, prov={"design": "~ 0 + groups", "n_samples": 30})
+            self.assertIn("The design analysed (~ 0 + groups) has no term for the mouse, so it "
+                          "treated the 30 samples as independent", notes_by_id(sr.load(s), s)["pairing"])
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.session(tmp, batch=mouse, extra_col="Mouse",
+                             prov={"design": "~ 0 + groups", "n_samples": 30, "block": "Mouse"})
+            self.assertIn("blocked on the mouse (\u201cMouse\u201d)", notes_by_id(sr.load(s), s)["pairing"])
 
     def test_blank_uniprot_is_a_note(self):
         self.assertIn("uniprot_blank", notes_by_id(sr.sanitize(fixture())))

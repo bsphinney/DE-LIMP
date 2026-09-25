@@ -46,7 +46,8 @@ def submission_brief(w, source):
       "is, use the submission's own words and add no detail it does not state (if it says "
       "\"cross-linked\", do not write \"chemically cross-linked\"). Never copy a contact or "
       "billing detail into the report.")
-    w({"lab": "- **The submitting lab prepared the samples and sent peptides.** Any Sample "
+    w({"lab": "- **The submitting lab prepared the samples"
+              + (" and sent peptides" if sr.sent_as_peptides(rec) else "") + ".** Any Sample "
               "Preparation note must say so; do not describe extraction, reduction, alkylation "
               "or digestion as work the Core did.",
        "core": "- **The Core prepared the samples.** Their protocol belongs in the Methods "
@@ -54,7 +55,9 @@ def submission_brief(w, source):
         who, f"- **Who prepared the samples is not clear** ({why}). Say so; do not guess."))
     notes = sr.quality_notes(rec, session)
     if notes:
-        w("- Carry every one of these into the report's **Data Quality Notes**:")
+        w("- The HTML report's Submission section already lists these notes, so do not copy "
+          "them. In **Data Quality Notes**, say what each one means for THESE results (e.g. "
+          "whether paired samples were analysed as independent):")
         for n in notes:
             w(f"  - {n['text']}")
     w("")

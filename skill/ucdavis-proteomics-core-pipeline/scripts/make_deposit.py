@@ -1330,6 +1330,8 @@ def write_html(out):
 # ------------------------------------------------------------------------- methods --
 def required_sections(f):
     need = ["Liquid chromatography", "Mass spectrometry", "Sequence database"]
+    if os.path.isfile(f["p"]["submission_record"]):
+        need.insert(0, "Sample preparation")    # a methods.md from before the submission was attached
     if f["srec"].get("engine") or f["params"] or f["search_prov_path"]:
         need.append("Database search")
     if f["de_prov"]:

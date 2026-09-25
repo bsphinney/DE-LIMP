@@ -81,26 +81,30 @@ Every report carries its submission, so the number is settled at SKILL.md step 1
 Core data, not only a staff "search submission 807" run. Never guessed:
 
 ```
-python3 scripts/core_submission.py identify <raw files or folder> --text "<the user's message>"
+python3 scripts/core_submission.py identify <raw files and/or their folder> --text "<the user's message>"
 ```
 
 1. **Named ids.** A `PROT_####` token (`PROT_0756`, `prot-756`) or a 12-character CoreOmics id
    (with a letter and a digit — a 12-digit timestamp is not one) anywhere in the paths, or
-   "submission 756" / `#756` in the message. A bare number in a FILE name never counts: Exploris
-   runs carry counters (`Ex08312026_380_JE21`). Several different ids → looked up (token) and
-   merged when they are the same submission, else `ambiguous`.
+   "submission 756" in the message (3-4 digits; `prot_10ug` is an amount, not PROT_0010). A bare number in a FILE name never counts: Exploris
+   runs carry counters (`Ex08312026_380_JE21`), and a 12-hex tail of a UUID/GUID is not an id.
+   With a token every named id is looked up: several that are one submission are merged; one
+   CoreOmics does not know is `not_found`; one whose sample IDs are in none of the file names
+   is `named_unconfirmed`. Without a token a single named id is `named` (unverified).
 2. **Sample ids (token).** Otherwise it lists the submissions made up to 240 days before the
    runs (`--max-days`) and matches their sample ids in the file names with `locate`'s rules run
    in reverse: delimited tokens, the timsTOF sample field only, the longest id owns a run, weak
    ids (`A3`, `001`) are no evidence, and a run counts only for a submission made on or before
    the date in its name. Two submissions that could own one run → `ambiguous` (`locate`'s
-   `ambiguous_label`). A name with no date matches every submission using the id.
+   `ambiguous_label`). A name with no date matches every submission using the id. `matched`
+   needs the one candidate to own at least half the files and two sheet IDs, and the whole
+   window to have been listed; otherwise `weak`. A folder is listed one level deep for names.
 
 | exit | status | what to do |
 |---|---|---|
-| 0 | `named`, `matched` | confirm in one line — the JSON's `ask` (`matched` says how many files and sheet ids it covers) |
-| 2 | `none`, `ambiguous` | ask the user for the number — the JSON's `ask` |
-| 3 | `needs_token` | ask for the number, relay `token_help`; ask the key facts and `attach --given` (below) |
+| 0 | `named`, `matched` | confirm in one line — the JSON's `ask` (it says how many file names carry the sample IDs) |
+| 2 | `none`, `ambiguous`, `weak`, `named_unconfirmed`, `not_found` | ask the user for the number — the JSON's `ask` |
+| 3 | `needs_token`, `lookup_failed` (CoreOmics refused or unreachable) | ask for the number, relay `token_help`; ask the key facts and `attach --given` (below) |
 
 **Never search `/quobyte/proteomics-grp/coreomics/.submissions_db`.** It is a stale snapshot
 (March 2026), and a free-text search for `0756` there matched an unrelated 2019 record.
@@ -134,7 +138,8 @@ one mouse are not independent, and the note says whether the design analysed car
 ```
 python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
 bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
-bash scripts/hive_exec.sh --put ~/core/PROT_0807/submission_summary.json '~/core/PROT_0807/'
+bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
+bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
 ```
 
 **The API (verified).** Base `https://ucdavis.coreomics.com/server/api`, header
@@ -170,7 +175,12 @@ than the window recorded here.
 **Outputs:** `submission.json` (raw record), `samples.tsv`, `submission_summary.json`
 (identity, PI, contacts, campus, conditions present/groups/missing, `canonical_project_dir`,
 `share_dir`, neighbours, existing Bioshare shares). A failure listing shares is recorded as
-`existing_shares_error` and does not block.
+`existing_shares_error` and does not block. **Only `hive/` leaves this computer:**
+`hive/submission_summary.json` is the summary with every email and the contacts removed and
+free text scrubbed (`hive_summary()`), and `hive/submission.json` is the allowlisted record
+(`submission_report.py`). The raw record holds emails, phones and PPMS/payment fields and the
+full summary holds emails; both stay local, where `bioshare` and `email-draft` need them.
+`stage`'s staff-facing `SUBMISSION.md` names people but shows no email.
 
 **The organism is not resolved here.** `organism_as_submitted` is the submitter's free text,
 labelled `confirmed: false`. Put it to the staff member as the proposed answer and confirm
@@ -387,7 +397,7 @@ bash scripts/hive_exec.sh --get "$S/output/search/report.parquet" ~/core/PROT_08
 for f in AUDIT.md SAMPLE_QUALITY.md methods.md; do bash scripts/hive_exec.sh --get "$S/output/$f" ~/core/PROT_0807/session/output/; done
 ```
 Attach the submission to `$S` right after `init` (`submission_report.py attach --session "$S"
---record ~/core/PROT_0807`, on HIVE, after `--put`ting fetch's `submission.json` there), and pull
+--record ~/core/PROT_0807`, on HIVE: the allowlisted `hive/submission.json` put there in step 1), and pull
 `$S/session.json` and `$S/input/{submission.json,samples.tsv,raw_files.txt,conditions.csv,
 search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.md`;
 `make_analysis_html.py --session ~/core/PROT_0807/session --out

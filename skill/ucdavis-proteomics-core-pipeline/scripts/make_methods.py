@@ -533,10 +533,14 @@ def sample_prep_lines(rec, sr):
     src = (f"CoreOmics submission {sr.label(rec)}" if rec["source"] == sr.SOURCE_COREOMICS
            else f"submission {sr.label(rec)}, details given by the user")
     if who == "lab":
+        # "peptides" only when the form's proteins/peptides answer says so.
         lines = [f"Samples were prepared by the submitting laboratory and provided to the UC Davis "
-                 f"Proteomics Core as peptides ready for LC-MS/MS ({src})."]
-        said = [f"{k} “{rec[f]}”" for k, f in (("buffer", "buffer"), ("beads", "beads"))
-                if rec.get(f)]
+                 f"Proteomics Core" + (" as peptides ready for LC-MS/MS" if sr.sent_as_peptides(rec)
+                                       else "") + f" ({src})."]
+        # One line, no stray "*": the note must stay ONE italic line, which make_deposit drops
+        # from the PRIDE protocol -- a multi-line quote would leak into it.
+        said = [f"{k} “{' '.join(rec[f].split()).replace('*', '')}”"
+                for k, f in (("buffer", "buffer"), ("beads", "beads")) if rec.get(f)]
         lines += ["", "*Describe the preparation from the submitting laboratory's own protocol."
                   + (f" As submitted: {'; '.join(said)}." if said else "") + "*"]
         return lines

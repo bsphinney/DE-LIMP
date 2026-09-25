@@ -480,13 +480,10 @@ def contact_rows(rec: dict) -> list:
     return out
 
 
-def fetch_neighbors(ours: dict, ours_date: dt.date, window_days: int) -> tuple:
-    """Submissions within +/-window of ours, with their unique_ids -- what `locate` needs to
-    tell "our BN1" from another lab's BN1. The list is newest-first, so paging stops once a
-    page reaches past the old edge of the window."""
-    lo = ours_date - dt.timedelta(days=window_days)
-    hi = ours_date + dt.timedelta(days=window_days)
-    neighbors, page = [], 1
+def submissions_between(lo: dt.date, hi: dt.date) -> tuple:
+    """([record, ...] submitted in [lo, hi], truncated). The list is newest-first, so paging
+    stops once a page reaches past the old edge. List results already carry the samples."""
+    out, page = [], 1
     while True:
         data = api_call("GET", "submissions/", {"lab": LAB, "page": page, "page_size": 100,
                                                 "ordering": "-submitted"})
@@ -495,24 +492,33 @@ def fetch_neighbors(ours: dict, ours_date: dt.date, window_days: int) -> tuple:
             raise ApiError(None, "unexpected submissions list payload", api_url("submissions/"))
         oldest = None
         for r in results:
-            if not isinstance(r, dict):
-                continue
-            d = parse_date(r.get("submitted"))
+            d = parse_date(r.get("submitted")) if isinstance(r, dict) else None
             if d is None:
                 continue
             oldest = d if oldest is None or d < oldest else oldest
-            if _s(r.get("id")) == _s(ours.get("id")) or not (lo <= d <= hi):
-                continue
-            neighbors.append({"internal_id": r.get("internal_id"), "id": r.get("id"),
-                              "submitted": r.get("submitted"),
-                              "unique_ids": [x["unique_id"] for x in sample_rows(r) if x["unique_id"]]})
+            if lo <= d <= hi:
+                out.append(r)
         if not results or (oldest is not None and oldest < lo):
-            return neighbors, False
+            return out, False
         if not isinstance(data, dict) or not data.get("next"):
-            return neighbors, False
+            return out, False
         page += 1
         if page > NEIGHBOR_MAX_PAGES:
-            return neighbors, True
+            return out, True
+
+
+def neighbor_row(r: dict) -> dict:
+    """A submission as `locate` and `identify` weigh it: its ids, date and sample ids."""
+    return {"internal_id": r.get("internal_id"), "id": r.get("id"), "submitted": r.get("submitted"),
+            "unique_ids": [x["unique_id"] for x in sample_rows(r) if x["unique_id"]]}
+
+
+def fetch_neighbors(ours: dict, ours_date: dt.date, window_days: int) -> tuple:
+    """Submissions within +/-window of ours, with their unique_ids -- what `locate` needs to
+    tell "our BN1" from another lab's BN1."""
+    recs, truncated = submissions_between(ours_date - dt.timedelta(days=window_days),
+                                          ours_date + dt.timedelta(days=window_days))
+    return [neighbor_row(r) for r in recs if _s(r.get("id")) != _s(ours.get("id"))], truncated
 
 
 def compact_share(s: dict) -> dict:
@@ -629,6 +635,24 @@ def load_json_file(path: str, what: str) -> dict:
     return d
 
 
+def hive_summary(summary: dict) -> dict:
+    """The summary as it may leave the staff member's computer: no email address, no contacts,
+    and free text scrubbed of anything shaped like an email or phone number. locate, stage and
+    deliver need none of those; `bioshare` and `email-draft` do, and they run locally on the
+    full summary. (The record's allowlist is submission_report.py's; this is the summary's.)"""
+    scrub = sibling("submission_report").scrub
+
+    def walk(v):
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items() if k not in ("email", "contacts")}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return scrub(v) if isinstance(v, str) else v
+    out = walk(summary)
+    out["redacted_for_hive"] = True
+    return out
+
+
 def load_summary(path: str) -> dict:
     try:
         with open(path) as fh:
@@ -676,6 +700,16 @@ def cmd_fetch(a) -> int:
     write_tsv(paths["samples_tsv"], ["unique_id", "sample_name", "condition_name"], summary["samples"])
     with open(paths["summary"], "w") as fh:
         json.dump(summary, fh, indent=2)
+    # What goes to HIVE: only these two. The raw record and the full summary hold emails and
+    # billing (PPMS) fields and stay on this computer.
+    hive = os.path.join(a.out, "hive")
+    os.makedirs(hive, exist_ok=True)
+    paths["hive_summary"] = os.path.join(hive, "submission_summary.json")
+    paths["hive_record"] = os.path.join(hive, "submission.json")
+    with open(paths["hive_summary"], "w") as fh:
+        json.dump(hive_summary(summary), fh, indent=2)
+    with open(paths["hive_record"], "w") as fh:
+        json.dump(sibling("submission_report").sanitize(rec), fh, indent=2)
     for w in warnings:
         note(f"WARN {w}")
     emit({"internal_id": summary["internal_id"], "id": summary["id"],
@@ -912,13 +946,17 @@ def id_universe(samples: list, neighbors: list, ours_label: str, ours_date) -> l
     return universe
 
 
-def file_owners(e: dict, universe: list, cache: dict) -> list:
-    """The ids that own a file: of every id whose pattern matches it, the LONGEST. `DH1`
-    matches `DH1-1`'s run too, but the run belongs to DH1-1."""
-    if e["path"] not in cache:
-        cands = [u for u in universe if u["norm"] in e["norm"] and u["pattern"].search(e["space"])]
+def file_owners(e: dict, universe: list, cache: dict, keep=None) -> list:
+    """The ids that own a file: of every id whose pattern matches it (and that `keep` accepts),
+    the LONGEST. `DH1` matches `DH1-1`'s run too, but the run belongs to DH1-1."""
+    if keep is not None or e["path"] not in cache:
+        cands = [u for u in universe if u["norm"] in e["norm"] and u["pattern"].search(e["space"])
+                 and (keep is None or keep(u))]
         top = max((len(u["norm"]) for u in cands), default=0)
-        cache[e["path"]] = [u for u in cands if len(u["norm"]) == top]
+        owners = [u for u in cands if len(u["norm"]) == top]
+        if keep is not None:
+            return owners
+        cache[e["path"]] = owners
     return cache[e["path"]]
 
 
@@ -1278,9 +1316,14 @@ def cmd_locate(a) -> int:
 # PROT_#### token in a path or message, a 12-hex CoreOmics id, or "submission 807" typed by the
 # user. A bare number in a FILE name is never read as one -- Exploris runs carry counters
 # (Ex08312026_380_JE21). Everything else goes through the same sample-id matching as `locate`.
-PROT_TOKEN = re.compile(r"(?<![A-Za-z0-9])prot[\s_\-#]*0*(\d{1,5})(?![0-9])", re.I)
-SUBMISSION_WORD = re.compile(r"\bsubmission\s*(?:number|no\.?)?\s*#?\s*0*(\d{1,5})(?![0-9])", re.I)
-HEX_TOKEN = re.compile(r"(?<![0-9a-z])([0-9a-f]{12})(?![0-9a-z])")
+# 3-4 digits after PROT: "Total_prot_10ug" and "WT_prot1" are protein amounts and names, not
+# submissions. A hex id preceded by "xxxx-" is the tail of a UUID/GUID, not a CoreOmics id.
+PROT_TOKEN = re.compile(r"(?<![A-Za-z0-9])prot[_\-# ]?(\d{3,4})(?![A-Za-z0-9])", re.I)
+SUBMISSION_WORD = re.compile(r"\bsubmission\s*(?:number|no\.?)?\s*#?\s*(\d{3,4})(?![0-9])", re.I)
+HEX_TOKEN = re.compile(r"(?<![0-9a-z])(?<![0-9a-f]{4}-)([0-9a-f]{12})(?![0-9a-z])")
+# identify's exit 0 needs more than one lucky id: a generic id ("HeLa", "Blank") can name one
+# file of thirty. The candidate must own at least half the files and two distinct sheet ids.
+MIN_FILE_SHARE, MIN_SHEET_IDS = 0.5, 2
 STALE_SNAPSHOT = "/quobyte/proteomics-grp/coreomics/.submissions_db"
 TOKEN_HELP = (
     "Looking a submission up needs a CoreOmics API token with staff access, saved on THIS "
@@ -1307,55 +1350,20 @@ def ids_in(text: str, typed: bool = False) -> list:
     return list(dict.fromkeys(hits))
 
 
-def list_window(lo: dt.date, hi: dt.date) -> list:
-    """Submissions with `submitted` in [lo, hi], newest first, with their sample ids (the list
-    endpoint already carries them)."""
-    out, page = [], 1
-    while page <= NEIGHBOR_MAX_PAGES:
-        data = api_call("GET", "submissions/", {"lab": LAB, "page": page, "page_size": 100,
-                                                "ordering": "-submitted"})
-        results = data.get("results") if isinstance(data, dict) else data
-        if not isinstance(results, list):
-            raise ApiError(None, "unexpected submissions list payload", api_url("submissions/"))
-        oldest = None
-        for r in results:
-            d = parse_date(r.get("submitted")) if isinstance(r, dict) else None
-            if d is None:
-                continue
-            oldest = d if oldest is None or d < oldest else oldest
-            if lo <= d <= hi:
-                out.append({"internal_id": r.get("internal_id"), "id": r.get("id"), "submitted": d,
-                            "samples": sample_rows(r)})
-        if not results or (oldest is not None and oldest < lo) \
-                or not isinstance(data, dict) or not data.get("next"):
-            return out
-        page += 1
-    return out
-
-
 def attribute_files(names: list, subs: list, max_days: int) -> dict:
     """Which submission's sample ids each raw file name carries -- `locate`'s rules run in
-    reverse. Weak ids (A3, 001) are no evidence. A file dated in its NAME counts only for a
-    submission made on or before that date and within `max_days` of it; an undated name (or a
-    modification time, which a copy resets) counts for every submission using the id. A file
-    two submissions could own is ambiguous, exactly like `locate`'s ambiguous_label."""
-    universe = []
-    for s in subs:
-        label = _s(s.get("internal_id")) or _s(s.get("id"))
-        for smp in s["samples"]:
-            uid = smp.get("unique_id")
-            pat = token_pattern(uid)
-            if pat and not weak_reason(uid):
-                universe.append({"uid": _s(uid), "norm": normkey(uid), "pattern": pat,
-                                 "sub": label, "submitted": s["submitted"]})
+    reverse, on its own pieces (id_universe, file_owners). Weak ids (A3, 001) are no evidence.
+    A file dated in its NAME counts only for a submission made on or before that date and
+    within `max_days` of it; an undated name (or a modification time, which a copy resets)
+    counts for every submission using the id. A file two submissions could own is ambiguous,
+    exactly like `locate`'s ambiguous_label. `subs` are neighbor_row()s."""
+    universe = [u for u in id_universe([], subs, "", None) if not weak_reason(u["uid"])]
     by_sub, ambiguous, loose = {}, [], []
     for n in names:
         e = prepare_entry({"path": n, "name": os.path.basename(_s(n).rstrip("/\\"))})
         d = date_from_name(e["name"])
-        cands = [u for u in universe if u["norm"] in e["norm"] and u["pattern"].search(e["space"])
-                 and (d is None or u["submitted"] <= d <= u["submitted"] + dt.timedelta(days=max_days))]
-        top = max((len(u["norm"]) for u in cands), default=0)
-        owners = [u for u in cands if len(u["norm"]) == top]
+        owners = file_owners(e, universe, {}, keep=lambda u: d is None or (
+            u["submitted"] is not None and u["submitted"] <= d <= u["submitted"] + dt.timedelta(days=max_days)))
         who = sorted({u["sub"] for u in owners})
         if len(who) == 1:
             b = by_sub.setdefault(who[0], {"files": [], "sample_ids": set()})
@@ -1368,14 +1376,28 @@ def attribute_files(names: list, subs: list, max_days: int) -> dict:
     return {"by_submission": by_sub, "ambiguous": ambiguous, "unattributed": loose}
 
 
-def cmd_identify(a) -> int:
-    names = list(a.paths or [])
-    if a.files_from:
+def _names_from(paths: list, files_from) -> list:
+    """The paths as given, plus the raw entries one level inside any folder given (a folder
+    alone has no file names to match)."""
+    names = list(paths or [])
+    if files_from:
         try:
-            with open(a.files_from) as fh:
+            with open(files_from) as fh:
                 names += [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
         except OSError as e:
-            raise Stop(EXIT_DECIDE, {"error": f"cannot read --files-from {a.files_from}: {e.strerror}"})
+            raise Stop(EXIT_DECIDE, {"error": f"cannot read --files-from {files_from}: {e.strerror}"})
+    for p in list(names):
+        if os.path.isdir(p) and not is_raw_name(os.path.basename(p.rstrip("/\\"))):
+            try:
+                names += [os.path.join(p, c) for c in sorted(os.listdir(p)) if is_raw_name(c)]
+            except OSError:
+                pass                        # an unreadable folder adds no names; the path still counts
+    return list(dict.fromkeys(names))
+
+
+def cmd_identify(a) -> int:
+    names = _names_from(a.paths, a.files_from)
+    raws = [n for n in names if is_raw_name(os.path.basename(_s(n).rstrip("/\\")))]
     named = {}
     for n in names:
         for hit in ids_in(n):
@@ -1384,27 +1406,68 @@ def cmd_identify(a) -> int:
         named.setdefault(hit, []).append("in the user's message")
     base = {"never_search": f"{STALE_SNAPSHOT} is a stale snapshot -- never search it for a "
                             f"submission (a search for 0756 there matched an unrelated 2019 record)"}
+    ask_none = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
+                "PROT_0756) or the 12-character CoreOmics id.")
 
     def label_of(kind, key):
         return key if kind == "internal_id" else f"CoreOmics id {key}"
 
-    if len(named) > 1 and not a.no_lookup:
-        # A PROT number and a hex id are often the same submission: look each up, and merge
-        # the ones that are. Without a token they stay separate candidates -- never assumed.
+    def lookup_failed(e):
+        emit(dict(base, status="lookup_failed", detail=e.detail, token_help=TOKEN_HELP,
+                  ask=ask_none + " (CoreOmics could not be asked: " + e.detail + ")"))
+        return EXIT_UNREACHABLE
+
+    have_token = False
+    if not a.no_lookup:
         try:
             api_token()
-            merged = {}
+            have_token = True
+        except ApiError:
+            pass
+
+    if named and have_token:
+        # Look every named id up: a PROT number and a hex id are often one submission, and a
+        # named submission whose sample ids appear in NONE of the file names is asked about.
+        merged, found = {}, {}
+        try:
             for (kind, key), where in named.items():
-                rec = get_submission(kind, key)
+                try:
+                    rec = get_submission(kind, key)
+                except Stop as e:
+                    emit(dict(base, status="not_found", submission=key, detail=e.payload.get("error"),
+                              ask=f"CoreOmics has no submission {label_of(kind, key)} ({where[0]}). "
+                                  f"Which submission is this data from?"))
+                    return EXIT_DECIDE
                 ident = _s(rec.get("internal_id")) or _s(rec.get("id"))
                 k = ("internal_id", ident) if ident.upper().startswith("PROT_") else ("id", ident)
                 merged.setdefault(k, []).extend(where)
-            named = merged
-        except (ApiError, Stop) as e:   # unresolved: they stay separate candidates, and it says why
-            base["lookup_error"] = e.detail if isinstance(e, ApiError) else e.payload.get("error")
+                found[k] = rec
+        except ApiError as e:
+            return lookup_failed(e)
+        named = merged
+        if len(named) == 1:
+            (kind, key), where = next(iter(named.items()))
+            rec = found[(kind, key)]
+            res = attribute_files(raws, [neighbor_row(rec)], a.max_days) if raws else None
+            hit = (res or {}).get("by_submission", {}).get(key)
+            n_sheet = len(sample_rows(rec))
+            if raws and not hit:
+                emit(dict(base, status="named_unconfirmed", submission=key, kind=kind,
+                          evidence=where[:5],
+                          ask=f"{label_of(kind, key)} is named {where[0]}, but none of its "
+                              f"{n_sheet} sample IDs appear in these {len(raws)} file names. Is "
+                              f"this data from {label_of(kind, key)}?"))
+                return EXIT_DECIDE
+            cover = (f": {len(hit['files'])} of {len(raws)} file names carry its sample IDs"
+                     if hit else "")
+            emit(dict(base, status="named", submission=key, kind=kind, evidence=where[:5],
+                      verified=bool(hit), files_matched=len(hit["files"]) if hit else None,
+                      ask=f"This looks like CoreOmics submission {label_of(kind, key)} "
+                          f"({where[0]}{cover}). Is that right?"))
+            return EXIT_OK
     if len(named) == 1:
         (kind, key), where = next(iter(named.items()))
-        emit(dict(base, status="named", submission=key, kind=kind, evidence=where[:5],
+        emit(dict(base, status="named", submission=key, kind=kind, evidence=where[:5], verified=False,
                   ask=f"This looks like CoreOmics submission {label_of(kind, key)} "
                       f"({where[0]}). Is that right?"))
         return EXIT_OK
@@ -1413,20 +1476,14 @@ def cmd_identify(a) -> int:
         emit(dict(base, status="ambiguous", candidates=[{"kind": k, "submission": v, "evidence": w[:5]}
                                                         for (k, v), w in named.items()],
                   ask=f"The names and message mention {', '.join(cands)} -- which submission is "
-                      f"this data from? (A PROT number and a 12-character id may be the same "
-                      f"submission; `fetch` either one to check.)"))
+                      f"this data from?"))
         return EXIT_DECIDE
 
-    raws = [n for n in names if is_raw_name(os.path.basename(_s(n).rstrip("/\\")))] or names
-    ask_none = ("Which CoreOmics submission is this data from? Give the PROT number (e.g. "
-                "PROT_0756) or the 12-character CoreOmics id.")
     if a.no_lookup or not raws:
         emit(dict(base, status="none", looked_up=False, ask=ask_none))
         return EXIT_DECIDE
-    try:
-        api_token()
-    except ApiError as e:
-        emit(dict(base, status="needs_token", looked_up=False, detail=e.detail,
+    if not have_token:
+        emit(dict(base, status="needs_token", looked_up=False,
                   ask=ask_none + " (No PROT number is in the names, and without a CoreOmics token "
                                  "I cannot look it up by sample ID.)", token_help=TOKEN_HELP))
         return EXIT_UNREACHABLE
@@ -1434,24 +1491,39 @@ def cmd_identify(a) -> int:
     today = dt.date.today()
     lo = (min(dates) if dates else today - dt.timedelta(days=a.max_days)) - dt.timedelta(days=a.max_days)
     hi = max(dates) if dates else today
-    subs = list_window(lo, hi)
+    try:
+        recs, truncated = submissions_between(lo, hi)
+    except ApiError as e:
+        return lookup_failed(e)
+    subs = [neighbor_row(r) for r in recs]
     res = attribute_files(raws, subs, a.max_days)
     window = {"from": lo.isoformat(), "to": hi.isoformat(), "submissions_checked": len(subs),
-              "files": len(raws), "files_dated_by_name": len(dates)}
+              "truncated": truncated, "files": len(raws), "files_dated_by_name": len(dates)}
     by = res["by_submission"]
-    sizes = {(_s(s.get("internal_id")) or _s(s.get("id"))): len(s["samples"]) for s in subs}
+    sizes = {(_s(s.get("internal_id")) or _s(s.get("id"))): len(s["unique_ids"]) for s in subs}
     cands = [{"submission": k, "files_matched": len(v["files"]), "files": len(raws),
               "sample_ids_matched": len(v["sample_ids"]), "samples_on_sheet": sizes.get(k),
               "examples": v["files"][:3]} for k, v in sorted(by.items())]
     out = dict(base, window=window, candidates=cands, ambiguous_files=res["ambiguous"][:20],
                n_unattributed=len(res["unattributed"]), unattributed_examples=res["unattributed"][:5])
-    if len(by) == 1 and not res["ambiguous"]:
+    one = len(by) == 1 and not res["ambiguous"]
+    if one and not truncated and cands[0]["files_matched"] >= MIN_FILE_SHARE * len(raws) \
+            and cands[0]["sample_ids_matched"] >= min(MIN_SHEET_IDS, len(raws)):
         c = cands[0]
         emit(dict(out, status="matched", submission=c["submission"],
                   ask=f"These files look like CoreOmics submission {c['submission']}: "
                       f"{c['files_matched']} of {c['files']} file names carry its sample IDs "
                       f"({c['sample_ids_matched']} of {c['samples_on_sheet']} on its sheet). Is that right?"))
         return EXIT_OK
+    if one:
+        c = cands[0]
+        why = ("the submission list was cut off before every submission in the window was checked"
+               if truncated else f"only {c['files_matched']} of {c['files']} file names carry its "
+                                 f"sample IDs")
+        emit(dict(out, status="weak", submission=c["submission"],
+                  ask=f"These files may be CoreOmics submission {c['submission']}, but {why}. "
+                      f"Which submission is this data from?"))
+        return EXIT_DECIDE
     if by or res["ambiguous"]:
         who = sorted(set(by) | {s for f in res["ambiguous"] for s in f["submissions"]})
         emit(dict(out, status="ambiguous",
@@ -1649,8 +1721,8 @@ def submission_md(s: dict, label: str, links: list, sample_rows_: list, work_dir
          f"| CoreOmics | {('[' + label + '](' + url + ')') if url else _md_cell(label)} |",
          f"| Status | {_md_cell(s.get('status'))} |",
          f"| PI | {_md_cell(pi.get('name'))} — {_md_cell(pi.get('institution'))}"
-         f"{(', ' + _s(pi.get('department'))) if pi.get('department') else ''} — {_md_cell(pi.get('email'))} |",
-         f"| Submitter | {_md_cell(sub.get('name'))} — {_md_cell(sub.get('email'))} |",
+         f"{(', ' + _s(pi.get('department'))) if pi.get('department') else ''} |",
+         f"| Submitter | {_md_cell(sub.get('name'))} |",
          f"| Submitted | {_md_cell(s.get('submitted_date'))} |",
          f"| Organism (as submitted — UNCONFIRMED) | {_md_cell(org)} |",
          f"| Experiment type | {_md_cell(', '.join(s.get('experiment_types') or []))} |",

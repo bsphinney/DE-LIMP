@@ -240,13 +240,14 @@ it (a `find` over the Flinders NFS mount does not finish). Exit 3 (the laptop's 
 submission (PI, organism, sample sheet, who prepared the samples), so find it before step 2.
 On the user's computer:
 ```
-python3 scripts/core_submission.py identify <raw files or folder> --text "<the user's message>"
+python3 scripts/core_submission.py identify <raw files and/or their folder> --text "<the user's message>"
 ```
-It reads a `PROT_####` or 12-character CoreOmics id in the paths or the message, else matches
-the sample IDs in the file names against recent submissions by `locate`'s rules (weak ids are
-no evidence; a label two submissions share is ambiguous). Exit **0** → confirm its `ask` in
-one line. Exit **2** → ask for the number with its `ask`. Exit **3** (no CoreOmics token) →
-ask for the number and relay `token_help`; without a token, also ask the key facts (PI,
+It reads a `PROT_####` or 12-character CoreOmics id in the paths or the message (and, with a
+token, checks the named submission's sample IDs are in the file names), else matches the
+sample IDs in the file names against recent submissions by `locate`'s rules (weak ids are no
+evidence; a label two submissions share is ambiguous; one lucky ID is `weak`). Exit **0** →
+confirm its `ask` in one line. Exit **2** → ask for the number with its `ask`. Exit **3** (no
+token, or CoreOmics refused it) → ask for the number and relay `token_help`; without a token, also ask the key facts (PI,
 organism, UniProt, proteins or peptides and who prepared them, buffer, beads, sample sheet)
 and record them with `submission_report.py attach --given` (step 3b) — labelled "given by the
 user", never as the CoreOmics record. **Never search
@@ -306,9 +307,12 @@ locally and on HIVE (`~/core/PROT_0807`).
    ```
    python3 scripts/core_submission.py fetch 807 --out ~/core/PROT_0807
    bash scripts/hive_exec.sh 'mkdir -p ~/core/PROT_0807'
-   bash scripts/hive_exec.sh --put ~/core/PROT_0807/submission_summary.json '~/core/PROT_0807/'
-   bash scripts/hive_exec.sh --put ~/core/PROT_0807/submission.json '~/core/PROT_0807/'
+   bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission_summary.json '~/core/PROT_0807/'
+   bash scripts/hive_exec.sh --put ~/core/PROT_0807/hive/submission.json '~/core/PROT_0807/'
    ```
+   **Only `hive/` goes to HIVE**: a summary with no email or contact, and the allowlisted
+   record. The raw `submission.json` and the full summary (emails, PPMS/billing) stay on this
+   computer, where `bioshare` and `email-draft` read them.
 2. **Locate the raw files — on HIVE** (writes `files.txt`, `sample_files.tsv`, `locate.json`),
    then pull the proposal back for the local steps:
    ```
@@ -344,8 +348,8 @@ locally and on HIVE (`~/core/PROT_0807`).
      "$S/input/"`.
    - **Organism:** `organism_as_submitted` is the submitter's free text. Put it to the staff
      member as the proposed answer and get it confirmed — golden rule #4 still applies.
-   - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, `make_methods.py`
-     (it reads the raw metadata) and provenance — heavy steps as SLURM jobs.
+   - **On HIVE in `$S`:** search, DE, figures, audit, `sample_quality.py`, `make_methods.py
+     --submission "$S"` (it reads the raw metadata) and provenance — heavy steps as SLURM jobs.
    - **Pull what the report needs:**
      ```
      mkdir -p ~/core/PROT_0807/session/output/search

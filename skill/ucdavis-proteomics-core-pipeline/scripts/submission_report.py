@@ -46,13 +46,13 @@ import json
 import os
 import re
 import sys
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import core_submission as cs  # noqa: E402  ids, dates and sample-id matching live there
-from session import paths_for  # noqa: E402  the session layout, one place
+from session import paths_for, read_raw_list  # noqa: E402  the session layout, one place
 
 SCHEMA = "submission_record/1"
 SOURCE_COREOMICS = "CoreOmics"
@@ -81,8 +81,19 @@ LAB_PREP = "i have prepped my samples"
 CORE_PREP = "i want the proteomics core to prepare"
 
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-PHONE = re.compile(r"(?<!\w)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?!\d)")
+# A number introduced as one: "tel: 555-0100", "phone 752 1234".
+LABELLED_PHONE = re.compile(r"\b(?:tel|phone|ph|cell|mobile|fax)\b\.?\s*[:#]?\s*\+?[\d\s().-]{6,}\d", re.I)
+# International: "+", then 8-15 digits with the usual separators ("+44 20 7946 0958").
+INTL_PHONE = re.compile(r"(?<![\w+])\+\d[\d\s().-]{6,22}\d(?!\d)")
+# North American, with or without separators or a leading 1: "(530)555-0100", "5305550100",
+# "530-5550100", "1 530 555 0100". Not a quantity: "100-200-3000 ug" is a dilution series.
+PHONE = re.compile(r"(?<![\w+])(?:1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)"
+                   r"(?!\s?(?:[unpmµ]?[gLlM]\b|mM\b|%))")
+# The only links shown: a CoreOmics submission page, and a UniProt page.
+COREOMICS_URL = re.compile(r"^https://[a-z0-9.-]+/submissions/[0-9a-f]{12}$")
+UNIPROT_URL = re.compile(r"^https://(?:www\.|rest\.)?uniprot\.org/[\w./?=&%:-]*$")
 MISSING, BLANK = "not in the record", "left blank on the form"
+FROM_SUMMARY = "not in submission_summary.json (attach fetch's submission.json)"
 
 
 class RecordError(Exception):
@@ -90,6 +101,15 @@ class RecordError(Exception):
 
 
 # ------------------------------------------------------------------------- the record --
+def scrub(s):
+    """Text with anything shaped like an email address or a phone number removed."""
+    s = EMAIL.sub("[email removed]", str(s))
+    s = LABELLED_PHONE.sub("[phone removed]", s)
+    s = INTL_PHONE.sub(lambda m: "[phone removed]" if 8 <= sum(c.isdigit() for c in m.group(0)) <= 15
+                       else m.group(0), s)
+    return PHONE.sub("[phone removed]", s)
+
+
 def clean(v):
     """Free text as it may appear in a report: contact details removed, whitespace tidied.
     None stays None (the record does not have the field); "" means it was left blank."""
@@ -97,13 +117,13 @@ def clean(v):
         return None
     if isinstance(v, (dict, list, tuple)):
         return None
-    s = PHONE.sub("[phone removed]", EMAIL.sub("[email removed]", str(v)))
+    s = scrub(v)
     lines = [" ".join(ln.split()) for ln in s.replace("\r\n", "\n").split("\n")]
     return "\n".join(ln for ln in lines if ln).strip()
 
 
 def _name(first, last):
-    return clean(" ".join(x for x in (cs._s(first), cs._s(last)) if x)) or None
+    return " ".join(x for x in (clean(first), clean(last)) if x) or None
 
 
 def _internal_id(v):
@@ -120,8 +140,9 @@ def _hex_id(v):
 
 
 def _url(v):
+    """A CoreOmics submission page, or None: nothing else -- no query string, no other site."""
     s = cs._s(v)
-    return s if s.startswith("https://") and " " not in s else None
+    return s if COREOMICS_URL.match(s) else None
 
 
 def _types(v):
@@ -142,7 +163,7 @@ def _base(source):
                         ("internal_id", None), ("id", None), ("url", None),
                         ("submitted_date", None), ("pi", {"name": None, "department": None,
                                                           "institution": None}),
-                        ("submitter", {"name": None})]
+                        ("submitter", {"name": None}), ("basis", None)]
                        + [(k, None) for k in TEXT_KEYS]
                        + [("experiment_types", []), ("samples", [])])
 
@@ -155,7 +176,7 @@ def _from_coreomics(rec):
     _campus, institution, _basis = cs.classify_campus(rec)
     day = cs.parse_date(rec.get("submitted"))
     out = _base(SOURCE_COREOMICS)
-    out.update(internal_id=_internal_id(rec.get("internal_id")), id=_hex_id(rec.get("id")),
+    out.update(basis="record", internal_id=_internal_id(rec.get("internal_id")), id=_hex_id(rec.get("id")),
                url=_url(rec.get("url")), submitted_date=day.isoformat() if day else None,
                pi={"name": _name(rec.get("pi_first_name") or pi.get("first_name"),
                                  rec.get("pi_last_name") or pi.get("last_name")),
@@ -164,8 +185,10 @@ def _from_coreomics(rec):
                experiment_types=_types(sd.get("proteomics_type")),
                samples=_samples(sd.get("samples")))
     for key, form_key in FORM_FIELDS:
-        # On the form but unanswered (null) is blank; absent from the form is missing.
-        out[key] = (clean(sd.get(form_key)) or "") if form_key in sd else None
+        # Unanswered (null) is blank; absent from the form, or not a plain answer, is missing.
+        v = sd.get(form_key)
+        out[key] = (None if form_key not in sd or isinstance(v, (dict, list)) else
+                    "" if v is None else clean(v))
     return out
 
 
@@ -176,7 +199,8 @@ def _from_summary(s):
     sub = s.get("submitter") if isinstance(s.get("submitter"), dict) else {}
     org = s.get("organism_as_submitted")
     out = _base(SOURCE_COREOMICS)
-    out.update(fetched_at=clean(s.get("fetched_at")), internal_id=_internal_id(s.get("internal_id")),
+    out.update(basis="summary", fetched_at=clean(s.get("fetched_at")),
+               internal_id=_internal_id(s.get("internal_id")),
                id=_hex_id(s.get("id")), url=_url(s.get("url")),
                submitted_date=clean(s.get("submitted_date")),
                pi={"name": clean(pi.get("name")) or None,
@@ -198,7 +222,8 @@ def _from_record(r):
     out = _base(source if source in (SOURCE_COREOMICS, SOURCE_USER) else SOURCE_USER)
     pi = r.get("pi") if isinstance(r.get("pi"), dict) else {"name": r.get("pi")}
     sub = r.get("submitter") if isinstance(r.get("submitter"), dict) else {"name": r.get("submitter")}
-    out.update(fetched_at=clean(r.get("fetched_at")), internal_id=_internal_id(r.get("internal_id")),
+    out.update(basis=r.get("basis") if r.get("basis") in ("record", "summary") and source else None,
+               fetched_at=clean(r.get("fetched_at")), internal_id=_internal_id(r.get("internal_id")),
                id=_hex_id(r.get("id")), url=_url(r.get("url")),
                submitted_date=clean(r.get("submitted_date")),
                pi={k: clean(pi.get(k)) or None for k in ("name", "department", "institution")},
@@ -234,16 +259,23 @@ def prepared_by(rec):
     pp = cs._s(rec.get("prot_or_pep")).casefold()
     by_prep = ("lab" if sp.startswith(LAB_PREP) or sp == "lab" else
                "core" if sp.startswith(CORE_PREP) or sp == "core" else None)
-    by_type = "lab" if pp == "peptides" else ("core" if pp == "intact proteins" else None)
-    if by_prep and by_type and by_prep != by_type:
+    # Peptides can only have been made by the lab; intact proteins say nothing about who
+    # extracted them, so they only ever count against a "the lab made peptides" answer.
+    by_type = "lab" if pp == "peptides" else ("proteins" if pp == "intact proteins" else None)
+    if by_prep and by_type and (by_prep, by_type) in (("lab", "proteins"), ("core", "lab")):
         return None, (f"the form contradicts itself: sample prep says "
                       f"\u201c{rec.get('sample_prep')}\u201d but it was sent as "
                       f"\u201c{rec.get('prot_or_pep')}\u201d")
     if by_prep:
         return by_prep, "sample prep answer"
-    if by_type:
-        return by_type, "sent as " + rec.get("prot_or_pep")
+    if by_type == "lab":
+        return "lab", "sent as peptides"
     return None, "the form does not say who prepared the samples"
+
+
+def sent_as_peptides(rec):
+    """Only when the proteins/peptides answer says so: nothing else on the form does."""
+    return cs._s(rec.get("prot_or_pep")).casefold() == "peptides"
 
 
 def raw_data_only(rec):
@@ -308,7 +340,7 @@ def load(session):
     announces but that cannot be read raises RecordError: the report must say so, not drop it."""
     if not session:
         return None
-    p = paths_for(session)
+    p = paths_for(os.path.expanduser(session))
     _sj, block = _session_block(p)
     obj = _read_json(p["submission_record"])
     if obj is None:
@@ -327,12 +359,15 @@ def resolve(source=None, session=None):
         if os.path.isdir(s) and is_session(s):
             return load(s), s
         return read_source(s)[0], session
+    session = os.path.abspath(os.path.expanduser(session)) if session else None
     return load(session), session
 
 
 def attach(session, rec, replace=False):
     """Write the record into the session (see the module docstring). Refuses to replace a
-    different submission's record unless replace=True."""
+    different submission's record unless replace=True. The record is sanitized here too, so no
+    caller can write anything but the allowlisted fields into a session."""
+    rec = sanitize(rec)
     p = paths_for(os.path.expanduser(session))
     if not os.path.isdir(p["input_dir"]):
         raise RecordError(f"not a session directory (no input/): {p['session_dir']}")
@@ -363,12 +398,31 @@ def attach(session, rec, replace=False):
 # A dash with a space on at least one side separates fields ("Old - IgG- Mouse 1"); a dash
 # inside a word ("Wild-type", "Kv2.1") does not.
 FIELD_SPLIT = re.compile(r"\s+-\s*|\s*-\s+")
+# A field naming an individual: the blocking unit. "Rep 2" is NOT one -- a replicate index
+# says nothing about which animal a sample came from.
 UNIT = re.compile(r"^(?P<noun>mouse|mice|rat|animal|pig|dog|monkey|fish|patient|donor|subject|"
                   r"individual|participant|plant|tree)\s*#?\s*(?P<n>\d+)$", re.I)
+REPLICATE_FIELD = re.compile(r"^(?:(?:bio(?:logical)?|tech(?:nical)?)\s*)?(?:rep(?:licate)?|r)?\s*#?\s*\d+$",
+                             re.I)
+REPLICATE_SUFFIX = re.compile(r"^(?P<base>.*?[A-Za-z)])[\s_-]*(?:rep(?:licate)?\s*)?#?\d+$", re.I)
 
 
 def _key(s):
     return " ".join(cs._s(s).split()).casefold()
+
+
+def _fields(name):
+    return [f.strip() for f in FIELD_SPLIT.split(name)]
+
+
+def replicate_base(name):
+    """The condition without a trailing replicate index ("Old - A - Rep 2" -> "Old - A",
+    "Control 3" -> "Control"), or None when it has none."""
+    f = _fields(name)
+    if len(f) > 1 and REPLICATE_FIELD.match(f[-1]):
+        return " - ".join(f[:-1])
+    m = REPLICATE_SUFFIX.match(cs._s(name))
+    return m.group("base").strip() if m else None
 
 
 def _ranges(nums):
@@ -378,102 +432,132 @@ def _ranges(nums):
             out[-1][1] = n
         else:
             out.append([n, n])
-    return ", ".join(f"{a}\u2013{b}" if b > a + 1 else (f"{a}, {b}" if b > a else str(a))
+    return ", ".join(f"{a}–{b}" if b > a + 1 else (f"{a}, {b}" if b > a else str(a))
                      for a, b in out)
 
 
+def _unit_design(rows, col, noun):
+    """rows = [(uid, fields)], col = the unit field. A unit NUMBER alone names an individual
+    only when the sheet numbers them across the whole study: when some other field keeps each
+    number to one of its levels ("Mouse 1-3 Old, 4-6 Young"). Without that, "Mouse 1" under Old
+    and under Young may be two animals whose numbering restarted, so a repeat is `unclear`,
+    never read as pairing."""
+    k = len(rows[0][1])
+    nums = [int(UNIT.match(f[col]).group("n")) for _, f in rows]
+    others = [c for c in range(k) if c != col]
+    levels, by_level = {}, {}
+    for c in others:
+        levels[c] = list(OrderedDict((_key(f[c]), f[c]) for _, f in rows).values())
+        by_level[c] = OrderedDict((lv, set()) for lv in levels[c])
+        for (_uid, f), n in zip(rows, nums):
+            by_level[c][next(lv for lv in levels[c] if _key(lv) == _key(f[c]))].add(n)
+    multi = [c for c in others if len(levels[c]) > 1]
+    between = [c for c in multi if sum(len(s) for s in by_level[c].values())
+               == len(set().union(*by_level[c].values()))]
+    # Who is who: with study-wide numbering, a number within its between-level; without it, every
+    # combination of levels is its own individual (the cautious reading).
+    ident = between if between else multi
+    unit_of = [tuple(_key(f[c]) for c in ident) + (n,) for (_uid, f), n in zip(rows, nums)]
+    factors = []
+    for c in multi:
+        complete = False
+        if c in between:
+            kind = "between"
+        elif not between:
+            kind = "unclear"
+        else:
+            spans = defaultdict(set)
+            for (_uid, f), u in zip(rows, unit_of):
+                spans[u].add(_key(f[c]))
+            sizes = {len(v) for v in spans.values()}
+            kind = ("within" if min(sizes) > 1 else "mixed")
+            complete = sizes == {len(levels[c])}
+        factors.append({"levels": levels[c], "kind": kind,
+                        "complete": kind == "within" and complete,
+                        "units_by_level": {lv: sorted(s) for lv, s in by_level[c].items()}})
+    groups = OrderedDict()
+    for uid, f in rows:
+        g = " - ".join(x for i, x in enumerate(f) if i != col)
+        groups.setdefault(_key(g), {"name": g, "samples": []})["samples"].append(uid)
+    counts = defaultdict(int)
+    for u in unit_of:
+        counts[u] += 1
+    return {"noun": noun, "field": col, "numbers": sorted(set(nums)),
+            "by_sample": {uid: u for (uid, _f), u in zip(rows, unit_of)},
+            "repeated": any(v > 1 for v in counts.values()),
+            "factors": factors, "groups": list(groups.values())}
+
+
 def design(samples):
-    """What the sheet's condition names say about the design. When every name has the same
-    fields and one of them names an individual ("Mouse 3"), that field is the blocking unit:
-    the other fields are the conditions, and the unit tells which samples are paired."""
+    """What the sheet's condition names say about the design. Most names share one pattern of
+    fields; when one field names an individual ("Mouse 3") it is the blocking unit and the rest
+    are the conditions. Names that do not follow the pattern ("Pool") are listed, not dropped."""
     named = [(s["unique_id"], s["condition_name"]) for s in samples if s.get("condition_name")]
     out = {"n_samples": len(samples), "n_named": len(named),
-           "n_distinct": len({_key(c) for _, c in named}), "unit": None}
-    fields = [[f.strip() for f in FIELD_SPLIT.split(c)] for _, c in named]
-    if not named or len({len(f) for f in fields}) != 1 or len(fields[0]) < 2:
+           "n_distinct": len({_key(c) for _, c in named}), "unit": None, "outliers": []}
+    if not named:
         return out
-    k = len(fields[0])
+    split = [(uid, _fields(c)) for uid, c in named]
+    k, n_k = Counter(len(f) for _, f in split).most_common(1)[0]
+    if k < 2 or n_k * 2 <= len(split):
+        return out
+    rows = [(uid, f) for uid, f in split if len(f) == k]
     for col in range(k):
-        ms = [UNIT.match(f[col]) for f in fields]
+        ms = [UNIT.match(f[col]) for _, f in rows]
         nouns = {m.group("noun").lower().replace("mice", "mouse") for m in ms if m}
-        if not all(ms) or len(nouns) != 1:
-            continue
-        noun = nouns.pop()
-        units = [int(m.group("n")) for m in ms]
-        factors = []
-        for other in (c for c in range(k) if c != col):
-            levels = list(OrderedDict((_key(f[other]), f[other]) for f in fields).values())
-            per_unit = defaultdict(set)
-            for f, u in zip(fields, units):
-                per_unit[u].add(_key(f[other]))
-            spans = {len(v) for v in per_unit.values()}
-            kind = "within" if min(spans) > 1 else ("between" if spans == {1} else "mixed")
-            by_level = defaultdict(set)
-            for f, u in zip(fields, units):
-                by_level[f[other]].add(u)
-            factors.append({"levels": levels, "kind": kind,
-                            "complete": kind == "within" and spans == {len(levels)},
-                            "units_by_level": {lv: sorted(by_level[lv]) for lv in levels}})
-        groups = OrderedDict()
-        for (uid, _c), f, u in zip(named, fields, units):
-            g = " - ".join(x for i, x in enumerate(f) if i != col)
-            groups.setdefault(_key(g), {"name": g, "samples": []})["samples"].append(uid)
-        out["unit"] = {"noun": noun, "field": col, "units": sorted(set(units)),
-                       "by_sample": {uid: u for (uid, _c), u in zip(named, units)},
-                       "factors": factors, "groups": list(groups.values())}
-        return out
+        if all(ms) and len(nouns) == 1:
+            out["unit"] = _unit_design(rows, col, nouns.pop())
+            out["outliers"] = [uid for uid, f in split if len(f) != k]
+            return out
     return out
 
 
 def sheet_groups(rec):
     """unique_id -> the group the sheet puts it in: the condition with the blocking unit set
-    aside when the names carry one, else the condition as written."""
+    aside when the names carry one, else without a trailing replicate index when that leaves
+    real groups, else the condition as written."""
+    named = {s["unique_id"]: s["condition_name"] for s in rec["samples"] if s["condition_name"]}
     d = design(rec["samples"])
-    out = {}
-    for s in rec["samples"]:
-        if not s["condition_name"]:
-            continue
-        out[s["unique_id"]] = s["condition_name"]
     if d["unit"]:
+        out = dict(named)
         for g in d["unit"]["groups"]:
-            for uid in g["samples"]:
-                out[uid] = g["name"]
-    return out
+            out.update({uid: g["name"] for uid in g["samples"]})
+        return out
+    bases = {uid: replicate_base(c) or c for uid, c in named.items()}
+    return bases if 1 < len({_key(b) for b in bases.values()}) < len(named) else named
 
 
 # ------------------------------------------------------------ matching sheet to runs --
-def sample_runs(samples, names):
-    """({unique_id: [names]}, [names carrying no sheet id]), by core_submission's matching:
-    delimited tokens, the timsTOF sample field only, the longest id owns a run."""
-    universe = cs.id_universe(samples, [], "", None)
-    by_uid, loose, cache = defaultdict(list), [], {}
-    for n in names:
-        e = cs.prepare_entry({"path": n, "name": os.path.basename(n.rstrip("/"))})
-        owners = {o["uid"] for o in cs.file_owners(e, universe, cache)}
-        for uid in owners:
-            by_uid[uid].append(n)
-        if not owners:
-            loose.append(n)
-    return by_uid, loose
+def run_owners(samples, names):
+    """{name: {unique_id, ...}} by core_submission's matching: delimited tokens, the timsTOF
+    sample field only, the longest id owns a run. Two ids on one run is an ambiguous run."""
+    universe, cache = cs.id_universe(samples, [], "", None), {}
+    return {n: {o["uid"] for o in cs.file_owners(
+                cs.prepare_entry({"path": n, "name": os.path.basename(n.rstrip("/\\"))}),
+                universe, cache)} for n in names}
 
 
-def _read_raw_names(session):
-    p = os.path.join(session, "input", "raw_files.txt")
+def _read_conditions(p):
     try:
-        with open(p, encoding="utf-8") as fh:
-            return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
-    except FileNotFoundError:
-        return None
-
-
-def _read_conditions(session):
-    p = os.path.join(session, "input", "conditions.csv")
-    try:
-        with open(p, newline="", encoding="utf-8-sig") as fh:
+        with open(p["conditions"], newline="", encoding="utf-8-sig") as fh:
             rows = list(csv.DictReader(fh))
     except FileNotFoundError:
         return None
     return [r for r in rows if cs._s(r.get("File.Name"))]
+
+
+def _de_design(p):
+    """(columns the DE models besides Group, a block column or None, de_provenance or None).
+    From de_provenance.json when the DE has run; before that, the columns run_de.R reads from
+    conditions.csv (collect_conditions.COV_COLS). A `block` key in de_provenance names a
+    column the DE blocked on (random effect / duplicateCorrelation)."""
+    prov = _read_json(os.path.join(p["de_dir"], "de_provenance.json"))
+    if isinstance(prov, dict) and cs._s(prov.get("design")).startswith("~"):
+        terms = [x.strip() for x in prov["design"].split("~", 1)[1].split("+")]
+        block = prov.get("block") if isinstance(prov.get("block"), str) else None
+        return [x for x in terms if x not in ("0", "1", "groups", "")], block, prov
+    import collect_conditions
+    return list(collect_conditions.COV_COLS), None, None
 
 
 # ------------------------------------------------------------------ quality notes --
@@ -486,88 +570,127 @@ def _binomial(name):
     return " ".join(cs._s(name).casefold().replace("(", " ").split()[:2])
 
 
-def _organism_note(rec, session):
+def _organism_note(rec, p):
     org = rec.get("organism")
     if org is None:
         return None
     if not org:
         return ("organism_missing", "Organism: left blank on the form, so the submitter never "
                                     "stated which organism the samples are from.")
-    fm = _read_json(os.path.join(session, "input", "search.fasta.meta.json")) if session else None
+    fm = _read_json(p["fasta_meta"]) if p else None
     if not isinstance(fm, dict) or not (fm.get("organism") or fm.get("taxid")):
         return None
     f_org, f_tax = cs._s(fm.get("organism")), fm.get("taxid")
     try:
         import fetch_fasta
     except ImportError as e:
-        return ("organism_unchecked", f"Organism: the form says \u201c{org}\u201d; it could not be "
+        return ("organism_unchecked", f"Organism: the form says “{org}”; it could not be "
                                       f"compared with the search database ({e}).")
-    parts = [org] + [p for p in re.split(r"[,;/()]|\band\b|\bin\b", org) if p.strip()]
-    taxa = {t for t in (fetch_fasta.alias_taxid(p) for p in parts) if t}
+    parts = [org] + [x for x in re.split(r"[,;/()]|\band\b|\bin\b", org) if x.strip()]
+    taxa = {t for t in (fetch_fasta.alias_taxid(x) for x in parts) if t}
     names = {_binomial(fetch_fasta.ORGANISM_TAXIDS[t][0]) for t in taxa if t in fetch_fasta.ORGANISM_TAXIDS}
     if (f_tax and f_tax in taxa) or (f_org and (_binomial(f_org) in names
                                                 or _binomial(f_org) in _binomial(org))):
         return None
     db = f"{f_org or '?'}" + (f" (taxid {f_tax})" if f_tax else "")
     if taxa:
-        return ("organism_mismatch", f"Organism: the form says \u201c{org}\u201d but the search "
+        return ("organism_mismatch", f"Organism: the form says “{org}” but the search "
                                      f"database is {db}. Confirm which is right before using "
                                      f"these results.")
-    return ("organism_unchecked", f"Organism: the form says \u201c{org}\u201d, which could not be "
+    return ("organism_unchecked", f"Organism: the form says “{org}”, which could not be "
                                   f"matched automatically to the search database ({db}). Confirm "
                                   f"they agree.")
 
 
-def _pairing_note(rec, session):
+def _levels_phrase(levels):
+    return (f"both {levels[0]} and {levels[1]}" if len(levels) == 2
+            else f"all {len(levels)} of {', '.join(levels)}")
+
+
+def _model_sentence(rec, u, p):
+    """What the DE does with the unit -- read from de_provenance.json / conditions.csv, never
+    assumed. None when there is nothing to read yet."""
+    rows = _read_conditions(p)
+    cols, block, prov = _de_design(p)
+    if not rows and not prov:
+        return None
+    noun = u["noun"]
+    unit_of_run = {}
+    for run, uids in run_owners(rec["samples"], [r["File.Name"] for r in rows or []]).items():
+        if len(uids) == 1 and next(iter(uids)) in u["by_sample"]:
+            unit_of_run[run] = u["by_sample"][next(iter(uids))]
+
+    def carries(col):
+        pairs = {(unit_of_run[r["File.Name"]], cs._s(r.get(col))) for r in rows or []
+                 if r["File.Name"] in unit_of_run}
+        return len(pairs) == len({x[0] for x in pairs}) == len({x[1] for x in pairs}) > 1
+
+    if block and carries(block):
+        return f"The analysis blocked on the {noun} (“{block}”)."
+    fixed = [c for c in cols if carries(c)]
+    if fixed:
+        return f"The design analysed includes the {noun} as “{fixed[0]}”, a fixed effect."
+    if prov:
+        return (f"The design analysed ({prov['design']}) has no term for the {noun}, so it treated "
+                f"the {prov.get('n_samples') or len(rows or [])} samples as independent.")
+    return (f"No column the DE reads from input/conditions.csv (Group, {', '.join(cols)}) "
+            f"identifies the {noun}, so as set up it will treat the samples as independent.")
+
+
+def _pairing_note(rec, p):
     d = design(rec["samples"])
     u = d["unit"]
     if not u:
         return None
-    noun = u["noun"]
-    cap = noun.capitalize()
-    bits = [f"Pairing in the sample sheet: each condition name carries the {noun} the sample "
-            f"came from ({cap} {_ranges(u['units'])})."]
+    noun, cap = u["noun"], u["noun"].capitalize()
     plural = {"mouse": "mice", "fish": "fish"}.get(noun, noun + "s")
-    for f in sorted(u["factors"], key=lambda f: ("within", "between", "mixed").index(f["kind"])):
-        lv = ", ".join(f["levels"])
+    order = ("within", "unclear", "between", "mixed")
+    facs = sorted(u["factors"], key=lambda f: order.index(f["kind"]))
+    paired = any(f["kind"] == "within" for f in facs)
+    if not (paired or u["repeated"] or any(f["kind"] == "unclear" for f in facs)):
+        return None                       # every sample its own individual: nothing to pair
+    bits = [f"Pairing in the sample sheet: the condition names carry the {noun} each sample came "
+            f"from ({cap} {_ranges(u['numbers'])})."]
+    for f in facs:
         if f["kind"] == "within":
-            bits.append(f"{'Each' if f['complete'] else 'Most'} {noun} gave samples under "
-                        f"{'all ' + str(len(f['levels'])) + ' of' if f['complete'] else 'several of'} "
-                        f"{lv}, so comparisons among those are within-{noun} (paired).")
+            bits.append(f"{'Each' if f['complete'] else 'Some'} {noun} gave samples under "
+                        f"{_levels_phrase(f['levels']) if f['complete'] else 'several of ' + ', '.join(f['levels'])}"
+                        f", so comparisons among those are within-{noun} (paired).")
+        elif f["kind"] == "unclear":
+            lv = f["levels"]
+            bits.append(f"The sheet uses the same {noun} numbers under {_levels_phrase(lv)}, so it "
+                        f"does not say whether {cap} {u['numbers'][0]} under {lv[0]} and under "
+                        f"{lv[1]} is the same {noun}: if so, comparisons among them are paired; "
+                        f"if the numbering restarts per group, they are not. Ask the submitter.")
         elif f["kind"] == "between":
-            by = "; ".join(f"{lv_}: {cap} {_ranges(us)}" for lv_, us in f["units_by_level"].items())
+            by = "; ".join(f"{lv}: {cap} {_ranges(us)}" for lv, us in f["units_by_level"].items())
             bits.append(f"{' vs '.join(f['levels'])} differs between {plural} ({by}).")
+    if not paired and u["repeated"] and not any(f["kind"] == "unclear" for f in facs):
+        bits.append(f"Some {plural} have more than one sample under the same condition.")
     sizes = sorted({len(g["samples"]) for g in u["groups"]})
     bits.append(f"Setting the {noun} aside, the sheet defines {len(u['groups'])} groups of "
-                f"{'/'.join(map(str, sizes))}. Samples from one {noun} are not independent.")
-    rows = _read_conditions(session) if session else None
-    if rows:
-        by_uid, _ = sample_runs(rec["samples"], [r["File.Name"] for r in rows])
-        unit_of_run = {n: u["by_sample"][uid] for uid, ns in by_uid.items()
-                       if uid in u["by_sample"] for n in ns}
-
-        def carries(col):
-            """One value per unit, a different one for each: the column IS the unit."""
-            pairs = {(unit_of_run[r["File.Name"]], cs._s(r.get(col))) for r in rows
-                     if r["File.Name"] in unit_of_run}
-            return len(pairs) == len({p[0] for p in pairs}) == len({p[1] for p in pairs}) > 1
-
-        carried = [c for c in rows[0] if c not in ("File.Name", "Group") and carries(c)]
-        if carried:
-            bits.append(f"The analysed design carries the {noun} as \u201c{carried[0]}\u201d.")
-        else:
-            bits.append(f"The analysed design (input/conditions.csv) has no column for the "
-                        f"{noun}, so the model treated all {len(rows)} samples as independent.")
+                f"{'/'.join(map(str, sizes))}.")
+    if paired or u["repeated"]:
+        bits.append(f"Samples from one {noun} are not independent.")
+    if d["outliers"]:
+        bits.append(f"{len(d['outliers'])} sample(s) do not follow this naming and are not "
+                    f"part of this reading ({_examples(d['outliers'])}).")
+    if p and (paired or u["repeated"]):
+        m = _model_sentence(rec, u, p)
+        if m:
+            bits.append(m)
     return ("pairing", " ".join(bits))
 
 
-def _sheet_vs_raw(rec, session):
-    names = _read_raw_names(session) if session else None
+def _sheet_vs_raw(rec, p):
+    names = read_raw_list(p["session_dir"])
     if not names or not rec["samples"]:
         return []
-    by_uid, loose = sample_runs(rec["samples"], names)
+    owners = run_owners(rec["samples"], names)
+    found = {uid for o in owners.values() for uid in o}
+    loose = [n for n, o in owners.items() if not o]
     uids = [s["unique_id"] for s in rec["samples"] if s["unique_id"]]
-    none = [u for u in uids if u not in by_uid]
+    none = [u for u in uids if u not in found]
     out = []
     if none:
         out.append(("sheet_ids_without_raw", f"Sample sheet vs raw files: {len(none)} of "
@@ -584,45 +707,62 @@ def _sheet_vs_raw(rec, session):
     return out
 
 
-def _conditions_vs_analysed(rec, session):
-    rows = _read_conditions(session) if session else None
+def _conditions_vs_analysed(rec, p):
+    rows = _read_conditions(p)
     d = design(rec["samples"])
-    if not rows or not d["n_named"] or (not d["unit"] and d["n_distinct"] == d["n_named"]):
-        return []
     sheet = sheet_groups(rec)
-    by_uid, _ = sample_runs(rec["samples"], [r["File.Name"] for r in rows])
-    group_of_run = {r["File.Name"]: cs._s(r.get("Group")) for r in rows}
-    analysed = {uid: group_of_run[ns[0]] for uid, ns in by_uid.items() if len(ns) == 1}
-    common = [u for u in analysed if u in sheet]
+    if not rows or not sheet or (not d["unit"] and len({_key(g) for g in sheet.values()}) == len(sheet)):
+        return []
+    owners = run_owners(rec["samples"], [r["File.Name"] for r in rows])
+    groups_of, in_design = defaultdict(set), set()
+    for r in rows:
+        o = owners[r["File.Name"]]
+        in_design |= o
+        if len(o) == 1:                   # a run carrying two sheet ids says nothing here
+            groups_of[next(iter(o))].add(cs._s(r.get("Group")))
     a2s, s2a = defaultdict(set), defaultdict(set)
-    for u in common:
-        a2s[analysed[u]].add(sheet[u])
-        s2a[sheet[u]].add(analysed[u])
+    for uid, groups in groups_of.items():
+        if uid in sheet:
+            for g in groups:
+                a2s[g].add(sheet[uid])
+                s2a[sheet[uid]].add(g)
     bits = []
     for a, ss in sorted(a2s.items()):
         if len(ss) > 1:
-            bits.append(f"group \u201c{a}\u201d pools the sheet's {_examples(sorted(ss), 4)}")
+            bits.append(f"group “{a}” pools the sheet's {_examples(sorted(ss), 4)}")
     for s, aa in sorted(s2a.items()):
         if len(aa) > 1:
-            bits.append(f"the sheet's \u201c{s}\u201d is split across groups {_examples(sorted(aa), 4)}")
-    left_out = [u for u in sheet if u not in analysed]
-    if left_out and common:
-        bits.append(f"{len(left_out)} sheet samples are not in the analysed design "
+            bits.append(f"the sheet's “{s}” is split across groups {_examples(sorted(aa), 4)}")
+    left_out = [u for u in sheet if u not in in_design]
+    if left_out and in_design:
+        n = len(left_out)
+        bits.append(f"{n} sheet sample{'s are' if n > 1 else ' is'} not in the analysed design "
                     f"({_examples(left_out)})")
     if not bits:
         return []
     return [("conditions_differ", "Conditions analysed vs the sample sheet: " + "; ".join(bits) + ".")]
 
 
+def _no_groups(rec, d):
+    """True when the sheet's condition names give no replicate groups at all: every name is
+    its own, even with a trailing replicate index set aside ("sample 1..30" counts as none)."""
+    if d["unit"] or d["n_named"] < 2 or d["n_distinct"] < d["n_named"]:
+        return False
+    names = [s["condition_name"] for s in rec["samples"] if s["condition_name"]]
+    bases = {_key(replicate_base(c) or c) for c in names}
+    return len(bases) in (1, len(names))
+
+
 def quality_notes(rec, session=None):
     """[{"id", "text"}]: gaps in the submission, and places where it disagrees with what was
     analysed. Each is checked against the session's own files; a check with nothing to read
     (no FASTA record yet, no conditions.csv) says nothing rather than guessing."""
+    p = paths_for(os.path.expanduser(session)) if session else None
     notes = []
     if rec["source"] == SOURCE_USER:
         notes.append(("source_user", "These submission details were given by the user during "
                                      "the analysis, not read from the CoreOmics record."))
-    n = _organism_note(rec, session)
+    n = _organism_note(rec, p)
     if n:
         notes.append(n)
     if rec.get("uniprot") == "":
@@ -642,30 +782,31 @@ def quality_notes(rec, session=None):
         notes.append(("sheet_conditions_blank", f"Sample sheet: {len(blank)} of {len(rec['samples'])} "
                                                 f"samples have no condition ({_examples(blank)})."))
     d = design(rec["samples"])
-    if not d["unit"] and d["n_named"] > 1 and d["n_distinct"] == d["n_named"]:
+    if _no_groups(rec, d):
         notes.append(("sheet_conditions_unique", "Sample sheet: every sample has its own condition "
                                                  "name, so the sheet gives no replicate groups. The "
                                                  "groups analysed were not taken from it and are "
                                                  "not corroborated by it."))
-    if session:
-        notes += _sheet_vs_raw(rec, session)
-        notes += _conditions_vs_analysed(rec, session)
-    p = _pairing_note(rec, session)
     if p:
-        notes.append(p)
+        notes += _sheet_vs_raw(rec, p)
+        notes += _conditions_vs_analysed(rec, p)
+    pn = _pairing_note(rec, p)
+    if pn:
+        notes.append(pn)
     return [{"id": i, "text": t} for i, t in notes]
 
 
 # ---------------------------------------------------------------------- rendering --
-def _shown(v):
-    return MISSING if v is None else (v or BLANK)
+def _shown(v, rec=None):
+    if v is None:
+        return FROM_SUMMARY if (rec or {}).get("basis") == "summary" else MISSING
+    return v or BLANK
 
 
 def _prep_text(rec):
     who, _why = prepared_by(rec)
     if who == "lab":
-        return ("the lab prepared peptides" if cs._s(rec.get("prot_or_pep")).casefold() == "peptides"
-                else "the lab prepared the samples")
+        return "the lab prepared peptides" if sent_as_peptides(rec) else "the lab prepared the samples"
     return "the Core prepared the samples" if who == "core" else "not clear from the form"
 
 
@@ -677,16 +818,16 @@ def fields(rec):
         ("PI", who or MISSING),
         ("Submitted by", _shown(rec["submitter"].get("name"))),
         ("Submitted", _shown(rec.get("submitted_date"))),
-        ("Organism (as specified)", _shown(rec.get("organism"))),
-        ("UniProt", _shown(rec.get("uniprot"))),
+        ("Organism (as specified)", _shown(rec.get("organism"), rec)),
+        ("UniProt", _shown(rec.get("uniprot"), rec)),
         ("Experiment type", "; ".join(rec["experiment_types"]) or MISSING),
-        ("Sent as", _shown(rec.get("prot_or_pep"))),
+        ("Sent as", _shown(rec.get("prot_or_pep"), rec)),
         ("Sample preparation", _prep_text(rec) + (f" (\u201c{rec['sample_prep']}\u201d)"
                                                   if rec.get("sample_prep") not in (None, "", "lab", "core") else "")),
-        ("Buffer", _shown(rec.get("buffer"))),
-        ("Beads", _shown(rec.get("beads"))),
-        ("Normalisation", _shown(rec.get("normalisation"))),
-        ("Data analysis requested", _shown(rec.get("data_analysis"))),
+        ("Buffer", _shown(rec.get("buffer"), rec)),
+        ("Beads", _shown(rec.get("beads"), rec)),
+        ("Normalisation", _shown(rec.get("normalisation"), rec)),
+        ("Data analysis requested", _shown(rec.get("data_analysis"), rec)),
     ]
 
 
@@ -717,11 +858,10 @@ def _link(rec, text=None):
     return f"<a href='{_h(rec['url'])}'>{t}</a>" if rec.get("url") else t
 
 
-def _uniprot_html(v):
+def _uniprot_html(v, rec):
     if v is None or v == "":
-        return f"<span class='blank'>{_h(_shown(v))}</span>"
-    m = re.match(r"^https://\S+$", v)
-    return f"<a href='{_h(v)}'>{_h(v)}</a>" if m else _h(v)
+        return f"<span class='blank'>{_h(_shown(v, rec))}</span>"
+    return f"<a href='{_h(v)}'>{_h(v)}</a>" if UNIPROT_URL.match(v) else _h(v)
 
 
 def render_html(rec, notes=()):
@@ -730,9 +870,9 @@ def render_html(rec, notes=()):
     rows = [("Submission", _link(rec))]
     for k, v in fields(rec):
         if k == "UniProt":
-            rows.append((k, _uniprot_html(rec.get("uniprot"))))
+            rows.append((k, _uniprot_html(rec.get("uniprot"), rec)))
         else:
-            cls = " class='blank'" if v in (MISSING, BLANK) else ""
+            cls = " class='blank'" if v in (MISSING, BLANK, FROM_SUMMARY) else ""
             rows.append((k, f"<span{cls}>{_h(v)}</span>" if cls else _h(v)))
     out = [HTML_STYLE, "<div class='subm'>", f"<p class='sub'>{_h(_source_line(rec))}</p>", "<dl>"]
     out += [f"<dt>{_h(k)}</dt><dd>{v}</dd>" for k, v in rows]
@@ -829,11 +969,12 @@ def cmd_attach(a):
         rec["source"] = SOURCE_USER
     if not (rec.get("internal_id") or rec.get("id")):
         return _emit({"error": "the record has no PROT number or CoreOmics id"}, 2)
-    paths = attach(a.session, rec, a.replace)
+    session = os.path.abspath(os.path.expanduser(a.session))
+    paths = attach(session, rec, a.replace)
     who, why = prepared_by(rec)
     return _emit({"attached": label(rec), "source": rec["source"], "prepared_by": who,
                   "prepared_by_basis": why, "n_samples": len(rec["samples"]),
-                  "notes": quality_notes(rec, os.path.abspath(a.session)),
+                  "notes": quality_notes(rec, session),
                   "warnings": warnings, "outputs": paths})
 
 

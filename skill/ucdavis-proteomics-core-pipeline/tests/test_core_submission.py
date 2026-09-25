@@ -605,6 +605,7 @@ class TestStage(unittest.TestCase):
             self.assertFalse(os.path.isabs(os.readlink(link)), "absolute links are invisible over SMB")
             self.assertEqual(os.path.realpath(link), os.path.realpath(f))
         self.assertTrue(os.path.isfile(os.path.join(project, "SUBMISSION.md")))
+        self.assertNotIn("@", read(os.path.join(project, "SUBMISSION.md")), "no email on HIVE")
         self.assertEqual(load(os.path.join(project, cs.MARKER))["id"], HEX)
         self.assertEqual(load(os.path.join(project, cs.MARKER))["share_dir"], SERVER_SHARE)
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "work", "on_campus", "Placeholder lab", "PROT_0807")))
@@ -1229,6 +1230,29 @@ class TestFetch(unittest.TestCase):
         fake.routes[("GET", "/server/api/submissions/")] = listing
         fake.routes[("GET", SHARES)] = lambda q, b: shares
 
+    def test_only_redacted_files_are_written_for_hive(self):
+        """SKILL 1c --puts hive/ to HIVE: never an email, contact or billing field."""
+        rec = record()
+        rec["payment"] = {"display": {"PPMS Order Ref #": "PPMS-CANARY"}}
+        rec["submission_data"]["description"] = "call 530-555-0100 or ada.example@example.org"
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, rec)
+            out_dir = os.path.join(tmp, "PROT_0807")
+            rc, out, p = run(["fetch", "807", "--out", out_dir], child_env(tmp, fake.base))
+            self.assertEqual(rc, 0, p.stderr)
+            full = load(os.path.join(out_dir, "submission_summary.json"))
+            hive_s = load(out["outputs"]["hive_summary"])
+            for f in ("hive_summary", "hive_record"):
+                text = read(out["outputs"][f])
+                for bad in ("@", "555-0100", "PPMS-CANARY", "Robin"):
+                    self.assertNotIn(bad, text, f"{bad} in {f}")
+            self.assertEqual(hive_s["share_dir"], full["share_dir"])
+            self.assertEqual(hive_s["samples"], full["samples"])
+            self.assertEqual(load(out["outputs"]["hive_record"])["schema"], "submission_record/1")
+            # and the HIVE-side steps still work from it
+            s = cs.load_summary(out["outputs"]["hive_summary"])
+            self.assertEqual(s["neighbor_window_days"], full["neighbor_window_days"])
+
     def test_fetch_writes_three_files_and_the_neighbours_in_the_window(self):
         rec = record()
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
@@ -1345,6 +1369,10 @@ class TestIdentifyByName(unittest.TestCase):
         for s in ("FLsep26_wa_202609090050.raw", "Ex08312026_380_JE21.raw", "/x/deadbeefcafe/a.raw",
                   "/Volumes/proteomics/PROTEOMICS/a.d", "08132026__60SPD_DIA-LRS-96_S3-B1_1_23630.d"):
             self.assertEqual(cs.ids_in(s), [], s)
+        for s in ("Total_prot_10ug_rep1.raw", "WT_prot1.raw", "Nuclear_Prot_50ug.raw",
+                  "/tmp/2a31667e-609f-4d85-85ae-f9773f03ff76/raw/a.d"):
+            self.assertEqual(cs.ids_in(s), [], s)
+        self.assertEqual(cs.ids_in("the 2nd submission 3 weeks later", typed=True), [])
         self.assertEqual(cs.ids_in("submission 756 please"), [], "file-name rules for a path")
         self.assertEqual(cs.ids_in("please search submission #756", typed=True), [("internal_id", "PROT_0756")])
 
@@ -1418,6 +1446,15 @@ class TestIdentifyBySampleIds(unittest.TestCase):
             rc, out, _ = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
             self.assertEqual((rc, out["submission"]), (0, "PROT_0756"))
 
+    def test_one_generic_id_in_thirty_files_is_not_enough(self):
+        qc = record(internal_id="PROT_0801", sid="bbbbbbbbbbb6", submitted="2026-07-01T10:00:00-07:00",
+                    samples=[("HeLa", "x"), ("Blank", "y"), ("KG77", "z")])
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[qc]])
+            names = ["/d/08132026__60SPD_DIA-HeLa_S3-A1_1_1.d"] + LRS_RUNS[:29]
+            rc, out, _ = run(["identify"] + names, child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["submission"]), (2, "weak", "PROT_0801"))
+
     def test_weak_ids_are_no_evidence(self):
         wells = record(internal_id="PROT_0761", sid="bbbbbbbbbbb5", submitted="2026-07-01T10:00:00-07:00",
                        samples=[("A1", "x"), ("001", "y")])
@@ -1430,9 +1467,54 @@ class TestIdentifyBySampleIds(unittest.TestCase):
     def test_a_prot_number_and_its_hex_id_are_merged_by_lookup(self):
         with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
             self.serve(fake, [[rec_0756()]])
-            rc, out, p = run(["identify", f"/coreomics/projects/2026/07/{HEX_0756}/share/x.d",
-                              "--text", "this is PROT_0756"], child_env(tmp, fake.base))
+            rc, out, p = run(["identify", f"/coreomics/projects/2026/07/{HEX_0756}/share/x.d"] + LRS_RUNS
+                             + ["--text", "this is PROT_0756"], child_env(tmp, fake.base))
             self.assertEqual((rc, out["status"], out["submission"]), (0, "named", "PROT_0756"), p.stderr)
+            self.assertTrue(out["verified"])
+            self.assertEqual(out["files_matched"], 30)
+
+    def test_a_named_submission_whose_ids_are_in_no_file_name_is_asked_about(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[rec_0756()]])
+            rc, out, _ = run(["identify", "/svc/PROT_0756/Ex08152026_1_other.raw"], child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"]), (2, "named_unconfirmed"))
+            self.assertIn("none of its 30 sample IDs", out["ask"])
+
+    def test_a_named_submission_that_does_not_exist_is_asked_about(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[rec_0756()]])
+            rc, out, _ = run(["identify", "/svc/PROT_0999/a.d"], child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"]), (2, "not_found"))
+
+    def test_a_failed_lookup_says_so_and_how_to_fix_the_token(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            fake.routes[("GET", "/server/api/submissions/")] = lambda q, b: (401, {"detail": "Invalid token."})
+            rc, out, _ = run(["identify"] + LRS_RUNS, child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"]), (3, "lookup_failed"))
+            self.assertIn("Invalid token", out["ask"])
+            self.assertIn("~/.coreomics_token", out["token_help"])
+
+    def test_a_folder_is_listed_for_its_raw_file_names(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            self.serve(fake, [[rec_0756()]])
+            folder = os.path.join(tmp, "JUL26")
+            for r in LRS_RUNS:
+                os.makedirs(os.path.join(folder, os.path.basename(r)))
+            rc, out, p = run(["identify", folder], child_env(tmp, fake.base))
+            self.assertEqual((rc, out["status"], out["submission"]), (0, "matched", "PROT_0756"), p.stderr)
+
+    def test_a_cut_off_submission_list_never_confirms(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeCoreOmics() as fake:
+            later = record(internal_id="PROT_0799", sid="bbbbbbbbbbb7", submitted="2026-06-01T10:00:00-07:00",
+                           samples=[("ZZ1", "x")])
+            self.serve(fake, [[rec_0756()], [later]])
+            with mock.patch.object(cs, "NEIGHBOR_MAX_PAGES", 1):
+                with mock.patch.dict(os.environ, child_env(tmp, fake.base), clear=True):
+                    with contextlib.redirect_stdout(io.StringIO()) as buf:
+                        rc = cs.main(["identify"] + LRS_RUNS)
+            out = json.loads(buf.getvalue())
+            self.assertEqual((rc, out["status"]), (2, "weak"))
+            self.assertTrue(out["window"]["truncated"])
 
 
 # --------------------------------------------------------------------- hive_exec --
