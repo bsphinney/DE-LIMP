@@ -793,11 +793,18 @@ bundle) and act on it:
   itself (step 8).
 - `n_contaminants_dropped_as_target` > 0 is normal, not a failure. The universal
   contaminant set holds sequences identical to real proteins (human keratins; bovine
-  ACTB/EEF1A1/tubulins that are residue-for-residue the human and mouse proteins). Left in,
-  DIA-NN reports those proteins ONLY as `Cont_` groups and `--cont-quant-exclude` drops them
-  from quant — ACTB, EEF1A1 and KRT8 vanished from a real HeLa search this way. `fetch`
-  removes every contaminant entry identical to (or contained in) a target entry, lists them
-  under `contaminants_dropped_as_target`, and warns (expect ~153 for human, ~31 for mouse);
+  ACTB/EEF1A1/tubulins that are residue-for-residue the human proteins) and near-identical to
+  others (bovine EEF1A1 and YWHAZ each differ from the MOUSE protein by one residue). Left in,
+  DIA-NN reports those proteins ONLY as `Cont_` groups, which `--cont-quant-exclude` and
+  `run_de.R`'s contaminant filter (step 8) then drop from quant — ACTB, EEF1A1 and KRT8
+  vanished from a real HeLa search this way, and EEF1A1 and
+  YWHAZ from every run of a mouse-brain study. `fetch` removes every contaminant entry
+  identical to (or contained in) a target entry, and every entry that shares peptides with a
+  target but has fewer than 2 non-overlapping peptides of its own in the search's digest (I =
+  L; `--min-unique-peptides`, 0 = identity rule only), lists them under
+  `contaminants_dropped_as_target` with each one's `reason`, target and `n_unique_peptides`,
+  and warns (expect ~161 for human: 152 identical + 1 contained + 8 by peptide; ~41 for mouse:
+  31 + 10 — bovine EEF1A1, YWHAZ, TUBA1D and seven hair KRTAPs);
   the digestion enzyme(s) named by `--enzyme` are the exception and stay contaminants
   (`contaminants_kept_despite_target_match`; a warning naming a protease dropped as "not in
   --enzyme" means: if that enzyme WAS used, re-run `fetch` with it in `--enzyme`). Tell the user those proteins — skin keratins

@@ -40,7 +40,8 @@ Outputs under --outdir:
 """
 import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
-from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE   # one definition, where it is written
+# one definition each, where it is written
+from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES
 
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
@@ -402,6 +403,20 @@ def main():
             "the corrected database." if not _rule else
             " The original database was built with --keep-target-contaminants; this replays "
             "that faithfully -- drop the flag to get the corrected database.")
+    # A sidecar with the rule but no min_unique_peptides was built with the identity rule
+    # alone, before the peptide rule (near-identical entries: bovine EEF1A1 vs mouse). Today's
+    # fetch_fasta.py would drop more; --min-unique-peptides 0 rebuilds that database. A
+    # recorded non-default threshold is replayed as recorded.
+    if fi and fasta_repro_contam != "none" and _rule and _rule != KEEP_TARGET_CONTAMINANTS_RULE:
+        _k = fi.get("min_unique_peptides")
+        if _k is None:
+            fasta_repro_keep += " --min-unique-peptides 0"
+            fasta_repro_note += (
+                " The original database was built before near-identical contaminants were "
+                "removed; this replays that faithfully -- drop --min-unique-peptides 0 to get "
+                "the corrected database.")
+        elif _k != MIN_UNIQUE_PEPTIDES:
+            fasta_repro_keep += f" --min-unique-peptides {int(_k)}"
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
