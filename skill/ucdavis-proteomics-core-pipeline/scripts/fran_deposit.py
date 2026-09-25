@@ -1702,8 +1702,32 @@ def entry_log_state(runs, entry, output_dir=None):
     return res
 
 
+def _staged_epoch(v):
+    """A manifest's staged_at as epoch seconds, or None. Epoch numbers and ISO 8601 (a trailing
+    "Z" included, which Python 3.10's fromisoformat refuses). TWIN: FRAN ingest/find_uningested.py
+    `_staged_epoch`, which reads the same field to order the drop box oldest-first."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    try:
+        return float(str(v).strip())
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.fromisoformat(str(v).strip().replace("Z", "+00:00")).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def incoming_health(runs, now=None, drop=None):
-    """Every entry in the drop dir: age, who staged it, broken links, and what the logs say."""
+    """Every entry in the drop dir: age, who staged it, broken links, and what the logs say.
+
+    An entry's AGE is its manifest's staged_at -- when it was first handed over -- and the entry
+    directory's mtime only when there is none. Rewriting a manifest (a repair, a QC withdrawal)
+    bumps the directory mtime: on 2026-09-25 the repaired search_mouse_mousecont entry, staged
+    2026-09-08, showed as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough
+    to hide a starved entry under STARVED_AFTER_H."""
     now = now or time.time()
     drop = drop or os.environ.get("FRAN_DROP_DIR", DROP_DIR)
     res = {"drop_dir": drop, "verdict": "unknown", "entries": []}
@@ -1714,16 +1738,21 @@ def incoming_health(runs, now=None, drop=None):
         res["detail"] = f"cannot read {drop}: {e.strerror or e}"
         return res
     for e in ents:
-        try:
-            age_d = (now - e.stat(follow_symlinks=False).st_mtime) / 86400
-        except OSError:
-            age_d = None
         man = {}
         try:
             with open(os.path.join(e.path, MANIFEST)) as fh:
                 man = json.load(fh)
         except (OSError, ValueError):
             pass
+        staged = _staged_epoch(man.get("staged_at")) if isinstance(man, dict) else None
+        if staged:
+            age_d, age_src = (now - staged) / 86400, "staged_at"
+        else:
+            try:
+                age_d = (now - e.stat(follow_symlinks=False).st_mtime) / 86400
+                age_src = "entry mtime"
+            except OSError:
+                age_d, age_src = None, None
         try:
             broken = [f for f in os.listdir(e.path)
                       if os.path.islink(os.path.join(e.path, f))
@@ -1740,6 +1769,7 @@ def incoming_health(runs, now=None, drop=None):
         res["entries"].append({
             "entry": e.name, "age_days": None if age_d is None else round(age_d, 1),
             "staged_by": man.get("staged_by"), "staged_at": man.get("staged_at"),
+            "age_source": age_src,
             "engine": man.get("engine"), "output_dir": man.get("output_dir"),
             "search_name": man.get("search_name"), "state": st["state"],
             "outcome": st["outcome"], "when": st["when"], "detail": st["detail"],

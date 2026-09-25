@@ -335,6 +335,36 @@ class IncomingTests(unittest.TestCase):
             self.assertAlmostEqual(inc["oldest_never_reached_days"], 29, delta=0.2)
             self.assertTrue(os.path.isdir(old))
 
+    def test_age_is_staged_at_not_the_mtime_of_a_rewritten_manifest(self):
+        """search_mouse_mousecont on 2026-09-25: staged 2026-09-08, manifest repaired today. The
+        rewrite bumped the entry's mtime, so it read as 0 days old and hid a starved entry."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            ent = e.entry("search_mouse_mousecont__9ad24935", age_h=0)     # mtime: just now
+            month_ago = NOW - 30 * 86400
+            with open(os.path.join(ent, fd.MANIFEST), "w") as fh:
+                json.dump({"output_dir": "/real/mousecont", "engine": "diann",
+                           "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                      time.gmtime(month_ago))}, fh)
+            os.utime(ent, (NOW, NOW))                                    # rewritten "today"
+            legacy = e.entry("GallPlasCer__5b11a0d9", age_h=5 * 24)       # no staged_at: mtime
+            inc = fd.incoming_health([], NOW, e.drop)
+            by = {x["entry"]: x for x in inc["entries"]}
+            self.assertAlmostEqual(by["search_mouse_mousecont__9ad24935"]["age_days"], 30, delta=0.1)
+            self.assertEqual(by["search_mouse_mousecont__9ad24935"]["age_source"], "staged_at")
+            self.assertAlmostEqual(by["GallPlasCer__5b11a0d9"]["age_days"], 5, delta=0.1)
+            self.assertEqual(by["GallPlasCer__5b11a0d9"]["age_source"], "entry mtime")
+            self.assertEqual(inc["verdict"], "starved")
+            self.assertAlmostEqual(inc["oldest_never_reached_days"], 30, delta=0.1)
+            self.assertTrue(os.path.isdir(legacy))
+
+    def test_staged_at_forms_frans_reader_accepts(self):
+        epoch = 1788908552.0                                   # 2026-09-08T23:02:32Z
+        for v in ("2026-09-08T23:02:32Z", "2026-09-08T23:02:32+00:00", epoch, str(epoch)):
+            self.assertAlmostEqual(fd._staged_epoch(v), epoch, delta=1, msg=repr(v))
+        for v in (None, True, "", "yesterday", -5):
+            self.assertIsNone(fd._staged_epoch(v), repr(v))
+
     def test_broken_links_are_listed(self):
         with tempfile.TemporaryDirectory() as d:
             e = Env(d)
