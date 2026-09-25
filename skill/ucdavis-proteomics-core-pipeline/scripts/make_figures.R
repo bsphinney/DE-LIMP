@@ -124,6 +124,38 @@ short_sample_names <- function(runs, meta = NULL) {
   data.frame(File.Name = runs, Label = make.unique(lab), Source = src, stringsAsFactors = FALSE)
 }
 
+# Rounded hull around a group's samples: a small circle of points around every sample, then
+# the convex hull of all of them. Works for any n -- a circle for 1 sample, a capsule for 2, a
+# smooth rounded hull for 3+ -- and assumes no distribution, unlike a 95% normal ellipse, which
+# with n = 3 is unstable and enormous. Returned closed (last vertex = first).
+rounded_hull <- function(x, y, r, n_arc = 32) {
+  th <- seq(0, 2 * pi, length.out = n_arc + 1)[-1]
+  px <- as.vector(outer(x, r * cos(th), "+")); py <- as.vector(outer(y, r * sin(th), "+"))
+  h <- grDevices::chull(px, py)
+  data.frame(x = px[c(h, h[1])], y = py[c(h, h[1])])
+}
+
+# Do the group names cross two factors, e.g. Old_JPH3 / Young_IgG = Age x Bait? Only when the
+# "_" split is unambiguous: every name has the same number of "_" tokens, exactly one split
+# point gives two factors with >= 2 levels each crossing (near-)fully (>= 75% of cells), one of
+# them has exactly 2 levels (drawn as point shape + outline style) and the other fits the
+# palette (drawn as colour). Returns per-level colour/style factors, or NULL.
+two_factor_split <- function(lvls) {
+  tok <- strsplit(lvls, "_", fixed = TRUE); k <- unique(lengths(tok))
+  if (length(lvls) < 4 || length(k) != 1 || k < 2) return(NULL)
+  hits <- list()
+  for (p in seq_len(k - 1)) {
+    a <- vapply(tok, function(t) paste(t[seq_len(p)], collapse = "_"), "")
+    b <- vapply(tok, function(t) paste(t[(p + 1):k], collapse = "_"), "")
+    na <- length(unique(a)); nb <- length(unique(b))
+    if (na < 2 || nb < 2 || length(lvls) / (na * nb) < 0.75 || !(na == 2 || nb == 2)) next
+    split <- if (nb == 2 && na != 2) list(colour = a, style = b) else list(colour = b, style = a)
+    if (length(unique(split$colour)) > length(GROUP_PAL)) next
+    hits[[length(hits) + 1]] <- lapply(split, stats::setNames, lvls)
+  }
+  if (length(hits) == 1) hits[[1]] else NULL
+}
+
 de_files <- list.files(de_dir, pattern = "^DE_.*\\.csv$", full.names = TRUE)
 contrast_of <- function(f) sub("\\.csv$", "", sub("^DE_[^_]+_", "", basename(f)))
 
@@ -298,6 +330,18 @@ if (file.exists(em_path)) {
   short_of <- function(x) ifelse(is.na(slab[x]), x, slab[x])
   utils::write.csv(sl, file.path(outdir, "sample_labels.csv"), row.names = FALSE)
   LABELS_NOTE <- " Samples are labelled with short names; sample_labels.csv maps each one to its run file."
+  # How the pipeline describes itself, and which values were measured -- read once, used by
+  # the PCA subtitle and the violins.
+  prov <- read_provenance(file.path(de_dir, "de_provenance.json"))
+  det_f <- file.path(de_dir, "Detection_Matrix.csv")
+  D <- if (file.exists(det_f)) tryCatch({
+    dm <- utils::read.csv(det_f, stringsAsFactors = FALSE, check.names = FALSE)
+    dmat <- as.matrix(dm[, setdiff(names(dm), c("Protein.Group", "Genes", "Protein.Names")), drop = FALSE])
+    storage.mode(dmat) <- "double"; rownames(dmat) <- dm$Protein.Group
+    dmat
+  }, error = function(e) { message("[figures] Detection_Matrix.csv unreadable (", e$message,
+                                   "); figures drawn without detection status"); NULL })
+  vocab <- if (!is.null(D)) detection_vocab(prov, M, D) else NULL
 
   # ---- QC: proteins quantified per sample ----
   # Only when the matrix HAS missing values (e.g. MaxLFQ). A DPC/limpa matrix is complete by
@@ -356,27 +400,144 @@ if (file.exists(em_path)) {
   # complete-ish matrix for PCA/heatmap: keep proteins seen in all samples; if too
   # few, mean-impute per protein (PCA/heatmap need no NAs).
   complete <- M[rowSums(is.na(M)) == 0, , drop = FALSE]
-  Mi <- if (nrow(complete) >= 10) complete else {
+  mi_imputed <- nrow(complete) < 10
+  Mi <- if (!mi_imputed) complete else {
     imp <- M; rm <- rowMeans(imp, na.rm = TRUE)
     imp[is.na(imp)] <- rm[row(imp)[is.na(imp)]]; imp[rowSums(is.na(imp)) == 0, , drop = FALSE]
   }
 
   # ---- PCA ----
+  # Every group is circled with a rounded hull (rounded_hull) and named on the plot itself, so
+  # nobody bounces to a legend, and the axes share one scale, so distances between samples are
+  # true. When the group names cross two factors (two_factor_split), one is colour and the other
+  # point shape + outline style -- never filled vs hollow, which the violins reserve for
+  # measured vs inferred. The subtitle states how the PCA was computed, from the code below.
   tryCatch({
-    if (ncol(Mi) >= 3 && nrow(Mi) >= 5) {
-      pc <- prcomp(t(Mi), scale. = TRUE)
-      ve <- round(100 * pc$sdev^2 / sum(pc$sdev^2), 1)
-      pdf <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2], Sample = short_of(colnames(Mi)),
-                        Group = if (!is.null(grp)) grp else "all")
-      p <- ggplot(pdf, aes(PC1, PC2, color = Group, label = Sample)) +
-        geom_point(size = 3) +
-        labs(title = "Sample PCA",
-             x = sprintf("PC1 (%.1f%%)", ve[1]), y = sprintf("PC2 (%.1f%%)", ve[2])) + THEME
-      if (!is.null(grp)) p <- p + scale_color_manual(values = group_colours(levels(grp)))
-      if (has_repel) p <- p + ggrepel::geom_text_repel(size = 3, show.legend = FALSE)
+    Mp <- Mi[apply(Mi, 1, stats::var) > 0, , drop = FALSE]    # prcomp cannot scale a constant protein
+    n_const <- nrow(Mi) - nrow(Mp)
+    if (ncol(Mp) >= 3 && nrow(Mp) >= 5) {
+      pc <- prcomp(t(Mp), scale. = TRUE)
+      ve <- 100 * pc$sdev^2 / sum(pc$sdev^2)
+      g  <- if (!is.null(grp)) grp else factor(rep("all samples", ncol(Mp)))
+      pdf <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2], Sample = short_of(colnames(Mp)),
+                        Group = as.character(g), stringsAsFactors = FALSE)
+      tf <- two_factor_split(levels(g))
+      pdf$Colour <- if (is.null(tf)) pdf$Group else unname(tf$colour[pdf$Group])
+      pdf$Style  <- if (is.null(tf)) "all" else unname(tf$style[pdf$Group])
+      col_lv <- unique(if (is.null(tf)) levels(g) else tf$colour[levels(g)])
+      sty_lv <- unique(if (is.null(tf)) "all" else tf$style[levels(g)])
+      pal  <- group_colours(col_lv)
+      dark <- stats::setNames(grDevices::rgb(t(grDevices::col2rgb(pal) / 255 * 0.62)), paste(col_lv, "text"))
+      message("[figures] PCA encoding: ", if (is.null(tf)) "one colour per group" else
+              sprintf("two factors -- colour = %s; shape/outline = %s", paste(col_lv, collapse = "/"),
+                      paste(sty_lv, collapse = "/")))
+
+      span <- max(diff(range(pdf$PC1)), diff(range(pdf$PC2)))
+      hull <- do.call(rbind, lapply(split(pdf, pdf$Group), function(z) cbind(
+        rounded_hull(z$PC1, z$PC2, 0.035 * span), Group = z$Group[1], Colour = z$Colour[1], Style = z$Style[1])))
+      cen <- do.call(rbind, lapply(split(pdf, pdf$Group), function(z) data.frame(
+        Group = z$Group[1], Colour = z$Colour[1], PC1 = mean(z$PC1), PC2 = mean(z$PC2))))
+      # samples far from their own group's centroid (> 2x the median such distance) get named
+      m <- match(pdf$Group, cen$Group)
+      dist <- sqrt((pdf$PC1 - cen$PC1[m])^2 + (pdf$PC2 - cen$PC2[m])^2)
+      med <- stats::median(dist[dist > 0])
+      out <- which(is.finite(med) & dist > 2 * med)
+      out <- utils::head(out[order(-dist[out])], 5)
+
+      # Crossed design: join each colour level's centroids across the two style levels (e.g. a
+      # bait's Old and Young groups), so a consistent shift from the second factor shows at once.
+      pair <- NULL
+      if (!is.null(tf)) {
+        cen$Style <- unname(tf$style[cen$Group])
+        a1 <- cen[cen$Style == sty_lv[1], c("Colour", "PC1", "PC2")]
+        a2 <- cen[cen$Style == sty_lv[2], c("Colour", "PC1", "PC2")]
+        pair <- merge(a1, a2, by = "Colour", suffixes = c("_1", "_2"))
+      }
+      shapes <- stats::setNames(c(21, 24)[seq_along(sty_lv)], sty_lv)
+      ltys   <- stats::setNames(c("solid", "22")[seq_along(sty_lv)], sty_lv)
+      p <- ggplot() +
+        geom_polygon(data = hull, aes(x, y, group = Group, fill = Colour, colour = Colour, linetype = Style),
+                     alpha = 0.13, linewidth = 0.55, show.legend = FALSE) +
+        (if (!is.null(pair) && nrow(pair)) geom_segment(data = pair, aes(x = PC1_1, y = PC2_1, xend = PC1_2, yend = PC2_2,
+                                                                         colour = Colour), linewidth = 0.5, alpha = 0.75)) +
+        geom_point(data = cen, aes(PC1, PC2, colour = Colour), shape = 3, size = 2, stroke = 0.6, alpha = 0.6) +
+        geom_point(data = pdf, aes(PC1, PC2, fill = Colour, shape = Style), colour = "white", size = 3.1, stroke = 0.5) +
+        scale_fill_manual(values = pal, guide = "none") +
+        scale_colour_manual(values = c(pal, dark, outlier = "#52514e"), guide = "none") +
+        scale_linetype_manual(values = ltys, guide = "none") +
+        scale_shape_manual(values = shapes, name = NULL,
+                           labels = if (length(sty_lv) == 2) paste0(sty_lv, c(" (circle, solid outline)",
+                                                                              " (triangle, dashed outline)")) else sty_lv) +
+        guides(shape = if (length(sty_lv) == 2) guide_legend(override.aes = list(fill = "#8f8d87", size = 3.4)) else "none") +
+        coord_fixed()
+      labs_df <- rbind(
+        data.frame(x = cen$PC1, y = cen$PC2, label = cen$Group, key = paste(cen$Colour, "text"),
+                   face = "bold", sz = 3.7),
+        data.frame(x = pdf$PC1[out], y = pdf$PC2[out], label = pdf$Sample[out], key = rep("outlier", length(out)),
+                   face = rep("plain", length(out)), sz = rep(2.9, length(out))))
+      if (has_repel) {
+        # the samples go in as empty labels: ggrepel keeps the names off the points
+        keep <- setdiff(seq_len(nrow(pdf)), out)       # (x[-integer(0)] would drop every sample)
+        obst <- data.frame(x = pdf$PC1[keep], y = pdf$PC2[keep], label = rep("", length(keep)),
+                           key = "outlier", face = "plain", sz = 1)
+        p <- p + ggrepel::geom_text_repel(data = rbind(labs_df, obst),
+                   aes(x, y, label = label, colour = key, fontface = face, size = sz),
+                   bg.color = "white", bg.r = 0.12, box.padding = 0.45, point.padding = 0.3,
+                   min.segment.length = 0.3, segment.colour = "#9a9892", segment.size = 0.3,
+                   max.overlaps = Inf, seed = 1, show.legend = FALSE)
+      } else {
+        p <- p + geom_text(data = labs_df, aes(x, y, label = label, colour = key, fontface = face, size = sz),
+                           vjust = -1.1, show.legend = FALSE)
+      }
+      p <- p + scale_size_identity()
+
+      pct_inf <- NA_real_
+      if (!is.null(D) && !is.null(vocab) && identical(vocab$absent, "Inferred")) {
+        z <- D[match(rownames(Mp), rownames(D)), match(colnames(Mp), colnames(D)), drop = FALSE]
+        if (any(!is.na(z))) pct_inf <- 100 * mean(z == 0, na.rm = TRUE)
+      }
+      basis <- sprintf("%s proteins %s, log2 intensities centred and scaled to unit variance per protein%s.",
+                       format(nrow(Mp), big.mark = ","),
+                       if (!mi_imputed) "with a value in every sample" else
+                         "with any value (missing values set to the protein's mean: fewer than 10 had a value in every sample)",
+                       if (n_const) sprintf("; %d constant protein%s left out", n_const, if (n_const > 1) "s" else "") else "")
+      inf_line <- if (is.finite(pct_inf) && pct_inf > 0)
+        sprintf("%.0f%% of these values are inferred by %s (no precursor observed in that run), not measured.",
+                pct_inf, vocab$source)
+      enc_line <- paste0("Rounded hulls circle each group's samples; + = group centroid",
+                         if (!is.null(pair) && nrow(pair)) sprintf("; a line joins the %s and %s centroids of each colour",
+                           sty_lv[1], sty_lv[2]) else "",
+                         if (length(out)) "; named samples lie > 2x the median distance from their group's centroid." else ".")
+      subtitle <- paste(unlist(lapply(c(basis, inf_line, enc_line), strwrap, width = 118)), collapse = "\n")
+      message("[figures] PCA subtitle: ", gsub("\n", " ", subtitle))
+      p <- p + labs(title = "Sample PCA", subtitle = subtitle,
+                    x = sprintf("PC1 (%.1f%%)", ve[1]), y = sprintf("PC2 (%.1f%%)", ve[2])) +
+        theme_bw(base_size = 12) +
+        theme(panel.grid.minor = element_blank(), panel.grid.major = element_line(colour = "#ecebe7", linewidth = 0.35),
+              panel.border = element_rect(colour = "#d6d5cf", fill = NA, linewidth = 0.5),
+              plot.title = element_text(face = "bold", size = 15), plot.title.position = "plot",
+              plot.subtitle = element_text(size = 10, colour = "#52514e", lineheight = 1.15),
+              legend.position = "top", legend.justification = "left", legend.text = element_text(size = 10),
+              legend.margin = margin(0, 0, 0, 0), axis.title = element_text(size = 11, colour = "#3a3936"))
+
+      xr <- range(hull$x); yr <- range(hull$y)
+      asp <- min(1.3, max(0.45, diff(yr) / diff(xr)))
+      n_sub <- length(strsplit(subtitle, "\n")[[1]])
       fn <- file.path(outdir, "pca.png")
-      ggsave(fn, p, width = 7, height = 5.5, dpi = 200)
-      add_fig(fn, "pca", paste0("Principal-component analysis of samples (top 2 PCs). Replicates of the same group should cluster; clear separation between groups indicates a strong global difference, while an outlier sample stands apart.", LABELS_NOTE))
+      ggsave(fn, p, width = 8.4, height = 6.9 * asp + 0.75 + 0.19 * n_sub + if (length(sty_lv) == 2) 0.3 else 0,
+             dpi = 200)
+      enc_cap <- if (!is.null(tf)) sprintf(paste(" The group names cross two factors, so colour = %s and point shape +",
+        "hull outline = %s (%s: circle, solid outline; %s: triangle, dashed outline); a thin line joins the %s and %s",
+        "centroids of each colour, so a consistent shift between them shows as parallel lines."),
+        paste(col_lv, collapse = " / "), paste(sty_lv, collapse = " / "), sty_lv[1], sty_lv[2], sty_lv[1], sty_lv[2]) else ""
+      add_fig(fn, "pca", paste0(
+        "Principal-component analysis of samples (PC1 vs PC2, drawn to equal scale so distances compare). ", basis,
+        if (!is.null(inf_line)) paste0(" ", inf_line) else "",
+        " Each group is circled by a rounded hull around its samples -- the actual spread of its replicates, not a",
+        " statistical confidence region -- and named on the plot; + marks the group centroid.", enc_cap,
+        " Replicates of a group should sit together; well-separated hulls mean a strong global difference between",
+        " groups, and a named sample lies more than twice the median distance from its group's centroid, worth checking.",
+        if (length(ve) >= 3) sprintf(" PC3 explains a further %.1f%%.", ve[3]) else "", LABELS_NOTE))
     }
   }, error = function(e) message("[figures] PCA failed: ", e$message))
 
@@ -442,16 +603,6 @@ if (file.exists(em_path)) {
   # magnitude -- invisible in the DE table. Other groups are left out on purpose: the
   # heatmap already shows the top proteins across every group, and adding them here would
   # bury the two groups the contrast is about.
-  prov <- read_provenance(file.path(de_dir, "de_provenance.json"))
-  det_f <- file.path(de_dir, "Detection_Matrix.csv")
-  D <- if (file.exists(det_f)) tryCatch({
-    dm <- utils::read.csv(det_f, stringsAsFactors = FALSE, check.names = FALSE)
-    dmat <- as.matrix(dm[, setdiff(names(dm), c("Protein.Group", "Genes", "Protein.Names")), drop = FALSE])
-    storage.mode(dmat) <- "double"; rownames(dmat) <- dm$Protein.Group
-    dmat
-  }, error = function(e) { message("[figures] Detection_Matrix.csv unreadable (", e$message,
-                                   "); violins drawn without detection status"); NULL })
-  vocab <- if (!is.null(D)) detection_vocab(prov, M, D) else NULL
   INK <- "#1f1f1d"; MUTED <- "#6b6a66"; EVENT_INK <- "#8a5300"
 
   for (f in de_files) {
