@@ -144,6 +144,32 @@ class Convert(unittest.TestCase):
             self.assertGreaterEqual(h2p.page_count(fh.read()), 1)
 
 
+class FinalizeKeepsThePdf(unittest.TestCase):
+    """finalize's tidy step moved every loose .pdf in output/ into figures/ -- the report's PDF
+    too -- so each finalize reprinted it and left a stray figures/Analysis_Report.pdf."""
+
+    def test_an_up_to_date_pdf_stays_and_is_not_reprinted(self):
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            html = os.path.join(p["output_dir"], "Analysis_Report.html")
+            pdf = os.path.join(p["output_dir"], "Analysis_Report.pdf")
+            with open(html, "w") as fh:
+                fh.write("<html><body>r</body></html>")
+            with open(pdf, "wb") as fh:
+                fh.write(b"%PDF-1.4\nCANARY\n%%EOF\n")
+            os.utime(html, (1000, 1000))                     # the PDF is newer than the HTML
+            for _ in range(2):
+                r = tdp.finalize(p["session_dir"])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                with open(pdf, "rb") as fh:
+                    self.assertTrue(b"CANARY" in fh.read(), "the PDF was reprinted")
+                self.assertFalse(os.path.exists(os.path.join(p["figures_dir"],
+                                                             "Analysis_Report.pdf")))
+                with open(p["manifest_txt"]) as fh:
+                    self.assertIn("made from the current HTML", fh.read())
+
+
 class Integration(unittest.TestCase):
     def test_make_analysis_html_no_pdf(self):
         with tempfile.TemporaryDirectory() as tmp:

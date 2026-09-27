@@ -418,7 +418,10 @@ def do_finalize(a):
             continue
         ext = f.lower().rsplit(".", 1)[-1]
         base = os.path.basename(f)
-        if base in ("AI_Analysis_Report.md", "ANALYSIS_PROMPT.md", "OUTPUT_FILES.md"):
+        # The report's own files stay beside it: Analysis_Report.pdf is a .pdf, and moving it
+        # into figures/ left a stray copy there and made every finalize reprint it.
+        if base in ("AI_Analysis_Report.md", "ANALYSIS_PROMPT.md", "OUTPUT_FILES.md",
+                    "Analysis_Report.pdf"):
             continue
         if ext in ("csv", "tsv"):
             shutil.move(f, os.path.join(p["de_dir"], base))
