@@ -1721,6 +1721,37 @@ keep the acknowledgment exact** (confirm the wording at the source URL). This ca
 standalone — point `--raw` at facility data; no search or DE is needed. → detail:
 `references/methods.md`.
 
+### 9e. Optional: an audio discussion of the results
+When you deliver the final report to a collaborator, **offer** (never make by default) a ~20-min
+two-host audio discussion: Maya, a cell biologist, and Leo, a statistician, on "Signal to
+Noise". It is linked from a "Listen" card at the top of `Analysis_Report.html`. It is for the
+person who submitted the samples. It tells them what their data say and how their samples were
+measured and analysed, and it teaches how proteomics works (LC-MS/MS, DIA, FDR, inferred values,
+empirical Bayes) with their own data. **You write the script** from the report, then check it,
+render it and link it:
+```
+python3 scripts/make_podcast.py check <session>/output/podcast/podcast_script.md \
+    --source <session>/output/AI_Analysis_Report.md <session>/output/methods.md \
+             <session>/output/AUDIT.md <session>/output/SAMPLE_QUALITY.md --forbid-name "<people>"
+python3 scripts/make_podcast.py render <session>/output/podcast/podcast_script.md --tts say
+python3 scripts/make_podcast.py verify <session>/output/podcast/podcast_script.md --cloud-ok "<who, when>"
+python3 scripts/make_podcast.py link <session>/output
+```
+`verify` has Gemini transcribe the rendered audio and compares it with the script. It reports
+the word match ratio, dropped spans and numbers the voice misread, and names the segments to
+listen to. It runs by itself after a consented `--tts gemini` render, and it sends the audio,
+so it needs `--cloud-ok` too.
+`check` matches tokens, not meaning. It fails a number, symbol-like word or capitalised name
+that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
+missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch
+a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
+false sentence built from true tokens, so read the script against the report yourself. Render
+and link refuse until the check passes for the current script and sources. `--tts gemini` sends
+the transcript (never the report) to Google, and nothing without `--cloud-ok` (`--cloud-ok no`
+is a refusal). On a free-tier key Google may use the text, so use a paid-tier key or `--tts say`
+for unpublished data, and record the user's consent.
+→ detail (the brief, the file format, privacy): `references/podcast.md`.
+
 ### 10. Reproducibility bundle (mandatory)
 Assemble the bundle that makes the whole analysis reproducible:
 ```
@@ -1882,6 +1913,8 @@ notification -- not configured for this user". Then summarize: data type (instru
   output), and that these are facts only the user knows — tissue, disease, sex, age, what the
   groups are — which the skill never guesses.
 - for a re-analysis, `DIFFERENCES.md` + `comparison/COMPARISON.md`.
+- if one was made (9e), `output/podcast/podcast.m4a`: say it is AI-generated, that you could
+  not listen to it, and that someone should before it is shared.
 
 If anything was recorded with `report_issue.sh` this session, say so in one line and where
 it went (`report_issue.sh --where`), so the user knows the Core will see it.

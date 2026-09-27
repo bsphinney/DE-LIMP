@@ -43,6 +43,7 @@ import argparse, base64, csv, datetime, html, json, mimetypes, os, re, sys, urll
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
+import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 
 # Galleries (no report only): QC first, then overview, then per-contrast results.
 FIGURE_ORDER = [
@@ -1015,7 +1016,7 @@ def main():
     n_par = 0
     if has_report:
         with open(a.report, encoding="utf-8", errors="replace") as fh:
-            md_text = md_orig = fh.read()
+            md_text = md_orig = make_podcast.strip_block(fh.read())  # its Listen line: the card is below
         # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
         md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
         figs.suppressed += [g for g in gone if g not in figs.suppressed]
@@ -1064,6 +1065,11 @@ def main():
               f"outside the session and were not embedded: {', '.join(figs.rejected)}",
               file=sys.stderr)
 
+    # The optional podcast's Listen card and line (make_podcast.py): added before the files are
+    # written, so the HTML, its .md twin and the PDF printed from the HTML all carry it.
+    outdir = os.path.dirname(os.path.abspath(a.out))
+    doc = make_podcast.add_listen_card(doc, outdir)
+    md_doc = make_podcast.add_listen_md(md_doc, outdir)
     for path, text in ((a.out, doc), (md_out, md_doc)):
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:

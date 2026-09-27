@@ -38,6 +38,9 @@ The orchestrator asks where results should live (SKILL.md step 3b):
     AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
     Analysis_Report.html    # THE report of record: one self-contained page (no Word copy)
     AUDIT.md                # results audit — common-mistake checks (PASS/WARN/FAIL)
+    podcast/                # OPTIONAL audio discussion (make_podcast.py; references/podcast.md):
+                            #   podcast.m4a, podcast_script.md (with its claims ledger),
+                            #   transcript.html, podcast.json, check.txt; .cache/ is scratch
     OUTPUT_FILES.md         # catalog of every file
     comparison/             # (re-analyses) COMPARISON.md + concordance CSVs
   scripts/                  # a copy of the skill scripts that ran this analysis (self-contained)
@@ -74,6 +77,37 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 - The registry record is looked up read-only before the zip (`record_run.locate()`); when the
   run-log hook creates it, the three documents are rewritten with its path and go into the zip
   after the hook, like `MANIFEST.txt`.
+
+### The optional podcast (`output/podcast/`, `make_podcast.py`)
+An AI-generated audio discussion of the finished report, made only when the user asks
+(`references/podcast.md`). It is a **derivative, not a record**: README and AGENTS.md say so,
+and the report and tables stay authoritative.
+- `podcast.m4a` (or `podcast.wav` when there is no AAC encoder): the episode.
+- `podcast_script.md`: the script, with its **"Claims beyond the report"** ledger.
+- `transcript.html`: the disclosure, a player, the transcript, the claims and how it was made.
+- `podcast.json`: show, title, hosts and voices, TTS backend and exact model, cloud consent,
+  script sha256, sources with their sha256, words, duration, `ai_generated: true`.
+- `check.txt`: the fidelity check the render was gated on.
+- `verify.txt`, `verify_transcript.txt`: the ASR round trip (`make_podcast.py verify`) -- word
+  match ratio, spans not heard, numbers not heard with transcript context, segments to listen
+  to; its result is also the `verify` block in `podcast.json`.
+
+`make_podcast.py link <session>/output` adds a "Listen" card near the top of
+`Analysis_Report.html` (hidden when printed, which prints the file name instead), a line under
+the Markdown report's title, and entries in README and AGENTS.md. Each addition sits between
+`<!-- podcast:start -->` / `<!-- podcast:end -->` and is replaced on a re-run.
+`make_analysis_html.py` and `session_docs.py` add the same card and entries on their own when
+`podcast/podcast.json` exists, so regenerating the report or re-finalizing keeps them. An
+`Analysis_Report.pdf` older than the edited HTML is reprinted by `link` (html_to_pdf.py), or
+flagged with an `[INFO]` line saying how to reprint it.
+`podcast/.cache/` (per-chunk TTS audio, ~60 MB for 20 min) is kept on disk for resuming.
+`scripts/scratch_files.py` is the one rule for scratch: every `.cache` folder, every `*.part`
+file, and `podcast.wav` beside `podcast.m4a`. The session zip leaves them out (`zip_excluded`)
+and `make_report.py` does not list them. Never deposit them. The run-registry record
+(`record_run.py`) copies what the Listen card points at: the audio `podcast.json` names,
+`transcript.html`, `podcast_script.md`, `check.txt` and `podcast.json`. A `podcast.json` that is
+unreadable or has a wrong field never stops the report: it is reported as a `[WARN]` and the
+report, README and AGENTS.md are made without the podcast.
 
 ## Re-analysis of the same dataset
 Re-running the same raw data (different engine, version, parameters, FASTA, or

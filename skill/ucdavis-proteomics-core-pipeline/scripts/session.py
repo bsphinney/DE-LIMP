@@ -544,6 +544,11 @@ def do_finalize(a):
         speclib_label = ("predicted spectral libraries (*.predicted.speclib anywhere in the "
                          "session; rebuilt from the FASTA + params, kept on disk where they are)")
         n_speclib = 0
+        # Scratch (scratch_files.py, the one rule): every .cache folder -- make_podcast.py's TTS
+        # chunks, ~60 MB per episode -- every *.part, and podcast.wav beside podcast.m4a. The
+        # podcast itself (podcast.m4a, transcript, script, check.txt, podcast.json) goes in.
+        import scratch_files
+        n_scratch = 0
 
         def is_search_out(d):
             return (os.path.abspath(d) == os.path.abspath(p["search_out"])
@@ -558,6 +563,8 @@ def do_finalize(a):
                 if is_search_out(root) and "quant" in dirs:
                     dirs.remove("quant")
                     n_quant += sum(len(fs) for _, _, fs in os.walk(os.path.join(root, "quant")))
+                files, k = scratch_files.prune(root, dirs, files)
+                n_scratch += k
                 for fn in files:
                     full = os.path.join(root, fn)
                     if fn.endswith(".quant"):
@@ -572,6 +579,8 @@ def do_finalize(a):
                     z.write(full, os.path.join(base, os.path.relpath(full, sdir)))
         excluded[quant_label] = n_quant
         excluded[speclib_label] = n_speclib
+        if n_scratch:
+            excluded[scratch_files.LABEL] = n_scratch
         result["zip"] = archive
         result["zip_excluded"] = excluded
 

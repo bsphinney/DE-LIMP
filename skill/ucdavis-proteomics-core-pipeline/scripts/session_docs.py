@@ -34,6 +34,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from session import paths_for, read_raw_list      # noqa: E402  the session layout, one place
 import share_map                                    # noqa: E402
+import make_podcast                                 # noqa: E402  the optional audio discussion
 
 NOT_RECORDED = "not recorded"
 RAW_HEADER = "# Raw MS files used in this analysis (not copied — too large)."
@@ -368,6 +369,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         "audit": os.path.join(out, "AUDIT.md"),
         "quality": os.path.join(out, "SAMPLE_QUALITY.md"),
         "agents": os.path.join(sd, "AGENTS.md"),
+        "podcast": os.path.join(out, "podcast", "podcast.json"),
     }.items() if v and (has(v) or k in pending)}
     f["de_files"] = sorted(glob.glob(os.path.join(p["de_dir"], "DE_*.csv")))
     f["rel"] = rel
@@ -521,6 +523,10 @@ def readme_md(f, for_html=False):
                      "built): open `Analysis_Report.html`, Print, Save as PDF")
     if not files.get("agents"):
         start.append("- `AGENTS.md` — for an AI assistant: give it this file with the folder")
+    item = (make_podcast.readme_item_md(f["p"]["output_dir"], f["p"]["session_dir"])
+            if files.get("podcast") else "")
+    if item:                                     # after the report it discusses
+        start.insert(1 if files.get("report_html") else 0, item)
     L += ["", "## Start here", "", *start]
     L += ["", "## Summary", "", *summary_lines(f)]
     if f["contrasts"]:
@@ -770,6 +776,8 @@ def agents_md(f):
              "- The full run: no REPRODUCE.md in this folder.")
 
     L += ["", "## Where this lives on HIVE", "", locations_table(f)]
+    if files.get("podcast"):
+        L += ["", *make_podcast.agents_md_lines(f["p"]["output_dir"], f["p"]["session_dir"])]
 
     L += ["", "## Do not", "",
           "- Invent a value, protein, count or threshold that is not in these files.",
