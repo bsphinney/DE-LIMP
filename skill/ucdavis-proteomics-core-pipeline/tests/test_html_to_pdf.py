@@ -215,18 +215,83 @@ class FinalizeKeepsThePdf(unittest.TestCase):
 
     def test_a_stale_pdf_stays_beside_the_report(self):
         """print_report renames a PDF it could not re-print to Analysis_Report.stale.pdf; the
-        next finalize's tidy step must not move that into figures/ either."""
+        next finalize's tidy step must not move that into figures/, and the zip never carries
+        it (scratch_files)."""
+        import json
+        import zipfile
         import test_deposit_package as tdp
         with tempfile.TemporaryDirectory() as d:
             p = tdp.dia_session(d)
             stale = os.path.join(p["output_dir"], "Analysis_Report.stale.pdf")
             with open(stale, "wb") as fh:
                 fh.write(b"%PDF-1.4\nOLD\n%%EOF\n")
-            r = tdp.finalize(p["session_dir"])
+            r = tdp.finalize(p["session_dir"], "--zip")
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertTrue(os.path.isfile(stale))
+            self.assertTrue(os.path.isfile(stale))              # no HTML: nothing supersedes it
             self.assertFalse(os.path.exists(os.path.join(p["figures_dir"],
                                                          "Analysis_Report.stale.pdf")))
+            names = zipfile.ZipFile(json.loads(r.stdout)["zip"]).namelist()
+            self.assertFalse([n for n in names if n.endswith(".stale.pdf")], names)
+
+
+class StalePdfNeverShips(unittest.TestCase):
+    """A *.stale.pdf must never reach a collaborator (release decision, 2026-09-28): it is
+    scratch everywhere, finalize deletes it once a current PDF exists, and when none could be
+    made the [SKIPPED] line says it is kept but not shipped."""
+
+    def setUp(self):
+        import session
+        import make_deposit
+        self._td = tempfile.TemporaryDirectory()
+        self.p = session.paths_for(self._td.name)
+        os.makedirs(self.p["output_dir"])
+        self.html = os.path.join(self.p["output_dir"], "Analysis_Report.html")
+        self.pdf = os.path.join(self.p["output_dir"], "Analysis_Report.pdf")
+        self.stale = os.path.join(self.p["output_dir"], "Analysis_Report.stale.pdf")
+        for path, text in ((self.html, "<html>r</html>"), (self.stale, "%PDF old")):
+            with open(path, "w") as fh:
+                fh.write(text)
+        self.man = make_deposit.Manifest()
+        self.step = session.report_pdf_step
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_scratch_everywhere(self):
+        import scratch_files
+        import make_report
+        self.assertTrue(scratch_files.is_scratch_file("Analysis_Report.stale.pdf"))
+        self.assertIn("*.stale.pdf", scratch_files.LABEL)
+        self.assertEqual(sorted(os.path.basename(f) for f in
+                                make_report.collect([self.p["output_dir"]])),
+                         ["Analysis_Report.html"])
+
+    def test_a_current_pdf_deletes_the_stale_copy(self):
+        def printed(html, pdf):
+            with open(pdf, "w") as fh:
+                fh.write("%PDF new")
+            return "OK", "1 pages, printed"
+        self.step(self.p, self.man, print_report=printed)
+        self.assertFalse(os.path.exists(self.stale))
+        self.assertTrue(any(ln.startswith("[OK]") and "removed the stale copy superseded by the "
+                            "current PDF" in ln for ln in self.man.lines), self.man.lines)
+
+    def test_an_up_to_date_pdf_also_deletes_it(self):
+        with open(self.pdf, "w") as fh:
+            fh.write("%PDF current")
+        os.utime(self.html, (1000, 1000))
+        self.step(self.p, self.man, print_report=lambda *a: self.fail("must not reprint"))
+        self.assertFalse(os.path.exists(self.stale))
+        self.assertTrue(any("made from the current HTML" in ln for ln in self.man.lines))
+
+    def test_no_current_pdf_keeps_it_and_says_it_is_not_shipped(self):
+        long_note = "no Chrome, Chromium or Edge found " + "x" * 200     # html_to_pdf's is long
+        self.step(self.p, self.man, print_report=lambda *a: ("INFO", long_note))
+        self.assertTrue(os.path.isfile(self.stale))
+        line = next(ln for ln in self.man.lines if "Report PDF" in ln)
+        self.assertTrue(line.startswith("[SKIPPED]"), line)
+        self.assertIn("left out of the zip and the file catalog", line)   # survives the cap
+        self.assertIn("no Chrome", line)
 
 
 class Integration(unittest.TestCase):

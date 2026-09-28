@@ -427,6 +427,51 @@ def _zip_docs(zip_path, session_dir, written):
     return "added" if not missing else f"added; not written, so not in the zip: {', '.join(missing)}"
 
 
+def report_pdf_step(p, man, print_report=None):
+    """The report PDF (html_to_pdf.py): made here when step 9 ran where no browser was -- in
+    hive_remote, on HIVE -- or the HTML changed since. Never fatal. A *.stale.pdf (an earlier
+    report that print_report could not re-print) never reaches a collaborator: it is scratch
+    (scratch_files.py), so the zip and the catalog leave it out, and once a current PDF exists it
+    is deleted. `print_report` is html_to_pdf.print_report (a stand-in in tests)."""
+    name = "Report PDF (output/Analysis_Report.pdf)"
+    html_rep = os.path.join(p["output_dir"], "Analysis_Report.html")
+    pdf_rep = os.path.join(p["output_dir"], "Analysis_Report.pdf")
+    stale = os.path.splitext(pdf_rep)[0] + ".stale.pdf"
+    if not os.path.isfile(html_rep):
+        man.info(name, "no output/Analysis_Report.html to print -- step 9 (make_analysis_html.py) "
+                       "has not run")
+        return
+    if os.path.isfile(pdf_rep) and os.path.getmtime(pdf_rep) >= os.path.getmtime(html_rep):
+        status, note = "OK", "made from the current HTML"
+    else:
+        try:
+            if print_report is None:
+                import html_to_pdf
+                print_report = html_to_pdf.print_report
+            # an older PDF that could not be re-printed is renamed *.stale.pdf -> [SKIPPED]
+            status, note = print_report(html_rep, pdf_rep)
+        except Exception as e:                      # recorded, never swallowed
+            status, note = "INFO", f"{type(e).__name__}: {e}"
+    removed = None
+    if os.path.isfile(stale):
+        if status == "OK":
+            try:
+                os.remove(stale)
+                removed = ("OK", "removed the stale copy superseded by the current PDF")
+            except OSError as e:
+                removed = ("SKIPPED", f"the stale copy could not be removed "
+                                      f"({e.strerror or e}); it is left out of the zip")
+        else:
+            # First, so the 200-character cap on a [SKIPPED] reason never cuts it off.
+            status = "SKIPPED"
+            note = ("no current PDF; Analysis_Report.stale.pdf (an earlier report) is kept on disk "
+                    "but left out of the zip and the file catalog, never send it -- " + note)
+    {"OK": man.ok, "SKIPPED": man.skip}.get(status, man.info)(name, note)
+    if removed:
+        (man.ok if removed[0] == "OK" else man.skip)(
+            "Report PDF (output/Analysis_Report.stale.pdf)", removed[1])
+
+
 def do_finalize(a):
     p = paths_for(a.dir)
     if not os.path.isdir(p["session_dir"]):
@@ -489,25 +534,7 @@ def do_finalize(a):
                 deposit = make_deposit.build(p["session_dir"], man, methods_md)
             except Exception as e:
                 man.skip("Deposit package (output/DATA_SUBMISSION)", f"{type(e).__name__}: {e}")
-        # The report PDF (html_to_pdf.py): made here when step 9 ran where no browser was --
-        # in hive_remote, on HIVE -- or the HTML changed since. [INFO], never fatal.
-        html_rep = os.path.join(p["output_dir"], "Analysis_Report.html")
-        pdf_rep = os.path.join(p["output_dir"], "Analysis_Report.pdf")
-        if not os.path.isfile(html_rep):
-            man.info("Report PDF (output/Analysis_Report.pdf)",
-                     "no output/Analysis_Report.html to print -- step 9 (make_analysis_html.py) "
-                     "has not run")
-        elif os.path.isfile(pdf_rep) and os.path.getmtime(pdf_rep) >= os.path.getmtime(html_rep):
-            man.ok("Report PDF (output/Analysis_Report.pdf)", "made from the current HTML")
-        else:
-            try:
-                import html_to_pdf
-                # an older PDF that could not be re-printed is renamed *.stale.pdf -> [SKIPPED]
-                status, note = html_to_pdf.print_report(html_rep, pdf_rep)
-            except Exception as e:                  # recorded, never swallowed
-                status, note = "INFO", f"{type(e).__name__}: {e}"
-            {"OK": man.ok, "SKIPPED": man.skip}.get(status, man.info)(
-                "Report PDF (output/Analysis_Report.pdf)", note)
+        report_pdf_step(p, man)
     registry, registry_note = _registry_lookup(p["session_dir"])
     docs = _write_docs(session_docs, p, man, registry, registry_note,
                        pending=("manifest",))        # MANIFEST.txt is written right below

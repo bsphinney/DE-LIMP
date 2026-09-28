@@ -149,10 +149,13 @@ the Markdown report's title, and entries in README and AGENTS.md. Each addition 
 `podcast/podcast.json` exists, so regenerating the report or re-finalizing keeps them. An
 `Analysis_Report.pdf` older than the edited HTML is reprinted by `link`
 (`html_to_pdf.print_report`); if it cannot be, it is renamed `Analysis_Report.stale.pdf` and
-reported as `[SKIPPED]` with the reason.
+reported as `[SKIPPED]` with the reason. A `*.stale.pdf` never reaches a collaborator: it is
+scratch (below), and the next finalize that has a current PDF deletes it (`[OK] … removed the
+stale copy superseded by the current PDF`); until then its `[SKIPPED]` line says it is kept on
+disk but not shipped.
 `podcast/.cache/` (per-chunk TTS audio, ~60 MB for 20 min) is kept on disk for resuming.
 `scripts/scratch_files.py` is the one rule for scratch: every `.cache` folder, every `*.part`
-file, and `podcast.wav` beside `podcast.m4a`. The session zip leaves them out (`zip_excluded`)
+file, every `*.stale.pdf`, and `podcast.wav` beside `podcast.m4a`. The session zip leaves them out (`zip_excluded`)
 and `make_report.py` does not list them. Never deposit them. The run-registry record
 (`record_run.py`) copies what the Listen card points at: the audio `podcast.json` names,
 `transcript.html`, `podcast_script.md`, `check.txt` and `podcast.json`. A `podcast.json` that is

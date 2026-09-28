@@ -5,6 +5,9 @@ to a record. session.py (the session zip) and make_report.py (OUTPUT_FILES.md) b
   * every `.cache` directory -- make_podcast.py's per-chunk TTS audio (~48 KB per second of
     speech, ~60 MB for a 20-minute episode), kept only so a render can resume;
   * every `*.part` file -- a write still in progress, or one that died;
+  * every `*.stale.pdf` -- a report PDF that no longer matches its HTML (html_to_pdf.print_report
+    renames it rather than leave it looking current). It must never reach a collaborator;
+    finalize deletes it once a current PDF exists (session.report_pdf_step);
   * podcast.wav when podcast.m4a sits beside it (render --keep-wav): the .m4a is the episode.
 
 They stay on disk where they are. Stdlib only.
@@ -12,7 +15,8 @@ They stay on disk where they are. Stdlib only.
 import os
 
 SCRATCH_DIRS = frozenset({".cache"})
-LABEL = "scratch: .cache folders, *.part files, podcast.wav beside podcast.m4a (kept on disk)"
+LABEL = ("scratch: .cache folders, *.part files, *.stale.pdf, podcast.wav beside podcast.m4a "
+         "(kept on disk)")
 
 
 def is_scratch_dir(name):
@@ -20,7 +24,8 @@ def is_scratch_dir(name):
 
 
 def is_scratch_file(name, siblings=()):
-    return name.endswith(".part") or (name == "podcast.wav" and "podcast.m4a" in siblings)
+    return (name.endswith((".part", ".stale.pdf"))
+            or (name == "podcast.wav" and "podcast.m4a" in siblings))
 
 
 def prune(root, dirs, files):
