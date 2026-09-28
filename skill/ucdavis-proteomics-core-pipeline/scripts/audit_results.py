@@ -40,7 +40,8 @@ import sys, os, csv, json, glob, argparse
 from collections import Counter, defaultdict
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
-from fetch_fasta import target_contaminants, seen_only_as_cont, lost_to_contaminants_message
+from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
+                         CONT_TAG)
 # What a subject / animal column is called: one definition, shared with --map.
 from collect_conditions import subject_header, subject_assessment
 
@@ -271,7 +272,7 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
         gone = seen_only_as_cont(kept, [(_tokens(r.get("Protein.Group")), r.get("Genes") or "?")
                                         for r in removed])
         if rec.get("removed"):
-            msg += (f" run_de.R's contaminant filter then removed every {rec.get('tag') or 'Cont_'}"
+            msg += (f" run_de.R's contaminant filter then removed every {rec.get('tag') or CONT_TAG}"
                     f" group from the DE ({rec.get('n_protein_groups')} groups, listed in "
                     f"{rec.get('removed_table')})"
                     + (f", among them {', '.join(gone[:12])}" if gone else "")
