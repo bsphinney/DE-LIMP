@@ -16,6 +16,13 @@ inline instead of shipping the prompt to an external API.
    record: one self-contained page (figures inlined). No Word copy of the report is made
    any more (Word mangled the figures, 2026-09-24); the Methods stay in Word
    (`methods.docx`). An older session's `AI_Analysis_Report.docx` is left in place.
+   The same call writes two twins beside it:
+   - **`Analysis_Report.md`** — the report as plain text with each figure's caption and
+     numbers written out, for NotebookLM and other AI notebooks. `--md-out <path>` puts it
+     elsewhere (default: `--out` with `.md`).
+   - **`Analysis_Report.pdf`** — the HTML printed by a headless Chrome, Chromium or Edge when
+     one is installed (`html_to_pdf.py`). `--no-pdf` skips it; with no browser there is no PDF
+     and the output says so, and `session.py finalize` prints it later where a browser exists.
 4. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
    plain-language description, grouped by purpose.
 
@@ -54,3 +61,14 @@ prompt generator rather than filled with guesses.
 (search output, DE tables, reproducibility bundle, inputs, analysis report).
 Unrecognized files are listed under "Other" with a note — never silently dropped
 (DE-LIMP rule #4, the MANIFEST discipline).
+
+## Less-used flags
+- `make_analysis_html.py` takes its inputs from `--session`; without one, name them:
+  `--report AI_Analysis_Report.md --figures <dir> --tables <dir> [--quality SAMPLE_QUALITY.md]
+  [--audit AUDIT.md]`. `--title` overrides the page title (default: the report's own `#`
+  heading); `--adjp` applies only when the tables carry no `de_provenance.json`.
+- `analysis_prompt.py --qc <QC_Metrics.csv> --gsea <GSEA_Results.csv>` add those sections to
+  the brief; `--report-out` names the report the brief asks for (default `AI_Analysis_Report.md`).
+- `make_report.py --root <dir>`: the folder paths in OUTPUT_FILES.md are shown relative to.
+- `html_to_pdf.py --html <report.html> [--pdf <out.pdf>] [--timeout 120]`: print a report by
+  hand (default: beside it, `.pdf`).

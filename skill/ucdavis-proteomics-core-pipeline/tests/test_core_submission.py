@@ -886,6 +886,19 @@ class TestDeliver(DeliverBase):
         self.assertTrue(dj["verified"])
         self.assertEqual((dj["share_dir"], dj["internal_id"]), (SERVER_SHARE, "PROT_0807"))
 
+    def test_the_podcast_audio_and_transcript_go_to_the_collaborator(self):
+        rc, out, p = self.deliver("--apply", "--label", "t0")
+        self.assertEqual(rc, 0, p.stderr)
+        manifest_no = read(os.path.join(self.share, "PROT_0807_t0", "MANIFEST.txt"))
+        self.assertIn("[SKIPPED] podcast/ -- none was made (optional)", manifest_no)
+        for fn in ("podcast.m4a", "transcript.html", "podcast.json", "podcast_script.md", ".cache/a.wav"):
+            write(self.output, "podcast/" + fn, fn)
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        got = sorted(os.listdir(os.path.join(self.delivery, "podcast")))
+        self.assertEqual(got, ["podcast.m4a", "transcript.html"], "no cache, script or consent record")
+        self.assertIn("`podcast/`", read(os.path.join(self.delivery, "README.md")))
+
     def test_missing_analysis_report_blocks(self):
         os.remove(os.path.join(self.output, "Analysis_Report.html"))
         rc, out, _ = self.deliver("--apply")

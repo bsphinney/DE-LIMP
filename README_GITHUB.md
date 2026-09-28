@@ -284,6 +284,14 @@ derived from your data type, then limpa/limma DE, and writes a biological analys
 report plus a full reproducibility bundle, all packaged into tidy session folders.
 It runs in **Claude Code** and **Claude Desktop**.
 
+- **One self-contained HTML report** (`Analysis_Report.html`) is the report of record — QC,
+  volcano plots, PCA and violins embedded, with a PDF copy and a plain-text twin for NotebookLM;
+  the session opens from `README.html`.
+- **Publication Methods** and a **PRIDE/MassIVE deposit package** in every session.
+- **UC Davis Proteomics Core runs** carry their CoreOmics submission (PI, organism, sample sheet,
+  who prepared the samples) in every report, and deliver to the collaborator's Bioshare folder.
+- **Optional audio discussion** of the results for the collaborator (AI-generated, on request).
+
 **Install (one time)** — in **Claude Code**:
 ```
 /plugin marketplace add bsphinney/DE-LIMP
@@ -301,8 +309,8 @@ first 3 are control, last 3 treated."* It asks only for what it can't detect
 (organism, conditions) and does the rest. First run installs its toolchain (a few
 minutes, one time).
 
-Source and docs: [`skill/ucdavis-proteomics-core-pipeline/`](skill/ucdavis-proteomics-core-pipeline). Validated
-search workflows live in [`workflows/`](workflows).
+Source and docs: [`skill/ucdavis-proteomics-core-pipeline/`](skill/ucdavis-proteomics-core-pipeline).
+Search parameters ship with the skill, so its version pins them.
 
 ---
 

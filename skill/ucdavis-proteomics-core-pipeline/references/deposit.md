@@ -93,3 +93,6 @@ Methods paragraph and the SDRF cannot disagree.
 Re-read the pages above, then update `PX_TOOL_VERSION`, the protocol/title limits and
 `ACQ_TERMS` in `make_deposit.py` (and this table's dates). If a newer `sdrf-pipelines` accepts
 `NT=diaPASEF;AC=PRIDE:0000650` in a DIA SDRF, write that instead of the parent term.
+
+`make_deposit.py --skip-methods`: build the package without creating `output/methods.md` when it
+is missing; the protocols part is then `[SKIPPED]` in MANIFEST.txt with the reason.

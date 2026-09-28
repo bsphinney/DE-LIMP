@@ -116,6 +116,7 @@ shiny::runApp('/Users/brettphinney/Documents/claude/', port=3838, launch.browser
 
 ### Release Checklist
 1. Bump `VERSION` · 2. Update `CHANGELOG.md` · 3. Update `README_GITHUB.md` → copy to `README.md` · 4. Update `README_HF.md` · 5. Update `docs/index.html` version badge + feature cards · 6. `gh release create vX.Y.Z` · 7. Run the 5 review agents.
+- **Skill release** (separate version): `python3 skill/ucdavis-proteomics-core-pipeline/scripts/bump_version.py <x.y.z|patch|minor>` — moves plugin.json + both marketplace.json fields together (CI fails on a mismatch; never edit them by hand) — plus a `## [Skill x.y.z] — <date>` entry in `CHANGELOG.md`.
 
 ### README Management (CRITICAL)
 - Edit `README_GITHUB.md` for GitHub, `README_HF.md` for HF.

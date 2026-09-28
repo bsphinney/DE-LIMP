@@ -1,6 +1,87 @@
 # Changelog
 
-## [Skill unreleased] — Orbitrap mass accuracy
+## [Skill 2.8.0] — 2026-09-28
+
+The report of record becomes one HTML page, paired and repeated designs are modelled, and
+contaminants no longer reach the statistics. Also: the CoreOmics submission in every Core
+report, and an optional audio discussion for the collaborator.
+
+### Reports
+- **`Analysis_Report.html` is the report of record** everywhere (step 9, the run record,
+  README, AGENTS.md, deliveries); no Word copy of the report is made any more (Word mangled
+  the figures). The Methods stay in Word. The page is restyled on a shared `report_style.py`,
+  renders each figure where the text references it (and only those), and counts "Results at
+  a glance" at adj.P.Val < adjp only — no fold-change filter.
+- **`Analysis_Report.md`**, its plain-text twin with captions and numbers written out (for
+  NotebookLM), and **`Analysis_Report.pdf`**, printed by a headless Chrome/Chromium/Edge
+  (`html_to_pdf.py`; `--no-pdf`, `--md-out`; `finalize` prints it later where no browser was).
+- **`README.html` + `AGENTS.md`** at finalize (`session_docs.py`, `session.py docs`): the page
+  collaborators open, a guide for an AI agent given the folder, and "Where this lives on HIVE"
+  with Windows/Mac paths (`hive_shares.tsv` / `share_map.py`, one definition of the shares).
+- Figures: **top-protein violins** per contrast, each run marked measured or inferred; **PCA
+  circles every group** (rounded hulls, labels on the plot, crossed designs read); short sample
+  names mapped in `sample_labels.csv`; the per-sample protein-count plot is skipped for a
+  complete (DPC) matrix, where every bar was identical.
+
+### Differential expression
+- **`run_de.R --block <column>`** for paired / repeated designs (IPs from the same mouse,
+  biopsies from one patient): a fixed subject effect for a crossed paired design, a random
+  effect (`duplicateCorrelation`, `dpcDE(block=)`) for nested ones (`--block-effect
+  auto|fixed|random`); `--block-scope within|all` reports each contrast from the fit it
+  belongs to, in one run with one record (`de_provenance.json` `block`).
+  `collect_conditions.py` keeps a subject column (Mouse, Patient…) under its own name and
+  suggests `--block`; `--subject-column <header>` confirms an ambiguous one.
+- **`Detection_Matrix.csv`**: measured vs inferred per protein × run (DPC: precursors
+  observed; MaxLFQ: quantified or missing).
+- **Contaminants are removed before quantification** on both methods (`Cont_` precursors,
+  DIA-NN's own rule), with `QC_contaminant_share.csv` / `contaminants_removed.csv`; before,
+  every `Cont_` group was tested and bovine serum proteins came out as hits.
+  `--keep-contaminants` restores the old behaviour, recorded either way.
+- `sample_quality.py`'s confound check is a permutation F-test (the max–min gap flagged
+  every panel of a 10-group design); its panels see mouse/rat gene names.
+
+### Sequence database
+- `fetch_fasta.py` drops contaminant entries the search cannot tell apart from a target
+  protein — identical, contained, or near-identical by the peptide rule (bovine EEF1A1 and
+  YWHAZ are one residue from mouse) — so those proteins are quantified under their own
+  accessions. A database built by the identity rule alone is named as a contaminant risk.
+- The Core's shared human + contaminant FASTA was rebuilt (`MRS/`, 2026-09-25; the Sep-2025
+  file stays for old searches' provenance); `docs/HPC_PATHS.md` has both.
+- `provenance.py`'s replay rebuilds the database the run actually searched
+  (`--enzyme`, `--keep-target-contaminants`, `--min-unique-peptides 0` as recorded).
+
+### Methods
+- The LC and instrument method are read from the `.d` (Evosep method, TIMS ramp, collision
+  energy ramp, window overlap, cycle time, source settings), in the order dia-PASEF papers use.
+- A peptide submission's Sample preparation says the submitting laboratory prepared it.
+
+### Core service runs (CoreOmics)
+- **`core_submission.py`**: `identify` (which submission is this data? — named ids first, then
+  sample ids, never a guess), `fetch`, `locate` (a sample id finds its run even when the name
+  adds a dash: LRS96 = LRS-96), `stage`, `conditions`, `deliver` (real files into the Bioshare
+  share, the podcast's audio and transcript included), `bioshare`, `email-draft`. Only an
+  allowlisted record and a redacted summary go to HIVE.
+- **`submission_report.py`**: the submission stored once per session and shown first in every
+  report (PI, organism, description as written, sample sheet, who prepared the samples), with
+  Data Quality Notes — organism vs the FASTA, blank UniProt, sheet ids vs raw files, conditions
+  vs the design analysed, pairing read from the condition names.
+- **`ht_manifest.py`**: an HT plate's file list from STAN, never a glob (SKILL.md step 1a).
+
+### Optional audio discussion
+- **`make_podcast.py`** `check` / `render` / `verify` / `link`: a two-host discussion of the
+  finished report for the collaborator, written by the agent, checked token by token against
+  the report, rendered with Gemini TTS (rate-limit aware, resumable) or macOS `say`, heard back
+  by an ASR round trip, and linked from a "Listen" card. Only on request; never blocks a report.
+
+### From 2.6.0 and 2.7.0 (not logged here before)
+- 2.6.0: publication Methods (`methods.md` / `.docx`) and the PRIDE/MassIVE deposit package
+  (`output/DATA_SUBMISSION/`) in every session zip.
+- 2.7.0: the job-end hook for every search job — the Core run log, the automatic FRAN
+  hand-off (`fran_deposit.py`: health, backfill, QC exclusion) and Slack notifications — and
+  the central run registry (`record_run.py`). The FRAN manifest now reads the database and
+  organism from the search's own FASTA.
+
+## [Skill 2.5.0] — 2026-09-21 — Orbitrap mass accuracy
 
 ### Changed — BREAKING for existing `workflow.yaml` files
 

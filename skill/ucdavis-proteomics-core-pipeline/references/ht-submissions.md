@@ -247,3 +247,7 @@ verified live against `ucd.stan-proteomics.org`:
 The durable fix for the CLI path is a group-readable token under
 `/quobyte/proteomics-grp`; until then the HTTP + share-token route is what makes this
 workflow usable by the Core rather than by one person.
+
+Less-used `ht_manifest.py` flags: `--stan <path>` (the stan binary), `--token <file>` (the STAN
+Postgres credential; or `STAN_PG_TOKEN` / `PGPASSWORD`), `--fran <url>` (the FRAN base URL for
+`link`; or `FRAN_URL`).

@@ -51,7 +51,7 @@ CATALOG = [
      "The master record — registry commit, engine + versions, all parameters, environment, input/output checksums."),
     (r"^REPRODUCE\.md$", "Reproducibility bundle", "Human-readable methods + step-by-step how to re-run."),
     (r"^reproduce\.sh$", "Reproducibility bundle",
-     "Runnable script that rebuilds the env, re-fetches the pinned workflow, and re-runs search + DE."),
+     "Runnable script that rebuilds the env, re-derives the search defaults the skill ships, and re-runs search + DE."),
     (r"^MANIFEST\.txt$", "Reproducibility bundle",
      "Capture log: [OK]/[SKIPPED] for each artifact, so you can trust what the bundle contains."),
     (r"^conda-explicit\.txt$", "Reproducibility bundle", "Fully pinned conda environment lock (URL + md5 per package)."),

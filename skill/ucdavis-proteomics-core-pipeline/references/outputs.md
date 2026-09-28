@@ -27,17 +27,30 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   session.json              # session metadata; `coreomics` names the submission (Core data)
   output/
     search/                 # the normalized search report.parquet (+ search_provenance.json, logs)
-    tables/                 # DE_*.csv, Expression_Matrix.csv, methods.txt, sessionInfo.txt,
-                            #   de_provenance.json, and reproducibility_log.R — the analysis as
-                            #   plain R, runnable with just R + limpa/limma (point users here
-                            #   when they ask for "the code")
+    tables/                 # DE_<method>_<contrast>.csv (one per comparison), Expression_Matrix.csv,
+                            #   Detection_Matrix.csv (per protein x run: DPC = precursors
+                            #   observed, 0 = inferred; MaxLFQ = 1/0 quantified/missing; which
+                            #   applies is de_provenance.json detection_matrix), QC_detected_vs_inferred.csv,
+                            #   QC_contaminant_share.csv + contaminants_removed.csv (the Cont_
+                            #   filter), methods.txt, sessionInfo.txt, de_provenance.json,
+                            #   DE-LIMP_session.rds (DPC runs: load it in the DE-LIMP app), and
+                            #   reproducibility_log.R — the analysis as plain R, runnable with
+                            #   just R + limpa/limma (point users here when they ask for "the code")
     figures/                # volcano / top-protein violins / PCA / heatmap / p-value / QC PNGs
                             #   + figures.json (captions) + sample_labels.csv (the short
                             #   sample names on the plots -> their full run names)
     reproducibility/        # the pinned bundle (reproduce.sh, env lock, sessionInfo, skill.txt, checksums)
-    AI_Analysis_Report.md   # the biological interpretation, with figures (read first)
+    AI_Analysis_Report.md   # the interpretation the agent wrote (step 9); an input to the report
     Analysis_Report.html    # THE report of record: one self-contained page (no Word copy)
+    Analysis_Report.md      # its plain-text twin, captions and numbers written out (NotebookLM)
+    Analysis_Report.pdf     # the same page printed by a headless Chrome/Chromium/Edge, when one
+                            #   is installed (make_analysis_html.py, or finalize via html_to_pdf.py)
+    methods.md / .docx      # publication Methods + the instrument-grant acknowledgment (step 9d;
+                            #   finalize writes them when missing)
     AUDIT.md                # results audit — common-mistake checks (PASS/WARN/FAIL)
+    SAMPLE_QUALITY.md       # biological sample-quality panels (contamination that mimics biology)
+    DATA_SUBMISSION/        # PRIDE / MassIVE deposit package (finalize): HOW_TO_SUBMIT.md/.html,
+                            #   sdrf.tsv, protocols.txt, files_to_upload.tsv, prepare_upload.sbatch
     podcast/                # OPTIONAL audio discussion (make_podcast.py; references/podcast.md):
                             #   podcast.m4a, podcast_script.md (with its claims ledger),
                             #   transcript.html, podcast.json, check.txt; .cache/ is scratch
@@ -50,19 +63,22 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 - `session.py init --name "..." --raw <globs> [--base <path>] [--reanalysis-of <prior>]`
   makes the folders and prints a `paths` map; **route every step's
   `--out`/`--outdir`/`--dest` into those paths**.
-- `session.py finalize --dir <session> [--zip]` writes `README.md` + `README.html` +
-  `AGENTS.md`, moves any loose tables/figures into their subdirs, and (for a re-analysis)
-  writes `DIFFERENCES.md`. `session.py docs --dir <session> [--as <real location>]` writes only
+- `session.py finalize --dir <session> [--zip]` ensures the Methods, writes the deposit package,
+  `README.md` + `README.html` + `AGENTS.md` and `MANIFEST.txt`, prints the report PDF when it is
+  missing and a browser is there, moves any loose tables/figures into their subdirs, (for a
+  re-analysis) writes `DIFFERENCES.md`, and with `--zip` zips the session, then logs the run and
+  posts to the Core's Slack channel (Core runs). `session.py docs --dir <session> [--as <real location>]` writes only
   the three documents (e.g. for a session finalized before they existed, or a copy of one).
 
 ### README.html, README.md and AGENTS.md (`session_docs.py`)
 - **README.html** is what collaborators open: one self-contained page (inline CSS, no external
   assets) rendered from the same text as README.md by make_deposit's Markdown renderer, with links
-  to the analysis report, the Word files, `HOW_TO_SUBMIT.html` and the tables. A double-clicked
+  to the analysis report (HTML, and its PDF and Markdown twin when present), the Methods
+  (`methods.md` / `.docx`), `HOW_TO_SUBMIT.html` and the tables. A double-clicked
   page opened from inside a zip loses its links (Windows extracts only that file): unzip first.
 - **AGENTS.md** is for an AI agent given the folder: the study (organism, groups, contrasts,
   instrument, engine + version), which file is authoritative for what, the columns of `DE_*.csv`
-  / `Expression_Matrix.csv` / `QC_detected_vs_inferred.csv`, the traps (significance as
+  / `Expression_Matrix.csv` / `Detection_Matrix.csv` / `QC_detected_vs_inferred.csv`, the traps (significance as
   `de_provenance.json` records it, inferred vs measured values, contaminants, pull-down controls
   by group name), the AUDIT / SAMPLE_QUALITY notes, how to reproduce, and what not to do. The
   pipeline is described in `de_provenance.json`'s own words -- never a description written here.
@@ -139,3 +155,6 @@ For each shared contrast across ≥2 analyses it reports:
 Outputs: `COMPARISON.md`, `concordance_summary.csv`, and per-pair 3×3 +
 merged-protein CSVs. Use it whenever two analyses of the same dataset exist
 (re-analysis vs original, or two engines/parameter sets side by side).
+
+`session.py init --date YYYY-MM-DD` dates the session folder (default: today) — for a session
+created after the day the analysis actually ran.

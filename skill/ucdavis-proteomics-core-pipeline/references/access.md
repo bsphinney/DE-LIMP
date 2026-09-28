@@ -45,10 +45,14 @@ export HIVE_USER=<hive_user>
 export HIVE_KEY=<private_key_path>        # the path the user gave you
 bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
 ```
-1. **Put the skill's scripts on HIVE once** (they run there):
+1. **Put the skill on HIVE** (its scripts run there) — the first time, and **again after
+   every skill update**, or HIVE runs the old scripts. Put `.claude-plugin/` too: the scripts
+   read the skill version from `../.claude-plugin/plugin.json`, and without it every record
+   (provenance, the run log, the deposit package) says the version is unknown.
    ```
    bash scripts/hive_exec.sh 'mkdir -p ~/proteomics-pipeline'
    bash scripts/hive_exec.sh --put ./scripts '~/proteomics-pipeline/'
+   bash scripts/hive_exec.sh --put ./.claude-plugin '~/proteomics-pipeline/'
    ```
 2. **Toolchain on HIVE:**
    - **Core member:** `acquire_tools.sh` (run on HIVE) finds the group's DIA-NN

@@ -2033,6 +2033,10 @@ DELIVER_FILES = (("Analysis_Report.html", True), ("Analysis_Report.pdf", False),
                  ("Analysis_Report.md", False), ("AI_Analysis_Report.md", False), ("methods.md", False), ("methods.docx", False),
                  ("OUTPUT_FILES.md", False), ("AUDIT.md", False), ("SAMPLE_QUALITY.md", False))
 DELIVER_DIRS = ("tables", "figures", "reproducibility")
+# The optional audio discussion (make_podcast.py): the audio and its transcript only. Its
+# chunk cache, script, check/verify logs and podcast.json (consent notes) stay in the session.
+# The report's "Listen" card links podcast/<file> relative to Analysis_Report.html.
+PODCAST_FILES = ("podcast.m4a", "podcast.wav", "transcript.html")
 SEARCH_FILES = ("report.parquet", "report.pg_matrix.tsv", "report.pr_matrix.tsv", "report.gg_matrix.tsv",
                 "report.unique_genes_matrix.tsv", "report.stats.tsv", "report.log.txt",
                 "search_provenance.json")
@@ -2099,6 +2103,16 @@ def plan_delivery(output_dir: str) -> list:
                                   "reason": "excluded: engine intermediate", "required": False})
                     continue
                 items.append(_plan_file(os.path.join(dirpath, fn), rel))
+    pdir = os.path.join(output_dir, "podcast")
+    if not os.path.isdir(pdir):
+        items.append({"name": "podcast/", "status": "SKIPPED", "required": False,
+                      "reason": "none was made (optional)"})
+    else:
+        audio = [fn for fn in PODCAST_FILES if os.path.exists(os.path.join(pdir, fn))]
+        if not any(fn != "transcript.html" for fn in audio):
+            items.append({"name": "podcast/", "status": "SKIPPED", "required": False,
+                          "reason": "no rendered audio in output/podcast"})
+        items += [_plan_file(os.path.join(pdir, fn), "podcast/" + fn) for fn in audio]
     for fn in SEARCH_FILES:
         items.append(_plan_file(os.path.join(output_dir, "search", fn), "search/" + fn))
     return items
@@ -2330,6 +2344,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             ("methods.docx", "the Methods section as a Word document"),
             ("tables/", tables_description(delivered)),
             ("figures/", "every figure as a separate image file"),
+            ("podcast/", "an optional AI-generated audio discussion of these results (synthetic "
+                         "voices) and its transcript; the report links it near the top"),
             ("reproducibility/", "the pinned record of the run: software versions, parameters, checksums, "
                                  "and reproduce.sh"),
             ("search/", "the search engine's own output (report.parquet and the matrices delivered)"),

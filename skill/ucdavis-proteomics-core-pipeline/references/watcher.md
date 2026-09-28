@@ -141,3 +141,9 @@ background — never present it as a finding about the user's data.
 
 Every fact in `pipeline_notes.py` carries a `source`. If you add one and cannot attribute
 it, do not add it.
+
+`checkpoint.py record` flags are written by the generated `submit.sh`: `--jobs` (the SLURM ids),
+`--desc`, `--next` (the command to run once the stage completes), `--watch-job` / `--watch-log`
+(the job and log the watcher follows for that stage). `check_report_runs.py --files-list <file>` gives the input paths
+one per line; `pipeline_notes.py --index <n>` rotates the progress notes (`--no-fact` leaves out
+the proteomics fact).

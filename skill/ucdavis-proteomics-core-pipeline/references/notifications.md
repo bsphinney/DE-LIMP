@@ -252,3 +252,8 @@ Isolation therefore does not depend on `$SLURM_JOB_ID` being unset: a suite run 
 allocation cannot log, stage or post. `tests/test_job_env_guard.py` fails any test module
 that runs a generated script without it. `test_slack_notify.py` switches single steps back on,
 against a loopback webhook, a fake `record_run.py`, and a temp FRAN drop directory.
+
+The job-end hook calls `notify_slack.py` with flags a person never types: `--from-job` (refuse
+outside a SLURM job), `--facts-b64` (the run's facts, encoded by the generated trap),
+`--started` / `--time-limit-min` / `--signal` (timing and how the job ended), `--fail-only` (not
+the route's last job: post only a failure) and `--fran-stage` (stage a finished search for FRAN).

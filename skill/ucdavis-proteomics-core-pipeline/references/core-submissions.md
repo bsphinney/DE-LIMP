@@ -406,9 +406,28 @@ search.fasta.meta.json}` with the rest. Then locally: write `AI_Analysis_Report.
 ~/core/PROT_0807/session/output/Analysis_Report.html` (its Submission section comes from the
 attached record, never an email address); `to_docx.py` for the Methods only (no Word copy of the report). **Push the finished files back before delivering** — `deliver` copies from `$S`:
 ```
+L=~/core/PROT_0807/session/output
 for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf methods.md methods.docx; do
-  bash scripts/hive_exec.sh --put ~/core/PROT_0807/session/output/$f "$S/output/"; done
+  [ -f "$L/$f" ] && bash scripts/hive_exec.sh --put "$L/$f" "$S/output/"; done
+[ -d "$L/podcast" ] && bash scripts/hive_exec.sh --put "$L/podcast" "$S/output/"   # only if one was made
 ```
+The PDF exists only where a headless browser printed it, so each file is put only if it is
+there. **Then finish the session on HIVE** before delivering — the output-files report (SKILL.md
+step 11) and `finalize` (step 12: README.html, AGENTS.md, the deposit package, MANIFEST.txt, the
+zip and the run log). Without it the delivery goes out with no OUTPUT_FILES.md and the session
+is never recorded:
+```
+bash scripts/hive_exec.sh "cd $S && python3 ~/proteomics-pipeline/scripts/make_report.py \
+    --out output/OUTPUT_FILES.md --search-out output/search --de-dir output/tables \
+    --repro output/reproducibility --extra input/conditions.csv output/figures \
+    output/AUDIT.md output/SAMPLE_QUALITY.md output/Analysis_Report.html \
+    output/Analysis_Report.md output/Analysis_Report.pdf output/methods.md"
+bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $S --zip"
+```
+Then deliver (section 6). `deliver` also takes the podcast's audio and transcript, when there is
+one, into `podcast/` beside the report, which links it. Its script, checks and consent record
+stay in the session.
+
 **Step 8d's expert review always runs**: the result goes to a collaborator.
 
 ## 6. `deliver` — real files into the Bioshare folder (HIVE)
@@ -574,3 +593,13 @@ collaborator nothing, because Bioshare streams files through an Apache module wh
 HIVE, and nothing reported an error.
 That is why `deliver` copies real files, makes only relative Flinders-to-Flinders links, and
 refuses to call a delivery done until it has walked the whole share and found no other symlink.
+
+## Less-used flags
+- `identify --no-lookup`: read ids from the names and the message only; never ask CoreOmics.
+- `locate --raw-root <dir>`: another raw-data root (default `<CORE_FLINDERS_ROOT>/Data/raw_data`).
+- `deliver --service-project <dir>`: the staged service project when it is not discovered;
+  `--force`: deliver a session with no stage record (only after staff confirm it is this
+  submission's); `--no-size-guard` is for the `deliver_job.sh` that `deliver` writes, not by hand.
+- `bioshare send --email | --no-email`: whether Bioshare emails the recipients (default: silent).
+- `submission_report.py attach --replace`: replace a DIFFERENT submission already attached —
+  only when the first one was wrong.

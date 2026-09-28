@@ -71,3 +71,8 @@ file that doesn't exist, or mismatching near-identical names). Keeping the match
 `collect_conditions.py`, grounded in the real run list, means the agent does the
 language understanding while the assignment is verifiable — and every uncertainty
 is surfaced for explicit confirmation rather than guessed.
+
+## Less-used flags
+- `--from-report <report.parquet|.tsv>` takes the run names from a search report, and
+  `--runs "run1,run2,..."` gives them directly, instead of `--from-dir` + `--glob`.
+- `--emit-template ... --covariates Batch,Covariate1`: add covariate columns to the blank sheet.
