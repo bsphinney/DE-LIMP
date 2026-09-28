@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -1100,7 +1101,10 @@ class QcRuleTests(unittest.TestCase):
                      "12May2026_DIA_60spd_HeLa50_S1-A5", "30apr26_HeL50Flextr-tf9d0_100spd_S4-A1",
                      "FL050525_HeL50-Dda-newDualIT-HCDIT_60m_1", "Hel-50_100spd"]
     HELA_KEPT = ["HeLa50ng_titration", "buffer 100mM HeLa50", "HeLa_digest_timecourse"]
-    AGENT = ["PROT_0812 plasma + pooled QC"]
+    AGENT = ["PROT_0812 plasma + pooled QC", "PROT_10234 plasma + pooled QC"]
+    # core_submission.PROT_TOKEN's pattern and flags, which FRAN's find_uningested.PROT_ID_RE
+    # copies literally (it cannot import the skill); FRAN's test pins this same string.
+    PROT_PATTERN = r"(?<![A-Za-z0-9])prot[_\-# ]?(\d{3,5})(?![A-Za-z0-9])"
 
     def test_hela_standard_and_prot_vectors(self):
         for n in self.HELA_EXCLUDED:
@@ -1112,7 +1116,45 @@ class QcRuleTests(unittest.TestCase):
         self.assertEqual(fd.HELA_STD_RE.pattern, r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
         self.assertEqual(fd.RUN_METHOD_RE.pattern,
                          r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
-        self.assertEqual(fd.PROT_ID_RE.pattern, r"(?i)(?<![a-z0-9])prot[-_]?\d{4}(?!\d)")
+
+    def test_the_prot_id_is_core_submissions_one_definition(self):
+        """Rule 3: the QC rule reads a PROT id with the SAME regex `identify` does -- imported, not
+        copied. It once required exactly 4 digits, while --prot takes up to 5."""
+        import core_submission as cs
+        self.assertIs(fd.PROT_ID_RE, cs.PROT_TOKEN)
+        self.assertIsNone(fd.PROT_ID_UNAVAILABLE)
+        self.assertEqual((cs.PROT_TOKEN.pattern, cs.PROT_TOKEN.flags & re.I),
+                         (self.PROT_PATTERN, re.I))
+        self.assertEqual(cs.ids_in("PROT_10234 plasma"), [("internal_id", "PROT_10234")])
+        self.assertEqual(cs.normalize_submission("PROT_10234"), ("internal_id", "PROT_10234"))
+
+    def test_a_prot_id_anywhere_up_the_path_goes_to_an_agent(self):
+        """The QC signal is read on the last three components (FRAN's reach); a PROT id on all of
+        them -- here it is the fourth from the end."""
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(os.path.join(d, "SERVICE", "Lab", "PROT_0812", "diann", "2.7.0"))
+            q, why = fd.is_qc_run(out, names=["Lumos QC"])
+            self.assertIsNone(q, why)
+            self.assertIn("needs_agent_check", why)
+            self.assertIn("PROT_0812", why)
+            q, why = fd.is_qc_run(search_dir(os.path.join(d, "SERVICE", "Lab", "x", "diann", "2.7.0")),
+                                  names=["Lumos QC"])
+            self.assertIs(q, True, why)                    # no id anywhere: still QC
+
+    def test_no_prot_regex_means_a_person_decides_and_it_is_said(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            with mock.patch.object(fd, "PROT_ID_RE", None), \
+                    mock.patch.object(fd, "PROT_ID_UNAVAILABLE", "core_submission.py could not be "
+                                      "imported (ModuleNotFoundError: x)"), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                q, why = fd.is_qc_run(out, names=["Exploris QC2"])
+                plain = fd.is_qc_run(out, names=["Plasma_liver2"])
+        self.assertIsNone(q)
+        self.assertIn("needs_agent_check", why)
+        self.assertIn("core_submission.py could not be imported", why)
+        self.assertIn("WARNING: cannot look for a PROT id", err.getvalue())
+        self.assertIs(plain[0], False)                     # no QC signal: nothing to refer
 
     def test_the_cores_hela_standard_runs_are_qc(self):
         """HT (Evosep, NN-spd) and Lumos (NNm gradient) HeLa QC, named as the Core names them."""

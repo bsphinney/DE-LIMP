@@ -38,7 +38,7 @@ ACTB = "MDDDIAALVVDNGSGMCKAGFAGDDAPRAVFPSIVGRPRHQGVMVGMGQKDSYVGDEAQSKRGILTLKYPIE
 GAPDH = ("MGKVKVGVNGFGRIGRLVTRAAFNSGKVDIVAINDPFIDLNYMVYMFQYDSTHGKFHGTVKAENGKLVINGNPITIFQERDPSK"
          "IKWGDAGAEYVVESTGVFTTMEKAGAHLQGGAKRVIISAPSADAPMFVMGVNHEKYDNSLKIISNASCTTNCLAPLAKVIHDNF")
 # Enough human entries that OX=9606 holds the >= 95% majority fran_deposit.organism_from_headers
-# needs even counting the Cont_ entries (it does count `>sp|Cont_...` ones -- reported upstream).
+# needs even if the Cont_ entries were counted (they are not: it tests `CONT_TAG in header`, 2.8.0).
 FILLER = "".join(f">sp|Q{i:05d}|F{i}_HUMAN Filler {i} OS=Homo sapiens OX=9606 GN=F{i} PE=1 SV=1\n"
                  + "".join("ACDEFGHILMNPQSTVWY"[(i * 7 + j) % 18] for j in range(15)) + "K\n"
                  for i in range(40))
