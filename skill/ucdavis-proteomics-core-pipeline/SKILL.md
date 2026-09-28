@@ -2022,10 +2022,14 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
 - An analysis delivery fills `<share>/PROT_0807_analysis_<date>/` with `Analysis_Report.html`
   (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
   `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and
-  `transcript.html` only — never its script, checks or consent record), plus `README.md` (every claim from a file actually delivered), `MANIFEST.txt`
+  `transcript.html` only — never its script, checks or consent record), plus `README.html` +
+  `README.md` (every claim from a file actually delivered, every item a link, and the session's
+  "Where this lives on HIVE" table), `AGENTS.md` (the session's guide for an AI assistant, its
+  paths mapped onto the delivery), `MANIFEST.txt`
   (`[OK]` / `[SKIPPED] <name> -- <reason>`, architectural rule #4) and `checksums.sha256`, all
-  group- and world-readable. A raw-only delivery holds the README, MANIFEST, checksums and any
-  methods, with the raw files as relative links in `<share>/raw/`.
+  group- and world-readable. A raw-only delivery holds README.html/.md, MANIFEST, checksums and any
+  methods (no AGENTS.md: there is no session), with the raw files as relative links in
+  `<share>/raw/`.
 - **Verification walks the whole share**: any symlink other than a relative `raw/` link under
   the Flinders root, any file this run did not deliver, or anything unreadable fails it. An
   error mid-copy still writes the MANIFEST and `delivery.json` with `verified: false`. **Exit 2

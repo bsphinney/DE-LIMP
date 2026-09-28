@@ -489,9 +489,15 @@ Every delivery also gets:
 - **`MANIFEST.txt`** — `[OK] <name>` for every item copied and `[SKIPPED] <name> -- <reason>` for
   every item missing, unreadable (including an unreadable subfolder), excluded, or not reached
   because of an error (architectural rule #4).
-- **`README.md`** for the collaborator — every claim traced to a delivered file: "searched" only
-  with `search/` output, "compared between sample groups" only with `DE_*.csv` tables. No
-  internal paths, no email addresses.
+- **`README.html`** (what the collaborator double-clicks) and **`README.md`** (the same text) —
+  every claim traced to a delivered file: "searched" only with `search/` output, "compared
+  between sample groups" only with `DE_*.csv` tables; every item a link that works in this
+  folder; no email addresses. Its only paths are the **"Where this lives on HIVE"** table, from
+  `session_docs.py` (the session's own), so the Core can find the session and raw data again.
+- **`AGENTS.md`** — the session's guide for an AI assistant (`session_docs.agents_md`, from its
+  records), with a note under the title mapping its `output/<x>` paths onto this folder's `<x>`.
+  A raw-only delivery has no session to describe: `[SKIPPED] AGENTS.md` with that reason.
+  AGENTS.md or README.html failing is its own `[SKIPPED]` line and never stops the delivery.
 - **`checksums.sha256`**.
 - permissions `g+rw,o+r` on files and `g+rwxs,o+rx` on folders — Bioshare reads as another
   user, and a copied 0600 file would be unservable.
