@@ -150,6 +150,13 @@ local({
     stop("blocking.R not found next to run_de.R -- it defines the --block model and its record.")
   source(f)
 })
+# The skill version (skill_version.R: the R mirror of skill_version.py).
+local({
+  f <- .sibling("skill_version.R")
+  if (is.null(f))
+    stop("skill_version.R not found next to run_de.R -- it reads the skill version the session records.")
+  source(f, encoding = "UTF-8")
+})
 # readDIANN() across limpa versions (1.2.x extra.columns / 1.4.x annotation.columns).
 local({
   f <- .sibling("limpa_compat.R")
@@ -1045,18 +1052,10 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
 }
 
 # ---- DE-LIMP-loadable session ----------------------------------------------
-# What wrote the session, as DE-LIMP shows it ("App version: ..."): the skill and its version
-# from plugin.json beside the scripts, never a hard-coded app version.
-run_de_version <- local({
-  v <- tryCatch({
-    pj <- file.path(.script_dir, "..", ".claude-plugin", "plugin.json")
-    m <- regmatches(readLines(pj, warn = FALSE), regexpr('"version"[[:space:]]*:[[:space:]]*"[^"]+"',
-                                                         readLines(pj, warn = FALSE)))
-    sub('.*"([^"]+)"$', "\\1", m[1])
-  }, error = function(e) NA_character_, warning = function(w) NA_character_)
-  paste("ucdavis-proteomics-core-pipeline run_de.R",
-        if (length(v) && !is.na(v)) paste0("v", v) else "(skill version not recorded)")
-})
+# What wrote the session, as DE-LIMP shows it ("App version: ..."): the skill and its version,
+# read by skill_version.R -- the R mirror of skill_version.py, the one reader of plugin.json.
+run_de_version <- paste("ucdavis-proteomics-core-pipeline run_de.R",
+                        skill_label(skill_version(.script_dir)))
 # Everything the DE-LIMP Shiny app needs is already in memory here. Writing it in
 # server_session.R's schema lets any result be dropped straight into the GUI at
 # https://delimp.stan-proteomics.org/ for interactive exploration.

@@ -49,7 +49,14 @@ topTable(fit, coef=cn, number=Inf, adjust.method="BH")
 ```
 Missing precursors are modelled by the detection-probability curve — **not imputed,
 not dropped** — and the imputation uncertainty is propagated into the limma fit.
-Needs **R 4.5+ / Bioconductor 3.22+**.
+Needs **R 4.5+ / Bioconductor 3.22+**; setup.sh pins **limpa ≥ 1.4.0**.
+
+**The numbers depend on the limpa version.** On > 2,000 precursors `dpcCN()` fits the curve
+on a 2,000-row subset: a seeded random sample in limpa 1.2.x, a systematic one (ordered by
+missingness, then mean) in 1.4. On PROT_0756 v2 that moved |logFC| by at most 0.064 (median
+≤ 0.006) and the significant sets by Jaccard 0.958–1.000. `de_provenance.json` records
+`limpa_version`: **compare analyses only within one limpa version** (detail and numbers:
+`references/environment.md`, "Results depend on the limpa version").
 
 ## `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
 `build_maxlfq.R`: filter `Q/Lib.Q/Lib.PG.Q ≤ q` (+ optional QuantUMS `eQ`/`pgQ`),

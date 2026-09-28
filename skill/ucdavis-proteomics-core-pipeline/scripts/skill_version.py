@@ -5,10 +5,10 @@ scripts/. In the installed skill it is always there. On HIVE it is there when bo
 put up together (`hive_exec.sh --put-skill`, again after every skill update).
 
 Every record that names the skill version reads it here: record_run.py, provenance.py,
-make_deposit.py (sdrf.tsv, prepare_upload.sbatch), core_submission.py. Two cannot import it and
+make_deposit.py (sdrf.tsv, prepare_upload.sbatch), core_submission.py. Three cannot import it and
 carry a mirror, kept equal by tests/test_skill_version.py: notify_slack.py (on HIVE it also runs
-from stdin, with no sibling to import) and report_issue.sh (bash; on Windows `python3` is often the
-Microsoft Store stub).
+from stdin, with no sibling to import), report_issue.sh (bash; on Windows `python3` is often the
+Microsoft Store stub) and skill_version.R (R: run_de.R's, for the DE-LIMP session).
 
 When plugin.json is not there -- a scripts/ folder copied up on its own -- the version is UNKNOWN,
 a tagged value, never a guessed one (CLAUDE.md rule 2): it used to read "0.0.0" in sdrf.tsv.

@@ -53,7 +53,7 @@ Usage:
 
 Reads/writes plain files; stdlib only (pyarrow optional, just for --report).
 """
-import sys, os, csv, json, math, argparse, random, re
+import sys, os, csv, json, math, argparse, random, re, itertools
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
@@ -345,86 +345,128 @@ def _arrangements(labels_by_stratum):
     return total
 
 
-def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=None,
-                   block_name="block"):
-    """Return (confounded: bool, detail, p) -- does the panel score differ between groups
-    more than relabelling the samples at random would? That is the danger signal: DE may be
-    contamination, not biology. p is None when the design is too small for any relabelling
-    to reach CONFOUND_P (3 vs 3: 1 in 10); then complete separation of the extreme groups
-    by >= thr is reported instead, labelled as such.
+def _stratum_arrangements(labels):
+    """Every distinct ordering of a multiset of labels (C(6,3) = 20 for 3 Old + 3 Young)."""
+    counts = {}
+    for l in labels:
+        counts[l] = counts.get(l, 0) + 1
+    keys, n, out, cur = sorted(counts), len(labels), [], []
 
-    With bmap (sample -> block, e.g. the mouse) the samples of one animal are not
-    exchangeable, and the question splits in two (block_confound_checks): here the two
-    answers are combined -- flagged if either flags, p the smallest -- for callers that want
-    one line; main() reports them separately."""
-    if not gmap:
-        return False, "no conditions.csv -- group-confounding not assessed", None
-    if bmap:
-        tests = block_confound_checks(z, gmap, bmap, samples, thr, block_name, n_perm, seed)
-        if tests:
-            ps = [t["p"] for t in tests if t["p"] is not None]
-            return (any(t["flag"] for t in tests), "  ||  ".join(t["detail"] for t in tests),
-                    min(ps) if ps else None)
-    vals, labs = [], []
-    for s in samples:
-        if s in gmap and z.get(s) is not None:
-            vals.append(z[s])
-            labs.append(gmap[s])
-    return _perm_f(vals, labs, thr, n_perm, seed)
+    def rec():
+        if len(cur) == n:
+            out.append(tuple(cur)); return
+        for k in keys:
+            if counts[k]:
+                counts[k] -= 1; cur.append(k); rec(); cur.pop(); counts[k] += 1
+    rec()
+    return out
 
 
-def _perm_f(vals, labs, thr, n_perm=N_PERM, seed=20260925, strata=None, unit="sample",
-            block_name="block"):
-    """The permutation F-test on (vals, labs): relabel freely, or within `strata` when given.
-    Returns (flag, detail, p); p None = too few arrangements for a CONFOUND_P test, and then
-    complete separation of the extreme groups by >= thr is reported instead."""
+EXACT_MAX = 200000     # label arrangements enumerated exactly; beyond, N_PERM random ones
+
+
+def _relabel_test(vals, labs, strata=None, n_perm=N_PERM, seed=20260925):
+    """The permutation test of the between-group statistic, relabelling freely or within each
+    stratum. EXACT (every distinct arrangement) when there are <= EXACT_MAX of them, else
+    n_perm random relabellings. Returns (p, min_p, n_arrangements, exact): min_p is the
+    smallest p ANY data could give here -- the share of arrangements as extreme as the most
+    extreme one (3 vs 3: 2 of 20 = 0.10; 6 pairs: 2 of 64 = 0.031)."""
+    idx = {}
+    for i, b in enumerate(strata if strata is not None else [None] * len(labs)):
+        idx.setdefault(b, []).append(i)
+    n_arr = _arrangements([[labs[i] for i in ii] for ii in idx.values()])
+    obs = _between(vals, labs)
+    if n_arr <= EXACT_MAX:
+        per = [(ii, _stratum_arrangements([labs[i] for i in ii])) for ii in idx.values()]
+        stats = []
+        perm = list(labs)
+        for combo in itertools.product(*[a for _ii, a in per]):
+            for (ii, _a), arr in zip(per, combo):
+                for i, g in zip(ii, arr):
+                    perm[i] = g
+            stats.append(_between(vals, perm))
+        top = max(stats)
+        p = sum(1 for x in stats if x >= obs - 1e-9) / len(stats)
+        return p, sum(1 for x in stats if x >= top - 1e-9) / len(stats), n_arr, True
+    rng = random.Random(seed)
+    ge, perm = 0, list(labs)
+    for _ in range(n_perm):
+        for ii in idx.values():
+            sub = [labs[i] for i in ii]
+            rng.shuffle(sub)
+            for i, g in zip(ii, sub):
+                perm[i] = g
+        if _between(vals, perm) >= obs - 1e-9:
+            ge += 1
+    return (ge + 1) / (n_perm + 1), 1 / n_arr, n_arr, False
+
+
+def _confound_test(vals, labs, thr, unit, strata=None, n_perm=N_PERM, seed=20260925):
+    """ONE rule for every confound question (review round 2): the permutation test, exact
+    when it can be; flagged at p < CONFOUND_P. When even the most extreme arrangement cannot
+    reach CONFOUND_P, there is NO flag, whatever the data: the data sitting at that extreme
+    (complete separation / every block ordered alike) with a gap >= thr is a CAUTION, never
+    a finding -- the same weak evidence is worded the same way, blocked or not.
+    `unit`: what one value is ("sample", "Mouse mean"); `strata`: blocks relabelled within.
+    Returns {flag, caution, p, min_p, hi, lo, gap, detail}."""
     groups = {}
     for v, g in zip(vals, labs):
         groups.setdefault(g, []).append(v)
     if len(groups) < 2:
-        return False, "fewer than 2 groups with panel data", None
+        return {"flag": False, "caution": False, "p": None, "min_p": None,
+                "detail": "fewer than 2 groups with panel data"}
     means = {g: sum(v) / len(v) for g, v in groups.items()}
-    per_blk = f" {block_name}" if unit.endswith("mean") else ""
-    detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n={len(groups[g])}{per_blk})" for g in sorted(means))
-    if strata is not None:
-        by = {}
-        for b, g in zip(strata, labs):
-            by.setdefault(b, []).append(g)
-        min_p = 1 / _arrangements(list(by.values()))
-    else:
-        min_p = _min_p([len(v) for v in groups.values()])
+    hi = max(means, key=means.get); lo = min(means, key=means.get)
+    gap = means[hi] - means[lo]
+    detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n = {len(groups[g])})" for g in sorted(means))
+    p, min_p, n_arr, exact = _relabel_test(vals, labs, strata, n_perm, seed)
+    how = (f"exact over all {n_arr:,} arrangements" if exact else f"{n_perm:,} random relabellings")
+    within = f", labels relabelled within each block" if strata is not None else ""
     if min_p > CONFOUND_P:
-        hi = max(means, key=means.get); lo = min(means, key=means.get)
-        gap = means[hi] - means[lo]
-        separated = gap >= thr and min(groups[hi]) > max(groups[lo])
-        return bool(separated), (f"{detail}  [too few {'samples' if unit == 'sample' else unit + 's'} "
-                                 f"for a test (best possible p {min_p:.2g}); extreme groups "
-                                 f"{'completely separated' if separated else 'overlap'}, "
-                                 f"gap {gap:+.2f}]"), None
-    obs = _between(vals, labs)
-    rng = random.Random(seed)
-    ge = 0
-    perm = list(labs)
-    idx = {}
-    for i, b in enumerate(strata or []):
-        idx.setdefault(b, []).append(i)
-    for _ in range(n_perm):
-        if strata is None:
-            rng.shuffle(perm)
-        else:
-            for ii in idx.values():
-                sub = [labs[i] for i in ii]
-                rng.shuffle(sub)
-                for i, g in zip(ii, sub):
-                    perm[i] = g
-        if _between(vals, perm) >= obs - 1e-9:
-            ge += 1
-    p = (ge + 1) / (n_perm + 1)
-    how = ("" if unit == "sample" else
-           f" on {block_name} means (one value per {block_name})" if unit.endswith("mean")
-           else f", relabelling within each {block_name}")
-    return p < CONFOUND_P, (f"{detail}  [permutation F-test across {len(groups)} groups{how}: "
-                            f"p = {p:.2g}, {n_perm:,} relabellings; flagged at p < {CONFOUND_P}]"), p
+        extreme = p <= min_p + 1e-12
+        shape = (("every block orders the groups the same way" if strata is not None
+                  else f"complete separation (all {hi} above all {lo})")
+                 if extreme else "not the most extreme arrangement")
+        return {"flag": False, "caution": bool(extreme and gap >= thr), "p": None, "min_p": min_p,
+                "hi": hi, "lo": lo, "gap": gap,
+                "detail": (f"{detail}  [one value per {unit}{within}; best possible p "
+                           f"{min_p:.2g} > {CONFOUND_P} ({how}), so no test; {shape}, gap "
+                           f"{gap:+.2f}]")}
+    return {"flag": p < CONFOUND_P, "caution": False, "p": p, "min_p": min_p, "hi": hi, "lo": lo,
+            "gap": gap,
+            "detail": (f"{detail}  [permutation F-test across {len(groups)} groups, one value "
+                       f"per {unit}{within} ({how}): p = {p:.2g}; flagged at p < {CONFOUND_P}]")}
+
+
+def confound_tests(z, gmap, samples, thr, bmap=None, block_name="block", n_perm=N_PERM,
+                   seed=20260925):
+    """Every confound question this design can ask, each as {question, factor, flag, caution,
+    p, min_p, hi, lo, detail}. Without a block: one question, the groups. With one (bmap:
+    sample -> animal), block_confound_checks' two. [] without conditions."""
+    if not gmap:
+        return []
+    if bmap:
+        tests = block_confound_checks(z, gmap, bmap, samples, thr, block_name, n_perm, seed)
+        if tests:
+            return tests
+    vals, labs = [], []
+    for s in samples:
+        if s in gmap and z.get(s) is not None:
+            vals.append(z[s]); labs.append(gmap[s])
+    r = _confound_test(vals, labs, thr, "sample", n_perm=n_perm, seed=seed)
+    return [dict(r, question="groups", factor="the groups")]
+
+
+def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=None,
+                   block_name="block"):
+    """(confounded, detail, p) in one line, for callers that want one: flagged if any question
+    flags (a caution never does), p the smallest tested. main() reports the questions apart."""
+    if not gmap:
+        return False, "no conditions.csv -- group-confounding not assessed", None
+    tests = confound_tests(z, gmap, samples, thr, bmap, block_name, n_perm, seed)
+    ps = [t["p"] for t in tests if t.get("p") is not None]
+    return (any(t["flag"] for t in tests), "  ||  ".join(t["detail"] for t in tests),
+            min(ps) if ps else None)
 
 
 def _between_levels(blocks, labels):
@@ -464,64 +506,6 @@ def _between_levels(blocks, labels):
     return name
 
 
-EXACT_MAX = 200000     # distinct arrangements enumerated exactly; beyond, random relabellings
-
-
-def _distinct_arrangements(labels):
-    """Every distinct ordering of a multiset of labels (C(6,3) = 20 for 3 Old + 3 Young)."""
-    counts = {}
-    for l in labels:
-        counts[l] = counts.get(l, 0) + 1
-    keys, n, out, cur = sorted(counts), len(labels), [], []
-
-    def rec():
-        if len(cur) == n:
-            out.append(tuple(cur)); return
-        for k in keys:
-            if counts[k]:
-                counts[k] -= 1; cur.append(k); rec(); cur.pop(); counts[k] += 1
-    rec()
-    return out
-
-
-def _exact_block_means(means, levels, thr, block_name):
-    """Between-block test on BLOCK MEANS by EXACT enumeration of every assignment of the level
-    labels to the blocks. When even the most extreme assignment cannot reach CONFOUND_P (3 vs 3
-    mice: 2 of 20 = 0.10), no p-value flag: complete separation is reported as a caution."""
-    vals = [means[b] for b in sorted(means)]
-    labs = [levels[b] for b in sorted(means)]
-    by = {}
-    for v, l in zip(vals, labs):
-        by.setdefault(l, []).append(v)
-    lm = {l: sum(v) / len(v) for l, v in by.items()}
-    detail = "; ".join(f"{l}: mean z {lm[l]:+.2f} (n={len(by[l])} {block_name})" for l in sorted(lm))
-    obs = _between(vals, labs)
-    n_arr = math.factorial(len(labs))
-    for l in set(labs):
-        n_arr //= math.factorial(labs.count(l))
-    arrangements = _distinct_arrangements(labs) if n_arr <= EXACT_MAX else None
-    if arrangements is None:
-        f, detail2, p = _perm_f(vals, labs, thr, unit=f"{block_name} mean", block_name=block_name)
-        return {"flag": f, "caution": False, "p": p, "detail": detail2}
-    stats = [_between(vals, list(a)) for a in arrangements]
-    p = sum(1 for x in stats if x >= obs - 1e-9) / len(stats)
-    top = max(stats)
-    min_p = sum(1 for x in stats if x >= top - 1e-9) / len(stats)
-    hi = max(lm, key=lm.get); lo = min(lm, key=lm.get)
-    separated = min(by[hi]) > max(by[lo])
-    if min_p > CONFOUND_P:
-        caution = separated and lm[hi] - lm[lo] >= thr
-        return {"flag": False, "caution": bool(caution), "p": None, "min_p": min_p,
-                "hi": hi, "lo": lo,
-                "detail": (f"{detail}  [exact permutation of the {len(vals)} {block_name} means: "
-                           f"best possible p {min_p:.2g} > {CONFOUND_P}, so no test; "
-                           + (f"complete separation (all {hi} above all {lo})"
-                              if separated else f"{hi} and {lo} overlap") + "]")}
-    return {"flag": p < CONFOUND_P, "caution": False, "p": p, "min_p": min_p, "hi": hi, "lo": lo,
-            "detail": (f"{detail}  [exact permutation of the {len(vals)} {block_name} means "
-                       f"({len(stats):,} arrangements): p = {p:.2g}; flagged at p < {CONFOUND_P}]")}
-
-
 def block_confound_checks(z, gmap, bmap, samples, thr, block_name="block", n_perm=N_PERM,
                           seed=20260925):
     """Two different questions once samples come in blocks (animals), each tested the way its
@@ -531,10 +515,10 @@ def block_confound_checks(z, gmap, bmap, samples, thr, block_name="block", n_per
                   same mouse)? Group labels relabelled within each block. It flags what
                   within-block contrasts can pick up; it says nothing about the between factor.
       between  -- does it differ between blocks of different levels of the between-block
-                  factor (Old vs Young mice)? One mean per block, exact permutation; too few
-                  blocks for a test -> complete separation is a caution, not a p-value flag.
-    Returns a list of {question, factor, flag, caution, p, detail}; [] when the blocks do not
-    cover the samples."""
+                  factor (Old vs Young mice)? One mean per block.
+    Both follow _confound_test's one rule (exact where possible; too few arrangements -> a
+    caution, never a flag). Returns [{question, factor, flag, caution, p, ...}]; [] when the
+    blocks do not cover the samples."""
     data = [(z[s], gmap[s], bmap.get(s)) for s in samples if s in gmap and z.get(s) is not None]
     if not data or any(b is None for _v, _g, b in data):
         return []
@@ -542,26 +526,25 @@ def block_confound_checks(z, gmap, bmap, samples, thr, block_name="block", n_per
     groups_in = {}
     for b, g in zip(blks, labs):
         groups_in.setdefault(b, set()).add(g)
+    unit = f"block ({block_name})"
     tests = []
     if any(len(v) > 1 for v in groups_in.values()):
-        f, d, p = _perm_f(list(vals), list(labs), thr, n_perm, seed, strata=list(blks),
-                          unit=f"sample, relabelled within each {block_name}", block_name=block_name)
-        tests.append({"question": "within", "factor": f"groups within one {block_name}",
-                      "flag": bool(f) and p is not None, "caution": False, "p": p,
-                      "detail": f"[within one {block_name}] {d}"})
+        r = _confound_test(list(vals), list(labs), thr, f"sample within a {unit}",
+                           strata=list(blks), n_perm=n_perm, seed=seed)
+        tests.append(dict(r, question="within", factor=f"groups within one {unit}",
+                          detail=f"[within one {unit}] {r['detail']}"))
     level_of_group = _between_levels(blks, labs)
     levels = {b: level_of_group[next(iter(gs))] for b, gs in groups_in.items()}
     if len(set(levels.values())) >= 2:
         per = {}
         for b, v in zip(blks, vals):
             per.setdefault(b, []).append(v)
-        means = {b: sum(v) / len(v) for b, v in per.items()}
-        r = _exact_block_means(means, levels, thr, block_name)
+        order = sorted(per)
+        r = _confound_test([sum(per[b]) / len(per[b]) for b in order], [levels[b] for b in order],
+                           thr, f"{unit} mean", n_perm=n_perm, seed=seed)
         names = sorted(set(levels.values()))
-        tests.append({"question": "between", "factor": " vs ".join(names),
-                      "flag": r["flag"], "caution": r["caution"], "p": r["p"],
-                      "hi": r.get("hi"), "lo": r.get("lo"), "min_p": r.get("min_p"),
-                      "detail": f"[between {block_name} levels: {' vs '.join(names)}] {r['detail']}"})
+        tests.append(dict(r, question="between", factor=" vs ".join(names),
+                          detail=f"[between {unit} levels: {' vs '.join(names)}] {r['detail']}"))
     return tests
 
 
@@ -654,11 +637,15 @@ def main():
         per, nhit, matched, cont_hits = panel_scores(rows, samples, genes, removed)
         z = zscore(per, samples)
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
-        confounded, detail, confound_p = confound_check(z, gmap, samples, a.z, bmap=bmap,
-                                                        block_name=block_col or "block")
-        # with a block, the two questions are reported apart (block_confound_checks)
-        btests = (block_confound_checks(z, gmap, bmap, samples, a.z, block_col or "block")
-                  if bmap else [])
+        blk = block_col or "block"
+        # every question the design can ask, one rule (_confound_test): flagged at p < 0.01;
+        # too few arrangements for that -> a caution when the data sit at the extreme, never a flag
+        ctests = confound_tests(z, gmap, samples, a.z, bmap=bmap, block_name=blk)
+        confounded = any(t["flag"] for t in ctests)
+        ps = [t["p"] for t in ctests if t.get("p") is not None]
+        confound_p = min(ps) if ps else None
+        detail = ("  ||  ".join(t["detail"] for t in ctests) if ctests
+                  else "no conditions.csv -- group-confounding not assessed")
         expected = a.keratin_sample and name == "EPIDERMIS"
         kept = name == TARGET_PANEL
         if kept or expected:
@@ -669,50 +656,62 @@ def main():
                          "contaminant_matches": cont_hits,
                          "z": {s: (round(z[s], 2) if z[s] is not None else None) for s in samples},
                          "elevated_samples": elevated, "group_confounded": confounded,
+                         "confound_caution": any(t.get("caution") for t in ctests),
                          "confound_p": confound_p,
                          "group_detail": detail, "expected_analyte": expected,
-                         "block_tests": btests,
+                         "confound_tests": ctests,
                          "kept_in_quantification": kept}
         why = (f" These are {org} proteins that are also common-contaminant sequences: possible "
                f"contamination, KEPT in quantification and normalisation." if kept else "")
         if expected:
             pass   # keratin IS the analyte for a keratin-matrix sample: report for QC, never flag
-        elif btests:
+        else:
             # Each message says which question it answers: a within-block flag cannot speak
-            # to the between-block factor, and vice versa (PROT_0756 v2).
-            blk = block_col or "block"
-            for t in btests:
-                if t["question"] == "within" and t["flag"]:
+            # to the between-block factor, and vice versa (PROT_0756 v2). A caution is worded
+            # as one everywhere (review round 2): the same weak evidence, the same words.
+            unit = f"block ({blk})"
+            caution_tail = ("so this is a caution, not a finding: treat {} proteins in {} with "
+                            "care.")
+            for t in ctests:
+                q = t["question"]
+                if q == "groups" and t["flag"]:
+                    flags.append(f"**{name} is CONFOUNDED WITH GROUP** ({t['detail']}). DE between "
+                                 "these groups may be contamination, not biology; protein-level "
+                                 "marker removal will NOT fix a confounded contrast -- resolve at "
+                                 "the sample/design level." + why)
+                elif q == "groups" and t.get("caution"):
+                    flags.append(f"{name}: complete separation between groups -- all {t['hi']} above "
+                                 f"all {t['lo']} ({t['detail']}). Too few samples for a test, "
+                                 + caution_tail.format(name, f"{t['hi']}-vs-{t['lo']} contrasts")
+                                 + why)
+                elif q == "within" and t["flag"]:
                     flags.append(
-                        f"**{name} differs among the samples of one {blk}** ({t['detail']}). "
+                        f"**{name} differs among the samples of one {unit}** ({t['detail']}). "
                         f"This answers the WITHIN-{blk} question only: contrasts between groups "
-                        f"inside a {blk} (e.g. bait vs control IPs of the same {blk}) can pick up "
+                        f"inside one {blk} (e.g. bait vs control IPs of the same {blk}) can pick up "
                         f"{name} proteins -- check those contrasts' hits against this panel "
                         f"before reading them as biology. It says nothing about differences "
-                        f"BETWEEN {blk}s." + why)
-                elif t["question"] == "between" and t["flag"]:
+                        f"between {unit} levels." + why)
+                elif q == "within" and t.get("caution"):
+                    flags.append(
+                        f"{name}: every {unit} orders the groups the same way, {t['hi']} highest "
+                        f"and {t['lo']} lowest ({t['detail']}). Too few blocks for a test, "
+                        + caution_tail.format(name, f"within-{blk} contrasts") + why)
+                elif q == "between" and t["flag"]:
                     flags.append(
                         f"**{name} is CONFOUNDED WITH {t['factor']}** ({t['detail']}). This "
-                        f"answers the BETWEEN-{blk} question: {name} differs between {blk}s of "
-                        f"{t['factor']}, so DE between them may be contamination, not biology; "
-                        f"protein-level marker removal will NOT fix a confounded contrast." + why)
-                elif t["question"] == "between" and t.get("caution"):
+                        f"answers the BETWEEN-{blk} question: {name} differs between {unit} "
+                        f"levels ({t['factor']}), so DE between them may be contamination, not "
+                        f"biology; protein-level marker removal will NOT fix a confounded "
+                        f"contrast." + why)
+                elif q == "between" and t.get("caution"):
                     flags.append(
-                        f"{name}: complete separation between {blk} levels -- all {t['hi']} "
-                        f"above all {t['lo']} ({t['detail']}). Too few {blk}s for a test, so "
-                        f"this is a caution, not a finding: treat {name} proteins in "
-                        f"{t['hi']}-vs-{t['lo']} contrasts with care." + why)
-            if elevated and not any(t["flag"] for t in btests):
+                        f"{name}: complete separation between {unit} levels -- all {t['hi']} "
+                        f"above all {t['lo']} ({t['detail']}). Too few blocks for a test, "
+                        + caution_tail.format(name, f"{t['hi']}-vs-{t['lo']} contrasts") + why)
+            if elevated and not confounded:
                 flags.append(f"{name}: elevated in {', '.join(elevated)} (|z|>={a.z}) -- possible "
                              "per-sample contamination; check before interpreting these samples." + why)
-        elif confounded:
-            flags.append(f"**{name} is CONFOUNDED WITH GROUP** ({detail}). DE between these "
-                         "groups may be contamination, not biology; protein-level marker removal "
-                         "will NOT fix a confounded contrast -- resolve at the sample/design level."
-                         + why)
-        elif elevated:
-            flags.append(f"{name}: elevated in {', '.join(elevated)} (|z|>={a.z}) -- possible "
-                         "per-sample contamination; check before interpreting these samples." + why)
     # Did the check RUN? A panel that matched nothing is only evidence of absence when the
     # matrix's gene names are ones the panels know. If NO curated panel matched a single
     # sample protein -- each lists markers (CAT, PRDX2, TPM1, DSP ...) found in nearly any
@@ -814,15 +813,15 @@ def main():
             for s in samples:
                 zz = r["z"][s]
                 fh.write(f"| {s} | {gmap.get(s,'?')} | {zz if zz is not None else 'NA'} |\n")
-            if r.get("block_tests"):
-                for t in r["block_tests"]:
-                    q = ("differs among the samples of one block? (within-block contrasts)"
-                         if t["question"] == "within" else
-                         f"differs between blocks, {t['factor']}? (between-block contrasts)")
-                    fh.write(f"\n_{q}_ {t['detail']}\n")
-                fh.write("\n")
-            else:
-                fh.write(f"\n_group-confounding:_ {r['group_detail']}\n\n")
+            for t in r.get("confound_tests") or []:
+                q = {"groups": "differs between groups?",
+                     "within": "differs among the samples of one block? (within-block contrasts)",
+                     "between": f"differs between block levels, {t['factor']}? (between-block "
+                                "contrasts)"}[t["question"]]
+                fh.write(f"\n_{q}_ {t['detail']}\n")
+            if not r.get("confound_tests"):
+                fh.write(f"\n_group-confounding:_ {r['group_detail']}\n")
+            fh.write("\n")
         if tc_note:
             fh.write(f"## {TARGET_PANEL}\n\n_Proteins that are also common-contaminant "
                      f"sequences: {tc_note}._\n\n")

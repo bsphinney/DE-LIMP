@@ -5,8 +5,8 @@ scripts/). On HIVE it read "unknown" -- and make_deposit wrote "0.0.0" into sdrf
 scripts/ went up without .claude-plugin/ (access.md's "put ./scripts once"). Every reader now asks
 skill_version.py, and a missing plugin.json is a tagged UNKNOWN, never a made-up number.
 
-notify_slack.py (runs from stdin on HIVE, no siblings) and report_issue.sh (bash) carry mirrors;
-this file keeps each one equal to the original.
+notify_slack.py (runs from stdin on HIVE, no siblings), report_issue.sh (bash) and skill_version.R
+(run_de.R's, in R) carry mirrors; this file keeps each one equal to the original.
 """
 import json
 import os
@@ -149,6 +149,58 @@ class ReportIssueMirror(unittest.TestCase):
                     want = sv.skill_version(sd)
                     self.assertIn(f"- **Skill version:** {want}\n", text)
                     self.assertIn(f"- **Skill:** {sv.label(want)}, mode ", text)
+
+
+def _r_has(*pkgs):
+    if not shutil.which("Rscript"):
+        return False
+    expr = ("quit(status = if (all(vapply(c(%s), requireNamespace, logical(1), quietly = TRUE))) 0 "
+            "else 1)" % ", ".join(f'"{p}"' for p in pkgs))
+    return subprocess.run(["Rscript", "-e", expr], capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(_r_has("jsonlite"), "needs Rscript + jsonlite")
+class RunDeRMirror(unittest.TestCase):
+    """run_de.R reads the version through skill_version.R, the R mirror: same constant, same
+    answer for every fixture, with jsonlite and without it (its regex fallback)."""
+    R_FILE = os.path.join(SCRIPTS, "skill_version.R")
+
+    def r(self, expr):
+        env = dict(os.environ, LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8")
+        p = subprocess.run(["Rscript", "-e", f'source("{self.R_FILE}", encoding = "UTF-8"); {expr}'],
+                           capture_output=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr.decode("utf-8", "replace"))
+        return json.loads(p.stdout.decode("utf-8"))
+
+    def test_same_constant(self):
+        self.assertEqual(self.r("cat(jsonlite::toJSON(SKILL_VERSION_UNKNOWN, auto_unbox = TRUE))"),
+                         sv.UNKNOWN)
+
+    def test_same_answer_for_every_fixture_both_parsers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sds = {name: fixture(tmp, name, text) for name, text in CASES.items()}
+            for use in ("TRUE", "FALSE"):
+                calls = ", ".join(f'"{n}" = skill_version("{sd}", use_jsonlite = {use})'
+                                  for n, sd in sds.items())
+                got = self.r(f"cat(jsonlite::toJSON(list({calls}), auto_unbox = TRUE))")
+                for name, sd in sds.items():
+                    with self.subTest(name, jsonlite=use):
+                        self.assertEqual(got[name], sv.skill_version(sd))
+        got = self.r(f'cat(jsonlite::toJSON(skill_version("{SCRIPTS}"), auto_unbox = TRUE))')
+        self.assertEqual(got, sv.skill_version())
+
+    def test_same_label(self):
+        got = self.r('cat(jsonlite::toJSON(list(skill_label("2.8.0"), '
+                     'skill_label(SKILL_VERSION_UNKNOWN)), auto_unbox = TRUE))')
+        self.assertEqual(got, [sv.label("2.8.0"), sv.label(sv.UNKNOWN)])
+
+    def test_run_de_reads_it_through_the_mirror(self):
+        with open(os.path.join(SCRIPTS, "run_de.R"), encoding="utf-8") as fh:
+            code = [l for l in fh.read().splitlines() if not l.lstrip().startswith("#")]
+        src = "\n".join(code)
+        self.assertIn('.sibling("skill_version.R")', src)
+        self.assertIn("skill_label(skill_version(.script_dir))", src)
+        self.assertNotIn("plugin.json", src.replace("skill_version.R", ""))
 
 
 if __name__ == "__main__":
