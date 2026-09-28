@@ -145,6 +145,14 @@ _SECRET_PATTERNS = [
     re.compile(r"\bAQ\.[0-9A-Za-z_\-]{20,}"),                  # a Google API key, newer format
     re.compile(r"(?i)(?<=key=)[A-Za-z0-9_.\-]{20,}"),           # a key-shaped key=... value
     re.compile(r"xox[abeprs]-[A-Za-z0-9\-]{10,}"),             # a Slack bot/user/app token
+    re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),                 # an Anthropic API key
+    re.compile(r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}"),  # OpenAI project/service keys
+    # Any other sk- key, but only 32+ letters and digits with no dash or underscore: a session or
+    # file slug that happens to start "sk-" (sk-2026-09-28_run_...) has dashes and must pass.
+    re.compile(r"\bsk-[A-Za-z0-9]{32,}"),
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),              # an AWS access key id
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-.=+/]{20,}"),     # a bare "Bearer <credential>"
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]*"),  # a JWT
     # STAN's per-submission HT share token (ht_manifest.py): in a URL's query (`&token=...`), as
     # `--share-token=...` / `--share-token ...`, and as STAN_HT_SHARE_TOKEN=... in a logged
     # command. The release review found the full URL, token and all, in an HTTP error line, and
@@ -152,18 +160,29 @@ _SECRET_PATTERNS = [
     # like a path (`/`, `~`, `.`, `$`) is a file NAME -- --share-token-file, STAN_PG_TOKEN=/... --
     # and not a secret; STAN_PG_TOKEN also fails the "not after a letter or _" test.
     re.compile(r"(?i)(?:(?<=[^A-Za-z0-9_]token=)|(?<=^token=))(?![/~.$])[^\s&\"'<>]{8,}"),
-    re.compile(r"(?i)(?:(?<=--share-token )|(?<=--share-token=))['\"]?(?![/~.$-])[^\s\"'<>]{8,}"),
+    # A named group `s` is all redact() replaces, so the flag stays readable. Any run of spaces,
+    # tabs and `=` separates it: a lookbehind allowed exactly one space, and "--share-token" plus
+    # two spaces or a tab went through both lists (release verification, 2.8.0).
+    re.compile(r"(?i)--share-token[ \t=]+['\"]?(?P<s>(?![/~.$-])[^\s\"'<>]{8,})"),
     re.compile(r"(?i)(?<=share_token=)['\"]?(?![/~.$])[^\s\"'<>]{8,}"),
     # ...and its companion, ht_manifest.py --cookie <Entra session cookie>
-    re.compile(r"(?i)(?:(?<=--cookie )|(?<=--cookie=))['\"]?(?![/~.$-])[^\s\"'<>]{8,}"),
+    re.compile(r"(?i)--cookie[ \t=]+['\"]?(?P<s>(?![/~.$-])[^\s\"'<>]{8,})"),
 ]
+
+
+def _redact_match(m):
+    """[redacted] for the match -- or, for a pattern with a group `s`, for that group alone."""
+    if "s" not in m.re.groupindex:
+        return REDACTED
+    whole, at = m.group(0), m.start()
+    return whole[:m.start("s") - at] + REDACTED + whole[m.end("s") - at:]
 
 
 def redact(text):
     """Every secret-shaped substring of `text` replaced with [redacted]."""
     out = str(text)
     for pat in _SECRET_PATTERNS:
-        out = pat.sub(REDACTED, out)
+        out = pat.sub(_redact_match, out)
     return out
 
 

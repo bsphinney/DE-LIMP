@@ -118,6 +118,11 @@ hf_[A-Za-z0-9]{20,}
 AIza[0-9A-Za-z_-]{20,}
 (^|[^A-Za-z0-9_])AQ\.[0-9A-Za-z_-]{20,}
 xox[abeprs]-[A-Za-z0-9-]{10,}
+sk-ant-[A-Za-z0-9_-]{20,}
+sk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}
+(^|[^A-Za-z0-9_])sk-[A-Za-z0-9]{32,}
+(^|[^A-Za-z0-9_])(AKIA|ASIA)[0-9A-Z]{16}([^A-Za-z0-9_]|$)
+(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*
 ERE
 read -r -d '' SECRET_CI <<'ERE'
 authorization:[[:space:]]*(token|bearer)[[:space:]]+[^[:space:]]+
@@ -126,9 +131,10 @@ postgres(ql)?://[^[:space:]:/@]+:[^[:space:]@]+@
 https?://hooks\.slack\.com/services/[^[:space:]]+
 key=[A-Za-z0-9_.-]{20,}
 (^|[^A-Za-z0-9_])token=[^/~.$[:space:]&"'<>][^[:space:]&"'<>]{7,}
---share-token[ =]['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
+--share-token[[:space:]=]+['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
 share_token=['"]?[^/~.$[:space:]"'<>][^[:space:]"'<>]{7,}
---cookie[ =]['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
+--cookie[[:space:]=]+['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
+(^|[^A-Za-z0-9_])bearer[[:space:]]+[A-Za-z0-9_.=+/-]{20,}
 ERE
 looks_secret() {
   local p
@@ -146,7 +152,8 @@ EOF
 }
 # Secrets must never reach a folder 46 people can read. Refuse rather than redact: a
 # redacted report can still be wrong about what it hid, and the agent can rephrase.
-ALL="$TITLE $WHAT $IMPACT $WORKAROUND $FIX $STEP $SESSION"
+# Every free-text field that reaches the file -- --mode too (release verification, 2.8.0).
+ALL="$TITLE $WHAT $IMPACT $WORKAROUND $FIX $STEP $SESSION $MODE"
 if looks_secret "$ALL"; then
   die "the text looks like it contains a key, token, password or webhook -- remove it and re-run"
 fi

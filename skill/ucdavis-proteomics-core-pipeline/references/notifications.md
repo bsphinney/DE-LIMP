@@ -205,9 +205,14 @@ Significant counts are the ones `run_de.R` wrote; they are never recounted.
      - `postgres(ql)://user:pass@`;
      - any `hooks.slack.com/services/…` URL, and Slack `xox[abeprs]-` tokens;
      - Google API keys (`AIza…`, `AQ.…`), and any key-shaped `key=…` value;
-     - STAN share tokens (`token=…` in a URL, `--share-token …`, `STAN_HT_SHARE_TOKEN=…`)
-       and an Entra cookie on the command line (`--cookie …`). A value that begins like a path
-       (`/`, `~`, `.`, `$`) is a file name and is left alone.
+     - Anthropic (`sk-ant-…`) and OpenAI (`sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`) keys, and
+       any other `sk-` followed by 32+ letters and digits (a dashed slug such as
+       `sk-2026-09-28_run` is left alone);
+     - AWS access key ids (`AKIA…` / `ASIA…`), a bare `Bearer <credential>`, and any JWT
+       (`eyJ….eyJ….…`, the shape of the PG Farm token);
+     - STAN share tokens (`token=…` in a URL, `--share-token …` with any spaces, tabs or `=`,
+       `STAN_HT_SHARE_TOKEN=…`) and an Entra cookie on the command line (`--cookie …`). A
+       value that begins like a path (`/`, `~`, `.`, `$`) is a file name and is left alone.
 
      A match becomes `[redacted]`, and the message still goes out.
 3. **The top-level `text`** is escaped like the blocks (`&`, `<`, `>`), so `<!channel>` or
