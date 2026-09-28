@@ -310,6 +310,23 @@ class ReleaseReview280(unittest.TestCase):
                     self.assertNotIn("0.0.0", json.dumps(rows))
 
 
+class ChainLibrary(unittest.TestCase):
+    def test_the_library_the_chain_searched_is_the_one_to_upload(self):
+        """diann_parallel.py step 3 writes the empirical library to empirical.parquet (--out-lib)
+        and only its assembly report to step3_assembly.parquet (--out). The upload plan named the
+        report "the empirical library" and left the library out."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = dia_session(tmp)
+            for n in ("empirical.parquet", "step3_assembly.parquet"):
+                write(os.path.join(p["search_out"], n), "e" * 64)
+            rows = {r["upload_name"]: r for r in md.plan_uploads(md.gather(p["session_dir"]))}
+            lib, rep = rows["empirical.parquet"], rows["step3_assembly.parquet"]
+            self.assertEqual((lib["pride_file_type"], lib["requirement"]),
+                             ("SPECTRUM_LIBRARY", "required"))
+            self.assertEqual((rep["pride_file_type"], rep["requirement"]), ("OTHER", "optional"))
+            self.assertNotIn("library assembled", rep["notes"])
+
+
 class FullSession(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

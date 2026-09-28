@@ -8,7 +8,9 @@ removed workflow registry; and the Figures category was missing from CATEGORY_OR
 figure was dropped from the catalog without a word.
 stdlib only.
 """
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -82,6 +84,74 @@ class Catalog(unittest.TestCase):
             self.assertIn("## Figures", text)
             self.assertIn("volcano.png", text)
             self.assertIn("figures.json", text)
+
+
+class RealSessionLayout(unittest.TestCase):
+    """PROT_0756 v2 (a 5-step DIA-NN chain, 30 runs): OUTPUT_FILES.md left out output/podcast/
+    and marked 298 of the chain's files "unrecognized"."""
+
+    CHAIN = ["quant_step2/r1.quant", "quant_step2/r2.quant", "quant_step4/r1.quant",
+             "quant_step2_orig/r1.quant", "xic/t0.parquet", "xic/t0.log.txt",
+             "xic/t0.stats.tsv", "xic/t0_xic/r1.xic.parquet",
+             "xic/t0_xic/r1.ms1_mobilogram.parquet", "empirical.parquet",
+             "step3_assembly.parquet", "step3_assembly.log.txt", "step3_assembly.stats.tsv",
+             "step1.log.txt", "file_list.txt", "parallel_input_files.txt", "jobs.txt",
+             "fran_deposit.json", "window.json", "window.txt", "step1_libpred.sbatch",
+             "step5_report.sbatch", "submit.sh", "report.parquet", "report.pg_matrix.tsv",
+             "report.pr_matrix.tsv", "report.unique_genes_matrix.tsv", "report.manifest.txt",
+             "report.protein_description.tsv"]
+    PODCAST = ["podcast.m4a", "transcript.html", "podcast_script.md", "check.txt", "verify.txt",
+               "verify_transcript.txt", "podcast.json"]
+
+    def build(self, d):
+        out = os.path.join(d, "output")
+        for rel in self.CHAIN:
+            path = os.path.join(out, "search", rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("x" * 10)
+        for n in self.PODCAST + ["podcast.wav", ".cache/chunk_001.wav"]:
+            path = os.path.join(out, "podcast", n)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w").close()
+        md = os.path.join(out, "OUTPUT_FILES.md")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_report.py"), "--out", md,
+                            "--search-out", os.path.join(out, "search"), "--root", d],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(md, encoding="utf-8") as fh:
+            return fh.read(), json.loads(r.stdout)
+
+    def test_nothing_the_chain_writes_is_unrecognized(self):
+        with tempfile.TemporaryDirectory() as d:
+            text, res = self.build(d)
+            self.assertEqual(res["unrecognized"], 0, text)
+            self.assertNotIn("unrecognized", text)
+
+    def test_the_per_run_files_are_one_line_per_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            text, res = self.build(d)
+            internals = text.split("## Search internals")[1].split("\n## ")[0]
+            for line, n in (("output/search/xic/", 5), ("output/search/quant_step2/*.quant", 2),
+                            ("output/search/quant_step4/*.quant", 1),
+                            ("output/search/quant_step2_orig/*.quant", 1)):
+                self.assertRegex(internals, rf"\| `{re.escape(line)}` \| {10 * n} B in {n} "
+                                            rf"files? \|")
+            self.assertNotIn("t0_xic/r1.xic.parquet", text)
+            self.assertNotIn("r1.quant`", text)
+            self.assertIn("The empirical spectral library", text)
+            self.assertIn("| `output/search/step3_assembly.parquet` |", internals)
+            # the header counts every file, the collapsed ones included
+            self.assertIn(f"This run produced {len(self.CHAIN) + len(self.PODCAST)} file(s)", text)
+            self.assertEqual(res["n_files"], len(self.CHAIN) + len(self.PODCAST))
+
+    def test_the_podcast_beside_output_files_is_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            text, _ = self.build(d)
+            for n in self.PODCAST:
+                self.assertIn(f"| `output/podcast/{n}` |", text)
+            self.assertNotIn("podcast.wav", text)            # scratch: beside podcast.m4a
+            self.assertNotIn(".cache", text)
 
 
 if __name__ == "__main__":

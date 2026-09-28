@@ -6,7 +6,9 @@ After a run, the user gets a pile of files (search output, DE tables, the
 reproducibility bundle, the AI report). This walks the output directories and
 writes OUTPUT_FILES.md: one row per file with its size and a plain-language
 description of what it is and how to use it. Files it doesn't recognize are still
-listed (honest — never silently omit), tagged "unrecognized output".
+listed (honest — never silently omit), tagged "unrecognized output". The search's
+per-run working files (the 5-step chain's .quant and xic/ folders) are one line per
+kind (INTERNAL_KINDS), and a podcast/ folder beside --out is listed when present.
 
 Usage:
   python3 make_report.py --out OUTPUT_FILES.md \
@@ -20,8 +22,16 @@ CATALOG = [
     (r"^report\.parquet$", "Search output",
      "Normalized search result in the DIA-NN report format (protein × run, with PG.MaxLFQ and Q-values). This is the exact input to the DE step."),
     (r"^report\.tsv$", "Search output", "DIA-NN precursor report (tab-separated)."),
-    (r"^report\.stats\.tsv$", "Search output", "DIA-NN per-run summary stats (IDs, proteins, precursors)."),
-    (r"^report\.log\.txt$|.*\.log$", "Search output", "Search-engine run log (parameters, timing, warnings)."),
+    (r".*\.stats\.tsv$", "Search output", "DIA-NN per-run summary stats (IDs, proteins, precursors)."),
+    (r".*\.log\.txt$|.*\.log$", "Search output", "Search-engine run log (parameters, timing, warnings)."),
+    (r"^report\..*_matrix\.tsv$", "Search output",
+     "DIA-NN quantity matrix, runs as columns (pg = protein groups, pr = precursors, gg and "
+     "unique_genes = genes)."),
+    (r"^report\.protein_description\.tsv$", "Search output", "DIA-NN protein descriptions."),
+    (r"^report\.manifest\.txt$", "Search output", "DIA-NN report manifest."),
+    (r"^empirical\.parquet$", "Search output",
+     "The empirical spectral library assembled from these runs (DIA-NN 5-step chain, step 3); "
+     "the final pass searched against it."),
     (r".*\.predicted\.speclib$", "Search output",
      "DIA-NN's in-silico predicted spectral library (from the FASTA). Left out of the session "
      "zip: the FASTA, the pinned engine and the parameters rebuild it exactly."),
@@ -168,9 +178,36 @@ CATALOG = [
      "A SLURM job (not run by the skill) that archives each .d run and checksums the upload."),
     (r"^methods_complete_draft\.md$", "Analysis report",
      "A complete Methods draft, written beside a hand-edited methods.md that lacks a section."),
+
+    # the search's own working files (run_search.py / diann_parallel.py's 5-step chain)
+    (r"^step3_assembly\.parquet$", "Search internals",
+     "DIA-NN's report of the library-assembly pass (step 3); the results are report.parquet."),
+    (r".*\.sbatch$|^submit\.sh$", "Search internals",
+     "A SLURM job script of the search, as submitted (submit.sh submitted the chain in order)."),
+    (r"^window\.(json|txt)$", "Search internals",
+     "The DIA-NN scan window measured on these runs (step 1b): window.json records every probe, "
+     "window.txt is the value passed as --window."),
+    (r"^(file_list|parallel_input_files)\.txt$", "Search internals",
+     "The raw files the search read, one path per line."),
+    (r"^jobs\.txt$", "Search internals", "The search's SLURM job ids (watch_run.sh --all reads it)."),
+    (r"^fran_deposit\.json$", "Search internals",
+     "This search's FRAN hand-off receipt (fran_deposit.py)."),
+]
+
+# Kinds that come by the hundred -- the 5-step chain's per-run files. Each is ONE line of
+# OUTPUT_FILES.md (how many files, how much space), never hundreds of rows: (regex on the path
+# relative to --root, the line's name for them from that path, what they are).
+INTERNAL_KINDS = [
+    (r"(^|/)xic/", lambda rel: rel[:rel.index("xic/") + 4],
+     "DIA-NN extracted ion chromatograms and mobilograms (step 4, --xic): per array task a "
+     "t<N>.parquet report and a t<N>_xic/ folder with each run's .xic / mobilogram parquet."),
+    (r"\.quant$", lambda rel: (os.path.dirname(rel) or ".") + "/*.quant",
+     "DIA-NN per-run .quant intermediates (quant_step2 = first pass, quant_step4 = final pass, "
+     "quant_step2_orig = step 3's copy of quant_step2). Kept out of the session zip."),
 ]
 
 CATEGORY_ORDER = ["Analysis report", "Differential expression", "Figures", "Search output",
+                  "Search internals",
                   "Reproducibility bundle", "Inputs", "Data deposit (PRIDE / MassIVE)", "Other"]
 
 
@@ -244,23 +281,42 @@ def main():
     ap.add_argument("--root", default=".", help="base dir to show paths relative to")
     a = ap.parse_args()
 
-    files = collect([a.search_out, a.de_dir, a.repro, *a.extra])
+    # the podcast (make_podcast.py) sits in podcast/ beside OUTPUT_FILES.md: listed when present
+    podcast = os.path.join(os.path.dirname(os.path.abspath(a.out)), "podcast")
+    files = collect([a.search_out, a.de_dir, a.repro, *a.extra,
+                     podcast if os.path.isdir(podcast) else None])
     root = os.path.abspath(a.root)
-    rows, by_cat = [], {}
+    rows, by_cat, kinds = [], {}, {}
     for f in files:
         if os.path.basename(f) == os.path.basename(a.out):
             continue
-        cat, desc = describe(os.path.basename(f))
-        try:
-            size = human(os.path.getsize(f))
-        except OSError:
-            size = "?"
         rel = os.path.relpath(f, root)
+        try:
+            nbytes = os.path.getsize(f)
+        except OSError:
+            nbytes = None
+        kind = next(((name(rel.replace(os.sep, "/")), desc) for pat, name, desc in INTERNAL_KINDS
+                     if re.search(pat, rel.replace(os.sep, "/"))), None)
+        if kind:                                     # one line per kind, below
+            k = kinds.setdefault(kind, [0, 0])
+            k[0] += 1
+            k[1] += nbytes or 0
+            continue
+        cat, desc = describe(os.path.basename(f))
+        size = human(nbytes) if nbytes is not None else "?"
         by_cat.setdefault(cat, []).append((rel, size, desc))
         rows.append({"file": rel, "category": cat, "size": size, "description": desc})
+    for (name, desc), (n, nbytes) in sorted(kinds.items()):
+        size = f"{human(nbytes)} in {n} file{'s' if n != 1 else ''}"
+        by_cat.setdefault("Search internals", []).append((name, size, desc))
+        rows.append({"file": name, "category": "Search internals", "size": size,
+                     "description": desc, "n_files": n})
 
+    n_files = sum(r.get("n_files", 1) for r in rows)
     lines = ["# Output files — what each one is", "",
-             f"This run produced {len(rows)} file(s). Each is described below, grouped by purpose.", ""]
+             f"This run produced {n_files} file(s). Each is described below, grouped by purpose"
+             + (" (the search's per-run working files one line per kind)" if kinds else "")
+             + ".", ""]
     n_unknown = 0
     # every category that has files, the known ones in order: a category missing from the order
     # (Figures was) must never drop its files from the catalog
@@ -296,7 +352,7 @@ def main():
     with open(a.out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
-    print(json.dumps({"report": os.path.abspath(a.out), "n_files": len(rows),
+    print(json.dumps({"report": os.path.abspath(a.out), "n_files": n_files,
                       "categories": {c: len(by_cat.get(c, [])) for c in CATEGORY_ORDER if by_cat.get(c)},
                       "unrecognized": n_unknown}, indent=2))
 

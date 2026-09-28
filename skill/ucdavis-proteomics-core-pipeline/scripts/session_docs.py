@@ -212,15 +212,32 @@ def _manifest(p):
     return [ln for ln in lines if ln.startswith("[")]
 
 
+# How the rule run_de.R records ("adj.P.Val < adjp (BH); no fold-change filter") reads for people.
+# topTable() adjusts each contrast's p-values on its own (run_de.R, adjust.method = "BH"), hence
+# "within each comparison" -- the wording the report uses too.
+_RULE_WORDS = (("adj.P.Val < adjp", "adjusted p < {adjp}"),
+               ("(BH)", "(Benjamini–Hochberg, within each comparison)"))
+
+
 def significance_text(de):
-    """The significance rule as de_provenance.json records it. An older record without
-    `significance_rule` is described only from the fields it has (adjp, logfc_role)."""
+    """The significance rule as de_provenance.json records it, written for people: its
+    `significance_rule` with the recorded adjp in place of the variable ("adjusted p < 0.05
+    (Benjamini–Hochberg, within each comparison); no fold-change filter"). A threshold the record
+    lacks is tagged, never assumed. An older record without `significance_rule` is described only
+    from the fields it has (adjp, logfc_role)."""
     rule, adjp, role = de.get("significance_rule"), de.get("adjp"), de.get("logfc_role")
+    thr = (f"{adjp:g}" if isinstance(adjp, (int, float)) and not isinstance(adjp, bool) else
+           str(adjp) if adjp is not None else f"[threshold {NOT_RECORDED}]")
     if rule:
-        return rule + (f" (adjp = {adjp})" if adjp is not None else "")
+        text = str(rule)
+        for recorded, said in _RULE_WORDS:
+            text = text.replace(recorded, said.format(adjp=thr))
+        # a rule worded some other way keeps its own words, and the value it names
+        return text + (f" (adjp = {thr})" if "adjp" in text else "")
     if adjp is not None and role == "reference_line_only":
-        return f"adj.P.Val < {adjp} (BH); |log2FC| is a volcano reference line only"
-    return NOT_RECORDED + (f" (adjp = {adjp}; whether a fold-change filter was applied is not "
+        return (f"adjusted p < {thr} (Benjamini–Hochberg, within each comparison); |log2FC| is a "
+                "volcano reference line only")
+    return NOT_RECORDED + (f" (adjp = {thr}; whether a fold-change filter was applied is not "
                            "recorded)" if adjp is not None else "")
 
 
