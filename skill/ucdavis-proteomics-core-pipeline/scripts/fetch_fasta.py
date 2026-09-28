@@ -1190,11 +1190,26 @@ def target_contaminants(meta, keratin_sample=False):
     if keratin_sample:
         dropped = [r for r in dropped if not is_keratin_gene(r.get("gene"))]
     genes = {r["gene"].upper() for r in dropped if r.get("gene")}
-    accs = {a.upper() for r in dropped for a in (r.get("target_accs") or [r.get("target_acc")])
-            if a}
+    accs = {a.upper() for r in dropped for a in matched_target_accs(r) if a}
     return {"organism": meta.get("organism") or "", "dropped": dropped,
             "kept_as_contaminant": kept, "genes": genes, "accessions": accs,
             "legacy_note": legacy_note, "state": state}
+
+
+def matched_target_accs(rec):
+    """The target accession(s) a dropped contaminant entry IS -- what the auditors may flag.
+
+    An identical or substring record's target_accs are all genuine matches: every target with
+    that sequence, or that contains it. A shared_peptides record's target_accs are every target
+    sharing even ONE peptide with it -- a whole paralog family -- so only its matched pair,
+    target_acc (the target sharing the most peptides), is the protein it cannot be told apart
+    from. Why (PROT_0756 v2, 2026-09-28): with the family flattened into the flagged set, AUDIT
+    listed Ywhab/e/g/h/q, Sfn, Tuba8, Tubal3 and Eef1a2 -- abundant endogenous brain proteins --
+    as possible contamination, because 1433Z_BOVIN, TBA1D_BOVIN and EF1A1_BOVIN each share a
+    conserved peptide with them. target_accs stays in the sidecar as information."""
+    if rec.get("reason") == "shared_peptides":
+        return [rec.get("target_acc")]
+    return rec.get("target_accs") or [rec.get("target_acc")]
 
 
 def seen_only_as_cont(kept, groups):
