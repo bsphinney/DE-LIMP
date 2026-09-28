@@ -4,7 +4,8 @@
 #
 # Produces the standard figures a proteomics expert expects, from the DE output:
 #   volcano_<contrast>.png   per-contrast volcano (top genes labelled)
-#   pvalue_<contrast>.png    raw p-value distribution (calibration check)
+#   qc_pvalue_panel.png      raw p-value distributions, every contrast in one small-multiples
+#                            panel (calibration check, for the report's appendix)
 #   pca.png                  sample PCA, coloured by group
 #   heatmap_top.png          top differential proteins, z-scored, group-annotated
 #   qc_protein_counts.png    proteins quantified per sample (loading/QC check) -- only when the
@@ -18,18 +19,20 @@
 #                                     Detection_Matrix.csv + de_provenance.json if present)
 #          --conditions conditions.csv   --outdir output/figures
 #          [--adjp 0.05] [--logfc 1] [--top 50] [--violin-top 8]
-# Writes the PNGs + figures.json (a list of {file, type, caption}) for the report.
-# Each figure is wrapped in tryCatch so one failure never blocks the others.
+#          --adjp/--logfc are a FALLBACK: the cutoff the DE run recorded in de_provenance.json
+#          wins, so the figures call significance exactly as the DE tables and the report do.
+# Writes the PNGs + figures.json: {"figures": [{file, type, caption}],
+#                                  "failed":  [{file, type, reason}]}
+# Every PNG this script owns is deleted before drawing, and each figure is wrapped in
+# tryCatch: one failure never blocks the others, and none is left stale or silently absent.
 # =============================================================================
 args <- commandArgs(trailingOnly = TRUE)
 getone <- function(flag, d = NULL) { i <- which(args == flag); if (!length(i)) d else args[i + 1] }
 de_dir   <- getone("--de-dir", "output/tables")
 cond_path<- getone("--conditions")
 outdir   <- getone("--outdir", "output/figures")
-adjp_thr <- as.numeric(getone("--adjp", "0.05"))
-# Reference line only -- drawn and labelled on the volcano, never used to call
-# significance. See the note in run_de.R: significance is the BH adjusted p-value alone.
-logfc_ref<- as.numeric(getone("--logfc", "1"))
+cli_adjp <- getone("--adjp")    # fallbacks only -- see "significance cutoff" below
+cli_logfc<- getone("--logfc")
 top_n    <- as.integer(getone("--top", "50"))
 violin_n <- as.integer(getone("--violin-top", "8"))   # proteins per violin_top_<contrast>.png
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
@@ -44,6 +47,21 @@ library(ggplot2)
 
 figs <- list()
 add_fig <- function(file, type, caption) figs[[length(figs) + 1]] <<- list(file = basename(file), type = type, caption = caption)
+# A figure this script meant to draw and did not -- an error, or too little data -- is listed in
+# figures.json "failed" with the reason, so the report can say so instead of silently lacking it.
+failed <- list()
+add_failed <- function(file, type, reason) {
+  failed[[length(failed) + 1]] <<- list(file = basename(file), type = type, reason = reason)
+  message("[figures] ", basename(file), " not drawn: ", reason)
+}
+# Every PNG this script owns is removed before drawing. Otherwise a figure that now fails, or is
+# no longer drawn (the per-sample count plot for a complete matrix, the old per-contrast p-value
+# histograms), survives from an earlier run and is embedded as if current. Only these names.
+OWNED_FIGS <- paste0("^(volcano_.+|pvalue_.+|violin_top_.+|pca|heatmap_top|qc_protein_counts|",
+                     "qc_detected_vs_inferred|qc_pvalue_panel)\\.png$")
+old_figs <- list.files(outdir, pattern = OWNED_FIGS, full.names = TRUE)
+if (length(old_figs) && all(file.remove(old_figs)))
+  message(sprintf("[figures] removed %d figure(s) left by an earlier run in %s", length(old_figs), outdir))
 THEME <- theme_bw(base_size = 13) + theme(panel.grid.minor = element_blank(),
                                           plot.title = element_text(face = "bold"))
 
@@ -159,65 +177,6 @@ two_factor_split <- function(lvls) {
 de_files <- list.files(de_dir, pattern = "^DE_.*\\.csv$", full.names = TRUE)
 contrast_of <- function(f) sub("\\.csv$", "", sub("^DE_[^_]+_", "", basename(f)))
 
-# ---- volcano + p-value distribution, per contrast ---------------------------
-for (f in de_files) {
-  ct <- contrast_of(f)
-  tryCatch({
-    d <- utils::read.csv(f, stringsAsFactors = FALSE, check.names = FALSE)
-    d <- d[is.finite(d$logFC) & is.finite(d$adj.P.Val), ]
-    d$sig <- ifelse(d$adj.P.Val < adjp_thr,
-                    ifelse(d$logFC > 0, "Up", "Down"), "NS")
-    d$lab <- gene_label(d)
-    nlogp <- -log10(pmax(d$adj.P.Val, .Machine$double.xmin))
-    d$nlogp <- nlogp
-    top <- d[d$sig != "NS", ]; top <- top[order(top$adj.P.Val), ]; top <- head(top, 15)
-    p <- ggplot(d, aes(logFC, nlogp, color = sig)) +
-      geom_point(alpha = 0.6, size = 1.4) +
-      scale_color_manual(values = c(DIR_COLS, NS = "grey75"), name = NULL) +
-      geom_vline(xintercept = c(-logfc_ref, logfc_ref), linetype = "dashed", color = "grey50") +
-      geom_hline(yintercept = -log10(adjp_thr), linetype = "dashed", color = "grey50") +
-      # Label the reference lines in the MARGIN, as ticks on a secondary axis, never inside
-      # the panel: labels at the top of the lines collided with the repelled gene labels,
-      # and labels tucked inward at their foot overprinted each other ("2-fold2-fold")
-      # whenever the lines were close. check.overlap drops a label rather than overprint.
-      scale_x_continuous(sec.axis = dup_axis(name = NULL, breaks = c(-logfc_ref, logfc_ref),
-                                             labels = sprintf("%.3g×", 2^c(-logfc_ref, logfc_ref)))) +
-      scale_y_continuous(sec.axis = dup_axis(name = NULL, breaks = -log10(adjp_thr),
-                                             labels = sprintf("adj.P %.2g", adjp_thr))) +
-      guides(x.sec = guide_axis(check.overlap = TRUE)) +
-      # Two short lines: one long line ran past the device edge and was clipped.
-      labs(title = paste0("Volcano — ", ct),
-           subtitle = sprintf("%d up, %d down at adj.P < %.2g (BH)\nDashed lines: %.3g-fold and adj.P %.2g (fold is a reference, not a cutoff)",
-                              sum(d$sig == "Up"), sum(d$sig == "Down"), adjp_thr, 2^logfc_ref, adjp_thr),
-           x = "log2 fold change", y = "-log10 adjusted p-value") + THEME +
-      theme(plot.title.position = "plot",
-            axis.text.x.top = element_text(color = "grey40", size = 9),
-            axis.text.y.right = element_text(color = "grey40", size = 9),
-            axis.ticks.x.top = element_line(color = "grey50"),
-            axis.ticks.y.right = element_line(color = "grey50"))
-    if (has_repel && nrow(top)) p <- p + ggrepel::geom_text_repel(
-      data = top, aes(label = lab), size = 3, max.overlaps = 20, show.legend = FALSE)
-    fn <- file.path(outdir, sprintf("volcano_%s.png", make.names(ct)))
-    ggsave(fn, p, width = 7, height = 6, dpi = 200)
-    add_fig(fn, "volcano", sprintf(paste("Volcano plot for %s: log2 fold change vs significance.",
-      "Coloured points are significant at adj.P < %.2g (Benjamini-Hochberg); no fold-change",
-      "filter is applied. Vertical dashed lines mark %.3g-fold (labelled on the top axis) for",
-      "reference only, so a coloured point inside them is a confidently measured small change,",
-      "not an error."),
-      ct, adjp_thr, 2^logfc_ref))
-
-    if ("P.Value" %in% names(d)) {
-      pp <- ggplot(d, aes(P.Value)) +
-        geom_histogram(bins = 40, fill = "#4393c3", color = "white") +
-        labs(title = paste0("p-value distribution — ", ct),
-             x = "raw p-value", y = "proteins") + THEME
-      fn2 <- file.path(outdir, sprintf("pvalue_%s.png", make.names(ct)))
-      ggsave(fn2, pp, width = 6, height = 4.5, dpi = 200)
-      add_fig(fn2, "pvalue", sprintf("Raw p-value distribution for %s. A peak near 0 over a flat background indicates real signal; a skew toward 1 or a spike mid-range suggests model/QC issues.", ct))
-    }
-  }, error = function(e) message("[figures] volcano/pvalue ", ct, " failed: ", e$message))
-}
-
 # ---- helpers for the top-protein violins ------------------------------------
 or_else <- function(x, y) if (is.null(x) || !length(x) || all(is.na(x)) || identical(x, "")) y else x
 
@@ -235,8 +194,13 @@ read_provenance <- function(path) {
     m <- regmatches(txt, regexec(sprintf('"%s"\\s*:\\s*"([^"]*)"', key), txt))[[1]]
     if (length(m) == 2) m[2] else NULL
   }
+  num <- function(key) {
+    m <- regmatches(txt, regexec(sprintf('"%s"\\s*:\\s*([-0-9.eE+]+)', key), txt))[[1]]
+    if (length(m) == 2) as.numeric(m[2]) else NULL
+  }
   arr <- regmatches(txt, regexec('"contrasts"\\s*:\\s*\\[([^]]*)\\]', txt))[[1]]
   list(pipeline_id = str("pipeline_id"), method = str("method"), rollup_method = str("rollup_method"),
+       adjp = num("adjp"), logfc = num("logfc"),
        contrasts = if (length(arr) == 2) gsub('"', "", regmatches(arr[2], gregexpr('"[^"]*"', arr[2]))[[1]]),
        detection_matrix = list(zero_means = str("zero_means")))
 }
@@ -308,6 +272,128 @@ wrap_label <- function(x, width = 12) vapply(x, function(s) {
 fmt_p <- function(p) ifelse(p < 0.001, formatC(p, format = "e", digits = 1), formatC(p, format = "fg", digits = 2))
 tint  <- function(col, f) grDevices::rgb(t(grDevices::col2rgb(col) / 255 * (1 - f) + f))
 
+# ---- significance cutoff: ONE definition -------------------------------------
+# The DE run records the cutoff it applied (de_provenance.json: adjp, logfc). The figures must
+# call significance exactly as the DE tables, the audit and the report do, so that record wins;
+# --adjp/--logfc only stand in when a run left no record, and every caption that depends on the
+# cutoff then says where it came from (architectural rule 2: a default never passes silently
+# as the analysis's own value).
+prov <- read_provenance(file.path(de_dir, "de_provenance.json"))
+num1 <- function(x) { v <- suppressWarnings(as.numeric(x)); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
+resolve_cut <- function(recorded, cli, default, flag, what) {
+  if (!is.na(num1(recorded))) {
+    if (!is.null(cli) && !isTRUE(all.equal(num1(cli), num1(recorded))))
+      message(sprintf("[figures] %s %s ignored: the DE run used %s %s (de_provenance.json)",
+                      flag, cli, what, format(num1(recorded))))
+    return(list(value = num1(recorded), src = "record"))
+  }
+  if (!is.na(num1(cli))) return(list(value = num1(cli), src = "cli"))
+  list(value = default, src = "default")
+}
+.adjp  <- resolve_cut(prov$adjp,  cli_adjp,  0.05, "--adjp",  "adj.P <")
+.logfc <- resolve_cut(prov$logfc, cli_logfc, 1,    "--logfc", "a reference line at |log2FC| =")
+adjp_thr  <- .adjp$value
+# Reference line only -- drawn and labelled on the volcano, never used to call significance.
+# See the note in run_de.R: significance is the BH adjusted p-value alone.
+logfc_ref <- .logfc$value
+cut_part <- function(label, src) if (src == "cli") sprintf("%s from the command line", label) else
+  sprintf("%s is make_figures.R's DEFAULT, not user-confirmed", label)
+.parts <- c(if (.adjp$src != "record") cut_part(sprintf("adj.P < %.2g", adjp_thr), .adjp$src),
+            if (.logfc$src != "record") cut_part(sprintf("the %.3g-fold reference line", 2^logfc_ref), .logfc$src))
+CUT_NOTE <- if (!length(.parts)) "" else
+  sprintf(" (The DE run recorded no cutoff in de_provenance.json: %s.)", paste(.parts, collapse = "; "))
+message(sprintf("[figures] significance cutoff: adj.P < %s (%s); fold reference %s (%s)",
+                format(adjp_thr), .adjp$src, format(logfc_ref), .logfc$src))
+
+# A contrast's display label from the formula the DE run recorded ("A-B" -> "A vs B").
+contrast_display <- function(ct) {
+  form <- or_else(prov$contrasts, character(0)); form <- form[make.names(form) == ct]
+  if (length(form) == 1 && lengths(regmatches(form, gregexpr("-", form))) == 1 && !grepl("[()+*/]", form))
+    sub("\\s*-\\s*", " vs ", form) else ct
+}
+
+# ---- volcano per contrast; p-values collected for one panel -------------------
+pv <- list()
+for (f in de_files) {
+  ct <- contrast_of(f)
+  fn <- file.path(outdir, sprintf("volcano_%s.png", make.names(ct)))
+  tryCatch({
+    d <- utils::read.csv(f, stringsAsFactors = FALSE, check.names = FALSE)
+    if ("P.Value" %in% names(d) && any(is.finite(d$P.Value)))
+      pv[[ct]] <- data.frame(contrast = contrast_display(ct), P.Value = d$P.Value[is.finite(d$P.Value)])
+    d <- d[is.finite(d$logFC) & is.finite(d$adj.P.Val), ]
+    if (!nrow(d)) stop("no protein has a finite logFC and adj.P.Val")
+    d$sig <- ifelse(d$adj.P.Val < adjp_thr,
+                    ifelse(d$logFC > 0, "Up", "Down"), "NS")
+    d$lab <- gene_label(d)
+    nlogp <- -log10(pmax(d$adj.P.Val, .Machine$double.xmin))
+    d$nlogp <- nlogp
+    top <- d[d$sig != "NS", ]; top <- top[order(top$adj.P.Val), ]; top <- head(top, 15)
+    p <- ggplot(d, aes(logFC, nlogp, color = sig)) +
+      geom_point(alpha = 0.6, size = 1.4) +
+      scale_color_manual(values = c(DIR_COLS, NS = "grey75"), name = NULL) +
+      geom_vline(xintercept = c(-logfc_ref, logfc_ref), linetype = "dashed", color = "grey50") +
+      geom_hline(yintercept = -log10(adjp_thr), linetype = "dashed", color = "grey50") +
+      # Label the reference lines in the MARGIN, as ticks on a secondary axis, never inside
+      # the panel: labels at the top of the lines collided with the repelled gene labels,
+      # and labels tucked inward at their foot overprinted each other ("2-fold2-fold")
+      # whenever the lines were close. check.overlap drops a label rather than overprint.
+      scale_x_continuous(sec.axis = dup_axis(name = NULL, breaks = c(-logfc_ref, logfc_ref),
+                                             labels = sprintf("%.3g×", 2^c(-logfc_ref, logfc_ref)))) +
+      scale_y_continuous(sec.axis = dup_axis(name = NULL, breaks = -log10(adjp_thr),
+                                             labels = sprintf("adj.P %.2g", adjp_thr))) +
+      guides(x.sec = guide_axis(check.overlap = TRUE)) +
+      # Two short lines: one long line ran past the device edge and was clipped.
+      labs(title = paste0("Volcano — ", ct),
+           subtitle = sprintf("%d up, %d down at adj.P < %.2g (BH)%s\nDashed lines: %.3g-fold and adj.P %.2g (fold is a reference, not a cutoff)",
+                              sum(d$sig == "Up"), sum(d$sig == "Down"), adjp_thr,
+                              if (nzchar(CUT_NOTE)) " -- cutoff not from the DE record" else "",
+                              2^logfc_ref, adjp_thr),
+           x = "log2 fold change", y = "-log10 adjusted p-value") + THEME +
+      theme(plot.title.position = "plot",
+            axis.text.x.top = element_text(color = "grey40", size = 9),
+            axis.text.y.right = element_text(color = "grey40", size = 9),
+            axis.ticks.x.top = element_line(color = "grey50"),
+            axis.ticks.y.right = element_line(color = "grey50"))
+    if (has_repel && nrow(top)) p <- p + ggrepel::geom_text_repel(
+      data = top, aes(label = lab), size = 3, max.overlaps = 20, show.legend = FALSE)
+    ggsave(fn, p, width = 7, height = 6, dpi = 200)
+    add_fig(fn, "volcano", paste0(sprintf(paste("Volcano plot for %s: log2 fold change vs significance.",
+      "Coloured points are significant at adj.P < %.2g (Benjamini-Hochberg); no fold-change",
+      "filter is applied. Vertical dashed lines mark %.3g-fold (labelled on the top axis) for",
+      "reference only, so a coloured point inside them is a confidently estimated small change,",
+      "not an error."),
+      ct, adjp_thr, 2^logfc_ref), CUT_NOTE))
+  }, error = function(e) add_failed(fn, "volcano", conditionMessage(e)))
+}
+
+# ---- raw p-value distributions: ONE small-multiples panel ----------------------
+# A calibration check, not a finding: one panel for the report's appendix instead of a
+# separate figure per contrast that the narrative then interleaves with the results.
+fn_pv <- file.path(outdir, "qc_pvalue_panel.png")
+if (length(pv)) tryCatch({
+  pvd <- do.call(rbind, pv)
+  pvd$contrast <- factor(pvd$contrast, levels = unique(pvd$contrast))
+  nc <- length(levels(pvd$contrast)); ncol_pv <- min(4, nc); nrow_pv <- ceiling(nc / ncol_pv)
+  pp <- ggplot(pvd, aes(P.Value)) +
+    geom_histogram(breaks = seq(0, 1, by = 0.025), fill = "#4393c3", colour = "white", linewidth = 0.15) +
+    facet_wrap(~contrast, ncol = ncol_pv, scales = "free_y", labeller = label_wrap_gen(width = 28)) +
+    scale_x_continuous(breaks = c(0, 0.5, 1), labels = c("0", "0.5", "1"), expand = expansion(mult = 0.01)) +
+    labs(title = "Raw p-value distributions",
+         subtitle = "One panel per contrast. Well calibrated: flat, with a peak at 0 when there is real signal.",
+         x = "raw p-value", y = "proteins") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"),
+          plot.title.position = "plot", strip.background = element_rect(fill = "#f3f2ee", colour = "#d6d5cf"),
+          strip.text = element_text(size = 9), plot.subtitle = element_text(colour = "#52514e"))
+  ggsave(fn_pv, pp, width = 2.6 * ncol_pv + 0.8, height = 2.1 * nrow_pv + 1.1, dpi = 200)
+  add_fig(fn_pv, "pvalue", sprintf(paste(
+    "Raw p-value distributions for all %d contrast%s (appendix; a calibration check, not a result).",
+    "A flat background with a peak near 0 indicates real signal on a well-behaved model; a skew",
+    "toward 1, a hump mid-range or a U shape suggests model or QC problems for that contrast."),
+    nc, if (nc > 1) "s" else ""))
+}, error = function(e) add_failed(fn_pv, "pvalue", conditionMessage(e)))
+
 # ---- expression-matrix-based figures (PCA, heatmap, QC) ---------------------
 em_path <- file.path(de_dir, "Expression_Matrix.csv")
 meta <- if (!is.null(cond_path) && file.exists(cond_path))
@@ -330,9 +416,8 @@ if (file.exists(em_path)) {
   short_of <- function(x) ifelse(is.na(slab[x]), x, slab[x])
   utils::write.csv(sl, file.path(outdir, "sample_labels.csv"), row.names = FALSE)
   LABELS_NOTE <- " Samples are labelled with short names; sample_labels.csv maps each one to its run file."
-  # How the pipeline describes itself, and which values were measured -- read once, used by
-  # the PCA subtitle and the violins.
-  prov <- read_provenance(file.path(de_dir, "de_provenance.json"))
+  # Which values were measured -- read once, used by the QC plot, PCA, heatmap and violins.
+  # (prov, the pipeline's own record, was read above with the significance cutoff.)
   det_f <- file.path(de_dir, "Detection_Matrix.csv")
   D <- if (file.exists(det_f)) tryCatch({
     dm <- utils::read.csv(det_f, stringsAsFactors = FALSE, check.names = FALSE)
@@ -356,12 +441,9 @@ if (file.exists(em_path)) {
               cnt$n[1], " proteins in every sample), so every bar would be identical",
               if (file.exists(file.path(de_dir, "QC_detected_vs_inferred.csv")))
                 "; qc_detected_vs_inferred.png shows per-sample depth" else "")
-      # A copy left by an earlier run would otherwise survive a re-render and be read as
-      # current (Silva08172026's re-rendered report showed the identical-bar plot again).
-      # Only this exact file, which this script owns, is removed.
-      stale <- file.path(outdir, "qc_protein_counts.png")
-      if (file.exists(stale) && file.remove(stale))
-        message("[figures] removed stale qc_protein_counts.png from an earlier run in ", outdir)
+      # Not a failure -- nothing to show -- so not listed in "failed". A copy from an earlier
+      # run was already removed by the sweep at the top (Silva08172026's re-rendered report
+      # had shown the identical-bar plot again).
     } else {
       p <- ggplot(cnt, aes(reorder(Sample, n), n, fill = Group)) +
         geom_col() + coord_flip() +
@@ -371,7 +453,7 @@ if (file.exists(em_path)) {
       ggsave(fn, p, width = 7, height = max(3, 0.3 * ncol(M) + 1), dpi = 200)
       add_fig(fn, "qc", paste0("Proteins quantified per sample — a loading/QC check. Large differences between samples (or systematic differences between groups) flag uneven input or sample-quality problems.", LABELS_NOTE))
     }
-  }, error = function(e) message("[figures] QC counts failed: ", e$message))
+  }, error = function(e) add_failed("qc_protein_counts.png", "qc", conditionMessage(e)))
 
   # ---- detected vs inferred (the QC view that actually works after DPC) ----
   # The plot above counts non-missing cells, but a DPC matrix is complete by
@@ -383,7 +465,11 @@ if (file.exists(em_path)) {
     if (file.exists(qcf)) {
       q <- utils::read.csv(qcf, stringsAsFactors = FALSE, check.names = FALSE)
       q <- q[order(q$Detected), ]
-      q$Sample <- short_of(q$Sample)
+      # "RUN · Group", so a group whose runs all sit at the bottom shows at a glance.
+      q$Sample <- if ("Group" %in% names(q) && !all(is.na(q$Group)))
+        paste(short_of(q$Sample), q$Group, sep = " \u00b7 ") else short_of(q$Sample)
+      inf_by <- if (!is.null(vocab)) vocab$source else or_else(sub("\\s*\\(.*$", "", or_else(prov$rollup_method, "")),
+                                                               "the detection-probability model")
       long <- rbind(
         data.frame(Sample = q$Sample, n = q$Detected, Kind = "Detected"),
         data.frame(Sample = q$Sample, n = q$Inferred, Kind = "Inferred"))
@@ -393,15 +479,15 @@ if (file.exists(em_path)) {
         ggplot2::geom_col(width = 0.72) +
         ggplot2::scale_fill_manual(values = c(Detected = STATUS_DETECTED, Inferred = STATUS_ABSENT)) +
         ggplot2::labs(title = "Detected vs inferred proteins per sample",
-                      subtitle = "Inferred values come from the DPC detection model, not measurement",
+                      subtitle = sprintf("Inferred values come from %s, not measurement", inf_by),
                       x = "proteins", y = NULL, fill = NULL) +
         ggplot2::theme_minimal(base_size = 11) +
         ggplot2::theme(legend.position = "top")
       fn2 <- file.path(outdir, "qc_detected_vs_inferred.png")
       ggsave(fn2, p2, width = 9, height = max(3, 0.34 * nrow(q) + 1.6), dpi = 200)
-      add_fig(fn2, "qc", sprintf("Detected vs inferred proteins per sample (%.0f%%-%.0f%% detected). Detected means at least one precursor was actually observed in that run; inferred means the value came from the DPC detection-probability model. Samples with a large inferred fraction contribute weaker evidence, and fold-changes for proteins inferred in one whole group should be read as detection events rather than magnitudes.%s", min(q$PctDetected), max(q$PctDetected), LABELS_NOTE))
+      add_fig(fn2, "qc", sprintf("Detected vs inferred proteins per sample (%.0f%%-%.0f%% detected), each bar labelled run \u00b7 group. Detected means at least one precursor was actually observed in that run; inferred means the value came from %s. Samples with a large inferred fraction contribute weaker evidence, and fold-changes for proteins inferred in one whole group should be read as detection events rather than magnitudes.%s", min(q$PctDetected), max(q$PctDetected), inf_by, LABELS_NOTE))
     }
-  }, error = function(e) message("[figures] detected/inferred QC failed: ", e$message))
+  }, error = function(e) add_failed("qc_detected_vs_inferred.png", "qc", conditionMessage(e)))
 
   # complete-ish matrix for PCA/heatmap: keep proteins seen in all samples; if too
   # few, mean-impute per protein (PCA/heatmap need no NAs).
@@ -421,7 +507,11 @@ if (file.exists(em_path)) {
   tryCatch({
     Mp <- Mi[apply(Mi, 1, stats::var) > 0, , drop = FALSE]    # prcomp cannot scale a constant protein
     n_const <- nrow(Mi) - nrow(Mp)
-    if (ncol(Mp) >= 3 && nrow(Mp) >= 5) {
+    if (ncol(Mp) < 3 || nrow(Mp) < 5) {
+      add_failed("pca.png", "pca", sprintf(
+        "a PCA needs at least 3 samples and 5 varying proteins; this matrix has %d sample%s and %d protein%s",
+        ncol(Mp), if (ncol(Mp) == 1) "" else "s", nrow(Mp), if (nrow(Mp) == 1) "" else "s"))
+    } else {
       pc <- prcomp(t(Mp), scale. = TRUE)
       ve <- 100 * pc$sdev^2 / sum(pc$sdev^2)
       g  <- if (!is.null(grp)) grp else factor(rep("all samples", ncol(Mp)))
@@ -545,7 +635,7 @@ if (file.exists(em_path)) {
         " groups, and a named sample lies more than twice the median distance from its group's centroid, worth checking.",
         if (length(ve) >= 3) sprintf(" PC3 explains a further %.1f%%.", ve[3]) else "", LABELS_NOTE))
     }
-  }, error = function(e) message("[figures] PCA failed: ", e$message))
+  }, error = function(e) add_failed("pca.png", "pca", conditionMessage(e)))
 
   # ---- heatmap of top differential proteins ----
   tryCatch({
@@ -570,6 +660,15 @@ if (file.exists(em_path)) {
       v <- apply(Mi, 1, var); pick <- names(sort(v, decreasing = TRUE))[seq_len(min(top_n, nrow(Mi)))]
     } else pick <- head(pick, top_n)
     H <- Mi[pick, , drop = FALSE]
+    hm_inf <- ""
+    if (!is.null(D) && !is.null(vocab) && identical(vocab$absent, "Inferred")) {
+      z <- D[match(rownames(H), rownames(D)), match(colnames(H), colnames(D)), drop = FALSE]
+      if (any(!is.na(z))) hm_inf <- sprintf(paste(
+        " %.0f%% of the cells shown are inferred by %s (no precursor observed in that run), not measured.",
+        "A uniform block of colour across a group can therefore be the model's estimates for proteins",
+        "never seen there, not agreement between replicates; the violins mark which values were measured."),
+        100 * mean(z == 0, na.rm = TRUE), vocab$source)
+    }
     lab <- gene_label(em[match(rownames(H), em$Protein.Group), , drop = FALSE])
     lab <- ifelse(is.na(lab), rownames(H), lab)
     # Semicolon-joined protein groups (e.g. "H2ac12;H2ac13;H2ac15;...") overflow the
@@ -596,8 +695,8 @@ if (file.exists(em_path)) {
                      margins = c(8, 8), main = sprintf("Top %d differential proteins", nrow(H)))
       grDevices::dev.off()
     }
-    add_fig(fn, "heatmap", sprintf("Heatmap of the top %d differential proteins (row z-scored log2 abundance), samples annotated by group. Reveals which proteins drive the group separation and whether replicates behave consistently.%s", nrow(H), LABELS_NOTE))
-  }, error = function(e) message("[figures] heatmap failed: ", e$message))
+    add_fig(fn, "heatmap", sprintf("Heatmap of the top %d differential proteins (row z-scored log2 abundance), samples annotated by group. Reveals which proteins drive the group separation and whether replicates behave consistently.%s%s%s", nrow(H), hm_inf, LABELS_NOTE, CUT_NOTE))
+  }, error = function(e) add_failed("heatmap_top.png", "heatmap", conditionMessage(e)))
 
   # ---- top-protein violins, one figure per contrast ----
   # The volcano says WHICH proteins changed; this says what the change rests on. Each
@@ -624,7 +723,11 @@ if (file.exists(em_path)) {
       d <- utils::read.csv(f, stringsAsFactors = FALSE, check.names = FALSE)
       d <- d[is.finite(d$logFC) & is.finite(d$adj.P.Val) & d$Protein.Group %in% rownames(M), , drop = FALSE]
       if (!nrow(d)) stop("no tested protein is in Expression_Matrix.csv")
-      d <- utils::head(d[order(d$adj.P.Val, -abs(d$logFC)), , drop = FALSE], violin_n)
+      # BH gives many proteins the same adj.P.Val; break ties by the raw p-value (the DE table's
+      # own topTable order), not by |logFC|, which would promote large but noisy changes.
+      ord <- if ("P.Value" %in% names(d)) order(d$adj.P.Val, d$P.Value) else order(d$adj.P.Val)
+      d <- utils::head(d[ord, , drop = FALSE], violin_n)
+      message("[figures] violin ", ct, " proteins: ", paste(d$Protein.Group, collapse = ", "))
       k <- nrow(d)
       ncv <- max(1, min(k, floor(11 / pw))); nr <- ceiling(k / ncv); fig_w <- pw * ncv + 0.7
 
@@ -639,7 +742,7 @@ if (file.exists(em_path)) {
       long <- do.call(rbind, lapply(seq_len(k), function(i) do.call(rbind, lapply(gx, function(g) {
         r <- runs[[g]]; pid <- d$Protein.Group[i]
         nobs <- if (!is.null(D) && pid %in% rownames(D)) D[pid, match(r, colnames(D))] else rep(NA_real_, length(r))
-        data.frame(panel = rep(lab[i], length(r)), group = rep(g, length(r)), value = unname(M[pid, r]),
+        data.frame(panel = rep(lab[i], length(r)), group = rep(g, length(r)), run = r, value = unname(M[pid, r]),
                    nobs = unname(as.numeric(nobs)), stringsAsFactors = FALSE)
       }))))
       long$panel <- factor(long$panel, levels = lab)
@@ -678,26 +781,59 @@ if (file.exists(em_path)) {
 
       gcol <- group_colours(levels(grp))[gx]
       p <- ggplot()
+      # A density needs data: a violin drawn through 3 points is a shape the data do not have.
+      # Groups with <= 4 runs in a panel are shown as their points and a mean bar only.
+      MIN_VIOLIN <- 5
+      n_violin <- 0
       for (g in gx) {
         vg <- pts[pts$group == g, , drop = FALSE]
-        if (nrow(vg)) p <- p + geom_violin(data = vg, aes(x = x, y = value, group = x), fill = tint(gcol[[g]], 0.74),
-                                           colour = gcol[[g]], linewidth = 0.45, width = 0.74,
-                                           trim = TRUE, scale = "width")
+        vg <- vg[stats::ave(vg$value, vg$panel, FUN = length) >= MIN_VIOLIN, , drop = FALSE]
+        if (nrow(vg)) {
+          n_violin <- n_violin + 1
+          p <- p + geom_violin(data = vg, aes(x = x, y = value, group = x), fill = tint(gcol[[g]], 0.74),
+                               colour = gcol[[g]], linewidth = 0.45, width = 0.74, trim = TRUE, scale = "width")
+        }
+      }
+      # Within-block (paired) contrast: join each block's runs across the two groups, so the
+      # reader sees the within-block changes the model actually tested, not two clouds.
+      bcol <- or_else(prov$block$column, NA_character_)
+      bstr <- unlist(prov$block$contrast_structure)
+      paired <- cg$simple && !is.na(bcol) && !is.null(meta) && bcol %in% names(meta) &&
+        identical(unname(bstr[make.names(names(bstr)) == ct]), "within")
+      if (paired) {
+        pts$block <- as.character(meta[[bcol]][match(pts$run, meta$File.Name)])
+        one_each <- all(table(pts$panel, pts$block, pts$group) <= 1)
+        bl <- if (one_each) pts[, c("panel", "block", "x", "xj", "value")] else {
+          m <- stats::aggregate(value ~ panel + block + x, data = pts, FUN = mean); m$xj <- m$x; m }
+        bl <- bl[order(bl$panel, bl$block, bl$x), ]
+        p <- p + geom_line(data = bl, aes(x = xj, y = value, group = interaction(panel, block)),
+                           colour = "#a8a69f", linewidth = 0.35, alpha = 0.9)
+        message(sprintf("[figures] violin %s: paired lines join each %s (%s)", ct, bcol,
+                        if (one_each) "one run per group" else "block means per group"))
       }
       mb <- cnt[!is.na(cnt$mean), , drop = FALSE]
       p <- p + geom_segment(data = mb, aes(x = x - 0.22, xend = x + 0.22, y = mean, yend = mean),
                             colour = INK, linewidth = 0.9, lineend = "round")
-      if (cg$simple) {                                  # arrow reference mean -> compared mean
-        a <- merge(mb[mb$group == cg$ref, c("panel", "mean")], mb[mb$group == cg$test, c("panel", "mean")],
-                   by = "panel", suffixes = c("_ref", "_test"))
+      # The arrow is the MODEL's log2 fold change, drawn up (or down) from the reference mean, so
+      # it always agrees in sign with the label. The difference of plain means can disagree once
+      # the model weights runs, models inferred values or removes a block effect.
+      if (cg$simple) {
+        a <- merge(mb[mb$group == cg$ref, c("panel", "mean")],
+                   data.frame(panel = factor(lab, levels = lab), lfc = d$logFC), by = "panel")
         if (nrow(a)) {
-          a$dir <- ifelse(a$mean_test >= a$mean_ref, "Up", "Down")
+          a$end <- a$mean + a$lfc
+          message("[figures] violin ", ct, " arrows (model log2FC): ",
+                  paste(sprintf("%s %+.2f", a$panel, a$end - a$mean), collapse = ", "))   # the span as drawn
+          a$dir <- ifelse(a$lfc >= 0, "Up", "Down")
           for (dd in unique(a$dir))              # one layer per direction: a constant colour each
-            p <- p + geom_segment(data = a[a$dir == dd, ], aes(x = 1.3, xend = 1.7, y = mean_ref, yend = mean_test),
+            p <- p + geom_segment(data = a[a$dir == dd, ], aes(x = 1.3, xend = 1.7, y = mean, yend = end),
                                   colour = DIR_COLS[[dd]], linewidth = 0.55, alpha = 0.9,
                                   arrow = grid::arrow(length = grid::unit(0.06, "in"), type = "closed"))
         }
       }
+      message(sprintf("[figures] violin %s drawn as: %s", ct,
+                      if (n_violin == length(gx)) "violins" else if (n_violin) "violins + points"
+                      else sprintf("points + mean bars (<= %d runs per group)", MIN_VIOLIN - 1)))
       st_keys <- intersect(c("Detected", "Inferred", "Missing", "Not recorded"), unique(pts$status))
       st_lab <- c(Detected = "Measured in that run (precursors observed)",
                   Inferred = sprintf("Inferred: not measured; value from %s", or_else(vocab$source, "the model")),
@@ -730,12 +866,16 @@ if (file.exists(em_path)) {
       # ---- words: title, subtitle, caption (all from the data + provenance) ----
       nsig <- sum(sig); n_abs <- sum(pts$status %in% c("Inferred", "Missing")); n_missing <- sum(is.na(long$value))
       ev <- cnt[cnt$event, , drop = FALSE]; n_ev <- length(unique(ev$panel))
-      rank_line <- paste0("Ranked by adjusted p-value (BH), then |log2FC|; ",
+      rank_line <- paste0("Ranked by adjusted p-value (BH), ties by raw p-value; ",
         if (nsig == k) sprintf("all %d significant at adj.P < %.2g.", k, adjp_thr) else
         if (nsig > 0) sprintf("%d of %d significant at adj.P < %.2g, the rest (n.s.) shown as context, not findings.", nsig, k, adjp_thr) else
         sprintf("none reaches adj.P < %.2g, so these are shown for inspection only, not as findings.", adjp_thr))
-      mark_line <- paste0("Bar = group mean", if (cg$simple) sprintf("; arrow = %s mean to %s mean", cg$ref, cg$test), ".",
-                          if (!is.null(D) && any(nzchar(cnt$lab))) " A label under a violin counts its measured runs." else "")
+      mark_line <- paste0("Bar = group mean",
+                          if (cg$simple) sprintf("; arrow = the model's log2FC, drawn from the %s mean", cg$ref) else "",
+                          if (paired) sprintf("; grey lines join each %s's runs", bcol) else "",
+                          if (n_violin < length(gx)) sprintf("; groups with <= %d runs are shown as points (no density)", MIN_VIOLIN - 1) else "",
+                          ".",
+                          if (!is.null(D) && any(nzchar(cnt$lab))) " A label under a group counts its measured runs." else "")
       status_line <- if (is.null(D))
         "Detection status was not recorded for this run (no Detection_Matrix.csv), so measured and inferred values cannot be told apart here." else
         if (vocab$absent == "Inferred")
@@ -790,37 +930,51 @@ if (file.exists(em_path)) {
         if (vocab$absent == "Inferred")
           sprintf(paste("Filled teal points were measured in that run (at least one precursor observed); hollow amber points",
                         "are inferred values: %s. %s Where not every run of a group was measured,",
-                        "a label under its violin counts the measured runs. A group with no measured run (amber 'all inferred') makes the fold change a detection",
+                        "a label under that group counts its measured runs. A group with no measured run (amber 'all inferred') makes the fold change a detection",
                         "event -- the protein is seen in one group and not the other -- not a measured magnitude; confirm such",
                         "a protein before building on the size of its change."), vocab$how,
                   if (n_abs) sprintf("%d of %d values shown are inferred.", n_abs, nrow(pts)) else
                   sprintf("All %d values shown were measured.", nrow(pts))) else
           sprintf(paste("Filled teal points were measured in that run. Missing values (%s) are not drawn; %d of %d runs here",
-                        "are missing; a label under a violin counts its measured runs. A group with no measured run",
+                        "are missing; a label under a group counts its measured runs. A group with no measured run",
                         "(amber 'all missing') makes any fold change a detection event, not a measured magnitude."),
                   vocab$how, n_missing, nrow(long))
-      add_fig(fn, "violin", paste(sprintf(paste(
-        "Top %d proteins for %s, ranked by adjusted p-value (BH) then |log2 fold change| -- %d significant at adj.P < %.2g.",
+      add_fig(fn, "violin", paste0(paste(sprintf(paste(
+        "Top %d proteins for %s, ranked by adjusted p-value (BH), ties broken by raw p-value -- %d significant at adj.P < %.2g.",
         "Each panel is one protein: log2 intensity, one point per run, the reference group (%s) on the left.",
-        "Violins show each group's spread (with few replicates the outline is only a guide; the points are the data);",
-        "the black bar is the group mean%s.",
+        "%s The black bar is the group mean%s.%s",
         "The label gives the model's log2 fold change and adjusted p-value (n.s. = not significant)."),
         k, cg$label, nsig, adjp_thr, paste(cg$ref, collapse = ", "),
-        if (cg$simple) sprintf(" and the arrow runs from the %s mean to the %s mean (red = higher, blue = lower)",
-                               cg$ref, cg$test) else ""), cap_status))
-    }, error = function(e) message("[figures] violin ", ct, " skipped: ", e$message))
+        if (n_violin == length(gx)) "Violins show each group's spread; the points are the data." else if (n_violin)
+          sprintf("A violin shows the spread of a group with %d or more runs; smaller groups are shown as their points only.", MIN_VIOLIN) else
+          sprintf("With %d or fewer runs per group no density is drawn -- the points are the data.", MIN_VIOLIN - 1),
+        if (cg$simple) sprintf(paste0("; the arrow is the model's log2 fold change, drawn from the %s mean (red = higher,",
+                                      " blue = lower), so its tip is where the model puts %s, which need not be that",
+                                      " group's plain mean%s"), cg$ref, cg$test,
+                               {why <- c(if (identical(vocab$absent, "Inferred")) sprintf("values inferred by %s", vocab$source),
+                                         if (paired) sprintf("the %s effect it removes", bcol))
+                                if (length(why)) sprintf(" (here: %s)", paste(why, collapse = " and ")) else ""}) else "",
+        if (paired) sprintf(paste(" This is a within-%s contrast: grey lines join each %s's runs, the paired changes the",
+                                  "model tested."), bcol, bcol) else ""), cap_status), CUT_NOTE))
+    }, error = function(e) add_failed(sprintf("violin_top_%s.png", make.names(ct)), "violin", conditionMessage(e)))
   }
 } else {
-  message("[figures] no Expression_Matrix.csv in ", de_dir, " — skipping PCA/heatmap/QC")
+  why <- sprintf("no Expression_Matrix.csv in %s", de_dir)
+  add_failed("pca.png", "pca", why); add_failed("heatmap_top.png", "heatmap", why)
+  for (f in de_files) add_failed(sprintf("violin_top_%s.png", make.names(contrast_of(f))), "violin", why)
 }
 
 # ---- write figures.json -----------------------------------------------------
-to_json <- function(figs) {
+to_json <- function(figs, failed) {
   if (requireNamespace("jsonlite", quietly = TRUE))
-    return(jsonlite::toJSON(figs, auto_unbox = TRUE, pretty = TRUE))
-  items <- vapply(figs, function(f) sprintf('  {"file": "%s", "type": "%s", "caption": "%s"}',
-                  f$file, f$type, gsub('"', '\\\\"', f$caption)), "")
-  paste0("[\n", paste(items, collapse = ",\n"), "\n]")
+    return(jsonlite::toJSON(list(figures = figs, failed = failed), auto_unbox = TRUE, pretty = TRUE))
+  esc <- function(x) gsub('"', '\\\\"', gsub("\\\\", "\\\\\\\\", x))
+  arr <- function(l, keys) if (!length(l)) "[]" else paste0("[\n", paste(vapply(l, function(f)
+    paste0("    {", paste(sprintf('"%s": "%s"', keys, vapply(keys, function(k) esc(f[[k]]), "")), collapse = ", "), "}"),
+    ""), collapse = ",\n"), "\n  ]")
+  paste0('{\n  "figures": ', arr(figs, c("file", "type", "caption")),
+         ',\n  "failed": ', arr(failed, c("file", "type", "reason")), "\n}")
 }
-writeLines(to_json(figs), file.path(outdir, "figures.json"))
-cat(sprintf("[figures] wrote %d figure(s) + figures.json to %s\n", length(figs), normalizePath(outdir)))
+writeLines(to_json(figs, failed), file.path(outdir, "figures.json"))
+cat(sprintf("[figures] wrote %d figure(s) + figures.json to %s%s\n", length(figs), normalizePath(outdir),
+            if (length(failed)) sprintf("; %d not drawn (listed under \"failed\")", length(failed)) else ""))

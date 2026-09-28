@@ -134,7 +134,7 @@ class PcaFigure(unittest.TestCase):
         log = r.stderr + r.stdout
         self.assertNotIn("PCA failed", log)
         with open(os.path.join(out, "figures.json")) as fh:
-            caps = {f["file"]: f["caption"] for f in json.load(fh)}
+            caps = {f["file"]: f["caption"] for f in json.load(fh)["figures"]}
         self.assertIn("pca.png", caps)
         self.assertGreater(os.path.getsize(os.path.join(out, "pca.png")), 0)
         return caps["pca.png"], log

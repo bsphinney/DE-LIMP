@@ -114,7 +114,7 @@ class SampleLabelsFile(unittest.TestCase):
         self.assertEqual(len({r["Label"] for r in rows}), len(runs))
         self.assertTrue(all(len(r["Label"]) < len(r["File.Name"]) for r in rows))
         with open(os.path.join(out, "figures.json")) as fh:
-            caps = {f["file"]: f["caption"] for f in json.load(fh)}
+            caps = {f["file"]: f["caption"] for f in json.load(fh)["figures"]}
         for fn in ("pca.png", "heatmap_top.png"):
             self.assertIn("sample_labels.csv", caps[fn])
 
