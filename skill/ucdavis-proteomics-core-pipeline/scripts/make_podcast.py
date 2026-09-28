@@ -2824,8 +2824,11 @@ def cmd_link(a):
 
 def refresh_pdf(html_path):
     """Analysis_Report.pdf is printed from the HTML (html_to_pdf.py, where the skill has it):
-    once link has put the card in the HTML, an older PDF lacks it. Reprint it; the card's print
-    style shows the audio's file name in place of the player. -> (level, path, note)"""
+    once link has put the card in the HTML, an older PDF lacks it. Reprint it with
+    html_to_pdf.print_report; the card's print style shows the audio's file name in place of
+    the player. When it cannot reprint, print_report renames the old PDF
+    Analysis_Report.stale.pdf (kept, so it never passes for current) and says SKIPPED.
+    -> (level, path, note)"""
     pdf = os.path.splitext(html_path)[0] + ".pdf"
     if not os.path.isfile(pdf):
         return "INFO", pdf, "no PDF beside the report; nothing to reprint"
@@ -2836,9 +2839,12 @@ def refresh_pdf(html_path):
         import html_to_pdf
     except ImportError:
         return "INFO", pdf, f"older than the HTML, so it has no Listen card; to reprint it, {how}"
-    ok, note = html_to_pdf.convert(html_path, pdf)
-    return (("OK", pdf, f"reprinted with the Listen card ({note})") if ok else
-            ("INFO", pdf, f"older than the HTML and NOT reprinted: {note}"))
+    status, note = html_to_pdf.print_report(html_path, pdf)
+    if status == "OK":
+        return "OK", pdf, f"reprinted with the Listen card ({note})"
+    if status == "SKIPPED":
+        return "SKIPPED", pdf, f"NOT reprinted: {note}"
+    return "INFO", pdf, f"older than the HTML and NOT reprinted: {note}"
 
 
 # ----------------------------------------------------------------------------- main

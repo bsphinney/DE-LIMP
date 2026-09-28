@@ -1141,12 +1141,17 @@ class Link(Workspace):
         self.assertEqual(mp.strip_block(once).replace("\n\n\n", "\n\n"), md)
         self.assertEqual(mp.add_listen_md(md, self.d), md)             # no podcast: unchanged
 
-    def test_an_older_pdf_is_reprinted_or_flagged(self):
+    def test_an_older_pdf_is_reprinted_or_set_aside(self):
+        # link reprints through html_to_pdf.print_report (the release's one PDF printer): OK when
+        # it reprints; when it cannot, the older PDF is renamed .stale.pdf and link says SKIPPED
+        # with the reason, so an old PDF never passes for current.
+        import html_to_pdf
         html_path = os.path.join(self.out, "Analysis_Report.html")
         pdf = os.path.join(self.out, "Analysis_Report.pdf")
+        stale = os.path.join(self.out, "Analysis_Report.stale.pdf")
         write(pdf, "%PDF old")
         os.utime(pdf, (1, 1))                                 # older than the HTML
-        with mock.patch.dict(sys.modules, {"html_to_pdf": None}):     # not on this branch
+        with mock.patch.dict(sys.modules, {"html_to_pdf": None}):     # no printer at all
             rc, out, err = run("link", self.out)
         self.assertEqual(rc, 0, err)
         self.assertIn("[INFO] output/Analysis_Report.pdf: older than the HTML, so it has no "
@@ -1158,17 +1163,23 @@ class Link(Workspace):
             self.assertIn(mp.START, read(h))                  # printed AFTER the card went in
             write(p, "%PDF new")
             return True, "3 pages, printed by fake"
-        fake = types.ModuleType("html_to_pdf")
-        fake.convert = convert
         os.utime(pdf, (1, 1))
-        with mock.patch.dict(sys.modules, {"html_to_pdf": fake}):
+        with mock.patch.object(html_to_pdf, "convert", side_effect=convert):
             rc, out, err = run("link", self.out)
             self.assertIn("[OK] output/Analysis_Report.pdf: reprinted with the Listen card", out)
             self.assertEqual(calls, [(html_path, pdf)])
             rc, out, err = run("link", self.out)              # up to date now: not reprinted
         self.assertEqual(len(calls), 1)
         self.assertIn("up to date with the HTML", out)
-        os.remove(pdf)
+        os.utime(pdf, (1, 1))
+        with mock.patch.object(html_to_pdf, "convert", return_value=(False, "no Chrome found")):
+            rc, out, err = run("link", self.out)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[SKIPPED] output/Analysis_Report.pdf: NOT reprinted: no Chrome found -- "
+                      "the older Analysis_Report.pdf no longer matches the HTML and was renamed "
+                      "Analysis_Report.stale.pdf", out)
+        self.assertFalse(os.path.exists(pdf))
+        self.assertEqual(read(stale), "%PDF new")             # kept, never deleted
         self.assertIn("no PDF beside the report", run("link", self.out)[1])
 
     def test_missing_files_are_info_and_no_podcast_is_an_error(self):

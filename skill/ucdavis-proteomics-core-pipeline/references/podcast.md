@@ -438,9 +438,12 @@ python3 scripts/make_podcast.py link $S/output
     record: a `podcast.json` that is unreadable or has a wrong field is reported once as a
     `[WARN]` naming the file and the reason, and the report is made without the card; `link`
     says "podcast.json exists but is invalid: …".
-  - If an `Analysis_Report.pdf` is older than the HTML, link reprints it with `html_to_pdf.py`
-    where the skill has it, so the PDF shows the card's print text (the audio's file name).
-    Otherwise it prints an `[INFO]` line saying how to reprint it by hand.
+  - If an `Analysis_Report.pdf` is older than the HTML, link reprints it with
+    `html_to_pdf.print_report`, so the PDF shows the card's print text (the audio's file
+    name). When it cannot reprint (no browser, say), the old PDF is renamed
+    `Analysis_Report.stale.pdf` -- kept, so it never passes for current -- and link reports it
+    as `[SKIPPED]` with the reason. Without `html_to_pdf.py` at all, an `[INFO]` line says how
+    to reprint it by hand.
 
 ## What ends up in `output/podcast/`
 

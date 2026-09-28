@@ -117,8 +117,9 @@ the Markdown report's title, and entries in README and AGENTS.md. Each addition 
 `<!-- podcast:start -->` / `<!-- podcast:end -->` and is replaced on a re-run.
 `make_analysis_html.py` and `session_docs.py` add the same card and entries on their own when
 `podcast/podcast.json` exists, so regenerating the report or re-finalizing keeps them. An
-`Analysis_Report.pdf` older than the edited HTML is reprinted by `link` (html_to_pdf.py), or
-flagged with an `[INFO]` line saying how to reprint it.
+`Analysis_Report.pdf` older than the edited HTML is reprinted by `link`
+(`html_to_pdf.print_report`); if it cannot be, it is renamed `Analysis_Report.stale.pdf` and
+reported as `[SKIPPED]` with the reason.
 `podcast/.cache/` (per-chunk TTS audio, ~60 MB for 20 min) is kept on disk for resuming.
 `scripts/scratch_files.py` is the one rule for scratch: every `.cache` folder, every `*.part`
 file, and `podcast.wav` beside `podcast.m4a`. The session zip leaves them out (`zip_excluded`)
