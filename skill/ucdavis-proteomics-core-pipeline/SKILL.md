@@ -143,10 +143,10 @@ Read `recommended_mode` + `core_member`, then:
   "submit with:"** — `hive_exec.sh 'bash <out>/submit.sh'` for a DIA-NN search that
   predicts its library from the FASTA (two jobs: library, then search — the usual case) or
   that routed to the 5-step chain (>5 files; exit 3), `hive_exec.sh 'sbatch job.sh'` only
-  when a single `job.sh` was written. **Put the skill on HIVE first, and again after every
-  skill update** (`hive_exec.sh --put ./scripts '~/proteomics-pipeline/'` and the same for
-  `./.claude-plugin`, which carries the version every record states). HIVE gives
-  **compute**; the Core software is separate (next).
+  when a single `job.sh` was written. **Put the skill there first, and again after every
+  skill update:** `bash scripts/hive_exec.sh --put-skill` (`scripts/` and `.claude-plugin/`
+  into `~/proteomics-pipeline/`; the latter carries the version every record states). HIVE
+  gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -410,7 +410,7 @@ locally and on HIVE (`~/core/PROT_0807`).
 |---|---|---|
 | **0** | ok | continue |
 | **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `ambiguous_label` (→ staff decide: `--accept-ambiguous` or `--files-from`), `weak_ids` / `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b) |
-| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | fix the token; run where the data is (`fetch`/`bioshare` local; `locate`/`stage`/`deliver` on HIVE); sync the whole `scripts/` to `~/proteomics-pipeline/scripts/` |
+| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | fix the token; run where the data is (`fetch`/`bioshare` local; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
 | **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
 

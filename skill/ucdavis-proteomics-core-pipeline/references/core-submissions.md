@@ -53,8 +53,8 @@ Every subcommand prints one JSON object to stdout and notes to stderr. `stage`, 
   `identify` still reads ids in names and the agent asks the rest (section 0).
 - **A HIVE account in `proteomics-grp`.** The service directory is
   `gc-prot-core-user:proteomics-grp`, mode `2775`.
-- **The whole scripts directory on HIVE at `~/proteomics-pipeline/scripts/`**
-  (`references/access.md`) — not `~/pipeline/`, which does not exist. `core_submission.py`
+- **The whole skill on HIVE at `~/proteomics-pipeline/`** (`hive_exec.sh --put-skill`,
+  `references/access.md`) — not `~/pipeline/`, which does not exist. `core_submission.py`
   imports `session.py`, `collect_conditions.py` and `run_search.py`; a partial copy exits 3
   and says to sync the directory.
 - **For HT plates only:** a STAN per-submission share token (`references/ht-submissions.md`).
@@ -580,7 +580,7 @@ means a placeholder is left (no link, or no submitter address).
 | 2 | `deliver` | no `Analysis_Report.html`; session not this submission's; folder not empty; symlink in the path or the share; raw requested but no staged project; any verification failure | finish step 9 and push it; use the right session (or `--force` with staff); `--label`; remove the offending link; `stage --apply` |
 | 2 | `bioshare send` | no share linked; no or unverified `delivery.json`, or one for another share | `bioshare ensure --apply`; deliver again and `--get` the new `delivery.json` |
 | 3 | `fetch`, `bioshare` | no/invalid token; CoreOmics down; DRF validation error; a redirect or unexpected reply to a write | fix `~/.coreomics_token`; read the detail |
-| 3 | `locate`, `stage`, `deliver`, `conditions` | not on a machine with the Flinders tree; incomplete scripts directory | run through `hive_exec.sh`; sync the whole `scripts/` |
+| 3 | `locate`, `stage`, `deliver`, `conditions` | not on a machine with the Flinders tree; incomplete scripts directory | run through `hive_exec.sh`; re-put the skill (`hive_exec.sh --put-skill`) |
 | 4 | `locate` | the submission is an HT plate | `ht_manifest.py` (step 1a) |
 | 5 | `deliver` | more than `--max-gb` to copy | `sbatch deliver_job.sh` |
 

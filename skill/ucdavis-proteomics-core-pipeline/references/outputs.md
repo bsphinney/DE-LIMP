@@ -36,6 +36,8 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   DE-LIMP_session.rds (DPC runs: load it in the DE-LIMP app), and
                             #   reproducibility_log.R — the analysis as plain R, runnable with
                             #   just R + limpa/limma (point users here when they ask for "the code")
+                            #   TODO(2.8.0, fix/280-stats): per-group detection columns in DE_*.csv
+                            #   -- add their final names here once de-blocking commits them
     figures/                # volcano / top-protein violins / PCA / heatmap / p-value / QC PNGs
                             #   + figures.json (captions) + sample_labels.csv (the short
                             #   sample names on the plots -> their full run names)
@@ -74,8 +76,12 @@ The orchestrator asks where results should live (SKILL.md step 3b):
 - **README.html** is what collaborators open: one self-contained page (inline CSS, no external
   assets) rendered from the same text as README.md by make_deposit's Markdown renderer, with links
   to the analysis report (HTML, and its PDF and Markdown twin when present), the Methods
-  (`methods.md` / `.docx`), `HOW_TO_SUBMIT.html` and the tables. A double-clicked
-  page opened from inside a zip loses its links (Windows extracts only that file): unzip first.
+  (`methods.md` / `.docx`), `HOW_TO_SUBMIT.html` and the tables. Its "Where everything is"
+  table names `Detection_Matrix.csv`, `QC_detected_vs_inferred.csv`, `contaminants_removed.csv`,
+  `AUDIT.md` and `SAMPLE_QUALITY.md` one by one, each in its own record's words where it has
+  them. When there is no PDF it points at the "Report PDF" line of `MANIFEST.txt`. A
+  double-clicked page opened from inside a zip loses its links (Windows extracts only that
+  file): unzip first.
 - **AGENTS.md** is for an AI agent given the folder: the study (organism, groups, contrasts,
   instrument, engine + version), which file is authoritative for what, the columns of `DE_*.csv`
   / `Expression_Matrix.csv` / `Detection_Matrix.csv` / `QC_detected_vs_inferred.csv`, the traps (significance as
@@ -88,6 +94,14 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   Windows (`\\128.120.208.24\proteomics\...`) and Mac (`/Volumes/proteomics/...`) equivalent.
   Which share is which HIVE path is `scripts/hive_shares.tsv`, the one table `hive_path.sh` also
   reads (`share_map.py` is the Python side). Anything the records do not give is "not recorded".
+  A row on the Core's own storage (`/quobyte/proteomics-grp`) says so: only Core members can open
+  it, so its Windows cell reads "Proteomics Core storage: only Core members can open it -- ask the
+  Core for a copy or for access" (the `access` column of `hive_shares.tsv`) and its Mac path is
+  marked "(Core members)". The Mac Connect-to-Server route `smb://128.120.208.24/proteomics` is
+  given only for paths under `/Volumes/proteomics` (Flinders).
+- README.md, README.html and AGENTS.md are each written through a `.part` file and renamed into
+  place, so a render that fails leaves the previous file whole (never a 0-byte README.html), and
+  finalize zips only the ones it wrote this time.
 - **input/raw_files.txt** is written at finalize when missing (a hive_remote session is initialised
   without `--raw`), from `search_provenance.json` `files`, else `output/search/file_list.txt`.
 - The registry record is looked up read-only before the zip (`record_run.locate()`); when the
@@ -135,10 +149,13 @@ design) is common and must not clobber or be confused with the original.
 - **Placement:** with `--reanalysis-of <prior>`, the new run nests under
   `<prior>/reanalysis/<date>_<name>/` — same internal layout — so all re-analyses
   live with their original.
-- **`DIFFERENCES.md`** (written at finalize) states exactly what changed vs the
-  original: engine + version, DE method + thresholds, contrasts, FASTA, the pinned
-  workflow commit, a unified diff of the search parameters, and the
-  significant-protein counts per contrast. Unchanged settings are omitted.
+- **`DIFFERENCES.md`** (written at finalize) states exactly what changed vs the original:
+  engine + version, DE method, q / logFC value and role / adj.P, contrasts, the design with its
+  covariates, the blocking factor (column, effect, scope), the DE contaminant policy, the FASTA
+  and its sidecar state (`fetch_fasta.sidecar_state`), the skill and limpa versions, the raw-file
+  list, a unified diff of the search parameters (the resolved cfg, else `input/wf/params.cfg`),
+  and the significant-protein counts per contrast. Unchanged settings are omitted. A setting
+  neither session records is listed as "not compared", never counted as unchanged.
 
 ## Comparing analyses (`compare_analyses.R`)
 `DIFFERENCES.md` says what *settings* changed; the Comparator shows how the
