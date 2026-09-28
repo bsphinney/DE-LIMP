@@ -444,6 +444,21 @@ class IgChains(unittest.TestCase):
         self.assertIn("Bait vs IgG: 2 significant enriched proteins never measured in IgG "
                       "(top by adj.P: Jph3, Stim2).", b)
 
+    def test_a_gene_less_row_goes_by_its_entry_name_never_the_accession_twice(self):
+        rows = list(ROWS) + [("P06330", "", 7.0, 5e-8, [3, 3, 3, 0, 0, 0], 2.5e-8, "HVM51_MOUSE"),
+                             ("Q8K207", "", 6.0, 6e-8, [3, 3, 3, 0, 0, 0], 3e-8, "CA021_MOUSE"),
+                             ("Q9XXX1", "", 5.0, 7e-8, [3, 3, 3, 3, 3, 3], 3.5e-8, "")]
+        _, _, md, _ = page(self.root, rows=rows)
+        top = md[md.index("## Top proteins per contrast"):]
+        self.assertIn("| P06330 | HVM51_MOUSE |", top)
+        self.assertIn("| Q8K207 | CA021_MOUSE |", top)
+        self.assertIn("| Q9XXX1 | — |", top)                # no name at all: never it twice
+        self.assertNotIn("| Q9XXX1 | Q9XXX1 |", top)
+        b = brief(tempfile.mkdtemp(dir=self.root), rows=rows)
+        self.assertIn("Bait vs IgG: 3 significant enriched proteins never measured in IgG "
+                      "(top by adj.P: Jph3, CA021_MOUSE, Stim2).", b)
+        self.assertIn("a protein with no gene name goes by its UniProt entry name", b)
+
 
 class Encoding(unittest.TestCase):
     """Records are UTF-8 whatever the locale, and one that cannot be read is said -- on stderr,

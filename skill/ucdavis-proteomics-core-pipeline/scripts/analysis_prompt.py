@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_analysis_html import (matrix_complete, SUPPRESS_WHEN_COMPLETE,  # noqa: E402
                                 contrast_label, LOGFC_DIRECTION, DEFAULT_TAG, background_flag,
                                 _make_names, read_figures_json, APPENDIX, APPENDIX_FIGURES,
-                                load_record, read_text, csv_text, _UNREADABLE)
+                                load_record, read_text, csv_text, _UNREADABLE, gene_label)
 # which groups are pull-down controls, and what the DE columns mean -- session_docs' own.
 from session_docs import IP_CONTROL_NAME, COLUMNS as DE_COLUMNS  # noqa: E402
 import csv  # noqa: E402
@@ -130,9 +130,9 @@ def never_in_control(de_dir, de_file, contrast, control, adjp, det, groups, k=15
             kn = _k_of_n(r, control, det, groups)
             known = known or kn is not None
             if p < adjp and lfc > 0 and kn is not None and kn[0] == 0:
-                g = (r.get("Genes") or "").split(";")[0] or r.get("Protein.Group")
-                if not background_flag(g, r.get("Protein.Group"), r.get("Protein.Names")):
-                    rows.append((p, g))
+                if not background_flag(r.get("Genes"), r.get("Protein.Group"),
+                                       r.get("Protein.Names")):
+                    rows.append((p, gene_label(r)))
     if not known:
         return None
     rows.sort()
@@ -357,8 +357,10 @@ def main():
       "was measured"
       + ("." if has_detmat else ". **Detection_Matrix.csv is not attached, so you cannot tell "
                                 "measured from inferred: do not report CVs as reproducibility.**"))
-    w("Use gene names where available. **Never fabricate a value, protein, pathway, or "
-      "citation you cannot ground in the data or established biology.**")
+    w("Use gene names where available; a protein with no gene name goes by its UniProt entry "
+      "name (`Protein.Names`, e.g. HVM51_MOUSE), not its accession, as the HTML report's "
+      "tables do. **Never fabricate a value, protein, pathway, or citation you cannot ground "
+      "in the data or established biology.**")
     w("")
     # measured vs inferred: how to tier, and what PropObs is NOT
     w("## Measured vs inferred — how to tier hits")

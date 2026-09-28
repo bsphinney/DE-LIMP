@@ -614,8 +614,12 @@ class Tables:
 
 
 def gene_label(r):
+    """THE name a DE row is shown by (top tables, figure summaries, the brief): its first gene,
+    else its first UniProt entry name (DIA-NN's Protein.Names, e.g. HVM51_MOUSE for a gene-less
+    Ig V region), else its accession -- never the accession where a name exists."""
     g = (r.get("Genes") or "").split(";")[0].strip()
-    return g or (r.get("Protein.Group") or "?").split(";")[0]
+    n = (r.get("Protein.Names") or "").split(";")[0].strip()
+    return g or n or (r.get("Protein.Group") or "?").split(";")[0]
 
 
 def fmt_p(p):
@@ -1078,9 +1082,11 @@ def top_data(tables, a, prov):
             det = note(r.get("Protein.Group"), raw, r) if note else None
             if det is None and detected_columns(r, raw):
                 det = f"{word} {detected_columns(r, raw)}"
-            rows.append({"protein": (r.get("Protein.Group") or "?"), "gene": gene_label(r),
+            prot, name = (r.get("Protein.Group") or "?"), gene_label(r)
+            # the name column never repeats the accession: no gene and no entry name -> "—"
+            rows.append({"protein": prot, "gene": "—" if name == prot.split(";")[0] else name,
                          "lfc": r["_lfc"], "p": r["_p"], "sig": r["_p"] < tables.adjp,
-                         "det": det, "flag": background_flag(gene_label(r), r.get("Protein.Group"),
+                         "det": det, "flag": background_flag(r.get("Genes"), r.get("Protein.Group"),
                                                              r.get("Protein.Names"))})
         out.append({"contrast": tables.display(c), "rows": rows, "counts": tables.counts(c),
                     "adjp": tables.adjp})
