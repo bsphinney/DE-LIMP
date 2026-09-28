@@ -38,7 +38,7 @@ Modes:
   # validate a finished design against the search output
   python3 collect_conditions.py --validate conditions.csv --against report.parquet
 """
-import sys, os, csv, glob, json, re, argparse
+import sys, os, csv, glob, json, re, argparse, io
 from collections import Counter, defaultdict
 
 COV_COLS = ["Batch", "Covariate1", "Covariate2"]
@@ -97,6 +97,24 @@ def column_name(h):
     return re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_.]", "_", h.strip())).strip("_") or "Subject"
 
 
+# ------------------------------------------------------------------ encoding --
+# conditions.csv is WRITTEN as UTF-8 always: open() without an encoding writes the platform's
+# (cp1252 on Windows), and one accented sample name then cost the Methods and the SDRF
+# downstream (deposit-builder, 2.8.0). What we READ may come from anywhere: UTF-8 (Excel's
+# "CSV UTF-8" adds a BOM, dropped here) or Windows-1252 (Excel's plain "CSV" on Windows).
+def _read_text(path):
+    """A small text file's contents whatever wrote it: UTF-8 (BOM dropped), else
+    Windows-1252, else Latin-1 (which cannot fail). Returns (text, encoding)."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("latin-1"), "latin-1"
+
+
 # ----------------------------------------------------------------- run lists --
 def runs_from_report(path):
     if path.endswith(".parquet"):
@@ -107,7 +125,8 @@ def runs_from_report(path):
         except Exception as e:
             sys.exit(f"Could not read Run column from parquet: {e}\nInstall pyarrow, or export a TSV report.")
     seen = set()
-    with open(path, newline="") as fh:
+    # a DIA-NN report can be gigabytes: streamed, UTF-8 (BOM dropped), never decoded whole
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
         rd = csv.DictReader(fh, delimiter="\t")
         if "Run" not in (rd.fieldnames or []):
             sys.exit("No 'Run' column in report.")
@@ -162,7 +181,8 @@ def parse_conditions_file(path, subject_column=None):
     each covariate slot, and the extra headers that did NOT fit (conditions.csv has two
     covariate slots) -- reported, never dropped silently."""
     delim = "\t" if path.lower().endswith((".tsv", ".txt")) else None
-    with open(path, newline="") as fh:
+    text, _enc = _read_text(path)
+    with io.StringIO(text, newline="") as fh:
         sample = fh.read(4096); fh.seek(0)
         if delim is None:
             try: delim = csv.Sniffer().sniff(sample, delimiters=",\t;").delimiter
@@ -301,7 +321,7 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, co
             cov_used = sorted(set(cov_used) | {slot}, key=COV_COLS.index)
         subject_col = None
     cols = ["File.Name", "Group"] + cov_used + ([subject_col] if subject_col else [])
-    with open(out_path, "w", newline="") as fh:
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh); w.writerow(cols)
         for r in runs:
             row = [r, assigned.get(r, "")]
@@ -374,7 +394,7 @@ def do_map(out_path, runs, intent, subject_col=None, subject_confirmed=False, co
 # ------------------------------------------------------------------ template --
 def emit_template(out, names, covariates):
     cols = ["File.Name", "Group"] + covariates
-    with open(out, "w", newline="") as fh:
+    with open(out, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh); w.writerow(cols)
         for n in names:
             w.writerow([n] + [""] * (len(cols) - 1))
@@ -383,7 +403,7 @@ def emit_template(out, names, covariates):
 
 # ------------------------------------------------------------------ validate --
 def validate(meta_path, report_path):
-    with open(meta_path, newline="") as fh:
+    with io.StringIO(_read_text(meta_path)[0], newline="") as fh:
         rows = list(csv.DictReader(fh))
     problems = []
     if not rows: problems.append("metadata is empty")

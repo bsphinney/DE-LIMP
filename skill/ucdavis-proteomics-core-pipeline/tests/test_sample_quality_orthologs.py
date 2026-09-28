@@ -215,11 +215,17 @@ class ConfoundTest(unittest.TestCase):
         self.assertLess(p, sq.CONFOUND_P)
 
     def test_three_vs_three_falls_back_to_separation(self):
-        # 20 labellings: no test can reach 1%, so complete separation is reported instead.
+        # 20 labellings: no test can reach 1%. Complete separation is then a CAUTION, never a
+        # flag (review round 2: the same weak evidence read "CONFOUNDED WITH GROUP" unblocked
+        # but "a caution" blocked -- ~4% of null panels per design, ~12% for any of 3).
         confounded, detail, p = sq.confound_check(*self.design([0.1, 0.2, 0.0, 2.1, 2.3, 2.2]), 1.5)
         self.assertIsNone(p)
-        self.assertTrue(confounded)
-        self.assertIn("too few samples for a test", detail)
+        self.assertFalse(confounded)
+        self.assertIn("best possible p 0.1 > 0.01 (exact over all 20 arrangements), so no test; "
+                      "complete separation (all G1 above all G0)", detail)
+        (t,) = sq.confound_tests(*self.design([0.1, 0.2, 0.0, 2.1, 2.3, 2.2]), 1.5)
+        self.assertTrue(t["caution"])
+        self.assertAlmostEqual(t["min_p"], 0.1)
         self.assertAlmostEqual(sq._min_p([3, 3]), 0.1)
 
 
