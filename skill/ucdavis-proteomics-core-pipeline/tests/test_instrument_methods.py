@@ -335,7 +335,7 @@ class Paragraphs(unittest.TestCase):
         # literature survey 2026-09-24: LC coupled to the timsTOF via its source; column and
         # its temperature; the LC method; mobile phases
         order = ["Evosep One LC system", "coupled online to a timsTOF HT mass spectrometer "
-                 "(Bruker Daltonics) via a Captive Spray ion source", mm.LC_COLUMN_DEFAULT,
+                 "(Bruker Daltonics) via a CaptiveSpray ion source", mm.LC_COLUMN_DEFAULT,
                  "column temperature", "(60 SPD) method", "Mobile phase A"]
         pos = [self.lc.find(x) for x in order]
         self.assertNotIn(-1, pos, dict(zip(order, pos)))
@@ -364,7 +364,7 @@ class Paragraphs(unittest.TestCase):
 
     def test_what_no_file_records_is_tagged(self):
         self.assertIn(f"{mm.LC_COLUMN_DEFAULT} {mm.DEF}", self.lc)
-        self.assertIn(f"column temperature of ____ °C {mm.NR_TAG}", self.lc)
+        self.assertIn(f"column temperature of {mm.COLUMN_TEMP_DEFAULT} {mm.DEF}", self.lc)
         self.assertIn(f"acetonitrile {mm.DEF}", self.lc)
         self.assertIn(f"{mm.EMITTER_DEFAULT} {mm.DEF}", self.ms)
 
@@ -420,14 +420,14 @@ class RenderFromDict(unittest.TestCase):
 
     @staticmethod
     def v(x, unit="", default=None):
-        return f"____ {mm.DEF}" if x is None else f"{x}{unit}"
+        return f"____ {mm.NR_TAG}" if x is None else f"{x}{unit}"
 
     def test_expected_sentences(self):
         lc = mm.lc_paragraph(self.REP, self.COL, True, True)
         self.assertIn("analysed on an Evosep One LC system (Evosep Biosystems) coupled online to "
-                      "a timsTOF HT mass spectrometer (Bruker Daltonics) via a Captive Spray ion "
+                      "a timsTOF HT mass spectrometer (Bruker Daltonics) via a CaptiveSpray ion "
                       "source. Peptides were separated on a PepSep MAX C18 (Bruker PepSep), at a "
-                      "column temperature of ____ °C [not recorded — confirm], with the 60 "
+                      "column temperature of 50 °C [facility default — confirm], with the 60 "
                       "samples per day (60 SPD) method (run time 21 min).", lc)
         ms = mm.ms_paragraph(self.REP, self.v, coupled=True)
         self.assertTrue(ms.startswith("The mass spectrometer was operated in positive-ion "
@@ -440,8 +440,8 @@ class RenderFromDict(unittest.TestCase):
         rep = dict(self.REP, im_low=None, im_high=None, polarity=None, cycle_s=None,
                    capillary_v=None, instrument=None)
         ms = mm.ms_paragraph(rep, self.v, coupled=False)
-        self.assertIn(f"1/K₀ ____ {mm.DEF}–____ {mm.DEF} V·s/cm²", ms)
-        self.assertIn(f"on a ____ {mm.DEF} mass spectrometer", ms)
+        self.assertIn(f"1/K₀ ____ {mm.NR_TAG}–____ {mm.NR_TAG} V·s/cm²", ms)
+        self.assertIn(f"on a ____ {mm.NR_TAG} mass spectrometer", ms)
         self.assertNotIn("positive-ion", ms)                    # polarity not recorded: omitted
         self.assertNotIn("cycle time", ms)
         self.assertNotIn("capillary", ms)

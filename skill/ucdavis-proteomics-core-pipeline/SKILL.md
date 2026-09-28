@@ -1697,7 +1697,8 @@ What it extracts, and what it only defaults:
   MAX C18, 10 cm × 150 µm, 1.5 µm) is printed **tagged `[facility default — confirm]`**.
   STAN keeps that log in PG Farm, which needs credentials, so the script never connects to it.
 - It tags what no file records: column temperature, emitter, mobile phases, Evotip loading and
-  peptide amount.
+  peptide amount. STAN's 50 °C and the 20 µm emitter are given as facility defaults, tagged;
+  anything else unknown is tagged `[not recorded — confirm]`.
 - It builds parameter tables showing the source of each value.
 - It appends the instrument's grant acknowledgment (Fusion Lumos → S10OD021801; Exploris 480 →
   S10OD026918-01A1; timsTOF → Dr. Neil Hunter / HHMI).

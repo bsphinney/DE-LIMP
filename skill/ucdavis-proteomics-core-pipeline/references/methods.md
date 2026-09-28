@@ -46,11 +46,22 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
      it; export the rows and pass the file.
   4. Otherwise the facility's standard column, from STAN's column catalogue (PepSep MAX C18,
      10 cm × 150 µm, 1.5 µm, part 1893483), **tagged `[facility default — confirm]`**.
-- **Never in a .d, always tagged**: column temperature, emitter (the default 20 µm
-  CaptiveSpray emitter is tagged `[facility default — confirm]`), mobile phases, Evotip type,
-  loading and peptide amount, and the %B gradient of an Evosep method (its fixed, named
-  method is given instead). A non-Evosep LC's gradient table is not parsed, and is tagged
-  `[not recorded — confirm]`.
+- **Never in a .d, always tagged**:
+  - Column temperature. For a timsTOF, STAN's operator-reported 50 °C is given, tagged
+    `[facility default — confirm]`.
+  - The emitter. The default 20 µm CaptiveSpray emitter is tagged
+    `[facility default — confirm]`.
+  - Mobile phases.
+  - Evotip type, loading and peptide amount.
+  - The %B gradient of an Evosep method. Its fixed, named method is given instead.
+  - A non-Evosep LC's gradient table, which is not parsed. It is tagged
+    `[not recorded — confirm]`.
+- **Tags**:
+  - A value no record holds is tagged `[not recorded — confirm]`, never
+    `[facility default — confirm]`.
+  - A `.d` that could not be read is named on stderr and in the note under Mass spectrometry.
+    When it is the only run, its values are tagged `[raw file not readable here — confirm]`.
+  - The ddaPASEF precursor-selection settings are not extracted, and the text says so.
 
 With `--params` / `--search-prov` / `--workflow-manifest`, it adds a **Database search**
 paragraph and a search-parameter table (engine, the version that ran, cleavage rule, missed
@@ -80,14 +91,23 @@ those two values (sourced as the session record) and every acquisition value bla
 see `references/deposit.md`.
 
 ## Instrument grant acknowledgments (verified 2026-06)
-Picked by instrument metadata **or** facility filename prefix, from
-https://proteomics.ucdavis.edu/instrument-grant-acknowledgments:
+The acknowledgment comes from
+https://proteomics.ucdavis.edu/instrument-grant-acknowledgments.
+
+It is picked by the **instrument name** first: the name read from the raw file, or from the
+session record. The facility filename prefix (`FL`, `Ex`) is used only when the instrument is
+unknown and every file is a Thermo `.raw` with that prefix. It is never used for a `.d`, because
+a timsTOF run named `FLAG_IP_1.d` or `Exp3_HeLa.d` is not a Thermo run. A named instrument that
+is not in the registry gets the placeholder below, not a guess from the filename.
 
 | Instrument | Prefix | Acknowledgment |
 |---|---|---|
 | Orbitrap Fusion Lumos | `FL` | NIH S10 grant **S10OD021801** |
 | Orbitrap Exploris 480 | `Ex` | NIH S10 grant **S10OD026918-01A1** |
-| Bruker timsTOF | — | Dr. Neil Hunter / **Howard Hughes Medical Institute** |
+| Bruker timsTOF (Pro 2 and HT) | — | Dr. Neil Hunter / **Howard Hughes Medical Institute** |
+
+The web page names only the timsTOF Pro 2 for the HHMI acknowledgment. Brett confirmed on
+2026-09-25 that it covers the timsTOF HT too.
 
 An instrument not in this registry yields a placeholder pointing at the source URL.
 **Grant wording must be exact** — the script cites the verified grant numbers and
