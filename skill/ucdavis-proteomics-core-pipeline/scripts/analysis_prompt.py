@@ -28,7 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # direction sentence and ONE default tag, shared with the HTML report.
 from make_analysis_html import (matrix_complete, SUPPRESS_WHEN_COMPLETE,  # noqa: E402
                                 contrast_label, LOGFC_DIRECTION, DEFAULT_TAG, background_flag,
-                                _make_names, read_figures_json, APPENDIX, APPENDIX_FIGURES)
+                                _make_names, read_figures_json, APPENDIX, APPENDIX_FIGURES,
+                                load_record, read_text, csv_text, _UNREADABLE)
 # which groups are pull-down controls, and what the DE columns mean -- session_docs' own.
 from session_docs import IP_CONTROL_NAME, COLUMNS as DE_COLUMNS  # noqa: E402
 import csv  # noqa: E402
@@ -40,13 +41,6 @@ ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "
 # measured / never measured in a group / otherwise, "partly" + the record's zero_means word).
 # They name the tiers; what they mean is quoted from de_provenance.json when the run recorded it.
 EVIDENCE = ("measured in both", "presence call", "partly")
-
-
-def load(path):
-    try:
-        return json.load(open(path))
-    except Exception:
-        return None
 
 
 def submission_brief(w, source):
@@ -90,15 +84,13 @@ def _detection(de_dir, conditions):
     det, groups = {}, {}
     if not (os.path.exists(path) and conditions and os.path.exists(conditions)):
         return det, groups
-    with open(path, newline="") as fh:
-        rd = csv.reader(fh)
-        head = next(rd)
-        for rec in rd:
-            det[rec[0]] = {head[i]: _on(rec[i]) for i in range(1, len(rec))}
-    with open(conditions, newline="") as fh:
-        for r in csv.DictReader(fh):
-            groups.setdefault((r.get("Group") or "").strip(), []).append(
-                (r.get("File.Name") or "").strip())
+    rd = csv.reader(csv_text(path))
+    head = next(rd)
+    for rec in rd:
+        det[rec[0]] = {head[i]: _on(rec[i]) for i in range(1, len(rec))}
+    for r in csv.DictReader(csv_text(conditions)):
+        groups.setdefault((r.get("Group") or "").strip(), []).append(
+            (r.get("File.Name") or "").strip())
     return det, groups
 
 
@@ -129,7 +121,7 @@ def never_in_control(de_dir, de_file, contrast, control, adjp, det, groups, k=15
     """Significant, enriched proteins of a bait-vs-control contrast that were never measured
     in the control -> (count, [gene names by adj.P]), or None when detection is unknown."""
     rows, known = [], False
-    with open(os.path.join(de_dir, de_file), newline="", encoding="utf-8", errors="replace") as fh:
+    with csv_text(os.path.join(de_dir, de_file)) as fh:
         for r in csv.DictReader(fh):
             try:
                 p, lfc = float(r.get("adj.P.Val")), float(r.get("logFC"))
@@ -165,8 +157,10 @@ def main():
                                          "(submission_report.py) is quoted in the brief")
     a = ap.parse_args()
 
-    prov = load(os.path.join(a.de_dir, "de_provenance.json")) or {}
-    wfman = load(a.workflow_manifest) if a.workflow_manifest else {}
+    # the page's loaders: UTF-8 whatever the locale, and a record that exists but cannot be
+    # read is said (stderr + a line in this brief), never a silent {}
+    prov = load_record(os.path.join(a.de_dir, "de_provenance.json"))
+    wfman = load_record(a.workflow_manifest) if a.workflow_manifest else {}
     method = prov.get("method") or (wfman.get("de", {}) or {}).get("method", "")
     engine = a.engine or (wfman.get("engine", {}) or {}).get("name", "")
     eng_ver = (wfman.get("engine", {}) or {}).get("version", "")
@@ -299,12 +293,12 @@ def main():
     if a.submission:
         submission_brief(w, a.submission)
 
+    unread_at = len(L)                       # records that could not be read: listed here, last
     w("## Attached data files — read these")
     heads = {}                               # each DE table's own header: its own groups
     for f in de_files:
         try:
-            with open(os.path.join(a.de_dir, f), newline="") as fh:
-                heads[f] = next(csv.reader(fh))
+            heads[f] = next(csv.reader(csv_text(os.path.join(a.de_dir, f))))
         except (OSError, StopIteration):
             heads[f] = []
     de_cols = [c for f in de_files for c in heads[f]]
@@ -631,7 +625,14 @@ def main():
       "Analysis_Report.html (the report of record).")
     w("")
 
-    with open(a.out, "w") as fh:
+    if _UNREADABLE:
+        L[unread_at:unread_at] = (
+            ["## Records that could not be read — say so, do not fill in"]
+            + [f"- `{p}` {why}" for p, why in _UNREADABLE.items()]
+            + ["What these records hold (a cutoff, a contaminant caveat, a study fact) may be "
+               "missing from this brief. Say in Data Quality Notes which could not be read; never "
+               "describe what they would have said. The HTML report says so too.", ""])
+    with open(a.out, "w", encoding="utf-8") as fh:        # "≥", "—": not cp1252-safe
         fh.write("\n".join(L) + "\n")
 
     print(json.dumps({
@@ -642,7 +643,7 @@ def main():
         "figures": [f["file"] for f in figs], "n_figures": len(embed),
         "figures_appendix": [f["file"] for f in appendix],
         "figures_failed": [f["file"] for f in failed], "figures_error": fig_error,
-        "has_qc": has_qc, "has_gsea": has_gsea,
+        "has_qc": has_qc, "has_gsea": has_gsea, "records_unreadable": dict(_UNREADABLE),
         "next": f"Read {a.out} + the data files + figures, then write {a.report_out} "
                 f"(ALL sections, embed all {len(embed)} figures, expert interpretation), "
                 "then render it with make_analysis_html.py into Analysis_Report.html "

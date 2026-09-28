@@ -66,22 +66,26 @@ def evidence(d):
 
 
 def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, report=True,
-            removed=None, evidence_col=False, extra_figs=(), omit=(), report_extra=""):
+            removed=None, evidence_col=False, extra_figs=(), omit=(), report_extra="",
+            rows=None, prov_bytes=None):
+    """rows: (protein, gene, logFC, adj.P, detection b1..b3 c1..c3[, raw P]) -- ROWS by default,
+    raw P = adj.P / 2 unless given. prov_bytes: de_provenance.json exactly as these bytes."""
+    rows = rows or ROWS
     out = os.path.join(root, "output")
     tables, figs = os.path.join(out, "tables"), os.path.join(out, "figures")
     for d in (tables, figs, os.path.join(root, "input")):
         os.makedirs(d, exist_ok=True)
     prov = prov if prov is not None else dict(PROV)
-    with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
-        json.dump(prov, fh)
+    with open(os.path.join(tables, "de_provenance.json"), "wb") as fh:
+        fh.write(prov_bytes if prov_bytes is not None else json.dumps(prov).encode())
     head = ["Protein.Group", "Genes", "logFC", "P.Value", "adj.P.Val", "PropObs"]
     if det_cols:
         head += ["Detected_Bait", "Detected_IgG"] + (["Evidence"] if evidence_col else [])
     with open(os.path.join(tables, "DE_dpc_Bait.IgG.csv"), "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(head)
-        for p, g, lfc, adj, d in ROWS:
-            row = [p, g, lfc, adj / 2, adj, 0.5]
+        for p, g, lfc, adj, d, *raw in rows:
+            row = [p, g, lfc, raw[0] if raw else adj / 2, adj, 0.5]
             if det_cols:
                 row += [f"{sum(x > 0 for x in d[:3])}/3", f"{sum(x > 0 for x in d[3:])}/3"]
                 row += [evidence(d)] if evidence_col else []
@@ -90,7 +94,7 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
         with open(os.path.join(tables, "Detection_Matrix.csv"), "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["Protein.Group"] + RUNS["Bait"] + RUNS["IgG"])
-            for p, _, _, _, d in ROWS:
+            for p, _, _, _, d, *_ in rows:
                 w.writerow([p] + d)
     with open(os.path.join(tables, "QC_detected_vs_inferred.csv"), "w") as fh:
         fh.write("Sample,Group,Detected,Inferred,Total,PctDetected,PctInferred\n"
@@ -117,24 +121,29 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
     return out, tables
 
 
-def brief(root, **kw):
+def brief_run(root, env=None, **kw):
+    """-> (brief text, the JSON analysis_prompt prints, stderr)."""
     out, tables = session(root, **kw)
     b = os.path.join(root, "brief.md")
     r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "analysis_prompt.py"), "--out", b,
                         "--de-dir", tables, "--figures-dir", os.path.join(out, "figures"),
                         "--conditions", os.path.join(root, "input", "conditions.csv")],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
-    with open(b) as fh:
-        return fh.read()
+    with open(b, encoding="utf-8") as fh:
+        return fh.read(), json.loads(r.stdout), r.stderr
 
 
-def page(root, **kw):
+def brief(root, **kw):
+    return brief_run(root, **kw)[0]
+
+
+def page(root, env=None, **kw):
     out, _ = session(root, **kw)
     html_out = os.path.join(out, "Analysis_Report.html")
     r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "make_analysis_html.py"),
                         "--session", root, "--out", html_out, "--no-pdf"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     with open(html_out, encoding="utf-8") as fh, open(html_out[:-5] + ".md", encoding="utf-8") as m:
         return json.loads(r.stdout), fh.read(), m.read(), r.stderr
@@ -352,6 +361,96 @@ class Page(unittest.TestCase):
         _, html, _, _ = page(self.root)
         self.assertIn("swipe the table sideways", html)
         self.assertIn(".scrollhint", html)
+
+
+# Round 2 (verifier on 9dc5aa2)
+TIES = [("PI", "Inf1", 9.0, 1e-6, [3, 3, 3, 0, 0, 0], 1e-8),     # presence call, big |logFC|
+        ("PM", "Meas1", 1.0, 1e-6, [3, 3, 3, 3, 3, 3], 1e-9),    # same adj.P, smaller raw P
+        ("PX", "Next1", 2.0, 5e-4, [3, 3, 3, 3, 3, 3], 2e-4)]
+# A latin-1 locale: open() without an encoding mis-decodes (or, under cp1252, rejects) UTF-8.
+LATIN1 = dict(os.environ, LC_ALL="en_US.ISO8859-1", LANG="en_US.ISO8859-1", PYTHONUTF8="0")
+NOTE = "the search database — built before the overlap check — held 5 µg of bovine entries."
+
+
+class TopTies(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = self._td.name
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_adjp_ties_break_by_raw_p_not_fold_change(self):
+        import make_analysis_html as mah
+        _, tables = session(self.root, rows=TIES)
+        t = mah.Tables(tables, dict(PROV), 0.05, "de_provenance.json")
+        self.assertEqual([r["Genes"] for r in t.top("Bait.IgG", 3)], ["Meas1", "Inf1", "Next1"])
+        _, _, md, _ = page(tempfile.mkdtemp(dir=self.root), rows=TIES)
+        top = md[md.index("## Top proteins per contrast"):]
+        self.assertLess(top.index("Meas1"), top.index("Inf1"))
+
+    def test_a_tie_without_a_raw_p_keeps_its_table_order(self):
+        import make_analysis_html as mah
+        _, tables = session(self.root, rows=[("PA", "A1", 5.0, 1e-3, [1] * 6, ""),
+                                             ("PB", "B1", 9.0, 1e-3, [1] * 6, "")])
+        t = mah.Tables(tables, dict(PROV), 0.05, "de_provenance.json")
+        self.assertEqual([r["Genes"] for r in t.top("Bait.IgG", 2)], ["A1", "B1"])
+
+
+class Encoding(unittest.TestCase):
+    """Records are UTF-8 whatever the locale, and one that cannot be read is said -- on stderr,
+    on the page and in the brief -- never a silent {} that drops what it held."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = self._td.name
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def prov(self, note=NOTE):
+        return dict(PROV, contaminants={"policy": "removed", "removed": True,
+                                        "database_risk": True, "database_note": note,
+                                        "removed_table": "contaminants_removed.csv"})
+
+    def test_utf8_records_read_right_under_a_latin1_locale(self):
+        raw = json.dumps(self.prov(), ensure_ascii=False).encode("utf-8")
+        res, html, md, err = page(self.root, env=LATIN1, prov_bytes=raw,
+                                  removed=[("Cont_P60712", "ACTB")])
+        for doc in (html, md):
+            self.assertIn("Real proteins may have been removed as contaminants", doc)
+            self.assertIn("The search database — built before the overlap check — held 5 µg", doc)
+            self.assertNotIn("\u00e2\u0080\u0094", doc)                  # "—" read as latin-1
+        self.assertEqual(res["records_unreadable"], {})
+        self.assertNotIn("WARNING", err)
+        b, out, _ = brief_run(tempfile.mkdtemp(dir=self.root), env=LATIN1, prov_bytes=raw)
+        self.assertIn("built before the overlap check — held 5 µg", b)
+        self.assertIn("≥2 contrasts", b)                              # written as UTF-8
+        self.assertEqual(out["records_unreadable"], {})
+
+    def test_a_record_that_is_not_utf8_is_loud_and_still_used(self):
+        raw = json.dumps(self.prov(note="5 \u00b5g"), ensure_ascii=False).encode("latin-1")
+        res, html, md, err = page(self.root, prov_bytes=raw, removed=[("Cont_P60712", "ACTB")])
+        path = os.path.join(self.root, "output", "tables", "de_provenance.json")
+        self.assertIn(f"WARNING: {path} is not UTF-8", err)
+        self.assertEqual(list(res["records_unreadable"]), [path])
+        for doc in (html, md):
+            self.assertIn("1 record of this run could not be read", doc)
+            self.assertIn("Real proteins may have been removed as contaminants", doc)  # kept
+
+    def test_an_unparseable_record_is_said_not_dropped(self):
+        raw = json.dumps(self.prov()).encode()[:-20]                  # truncated
+        res, html, md, err = page(self.root, prov_bytes=raw)
+        self.assertIn("de_provenance.json could not be read (JSONDecodeError", err)
+        for doc in (html, md):
+            self.assertIn("1 record of this run could not be read", doc)
+            self.assertIn("missing from the page, not from the run", doc)
+        self.assertIn("(DEFAULT — not user-confirmed)", md)            # the cutoff: tagged
+        b, out, err2 = brief_run(tempfile.mkdtemp(dir=self.root), prov_bytes=raw)
+        self.assertIn("## Records that could not be read — say so, do not fill in", b)
+        self.assertIn("de_provenance.json` could not be read (JSONDecodeError", b)
+        self.assertEqual(len(out["records_unreadable"]), 1)
+        self.assertIn("WARNING", err2)
 
 
 class StalePdf(unittest.TestCase):

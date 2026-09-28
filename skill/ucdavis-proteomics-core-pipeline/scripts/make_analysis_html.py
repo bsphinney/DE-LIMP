@@ -38,7 +38,7 @@ Usage
   python3 make_analysis_html.py --report AI_Analysis_Report.md --figures ./figures \\
       --tables ./tables --out report.html [--title "..."] [--quality SAMPLE_QUALITY.md]
 """
-import argparse, base64, csv, datetime, html, json, mimetypes, os, re, sys, urllib.parse
+import argparse, base64, csv, datetime, html, io, json, mimetypes, os, re, sys, urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
@@ -123,8 +123,7 @@ def read_figures_json(figures_dir):
         return out
     out["found"] = True
     try:
-        with open(path, encoding="utf-8") as fh:
-            fj = json.load(fh)
+        fj = json.loads(read_text(path))
     except (OSError, ValueError) as e:
         out["error"] = f"unreadable ({e})"
         return out
@@ -432,13 +431,9 @@ def significance_rule(tables_dir, default_adjp=0.05):
     fold-change filter"), so it is here too. Source "--adjp" means NOTHING recorded it: the
     page then says so and tags the value (architectural rule 2), never "the rule the DE
     applied"."""
-    try:
-        with open(os.path.join(tables_dir or "", "de_provenance.json")) as fh:
-            adjp = json.load(fh).get("adjp")
-        if isinstance(adjp, (int, float)):
-            return float(adjp), "de_provenance.json"
-    except (OSError, ValueError):
-        pass
+    adjp = load_record(os.path.join(tables_dir or "", "de_provenance.json")).get("adjp")
+    if isinstance(adjp, (int, float)) and not isinstance(adjp, bool):
+        return float(adjp), "de_provenance.json"
     return default_adjp, "--adjp"
 
 
@@ -465,12 +460,65 @@ def norm_title(t):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or "")).strip().lower())
 
 
-def _load(path):
+# Records that exist but could not be read, {path: why}: said on stderr when it happens and on
+# the page (Results at a glance) -- never a silent {}. A de_provenance.json the platform's
+# locale could not decode once dropped the contaminant-database warning without a word.
+_UNREADABLE = {}
+
+
+def _unreadable(path, why):
+    if path not in _UNREADABLE:
+        _UNREADABLE[path] = why
+        print(f"[{os.path.basename(sys.argv[0] or 'make_analysis_html.py')}] WARNING: {path} "
+              f"{why}", file=sys.stderr)
+
+
+def read_text(path):
+    """A record's text, decoded as UTF-8 (a BOM dropped) whatever the platform's locale: the
+    skill writes UTF-8, which Windows' cp1252 default mis-decodes or rejects. A file that is not
+    valid UTF-8 is still read, bad bytes replaced, and recorded as unreadable."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
     try:
-        with open(path) as fh:
-            return json.load(fh)
-    except (OSError, ValueError, TypeError):
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        _unreadable(path, f"is not UTF-8 (byte {e.start}): read with the bad bytes replaced")
+        return raw.decode("utf-8-sig", errors="replace")
+
+
+def csv_text(path):
+    """read_text() as a file for csv.reader / csv.DictReader."""
+    return io.StringIO(read_text(path), newline="")
+
+
+def load_record(path):
+    """A JSON record -> dict. {} when there is no such file (nothing was recorded); a file that
+    exists but cannot be read, parsed, or is not a JSON object gives {} AND is recorded as
+    unreadable (stderr + the page), so what it holds is said to be missing, not absent."""
+    if not path or not os.path.exists(path):
         return {}
+    try:
+        v = json.loads(read_text(path))
+    except (OSError, ValueError) as e:
+        _unreadable(path, f"could not be read ({type(e).__name__}: {e})")
+        return {}
+    if not isinstance(v, dict):
+        _unreadable(path, f"is not a JSON object ({type(v).__name__})")
+        return {}
+    return v
+
+
+def unreadable_note():
+    """The fixed callout for records that could not be read, or None."""
+    if not _UNREADABLE:
+        return None
+    return {"kind": "warning",
+            "title": f"{len(_UNREADABLE)} record{'' if len(_UNREADABLE) == 1 else 's'} of this "
+                     f"run could not be read",
+            "text": "; ".join(f"`{os.path.basename(p)}` {why}" for p, why in _UNREADABLE.items())
+                    + ". What this page would show from them (a recorded cutoff, a contaminant "
+                      "warning, a study fact) may be missing here — missing from the page, not "
+                      "from the run. Re-save the file as UTF-8 and render again."}
 
 
 def session_facts(a, prov, submission=None):
@@ -478,9 +526,9 @@ def session_facts(a, prov, submission=None):
     holds is left out, never filled in (architectural rule 2). `submission` is the attached
     CoreOmics record's label (submission_report.label)."""
     s = os.path.abspath(a.session) if a.session else None
-    man = _load(os.path.join(s, "input", "wf", "workflow.manifest.json")) if s else {}
-    fmeta = _load(os.path.join(s, "input", "search.fasta.meta.json")) if s else {}
-    sprov = _load(os.path.join(s, "output", "search", "search_provenance.json")) if s else {}
+    man = load_record(os.path.join(s, "input", "wf", "workflow.manifest.json")) if s else {}
+    fmeta = load_record(os.path.join(s, "input", "search.fasta.meta.json")) if s else {}
+    sprov = load_record(os.path.join(s, "output", "search", "search_provenance.json")) if s else {}
     org = fmeta.get("organism") or man.get("organism")
     tax = fmeta.get("taxid") or man.get("organism_taxid")
     eng = (sprov.get("engine") or (man.get("engine") or {}).get("name") or "").lower()
@@ -533,15 +581,17 @@ class Tables:
     def rows(self, c):
         if c not in self._rows:
             out = []
-            with open(os.path.join(self.dir, self.files[c]), newline="", encoding="utf-8",
-                      errors="replace") as fh:
-                for r in csv.DictReader(fh):
-                    try:
-                        r["_p"] = float(r.get("adj.P.Val") or r.get("padj") or r.get("FDR"))
-                        r["_lfc"] = float(r.get("logFC") or r.get("log2FoldChange"))
-                    except (TypeError, ValueError):
-                        r["_p"], r["_lfc"] = None, None
-                    out.append(r)
+            for r in csv.DictReader(csv_text(os.path.join(self.dir, self.files[c]))):
+                try:
+                    r["_p"] = float(r.get("adj.P.Val") or r.get("padj") or r.get("FDR"))
+                    r["_lfc"] = float(r.get("logFC") or r.get("log2FoldChange"))
+                except (TypeError, ValueError):
+                    r["_p"], r["_lfc"] = None, None
+                try:
+                    r["_raw_p"] = float(r.get("P.Value") or r.get("pvalue"))
+                except (TypeError, ValueError):
+                    r["_raw_p"] = None
+                out.append(r)
             self._rows[c] = out
         return self._rows[c]
 
@@ -554,8 +604,13 @@ class Tables:
         return len(rows), sum(r["_lfc"] > 0 for r in sig), sum(r["_lfc"] < 0 for r in sig)
 
     def top(self, c, k):
+        """The k best by adj.P, ties broken by the raw p-value (topTable's order, as the brief
+        and make_figures.R rank them) -- never by |log2FC|: BH ties are common, and the largest
+        fold changes there are presence calls, not the strongest evidence. A row without a raw
+        p-value keeps its place in the table among its ties (sorted() is stable)."""
         rows = [r for r in self.rows(c) if r["_p"] is not None]
-        return sorted(rows, key=lambda r: (r["_p"], -abs(r["_lfc"])))[:k]
+        return sorted(rows, key=lambda r: (r["_p"], r["_raw_p"] if r["_raw_p"] is not None
+                                           else float("inf")))[:k]
 
 
 def gene_label(r):
@@ -582,7 +637,7 @@ def matrix_complete(tables_dir, prov):
     em = os.path.join(tables_dir or "", "Expression_Matrix.csv")
     if os.path.exists(em):
         try:
-            with open(em, newline="") as fh:
+            with csv_text(em) as fh:
                 rd = csv.reader(fh)
                 head = next(rd)
                 cols = [i for i, h in enumerate(head)
@@ -676,8 +731,7 @@ def figure_summary(name, tables, qc_path, em_path):
                         f"({100 * below / len(raw):.0f}%) below 0.05; {up + dn:,} significant "
                         f"at adj.P < {tables.adjp:g}.")
     if stem.startswith("qc_detected_vs_inferred") and qc_path and os.path.exists(qc_path):
-        with open(qc_path, newline="") as fh:
-            q = list(csv.DictReader(fh))
+        q = list(csv.DictReader(csv_text(qc_path)))
         if q:
             det = sorted(int(float(r["Detected"])) for r in q)
             pct = sorted(float(r["PctInferred"]) for r in q)
@@ -685,7 +739,7 @@ def figure_summary(name, tables, qc_path, em_path):
                     f"(median {det[len(det) // 2]:,}) of {int(float(q[0]['Total'])):,}; "
                     f"inferred {pct[0]:.0f}–{pct[-1]:.0f}% per sample.")
     if stem.startswith("qc_protein_counts") and em_path and os.path.exists(em_path):
-        with open(em_path, newline="") as fh:
+        with csv_text(em_path) as fh:
             rd = csv.reader(fh)
             head = next(rd)
             cols = [i for i, h in enumerate(head) if h not in ("Protein.Group", "Genes", "Protein.Names")]
@@ -737,16 +791,14 @@ def detection_note_fn(tables_dir, prov, conditions):
         return None
     word = "quantified" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing" \
         else "detected"
-    with open(path, newline="") as fh:
-        rd = csv.reader(fh)
-        head = next(rd)
-        det = {rec[0]: {head[i]: rec[i] for i in range(1, len(rec))} for rec in rd}
+    rd = csv.reader(csv_text(path))
+    head = next(rd)
+    det = {rec[0]: {head[i]: rec[i] for i in range(1, len(rec))} for rec in rd}
     groups = {}
     if conditions and os.path.exists(conditions):
-        with open(conditions, newline="") as fh:
-            for r in csv.DictReader(fh):
-                groups.setdefault((r.get("Group") or "").strip(), []).append(
-                    (r.get("File.Name") or "").strip())
+        for r in csv.DictReader(csv_text(conditions)):
+            groups.setdefault((r.get("Group") or "").strip(), []).append(
+                (r.get("File.Name") or "").strip())
 
     def on(v):
         try:
@@ -783,12 +835,24 @@ def build_page(a, prov, tables, figs, md_text, used):
         h1, pre, report_secs = split_md_sections(md_text)
     report_h2 = {norm_title(t) for t, _ in report_secs}
     referenced = set(report_figures(md_text)) if md_text is not None else set()
+    glance_anchor = anchor("Results at a glance", used)
+    # Every record the page reads is read before the glance is assembled, so its "could not be
+    # read" callout lists them all (a record read later would be on stderr only).
+    extras = []
+    for path, title, key in ((a.quality, "Sample quality notes", "quality"),
+                             (a.audit, "Audit & caveats", "audit")):
+        if not (path and os.path.exists(path)):
+            continue
+        if report_h2 & (SUPERSEDED_BY[key] | {norm_title(title)}):
+            continue                    # the report has its own -- never show it twice
+        extras.append((title, strip_h1(read_text(path))))
+    top = top_data(tables, a, prov)
     g = glance_data(prov, tables, a.tables, a.session)
-    nd = not_drawn_note(figs.failed, referenced)
-    if nd:
-        g["notes"].append(nd)
+    for n in (not_drawn_note(figs.failed, referenced), unreadable_note()):
+        if n:
+            g["notes"].append(n)
     if g["tiles"] or g["contrasts"] or g["notes"]:
-        sections.append({"anchor": anchor("Results at a glance", used),
+        sections.append({"anchor": glance_anchor,
                          "title": "Results at a glance", "kind": None, "blocks": [("glance", g)]})
     if md_text is None:
         gal = {}
@@ -802,20 +866,12 @@ def build_page(a, prov, tables, figs, md_text, used):
             if sec in gal:
                 sections.append({"anchor": anchor(sec, used), "title": sec, "kind": None,
                                  "blocks": [("gallery", sec, [fn for _, fn in sorted(gal[sec])])]})
-    for path, title, key in ((a.quality, "Sample quality notes", "quality"),
-                             (a.audit, "Audit & caveats", "audit")):
-        if not (path and os.path.exists(path)):
-            continue
-        if report_h2 & (SUPERSEDED_BY[key] | {norm_title(title)}):
-            continue                    # the report has its own -- never show it twice
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            body = strip_h1(fh.read())
+    for title, body in extras:
         sections.append({"anchor": anchor(title, used), "title": title,
                          "kind": severity(title, body), "blocks": [("md", body)]})
     for title, body in report_secs:
         sections.append({"anchor": anchor(title, used), "title": title,
                          "kind": severity(title, body), "blocks": [("md", body)]})
-    top = top_data(tables, a, prov)
     if top:
         sections.append({"anchor": anchor("Top proteins per contrast", used),
                          "title": "Top proteins per contrast", "kind": None,
@@ -901,8 +957,7 @@ def inferred_note(prov, tables_dir):
     if not os.path.exists(qc):
         return None
     try:
-        with open(qc, newline="") as fh:
-            pct = sorted(float(r["PctInferred"]) for r in csv.DictReader(fh))
+        pct = sorted(float(r["PctInferred"]) for r in csv.DictReader(csv_text(qc)))
     except (OSError, KeyError, ValueError) as e:
         print(f"[make_analysis_html] WARNING: {qc} unreadable ({e}); the inferred-values "
               f"note is left out", file=sys.stderr)
@@ -937,9 +992,8 @@ def database_note(prov, tables_dir, session=None):
     table = cont.get("removed_table")
     path = os.path.join(tables_dir or "", table) if table else None
     if path and os.path.exists(path):
-        with open(path, newline="", encoding="utf-8", errors="replace") as fh:
-            removed = [r for r in csv.DictReader(fh)
-                       if (r.get("Contaminant.Group") or "").upper() == "TRUE"]
+        removed = [r for r in csv.DictReader(csv_text(path))
+                   if (r.get("Contaminant.Group") or "").upper() == "TRUE"]
     named, how, extra = [], "", ""
     meta_path = next((m for m in (cont.get("fasta_meta"),
                                   os.path.join(session, "input", "search.fasta.meta.json")
@@ -947,8 +1001,10 @@ def database_note(prov, tables_dir, session=None):
     if meta_path and removed:
         try:
             import fetch_fasta
-            with open(meta_path) as fh:
-                tc = fetch_fasta.target_contaminants(json.load(fh))
+            meta = load_record(meta_path)     # an unreadable one is said, on the page too
+            if not meta:
+                raise ValueError(f"{os.path.basename(meta_path)} could not be read")
+            tc = fetch_fasta.target_contaminants(meta)
             named = fetch_fasta.seen_only_as_cont(
                 tc["kept_as_contaminant"],
                 [({t.strip().upper() for t in (r.get("Protein.Group") or "").split(";")},
@@ -1232,6 +1288,7 @@ def main():
                     help="skip the PDF (default: print the HTML to --out with .pdf with a "
                          "headless Chrome/Chromium/Edge when one is installed)")
     a = ap.parse_args()
+    _UNREADABLE.clear()                  # one page per run
 
     if a.session:
         o = os.path.join(a.session, "output")
@@ -1243,7 +1300,7 @@ def main():
             if not getattr(a, attr) and os.path.exists(p):
                 setattr(a, attr, p)
     has_report = bool(a.report and os.path.exists(a.report))
-    prov = _load(os.path.join(a.tables, "de_provenance.json")) if a.tables else {}
+    prov = load_record(os.path.join(a.tables, "de_provenance.json")) if a.tables else {}
     md_out = a.md_out or (os.path.splitext(a.out)[0] + ".md")
     if os.path.abspath(md_out) == os.path.abspath(a.report or ""):
         sys.exit("[make_analysis_html] --md-out would overwrite the report it is made from")
@@ -1276,26 +1333,30 @@ def main():
     md_text = md_orig = None
     n_par = 0
     if has_report:
-        with open(a.report, encoding="utf-8", errors="replace") as fh:
-            md_text = md_orig = make_podcast.strip_block(fh.read())  # its Listen line: the card is below
+        md_text = md_orig = make_podcast.strip_block(read_text(a.report))  # its Listen line: the card is below
         # The one source both renderers draw from, so the HTML, .md and PDF all lose it.
         md_text, gone, n_par = drop_suppressed(md_text, figs.suppress)
         figs.suppressed += [g for g in gone if g not in figs.suppressed]
-    used = set()
-    h1, subtitle, sections = build_page(a, prov, tables, figs, md_text, used)
-    if not sections and not subtitle and md_text is None:
-        sys.exit("[make_analysis_html] nothing to render — check --session/--report/--figures")
-    title = a.title or (re.sub(r"[*`]", "", h1) if h1 else "Proteomics Analysis Report")
     # The CoreOmics submission this run answers goes first: ONE record, attached to the session
     # (submission_report.py attach) or named by --submission. The record and its rendering
     # (allowlisted: never a contact or billing field) live in submission_report.py, and its
     # label is the header's Submission fact -- never a number read from other text.
     import submission_report
     sub = submission_report.report_section(a.submission, a.session)
-    if sub:
-        sections.insert(0, {"anchor": anchor("Submission", used), "title": "Submission",
-                            "kind": None, "blocks": [("submission", sub["html"], sub["md"])]})
+    # The session's records (manifest, FASTA meta, search provenance) and the QC table a figure
+    # summary reads are read now, before the page is assembled: see build_page().
     facts = session_facts(a, prov, sub["label"] if sub else None)
+    if os.path.exists(qc):
+        read_text(qc)
+    used = set()
+    sub_anchor = anchor("Submission", used) if sub else None
+    h1, subtitle, sections = build_page(a, prov, tables, figs, md_text, used)
+    if not sections and not subtitle and md_text is None:
+        sys.exit("[make_analysis_html] nothing to render — check --session/--report/--figures")
+    title = a.title or (re.sub(r"[*`]", "", h1) if h1 else "Proteomics Analysis Report")
+    if sub:
+        sections.insert(0, {"anchor": sub_anchor, "title": "Submission",
+                            "kind": None, "blocks": [("submission", sub["html"], sub["md"])]})
 
     doc = render_html(title, subtitle, sections, figs, facts, used)
     md_doc = render_md(title, subtitle, sections, figs, facts,
@@ -1359,6 +1420,7 @@ def main():
                       "figures_not_embedded": left_out, "figures_missing": figs.missing,
                       "figures_rejected": figs.rejected, "figures_suppressed": figs.suppressed,
                       "figures_stale": figs.stale, "pdf_status": pdf_status,
+                      "records_unreadable": dict(_UNREADABLE),
                       "contrasts": len(tables.contrasts), "self_contained": True}, indent=2))
 
 
