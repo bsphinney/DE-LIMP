@@ -501,13 +501,25 @@ def _fasta_helpers():
 
 
 def _cont_tag():
-    """fetch_fasta.CONT_TAG ("Cont_"): the contaminant tag DIA-NN's --cont-quant-exclude keys on."""
+    """(tag, None): fetch_fasta.CONT_TAG ("Cont_"), the contaminant tag DIA-NN's
+    --cont-quant-exclude keys on -- or (None, why) when fetch_fasta cannot be imported. Never a
+    silent None: without the tag every contaminant counts as a target, so the failure is WARNED
+    and organism_from_headers / fasta_from_search mark a header-derived organism unverified. (A
+    partial copy of scripts/ without estimate_params.py did exactly this on HIVE, 2026-09-28, and
+    recorded contaminant_entries 0 with no word said.)"""
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from fetch_fasta import CONT_TAG
-        return CONT_TAG
-    except Exception:                                               # noqa: BLE001
-        return None                 # unknown: organism_from_headers then treats no entry as one
+        return CONT_TAG, None
+    except Exception as e:                                          # noqa: BLE001
+        missing = getattr(e, "name", None)
+        why = ("fetch_fasta could not be imported"
+               + (f" (missing module {missing!r})" if missing else "")
+               + f": {type(e).__name__}: {e}")
+        sys.stderr.write(f"[fran_deposit] WARNING: contaminant tag unavailable -- {why}. Every "
+                         f"contaminant counts as a target, so an organism read from FASTA headers "
+                         f"is recorded as unverified. Copy the whole scripts/ directory.\n")
+        return None, why
 
 
 # When NO sidecar is tied to the search's FASTA, the FASTA itself still answers "which database,
@@ -536,8 +548,13 @@ def organism_from_headers(path, cont_tag=None):
     recorded contaminant_entries 0. Human only resolved by the margin. A small proteome does not:
     6,066 yeast entries + 380 appended contaminants is 94.1% < HEADER_MAJORITY, so the organism
     went unresolved. A hand-built FASTA whose contaminants carry no tag still counts them as
-    targets and resolves only when the majority holds."""
-    cont_tag = cont_tag or _cont_tag()
+    targets and resolves only when the majority holds. So does every FASTA when the tag itself is
+    unavailable (_cont_tag: fetch_fasta not importable) -- then evidence carries
+    `contaminant_tag_unavailable`, why-not says so, and fasta_from_search records the organism as
+    "unverified: contaminant tag unavailable ..."."""
+    no_tag = None
+    if not cont_tag:
+        cont_tag, no_tag = _cont_tag()
     ox, names = collections.Counter(), collections.defaultdict(collections.Counter)
     tag = cont_tag.encode() if cont_tag else None
     n_target = n_cont = 0
@@ -561,6 +578,9 @@ def organism_from_headers(path, cont_tag=None):
         return None, None, {}, f"cannot read {path} ({e.strerror or e})"
     ev = {"target_entries": n_target, "contaminant_entries": n_cont,
           "contaminant_tag": cont_tag, "ox_tally": dict(ox.most_common(4))}
+    if no_tag:
+        # The counts above include every contaminant as a target; say so wherever they are shown.
+        ev["contaminant_tag_unavailable"] = no_tag
     if not n_target:
         return None, None, ev, f"{path} has no target entries"
     if not ox:
@@ -569,7 +589,9 @@ def organism_from_headers(path, cont_tag=None):
     ev.update(ox_top=int(top), ox_top_entries=k)
     if k / n_target < HEADER_MAJORITY:
         return None, None, ev, (f"no clear majority taxon: OX={top} on {k:,} of {n_target:,} target "
-                                f"entries ({k / n_target:.1%} < {HEADER_MAJORITY:.0%})")
+                                f"entries ({k / n_target:.1%} < {HEADER_MAJORITY:.0%})"
+                                + (" -- contaminant tag unavailable, so contaminants were counted "
+                                   "as targets" if no_tag else ""))
     org = names[top].most_common(1)[0][0] if names[top] else None
     return org, int(top), ev, None
 
@@ -607,9 +629,13 @@ def fasta_from_search(out):
         ev["proteome_id_in_filename"] = pid.group(0) + " (supporting evidence only, never the source)"
     res["organism_evidence"] = ev
     if tax:
-        res.update(organism=org, taxon=tax,
-                   organism_source=(f"FASTA headers (OX={tax} in {ev['ox_top_entries']:,} of "
-                                    f"{ev['target_entries']:,} target entries) via {src}"))
+        src_text = (f"FASTA headers (OX={tax} in {ev['ox_top_entries']:,} of "
+                    f"{ev['target_entries']:,} target entries) via {src}")
+        if ev.get("contaminant_tag_unavailable"):
+            src_text = (f"unverified: contaminant tag unavailable "
+                        f"({ev['contaminant_tag_unavailable']}; contaminants counted as targets) "
+                        f"-- {src_text}")
+        res.update(organism=org, taxon=tax, organism_source=src_text)
     else:
         res["why"] = why
     return res

@@ -11,7 +11,9 @@ The failure this guards is silent: a manifest with no database still stages, sti
 leaves the corpus unable to say whether two searches used comparable proteomes. Entries-per-gene
 is what separates a real depth difference from database redundancy.
 """
+import contextlib
 import hashlib
+import io
 import json
 import os
 import sys
@@ -192,7 +194,64 @@ class OrganismFromHeadersTests(unittest.TestCase):
 
     def test_the_tag_is_fetch_fastas(self):
         import fetch_fasta
-        self.assertEqual(fd._cont_tag(), fetch_fasta.CONT_TAG)
+        self.assertEqual(fd._cont_tag(), (fetch_fasta.CONT_TAG, None))
+
+
+class ContaminantTagUnavailableTests(unittest.TestCase):
+    """A partial copy of scripts/ (no estimate_params.py, which fetch_fasta imports) cannot import
+    fetch_fasta. The contaminant tag is then unknown and every contaminant counts as a target --
+    which must be SAID (a warning naming the missing module) and RECORDED (a header-derived
+    organism is "unverified"), never silent. It was silent on HIVE, 2026-09-28."""
+
+    def _partial_copy(self):
+        """sys.modules as a partial copy of scripts/ sees it: fetch_fasta not yet imported, and
+        estimate_params absent. mock.patch.dict restores both afterwards."""
+        from unittest import mock
+        ctx = mock.patch.dict(sys.modules, {"estimate_params": None})
+        ctx.start()
+        self.addCleanup(ctx.stop)
+        sys.modules.pop("fetch_fasta", None)
+
+    def _search(self, d, entries):
+        fa = _fasta(os.path.join(d, "db.fasta"), entries)
+        out = os.path.join(d, "search")
+        os.makedirs(out)
+        with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+            json.dump({"fasta": fa}, fh)
+        return out
+
+    def test_a_missing_tag_is_warned_naming_the_module(self):
+        self._partial_copy()
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            tag, why = fd._cont_tag()
+        self.assertIsNone(tag)
+        self.assertIn("'estimate_params'", why)
+        self.assertIn("WARNING: contaminant tag unavailable", err.getvalue())
+        self.assertIn("estimate_params", err.getvalue())
+
+    def test_a_header_organism_without_the_tag_is_recorded_unverified(self):
+        entries = [HUMAN.format(i=i) for i in range(40)] + [CONT_SP]
+        with tempfile.TemporaryDirectory() as d:
+            ok = fd.fasta_from_search(self._search(d, entries))
+            self.assertTrue(ok["organism_source"].startswith("FASTA headers"), ok)
+        self._partial_copy()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(io.StringIO()):
+            res = fd.fasta_from_search(self._search(d, entries))
+        self.assertEqual(res["taxon"], 9606)                  # 40 of 41 still clears the majority
+        self.assertTrue(res["organism_source"].startswith(
+            "unverified: contaminant tag unavailable"), res["organism_source"])
+        self.assertIn("estimate_params", res["organism_source"])
+        ev = res["organism_evidence"]
+        self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (41, 0), ev)
+        self.assertIn("estimate_params", ev["contaminant_tag_unavailable"])
+
+    def test_an_unresolved_organism_says_the_tag_was_missing(self):
+        self._partial_copy()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(io.StringIO()):
+            f = _fasta(os.path.join(d, "y.fasta"), [YEAST.format(i=i) for i in range(16)] + [CONT_SP])
+            org, tax, ev, why = fd.organism_from_headers(f)
+        self.assertIsNone(tax)
+        self.assertIn("contaminant tag unavailable", why)
 
 
 if __name__ == "__main__":
