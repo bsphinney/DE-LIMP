@@ -20,14 +20,16 @@ that its version matches the one you expect.
 
 It downloads **micromamba** (a single static binary, ~5 MB) into
 `~/.proteomics-pipeline/micromamba/` if no conda/mamba is already present, then
-creates one conda environment containing:
+creates one conda environment — solved with `--override-channels -c conda-forge -c bioconda`, so
+a `~/.condarc` listing `defaults` cannot pull in its R ≤ 4.3 builds — containing:
 
 | package | why |
 |---|---|
 | `python=3.11` + `pyarrow` + `pyyaml` | the skill's Python scripts + parquet adapters |
 | `r-base` (≥4.5) | the DE step |
-| `bioconductor-limpa` (1.2.5, noarch) | the DPC-Quant DE pipeline |
-| `bioconductor-limma` | both DE pipelines |
+| `bioconductor-limpa` (1.2.5, noarch) | the DPC-Quant DE pipeline — bioconda's only build, a floor: step 2a then installs **limpa ≥ 1.4.0** from the Bioconductor 3.23 source repository |
+| `bioconductor-limma` (3.66) + `r-statmod` + `r-data.table` | both DE pipelines (limpa's and limma's dependencies) |
+| `r-nanoparquet` | reading a DIA-NN `report.parquet` |
 | `r-arrow`, `r-dplyr`, `r-tidyr` | reading parquet + the MaxLFQ matrix builder |
 | `sage-proteomics` | the DDA search engine |
 | `proteowizard` (msconvert) | `.d`/`.raw` → mzML for Sage — **Linux only on bioconda** |
@@ -42,7 +44,14 @@ ThermoRawFileParser and the resolution reader all use. It reuses a good root at 
 (it needs internet the first time) is a note, not a stop; `setup.json`'s `dotnet8`
 (`root`, `note`) says what happened.
 
-If the conda solve drops limpa, `setup.sh` installs it via `BiocManager::install("limpa")`.
+**limpa ≥ 1.4.0** (`run_de.R` reads the report with its `readDIANN(annotation.columns =)`): step
+2a installs it into the env from the Bioconductor 3.23 source repository (`PROTEOMICS_LIMPA_BIOC`
+overrides the release; limpa is pure R, so no compiler). The env stays on R 4.5. The last check
+of `setup.sh` is `packageVersion("limpa") >= "1.4.0"`; `setup.json` → `limpa` =
+`{version, required, ok, source}`, and on failure it prints `ERROR: limpa ...` with the exact
+`install.packages()` line to run where there is internet, and exits 1. An env still on limpa
+1.2.x runs `run_de.R` anyway (the argument was `extra.columns` there; `limpa_compat.R`) and
+records it in `de_provenance.json`. → `references/environment.md`, "The R stack".
 
 Everything lands under `~/.proteomics-pipeline/`. `source activate.sh` puts it on
 PATH so `Rscript`, `python`, `sage`, `msconvert`, `ThermoRawFileParser` resolve to the env,

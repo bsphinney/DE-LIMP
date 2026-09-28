@@ -36,8 +36,8 @@ The orchestrator asks where results should live (SKILL.md step 3b):
                             #   DE-LIMP_session.rds (DPC runs: load it in the DE-LIMP app), and
                             #   reproducibility_log.R — the analysis as plain R, runnable with
                             #   just R + limpa/limma (point users here when they ask for "the code")
-                            #   TODO(2.8.0, fix/280-stats): per-group detection columns in DE_*.csv
-                            #   -- add their final names here once de-blocking commits them
+                            #   Each DE table carries Detected_<group> (k/n measured runs per
+                            #   compared group) and Evidence -- "The DE tables" below
     figures/                # volcano / top-protein violins / PCA / heatmap / p-value / QC PNGs
                             #   + figures.json (captions) + sample_labels.csv (the short
                             #   sample names on the plots -> their full run names)
