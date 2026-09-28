@@ -320,6 +320,53 @@ class OneRuleForWeakEvidence(unittest.TestCase):
         self.assertEqual(summary["group_confounded"], [])
 
 
+class ConditionsCsvIsUtf8(unittest.TestCase):
+    """collect_conditions.py wrote conditions.csv in the platform encoding (cp1252 on
+    Windows): one accented sample name then cost the Methods and the SDRF (deposit-builder,
+    2.8.0). It writes UTF-8 now, and reads a sheet saved as UTF-8 with Excel's BOM or as
+    Windows-1252 (Excel's plain "CSV") alike."""
+    RUNS = ["Échantillon_1", "Échantillon_2", "Probe_ä_3", "Probe_ä_4"]
+    ROWS = [("Échantillon_1", "Contrôle"), ("Échantillon_2", "Contrôle"),
+            ("Probe_ä_3", "Traité"), ("Probe_ä_4", "Traité")]
+
+    def cc(self, *args, cwd):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "collect_conditions.py"), *args],
+                           capture_output=True, cwd=cwd, env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        return p
+
+    def check_written(self, path):
+        raw = open(path, "rb").read()
+        text = raw.decode("utf-8")                 # strict: a cp1252 file would fail here
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), "no BOM in our own output")
+        for run, grp in self.ROWS:
+            self.assertIn(f"{run},{grp}", text)
+
+    def test_a_utf8_bom_sheet_and_a_cp1252_sheet_give_the_same_utf8_csv(self):
+        for enc in ("utf-8-sig", "cp1252"):
+            with self.subTest(enc), tempfile.TemporaryDirectory() as tmp:
+                sheet = os.path.join(tmp, "sheet.csv")
+                with open(sheet, "w", newline="", encoding=enc) as fh:
+                    w = csv.writer(fh); w.writerow(["sample", "condition"]); w.writerows(self.ROWS)
+                out = os.path.join(tmp, "conditions.csv")
+                p = self.cc("--map", out, "--runs", ",".join(self.RUNS), "--from-file", sheet, cwd=tmp)
+                self.assertEqual(p.returncode, 0, p.stderr.decode("utf-8", "replace"))
+                rep = json.loads(p.stdout.decode("utf-8"))
+                self.assertEqual(rep["ambiguities"]["unassigned_runs"], [])
+                self.check_written(out)
+                # and --validate reads it back
+                v = self.cc("--validate", out, cwd=tmp)
+                self.assertEqual(v.returncode, 0, v.stdout.decode("utf-8", "replace"))
+                self.assertEqual(json.loads(v.stdout.decode("utf-8"))["groups"],
+                                 {"Contrôle": 2, "Traité": 2})
+
+    def test_the_template_is_utf8_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "template.csv")
+            p = self.cc("--emit-template", out, "--runs", ",".join(self.RUNS), cwd=tmp)
+            self.assertEqual(p.returncode, 0, p.stderr.decode("utf-8", "replace"))
+            self.assertIn("Échantillon_1", open(out, "rb").read().decode("utf-8"))
+
+
 class AuditReplicationAndCutoffs(unittest.TestCase):
     def audit(self, tmp, cond_rows, header, prov=None, extra=()):
         cond = os.path.join(tmp, "conditions.csv")
