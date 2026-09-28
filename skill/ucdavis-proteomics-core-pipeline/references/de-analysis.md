@@ -231,7 +231,11 @@ such as bovine EEF1A1 and YWHAZ for mouse), or one listing
 `contaminants_identical_to_target_kept`, holds real proteins only as `Cont_` groups — the
 filter removes those too. The run then prints a `CAUTION` and records `database_risk: true`
 with a note naming the set; `audit_results.py --fasta-meta` re-checks the searched FASTA and
-names the proteins. The states are `sidecar_state()` in `fetch_fasta.py`, mirrored in
+names the proteins. With NO sidecar the run checks the FASTA the search itself names (its
+`search_provenance.json`, or `--fasta` in `report.log.txt`): `fetch_fasta.py check-db`
+re-checks it, or — when it cannot be read here — recognises a known superseded database by
+md5 or name (`superseded_databases.json`: the Core's Sep-2025 MRS human FASTA, 161 entries);
+only when neither works is the check recorded as not run. The states are `sidecar_state()` in `fetch_fasta.py`, mirrored in
 `contaminants.R` (a test keeps them equal). Rebuild the FASTA with this release's
 fetch_fasta.py (skill 2.8.0 or later) and re-search; the Core's shared human+contaminant FASTA
 was rebuilt with it on 2026-09-25 (`MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`,

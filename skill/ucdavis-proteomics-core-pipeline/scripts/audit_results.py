@@ -24,7 +24,8 @@ Checks:
                     quantified under its own accession): possible contamination, KEPT
                     in quantification -- reported, never excluded (WARN)
   contaminant_overlap
-                    real proteins present only as identical Cont_ entries in a
+                    real proteins present only as identical (or peptide-
+                    indistinguishable) Cont_ entries in a
                     database used as-is -- excluded from quant, missing here (WARN)
   de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)

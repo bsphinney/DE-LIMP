@@ -127,15 +127,20 @@ sidecar_state <- function(meta) {
 }
 sidecar_is_legacy <- function(meta) identical(sidecar_state(meta), "legacy")
 
-# The measured near-identical set for this organism and contaminant set
-# (near_identical_contaminants.json beside this file, shared with fetch_fasta.py), or NULL.
-near_identical_measured <- function(meta) {
+# A file shipped beside this one (fetch_fasta.py, its JSON data), or NA.
+contaminants_sibling <- function(name) {
   f <- grep("^--file=", commandArgs(), value = TRUE)[1]
   dirs <- c(if (exists(".script_dir")) get(".script_dir"),
             if (!is.na(f)) dirname(normalizePath(sub("^--file=", "", f), mustWork = FALSE)),
             getwd())
-  p <- file.path(dirs, "near_identical_contaminants.json")
-  p <- p[file.exists(p)][1]
+  p <- file.path(dirs, name)
+  p[file.exists(p)][1]
+}
+
+# The measured near-identical set for this organism and contaminant set
+# (near_identical_contaminants.json beside this file, shared with fetch_fasta.py), or NULL.
+near_identical_measured <- function(meta) {
+  p <- contaminants_sibling("near_identical_contaminants.json")
   if (is.na(p) || !requireNamespace("jsonlite", quietly = TRUE)) return(NULL)
   m <- tryCatch(jsonlite::fromJSON(p, simplifyVector = FALSE), error = function(e) NULL)
   tax <- suppressWarnings(as.integer(meta[["taxid"]]))
@@ -152,11 +157,11 @@ near_identical_measured <- function(meta) {
 # (sidecar_state), or a non-empty contaminants_identical_to_target_kept list.
 # -> list(checked, risk, note):
 # risk NA when the check could not run (note says why), FALSE when the sidecar is clean.
-contaminant_database_risk <- function(sidecar, n_groups_removed) {
+# With NO sidecar, `search_dir` (the report's folder) lets fetch_fasta.py check the FASTA the
+# search itself names -- database_check_without_sidecar() below.
+contaminant_database_risk <- function(sidecar, n_groups_removed, search_dir = NULL) {
   if (is.null(sidecar) || !nzchar(sidecar))
-    return(list(checked = FALSE, risk = NA, note = paste0(
-      "not run: no FASTA sidecar (--fasta-meta) -- whether real proteins sat in the ",
-      "database only as ", CONTAMINANT_TAG, " entries is unknown")))
+    return(database_check_without_sidecar(search_dir, n_groups_removed))
   if (!requireNamespace("jsonlite", quietly = TRUE))
     return(list(checked = FALSE, risk = NA, note = paste0(
       "not run: jsonlite is not installed, so ", sidecar, " could not be read")))
@@ -181,7 +186,8 @@ contaminant_database_risk <- function(sidecar, n_groups_removed) {
                      "contaminant entries identical to %s proteins (no contaminant_target_rule ",
                      "in %s)"), org, basename(sidecar)),
     if (length(kept))
-      sprintf("%d %s protein(s) are in the search database only as identical %s entries (%s)",
+      sprintf(paste0("%d %s protein(s) are in the search database only as identical (or ",
+                     "peptide-indistinguishable) %s entries (%s)"),
               length(kept), org, CONTAMINANT_TAG,
               paste(utils::head(genes, 12), collapse = ", ")),
     if (identical(state, "identity_only"))
@@ -201,6 +207,50 @@ contaminant_database_risk <- function(sidecar, n_groups_removed) {
     "audit_results.py --fasta-meta %s names them. %s Or re-run with --keep-contaminants to ",
     "test them together with the true contaminants."),
     why, n_groups_removed, CONTAMINANT_TAG, org, CONTAMINANT_TAG, sidecar, REBUILD_ADVICE))
+}
+
+# No sidecar: ask fetch_fasta.py about the FASTA the search itself names. Why (release review
+# 2026-09-28): this used to say only "not run", so a search on the Core's superseded MRS human
+# FASTA -- the Siegel entries staged 2026-09-25 -- lost ACTB, EEF1A1, KRT8 and ~150 other real
+# proteins with no caveat. The check (find the FASTA in the search's provenance / log, re-check
+# it, or recognise a known superseded database by md5 or name) is defined ONCE, in
+# fetch_fasta.database_without_sidecar(); this only words its answer. Same list(checked, risk,
+# note) as contaminant_database_risk().
+database_check_without_sidecar <- function(search_dir, n_groups_removed) {
+  not_run <- function(why) list(checked = FALSE, risk = NA, note = paste0(
+    "not run: no FASTA sidecar (--fasta-meta), and ", why, " -- whether real proteins sat in ",
+    "the database only as ", CONTAMINANT_TAG, " entries is unknown"))
+  if (is.null(search_dir) || !nzchar(search_dir))
+    return(not_run("the search's folder is not known"))
+  py <- Sys.which("python3")
+  script <- contaminants_sibling("fetch_fasta.py")
+  if (!nzchar(py)) return(not_run("python3 is not on PATH to check the search's FASTA"))
+  if (is.na(script)) return(not_run("fetch_fasta.py was not found beside contaminants.R"))
+  if (!requireNamespace("jsonlite", quietly = TRUE))
+    return(not_run("jsonlite is not installed to read fetch_fasta.py's answer"))
+  out <- suppressWarnings(tryCatch(
+    system2(py, c(shQuote(script), "check-db", "--search-dir", shQuote(search_dir)),
+            stdout = TRUE, stderr = FALSE, timeout = 600),
+    error = function(e) structure(character(0), status = conditionMessage(e))))
+  res <- tryCatch(jsonlite::fromJSON(paste(out, collapse = "\n"), simplifyVector = TRUE),
+                  error = function(e) NULL)
+  if (is.null(res))
+    return(not_run(sprintf("fetch_fasta.py check-db gave no answer (exit status %s)",
+                           if (is.null(attr(out, "status"))) "0"
+                           else paste(attr(out, "status"), collapse = ""))))
+  if (!isTRUE(res$checked)) return(not_run(res$why))
+  if (!isTRUE(res$risk))
+    return(list(checked = TRUE, risk = FALSE, note = paste0("passed: ", res$why)))
+  org <- if (is.character(res$organism) && nzchar(res$organism)) res$organism
+         else "target-organism"
+  genes <- as.character(unlist(res$genes))
+  list(checked = TRUE, risk = TRUE, note = sprintf(paste0(
+    "%s -- %s%s. So some of the %d %s protein groups removed here are probably real %s ",
+    "proteins (DIA-NN reports them only as %s groups), now missing from the DE. %s Or re-run ",
+    "with --keep-contaminants to test them together with the true contaminants."),
+    res$why, paste(utils::head(genes, 15), collapse = ", "),
+    if (length(genes) > 15) sprintf(", and %d more", length(genes) - 15) else "",
+    n_groups_removed, CONTAMINANT_TAG, org, CONTAMINANT_TAG, REBUILD_ADVICE))
 }
 
 # The record run_de.R writes into de_provenance.json ("contaminants") -- the ONE

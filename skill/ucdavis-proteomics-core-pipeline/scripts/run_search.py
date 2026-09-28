@@ -1362,6 +1362,70 @@ def refuse_sage_fragment_mismatch(bundle, params):
         print(f"[run_search] WARNING: {params}: {hit[1]}", file=sys.stderr)
 
 
+def search_digest(engine, params):
+    """This search's in-silico digest in estimate_params.DIANN_DIGEST's shape -- only the keys
+    the params file states -- or None when it cannot be read. DIA-NN: the cfg's --cut /
+    --missed-cleavages / --min-/--max-pep-len / --met-excision. Sage: its database.enzyme block,
+    with cleave_at/restrict written in DIA-NN's --cut syntax (KR + restrict P = K*,R*,!*P)."""
+    try:
+        if engine == "diann":
+            groups = dict(_diann_parallel_mod().cfg_groups(_diann_parallel_mod().cfg_tokens(params)))
+            got = {"met_excision": "--met-excision" in groups}
+            for flag, key, conv in (("--cut", "cut", str), ("--missed-cleavages", "missed_cleavages", int),
+                                    ("--min-pep-len", "min_pep_len", int),
+                                    ("--max-pep-len", "max_pep_len", int)):
+                if groups.get(flag):
+                    got[key] = conv(groups[flag][0])
+            return got
+        if engine == "sage":
+            with open(params) as fh:
+                enz = (json.load(fh).get("database") or {}).get("enzyme") or {}
+            got = {k2: enz[k1] for k1, k2 in (("missed_cleavages", "missed_cleavages"),
+                                               ("min_len", "min_pep_len"),
+                                               ("max_len", "max_pep_len")) if k1 in enz}
+            if enz.get("cleave_at"):
+                got["cut"] = ",".join(f"{c}*" for c in enz["cleave_at"]) + (
+                    f",!*{enz['restrict']}" if enz.get("restrict") else "")
+            return got
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def warn_contaminant_digest(engine, params, fasta):
+    """Warn when this search digests differently from the digest fetch_fasta.py judged the
+    contaminants on (the sidecar's contaminant_digest, estimate_params.DIANN_DIGEST): its peptide
+    rule dropped the contaminant entries with fewer than min_unique_peptides peptides of their
+    own IN THAT DIGEST, so under another one -- an --overrides change, or Sage's own 2 missed
+    cleavages and proline rule -- an entry near that cut may be judged differently. A warning,
+    not a stop: the database is still correct for the identity rule, and the list is on record.
+    Returns the message (or None)."""
+    sidecar = fasta + ".meta.json"
+    try:
+        with open(sidecar) as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    want = meta.get("contaminant_digest")
+    if not isinstance(want, dict) or not meta.get("min_unique_peptides"):
+        return None                 # no peptide rule was applied, so no digest to disagree with
+    got = search_digest(engine, params)
+    if not got:
+        return None
+    diffs = [f"{k} {got[k]!r} (FASTA: {want[k]!r})" for k in sorted(got)
+             if k in want and got[k] != want[k]]
+    if not diffs:
+        return None
+    msg = (f"[run_search] WARNING: this search's digest differs from the one fetch_fasta.py judged "
+           f"the contaminants on ({sidecar}, contaminant_digest): {'; '.join(diffs)}. Its peptide "
+           f"rule dropped contaminant entries with fewer than {meta['min_unique_peptides']} "
+           f"peptides of their own in THAT digest; under this one an entry near the cut may be "
+           f"judged differently. The dropped list, with each entry's peptide counts, is "
+           f"contaminants_dropped_as_target in the sidecar.")
+    print(msg, file=sys.stderr)
+    return msg
+
+
 def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None):
     os.makedirs(out, exist_ok=True)
     mzml = ensure_mzml(files, out)
@@ -2074,6 +2138,8 @@ def main():
     if engine == "diann":
         a.params = ensure_xic(a.params, a.out)
         ensure_temp_dirs(a.params, a.out)
+    if engine in ("diann", "sage"):
+        warn_contaminant_digest(engine, a.params, a.fasta)
     use_parallel, why = parallel_decision(engine, files, a.params, a)
     if engine == "diann":
         print(f"[run_search] parallel routing: {'YES' if use_parallel else 'no'} -- {why}")
