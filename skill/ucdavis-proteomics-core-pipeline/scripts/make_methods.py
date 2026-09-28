@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # analysis.tdf (and every other sqlite file in a .d) is opened read-only AND immutable -- see
 # bruker_tdf.py for how a read-write open truncates a tdf (the state of 342 on HIVE).
 import bruker_method  # noqa: E402
+from fetch_fasta import CONT_TAG  # noqa: E402  the contaminant tag: one definition (rule 3)
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
@@ -816,7 +817,7 @@ def de_contaminant_sentence(prov):
         return (f"Contaminant handling in the differential-expression step: {NOT_RECORDED} "
                 f"(this DE record predates it; run_de.R versions that did not record it did not "
                 f"remove contaminants).")
-    tag = c.get("tag") or "Cont_"
+    tag = c.get("tag") or CONT_TAG
     fmt = lambda k: f"{c.get(k):,}" if isinstance(c.get(k), int) else "____"  # noqa: E731
     policy = c.get("policy")
     if policy == "removed":
