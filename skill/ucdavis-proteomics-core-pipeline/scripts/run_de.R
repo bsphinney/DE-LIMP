@@ -672,6 +672,7 @@ if (is.null(block)) {
   formula_parts <- setdiff(formula_parts, .eff$absorbed)
   cmat <- limma::makeContrasts(contrasts = forms, levels = design)
   fit <- fit_independent()          # samples independent GIVEN the block columns
+  block_fit_check(fit, "fixed", block_col, colnames(block_fixed_columns(block, block_col)))
   block_rec <- block_record(block_col, block, method, NA_real_, numeric(0), nrow(E),
                             groups = groups, cmat = cmat, scope = block_scope,
                             effect = "fixed", effect_choice = .eff$choice,
@@ -692,7 +693,8 @@ if (is.null(block)) {
   # final pass made (fit$EList holds its y and final weights), so it must agree with it.
   .dc <- suppressWarnings(limma::duplicateCorrelation(fit$EList, design, block = block,
                                                       weights = fit$EList$weights))
-  .rho <- if (!is.null(fit$correlation)) fit$correlation else .pass[["final"]]
+  block_fit_check(fit, "random", block_col)     # the correlation came back, or stop
+  .rho <- fit$correlation
   if (!isTRUE(all.equal(.dc$consensus.correlation, .rho, tolerance = 1e-6)))
     warning(sprintf("--block: recomputed consensus correlation %.4f differs from limpa's %.4f",
                     .dc$consensus.correlation, .rho), call. = FALSE)
@@ -706,6 +708,7 @@ if (is.null(block)) {
                         "within-block correlation. Drop --block, or loosen --coverage-min only if ",
                         "that is what emptied the matrix."), block_col))
   fit <- limma::lmFit(E, design, block = block, correlation = .dc$consensus.correlation)
+  block_fit_check(fit, "random", block_col)
   block_rec <- block_record(block_col, block, method, .dc$consensus.correlation,
                             .dc$atanh.correlations, nrow(E), groups = groups, cmat = cmat,
                             scope = block_scope, effect_choice = .eff$choice)

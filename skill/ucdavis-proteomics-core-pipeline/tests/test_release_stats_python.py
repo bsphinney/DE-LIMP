@@ -104,8 +104,12 @@ class ConfoundTestRespectsTheBlock(unittest.TestCase):
         z, gmap, samples, bmap = self.techrep(6, 5)
         c, detail, p = sq.confound_check(z, gmap, samples, 1.5, bmap=bmap, block_name="Mouse",
                                          n_perm=999)
-        self.assertIn("on Mouse means (one value per Mouse)", detail)
+        # each mouse in one group: the between-block factor IS the group, tested on the 12
+        # mouse means by exact permutation; no within-mouse question to ask
+        self.assertIn("[between Mouse levels: Ctrl vs Trt]", detail)
+        self.assertIn("exact permutation of the 12 Mouse means (924 arrangements)", detail)
         self.assertIn("(n=6 Mouse)", detail)
+        self.assertNotIn("within one Mouse", detail)
         self.assertIsNotNone(p)
         self.assertFalse(c, detail)
 
@@ -113,7 +117,7 @@ class ConfoundTestRespectsTheBlock(unittest.TestCase):
         z, gmap, samples, bmap = self.techrep(3, 5)
         _c, detail, p = sq.confound_check(z, gmap, samples, 1.5, bmap=bmap, block_name="Mouse")
         self.assertIsNone(p)                      # 20 arrangements of 6 means: no 1% test
-        self.assertIn("too few Mouse means for a test", detail)
+        self.assertIn("best possible p 0.1 > 0.01, so no test", detail)
         self.assertIn("(n=3 Mouse)", detail)
 
     def test_blocks_spanning_groups_are_relabelled_within_block(self):
@@ -150,6 +154,100 @@ class ConfoundTestRespectsTheBlock(unittest.TestCase):
         a = sq.confound_check(z, gmap, samples, 1.5)
         b = sq.confound_check(z, gmap, samples, 1.5, bmap={})
         self.assertEqual(a, b)
+
+
+class WithinAndBetweenBlockQuestions(unittest.TestCase):
+    """PROT_0756 v2 (michelle-rerun, job 24175676): 6 mice x 5 IPs, age between mice. The
+    within-mouse relabelling test flagged hemolysis at p = 0.001 -- a BAIT effect (Kv2.1 IPs) --
+    and the message read like an age confound it can never detect. Now the two questions are
+    separate tests with separate words."""
+
+    BAITS = ("JPH3", "JPH4", "Kv21", "RyR", "IgG")
+
+    def prot0756(self, age_blood=3.0, bait_blood=2.0, mice_per_age=3, seed=7):
+        rng = random.Random(seed)
+        samples, gmap, bmap, vals = [], {}, {}, {}
+        for m in range(1, 2 * mice_per_age + 1):
+            age = "Old" if m <= mice_per_age else "Young"
+            mouse = rng.gauss(0, 0.3) + (age_blood if age == "Old" else 0.0)   # per-mouse blood
+            for b in self.BAITS:
+                s = f"M{m}_{b}"
+                samples.append(s); gmap[s] = f"{age}_{b}"; bmap[s] = f"Mouse{m}"
+                vals[s] = mouse + (bait_blood if b == "Kv21" else 0.0) + rng.gauss(0, 0.2)
+        return samples, gmap, bmap, vals
+
+    def tests(self, **kw):
+        samples, gmap, bmap, vals = self.prot0756(**kw)
+        z = sq.zscore(vals, samples)
+        return {t["question"]: t for t in sq.block_confound_checks(z, gmap, bmap, samples, 1.5, "Mouse")}
+
+    def test_the_bait_effect_is_the_within_question(self):
+        t = self.tests(age_blood=0.0)
+        self.assertTrue(t["within"]["flag"])
+        self.assertLess(t["within"]["p"], sq.CONFOUND_P)
+        self.assertTrue(t["within"]["detail"].startswith("[within one Mouse]"))
+        self.assertFalse(t["between"]["flag"])       # no age effect, and 3 vs 3 cannot test
+
+    def test_age_is_the_between_question_on_mouse_means(self):
+        t = self.tests(bait_blood=0.0)
+        b = t["between"]
+        self.assertEqual(b["factor"], "Old vs Young")
+        self.assertIsNone(b["p"])                     # 3 vs 3 mice: best p 2/20 = 0.1
+        self.assertAlmostEqual(b["min_p"], 0.1)
+        self.assertFalse(b["flag"])
+        self.assertTrue(b["caution"])
+        self.assertIn("complete separation (all Old above all Young)", b["detail"])
+        self.assertFalse(t["within"]["flag"])        # no bait effect
+
+    def test_enough_mice_make_age_testable(self):
+        t = self.tests(bait_blood=0.0, mice_per_age=8)
+        b = t["between"]
+        self.assertTrue(b["flag"])
+        self.assertLess(b["p"], sq.CONFOUND_P)
+        self.assertIn("exact permutation of the 16 Mouse means (12,870 arrangements)", b["detail"])
+
+    def test_a_paired_design_has_no_between_question(self):
+        rng = random.Random(1)
+        samples, gmap, bmap, vals = [], {}, {}, {}
+        for p in range(6):
+            eff = rng.gauss(0, 2)
+            for g in ("Ctrl", "Trt"):
+                s = f"P{p}_{g}"
+                samples.append(s); gmap[s] = g; bmap[s] = f"P{p}"; vals[s] = eff + rng.gauss(0, 0.2)
+        z = sq.zscore(vals, samples)
+        qs = [t["question"] for t in sq.block_confound_checks(z, gmap, bmap, samples, 1.5, "Patient")]
+        self.assertEqual(qs, ["within"])
+
+    def test_the_report_words_each_question_apart(self):
+        samples, gmap, bmap, vals = self.prot0756()        # age AND bait blood
+        genes = ["HBB", "HBA1", "CA1", "CA2", "CAT", "AHSP"]
+        rng = random.Random(3)
+        with tempfile.TemporaryDirectory() as tmp:
+            m = os.path.join(tmp, "Expression_Matrix.csv")
+            rows = [[f"P{i}", g] + [f"{20 + vals[s] + rng.gauss(0, 0.1):.3f}" for s in samples]
+                    for i, g in enumerate(genes)]
+            rows += [[f"Q{i}", f"G{i}"] + [f"{18 + rng.gauss(0, 0.3):.3f}" for _ in samples]
+                     for i in range(60)]
+            write_csv(m, ["Protein.Group", "Genes"] + samples, rows)
+            c = os.path.join(tmp, "conditions.csv")
+            write_csv(c, ["File.Name", "Group", "Mouse"], [(s, gmap[s], bmap[s]) for s in samples])
+            with open(os.path.join(tmp, "de_provenance.json"), "w") as fh:
+                json.dump({"block_column": "Mouse"}, fh)          # the block comes from here
+            out = os.path.join(tmp, "SAMPLE_QUALITY.md")
+            p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "sample_quality.py"),
+                                "--matrix", m, "--conditions", c, "--out", out, "--taxid", "9606"],
+                               capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(out) as fh:
+                md = fh.read()
+        self.assertIn("**HEMOLYSIS differs among the samples of one Mouse**", md)
+        self.assertIn("This answers the WITHIN-Mouse question only", md)
+        self.assertIn("HEMOLYSIS: complete separation between Mouse levels -- all Old above all "
+                      "Young", md)
+        self.assertIn("this is a caution, not a finding", md)
+        self.assertNotIn("CONFOUNDED WITH GROUP", md)
+        self.assertIn("_differs among the samples of one block? (within-block contrasts)_", md)
+        self.assertIn("_differs between blocks, Old vs Young? (between-block contrasts)_", md)
 
 
 class AuditReplicationAndCutoffs(unittest.TestCase):
