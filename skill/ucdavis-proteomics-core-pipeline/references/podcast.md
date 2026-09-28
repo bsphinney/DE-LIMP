@@ -166,7 +166,9 @@ warns outside 2,200–3,600.
 
     **Never tier by PropObs.** It is the observed fraction of a protein's precursors over ALL
     runs, so a protein found only in its own group -- exactly the hit a pulldown is looking for
-    -- scores low. `check` fails "tier/rank/sort by PropObs" advice.
+    -- scores low. `check` fails advice to tier, rank, sort, filter or prioritise by it,
+    however it is written or spoken ("PropObs", "prop obs", "proportion observed"), within a
+    clause; saying not to ("Never tier by PropObs", "rank by fold change, not PropObs") is fine.
     `check` warns when the last two segments never point at README.html, the report, the
     detection columns or the tier file, or validation.
 
@@ -330,7 +332,9 @@ python3 scripts/make_podcast.py link $S/output
   `SAMPLE_QUALITY.md`. A `--source` outside `output/` (or inside `output/podcast/`) fails;
   give it as `--extra-source <file> --label "<what it is>"` instead (see "Discuss only what the
   lab was given"). `check` finds `output/` as the folder above the script's `podcast/` folder,
-  or from `--output-dir`. Do **not** pass the DE tables: with thousands of numbers in the
+  or from `--output-dir`, and only accepts a folder that holds the report
+  (`Analysis_Report.html`) or the DE record (`tables/de_provenance.json`): pointing it at the
+  session or its parent would let a draft beside `output/` count as delivered. Do **not** pass the DE tables: with thousands of numbers in the
   sources, almost any number would match something, and `check` warns when that happens.
 - **No absolute paths are delivered.** `check.txt` records the script by name and each source
   by its path relative to `check.txt` (an extra source by its file name and label), each with

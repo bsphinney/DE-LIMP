@@ -129,6 +129,7 @@ class Workspace(unittest.TestCase):
         self.report = os.path.join(self.out, "AI_Analysis_Report.md")
         self.script = os.path.join(self.pod, "podcast_script.md")
         write(self.report, REPORT)
+        write(os.path.join(self.out, "Analysis_Report.html"), REPORT_HTML)   # a session output/
 
     def tearDown(self):
         self._td.cleanup()
@@ -1766,6 +1767,50 @@ class Release280(Workspace):
         rc, out, err = run("check", self.script, "--source", self.report)
         self.assertNotIn("do not tier", read(os.path.join(self.pod, "check.txt")))
         self.assertIn("Detected_<group>, Evidence", read(os.path.join(self.pod, "check.txt")))
+
+    def test_propobs_advice_allows_negation_and_catches_every_spelling(self):
+        # verifier, round 2 (9dc5aa2): "Never tier by PropObs" failed; "prop obs" and
+        # "proportion observed" slipped through
+        cases = {"Never tier by PropObs.": False, "Don't rank hits by prop obs.": False,
+                 "Avoid sorting by PropObs.": False, "Rank by fold change, not PropObs.": False,
+                 "PropObs is the fraction observed over all runs.": False,
+                 "Tier hits by PropObs, not by fold change.": True,
+                 "Don't rank by fold change; rank by PropObs.": True,
+                 "Rank hits by prop obs.": True, "Tier them by proportion observed.": True,
+                 "The proportion of observations is how to prioritise them.": True,
+                 "Filter on prop-obs above 0.5.": True}
+        for text, bad in cases.items():
+            seg = [("MAYA", "An AI-generated show. " + text), ("LEO", "The report is the record.")]
+            write(self.script, script_text(segs=(seg,), claims="None"))
+            run("check", self.script, "--source", self.report)
+            txt = read(os.path.join(self.pod, "check.txt"))
+            self.assertEqual("do not tier or rank hits by PropObs" in txt, bad, text)
+
+    def test_output_dir_must_be_the_sessions_output_folder(self):
+        # verifier, round 2: --output-dir at the session's parent let a draft there count as
+        # delivered
+        draft = os.path.join(self.d, "draft_notes.md")                 # beside output/, not in it
+        write(draft, REPORT)
+        write(self.script, script_text())
+        rc, out, err = run("check", self.script, "--source", draft, "--output-dir", self.d)
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 1)
+        self.assertIn("--output-dir: " + os.path.basename(self.d) + " is not a session's output "
+                      "folder: it holds neither Analysis_Report.html nor tables/de_provenance.json",
+                      txt)
+        self.assertNotIn("source: ", txt)                              # nothing counted delivered
+        rc, out, err = run("check", self.script, "--source", self.report, "--output-dir", self.out)
+        self.assertEqual(rc, 0, read(os.path.join(self.pod, "check.txt")))
+        os.remove(os.path.join(self.out, "Analysis_Report.html"))      # a DE record also marks it
+        write(os.path.join(self.out, "tables", "de_provenance.json"), "{}")
+        self.assertEqual(run("check", self.script, "--source", self.report)[0], 0)
+        # a script in some other podcast/ folder: the folder above it is not an output folder
+        stray = os.path.join(self.d, "podcast", "podcast_script.md")
+        write(stray, script_text())
+        rc, out, err = run("check", stray, "--source", draft)
+        self.assertEqual(rc, 1)
+        self.assertIn("the folder above podcast/: ", read(os.path.join(self.d, "podcast",
+                                                                     "check.txt")))
 
     def test_delivered_files_hold_no_absolute_paths_and_no_pronunciation_table(self):
         mp.BACKENDS["fake"] = FakeTTS
