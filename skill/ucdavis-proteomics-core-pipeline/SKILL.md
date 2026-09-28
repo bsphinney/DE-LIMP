@@ -1509,14 +1509,18 @@ the variance moderation for *every* protein, not just those rows.
 ### 8b. Generate figures
 ```
 Rscript scripts/make_figures.R --de-dir ./de_results --conditions ./conditions.csv \
-    --outdir ./figures --adjp 0.05 --logfc 1
+    --outdir ./figures
 ```
 Produces publication-quality volcano (per contrast), PCA, heatmap of top proteins,
-p-value distributions, a per-sample protein-count QC plot, and per-contrast
-top-protein violins (`violin_top_<contrast>.png`: each run's point filled if measured,
-hollow if inferred; a group never measured makes that fold change a detection event),
-plus `figures.json`
-(captions). These get embedded in the report.
+per-contrast top-protein violins (`violin_top_<contrast>.png`: each run's point filled if
+measured, hollow if inferred; a group never measured makes that fold change a detection
+event), the detected-vs-inferred QC plot, and ONE panel of raw p-value distributions
+(`qc_pvalue_panel.png`, for the appendix), plus `figures.json` (`figures`: captions;
+`failed`: every figure not drawn, with the reason). The per-sample protein-count plot is
+drawn only for a matrix with missing values (MaxLFQ); a DPC matrix is complete, so it is
+skipped. The significance cutoff comes from the DE run's `de_provenance.json`;
+`--adjp`/`--logfc` are only a fallback for a run with no record, and the captions then say so.
+These get embedded in the report.
 
 **Significance is `adj.P.Val` alone — there is no fold-change cutoff anywhere in this
 pipeline.** `--logfc` only positions a labelled reference line on the volcano. Never

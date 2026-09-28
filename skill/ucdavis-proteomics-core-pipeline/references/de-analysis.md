@@ -268,12 +268,18 @@ they ask what was done or want the code. → `references/reproducibility.md`.
 
 ## Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
 One figure per contrast: the top `--violin-top` proteins (default 8), ranked by
-`adj.P.Val` then `|logFC|`, as small multiples. Each panel shows the contrast's groups as
-violins (reference group on the left), one point per run, the group mean as a bar, an
-arrow from the reference mean to the compared mean (red = higher, blue = lower), and the
-model's log2FC + adjusted p (`n.s.` when not significant; non-significant panels are shown
-as context only). Other groups are left out on purpose: `heatmap_top.png` already shows
-the top proteins across every group.
+`adj.P.Val`, ties broken by the raw `P.Value` (the DE table's own order), as small
+multiples. Each panel shows the contrast's groups (reference group on the left), one point
+per run, the group mean as a bar, and the model's log2FC + adjusted p (`n.s.` when not
+significant; non-significant panels are shown as context only). A group with 5 or more runs
+also gets a violin; with 4 or fewer only the points are drawn, since a density through 3
+points is a shape the data do not have. The arrow is the **model's** log2 fold change, drawn
+from the reference mean (red = higher, blue = lower), so it always agrees in sign with the
+label; the difference of plain means can disagree once the model weights runs, models
+inferred values or removes a block effect. For a within-block contrast (`--block`, recorded
+as `within` in `de_provenance.json`) grey lines join each block's runs: the paired changes
+the model tested. Other groups are left out on purpose: `heatmap_top.png` already shows the
+top proteins across every group.
 
 **Each point is marked measured or not** (DE-LIMP's expression-grid violin):
 filled teal = at least one precursor observed in that run; hollow amber = no precursor
@@ -281,7 +287,7 @@ observed. Read it from `Detection_Matrix.csv` (Protein.Group + one column per ru
 as in `Expression_Matrix.csv`; values = precursors observed, 0 = not observed). What a 0
 means comes from `de_provenance.json` (`detection_matrix.zero_means` if present, else
 `pipeline_id`): **Inferred** under DPC-Quant (the value exists but was modelled), **Missing**
-under MaxLFQ (no value exists, so nothing is drawn). A label under a violin counts its
+under MaxLFQ (no value exists, so nothing is drawn). A label under a group counts its
 measured runs, shown only when not every run was measured.
 
 **Say this when you describe the figure:** a group labelled *all inferred* (0 measured

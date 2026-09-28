@@ -117,7 +117,7 @@ class TopProteinViolins(unittest.TestCase):
                            capture_output=True, text=True, timeout=300)
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(os.path.join(out, "figures.json")) as fh:
-            figs = json.load(fh)
+            figs = json.load(fh)["figures"]
         violins = {f["file"]: f["caption"] for f in figs if f["type"] == "violin"}
         return out, violins, r.stderr + r.stdout
 

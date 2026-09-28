@@ -64,7 +64,7 @@ class ProteinCountsPlot(unittest.TestCase):
                            capture_output=True, text=True, timeout=300)
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(os.path.join(out, "figures.json")) as fh:
-            listed = [f["file"] for f in json.load(fh)]
+            listed = [f["file"] for f in json.load(fh)["figures"]]
         return out, listed, r.stderr + r.stdout
 
     def test_a_complete_matrix_gets_no_identical_bar_plot(self):
@@ -78,7 +78,7 @@ class ProteinCountsPlot(unittest.TestCase):
         out, listed, log = self.run_figures(missing=False, stale=True)
         self.assertFalse(os.path.exists(os.path.join(out, "qc_protein_counts.png")))
         self.assertNotIn("qc_protein_counts.png", listed)
-        self.assertIn("removed stale qc_protein_counts.png", log)
+        self.assertIn("removed 1 figure(s) left by an earlier run", log)
 
     def test_a_stale_copy_is_replaced_when_the_plot_is_drawn(self):
         out, listed, log = self.run_figures(missing=True, stale=True)
@@ -86,7 +86,7 @@ class ProteinCountsPlot(unittest.TestCase):
         with open(path, "rb") as fh:
             self.assertTrue(fh.read(8).startswith(b"\x89PNG"))   # regenerated, not the stale bytes
         self.assertIn("qc_protein_counts.png", listed)
-        self.assertNotIn("removed stale", log)
+        self.assertNotIn("not drawn", log)
 
     def test_a_matrix_with_missing_values_keeps_the_plot(self):
         out, listed, _ = self.run_figures(missing=True)
