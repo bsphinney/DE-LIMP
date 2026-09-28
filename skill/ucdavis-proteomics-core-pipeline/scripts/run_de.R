@@ -589,8 +589,10 @@ if (method == "dpc") {
 }
 
 # ---- the contaminant record (contaminants.R): one description, read by everything ----
+# With no sidecar, the report's folder is where the search names its FASTA (provenance / log).
 cont_risk <- if (!is.null(cont_census) && cont_census$n_precursors > 0 && !keep_contaminants)
-  contaminant_database_risk(fasta_meta, cont_census$n_groups_contaminant) else NULL
+  contaminant_database_risk(fasta_meta, cont_census$n_groups_contaminant,
+                            search_dir = dirname(normalizePath(input, mustWork = FALSE))) else NULL
 cont_rec <- contaminant_record(cont_census, cont_share, keep_contaminants, cont_col,
                                cont_intensity, risk = cont_risk,
                                fasta_meta = if (is.null(fasta_meta)) NULL

@@ -1190,11 +1190,26 @@ def target_contaminants(meta, keratin_sample=False):
     if keratin_sample:
         dropped = [r for r in dropped if not is_keratin_gene(r.get("gene"))]
     genes = {r["gene"].upper() for r in dropped if r.get("gene")}
-    accs = {a.upper() for r in dropped for a in (r.get("target_accs") or [r.get("target_acc")])
-            if a}
+    accs = {a.upper() for r in dropped for a in matched_target_accs(r) if a}
     return {"organism": meta.get("organism") or "", "dropped": dropped,
             "kept_as_contaminant": kept, "genes": genes, "accessions": accs,
             "legacy_note": legacy_note, "state": state}
+
+
+def matched_target_accs(rec):
+    """The target accession(s) a dropped contaminant entry IS -- what the auditors may flag.
+
+    An identical or substring record's target_accs are all genuine matches: every target with
+    that sequence, or that contains it. A shared_peptides record's target_accs are every target
+    sharing even ONE peptide with it -- a whole paralog family -- so only its matched pair,
+    target_acc (the target sharing the most peptides), is the protein it cannot be told apart
+    from. Why (PROT_0756 v2, 2026-09-28): with the family flattened into the flagged set, AUDIT
+    listed Ywhab/e/g/h/q, Sfn, Tuba8, Tubal3 and Eef1a2 -- abundant endogenous brain proteins --
+    as possible contamination, because 1433Z_BOVIN, TBA1D_BOVIN and EF1A1_BOVIN each share a
+    conserved peptide with them. target_accs stays in the sidecar as information."""
+    if rec.get("reason") == "shared_peptides":
+        return [rec.get("target_acc")]
+    return rec.get("target_accs") or [rec.get("target_acc")]
 
 
 def seen_only_as_cont(kept, groups):
@@ -1361,6 +1376,102 @@ def _legacy_overlap(meta):
             "an unknown number of target-identical contaminant entries")
     return [], (f"{head}, and {why}. Expect {size}: those {org} proteins are probably missing "
                 f"from quantification (reported only as {CONT_TAG} groups).{tail}")
+
+
+# Known search databases that hold target-identical contaminant entries (the Core's Sep-2025
+# MRS human FASTA), measured -- shared data, read only by database_without_sidecar() below.
+SUPERSEDED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "superseded_databases.json")
+
+
+def superseded_database(path=None, md5=None):
+    """The superseded_databases.json record for this file: by md5 when it was read, by file name
+    (either path separator -- a Windows search log says Y:\\MRS\\...) only when it could not be.
+    None when it is not a known database."""
+    try:
+        with open(SUPERSEDED_FILE, encoding="utf-8") as fh:
+            known = json.load(fh).get("databases") or []
+    except (OSError, ValueError):
+        return None
+    name = re.split(r"[\\/]", path or "")[-1]
+    for d in known:
+        if (md5 and d.get("md5") == md5) or (not md5 and name and d.get("basename") == name):
+            return d
+    return None
+
+
+def database_without_sidecar(search_dir):
+    """Does a search with NO fetch_fasta.py sidecar have a database that holds contaminant entries
+    which ARE (or cannot be told apart from) target proteins? The ONE definition of that check;
+    contaminants.R (run_de.R's contaminant filter) asks it through `fetch_fasta.py check-db`.
+
+    Why (release review 2026-09-28): with no sidecar the filter said only "not run", so a search
+    on the Core's superseded MRS human FASTA -- the Siegel entries staged 2026-09-25 -- lost ACTB,
+    EEF1A1, KRT8 and ~150 other real proteins with no caveat anywhere.
+
+    The FASTA is the one the search itself names (fran_deposit.search_fastas: its provenance, or
+    --fasta in its log). A readable one is re-checked with today's rule (_overlap_now, default
+    --enzyme); one that cannot be read here is recognised by name (superseded_database), never
+    guessed. -> {checked, risk, organism, fasta, n_lost, genes, unchecked, why}; `why` is one
+    clause saying what was found or why nothing could be.
+    """
+    res = {"checked": False, "risk": None, "organism": "", "fasta": [], "n_lost": 0,
+           "genes": [], "unchecked": [], "why": None}
+    try:
+        import fran_deposit as fd       # lazy: fran_deposit imports this module's helpers
+    except Exception as e:              # noqa: BLE001 -- any import failure is reported, not raised
+        res["why"] = f"fran_deposit.py could not be imported ({type(e).__name__}: {e})"
+        return res
+    named = fd.search_fastas(os.path.abspath(search_dir))
+    if not named:
+        res["why"] = (f"the search in {search_dir} names no FASTA (no `fasta` in "
+                      f"search_provenance.json, no --fasta in report.log.txt)")
+        return res
+    parts, genes = [], []
+    for path in named:
+        recs, err = None, None
+        if os.path.isfile(path):
+            try:
+                recs = _fasta_records(_read_fasta_text(path))
+            except OSError as e:
+                err = e
+        if recs is None:
+            known = superseded_database(path=path)
+            if not known:
+                res["unchecked"].append(path + (f" ({err})" if err else " (not readable here)"))
+                continue
+            res["fasta"].append(path)
+            res["organism"] = res["organism"] or known.get("organism") or ""
+            genes += known.get("genes") or []
+            res["n_lost"] += int(known.get("n_lost") or 0)
+            parts.append(f"{path} cannot be read here, but by its name it is {known['name']}, in "
+                         f"which {known.get('n_lost')} {CONT_TAG} entries are (or cannot be told apart "
+                         f"from) {known.get('organism') or 'target'} proteins (measured "
+                         f"{known.get('measured')})")
+            continue
+        lost = _overlap_now({}, recs)
+        known = superseded_database(md5=_md5(path))
+        org = fd.organism_from_headers(path)[0] or ""
+        res["fasta"].append(path)
+        res["organism"] = res["organism"] or org
+        genes += [r.get("gene") or r.get("target_acc") or "?" for r in lost]
+        res["n_lost"] += len(lost)
+        what = f" ({known['name']})" if known else ""
+        parts.append(f"re-checked {path}{what}: {len(lost)} of its {CONT_TAG} entries are (or "
+                     f"cannot be told apart from) {org or 'target'} proteins" if lost else
+                     f"re-checked {path}{what}: none of its {CONT_TAG} entries is a target protein")
+    if not res["fasta"]:
+        res["why"] = (f"no FASTA the search names could be re-checked or recognised: "
+                      f"{'; '.join(res['unchecked'])}")
+        return res
+    # Non-keratins first: the file order leads with KRTAPs and buries ACTB/EEF1A1.
+    res["genes"] = sorted(dict.fromkeys(genes), key=is_keratin_gene)
+    res["checked"], res["risk"] = True, res["n_lost"] > 0
+    res["why"] = ("the search has no fetch_fasta.py sidecar, so its own FASTA was checked: "
+                  + "; ".join(parts)
+                  + (f" (also named, not checked: {'; '.join(res['unchecked'])})"
+                     if res["unchecked"] else ""))
+    return res
 
 
 # --------------------------------------------------------------------------
@@ -1862,6 +1973,11 @@ def main():
                    help="also search NCBI genome assemblies. Automatic when UniProt "
                         "returns no candidates.")
 
+    c = sub.add_parser("check-db", help="a search with no sidecar: does its database hold "
+                                        "contaminant entries that are target proteins? (JSON)")
+    c.add_argument("--search-dir", required=True,
+                   help="the search's output folder (search_provenance.json / report.log.txt)")
+
     f = sub.add_parser("fetch", help="build the search FASTA")
     f.add_argument("--proteome", help="UniProt proteome ID, e.g. UP000005640")
     f.add_argument("--path", help="explicit FASTA override; used verbatim if set")
@@ -1911,6 +2027,9 @@ def main():
     if legacy and not explicit_contam:
         a.contaminants = "universal" if a.add_contaminants else "none"
 
+    if a.cmd == "check-db":
+        print(json.dumps(database_without_sidecar(a.search_dir), indent=2))
+        return 0
     if a.cmd == "resolve":
         if a.list:
             print(json.dumps([{"taxid": tx, "organism": n, "offline_fallback_proteome": up,

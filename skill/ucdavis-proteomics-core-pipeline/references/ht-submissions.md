@@ -106,7 +106,10 @@ fabricating parameters applies unchanged: ask the operator, resolve with
 Pre-staged FASTAs live in `/quobyte/proteomics-grp/de-limp/fasta/` (20 files as of
 2026-08-31 — human, mouse, chicken, pig, cow, dog and others, most as `_opg_` one-per-gene
 sets with a `.provenance.json` beside them), plus `/quobyte/proteomics-grp/MRS/` for human
-± contaminants. Reuse one rather than re-downloading; `fetch_fasta.py --hive` already does.
+± contaminants. `fetch_fasta.py --hive` reuses only a proteome in `MRS/` (a file named
+`<UPID>*.fasta` there); it does not look in `de-limp/fasta/`. For any other organism let
+`fetch` download it (seconds) rather than passing a `de-limp/fasta/` file with `--path`,
+which records no organism or content type in the sidecar.
 
 ## 4. Search — the DIA-NN parallel chain, automatically
 
