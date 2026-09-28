@@ -131,7 +131,7 @@ def never_in_control(de_dir, de_file, contrast, control, adjp, det, groups, k=15
             known = known or kn is not None
             if p < adjp and lfc > 0 and kn is not None and kn[0] == 0:
                 g = (r.get("Genes") or "").split(";")[0] or r.get("Protein.Group")
-                if not background_flag(g, r.get("Protein.Group")):
+                if not background_flag(g, r.get("Protein.Group"), r.get("Protein.Names")):
                     rows.append((p, g))
     if not known:
         return None

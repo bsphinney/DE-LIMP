@@ -68,8 +68,9 @@ def evidence(d):
 def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, report=True,
             removed=None, evidence_col=False, extra_figs=(), omit=(), report_extra="",
             rows=None, prov_bytes=None):
-    """rows: (protein, gene, logFC, adj.P, detection b1..b3 c1..c3[, raw P]) -- ROWS by default,
-    raw P = adj.P / 2 unless given. prov_bytes: de_provenance.json exactly as these bytes."""
+    """rows: (protein, gene, logFC, adj.P, detection b1..b3 c1..c3[, raw P[, Protein.Names]]) --
+    ROWS by default, raw P = adj.P / 2 unless given. prov_bytes: de_provenance.json exactly as
+    these bytes."""
     rows = rows or ROWS
     out = os.path.join(root, "output")
     tables, figs = os.path.join(out, "tables"), os.path.join(out, "figures")
@@ -78,14 +79,15 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
     prov = prov if prov is not None else dict(PROV)
     with open(os.path.join(tables, "de_provenance.json"), "wb") as fh:
         fh.write(prov_bytes if prov_bytes is not None else json.dumps(prov).encode())
-    head = ["Protein.Group", "Genes", "logFC", "P.Value", "adj.P.Val", "PropObs"]
+    head = ["Protein.Group", "Genes", "logFC", "P.Value", "adj.P.Val", "PropObs", "Protein.Names"]
     if det_cols:
         head += ["Detected_Bait", "Detected_IgG"] + (["Evidence"] if evidence_col else [])
     with open(os.path.join(tables, "DE_dpc_Bait.IgG.csv"), "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(head)
-        for p, g, lfc, adj, d, *raw in rows:
-            row = [p, g, lfc, raw[0] if raw else adj / 2, adj, 0.5]
+        for p, g, lfc, adj, d, *more in rows:
+            row = [p, g, lfc, more[0] if more and more[0] != "" else (adj / 2 if not more else ""),
+                   adj, 0.5, more[1] if len(more) > 1 else ""]
             if det_cols:
                 row += [f"{sum(x > 0 for x in d[:3])}/3", f"{sum(x > 0 for x in d[3:])}/3"]
                 row += [evidence(d)] if evidence_col else []
@@ -395,6 +397,52 @@ class TopTies(unittest.TestCase):
                                              ("PB", "B1", 9.0, 1e-3, [1] * 6, "")])
         t = mah.Tables(tables, dict(PROV), 0.05, "de_provenance.json")
         self.assertEqual([r["Genes"] for r in t.top("Bait.IgG", 2)], ["A1", "B1"])
+
+
+# PROT_0756 v2: IgG-side chains with NO gene name -- DIA-NN's Protein.Names is the UniProt entry
+# name (verified in the run's DE tables: P06330 HVM51_MOUSE, Genes empty)
+NAMELESS_IG = [("P01647", "KV5AE_MOUSE"), ("P01636", "KV5A4_MOUSE"), ("P06330", "HVM51_MOUSE"),
+               ("P18528", "HVM57_MOUSE"), ("P01630", "KV2A6_MOUSE")]
+
+
+class IgChains(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = self._td.name
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_one_classifier_gene_entry_name_or_description(self):
+        import make_analysis_html as mah
+        for acc, name in NAMELESS_IG:
+            self.assertEqual(mah.background_flag(acc, acc, name), "Ig chain", name)
+        for gene in ("IGHG1", "Ighg2c", "Ighm", "IGKC", "IGKV1-5", "Iglc2", "IGLV1-40", "JCHAIN",
+                     "Igg-2a"):
+            self.assertTrue(mah.is_ig_chain(gene), gene)
+        for desc in ("Ig kappa chain V-V region MOPC 41", "Ig gamma-1 chain C region",
+                     "Immunoglobulin heavy constant gamma 1", "Immunoglobulin J chain"):
+            self.assertTrue(mah.is_ig_chain("", desc), desc)
+        for gene, names in (("IGLON5", "IGLO5_HUMAN"), ("Iglon5", ""), ("IGF1", "IGF1_HUMAN"),
+                            ("IGHMBP2", "SMBP2_HUMAN"), ("IGLL1", "IGLL1_HUMAN"),
+                            ("Hvcn1", "HVCN1_MOUSE"), ("", "HVCN1_MOUSE"),
+                            ("", "KV53_BUNCI"),              # a sea-anemone toxin, not an Ig
+                            ("", "A0ABJ3HKK3_MOUSE"),
+                            ("", "Low affinity immunoglobulin gamma Fc region receptor II"),
+                            ("HSPA5", "Endoplasmic reticulum chaperone BiP (Immunoglobulin heavy "
+                                      "chain-binding protein)")):
+            self.assertFalse(mah.is_ig_chain(gene, names), (gene, names))
+        self.assertEqual(mah.background_flag("", "Cont_P01966", "HVM51_MOUSE"), "contaminant")
+
+    def test_nameless_ig_is_flagged_on_the_page_and_kept_out_of_the_brief(self):
+        rows = list(ROWS) + [("P06330", "", 7.0, 5e-8, [3, 3, 3, 0, 0, 0], 2.5e-8, "HVM51_MOUSE")]
+        _, html, md, _ = page(self.root, rows=rows)
+        top = md[md.index("## Top proteins per contrast"):]
+        line = next(ln for ln in top.splitlines() if "P06330" in ln)
+        self.assertIn("**Ig chain**", line)
+        b = brief(tempfile.mkdtemp(dir=self.root), rows=rows)
+        self.assertIn("Bait vs IgG: 2 significant enriched proteins never measured in IgG "
+                      "(top by adj.P: Jph3, Stim2).", b)
 
 
 class Encoding(unittest.TestCase):
