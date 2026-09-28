@@ -363,8 +363,11 @@ the lock, append-only, with the header written only at creation.
 - **Anything that looks like a credential.**
   - By name: `*token*`, `*webhook*`, `*secret*`, `*passw*`, `*credential*`, `.env`, `hive.env`,
     `id_rsa`/`id_ed25519`, `*.pem`, `*.key`, `.netrc`, `.pgpass`.
-  - By content: a private-key block, a GitHub or Hugging Face token, an `Authorization:` header,
-    a Slack token or webhook URL.
+  - By content: anything `notify_slack._SECRET_PATTERNS` matches (the skill's one list; see
+    `references/notifications.md`). That covers private keys, GitHub and Hugging Face tokens,
+    `Authorization:` headers, passwords, database DSNs, Slack tokens and webhooks, Google API
+    keys, and STAN share tokens and cookies. A `commands.log` holding `--share-token <tok>` is
+    refused, not copied.
 
   The whole registry is readable by the Core group, so a refused file is listed with the reason
   and its contents are never quoted.

@@ -278,9 +278,15 @@ that fails with *permission denied*, which reads exactly like "no such submissio
 hosted dashboard instead, with a per-submission share token from the HT tab — the one auth
 path that works headless. Sign-in is **Microsoft Entra, not CAS**:
 ```
+printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0793'
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
-    --http https://ucd.stan-proteomics.org --share-token <tok> --out ~/ht0793'
+    --http https://ucd.stan-proteomics.org --share-token-file ~/.stan/share_0793 --out ~/ht0793'
 ```
+The token goes into a mode-600 file on HIVE through stdin, and the search reads it from
+there. **Never put it on a command line or in `commands.log`**, and don't log the `printf` line
+above. The run registry copies `commands.log` into a folder the whole Core can read, and a
+token on a command line is in the process list too. `ht_manifest.py` masks the token in
+everything it prints.
 Writes `files.txt` (absolute resolved paths → feed to `--raw`/`--files`) and
 `ht_manifest.json` (STAN's payload + gate results). `--include` = `samples` (**default**,
 excludes blanks/standards), `rerun`, `standards`, `all`. Both `0793` and `793` work.
@@ -2003,7 +2009,7 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
 
 ## Recording skill problems (`report_issue.sh`)
 The skill is fixed from these reports. For a Core member they land in the Core's shared
-folder on HIVE, `/quobyte/proteomics-grp/skill_issues/`, one file per user per day, where the
+folder on HIVE, `/quobyte/proteomics-grp/skill_issues/`, one file per entry, where the
 maintainers read them. A report holds only what you write in it. The Slack post at the end of
 the search or analysis counts them (`references/notifications.md`), so the Core sees them
 without anyone forwarding a file.

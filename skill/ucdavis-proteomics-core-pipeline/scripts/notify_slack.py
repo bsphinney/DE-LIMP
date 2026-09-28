@@ -122,12 +122,14 @@ def say(msg):
         pass
 
 
-#: What report_issue.sh refuses to write to a shared folder, plus a database DSN with a password,
-#: the webhook itself and Google API keys. Redacted, not refused: an alert with "[redacted]" in it
-#: still tells the channel something went wrong. The reviewer posted a webhook through
-#: send_alert(). THE skill's one list of secret-shaped strings: make_podcast.py imports it. It
-#: lives here, not in a module of its own, because the relay pipes this file alone to HIVE's
-#: python (`python3 - relay`), where no sibling module can be imported.
+#: THE skill's one list of secret-shaped strings. Redacted here, not refused: an alert with
+#: "[redacted]" in it still tells the channel something went wrong (the reviewer posted a webhook
+#: through send_alert()). record_run.py and make_podcast.py import it; report_issue.sh must run
+#: with no Python at all (Git Bash on Windows), so it carries an ERE mirror, and
+#: tests/test_secret_patterns.py keeps the two catching the same examples. Add a pattern HERE,
+#: then its fake example there and the mirror in report_issue.sh -- that test fails until you do.
+#: It lives in this file, not a module of its own, because the relay pipes this file alone to
+#: HIVE's python (`python3 - relay`), where no sibling module can be imported.
 REDACTED = "[redacted]"
 _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
@@ -142,6 +144,18 @@ _SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),                    # a Google API key
     re.compile(r"\bAQ\.[0-9A-Za-z_\-]{20,}"),                  # a Google API key, newer format
     re.compile(r"(?i)(?<=key=)[A-Za-z0-9_.\-]{20,}"),           # a key-shaped key=... value
+    re.compile(r"xox[abeprs]-[A-Za-z0-9\-]{10,}"),             # a Slack bot/user/app token
+    # STAN's per-submission HT share token (ht_manifest.py): in a URL's query (`&token=...`), as
+    # `--share-token=...` / `--share-token ...`, and as STAN_HT_SHARE_TOKEN=... in a logged
+    # command. The release review found the full URL, token and all, in an HTTP error line, and
+    # the argv in commands.log and so in the group-readable run registry. A value that starts
+    # like a path (`/`, `~`, `.`, `$`) is a file NAME -- --share-token-file, STAN_PG_TOKEN=/... --
+    # and not a secret; STAN_PG_TOKEN also fails the "not after a letter or _" test.
+    re.compile(r"(?i)(?:(?<=[^A-Za-z0-9_]token=)|(?<=^token=))(?![/~.$])[^\s&\"'<>]{8,}"),
+    re.compile(r"(?i)(?:(?<=--share-token )|(?<=--share-token=))['\"]?(?![/~.$-])[^\s\"'<>]{8,}"),
+    re.compile(r"(?i)(?<=share_token=)['\"]?(?![/~.$])[^\s\"'<>]{8,}"),
+    # ...and its companion, ht_manifest.py --cookie <Entra session cookie>
+    re.compile(r"(?i)(?:(?<=--cookie )|(?<=--cookie=))['\"]?(?![/~.$-])[^\s\"'<>]{8,}"),
 ]
 
 
@@ -151,6 +165,13 @@ def redact(text):
     for pat in _SECRET_PATTERNS:
         out = pat.sub(REDACTED, out)
     return out
+
+
+def contains_secret(text):
+    """True when `text` holds anything redact() would hide -- for callers that must REFUSE
+    rather than redact (record_run.py's group-readable registry)."""
+    s = str(text)
+    return any(pat.search(s) for pat in _SECRET_PATTERNS)
 
 
 def one_line(text):
@@ -525,7 +546,8 @@ def _clean(s):
 def add_issues(facts):
     """Count the skill problems report_issue.sh recorded for this user since the run began.
 
-    Its files are <date>_<user>[_<session>].md, one entry per `## ` heading. Counted where
+    Its files are <date>_<user>[_<session>][+<unique>].md -- one file per entry since 2.8.0, one
+    per day before -- one entry per `## ` heading. Counted where
     they are readable from here -- the Core's folder on HIVE, or this machine's fallback."""
     try:
         since = datetime.date.fromisoformat(facts.get("since") or "")
