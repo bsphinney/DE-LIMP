@@ -145,12 +145,18 @@ class Env:
             fh.write(f"{ts(self.now - age_h * H - 420)} {line}\n")
         os.utime(p, (self.now - age_h * H, self.now - age_h * H))
 
-    def entry(self, name, age_h=100, output_dir=None):
+    def entry(self, name, age_h=100, output_dir=None, staged=True):
+        """A drop entry staged `age_h` ago -- by its manifest's staged_at, as stage writes it
+        (staged=False: a legacy entry without one). The directory mtime is set to the same time,
+        and the age must never be read from it."""
         d = os.path.join(self.drop, name)
         os.makedirs(d)
+        man = {"output_dir": output_dir or f"/real/{name}", "engine": "diann", "staged_by": "brettsp"}
+        if staged:
+            man["staged_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime(self.now - age_h * H))
         with open(os.path.join(d, fd.MANIFEST), "w") as fh:
-            json.dump({"output_dir": output_dir or f"/real/{name}", "engine": "diann",
-                       "staged_by": "brettsp"}, fh)
+            json.dump(man, fh)
         os.utime(d, (self.now - age_h * H, self.now - age_h * H))
         return d
 
@@ -518,16 +524,44 @@ class IncomingTests(unittest.TestCase):
                            "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                       time.gmtime(month_ago))}, fh)
             os.utime(ent, (NOW, NOW))                                    # rewritten "today"
-            legacy = e.entry("GallPlasCer__5b11a0d9", age_h=5 * 24)       # no staged_at: mtime
+            legacy = e.entry("GallPlasCer__5b11a0d9", age_h=3 * 24, staged=False)  # mtime 3 d
             inc = fd.incoming_health([], NOW, e.drop)
             by = {x["entry"]: x for x in inc["entries"]}
             self.assertAlmostEqual(by["search_mouse_mousecont__9ad24935"]["age_days"], 30, delta=0.1)
             self.assertEqual(by["search_mouse_mousecont__9ad24935"]["age_source"], "staged_at")
-            self.assertAlmostEqual(by["GallPlasCer__5b11a0d9"]["age_days"], 5, delta=0.1)
-            self.assertEqual(by["GallPlasCer__5b11a0d9"]["age_source"], "entry mtime")
+            # No staged_at: age UNKNOWN -- never the 3 d its directory mtime says (2026-09-28).
+            self.assertIsNone(by["GallPlasCer__5b11a0d9"]["age_days"])
+            self.assertEqual(by["GallPlasCer__5b11a0d9"]["age_source"], "age unknown: no staged_at")
+            self.assertEqual(inc["no_staged_at"], ["GallPlasCer__5b11a0d9"])
             self.assertEqual(inc["verdict"], "starved")
             self.assertAlmostEqual(inc["oldest_never_reached_days"], 30, delta=0.1)
+            self.assertIn("1 with no staged_at, so of unknown age (GallPlasCer__5b11a0d9)",
+                          inc["detail"])
             self.assertTrue(os.path.isdir(legacy))
+
+    def test_an_entry_without_staged_at_is_never_starved_on_a_guess(self):
+        """Its directory says 40 days; nothing says when it was staged. Not starved, and said."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            e.entry("GallPlasCer__5b11a0d9", age_h=40 * 24, staged=False)
+            e.entry("new__00000001", age_h=2)
+            inc = fd.incoming_health([], NOW, e.drop)
+            self.assertEqual(inc["verdict"], "ok", inc)
+            self.assertIsNone([x for x in inc["entries"]
+                               if x["entry"] == "GallPlasCer__5b11a0d9"][0]["age_days"])
+            self.assertAlmostEqual(inc["oldest_never_reached_days"], 2 / 24, delta=0.1)
+            self.assertIn("no staged_at", inc["detail"])
+
+    def test_age_never_reads_any_mtime(self):
+        """staged_at 10 d ago; the directory AND the manifest file touched just now."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            ent = e.entry("x__00000002", age_h=10 * 24)
+            os.utime(os.path.join(ent, fd.MANIFEST), (NOW, NOW))
+            os.utime(ent, (NOW, NOW))
+            x = fd.incoming_health([], NOW, e.drop)["entries"][0]
+            self.assertAlmostEqual(x["age_days"], 10, delta=0.05)
+            self.assertEqual(x["age_source"], "staged_at")
 
     def test_staged_at_forms_frans_reader_accepts(self):
         epoch = 1788908552.0                                   # 2026-09-08T23:02:32Z

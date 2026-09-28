@@ -2058,11 +2058,13 @@ def _staged_epoch(v):
 def incoming_health(runs, now=None, drop=None):
     """Every entry in the drop dir: age, who staged it, broken links, and what the logs say.
 
-    An entry's AGE is its manifest's staged_at -- when it was first handed over -- and the entry
-    directory's mtime only when there is none. Rewriting a manifest (a repair, a QC withdrawal)
-    bumps the directory mtime: on 2026-09-25 the repaired search_mouse_mousecont entry, staged
-    2026-09-08, showed as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough
-    to hide a starved entry under STARVED_AFTER_H."""
+    An entry's AGE is its manifest's staged_at -- when it was first handed over -- and nothing
+    else. Never a modification time: rewriting a manifest (a repair, a QC withdrawal) bumps the
+    directory's. On 2026-09-25 the repaired search_mouse_mousecont entry, staged 2026-09-08, showed
+    as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough to hide a starved
+    entry under STARVED_AFTER_H; on 2026-09-28 the Gallegos pair, which have no staged_at, read as
+    3 d old. An entry without a readable staged_at has age None ("age unknown: no staged_at"),
+    is never called starved on a guess, and is counted and named in the detail instead."""
     now = now or time.time()
     drop = drop or os.environ.get("FRAN_DROP_DIR", DROP_DIR)
     res = {"drop_dir": drop, "verdict": "unknown", "entries": []}
@@ -2080,14 +2082,8 @@ def incoming_health(runs, now=None, drop=None):
         except (OSError, ValueError):
             pass
         staged = _staged_epoch(man.get("staged_at")) if isinstance(man, dict) else None
-        if staged:
-            age_d, age_src = (now - staged) / 86400, "staged_at"
-        else:
-            try:
-                age_d = (now - e.stat(follow_symlinks=False).st_mtime) / 86400
-                age_src = "entry mtime"
-            except OSError:
-                age_d, age_src = None, None
+        age_d = (now - staged) / 86400 if staged else None
+        age_src = "staged_at" if staged else "age unknown: no staged_at"
         try:
             broken = [f for f in os.listdir(e.path)
                       if os.path.islink(os.path.join(e.path, f))
@@ -2114,17 +2110,23 @@ def incoming_health(runs, now=None, drop=None):
     res["n_entries"] = len(res["entries"])
     res["by_state"] = dict(counts)
     waiting = [x for x in res["entries"] if x["state"] == "never_reached"]
-    oldest = max((x["age_days"] or 0 for x in waiting), default=0)
-    res["oldest_never_reached_days"] = round(oldest, 1) if waiting else None
+    dated = [x for x in waiting if x["age_days"] is not None]
+    oldest = max((x["age_days"] for x in dated), default=0)
+    res["oldest_never_reached_days"] = round(oldest, 1) if dated else None
+    undated = [x["entry"] for x in res["entries"] if x["age_days"] is None]
+    res["no_staged_at"] = undated
+    unknown_age = (f"; {len(undated)} with no staged_at, so of unknown age "
+                   f"({', '.join(undated[:3])}{', ...' if len(undated) > 3 else ''})"
+                   if undated else "")
     if runs is None:
         res["detail"] = "the cron's logs could not be read, so no entry's state is known"
-    elif waiting and oldest * 24 > STARVED_AFTER_H:
+    elif dated and oldest * 24 > STARVED_AFTER_H:
         res.update(verdict="starved",
                    detail=f"{len(waiting)} of {len(res['entries'])} staged entries never reached "
-                          f"by the cron (oldest {oldest:.0f} d)")
+                          f"by the cron (oldest {oldest:.0f} d, by staged_at){unknown_age}")
     else:
         res.update(verdict="ok", detail=f"{len(res['entries'])} staged entries; "
-                   + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
+                   + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + unknown_age)
     if counts.get("failed"):
         res["failed"] = [{"entry": x["entry"], "detail": x["detail"]}
                          for x in res["entries"] if x["state"] == "failed"]
