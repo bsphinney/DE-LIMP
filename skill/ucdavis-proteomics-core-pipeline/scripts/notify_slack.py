@@ -331,11 +331,28 @@ def _who():
         return "unknown"
 
 
-def _skill_version():
-    if not HERE:
-        return None
-    pj = _load(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}
-    return pj.get("version")
+# A copy of skill_version.py (the one reader of plugin.json): this script cannot import a sibling
+# -- on HIVE it also runs from stdin. tests/test_skill_version.py keeps the two equal.
+SKILL_VERSION_UNKNOWN = "(unknown — plugin.json not found)"
+
+
+def _skill_version(here=HERE):
+    """The version in <here>/../.claude-plugin/plugin.json, or SKILL_VERSION_UNKNOWN."""
+    try:
+        with open(os.path.join(here, "..", ".claude-plugin", "plugin.json"),
+                  encoding="utf-8") as fh:
+            v = json.load(fh).get("version")
+    except (OSError, ValueError, AttributeError, TypeError):
+        v = None
+    return v.strip() if isinstance(v, str) and v.strip() else SKILL_VERSION_UNKNOWN
+
+
+def _skill_label(version):
+    """The skill's name and version as the footer shows it: "... v2.8.0", or the unknown tag."""
+    name = "ucdavis-proteomics-core-pipeline"
+    if not version:
+        return name
+    return f"{name} {version}" if version == SKILL_VERSION_UNKNOWN else f"{name} v{version}"
 
 
 def _engine_label(engine):
@@ -600,8 +617,7 @@ def render(f):
         head = f":warning: {_esc(f['title'])}: " if f.get("title") else ":warning: "
         text = _cut(head + _esc(f.get("body") or ""), 300)
         ctx = " · ".join(x for x in (
-            f"ucdavis-proteomics-core-pipeline v{f['skill_version']}" if f.get("skill_version")
-            else "ucdavis-proteomics-core-pipeline", f"{_esc(f.get('who'))} on {_esc(f.get('host'))}")
+            _skill_label(f.get("skill_version")), f"{_esc(f.get('who'))} on {_esc(f.get('host'))}")
             if x)
         return {"text": text,
                 "blocks": [{"type": "section", "text": {"type": "mrkdwn",
@@ -720,8 +736,7 @@ def render(f):
         ctx.append(f":memo: {iss['entries']} skill issue(s) recorded by {_esc(f.get('who'))} "
                    f"since {_esc(f.get('since'))}: {files}{more}")
     job = f.get("job") or {}
-    tail = [f"ucdavis-proteomics-core-pipeline v{f['skill_version']}" if f.get("skill_version")
-            else "ucdavis-proteomics-core-pipeline"]
+    tail = [_skill_label(f.get("skill_version"))]
     if job.get("id"):
         jid = (f"{job['array_id']}_{job['task']}" if job.get("array_id") and job.get("task")
                else job["id"])

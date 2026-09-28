@@ -48,6 +48,8 @@ session was initialised without --raw).
 """
 import sys, os, json, re, glob, shutil, argparse, datetime
 
+NOT_RECORDED = "not recorded"      # a fact the session's records do not give -- never a guess
+
 SUBDIRS = ["input", "output", "output/search", "output/tables", "output/figures",
            "output/reproducibility", "scripts", "logs"]
 
@@ -97,7 +99,7 @@ def read_raw_list(session_dir):
     rl = paths_for(session_dir)["raw_list"]
     if not os.path.exists(rl):
         return []
-    with open(rl) as fh:
+    with open(rl, encoding="utf-8") as fh:
         return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
 
 
@@ -203,7 +205,7 @@ def do_init(a):
 
     # record raw file locations (not the files themselves)
     if raws:
-        with open(p["raw_list"], "w") as fh:
+        with open(p["raw_list"], "w", encoding="utf-8") as fh:
             fh.write("# Raw MS files used in this analysis (not copied — too large).\n")
             for r in raws:
                 fh.write(os.path.abspath(r.rstrip("/")) + "\n")
@@ -227,11 +229,11 @@ def do_init(a):
     # record the parent when this is a re-analysis
     parent = os.path.abspath(os.path.expanduser(a.reanalysis_of)) if a.reanalysis_of else None
     if parent:
-        with open(os.path.join(session_dir, ".reanalysis_of"), "w") as fh:
+        with open(os.path.join(session_dir, ".reanalysis_of"), "w", encoding="utf-8") as fh:
             fh.write(parent + "\n")
 
     # starter README (finalize fills in results)
-    with open(p["readme"], "w") as fh:
+    with open(p["readme"], "w", encoding="utf-8") as fh:
         fh.write(f"# {a.name}\n\n- Date: {date}\n- Status: in progress\n")
         if parent:
             fh.write(f"- **Re-analysis of:** `{parent}` — see `DIFFERENCES.md` (written at finalize) "
@@ -244,8 +246,11 @@ def do_init(a):
 
 
 def _load(path):
-    try: return json.load(open(path))
-    except Exception: return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
 
 
 def _append_manifest(path, level, name, note):
@@ -256,7 +261,7 @@ def _append_manifest(path, level, name, note):
     note = " ".join(str(note).replace("\r", " ").replace("\n", " ").split())
     if len(note) > 200:
         note = note[:197] + "..."
-    with open(path, "a") as fh:
+    with open(path, "a", encoding="utf-8") as fh:
         fh.write(f"{'[' + level + ']':<10}{name:<50} -- {note}\n")
 
 
@@ -311,6 +316,18 @@ def _zip_manifest(zip_path, arcname, text, pre_hook):
 
 
 LATE_DOCS = ("README.md", "README.html", "AGENTS.md")
+
+# DIA-NN's in-silico predicted library (step1.predicted.speclib, <lib>.predicted.speclib): 687 MB
+# for one 15-file Lumos session on HIVE. It is rebuilt exactly from the FASTA, the pinned engine
+# and the params the zip already holds, so the session zip leaves it out -- wherever it sits in the
+# session (a seeded chain, a Radiant library dir). ONE rule: finalize's zip and make_deposit.py
+# (files_to_upload.tsv says it is not in the zip) both read it here. Empirical libraries
+# (.parquet, a .speclib without "predicted") are not covered and stay in.
+PREDICTED_SPECLIB = ".predicted.speclib"
+
+
+def is_predicted_speclib(name):
+    return os.path.basename(name).lower().endswith(PREDICTED_SPECLIB)
 
 
 def _registry_lookup(session_dir, in_finalize=True):
@@ -388,17 +405,20 @@ def _write_docs(session_docs, p, man, registry, registry_note, ok_lines=True, pe
     return out
 
 
-def _zip_docs(zip_path, session_dir):
-    """Add README.md, README.html and AGENTS.md to the zip (after the run-log hook). Returns
-    "added", or what went wrong -- recorded in MANIFEST.txt, which goes in after."""
+def _zip_docs(zip_path, session_dir, written):
+    """Add README.md, README.html and AGENTS.md to the zip (after the run-log hook) -- only the
+    ones this finalize wrote (`written`: the paths session_docs.write_docs returned). One it could
+    not write stays out even when an older copy is on disk: that copy describes an earlier state.
+    Returns "added", or what went wrong -- recorded in MANIFEST.txt, which goes in after."""
     import zipfile
     base = os.path.basename(session_dir)
+    done = {os.path.abspath(w) for w in written if w}
     missing = []
     try:
         with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
             for n in LATE_DOCS:
                 full = os.path.join(session_dir, n)
-                if os.path.isfile(full):
+                if os.path.abspath(full) in done and os.path.isfile(full):
                     z.write(full, os.path.join(base, n))
                 else:
                     missing.append(n)
@@ -435,12 +455,18 @@ def do_finalize(a):
     # input/raw_files.txt first: a hive_remote session is initialised without --raw, so it has
     # none, and the deposit package, README and AGENTS.md all read it. Written from the search's
     # own record of what it read (session_docs.raw_record).
+    # The import and the call fail apart: a raw list that cannot be written must not also cost
+    # the README and AGENTS.md (nor blame session_docs.py for it in MANIFEST.txt).
     try:
         import session_docs
-        raw_list = session_docs.ensure_raw_list(p)
     except Exception as e:                      # recorded below, not swallowed
         session_docs = None
-        raw_list = ("SKIPPED", f"session_docs.py could not run: {type(e).__name__}: {e}")
+        raw_list = ("SKIPPED", f"session_docs.py could not be loaded: {type(e).__name__}: {e}")
+    else:
+        try:
+            raw_list = session_docs.ensure_raw_list(p)
+        except Exception as e:                  # recorded below, not swallowed
+            raw_list = ("SKIPPED", f"{type(e).__name__}: {e}")
     methods_md, deposit = None, None
     try:
         import make_deposit
@@ -485,10 +511,12 @@ def do_finalize(a):
     if man is not None:
         man.write(p["manifest_txt"], "Session export manifest")
     else:
-        with open(p["manifest_txt"], "w") as fh:
+        with open(p["manifest_txt"], "w", encoding="utf-8") as fh:
             fh.write("Session export manifest\n=======================\n"
                      f"[SKIPPED] {'Publication methods + deposit package':<50} -- "
                      f"{import_error}\n")
+        _append_manifest(p["manifest_txt"], raw_list[0], "input/raw_files.txt (where the raw data are)",
+                         raw_list[1])
         for level, part, note in docs["manifest"]:
             _append_manifest(p["manifest_txt"], level, part, note)
 
@@ -503,7 +531,8 @@ def do_finalize(a):
     parent = a.reanalysis_of
     marker = os.path.join(p["session_dir"], ".reanalysis_of")
     if not parent and os.path.exists(marker):
-        parent = open(marker).read().strip()
+        with open(marker, encoding="utf-8") as fh:
+            parent = fh.read().strip()
     if parent:
         diff_path = write_differences(parent, p["session_dir"])
         result["differences"] = diff_path
@@ -538,12 +567,7 @@ def do_finalize(a):
         # agent relays it; which files it covers is said here.
         quant_label = "DIA-NN .quant intermediates (kept on disk where they are)"
         n_quant = 0
-        # The in-silico predicted library (step1.predicted.speclib, <lib>.predicted.speclib):
-        # 687 MB for one 15-file Lumos session on HIVE. It is regenerated exactly from the FASTA,
-        # the pinned engine and the params the zip already holds, so it carries nothing a reader
-        # needs. Empirical libraries (.parquet/.speclib without "predicted") stay in.
-        # "where they are": a predicted library may sit anywhere in the session, not only in
-        # the search out dir (a seeded chain, a Radiant library dir).
+        # The predicted library: is_predicted_speclib() above.
         speclib_label = ("predicted spectral libraries (*.predicted.speclib anywhere in the "
                          "session; rebuilt from the FASTA + params, kept on disk where they are)")
         n_speclib = 0
@@ -573,7 +597,7 @@ def do_finalize(a):
                     if fn.endswith(".quant"):
                         n_quant += 1
                         continue
-                    if fn.endswith(".predicted.speclib"):
+                    if is_predicted_speclib(fn):
                         n_speclib += 1
                         continue
                     if os.path.islink(full) or os.path.abspath(full) == manifest_txt \
@@ -590,20 +614,23 @@ def do_finalize(a):
     # The run log and Slack go once everything they point at exists -- after the zip. Their
     # outcomes are the last two lines of MANIFEST.txt, so the zip's copy (added now) says them.
     try:
-        with open(p["manifest_txt"]) as fh:
+        with open(p["manifest_txt"], encoding="utf-8") as fh:
             pre_hook = fh.read()
     except OSError:
         pre_hook = None
     hooks = _finish_hooks(a, p["session_dir"], result.get("zip"))
     result["run_log"], result["slack"] = hooks["run_log"], hooks["slack"]
     rl = hooks["run_log"] or {}
+    written = list(docs["written"].values())
     if rl.get("logged") is True and rl.get("path") and rl["path"] != registry:
         # the registry record exists now: name it in README / AGENTS (the registry's own copy of
-        # the README, taken during the hook, is the one written above)
+        # the README, taken during the hook, is the one written above). A document this re-render
+        # cannot write keeps the whole one written above (session_docs writes via a .part).
         again = _write_docs(session_docs, p, None, rl["path"], None, ok_lines=False)
         hooks["manifest"] = again["manifest"] + hooks["manifest"]
+        written += list(again["written"].values())
     if a.zip:
-        how = _zip_docs(result["zip"], p["session_dir"])
+        how = _zip_docs(result["zip"], p["session_dir"], written)
         result["zip_docs"] = how
         if how != "added":
             hooks["manifest"].insert(0, ("SKIPPED", "README / AGENTS.md in the zip", how))
@@ -614,7 +641,7 @@ def do_finalize(a):
             sys.stderr.write(f"[session] could not record '{part}' in MANIFEST.txt: {e}\n")
     if a.zip:
         try:
-            with open(p["manifest_txt"]) as fh:
+            with open(p["manifest_txt"], encoding="utf-8") as fh:
                 text = fh.read()
         except OSError:
             text = pre_hook
@@ -634,7 +661,10 @@ def do_docs(a):
     if not os.path.isdir(p["session_dir"]):
         sys.exit(f"session dir not found: {p['session_dir']}")
     import session_docs
-    raw = session_docs.ensure_raw_list(p)
+    try:
+        raw = session_docs.ensure_raw_list(p)
+    except Exception as e:                      # reported below; the documents still get written
+        raw = ("SKIPPED", f"{type(e).__name__}: {e}")
     registry, note = _registry_lookup(p["session_dir"], in_finalize=False)
     docs = _write_docs(session_docs, p, None, registry, note,
                        located_at=os.path.abspath(a.as_path) if a.as_path else None)
@@ -644,27 +674,74 @@ def do_docs(a):
                                 docs["manifest"]]}, indent=2))
 
 
+def params_file(p):
+    """The search parameters a session ran with (paths_for dict -> path or None): the resolved
+    cfg the search wrote, else the one the workflow step staged, else a params.* / *.cfg /
+    sage_config*.json directly in input/ (older sessions)."""
+    for x in (os.path.join(p["search_out"], "params.resolved.cfg"),
+              os.path.join(p["workflow_dir"], "params.cfg"),
+              os.path.join(p["workflow_dir"], "params.json")):
+        if os.path.isfile(x):
+            return x
+    older = sorted(glob.glob(os.path.join(p["input_dir"], "params.*"))) + \
+        sorted(glob.glob(os.path.join(p["input_dir"], "*.cfg"))) + \
+        sorted(glob.glob(os.path.join(p["input_dir"], "sage_config*.json")))
+    return next((x for x in older if not x.endswith(".rationale.json")), None)
+
+
+def _block(prov):
+    """de_provenance.json `block` (run_de.R / blocking.R) as column, effect, scope -- or None
+    when the record predates it."""
+    b = prov.get("block")
+    if not isinstance(b, dict):
+        return None
+    if b.get("applied"):
+        return (f"{b.get('column')} ({b.get('effect') or 'random'} effect, "
+                f"scope {b.get('scope') or NOT_RECORDED})")
+    if b.get("column"):
+        return f"{b['column']} given, not applied" + (f": {b['note']}" if b.get("note") else "")
+    return "none (samples modelled as independent)"
+
+
 def _facts(session_dir):
-    """Pull the comparable facts of a run from its session files."""
+    """Pull the comparable facts of a run from its session files. None = not recorded there."""
     p = paths_for(session_dir)
     man = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
     prov = _load(os.path.join(p["de_dir"], "de_provenance.json")) or {}
     wf = _load(os.path.join(p["workflow_dir"], "workflow.manifest.json")) or {}
-    params = sorted(glob.glob(os.path.join(p["input_dir"], "params.*"))) + \
-             sorted(glob.glob(os.path.join(p["input_dir"], "*.cfg"))) + \
-             sorted(glob.glob(os.path.join(p["input_dir"], "sage_config*.json")))
     ptext = ""
-    for pf in params:
-        if not pf.endswith(".rationale.json"):
-            try: ptext = open(pf).read(); break
-            except OSError: pass
-    fi = (man.get("inputs") or {}).get("fasta_info") or {}
+    pf = params_file(p)
+    if pf:
+        try:
+            with open(pf, encoding="utf-8", errors="replace") as fh:
+                ptext = fh.read()
+        except OSError:
+            pass
+    # the session's own sidecar first; the reproducibility bundle's copy of it for older ones
+    fi = _load(p["fasta_meta"]) or (man.get("inputs") or {}).get("fasta_info") or {}
+    try:
+        from fetch_fasta import sidecar_state          # the one definition of the states
+        fasta_state = sidecar_state(fi) if fi else None
+    except Exception as e:                             # said in the table, not dropped
+        fasta_state = f"could not be read ({type(e).__name__})"
+    try:
+        from session_docs import _sig_counts           # also reads an old repr() record
+        sig = _sig_counts(prov)
+    except Exception:
+        sig = prov.get("significant_per_contrast") if isinstance(
+            prov.get("significant_per_contrast"), dict) else {}
+    cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else None
     return {
         "engine": man.get("engine") or (wf.get("engine", {}) or {}).get("name"),
         "engine_version": (wf.get("engine", {}) or {}).get("version"),
         "de_method": prov.get("method") or (wf.get("de", {}) or {}).get("method"),
-        "q_cutoff": prov.get("q_cutoff"), "logfc": prov.get("logfc"), "adjp": prov.get("adjp"),
-        "contrasts": prov.get("contrasts") or [],
+        "q_cutoff": prov.get("q_cutoff"), "logfc": prov.get("logfc"),
+        "logfc_role": prov.get("logfc_role"), "adjp": prov.get("adjp"),
+        "contrasts": prov.get("contrasts") or None,
+        "design": prov.get("design"),
+        "block": _block(prov),
+        "contaminants": (cont.get("policy") + (f" ({cont['tag']} entries)" if cont.get("tag")
+                                               else "")) if cont and cont.get("policy") else None,
         # Spell the database out: a re-analysis that switched organism, database type,
         # or contaminant set must show up as a difference, not hide behind one count.
         "fasta": (f"{fi.get('organism') or '?'} "
@@ -675,34 +752,59 @@ def _facts(session_dir):
                   f" contaminants "
                   f"[{fi.get('contaminant_set') or ('universal' if fi.get('n_contaminants_appended') else 'none')}]"
                   + (f", UniProt {fi['uniprot_release']}" if fi.get("uniprot_release") else "")
-                  ) if fi else "?",
-        "registry_commit": (man.get("registry") or wf.get("registry") or {}).get("commit"),
-        "significant_per_contrast": prov.get("significant_per_contrast") or {},
+                  ) if fi else None,
+        "fasta_state": fasta_state,
+        "skill_version": (man.get("skill") or {}).get("version"),
+        "limpa": (prov.get("packages") or {}).get("limpa"),
+        "raw": read_raw_list(session_dir),
+        "significant_per_contrast": sig,
         "params_text": ptext,
         "conditions": p["conditions"],
     }
 
 
+# (label, _facts key) -- every setting DIFFERENCES.md compares, in the order it lists them
+DIFF_FIELDS = [("Search engine", "engine"), ("Engine version", "engine_version"),
+               ("DE method", "de_method"), ("ID FDR (q)", "q_cutoff"),
+               ("logFC value", "logfc"), ("logFC role (de_provenance.json)", "logfc_role"),
+               ("adj.P threshold", "adjp"), ("Contrasts", "contrasts"),
+               ("Design (with covariates)", "design"),
+               ("Blocking (column, effect, scope)", "block"),
+               ("Contaminant policy (DE)", "contaminants"), ("FASTA", "fasta"),
+               ("FASTA sidecar state (fetch_fasta.sidecar_state)", "fasta_state"),
+               ("Skill version", "skill_version"), ("limpa version", "limpa")]
+
+
 def write_differences(prior_dir, new_dir):
     prior_dir = os.path.abspath(os.path.expanduser(prior_dir))
     old, new = _facts(prior_dir), _facts(new_dir)
+    shown = lambda v: NOT_RECORDED if v is None else (
+        ", ".join(map(str, v)) if isinstance(v, list) else str(v).replace("|", "\\|"))
+    same_raw = bool(old["raw"]) and sorted(old["raw"]) == sorted(new["raw"])
     L = [f"# What changed in this re-analysis", "",
          f"Re-analysis of `{prior_dir}`.", "",
-         "Same raw data; the table below is exactly what differs. Unchanged settings are omitted.",
+         (f"Same raw files ({len(new['raw'])}, input/raw_files.txt). " if same_raw else "")
+         + "The table below is exactly what differs among the settings both sessions record. "
+           "Unchanged settings are omitted.",
          "", "| Aspect | Original | This re-analysis |", "|---|---|---|"]
-    fields = [("Search engine", "engine"), ("Engine version", "engine_version"),
-              ("DE method", "de_method"), ("ID FDR (q)", "q_cutoff"),
-              ("logFC threshold", "logfc"), ("adj.P threshold", "adjp"),
-              ("Contrasts", "contrasts"), ("FASTA", "fasta"),
-              ("Validated workflow commit", "registry_commit")]
-    n_changes = 0
-    for label, key in fields:
+    if not same_raw:
+        common = len(set(old["raw"]) & set(new["raw"]))
+        L.append(f"| Raw files (input/raw_files.txt) | {len(old['raw']) or NOT_RECORDED} | "
+                 f"{len(new['raw']) or NOT_RECORDED}"
+                 + (f" ({common} in common)" if old["raw"] and new["raw"] else "") + " |")
+    n_changes, neither = 0, []
+    for label, key in DIFF_FIELDS:
         a_v, b_v = old.get(key), new.get(key)
-        if a_v != b_v:
+        if a_v is None and b_v is None:
+            neither.append(label)
+        elif a_v != b_v:
             n_changes += 1
-            L.append(f"| {label} | {a_v} | {b_v} |")
+            L.append(f"| {label} | {shown(a_v)} | {shown(b_v)} |")
     if n_changes == 0:
-        L.append("| (settings) | — | identical settings; difference is data/environment only |")
+        L.append("| (settings) | — | none of the settings compared here differ"
+                 + ("" if same_raw else "; check the raw-file row") + " |")
+    if neither:
+        L += ["", f"_Not recorded in either session, so not compared: {', '.join(neither)}._"]
 
     # search-parameter text diff (mass tolerances etc.)
     if old["params_text"] and new["params_text"] and old["params_text"] != new["params_text"]:
@@ -723,7 +825,7 @@ def write_differences(prior_dir, new_dir):
               "run `compare_analyses.R` across the two sessions' `output/tables` dirs._"]
 
     out = os.path.join(new_dir, "DIFFERENCES.md")
-    with open(out, "w") as fh:
+    with open(out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(L) + "\n")
     return out
 

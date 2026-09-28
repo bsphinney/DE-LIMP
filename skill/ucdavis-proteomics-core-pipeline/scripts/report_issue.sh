@@ -107,9 +107,13 @@ if printf '%s' "$ALL" | grep -Eq -- '-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-
 fi
 
 # ---- context captured automatically, so the agent never has to remember it ----------
+# The skill version: a bash copy of skill_version.py (the one reader of plugin.json) -- on Windows
+# `python3` is often the Microsoft Store stub. tests/test_skill_version.py keeps the two equal.
 PLUGIN_JSON="$HERE/../.claude-plugin/plugin.json"
-VER="$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PLUGIN_JSON" 2>/dev/null | head -n1)"
-[ -n "$VER" ] || VER="unknown"
+VER_UNKNOWN="(unknown — plugin.json not found)"
+VER="$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$PLUGIN_JSON" 2>/dev/null | head -n1 | tr -d '[:space:]')"
+[ -n "$VER" ] || VER="$VER_UNKNOWN"
+if [ "$VER" = "$VER_UNKNOWN" ]; then VER_SHOWN="$VER"; else VER_SHOWN="v$VER"; fi
 LOCAL_USER="$(id -un 2>/dev/null || echo "${USERNAME:-${USER:-unknown}}")"
 WHO="${HIVE_USER:-$LOCAL_USER}"
 OS="$(uname -sr 2>/dev/null || echo unknown)"
@@ -136,7 +140,7 @@ trap 'rm -f "$ENTRY"' EXIT
   printf '%s\n' "$MARK"
   printf '\n## %s  [%s, %s]\n\n' "$TITLE" "$KIND" "$SEV"
   printf -- '- **When:** %s%s\n' "$NOW" "${STEP:+ -- step $STEP}"
-  printf -- '- **Skill:** v%s, mode %s\n' "$VER" "$MODE"
+  printf -- '- **Skill:** %s, mode %s\n' "$VER_SHOWN" "$MODE"
   printf -- '- **What happened:** %s\n' "$WHAT"
   printf -- '- **Impact:** %s\n' "$IMPACT"
   # `if`, not `[ ] &&`: a block's status is its last command's, and a false test there

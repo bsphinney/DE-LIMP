@@ -62,11 +62,13 @@ MAXLFQ = {"pipeline_id": "maxlfq", "display_label": "MaxLFQ + limma",
           "significance_rule": "adj.P.Val < adjp (BH); no fold-change filter",
           "design": "~ 0 + groups + Batch", "contrasts": ["Treated-Control"],
           "significant_per_contrast": {"Treated-Control": 3}}
+CORE_ONLY = ("Proteomics Core storage: only Core members can open it -- ask the Core for a copy "
+             "or for access")
 ROWS = [{"server": "128.120.208.24", "share": "proteomics",
          "hive": "/nfs/lssc0/flinders/proteomics", "mac": "/Volumes/proteomics",
-         "windows": "\\\\128.120.208.24\\proteomics"},
+         "windows": "\\\\128.120.208.24\\proteomics", "access": None},
         {"server": "*", "share": "proteomics-grp", "hive": "/quobyte/proteomics-grp",
-         "mac": "/Volumes/proteomics-grp", "windows": None}]
+         "mac": "/Volumes/proteomics-grp", "windows": None, "access": CORE_ONLY}]
 FLINDERS = "/nfs/lssc0/flinders/proteomics"
 
 
@@ -429,8 +431,14 @@ class Readme(unittest.TestCase):
             p = tdp.dia_session(d)
             write(os.path.join(p["output_dir"], "Analysis_Report.html"), "<html></html>")
             md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
-            self.assertIn("not made (no browser where the report was built)", md)
+            # why it was not made is MANIFEST.txt's to say (finalize), never assumed here
+            self.assertIn("`output/Analysis_Report.pdf` — not made: open `Analysis_Report.html`, "
+                          "Print, Save as PDF", md)
+            self.assertNotIn("no browser", md)
             self.assertNotIn("(output/Analysis_Report.pdf)", md)
+            write(p["manifest_txt"], "[INFO]    Report PDF (output/Analysis_Report.pdf) -- x\n")
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            self.assertIn("not made (the \"Report PDF\" line of `MANIFEST.txt` says why)", md)
             write(os.path.join(p["output_dir"], "Analysis_Report.pdf"), "%PDF-1.4")
             write(os.path.join(p["output_dir"], "Analysis_Report.md"), "# twin")
             f = session_docs.gather(p["session_dir"])
@@ -438,7 +446,7 @@ class Readme(unittest.TestCase):
             self.assertIn("[Analysis report (PDF)](output/Analysis_Report.pdf)", md)
             self.assertIn("[Analysis report (plain text)](output/Analysis_Report.md)", md)
             self.assertIn("for NotebookLM or other AI notebooks", md)
-            self.assertNotIn("not made (no browser", md)
+            self.assertNotIn("— not made", md)
             agents = session_docs.agents_md(f)
             self.assertIn("`output/Analysis_Report.md`", agents)
             self.assertIn("`output/Analysis_Report.pdf`", agents)
@@ -501,6 +509,52 @@ class Finalize(unittest.TestCase):
                 base = os.path.basename(p["session_dir"])
                 self.assertIn(reg, z.read(f"{base}/README.html").decode())
 
+    def test_a_raw_list_that_cannot_be_written_keeps_the_readme(self):
+        """ensure_raw_list() failing used to set session_docs = None: README.html and AGENTS.md
+        were lost, and MANIFEST.txt blamed session_docs.py for it."""
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            with mock.patch.object(session_docs, "ensure_raw_list",
+                                   side_effect=OSError("disk full")):
+                res = self.run_finalize(p)
+            self.assertEqual(res["zip_docs"], "added")
+            for n in ("README.html", "AGENTS.md"):
+                self.assertGreater(os.path.getsize(os.path.join(p["session_dir"], n)), 0, n)
+            man = read(p["manifest_txt"])
+            self.assertRegex(man, r"\[SKIPPED\] input/raw_files\.txt .*-- OSError: disk full")
+            self.assertNotIn("could not be loaded", man)
+            self.assertRegex(man, r"\[OK\]\s+README\.html")
+
+    def test_a_readme_that_cannot_render_is_neither_empty_nor_zipped(self):
+        """README.html was opened, then rendered: a failed render left a 0-byte file, and the zip
+        took anything that existed."""
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            html = os.path.join(p["session_dir"], "README.html")
+            base = os.path.basename(p["session_dir"])
+            broke = mock.patch.object(session_docs, "_render_html",
+                                      side_effect=RuntimeError("renderer broke"))
+            with broke:
+                res = self.run_finalize(p)
+            self.assertFalse(os.path.exists(html), "a failed render left a file behind")
+            self.assertFalse(os.path.exists(html + ".part"))
+            with zipfile.ZipFile(res["zip"]) as z:
+                names = z.namelist()
+            self.assertNotIn(f"{base}/README.html", names)
+            for n in ("README.md", "AGENTS.md"):
+                self.assertIn(f"{base}/{n}", names)
+            self.assertIn("README.html", res["zip_docs"])
+            man = read(p["manifest_txt"])
+            self.assertRegex(man, r"\[SKIPPED\] README\.html .*RuntimeError: renderer broke")
+            self.assertRegex(man, r"\[SKIPPED\] README / AGENTS\.md in the zip")
+            # an older README.html stays whole on disk, and is not zipped as this finalize's
+            write(html, "<html>older</html>")
+            with broke:
+                res = self.run_finalize(p)
+            self.assertEqual(read(html), "<html>older</html>")
+            with zipfile.ZipFile(res["zip"]) as z:
+                self.assertNotIn(f"{base}/README.html", z.namelist())
+
     def test_docs_subcommand_as_a_copy(self):
         with tempfile.TemporaryDirectory() as d:
             p = tdp.dia_session(d)
@@ -513,6 +567,53 @@ class Finalize(unittest.TestCase):
             self.assertIn(f"`{FLINDERS}/Data/lab/service/x/2026-09-24_demo`", md)
             self.assertFalse(os.path.exists(p["manifest_txt"]), "docs must not write MANIFEST")
             self.assertNotIn("[MANIFEST.txt]", md)
+
+
+class WhereEverythingIs(unittest.TestCase):
+    def test_the_tables_a_reader_needs_are_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            values = "precursors observed for the protein in that run; 0 = value inferred"
+            de = dict(DPC, detection_matrix={"file": "Detection_Matrix.csv", "values": values},
+                      contaminants={"policy": "removed", "tag": "Cont_",
+                                    "removed_table": "contaminants_removed.csv"})
+            write(os.path.join(p["de_dir"], "de_provenance.json"), json.dumps(de))
+            for n in ("Detection_Matrix.csv", "QC_detected_vs_inferred.csv",
+                      "contaminants_removed.csv"):
+                write(os.path.join(p["de_dir"], n), "Protein.Group\n")
+            write(os.path.join(p["output_dir"], "AUDIT.md"), "**Overall: PASS**\n")
+            write(os.path.join(p["output_dir"], "AUDIT.json"), "{}")
+            write(os.path.join(p["output_dir"], "SAMPLE_QUALITY.md"), "# Sample quality\n")
+            md = session_docs.readme_md(session_docs.gather(p["session_dir"]))
+            where = md.split("## Where everything is")[1].split("\n## ")[0]
+            for rel in ("output/tables/Detection_Matrix.csv",
+                        "output/tables/QC_detected_vs_inferred.csv",
+                        "output/tables/contaminants_removed.csv", "output/AUDIT.md",
+                        "output/SAMPLE_QUALITY.md"):
+                self.assertIn(f"| `{rel}` |", where)
+            self.assertIn(values, where)                         # the record's own words
+            self.assertIn("`output/AUDIT.md` | the pitfall audit: PASS / WARN / FAIL per check "
+                          "(and `.json` beside it)", where)
+            self.assertNotIn("SAMPLE_QUALITY.md` | sample quality and contamination flags (and",
+                             where)
+
+    def test_core_storage_says_ask_the_core_not_the_flinders_server(self):
+        """Bio review S6: a raw folder on /quobyte/proteomics-grp read as if a collaborator
+        could open it with smb://128.120.208.24 -- which is Flinders."""
+        f = {"locations": [
+            dict(share_map.locate("/quobyte/proteomics-grp/raw/P1", ROWS), what="Raw data"),
+            dict(share_map.locate(FLINDERS + "/Data/x", ROWS), what="Search output")]}
+        t = session_docs.locations_table(f)
+        raw = next(ln for ln in t.splitlines() if ln.startswith("| Raw data"))
+        self.assertIn(CORE_ONLY, raw)                           # the Windows cell
+        self.assertIn("`/Volumes/proteomics-grp/raw/P1` (Core members)", raw)
+        self.assertIn("`smb://128.120.208.24/proteomics` for paths under `/Volumes/proteomics`",
+                      t)
+        self.assertIn(f"Paths under `/quobyte/proteomics-grp` (`/Volumes/proteomics-grp`): "
+                      f"{CORE_ONLY}.", t)
+        flinders_only = session_docs.locations_table({"locations": f["locations"][1:]})
+        self.assertNotIn("Core storage", flinders_only)
+        self.assertNotIn("Core members", flinders_only)
 
 
 class RegistryLocate(unittest.TestCase):

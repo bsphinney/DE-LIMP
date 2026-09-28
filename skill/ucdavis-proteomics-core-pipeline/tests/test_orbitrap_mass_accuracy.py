@@ -602,6 +602,9 @@ class RoutingTests(unittest.TestCase):
             self.assertIn("mass accuracy", prov["resolved_params_note"])
 
 
+@unittest.skipUnless(os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.dirname(HERE))), "CHANGELOG.md")),
+    "no repo-root CHANGELOG.md: the skill installed on its own does not ship it")
 class ChangelogTests(unittest.TestCase):
     """A one-flag mass-accuracy override on an instrument with no table value for the other level
     used to produce a cfg and now exits non-zero. That is the right call -- written alone the flag

@@ -22,12 +22,17 @@ CATALOG = [
     (r"^report\.tsv$", "Search output", "DIA-NN precursor report (tab-separated)."),
     (r"^report\.stats\.tsv$", "Search output", "DIA-NN per-run summary stats (IDs, proteins, precursors)."),
     (r"^report\.log\.txt$|.*\.log$", "Search output", "Search-engine run log (parameters, timing, warnings)."),
-    (r".*\.speclib$|.*lib\.parquet$|.*\.predicted\.speclib$", "Search output",
-     "Spectral library generated/used during the library-free search."),
+    (r".*\.predicted\.speclib$", "Search output",
+     "DIA-NN's in-silico predicted spectral library (from the FASTA). Left out of the session "
+     "zip: the FASTA, the pinned engine and the parameters rebuild it exactly."),
+    (r".*\.speclib$|.*lib\.parquet$", "Search output",
+     "Spectral library generated/used during the search."),
     (r"^lfq\.parquet$|^results\.sage\.parquet$", "Search output", "Sage output (LFQ intensities / PSMs)."),
     (r"^combined_protein\.tsv$", "Search output", "FragPipe/IonQuant protein-level MaxLFQ table."),
     (r"^search_provenance\.json$", "Search output", "Exact search engine, version, and command used (reproducibility)."),
 
+    (r"^qc_pvalue_panel\.png$", "Figures",
+     "QC panel: the p-value distribution of each contrast."),
     (r".*\.png$", "Figures", "Publication-quality figure (volcano / PCA / heatmap / QC) embedded in the analysis report."),
     (r"^figures\.json$", "Figures", "Figure manifest: each figure's file, type, and caption."),
 
@@ -40,7 +45,27 @@ CATALOG = [
     (r"^de_provenance\.json$", "Differential expression",
      "Machine-readable DE record: method, design, contrasts, thresholds, per-contrast significant counts, package versions."),
     (r"^Expression_Matrix\.csv$", "Differential expression",
-     "Log2 protein expression per sample (proteins × runs), the matrix DE was run on."),
+     "Log2 protein expression per sample (proteins × runs), the matrix DE was run on. With DPC "
+     "every cell has a value, measured or inferred -- Detection_Matrix.csv says which."),
+    (r"^Detection_Matrix\.csv$", "Differential expression",
+     "Which values of Expression_Matrix.csv were measured and which inferred, per protein and "
+     "sample (same rows and columns). What a 0 means is recorded in de_provenance.json "
+     "`detection_matrix` (DPC: precursors observed, 0 = inferred by the model)."),
+    (r"^QC_detected_vs_inferred\.csv$", "Differential expression",
+     "Per sample: proteins detected (at least one precursor observed) vs inferred by the DPC "
+     "model, as counts and percentages -- the real depth of each run."),
+    (r"^QC_contaminant_share\.csv$", "Differential expression",
+     "Per run: the contaminants' share of the signal -- Contaminant.Pct, the "
+     "contaminant and total intensity, and the intensity column used."),
+    (r"^contaminants_removed\.csv$", "Differential expression",
+     "The contaminant protein groups removed before quantification. A real protein that sat "
+     "in the database only as a contaminant entry is listed here, not in the DE tables."),
+    (r"^DE-LIMP_session\.rds$", "Differential expression",
+     "The analysis as a DE-LIMP session: load it in the DE-LIMP app "
+     "(https://delimp.stan-proteomics.org/) to explore the results interactively."),
+    (r"^sample_labels\.csv$", "Figures",
+     "The short sample names the figures use, and the run file each one stands for "
+     "(File.Name, Label, Source)."),
     (r"^reproducibility_log\.R$", "Differential expression",
      "THE ANALYSIS AS PLAIN R — the whole DE written out top to bottom with every value "
      "literal (report path, FDR cutoff, sample→group map, design, contrasts). Read it to "
@@ -48,10 +73,13 @@ CATALOG = [
      "using only R and limpa/limma — no conda, no skill install."),
 
     (r"^run_manifest\.json$", "Reproducibility bundle",
-     "The master record — registry commit, engine + versions, all parameters, environment, input/output checksums."),
+     "The master record — skill version and search-defaults version, engine + versions, all "
+     "parameters, environment, input/output checksums."),
     (r"^REPRODUCE\.md$", "Reproducibility bundle", "Human-readable methods + step-by-step how to re-run."),
     (r"^reproduce\.sh$", "Reproducibility bundle",
-     "Runnable script that rebuilds the env, re-fetches the pinned workflow, and re-runs search + DE."),
+     "Runnable script that rebuilds the env, re-derives the search defaults from the data "
+     "type (they ship with the skill -- nothing is fetched), re-resolves the pinned engine, "
+     "rebuilds the FASTA and re-runs search + DE."),
     (r"^MANIFEST\.txt$", "Reproducibility bundle",
      "Capture log: [OK]/[SKIPPED] for each artifact, so you can trust what the bundle contains."),
     (r"^conda-explicit\.txt$", "Reproducibility bundle", "Fully pinned conda environment lock (URL + md5 per package)."),
@@ -66,7 +94,7 @@ CATALOG = [
     (r"^conditions\.csv$", "Inputs",
      "Experimental design: File.Name → Group (+ optional Batch/Covariates) used in the DE model."),
     (r".*\.fasta$|.*\.fa$", "Inputs", "Protein sequence database used for the search (proteome + contaminants)."),
-    (r"^workflow\.manifest\.json$", "Inputs", "The validated workflow that drove the run (engine, version, FASTA spec, DE method, pinned registry commit)."),
+    (r"^workflow\.manifest\.json$", "Inputs", "The search defaults that drove the run, derived from the data type (engine, version, FASTA spec, DE method, the skill's defaults version)."),
     (r".*\.cfg$|^sage_config.*\.json$|.*\.workflow$|^params\..*$", "Inputs", "Engine search parameters actually used (estimated from the data type, or a validated SOP config)."),
     (r"^commands\.log$", "Inputs", "Verbatim log of every command the run executed (audit trail)."),
 
@@ -107,10 +135,40 @@ CATALOG = [
      "What the ASR heard in the podcast audio (for verify.txt)."),
     (r"^raw_files\.txt$", "Inputs",
      "Where the raw data files are (full paths); raw data is never copied into the session."),
+    (r"^submission\.json$", "Inputs",
+     "The CoreOmics submission this analysis answers (submission_report.py): the sample sheet, "
+     "who prepared the samples, the description as written. Contacts and billing are left out."),
+    (r"^samples\.tsv$", "Inputs",
+     "The submission's sample sheet as a table, for people to read (submission.json is the record)."),
+    (r"^session\.json$", "Inputs",
+     "Which CoreOmics submission this session answers (its id and link)."),
+
+    (r"^AUDIT\.(md|json)$", "Analysis report",
+     "The pitfall audit (audit_results.py): PASS / WARN / FAIL per check -- replication, "
+     "confounding, contamination, DE signal. Read every WARN and FAIL before the results."),
+    (r"^SAMPLE_QUALITY\.(md|json)$", "Analysis report",
+     "Sample quality and contamination flags per sample (sample_quality.py): hemolysis, muscle, "
+     "skin, contaminant-identical proteins."),
+    (r"^DIFFERENCES\.md$", "Analysis report",
+     "What this re-analysis changed from the original: settings, database, significant counts."),
+
+    (r"^HOW_TO_SUBMIT\.(md|html)$", "Data deposit (PRIDE / MassIVE)",
+     "START HERE to deposit the data: the steps for PRIDE (or MassIVE), what to upload and "
+     "what to fill in first."),
+    (r"^sdrf\.tsv$", "Data deposit (PRIDE / MassIVE)",
+     "SDRF-Proteomics sample metadata for the deposit. Fill every TO-FILL cell first."),
+    (r"^protocols\.txt$", "Data deposit (PRIDE / MassIVE)",
+     "The sample- and data-processing protocols to paste into the submission form."),
+    (r"^files_to_upload\.tsv$", "Data deposit (PRIDE / MassIVE)",
+     "Every file to upload: its PRIDE file type, where it is, and what to do to it first."),
+    (r"^prepare_upload\.sbatch$", "Data deposit (PRIDE / MassIVE)",
+     "A SLURM job (not run by the skill) that archives each .d run and checksums the upload."),
+    (r"^methods_complete_draft\.md$", "Analysis report",
+     "A complete Methods draft, written beside a hand-edited methods.md that lacks a section."),
 ]
 
-CATEGORY_ORDER = ["Analysis report", "Differential expression", "Search output",
-                  "Reproducibility bundle", "Inputs", "Other"]
+CATEGORY_ORDER = ["Analysis report", "Differential expression", "Figures", "Search output",
+                  "Reproducibility bundle", "Inputs", "Data deposit (PRIDE / MassIVE)", "Other"]
 
 
 def human(n):
@@ -201,7 +259,9 @@ def main():
     lines = ["# Output files — what each one is", "",
              f"This run produced {len(rows)} file(s). Each is described below, grouped by purpose.", ""]
     n_unknown = 0
-    for cat in CATEGORY_ORDER:
+    # every category that has files, the known ones in order: a category missing from the order
+    # (Figures was) must never drop its files from the catalog
+    for cat in CATEGORY_ORDER + sorted(set(by_cat) - set(CATEGORY_ORDER)):
         items = by_cat.get(cat)
         if not items:
             continue
@@ -230,7 +290,7 @@ def main():
                  "*search* too (pinned engine, environment lock, checksums).")
     lines.append("")
 
-    with open(a.out, "w") as fh:
+    with open(a.out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
     print(json.dumps({"report": os.path.abspath(a.out), "n_files": len(rows),

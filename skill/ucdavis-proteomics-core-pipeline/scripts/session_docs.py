@@ -32,11 +32,11 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-from session import paths_for, read_raw_list      # noqa: E402  the session layout, one place
+from session import paths_for, read_raw_list, params_file, NOT_RECORDED  # noqa: E402  one place
 import share_map                                    # noqa: E402
 import make_podcast                                 # noqa: E402  the optional audio discussion
+from fetch_fasta import CONT_TAG                    # noqa: E402  the contaminant tag, one place
 
-NOT_RECORDED = "not recorded"
 RAW_HEADER = "# Raw MS files used in this analysis (not copied — too large)."
 
 # DE_*.csv / Expression_Matrix.csv columns. Sources: limma's topTable() (logFC ... B), limpa's
@@ -294,7 +294,9 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     q = rm.get("query") or {}
     f = {"p": p, "name": os.path.basename(sd), "de": de, "sp": sp, "wf": wf, "fm": fm}
     rel = lambda path: os.path.relpath(path, sd).replace(os.sep, "/")
-    has = lambda path: os.path.exists(path)
+    # a 0-byte file (a write that died) is not linked as if it held the thing it is named for
+    has = lambda path: os.path.isdir(path) or (os.path.isfile(path) and
+                                                os.path.getsize(path) > 0)
 
     # --- the study
     f["submission"] = submission_line(p)
@@ -361,10 +363,7 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
         "output_files": p["output_files_md"], "manifest": p["manifest_txt"],
         "conditions": p["conditions"], "raw_list": p["raw_list"], "fasta_meta": p["fasta_meta"],
         "search_prov": p["search_prov"], "report": os.path.join(p["search_out"], "report.parquet"),
-        "params": next((x for x in (os.path.join(p["search_out"], "params.resolved.cfg"),
-                                    os.path.join(p["workflow_dir"], "params.cfg"),
-                                    os.path.join(p["workflow_dir"], "params.json"))
-                        if has(x)), None),
+        "params": params_file(p),
         "figures_json": os.path.join(p["figures_dir"], "figures.json"),
         "audit": os.path.join(out, "AUDIT.md"),
         "quality": os.path.join(out, "SAMPLE_QUALITY.md"),
@@ -445,23 +444,32 @@ def _esc(s):
 def locations_table(f):
     rows = []
     for r in f["locations"]:
+        acc = r.get("access")               # hive_shares.tsv: who can open that share
         hive = f"`{r['hive']}`" if r.get("hive") else NOT_RECORDED
-        win = f"`{r['windows']}`" if r.get("windows") else ("—" if not r.get("hive") else
-                                                             NOT_RECORDED)
-        mac = f"`{r['mac']}`" if r.get("mac") else ("—" if not r.get("hive") else NOT_RECORDED)
+        win = (f"`{r['windows']}`" if r.get("windows") else acc if acc else
+               "—" if not r.get("hive") else NOT_RECORDED)
+        mac = (f"`{r['mac']}`" + (" (Core members)" if acc else "") if r.get("mac") else
+               "—" if not r.get("hive") else NOT_RECORDED)
         how = r.get("how") or ""
         rows.append(f"| {_esc(r['what'])} | {_esc(hive)} | {_esc(win)} | {_esc(mac)} | "
                     f"{_esc(how)} |")
-    smb = [f"`smb://{t['server']}/{t['share']}`" for t in share_map.load_table()
+    table = share_map.load_table()
+    # Connect to Server only for a share with a known server, and said for its own Mac paths:
+    # smb://128.120.208.24/proteomics is Flinders, and does not reach /Volumes/proteomics-grp.
+    smb = [f"`smb://{t['server']}/{t['share']}` for paths under `{t['mac']}`" for t in table
            if t["server"] and t["server"] != "*" and t["mac"]]
+    used = {r.get("access") for r in f["locations"] if r.get("access")}
+    limited = [f"Paths under `{t['hive']}`" + (f" (`{t['mac']}`)" if t["mac"] else "")
+               + f": {t['access']}." for t in table if t["access"] in used]
     return "\n".join(
         ["| What | On HIVE | Windows | Mac | How it was found |", "|---|---|---|---|---|", *rows,
          "", "> [!NOTE]", "> To browse there: on **Windows**, paste the Windows path into File Explorer's "
              "address bar (a PC that maps the share to a drive letter, e.g. `R:`, has the same "
              "folders below that letter). On a **Mac**, Finder → Go → Connect to Server"
-         + (f" ({', '.join(smb)})" if smb else "") + ", then open the Mac path. On **HIVE**, "
-         "`cd` to the HIVE path. \"not recorded\" means the session's records do not say — it is "
-         "never filled with a guess. Raw data is not copied into this folder."])
+         + (f" ({'; '.join(smb)})" if smb else "") + ", then open the Mac path. On **HIVE**, "
+         "`cd` to the HIVE path. " + "".join(x + " " for x in limited)
+         + "\"not recorded\" means the session's records do not say — it is never filled with a "
+           "guess. Raw data is not copied into this folder."])
 
 
 def summary_lines(f):
@@ -486,6 +494,22 @@ def summary_lines(f):
     if f["groups"]:
         L.append("- Groups: " + ", ".join(f"{g} ({n})" for g, n in sorted(f["groups"].items())))
     return L
+
+
+def _named_tables(f):
+    """(files key, what it is) for the tables and records the README names one by one -- each
+    in its own record's words where it has them (de_provenance.json)."""
+    dm = f["de"].get("detection_matrix") if isinstance(f["de"].get("detection_matrix"),
+                                                         dict) else {}
+    both = lambda k: " (and `.json` beside it)" if os.path.isfile(
+        os.path.splitext(f["files"].get(k) or "")[0] + ".json") else ""
+    return (("det_matrix", "which values were measured and which inferred, per protein and "
+                           "sample" + (f": {dm['values']}" if dm.get("values") else "")),
+            ("qc_di", "per sample: proteins detected (at least one precursor observed) vs "
+                      "inferred by the model"),
+            ("cont_removed", "the contaminant protein groups removed before the DE"),
+            ("audit", "the pitfall audit: PASS / WARN / FAIL per check" + both("audit")),
+            ("quality", "sample quality and contamination flags" + both("quality")))
 
 
 def readme_md(f, for_html=False):
@@ -519,8 +543,11 @@ def readme_md(f, for_html=False):
         if link:
             start.append(f"- {link}{what}")
     if files.get("report_html") and not files.get("report_pdf"):
-        start.append("- `output/Analysis_Report.pdf` — not made (no browser where the report was "
-                     "built): open `Analysis_Report.html`, Print, Save as PDF")
+        # why is MANIFEST.txt's "Report PDF" line (finalize, html_to_pdf.py) -- not assumed here
+        start.append("- `output/Analysis_Report.pdf` — not made"
+                     + (" (the \"Report PDF\" line of `MANIFEST.txt` says why)"
+                        if files.get("manifest") else "")
+                     + ": open `Analysis_Report.html`, Print, Save as PDF")
     if not files.get("agents"):
         start.append("- `AGENTS.md` — for an AI assistant: give it this file with the folder")
     item = (make_podcast.readme_item_md(f["p"]["output_dir"], f["p"]["session_dir"])
@@ -550,6 +577,9 @@ def readme_md(f, for_html=False):
             ("scripts", "the skill scripts that ran"), ("logs", "commands.log + engine logs")):
         if os.path.exists(os.path.join(f["p"]["session_dir"], path)):
             L.append(f"| `{path}` | {what} |")
+        if path == "output/tables":                  # the files a reader needs by name
+            L += [f"| `{f['rel'](files[k])}` | {_esc(what)} |" for k, what in _named_tables(f)
+                  if files.get(k)]
     L += ["", "## Reproduce", ""]
     L.append("**The analysis, as code:** `output/tables/reproducibility_log.R` — the whole "
              "differential-expression analysis in plain R with every value written out."
@@ -687,7 +717,7 @@ def agents_md(f):
     if files.get("qc_di"):
         pct = []
         try:
-            with open(files["qc_di"], newline="") as fh:
+            with open(files["qc_di"], newline="", encoding="utf-8") as fh:
                 pct = [float(r["PctInferred"]) for r in csv.DictReader(fh)
                        if r.get("PctInferred") not in (None, "", "NA")]
         except (OSError, ValueError, KeyError):
@@ -713,8 +743,8 @@ def agents_md(f):
         de_step = _de_contaminants(de) if de else None
         L.append(f"- **Contaminants:** {db}"
                  + (f"{de_step} " if de_step else "")
-                 + ("A `Cont_` protein in the DE tables is contamination, not biology. "
-                    if cont.get("policy") == "kept" or (de and not cont) else "")
+                 + (f"A `{tag or CONT_TAG}` protein in the DE tables is contamination, not "
+                    "biology. " if cont.get("policy") == "kept" or (de and not cont) else "")
                  + "A protein you expect but cannot find may be listed under a contaminant "
                    "entry.")
         if cont.get("database_risk") is True and cont.get("database_note"):
@@ -796,6 +826,19 @@ def _render_html(md, title):
     return make_deposit.md_to_html(md, title, semantic=True)
 
 
+def _write_whole(path, text):
+    """`text` into `path` whole or not at all: <path>.part, then os.replace (scratch_files.py
+    keeps a stray .part out of the zip and the catalog)."""
+    part = path + ".part"
+    try:
+        with open(part, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(part, path)
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
+
+
 def write_docs(session_dir, man=None, registry=None, registry_note=None, pending=(),
                located_at=None):
     """README.md, README.html and AGENTS.md at the session root. Each is its own [OK]/[SKIPPED]
@@ -812,21 +855,21 @@ def write_docs(session_dir, man=None, registry=None, registry_note=None, pending
     f = gather(session_dir, registry, registry_note, pending, located_at)
     sd = f["p"]["session_dir"]
 
+    # Each document is rendered to a string first, then written to <name>.part and renamed over
+    # the old one: a render that fails leaves the previous file whole (or none) -- never the
+    # 0-byte README.html that an open-then-render left, and zipped, before.
     def _md():
-        with open(f["p"]["readme"], "w", encoding="utf-8") as fh:
-            fh.write(readme_md(f))
+        _write_whole(f["p"]["readme"], readme_md(f))
         written["readme"] = f["p"]["readme"]
 
     def _html():
         path = os.path.join(sd, "README.html")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(_render_html(readme_md(f, for_html=True), f["name"]))
+        _write_whole(path, _render_html(readme_md(f, for_html=True), f["name"]))
         written["readme_html"] = path
 
     def _agents():
         path = os.path.join(sd, "AGENTS.md")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(agents_md(f))
+        _write_whole(path, agents_md(f))
         written["agents"] = path
 
     # AGENTS.md first, so the README's link to it is to a file that exists

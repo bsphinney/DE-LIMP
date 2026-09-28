@@ -42,6 +42,7 @@ import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shl
 
 # one definition each, where it is written
 from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sidecar_state
+from skill_version import skill_version, plugin_meta, label as skill_label
 
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
@@ -217,11 +218,10 @@ def main():
     open(os.path.join(env_dir, "versions.txt"), "w").write(json.dumps(versions, indent=2)); ok("tool versions")
 
     # ---- which skill produced this + how it was installed --------------------
-    skill_meta = load_json(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        "..", ".claude-plugin", "plugin.json")) or {}
+    skill_meta = plugin_meta()
     skill_info = {
         "name": skill_meta.get("name", "ucdavis-proteomics-core-pipeline"),
-        "version": skill_meta.get("version", "unknown"),
+        "version": skill_version(),                 # skill_version.py: the one reader
         "title": "UC Davis Proteomics Core pipeline",
         "repository": skill_meta.get("repository", "https://github.com/bsphinney/DE-LIMP"),
         "marketplace": "ucdavis-proteomics-core",
@@ -230,13 +230,14 @@ def main():
             "claude plugin install ucdavis-proteomics-core-pipeline",
         ],
     }
-    open(os.path.join(env_dir, "skill.txt"), "w").write(
+    open(os.path.join(env_dir, "skill.txt"), "w", encoding="utf-8").write(
         "Produced by the {title} Claude skill.\n\n"
-        "Skill:       {name} v{version}\n"
+        "Skill:       {name} {shown}\n"
         "Repository:  {repository}\n"
         "Marketplace: {marketplace}\n\n"
         "Installed with:\n  {i0}\n  {i1}\n".format(
-            i0=skill_info["install"][0], i1=skill_info["install"][1], **skill_info)); ok("skill identity + install")
+            i0=skill_info["install"][0], i1=skill_info["install"][1],
+            shown=skill_label(skill_info["version"]), **skill_info)); ok("skill identity + install")
 
     # ---- copy inputs ---------------------------------------------------------
     in_dir = os.path.join(out, "inputs")
@@ -517,7 +518,7 @@ make input drift visible.
 
 {r_section}
 ## Skill that produced this
-- **{skill_info['title']}** — `{skill_info['name']}` v{skill_info['version']}
+- **{skill_info['title']}** — `{skill_info['name']}` {skill_label(skill_info['version'])}
 - Repository: {skill_info['repository']}
 - This analysis was run by the above Claude skill (in Claude Code / Claude Desktop).
 - Installed with:
@@ -557,7 +558,7 @@ search. If you only want the statistics, use the R script above.
 ## Capture log
 See `MANIFEST.txt` for exactly what was and wasn't captured.
 """
-    open(os.path.join(out, "REPRODUCE.md"), "w").write(md); ok("REPRODUCE.md")
+    open(os.path.join(out, "REPRODUCE.md"), "w", encoding="utf-8").write(md); ok("REPRODUCE.md")
 
     open(os.path.join(out, "MANIFEST.txt"), "w").write(
         "Reproducibility bundle — capture log\n" + "=" * 40 + "\n" + "\n".join(MANIFEST_LINES) + "\n")

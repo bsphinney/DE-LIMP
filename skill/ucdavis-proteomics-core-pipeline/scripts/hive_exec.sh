@@ -15,6 +15,11 @@
 #     bash hive_exec.sh --put  ./local/path   '~/remote/path'
 #     bash hive_exec.sh --get  '~/remote/path' ./local/path
 #
+#   Put the skill on HIVE -- once, and again after every skill update:
+#     bash hive_exec.sh --put-skill
+#   = scripts/ AND .claude-plugin/ into ~/proteomics-pipeline/. plugin.json is where every
+#   HIVE-side record reads the skill version (skill_version.py); scripts/ alone reads "unknown".
+#
 #   Calls share one SSH connection for 10 minutes (ControlMaster); HIVE_SSH_MUX=0 disables.
 #
 #   --put refuses a source that is already on HIVE (a mapped drive or SMB mount of a
@@ -105,7 +110,7 @@ winpath() {
   printf '%s\n' "$1"
 }
 
-usage() { echo "usage: hive_exec.sh '<command>' | --put <local> <remote> | --get <remote> <local>" >&2; exit 2; }
+usage() { echo "usage: hive_exec.sh '<command>' | --put <local> <remote> | --get <remote> <local> | --put-skill" >&2; exit 2; }
 
 # gabrig 2026-09-23: T:\Data\lab\service\... went up by scp (7.1 GB, ~20 min) although T: is
 # the Flinders share HIVE mounts at /nfs/lssc0/flinders/proteomics. hive_path.sh makes no
@@ -175,6 +180,16 @@ scp_get() {
 }
 
 case "${1:-}" in
+  # The skill's scripts/ and .claude-plugin/ (the version) side by side, as in the skill itself.
+  --put-skill) [ $# -eq 1 ] || usage
+         root="$(cd "$HERE/.." && pwd)"
+         [ -f "$root/.claude-plugin/plugin.json" ] || {
+           echo "hive_exec.sh: no .claude-plugin/plugin.json beside $HERE -- run this from the" >&2
+           echo "installed skill, whose version it records." >&2; exit 2; }
+         for d in scripts .claude-plugin; do
+           bash "$HERE/hive_exec.sh" --put "$root/$d" '~/proteomics-pipeline/' || exit
+         done
+         echo "put $root/scripts and $root/.claude-plugin into ~/proteomics-pipeline/ on HIVE" ;;
   --put) [ $# -eq 3 ] || usage; shift; put_guard "$1"; src="$(winpath "$1")"
          if command -v rsync >/dev/null 2>&1; then rsync -e "$RSYNC_E" -a "$src" "$HU@$HOST:$2"
          else scp_put "$src" "$2"; fi ;;
