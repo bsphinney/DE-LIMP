@@ -1035,8 +1035,8 @@ def sample_prep_lines(rec, sr):
            else f"submission {sr.label(rec)}, details given by the user")
     if who == "lab":
         # "peptides" only when the form's proteins/peptides answer says so.
-        lines = [f"Samples were prepared by the submitting laboratory and provided to the UC Davis "
-                 f"Proteomics Core" + (" as peptides ready for LC-MS/MS" if sr.sent_as_peptides(rec)
+        lines = ["Samples were prepared by the submitting laboratory and provided to the UC Davis "
+                 "Proteomics Core" + (" as peptides ready for LC-MS/MS" if sr.sent_as_peptides(rec)
                                        else "") + f" ({src})."]
         # One line, no stray "*": the note must stay ONE italic line, which make_deposit drops
         # from the PRIDE protocol -- a multi-line quote would leak into it.
