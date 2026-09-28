@@ -40,7 +40,10 @@ from bruker_tdf import connect_tdf  # noqa: E402
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
-# Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06).
+# Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06). The page
+# names only the timsTOF Pro 2 for the HHMI acknowledgment; Brett confirmed on 2026-09-25 that it
+# covers the timsTOF HT too. The filename prefixes (FL*.raw, Ex*.raw) are only a fallback for
+# .raw files whose instrument nothing names -- never for a .d (pick_ack).
 ACKS = [
     (("fusion lumos", "lumos"), ("FL",), "Thermo Orbitrap Fusion Lumos",
      "Mass spectrometry was performed at the UC Davis Proteomics Core on an "
@@ -127,14 +130,36 @@ def detect(files):
     return metas
 
 
+def prefix_instrument(files):
+    """The instrument the facility's Thermo filename prefix implies, when EVERY file is a .raw
+    carrying the same entry's prefix; otherwise None. Never for a .d: a timsTOF run renamed
+    FLAG_IP_1.d or Exp3_HeLa.d is not a Fusion Lumos or an Exploris run."""
+    raws = [os.path.basename(f.rstrip("/")) for f in files]
+    if not raws or not all(b.lower().endswith(".raw") for b in raws):
+        return None
+    for subs, prefixes, label, _ in ACKS:
+        if prefixes and all(any(b.startswith(p) for p in prefixes) for b in raws):
+            return label
+    return None
+
+
 def pick_ack(instrument, files):
+    """The acknowledgment for the instrument NAME, matched across every registry entry first. The
+    Thermo filename prefix is only a fallback for .raw files whose instrument nothing names -- a
+    real timsTOF HT run renamed FLAG_IP_1.d once got the Fusion Lumos S10 grant."""
+    missing = (None, f"[Instrument not in the UC Davis acknowledgment registry — check "
+                     f"{ACK_SOURCE} and insert the correct instrument-grant acknowledgment.]")
     instr = (instrument or "").lower()
-    bn = [os.path.basename(f) for f in files]
-    for subs, prefixes, label, text in ACKS:
-        if any(s in instr for s in subs) or any(b.startswith(p) for b in bn for p in prefixes):
+    if instr:
+        for subs, _prefixes, label, text in ACKS:
+            if any(s in instr for s in subs):
+                return label, text
+        return missing               # a named instrument the registry lacks: no filename guess
+    guess = prefix_instrument(files)
+    for _subs, _prefixes, label, text in ACKS:
+        if label == guess:
             return label, text
-    return None, (f"[Instrument not in the UC Davis acknowledgment registry — "
-                  f"check {ACK_SOURCE} and insert the correct instrument-grant acknowledgment.]")
+    return missing
 
 
 def main():

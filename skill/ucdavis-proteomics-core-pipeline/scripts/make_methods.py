@@ -45,10 +45,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # analysis.tdf (and every other sqlite file in a .d) is opened read-only AND immutable -- see
 # bruker_tdf.py for how a read-write open truncates a tdf (the state of 342 on HIVE).
 import bruker_method  # noqa: E402
+from fetch_fasta import CONT_TAG  # noqa: E402  the contaminant tag: one definition (rule 3)
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
-# Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06).
+# Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06). The page
+# names only the timsTOF Pro 2 for the HHMI acknowledgment; Brett confirmed on 2026-09-25 that it
+# covers the timsTOF HT too, so every timsTOF gets it.
+# The filename prefixes are the facility's Thermo naming (FL*.raw, Ex*.raw) and are only a
+# fallback for a .raw whose instrument no record names -- never for a .d (pick_ack).
 ACKS = [
     (("fusion lumos", "lumos"), ("FL",), "Thermo Orbitrap Fusion Lumos",
      "Mass spectrometry was performed at the UC Davis Proteomics Core on an "
@@ -69,6 +74,9 @@ ACKS = [
 LC_COLUMN_DEFAULT = ("PepSep MAX C18 column (10 cm × 150 µm i.d., 1.5 µm particles; "
                      "Bruker PepSep, part no. 1893483)")
 EMITTER_DEFAULT = "a 20 µm-bore CaptiveSpray emitter (Bruker)"
+# STAN config/columns.yml `defaults.oven_c` (oven_c_source: operator-reported, read off the
+# timsTOF HT's Bruker Column Toaster on 2026-09-02). Not recorded per run, so always DEF-tagged.
+COLUMN_TEMP_DEFAULT = "50 °C"
 DEF = "[facility default — confirm]"
 # A value this script could not find in any record of the run. Printed in place of the value,
 # never replaced by a plausible default (DE-LIMP rule #2).
@@ -77,6 +85,11 @@ NOT_RECORDED = f"____ {NR_TAG}"
 # Evosep loads every sample from an Evotip; the tip type and the amount on it are the Core's
 # bench record, not the instrument's.
 EVOTIP_TAG = "[Evotip type, loading protocol and peptide amount — confirm]"
+# The ddaPASEF precursor-selection settings are in the .d's method, but this script does not
+# read them: say so, rather than "not recorded".
+DDA_TAG = "[not extracted by this script — take from the MS method; confirm]"
+# A .d that could not be read: its values are unknown here, not unrecorded.
+UNREADABLE_TAG = "[raw file not readable here — confirm]"
 
 ENGINE_LABEL = {"diann": "DIA-NN", "sage": "Sage", "fragpipe": "FragPipe",
                 "radiant": "Radiant", "alphadia": "AlphaDIA"}
@@ -244,6 +257,12 @@ def _with_tag(text, tag):
     return f"{text} {tag}" if tag else text
 
 
+def _source_name(name):
+    """The ion source as Methods write it: timsTOF files name code 11 "Captive Spray", Bruker's
+    product is "CaptiveSpray" -- one spelling in the prose (the table keeps the file's)."""
+    return re.sub(r"(?i)\bcaptive\s+spray\b", "CaptiveSpray", name or "")
+
+
 def lc_paragraph(rep, col, is_bruker, lc_known):
     """The Liquid chromatography paragraph: LC system and method as the .d recorded them,
     the column from column_record(), and tagged placeholders for what no file records."""
@@ -258,7 +277,7 @@ def lc_paragraph(rep, col, is_bruker, lc_known):
                    f"CaptiveSpray source with {EMITTER_DEFAULT} {DEF}. " if is_bruker else
                    f"The column was interfaced to the mass spectrometer by a nanospray source "
                    f"{DEF}. ")
-                + f"The LC system and gradient were [LC system / gradient — confirm] {DEF}.")
+                + f"The LC system and gradient were [LC system / gradient — confirm] {NR_TAG}.")
     system = rep["lc_system"] + (f" LC system ({rep['lc_vendor']})" if rep.get("lc_vendor")
                                  else " LC system")
     meth = rep.get("lc_method") or rep.get("lc_method_name")
@@ -271,9 +290,10 @@ def lc_paragraph(rep, col, is_bruker, lc_known):
          "Peptides were analysed")
     s += f" on {'an' if system[0] in 'AEIOU' else 'a'} {system} coupled online to a " \
          f"{rep.get('instrument') or NOT_RECORDED} mass spectrometer (Bruker Daltonics)"
-    s += (f" via a {rep['source_type']} ion source." if rep.get("source_type") and is_bruker
-          else ".")
-    s += f" Peptides were separated on {column}, at a column temperature of ____ °C {NR_TAG},"
+    s += (f" via a {_source_name(rep['source_type'])} ion source."
+          if rep.get("source_type") and is_bruker else ".")
+    temp = f"{COLUMN_TEMP_DEFAULT} {DEF}" if is_bruker else f"____ °C {NR_TAG}"
+    s += f" Peptides were separated on {column}, at a column temperature of {temp},"
     spd = re.search(r"(\d+)\s*samples?\s*per\s*day", meth or "", re.I)
     s += (f" with the {meth} ({spd.group(1)} SPD) method{run}." if spd else
           f" with the '{meth}' method{run}." if meth else
@@ -345,6 +365,9 @@ def ms_paragraph(rep, v, coupled=False):
             area.append(f"1/K₀ {_r(s['im_lo'])}–{_r(s['im_hi'])} V·s/cm²")
         out.append(cyc + ("," if cyc.startswith("Each") else "") + place
                    + (f" across {' and '.join(area)}" if area else "") + ".")
+    if rep.get("mode") == "ddaPASEF":
+        out.append("Precursor selection (PASEF ramps per cycle, target intensity, charge and "
+                   f"mobility filters, dynamic exclusion) was ____ {DDA_TAG}.")
     if rep.get("cycle_s"):
         out.append(f"The cycle time was {rep['cycle_s']:.2f} s.")
     ramp_ce, chk = rep.get("ce_ramp"), rep.get("ce_check") or {}
@@ -371,7 +394,8 @@ def ms_paragraph(rep, v, coupled=False):
                                    ("dry_temp", "a dry temperature of")) if rep.get(key)]
         joined = (", ".join(bits[:-1]) + " and " + bits[-1]) if len(bits) > 1 else \
             (bits[0] if bits else "")
-        out.append(f"The {rep['source_type']} source was fitted with {EMITTER_DEFAULT} {DEF}"
+        out.append(f"The {_source_name(rep['source_type'])} source was fitted with "
+                   f"{EMITTER_DEFAULT} {DEF}"
                    + (f" and operated at {joined}" if joined else "") + ".")
     ctrl = rep.get("ms_control") or rep.get("control_software")
     if ctrl or rep.get("acquisition_software_version"):
@@ -387,15 +411,26 @@ def ms_paragraph(rep, v, coupled=False):
 
 
 def thermo_meta(f):
-    """Thermo .raw: identify by facility filename prefix (FL*, Ex*) — the model is
-    not reliably readable without a vendor reader."""
+    """Thermo .raw: the model is not readable here without a vendor reader. The facility
+    filename prefix (FL*, Ex*) is kept as a GUESS, apart from `instrument`: a session record
+    (--instrument, read from the file by detect_acquisition.py) outranks it, and a .raw from
+    elsewhere named FLAG_... must not become a Fusion Lumos run."""
     base = os.path.basename(f)
-    m = {"vendor": "Thermo", "file": base, "mode": None}
+    return {"vendor": "Thermo", "file": base, "mode": None,
+            "prefix_instrument": prefix_instrument([f])}
+
+
+def prefix_instrument(files):
+    """The instrument the facility's Thermo filename prefix implies, when EVERY file is a .raw
+    carrying the same entry's prefix; otherwise None. Never for a .d: a timsTOF run renamed
+    FLAG_IP_1.d or Exp3_HeLa.d is not a Fusion Lumos or an Exploris run."""
+    raws = [os.path.basename(f.rstrip("/")) for f in files]
+    if not raws or not all(b.lower().endswith(".raw") for b in raws):
+        return None
     for subs, prefixes, label, _ in ACKS:
-        if any(base.startswith(p) for p in prefixes):
-            m["instrument"] = label
-            break
-    return m
+        if prefixes and all(any(b.startswith(p) for p in prefixes) for b in raws):
+            return label
+    return None
 
 
 def detect(files):
@@ -413,20 +448,29 @@ def detect(files):
 
 
 def pick_ack(instrument, files):
+    """The acknowledgment for the instrument NAME, matched across every registry entry first. The
+    Thermo filename prefix is only a fallback for .raw files whose instrument nothing names -- a
+    real timsTOF HT run renamed FLAG_IP_1.d once got the Fusion Lumos S10 grant."""
+    missing = (None, f"[Instrument not in the UC Davis acknowledgment registry — check "
+                     f"{ACK_SOURCE} and insert the correct instrument-grant acknowledgment.]")
     instr = (instrument or "").lower()
-    bn = [os.path.basename(f) for f in files]
-    for subs, prefixes, label, text in ACKS:
-        if any(s in instr for s in subs) or any(b.startswith(p) for b in bn for p in prefixes):
+    if instr:
+        for subs, _prefixes, label, text in ACKS:
+            if any(s in instr for s in subs):
+                return label, text
+        return missing               # a named instrument the registry lacks: no filename guess
+    guess = prefix_instrument(files)
+    for _subs, _prefixes, label, text in ACKS:
+        if label == guess:
             return label, text
-    return None, (f"[Instrument not in the UC Davis acknowledgment registry — "
-                  f"check {ACK_SOURCE} and insert the correct instrument-grant acknowledgment.]")
+    return missing
 
 
 def _load_json(path):
     if not path or not os.path.isfile(path):
         return None
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError):
         return None
@@ -773,7 +817,7 @@ def de_contaminant_sentence(prov):
         return (f"Contaminant handling in the differential-expression step: {NOT_RECORDED} "
                 f"(this DE record predates it; run_de.R versions that did not record it did not "
                 f"remove contaminants).")
-    tag = c.get("tag") or "Cont_"
+    tag = c.get("tag") or CONT_TAG
     fmt = lambda k: f"{c.get(k):,}" if isinstance(c.get(k), int) else "____"  # noqa: E731
     policy = c.get("policy")
     if policy == "removed":
@@ -991,8 +1035,8 @@ def sample_prep_lines(rec, sr):
            else f"submission {sr.label(rec)}, details given by the user")
     if who == "lab":
         # "peptides" only when the form's proteins/peptides answer says so.
-        lines = [f"Samples were prepared by the submitting laboratory and provided to the UC Davis "
-                 f"Proteomics Core" + (" as peptides ready for LC-MS/MS" if sr.sent_as_peptides(rec)
+        lines = ["Samples were prepared by the submitting laboratory and provided to the UC Davis "
+                 "Proteomics Core" + (" as peptides ready for LC-MS/MS" if sr.sent_as_peptides(rec)
                                        else "") + f" ({src})."]
         # One line, no stray "*": the note must stay ONE italic line, which make_deposit drops
         # from the PRIDE protocol -- a multi-line quote would leak into it.
@@ -1005,6 +1049,20 @@ def sample_prep_lines(rec, sr):
         return [f"Samples were prepared by the UC Davis Proteomics Core ({src}); protocol: "
                 f"{NOT_RECORDED}."]
     return [f"Who prepared the samples is not recorded: {why} ({src}). {NOT_RECORDED}"]
+
+
+def _write_text(path, text):
+    """UTF-8 whatever the platform's locale ("1/K₀" and "—" fail under Windows cp1252), and
+    atomic: written to <path>.part and renamed, so a failure never leaves a 0-byte methods.md."""
+    part = path + ".part"
+    try:
+        with open(part, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(part, path)
+    except BaseException:
+        if os.path.exists(part):
+            os.remove(part)
+        raise
 
 
 def main():
@@ -1035,7 +1093,8 @@ def main():
     fmeta = None
     if a.fasta_meta:
         try:
-            fmeta = json.load(open(a.fasta_meta))
+            with open(a.fasta_meta, encoding="utf-8") as fh:
+                fmeta = json.load(fh)
         except (OSError, json.JSONDecodeError) as e:
             sys.exit(f"--fasta-meta could not be read: {e}")
 
@@ -1043,11 +1102,27 @@ def main():
     for p in a.raw:
         files.extend(sorted(glob.glob(p)) or [p])
     metas = detect(files)
-    for m in metas:
-        m.setdefault("instrument_source", "GlobalMetadata InstrumentName" if m.get("vendor") ==
-                     "Bruker" else "facility filename prefix")
     rec_instr = (a.instrument or "").strip() or None
     rec_src = "session record (workflow manifest) — not read from the raw file"
+    for m in metas:
+        if m.get("vendor") == "Bruker":
+            m.setdefault("instrument_source", "GlobalMetadata InstrumentName")
+        elif m.get("vendor") == "Thermo" and not m.get("instrument"):
+            # a recorded instrument outranks the facility filename prefix, which is a guess
+            if rec_instr:
+                m["instrument"], m["instrument_source"] = rec_instr, rec_src
+            elif m.get("prefix_instrument"):
+                m["instrument"] = m["prefix_instrument"]
+                m["instrument_source"] = "facility filename prefix (a guess — confirm)"
+    # A .d that could not be read says so -- on stderr, in the note under Mass spectrometry,
+    # and in the tag on its blank values -- rather than passing for an unrecorded value.
+    problems = []
+    for m in metas:
+        for msg in ([f"could not be read ({m['error']})"] if m.get("error") else []) + \
+                [f"read with warnings ({w})" for w in m.get("warnings") or []]:
+            problems.append(f"{m.get('file')} {msg}")
+            print(f"make_methods: {m.get('file')} {msg}", file=sys.stderr)
+    unreadable = [m for m in metas if m.get("error")]
     from_record = False
     if not metas and rec_instr:
         # The raw files cannot be read from here (e.g. a session finalized away from the data).
@@ -1067,7 +1142,8 @@ def main():
                  "(and --acquisition) from the session record to write the Methods anyway.")
 
     # representative metadata (facility usually acquires a series identically)
-    bru = [m for m in metas if m.get("vendor") == "Bruker" and m.get("instrument")]
+    bru = [m for m in metas if m.get("vendor") == "Bruker" and m.get("instrument")
+           and not m.get("error")]
     rep = bru[0] if bru else metas[0]
     if not rep.get("instrument") and rec_instr:
         rep = dict(rep, instrument=rec_instr, instrument_source=rec_src)
@@ -1083,15 +1159,15 @@ def main():
     col = column_record(a.lc_column, metas if not from_record else (), a.column_log,
                         a.column_log_instrument, ser["acquired_first"], ser["acquired_last"])
 
-    json.dump({"files": [m.get("file") for m in metas], "representative": rep,
-               "instrument": instrument, "acknowledgment_for": ack_label, "all": metas,
-               "from_session_record": from_record, "acquisition": a.acquisition,
-               "series": ser, "column": col, "search": srec},
-              open(os.path.splitext(a.out)[0] + "_params.json", "w"), indent=2)
+    _write_text(os.path.splitext(a.out)[0] + "_params.json", json.dumps(
+        {"files": [m.get("file") for m in metas], "representative": rep,
+         "instrument": instrument, "acknowledgment_for": ack_label, "all": metas,
+         "from_session_record": from_record, "acquisition": a.acquisition,
+         "series": ser, "column": col, "search": srec, "read_problems": problems}, indent=2))
 
-    # A blank acquisition value is a facility default to confirm when the raw file was read, but
-    # simply unknown when it could not be -- it must not then be labelled a facility default.
-    blank_tag = "[raw file not readable here — confirm]" if from_record else DEF
+    # A blank acquisition value is one no record holds -- never a facility default (rule 2) --
+    # or, when the representative raw file could not be read, simply unknown from here.
+    blank_tag = UNREADABLE_TAG if (from_record or rep.get("error")) else NR_TAG
 
     def v(x, unit="", default=None):
         if x is None:
@@ -1106,16 +1182,18 @@ def main():
     if from_record:
         w(f"*Generated by the UC Davis Proteomics Core pipeline skill from the session record: "
           f"the {len(metas)} raw file(s) could not be read from where this was run, so the "
-          f"acquisition values below are blank and tagged, and the instrument and acquisition "
-          f"mode come from the workflow manifest. Values marked {DEF} are facility defaults to "
-          f"confirm; values marked {NOT_RECORDED} were not in any record. Re-run "
+          f"acquisition values below are blank and tagged {UNREADABLE_TAG}, and the instrument "
+          f"and acquisition mode come from the workflow manifest. Values marked {DEF} are "
+          f"facility defaults to confirm; values marked {NR_TAG} were not in any record. Re-run "
           f"make_methods.py where the raw files are readable to fill them in.*")
     else:
+        n_bad = len(unreadable)
         w(f"*Generated by the UC Davis Proteomics Core pipeline skill from the raw data "
-          f"({len(metas)} file(s)). Values marked {DEF} are facility defaults to confirm; "
-          "all other values were extracted from the raw acquisition metadata"
-          + (" and the search and analysis records" if (srec.get("engine") or de_prov)
-             else "") + ".*")
+          f"({len(metas)} file(s)"
+          + (f"; {n_bad} could not be read — see the note under Mass spectrometry" if n_bad
+             else "") + f"). Values marked {DEF} are facility defaults to confirm and values "
+          f"marked {NR_TAG} were not in any record; every other value is listed with its "
+          "source in the parameter tables below.*")
     w("")
     if a.submission:
         import submission_report
@@ -1138,13 +1216,17 @@ def main():
     else:
         acq = (a.acquisition or "").upper()
         mode = (f"{acq} mode (as detected from the data in step 2)" if acq in ("DIA", "DDA")
-                else f"[DDA/DIA — confirm] mode {DEF}")
-        w(f"Mass spectra were acquired on a {v(rep.get('instrument'), default='[instrument]')} mass "
+                else f"[DDA/DIA — confirm] mode {NR_TAG}")
+        # "Thermo Orbitrap ... (Thermo Fisher Scientific)" names the vendor twice
+        thermo_name = v(re.sub(r"^Thermo\s+", "", rep.get("instrument") or "") or None,
+                        default="[instrument]")
+        art = "an" if thermo_name[:1] in "AEIOU" else "a"
+        w(f"Mass spectra were acquired on {art} {thermo_name} mass "
           f"spectrometer (Thermo Fisher Scientific) operated in {mode}. "
           "Full acquisition parameters (resolution, AGC, isolation width, NCE, gradient) should be "
-          f"taken from the instrument method file {DEF}.")
+          f"taken from the instrument method file {NR_TAG}.")
     notes = [f"the runs differ in {k} ({', '.join(vals)})"
-             for k, vals in ser["differences"].items()] + col["warnings"]
+             for k, vals in ser["differences"].items()] + col["warnings"] + problems
     if notes:
         w("")
         w("> One paragraph cannot describe every run as it stands — resolve before publication: "
@@ -1164,7 +1246,7 @@ def main():
             "full": "all entries including unreviewed (TrEMBL)",
             "full_isoforms": "all entries including unreviewed (TrEMBL) and splice isoforms",
         }.get(fmeta.get("content_used"))
-        rel = f"release {rel}" if (rel := fmeta.get("uniprot_release")) else f"release ____ {DEF}"
+        rel = f"release {rel}" if (rel := fmeta.get("uniprot_release")) else f"release ____ {NR_TAG}"
         n_p = fmeta.get("n_proteome")
         n_p = f"{n_p:,}" if isinstance(n_p, int) else "____"
         # Only call it a *reference* proteome when UniProt says it is one: a strain
@@ -1184,20 +1266,20 @@ def main():
                     f"{fmeta.get('organism') or '____'} {kind} "
                     f"({fmeta.get('proteome') or '____'}{tax}; copy dated "
                     f"{(staged.get('mtime_utc') or '')[:10] or '____'}, "
-                    f"release ____ {DEF}), comprising {n_p} sequences")
+                    f"release ____ {NR_TAG}), comprising {n_p} sequences")
             g = (fmeta.get("content_check") or {}).get("uniprot_gene_count")
             if fmeta.get("content_inferred") == "one_per_gene" and isinstance(g, int):
                 sent += (f"; the entry count is consistent with one canonical protein "
                          f"sequence per gene (inferred, not verified: UniProt lists "
                          f"{g:,} genes).")
             else:
-                sent += f". Database composition: ____ {DEF}."
+                sent += f". Database composition: ____ {NR_TAG}."
         elif content_phrase is None:
             # 'unknown' (--path) / 'as_staged' (--hive): we did not build this database,
             # so we cannot describe its composition. Leave it tagged for the user.
             sent = (f"Spectra were searched against a supplied sequence database "
                     f"({os.path.basename(fmeta.get('fasta', '') ) or '____'}; "
-                    f"{n_p} sequences). Database composition and version: ____ {DEF}.")
+                    f"{n_p} sequences). Database composition and version: ____ {NR_TAG}.")
         else:
             sent = (f"Spectra were searched against the UniProt "
                     f"{fmeta.get('organism') or '____'} {kind} "
@@ -1327,7 +1409,7 @@ def main():
     w(f"*Acknowledgment source: {ACK_SOURCE} (confirm the exact current wording before publishing).*")
     w("")
 
-    open(a.out, "w").write("\n".join(L) + "\n")
+    _write_text(a.out, "\n".join(L) + "\n")
     print(json.dumps({"methods": os.path.abspath(a.out), "instrument": instrument,
                       "acknowledgment_for": ack_label, "n_files": len(metas),
                       "params_json": os.path.splitext(a.out)[0] + "_params.json",
