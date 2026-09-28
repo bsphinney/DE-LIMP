@@ -14,7 +14,7 @@ path is resolved, first match wins:
      which share it is (net use / mount, no ssh); the table then says where HIVE mounts it
 A share that is not in the table is "not recorded" -- never hive_path.sh's unverified guess.
 
-  python3 share_map.py <path>     # prints {"hive", "how", "windows", "mac"}
+  python3 share_map.py <path>     # prints {"path", "hive", "how", "windows", "mac", "access"}
 """
 import json
 import os
@@ -40,15 +40,16 @@ QUOBYTE_SERVICE = ("SERVICE",)
 
 
 def load_table(path=TABLE):
-    """[{server, share, hive, mac, windows}] -- `-` becomes None (not recorded)."""
+    """[{server, share, hive, mac, windows, access}] -- `-` becomes None (not recorded; for
+    `access`: nothing to add to the paths)."""
+    keys = ("server", "share", "hive", "mac", "windows", "access")
     rows = []
     with open(path, encoding="utf-8") as fh:
         for ln in fh:
             if not ln.strip() or ln.startswith("#"):
                 continue
-            f = (ln.rstrip("\r\n").split("\t") + [""] * 5)[:5]
-            rows.append({k: (v if v and v != "-" else None) for k, v in
-                         zip(("server", "share", "hive", "mac", "windows"), f)})
+            f = (ln.rstrip("\r\n").split("\t") + [""] * len(keys))[:len(keys)]
+            rows.append({k: (v if v and v != "-" else None) for k, v in zip(keys, f)})
     return rows
 
 
@@ -137,8 +138,9 @@ def hive_of(path, rows=None, resolver=_ask_hive_path_sh, here_is_hive=None):
 
 def views_of(hive, rows=None):
     """How a collaborator browses to a HIVE path: {"windows": UNC path or None, "mac": path or
-    None}. None where the table does not record that share's Windows/Mac name."""
-    out = {"windows": None, "mac": None}
+    None, "access": the table's note on who can open that share, or None}. None where the table
+    does not record that share's Windows/Mac name."""
+    out = {"windows": None, "mac": None, "access": None}
     if not hive:
         return out
     rows = load_table() if rows is None else rows
@@ -150,12 +152,13 @@ def views_of(hive, rows=None):
                 out["windows"] = _join(r["windows"], rest, sep="\\")
             if r["mac"]:
                 out["mac"] = _join(r["mac"], rest)
+            out["access"] = r.get("access")
             break
     return out
 
 
 def locate(path, rows=None, resolver=_ask_hive_path_sh, here_is_hive=None):
-    """{"path", "hive", "how", "windows", "mac"} for one path."""
+    """{"path", "hive", "how", "windows", "mac", "access"} for one path."""
     rows = load_table() if rows is None else rows
     h = hive_of(path, rows, resolver, here_is_hive)
     return dict({"path": path}, **h, **views_of(h["hive"], rows))

@@ -6,6 +6,8 @@
 #             HIVE mounts it at /nfs/lssc0/flinders/proteomics (hive_path.sh, gabrig 2026-09-23).
 #   Quobyte:  the Core's group dir; Macs mount the proteomics-grp share at /Volumes/proteomics-grp
 #             (docs/FILE_MANIFEST.md); its Windows server is not recorded here.
-#server	share	hive_path	mac_mount	windows_unc
-128.120.208.24	proteomics	/nfs/lssc0/flinders/proteomics	/Volumes/proteomics	\\128.120.208.24\proteomics
-*	proteomics-grp	/quobyte/proteomics-grp	/Volumes/proteomics-grp	-
+# access: who can open the share, for the README a collaborator reads; `-` = the paths as shown.
+#   proteomics-grp is the HIVE group of Core members, so a collaborator cannot browse to it.
+#server	share	hive_path	mac_mount	windows_unc	access
+128.120.208.24	proteomics	/nfs/lssc0/flinders/proteomics	/Volumes/proteomics	\\128.120.208.24\proteomics	-
+*	proteomics-grp	/quobyte/proteomics-grp	/Volumes/proteomics-grp	-	Proteomics Core storage: only Core members can open it -- ask the Core for a copy or for access

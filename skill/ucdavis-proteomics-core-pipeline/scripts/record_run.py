@@ -335,8 +335,21 @@ def fmt_bytes(n):
 
 
 def skill_version():
-    pj = load_json(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}
-    return pj.get("version")
+    """skill_version.py's reading -- the one reader of .claude-plugin/plugin.json. Piped to a
+    remote python (`python3 - ...`) there is no sibling to import, and nothing is guessed: None,
+    and the plan takes the laptop's version from --skill-version."""
+    try:
+        import skill_version as sv
+    except ImportError:
+        return None
+    return sv.skill_version()
+
+
+def _named_version(plan):
+    """The plan's skill version for "with skill X or later" -- "this version" when it is not a
+    number (not recorded, or skill_version.py's unknown tag)."""
+    v = str(plan.get("skill_version") or "")
+    return v if v[:1].isdigit() else "this version"
 
 
 def say(msg):
@@ -1667,7 +1680,7 @@ def plan_analysis(plan, session, a, zip_cap):
                                + ("; the FASTA is identified by its copied sidecar "
                                   "(input/<fasta>.meta.json: path + md5)" if fa["n"] else "")
                                + f". To shrink the original, re-run session.py finalize --zip "
-                                 f"with skill {plan.get('skill_version') or 'this version'} or "
+                                 f"with skill {_named_version(plan)} or "
                                  f"later, whose zip leaves out the .quant files and the "
                                  f"predicted library.")})
             if sv["kept_bytes"] > zip_cap:

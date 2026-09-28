@@ -46,7 +46,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from session import paths_for, read_raw_list      # noqa: E402  the session layout, one place
+from session import PREDICTED_SPECLIB, is_predicted_speclib   # noqa: E402  out of the zip
 import make_methods as mm                           # noqa: E402  search_record(): one reader
+from skill_version import skill_version, label     # noqa: E402  the one plugin.json reader
 
 TO_FILL = "TO-FILL"
 HASH_MAX_BYTES = 256 * 1024 ** 2        # hash session files inline only up to this size
@@ -175,7 +177,7 @@ class Manifest:
         return sum(1 for ln in self.lines if ln.startswith("[SKIPPED]"))
 
     def write(self, path, title):
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(f"{title}\n{'=' * len(title)}\n"
                      f"Written {datetime.datetime.now().isoformat(timespec='seconds')} by "
                      f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why; [INFO] = not produced, not a failure, and what to do instead.\n\n"
@@ -186,7 +188,7 @@ class Manifest:
 # ----------------------------------------------------------------------- session facts --
 def _load(path):
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError, TypeError):
         return None
@@ -215,7 +217,7 @@ def read_conditions(path):
     """conditions.csv (collect_conditions.py schema: File.Name,Group[,Batch,...]) -> rows."""
     if not path or not os.path.isfile(path):
         return None
-    with open(path, newline="") as fh:
+    with open(path, newline="", encoding="utf-8-sig") as fh:     # -sig: an Excel-saved BOM
         rows = list(csv.DictReader(fh))
     if not rows or "File.Name" not in rows[0]:
         return None
@@ -332,9 +334,11 @@ SEARCH_FILES = [
      "empirical library assembled from these runs (PRIDE: recommended)"),
     (r"(lib|library)[^/]*\.parquet$", "SPECTRUM_LIBRARY", "recommended",
      "spectral library (PRIDE: mandatory if a library search was performed)"),
+    (re.escape(PREDICTED_SPECLIB) + "$", "SPECTRUM_LIBRARY", "recommended",
+     "DIA-NN's in-silico predicted spectral library; can also be regenerated from the FASTA and "
+     "pinned DIA-NN version"),
     (r"\.speclib$", "SPECTRUM_LIBRARY", "recommended",
-     "predicted spectral library; can also be regenerated from the FASTA and pinned DIA-NN "
-     "version"),
+     "spectral library (PRIDE: mandatory if a library search was performed)"),
     (r"^params\.(resolved|base)\.cfg$", "OTHER", "recommended",
      "the DIA-NN parameters the search ran with"),
     (r"^search_provenance\.json$", "OTHER", "recommended",
@@ -409,8 +413,11 @@ def plan_uploads(f):
                 full = os.path.join(root, fn)
                 up = fn if root == search else safe_name(
                     os.path.relpath(root, search).replace(os.sep, "_") + "_" + fn)
+                rel = os.path.relpath(full, p["session_dir"])
                 add("copy", full, safe_name(up), *c,
-                    os.path.relpath(full, p["session_dir"]), _size(full))
+                    (f"no (left out of the session zip, which the FASTA and params rebuild it "
+                     f"from; on disk at {rel})") if is_predicted_speclib(fn) else rel,
+                    _size(full))
     if f["params"]:
         pb = os.path.basename(f["params"])
         add("copy", f["params"], safe_name(pb),
@@ -481,7 +488,7 @@ UPLOAD_COLS = ["upload_name", "pride_file_type", "massive_category", "requiremen
 
 def write_upload_list(out, rows):
     path = os.path.join(out, "files_to_upload.tsv")
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(UPLOAD_COLS)
         for r in rows:
@@ -599,8 +606,7 @@ def build_sdrf(f):
     cols += ["comment[sdrf template]"] * len(templates)
     cols += ["comment[sdrf annotation tool]", f"factor value[{TO_FILL}]"]
 
-    skill_ver = (_load(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}).get(
-        "version") or "0.0.0"
+    skill_ver = skill_version()
     rows, rep_n = [], {}
     for i, (path, base) in enumerate(items):
         if path:
@@ -624,7 +630,7 @@ def build_sdrf(f):
             row.append(ms1_range)
         row += ["1", "1", safe_name(base) if base else TO_FILL, SDRF_VERSION]
         row += [f"{t} {TEMPLATE_VERSION}" for t in templates]
-        row += [f"ucdavis-proteomics-core-pipeline v{skill_ver}", group or TO_FILL]
+        row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver)}", group or TO_FILL]
         rows.append(row)
         if path and not c and conds:
             notes.append(("factor value", TO_FILL, f"{base} has no row in conditions.csv"))
@@ -690,7 +696,7 @@ def build_sdrf(f):
              ("human" if human else "non-human: add the matching sample template (vertebrates, "
               "invertebrates or plants) and its required columns") + "; "
              + ("dia-acquisition implies ms-proteomics" if acq == "DIA" else "ms-proteomics")),
-            ("comment[sdrf annotation tool]", f"ucdavis-proteomics-core-pipeline v{skill_ver}",
+            ("comment[sdrf annotation tool]", f"ucdavis-proteomics-core-pipeline {label(skill_ver)}",
              "this skill"),
             (f"factor value[{TO_FILL}]", "conditions.csv Group" if conds else TO_FILL,
              "conditions.csv gives each run's group label (filled in) but not what variable "
@@ -706,7 +712,7 @@ def build_sdrf(f):
 def write_sdrf(f, out, info):
     cols, rows, sources, to_fill = build_sdrf(f)
     path = os.path.join(out, "sdrf.tsv")
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         fh.write("\t".join(cols) + "\n")
         for r in rows:
             fh.write("\t".join(r) + "\n")
@@ -824,8 +830,7 @@ def write_prep_script(f, out, rows):
     if bad:
         raise Skip(f"a path contains a tab/newline: {bad[0][1]!r}")
     qlines, qsrc = queue_lines()
-    skill_ver = (_load(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}).get(
-        "version") or "?"
+    skill_ver = skill_version()
     listing = "\n".join("\t".join(i) for i in items)
     script = f"""#!/bin/bash -l
 #SBATCH --job-name=deposit_prep
@@ -835,7 +840,7 @@ def write_prep_script(f, out, rows):
 #SBATCH --time=24:00:00
 {chr(10).join(qlines)}
 # prepare_upload.sbatch -- written by make_deposit.py (ucdavis-proteomics-core-pipeline
-# v{skill_ver}) on {datetime.date.today().isoformat()} for session {f['session']}.
+# {label(skill_ver)}) on {datetime.date.today().isoformat()} for session {f['session']}.
 # The skill did NOT run it. Submit it yourself when the SDRF is filled in:
 #
 #   sbatch {out}/prepare_upload.sbatch
@@ -932,7 +937,9 @@ echo "Globus submission (the PRIDE Submission Tool writes its own)."
 [ "$missing" -eq 0 ]
 """
     path = os.path.join(out, "prepare_upload.sbatch")
-    with open(path, "w") as fh:
+    # newline="\n": text mode on Windows writes CRLF, and sbatch refuses the script ("Batch script
+    # contains DOS line breaks").
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(script)
     os.chmod(path, 0o755)
     n_dir = sum(1 for i in items if i[0] == "dir")
@@ -1409,6 +1416,16 @@ def _run(cmd, what):
     return r
 
 
+def _has_text(path):
+    """A file with something in it. An empty methods.md (0 bytes or blank: a make_methods.py
+    that died after opening it) is no methods at all -- never a source, never "kept"."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return bool(fh.read().strip())
+    except OSError:
+        return False
+
+
 def ensure_methods(session_dir, man):
     """Make sure the session carries publication Methods (output/methods.md + .docx). A
     methods.md already there is never overwritten -- it may be hand-polished; if it lacks a
@@ -1421,7 +1438,10 @@ def ensure_methods(session_dir, man):
     def _md():
         need = required_sections(f)
         md = p["methods_md"]
-        if os.path.isfile(md):
+        was_empty = os.path.isfile(md) and not _has_text(md)
+        # An empty methods.md is missing, not "kept as written" -- nobody polished it, and with
+        # no required section known it used to pass as complete.
+        if os.path.isfile(md) and not was_empty:
             with open(md, encoding="utf-8") as fh:
                 have = md_sections(fh.read())
             missing = [s for s in need if s not in have]
@@ -1442,8 +1462,9 @@ def ensure_methods(session_dir, man):
         with open(md, encoding="utf-8") as fh:
             have = md_sections(fh.read())
         missing = [s for s in need if s not in have]
-        return "generated by make_methods.py" + (
-            f"; no record to write: {', '.join(missing)}" if missing else "")
+        return ("generated by make_methods.py" + (" (the methods.md there was empty)"
+                                                  if was_empty else "") + (
+            f"; no record to write: {', '.join(missing)}" if missing else ""))
 
     man.section("Publication methods (output/methods.md)", _md)
 
@@ -1452,7 +1473,8 @@ def ensure_methods(session_dir, man):
         if not src:
             raise Skip("no methods .md to convert (see the line above)")
         out = os.path.splitext(src)[0] + ".docx"
-        if os.path.isfile(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+        if os.path.isfile(out) and os.path.getsize(out) > 0 and \
+                os.path.getmtime(out) >= os.path.getmtime(src):      # a 0-byte .docx is missing
             return f"{os.path.basename(out)} up to date -- kept"
         _run([sys.executable, os.path.join(HERE, "to_docx.py"), "--in", src, "--out", out],
              "to_docx.py")
@@ -1500,7 +1522,7 @@ def build(session_dir, man, methods_md=None):
     man.section("Deposit: raw files in the upload plan", _raws)
     man.section("Deposit: sdrf.tsv (SDRF-Proteomics v1.1.0)", write_sdrf, f, out, sdrf)
     man.section("Deposit: protocols.txt", write_protocols, out, methods_md
-                or (f["p"]["methods_md"] if os.path.isfile(f["p"]["methods_md"]) else None),
+                or (f["p"]["methods_md"] if _has_text(f["p"]["methods_md"]) else None),
                 prot)
     man.section("Deposit: files_to_upload.tsv", _list)
     man.section("Deposit: prepare_upload.sbatch (written, not run)", _prep)
