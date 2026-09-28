@@ -37,7 +37,7 @@ A QC run (a HeLa series watching an instrument) is not a customer search, and FR
 out of the corpus, as it does STAN. FRAN's scanner can only recognise QC by path, and a drop
 entry has no QC path, so the skill decides. There is **one** definition,
 `fran_deposit.is_qc_run(out, session)`, used by `check`, `stage` and `backfill`. Its twin in
-FRAN is `ingest/find_uningested.py` `policy_exclusion` / `qc_reason` / `QC_NAME_RE`: change one,
+FRAN is `ingest/find_uningested.py` `qc_reason` / `name_qc_signal` and its regexes: change one,
 change the other. The precedence is FRAN's; the first match wins:
 
 1. **Explicit QC:** `stage --qc`, or `"qc": true` in the session's `session.json` (or
@@ -54,6 +54,19 @@ change the other. The precedence is FRAN's; the first match wins:
    `hela_qc_2` and `Exploris QC2`. It keeps `HeLa_digest_timecourse`, `aqc_buffer_study`,
    `QCM_study` and `Plasma_liver2`, the same pinned vectors as FRAN. "HeLa" alone is **not**
    QC.
+
+   The rule also catches the Core's **HeLa standard**: `HE50` / `HeL50` / `Hel-50` /
+   `HeLa50(ng)` beside a run-method token, `NN-spd` (Evosep, e.g. the timsTOF HT's
+   `07162026_HE50_60-spd-dia-_S1-A1`) or an `NNm` gradient (the Lumos's `FL030926_HeL50_90m_3`,
+   which carries no SPD). Neither token alone counts: `HeLa50ng_titration` is an experiment.
+
+   **A PROT_#### id overrides the name rule.** A name that trips it but also carries a Core
+   submission id (`PROT_0812 plasma + pooled QC`) is a customer study that mentions its pooled QC.
+   The reason is then `needs_agent_check`, not `qc_run`: `stage` refuses, records nothing, and
+   blocks nothing. Decide it and re-run `stage` with `--qc` or `--not-qc`. The id is read with
+   `core_submission.PROT_TOKEN`, the regex `identify` uses (PROT plus 3-5 digits, so PROT_10234
+   counts), in the names and in **every** folder of the out dir's path, not only the last three
+   the QC token is read on: a PROT id can only send the call to a person, never exclude a run.
 
 A QC run gets reason `qc_run`, with a `why` in FRAN's wording, e.g. `QC run: excluded by policy
 (search_name 'chkLUppm_HeLa50_2026 Lumos QC' matches QC_NAME_RE)`. The receipt records it. `--not-qc` corrects a
@@ -78,7 +91,10 @@ skips at ingest time. Nothing in the shared drop dir is deleted, and `verify` th
 
 - **A withdrawal sticks.** A `qc_run` receipt, or a staged manifest that says `qc: true`, means
   QC for every later `stage` until someone passes `--not-qc` explicitly. A plain `stage --out X`
-  used to re-stage a withdrawn run with `qc: false`, which FRAN honours.
+  used to re-stage a withdrawn run with `qc: false`, which FRAN honours. The exception is a verdict
+  the **name rule** reached: it is re-judged by today's rule, with the name it was judged on, so a
+  rule fix reaches a search it misjudged before. An explicit `--qc`, a session marker and an
+  excluded tree stay binding.
 - **A withdrawal that fails says so.** For example, the entry was staged by another account
   without group write. The result then starts `withdraw FAILED: <why>`, names the entry that is
   still staged, and never claims the run was kept out.
@@ -134,12 +150,19 @@ their real paths on 2026-09-08.) `health` is how this becomes visible from the s
 It is read-only and needs no credential. It reads what the cron itself writes
 (`/quobyte/proteomics-grp/de-limp/fran_refresh/logs/auto_ingest_<jobid>.out` and
 `auto_ingest_submit.log`), lists the drop dir, and compares FRAN's ingest code on HIVE with
-GitHub `main`:
+GitHub `main`.
+
+Each run's `===== done: ... — <time> =====` line is read **by name**: every `<n> <name>` field
+is kept, whatever FRAN adds, and a field it no longer prints is reported missing, never 0. On
+2026-09-26 FRAN appended `quarantined` and `backed-off`; the old positional reader matched none
+of the new lines and read 18 runs that ingested 46 searches as runs that died. A done line that
+still cannot be read is counted as unreadable (the run finished, in a format the skill does not
+know), never as a death, and the verdict says which logs it rests on:
 
 | part | answers | verdicts |
 |---|---|---|
-| `progress` | last run, last run that ingested anything, consecutive runs without an ingest, queue size, whether the cron is still submitting | `healthy` · `stuck` (≥ 3 runs in a row ingested nothing while work was queued; a run that died counts) · `not_running` (no run, or no submission, for > 12 h) · `unknown` |
-| `incoming` | each drop entry: age, who staged it and when, broken links, what the logs say (`ingested` / `failed` / `never_reached`), and whether it is a QC run not yet marked (`qc_unmarked`) | `starved` when an entry has gone unreached for > 48 h, even if the cron is ingesting *other* searches |
+| `progress` | last run, last run that ingested anything, consecutive runs without an ingest, queue size, whether the cron is still submitting, and how many logs end in a done line it could not read (`unreadable_done_lines`, `verdict_basis`) | `healthy` · `stuck` (≥ 3 runs in a row ingested nothing while work was queued; a run that died counts) · `not_running` (no run, or no submission, for > 12 h) · `unknown` (also when the newest logs are unreadable: never `stuck` from stale logs) |
+| `incoming` | each drop entry: age (from its manifest's `staged_at` only, never a modification time; without one the age is unknown and the entry is listed in `no_staged_at`), who staged it and when, broken links, what the logs say (`ingested` / `failed` / `never_reached`), and whether it is a QC run not yet marked (`qc_unmarked`) | `starved` when an entry has gone unreached for > 48 h by its `staged_at`, even if the cron is ingesting *other* searches; an entry of unknown age is never called starved |
 | `ingest_code` | each ingest file's md5 on HIVE vs `main`: `current`, `stale` (matches an older commit: *which one, from when*), `local_modification` (matches none of that file's recent commits), `missing`, `not_on_main`, `unknown` | `stale` if any file is stale or missing, or a file on FRAN's own refuse list (`corpus_ingest.py`, `spectronaut_to_corpus.py`, `diann_to_corpus.py`, `versions.py`) differs at all · `modified` · `current` |
 
 Overall `verdict`: `healthy` · `stuck` · `not_running` · `stale_code` · `unknown`, plus a one-line
@@ -214,7 +237,8 @@ sbatch ~/fran_backfill/fran_backfill_<stamp>.sbatch
 python3 ~/proteomics-pipeline/scripts/fran_deposit.py backfill --sbatch --apply
 ```
 
-- **Where it looks:** `/quobyte/proteomics-grp/SERVICE`, `/nfs/lssc0/flinders/proteomics/Data/lab/service`,
+- **Where it looks:** `/quobyte/proteomics-grp/SERVICE`, `/nfs/lssc0/flinders/proteomics/Data/lab/service`
+  (the Flinders path from `hive_shares.tsv` via `share_map.py`, as `core_submission.py` reads it),
   and `~/proteomics-pipeline` of each non-teaching `proteomics-grp` member (`--no-homes` to skip).
   `--roots` replaces the trees; `--list <file>` checks named out dirs instead (up to 10 are fine
   on a login node). Checkpoint sessions (`.recovery.json`) found on the way add the search out dir
@@ -357,6 +381,33 @@ search's manifest recorded the **human** database (seen in the drop dir, 2026-09
 A sidecar that itself records `organism: ""` (PROT_0793's human one does) gives no organism.
 That is honest, not a bug.
 
+**No sidecar at all: read the FASTA the search names** (`fasta_from_search`). A search whose
+FASTA has no sidecar (a hand-run DIA-NN, or `MRS/UP000005640_9606_plus_universal_contam.fasta`
+behind the Siegel searches) still says exactly which database it read: `fasta` in
+`search_provenance.json`, or `--fasta` in its `report.log.txt`. The log is read the way DIA-NN
+reads its own arguments (logged unquoted; a value runs to the next `--`), so a path with spaces,
+such as `Universal Protein Contaminants.fasta`, is kept whole. That file then supplies
+everything:
+
+- `fasta_path`, plus `fasta_md5` and `fasta_n_proteins` from fetch_fasta's own helpers, and
+  `fasta_source` saying where the path was named.
+- **Organism and taxon from the file's UniProt headers, never its name.** `OX=` is tallied over
+  the target entries (`Cont_`-tagged contaminants excluded). One taxon must hold at least 95% of
+  them; the name comes from that taxon's `OS=`. `organism_source` says so, e.g. `FASTA headers
+  (OX=9606 in <n> of <m> target entries) via search log --fasta (report.log.txt)`.
+  `organism_evidence` holds the tally, and records a proteome id found in the filename
+  (`UP000005640`) as supporting evidence only.
+- A FASTA whose appended contaminants are **not** `Cont_`-tagged (a hand-built one) counts them
+  as targets, and the majority still holds: over all 21,044 entries of the Sep-2025 MRS
+  human+contaminant file, OX=9606 is on 20,814 (98.9%). That file itself **does** tag its 381
+  contaminants `Cont_`; its defect is the 153 of them identical to human proteins (superseded by
+  `MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta`, docs/HPC_PATHS.md).
+- **Nothing is claimed when the file can't answer.** If no taxon reaches 95%, the headers carry
+  no `OX=`, the file isn't readable, or the search read two FASTAs, organism (and for the last
+  two, the database) stays blank, and `organism_unresolved` says why.
+- An explicit `--organism`/`--taxon` still wins. If it disagrees with the headers, that is
+  recorded as `organism_warning` and printed on stderr, never silently resolved.
+
 ## Why `check` refuses (stable codes, never an exception)
 
 | reason | meaning |
@@ -433,3 +484,8 @@ database lookup therefore asks under both names.
   out. The cost is disk: 27 GB for the 399-run cohort above. How long they are kept is the
   facility's retention decision, not the skill's.
 - **Local (non-HIVE) searches** have no drop directory to write to and are not handed over.
+
+Less-used flags: `health --no-code` skips the GitHub comparison of FRAN's ingest code (no
+network); `backfill --sbatch --sbatch-dir <dir>` (default `~/fran_backfill`) and
+`--sbatch-minutes <n>` (default: the time budget plus 10 min) set where the job script goes and
+its time limit.

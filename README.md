@@ -37,6 +37,28 @@ Give it `.raw`, `.d` or `.mzML` files and it takes them all the way to different
 
 You can also ask it for just one piece — *"re-run this search with the settings matched to the Spectronaut run"* — without wanting the full analysis.
 
+### New in skill 2.8.0
+
+- **One report you can open and share.** Every analysis produces a single self-contained `Analysis_Report.html`, the report of record, with every figure embedded. It comes with a PDF copy and a plain-text twin you can feed to NotebookLM. The session folder opens from `README.html`. An `AGENTS.md` explains every file to an AI assistant, including where the raw data, search and database live on the cluster.
+- **Listen to your results (optional).** You can have a two-host audio discussion of your results ("Signal to Noise": a biologist and a statistician). It covers what your data show, how your samples were measured, and how proteomics works, all using your own numbers.
+  - It is written from your report, and every number and protein name in it is checked against the report.
+  - After recording, the audio is transcribed back and compared with the script.
+  - A **Listen** card sits at the top of the report.
+  - Voices come from Google Gemini, or from offline Mac voices if you prefer.
+- **Paired designs handled properly.** `--block` models samples that come from the same animal or patient: as a fixed effect for simple before/after designs, and as a random effect when animals are nested within groups. It warns wherever a comparison can't be trusted.
+- **You can see what was actually measured.** Every results table now reports, for each group, how many runs detected each protein, and whether a hit was measured in both groups, partly estimated by the model, or is a presence-only call. Hits are ranked by significance, and model-estimated values are never presented as measurements.
+- **Figures built for small studies.** The top-protein plots show measured and model-estimated points differently, and join paired samples. The PCA circles each group. The p-value diagnostics move into one appendix panel.
+- **Real proteins are no longer lost as "contaminants".** The search database now drops contaminant entries that are identical, or nearly identical, to your organism's own proteins, such as bovine EEF1A1 against mouse. Actin, tubulin and similar proteins are therefore quantified. An older database gets an explicit warning that names the proteins affected.
+- **Methods written from the raw files.** LC–MS settings are read from the instrument's own files: the dia-PASEF window scheme, ion-mobility ramp, collision energy and source settings. They are written up in the order recent timsTOF papers use, and anything the files don't record is clearly marked for you to fill in.
+- **Sample-quality checks that respect your design.** Signal from blood, muscle, skin and contaminants is tested separately within animals and between animals. With only a few animals per group, you get a caution rather than a false alarm.
+- **For UC Davis Proteomics Core runs:**
+  - the CoreOmics submission (PI, organism, sample sheet, who prepared the samples) appears in every report;
+  - Bioshare deliveries include the report, methods, `README.html`, `AGENTS.md` and the audio discussion when there is one;
+  - finished searches are handed to the FRAN corpus automatically and recorded in a central registry.
+- **Simpler setup.** One setup script installs the toolchain (including limpa 1.4 from Bioconductor), checks it, and prints the exact fix if anything is wrong.
+
+The full list is in the [CHANGELOG](CHANGELOG.md).
+
 ### Install
 
 Requires [Claude Code](https://claude.com/claude-code). In a Claude Code session:
@@ -284,6 +306,14 @@ derived from your data type, then limpa/limma DE, and writes a biological analys
 report plus a full reproducibility bundle, all packaged into tidy session folders.
 It runs in **Claude Code** and **Claude Desktop**.
 
+- **One self-contained HTML report** (`Analysis_Report.html`) is the report of record — QC,
+  volcano plots, PCA and violins embedded, with a PDF copy and a plain-text twin for NotebookLM;
+  the session opens from `README.html`.
+- **Publication Methods** and a **PRIDE/MassIVE deposit package** in every session.
+- **UC Davis Proteomics Core runs** carry their CoreOmics submission (PI, organism, sample sheet,
+  who prepared the samples) in every report, and deliver to the collaborator's Bioshare folder.
+- **Optional audio discussion** of the results for the collaborator (AI-generated, on request).
+
 **Install (one time)** — in **Claude Code**:
 ```
 /plugin marketplace add bsphinney/DE-LIMP
@@ -301,8 +331,8 @@ first 3 are control, last 3 treated."* It asks only for what it can't detect
 (organism, conditions) and does the rest. First run installs its toolchain (a few
 minutes, one time).
 
-Source and docs: [`skill/ucdavis-proteomics-core-pipeline/`](skill/ucdavis-proteomics-core-pipeline). Validated
-search workflows live in [`workflows/`](workflows).
+Source and docs: [`skill/ucdavis-proteomics-core-pipeline/`](skill/ucdavis-proteomics-core-pipeline).
+Search parameters ship with the skill, so its version pins them.
 
 ---
 

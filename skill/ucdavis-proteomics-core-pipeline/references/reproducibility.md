@@ -49,8 +49,10 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
 
 1. **Parameters pinned by the skill version.** `resolve_defaults.py` derives them
    from the data type and they ship *with* the skill, so nothing is fetched at run
-   time and there is no moving branch to drift. `workflow.manifest.json.registry`
-   records `defaults_version`; record the skill version alongside it. Re-running the
+   time and there is no moving branch to drift. The skill version (`.claude-plugin/
+   plugin.json`) is recorded in `environment/skill.txt` and `run_manifest.json`'s `skill`;
+   `workflow.manifest.json.registry.defaults_version` is only the date of the defaults
+   table, not a version. Re-running the
    same skill version on the same data type reproduces the parameters exactly.
    (Before 2026-08-14 this came from a remote `workflows/` registry pinned by commit
    SHA. That registry is retired — old run records citing a SHA stay valid; see
@@ -84,8 +86,9 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
    in `run_manifest.json`; sha256 of the FASTA, the search report, and DE outputs.
    Raw files get a sha256 (or, for `.d` directories / >5 GB files, a structural
    fingerprint — name+size of every member) so input drift is detectable.
-5. **A runnable recipe.** `reproduce.sh` re-creates the env, re-fetches the pinned
-   workflow, re-resolves the engine, rebuilds the FASTA, and re-runs search + DE
+5. **A runnable recipe.** `reproduce.sh` re-creates the env, re-derives the search
+   defaults from the data type (`resolve_defaults.py` — they ship with the skill, nothing
+   is fetched), re-resolves the engine, rebuilds the FASTA, and re-runs search + DE
    with identical arguments. `REPRODUCE.md` is the human-readable version.
 
 ### The sequence database (`--fasta-info`)
@@ -100,11 +103,27 @@ any build warnings. **Always pass it as
 `provenance.py --fasta-info "$(cat search.fasta.meta.json)"`.**
 
 `reproduce.sh` then rebuilds the database from *what actually ran*, not from the
-workflow bundle's `fasta.uniprot_proteome`. This matters: the bundle holds the
-workflow **default**, but the user confirms the organism at step 3 and may have
-chosen a different one — regenerating from the bundle would reproduce a different
-database and quietly invalidate the comparison. Without `--fasta-info`,
-`reproduce.sh` falls back to the bundle and labels that step as not recorded.
+workflow manifest's (`input/wf/`) default. This matters: the manifest holds the
+**default**, but the user confirms the organism at step 3 and may have chosen a
+different one — regenerating from the default would reproduce a different database and
+quietly invalidate the comparison. Without `--fasta-info`, `reproduce.sh` falls back to
+the manifest and labels that step as not recorded.
+
+The rebuild replays the flags the original database was built with, from its sidecar
+(`fetch_fasta.sidecar_state()` is the one reading of which rules built it), so a replay
+reproduces THAT database rather than today's corrected one. `REPRODUCE.md`'s database note
+says which flag was added and why; drop the flag to get the current database instead:
+- **`--enzyme <list>`** — always passed: the digestion enzyme(s) recorded as
+  `digestion_enzymes_used` (they decide which protease contaminant entries stay `Cont_`
+  when they match a target). A sidecar from before the field existed replays the default,
+  `trypsin,lysc`.
+- **`--keep-target-contaminants`** — the database predates the removal of contaminant
+  entries identical to a target protein (bovine ACTB = human ACTB …; sidecar state
+  `legacy`), or was built with that flag. Without it the rebuild drops entries the original
+  searched (153 human `Cont_` entries in the universal set).
+- **`--min-unique-peptides 0`** — the database was built by the identity rule alone (state
+  `identity_only`), before near-identical contaminants (e.g. bovine EEF1A1 vs mouse) were
+  also removed. A recorded threshold other than the default is replayed as recorded.
 
 Re-running later uses the *current* UniProt release, so entry counts may drift by
 a few sequences. The recorded release and the FASTA sha256 in `checksums/` are
@@ -117,8 +136,6 @@ difference rather than hiding behind an unchanged sequence count.
 
 - **Log every command.** Append each command you execute (verbatim, full args) to
   `commands.log` and pass it via `--commands`. This is the audit trail.
-- **Pass the recorded commit SHA** to `pull --ref` and into `provenance.py` (it
-  reads it from the workflow manifest).
 - **Pass a timestamp** (`--timestamp "$(date -u +%FT%TZ)"`) — the scripts can't read
   the clock themselves.
 - **Check the bundle's `skipped` count.** If the conda lock, checksums, or
@@ -130,7 +147,7 @@ difference rather than hiding behind an unchanged sequence count.
 reproducibility/
 ├── run_manifest.json        # full machine-readable record (the master file)
 ├── REPRODUCE.md             # human-readable methods + how to re-run
-├── reproduce.sh             # re-creates env, re-fetches @commit, re-runs search+DE
+├── reproduce.sh             # re-creates env, re-derives the shipped defaults, re-runs search+DE
 ├── MANIFEST.txt             # [OK]/[SKIPPED] capture log — read this to trust the bundle
 ├── environment/
 │   ├── conda-explicit.txt   # fully pinned env lock (URL + md5 per package)

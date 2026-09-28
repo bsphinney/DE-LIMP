@@ -26,6 +26,10 @@
   paste0("'", x, "'")
 }
 .rnum <- function(x) format(x, scientific = FALSE, trim = TRUE)
+.hdr <- function(txt) {                    # "# --- txt ---...---" padded to 80 cols
+  base <- paste0("# --- ", txt, " ")
+  paste0(base, strrep("-", max(3, 80 - nchar(base))))
+}
 .rvec <- function(x) paste0("c(", paste(vapply(x, .rq, ""), collapse = ", "), ")")
 
 # A named map, one entry per line, in DE-LIMP's reproducibility-log style.
@@ -51,6 +55,12 @@ write_repro_script <- function(path,
                                adjp_thr, logfc_ref,
                                ann_cols = character(0),   # Genes / Protein.Names, if present
                                descriptor = NULL,
+                               # run_de.R's contaminant record (contaminants.R). NULL = the
+                               # run applied no contaminant filter, so none is emitted.
+                               contaminants = NULL,
+                               # readDIANN annotation.columns the dpc run used (limpa's
+                               # defaults + the accession column the filter reads).
+                               dpc_annotation_columns = NULL,
                                timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
                                # TRUE only when this is being generated for a run that
                                # predates the feature, from that run's recorded provenance
@@ -64,6 +74,14 @@ write_repro_script <- function(path,
 
   is_dpc  <- identical(method, "dpc")
   rpt_abs <- normalizePath(input, mustWork = FALSE)
+  # The contaminant step, emitted from the record so the script removes exactly what the
+  # run removed -- a script that kept them would reproduce a different analysis.
+  cont_on  <- isTRUE(contaminants$removed)
+  cont_col <- if (cont_on) contaminants$id_column else NULL
+  cont_hdr <- if (cont_on) c(
+    .hdr(sprintf("Remove contaminants: any precursor mapping to a '%s' entry", contaminants$tag)),
+    sprintf("#     (%s -- DIA-NN's --cont-quant-exclude rule). They must not enter", cont_col),
+    "#     normalisation, the model or the BH correction.") else NULL
   eq_on   <- !is.na(eq_cutoff)  && eq_cutoff  > 0
   pgq_on  <- !is.na(pgq_cutoff) && pgq_cutoff > 0
 
@@ -112,10 +130,6 @@ write_repro_script <- function(path,
   L <- c(L, "# --- Load Required Libraries -------------------------------------------------", libs, "")
 
   # ---- experimental design ----------------------------------------------------
-  .hdr <- function(txt) {                      # "# --- txt ---...---" padded to 80 cols
-    base <- paste0("# --- ", txt, " ")
-    paste0(base, strrep("-", max(3, 80 - nchar(base))))
-  }
   L <- c(L,
     .hdr(sprintf("Experimental design (%d samples%s)", nrow(meta),
                  if (length(covariates)) sprintf(", covariates: %s", paste(covariates, collapse = ", ")) else "")),
@@ -165,11 +179,23 @@ write_repro_script <- function(path,
       "#     limpa recycles q.cutoffs against q.columns element-wise.",
       sprintf("dat <- limpa::readDIANN(%s, format = %s, q.cutoffs = %s,",
               src, .rq(format), .cuts_src),
-      sprintf("                        q.columns = %s)", .rvec(q_columns)),
+      if (cont_on) c(
+      sprintf("                        q.columns = %s,", .rvec(q_columns)),
+      sprintf("                        annotation.columns = %s)",
+              if (!is.null(dpc_annotation_columns)) .rvec(dpc_annotation_columns)
+              else sprintf("c(eval(formals(limpa::readDIANN)$annotation.columns), %s)",
+                           .rq(cont_col))))
+      else sprintf("                        q.columns = %s)", .rvec(q_columns)),
       "",
       "# --- 2. Keep only the runs that appear in the design -------------------------",
       "dat <- dat[, colnames(dat$E) %in% metadata$File.Name]",
       "",
+      if (cont_on) c(cont_hdr,
+        sprintf("is_contaminant <- grepl(%s, dat$genes[[%s]])", .rq(contaminants$pattern),
+                .rq(cont_col)),
+        "dat <- dat[!is_contaminant, ]",
+        if (cont_col != "Protein.Group") sprintf("dat$genes[[%s]] <- NULL", .rq(cont_col)),
+        "") else NULL,
       "# --- 3. Normalise and roll precursors up to proteins (DPC-CN + DPC-Quant) ----",
       "dpcfit    <- limpa::dpcCN(dat)",
       "y_protein <- limpa::dpcQuant(dat, 'Protein.Group', dpc = dpcfit)",
@@ -177,7 +203,8 @@ write_repro_script <- function(path,
       "")
   } else {
     sel <- unique(c("Run", "Protein.Group", "PG.MaxLFQ", q_columns, ann_cols,
-                    if (eq_on) "Empirical.Quality", if (pgq_on) "PG.MaxLFQ.Quality"))
+                    if (eq_on) "Empirical.Quality", if (pgq_on) "PG.MaxLFQ.Quality",
+                    cont_col))
     # Per-column cutoffs, same as the dpc branch above. build_maxlfq() applies
     # diann_cutoff_for() per column, so emitting the scalar --q-cutoff for all of
     # them produced a script that ran clean and returned different results than
@@ -197,6 +224,10 @@ write_repro_script <- function(path,
       "  dplyr::filter(Run %in% metadata$File.Name) |>",
       "  dplyr::collect()",
       "",
+      if (cont_on) c(cont_hdr,
+        sprintf("rows <- rows[!grepl(%s, rows[[%s]]), ]", .rq(contaminants$pattern),
+                .rq(cont_col)),
+        "") else NULL,
       "# --- 2. One PG.MaxLFQ per (protein, run); pivot wide; log2; quantile-normalise",
       "pg_run <- rows |>",
       "  dplyr::group_by(Protein.Group, Run) |>",

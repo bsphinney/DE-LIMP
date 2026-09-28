@@ -602,6 +602,9 @@ class RoutingTests(unittest.TestCase):
             self.assertIn("mass accuracy", prov["resolved_params_note"])
 
 
+@unittest.skipUnless(os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.dirname(HERE))), "CHANGELOG.md")),
+    "no repo-root CHANGELOG.md: the skill installed on its own does not ship it")
 class ChangelogTests(unittest.TestCase):
     """A one-flag mass-accuracy override on an instrument with no table value for the other level
     used to produce a cfg and now exits non-zero. That is the right call -- written alone the flag
@@ -613,7 +616,9 @@ class ChangelogTests(unittest.TestCase):
     def test_the_breaking_override_change_is_in_the_changelog(self):
         text = open(self.PATH).read()
         self.assertIn("BREAKING", text)
-        head = text[:text.index("\n## ", 20)]          # the newest entry only
+        # The entry that shipped it (Skill 2.5.0), not whichever entry is newest.
+        start = text.index("Orbitrap mass accuracy")
+        head = text[start:text.index("\n## ", start)]
         self.assertIn("param_overrides", head)
         self.assertIn("--mass-acc", head)
         self.assertIn("20 ppm", head, "the changelog does not say what went wrong before")

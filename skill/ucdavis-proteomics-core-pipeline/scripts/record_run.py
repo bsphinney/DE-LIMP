@@ -19,6 +19,7 @@ plus a line in an append-only master log and rows in an activity log.
   # the registry, from every run_record.json (the logs are for people; this is the index)
   python3 record_run.py list [--since 2026-09-01] [--user gabrig] [--status failed] [--tsv|--json]
   python3 record_run.py --where        # which route and destination from here, and nothing else
+  python3 record_run.py locate --session <dir>   # the record already holding it, read-only, here
   ... --dry-run                        # what it would write, written nowhere (preview on stderr)
 
 stdout is ONE JSON object -- {"recorded": true, "path": "<session folder>", ...} or
@@ -34,11 +35,13 @@ Layout (DataAnalysis "Session Structure"):
                             who/when/status, data, engine + version, key parameters and their
                             sources, headline results, where everything is, FRAN, skill issues
       run_record.json       the same, machine-readable (schema_version)
-      README.md             the session README (after finalize)
+      README.md / .html     the session README (after finalize), and AGENTS.md, its guide for
+                            an AI agent handed the folder
       <session>.zip         the session zip, minus per-run .quant files, when under the cap
       input/                conditions.csv, FASTA sidecar, params + rationale, raw_files.txt -- never
                             raw data
-      output/               *.docx (the report of record), methods.md, AUDIT/SAMPLE_QUALITY, tables/,
+      output/               Analysis_Report.html (the report of record), methods.docx + .md,
+                            AUDIT/SAMPLE_QUALITY, tables/,
                             small figures/, and search/ (provenance, stats, engine + SLURM logs,
                             FRAN receipt, and a LINK to report.parquet)
       scripts/              commands.log, reproduce.sh, REPRODUCE.md
@@ -128,8 +131,8 @@ LIVE_STATES = {"PENDING", "RUNNING", "REQUEUED", "RESIZING", "SUSPENDED", "CONFI
 SACCT_CANDIDATES = ("/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sacct",
                     "/usr/bin/sacct", "/usr/local/bin/sacct", "/opt/slurm/bin/sacct")
 # The registry is readable by the whole Core group. Refuse by NAME anything that holds a
-# credential, and by CONTENT anything that looks like one -- the patterns report_issue.sh refuses,
-# plus Slack tokens and webhook URLs. A refused file is listed with the reason, never silent.
+# credential, and by CONTENT anything that looks like one -- notify_slack.contains_secret(), the
+# skill's one secret-pattern list. A refused file is listed with the reason, never silent.
 SECRET_NAME_RE = re.compile(
     r"token|webhook|secret|passw|credential|(^|\.)env$|^id_(rsa|dsa|ecdsa|ed25519)|"
     r"\.(pem|key|p12|pfx)$|^\.netrc$|^\.pgpass$", re.I)
@@ -139,10 +142,15 @@ SECRET_NAME_RE = re.compile(
 # that is gone (a re-finalized, clean zip) leaves the record, and one a call did not look at stays.
 FINDING_PARTS = ("search", "detection", "fasta", "analysis", "zip")
 FASTA_RE = re.compile(r"\.(fasta|fa|faa)(\.gz)?$", re.I)
-SECRET_TEXT_RE = re.compile(
-    rb"-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|hf_[A-Za-z0-9]{20,}|"
-    rb"Authorization: *(Token|Bearer) +[A-Za-z0-9]|xox[abprs]-[A-Za-z0-9-]{10,}|"
-    rb"hooks\.slack\.com/services/")
+# The content check is notify_slack's list, not a copy of it. This file kept its own regex, and it
+# disagreed with the other two lists: it had no share-token, password, DSN or Google-key pattern,
+# so a commands.log holding `--share-token <tok>` went into the group-readable registry (release
+# review, 2.8.0). A copy piped alone to a remote python has no siblings to import; the content
+# check then refuses every file (secret_reason) rather than copying unchecked.
+try:
+    from notify_slack import contains_secret  # noqa: E402
+except ImportError:
+    contains_secret = None
 # CoreOmics identifiers (DataAnalysis CLAUDE.md, "Every session links to its CoreOmics
 # submission"): PROT_#### plus a 12-hex id. The same forms core_submission.py accepts.
 HEX_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -162,7 +170,7 @@ LOCK_TIMEOUTS = []
 # The registry's own README.md, written by ensure_readme() when it is missing or carries an older
 # version marker than this. THE source: references/run-registry.md quotes it verbatim, and
 # tests/test_record_run.py fails when the two differ. Raise README_VERSION with any edit.
-README_VERSION = 1
+README_VERSION = 2
 README_TEXT = """# Skill run registry
 
 Every search the `ucdavis-proteomics-core-pipeline` skill runs for the UC Davis Proteomics Core,
@@ -178,10 +186,11 @@ is finalized. Laid out like the Core's DataAnalysis sessions.
   session (else `<date>_<search folder name>`; a different search wanting the same name gets
   `_2`). Start with `SEARCH_LOG.md`: the CoreOmics submission, Data Quality Notes, status, engine
   and the version that ran, key parameters and where each came from, results, and where every
-  output is. Beside it: `run_record.json` (the same, machine-readable), the session `README.md`
-  and zip, `input/` (conditions, FASTA sidecar, parameters, `raw_files.txt`), `output/` (the
-  Word report of record, Methods, tables, `search/` logs and a link to `report.parquet`) and
-  `scripts/` (commands, reproduce script).
+  output is. Beside it: `run_record.json` (the same, machine-readable), the session's
+  `README.html` / `README.md` and `AGENTS.md`, its zip, `input/` (conditions, FASTA sidecar,
+  parameters, `raw_files.txt`), `output/` (the report of record `Analysis_Report.html`, the
+  Methods in Word, tables, `search/` logs and a link to `report.parquet`) and `scripts/`
+  (commands, reproduce script).
 - `.index/` -- how recording the same search again finds its folder (by the search folder's real
   path, not its name). Leave it alone.
 - `*.lock.d` -- a writer's lock, held for a second or two; one older than 60 s is broken
@@ -326,8 +335,21 @@ def fmt_bytes(n):
 
 
 def skill_version():
-    pj = load_json(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}
-    return pj.get("version")
+    """skill_version.py's reading -- the one reader of .claude-plugin/plugin.json. Piped to a
+    remote python (`python3 - ...`) there is no sibling to import, and nothing is guessed: None,
+    and the plan takes the laptop's version from --skill-version."""
+    try:
+        import skill_version as sv
+    except ImportError:
+        return None
+    return sv.skill_version()
+
+
+def _named_version(plan):
+    """The plan's skill version for "with skill X or later" -- "this version" when it is not a
+    number (not recorded, or skill_version.py's unknown tag)."""
+    v = str(plan.get("skill_version") or "")
+    return v if v[:1].isdigit() else "this version"
 
 
 def say(msg):
@@ -417,10 +439,12 @@ def secret_reason(path):
     """Why this file must not be copied into a group-readable folder, or None."""
     if SECRET_NAME_RE.search(os.path.basename(path)):
         return "its name marks it as a credential (token / webhook / .env / key file)"
+    if contains_secret is None:
+        return "its contents cannot be checked for secrets here (notify_slack.py not importable)"
     try:
         with open(path, "rb") as fh:
-            if SECRET_TEXT_RE.search(fh.read()):
-                return "its contents look like a key, token or webhook URL"
+            if contains_secret(fh.read().decode("utf-8", "replace")):
+                return "its contents look like a key, token, password or webhook URL"
     except OSError as e:
         return f"unreadable: {e}"
     return None
@@ -783,6 +807,9 @@ def find_prot(explicit, session, out):
         return dict(p, source="--prot")
     cands, parents = [], []
     if session and os.path.isdir(session):
+        # session.json first: submission_report.py attach records the PROT number AND the hex id
+        # there, where input/submission.json alone would give only the PROT number.
+        cands.append(os.path.join(session, "session.json"))
         cands += sorted(glob.glob(os.path.join(session, "input", "*.json")))
         cands += [os.path.join(session, f) for f in listdir(session) if f.endswith(".json")]
         d = os.path.dirname(os.path.abspath(session))
@@ -1025,6 +1052,30 @@ def parameters(out, prov, params_file, manifest_path, rationale):
     return p
 
 
+def _database_state(merged):
+    """(fetch_fasta.sidecar_state(): which contaminant rule built the database -- the one
+    definition; for an identity-only database, the measured near-identical set for this
+    organism, fetch_fasta.near_identical_measured(), or None). (None, None) when fetch_fasta.py
+    cannot be loaded here (never fatal)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import sidecar_state, near_identical_measured
+    except Exception:                                   # noqa: BLE001
+        return None, None
+    state = sidecar_state(merged)
+    return state, (near_identical_measured(merged) if state == "identity_only" else None)
+
+
+def _rebuild_advice():
+    """fetch_fasta.REBUILD_ADVICE -- the one wording of the fix for an older database."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import REBUILD_ADVICE
+        return REBUILD_ADVICE
+    except Exception:                                   # noqa: BLE001
+        return "Rebuild the FASTA with this release's fetch_fasta.py and re-search."
+
+
 def fasta_facts(meta_path):
     m = load_json(meta_path)
     if not isinstance(m, dict):
@@ -1032,6 +1083,7 @@ def fasta_facts(meta_path):
     sel = m.get("selected") if isinstance(m.get("selected"), dict) else m
     g = lambda k: sel.get(k) if sel.get(k) is not None else m.get(k)  # noqa: E731
     sf = g("staged_file") or {}
+    merged = dict(m, **{k: v for k, v in sel.items() if v is not None}) if sel is not m else m
     return {"meta_file": meta_path, "fasta": g("fasta"), "organism": g("organism"),
             "taxid": g("taxid"), "organism_source": g("organism_source"),
             "proteome": g("proteome"), "proteome_type": g("proteome_type"),
@@ -1050,6 +1102,8 @@ def fasta_facts(meta_path):
             "contaminant_citation": g("contaminant_citation"),
             "cont_quant_exclude": g("diann_cont_quant_exclude"),
             "digestion_enzymes_used": g("digestion_enzymes_used"),
+            "min_unique_peptides": g("min_unique_peptides"),
+            **dict(zip(("database_state", "near_identical_measured"), _database_state(merged))),
             "warnings": g("warnings") or []}
 
 
@@ -1514,6 +1568,10 @@ def plan_analysis(plan, session, a, zip_cap):
         man_txt = None
     dep = os.path.join(out_d, "DATA_SUBMISSION")
     docx = [os.path.join(out_d, f) for f in listdir(out_d) if f.lower().endswith(".docx")]
+    # The report of record is the HTML report (2026-09-24: Word mangled its figures, so the skill
+    # no longer makes a report .docx). It is listed and copied FIRST; the Methods .docx stays,
+    # and an older session's report .docx is still copied, after it.
+    html_report = first_existing([os.path.join(out_d, "Analysis_Report.html")])
     audit = load_json(first_existing([os.path.join(out_d, "AUDIT.json"),
                                       os.path.join(session, "AUDIT.json")])) or {}
     sq = load_json(first_existing([os.path.join(out_d, "SAMPLE_QUALITY.json"),
@@ -1527,7 +1585,12 @@ def plan_analysis(plan, session, a, zip_cap):
                                          "q_cutoff", "logfc", "adjp")} if de else None,
           "manifest": {"file": man_txt, "n_ok": ok, "skipped": skipped} if man_txt else None,
           "docx": [{"file": d, "kind": "Methods (Word)" if "method" in os.path.basename(d).lower()
-                    else "Report (Word)"} for d in docx],
+                    else "Report (Word, older copy)"} for d in docx],
+          "deliverables": ([{"file": html_report, "kind": "Report of record (HTML)"}]
+                           if html_report else [])
+                          + [{"file": d, "kind": "Methods (Word)"
+                              if "method" in os.path.basename(d).lower()
+                              else "Report (Word, older copy)"} for d in docx],
           "methods_md": first_existing([os.path.join(out_d, "methods.md"),
                                         os.path.join(out_d, "METHODS.md")]),
           "data_submission": dep if os.path.isdir(dep) else None,
@@ -1548,7 +1611,7 @@ def plan_analysis(plan, session, a, zip_cap):
                               "not run on this session")
 
     # ---- copies, mirroring the session: top level, input/, output/, scripts/
-    for rel in ("README.md", "MANIFEST.txt", "DIFFERENCES.md"):
+    for rel in ("README.md", "README.html", "AGENTS.md", "MANIFEST.txt", "DIFFERENCES.md"):
         add_copy(plan, os.path.join(session, rel), rel, "analysis")
     inp = os.path.join(session, "input")
     for f in listdir(inp):
@@ -1558,8 +1621,19 @@ def plan_analysis(plan, session, a, zip_cap):
     for f in listdir(os.path.join(inp, "wf")):
         if f.endswith((".json", ".cfg")) or f.startswith("params."):
             add_copy(plan, os.path.join(inp, "wf", f), f"input/{f}", "analysis")
-    for d in docx:                                     # the deliverable of record, first
+    for d in ([html_report] if html_report else []) + docx:    # the report of record first
         add_copy(plan, d, f"output/{os.path.basename(d)}", "analysis")
+    # The optional podcast (make_podcast.py): the report's Listen card links podcast/<file>, so
+    # the record keeps what the card points at -- the audio podcast.json names, the transcript,
+    # the script with its claims ledger, the check, the manifest, and verify's report and what
+    # it heard. Never .cache (scratch).
+    pod = os.path.join(out_d, "podcast")
+    pman = load_json(os.path.join(pod, "podcast.json")) or {}
+    for f in [pman.get("audio"), pman.get("transcript") or "transcript.html",
+              "podcast_script.md", "check.txt", "podcast.json", "verify.txt",
+              "verify_transcript.txt"]:
+        if isinstance(f, str) and f and os.path.basename(f) == f:
+            add_copy(plan, os.path.join(pod, f), f"output/podcast/{f}", "analysis")
     for f in ("methods.md", "METHODS.md", "AI_Analysis_Report.md", "OUTPUT_FILES.md", "AUDIT.md",
               "AUDIT.json", "SAMPLE_QUALITY.md", "SAMPLE_QUALITY.json", "QC_Report.html"):
         add_copy(plan, os.path.join(out_d, f), f"output/{f}", "analysis")
@@ -1606,7 +1680,7 @@ def plan_analysis(plan, session, a, zip_cap):
                                + ("; the FASTA is identified by its copied sidecar "
                                   "(input/<fasta>.meta.json: path + md5)" if fa["n"] else "")
                                + f". To shrink the original, re-run session.py finalize --zip "
-                                 f"with skill {plan.get('skill_version') or 'this version'} or "
+                                 f"with skill {_named_version(plan)} or "
                                  f"later, whose zip leaves out the .quant files and the "
                                  f"predicted library.")})
             if sv["kept_bytes"] > zip_cap:
@@ -1703,11 +1777,14 @@ def add_manifest(zip_path, name, src):
 
 
 # ------------------------------------------------------------------------- skill issues
-ISSUE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(.+)\.md$")
+# <date>_<user>[_<tag>][+<unique>].md: report_issue.sh writes one file per entry since 2.8.0, named
+# with a `+<HHMMSS>-<host>-<pid>-<random>` suffix that clean() guarantees the user and tag never
+# contain. Older one-file-per-day names (no suffix) still match.
+ISSUE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_([^+]+?)(?:\+[A-Za-z0-9._-]+)?\.md$")
 
 
 def find_issues(user, tags, days):
-    """report_issue.sh files for this run: <date>_<user>_<tag>.md whose tag matches the session
+    """report_issue.sh files for this run: <date>_<user>_<tag>[+...].md whose tag matches the session
     (compared on letters and digits only -- the agent may have spelled the name either way), from
     any day, since setup problems are often recorded the day before the search; plus the same
     user's untagged files from the days the search ran."""
@@ -1812,22 +1889,40 @@ def data_quality_notes(rec):
         notes.append(dq("WARNING", str(w), fa.get("meta_file"), source="FASTA sidecar"))
     if fa.get("n_contaminants_dropped_as_target"):
         notes.append(dq("NOTE", f"{fa['n_contaminants_dropped_as_target']} contaminant entries "
-                                f"were identical to a target protein and were dropped",
+                                f"matched a target protein (identical, or too few peptides of "
+                                f"their own) and were dropped",
                         fa.get("meta_file"),
                         "left in, they take the target's peptides and --cont-quant-exclude "
                         "removes them from quant", "the universal contaminant set holds bovine/"
                         "human/mouse proteins identical to real ones",
                         None, "FASTA sidecar"))
-    if fa and fa.get("n_contaminants_appended") and not fa.get("contaminant_target_rule"):
+    state = fa.get("database_state") if fa else None
+    if state is None and fa:            # fetch_fasta.py not loadable: the rule-key test alone
+        state = ("legacy" if fa.get("n_contaminants_appended")
+                 and not fa.get("contaminant_target_rule") else None)
+    if state == "legacy":
         notes.append(dq(
             "WARNING", "legacy database: built before contaminants identical to a target protein "
                        "were removed", fa.get("meta_file"),
             "a contaminant entry identical to a real protein (bovine ACTB = human ACTB, ...) takes "
             "its peptides; --cont-quant-exclude Cont_ then drops them from quant and "
-            "normalisation, so real proteins go missing without an error",
+            "normalisation, and run_de.R removes Cont_ groups from the DE, so real proteins go "
+            "missing without an error",
             "the FASTA sidecar has no contaminant_target_rule: fetch_fasta.py predates the check",
-            "rebuild the FASTA with the current fetch_fasta.py and re-search, or run "
-            "check_contaminant_competition.py on the pg_matrix", "FASTA sidecar"))
+            _rebuild_advice() + " AUDIT.md names the proteins.", "FASTA sidecar"))
+    elif state == "identity_only":
+        notes.append(dq(
+            "WARNING", "database built by the identity rule alone: contaminants near-identical to "
+                       "a target protein were left in"
+                       + (" (with the {} set, {} such entries: {}; measured {})".format(
+                           fa.get("contaminant_set"), *fa["near_identical_measured"])
+                          if fa.get("near_identical_measured") else ""), fa.get("meta_file"),
+            "a contaminant entry the search cannot tell apart from a real protein (bovine EEF1A1 "
+            "and YWHAZ are one residue from the mouse proteins) takes its peptides; DIA-NN "
+            "reports that protein only as a Cont_ group and run_de.R removes it from the DE",
+            "the FASTA sidecar has contaminant_target_rule but no min_unique_peptides: "
+            "fetch_fasta.py before skill 2.8.0 (or --min-unique-peptides 0)",
+            _rebuild_advice() + " AUDIT.md names the proteins.", "FASTA sidecar"))
     if not fa and s:
         notes.append(dq("WARNING", "no FASTA sidecar, so the organism and database are not "
                                    "recorded", s.get("out_dir"), source="record_run"))
@@ -2033,7 +2128,7 @@ def render_search(s):
                   f"not recorded (pre-staged copy dated {fa['staged_file_date']})"
                   if fa.get("staged_file_date") else "not recorded")),
               f"- **Contaminants:** {fmt_n(nc)} ({fa.get('contaminant_set') or 'none'})"
-              + (f", {fa['n_contaminants_dropped_as_target']} dropped as identical to a target "
+              + (f", {fa['n_contaminants_dropped_as_target']} dropped as matching a target "
                  f"protein" if fa.get("n_contaminants_dropped_as_target") else "")
               + (f"; excluded from quantification with `--cont-quant-exclude "
                  f"{fa['cont_quant_exclude']}`" if fa.get("cont_quant_exclude") else "")
@@ -2098,7 +2193,7 @@ def render_analysis(rec, an):
     de = an.get("de") or {}
     L = ["", f"## Analysis -- finalized {an.get('finalized') or '?'}",
          f"- **Session:** `{an.get('session')}`"]
-    for d in an.get("docx") or []:
+    for d in an.get("deliverables") or an.get("docx") or []:   # older records: docx only
         L.append(f"- **{d['kind']}:** `output/{os.path.basename(d['file'])}`"
                  f" (original `{d['file']}`)")
     if de:
@@ -2245,6 +2340,26 @@ def find_record(root, identity):
                 if state != "ok" or same_identity(rec, identity):
                     return tgt                # the index is the claim; a bad record is not a miss
     return None
+
+
+def locate(session):
+    """The registry folder already holding this session's record, looked up READ-ONLY from here,
+    the way a re-record finds it (find_record: the .index link of the session and of its search
+    out dir). None when there is none yet, or the registry is not readable from this machine --
+    nothing is written and nothing goes over ssh. session.py puts it in the session README."""
+    if disabled() or not session or not os.path.isdir(session):
+        return None
+    root = runs_dir()
+    if not (os.path.isdir(root) and os.access(root, os.R_OK | os.X_OK)):
+        return None
+    ident = {"session": os.path.realpath(session), "out": None}
+    out = session_search_out(session, None)
+    if out and os.path.isdir(out):
+        ident["out"] = os.path.realpath(out)
+    try:
+        return find_record(root, ident)
+    except OSError:
+        return None
 
 
 def claim_folder(root, base, identity, dry_run):
@@ -2418,7 +2533,7 @@ def master_entries(rec, event):
     if event == "analysis-done" and an:
         marker = f"<!-- record_run {key} analysis {an.get('finalized') or 'complete'} -->"
         body = []
-        for x in an.get("docx") or []:              # the report of record comes first
+        for x in an.get("deliverables") or an.get("docx") or []:   # report of record first
             body.append(f"- **{x['kind']}:** `{folder}output/{os.path.basename(x['file'])}`")
         sig = (an.get("de") or {}).get("significant_per_contrast") or {}
         if sig:
@@ -3105,7 +3220,7 @@ def build_parser():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--where", action="store_true",
                     help="print where a record would go from here, and nothing else")
-    sub = ap.add_subparsers(dest="cmd", metavar="{search-done,analysis-done,list}")
+    sub = ap.add_subparsers(dest="cmd", metavar="{search-done,analysis-done,list,locate}")
 
     def common(p):
         p.add_argument("--dry-run", action="store_true",
@@ -3163,6 +3278,9 @@ def build_parser():
     ls.add_argument("--json", action="store_true")
     ls.add_argument("--timeout", type=float, default=120)
     ls.add_argument("--remote-hop", action="store_true", help=argparse.SUPPRESS)
+    lc = sub.add_parser("locate", help="the registry folder already holding a session's record, "
+                                       "read-only and from here only: {\"located\": path|null}")
+    lc.add_argument("--session", required=True)
     return ap
 
 
@@ -3174,6 +3292,12 @@ def main(argv=None):
     if not a.cmd:
         build_parser().print_usage(sys.stderr)
         print(json.dumps(not_recorded("bad_input", "no command given")))
+        return 0
+    if a.cmd == "locate":                      # read-only; disabled -> null, like no record
+        try:
+            print(json.dumps({"located": locate(a.session)}))
+        except Exception as e:                  # noqa: BLE001 -- never fatal, by contract
+            print(json.dumps({"located": None, "error": f"{type(e).__name__}: {e}"}))
         return 0
     if a.cmd != "list" and disabled():
         # The kill switch: before any read, write or SSH attempt.

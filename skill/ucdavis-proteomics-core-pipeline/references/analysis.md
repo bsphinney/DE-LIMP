@@ -10,20 +10,46 @@ inline instead of shipping the prompt to an external API.
 1. `analysis_prompt.py` writes `ANALYSIS_PROMPT.md` — the brief, parameterized by
    what's present (QC, GSEA) and by the actual engine + DE method.
 2. **The agent reads the brief and the data files and writes `AI_Analysis_Report.md`.**
-   It computes significant proteins, up/down splits, cross-comparison overlaps, and
-   lowest-CV proteins from the CSVs — citing specific proteins, never fabricating.
-3. `to_docx.py` saves the report **also as `AI_Analysis_Report.docx`** (pandoc, with
-   a python-docx fallback so the Word file is always produced). Both `.md` and
-   `.docx` are required outputs.
+   It computes significant proteins, up/down splits and cross-comparison overlaps from the
+   CSVs, and CVs from measured values only — citing specific proteins, never fabricating.
+   Hits are tiered by per-group detection: the DE tables' `Evidence` (measured in both /
+   partly inferred or missing / presence call, as `de_provenance.json` defines it), never
+   by PropObs. The brief lists every figure in `figures/figures.json` (the 2.8.0 object or an
+   older bare list) and names each one make_figures.R could not draw, with its reason.
+3. `make_analysis_html.py` renders it into **`Analysis_Report.html`** — the report of
+   record: one self-contained page (figures inlined). Only figures in this run's
+   `figures.json` are embedded. What must not depend on the writer is added by the page
+   itself: Results at a glance, fixed callouts (inferred values, a contaminant-database
+   risk, figures that could not be drawn), the top-protein tables and, as the last section,
+   *Appendix: p-value calibration* (`qc_pvalue_panel.png`). No Word copy of the report is made
+   any more (Word mangled the figures, 2026-09-24); the Methods stay in Word
+   (`methods.docx`). An older session's `AI_Analysis_Report.docx` is left in place.
+   The same call writes two twins beside it:
+   - **`Analysis_Report.md`** — the report as plain text with each figure's caption and
+     numbers written out, for NotebookLM and other AI notebooks. `--md-out <path>` puts it
+     elsewhere (default: `--out` with `.md`).
+   - **`Analysis_Report.pdf`** — the HTML printed by a headless Chrome, Chromium or Edge when
+     one is installed (`html_to_pdf.py`). `--no-pdf` skips it; with no browser there is no PDF
+     and the output says so, and `session.py finalize` prints it later where a browser exists.
 4. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
    plain-language description, grouped by purpose.
 
+## The CoreOmics submission (Core data)
+When `submission_report.py attach` has stored the submission in the session,
+`make_analysis_html.py` opens the report with a **Submission** section by default: the PROT id
+linked to CoreOmics, PI, submitter, date, organism and UniProt as specified, the description
+as written, experiment type, proteins or peptides and who prepared them, buffer, beads,
+normalisation, the analysis requested, the sample sheet, and the record's Data Quality Notes.
+The record is allowlisted — no email, phone, billing or internal field can reach the page.
+`analysis_prompt.py --submission <session>` quotes the same record in the brief, so the
+report describes the samples in the submitter's words and adds nothing they did not state.
+
 ## Report sections (faithful to DE-LIMP's export prompt)
 Overview · QC Assessment (if QC present) · Key Findings Per Comparison ·
-Cross-Comparison Biomarkers · High-Confidence Biomarker Insights · Pathway/GSEA
-(if present) · Biological Interpretation · How This Analysis Works (LC-MS/MS,
-DIA/DDA, the engine, the stats framework, key terms — written for a biologist with
-no MS background) · Methods & Reproducibility.
+Specificity (pull-down designs) or Cross-Comparison Biomarkers + High-Confidence
+Findings · Pathway/GSEA (if present) · Biological Interpretation · How This Analysis
+Works (LC-MS/MS, DIA/DDA, the engine, the stats framework, key terms — written for a
+biologist with no MS background) · Methods & Reproducibility · Next steps.
 
 ## Pipeline self-description (DE-LIMP rule #1)
 The brief takes the pipeline label, quantification, DE engine, missing-value
@@ -43,3 +69,14 @@ prompt generator rather than filled with guesses.
 (search output, DE tables, reproducibility bundle, inputs, analysis report).
 Unrecognized files are listed under "Other" with a note — never silently dropped
 (DE-LIMP rule #4, the MANIFEST discipline).
+
+## Less-used flags
+- `make_analysis_html.py` takes its inputs from `--session`; without one, name them:
+  `--report AI_Analysis_Report.md --figures <dir> --tables <dir> [--quality SAMPLE_QUALITY.md]
+  [--audit AUDIT.md]`. `--title` overrides the page title (default: the report's own `#`
+  heading); `--adjp` applies only when the tables carry no `de_provenance.json`.
+- `analysis_prompt.py --qc <QC_Metrics.csv> --gsea <GSEA_Results.csv>` add those sections to
+  the brief; `--report-out` names the report the brief asks for (default `AI_Analysis_Report.md`).
+- `make_report.py --root <dir>`: the folder paths in OUTPUT_FILES.md are shown relative to.
+- `html_to_pdf.py --html <report.html> [--pdf <out.pdf>] [--timeout 120]`: print a report by
+  hand (default: beside it, `.pdf`).

@@ -8,12 +8,23 @@ genuine ambiguities.
 1. **In words** — "the first three are control, the last three treated", "A* are
    wild-type, B* are knockout". The agent reads the real run list and turns this
    into an intent JSON: `{"groups": {"control": [...], "treated": [...]}}` or
-   `{"mapping": {"<sample>": "<group>"}}`.
+   `{"mapping": {"<sample>": "<group>"}}`. If they said which animal / patient each
+   sample came from, add `"subjects": {"<sample>": "<subject>"}, "subject_column": "Mouse"`.
 2. **A file** — any CSV/TSV they already have. Column names are auto-detected:
    sample column from {File.Name, filename, run, sample, sample name, name, raw,
    id}; group from {group, condition, treatment, class, type, cohort, phenotype};
-   batch from {batch, block, plate, run order}. Up to two further columns become
-   Covariate1/Covariate2.
+   batch from {batch, plate, run order}; a subject column from {mouse, mice,
+   animal, rat, subject, patient, donor, individual, participant, pair, block} (an `id` / `no` /
+   `number` suffix allowed: `Mouse ID`, `animal_no`) is kept **under its own name**
+   (`Mouse ID` → `Mouse_ID`) — but only when its VALUES look like subjects: ≥ 3 of them,
+   not the groups relabelled, and (where they span groups) recurring across them. A
+   `Subject` of M/F, a `Patient` of Yes/No or a `Donor` identical to the group stays a
+   covariate and is reported as `subject_ambiguous` for the user to confirm
+   (`--subject-column <header>`; `--subject-column none` turns detection off). Up to two
+   further columns become Covariate1/Covariate2 (`covariate_columns` says which header
+   went where). Anything that does not fit is NAMED, never dropped silently:
+   `columns_not_written` lists extra columns beyond the two slots, and an ambiguous subject
+   column with no free slot says `"written": false` and how to keep it.
 
 ## How mapping works (`collect_conditions.py --map`)
 Matching is grounded in the actual run names (never guessed):
@@ -36,7 +47,20 @@ The agent confirms each with the user, finalizes `conditions.csv`, then runs
 `--validate` against the search report before DE.
 
 ## The finished metadata
-`conditions.csv` columns: `File.Name,Group[,Batch,Covariate1,Covariate2]`.
+`conditions.csv` columns: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`.
+
+**Samples from the same animal / patient?** (five IPs from one mouse brain, paired
+before/after samples.) Ask. If so, keep that unit in its own column under its own name
+(`Mouse`, `Patient`) and run DE with `--block Mouse` (`references/de-analysis.md`,
+"Paired / repeated designs"). `run_de.R` then fits it as a **fixed** effect when it is
+crossed with the groups and every contrast is within one subject (before/after in the same
+patient: the exact paired analysis), and as a **random** effect when it is nested in a
+group (mice within age). `--map` keeps a subject column under its own name and reports it
+as `block_column`; `block_suggested` is true when every run has a subject, every subject
+holds ≥ 2 runs (all singletons = a sample id, not a block) and the values look like
+subjects or were confirmed (`subject_confirmed`). Ambiguities add
+`subject_conflicting_runs`, `runs_without_subject` and `single_run_subjects`. run_de.R
+prints a note when a column recurs across groups and no `--block` was given.
 `File.Name` must equal the Run names in the search report. `--validate` checks
 column presence, blank groups, singleton groups, and that the report runs and
 metadata rows line up exactly.
@@ -47,3 +71,8 @@ file that doesn't exist, or mismatching near-identical names). Keeping the match
 `collect_conditions.py`, grounded in the real run list, means the agent does the
 language understanding while the assignment is verifiable — and every uncertainty
 is surfaced for explicit confirmation rather than guessed.
+
+## Less-used flags
+- `--from-report <report.parquet|.tsv>` takes the run names from a search report, and
+  `--runs "run1,run2,..."` gives them directly, instead of `--from-dir` + `--glob`.
+- `--emit-template ... --covariates Batch,Covariate1`: add covariate columns to the blank sheet.

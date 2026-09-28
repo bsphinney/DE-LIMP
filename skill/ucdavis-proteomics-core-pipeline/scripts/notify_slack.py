@@ -122,9 +122,15 @@ def say(msg):
         pass
 
 
-#: What report_issue.sh refuses to write to a shared folder, plus a database DSN with a password
-#: and the webhook itself. Redacted, not refused: an alert with "[redacted]" in it still tells the
-#: channel something went wrong. The reviewer posted a webhook through send_alert().
+#: THE skill's one list of secret-shaped strings. Redacted here, not refused: an alert with
+#: "[redacted]" in it still tells the channel something went wrong (the reviewer posted a webhook
+#: through send_alert()). record_run.py and make_podcast.py import it; report_issue.sh must run
+#: with no Python at all (Git Bash on Windows), so it carries an ERE mirror, and
+#: tests/test_secret_patterns.py keeps the two catching the same examples. Add a pattern HERE,
+#: then its fake example there and the mirror in report_issue.sh -- that test fails until you do.
+#: It lives in this file, not a module of its own, because the relay pipes this file alone to
+#: HIVE's python (`python3 - relay`), where no sibling module can be imported.
+REDACTED = "[redacted]"
 _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY[\s\S]*"),       # a header with no dashes after it
@@ -135,15 +141,56 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)password\s*[:=]\s*\S+"),
     re.compile(r"(?i)postgres(?:ql)?://[^\s:/@]+:[^\s@]+@"),
     re.compile(r"(?i)https?://hooks\.slack\.com/services/\S+"),
+    re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),                    # a Google API key
+    re.compile(r"\bAQ\.[0-9A-Za-z_\-]{20,}"),                  # a Google API key, newer format
+    re.compile(r"(?i)(?<=key=)[A-Za-z0-9_.\-]{20,}"),           # a key-shaped key=... value
+    re.compile(r"xox[abeprs]-[A-Za-z0-9\-]{10,}"),             # a Slack bot/user/app token
+    re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),                 # an Anthropic API key
+    re.compile(r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}"),  # OpenAI project/service keys
+    # Any other sk- key, but only 32+ letters and digits with no dash or underscore: a session or
+    # file slug that happens to start "sk-" (sk-2026-09-28_run_...) has dashes and must pass.
+    re.compile(r"\bsk-[A-Za-z0-9]{32,}"),
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),              # an AWS access key id
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-.=+/]{20,}"),     # a bare "Bearer <credential>"
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]*"),  # a JWT
+    # STAN's per-submission HT share token (ht_manifest.py): in a URL's query (`&token=...`), as
+    # `--share-token=...` / `--share-token ...`, and as STAN_HT_SHARE_TOKEN=... in a logged
+    # command. The release review found the full URL, token and all, in an HTTP error line, and
+    # the argv in commands.log and so in the group-readable run registry. A value that starts
+    # like a path (`/`, `~`, `.`, `$`) is a file NAME -- --share-token-file, STAN_PG_TOKEN=/... --
+    # and not a secret; STAN_PG_TOKEN also fails the "not after a letter or _" test.
+    re.compile(r"(?i)(?:(?<=[^A-Za-z0-9_]token=)|(?<=^token=))(?![/~.$])[^\s&\"'<>]{8,}"),
+    # A named group `s` is all redact() replaces, so the flag stays readable. Any run of spaces,
+    # tabs and `=` separates it: a lookbehind allowed exactly one space, and "--share-token" plus
+    # two spaces or a tab went through both lists (release verification, 2.8.0).
+    re.compile(r"(?i)--share-token[ \t=]+['\"]?(?P<s>(?![/~.$-])[^\s\"'<>]{8,})"),
+    re.compile(r"(?i)(?<=share_token=)['\"]?(?![/~.$])[^\s\"'<>]{8,}"),
+    # ...and its companion, ht_manifest.py --cookie <Entra session cookie>
+    re.compile(r"(?i)--cookie[ \t=]+['\"]?(?P<s>(?![/~.$-])[^\s\"'<>]{8,})"),
 ]
+
+
+def _redact_match(m):
+    """[redacted] for the match -- or, for a pattern with a group `s`, for that group alone."""
+    if "s" not in m.re.groupindex:
+        return REDACTED
+    whole, at = m.group(0), m.start()
+    return whole[:m.start("s") - at] + REDACTED + whole[m.end("s") - at:]
 
 
 def redact(text):
     """Every secret-shaped substring of `text` replaced with [redacted]."""
     out = str(text)
     for pat in _SECRET_PATTERNS:
-        out = pat.sub("[redacted]", out)
+        out = pat.sub(_redact_match, out)
     return out
+
+
+def contains_secret(text):
+    """True when `text` holds anything redact() would hide -- for callers that must REFUSE
+    rather than redact (record_run.py's group-readable registry)."""
+    s = str(text)
+    return any(pat.search(s) for pat in _SECRET_PATTERNS)
 
 
 def one_line(text):
@@ -324,11 +371,28 @@ def _who():
         return "unknown"
 
 
-def _skill_version():
-    if not HERE:
-        return None
-    pj = _load(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}
-    return pj.get("version")
+# A copy of skill_version.py (the one reader of plugin.json): this script cannot import a sibling
+# -- on HIVE it also runs from stdin. tests/test_skill_version.py keeps the two equal.
+SKILL_VERSION_UNKNOWN = "(unknown — plugin.json not found)"
+
+
+def _skill_version(here=HERE):
+    """The version in <here>/../.claude-plugin/plugin.json, or SKILL_VERSION_UNKNOWN."""
+    try:
+        with open(os.path.join(here, "..", ".claude-plugin", "plugin.json"),
+                  encoding="utf-8") as fh:
+            v = json.load(fh).get("version")
+    except (OSError, ValueError, AttributeError, TypeError):
+        v = None
+    return v.strip() if isinstance(v, str) and v.strip() else SKILL_VERSION_UNKNOWN
+
+
+def _skill_label(version):
+    """The skill's name and version as the footer shows it: "... v2.8.0", or the unknown tag."""
+    name = "ucdavis-proteomics-core-pipeline"
+    if not version:
+        return name
+    return f"{name} {version}" if version == SKILL_VERSION_UNKNOWN else f"{name} v{version}"
 
 
 def _engine_label(engine):
@@ -518,7 +582,8 @@ def _clean(s):
 def add_issues(facts):
     """Count the skill problems report_issue.sh recorded for this user since the run began.
 
-    Its files are <date>_<user>[_<session>].md, one entry per `## ` heading. Counted where
+    Its files are <date>_<user>[_<session>][+<unique>].md -- one file per entry since 2.8.0, one
+    per day before -- one entry per `## ` heading. Counted where
     they are readable from here -- the Core's folder on HIVE, or this machine's fallback."""
     try:
         since = datetime.date.fromisoformat(facts.get("since") or "")
@@ -593,8 +658,7 @@ def render(f):
         head = f":warning: {_esc(f['title'])}: " if f.get("title") else ":warning: "
         text = _cut(head + _esc(f.get("body") or ""), 300)
         ctx = " · ".join(x for x in (
-            f"ucdavis-proteomics-core-pipeline v{f['skill_version']}" if f.get("skill_version")
-            else "ucdavis-proteomics-core-pipeline", f"{_esc(f.get('who'))} on {_esc(f.get('host'))}")
+            _skill_label(f.get("skill_version")), f"{_esc(f.get('who'))} on {_esc(f.get('host'))}")
             if x)
         return {"text": text,
                 "blocks": [{"type": "section", "text": {"type": "mrkdwn",
@@ -713,8 +777,7 @@ def render(f):
         ctx.append(f":memo: {iss['entries']} skill issue(s) recorded by {_esc(f.get('who'))} "
                    f"since {_esc(f.get('since'))}: {files}{more}")
     job = f.get("job") or {}
-    tail = [f"ucdavis-proteomics-core-pipeline v{f['skill_version']}" if f.get("skill_version")
-            else "ucdavis-proteomics-core-pipeline"]
+    tail = [_skill_label(f.get("skill_version"))]
     if job.get("id"):
         jid = (f"{job['array_id']}_{job['task']}" if job.get("array_id") and job.get("task")
                else job["id"])

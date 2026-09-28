@@ -29,11 +29,15 @@
 #   3. Otherwise -> ~/.proteomics-pipeline/issues/ on this machine; the script says so and
 #      prints how to send the file to the Core. Never an error: recording a problem must not
 #      become a second problem.
-# One file per user per day per session (<date>_<user>[_<session>].md), appended to, so a
-# session's issues read top to bottom in the order they happened and two users never write
-# the same file.
+# One file per ENTRY: <date>_<user>[_<session>]+<HHMMSS>-<host>-<pid>-<random>.md. The part
+# before `+` is what readers match on (notify_slack.py counts a user's entries, record_run.py
+# finds a session's); `+` can never occur in it, because clean() maps it to `_`. Each file is
+# written under a dot-name and renamed into place, so a reader never sees half an entry.
+# Appending to one shared file per day lost entries: check-then-create raced (68 of 120 lost
+# with 3 writers, release review 2.8.0), and a cross-node `>>` on /quobyte is unlocked --
+# flock does not lock across HIVE nodes there (measured 2026-09-24: 578 of 800 writes lost).
 #
-# Never put secrets in a report: private keys, passwords, CoreOmics/GitHub/HF tokens. The
+# Never put secrets in a report: private keys, passwords, tokens, webhooks, API keys. The
 # script refuses text that looks like one rather than shipping it to a shared folder.
 # =============================================================================
 set -uo pipefail
@@ -61,7 +65,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION="${2:-}"; shift 2 ;;
     --where) ACTION="where"; shift ;;
     --list) ACTION="list"; case "${2:-}" in ''|-*) shift ;; *) LIST_N="$2"; shift 2 ;; esac ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -99,17 +103,69 @@ fi
 
 [ -n "$TITLE" ] && [ -n "$WHAT" ] || die "--title and --what are required"
 [ -n "$IMPACT" ] || IMPACT="(not stated)"
+
+# Secret-shaped text: the ERE mirror of notify_slack._SECRET_PATTERNS, the skill's one list.
+# This script must run with no Python (Git Bash on Windows), so it cannot import that list;
+# tests/test_secret_patterns.py runs every fake example of it through both and fails when they
+# disagree. It used to carry its own shorter list, which let Slack webhooks, xox tokens and
+# Google API keys through (release review, 2.8.0). One pattern per line: CS case-sensitive,
+# CI case-insensitive. \b and lookbehinds are spelled out as "(^|[^A-Za-z0-9_])" prefixes.
+read -r -d '' SECRET_CS <<'ERE'
+-----BEGIN [A-Z ]*PRIVATE KEY
+ghp_[A-Za-z0-9]{20,}
+github_pat_[A-Za-z0-9_]+
+hf_[A-Za-z0-9]{20,}
+AIza[0-9A-Za-z_-]{20,}
+(^|[^A-Za-z0-9_])AQ\.[0-9A-Za-z_-]{20,}
+xox[abeprs]-[A-Za-z0-9-]{10,}
+sk-ant-[A-Za-z0-9_-]{20,}
+sk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}
+(^|[^A-Za-z0-9_])sk-[A-Za-z0-9]{32,}
+(^|[^A-Za-z0-9_])(AKIA|ASIA)[0-9A-Z]{16}([^A-Za-z0-9_]|$)
+(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*
+ERE
+read -r -d '' SECRET_CI <<'ERE'
+authorization:[[:space:]]*(token|bearer)[[:space:]]+[^[:space:]]+
+password[[:space:]]*[:=][[:space:]]*[^[:space:]]+
+postgres(ql)?://[^[:space:]:/@]+:[^[:space:]@]+@
+https?://hooks\.slack\.com/services/[^[:space:]]+
+key=[A-Za-z0-9_.-]{20,}
+(^|[^A-Za-z0-9_])token=[^/~.$[:space:]&"'<>][^[:space:]&"'<>]{7,}
+--share-token[[:space:]=]+['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
+share_token=['"]?[^/~.$[:space:]"'<>][^[:space:]"'<>]{7,}
+--cookie[[:space:]=]+['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
+(^|[^A-Za-z0-9_])bearer[[:space:]]+[A-Za-z0-9_.=+/-]{20,}
+ERE
+looks_secret() {
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] && printf '%s\n' "$1" | grep -Eq -- "$p" && return 0
+  done <<EOF
+$SECRET_CS
+EOF
+  while IFS= read -r p; do
+    [ -n "$p" ] && printf '%s\n' "$1" | grep -Eiq -- "$p" && return 0
+  done <<EOF
+$SECRET_CI
+EOF
+  return 1
+}
 # Secrets must never reach a folder 46 people can read. Refuse rather than redact: a
 # redacted report can still be wrong about what it hid, and the agent can rephrase.
-ALL="$TITLE $WHAT $IMPACT $WORKAROUND $FIX $STEP"
-if printf '%s' "$ALL" | grep -Eq -- '-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|hf_[A-Za-z0-9]{20,}|Authorization: *(Token|Bearer) +[A-Za-z0-9]|[Pp]assword *[:=] *[^ ]'; then
-  die "the text looks like it contains a key, token or password -- remove it and re-run"
+# Every free-text field that reaches the file -- --mode too (release verification, 2.8.0).
+ALL="$TITLE $WHAT $IMPACT $WORKAROUND $FIX $STEP $SESSION $MODE"
+if looks_secret "$ALL"; then
+  die "the text looks like it contains a key, token, password or webhook -- remove it and re-run"
 fi
 
 # ---- context captured automatically, so the agent never has to remember it ----------
+# The skill version: a bash copy of skill_version.py (the one reader of plugin.json) -- on Windows
+# `python3` is often the Microsoft Store stub. tests/test_skill_version.py keeps the two equal.
 PLUGIN_JSON="$HERE/../.claude-plugin/plugin.json"
-VER="$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PLUGIN_JSON" 2>/dev/null | head -n1)"
-[ -n "$VER" ] || VER="unknown"
+VER_UNKNOWN="(unknown — plugin.json not found)"
+VER="$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$PLUGIN_JSON" 2>/dev/null | head -n1 | tr -d '[:space:]')"
+[ -n "$VER" ] || VER="$VER_UNKNOWN"
+if [ "$VER" = "$VER_UNKNOWN" ]; then VER_SHOWN="$VER"; else VER_SHOWN="v$VER"; fi
 LOCAL_USER="$(id -un 2>/dev/null || echo "${USERNAME:-${USER:-unknown}}")"
 WHO="${HIVE_USER:-$LOCAL_USER}"
 OS="$(uname -sr 2>/dev/null || echo unknown)"
@@ -120,23 +176,22 @@ NOW="$(date '+%Y-%m-%d %H:%M %Z')"
 clean() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40; }
 NAME="${DAY}_$(clean "$WHO")"
 [ -n "$SESSION" ] && NAME="${NAME}_$(clean "$SESSION")"
-FILE="$NAME.md"
+HOST="$(hostname 2>/dev/null || uname -n 2>/dev/null || echo host)"
+FILE="${NAME}+$(date +%H%M%S)-$(clean "${HOST%%.*}")-$$-${RANDOM}${RANDOM}.md"
 if [ -z "$MODE" ]; then
   case "$(route)" in direct) MODE="hive_local" ;; ssh) MODE="hive_remote" ;; *) MODE="local" ;; esac
 fi
 
-MARK="<!-- end of header: report_issue.sh strips everything above this line when appending -->"
 ENTRY="$(mktemp "${TMPDIR:-/tmp}/report_issue.XXXXXX")" || die "cannot create a temp file"
 trap 'rm -f "$ENTRY"' EXIT
 {
-  printf '# Skill issues -- %s -- %s%s\n\n' "$WHO" "$DAY" "${SESSION:+ -- $SESSION}"
+  printf '# Skill issue -- %s -- %s%s\n\n' "$WHO" "$DAY" "${SESSION:+ -- $SESSION}"
   printf -- '- **Skill version:** %s\n- **Mode:** %s\n- **OS:** %s\n- **Local user:** %s\n' \
          "$VER" "$MODE" "$OS" "$LOCAL_USER"
-  printf -- '- **HIVE user:** %s\n\n' "${HIVE_USER:-(none)}"
-  printf '%s\n' "$MARK"
+  printf -- '- **HIVE user:** %s\n' "${HIVE_USER:-(none)}"
   printf '\n## %s  [%s, %s]\n\n' "$TITLE" "$KIND" "$SEV"
   printf -- '- **When:** %s%s\n' "$NOW" "${STEP:+ -- step $STEP}"
-  printf -- '- **Skill:** v%s, mode %s\n' "$VER" "$MODE"
+  printf -- '- **Skill:** %s, mode %s\n' "$VER_SHOWN" "$MODE"
   printf -- '- **What happened:** %s\n' "$WHAT"
   printf -- '- **Impact:** %s\n' "$IMPACT"
   # `if`, not `[ ] &&`: a block's status is its last command's, and a false test there
@@ -145,13 +200,13 @@ trap 'rm -f "$ENTRY"' EXIT
   if [ -n "$FIX" ]; then printf -- '- **Proposed fix:** %s\n' "$FIX"; fi
 } > "$ENTRY" || die "cannot write $ENTRY"
 
-# The same append logic runs on either side of the SSH hop: a new file gets the header,
-# an existing one gets only what follows the marker line.
-APPEND='f="$1"; if [ -s "$f" ]; then sed "1,/^<!-- end of header/d" >> "$f"; else cat > "$f"; fi'
+# The same write runs on either side of the SSH hop: the entry goes to a dot-name no reader
+# matches (*.md skips it), then is renamed -- one step, so a reader sees all of it or none.
+WRITE='t="$1/.$2.part"; if cat > "$t" && mv -f "$t" "$1/$2"; then exit 0; fi; rm -f "$t"; exit 1'
 
 deliver_local() {
   mkdir -p "$LOCAL_DIR" 2>/dev/null || { echo "report_issue.sh: cannot create $LOCAL_DIR" >&2; return 1; }
-  bash -c "$APPEND" _ "$LOCAL_DIR/$FILE" < "$ENTRY" || return 1
+  bash -c "$WRITE" _ "$LOCAL_DIR" "$FILE" < "$ENTRY" || return 1
   echo "recorded locally: $LOCAL_DIR/$FILE"
   echo "  This machine cannot reach the Core's shared issue folder. Please send that file to the"
   echo "  UC Davis Proteomics Core, or open an issue at https://github.com/bsphinney/DE-LIMP/issues"
@@ -159,13 +214,13 @@ deliver_local() {
 
 case "$(route)" in
   direct)
-    if bash -c "$APPEND" _ "$ISSUES_DIR/$FILE" < "$ENTRY"; then
+    if bash -c "$WRITE" _ "$ISSUES_DIR" "$FILE" < "$ENTRY"; then
       chmod g+r "$ISSUES_DIR/$FILE" 2>/dev/null
       echo "recorded: $ISSUES_DIR/$FILE"
     else deliver_local; fi ;;
   ssh)
     # printf %q quoting: the path crosses a remote shell (hive_exec.sh runs `bash -l -c`).
-    remote="set -e; [ -d $(printf '%q' "$ISSUES_DIR") ] && [ -w $(printf '%q' "$ISSUES_DIR") ] || exit 7; bash -c $(printf '%q' "$APPEND") _ $(printf '%q' "$ISSUES_DIR/$FILE"); chmod g+r $(printf '%q' "$ISSUES_DIR/$FILE") 2>/dev/null || true"
+    remote="set -e; [ -d $(printf '%q' "$ISSUES_DIR") ] && [ -w $(printf '%q' "$ISSUES_DIR") ] || exit 7; bash -c $(printf '%q' "$WRITE") _ $(printf '%q' "$ISSUES_DIR") $(printf '%q' "$FILE"); chmod g+r $(printf '%q' "$ISSUES_DIR/$FILE") 2>/dev/null || true"
     if bash "$HIVE_EXEC" "$remote" < "$ENTRY"; then
       echo "recorded: $HIVE_USER@hive:$ISSUES_DIR/$FILE"
     else

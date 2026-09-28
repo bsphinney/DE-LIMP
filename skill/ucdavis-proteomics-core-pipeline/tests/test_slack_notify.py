@@ -930,9 +930,13 @@ class Finalize(unittest.TestCase):
             res = json.loads(r.stdout)
             self.assertIs(res["run_log"]["logged"], True)
             calls = order_log(os.path.join(os.path.dirname(p["session_dir"]), "order.log"))
+            # before the zip, a read-only `locate` names an existing registry record in the
+            # README (session._registry_lookup); the run is logged once, after the zip
             self.assertEqual([c["argv"] for c in calls],
-                             [["analysis-done", "--timeout", "300", "--session",
+                             [["locate", "--session", p["session_dir"]],
+                              ["analysis-done", "--timeout", "300", "--session",
                                p["session_dir"]]])
+            calls = calls[1:]
             self.assertGreater(m.times[0], calls[0]["t"])            # logged, then posted
             self.assertIn("*Run log:* yes", json.dumps(m.bodies[0]))
             # both outcomes, run log first, are the last lines of MANIFEST.txt -- and in the zip
@@ -1443,6 +1447,21 @@ class ScriptAndPayloadSafety(unittest.TestCase):
                         self.assertNotIn(bit, posted, secret)
                         self.assertIn("[redacted]", posted)
                         self.assertIn("(retrying)", posted)       # the alert still goes out
+            finally:
+                m.close()
+
+    def test_key_is_redacted_only_when_it_looks_like_a_key(self):
+        # the key= pattern (added for make_podcast's Google keys) must not eat ordinary text
+        self.assertEqual(ns.redact("sort key=value, lookup key=protein_id"),
+                         "sort key=value, lookup key=protein_id")
+        self.assertEqual(ns.redact("GET /v1/models?key=Ab12Cd34Ef56Gh78Ij90Kl&x=1"),
+                         "GET /v1/models?key=[redacted]&x=1")
+        with tempfile.TemporaryDirectory() as d:
+            m = Mock("ok")
+            try:
+                with env_patch(d, SKILL_SLACK_WEBHOOK=m.url):
+                    self.assertTrue(ns.send_alert("dedupe by key=value failed", title="FRAN"))
+                    self.assertIn("key=value", json.dumps(m.bodies[-1]))
             finally:
                 m.close()
 

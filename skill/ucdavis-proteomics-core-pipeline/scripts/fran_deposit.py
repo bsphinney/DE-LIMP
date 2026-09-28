@@ -72,6 +72,9 @@ permission on the directory is the enforcement, not a flag in this file.
   opted_out            FRAN_DEPOSIT=off, or --skip
   qc_run               a QC run (is_qc_run: --qc/--not-qc, session `qc`, FRAN's QC trees, or
                        FRAN's QC name rule). Never staged; one staged earlier is marked qc: true
+  needs_agent_check    the QC name rule fired on a name that also carries a Core submission id
+                       (PROT_####): a customer study can mention its pooled QC. Not a decision --
+                       nothing is recorded -- until someone runs stage --qc or --not-qc
 `backfill` adds three of its own, for a directory it found but will not hand over:
   not_a_skill_search   a search this skill did not run (e.g. a DE-LIMP app search)
   already_ingested     the cron's logs show FRAN already ingested it (by any route)
@@ -116,6 +119,20 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+# A Core submission id written in a name or a path has ONE definition, core_submission.PROT_TOKEN
+# (`identify` reads submissions with it); the QC rule imports it, never a copy. A partial copy of
+# scripts/ without core_submission.py cannot look for one, and is_qc_run then refers every
+# name-rule hit to a person (needs_agent_check) and says why -- it never guesses either way.
+try:
+    from core_submission import PROT_TOKEN as PROT_ID_RE
+    PROT_ID_UNAVAILABLE = None
+except ImportError as _e:
+    PROT_ID_RE = None
+    PROT_ID_UNAVAILABLE = f"core_submission.py could not be imported ({type(_e).__name__}: {_e})"
 
 GROUP_ROOT = "/quobyte/proteomics-grp"
 FRAN_URL = "https://fran.stan-proteomics.org"
@@ -297,20 +314,35 @@ def find_report(out, engine):
     return None
 
 
-_FASTA_ARG = re.compile(r"--fasta\s+(\"[^\"]+\"|'[^']+'|\S+)")
+# A --fasta value on the command line DIA-NN echoes into its log, read the way DIA-NN reads its own
+# arguments (diann.cpp 1.8, arguments()): argv is joined with single spaces, UNQUOTED -- the shell or
+# Windows already removed any quotes -- and each option's value runs to the next "--", trimmed. So a
+# path with spaces is logged as is, and only this reading gets it back: the DIA-NN 1.8.1 log of
+# PXD022216 has `--fasta C:\SpectralLib\human - 2021-02-16-reviewed-contam-UP000005640.fasta
+# --met-excision`, which \S+ cut to `C:\SpectralLib\human` and shlex (posix) to `C:SpectralLibhuman`.
+# "fasta " needs its space, as in DIA-NN, so --fasta-search / --fasta-filter are never read as one.
+_FASTA_ARG = re.compile(r"--fasta (.*?)(?=--|$)", re.M)
 
 
-def search_fastas(out):
+def logged_fastas(text):
+    """Every --fasta value in DIA-NN log text (see _FASTA_ARG), trimmed; surrounding quotes, which
+    only a hand-written command line would carry, are dropped."""
+    vals = (m.strip().strip("\"'").strip() for m in _FASTA_ARG.findall(text.replace("\r", "")))
+    return [v for v in vals if v]
+
+
+def search_fastas(out, with_source=False):
     """The FASTA path(s) this search actually used: `fasta` in search_provenance.json, then every
     `--fasta` on the engine command line DIA-NN echoes at the top of its log. Read from the head
     of the log only (2 MB): a 399-file command line puts `--fasta` ~60 KB in, and the rest of a
-    log is the search itself. Empty when neither says -- which is the caller's cue not to guess."""
+    log is the search itself. Empty when neither says -- which is the caller's cue not to guess.
+    with_source=True returns ((path, where-it-was-named), ...) instead of paths."""
     found = []
     try:
         with open(os.path.join(out, "search_provenance.json")) as fh:
             p = json.load(fh)
         if isinstance(p, dict) and p.get("fasta"):
-            found.append(str(p["fasta"]))
+            found.append((str(p["fasta"]), "search_provenance.json fasta"))
     except (OSError, ValueError):
         pass
     for log in ("report.log.txt", "dia-quant-output/report.log.txt"):
@@ -319,8 +351,11 @@ def search_fastas(out):
                 head = fh.read(2 << 20)
         except OSError:
             continue
-        found += [m.strip("\"'") for m in _FASTA_ARG.findall(head)]
-    return tuple(dict.fromkeys(found))
+        found += [(v, f"search log --fasta ({log})") for v in logged_fastas(head)]
+    uniq = {}
+    for path, src in found:
+        uniq.setdefault(path, src)
+    return tuple(uniq.items()) if with_source else tuple(uniq)
 
 
 def explicit_meta_mismatch(out, meta):
@@ -493,6 +528,147 @@ def _fasta_helpers():
         return None
 
 
+def _cont_tag():
+    """(tag, None): fetch_fasta.CONT_TAG ("Cont_"), the contaminant tag DIA-NN's
+    --cont-quant-exclude keys on -- or (None, why) when fetch_fasta cannot be imported. Never a
+    silent None: without the tag every contaminant counts as a target, so the failure is WARNED
+    and organism_from_headers / fasta_from_search mark a header-derived organism unverified. (A
+    partial copy of scripts/ without estimate_params.py did exactly this on HIVE, 2026-09-28, and
+    recorded contaminant_entries 0 with no word said.)"""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fetch_fasta import CONT_TAG
+        return CONT_TAG, None
+    except Exception as e:                                          # noqa: BLE001
+        missing = getattr(e, "name", None)
+        why = ("fetch_fasta could not be imported"
+               + (f" (missing module {missing!r})" if missing else "")
+               + f": {type(e).__name__}: {e}")
+        sys.stderr.write(f"[fran_deposit] WARNING: contaminant tag unavailable -- {why}. Every "
+                         f"contaminant counts as a target, so an organism read from FASTA headers "
+                         f"is recorded as unverified. Copy the whole scripts/ directory.\n")
+        return None, why
+
+
+# When NO sidecar is tied to the search's FASTA, the FASTA itself still answers "which database,
+# which organism" -- directly: its path is on the search's own command line, and UniProt headers
+# carry OX= (taxon) and OS= (organism) on every entry. Brett, 2026-09-25, of the Siegel searches
+# (human blood, human UniProt): "this should be directly queryable from the search logs". Never
+# from the FILENAME: a proteome id in a name (UP000005640) is recorded as supporting evidence only.
+HEADER_MAJORITY = 0.95     # one taxon on >= 95% of the TARGET entries, or no organism is claimed
+_OX = re.compile(r"\bOX=(\d+)")
+_OS = re.compile(r"\bOS=(.+?)(?=\s+[A-Z]{2}=|$)")
+_PROTEOME_ID = re.compile(r"UP\d{9}")
+
+
+def organism_from_headers(path, cont_tag=None):
+    """(organism, taxid, evidence, why-not) from the FASTA's own UniProt headers: OX= tallied over
+    the target entries. A contaminant is not a target: an entry is one when its header CONTAINS
+    fetch_fasta.CONT_TAG -- fetch_fasta's own test (`CONT_TAG in header`), because the tag sits
+    after the database prefix (`>sp|Cont_P00761|TRYP_PIG ...`), not at the start. One taxon must
+    hold at least HEADER_MAJORITY of the targets; otherwise nothing is claimed and why-not says
+    what was found.
+
+    Why containment, measured 2026-09-28: MRS/UP000005640_9606_plus_universal_contam.fasta tags
+    all 381 of its contaminants `sp|Cont_` (none start `>Cont_`), so the old startswith test
+    counted every one as a target -- OX=9606 on 20,814 of 21,044 (98.9%), where the true targets
+    are 20,663 of 20,663 (100%); and the live manifest incoming/DIA-NN_2.6.0_Ceres__88c1abfb
+    recorded contaminant_entries 0. Human only resolved by the margin. A small proteome does not:
+    6,066 yeast entries + 380 appended contaminants is 94.1% < HEADER_MAJORITY, so the organism
+    went unresolved. A hand-built FASTA whose contaminants carry no tag still counts them as
+    targets and resolves only when the majority holds. So does every FASTA when the tag itself is
+    unavailable (_cont_tag: fetch_fasta not importable) -- then evidence carries
+    `contaminant_tag_unavailable`, why-not says so, and fasta_from_search records the organism as
+    "unverified: contaminant tag unavailable ..."."""
+    no_tag = None
+    if not cont_tag:
+        cont_tag, no_tag = _cont_tag()
+    ox, names = collections.Counter(), collections.defaultdict(collections.Counter)
+    tag = cont_tag.encode() if cont_tag else None
+    n_target = n_cont = 0
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                if not line.startswith(b">"):
+                    continue
+                if tag and tag in line:             # fetch_fasta's test: CONT_TAG in header
+                    n_cont += 1
+                    continue
+                h = line[1:].decode("utf-8", "replace").strip()
+                n_target += 1
+                m = _OX.search(h)
+                if m:
+                    ox[m.group(1)] += 1
+                    o = _OS.search(h)
+                    if o:
+                        names[m.group(1)][o.group(1).strip()] += 1
+    except OSError as e:
+        return None, None, {}, f"cannot read {path} ({e.strerror or e})"
+    ev = {"target_entries": n_target, "contaminant_entries": n_cont,
+          "contaminant_tag": cont_tag, "ox_tally": dict(ox.most_common(4))}
+    if no_tag:
+        # The counts above include every contaminant as a target; say so wherever they are shown.
+        ev["contaminant_tag_unavailable"] = no_tag
+    if not n_target:
+        return None, None, ev, f"{path} has no target entries"
+    if not ox:
+        return None, None, ev, f"no OX= in the target headers of {path} (not UniProt-format)"
+    top, k = ox.most_common(1)[0]
+    ev.update(ox_top=int(top), ox_top_entries=k)
+    if k / n_target < HEADER_MAJORITY:
+        return None, None, ev, (f"no clear majority taxon: OX={top} on {k:,} of {n_target:,} target "
+                                f"entries ({k / n_target:.1%} < {HEADER_MAJORITY:.0%})"
+                                + (" -- contaminant tag unavailable, so contaminants were counted "
+                                   "as targets" if no_tag else ""))
+    org = names[top].most_common(1)[0][0] if names[top] else None
+    return org, int(top), ev, None
+
+
+def fasta_from_search(out):
+    """The database of a search with NO tied sidecar, from the FASTA the search itself names
+    (search_fastas: its provenance / its log's --fasta): path, md5, entry count (fetch_fasta's
+    helpers), and organism + taxon from the headers (organism_from_headers). A dict whose `why`
+    says what could not be established; nothing is ever guessed."""
+    res = {"fasta_path": None, "fasta_md5": None, "fasta_n_proteins": None, "organism": None,
+           "taxon": None, "organism_source": None, "why": None}
+    named = search_fastas(os.path.abspath(out), with_source=True)
+    readable = [(p, src) for p, src in named if os.path.isfile(p) and os.access(p, os.R_OK)]
+    distinct = {os.path.realpath(p): (p, src) for p, src in readable}
+    if not named:
+        res["why"] = ("the search names no FASTA (no `fasta` in search_provenance.json, no --fasta "
+                      "in report.log.txt)")
+        return res
+    if not distinct:
+        res["why"] = f"no FASTA the search names is readable here: {', '.join(p for p, _ in named)}"
+        return res
+    if len(distinct) > 1:
+        res["why"] = (f"the search read {len(distinct)} FASTA files "
+                      f"({', '.join(p for p, _ in distinct.values())}); one database path cannot "
+                      f"describe it")
+        return res
+    path, src = next(iter(distinct.values()))
+    res.update(fasta_path=path, fasta_source=src)
+    helpers = _fasta_helpers()
+    if helpers:
+        res["fasta_md5"], res["fasta_n_proteins"] = helpers[0](path), helpers[1](path)
+    org, tax, ev, why = organism_from_headers(path)
+    pid = _PROTEOME_ID.search(os.path.basename(path))
+    if pid:
+        ev["proteome_id_in_filename"] = pid.group(0) + " (supporting evidence only, never the source)"
+    res["organism_evidence"] = ev
+    if tax:
+        src_text = (f"FASTA headers (OX={tax} in {ev['ox_top_entries']:,} of "
+                    f"{ev['target_entries']:,} target entries) via {src}")
+        if ev.get("contaminant_tag_unavailable"):
+            src_text = (f"unverified: contaminant tag unavailable "
+                        f"({ev['contaminant_tag_unavailable']}; contaminants counted as targets) "
+                        f"-- {src_text}")
+        res.update(organism=org, taxon=tax, organism_source=src_text)
+    else:
+        res["why"] = why
+    return res
+
+
 def entry_name(out):
     """Deterministic drop-entry name for a search dir: `<dir name>__<8 hex of its real path>`.
 
@@ -569,14 +745,13 @@ def read_receipt(out):
 
 
 def write_receipt(out, data):
+    """Write the receipt ATOMICALLY (_write_json_group: tmp + replace, 0664). It carries decisions
+    -- opted_out, not_core_facility, qc_run -- that a later backfill must honour; written in place,
+    a job killed mid-write left a truncated receipt, read_receipt() saw it as malformed, and the
+    decision was lost. The next Core member's stage/verify rewrites it, hence group-writable."""
     p = os.path.join(out, RECEIPT)
     try:
-        with open(p, "w") as fh:
-            json.dump(data, fh, indent=2)
-        try:
-            os.chmod(p, 0o664)        # the next Core member's stage/verify rewrites it
-        except OSError:
-            pass
+        _write_json_group(p, data)
         return p
     except OSError as e:
         # A receipt we could not write is a resume hazard, not a failure of the deposit -- report
@@ -592,13 +767,44 @@ def write_receipt(out, data):
 # incoming/ has no QC path, so the decision has to be made here, before anything is staged.
 #
 # ONE definition: is_qc_run(). backfill and stage both call it; nothing else decides QC.
-# TWIN RULE in FRAN: ingest/find_uningested.py `policy_exclusion` / `qc_reason` / `QC_NAME_RE`
-# (branch fix/auto-ingest-starvation). The two must agree byte for byte -- change one, change the
-# other. Pinned by the same vectors on both sides (tests/test_fran_health_backfill.py QcRuleTests):
-#   excluded: "chkLUppm_HeLa50_2026 Lumos QC", "QC_run_01", "hela_qc_2", "Exploris QC2"
-#   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2"
+# TWIN RULE in FRAN: ingest/find_uningested.py `qc_reason` / `name_qc_signal` / QC_NAME_RE,
+# HELA_STD_RE, RUN_METHOD_RE, PROT_ID_RE (on FRAN main since PR #12; the HeLa-standard and
+# PROT_#### parts ship with the matching FRAN patches of 2026-09-28). The two must agree byte for
+# byte -- change one, change the other. FRAN cannot import the skill, so its PROT_ID_RE is a
+# literal copy of core_submission.PROT_TOKEN; both repos' tests pin the same pattern string.
+# Pinned by the same vectors on both sides (here tests/test_fran_health_backfill.py QcRuleTests;
+# FRAN tests/test_auto_ingest_starvation.py):
+#   excluded: "chkLUppm_HeLa50_2026 Lumos QC", "QC_run_01", "hela_qc_2", "Exploris QC2",
+#             "07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"
+#   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2",
+#             "HeLa50ng_titration"
+#   agent:    "PROT_0812 plasma + pooled QC" -> needs_agent_check
 # "HeLa" alone is deliberately NOT a QC signal: HeLa digests are real experiments too.
 QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
+# The Core's HeLa STANDARD -- 50 ng of HeLa digest, named HE50 / HeL50 / Hel-50 / HeLa50(ng) on its
+# runs -- is QC only beside a run-method token: NN-spd (Evosep samples per day; timsTOF HT
+# "07162026_HE50_60-spd-dia-_S1-A1") or an NNm gradient (the Lumos: "FL030926_HeL50_90m_3"; its
+# runs carry no SPD). Measured against STAN's records of the Core's own QC runs, 2026-09-28. Neither
+# token alone is a signal: "HeLa50ng_titration" is an experiment, and "100mM" is not a gradient.
+HELA_STD_RE = re.compile(r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
+RUN_METHOD_RE = re.compile(r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
+# A Core submission id (PROT_ID_RE, imported above). A name or path that carries one is a
+# CUSTOMER study, whatever QC word it also carries ("PROT_0812 plasma + pooled QC"), so the name
+# rule refers it to a person (needs_agent_check) instead of deciding qc_run -- and qc_run, once
+# recorded, blocks later stages.
+# What a NAME-rule verdict says in its reason text. A qc_run recorded on one of these is re-judged
+# by today's rule (decide_qc); an explicit --qc, session marker or excluded tree stays binding.
+NAME_RULE_MARKS = ("matches QC_NAME_RE", "is a HeLa standard")
+
+
+def name_qc_signal(text):
+    """What makes one name look like a QC run, or None: the QC token, or a HeLa standard beside a
+    run-method token. The twin of FRAN's find_uningested.name_qc_signal."""
+    if QC_NAME_RE.search(text or ""):
+        return "matches QC_NAME_RE"
+    if HELA_STD_RE.search(text or "") and RUN_METHOD_RE.search(text or ""):
+        return "is a HeLa standard (HELA_STD_RE beside a RUN_METHOD_RE token)"
+    return None
 # FRAN's find_uningested.DEFAULT_EXCLUDES, verbatim: trees whose engine output is never a corpus
 # search (STAN QC, the QC watcher, smoke tests, FRAN's scratch dir, the ToF QC series). Substring
 # match, as FRAN does it. A search under one is excluded by POLICY -- even with --not-qc, because
@@ -660,13 +866,16 @@ def _session_qc_marker(session):
 
 
 def is_qc_run(out, session=None, *, names=(), override=None):
-    """(is_qc, why) for a search out dir. FRAN's precedence (policy_exclusion), first match wins:
+    """(is_qc, why) for a search out dir. FRAN's precedence (qc_reason), first match wins:
       1. an explicit QC marker -- `override=True` (stage --qc) or session metadata "qc": true
       2. the out dir is under one of FRAN's DEFAULT_EXCLUDES trees -- excluded EVEN with --not-qc:
          FRAN refuses anything there, so staging it would only put a refusal in its queue
       3. an explicit NOT-QC marker -- `override=False` (--not-qc) or session metadata "qc": false
-      4. QC_NAME_RE on the search name(s) in `names` and the session name, then on the last three
-         components of the out dir path
+      4. name_qc_signal (QC_NAME_RE, or a HeLa standard beside a run-method token) on the search
+         name(s) in `names` and the session name, then on the last three components of the out dir
+         path -- UNLESS a Core submission id (PROT_ID_RE) is in one of those names or ANYWHERE in
+         the out dir's path: then the answer is None, "needs_agent_check: ..." -- a person
+         decides, with --qc or --not-qc. (Also None when PROT_ID_RE could not be imported.)
     `why` mirrors FRAN's reason text: "QC run: excluded by policy (<what matched>)". It goes into
     the receipt, and for a staged search into the manifest's `qc_rule`."""
     out = os.path.abspath(out)
@@ -694,9 +903,28 @@ def is_qc_run(out, session=None, *, names=(), override=None):
         labelled += [("session_name", n) for n in (_session_title(session),
                                                    os.path.basename(session)) if n]
     labelled += [("output_dir", c) for c in [x for x in real.split("/") if x][-3:]]
+    # The QC signal is read on the last three path components, as FRAN reads them; a PROT id on
+    # EVERY component. The Core files a search wherever the submission's tree puts it (in
+    # SERVICE/<lab>/PROT_0812/diann/2.7.0/search_out it is 4th from the end), and a PROT id can
+    # only turn qc_run into needs_agent_check -- reading further can never exclude anything.
+    prot_texts = [t for _, t in labelled] + [c for p in dict.fromkeys((out, real))
+                                             for c in p.split("/") if c]
     for field, text in labelled:
-        if QC_NAME_RE.search(text):
-            return True, f"QC run: excluded by policy ({field} {text!r} matches QC_NAME_RE)"
+        sig = name_qc_signal(text)
+        if not sig:
+            continue
+        if PROT_ID_RE is None:
+            sys.stderr.write(f"[fran_deposit] WARNING: cannot look for a PROT id -- "
+                             f"{PROT_ID_UNAVAILABLE}; a person decides this QC call\n")
+            return None, (f"needs_agent_check: {field} {text!r} {sig}, but whether a Core "
+                          f"submission id is in its names cannot be checked: "
+                          f"{PROT_ID_UNAVAILABLE}. Decide with stage --qc or --not-qc.")
+        prot = next((t for t in prot_texts if PROT_ID_RE.search(t)), None)
+        if prot:
+            return None, (f"needs_agent_check: {field} {text!r} {sig}, but {prot!r} carries a Core "
+                          f"submission id -- a customer study can mention its pooled QC. Decide "
+                          f"with stage --qc or --not-qc.")
+        return True, f"QC run: excluded by policy ({field} {text!r} {sig})"
     return False, "not QC: no qc marker, not under a FRAN excluded tree, no QC token in the names or path"
 
 
@@ -706,11 +934,17 @@ def _recorded_qc(receipt, manifest):
     A withdrawal must STAY a withdrawal. A later plain `stage --out X` (no --name, no flag) used to
     re-stage a withdrawn QC run with qc: false -- which FRAN honours -- so the run got ingested
     after all. A qc_run receipt, or a staged manifest saying qc/exclude: true, is therefore QC
-    until someone says --not-qc explicitly. A recorded --not-qc ("user override") is not-QC."""
-    if receipt.get("status") == "qc_run":
+    until someone says --not-qc explicitly. A recorded --not-qc ("user override") is not-QC.
+
+    EXCEPT a verdict the NAME rule reached (NAME_RULE_MARKS in its qc_rule): that is not binding.
+    decide_qc re-judges it by today's rule, with the name it was judged on. Otherwise a rule fix
+    could never reach a search it had already misjudged -- "PROT_0812 plasma + pooled QC", recorded
+    qc_run, stayed blocked for every later stage."""
+    if receipt.get("status") == "qc_run" and not _name_rule_verdict(receipt.get("qc_rule")):
         return True, (f"QC run: excluded by policy (recorded by {receipt.get('decided_by') or '?'} "
                       f"at {receipt.get('at') or '?'}: {receipt.get('qc_rule') or 'qc_run'})")
-    if manifest.get("qc") is True or manifest.get("exclude") is True:
+    if ((manifest.get("qc") is True or manifest.get("exclude") is True)
+            and not _name_rule_verdict(manifest.get("qc_rule"))):
         return True, (f"QC run: excluded by policy (its staged manifest says qc: true: "
                       f"{manifest.get('qc_rule') or 'no reason recorded'})")
     if QC_OVERRIDE in (receipt.get("qc_rule"), manifest.get("qc_rule")):
@@ -718,15 +952,26 @@ def _recorded_qc(receipt, manifest):
     return None, None
 
 
+def _name_rule_verdict(rule):
+    return any(m in (rule or "") for m in NAME_RULE_MARKS)
+
+
 def decide_qc(out, *, names=(), override=None, receipt=None, manifest=None):
     """THE QC decision for one search, for stage and backfill alike: an explicit flag, else what
     an earlier stage recorded, else is_qc_run's rule. (is_qc_run still puts FRAN's excluded trees
-    above any not-QC decision.)"""
+    above any not-QC decision.) Returns (True | False | None, why); None is needs_agent_check."""
+    receipt, manifest = receipt or {}, manifest or {}
     if override is None:
-        rec, why = _recorded_qc(receipt or {}, manifest or {})
+        rec, why = _recorded_qc(receipt, manifest)
         if rec is True:
             return True, why
         override = rec
+        # An earlier NAME-rule verdict is re-judged with the name it was judged on: a flagless
+        # re-stage does not carry that name, and without it a withdrawn QC run would come back.
+        names = list([names] if isinstance(names, str) else names) + [
+            n for n, rule in ((receipt.get("search_name"), receipt.get("qc_rule")),
+                              (manifest.get("search_name"), manifest.get("qc_rule")))
+            if n and _name_rule_verdict(rule)]
     return is_qc_run(out, names=names, override=override)
 
 
@@ -735,10 +980,17 @@ def _write_json_group(path, data):
     skill writes under incoming/ must be rewritable by the NEXT Core member: with a 022 umask a
     manifest came out 0644, and another member's withdrawal then failed."""
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.chmod(tmp, 0o664)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(data, fh, indent=2)
+        os.chmod(tmp, 0o664)
+        os.replace(tmp, path)
+    except BaseException:
+        try:                                      # never leave a half-written tmp beside it
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _withdraw_qc_entry(entry, why, user):
@@ -802,6 +1054,11 @@ def check(a):
     qc, why = decide_qc(out, names=[name] if name else (), override=override,
                         receipt=read_receipt(out) or {}, manifest=prior_man)
     r["qc"], r["qc_rule"] = qc, why
+    if qc is None:
+        r.update(reason="needs_agent_check", name=name,
+                 detail=f"{why} Nothing is recorded, so this blocks nothing: the next stage with "
+                        f"--qc or --not-qc decides it.")
+        return r
     if qc:
         r.update(reason="qc_run", name=name,
                  entry=os.path.join(os.environ.get("FRAN_DROP_DIR", DROP_DIR), entry_name(out)),
@@ -923,6 +1180,28 @@ def check(a):
 
     bad_meta = explicit_meta_mismatch(out, a.fasta_meta)
     org, tax, org_src = organism_from_meta(out, a.fasta_meta)
+    fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
+    if fp is None:
+        # No sidecar tied to the search's FASTA: read the FASTA the search itself names.
+        hdr = fasta_from_search(out)
+        fp, fmd5, fn = hdr["fasta_path"], hdr["fasta_md5"], hdr["fasta_n_proteins"]
+        if fp:
+            r["fasta_source"] = hdr.get("fasta_source")
+            r["organism_evidence"] = hdr.get("organism_evidence")
+        if org is None and hdr["taxon"]:
+            org, tax, org_src = hdr["organism"], hdr["taxon"], hdr["organism_source"]
+        elif org is None:
+            r["organism_unresolved"] = hdr["why"]
+        # The user's --organism/--taxon still wins; a disagreement with the headers is SAID.
+        hx = hdr["taxon"]
+        if hx and ((a.taxon and int(a.taxon) != hx) or (
+                a.organism and not a.taxon and hdr["organism"]
+                and a.organism.strip().lower() != hdr["organism"].lower())):
+            r["organism_warning"] = (f"--organism {a.organism!r} / --taxon {a.taxon} disagree with "
+                                     f"the FASTA's own headers: {hdr['organism_source']} "
+                                     f"({hdr['organism']})")
+            sys.stderr.write(f"[fran_deposit] WARNING: {r['organism_warning']}; the value you gave "
+                             f"is used\n")
     if bad_meta:
         r["fasta_meta_ignored"] = bad_meta
         sys.stderr.write(f"[fran_deposit] WARNING: --fasta-meta ignored: {bad_meta}; "
@@ -932,7 +1211,6 @@ def check(a):
                          + "\n")
     # None, never "": FRAN's read_manifest rejects an empty search_name or organism outright
     r["organism"] = (a.organism or "").strip() or org or None
-    fp, fmd5, fn = fasta_from_meta(out, a.fasta_meta)
     r["fasta_path"], r["fasta_md5"], r["fasta_n_proteins"] = fp, fmd5, fn
     r["taxon"] = a.taxon or tax
     r["organism_source"] = "--organism (given)" if a.organism else org_src
@@ -1158,6 +1436,10 @@ def do_stage(a):
         "fasta_path": c.get("fasta_path"),
         "fasta_md5": c.get("fasta_md5"),
         "fasta_n_proteins": c.get("fasta_n_proteins"),
+        # Where the two came from when no sidecar did (fasta_from_search), and anything that could
+        # not be established or that disagrees -- recorded, never silently resolved.
+        **{k: c[k] for k in ("fasta_source", "organism_evidence", "organism_unresolved",
+                             "organism_warning") if c.get(k)},
         "xic": c["xic"],
         "linked": linked,
         "staged_by": staged_by,
@@ -1416,10 +1698,22 @@ UNHEALTHY = ("stuck", "not_running", "stale_code")
 
 _TS = r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)"
 _RUN_START = re.compile(r"^===== (?:fran auto-ingest|auto_ingest) " + _TS + r" on (\S+)")
-_RUN_DONE = re.compile(r"^===== done: (\d+) ingested, (\d+) duplicate-skipped, (\d+) failed, "
-                       r"(\d+) still queued\W+" + _TS)
+# The run's summary line is read BY NAME, never by position. FRAN appends fields: on 2026-09-26
+# "... 182 still queued — <ts> =====" became "... 89 still queued, 3 quarantined, 0 backed-off
+# — <ts> =====", the positional regex this replaced matched none of the new lines, and every run
+# after the deploy read as one that died -- "64 runs with nothing ingested, 18 died" while the cron
+# had ingested 46 searches. parse_done_line() keeps whatever fields it finds.
+_DONE_PREFIX = "===== done:"
+_DONE_TAIL = re.compile(r"(?:\s+[—–-]+)?\s+" + _TS + r"\s*=+\s*$")   # " — <ts> =====", at the end
+_DONE_FIELD = re.compile(r"^(\d+) ([a-z][a-z -]*[a-z])$")    # "89 still queued", "0 backed-off"
+# The fields progress_health reads, by the name FRAN prints -> this run dict's key.
+DONE_FIELDS = {"ingested": "ingested", "duplicate-skipped": "duplicate", "failed": "failed",
+               "still queued": "queued"}
+_CRASHED = re.compile(r"^===== CRASHED: (.*?)\W+" + _TS)
 _ITEM = re.compile(r"^\[(\d+)/(\d+)\] (\S+) (.*)$")
-_SKIP = re.compile(r"^  SKIP (.+?)  \((.*)\)\s*$")
+# FRAN prints a selected-out candidate as "  SKIP <name>  (<why>)", and -- since 2026-09-26 -- a QC
+# exclusion or a manifest that needs a person as "  SKIP <name>  skipped (<why>)".
+_SKIP = re.compile(r"^  SKIP (.+?)  (?:skipped )?\((.*)\)\s*$")
 _QCLAIM = re.compile(r"^  Q(\d+)\s+(\S+)\s+(/.*?)\s*$")
 _CAND = re.compile(r"^  ([a-z]+)\s+(/.*?)\s*$")
 _SLURM_STATE = re.compile(r"^State\s+:\s+(\S+)")
@@ -1428,6 +1722,37 @@ _ENTRY_NAME = re.compile(r"__[0-9a-f]{8}$")          # entry_name()'s suffix
 # Lines in a failed ingest's tail that are noise, not the reason (PG Farm prints the collation
 # warning on every connection).
 _NOISE = ("collation", "HINT:", "DETAIL:  The database", "--- stderr ---", "--- last output ---")
+
+
+def parse_done_line(line):
+    """FRAN's run summary -> {"finished", "fields", "missing", "notes"}, or None if unreadable.
+
+    `===== done: 5 ingested, 0 duplicate-skipped, 0 failed, 89 still queued, 3 quarantined,
+    0 backed-off, 2 systemic, held back: sage (...) — 2026-09-28 11:54:37 =====`
+    The text between "done:" and the trailing timestamp is split on commas; each "<n> <name>"
+    becomes fields[name] = n, in any order, whatever names FRAN adds. The first piece that is not
+    "<n> <name>" (a "held back: ..." note, a count with a reason in brackets) starts `notes`, kept
+    verbatim. A DONE_FIELDS name that is absent is listed in `missing` -- never read as 0.
+    Unreadable: no trailing timestamp (a truncated line), or no "ingested" count, without which the
+    run's progress is unknown."""
+    if not line.startswith(_DONE_PREFIX):
+        return None
+    rest = line[len(_DONE_PREFIX):]
+    tail = _DONE_TAIL.search(rest)
+    if not tail:
+        return None
+    fields, notes = {}, None
+    pieces = rest[:tail.start()].split(",")
+    for i, piece in enumerate(pieces):
+        m = _DONE_FIELD.match(piece.strip())
+        if not m:
+            notes = ",".join(pieces[i:]).strip() or None
+            break
+        fields.setdefault(m.group(2), int(m.group(1)))
+    if "ingested" not in fields:
+        return None
+    return {"finished": _epoch(tail.group(1)), "fields": fields,
+            "missing": [n for n in DONE_FIELDS if n not in fields], "notes": notes}
 
 
 def _log_dir():
@@ -1460,11 +1785,17 @@ def parse_ingest_log(text):
       [i/N] <engine> <search>                                    an attempt, followed by
             <dir>  /  -> <identity>  /  report: ...              ...where it came from
             OK in Ns | SKIPPED-DUPLICATE ... | FAILED ... | TIMEOUT ...
-      ===== done: A ingested, B duplicate-skipped, C failed, D still queued — <ts> =====
-    A log with no `done` line is a run still going, or one that died (PG Farm unreachable, the
-    scan failed, SLURM killed it)."""
+      ===== done: A ingested, B duplicate-skipped, C failed, D still queued[, ...] — <ts> =====
+      ===== CRASHED: <error> — <ts> =====                        the run died, and said why
+    The done line is read by name (parse_done_line): every field lands in `done_fields`, and a
+    known one that is missing stays None, never 0. A `===== done:` line that cannot be read sets
+    `done_unreadable` -- the run FINISHED, in a format this reader does not know -- and is never
+    taken for a run that died. Only a log with no done line at all is a run still going, or one
+    that died (PG Farm unreachable, the scan failed, SLURM killed it). Re-verified against FRAN
+    main (14be43f) 2026-09-28."""
     run = {"started": None, "host": None, "finished": None, "complete": False,
            "ingested": None, "duplicate": None, "failed": None, "queued": None,
+           "done_fields": None, "done_missing": None, "done_notes": None, "done_unreadable": None,
            "aborted": None, "slurm_state": None,
            "items": [], "skips": [], "candidates": [], "queue_claims": []}
     item = None
@@ -1475,11 +1806,20 @@ def parse_ingest_log(text):
                 run["started"], run["host"] = _epoch(m.group(1)), m.group(2)
             item = None
             continue
-        m = _RUN_DONE.match(line)
+        if line.startswith(_DONE_PREFIX):
+            d = parse_done_line(line)
+            if d:
+                run.update(complete=True, done_unreadable=None, finished=d["finished"],
+                           done_fields=d["fields"], done_missing=d["missing"],
+                           done_notes=d["notes"],
+                           **{key: d["fields"].get(name) for name, key in DONE_FIELDS.items()})
+            elif not run["complete"]:
+                run["done_unreadable"] = line.strip()[:300]
+            item = None
+            continue
+        m = _CRASHED.match(line)
         if m:
-            run.update(complete=True, ingested=int(m.group(1)), duplicate=int(m.group(2)),
-                       failed=int(m.group(3)), queued=int(m.group(4)),
-                       finished=_epoch(m.group(5)))
+            run["aborted"] = f"CRASHED: {m.group(1)}"[:200]
             item = None
             continue
         m = _ITEM.match(line)
@@ -1496,8 +1836,13 @@ def parse_ingest_log(text):
                 item["identity"] = s[3:].rstrip("/")
             elif s.startswith("OK in"):
                 item["outcome"], item["detail"] = "ok", s
-            elif s.startswith("SKIPPED-DUPLICATE"):
-                item["outcome"], item["detail"] = "duplicate", s
+            elif s.startswith("staged as "):
+                item["staged_as"] = s[len("staged as "):].rstrip("/")
+            elif s.startswith(("SKIPPED-DUPLICATE", "ALREADY IN THE CORPUS")):
+                item["outcome"], item["detail"] = "duplicate", s   # in the corpus either way
+            elif s.startswith("SKIPPED"):
+                # "SKIPPED — held back / already handled this run / leased": not attempted
+                item["outcome"], item["detail"] = "skipped", s
             elif s.startswith(("FAILED", "TIMEOUT")):
                 item["outcome"], item["detail"] = "failed", s
             elif s.startswith("DRY RUN"):
@@ -1600,18 +1945,28 @@ def progress_health(runs, now=None, submit=None, info=None):
     def t(r):
         return r["started"] or r["mtime"]
 
+    def unreadable(r):
+        return bool(r.get("done_unreadable")) and not r["complete"]
+
     newest = runs[0]
-    running = (not newest["complete"] and not newest["aborted"] and not newest["slurm_state"]
-               and now - t(newest) < JOB_TIME_LIMIT_H * 3600)
+    running = (not newest["complete"] and not newest["aborted"] and not unreadable(newest)
+               and not newest["slurm_state"] and now - t(newest) < JOB_TIME_LIMIT_H * 3600)
     finished = runs[1:] if running else runs
+    # A run whose done line cannot be read FINISHED -- in a format this reader does not know. It is
+    # neither a run that ingested nothing nor one that died: it is left out of the streak, counted,
+    # and the verdict says which logs it rests on.
+    readable = [r for r in finished if not unreadable(r)]
+    n_unreadable = len(finished) - len(readable)
+    newer_unreadable = next((i for i, r in enumerate(finished) if not unreadable(r)),
+                            len(finished))
     streak = aborted = 0
-    for r in finished:
+    for r in readable:
         if r["complete"] and r["ingested"]:
             break
         streak += 1
         aborted += not r["complete"]
-    last_ok = next((r for r in finished if r["complete"] and r["ingested"]), None)
-    last_done = next((r for r in finished if r["complete"]), None)
+    last_ok = next((r for r in readable if r["complete"] and r["ingested"]), None)
+    last_done = next((r for r in readable if r["complete"]), None)
     queued = last_done["queued"] if last_done else None
     age_h = (now - t(newest)) / 3600
 
@@ -1619,16 +1974,27 @@ def progress_health(runs, now=None, submit=None, info=None):
         return None if r is None else {
             "jobid": r["jobid"], "started": _when(t(r)), "finished": _when(r["finished"]),
             "state": ("running" if r is newest and running else
-                      "complete" if r["complete"] else "aborted"),
+                      "complete" if r["complete"] else
+                      "unreadable" if unreadable(r) else "aborted"),
             "ingested": r["ingested"], "duplicate": r["duplicate"], "failed": r["failed"],
-            "queued": r["queued"], "aborted": r["aborted"] or (
-                None if r["complete"] or (r is newest and running) else
+            "queued": r["queued"], "fields": r.get("done_fields"),
+            "missing": r.get("done_missing") or None, "notes": r.get("done_notes"),
+            "aborted": r["aborted"] or (
+                None if r["complete"] or unreadable(r) or (r is newest and running) else
                 f"no summary line (SLURM state {r['slurm_state'] or 'unknown'})"),
+            "unreadable_done_line": r.get("done_unreadable") if unreadable(r) else None,
             "log": r["log"]}
 
     res.update(last_run=brief(newest), last_run_age_h=round(age_h, 1),
                last_ingest=brief(last_ok), queued=queued,
-               consecutive_runs_without_ingest=streak, of_which_aborted=aborted)
+               consecutive_runs_without_ingest=streak, of_which_aborted=aborted,
+               unreadable_done_lines=n_unreadable)
+    basis = None
+    if n_unreadable:
+        basis = (f"{n_unreadable} log(s) with an unreadable done line (format changed?)"
+                 + (f"; the {newer_unreadable} newest are unreadable, so the verdict uses logs up "
+                    f"to {_when(t(readable[0]))}" if newer_unreadable and readable else ""))
+        res["verdict_basis"] = basis
     if last_ok:
         res["last_ingest_age_days"] = round((now - (last_ok["finished"] or t(last_ok))) / 86400, 1)
     sub_age = (submit or {}).get("age_h")
@@ -1643,19 +2009,31 @@ def progress_health(runs, now=None, submit=None, info=None):
                           # `skip: 1 ... already pending/running` = a job stuck in the queue
                           + (f" ({last_word[20:] if last_word[:4].isdigit() else last_word})"
                              if last_word else ""))
+    elif n_unreadable and not readable:
+        res.update(verdict="unknown",
+                   detail=f"{basis}; no readable log is left, so whether FRAN is ingesting "
+                          f"cannot be told")
     elif streak >= STUCK_AFTER_RUNS and (queued is None or queued > 0):
         since = (f"last ingest {_when(last_ok['finished'] or t(last_ok))}" if last_ok
-                 else f"no ingest in the {len(finished)} logs kept")
-        res.update(verdict="stuck",
-                   detail=f"{streak} consecutive cron runs ingested nothing"
-                          + (f" ({aborted} of them died before finishing)" if aborted else "")
-                          + (f"; {queued} searches still queued" if queued is not None else "")
-                          + f"; {since}")
+                 else f"no ingest in the {len(readable)} readable logs kept")
+        stuck = (f"{streak} consecutive cron runs ingested nothing"
+                 + (f" ({aborted} of them died before finishing)" if aborted else "")
+                 + (f"; {queued} searches still queued" if queued is not None else "")
+                 + f"; {since}")
+        if newer_unreadable:
+            # Runs AFTER that streak finished, and cannot be read: "stuck" would rest on stale
+            # logs only -- the 2026-09-28 false alarm. Say what the old logs say, but not stuck.
+            res.update(verdict="unknown",
+                       detail=f"{basis}; those older logs alone would say stuck: {stuck}")
+        else:
+            res.update(verdict="stuck", detail=stuck)
     else:
         res.update(verdict="healthy",
                    detail=("a run is in progress; " if running else "")
                           + (f"last ingest {_when(last_ok['finished'] or t(last_ok))}" if last_ok
                              else "nothing ingested in the logs kept, and nothing waiting"))
+    if basis and not res["detail"].startswith(basis):
+        res["detail"] += f" ({basis})"
     return res
 
 
@@ -1682,7 +2060,7 @@ def entry_log_state(runs, entry, output_dir=None):
     for r in runs:
         when = r["finished"] or r["started"] or r["mtime"]
         for it in r["items"]:
-            if (it["dir"] in keys or it["identity"] in keys
+            if (it["dir"] in keys or it["identity"] in keys or it.get("staged_as") in keys
                     or (name and it["dir"] and os.path.basename(it["dir"]) == name)):
                 hits.append((r, when, it["outcome"] or "attempted",
                              it.get("error") or it["detail"]))
@@ -1702,8 +2080,34 @@ def entry_log_state(runs, entry, output_dir=None):
     return res
 
 
+def _staged_epoch(v):
+    """A manifest's staged_at as epoch seconds, or None. Epoch numbers and ISO 8601 (a trailing
+    "Z" included, which Python 3.10's fromisoformat refuses). TWIN: FRAN ingest/find_uningested.py
+    `_staged_epoch`, which reads the same field to order the drop box oldest-first."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    try:
+        return float(str(v).strip())
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.fromisoformat(str(v).strip().replace("Z", "+00:00")).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def incoming_health(runs, now=None, drop=None):
-    """Every entry in the drop dir: age, who staged it, broken links, and what the logs say."""
+    """Every entry in the drop dir: age, who staged it, broken links, and what the logs say.
+
+    An entry's AGE is its manifest's staged_at -- when it was first handed over -- and nothing
+    else. Never a modification time: rewriting a manifest (a repair, a QC withdrawal) bumps the
+    directory's. On 2026-09-25 the repaired search_mouse_mousecont entry, staged 2026-09-08, showed
+    as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough to hide a starved
+    entry under STARVED_AFTER_H; on 2026-09-28 the Gallegos pair, which have no staged_at, read as
+    3 d old. An entry without a readable staged_at has age None ("age unknown: no staged_at"),
+    is never called starved on a guess, and is counted and named in the detail instead."""
     now = now or time.time()
     drop = drop or os.environ.get("FRAN_DROP_DIR", DROP_DIR)
     res = {"drop_dir": drop, "verdict": "unknown", "entries": []}
@@ -1714,16 +2118,15 @@ def incoming_health(runs, now=None, drop=None):
         res["detail"] = f"cannot read {drop}: {e.strerror or e}"
         return res
     for e in ents:
-        try:
-            age_d = (now - e.stat(follow_symlinks=False).st_mtime) / 86400
-        except OSError:
-            age_d = None
         man = {}
         try:
             with open(os.path.join(e.path, MANIFEST)) as fh:
                 man = json.load(fh)
         except (OSError, ValueError):
             pass
+        staged = _staged_epoch(man.get("staged_at")) if isinstance(man, dict) else None
+        age_d = (now - staged) / 86400 if staged else None
+        age_src = "staged_at" if staged else "age unknown: no staged_at"
         try:
             broken = [f for f in os.listdir(e.path)
                       if os.path.islink(os.path.join(e.path, f))
@@ -1740,6 +2143,7 @@ def incoming_health(runs, now=None, drop=None):
         res["entries"].append({
             "entry": e.name, "age_days": None if age_d is None else round(age_d, 1),
             "staged_by": man.get("staged_by"), "staged_at": man.get("staged_at"),
+            "age_source": age_src,
             "engine": man.get("engine"), "output_dir": man.get("output_dir"),
             "search_name": man.get("search_name"), "state": st["state"],
             "outcome": st["outcome"], "when": st["when"], "detail": st["detail"],
@@ -1749,17 +2153,23 @@ def incoming_health(runs, now=None, drop=None):
     res["n_entries"] = len(res["entries"])
     res["by_state"] = dict(counts)
     waiting = [x for x in res["entries"] if x["state"] == "never_reached"]
-    oldest = max((x["age_days"] or 0 for x in waiting), default=0)
-    res["oldest_never_reached_days"] = round(oldest, 1) if waiting else None
+    dated = [x for x in waiting if x["age_days"] is not None]
+    oldest = max((x["age_days"] for x in dated), default=0)
+    res["oldest_never_reached_days"] = round(oldest, 1) if dated else None
+    undated = [x["entry"] for x in res["entries"] if x["age_days"] is None]
+    res["no_staged_at"] = undated
+    unknown_age = (f"; {len(undated)} with no staged_at, so of unknown age "
+                   f"({', '.join(undated[:3])}{', ...' if len(undated) > 3 else ''})"
+                   if undated else "")
     if runs is None:
         res["detail"] = "the cron's logs could not be read, so no entry's state is known"
-    elif waiting and oldest * 24 > STARVED_AFTER_H:
+    elif dated and oldest * 24 > STARVED_AFTER_H:
         res.update(verdict="starved",
                    detail=f"{len(waiting)} of {len(res['entries'])} staged entries never reached "
-                          f"by the cron (oldest {oldest:.0f} d)")
+                          f"by the cron (oldest {oldest:.0f} d, by staged_at){unknown_age}")
     else:
         res.update(verdict="ok", detail=f"{len(res['entries'])} staged entries; "
-                   + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
+                   + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + unknown_age)
     if counts.get("failed"):
         res["failed"] = [{"entry": x["entry"], "detail": x["detail"]}
                          for x in res["entries"] if x["state"] == "failed"]
@@ -2100,11 +2510,7 @@ def write_health_status(h, drop=None):
            "checked_by": getpass.getuser(), "host": os.uname().nodename,
            "written_by": "fran_deposit.py health"}
     try:
-        tmp = f"{p}.{os.getpid()}.tmp"
-        with open(tmp, "w") as fh:
-            json.dump(rec, fh, indent=2)
-        os.chmod(tmp, 0o664)
-        os.replace(tmp, p)
+        _write_json_group(p, rec)
         return {"written": p}
     except OSError as e:
         return {"written": None, "why": f"{type(e).__name__}: {e.strerror or e}"}
@@ -2242,10 +2648,41 @@ def health(a):
 # Where Core searches live. The Quobyte SERVICE tree and the Flinders service tree hold the facility's
 # customer work; ~/proteomics-pipeline is the skill's install on HIVE (verified 2026-09-24 to hold
 # only presets/, references/, scripts/ for brettsp -- kept so a member's sessions there are found).
-BACKFILL_ROOTS = ["/quobyte/proteomics-grp/SERVICE",
-                  "/nfs/lssc0/flinders/proteomics/Data/lab/service"]
-# A search whose real path is inside one of these is a Core search whatever account ran it.
-CORE_PREFIXES = (GROUP_ROOT + "/", "/nfs/lssc0/flinders/proteomics/")
+# The Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map.py), read
+# when a backfill needs them -- never a second copy here.
+
+
+def _flinders():
+    """(the Flinders share's HIVE path, share_map) -- SystemExit when the table cannot say: a
+    backfill that silently skipped the Flinders tree would under-report."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import share_map
+        root = share_map.hive_root(share_map.FLINDERS_SHARE)
+    except (ImportError, OSError) as e:
+        raise SystemExit(f"[fran_deposit] share_map.py / hive_shares.tsv could not be read "
+                         f"({type(e).__name__}: {e}); sync the whole scripts/ directory")
+    if not root:
+        raise SystemExit("[fran_deposit] hive_shares.tsv has no HIVE path for the Flinders share")
+    return root.rstrip("/"), share_map
+
+
+def backfill_roots():
+    """The Core trees a backfill walks: Quobyte's SERVICE tree and Flinders' service tree -- both
+    from hive_shares.tsv via share_map, the same definitions core_submission's work_root() and
+    service_root() read (no copy of either path here)."""
+    root, sm = _flinders()
+    quobyte = sm.hive_root(sm.QUOBYTE_SHARE)
+    if not quobyte:
+        raise SystemExit(f"[fran_deposit] hive_shares.tsv has no HIVE path for the "
+                         f"'{sm.QUOBYTE_SHARE}' (Quobyte) share")
+    return ["/".join((quobyte.rstrip("/"),) + sm.QUOBYTE_SERVICE),
+            "/".join((root,) + sm.FLINDERS_SERVICE)]
+
+
+def core_prefixes():
+    """A search whose real path is inside one of these is a Core search whatever account ran it."""
+    return (GROUP_ROOT + "/", _flinders()[0] + "/")
 GROUP_NAME = "proteomics-grp"
 # The group also holds ~30 teaching accounts (proteomics-class-NN). Their work is coursework, not
 # facility searches, and FRAN deliberately keeps teaching data out of the corpus.
@@ -2425,10 +2862,11 @@ def _in_core_group():
             or getpass.getuser() in g.gr_mem)
 
 
-def core_search(out, members, prefixes=CORE_PREFIXES):
+def core_search(out, members, prefixes=None):
     """(is_core, why). Coursework never is (_teaching_reason). Otherwise a search is the Core's if
     it lives in a Core tree, or if a non-teaching member of proteomics-grp owns it. Anything else
     is a collaborator's and is never handed over."""
+    prefixes = core_prefixes() if prefixes is None else prefixes
     real = os.path.realpath(out)
     teach = _teaching_reason(out)
     if teach:
@@ -2465,7 +2903,7 @@ class _StageArgs:
         self.require_completion_marker = True     # unattended: no marker, no stage
 
 
-def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=None):
+def plan_backfill(dirs, apply=False, members=None, prefixes=None, runs=None):
     """Classify each candidate directory; with apply=True, stage the eligible ones.
 
     Decision order, cheapest and most decisive first: a search this skill did not run, a search
@@ -2477,6 +2915,7 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=
     2026-09-08 FRAN's own queue ingested PROT_0793/search_mouse and search_hela by their real paths,
     and neither has a receipt -- staging them again would only put two duplicates in front of the
     cron's duplicate guard."""
+    prefixes = core_prefixes() if prefixes is None else prefixes      # read once, not per dir
     drop = os.environ.get("FRAN_DROP_DIR", DROP_DIR)
     seen, rows = set(), []
     for d in dirs:
@@ -2529,9 +2968,10 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=CORE_PREFIXES, runs=
         if not core:
             rows.append({**row, "decision": "skip", "reason": "not_core_facility", "detail": why})
             continue
-        if prior.get("status") in DECISION_STATUS:
-            rows.append({**row, "decision": "excluded" if prior["status"] == "qc_run" else "skip",
-                         "reason": prior["status"],
+        # A recorded qc_run was already weighed by decide_qc above: binding ones returned there,
+        # and a NAME-rule verdict was re-judged. It must not block a second time here.
+        if prior.get("status") in DECISION_STATUS and prior["status"] != "qc_run":
+            rows.append({**row, "decision": "skip", "reason": prior["status"],
                          "detail": f"recorded by {prior.get('decided_by') or '?'} at "
                                    f"{prior.get('at') or '?'}: {prior.get('detail') or ''}".strip()})
             continue
@@ -2582,7 +3022,7 @@ def login_guard(a, n_list, env=None):
     walking = bool(a.roots) or not a.list
     if not walking and n_list <= LOGIN_LIST_MAX:
         return None
-    what = (f"walk {', '.join(a.roots or BACKFILL_ROOTS)}" if walking
+    what = (f"walk {', '.join(a.roots or backfill_roots())}" if walking
             else f"check {n_list} directories")
     return {"action": "backfill", "refused": "login_node",
             "detail": f"This would {what} over NFS, and that is not allowed on a HIVE login node. "
@@ -2671,7 +3111,7 @@ def backfill(a):
     members = core_members()
     walk_roots = []
     if a.roots or not a.list:
-        walk_roots = list(a.roots or BACKFILL_ROOTS)
+        walk_roots = list(a.roots or backfill_roots())
         if not a.no_homes and not a.roots:
             walk_roots += member_home_roots(members)
     found, sessions, stats = discover(walk_roots, a.max_depth, a.time_budget) if walk_roots \
@@ -2745,8 +3185,9 @@ def main():
                    help="skip the GitHub comparison of FRAN's ingest code (no network)")
     b = ap.add_argument_group("backfill")
     b.add_argument("--roots", action="append", default=None,
-                   help=f"walk these instead of the Core trees (default: {', '.join(BACKFILL_ROOTS)} "
-                        f"and members' ~/proteomics-pipeline); repeatable")
+                   help="walk these instead of the Core trees (default: Quobyte's SERVICE tree "
+                        "and Flinders' service tree, both from hive_shares.tsv, and members' "
+                        "~/proteomics-pipeline); repeatable")
     b.add_argument("--list", default=None, help="file of search out dirs, one per line")
     b.add_argument("--apply", action="store_true", help="stage what is eligible (default: dry run)")
     b.add_argument("--max-depth", type=int, default=WALK_MAX_DEPTH)

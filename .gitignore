@@ -23,6 +23,9 @@ shinyapps/
 !data/networkin_kinase_substrate_ge5_July2016.csv
 *.xlsx
 *.tsv
+# ...except the skill's share table (which network share is which HIVE path): code, read by
+# hive_path.sh and share_map.py, and it must ship with the skill.
+!skill/ucdavis-proteomics-core-pipeline/scripts/hive_shares.tsv
 *.feather
 *.arrow
 

@@ -22,6 +22,10 @@ Usage:
 """
 import sys, os, json, glob, argparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ONE test for "the matrix is complete by construction", shared with the HTML report.
+from make_analysis_html import matrix_complete, SUPPRESS_WHEN_COMPLETE  # noqa: E402
+
 
 def load(path):
     try:
@@ -71,6 +75,13 @@ def main():
             figs = fj
         fdir_rel = os.path.basename(a.figures_dir.rstrip("/")) or "figures"
 
+    # A complete-by-construction matrix (DPC/limpa) makes "proteins quantified per sample" a
+    # row of identical bars: never ask the writer to embed or describe it -- make_analysis_html
+    # drops it, and a paragraph written about it, anyway (the same test, one definition).
+    complete, complete_why = matrix_complete(a.de_dir, prov)
+    if complete:
+        figs = [f for f in figs if not str(f.get("file", "")).startswith(SUPPRESS_WHEN_COMPLETE)]
+
     has_qc = bool(a.qc and os.path.exists(a.qc))
     has_gsea = bool(a.gsea and os.path.exists(a.gsea))
     is_dia = acq == "DIA" or engine == "diann"
@@ -97,6 +108,21 @@ def main():
         w(f"- Missing values: {missing_policy}")
     if citation:
         w(f"- Citation: {citation}")
+    # run_de.R's contaminant record -- stated as recorded, never assumed.
+    cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
+    if cont.get("policy") == "removed":
+        w(f"- Contaminants: {cont.get('n_precursors')} precursors mapping to a {cont.get('tag')} "
+          f"entry were removed before quantification ({cont.get('n_protein_groups')} contaminant "
+          f"protein groups); they are NOT in the DE tables or the expression matrix.")
+    elif cont.get("policy") == "kept":
+        w(f"- Contaminants: KEPT (--keep-contaminants) — {cont.get('n_protein_groups')} "
+          f"{cont.get('tag')} protein groups are in the DE tables; call any that are "
+          f"significant contamination, not biology.")
+    elif prov and not cont:
+        w("- Contaminants: not recorded by this DE run (older run_de.R, which did NOT remove "
+          "them) — any `Cont_` protein in the DE tables is contamination, not biology.")
+    if cont.get("database_risk") is True:
+        w(f"- **Contaminant-filter caveat (say this in the report):** {cont.get('database_note')}")
     w(f"- Significance rule: adj.P.Val < {adjp} (Benjamini-Hochberg) — the adjusted p-value "
       f"ALONE (ID FDR q ≤ {q_cut}). **No fold-change filter is applied.** |log2FC| = {lfc} "
       f"({2**float(lfc):.3g}-fold) is drawn on the volcano as a reference line only.")
@@ -115,6 +141,13 @@ def main():
           "AveExpr, t, P.Value, adj.P.Val (BH), B, gene annotation.")
     w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample.")
     w("- `tables/methods.txt`, `tables/de_provenance.json` — methods + exact versions.")
+    if cont.get("share_table"):
+        w(f"- `tables/{cont['share_table']}` — per-run contaminant share of "
+          f"{cont.get('intensity_column')} (QC): report a high or group-confounded share in "
+          f"Data Quality Notes.")
+    if cont.get("removed_table"):
+        w(f"- `tables/{cont['removed_table']}` — the protein groups the contaminant filter "
+          f"removed (or trimmed) before quantification.")
     if a.conditions:
         w(f"- `{a.conditions}` — experimental design (File.Name → Group [+ Batch/Covariates]).")
     if has_qc:
@@ -142,8 +175,14 @@ def main():
             w(f"- `{fdir_rel}/{fig.get('file')}` ({fig.get('type')}) — {fig.get('caption')}")
         w("")
         w("Placement: volcano + p-value figures in **Key Findings Per Comparison**; PCA + "
-          "per-sample counts in **QC Assessment**; the heatmap in **Cross-Comparison "
+          + ("detected-vs-inferred" if complete else "per-sample counts")
+          + " in **QC Assessment**; the heatmap in **Cross-Comparison "
           "Biomarkers** or **Biological Interpretation**.")
+        if complete:
+            w(f"Do NOT embed, reference or describe a proteins-quantified-per-sample plot "
+              f"(`qc_protein_counts.png`): {complete_why}, so every sample shows the same "
+              f"count and the plot says nothing. Per-sample depth is the *detected* part of "
+              f"`qc_detected_vs_inferred.png`.")
         w("")
 
     w("## OUTPUT — write `" + a.report_out + "` with ALL of these sections (markdown)")
@@ -156,7 +195,9 @@ def main():
       "depth (proteins quantified), and scope.")
     w("")
     w("### QC Assessment")
-    w("Evaluate technical quality. Use the PCA and per-sample protein-count figures, and "
+    w("Evaluate technical quality. Use the PCA and "
+      + ("detected-vs-inferred (per-sample depth)" if complete else "per-sample protein-count")
+      + " figures, and "
       "the QC metrics if present. Comment on consistency of identifications across "
       "replicates and groups, whether replicates cluster, and flag any outlier samples or "
       "systematic biases (e.g. a group quantifying far fewer proteins). State clearly "

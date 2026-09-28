@@ -116,8 +116,9 @@ def make_search(root, name="search_out", report=True, runs=RUNS, secrets=False, 
             "n_contaminants_appended": 381, "n_contaminants_already_present": 0,
             "contaminant_set": "universal", "diann_cont_quant_exclude": "Cont_",
             "digestion_enzymes_used": ["trypsin", "lysc"]}
-    if clean_db:
+    if clean_db:        # a current sidecar: both rules (fetch_fasta.py 2.8.0 on)
         meta["contaminant_target_rule"] = "drop contaminants identical to a target protein"
+        meta["min_unique_peptides"] = 2
     write(fasta + ".meta.json", json.dumps(meta))
     write(os.path.join(out, "search_provenance.json"), json.dumps({
         "engine": "diann", "version": "2.7.0",
@@ -172,7 +173,8 @@ def make_session(root, out=None, quant_in_zip=True, zip_secret=False, big=0, ext
     write(os.path.join(sess, "output", "tables", "methods.txt"), "DE methods\n")
     write(os.path.join(sess, "output", "tables", "DE_B-A.csv"), "protein,logFC\nP1,2\n")
     write(os.path.join(sess, "output", "methods.md"), "# Methods\n")
-    write(os.path.join(sess, "output", "HeLa50_Report.docx"), "PK-docx-report")
+    write(os.path.join(sess, "output", "Analysis_Report.html"), "<html>report</html>")
+    write(os.path.join(sess, "output", "HeLa50_Report.docx"), "PK-docx-report")   # an older copy
     write(os.path.join(sess, "output", "METHODS.docx"), "PK-docx-methods")
     write(os.path.join(sess, "output", "DATA_SUBMISSION", "HOW_TO_SUBMIT.md"), "# How\n")
     write(os.path.join(sess, "output", "reproducibility", "REPRODUCE.md"), "# Reproduce\n")
@@ -787,7 +789,7 @@ class Readme(Base):
 
 
 class WhatIsCopied(Base):
-    def test_the_session_is_mirrored_and_the_docx_listed_first(self):
+    def test_the_session_is_mirrored_and_the_html_report_listed_first(self):
         out = make_search(self.d)
         sess, zpath = make_session(self.d, quant_in_zip=False)
         self.run_it("analysis-done", "--session", sess, "--out", out)
@@ -795,7 +797,8 @@ class WhatIsCopied(Base):
         files = set(self.all_files(folder))
         for want in ("README.md", "MANIFEST.txt", os.path.basename(zpath),
                      "input/conditions.csv", "input/raw_files.txt",
-                     "output/HeLa50_Report.docx", "output/METHODS.docx", "output/methods.md",
+                     "output/Analysis_Report.html", "output/HeLa50_Report.docx",
+                     "output/METHODS.docx", "output/methods.md",
                      "output/tables/DE_B-A.csv", "output/tables/methods.txt",
                      "output/DATA_SUBMISSION/HOW_TO_SUBMIT.md", "scripts/commands.log",
                      "scripts/REPRODUCE.md", "scripts/reproduce.sh"):
@@ -803,11 +806,32 @@ class WhatIsCopied(Base):
         with open(os.path.join(folder, "input", "raw_files.txt")) as fh:
             self.assertIn("/nfs/x/A1.raw", fh.read())                # the session's own list
         entry = self.master().split(": analysis complete", 1)[1]
-        first = [ln for ln in entry.splitlines() if ln.startswith("- ")][0]
-        self.assertIn("Report (Word)", first)
-        self.assertIn(f"sessions/{SESSION}/output/HeLa50_Report.docx", first)
+        bullets = [ln for ln in entry.splitlines() if ln.startswith("- ")]
+        self.assertIn("Report of record (HTML)", bullets[0])
+        self.assertIn(f"sessions/{SESSION}/output/Analysis_Report.html", bullets[0])
+        self.assertTrue(any("Methods (Word)" in b for b in bullets[1:]), bullets)
         self.assertIn(f"Reproducibility / zip:** `sessions/{SESSION}/{os.path.basename(zpath)}`",
                       entry)
+
+    def test_the_podcast_the_listen_card_points_at_is_copied(self):
+        # podcast-reviewer 2026-09-25: the record kept Analysis_Report.html and its Listen card
+        # but not output/podcast/, so the card was dead in the registry.
+        out = make_search(self.d)
+        sess, zpath = make_session(self.d, quant_in_zip=False)
+        pod = os.path.join(sess, "output", "podcast")
+        write(os.path.join(pod, "podcast.json"), json.dumps(
+            {"audio": "podcast.m4a", "transcript": "transcript.html", "duration_s": 60}))
+        for f in ("podcast.m4a", "podcast.wav", "transcript.html", "podcast_script.md",
+                  "check.txt", "verify.txt", "verify_transcript.txt"):
+            write(os.path.join(pod, f), "x" * 100)
+        write(os.path.join(pod, ".cache", "abc.wav"), "scratch")
+        self.run_it("analysis-done", "--session", sess, "--out", out)
+        files = set(self.all_files(self.only_folder()))
+        for f in ("podcast.m4a", "transcript.html", "podcast_script.md", "check.txt",
+                  "podcast.json", "verify.txt", "verify_transcript.txt"):
+            self.assertIn(f"output/podcast/{f}", files)
+        self.assertNotIn("output/podcast/podcast.wav", files)          # the .m4a is the audio
+        self.assertFalse([f for f in files if ".cache" in f], files)
 
     def test_big_files_are_skipped_with_a_note(self):
         out = make_search(self.d)
@@ -894,7 +918,7 @@ class WhatIsCopied(Base):
             self.assertNotIn("s/input/hive.env", z.namelist())
         log = self.read(folder)
         self.assertIn("credential", log)
-        self.assertIn("look like a key, token or webhook", log)
+        self.assertIn("look like a key, token, password or webhook", log)
 
     def test_copy_zip_without_moves_compressed_bytes_intact(self):
         src = os.path.join(self.d, "a.zip")

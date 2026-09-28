@@ -168,6 +168,13 @@ class CfgSplicingTests(unittest.TestCase):
         self.assertEqual(flags, "--qvalue 0.01 --mass-acc 15")
 
 
+MARKETPLACE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))),
+                           ".claude-plugin", "marketplace.json")
+
+
+@unittest.skipUnless(os.path.isfile(MARKETPLACE),
+                     "no repo-root .claude-plugin/marketplace.json: the skill installed on its own "
+                     "has no marketplace entry to keep in step")
 class VersionBumpTests(unittest.TestCase):
     """The version lives in three places and CI fails the run if any disagrees. Two consecutive
     PRs bumped plugin.json alone; nothing about the third location is discoverable from the file

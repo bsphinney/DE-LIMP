@@ -155,6 +155,52 @@ N_FRAMES = 1000
 N_STALE = 10                                # frames the stale mid-acquisition -wal knows about
 
 
+def _sqlite_wal_behaviour():
+    """(keeps -wal/-shm after the last close, opens a WAL-mode file read-only with no side files).
+
+    Stock SQLite -- HIVE's, conda's, python.org's -- deletes -wal and -shm when the last
+    connection closes, and a mode=ro open of a bare WAL-mode file creates them. Apple's system
+    SQLite (3.51 under /usr/bin/python3) keeps both after close and cannot open that file
+    read-only at all ("unable to open database file"). The fixtures below reproduce the HIVE
+    state, so on Apple's build they remove what a stock close would have (close_like_stock), and
+    the one mode=ro read of a bare WAL file is checked only where SQLite can make it."""
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "probe.db")
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE t (a)")
+        con.commit()
+        con.close()
+        keeps = os.path.exists(db + "-wal") or os.path.exists(db + "-shm")
+        for side in ("-wal", "-shm"):
+            if os.path.exists(db + side):
+                os.remove(db + side)
+        try:
+            ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                ro.execute("SELECT COUNT(*) FROM t").fetchone()
+                bare_ro = True
+            finally:
+                ro.close()
+        except sqlite3.OperationalError:
+            bare_ro = False
+    return keeps, bare_ro
+
+
+KEEPS_SIDE_FILES_ON_CLOSE, READS_BARE_WAL_READ_ONLY = _sqlite_wal_behaviour()
+
+
+def close_like_stock(con, tdf):
+    """Close a READ-WRITE connection the way stock SQLite does: its -wal and -shm go with it
+    (see _sqlite_wal_behaviour). Never for a read-only one -- what mode=ro leaves behind is
+    what the hazard tests are about."""
+    con.close()
+    if KEEPS_SIDE_FILES_ON_CLOSE:
+        for side in ("-wal", "-shm"):
+            if os.path.exists(tdf + side):
+                os.remove(tdf + side)
+
+
 def _write_bin(d, n_blocks):
     """analysis.tdf_bin: one block per frame, each starting with its uint32 block size
     (then a uint32 scan count), as in a real TDF."""
@@ -201,7 +247,7 @@ def make_intact_d(tmp, name="intact.d", n_indexed=N_FRAMES, n_bin=N_FRAMES, wal=
     _frames(con, 0, n_indexed)
     _windows(con)
     con.commit()
-    con.close()
+    close_like_stock(con, os.path.join(d, "analysis.tdf"))
     return d
 
 
@@ -233,7 +279,7 @@ def make_stale_wal_d(tmp, name="stale.d", rollback_header=False):
     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     if rollback_header:
         con.execute("PRAGMA journal_mode=DELETE")
-    con.close()
+    close_like_stock(con, tdf)
     with open(tdf + "-wal", "wb") as fh:
         fh.write(stale)
     return d
@@ -260,7 +306,7 @@ def truncate_like_hive(d):
     """What happened on Hive: one plain read-write open of the tdf, then close."""
     con = sqlite3.connect(os.path.join(d, "analysis.tdf"))
     con.execute("SELECT COUNT(*) FROM Frames").fetchone()
-    con.close()
+    close_like_stock(con, os.path.join(d, "analysis.tdf"))
     return d
 
 
@@ -332,7 +378,8 @@ class TestFixturesReallyHaveTheHazard(unittest.TestCase):
                 move_side_files_out(d, os.path.join(tmp, "backup"))
                 with open(tdf, "rb") as fh:
                     finished = fh.read()
-                self.assertEqual(frame_count(tdf, "mode=ro"), N_FRAMES)
+                if READS_BARE_WAL_READ_ONLY or rollback_header:   # see _sqlite_wal_behaviour
+                    self.assertEqual(frame_count(tdf, "mode=ro"), N_FRAMES)
                 truncate_like_hive(d)
                 with open(tdf, "rb") as fh:
                     self.assertEqual(fh.read(), finished, "a read-write open changed the file")
@@ -346,7 +393,8 @@ class TestFixturesReallyHaveTheHazard(unittest.TestCase):
             tdf = os.path.join(d, "analysis.tdf")
             with open(tdf, "rb") as fh:
                 finished = fh.read()
-            self.assertEqual(frame_count(tdf, "mode=ro"), N_FRAMES)
+            if READS_BARE_WAL_READ_ONLY:              # see _sqlite_wal_behaviour
+                self.assertEqual(frame_count(tdf, "mode=ro"), N_FRAMES)
             for side in ("-wal", "-shm"):             # mode=ro leaves them; both are harmless
                 if os.path.exists(tdf + side):
                     os.remove(tdf + side)
@@ -801,10 +849,13 @@ class TestNoOtherTdfOpens(unittest.TestCase):
             self.assertGreater(os.path.getsize(tdf), 0, "the fixture writer wrote nothing")
 
     def test_the_skill_scripts_here_use_the_shared_helper(self):
-        for name in ("detect_acquisition.py", "make_methods.py"):
+        # make_methods.py reads a .d only through bruker_method.py, which opens every sqlite
+        # file in the run (analysis.tdf, diaSettings.diasqlite) through the helper.
+        for name in ("detect_acquisition.py", "bruker_method.py", "make_methods.py"):
             with open(os.path.join(SCRIPTS, name), encoding="utf-8") as fh:
                 src = fh.read()
-            self.assertIn("from bruker_tdf import", src, name)
+            self.assertIn("import bruker_method" if name == "make_methods.py" else
+                          "from bruker_tdf import", src, name)
             self.assertNotRegex(src, r"sqlite3\.connect\s*\(", name)
 
     def test_the_dev_fork_uses_the_same_helper_file(self):

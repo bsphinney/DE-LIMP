@@ -29,8 +29,20 @@
 #   Rscript run_de.R --input report.parquet --metadata conditions.csv \
 #                    --method dpc --outdir de_results
 #
-# metadata CSV columns: File.Name,Group[,Batch,Covariate1,Covariate2]
+# metadata CSV columns: File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]
 #   File.Name must match the Run / column names in the report.
+#
+# --block <column>: samples sharing a value of that column (the mouse several IPs came
+#   from, the patient several biopsies came from) are not treated as independent: a fixed
+#   subject effect or a random effect via limma's duplicateCorrelation (--block-effect).
+#   See blocking.R.
+# --block-scope within|all (default within): which contrasts the blocked fit reports.
+#   within: contrasts inside a block (bait vs IgG in the same mice) come from the blocked
+#   fit, contrasts BETWEEN blocks (Old vs Young mice) from the same data fitted without it;
+#   all: every contrast from the blocked fit. blocking.R says why.
+# --block-effect auto|fixed|random (default auto): auto fits the block as a FIXED effect
+#   when it is crossed with the groups and every contrast is within one block (a paired
+#   design: the exact analysis), and as a random effect otherwise (nested / multi-level).
 # =============================================================================
 
 suppressWarnings(suppressMessages({
@@ -69,6 +81,35 @@ outdir    <- getarg("--outdir", "de_results")
 # null, not a post-hoc cut (McCarthy & Smyth 2009).
 logfc_ref <- as.numeric(getarg("--logfc", "1.0"))
 adjp_thr  <- as.numeric(getarg("--adjp", "0.05"))
+# Contaminants (Cont_-tagged entries) are REMOVED before quantification by default --
+# see contaminants.R for the rule and why. --keep-contaminants quantifies and tests them
+# with the sample proteins instead; either way de_provenance.json records which.
+keep_contaminants <- isTRUE(getarg("--keep-contaminants", FALSE))
+# fetch_fasta.py's sidecar: says whether real proteins sat in the database only as Cont_
+# entries, which the filter would then remove too. Same default as the auditors.
+fasta_meta <- getarg("--fasta-meta", NULL)
+# A conditions.csv column naming the unit samples come from (e.g. Mouse). Fitted as a fixed
+# or random effect (--block-effect) -- blocking.R has the model and why. Unset = samples are
+# independent.
+block_col <- getarg("--block", NULL)
+if (isTRUE(block_col)) stop("--block needs a metadata column name (e.g. --block Mouse)")
+block_scope <- getarg("--block-scope", NULL)
+if (!is.null(block_scope) && is.null(block_col))
+  stop("--block-scope needs --block <column>")
+if (is.null(block_scope)) block_scope <- "within"
+if (!block_scope %in% c("within", "all"))
+  stop("--block-scope must be 'within' (default) or 'all'")
+block_effect_req <- getarg("--block-effect", NULL)
+if (!is.null(block_effect_req) && is.null(block_col))
+  stop("--block-effect needs --block <column>")
+if (is.null(block_effect_req)) block_effect_req <- "auto"
+if (!block_effect_req %in% c("auto", "fixed", "random"))
+  stop("--block-effect must be 'auto' (default), 'fixed' or 'random'")
+if (isTRUE(fasta_meta)) stop("--fasta-meta needs a path (<fasta>.meta.json)")
+if (is.null(fasta_meta) && file.exists("search.fasta.meta.json"))
+  fasta_meta <- "search.fasta.meta.json"
+if (!is.null(fasta_meta) && !file.exists(fasta_meta))
+  stop("--fasta-meta ", fasta_meta, " does not exist")
 
 if (is.null(input) || is.null(meta_path))
   stop("Required: --input <report> and --metadata <conditions.csv>")
@@ -94,6 +135,36 @@ local({
          "identification-FDR columns and there is no safe default to guess.")
   source(f)
 })
+# ONE definition of the contaminant filter, shared with build_maxlfq.R.
+local({
+  f <- .sibling("contaminants.R")
+  if (is.null(f))
+    stop("contaminants.R not found next to run_de.R -- it defines the contaminant ",
+         "filter, and skipping it would leave contaminants in the DE unrecorded.")
+  source(f)
+})
+# ONE definition of the blocking step (--block): validation, record, methods lines.
+local({
+  f <- .sibling("blocking.R")
+  if (is.null(f))
+    stop("blocking.R not found next to run_de.R -- it defines the --block model and its record.")
+  source(f)
+})
+# The skill version (skill_version.R: the R mirror of skill_version.py).
+local({
+  f <- .sibling("skill_version.R")
+  if (is.null(f))
+    stop("skill_version.R not found next to run_de.R -- it reads the skill version the session records.")
+  source(f, encoding = "UTF-8")
+})
+# readDIANN() across limpa versions (1.2.x extra.columns / 1.4.x annotation.columns).
+local({
+  f <- .sibling("limpa_compat.R")
+  if (is.null(f))
+    stop("limpa_compat.R not found next to run_de.R -- it reads the DIA-NN report for --method dpc.")
+  source(f)
+})
+limpa_read <- NULL      # dpc: which readDIANN() path ran (limpa_compat.R), for the record
 if (!method %in% c("dpc", "maxlfq"))
   stop("--method must be 'dpc' or 'maxlfq'")
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
@@ -104,9 +175,88 @@ if (!all(c("File.Name", "Group") %in% names(meta)))
   stop("metadata CSV must have at least File.Name and Group columns")
 covariates <- intersect(c("Batch", "Covariate1", "Covariate2"), names(meta))
 
-message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s",
+# ~ 0 + groups [+ covariates]. A function because the design is built twice: from the
+# whole metadata up front, so a --block that cannot be fitted fails before quantification
+# (which can take an hour), and again from the runs that survived it.
+build_design <- function(meta, covariates) {
+  groups <- factor(meta$Group)
+  ft <- list(groups = groups)
+  formula_parts <- c("groups")
+  for (cv in covariates) {
+    ft[[cv]] <- factor(meta[[cv]])
+    formula_parts <- c(formula_parts, cv)
+  }
+  design <- stats::model.matrix(
+    stats::as.formula(paste0("~ 0 + ", paste(formula_parts, collapse = " + "))),
+    data = ft)
+  colnames(design) <- sub("^groups", "", colnames(design))
+  list(design = design, groups = groups, formula_parts = formula_parts)
+}
+# rank check (DE-LIMP helpers.R guards against this before fitting). A covariate whose
+# removal restores the rank and that recurs across groups is usually the animal/subject
+# the samples came from, nested in the groups -- a random effect, not a fixed one.
+check_design_rank <- function(meta, covariates) {
+  full_rank <- function(cv) { d <- build_design(meta, cv)$design; qr(d)$rank == ncol(d) }
+  if (full_rank(covariates)) return(invisible(TRUE))
+  nested <- Filter(function(cv) full_rank(setdiff(covariates, cv)) &&
+                     cv %in% block_candidates(meta, setdiff(covariates, cv)), covariates)
+  stop("Design matrix is not full rank — check for confounded covariates / empty groups.",
+       if (length(nested)) sprintf(paste0(
+         " %s is confounded with the groups but recurs across them: if it names the animal or ",
+         "subject the samples came from, fit it as a random effect instead -- rename the column ",
+         "(e.g. Mouse) and pass --block Mouse."), nested[1]) else "", call. = FALSE)
+}
+
+# Residual degrees of freedom: limma estimates each protein's variance from them. None (one
+# sample per group, or covariates using up the rest) and every p-value is undefined -- the
+# old behaviour was to quantify for up to an hour and fail inside the fit. Stop here, before.
+check_residual_df <- function(design, where) {
+  df <- nrow(design) - qr(design)$rank
+  if (df > 0) return(invisible(df))
+  single <- names(which(colSums(design[, intersect(colnames(design), levels(factor(meta$Group))),
+                                        drop = FALSE] != 0) == 1))
+  stop(sprintf(paste0(
+    "No residual degrees of freedom %s: %d samples, %d model coefficients. limma estimates ",
+    "each protein's variance from replicates, and this design has none left%s. Add replicates ",
+    "(>= 2 samples in at least one group), or drop a covariate; a single-sample comparison ",
+    "cannot give p-values."), where, nrow(design), qr(design)$rank,
+    if (length(single)) sprintf(" (one sample in: %s)", paste(single, collapse = ", ")) else ""),
+    call. = FALSE)
+}
+
+# The block first: a block that is also a covariate is the more specific error.
+if (!is.null(block_col)) {
+  block_validate_column(meta, block_col, covariates)
+  block_check(trimws(as.character(meta[[block_col]])), build_design(meta, covariates)$design,
+              block_col)
+  # a requested fixed effect the design cannot carry (block nested in the groups) stops here
+  if (identical(block_effect_req, "fixed"))
+    block_choose_effect("fixed", trimws(as.character(meta[[block_col]])),
+                        build_design(meta, covariates)$design, list(), block_col, covariates)
+} else {
+  .cand <- block_candidates(meta, covariates)
+  if (length(.cand))
+    message(sprintf(paste0("[run_de] note: metadata column(s) %s recur across groups (the same ",
+                           "value in several conditions). If samples sharing a value come from one ",
+                           "source (the same animal, patient or lysate), pass --block %s so they are ",
+                           "not treated as independent."),
+                    paste(.cand, collapse = ", "), .cand[1]))
+  .rep <- setdiff(block_candidates_within(meta, covariates), .cand)
+  if (length(.rep))
+    message(sprintf(paste0("[run_de] note: metadata column(s) %s repeat within a group (several ",
+                           "runs of one group share a value -- technical replicates of one ",
+                           "animal or sample?). If so, pass --block %s: counted as independent ",
+                           "they inflate n and the significance."),
+                    paste(.rep, collapse = ", "), .rep[1]))
+}
+check_design_rank(meta, covariates)
+check_residual_df(build_design(meta, covariates)$design, "in this design")
+
+message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s  block=%s  contaminants=%s",
                 method, q_cutoff, nrow(meta),
-                if (length(covariates)) paste(covariates, collapse = ",") else "none"))
+                if (length(covariates)) paste(covariates, collapse = ",") else "none",
+                if (is.null(block_col)) "none" else block_col,
+                if (keep_contaminants) "kept (--keep-contaminants)" else "removed"))
 
 # ---- build the protein-level object per pipeline ----------------------------
 # Both branches produce:  E (proteins x samples, log2), run_names (cols of E),
@@ -114,6 +264,10 @@ message(sprintf("[run_de] method=%s  q=%.3f  samples=%d  covariates=%s",
 
 descriptor <- NULL
 quantums_applied <- character(0)   # populated on the dpc path; kept defined for provenance
+# Both branches set these: what the contaminant filter found (contaminants.R) and every
+# filter the run applied, in order -- recorded in de_provenance.json and methods.txt.
+cont_census <- NULL; cont_share <- NULL; cont_col <- NA_character_; cont_intensity <- NA_character_
+filters_applied <- character(0)
 
 # limpa/DPC is the DEFAULT path. It needs PRECURSOR-level input: readDIANN() keys on
 # Precursor.Id + Precursor.Normalised. DIA-NN's native report.parquet has them; the
@@ -297,10 +451,19 @@ if (method == "dpc") {
   # PG.Q.Value takes DIA-NN's own recommended 0.05 rather than the uniform
   # --q-cutoff -- see diann_q_columns.R.
   q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
-  dat <- limpa::readDIANN(dpc_input, format = format, q.cutoffs = unname(q_cuts),
-                          q.columns = q_use)
-  message(sprintf("[run_de] readDIANN: %d precursors x %d runs (FDR on %s)",
-                  nrow(dat$E), ncol(dat$E),
+  # limpa's own annotation columns, plus the accession column(s) the contaminant filter
+  # reads. Protein.Ids is dropped again after filtering, so nothing downstream changes.
+  # limpa 1.2.x names the argument extra.columns, 1.4.x annotation.columns: limpa_compat.R
+  # passes whichever this limpa has, and the record says which ran.
+  dpc_ann_default <- limpa_annotation_default()
+  dpc_ann <- unique(c(dpc_ann_default, CONTAMINANT_ID_COLUMNS))
+  .rd <- read_diann_annotated(dpc_input, format = format, q.cutoffs = unname(q_cuts),
+                              q.columns = q_use, annotation = dpc_ann)
+  dat <- .rd$dat
+  limpa_read <- list(limpa_version = limpa_version(), annotation_argument = .rd$argument,
+                     path = .rd$path)
+  message(sprintf("[run_de] readDIANN (limpa %s, %s): %d precursors x %d runs (FDR on %s)",
+                  limpa_read$limpa_version, .rd$path, nrow(dat$E), ncol(dat$E),
                   paste(sprintf("%s<=%.3f", q_use, q_cuts), collapse = ", ")))
 
   # ---- FIX: reconcile against the metadata BEFORE quantifying -----------------
@@ -322,6 +485,42 @@ if (method == "dpc") {
     message(sprintf("[run_de] note: %d metadata row(s) have no run in the report, e.g. %s",
                     length(.absent), paste(utils::head(.absent, 2), collapse = ", ")))
 
+  # ---- contaminants: out BEFORE dpcCN, or they shape the detection model and the DE ----
+  # Rows of `dat` are precursors that passed the identification filters, so the counts
+  # are exactly what limpa would have quantified. Rows left all-NA by the run subset
+  # above carry no data in the analysed runs and are not counted.
+  cont_col <- contaminant_id_column(names(dat$genes))
+  if (!is.na(cont_col)) {
+    .flag <- is_contaminant(dat$genes[[cont_col]])
+    .seen <- rowSums(!is.na(dat$E)) > 0
+    cont_census <- contaminant_census(group = dat$genes$Protein.Group[.seen],
+                                      is_cont = .flag[.seen], feature = rownames(dat$E)[.seen],
+                                      genes = dat$genes$Genes[.seen])
+    # The share is on the measured signal (Precursor.Quantity), read for exactly the
+    # precursor x run cells readDIANN kept; Precursor.Normalised -- what dat$E holds --
+    # only when the report has no Precursor.Quantity.
+    .qty <- tryCatch({
+      .cols <- c("Run", "Precursor.Id", CONTAMINANT_SHARE_COLUMNS[1])
+      .r <- if (identical(format, "parquet")) nanoparquet::read_parquet(dpc_input, col_select = .cols)
+            else data.table::fread(dpc_input, select = .cols, data.table = FALSE, showProgress = FALSE)
+      .i <- match(.r$Precursor.Id, rownames(dat$E)); .j <- match(.r$Run, colnames(dat$E))
+      .ok <- !is.na(.i) & !is.na(.j)
+      .ok[.ok] <- !is.na(dat$E[cbind(.i[.ok], .j[.ok])])
+      .m <- matrix(NA_real_, nrow(dat$E), ncol(dat$E), dimnames = dimnames(dat$E))
+      .m[cbind(.i[.ok], .j[.ok])] <- .r[[CONTAMINANT_SHARE_COLUMNS[1]]][.ok]
+      .m
+    }, error = function(e) {
+      message("[run_de] contaminant share: ", CONTAMINANT_SHARE_COLUMNS[1], " not readable (",
+              conditionMessage(e), "); using ", CONTAMINANT_SHARE_COLUMNS[2])
+      NULL
+    })
+    cont_intensity <- if (is.null(.qty)) CONTAMINANT_SHARE_COLUMNS[2] else CONTAMINANT_SHARE_COLUMNS[1]
+    cont_share <- contaminant_share(if (is.null(.qty)) 2^dat$E else .qty, .flag)
+    if (!keep_contaminants && any(.flag)) dat <- dat[!.flag, ]
+  }
+  .extra <- setdiff(names(dat$genes), dpc_ann_default)
+  if (length(.extra)) dat$genes <- dat$genes[, setdiff(names(dat$genes), .extra), drop = FALSE]
+
   dpcfit    <- limpa::dpcCN(dat)
   y_protein <- limpa::dpcQuant(dat, "Protein.Group", dpc = dpcfit)
   E         <- y_protein$E
@@ -336,6 +535,7 @@ if (method == "dpc") {
     missing_policy = "Missing precursors modelled via the detection probability curve; not imputed, not dropped.",
     citation      = "Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125; Li M, Smyth GK (2023) Bioinformatics 39(5):btad200"
   )
+  filters_applied <- c(sprintf("%s <= %g", q_use, q_cuts), quantums_applied)
 
 } else { # maxlfq
   if (!requireNamespace("arrow", quietly = TRUE) && identical(format, "parquet"))
@@ -352,12 +552,16 @@ if (method == "dpc") {
   q_cuts <- vapply(q_use, diann_cutoff_for, numeric(1), q_cutoff = q_cutoff)
   ml <- build_maxlfq(input, format = format, q_cutoff = q_cutoff,
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
-                     keep_runs = keep_runs)
+                     keep_runs = keep_runs, drop_contaminants = !keep_contaminants)
   E         <- ml$E
   run_names <- colnames(E)
   genes     <- ml$genes
   descriptor <- ml$descriptor
   q_use     <- ml$q_columns
+  cont_census    <- ml$contaminants$census
+  cont_share     <- ml$contaminants$share
+  cont_col       <- ml$contaminants$id_column
+  cont_intensity <- ml$contaminants$intensity_column
   message(sprintf("[run_de] MaxLFQ matrix: %d proteins x %d runs (%.1f%% missing)",
                   nrow(E), ncol(E), 100 * mean(is.na(E))))
 
@@ -383,34 +587,65 @@ if (method == "dpc") {
   E <- E[keep_cov, , drop = FALSE]
   if (!is.null(genes) && nrow(genes) == length(keep_cov))
     genes <- genes[keep_cov, , drop = FALSE]
-  prev_filters <- if (is.null(descriptor$filters_applied)) character(0) else descriptor$filters_applied
-  descriptor$filters_applied <- c(prev_filters,
+  # build_maxlfq() returns its filters beside the descriptor, not inside it -- reading
+  # descriptor$filters_applied here used to drop every one of them from the record.
+  filters_applied <- c(ml$filters_applied,
     sprintf("coverage >= %d/%d non-NA samples (%.0f%%); %d proteins dropped",
             min_obs, n_samples, 100 * cov_min_frac, n_dropped))
+  descriptor$filters_applied <- filters_applied
 }
+
+# ---- the contaminant record (contaminants.R): one description, read by everything ----
+# With no sidecar, the report's folder is where the search names its FASTA (provenance / log).
+cont_risk <- if (!is.null(cont_census) && cont_census$n_precursors > 0 && !keep_contaminants)
+  contaminant_database_risk(fasta_meta, cont_census$n_groups_contaminant,
+                            search_dir = dirname(normalizePath(input, mustWork = FALSE))) else NULL
+cont_rec <- contaminant_record(cont_census, cont_share, keep_contaminants, cont_col,
+                               cont_intensity, risk = cont_risk,
+                               fasta_meta = if (is.null(fasta_meta)) NULL
+                                            else normalizePath(fasta_meta, mustWork = FALSE))
+if (method == "dpc")   # build_maxlfq() records its own contaminant step in ml$filters_applied
+  filters_applied <- c(filters_applied, switch(cont_rec$policy,
+    removed = sprintf("contaminants removed: %d precursors mapping to a %s entry (%s); %d %s protein groups",
+                      cont_rec$n_precursors, cont_rec$tag, cont_rec$id_column,
+                      cont_rec$n_protein_groups, cont_rec$tag),
+    kept = sprintf("contaminants kept (--keep-contaminants): %d %s protein groups",
+                   cont_rec$n_protein_groups, cont_rec$tag),
+    NULL))
+for (.l in contaminant_methods_lines(cont_rec)) message("[run_de] ", sub("^ +", "", .l))
+if (isTRUE(cont_rec$database_risk))
+  warning("contaminant filter: ", cont_rec$database_note, call. = FALSE)
+if (!is.null(cont_share)) {
+  .qs <- cont_share
+  .qs$Group <- meta$Group[match(.qs$Run, meta$File.Name)]
+  .qs$Intensity.Column <- cont_intensity
+  utils::write.csv(.qs[, c("Run", "Group", "Contaminant.Pct", "Contaminant.Intensity",
+                           "Total.Intensity", "Intensity.Column")],
+                   file.path(outdir, cont_rec$share_table), row.names = FALSE)
+}
+if (isTRUE(cont_rec$removed))
+  utils::write.csv(cont_census$groups, file.path(outdir, cont_rec$removed_table), row.names = FALSE)
 
 # ---- align metadata to the matrix columns -----------------------------------
 meta <- meta[match(run_names, meta$File.Name), , drop = FALSE]
 if (any(is.na(meta$Group)))
   stop("Some report columns have no metadata row. Report runs:\n  ",
        paste(run_names, collapse = "\n  "))
-groups <- factor(meta$Group)
 
 # ---- design matrix (~ 0 + groups [+ covariates]) ----------------------------
-ft <- list(groups = groups)
-formula_parts <- c("groups")
-for (cv in covariates) {
-  ft[[cv]] <- factor(meta[[cv]])
-  formula_parts <- c(formula_parts, cv)
-}
-design <- stats::model.matrix(
-  stats::as.formula(paste0("~ 0 + ", paste(formula_parts, collapse = " + "))),
-  data = ft)
-colnames(design) <- sub("^groups", "", colnames(design))
+.dz <- build_design(meta, covariates)
+design <- .dz$design; groups <- .dz$groups; formula_parts <- .dz$formula_parts
 
-# rank check (DE-LIMP helpers.R guards against this before fitting)
-if (qr(design)$rank < ncol(design))
-  stop("Design matrix is not full rank — check for confounded covariates / empty groups.")
+check_design_rank(meta, covariates)   # again, on the runs that survived quantification
+check_residual_df(design, "among the runs that survived quantification")
+
+# ---- blocking factor (--block): re-checked on the runs actually analysed ------
+block <- NULL
+if (!is.null(block_col)) {
+  block <- trimws(as.character(meta[[block_col]]))
+  block_check(block, design, block_col)
+  meta[[block_col]] <- block   # the values fitted are the values the repro script and session carry
+}
 
 # ---- contrasts --------------------------------------------------------------
 lvls <- levels(groups)
@@ -421,15 +656,98 @@ if (is.null(contrasts)) {
   forms <- trimws(strsplit(contrasts, ",")[[1]])
 }
 message("[run_de] contrasts: ", paste(forms, collapse = ", "))
+cmat <- limma::makeContrasts(contrasts = forms, levels = design)
 
 # ---- fit --------------------------------------------------------------------
-if (method == "dpc") {
-  fit <- limpa::dpcDE(y_protein, design, plot = FALSE)
+# The fit with samples as independent. With --block it is still needed for the contrasts
+# --block-scope within reports from it (between-block ones); it reuses the quantification.
+fit_independent <- function()
+  if (method == "dpc") limpa::dpcDE(y_protein, design, plot = FALSE) else limma::lmFit(E, design)
+block_rec <- block_none_record()
+fit_ind <- NULL
+# Fixed or random block (blocking.R: block_choose_effect). A fixed block is extra design
+# columns, so the design and contrast matrix the fit uses change with it.
+.eff <- if (!is.null(block))
+  block_choose_effect(block_effect_req, block, design,
+                      block_contrast_structure(block, groups, cmat), block_col, covariates) else NULL
+if (is.null(block)) {
+  fit_ind <- fit_independent()
+} else if (identical(.eff$effect, "fixed")) {
+  design <- .eff$design
+  check_residual_df(design, "with the fixed block columns")
+  # a covariate the block is nested in is absorbed by it and left out of the fixed design:
+  # the design label, methods and repro script describe the model that ran
+  covariates <- setdiff(covariates, .eff$absorbed)
+  formula_parts <- setdiff(formula_parts, .eff$absorbed)
+  cmat <- limma::makeContrasts(contrasts = forms, levels = design)
+  fit <- fit_independent()          # samples independent GIVEN the block columns
+  block_fit_check(fit, "fixed", block_col, colnames(block_fixed_columns(block, block_col)))
+  block_rec <- block_record(block_col, block, method, NA_real_, numeric(0), nrow(E),
+                            groups = groups, cmat = cmat, scope = block_scope,
+                            effect = "fixed", effect_choice = .eff$choice,
+                            absorbed = .eff$absorbed)
+} else if (method == "dpc") {
+  # dpcDE(y, design, plot, ...) hands `block` to voomaLmFitWithImputation(), which
+  # estimates the correlation with the vooma weights twice and fits lmFit(block =,
+  # correlation =, weights =) -- see blocking.R. Its two estimates arrive as messages.
+  .pass <- c(first = NA_real_, final = NA_real_)
+  fit <- withCallingHandlers(
+    limpa::dpcDE(y_protein, design, plot = FALSE, block = block),
+    message = function(m) {
+      .m <- regmatches(conditionMessage(m),
+                       regexec("^(First|Final) intra-block correlation +(\\S+)", conditionMessage(m)))[[1]]
+      if (length(.m) == 3) .pass[[tolower(.m[2])]] <<- as.numeric(.m[3])
+    })
+  # The per-protein estimates behind the consensus, for the record: the same call limpa's
+  # final pass made (fit$EList holds its y and final weights), so it must agree with it.
+  .dc <- suppressWarnings(limma::duplicateCorrelation(fit$EList, design, block = block,
+                                                      weights = fit$EList$weights))
+  block_fit_check(fit, "random", block_col)     # the correlation came back, or stop
+  .rho <- fit$correlation
+  if (!isTRUE(all.equal(.dc$consensus.correlation, .rho, tolerance = 1e-6)))
+    warning(sprintf("--block: recomputed consensus correlation %.4f differs from limpa's %.4f",
+                    .dc$consensus.correlation, .rho), call. = FALSE)
+  block_rec <- block_record(block_col, block, method, .rho, .dc$atanh.correlations, nrow(E),
+                            first_pass = .pass[["first"]], groups = groups, cmat = cmat,
+                            scope = block_scope, effect_choice = .eff$choice)
 } else {
-  fit <- limma::lmFit(E, design)
+  .dc <- limma::duplicateCorrelation(E, design, block = block)
+  if (!is.finite(.dc$consensus.correlation))
+    stop(sprintf(paste0("--block %s: no protein had enough quantified samples to estimate the ",
+                        "within-block correlation. Drop --block, or loosen --coverage-min only if ",
+                        "that is what emptied the matrix."), block_col))
+  fit <- limma::lmFit(E, design, block = block, correlation = .dc$consensus.correlation)
+  block_fit_check(fit, "random", block_col)
+  block_rec <- block_record(block_col, block, method, .dc$consensus.correlation,
+                            .dc$atanh.correlations, nrow(E), groups = groups, cmat = cmat,
+                            scope = block_scope, effect_choice = .eff$choice)
 }
-fit <- limma::contrasts.fit(fit, limma::makeContrasts(contrasts = forms, levels = design))
-fit <- limma::eBayes(fit)
+# Which fit reports each contrast: block.contrast_model, the one definition.
+contrast_model <- if (is.null(block)) {
+  setNames(rep("independent", length(forms)), forms)
+} else unlist(block_rec$contrast_model)[forms]
+if (!is.null(block)) {
+  .fit_blocked <- limma::eBayes(limma::contrasts.fit(fit, cmat))
+  if (any(contrast_model == "independent"))
+    fit_ind <- fit_independent()
+  descriptor$de_engine <- paste0(descriptor$de_engine, block_engine_suffix(block_rec))
+  message(if (identical(block_rec$effect, "fixed"))
+    sprintf("[run_de] --block %s: %d levels, FIXED effect (%s)", block_col, block_rec$n_blocks,
+            block_rec$effect_choice)
+  else sprintf("[run_de] --block %s (scope %s): %d levels; consensus within-%s correlation %.3f (%d of %d proteins estimated)",
+               block_col, block_scope, block_rec$n_blocks, block_col,
+               block_rec$consensus_correlation, block_rec$n_proteins_estimated,
+               block_rec$n_proteins))
+  for (.w in unlist(block_rec$warnings)) warning("--block: ", .w, call. = FALSE)
+}
+if (!is.null(fit_ind)) fit_ind <- limma::eBayes(limma::contrasts.fit(fit_ind, cmat))
+# One fit object whose columns are each contrast's reporting fit (block_merge_fits), so the
+# DE tables and the DE-LIMP session read the same numbers.
+fit <- if (is.null(block)) fit_ind else block_merge_fits(.fit_blocked, fit_ind, contrast_model)
+
+# The fitted design as text: a fixed block is a design term, a random one is not.
+design_label <- paste0("~ 0 + ", paste(c(formula_parts,
+                       if (identical(block_rec$effect, "fixed")) block_col), collapse = " + "))
 
 # ---- write per-contrast results ---------------------------------------------
 gene_cols <- intersect(c("Genes", "Protein.Names"), names(genes))
@@ -451,7 +769,74 @@ expr_df <- merge(expr_df, data.frame(Protein.Group = rownames(E), E, check.names
 utils::write.csv(expr_df, file.path(outdir, "Expression_Matrix.csv"), row.names = FALSE)
 message(sprintf("[run_de] Expression_Matrix.csv: %d proteins x %d samples", nrow(E), ncol(E)))
 
+# ---- detection matrix: measured vs inferred/missing, per protein x sample ------
+# The ONE definition of "was this value measured": QC_detected_vs_inferred.csv's totals
+# below are column sums of this matrix, and the figures read it cell by cell (DE-LIMP
+# colours each violin dot by it). dpc: precursors actually observed for that protein in
+# that run (0 = value inferred by the detection-probability model). maxlfq: 1 where the
+# matrix has a value, 0 where it is NA (missing). Rows and sample columns follow
+# Expression_Matrix.csv exactly.
+det_n <- if (method == "dpc" && exists("dat")) {
+  .prot <- as.character(dat$genes[["Protein.Group"]])
+  if (is.null(.prot) || !length(.prot)) .prot <- rownames(dat$E)
+  .cnt <- rowsum((!is.na(dat$E)) * 1L, group = .prot, reorder = TRUE)
+  .m <- matrix(NA_integer_, nrow(E), ncol(E), dimnames = dimnames(E))
+  .ii <- match(rownames(E), rownames(.cnt))
+  .m[!is.na(.ii), ] <- as.matrix(.cnt)[.ii[!is.na(.ii)], colnames(E), drop = FALSE]
+  .m
+} else {
+  .m <- (!is.na(E)) * 1L
+  dimnames(.m) <- dimnames(E)
+  .m
+}
+detection_rec <- list(
+  file = "Detection_Matrix.csv",
+  zero_means = if (method == "dpc") "inferred" else "missing",
+  values = if (method == "dpc")
+    "precursors observed for the protein in that run; 0 = value inferred by the DPC model"
+  else "1 = quantified in the MaxLFQ matrix, 0 = missing (NA)",
+  na_means = "protein not in the precursor matrix: status not recorded")
+utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
+                            det_n[match(expr_df$Protein.Group, rownames(det_n)), , drop = FALSE],
+                            check.names = FALSE),
+                 file.path(outdir, detection_rec$file), row.names = FALSE)
+
+# ---- per-group detection, for each DE table ------------------------------------
+# From det_n (Detection_Matrix.csv) -- the one definition of "measured". Per group in the
+# contrast: Detected_<group> = "k/n", the runs of that group in which the protein was
+# measured; Evidence = "measured in both" (every run of every group in the contrast),
+# "presence call" (never measured in one group: the difference there is the model's, not a
+# measurement), else "partly <inferred|missing>". The same words go in de_provenance.json.
+EVIDENCE_LABELS <- c(all = "measured in both", none_in_a_group = "presence call",
+                     partial = paste("partly", detection_rec$zero_means))
+detection_columns <- function(prot, grp_names) {
+  i <- match(prot, rownames(det_n))
+  out <- list(); k_all <- list(); n_all <- list()
+  for (g in grp_names) {
+    cols <- which(as.character(groups) == g)
+    k <- rowSums(det_n[i, cols, drop = FALSE] > 0)
+    out[[paste0("Detected_", g)]] <- ifelse(is.na(k), NA_character_, sprintf("%d/%d", k, length(cols)))
+    k_all[[g]] <- k; n_all[[g]] <- length(cols)
+  }
+  kk <- do.call(cbind, k_all); nn <- matrix(unlist(n_all), nrow(kk), length(n_all), byrow = TRUE)
+  ev <- ifelse(rowSums(kk == 0) > 0, EVIDENCE_LABELS[["none_in_a_group"]],
+         ifelse(rowSums(kk == nn) == ncol(kk), EVIDENCE_LABELS[["all"]], EVIDENCE_LABELS[["partial"]]))
+  ev[rowSums(is.na(kk)) > 0] <- NA_character_
+  out$Evidence <- unname(ev)
+  as.data.frame(out, check.names = FALSE, stringsAsFactors = FALSE)
+}
+detection_rec$de_columns <- list(
+  `Detected_<group>` = sprintf(paste0("k/n: the runs of that group (n) in which the protein was ",
+                                      "measured (k; Detection_Matrix.csv > 0, 0 = %s)"),
+                               detection_rec$zero_means),
+  Evidence = sprintf(paste0("'%s' = measured in every run of every group in the contrast; '%s' = ",
+                            "never measured in at least one group, so the difference there is ",
+                            "the model's, not a measurement; '%s' = otherwise"),
+                     EVIDENCE_LABELS[["all"]], EVIDENCE_LABELS[["none_in_a_group"]],
+                     EVIDENCE_LABELS[["partial"]]))
+
 all_sig <- list()
+de_tables <- list()   # per DE table: its file and which fit it was reported from
 for (cn in forms) {
   tt <- limma::topTable(fit, coef = cn, number = Inf, adjust.method = "BH")
   tt$Protein.Group <- rownames(tt)
@@ -462,14 +847,19 @@ for (cn in forms) {
     if (length(.miss)) tt <- merge(tt, ann[, c("Protein.Group", .miss), drop = FALSE],
                                    by = "Protein.Group", all.x = TRUE, sort = FALSE)
   }
+  # the groups it compares, in the contrast's order: first side (coefficient > 0), then second
+  .cg <- intersect(c(rownames(cmat)[cmat[, cn] > 0], rownames(cmat)[cmat[, cn] < 0]), levels(groups))
+  if (length(.cg)) tt <- cbind(tt, detection_columns(tt$Protein.Group, .cg))
   tt <- tt[order(tt$adj.P.Val), ]
   fn <- file.path(outdir, sprintf("DE_%s_%s.csv", method, make.names(cn)))
   utils::write.csv(tt, fn, row.names = FALSE)
   sig <- subset(tt, !is.na(adj.P.Val) & adj.P.Val < adjp_thr)
   all_sig[[cn]] <- nrow(sig)
   n_beyond <- sum(abs(sig$logFC) >= logfc_ref, na.rm = TRUE)   # descriptive, not a filter
-  message(sprintf("[run_de] %-20s  %d proteins, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s",
-                  cn, nrow(tt), nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn)))
+  message(sprintf("[run_de] %-20s  %d proteins, %d significant (adj.P<%.2g); %d of those with |logFC|>=%.2g -> %s%s",
+                  cn, nrow(tt), nrow(sig), adjp_thr, n_beyond, logfc_ref, basename(fn),
+                  if (is.null(block)) "" else sprintf("  [%s fit]", contrast_model[[cn]])))
+  de_tables[[cn]] <- list(file = basename(fn), model = contrast_model[[cn]], n_significant = nrow(sig))
 }
 
 # ---- the analysis as plain R ------------------------------------------------
@@ -499,7 +889,9 @@ if (is.null(.rs)) {
       cov_min_frac = cov_min_frac,
       meta = meta, covariates = covariates, formula_parts = formula_parts,
       forms = forms, adjp_thr = adjp_thr, logfc_ref = logfc_ref,
-      ann_cols = gene_cols, descriptor = descriptor)
+      ann_cols = gene_cols, descriptor = descriptor,
+      contaminants = cont_rec, block = block_rec, contrast_model = contrast_model,
+      dpc_annotation_columns = if (exists("dpc_ann")) dpc_ann else NULL)
     message(sprintf("[run_de] reproducibility_log.R: the analysis as %d lines of plain R (Rscript-runnable)",
                     length(repro_lines)))
   }, error = function(e) message("[run_de] reproducibility_log.R not written: ", e$message))
@@ -514,9 +906,13 @@ methods_txt <- c(
   sprintf("DE engine     : %s", descriptor$de_engine),
   sprintf("Missing values: %s", descriptor$missing_policy),
   sprintf("ID FDR cutoff : q <= %.3f", q_cutoff),
+  sprintf("Filters       : %s", if (length(filters_applied)) filters_applied[1] else "none"),
+  if (length(filters_applied) > 1) sprintf("                %s", filters_applied[-1]),
+  contaminant_methods_lines(cont_rec),
   if (method == "maxlfq") sprintf("Normalization : quantile (limma::normalizeBetweenArrays)") else
                           sprintf("Normalization : DPC-CN (applied within dpcCN before dpcQuant)"),
-  sprintf("Design        : ~ 0 + %s", paste(formula_parts, collapse = " + ")),
+  sprintf("Design        : %s", design_label),
+  block_methods_lines(block_rec),
   sprintf("Contrasts     : %s", paste(forms, collapse = ", ")),
   sprintf("Significance  : adj.P.Val < %.3g (Benjamini-Hochberg), moderated t-test of", adjp_thr),
   "                H0: log2 fold change = 0. No fold-change filter is applied --",
@@ -584,16 +980,38 @@ prov <- list(
   # run never performed.
   eq_cutoff  = if (method == "dpc" && !any(grepl("Empirical", quantums_applied))) 0 else eq_cutoff,
   pgq_cutoff = if (method == "dpc" && !any(grepl("PG.MaxLFQ", quantums_applied))) 0 else pgq_cutoff,
+  # Every filter the run applied, in order, and what the contaminant filter did. Both are
+  # the record make_methods.py writes the Methods from -- it never assumes either.
+  filters_applied = as.list(filters_applied),
+  contaminants = cont_rec,
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
-  design = paste0("~ 0 + ", paste(formula_parts, collapse = " + ")),
-  contrasts = forms, n_samples = nrow(meta), groups = as.list(table(groups)),
+  design = design_label,
+  # The random blocking factor (--block), if any: column, consensus correlation, how it
+  # was estimated and fitted, and which contrasts are within vs between blocks.
+  block = block_rec,
+  # as.list: one contrast must still serialise as a list -- auto_unbox made it a bare
+  # string, which readers then iterated character by character ("B, -, A").
+  contrasts = as.list(forms), n_samples = nrow(meta), groups = as.list(table(groups)),
   significant_per_contrast = all_sig,
+  # Each DE_*.csv and the fit it came from: "blocked", or "independent" (samples fitted as
+  # independent -- every table of an unblocked run, between-block ones under --block-scope within).
+  de_tables = de_tables,
+  # Detection_Matrix.csv: what each 0 means depends on the pipeline -- say it here.
+  detection_matrix = detection_rec,
   R_version = as.character(getRversion()),
+  # dpc: the limpa that read the report and the readDIANN() annotation path it took
+  # (limpa_compat.R) -- an older limpa is not an error, but it is on the record.
+  limpa_read = limpa_read,
   packages = list(limpa = pkg_ver("limpa"), limma = pkg_ver("limma"),
                   arrow = pkg_ver("arrow"), dplyr = pkg_ver("dplyr"), tidyr = pkg_ver("tidyr")),
   input = normalizePath(input, mustWork = FALSE), metadata = normalizePath(meta_path, mustWork = FALSE)
 )
+# The block's column name at the top level too, for readers that only need "was the design
+# blocked, and on what" (the submission workflow). Present ONLY when blocked; `block` is the
+# full record either way (applied = FALSE says independence was modelled).
+if (isTRUE(block_rec$applied))
+  prov <- append(prov, list(block_column = block_rec$column), after = which(names(prov) == "block"))
 writeLines(jsonlite_or_manual(prov), file.path(outdir, "de_provenance.json"))
 
 # ---- detected vs inferred QC ------------------------------------------------
@@ -604,15 +1022,17 @@ writeLines(jsonlite_or_manual(prov), file.path(outdir, "de_provenance.json"))
 # (value supplied by the detection-probability model) — the same view DE-LIMP's
 # Data Completeness panel shows.
 qc_di <- NULL
+# dpc-only outputs left in this outdir by an earlier dpc run would describe THAT run next to
+# this one's tables (rules 1/4): remove them, and say so.
+if (method != "dpc") for (.stale in c("QC_detected_vs_inferred.csv", "DE-LIMP_session.rds")) {
+  if (file.exists(file.path(outdir, .stale))) {
+    unlink(file.path(outdir, .stale))
+    message(sprintf("[run_de] removed %s: left by an earlier --method dpc run in this outdir", .stale))
+  }
+}
 if (method == "dpc" && exists("dat") && exists("y_protein")) {
   tryCatch({
-    prot <- as.character(dat$genes[["Protein.Group"]])
-    if (is.null(prot) || !length(prot)) prot <- rownames(dat$E)
-    detm <- rowsum((!is.na(dat$E)) * 1, group = prot, reorder = TRUE) > 0
-    ii   <- match(rownames(E), rownames(detm))
-    det  <- matrix(FALSE, nrow(E), ncol(E), dimnames = list(rownames(E), colnames(E)))
-    ok   <- !is.na(ii)
-    det[ok, ] <- as.matrix(detm)[ii[ok], , drop = FALSE]
+    det <- !is.na(det_n) & det_n > 0          # from Detection_Matrix.csv -- one definition
 
     qc_di <- data.frame(
       Sample   = colnames(E),
@@ -632,6 +1052,10 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
 }
 
 # ---- DE-LIMP-loadable session ----------------------------------------------
+# What wrote the session, as DE-LIMP shows it ("App version: ..."): the skill and its version,
+# read by skill_version.R -- the R mirror of skill_version.py, the one reader of plugin.json.
+run_de_version <- paste("ucdavis-proteomics-core-pipeline run_de.R",
+                        skill_label(skill_version(.script_dir)))
 # Everything the DE-LIMP Shiny app needs is already in memory here. Writing it in
 # server_session.R's schema lets any result be dropped straight into the GUI at
 # https://delimp.stan-proteomics.org/ for interactive exploration.
@@ -641,6 +1065,10 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
       raw_data     = dat,
       metadata     = meta,
       fit          = fit,
+      # --block-scope within: `fit` holds each contrast's reporting fit column by column
+      # (fit$contrast_model); the independent fit whole, for anything needing a
+      # consistent per-protein variance (s2.post) on its contrasts.
+      fit_independent = if (!is.null(block) && any(contrast_model == "independent")) fit_ind else NULL,
       y_protein    = y_protein,
       dpc_fit      = if (exists("dpcfit")) dpcfit else NULL,
       design       = design,
@@ -656,7 +1084,7 @@ if (method == "dpc" && exists("dat") && exists("y_protein")) {
       logfc_cutoff = logfc_ref,
       q_cutoff     = adjp_thr,
       saved_at     = Sys.time(),
-      app_version  = "DE-LIMP v2.5"
+      app_version  = run_de_version
     )
     rds <- file.path(outdir, "DE-LIMP_session.rds")
     saveRDS(session_data, rds)

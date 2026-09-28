@@ -88,6 +88,13 @@ SOP_MASS_ACC_SOURCE = ("the facility's validated SOP tolerance for the Orbitraps
                        "re-search pilot (estimate_params.SOP_MASS_ACC), benchmarked in "
                        "references/diann_parallel.md")
 
+# The in-silico digest of the DIA-NN search: --cut (DIA-NN's syntax), --missed-cleavages,
+# --min/--max-pep-len and --met-excision, written into every cfg by build_diann(). The ONE
+# definition: fetch_fasta.py digests contaminant and target entries with it to decide whether
+# a contaminant can be told apart from a target protein by the peptides this search looks for.
+DIANN_DIGEST = {"cut": "K*,R*", "missed_cleavages": 1, "min_pep_len": 7, "max_pep_len": 30,
+                "met_excision": True}
+
 
 def instrument_ppm_summary():
     """One line of the table, MS1/MS2 ppm, for remediation text."""
@@ -524,10 +531,10 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     add("--predictor", True, "deep-learning predictor for library-free DIA")
     add("--reanalyse", True, "MBR across the run set")
     add("--rt-profiling", True, UNIV)
-    add("--cut", "K*,R*", "trypsin/P")
-    add("--missed-cleavages", 1, "DIA-NN default")
-    add("--min-pep-len", 7, UNIV)
-    add("--max-pep-len", 30, UNIV)
+    add("--cut", DIANN_DIGEST["cut"], "trypsin/P")
+    add("--missed-cleavages", DIANN_DIGEST["missed_cleavages"], "DIA-NN default")
+    add("--min-pep-len", DIANN_DIGEST["min_pep_len"], UNIV)
+    add("--max-pep-len", DIANN_DIGEST["max_pep_len"], UNIV)
     # Precursor m/z search range.
     #
     # This MUST follow the acquisition. Searching narrower than was acquired
@@ -567,7 +574,8 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     add("--max-pr-charge", 4, UNIV)
     add("--min-fr-mz", 200, UNIV)
     add("--max-fr-mz", 1800, UNIV)
-    add("--met-excision", True, UNIV)
+    if DIANN_DIGEST["met_excision"]:
+        add("--met-excision", True, UNIV)
     add("--unimod4", True, "fixed carbamidomethyl (C); DIA-NN recommended fixed mod")
 
     # variable mods: DIA-NN README says var mods don't help pure quant; default OFF.
@@ -728,6 +736,13 @@ SAGE_ITMS_BUCKET_SIZE = 32768
 SRC_SAGE_LOWRES = "Sage docs' low-res MS/MS setting (sage-docs.vercel.app/docs/configuration)"
 
 
+# Sage's in-silico digest (its database.enzyme block): trypsin with the proline rule, 2 missed
+# cleavages. The ONE definition: build_sage writes it, and run_search.py recognises it as Sage's
+# KNOWN difference from DIANN_DIGEST (which fetch_fasta.py judges contaminants on).
+SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
+               "cleave_at": "KR", "restrict": "P"}
+
+
 def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
     ion_trap = ms2_in_ion_trap(ms2_analyzer)
@@ -737,8 +752,7 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
     cfg = {
         "database": {
             "bucket_size": SAGE_ITMS_BUCKET_SIZE if ion_trap else 8192,
-            "enzyme": {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
-                       "cleave_at": "KR", "restrict": "P"},
+            "enzyme": dict(SAGE_ENZYME),
             "fragment_min_mz": 200.0, "fragment_max_mz": 1800.0,
             "peptide_min_mass": 500.0, "peptide_max_mass": 5000.0,
             "ion_kinds": ["b", "y"], "min_ion_index": 2,

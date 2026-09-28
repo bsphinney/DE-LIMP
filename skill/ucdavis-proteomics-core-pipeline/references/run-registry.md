@@ -150,11 +150,12 @@ counted, not traversed. There is a per-file cap and a per-record copy budget.
   sessions/<YYYY-MM-DD_Short-Description>/
     SEARCH_LOG.md             the run, for people
     run_record.json           the same facts, machine-readable (schema_version 2)
-    README.md  MANIFEST.txt   the session's own (after finalize)
+    README.html  README.md  AGENTS.md  MANIFEST.txt   the session's own (after finalize)
     <session>.zip             the session zip, without .quant or the predicted library, under the cap
     input/                    conditions.csv, <fasta>.meta.json, params.cfg + .rationale.json,
                               workflow.manifest.json, raw_files.txt -- NEVER raw data or the FASTA
-    output/                   *.docx (the report of record + Methods), methods.md,
+    output/                   Analysis_Report.html (the report of record), methods.docx,
+                              methods.md, an older session's report .docx,
                               AI_Analysis_Report.md, AUDIT.*, SAMPLE_QUALITY.*, tables/,
                               figures/ (files up to 5 MB), DATA_SUBMISSION/HOW_TO_SUBMIT.md
     output/search/            search_provenance.json, report.stats.tsv, report.log.txt, one SLURM
@@ -212,7 +213,8 @@ The log's sections, in order:
 13. **FRAN:** the hand-over receipt.
 14. **Skill issues** recorded for the session.
 15. **Analysis**, after finalize:
-    - the Word documents;
+    - the report of record (`Analysis_Report.html`), then the Methods in Word (and an older
+      session's report `.docx`, if it has one);
     - the DE method and thresholds, and significant proteins per contrast;
     - the overall audit result;
     - where `methods.md`, `DATA_SUBMISSION/` and `REPRODUCE.md` are;
@@ -330,7 +332,7 @@ can append before the header exists.
   median depth.
 - **Every later event is one dated line**, for example `### 2026-09-25 update -- <name>: search
   completed` after a failure, or `... analysis complete`. The analysis-complete line lists the
-  **Word report first**, then the Methods, the significant counts, the zip or reproducibility
+  **HTML report of record first**, then the Methods, the significant counts, the zip or reproducibility
   path, `REPRODUCE.md` and the submission.
 - **No duplicates.** Each entry ends with a `<!-- record_run <key> <event> <status> -->`
   marker. The marker is checked under the same lock, so the same event is never logged twice.
@@ -361,8 +363,11 @@ the lock, append-only, with the header written only at creation.
 - **Anything that looks like a credential.**
   - By name: `*token*`, `*webhook*`, `*secret*`, `*passw*`, `*credential*`, `.env`, `hive.env`,
     `id_rsa`/`id_ed25519`, `*.pem`, `*.key`, `.netrc`, `.pgpass`.
-  - By content: a private-key block, a GitHub or Hugging Face token, an `Authorization:` header,
-    a Slack token or webhook URL.
+  - By content: anything `notify_slack._SECRET_PATTERNS` matches (the skill's one list; see
+    `references/notifications.md`). That covers private keys, GitHub and Hugging Face tokens,
+    `Authorization:` headers, passwords, database DSNs, Slack tokens and webhooks, Google API
+    keys, and STAN share tokens and cookies. A `commands.log` holding `--share-token <tok>` is
+    refused, not copied.
 
   The whole registry is readable by the Core group, so a refused file is listed with the reason
   and its contents are never quoted.
@@ -456,10 +461,11 @@ is finalized. Laid out like the Core's DataAnalysis sessions.
   session (else `<date>_<search folder name>`; a different search wanting the same name gets
   `_2`). Start with `SEARCH_LOG.md`: the CoreOmics submission, Data Quality Notes, status, engine
   and the version that ran, key parameters and where each came from, results, and where every
-  output is. Beside it: `run_record.json` (the same, machine-readable), the session `README.md`
-  and zip, `input/` (conditions, FASTA sidecar, parameters, `raw_files.txt`), `output/` (the
-  Word report of record, Methods, tables, `search/` logs and a link to `report.parquet`) and
-  `scripts/` (commands, reproduce script).
+  output is. Beside it: `run_record.json` (the same, machine-readable), the session's
+  `README.html` / `README.md` and `AGENTS.md`, its zip, `input/` (conditions, FASTA sidecar,
+  parameters, `raw_files.txt`), `output/` (the report of record `Analysis_Report.html`, the
+  Methods in Word, tables, `search/` logs and a link to `report.parquet`) and `scripts/`
+  (commands, reproduce script).
 - `.index/` -- how recording the same search again finds its folder (by the search folder's real
   path, not its name). Leave it alone.
 - `*.lock.d` -- a writer's lock, held for a second or two; one older than 60 s is broken
@@ -473,7 +479,7 @@ recorded. To keep a run out: `RECORD_RUN=off`. To list the registry:
 `python3 <skill>/scripts/record_run.py list [--since YYYY-MM-DD] [--user U] [--status failed]`.
 Skill problems go to the sibling folder `../skill_issues/`.
 
-<!-- record_run.py README v1: written by the skill; edit README_TEXT in record_run.py, not this
+<!-- record_run.py README v2: written by the skill; edit README_TEXT in record_run.py, not this
 file -->
 ```
 <!-- README:END -->
@@ -498,3 +504,7 @@ python3 scripts/record_run.py list --json
 - `SLURM_*` and `HIVE_*` are removed from the environment.
 
 No test can reach the real registry.
+
+`record_run.py --detect-json <file>` points at `detect_acquisition.py`'s output when it is not
+beside the search. `--remote-hop` and `--skill-version` are internal (the SSH relay from a laptop
+to HIVE) and are hidden from `--help`.

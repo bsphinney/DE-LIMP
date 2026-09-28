@@ -23,6 +23,16 @@ UC Davis Proteomics Core analysis log):
                    group-confounded excess is flagged as possible contamination. Built from
                    the FASTA sidecar (--fasta-meta), the list's one source.
 
+Each curated panel is ONE list of human gene symbols (PANELS), matched case-insensitively,
+plus the ortholog names that differ by more than case for the searched organism
+(PANEL_ORTHOLOGS: mouse/rat adult globins, verified against MGI/RGD and the reference
+proteomes; the organism comes from --fasta-meta's taxid or --taxid). A panel that matches
+nothing is reported as "check could not run" when NO panel matched anything -- the names
+did not match -- rather than as an absence. Cont_-tagged proteins (common-contaminant
+entries, e.g. bovine serum haemoglobin from an antibody prep) are listed as "contaminant,
+not sample" and never scored; so are the ones run_de.R already removed (read from its
+de_provenance.json record beside the matrix).
+
 For each panel it computes a per-sample abundance score (z across samples) and --
 crucially -- checks whether that score is CONFOUNDED WITH GROUP. When a
 contamination panel separates the groups with little/no overlap, DE between those
@@ -39,17 +49,21 @@ Usage:
   python3 sample_quality.py --matrix Expression_Matrix.csv [--conditions conditions.csv]
       [--report report.parquet] [--out SAMPLE_QUALITY.md] [--z 1.5]
       [--fasta-meta search.fasta.meta.json]   # default: ./search.fasta.meta.json if present
+      [--taxid 10090]                          # organism, when there is no sidecar
 
 Reads/writes plain files; stdlib only (pyarrow optional, just for --report).
 """
-import sys, os, csv, json, math, argparse, re
+import sys, os, csv, json, math, argparse, random, re, itertools
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
-from fetch_fasta import target_contaminants, seen_only_as_cont, lost_to_contaminants_message
+from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
+                         CONT_TAG)
 
-# Curated gene-symbol panels (case-insensitive; matched against the matrix's gene /
-# protein-name column). Deliberately specific markers -- avoid ubiquitous glycolytic
-# enzymes. Extend per tissue as needed; document additions in references/sample-quality.md.
+# Curated marker panels, as HUMAN gene symbols (matched case-insensitively against every
+# id column of the matrix). Deliberately specific markers -- avoid ubiquitous glycolytic
+# enzymes. Extend per tissue as needed; document additions in references/anomaly-checks.md.
+# LORICRIN: HGNC's current symbol for loricrin, and the GN= UniProt uses for human, mouse
+# and rat (UP000005640 / UP000000589 / UP000002494, 2026_03) -- "LOR" alone never matched.
 PANELS = {
     "HEMOLYSIS": ["HBA1", "HBA2", "HBA", "HBB", "HBD", "CA1", "CA2", "CAT", "PRDX2",
                   "BLVRB", "SPTA1", "SPTB", "ANK1", "SLC4A1", "EPB42", "PKLR", "BPGM",
@@ -59,8 +73,60 @@ PANELS = {
                         "TPM1", "TPM2", "MYOM1", "MYOM2", "MYOM3", "DES", "MYL1", "MYL2",
                         "ATP2A1", "NEB", "TTN", "CASQ1", "SLN"],
     "EPIDERMIS": ["KRT1", "KRT2", "KRT9", "KRT10", "KRT5", "KRT14", "KRT16", "KRT6A",
-                  "FLG", "LOR", "IVL", "DSP", "JUP", "SBSN"],
+                  "FLG", "LOR", "LORICRIN", "IVL", "DSP", "JUP", "SBSN"],
 }
+
+# Ortholog names that differ from the human symbol by MORE than letter case, per NCBI taxid.
+# The Genes column DIA-NN writes is the GN= of the searched FASTA, so these are the gene
+# names UniProt gives the orthologs in each reference proteome, plus the MGI/RGD symbols
+# of the same genes (a full proteome or a later release may carry either).
+# Why a table and not a prefix rule like HBB-*/HBA-*: a prefix also pulls in the embryonic
+# chains (Hbb-y, Hbb-bh0/1/2, Hba-x -- embryonic erythropoiesis, not lysis of adult blood),
+# still misses rat Hbbl1 and HBB2_RAT (which has no GN= at all), and cannot express
+# anything that is not a prefix. A table is exact, and a test re-reads it.
+# Verified 2026-09-24 against the MGI HOM_MouseHumanSequence.rpt and RGD_ORTHOLOGS.txt
+# ortholog tables and the UP000000589 (mouse) / UP000002494 (rat) one-per-gene FASTAs:
+# every other panel gene's ortholog IS the human symbol in title case (Ca1, Cat, Prdx2,
+# Myh1, Ckm, Krt10, ...), so case-insensitive matching already covers it. Only the adult
+# globins differ. (msalemi 2026-09-24, mouse brain: Hbb-bs at ~15 log2 matched nothing.)
+PANEL_ORTHOLOGS = {
+    10090: {   # Mus musculus. UP000000589 GN=: Hba (P01942), Hbb-b1, Hbb-b2, Hbb-bs (A8DUK4)
+        "HBA1": ("Hba", "Hba-a1", "Hba-a2"),
+        "HBA2": ("Hba", "Hba-a1", "Hba-a2"),
+        "HBB": ("Hbb-b1", "Hbb-b2", "Hbb-bs", "Hbb-bt"),
+        "HBD": ("Hbb-b1", "Hbb-b2", "Hbb-bs", "Hbb-bt"),
+    },
+    10116: {   # Rattus norvegicus. UP000002494 GN=: Hba1 (P01946), Hbb (P02091); P11517
+               # HBB2_RAT has no GN=, so only its accession can match. Full proteome adds
+               # Hba-a1/-a2/-a3, Hbb-b1, Hbb-bs, Hbbl1.
+        "HBA1": ("Hba-a1", "Hba-a2", "Hba-a3"),
+        "HBA2": ("Hba1", "Hba-a1", "Hba-a2", "Hba-a3"),
+        "HBB": ("Hbb-b1", "Hbb-b2", "Hbb-bs", "Hbb-bt", "Hbbl1", "P11517"),
+        "HBD": ("Hbb", "Hbb-b1", "Hbb-b2", "Hbb-bs", "Hbb-bt", "Hbbl1", "P11517"),
+    },
+}
+# Organisms whose names the panels are verified for: human symbols, and PANEL_ORTHOLOGS.
+PANEL_ORGANISMS = {9606: "Homo sapiens", 10090: "Mus musculus", 10116: "Rattus norvegicus"}
+
+
+def panel_genes(name, taxid=None):
+    """The ONE place a panel's match set is built: its human symbols plus the organism's
+    ortholog names. taxid None (organism unknown) -> every organism's names; they cannot
+    collide, since no mouse/rat globin name is a human symbol."""
+    human = PANELS[name]
+    tables = ([PANEL_ORTHOLOGS[taxid]] if taxid in PANEL_ORTHOLOGS else
+              [] if taxid is not None else list(PANEL_ORTHOLOGS.values()))
+    names = set(human)
+    for t in tables:
+        for g in human:
+            names.update(t.get(g, ()))
+    return {n.upper() for n in names}
+
+
+# How a Cont_-tagged marker is reported: it measures a common-contaminant entry, not the sample.
+CONTAMINANT_NOT_SAMPLE = ("contaminant, not sample (a common-contaminant entry: reagent, serum or "
+                          "handling -- e.g. bovine serum haemoglobin from an antibody prep); not "
+                          "counted in the panel score")
 # Not a curated panel: built per run from the FASTA sidecar (--fasta-meta).
 TARGET_PANEL = "CONTAMINANT_IDENTICAL"
 
@@ -94,9 +160,40 @@ def read_matrix(path):
             genes = set().union(*(_genes(rec[i]) for i in id_idx if i < len(rec)))
             ids = set().union(*(_genes(rec[i]) for i in pid_idx if i < len(rec)))
             vals = {header[i]: _num(rec[i]) for i in sample_idx if i < len(rec)}
-            rows.append({"genes": genes, "ids": ids, "vals": vals})
+            rows.append({"genes": genes, "ids": ids, "vals": vals,
+                         "cont": _cont_accessions(ids)})
         samples = [header[i] for i in sample_idx]
     return samples, rows
+
+
+def _cont_accessions(ids):
+    """The Cont_-tagged accessions of a row (upper-cased tokens). A protein group naming one
+    is a common-contaminant entry -- bovine serum haemoglobin from an antibody prep, say --
+    not the sample's own protein, so it never counts toward a sample panel score."""
+    return sorted(CONT_TAG + t[len(CONT_TAG):] for t in ids if t.startswith(CONT_TAG.upper()))
+
+
+def removed_contaminant_rows(matrix_path):
+    """Contaminant groups run_de.R removed before building the matrix (its record in
+    de_provenance.json names the table), as panel rows -- so a Cont_ haemoglobin is still
+    reported as "contaminant, not sample" after the filter took it out of the matrix."""
+    d = os.path.dirname(os.path.abspath(matrix_path))
+    try:
+        with open(os.path.join(d, "de_provenance.json")) as fh:
+            rec = json.load(fh).get("contaminants") or {}
+        if not rec.get("removed_table"):
+            return []
+        with open(os.path.join(d, rec["removed_table"]), newline="") as fh:
+            out = []
+            for r in csv.DictReader(fh):
+                if (r.get("Contaminant.Group") or "").upper() != "TRUE":
+                    continue
+                ids = _genes(r.get("Protein.Group"))
+                out.append({"genes": _genes(r.get("Genes")) | ids, "ids": ids, "vals": {},
+                            "cont": _cont_accessions(ids), "removed": True})
+            return out
+    except (OSError, ValueError):
+        return []
 
 
 def _num(x):
@@ -125,16 +222,22 @@ def _to_log2(rows, samples):
                 r["vals"][s] = math.log2(v) if (v is not None and v > 0) else None
 
 
-def panel_scores(rows, samples, panel_genes):
+def panel_scores(rows, samples, panel_genes, removed=()):
+    """-> (per-sample mean, n sample proteins, matched names, contaminant matches). A
+    Cont_-tagged row is reported under contaminant matches and never scored: it measures
+    the reagent, not the sample. `removed` = rows run_de.R already filtered out."""
     pg = set(g.upper() for g in panel_genes)
-    hits = [r for r in rows if r["genes"] & pg]
+    hits = [r for r in rows if r["genes"] & pg and not r.get("cont")]
     per = {}
     for s in samples:
         vals = [r["vals"].get(s) for r in hits]
         vals = [v for v in vals if v is not None]
         per[s] = (sum(vals) / len(vals)) if vals else None
     matched = sorted({g for r in hits for g in (r["genes"] & pg)})
-    return per, len(hits), matched
+    cont = sorted({f"{'/'.join(sorted(r['genes'] & pg))} ({';'.join(r['cont'])})"
+                   + (" -- removed before DE" if r.get("removed") else "")
+                   for r in list(rows) + list(removed) if r.get("cont") and r["genes"] & pg})
+    return per, len(hits), matched, cont
 
 
 def zscore(per, samples):
@@ -146,24 +249,47 @@ def zscore(per, samples):
     return {s: ((per[s] - m) / sd if per[s] is not None else None) for s in samples}
 
 
-def load_conditions(path, samples):
-    """Map matrix sample columns -> group via conditions.csv (fuzzy basename-stem)."""
+def load_conditions(path, samples, column=None):
+    """Map matrix sample columns -> group via conditions.csv (basename stems), or -> the
+    value of `column` (e.g. the block, Mouse) when given. An EXACT stem match wins; a
+    substring match is used only when exactly one row matches -- 'S1' is a substring of
+    'S10'..'S19', and the first such row used to be taken (S10 got S1's group)."""
     if not path or not os.path.exists(path):
         return {}
     pairs = []
     with open(path, newline="") as fh:
         rd = csv.DictReader(fh)
         fcol = next((c for c in rd.fieldnames if "file" in c.lower() or "run" in c.lower() or "sample" in c.lower()), rd.fieldnames[0])
-        gcol = next((c for c in rd.fieldnames if "group" in c.lower() or "condition" in c.lower()), rd.fieldnames[-1])
+        gcol = column if column else next((c for c in rd.fieldnames if "group" in c.lower() or "condition" in c.lower()), rd.fieldnames[-1])
+        if gcol not in rd.fieldnames:
+            return {}
         for r in rd:
-            pairs.append((_stem(r.get(fcol, "")), r.get(gcol, "").strip()))
+            pairs.append((_stem(r.get(fcol, "")), (r.get(gcol) or "").strip()))
     gmap = {}
     for s in samples:
         ss = _stem(s)
-        hit = next((g for stem, g in pairs if stem and (stem == ss or stem in ss or ss in stem)), None)
-        if hit:
-            gmap[s] = hit
+        exact = [g for stem, g in pairs if stem and stem == ss]
+        if exact:
+            gmap[s] = exact[0]
+            continue
+        sub = [g for stem, g in pairs if stem and (stem in ss or ss in stem)]
+        if len(sub) == 1:
+            gmap[s] = sub[0]
     return gmap
+
+
+def block_column_for(matrix_path, explicit=None):
+    """The block (animal / subject) column: --block, else the one run_de.R recorded in the
+    de_provenance.json beside the expression matrix (block_column, present only when the
+    DE was blocked). None = samples are treated as independent."""
+    if explicit:
+        return explicit
+    prov = os.path.join(os.path.dirname(os.path.abspath(matrix_path)), "de_provenance.json")
+    try:
+        with open(prov) as fh:
+            return json.load(fh).get("block_column") or None
+    except (OSError, ValueError):
+        return None
 
 
 def _stem(x):
@@ -174,25 +300,252 @@ def _stem(x):
     return b.lower()
 
 
-def confound_check(z, gmap, samples, thr):
-    """Return (confounded: bool, detail) -- is the panel score separated by group with
-    little overlap? That is the danger signal: DE may be contamination, not biology."""
-    if not gmap:
-        return False, "no conditions.csv -- group-confounding not assessed"
+# Is a panel score confounded with group? A permutation test of the one-way between-group
+# F statistic: how often does a random relabelling of the samples (same group sizes) put at
+# least as much of the panel's variation between groups as the real labels do?
+# Why not the old rule (flag when the highest and lowest GROUP MEANS differ by >= --z SD and
+# barely overlap): with k groups it compares the extremes of k noisy means, and their spread
+# grows with k even when nothing differs -- the expected range of 10 means is ~3.1 standard
+# errors against ~1.1 for 2. Silva08172026 (10 groups x 3) flagged all three panels that way
+# (gaps 1.55-2.74). The test's null distribution comes from the design itself, so k, group
+# sizes and non-normal scores are all accounted for. 1% because three panels are tested.
+CONFOUND_P = 0.01
+N_PERM = 9999
+
+
+def _between(values, labels):
+    """sum over groups of (group sum)^2 / group size -- monotone in the one-way F for fixed
+    data, so permutations can be compared on it directly."""
+    sums, sizes = {}, {}
+    for v, g in zip(values, labels):
+        sums[g] = sums.get(g, 0.0) + v
+        sizes[g] = sizes.get(g, 0) + 1
+    return sum(sums[g] ** 2 / sizes[g] for g in sums)
+
+
+def _min_p(sizes):
+    """Smallest p-value any relabelling can give: 1 / number of distinct partitions."""
+    labellings = math.factorial(sum(sizes))
+    for n in sizes:
+        labellings //= math.factorial(n)
+    sym = 1
+    for n in set(sizes):
+        sym *= math.factorial(sizes.count(n))
+    return sym / labellings
+
+
+def _arrangements(labels_by_stratum):
+    """Distinct label arrangements a within-stratum relabelling can reach."""
+    total = 1
+    for labs in labels_by_stratum:
+        n = math.factorial(len(labs))
+        for c in set(labs):
+            n //= math.factorial(labs.count(c))
+        total *= n
+    return total
+
+
+def _stratum_arrangements(labels):
+    """Every distinct ordering of a multiset of labels (C(6,3) = 20 for 3 Old + 3 Young)."""
+    counts = {}
+    for l in labels:
+        counts[l] = counts.get(l, 0) + 1
+    keys, n, out, cur = sorted(counts), len(labels), [], []
+
+    def rec():
+        if len(cur) == n:
+            out.append(tuple(cur)); return
+        for k in keys:
+            if counts[k]:
+                counts[k] -= 1; cur.append(k); rec(); cur.pop(); counts[k] += 1
+    rec()
+    return out
+
+
+EXACT_MAX = 200000     # label arrangements enumerated exactly; beyond, N_PERM random ones
+
+
+def _relabel_test(vals, labs, strata=None, n_perm=N_PERM, seed=20260925):
+    """The permutation test of the between-group statistic, relabelling freely or within each
+    stratum. EXACT (every distinct arrangement) when there are <= EXACT_MAX of them, else
+    n_perm random relabellings. Returns (p, min_p, n_arrangements, exact): min_p is the
+    smallest p ANY data could give here -- the share of arrangements as extreme as the most
+    extreme one (3 vs 3: 2 of 20 = 0.10; 6 pairs: 2 of 64 = 0.031)."""
+    idx = {}
+    for i, b in enumerate(strata if strata is not None else [None] * len(labs)):
+        idx.setdefault(b, []).append(i)
+    n_arr = _arrangements([[labs[i] for i in ii] for ii in idx.values()])
+    obs = _between(vals, labs)
+    if n_arr <= EXACT_MAX:
+        per = [(ii, _stratum_arrangements([labs[i] for i in ii])) for ii in idx.values()]
+        stats = []
+        perm = list(labs)
+        for combo in itertools.product(*[a for _ii, a in per]):
+            for (ii, _a), arr in zip(per, combo):
+                for i, g in zip(ii, arr):
+                    perm[i] = g
+            stats.append(_between(vals, perm))
+        top = max(stats)
+        p = sum(1 for x in stats if x >= obs - 1e-9) / len(stats)
+        return p, sum(1 for x in stats if x >= top - 1e-9) / len(stats), n_arr, True
+    rng = random.Random(seed)
+    ge, perm = 0, list(labs)
+    for _ in range(n_perm):
+        for ii in idx.values():
+            sub = [labs[i] for i in ii]
+            rng.shuffle(sub)
+            for i, g in zip(ii, sub):
+                perm[i] = g
+        if _between(vals, perm) >= obs - 1e-9:
+            ge += 1
+    return (ge + 1) / (n_perm + 1), 1 / n_arr, n_arr, False
+
+
+def _confound_test(vals, labs, thr, unit, strata=None, n_perm=N_PERM, seed=20260925):
+    """ONE rule for every confound question (review round 2): the permutation test, exact
+    when it can be; flagged at p < CONFOUND_P. When even the most extreme arrangement cannot
+    reach CONFOUND_P, there is NO flag, whatever the data: the data sitting at that extreme
+    (complete separation / every block ordered alike) with a gap >= thr is a CAUTION, never
+    a finding -- the same weak evidence is worded the same way, blocked or not.
+    `unit`: what one value is ("sample", "Mouse mean"); `strata`: blocks relabelled within.
+    Returns {flag, caution, p, min_p, hi, lo, gap, detail}."""
     groups = {}
-    for s in samples:
-        if s in gmap and z.get(s) is not None:
-            groups.setdefault(gmap[s], []).append(z[s])
+    for v, g in zip(vals, labs):
+        groups.setdefault(g, []).append(v)
     if len(groups) < 2:
-        return False, "fewer than 2 groups with panel data"
+        return {"flag": False, "caution": False, "p": None, "min_p": None,
+                "detail": "fewer than 2 groups with panel data"}
     means = {g: sum(v) / len(v) for g, v in groups.items()}
     hi = max(means, key=means.get); lo = min(means, key=means.get)
     gap = means[hi] - means[lo]
-    overlap = max(min(groups[hi]), min(groups[lo])) <= min(max(groups[hi]), max(groups[lo]))  # crude
-    # strong signal: group means differ by > ~1.5 SD of z (i.e. > thr) AND ranges barely overlap
-    separated = (gap >= thr) and (min(groups[hi]) > max(groups[lo]) - 0.25 * gap)
-    detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n={len(groups[g])})" for g in sorted(means))
-    return bool(separated), f"{detail}  [gap {gap:+.2f}]"
+    detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n = {len(groups[g])})" for g in sorted(means))
+    p, min_p, n_arr, exact = _relabel_test(vals, labs, strata, n_perm, seed)
+    how = (f"exact over all {n_arr:,} arrangements" if exact else f"{n_perm:,} random relabellings")
+    within = f", labels relabelled within each block" if strata is not None else ""
+    if min_p > CONFOUND_P:
+        extreme = p <= min_p + 1e-12
+        shape = (("every block orders the groups the same way" if strata is not None
+                  else f"complete separation (all {hi} above all {lo})")
+                 if extreme else "not the most extreme arrangement")
+        return {"flag": False, "caution": bool(extreme and gap >= thr), "p": None, "min_p": min_p,
+                "hi": hi, "lo": lo, "gap": gap,
+                "detail": (f"{detail}  [one value per {unit}{within}; best possible p "
+                           f"{min_p:.2g} > {CONFOUND_P} ({how}), so no test; {shape}, gap "
+                           f"{gap:+.2f}]")}
+    return {"flag": p < CONFOUND_P, "caution": False, "p": p, "min_p": min_p, "hi": hi, "lo": lo,
+            "gap": gap,
+            "detail": (f"{detail}  [permutation F-test across {len(groups)} groups, one value "
+                       f"per {unit}{within} ({how}): p = {p:.2g}; flagged at p < {CONFOUND_P}]")}
+
+
+def confound_tests(z, gmap, samples, thr, bmap=None, block_name="block", n_perm=N_PERM,
+                   seed=20260925):
+    """Every confound question this design can ask, each as {question, factor, flag, caution,
+    p, min_p, hi, lo, detail}. Without a block: one question, the groups. With one (bmap:
+    sample -> animal), block_confound_checks' two. [] without conditions."""
+    if not gmap:
+        return []
+    if bmap:
+        tests = block_confound_checks(z, gmap, bmap, samples, thr, block_name, n_perm, seed)
+        if tests:
+            return tests
+    vals, labs = [], []
+    for s in samples:
+        if s in gmap and z.get(s) is not None:
+            vals.append(z[s]); labs.append(gmap[s])
+    r = _confound_test(vals, labs, thr, "sample", n_perm=n_perm, seed=seed)
+    return [dict(r, question="groups", factor="the groups")]
+
+
+def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=None,
+                   block_name="block"):
+    """(confounded, detail, p) in one line, for callers that want one: flagged if any question
+    flags (a caution never does), p the smallest tested. main() reports the questions apart."""
+    if not gmap:
+        return False, "no conditions.csv -- group-confounding not assessed", None
+    tests = confound_tests(z, gmap, samples, thr, bmap, block_name, n_perm, seed)
+    ps = [t["p"] for t in tests if t.get("p") is not None]
+    return (any(t["flag"] for t in tests), "  ||  ".join(t["detail"] for t in tests),
+            min(ps) if ps else None)
+
+
+def _between_levels(blocks, labels):
+    """Groups joined by a shared block (union-find) -> the BETWEEN-block factor: PROT_0756's
+    mice join all Old_* groups into one level and all Young_* into another; a paired design
+    (every patient in both groups) joins everything into one level (no between factor);
+    technical replicates (each mouse in one group) leave every group its own level."""
+    parent = {g: g for g in set(labels)}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    first = {}
+    for b, g in zip(blocks, labels):
+        if b in first:
+            ra, rb = find(first[b]), find(g)
+            if ra != rb:
+                parent[rb] = ra
+        else:
+            first[b] = g
+    members = {}
+    for g in parent:
+        members.setdefault(find(g), set()).add(g)
+    name = {}
+    for root, gs in members.items():
+        if len(gs) == 1:
+            nm = next(iter(gs))
+        else:
+            nm = os.path.commonprefix(sorted(gs)).rstrip("_-. /")
+            if not nm:
+                srt = sorted(gs)
+                nm = " / ".join(srt[:3]) + (" ..." if len(srt) > 3 else "")
+        for g in gs:
+            name[g] = nm
+    return name
+
+
+def block_confound_checks(z, gmap, bmap, samples, thr, block_name="block", n_perm=N_PERM,
+                          seed=20260925):
+    """Two different questions once samples come in blocks (animals), each tested the way its
+    samples are exchangeable (PROT_0756 v2: a hemolysis p of 0.001 from within-mouse
+    relabelling was read as an AGE confound it could never detect):
+      within   -- does the panel differ among the samples of ONE block (bait vs IgG IPs of the
+                  same mouse)? Group labels relabelled within each block. It flags what
+                  within-block contrasts can pick up; it says nothing about the between factor.
+      between  -- does it differ between blocks of different levels of the between-block
+                  factor (Old vs Young mice)? One mean per block.
+    Both follow _confound_test's one rule (exact where possible; too few arrangements -> a
+    caution, never a flag). Returns [{question, factor, flag, caution, p, ...}]; [] when the
+    blocks do not cover the samples."""
+    data = [(z[s], gmap[s], bmap.get(s)) for s in samples if s in gmap and z.get(s) is not None]
+    if not data or any(b is None for _v, _g, b in data):
+        return []
+    vals, labs, blks = zip(*data)
+    groups_in = {}
+    for b, g in zip(blks, labs):
+        groups_in.setdefault(b, set()).add(g)
+    unit = f"block ({block_name})"
+    tests = []
+    if any(len(v) > 1 for v in groups_in.values()):
+        r = _confound_test(list(vals), list(labs), thr, f"sample within a {unit}",
+                           strata=list(blks), n_perm=n_perm, seed=seed)
+        tests.append(dict(r, question="within", factor=f"groups within one {unit}",
+                          detail=f"[within one {unit}] {r['detail']}"))
+    level_of_group = _between_levels(blks, labs)
+    levels = {b: level_of_group[next(iter(gs))] for b, gs in groups_in.items()}
+    if len(set(levels.values())) >= 2:
+        per = {}
+        for b, v in zip(blks, vals):
+            per.setdefault(b, []).append(v)
+        order = sorted(per)
+        r = _confound_test([sum(per[b]) / len(per[b]) for b in order], [levels[b] for b in order],
+                           thr, f"{unit} mean", n_perm=n_perm, seed=seed)
+        names = sorted(set(levels.values()))
+        tests.append(dict(r, question="between", factor=" vs ".join(names),
+                          detail=f"[between {unit} levels: {' vs '.join(names)}] {r['detail']}"))
+    return tests
 
 
 def detected_depth(report):
@@ -223,6 +576,9 @@ def main():
     ap.add_argument("--matrix", required=True, help="expression matrix CSV (proteins x samples; a gene/id column + numeric sample columns)")
     ap.add_argument("--conditions", help="conditions.csv (File.Name,Group) to test group-confounding")
     ap.add_argument("--report", help="DIA-NN report.parquet for TRUE per-sample detected depth")
+    ap.add_argument("--block", help="conditions.csv column naming the animal / subject each sample "
+                    "came from (the confound test then respects it). Default: the block_column "
+                    "run_de.R recorded in the de_provenance.json beside --matrix, if any")
     ap.add_argument("--out", default="SAMPLE_QUALITY.md")
     ap.add_argument("--z", type=float, default=1.5, help="|z| threshold to flag an elevated sample (default 1.5)")
     ap.add_argument("--keratin-sample", action="store_true",
@@ -230,7 +586,11 @@ def main():
                          "so the EPIDERMIS panel is reported for QC but never flagged as contamination")
     ap.add_argument("--fasta-meta",
                     help="fetch_fasta.py's <fasta>.meta.json -- supplies the proteins that are also "
-                         "common-contaminant sequences. Default: ./search.fasta.meta.json if present")
+                         "common-contaminant sequences, and the organism (taxid) the panels' "
+                         "ortholog names are chosen for. Default: ./search.fasta.meta.json if present")
+    ap.add_argument("--taxid", type=int,
+                    help="NCBI taxid of the searched organism, when there is no --fasta-meta "
+                         "(9606 human, 10090 mouse, 10116 rat have verified panel names)")
     a = ap.parse_args()
     fasta_meta = a.fasta_meta or ("search.fasta.meta.json"
                                   if os.path.exists("search.fasta.meta.json") else None)
@@ -238,53 +598,172 @@ def main():
     samples, rows = read_matrix(a.matrix)
     _to_log2(rows, samples)
     gmap = load_conditions(a.conditions, samples)
+    block_col = block_column_for(a.matrix, a.block)
+    bmap = load_conditions(a.conditions, samples, column=block_col) if block_col else {}
 
     na = sum(1 for r in rows for s in samples if r["vals"].get(s) is None)
     complete = na / max(1, len(rows) * len(samples)) < 0.005
 
     # Proteins of the searched organism that are also common-contaminant sequences --
     # read from the sidecar, never kept as a list here.
-    tc, tc_note = None, None
+    tc, tc_note, meta = None, None, {}
     if fasta_meta:
         try:
             with open(fasta_meta) as fh:
-                tc = target_contaminants(json.load(fh), a.keratin_sample)
+                meta = json.load(fh)
+            tc = target_contaminants(meta, a.keratin_sample)
         except (OSError, ValueError) as e:
             tc_note = f"not assessed: could not read {fasta_meta} ({e})"
     else:
         tc_note = "not assessed: no <fasta>.meta.json from fetch_fasta.py (pass --fasta-meta)"
     org = (tc or {}).get("organism") or "target-organism"
-    panels = dict(PANELS)
+    taxid = a.taxid
+    if taxid is None:
+        try:
+            taxid = int(meta.get("taxid")) if meta.get("taxid") else None
+        except (TypeError, ValueError):
+            taxid = None
+    org_name = (tc or {}).get("organism") or PANEL_ORGANISMS.get(taxid) or (
+        f"taxid {taxid}" if taxid else "an unknown organism")
+    panels = {name: panel_genes(name, taxid) for name in PANELS}
     if tc and (tc["genes"] or tc["accessions"]):
         # Genes AND accessions: the matrix's id column may be either, and an NCBI database
         # carries no gene names at all.
         panels[TARGET_PANEL] = sorted(tc["genes"] | tc["accessions"])
+    removed = removed_contaminant_rows(a.matrix)
 
     results, flags = {}, []
     for name, genes in panels.items():
-        per, nhit, matched = panel_scores(rows, samples, genes)
+        per, nhit, matched, cont_hits = panel_scores(rows, samples, genes, removed)
         z = zscore(per, samples)
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
-        confounded, detail = confound_check(z, gmap, samples, a.z)
+        blk = block_col or "block"
+        # every question the design can ask, one rule (_confound_test): flagged at p < 0.01;
+        # too few arrangements for that -> a caution when the data sit at the extreme, never a flag
+        ctests = confound_tests(z, gmap, samples, a.z, bmap=bmap, block_name=blk)
+        confounded = any(t["flag"] for t in ctests)
+        ps = [t["p"] for t in ctests if t.get("p") is not None]
+        confound_p = min(ps) if ps else None
+        detail = ("  ||  ".join(t["detail"] for t in ctests) if ctests
+                  else "no conditions.csv -- group-confounding not assessed")
         expected = a.keratin_sample and name == "EPIDERMIS"
         kept = name == TARGET_PANEL
+        if kept or expected:
+            # A Cont_ row here is a real protein lost to a Cont_ entry (the lost-protein note
+            # below says so), or the analyte of a keratin sample -- never "not sample".
+            cont_hits = []
         results[name] = {"n_panel_proteins": nhit, "matched_genes": matched,
+                         "contaminant_matches": cont_hits,
                          "z": {s: (round(z[s], 2) if z[s] is not None else None) for s in samples},
                          "elevated_samples": elevated, "group_confounded": confounded,
+                         "confound_caution": any(t.get("caution") for t in ctests),
+                         "confound_p": confound_p,
                          "group_detail": detail, "expected_analyte": expected,
+                         "confound_tests": ctests,
                          "kept_in_quantification": kept}
         why = (f" These are {org} proteins that are also common-contaminant sequences: possible "
                f"contamination, KEPT in quantification and normalisation." if kept else "")
         if expected:
             pass   # keratin IS the analyte for a keratin-matrix sample: report for QC, never flag
-        elif confounded:
-            flags.append(f"**{name} is CONFOUNDED WITH GROUP** ({detail}). DE between these "
-                         "groups may be contamination, not biology; protein-level marker removal "
-                         "will NOT fix a confounded contrast -- resolve at the sample/design level."
-                         + why)
-        elif elevated:
-            flags.append(f"{name}: elevated in {', '.join(elevated)} (|z|>={a.z}) -- possible "
-                         "per-sample contamination; check before interpreting these samples." + why)
+        else:
+            # Each message says which question it answers: a within-block flag cannot speak
+            # to the between-block factor, and vice versa (PROT_0756 v2). A caution is worded
+            # as one everywhere (review round 2): the same weak evidence, the same words.
+            unit = f"block ({blk})"
+            caution_tail = ("so this is a caution, not a finding: treat {} proteins in {} with "
+                            "care.")
+            for t in ctests:
+                q = t["question"]
+                if q == "groups" and t["flag"]:
+                    flags.append(f"**{name} is CONFOUNDED WITH GROUP** ({t['detail']}). DE between "
+                                 "these groups may be contamination, not biology; protein-level "
+                                 "marker removal will NOT fix a confounded contrast -- resolve at "
+                                 "the sample/design level." + why)
+                elif q == "groups" and t.get("caution"):
+                    flags.append(f"{name}: complete separation between groups -- all {t['hi']} above "
+                                 f"all {t['lo']} ({t['detail']}). Too few samples for a test, "
+                                 + caution_tail.format(name, f"{t['hi']}-vs-{t['lo']} contrasts")
+                                 + why)
+                elif q == "within" and t["flag"]:
+                    flags.append(
+                        f"**{name} differs among the samples of one {unit}** ({t['detail']}). "
+                        f"This answers the WITHIN-{blk} question only: contrasts between groups "
+                        f"inside one {blk} (e.g. bait vs control IPs of the same {blk}) can pick up "
+                        f"{name} proteins -- check those contrasts' hits against this panel "
+                        f"before reading them as biology. It says nothing about differences "
+                        f"between {unit} levels." + why)
+                elif q == "within" and t.get("caution"):
+                    flags.append(
+                        f"{name}: every {unit} orders the groups the same way, {t['hi']} highest "
+                        f"and {t['lo']} lowest ({t['detail']}). Too few blocks for a test, "
+                        + caution_tail.format(name, f"within-{blk} contrasts") + why)
+                elif q == "between" and t["flag"]:
+                    flags.append(
+                        f"**{name} is CONFOUNDED WITH {t['factor']}** ({t['detail']}). This "
+                        f"answers the BETWEEN-{blk} question: {name} differs between {unit} "
+                        f"levels ({t['factor']}), so DE between them may be contamination, not "
+                        f"biology; protein-level marker removal will NOT fix a confounded "
+                        f"contrast." + why)
+                elif q == "between" and t.get("caution"):
+                    flags.append(
+                        f"{name}: complete separation between {unit} levels -- all {t['hi']} "
+                        f"above all {t['lo']} ({t['detail']}). Too few blocks for a test, "
+                        + caution_tail.format(name, f"{t['hi']}-vs-{t['lo']} contrasts") + why)
+            if elevated and not confounded:
+                flags.append(f"{name}: elevated in {', '.join(elevated)} (|z|>={a.z}) -- possible "
+                             "per-sample contamination; check before interpreting these samples." + why)
+    # Did the check RUN? A panel that matched nothing is only evidence of absence when the
+    # matrix's gene names are ones the panels know. If NO curated panel matched a single
+    # sample protein -- each lists markers (CAT, PRDX2, TPM1, DSP ...) found in nearly any
+    # cell or tissue proteome -- the names did not match, and "0 detected" means nothing.
+    # (msalemi 2026-09-24: all three read "0 panel proteins -- not assessable" on a mouse
+    # brain matrix with haemoglobin at ~15 log2.)
+    any_match = any(results[n]["n_panel_proteins"] for n in PANELS)
+    covered = taxid in PANEL_ORGANISMS
+    for name in PANELS:
+        r = results[name]
+        if r["n_panel_proteins"]:
+            r["status"], r["status_note"] = "assessed", None
+        elif not any_match:
+            r["status"] = "not_run"
+            r["status_note"] = (
+                f"check could not run (no panel gene matched this organism's symbols): none "
+                f"of the {len(PANELS)} panels matched a single protein of {org_name}"
+                + ("" if covered else
+                   f" -- its gene names are not in the verified set ({', '.join(PANEL_ORGANISMS.values())})")
+                + ". Check that the matrix has a Genes column, then pass --taxid / "
+                  "--fasta-meta or add the organism's names to PANEL_ORTHOLOGS.")
+        elif covered:
+            r["status"] = "none_detected"
+            r["status_note"] = (f"none of this panel's markers was detected; the check ran "
+                                f"({org_name} names are covered, and other panels matched)")
+        else:
+            r["status"] = "none_detected_unverified"
+            r["status_note"] = (f"none of this panel's markers matched; {org_name} gene names "
+                                f"are not in the verified set, so this may be a naming mismatch "
+                                f"rather than an absence")
+    not_run = [n for n in PANELS if results[n]["status"] == "not_run"]
+    if not_run:
+        flags.append(f"Contamination panels {', '.join(not_run)}: "
+                     + results[not_run[0]]["status_note"])
+    # A database built before fetch_fasta.py removed target-identical contaminant entries can
+    # hold the sample's OWN protein as a Cont_ entry; say so rather than call it a reagent.
+    lost_accs = {(r.get("cont_acc") or "").upper() for r in (tc or {}).get("kept_as_contaminant", [])}
+    for name in PANELS:
+        cm = results[name]["contaminant_matches"]
+        if not cm:
+            continue
+        msg = (f"{name}: {len(cm)} `{CONT_TAG}`-tagged marker(s) -- {CONTAMINANT_NOT_SAMPLE}: "
+               + "; ".join(cm[:8]))
+        own = [m for m in cm if any(acc and acc in m.upper() for acc in lost_accs)]
+        if own:
+            msg += (f". Except: {', '.join(own)} -- identical to {org} proteins in this database, "
+                    f"so possibly the sample's own (see the database note).")
+        elif (tc or {}).get("legacy_note"):
+            msg += (". Caveat: this database was built by an older contaminant rule, so a "
+                    f"{CONT_TAG} marker may be the sample's own protein (see the database note).")
+        flags.append(msg)
+
     # Real proteins that exist only as Cont_ entries (database used as-is, built with
     # --keep-target-contaminants, or built before the overlap check) -- same wording as
     # audit_results.py, from fetch_fasta.py.
@@ -321,15 +800,28 @@ def main():
                          f"so the proteins are quantified under their own accessions: they are "
                          f"**kept in quantification** — possible contamination (skin/hair keratins "
                          f"usually are), reported here, not excluded._\n\n")
+            if r.get("contaminant_matches"):
+                fh.write(f"_`{CONT_TAG}`-tagged matches -- {CONTAMINANT_NOT_SAMPLE}:_ "
+                         f"{'; '.join(r['contaminant_matches'])}\n\n")
             if not r["matched_genes"]:
-                fh.write("_None of this panel's markers were detected — not assessable._\n\n")
+                note = (r.get("status_note") if name != TARGET_PANEL else None) or \
+                    "none of these proteins was quantified"
+                fh.write(f"_{note[0].upper()}{note[1:]}._\n\n")
                 continue
             fh.write(f"markers: {', '.join(r['matched_genes'])}\n\n")
             fh.write("| sample | group | z (panel abundance) |\n|---|---|---|\n")
             for s in samples:
                 zz = r["z"][s]
                 fh.write(f"| {s} | {gmap.get(s,'?')} | {zz if zz is not None else 'NA'} |\n")
-            fh.write(f"\n_group-confounding:_ {r['group_detail']}\n\n")
+            for t in r.get("confound_tests") or []:
+                q = {"groups": "differs between groups?",
+                     "within": "differs among the samples of one block? (within-block contrasts)",
+                     "between": f"differs between block levels, {t['factor']}? (between-block "
+                                "contrasts)"}[t["question"]]
+                fh.write(f"\n_{q}_ {t['detail']}\n")
+            if not r.get("confound_tests"):
+                fh.write(f"\n_group-confounding:_ {r['group_detail']}\n")
+            fh.write("\n")
         if tc_note:
             fh.write(f"## {TARGET_PANEL}\n\n_Proteins that are also common-contaminant "
                      f"sequences: {tc_note}._\n\n")
@@ -350,12 +842,14 @@ def main():
     with open(os.path.splitext(a.out)[0].lower().replace("sample_quality", "sample_quality") + ".json"
              if False else a.out.replace(".md", ".json"), "w") as jf:
         json.dump({"samples": samples, "groups": gmap, "matrix_complete": complete,
+                   "taxid": taxid, "panel_organisms_verified": taxid in PANEL_ORGANISMS,
                    "panels": results, "detected_depth": depth, "flags": flags,
                    "fasta_meta": fasta_meta, "target_contaminants_note": tc_note,
                    "lost_to_contaminants": lost_msg}, jf, indent=2)
 
     print(json.dumps({"out": a.out, "flags": flags,
                       "group_confounded": [n for n, r in results.items() if r["group_confounded"]],
+                      "not_run": not_run,
                       "matrix_complete": complete}, indent=2))
 
 

@@ -54,6 +54,51 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   scan trailer — that needs a `Microsoft.NETCore.App` 8 root even with a self-contained
   parser. Detail: `references/install.md`.
 
+## The R stack: limpa >= 1.4.0 (`setup.sh`)
+
+`run_de.R --method dpc` reads the DIA-NN report with `limpa::readDIANN()`. The pinned stack is
+**limpa >= 1.4.0** (Bioconductor 3.23). bioconda's only build is limpa **1.2.5**
+(Bioconductor 3.22, R 4.5), and a 2.8.0 `run_de.R` died on it (HIVE sbatch 24154221:
+`unused argument (annotation.columns = dpc_ann)` — 1.2.x calls that argument `extra.columns`).
+
+- **What `setup.sh` builds.** A conda env, solved with `--override-channels -c conda-forge -c
+  bioconda` (a `~/.condarc` listing `defaults` with `channel_priority: strict` otherwise left
+  libmamba only defaults' R ≤ 4.3 `r-statmod`, and the solve failed: sbatch 24154212), with
+  R 4.5 + bioconda `bioconductor-limma` 3.66 + `r-statmod` / `r-data.table` /
+  `r-nanoparquet`. Step 2a then installs **limpa from the Bioconductor 3.23 source
+  repository** into that env (`PROTEOMICS_LIMPA_BIOC` overrides the release). limpa is pure R
+  (no `src/`), has no R-version floor, and every limma function it imports is in limma 3.66,
+  so no compiler and no second Bioconductor stack are needed — conda-forge has `r-base` 4.6
+  but no R 4.6 builds of `r-statmod`, `r-arrow` … yet. Measured on PROT_0756 v2 (HIVE sbatch
+  24176224): limpa 1.4.0 on the setup.sh env (limma 3.66) reproduces the delivered v2 tables
+  (limpa 1.4.0 / limma 3.68.5) exactly — every contrast's significant set identical.
+- **The check.** The last thing `setup.sh` does is verify `packageVersion("limpa") >=
+  "1.4.0"`. `setup.json` → `limpa` = `{version, required, ok, source}`; when it fails,
+  `notes` and stderr say `ERROR: limpa <v> ...` with the fix (an `install.packages()` line to
+  run where there is internet — a login node), and `setup.sh` exits 1 (`--check` only
+  reports).
+- **An env that is still on limpa 1.2.x** (an old `setup.sh`, no internet) is not a dead
+  end: `run_de.R` passes the annotation columns under whichever name this limpa's
+  `readDIANN()` has (`limpa_compat.R`) and records it — `de_provenance.json` →
+  `limpa_read = {limpa_version, annotation_argument, path}`. The upgrade is still the fix:
+  re-run `setup.sh` — 1.2.x and 1.4 do NOT give identical numbers (next point).
+- **Results depend on the limpa version, through `dpcCN()`'s row subset.** On more than
+  2,000 precursors `dpcCN()` fits the detection-probability curve on 2,000 rows: in limpa
+  1.2.x a SEEDED RANDOM sample (`set.seed(20250620)`, `sample.int`); in 1.4 a SYSTEMATIC one
+  (rows ordered by missingness, then mean; every n/2000-th) — github.com/bioc/limpa
+  RELEASE_3_22 vs RELEASE_3_23 `R/dpcCN.R`. The curve, and so every protein value and
+  p-value, moves a little. Measured on PROT_0756 v2 (83,587 precursors, 30 runs, `--block
+  Mouse`, same env, sbatch 24176224): DPC (β0, β1) = (−13.200, 1.184) on 1.2.5 vs (−13.072,
+  1.178) on 1.4.0; protein matrix |Δ| median 0.010, max 0.052 log2; within-mouse correlation
+  0.1883 vs 0.1882; per contrast |ΔlogFC| median 0.002–0.006, max 0.064; significant sets
+  Jaccard 0.958–1.000 (1.2.5 calls 0–4 more per contrast, e.g. RyR-vs-IgG Old 71 vs 68).
+  Small, but not zero: `de_provenance.json` records `limpa_version` (and `packages.limpa`)
+  for every run — **compare analyses only within one limpa version**, and re-run the older
+  one rather than diffing across versions. On small inputs (≤ 2,000 precursors) no subset is
+  taken and the two versions agree exactly.
+- **R 4.6 + Bioconductor 3.23 throughout** (HIVE's `proteomics-pipeline-r46`, built with
+  conda-forge `r-base` 4.6 + `BiocManager` 3.23) passes the same check.
+
 ## Version pinning (reproducibility)
 
 `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION` from the workflow bundle and
@@ -204,7 +249,25 @@ warning and a methods sentence. The universal set holds 152 human-identical entr
 keratins; bovine ACTB/EEF1A1/YWHAZ/tubulins) + 1 substring, and 31 mouse-identical ones;
 left in, DIA-NN reported ACTB, EEF1A1 and KRT8 only as `Cont_` groups and
 `--cont-quant-exclude` removed them from quant (a real HeLa search, 2026-09-23: 6.9% of all
-intensity). The digestion enzyme(s) actually used (`fetch --enzyme`, default `trypsin,lysc`)
+intensity).
+
+**So are entries the search cannot tell apart from a target protein.** Identity misses the
+near-identical ones: bovine EF1A1 and 1433Z each differ from the MOUSE protein by one residue,
+and in a 30-run mouse-brain search (PROT_0756, DIA-NN 2.6.1) both were `Cont_`-only groups in
+every run while mouse Eef1a1 had no protein group at all. `fetch` therefore also digests every
+contaminant and target entry with the search's own digest (`estimate_params.DIANN_DIGEST`:
+`--cut K*,R*`, 1 missed cleavage, 7–30 aa, N-terminal Met excision; I and L equal) and drops a
+contaminant that shares a peptide with a target but has fewer than `--min-unique-peptides`
+(default 2) peptides of its own that do not overlap one another — missed-cleavage variants of
+one residue difference count once. Each record carries `n_unique_peptides` (that count),
+`n_unique_peptides_all`, `n_shared_peptides` and the target sharing the most peptides. Measured
+2026-09-25 on the Universal set: human UP000005640 161 dropped (8 by peptide: KRT34, KRTAP10-4,
+KRTAP4-7, TBA1D_BOVIN, TPM2_BOVIN, three sheep KRB2), mouse UP000000589 41 (10 by peptide:
+EF1A1_BOVIN, 1433Z_BOVIN, TBA1D_BOVIN, four human KRTAPs, three sheep KRB2). An entry with
+2+ own peptides stays a contaminant (bovine ENO1, LDHB, GSN, CAP1 against mouse). The sidecar
+records `min_unique_peptides` and `contaminant_digest`; a sidecar with the rule but without
+`min_unique_peptides` was built by the identity rule alone, and `reproduce.sh` replays it with
+`--min-unique-peptides 0`. The digestion enzyme(s) actually used (`fetch --enzyme`, default `trypsin,lysc`)
 are kept as contaminants even when they match a target protein — they are reagents — and
 recorded under `contaminants_kept_despite_target_match`; any other protease entry follows the
 normal rule (S. aureus's own SspA is identical to the Glu-C entry and stays quantified on a

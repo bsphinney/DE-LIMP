@@ -45,8 +45,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from session import paths_for, read_raw_list      # noqa: E402  the session layout, one place
+from session import paths_for, read_raw_list, params_file, encoding_note  # noqa: E402  one place
+from session import PREDICTED_SPECLIB, is_predicted_speclib   # noqa: E402  out of the zip
 import make_methods as mm                           # noqa: E402  search_record(): one reader
+from skill_version import skill_version, label     # noqa: E402  the one plugin.json reader
 
 TO_FILL = "TO-FILL"
 HASH_MAX_BYTES = 256 * 1024 ** 2        # hash session files inline only up to this size
@@ -143,6 +145,14 @@ class Manifest:
         t = f" ({elapsed:.1f}s)" if elapsed is not None else ""
         self.lines.append(f"[OK]      {name:<50}{t}" + (f" -- {note}" if note else ""))
 
+    def info(self, name, why):
+        """A notice, not an export part: not made, and not a failure either (e.g. no browser to
+        print the PDF) -- says why and what to do instead. Not counted as skipped, and the
+        orchestrator does not relay it as missing (session._append_manifest's [INFO]). Not cut
+        short like a [SKIPPED] reason: the note ends with what to do."""
+        why = " ".join(str(why).split())
+        self.lines.append(f"[INFO]    {name:<50} -- {why}")
+
     def skip(self, name, why):
         why = " ".join(str(why).split())
         if len(why) > 200:
@@ -167,10 +177,10 @@ class Manifest:
         return sum(1 for ln in self.lines if ln.startswith("[SKIPPED]"))
 
     def write(self, path, title):
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(f"{title}\n{'=' * len(title)}\n"
                      f"Written {datetime.datetime.now().isoformat(timespec='seconds')} by "
-                     f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why.\n\n"
+                     f"make_deposit.py. [OK] = produced; [SKIPPED] = not produced, and why; [INFO] = not produced, not a failure, and what to do instead.\n\n"
                      + "\n".join(self.lines) + "\n")
         return path
 
@@ -178,7 +188,7 @@ class Manifest:
 # ----------------------------------------------------------------------- session facts --
 def _load(path):
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError, TypeError):
         return None
@@ -191,23 +201,14 @@ def _first(paths):
     return None
 
 
-def find_params(p):
-    """The search parameters file the session holds (DIA-NN cfg / Sage json / FragPipe
-    .workflow / Radiant config), newest convention first."""
-    wf, inp = p["workflow_dir"], p["input_dir"]
-    cands = [os.path.join(wf, n) for n in ("params.cfg", "params.json")]
-    for pat in ("*.cfg", "params*.json", "sage*.json", "*.workflow", "*.radiantConfig"):
-        cands += sorted(glob.glob(os.path.join(wf, pat)))
-    for pat in ("params.*", "*.cfg", "sage_config*.json"):
-        cands += sorted(glob.glob(os.path.join(inp, pat)))
-    return _first(c for c in cands if not c.endswith((".rationale.json", "manifest.json")))
-
-
 def read_conditions(path):
     """conditions.csv (collect_conditions.py schema: File.Name,Group[,Batch,...]) -> rows."""
     if not path or not os.path.isfile(path):
         return None
-    with open(path, newline="") as fh:
+    # -sig: an Excel-saved BOM. replace: collect_conditions.py writes it in the computer's own
+    # encoding (cp1252 on Windows) -- a sample name must not cost the SDRF and the Methods;
+    # gather() records encoding_note() for the SDRF line
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
         rows = list(csv.DictReader(fh))
     if not rows or "File.Name" not in rows[0]:
         return None
@@ -224,13 +225,15 @@ def gather(session_dir):
     f["run_manifest"] = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
     f["search_prov_path"] = _first([p["search_prov"]] + sorted(
         glob.glob(os.path.join(p["search_out"], "*", "search_provenance.json"))))
-    f["params"] = find_params(p)
+    f["params"] = params_file(p, resolved=False)     # the file the search was given
     f["fasta_meta_path"] = _first([p["fasta_meta"]] + sorted(
         glob.glob(os.path.join(p["input_dir"], "*.meta.json"))))
     f["fasta_meta"] = _load(f["fasta_meta_path"]) if f["fasta_meta_path"] else None
     f["de_prov_path"] = _first([os.path.join(p["de_dir"], "de_provenance.json")])
     f["de_prov"] = _load(f["de_prov_path"]) if f["de_prov_path"] else None
     f["conditions"] = read_conditions(p["conditions"])
+    f["conditions_note"] = encoding_note(p["conditions"], "row",
+                                         "the sample names there are not as written")
     f["methods_params"] = _load(os.path.join(p["output_dir"], "methods_params.json")) or {}
     f["srec"] = mm.search_record(f["params"], f["search_prov_path"], f["wf_path"])
     q = f["run_manifest"].get("query") or {}
@@ -320,13 +323,20 @@ SEARCH_FILES = [
     (r"\.stats\.tsv$", "OTHER", "optional", "DIA-NN run statistics"),
     (r"\.protein_description\.tsv$", "OTHER", "optional", "DIA-NN protein descriptions"),
     (r"\.manifest\.txt$", "OTHER", "optional", "DIA-NN report manifest"),
-    (r"^step3_assembly\.parquet$", "SPECTRUM_LIBRARY", "recommended",
-     "empirical library assembled from these runs (PRIDE: recommended)"),
+    # The 5-step chain's step 3 (diann_parallel.py): --out-lib empirical.parquet is the library
+    # the final pass searched; --out step3_assembly.parquet is only that pass's report.
+    (r"^empirical\.parquet$", "SPECTRUM_LIBRARY", "required",
+     "empirical spectral library assembled from these runs; the final pass searched it (PRIDE: "
+     "mandatory if a library search was performed)"),
+    (r"^step3_assembly\.parquet$", "OTHER", "optional",
+     "DIA-NN report of the library-assembly pass (step 3); the results are report.parquet"),
     (r"(lib|library)[^/]*\.parquet$", "SPECTRUM_LIBRARY", "recommended",
      "spectral library (PRIDE: mandatory if a library search was performed)"),
+    (re.escape(PREDICTED_SPECLIB) + "$", "SPECTRUM_LIBRARY", "recommended",
+     "DIA-NN's in-silico predicted spectral library; can also be regenerated from the FASTA and "
+     "pinned DIA-NN version"),
     (r"\.speclib$", "SPECTRUM_LIBRARY", "recommended",
-     "predicted spectral library; can also be regenerated from the FASTA and pinned DIA-NN "
-     "version"),
+     "spectral library (PRIDE: mandatory if a library search was performed)"),
     (r"^params\.(resolved|base)\.cfg$", "OTHER", "recommended",
      "the DIA-NN parameters the search ran with"),
     (r"^search_provenance\.json$", "OTHER", "recommended",
@@ -401,8 +411,11 @@ def plan_uploads(f):
                 full = os.path.join(root, fn)
                 up = fn if root == search else safe_name(
                     os.path.relpath(root, search).replace(os.sep, "_") + "_" + fn)
+                rel = os.path.relpath(full, p["session_dir"])
                 add("copy", full, safe_name(up), *c,
-                    os.path.relpath(full, p["session_dir"]), _size(full))
+                    (f"no (left out of the session zip, which the FASTA and params rebuild it "
+                     f"from; on disk at {rel})") if is_predicted_speclib(fn) else rel,
+                    _size(full))
     if f["params"]:
         pb = os.path.basename(f["params"])
         add("copy", f["params"], safe_name(pb),
@@ -473,7 +486,7 @@ UPLOAD_COLS = ["upload_name", "pride_file_type", "massive_category", "requiremen
 
 def write_upload_list(out, rows):
     path = os.path.join(out, "files_to_upload.tsv")
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(UPLOAD_COLS)
         for r in rows:
@@ -591,8 +604,7 @@ def build_sdrf(f):
     cols += ["comment[sdrf template]"] * len(templates)
     cols += ["comment[sdrf annotation tool]", f"factor value[{TO_FILL}]"]
 
-    skill_ver = (_load(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}).get(
-        "version") or "0.0.0"
+    skill_ver = skill_version()
     rows, rep_n = [], {}
     for i, (path, base) in enumerate(items):
         if path:
@@ -616,7 +628,7 @@ def build_sdrf(f):
             row.append(ms1_range)
         row += ["1", "1", safe_name(base) if base else TO_FILL, SDRF_VERSION]
         row += [f"{t} {TEMPLATE_VERSION}" for t in templates]
-        row += [f"ucdavis-proteomics-core-pipeline v{skill_ver}", group or TO_FILL]
+        row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}", group or TO_FILL]
         rows.append(row)
         if path and not c and conds:
             notes.append(("factor value", TO_FILL, f"{base} has no row in conditions.csv"))
@@ -682,7 +694,8 @@ def build_sdrf(f):
              ("human" if human else "non-human: add the matching sample template (vertebrates, "
               "invertebrates or plants) and its required columns") + "; "
              + ("dia-acquisition implies ms-proteomics" if acq == "DIA" else "ms-proteomics")),
-            ("comment[sdrf annotation tool]", f"ucdavis-proteomics-core-pipeline v{skill_ver}",
+            ("comment[sdrf annotation tool]",
+             f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}",
              "this skill"),
             (f"factor value[{TO_FILL}]", "conditions.csv Group" if conds else TO_FILL,
              "conditions.csv gives each run's group label (filled in) but not what variable "
@@ -698,14 +711,15 @@ def build_sdrf(f):
 def write_sdrf(f, out, info):
     cols, rows, sources, to_fill = build_sdrf(f)
     path = os.path.join(out, "sdrf.tsv")
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         fh.write("\t".join(cols) + "\n")
         for r in rows:
             fh.write("\t".join(r) + "\n")
     n_cells = sum(r.count(TO_FILL) for r in rows)
     info.update(path=path, n_rows=len(rows), n_to_fill=n_cells, sources=sources,
                 to_fill=to_fill, columns=cols)
-    return f"{len(rows)} row(s), {n_cells} TO-FILL cell(s) in {len(to_fill)} column(s)"
+    return (f"{len(rows)} row(s), {n_cells} TO-FILL cell(s) in {len(to_fill)} column(s)"
+            + (f"; conditions.csv is {f['conditions_note']}" if f.get("conditions_note") else ""))
 
 
 # ------------------------------------------------------------------------ protocols --
@@ -746,8 +760,11 @@ def build_protocols(methods_md):
                    "the methods line above")
     with open(methods_md, encoding="utf-8") as fh:
         sec = md_sections(fh.read())
-    sample = [SAMPLE_PREP_TO_FILL] + [_plain(sec[h]) for h in ("Liquid chromatography",
-                                                              "Mass spectrometry") if h in sec]
+    # make_methods writes Sample preparation only from a CoreOmics submission; when the lab
+    # sent peptides it has no placeholder, so none is added here either.
+    prep = _plain(sec["Sample preparation"]) if sec.get("Sample preparation") else SAMPLE_PREP_TO_FILL
+    sample = [prep] + [_plain(sec[h]) for h in ("Liquid chromatography",
+                                                "Mass spectrometry") if h in sec]
     data = [_plain(sec[h]) for h in ("Sequence database", "Database search",
                                      "Differential expression") if h in sec]
     if not data:
@@ -813,8 +830,7 @@ def write_prep_script(f, out, rows):
     if bad:
         raise Skip(f"a path contains a tab/newline: {bad[0][1]!r}")
     qlines, qsrc = queue_lines()
-    skill_ver = (_load(os.path.join(HERE, "..", ".claude-plugin", "plugin.json")) or {}).get(
-        "version") or "?"
+    skill_ver = skill_version()
     listing = "\n".join("\t".join(i) for i in items)
     script = f"""#!/bin/bash -l
 #SBATCH --job-name=deposit_prep
@@ -824,7 +840,7 @@ def write_prep_script(f, out, rows):
 #SBATCH --time=24:00:00
 {chr(10).join(qlines)}
 # prepare_upload.sbatch -- written by make_deposit.py (ucdavis-proteomics-core-pipeline
-# v{skill_ver}) on {datetime.date.today().isoformat()} for session {f['session']}.
+# {label(skill_ver)}) on {datetime.date.today().isoformat()} for session {f['session']}.
 # The skill did NOT run it. Submit it yourself when the SDRF is filled in:
 #
 #   sbatch {out}/prepare_upload.sbatch
@@ -921,7 +937,9 @@ echo "Globus submission (the PRIDE Submission Tool writes its own)."
 [ "$missing" -eq 0 ]
 """
     path = os.path.join(out, "prepare_upload.sbatch")
-    with open(path, "w") as fh:
+    # newline="\n": text mode on Windows writes CRLF, and sbatch refuses the script ("Batch script
+    # contains DOS line breaks").
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(script)
     os.chmod(path, 0o755)
     n_dir = sum(1 for i in items if i[0] == "dir")
@@ -1217,18 +1235,41 @@ def _inline(s):
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*([^*\s][^*]*)\*(?![\w*])", r"<em>\1</em>", s)
     s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
+    # a link to a file beside the page (README.html -> output/methods.docx): relative, never a
+    # scheme (so never javascript:) and never //host
+    s = re.sub(r"\[([^\]]+)\]\(((?![A-Za-z][A-Za-z0-9+.-]*:|/)[^)\s]+)\)",
+               r'<a href="\2">\1</a>', s)
     s = re.sub(r"(?<![\"'>=])(https?://[^\s<)]+[^\s<).,;])", r'<a href="\1">\1</a>', s)
     return s
 
 
-def md_to_html(md, title):
-    """Enough Markdown for HOW_TO_SUBMIT.md: headings, paragraphs, lists, tables, code blocks,
-    block quotes. Stdlib only, so the .html opens anywhere by double-click."""
-    out, para, lst, table, code = [], [], None, [], None
+# The pages' look is report_style.py's (document()), shared with Analysis_Report.html: the
+# markup here stays semantic (header / nav / section / aside.callout / table) and the style
+# lives there, once.
+CALLOUT = {"NOTE": "note", "TIP": "note", "IMPORTANT": "warning", "WARNING": "warning",
+           "CAUTION": "warning"}
+
+
+def md_to_html(md, title, semantic=False, nav=("Start here",)):
+    """Enough Markdown for HOW_TO_SUBMIT.md and README: headings, paragraphs, lists, tables,
+    code blocks, block quotes -- and GitHub alerts (`> [!NOTE]` / `> [!WARNING]` ...) as
+    <aside class="callout note|warning">. With `semantic`, what precedes the first `##` is the
+    <header>, each `##` part a <section>, and a part titled in `nav` a <nav>. Stdlib only, so the
+    .html opens anywhere by double-click; the look is report_style.document()'s."""
+    out, para, lst, table, code, quote = [], [], None, [], None, []
     lines = md.splitlines()
 
     def flush():
-        nonlocal para, lst, table
+        nonlocal para, lst, table, quote
+        if quote:
+            m = re.match(r"^\[!([A-Z]+)\]\s*(.*)$", quote[0])
+            if m and m.group(1) in CALLOUT:
+                body = " ".join(x for x in [m.group(2)] + quote[1:] if x)
+                out.append(f'<aside class="callout {CALLOUT[m.group(1)]}">'
+                           f"<p>{_inline(body)}</p></aside>")
+            else:
+                out.append("<blockquote>" + _inline(" ".join(quote)) + "</blockquote>")
+            quote = []
         if para:
             out.append("<p>" + _inline(" ".join(para)) + "</p>")
             para = []
@@ -1271,14 +1312,17 @@ def md_to_html(md, title):
             out.append(f"<h{n}>{_inline(m.group(2))}</h{n}>")
             continue
         if s.startswith("|"):
-            if para or lst:
+            if para or lst or quote:
                 flush()
             table.append(s)
             continue
         if s.startswith(">"):
-            flush()
-            out.append("<blockquote>" + _inline(s.lstrip("> ")) + "</blockquote>")
+            if para or lst or table:
+                flush()
+            quote.append(s[1:].strip())
             continue
+        if quote:
+            flush()
         m = re.match(r"^(\d+)\.\s+(.*)$", s) or re.match(r"^[-*]\s+(.*)$", s)
         if m and not ln.startswith("   "):
             tag = "ol" if s[0].isdigit() else "ul"
@@ -1298,19 +1342,23 @@ def md_to_html(md, title):
             flush()
         para.append(s)
     flush()
-    css = ("body{font:15px/1.55 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:"
-           "980px;margin:2em auto;padding:0 16px;color:#1d2330;background:#fff}"
-           "h1,h2{color:#1b3a5c}h2{border-bottom:1px solid #d8dee8;padding-bottom:.2em;"
-           "margin-top:1.8em}code{background:#f1f3f7;padding:1px 4px;border-radius:3px}"
-           "pre{background:#f1f3f7;padding:10px;overflow-x:auto}pre code{background:none}"
-           "table{border-collapse:collapse;margin:.6em 0;font-size:13px;display:block;"
-           "overflow-x:auto}th,td{border:1px solid #d8dee8;padding:4px 8px;text-align:left;"
-           "vertical-align:top}th{background:#eef2f7}blockquote{border-left:4px solid #9fb4cc;"
-           "margin:.8em 0;padding:.2em 1em;background:#f7f9fc}")
-    return (f"<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
-            f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            f"<title>{html.escape(title)}</title><style>{css}</style></head><body>\n"
-            + "\n".join(out) + "\n</body></html>\n")
+    if semantic:
+        blocks, cur, tag = [], [], "header"
+        for el in out:
+            if el.startswith("<h2>"):
+                if cur:
+                    blocks.append(f"<{tag}>" + "\n".join(cur) + f"</{tag}>")
+                title_txt = re.sub(r"<[^>]+>", "", el)
+                tag, cur = ("nav" if html.unescape(title_txt) in nav else "section"), [el]
+            else:
+                cur.append(el)
+        if cur:
+            blocks.append(f"<{tag}>" + "\n".join(cur) + f"</{tag}>")
+        out = blocks
+    # imported here, not at the top: session.py loads this module for the Methods and the
+    # deposit too, and those must not depend on the stylesheet being present
+    import report_style
+    return report_style.document(title, "\n".join(out))
 
 
 def write_html(out):
@@ -1327,6 +1375,8 @@ def write_html(out):
 # ------------------------------------------------------------------------- methods --
 def required_sections(f):
     need = ["Liquid chromatography", "Mass spectrometry", "Sequence database"]
+    if os.path.isfile(f["p"]["submission_record"]):
+        need.insert(0, "Sample preparation")    # a methods.md from before the submission was attached
     if f["srec"].get("engine") or f["params"] or f["search_prov_path"]:
         need.append("Database search")
     if f["de_prov"]:
@@ -1347,7 +1397,9 @@ def methods_command(f, out):
                       ("--workflow-manifest", f["wf_path"]),
                       ("--instrument", next(iter(f["wf"].get("instruments") or []), None)
                        or (f["run_manifest"].get("query") or {}).get("instrument")),
-                      ("--acquisition", f["acquisition"])):
+                      ("--acquisition", f["acquisition"]),
+                      ("--submission", f["p"]["session_dir"]
+                       if os.path.isfile(f["p"]["submission_record"]) else None)):
         if val:
             cmd += [flag, str(val)]
     return cmd
@@ -1364,6 +1416,16 @@ def _run(cmd, what):
     return r
 
 
+def _has_text(path):
+    """A file with something in it. An empty methods.md (0 bytes or blank: a make_methods.py
+    that died after opening it) is no methods at all -- never a source, never "kept"."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return bool(fh.read().strip())
+    except OSError:
+        return False
+
+
 def ensure_methods(session_dir, man):
     """Make sure the session carries publication Methods (output/methods.md + .docx). A
     methods.md already there is never overwritten -- it may be hand-polished; if it lacks a
@@ -1376,7 +1438,10 @@ def ensure_methods(session_dir, man):
     def _md():
         need = required_sections(f)
         md = p["methods_md"]
-        if os.path.isfile(md):
+        was_empty = os.path.isfile(md) and not _has_text(md)
+        # An empty methods.md is missing, not "kept as written" -- nobody polished it, and with
+        # no required section known it used to pass as complete.
+        if os.path.isfile(md) and not was_empty:
             with open(md, encoding="utf-8") as fh:
                 have = md_sections(fh.read())
             missing = [s for s in need if s not in have]
@@ -1397,8 +1462,9 @@ def ensure_methods(session_dir, man):
         with open(md, encoding="utf-8") as fh:
             have = md_sections(fh.read())
         missing = [s for s in need if s not in have]
-        return "generated by make_methods.py" + (
-            f"; no record to write: {', '.join(missing)}" if missing else "")
+        return ("generated by make_methods.py" + (" (the methods.md there was empty)"
+                                                  if was_empty else "") + (
+            f"; no record to write: {', '.join(missing)}" if missing else ""))
 
     man.section("Publication methods (output/methods.md)", _md)
 
@@ -1407,7 +1473,8 @@ def ensure_methods(session_dir, man):
         if not src:
             raise Skip("no methods .md to convert (see the line above)")
         out = os.path.splitext(src)[0] + ".docx"
-        if os.path.isfile(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+        if os.path.isfile(out) and os.path.getsize(out) > 0 and \
+                os.path.getmtime(out) >= os.path.getmtime(src):      # a 0-byte .docx is missing
             return f"{os.path.basename(out)} up to date -- kept"
         _run([sys.executable, os.path.join(HERE, "to_docx.py"), "--in", src, "--out", out],
              "to_docx.py")
@@ -1455,7 +1522,7 @@ def build(session_dir, man, methods_md=None):
     man.section("Deposit: raw files in the upload plan", _raws)
     man.section("Deposit: sdrf.tsv (SDRF-Proteomics v1.1.0)", write_sdrf, f, out, sdrf)
     man.section("Deposit: protocols.txt", write_protocols, out, methods_md
-                or (f["p"]["methods_md"] if os.path.isfile(f["p"]["methods_md"]) else None),
+                or (f["p"]["methods_md"] if _has_text(f["p"]["methods_md"]) else None),
                 prot)
     man.section("Deposit: files_to_upload.tsv", _list)
     man.section("Deposit: prepare_upload.sbatch (written, not run)", _prep)

@@ -65,6 +65,8 @@ import sys, os, re, json, argparse, glob, gzip, shutil, hashlib, zipfile, bisect
 import urllib.request, urllib.error, urllib.parse, http.client
 from datetime import datetime, timezone
 
+from estimate_params import DIANN_DIGEST   # the search's in-silico digest: one definition
+
 HIVE_MRS = "/quobyte/proteomics-grp/MRS"
 UNIPROT_REST = "https://rest.uniprot.org"
 FTP_REF = ("https://ftp.uniprot.org/pub/databases/uniprot/current_release"
@@ -731,12 +733,47 @@ def resolve_contaminants(set_name, explicit_path, use_hive, workdir):
 # quantification and normalisation: abundant real proteins silently lost. So a
 # contaminant entry that adds no sequence of its own is removed before the database is
 # written, and every removal is recorded in the sidecar.
+#
+# Identity is not enough (PROT_0756, mouse brain IPs, 30 timsTOF runs, 2026-09-25): bovine
+# EF1A1 (Cont_P68103) and 1433Z (Cont_P63103) each differ from the mouse protein by ONE
+# residue, so the exact rule kept them -- and in the v1 search both were Cont_-only protein
+# groups in all 30 runs while mouse Eef1a1 had no protein group at all. So a second, peptide-
+# level rule (contaminants_matching_targets) also drops an entry the search cannot tell apart
+# from a target protein: one with fewer than MIN_UNIQUE_PEPTIDES peptides of its own.
 # --------------------------------------------------------------------------
-# DIA-NN's default --min-pep-len. A contaminant shorter than the shortest searchable
-# peptide yields no precursors at all, so a substring test below it proves nothing.
-MIN_CONTAINED_LEN = 7
-CONTAMINANT_TARGET_RULE = (f"identical sequence, or an exact substring (>= {MIN_CONTAINED_LEN} "
-                           f"aa) of a target entry; I and L compared as distinct residues")
+# The search's --min-pep-len (estimate_params.DIANN_DIGEST, 7 = DIA-NN's default). A
+# contaminant shorter than the shortest searchable peptide yields no precursors at all, so a
+# substring test below it proves nothing.
+MIN_CONTAINED_LEN = DIANN_DIGEST["min_pep_len"]
+# How many INDEPENDENT peptides of its own (see _independent_count) a contaminant entry that
+# shares peptides with a target protein must have to stay a contaminant. 2 is the least
+# evidence that can show the contaminant, not the target, is in the sample: with one, the
+# contaminant is at best a one-hit protein -- the level of evidence protein-level reporting
+# refuses on its own -- while every peptide it shares with the target is taken out of that
+# target's quantification by --cont-quant-exclude Cont_. With EEF1A1 that trade is one
+# 1-residue peptide against the whole of the most abundant protein in the cell. An entry
+# with 2+ independent peptides of its own (bovine ENO1: 21 residues different) stays: its
+# own peptides can show it is there. 0 turns the peptide rule off (fetch --min-unique-peptides
+# 0), which is how a database built with the identity rule alone is replayed.
+MIN_UNIQUE_PEPTIDES = 2
+
+
+def contaminant_target_rule(min_unique=MIN_UNIQUE_PEPTIDES, digest=DIANN_DIGEST):
+    """The sidecar's `contaminant_target_rule`: what this build removed. Its PRESENCE marks a
+    sidecar written with the overlap check (provenance.py, record_run.py)."""
+    rule = (f"identical sequence, or an exact substring (>= {MIN_CONTAINED_LEN} aa) of a target "
+            f"entry; I and L compared as distinct residues")
+    if min_unique > 0:
+        rule += (f". Also: shares a peptide with a target entry and has fewer than {min_unique} "
+                 f"non-overlapping peptides of its own in the search's digest (--cut "
+                 f"{digest['cut']}, {digest['missed_cleavages']} missed cleavage(s), "
+                 f"{digest['min_pep_len']}-{digest['max_pep_len']} aa"
+                 f"{', N-term Met excision' if digest.get('met_excision') else ''}); "
+                 f"I and L equal there")
+    return rule
+
+
+CONTAMINANT_TARGET_RULE = contaminant_target_rule()
 KEEP_TARGET_CONTAMINANTS_RULE = "disabled (--keep-target-contaminants)"
 # Measured 2026-09-24 against the Universal set (MRS/kg_nov, 381 entries), default --enzyme:
 # contaminant entries identical to/contained in a target entry, per proteome taxid (human
@@ -777,6 +814,16 @@ ENZYME_FAMILIES = tuple(sorted(set(DIGESTION_ENZYMES.values())))
 # The Core's usual digest is a trypsin/Lys-C mix, and estimate_params.py searches
 # trypsin/P (--cut K*,R*), so an unchanged command keeps exactly those reagents.
 DEFAULT_ENZYMES = "trypsin,lysc"
+
+
+def _nonneg_int(text):
+    try:
+        v = int(text)
+    except ValueError:
+        v = -1
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"expected a whole number >= 0, got {text!r}")
+    return v
 
 
 def parse_enzymes(text):
@@ -836,33 +883,138 @@ def _header_ids(header):
     return acc, entry, (g.group(1) if g else "")
 
 
-def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINED_LEN):
+def _cut_pattern(cut):
+    """DIA-NN's --cut syntax -> a regex whose zero-width matches are the cleavage positions,
+    or None when the digest is disabled (an empty --cut). Sites are residue PAIRS around the
+    cut, comma-separated; '*' is any residue and a leading '!' means never cut there:
+    'K*,R*' = trypsin/P, 'K*,R*,!*P' = trypsin with the proline rule (DIA-NN README)."""
+    pos, neg = [], []
+    for tok in (t.strip() for t in (cut or "").split(",")):
+        if not tok:
+            continue
+        pair = tok[1:] if tok.startswith("!") else tok
+        if len(pair) != 2:
+            raise ValueError(f"unsupported --cut site {tok!r}: want a residue pair such as "
+                             f"K* or !*P")
+        before, after = ("." if c == "*" else re.escape(c.upper()) for c in pair)
+        (neg if tok.startswith("!") else pos).append(f"(?<={before})(?={after})")
+    if not pos:
+        return None
+    return re.compile("(?:" + "|".join(pos) + ")" + "".join(f"(?!{n})" for n in neg))
+
+
+def digest_spans(seq, digest=DIANN_DIGEST, pattern=None):
+    """-> [(start, end)] of every peptide the search's in-silico digest makes from `seq`:
+    cleaved per digest['cut'], up to digest['missed_cleavages'] missed cleavages, length
+    within [min_pep_len, max_pep_len], plus the protein N-terminal peptides without the
+    initiator Met when digest['met_excision'] (DIA-NN --met-excision)."""
+    pattern = pattern if pattern is not None else _cut_pattern(digest["cut"])
+    sites = [0] + ([m.start() for m in pattern.finditer(seq)] if pattern else []) + [len(seq)]
+    mc, lo, hi = digest["missed_cleavages"], digest["min_pep_len"], digest["max_pep_len"]
+    starts = [(a, sites[a]) for a in range(len(sites) - 1)]
+    if digest.get("met_excision") and seq.startswith("M") and len(sites) > 1 and sites[1] > 1:
+        starts.append((0, 1))            # the same N-terminal peptides, Met removed
+    spans = []
+    for a, s in starts:
+        for b in range(a + 1, min(a + mc + 2, len(sites))):
+            n = sites[b] - s
+            if n > hi:
+                break
+            if n >= lo:
+                spans.append((s, sites[b]))
+    return spans
+
+
+def _independent_count(spans):
+    """The most peptides among `spans` that share no residue: missed-cleavage variants of one
+    peptide, and the Met-excised N-terminal peptide, all cover the same residues, so a single
+    residue difference counts ONCE however many peptides carry it. Greedy by end position,
+    which is optimal for interval scheduling."""
+    n, end = 0, -1
+    for s, e in sorted(set(spans), key=lambda x: (x[1], x[0])):
+        if s >= end:
+            n, end = n + 1, e
+    return n
+
+
+def peptide_overlap(contam_recs, target_recs, digest=DIANN_DIGEST):
+    """Digest every contaminant and target entry with the search's settings (I and L equal:
+    the mass spectrometer cannot tell them apart) and return, per contaminant index,
+    {n_peptides, n_shared_peptides, n_unique_peptides (independent, see _independent_count),
+    n_unique_peptides_all, targets: [(target index, n peptides shared), ...] best first}.
+
+    One pass over the targets, holding only the contaminants' peptides (~25k for the
+    Universal set) -- never a set of every target peptide, which for a `full` human proteome
+    runs to millions of strings. Cont_-tagged target records are not targets."""
+    pattern = _cut_pattern(digest["cut"])
+    cont_spans, index = [], {}
+    for ci, (_h, lines) in enumerate(contam_recs):
+        seq = _record_seq(lines)
+        norm = seq.replace("I", "L")
+        spans = [(s, e, norm[s:e]) for s, e in digest_spans(seq, digest, pattern)]
+        cont_spans.append(spans)
+        for _s, _e, k in spans:
+            index.setdefault(k, set()).add(ci)
+    shared = {}                                  # ci -> {ti: set(shared peptides)}
+    for ti, (header, lines) in enumerate(target_recs):
+        if CONT_TAG in header:
+            continue
+        seq = _record_seq(lines)
+        # Sites from the real sequence: a --cut rule may name I or L.
+        norm = seq.replace("I", "L")
+        for s, e in digest_spans(seq, digest, pattern):
+            k = norm[s:e]
+            for ci in index.get(k, ()):
+                shared.setdefault(ci, {}).setdefault(ti, set()).add(k)
+    out = {}
+    for ci, spans in enumerate(cont_spans):
+        per_t = shared.get(ci, {})
+        common = set().union(*per_t.values()) if per_t else set()
+        own = [(s, e) for s, e, k in spans if k not in common]
+        out[ci] = {"n_peptides": len({k for _s, _e, k in spans}),
+                   "n_shared_peptides": len(common),
+                   "n_unique_peptides": _independent_count(own),
+                   "n_unique_peptides_all": len({k for _s, _e, k in spans if k not in common}),
+                   "targets": sorted(((ti, len(v)) for ti, v in per_t.items()),
+                                     key=lambda x: (-x[1], x[0]))}
+    return out
+
+
+def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINED_LEN,
+                                  min_unique=MIN_UNIQUE_PEPTIDES, digest=DIANN_DIGEST):
     """-> [(index into contam_recs, record)] for every contaminant entry whose sequence is
-    IDENTICAL to a target entry, or an exact substring of one.
+    IDENTICAL to a target entry or an exact substring of one (reason identical|substring),
+    or that shares a peptide with a target entry and has fewer than `min_unique`
+    independent peptides of its own in the search's digest (reason shared_peptides). Every
+    record carries the peptide counts (peptide_overlap); a shared_peptides record names the
+    target sharing the most peptides with it.
 
     Why a substring is dropped too: every peptide it can yield is then also in the target,
     except possibly its two end peptides -- and those are non-tryptic fragments of the
     target protein (the contaminant starts/stops mid-sequence), not evidence of a separate
     contaminant protein.
 
-    Why I and L stay distinct: the test proves redundancy at the sequence level, which is
-    what DIA-NN's protein inference sees. An I/L-only difference is a different string to
-    DIA-NN, so that entry's I/L peptides still read as unique to it; equating them would
-    remove an entry DIA-NN does not treat as redundant. Measured 2026-09-24 against the
-    Core's Universal set: exact matching finds 153 human (UP000005640, 152 identical + 1
-    substring) and 31 mouse (UP000000589) entries, and mapping I->L adds none to either.
+    Why I and L stay distinct in the identity test but are equal in the peptide test: the
+    identity test proves redundancy at the sequence level, and an I/L-only difference is a
+    different string to DIA-NN. But no spectrum can tell those peptides apart either, so as
+    evidence of which protein is present they are the same peptide -- and the peptide test
+    asks exactly that. Measured 2026-09-24 against the Core's Universal set: exact matching
+    finds 153 human (UP000005640, 152 identical + 1 substring) and 31 mouse (UP000000589)
+    entries, and mapping I->L adds none to either.
 
+    `min_unique=0` turns the peptide test off (the identity rule alone, as built before it).
     Target entries are only read, never changed. Cont_-tagged records among the targets
     (a database that already carries contaminants) are not targets.
     """
-    seqs, info = [], []
-    for header, lines in target_recs:
+    seqs, info, t_info = [], [], {}
+    for ti, (header, lines) in enumerate(target_recs):
         if CONT_TAG in header:
             continue
         s = _record_seq(lines)
         if s:
             seqs.append(s)
             info.append(_header_ids(header))
+            t_info[ti] = info[-1]
     by_seq = {}
     for i, s in enumerate(seqs):
         by_seq.setdefault(s, []).append(i)
@@ -906,6 +1058,28 @@ def contaminants_matching_targets(contam_recs, target_recs, min_len=MIN_CONTAINE
             # Capped: in a full/isoform database one keratin can sit inside many entries.
             "target_accs": [info[t][0] for t in hits[:10]],
         }))
+
+    pep = peptide_overlap(contam_recs, target_recs, digest)
+    counts = ("n_peptides", "n_shared_peptides", "n_unique_peptides", "n_unique_peptides_all")
+    for ci, rec in out:
+        rec.update({k: pep[ci][k] for k in counts})
+    if min_unique > 0:
+        matched = {ci for ci, _ in out}
+        for ci, p in pep.items():
+            if ci in matched or not p["targets"] or p["n_unique_peptides"] >= min_unique:
+                continue
+            c_acc, c_entry, c_gene = _header_ids(contam_recs[ci][0])
+            t_acc, t_entry, t_gene = t_info[p["targets"][0][0]]
+            out.append((ci, {
+                "cont_acc": c_acc, "cont_entry": c_entry, "cont_gene": c_gene,
+                "target_acc": t_acc, "target_entry": t_entry, "gene": t_gene,
+                "reason": "shared_peptides",
+                # Targets sharing at least one peptide, best first (capped, as above).
+                "n_targets": len(p["targets"]),
+                "target_accs": [t_info[ti][0] for ti, _n in p["targets"][:10]],
+                "n_shared_with_target": p["targets"][0][1],
+                **{k: p[k] for k in counts}}))
+        out.sort(key=lambda x: x[0])
     return out
 
 
@@ -924,14 +1098,17 @@ def _split_enzymes(hits, enzymes_used):
     return drop, enzymes
 
 
-def drop_target_contaminants(contam_text, target_text, enzymes_used=None):
+def drop_target_contaminants(contam_text, target_text, enzymes_used=None,
+                             min_unique=MIN_UNIQUE_PEPTIDES):
     """-> (contam_text without the entries that are target proteins, [dropped records],
     [digestion-enzyme records kept despite matching a target -- see DIGESTION_ENZYMES]).
-    `enzymes_used` defaults to DEFAULT_ENZYMES."""
+    `enzymes_used` defaults to DEFAULT_ENZYMES; `min_unique` is the peptide rule's threshold
+    (contaminants_matching_targets)."""
     used = enzymes_used if enzymes_used is not None else parse_enzymes(DEFAULT_ENZYMES)
     recs = _fasta_records(contam_text)
     hits, enzymes = _split_enzymes(
-        contaminants_matching_targets(recs, _fasta_records(target_text)), used)
+        contaminants_matching_targets(recs, _fasta_records(target_text),
+                                      min_unique=min_unique), used)
     if not hits:
         return contam_text, [], [rec for _, rec in enzymes]
     drop = {ci for ci, _ in hits}
@@ -947,8 +1124,8 @@ def _enzyme_advice(used):
 
 def _enzyme_note(enzymes, organism, used):
     return (f"kept {len(enzymes)} digestion-enzyme contaminant entr"
-            f"{'y' if len(enzymes) == 1 else 'ies'} although identical to (or contained in) a "
-            f"{organism or 'target'} protein: "
+            f"{'y' if len(enzymes) == 1 else 'ies'} although identical to, contained in or "
+            f"indistinguishable by peptide from a {organism or 'target'} protein: "
             + "; ".join(f"{r['cont_acc']} ({r['enzyme']}) = {r['target_acc']}"
                         f"{' ' + r['gene'] if r['gene'] else ''}" for r in enzymes)
             + f". The enzyme was used in this search, so its autolysis peptides stay "
@@ -961,9 +1138,13 @@ def _pair_list(records, limit=12):
     """'Cont_P60712 (ACTB_BOVIN) = P60709 ACTB; ...' for a warning line. Non-keratins first:
     the file order leads with a dozen KRTAPs and buries ACTB/EEF1A1, the surprising ones."""
     records = sorted(records, key=lambda r: is_keratin_gene(r["gene"]))
+    rel = {"identical": "=", "substring": "in", "shared_peptides": "~"}
     shown = [f"{r['cont_acc']} ({r['cont_entry'] or r['cont_gene'] or '?'}) "
-             f"{'=' if r['reason'] == 'identical' else 'in'} {r['target_acc']}"
-             f"{' ' + r['gene'] if r['gene'] else ''}" for r in records[:limit]]
+             f"{rel.get(r['reason'], 'in')} {r['target_acc']}"
+             f"{' ' + r['gene'] if r['gene'] else ''}"
+             + (f" ({r['n_unique_peptides']} own peptide"
+                f"{'' if r['n_unique_peptides'] == 1 else 's'})"
+                if r['reason'] == 'shared_peptides' else "") for r in records[:limit]]
     more = f"; +{len(records) - limit} more" if len(records) > limit else ""
     return "; ".join(shown) + more
 
@@ -987,10 +1168,12 @@ def target_contaminants(meta, keratin_sample=False):
     `dropped` -- they are not possible contamination there. `kept_as_contaminant` keeps
     them: an analyte excluded from quant is a loss either way.
 
-    `legacy_note` is set for a sidecar written BEFORE the overlap check (no
-    contaminant_target_rule, contaminants present) -- exactly the databases that lost ACTB,
-    EEF1A1 and KRT8. Those carry no list, so it is re-found in the FASTA the sidecar
-    describes (see _legacy_overlap) and returned as `kept_as_contaminant`.
+    `legacy_note` is set for a database built by an older rule (sidecar_state): "legacy",
+    written BEFORE the overlap check -- exactly the databases that lost ACTB, EEF1A1 and KRT8
+    -- or "identity_only", built by the identity rule alone, which kept the near-identical
+    entries (bovine EEF1A1 / YWHAZ against mouse). Neither carries the list, so it is
+    re-found in the FASTA the sidecar describes (_legacy_overlap / _identity_only_overlap)
+    and returned as `kept_as_contaminant`. `state` is sidecar_state(meta).
     """
     meta = meta if isinstance(meta, dict) else {}
     dropped = [r for r in (meta.get("contaminants_dropped_as_target") or [])
@@ -998,16 +1181,35 @@ def target_contaminants(meta, keratin_sample=False):
     kept = [r for r in (meta.get("contaminants_identical_to_target_kept") or [])
             if isinstance(r, dict)]
     legacy_note = None
-    if _is_legacy_sidecar(meta):
+    state = sidecar_state(meta)
+    if state == "legacy":
         kept, legacy_note = _legacy_overlap(meta)
+    elif state == "identity_only":
+        near, legacy_note = _identity_only_overlap(meta)
+        kept = kept + near
     if keratin_sample:
         dropped = [r for r in dropped if not is_keratin_gene(r.get("gene"))]
     genes = {r["gene"].upper() for r in dropped if r.get("gene")}
-    accs = {a.upper() for r in dropped for a in (r.get("target_accs") or [r.get("target_acc")])
-            if a}
+    accs = {a.upper() for r in dropped for a in matched_target_accs(r) if a}
     return {"organism": meta.get("organism") or "", "dropped": dropped,
             "kept_as_contaminant": kept, "genes": genes, "accessions": accs,
-            "legacy_note": legacy_note}
+            "legacy_note": legacy_note, "state": state}
+
+
+def matched_target_accs(rec):
+    """The target accession(s) a dropped contaminant entry IS -- what the auditors may flag.
+
+    An identical or substring record's target_accs are all genuine matches: every target with
+    that sequence, or that contains it. A shared_peptides record's target_accs are every target
+    sharing even ONE peptide with it -- a whole paralog family -- so only its matched pair,
+    target_acc (the target sharing the most peptides), is the protein it cannot be told apart
+    from. Why (PROT_0756 v2, 2026-09-28): with the family flattened into the flagged set, AUDIT
+    listed Ywhab/e/g/h/q, Sfn, Tuba8, Tubal3 and Eef1a2 -- abundant endogenous brain proteins --
+    as possible contamination, because 1433Z_BOVIN, TBA1D_BOVIN and EF1A1_BOVIN each share a
+    conserved peptide with them. target_accs stays in the sidecar as information."""
+    if rec.get("reason") == "shared_peptides":
+        return [rec.get("target_acc")]
+    return rec.get("target_accs") or [rec.get("target_acc")]
 
 
 def seen_only_as_cont(kept, groups):
@@ -1032,9 +1234,10 @@ def lost_to_contaminants_message(tc, seen=()):
     if not kept and not tc.get("legacy_note"):
         return None
     msg = tc.get("legacy_note") or (
-        f"{len(kept)} {org} protein(s) are in the search database only as identical "
-        f"{CONT_TAG} contaminant entries (the FASTA was used as-is, or built with "
-        f"--keep-target-contaminants), so they are MISSING under their own accessions: DIA-NN "
+        f"{len(kept)} {org} protein(s) are in the search database only as identical (or "
+        f"peptide-indistinguishable) {CONT_TAG} contaminant entries (the FASTA was used "
+        f"as-is, or built with --keep-target-contaminants), so they are MISSING under their "
+        f"own accessions: DIA-NN "
         f"reports them only as {CONT_TAG} groups, kept out of quantification and "
         f"normalisation. Rebuild the FASTA with fetch_fasta.py (no --path) and re-search.")
     names = sorted({r.get("gene") or r.get("target_acc") or "?" for r in kept})
@@ -1046,12 +1249,103 @@ def lost_to_contaminants_message(tc, seen=()):
     return msg
 
 
+def sidecar_state(meta):
+    """Which rule built the database a sidecar describes -- the ONE definition; contaminants.R's
+    sidecar_state() mirrors it (tests/test_run_de_contaminants.py keeps them equal):
+      "legacy"         no contaminant_target_rule: built before the overlap check;
+      "identity_only"  the rule, but no min_unique_peptides (before skill 2.8.0) or 0: built by
+                       the identity rule alone, so near-identical entries (bovine EEF1A1 /
+                       YWHAZ vs mouse) are still Cont_ entries;
+      "current"        both rules, --keep-target-contaminants (its kept list says what), or a
+                       database that holds no contaminants."""
+    meta = meta if isinstance(meta, dict) else {}
+    if not bool(meta.get("n_contaminants_appended") or meta.get("n_contaminants_already_present")
+                or (meta.get("contaminant_set") or "none") != "none"):
+        return "current"
+    if "contaminant_target_rule" not in meta:
+        return "legacy"
+    if meta.get("contaminant_target_rule") == KEEP_TARGET_CONTAMINANTS_RULE:
+        return "current"
+    return "identity_only" if not meta.get("min_unique_peptides") else "current"
+
+
 def _is_legacy_sidecar(meta):
     """Written before the overlap check, and the database does hold contaminants."""
-    if "contaminant_target_rule" in meta:
-        return False
-    return bool(meta.get("n_contaminants_appended") or meta.get("n_contaminants_already_present")
-                or (meta.get("contaminant_set") or "none") != "none")
+    return sidecar_state(meta) == "legacy"
+
+
+# The advice both older-database notes end with (contaminants.R's REBUILD_ADVICE is its R twin).
+REBUILD_ADVICE = ("Rebuild the FASTA with this release's fetch_fasta.py (skill 2.8.0 or later) "
+                  "and re-search; the Core's shared human+contaminant FASTA was rebuilt with it "
+                  "on 2026-09-25 (MRS/UP000005640_9606_plus_universal_contam_2026-09.fasta).")
+NEAR_IDENTICAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "near_identical_contaminants.json")
+
+
+def near_identical_measured(meta):
+    """(n, named, date) for this organism and contaminant set from
+    near_identical_contaminants.json (shared with contaminants.R), or None."""
+    try:
+        with open(NEAR_IDENTICAL_FILE, encoding="utf-8") as fh:
+            m = json.load(fh)
+        if (meta.get("contaminant_set") or "") != m.get("contaminant_set"):
+            return None
+        e = m["by_taxid"].get(str(int(meta.get("taxid") or 0)))
+        return (e["n"], e["named"], m.get("measured")) if e else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _recheck(meta):
+    """(the searched FASTA's records, None) when it is still there AND still the one searched
+    (sha256), else (None, why not)."""
+    path, sha = meta.get("fasta"), meta.get("sha256")
+    if not path or not os.path.isfile(path):
+        return None, f"the searched FASTA ({path or 'path not recorded'}) is no longer readable"
+    # Caught HERE, and named: left to propagate, an unreadable FASTA reached the auditors'
+    # sidecar handler and was reported as "could not read <meta.json>" -- the wrong file.
+    try:
+        if sha and _sha256(path) != sha:
+            return None, f"{path} has changed since the search (its sha256 no longer matches)"
+        return _fasta_records(_read_fasta_text(path)), None
+    except OSError as e:
+        return None, f"the searched FASTA {path} could not be read ({e})"
+
+
+def _overlap_now(meta, recs):
+    """The contaminant entries of `recs` today's rule drops (both rules; the digestion enzymes
+    the search used stay contaminants, as at build time)."""
+    used = meta.get("digestion_enzymes_used") or parse_enzymes(DEFAULT_ENZYMES)
+    overlap, _enz = _split_enzymes(contaminants_matching_targets(
+        [r for r in recs if CONT_TAG in r[0]], recs), used)
+    return [rec for _, rec in overlap]
+
+
+def _identity_only_overlap(meta):
+    """-> ([records], note) for a database built by the identity rule alone: the near-identical
+    entries re-found in the FASTA it describes when that file is still the one searched, else
+    the measured set (near_identical_contaminants.json). note is None when the re-check finds
+    nothing."""
+    org = meta.get("organism") or "target-organism"
+    head = ("This search database was built by fetch_fasta.py's identity rule alone (before "
+            "skill 2.8.0, or with --min-unique-peptides 0): contaminant entries identical to "
+            f"{org} proteins were removed, near-identical ones were not")
+    lost = (f"so DIA-NN reported those {org} proteins only as {CONT_TAG} groups and excluded "
+            f"them from quantification, and run_de.R's contaminant filter removes {CONT_TAG} "
+            f"groups from the DE.")
+    recs, why = _recheck(meta)
+    if why is None:
+        near = [r for r in _overlap_now(meta, recs) if r.get("reason") == "shared_peptides"]
+        if not near:
+            return [], None
+        return near, (f"{head}. Re-checked in {meta.get('fasta')} (sha256 matches the sidecar): "
+                      f"{len(near)} of its {CONT_TAG} entries share peptides with {org} proteins "
+                      f"and have too few of their own for the search to tell them apart, {lost} "
+                      f"{REBUILD_ADVICE}")
+    m = near_identical_measured(meta)
+    size = (f"with the {meta.get('contaminant_set')} set, {m[0]} such entries ({m[1]}; measured "
+            f"{m[2]})" if m else "an unknown number of such entries")
+    return [], (f"{head}, and {why}. Expect {size}: {lost} {REBUILD_ADVICE}")
 
 
 def _legacy_overlap(meta):
@@ -1061,30 +1355,16 @@ def _legacy_overlap(meta):
     org = meta.get("organism") or "target-organism"
     head = ("This search database was built before fetch_fasta.py checked contaminant entries "
             "against the target proteome")
-    tail = " Rebuild the FASTA with the current fetch_fasta.py and re-search."
-    path, sha = meta.get("fasta"), meta.get("sha256")
-    why, recs = None, None
-    if not path or not os.path.isfile(path):
-        why = f"the searched FASTA ({path or 'path not recorded'}) is no longer readable"
-    else:
-        # Caught HERE, and named: left to propagate, an unreadable FASTA reached the auditors'
-        # sidecar handler and was reported as "could not read <meta.json>" -- the wrong file.
-        try:
-            if sha and _sha256(path) != sha:
-                why = f"{path} has changed since the search (its sha256 no longer matches)"
-            else:
-                recs = _fasta_records(_read_fasta_text(path))
-        except OSError as e:
-            why = f"the searched FASTA {path} could not be read ({e})"
+    tail = " " + REBUILD_ADVICE
+    path = meta.get("fasta")
+    recs, why = _recheck(meta)
     if why is None:
-        used = meta.get("digestion_enzymes_used") or parse_enzymes(DEFAULT_ENZYMES)
-        overlap, _enz = _split_enzymes(contaminants_matching_targets(
-            [r for r in recs if CONT_TAG in r[0]], recs), used)
-        kept = [rec for _, rec in overlap]
+        kept = _overlap_now(meta, recs)
         if not kept:
             return [], None
         return kept, (f"{head}: re-checked in {path} (sha256 matches the sidecar), "
-                      f"{len(kept)} of its {CONT_TAG} entries are {org} proteins, so DIA-NN "
+                      f"{len(kept)} of its {CONT_TAG} entries are (or cannot be told apart "
+                      f"from) {org} proteins, so DIA-NN "
                       f"reported those proteins only as {CONT_TAG} groups and excluded them "
                       f"from quantification.{tail}")
     try:
@@ -1096,6 +1376,102 @@ def _legacy_overlap(meta):
             "an unknown number of target-identical contaminant entries")
     return [], (f"{head}, and {why}. Expect {size}: those {org} proteins are probably missing "
                 f"from quantification (reported only as {CONT_TAG} groups).{tail}")
+
+
+# Known search databases that hold target-identical contaminant entries (the Core's Sep-2025
+# MRS human FASTA), measured -- shared data, read only by database_without_sidecar() below.
+SUPERSEDED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "superseded_databases.json")
+
+
+def superseded_database(path=None, md5=None):
+    """The superseded_databases.json record for this file: by md5 when it was read, by file name
+    (either path separator -- a Windows search log says Y:\\MRS\\...) only when it could not be.
+    None when it is not a known database."""
+    try:
+        with open(SUPERSEDED_FILE, encoding="utf-8") as fh:
+            known = json.load(fh).get("databases") or []
+    except (OSError, ValueError):
+        return None
+    name = re.split(r"[\\/]", path or "")[-1]
+    for d in known:
+        if (md5 and d.get("md5") == md5) or (not md5 and name and d.get("basename") == name):
+            return d
+    return None
+
+
+def database_without_sidecar(search_dir):
+    """Does a search with NO fetch_fasta.py sidecar have a database that holds contaminant entries
+    which ARE (or cannot be told apart from) target proteins? The ONE definition of that check;
+    contaminants.R (run_de.R's contaminant filter) asks it through `fetch_fasta.py check-db`.
+
+    Why (release review 2026-09-28): with no sidecar the filter said only "not run", so a search
+    on the Core's superseded MRS human FASTA -- the Siegel entries staged 2026-09-25 -- lost ACTB,
+    EEF1A1, KRT8 and ~150 other real proteins with no caveat anywhere.
+
+    The FASTA is the one the search itself names (fran_deposit.search_fastas: its provenance, or
+    --fasta in its log). A readable one is re-checked with today's rule (_overlap_now, default
+    --enzyme); one that cannot be read here is recognised by name (superseded_database), never
+    guessed. -> {checked, risk, organism, fasta, n_lost, genes, unchecked, why}; `why` is one
+    clause saying what was found or why nothing could be.
+    """
+    res = {"checked": False, "risk": None, "organism": "", "fasta": [], "n_lost": 0,
+           "genes": [], "unchecked": [], "why": None}
+    try:
+        import fran_deposit as fd       # lazy: fran_deposit imports this module's helpers
+    except Exception as e:              # noqa: BLE001 -- any import failure is reported, not raised
+        res["why"] = f"fran_deposit.py could not be imported ({type(e).__name__}: {e})"
+        return res
+    named = fd.search_fastas(os.path.abspath(search_dir))
+    if not named:
+        res["why"] = (f"the search in {search_dir} names no FASTA (no `fasta` in "
+                      f"search_provenance.json, no --fasta in report.log.txt)")
+        return res
+    parts, genes = [], []
+    for path in named:
+        recs, err = None, None
+        if os.path.isfile(path):
+            try:
+                recs = _fasta_records(_read_fasta_text(path))
+            except OSError as e:
+                err = e
+        if recs is None:
+            known = superseded_database(path=path)
+            if not known:
+                res["unchecked"].append(path + (f" ({err})" if err else " (not readable here)"))
+                continue
+            res["fasta"].append(path)
+            res["organism"] = res["organism"] or known.get("organism") or ""
+            genes += known.get("genes") or []
+            res["n_lost"] += int(known.get("n_lost") or 0)
+            parts.append(f"{path} cannot be read here, but by its name it is {known['name']}, in "
+                         f"which {known.get('n_lost')} {CONT_TAG} entries are (or cannot be told apart "
+                         f"from) {known.get('organism') or 'target'} proteins (measured "
+                         f"{known.get('measured')})")
+            continue
+        lost = _overlap_now({}, recs)
+        known = superseded_database(md5=_md5(path))
+        org = fd.organism_from_headers(path)[0] or ""
+        res["fasta"].append(path)
+        res["organism"] = res["organism"] or org
+        genes += [r.get("gene") or r.get("target_acc") or "?" for r in lost]
+        res["n_lost"] += len(lost)
+        what = f" ({known['name']})" if known else ""
+        parts.append(f"re-checked {path}{what}: {len(lost)} of its {CONT_TAG} entries are (or "
+                     f"cannot be told apart from) {org or 'target'} proteins" if lost else
+                     f"re-checked {path}{what}: none of its {CONT_TAG} entries is a target protein")
+    if not res["fasta"]:
+        res["why"] = (f"no FASTA the search names could be re-checked or recognised: "
+                      f"{'; '.join(res['unchecked'])}")
+        return res
+    # Non-keratins first: the file order leads with KRTAPs and buries ACTB/EEF1A1.
+    res["genes"] = sorted(dict.fromkeys(genes), key=is_keratin_gene)
+    res["checked"], res["risk"] = True, res["n_lost"] > 0
+    res["why"] = ("the search has no fetch_fasta.py sidecar, so its own FASTA was checked: "
+                  + "; ".join(parts)
+                  + (f" (also named, not checked: {'; '.join(res['unchecked'])})"
+                     if res["unchecked"] else ""))
+    return res
 
 
 # --------------------------------------------------------------------------
@@ -1364,17 +1740,21 @@ def cmd_fetch(a):
     # only as Cont_ groups and kept out of quant. Find them and say so, loudly.
     # The enzymes this search used: only these stay Cont_ despite matching a target.
     enzymes_used = getattr(a, "enzyme", None) or parse_enzymes(DEFAULT_ENZYMES)
+    # The peptide rule's threshold (MIN_UNIQUE_PEPTIDES; 0 = identity rule only).
+    min_unique = getattr(a, "min_unique_peptides", MIN_UNIQUE_PEPTIDES)
     overlap_kept, enzymes_kept = [], []
     if n_cont_in_base:
         base_recs = _fasta_records(base_text)
         # A digestion enzyme staying Cont_ is correct here too, so it is not a lost protein.
         overlap, enz = _split_enzymes(contaminants_matching_targets(
-            [r for r in base_recs if CONT_TAG in r[0]], base_recs), enzymes_used)
+            [r for r in base_recs if CONT_TAG in r[0]], base_recs, min_unique=min_unique),
+            enzymes_used)
         overlap_kept, enzymes_kept = [rec for _, rec in overlap], [rec for _, rec in enz]
         if overlap_kept:
             msg = (f"the supplied database (source={source}) already contains "
-                   f"{len(overlap_kept)} '{CONT_TAG}' contaminant entries whose sequence is a "
-                   f"{meta.get('organism') or 'target'} protein: {_pair_list(overlap_kept)}. "
+                   f"{len(overlap_kept)} '{CONT_TAG}' contaminant entries that are (or cannot "
+                   f"be told apart from) a {meta.get('organism') or 'target'} protein: "
+                   f"{_pair_list(overlap_kept)}. "
                    f"They cannot be removed from a database used as-is, so DIA-NN will report "
                    f"those proteins ONLY as {CONT_TAG} groups and --cont-quant-exclude "
                    f"{CONT_TAG} will drop them from quantification and normalisation (ACTB, "
@@ -1414,12 +1794,14 @@ def cmd_fetch(a):
         # an old sidecar): append the set verbatim -- but still FIND the pairs and record
         # them, so the auditors can name the real proteins that sit only as Cont_.
         overlap, enz = _split_enzymes(contaminants_matching_targets(
-            _fasta_records(contam_text), _fasta_records(base_text)), enzymes_used)
+            _fasta_records(contam_text), _fasta_records(base_text), min_unique=min_unique),
+            enzymes_used)
         overlap_kept += [rec for _, rec in overlap]
         enzymes_kept += [rec for _, rec in enz]
         if overlap:
-            msg = (f"--keep-target-contaminants: kept {len(overlap)} contaminant entries whose "
-                   f"sequence is a {meta.get('organism') or 'target'} protein: "
+            msg = (f"--keep-target-contaminants: kept {len(overlap)} contaminant entries that "
+                   f"are (or cannot be told apart from) a {meta.get('organism') or 'target'} "
+                   f"protein: "
                    f"{_pair_list([rec for _, rec in overlap])}. DIA-NN will report those "
                    f"proteins ONLY as {CONT_TAG} groups and --cont-quant-exclude {CONT_TAG} "
                    f"drops them from quantification and normalisation. This reproduces a "
@@ -1430,7 +1812,7 @@ def cmd_fetch(a):
             warnings.append(msg)
     elif contam_text:
         contam_text, dropped, enz = drop_target_contaminants(contam_text, base_text,
-                                                            enzymes_used)
+                                                            enzymes_used, min_unique)
         enzymes_kept += enz
         n_contam = _count(contam_text)
     if enzymes_kept:
@@ -1439,11 +1821,14 @@ def cmd_fetch(a):
         warnings.append(msg)
     if dropped:
         n_ident = sum(1 for r in dropped if r["reason"] == "identical")
+        n_pep = sum(1 for r in dropped if r["reason"] == "shared_peptides")
         org = meta.get("organism") or "target"
         dropped_note = (
             f"removed {len(dropped)} of the {n_contam_in_set} '{a.contaminants}' contaminant "
-            f"entries because their sequence is a {org} protein ({n_ident} identical, "
-            f"{len(dropped) - n_ident} contained in one): {_pair_list(dropped)}. Left in, "
+            f"entries because each is, or cannot be told apart from, a {org} protein "
+            f"({n_ident} identical, {len(dropped) - n_ident - n_pep} contained in one"
+            + (f", {n_pep} with fewer than {min_unique} peptides of their own" if min_unique > 0
+               else "") + f"): {_pair_list(dropped)}. Left in, "
             f"DIA-NN reports those proteins only as {CONT_TAG} groups and "
             f"--cont-quant-exclude {CONT_TAG} drops them from quantification. They are now "
             f"quantified as {org} proteins -- and so count toward normalisation. Skin/hair "
@@ -1539,7 +1924,12 @@ def cmd_fetch(a):
         # Its PRESENCE marks a sidecar written with the overlap check; provenance.py replays a
         # sidecar without it (or with the rule disabled) using --keep-target-contaminants.
         "contaminant_target_rule": (KEEP_TARGET_CONTAMINANTS_RULE if keep_all
-                                    else CONTAMINANT_TARGET_RULE),
+                                    else contaminant_target_rule(min_unique)),
+        # The peptide rule's threshold and the digest it counted peptides in (the search's,
+        # estimate_params.DIANN_DIGEST). A sidecar with the rule but WITHOUT this key was built
+        # with the identity rule alone; provenance.py replays it with --min-unique-peptides 0.
+        "min_unique_peptides": min_unique,
+        "contaminant_digest": dict(DIANN_DIGEST),
         "n_contaminants_already_present": n_cont_in_base,
         "contaminant_set": (a.contaminants if n_contam
                             else ("already_in_supplied_database" if n_cont_in_base else "none")),
@@ -1583,6 +1973,11 @@ def main():
                    help="also search NCBI genome assemblies. Automatic when UniProt "
                         "returns no candidates.")
 
+    c = sub.add_parser("check-db", help="a search with no sidecar: does its database hold "
+                                        "contaminant entries that are target proteins? (JSON)")
+    c.add_argument("--search-dir", required=True,
+                   help="the search's output folder (search_provenance.json / report.log.txt)")
+
     f = sub.add_parser("fetch", help="build the search FASTA")
     f.add_argument("--proteome", help="UniProt proteome ID, e.g. UP000005640")
     f.add_argument("--path", help="explicit FASTA override; used verbatim if set")
@@ -1609,6 +2004,13 @@ def main():
                         + ", ".join(ENZYME_FAMILIES) + f". Default {DEFAULT_ENZYMES} (the Core's "
                         "trypsin/Lys-C mix). Only these enzymes' contaminant entries stay Cont_ "
                         "when they match a target protein; any other protease is dropped then.")
+    f.add_argument("--min-unique-peptides", type=_nonneg_int, default=MIN_UNIQUE_PEPTIDES,
+                   help="a contaminant entry that shares a peptide with a target protein is "
+                        "dropped when it has fewer than this many non-overlapping peptides of "
+                        "its own in the search's digest (I = L), since the search cannot tell it "
+                        f"apart from that protein. Default {MIN_UNIQUE_PEPTIDES}; 0 = drop only "
+                        "identical/contained entries (how a database built before this rule is "
+                        "replayed)")
     f.add_argument("--keep-target-contaminants", action="store_true",
                    help="do NOT remove contaminant entries identical to a target protein. Only "
                         "for replaying a database built before that check (provenance.py adds "
@@ -1625,6 +2027,9 @@ def main():
     if legacy and not explicit_contam:
         a.contaminants = "universal" if a.add_contaminants else "none"
 
+    if a.cmd == "check-db":
+        print(json.dumps(database_without_sidecar(a.search_dir), indent=2))
+        return 0
     if a.cmd == "resolve":
         if a.list:
             print(json.dumps([{"taxid": tx, "organism": n, "offline_fallback_proteome": up,

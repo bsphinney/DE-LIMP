@@ -805,3 +805,10 @@ can only delete, because `clear_stale` runs on a compute node long after generat
 inline we are the ones re-running and a re-run whose DIA-NN dies should still leave the user
 the report they had. Inline also checks the report with `getsize > 0`, matching the job
 route's `[ -s ]`: DIA-NN creating `report.parquet` and then dying leaves it at 0 bytes.
+
+Less-used flags: `--libpred-mem <GB>` / `--libpred-time <h>` (SLURM memory and hours for step 1's
+library prediction; defaults 64 / 4); `--no-norm` (pass `--no-norm` to DIA-NN and name the
+report `no_norm_report.parquet`); `--no-probe-window` (skip step 1b's radius measurement, which `--probe-window` turns on by
+default — the cfg must then pin `--window`). `probe_window.py --max-probes 1|3` (runs measured: 3 = median +
+quartiles, the default; 1 cannot measure mass accuracy) and `--max-failures <n>` (stop after n
+runs give no radius; default 3).

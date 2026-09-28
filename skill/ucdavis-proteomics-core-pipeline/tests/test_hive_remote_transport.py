@@ -464,6 +464,43 @@ class ScpFallbackTests(Harness):
         self.assertTrue(os.path.isfile(dst))
 
 
+class PutSkillTests(Harness):
+    """--put-skill: scripts/ AND .claude-plugin/ go up together. Every HIVE-side record reads the
+    skill version from ../.claude-plugin/plugin.json (skill_version.py); scripts/ put up alone
+    recorded "unknown" -- and "0.0.0" in the deposit package's sdrf.tsv."""
+
+    def fake_skill(self, with_plugin=True):
+        root = self._mk("skill")
+        sd = self._mk("skill", "scripts")
+        for f in ("hive_exec.sh", "hive_path.sh", "hive_shares.tsv"):
+            shutil.copy(os.path.join(SCRIPTS, f), sd)
+        if with_plugin:
+            with open(os.path.join(self._mk("skill", ".claude-plugin"), "plugin.json"), "w") as fh:
+                fh.write('{"version": "9.9.9"}\n')
+        return root, os.path.join(sd, "hive_exec.sh")
+
+    def test_both_folders_land_side_by_side_in_proteomics_pipeline(self):
+        root, hx = self.fake_skill()
+        r = self.run_script(hx, "--put-skill")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dests = [argv[-2:] for argv in self.calls("rsync")]
+        self.assertEqual(dests, [[os.path.join(root, d), f"tester@{HOST}:~/proteomics-pipeline/"]
+                                 for d in ("scripts", ".claude-plugin")])
+        self.assertEqual(self.calls("ssh"), [], "local paths: the put guard makes no connection")
+
+    def test_without_plugin_json_nothing_is_put(self):
+        _, hx = self.fake_skill(with_plugin=False)
+        r = self.run_script(hx, "--put-skill")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("plugin.json", r.stderr)
+        self.assertEqual(self.calls("rsync") + self.calls("scp"), [])
+
+    def test_it_takes_no_arguments(self):
+        _, hx = self.fake_skill()
+        self.assertEqual(self.run_script(hx, "--put-skill", "~/elsewhere/").returncode, 2)
+        self.assertEqual(self.calls("rsync"), [])
+
+
 class CheckAccessTests(Harness):
     def check(self, user="tester", **env):
         r = self.run_script(CHECK_ACCESS, user, self.key, **env)

@@ -1,0 +1,244 @@
+{
+  "id": "0022066cd85f",
+  "contacts": [],
+  "editable": true,
+  "participants": [],
+  "table_count": {
+    "Samples": 30
+  },
+  "type": {
+    "id": 53,
+    "prefix": "PROT",
+    "name": "Proteomics",
+    "statuses": [
+      "Samples Received",
+      "Sample Prep Completed",
+      "On Instrument",
+      "LCMS Completed",
+      "Data Analysis",
+      "Completed"
+    ]
+  },
+  "lab": {
+    "name": "Proteomics Core",
+    "id": 3,
+    "lab_id": "PROTEOMICS",
+    "disabled": false
+  },
+  "permissions": null,
+  "participant_names": [],
+  "url": "https://ucdavis.coreomics.com/submissions/0022066cd85f",
+  "received_by_name": null,
+  "users": [],
+  "pi": {
+    "id": 1,
+    "institution": {
+      "id": 1,
+      "name": "UC Davis"
+    },
+    "name": "Example, Alex",
+    "first_name": "Alex",
+    "last_name": "Example",
+    "department": "SOM: Example Department"
+  },
+  "internal_id": "PROT_0756",
+  "status": "Submitted",
+  "locked": false,
+  "cancelled": null,
+  "completed": null,
+  "submitted": "2026-07-15T16:09:50.151363-07:00",
+  "confirmed": null,
+  "updated": "2026-07-15T16:09:50.151382-07:00",
+  "first_name": "Sam",
+  "last_name": "Sampleton",
+  "pi_first_name": "Alex",
+  "pi_last_name": "Example",
+  "institute": "UC Davis, School of Medicine, Example Department",
+  "submission_data": {
+    "buffer": "The samples are in 50 mM Ammonium Bicarbonate, but have been extensively washed previously in RIPA (Triton X-100, Na deoxycholate, SDS, NaCl, Tris)",
+    "samples": [
+      {
+        "unique_id": "LRS96",
+        "sample_name": "LRS96",
+        "condition_name": "Old - JPH3 - Mouse 1 "
+      },
+      {
+        "unique_id": "LRS97",
+        "sample_name": "LRS97",
+        "condition_name": "Old - JPH3 - Mouse 2"
+      },
+      {
+        "unique_id": "LRS98",
+        "sample_name": "LRS98",
+        "condition_name": "Old - JPH3 - Mouse 3"
+      },
+      {
+        "unique_id": "LRS99",
+        "sample_name": "LRS99",
+        "condition_name": "Young - JPH3 - Mouse 4"
+      },
+      {
+        "unique_id": "LRS100",
+        "sample_name": "LRS100",
+        "condition_name": "Young - JPH3 - Mouse 5"
+      },
+      {
+        "unique_id": "LRS101",
+        "sample_name": "LRS101",
+        "condition_name": "Young - JPH3 - Mouse 6"
+      },
+      {
+        "unique_id": "LRS102",
+        "sample_name": "LRS102",
+        "condition_name": "Old - JPH4 - Mouse 1 "
+      },
+      {
+        "unique_id": "LRS103",
+        "sample_name": "LRS103",
+        "condition_name": "Old - JPH4 - Mouse 2"
+      },
+      {
+        "unique_id": "LRS104",
+        "sample_name": "LRS104",
+        "condition_name": "Old - JPH4 - Mouse 3"
+      },
+      {
+        "unique_id": "LRS105",
+        "sample_name": "LRS105",
+        "condition_name": "Young - JPH4 - Mouse 4"
+      },
+      {
+        "unique_id": "LRS106",
+        "sample_name": "LRS106",
+        "condition_name": "Young - JPH4 - Mouse 5"
+      },
+      {
+        "unique_id": "LRS107",
+        "sample_name": "LRS107",
+        "condition_name": "Young - JPH4 - Mouse 6"
+      },
+      {
+        "unique_id": "LRS108",
+        "sample_name": "LRS108",
+        "condition_name": "Old - Kv2.1 - Mouse 1 "
+      },
+      {
+        "unique_id": "LRS109",
+        "sample_name": "LRS109",
+        "condition_name": "Old - Kv2.1 - Mouse 2"
+      },
+      {
+        "unique_id": "LRS110",
+        "sample_name": "LRS110",
+        "condition_name": "Old - Kv2.1 - Mouse 3"
+      },
+      {
+        "unique_id": "LRS111",
+        "sample_name": "LRS111",
+        "condition_name": "Young - Kv2.1 - Mouse 4"
+      },
+      {
+        "unique_id": "LRS112",
+        "sample_name": "LRS112",
+        "condition_name": "Young - Kv2.1 - Mouse 5"
+      },
+      {
+        "unique_id": "LRS113",
+        "sample_name": "LRS113",
+        "condition_name": "Young - Kv2.1 - Mouse 6"
+      },
+      {
+        "unique_id": "LRS114",
+        "sample_name": "LRS114",
+        "condition_name": "Old - RyR - Mouse 1 "
+      },
+      {
+        "unique_id": "LRS115",
+        "sample_name": "LRS115",
+        "condition_name": "Old - RyR - Mouse 2"
+      },
+      {
+        "unique_id": "LRS116",
+        "sample_name": "LRS116",
+        "condition_name": "Old - RyR - Mouse 3"
+      },
+      {
+        "unique_id": "LRS117",
+        "sample_name": "LRS117",
+        "condition_name": "Young - RyR - Mouse 4"
+      },
+      {
+        "unique_id": "LRS118",
+        "sample_name": "LRS118",
+        "condition_name": "Young - RyR - Mouse 5"
+      },
+      {
+        "unique_id": "LRS119",
+        "sample_name": "LRS119",
+        "condition_name": "Young - RyR - Mouse 6"
+      },
+      {
+        "unique_id": "LRS120",
+        "sample_name": "LRS120",
+        "condition_name": "Old - IgG- Mouse 1 "
+      },
+      {
+        "unique_id": "LRS121",
+        "sample_name": "LRS121",
+        "condition_name": "Old - IgG- Mouse 2"
+      },
+      {
+        "unique_id": "LRS122",
+        "sample_name": "LRS122",
+        "condition_name": "Old - IgG- Mouse 3"
+      },
+      {
+        "unique_id": "LRS123",
+        "sample_name": "LRS123",
+        "condition_name": "Young - IgG - Mouse 4"
+      },
+      {
+        "unique_id": "LRS124",
+        "sample_name": "LRS124",
+        "condition_name": "Young - IgG - Mouse 5"
+      },
+      {
+        "unique_id": "LRS125",
+        "sample_name": "LRS125",
+        "condition_name": "Young - IgG - Mouse 6"
+      }
+    ],
+    "uniprot": "",
+    "organism": "Mouse",
+    "send_date": "2026-07-15",
+    "pathogenic": "No",
+    "transgenic": "No",
+    "description": "Immunopurifications of cross-linked brain tissue of young and old animals with antibodies for multiple Membrane Contact Sites tethers.",
+    "prot_or_pep": "peptides",
+    "sample_prep": "I have prepped my samples, they are peptides and ready to analyzed by LC-MSMS",
+    "nih_s10_user": "No",
+    "short_course": "No",
+    "data_analysis": "I want the proteomics core to do the data analysis",
+    "magbead_yes_no": "The magnetic beads have been removed from the sample (Protein G coated magnetic beads - ThermoFisher Cat#10004D)",
+    "volume_or_mass": "lets discuss/no idea",
+    "proteomics_type": [
+      "DIA (Quantitative)",
+      "Affinity Purification (magnetic Beads)"
+    ],
+    "mass_spec_wanted": null,
+    "is_nih_major_user": null
+  },
+  "plugin_data": {},
+  "notes": null,
+  "biocore": false,
+  "samples_received": null,
+  "data": {
+    "submission_data": {
+      "errors": {},
+      "warnings": {}
+    }
+  },
+  "comments": "",
+  "warnings": null,
+  "received_by": null
+}

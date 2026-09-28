@@ -11,7 +11,9 @@ The failure this guards is silent: a manifest with no database still stages, sti
 leaves the corpus unable to say whether two searches used comparable proteomes. Entries-per-gene
 is what separates a real depth difference from database redundancy.
 """
+import contextlib
 import hashlib
+import io
 import json
 import os
 import sys
@@ -136,6 +138,159 @@ class FastaInManifest(unittest.TestCase):
                 fh.write(head + "P" * (chunk - len(head) - 1) + "\n")  # next '>' starts at 1 MiB
                 fh.write(">b\nPEPTIDEK\n>c\nPEPTIDER\n")
             self.assertEqual(_count_entries(fa), 3)
+
+
+def _fasta(path, entries):
+    with open(path, "w") as fh:
+        for h in entries:
+            fh.write(h + "\nMPEPTIDEK\n")
+    return path
+
+
+YEAST = ">sp|P{i:05d}|Y{i}_YEAST Protein {i} OS=Saccharomyces cerevisiae (strain ATCC 204508 / S288c) OX=559292 GN=Y{i} PE=1 SV=1"
+HUMAN = ">sp|Q{i:05d}|H{i}_HUMAN Protein {i} OS=Homo sapiens OX=9606 GN=H{i} PE=1 SV=1"
+CONT_SP = ">sp|Cont_P00761|TRYP_PIG Trypsin OS=Sus scrofa OX=9823 GN=PRSS1 PE=1 SV=1"
+CONT_BARE = ">Cont_P02769|ALBU_BOVIN Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4"
+
+
+class OrganismFromHeadersTests(unittest.TestCase):
+    """A contaminant is not a target: its header CONTAINS fetch_fasta.CONT_TAG, as fetch_fasta
+    tests it -- the skill's and DE-LIMP's contaminants are `>sp|Cont_...`, not `>Cont_...`."""
+
+    def test_the_sp_cont_form_is_a_contaminant(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "h.fasta"),
+                       [HUMAN.format(i=i) for i in range(3)] + [CONT_SP, CONT_SP.replace("P00761", "P00760")])
+            org, tax, ev, why = fd.organism_from_headers(f)
+            self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (3, 2), ev)
+            self.assertEqual((org, tax, why), ("Homo sapiens", 9606, None))
+
+    def test_a_bare_cont_prefix_is_still_a_contaminant(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "h.fasta"), [HUMAN.format(i=0), CONT_BARE])
+            self.assertEqual(fd.organism_from_headers(f)[2]["contaminant_entries"], 1)
+
+    def test_yeast_plus_universal_resolves(self):
+        """6,066 yeast + 380 Universal contaminants is 94.1% yeast over ALL entries -- below
+        HEADER_MAJORITY, so counting contaminants as targets left the organism unresolved. The same
+        ratio here: 16 yeast + 1 contaminant."""
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "y.fasta"), [YEAST.format(i=i) for i in range(16)] + [CONT_SP])
+            self.assertLess(16 / 17, fd.HEADER_MAJORITY)            # the old count failed here
+            org, tax, ev, why = fd.organism_from_headers(f)
+            self.assertIsNone(why)
+            self.assertEqual(tax, 559292)
+            self.assertTrue(org.startswith("Saccharomyces cerevisiae"), org)
+            self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (16, 1))
+
+    def test_untagged_contaminants_still_count_as_targets(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "hand.fasta"),
+                       [YEAST.format(i=i) for i in range(16)] + [CONT_SP.replace("Cont_", "")])
+            org, tax, ev, why = fd.organism_from_headers(f)
+            self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (17, 0))
+            self.assertIsNone(tax)
+            self.assertIn("no clear majority", why)
+
+    def test_the_tag_is_fetch_fastas(self):
+        import fetch_fasta
+        self.assertEqual(fd._cont_tag(), (fetch_fasta.CONT_TAG, None))
+
+
+class LoggedFastaPathTests(unittest.TestCase):
+    """A --fasta path with spaces, as DIA-NN logs it: its arguments joined with spaces and NO
+    quotes, each option's value running to the next "--" (diann.cpp 1.8 arguments()). The Core's
+    own "Universal Protein Contaminants.fasta" was cut to ".../Universal" (not readable here)."""
+
+    # Verbatim from the DIA-NN 1.8.1 log of PXD022216 (Windows): a spaced path, and " - " in it.
+    PXD022216 = (r"C:\DIA-NN\1.8.1\DiaNN.exe --f D:\raw\a.raw  --lib  --threads 12 --fasta "
+                 r"C:\SpectralLib\human - 2021-02-16-reviewed-contam-UP000005640.fasta --met-excision "
+                 r"--cut K*,R* --mass-acc 10.0")
+
+    def test_a_windows_log_with_spaces(self):
+        self.assertEqual(fd.logged_fastas(self.PXD022216),
+                         [r"C:\SpectralLib\human - 2021-02-16-reviewed-contam-UP000005640.fasta"])
+
+    def test_values_end_at_the_next_option_and_fasta_search_is_not_one(self):
+        log = ("DIA-NN 2.7.0 Academia\r\n"
+               "/opt/diann-linux --f a.d --fasta /x/y/Universal Protein Contaminants.fasta "
+               "--fasta-search --fasta /x/human.fasta --fasta-filter f.txt --threads 8\r\n"
+               "diann.exe --f \"Z:\\a.raw \" --fasta \"/q/with space.fasta\" --out r.parquet\n"
+               "/opt/diann-linux --fasta /x/last.fasta\n")
+        self.assertEqual(fd.logged_fastas(log),
+                         ["/x/y/Universal Protein Contaminants.fasta", "/x/human.fasta",
+                          "/q/with space.fasta", "/x/last.fasta"])
+
+    def test_the_search_finds_its_spaced_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = _fasta(os.path.join(d, "Universal Protein Contaminants.fasta"),
+                        [HUMAN.format(i=i) for i in range(3)])
+            out = os.path.join(d, "search")
+            os.makedirs(out)
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"DIA-NN 2.7.0 Academia\n/opt/diann-linux --f a.d --lib  --fasta {fa} "
+                         f"--fasta-search --out {out}/report.parquet\n")
+            self.assertEqual(fd.search_fastas(out), (fa,))
+            res = fd.fasta_from_search(out)
+            self.assertEqual(res["fasta_path"], fa, res)
+            self.assertEqual(res["taxon"], 9606, res)
+
+
+class ContaminantTagUnavailableTests(unittest.TestCase):
+    """A partial copy of scripts/ (no estimate_params.py, which fetch_fasta imports) cannot import
+    fetch_fasta. The contaminant tag is then unknown and every contaminant counts as a target --
+    which must be SAID (a warning naming the missing module) and RECORDED (a header-derived
+    organism is "unverified"), never silent. It was silent on HIVE, 2026-09-28."""
+
+    def _partial_copy(self):
+        """sys.modules as a partial copy of scripts/ sees it: fetch_fasta not yet imported, and
+        estimate_params absent. mock.patch.dict restores both afterwards."""
+        from unittest import mock
+        ctx = mock.patch.dict(sys.modules, {"estimate_params": None})
+        ctx.start()
+        self.addCleanup(ctx.stop)
+        sys.modules.pop("fetch_fasta", None)
+
+    def _search(self, d, entries):
+        fa = _fasta(os.path.join(d, "db.fasta"), entries)
+        out = os.path.join(d, "search")
+        os.makedirs(out)
+        with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+            json.dump({"fasta": fa}, fh)
+        return out
+
+    def test_a_missing_tag_is_warned_naming_the_module(self):
+        self._partial_copy()
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            tag, why = fd._cont_tag()
+        self.assertIsNone(tag)
+        self.assertIn("'estimate_params'", why)
+        self.assertIn("WARNING: contaminant tag unavailable", err.getvalue())
+        self.assertIn("estimate_params", err.getvalue())
+
+    def test_a_header_organism_without_the_tag_is_recorded_unverified(self):
+        entries = [HUMAN.format(i=i) for i in range(40)] + [CONT_SP]
+        with tempfile.TemporaryDirectory() as d:
+            ok = fd.fasta_from_search(self._search(d, entries))
+            self.assertTrue(ok["organism_source"].startswith("FASTA headers"), ok)
+        self._partial_copy()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(io.StringIO()):
+            res = fd.fasta_from_search(self._search(d, entries))
+        self.assertEqual(res["taxon"], 9606)                  # 40 of 41 still clears the majority
+        self.assertTrue(res["organism_source"].startswith(
+            "unverified: contaminant tag unavailable"), res["organism_source"])
+        self.assertIn("estimate_params", res["organism_source"])
+        ev = res["organism_evidence"]
+        self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (41, 0), ev)
+        self.assertIn("estimate_params", ev["contaminant_tag_unavailable"])
+
+    def test_an_unresolved_organism_says_the_tag_was_missing(self):
+        self._partial_copy()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(io.StringIO()):
+            f = _fasta(os.path.join(d, "y.fasta"), [YEAST.format(i=i) for i in range(16)] + [CONT_SP])
+            org, tax, ev, why = fd.organism_from_headers(f)
+        self.assertIsNone(tax)
+        self.assertIn("contaminant tag unavailable", why)
 
 
 if __name__ == "__main__":

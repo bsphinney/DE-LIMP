@@ -14,13 +14,16 @@ No network and no HIVE: logs are synthetic in FRAN's exact format (checked again
 auto_ingest.py on 2026-09-24), GitHub is a fake fetcher, and the service tree is a temp dir.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
@@ -72,8 +75,10 @@ def ts(e):
 
 
 def run_log(start, ingested=0, dup=0, failed=0, queued=0, items=(), skips=(), cands=(),
-            done=True, abort=None):
-    """One auto_ingest_<jobid>.out, in the exact shape FRAN's auto_ingest.py prints."""
+            done=True, abort=None, fmt="old", quarantined=3, backed_off=0, extra=""):
+    """One auto_ingest_<jobid>.out, in the exact shape FRAN's auto_ingest.py prints. `fmt` is its
+    summary line: "old" (to 2026-09-25), "new" (FRAN main 14be43f: + quarantined, backed-off, and
+    any `extra` it appends), or "truncated" (cut mid-line)."""
     L = ["  preflight: PG Farm:5432 reachable",
          f"===== fran auto-ingest {ts(start)} on hive-as-11-2-70 limit=5 =====",
          f"===== auto_ingest {ts(start)} on hive-as-11-2-70 =====",
@@ -99,8 +104,14 @@ def run_log(start, ingested=0, dup=0, failed=0, queued=0, items=(), skips=(), ca
                   "      | HINT:  Rebuild all objects in this database",
                   "      | No precursor records parsed (check the report / --engine)."]
     if done:
-        L.append(f"===== done: {ingested} ingested, {dup} duplicate-skipped, {failed} failed, "
-                 f"{queued} still queued — {ts(start + 600)} =====")
+        head = f"===== done: {ingested} ingested, {dup} duplicate-skipped, {failed} failed, "
+        if fmt == "old":
+            L.append(head + f"{queued} still queued — {ts(start + 600)} =====")
+        elif fmt == "new":
+            L.append(head + f"{queued} still queued, {quarantined} quarantined, {backed_off} "
+                            f"backed-off{extra} — {ts(start + 600)} =====")
+        else:
+            L.append(head[:30])
         L.append(f"===== auto-ingest exit rc=0 {ts(start + 601)} =====")
     return "\n".join(L) + "\n"
 
@@ -134,12 +145,18 @@ class Env:
             fh.write(f"{ts(self.now - age_h * H - 420)} {line}\n")
         os.utime(p, (self.now - age_h * H, self.now - age_h * H))
 
-    def entry(self, name, age_h=100, output_dir=None):
+    def entry(self, name, age_h=100, output_dir=None, staged=True):
+        """A drop entry staged `age_h` ago -- by its manifest's staged_at, as stage writes it
+        (staged=False: a legacy entry without one). The directory mtime is set to the same time,
+        and the age must never be read from it."""
         d = os.path.join(self.drop, name)
         os.makedirs(d)
+        man = {"output_dir": output_dir or f"/real/{name}", "engine": "diann", "staged_by": "brettsp"}
+        if staged:
+            man["staged_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime(self.now - age_h * H))
         with open(os.path.join(d, fd.MANIFEST), "w") as fh:
-            json.dump({"output_dir": output_dir or f"/real/{name}", "engine": "diann",
-                       "staged_by": "brettsp"}, fh)
+            json.dump(man, fh)
         os.utime(d, (self.now - age_h * H, self.now - age_h * H))
         return d
 
@@ -254,6 +271,139 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(fd.progress_health(runs, NOW, None, info)["verdict"], "unknown")
 
 
+# ------------------------------------------------------------ the done line, read by name --
+# The regex this replaced: positional, so it matched no summary line after FRAN appended fields.
+OLD_RUN_DONE = re.compile(r"^===== done: (\d+) ingested, (\d+) duplicate-skipped, (\d+) failed, "
+                          r"(\d+) still queued\W+" + r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+NOW_B = time.mktime((2026, 9, 28, 12, 30, 0, 0, 0, -1))
+
+
+class DoneLineTests(unittest.TestCase):
+    OLD = "===== done: 0 ingested, 3 duplicate-skipped, 2 failed, 182 still queued — 2026-09-24 18:14:13 ====="
+    NEW = ("===== done: 5 ingested, 0 duplicate-skipped, 0 failed, 89 still queued, 3 quarantined, "
+           "0 backed-off — 2026-09-28 11:54:37 =====")
+
+    def test_old_and_new_formats(self):
+        old, new = fd.parse_done_line(self.OLD), fd.parse_done_line(self.NEW)
+        self.assertEqual(old["fields"], {"ingested": 0, "duplicate-skipped": 3, "failed": 2,
+                                         "still queued": 182})
+        self.assertEqual(new["fields"], {"ingested": 5, "duplicate-skipped": 0, "failed": 0,
+                                         "still queued": 89, "quarantined": 3, "backed-off": 0})
+        self.assertEqual((old["missing"], new["missing"], new["notes"]), ([], [], None))
+        self.assertEqual(new["finished"], time.mktime((2026, 9, 28, 11, 54, 37, 0, 0, -1)))
+        self.assertTrue(OLD_RUN_DONE.match(self.OLD))
+        self.assertIsNone(OLD_RUN_DONE.match(self.NEW))           # the blind spot, pinned
+
+    def test_a_future_format_keeps_every_field_and_the_notes(self):
+        line = ("===== done: 5 ingested, 0 duplicate-skipped, 1 failed, 89 still queued, "
+                "3 quarantined, 0 backed-off, 2 systemic, 7 retried-later, held back: sage (import "
+                "failed: No module named x, 2 tries) — 2026-09-28 11:54:37 =====")
+        d = fd.parse_done_line(line)
+        self.assertEqual(d["fields"]["systemic"], 2)
+        self.assertEqual(d["fields"]["retried-later"], 7)
+        self.assertNotIn("tries)", d["fields"])                  # nothing read out of the note
+        self.assertEqual(d["notes"], "held back: sage (import failed: No module named x, 2 tries)")
+        r = fd.parse_ingest_log(line + "\n")
+        self.assertEqual((r["complete"], r["ingested"], r["failed"], r["queued"]), (True, 5, 1, 89))
+        self.assertEqual(r["done_fields"]["quarantined"], 3)
+
+    def test_a_missing_known_field_is_missing_not_zero(self):
+        r = fd.parse_ingest_log("===== done: 5 ingested, 0 failed — 2026-09-28 11:54:37 =====\n")
+        self.assertTrue(r["complete"])
+        self.assertEqual((r["duplicate"], r["queued"]), (None, None))
+        self.assertEqual(r["done_missing"], ["duplicate-skipped", "still queued"])
+
+    def test_a_truncated_or_countless_done_line_is_unreadable_not_died(self):
+        for line in ("===== done: 5 ingested, 0 dupl",
+                     "===== done: 5 ingested, 0 duplicate-skipped",          # no timestamp
+                     "===== done: nothing to report — 2026-09-28 11:54:37 ====="):
+            self.assertIsNone(fd.parse_done_line(line), line)
+            r = fd.parse_ingest_log(line + "\n")
+            self.assertFalse(r["complete"], line)
+            self.assertEqual(r["done_unreadable"], line)
+            self.assertIsNone(r["aborted"])
+
+    def test_a_crashed_run_says_why(self):
+        r = fd.parse_ingest_log("===== auto_ingest 2026-09-28 08:23:01 on hive-a =====\n"
+                                "\n===== CRASHED: OperationalError: server closed the connection "
+                                "— 2026-09-28 08:24:10 =====\n")
+        self.assertFalse(r["complete"])
+        self.assertEqual(r["aborted"], "CRASHED: OperationalError: server closed the connection")
+
+
+class BlindAfterTheDeployTests(unittest.TestCase):
+    """2026-09-28, the exact case: FRAN's cron had ingested 46 searches since 09-26 (queue 136 ->
+    89), but the skill read every one of the 18 post-deploy logs as a run that died, and replayed
+    the last legible logs: last ingest 09-17, 182 queued, 64 runs with nothing ingested, 18 died."""
+
+    def _hive(self, d):
+        e = Env(d, now=NOW_B)
+        newest_done = time.mktime((2026, 9, 28, 11, 54, 37, 0, 0, -1))
+        new_starts = [newest_done - 600 - k * 4 * H for k in range(17, -1, -1)]     # 18, oldest first
+        old_starts = [new_starts[0] - k * 4 * H for k in range(46, 0, -1)]            # 46 before them
+        e.log(run_log(old_starts[0] - 4 * H, ingested=4, dup=1, queued=198))       # 09-17
+        for st in old_starts:
+            e.log(run_log(st, dup=3, failed=2, queued=182))
+        ingested = [0, 5, 0, 5, 0, 5, 0, 5, 1, 0, 5, 0, 5, 0, 5, 0, 5, 5]          # 46, oldest first
+        for i, st in enumerate(new_starts):
+            e.log(run_log(st, ingested=ingested[i], queued=135 - sum(ingested[:i + 1]), fmt="new"))
+        e.submit()
+        return e
+
+    def test_the_eighteen_post_deploy_logs_are_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            e = self._hive(d)
+            runs, info = runs_of(e)
+            self.assertEqual(len(runs), 65)
+            new = runs[:18]
+            self.assertTrue(all(r["complete"] for r in new))
+            self.assertEqual(sum(r["ingested"] for r in new), 46)
+            self.assertFalse(any(OLD_RUN_DONE.match(ln) for r in new
+                                 for ln in _read(r["log"]).splitlines()))  # the old parse: blind
+            p = fd.progress_health(runs, NOW_B, fd.submit_log_info(e.logs, NOW_B), info)
+            self.assertEqual(p["verdict"], "healthy", p)
+            self.assertEqual(p["queued"], 89)
+            self.assertEqual((p["consecutive_runs_without_ingest"], p["of_which_aborted"],
+                              p["unreadable_done_lines"]), (0, 0, 0))
+            self.assertEqual(p["last_ingest"]["finished"], "2026-09-28 11:54")
+            self.assertNotIn("died", p["detail"])
+
+    def test_unreadable_newest_logs_never_read_as_died_or_stuck(self):
+        """The same HIVE if FRAN's format changed again: the 18 newest logs finish with a done
+        line this reader cannot parse. The 46 old zero-ingest runs must not come back as stuck."""
+        with tempfile.TemporaryDirectory() as d:
+            e = self._hive(d)
+            for name in sorted(os.listdir(e.logs))[-19:]:              # 18 logs + the submit log
+                p = os.path.join(e.logs, name)
+                if name.startswith("auto_ingest_") and name.endswith(".out"):
+                    txt = _read(p).replace(" still queued,", " still queued;")  # a new separator
+                    txt = re.sub(r" — (\d{4})", r" at \1", txt)                  # and no dash
+                    txt = re.sub(r"(===== done:[^\n]*?) at \d{4}-\S+ \S+ =====", r"\1", txt)
+                    with open(p, "w") as fh:
+                        fh.write(txt)
+            runs, info = runs_of(e)
+            p = fd.progress_health(runs, NOW_B, fd.submit_log_info(e.logs, NOW_B), info)
+            self.assertEqual(p["unreadable_done_lines"], 18, p)
+            self.assertEqual(p["verdict"], "unknown", p)
+            self.assertEqual(p["of_which_aborted"], 0)
+            self.assertIn("18 log(s) with an unreadable done line (format changed?)", p["detail"])
+            self.assertIn("the 18 newest are unreadable, so the verdict uses logs up to", p["detail"])
+            self.assertIn("would say stuck", p["detail"])
+            self.assertNotIn("died", p["detail"])
+            self.assertEqual(p["last_run"]["state"], "unreadable")
+
+    def test_every_log_unreadable_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            for k in (3, 2, 1):
+                e.log(run_log(NOW - k * 4 * H, fmt="truncated"))
+            e.submit()
+            runs, info = runs_of(e)
+            p = fd.progress_health(runs, NOW, fd.submit_log_info(e.logs, NOW), info)
+            self.assertEqual(p["verdict"], "unknown", p)
+            self.assertIn("no readable log is left", p["detail"])
+
+
 # ------------------------------------------------------------------------ one entry's fate --
 class EntryStateTests(unittest.TestCase):
     ENTRY = "/quobyte/proteomics-grp/fran/incoming/search_out__e14aac29"
@@ -284,6 +434,29 @@ class EntryStateTests(unittest.TestCase):
         runs = self._runs(run_log(NOW - H, ingested=1, items=[("diann", self.ENTRY, "ok")]),
                           run_log(NOW - 5 * H, failed=1, items=[("diann", self.ENTRY, "fail")]))
         self.assertEqual(fd.entry_log_state(runs, self.ENTRY)["state"], "ingested")
+
+    def test_the_lines_fran_added_at_the_2026_09_26_deploy(self):
+        """FRAN main 14be43f: `SKIP <name>  skipped (<why>)` for QC / needs-a-person, `staged as
+        <entry>` under an item, `ALREADY IN THE CORPUS` (in FRAN: not a failure), and `SKIPPED --
+        <why>` (held back, not attempted)."""
+        name = os.path.basename(self.ENTRY)
+        skip = self._runs(run_log(NOW - H, skips=[(name, "x")]).replace(
+            f"  SKIP {name}  (x)", f"  SKIP {name}  skipped (qc: search_name 'Lumos QC' matches QC_NAME_RE)"))
+        s = fd.entry_log_state(skip, self.ENTRY)
+        self.assertEqual((s["state"], s["outcome"]), ("failed", "skipped"))
+        self.assertIn("QC_NAME_RE", s["detail"])
+
+        def item(line):
+            return ("===== auto_ingest 2026-09-24 11:00:00 on hive-a =====\n"
+                    "\n[1/1] diann search_out\n      /real/search_out\n"
+                    f"      staged as {self.ENTRY}\n      {line}\n")
+        s = fd.entry_log_state(self._runs(item("ALREADY IN THE CORPUS as search_id=42 under this "
+                                               "output_dir — not re-ingesting")), self.ENTRY)
+        self.assertEqual((s["state"], s["outcome"]), ("ingested", "duplicate"))   # via staged as
+        s = fd.entry_log_state(self._runs(item("SKIPPED — diann candidates are held back this "
+                                               "run: import failed (not charged)")), self.ENTRY)
+        self.assertEqual((s["outcome"], s["attempts"]), ("skipped", 0))
+        self.assertIn("held back", s["detail"])
 
     def test_skipped_by_name_is_a_failure_with_the_reason(self):
         runs = self._runs(run_log(NOW - H, skips=[("search_out__e14aac29",
@@ -338,6 +511,64 @@ class IncomingTests(unittest.TestCase):
             self.assertEqual(inc["by_state"], {"never_reached": 2})
             self.assertAlmostEqual(inc["oldest_never_reached_days"], 29, delta=0.2)
             self.assertTrue(os.path.isdir(old))
+
+    def test_age_is_staged_at_not_the_mtime_of_a_rewritten_manifest(self):
+        """search_mouse_mousecont on 2026-09-25: staged 2026-09-08, manifest repaired today. The
+        rewrite bumped the entry's mtime, so it read as 0 days old and hid a starved entry."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            ent = e.entry("search_mouse_mousecont__9ad24935", age_h=0)     # mtime: just now
+            month_ago = NOW - 30 * 86400
+            with open(os.path.join(ent, fd.MANIFEST), "w") as fh:
+                json.dump({"output_dir": "/real/mousecont", "engine": "diann",
+                           "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                      time.gmtime(month_ago))}, fh)
+            os.utime(ent, (NOW, NOW))                                    # rewritten "today"
+            legacy = e.entry("GallPlasCer__5b11a0d9", age_h=3 * 24, staged=False)  # mtime 3 d
+            inc = fd.incoming_health([], NOW, e.drop)
+            by = {x["entry"]: x for x in inc["entries"]}
+            self.assertAlmostEqual(by["search_mouse_mousecont__9ad24935"]["age_days"], 30, delta=0.1)
+            self.assertEqual(by["search_mouse_mousecont__9ad24935"]["age_source"], "staged_at")
+            # No staged_at: age UNKNOWN -- never the 3 d its directory mtime says (2026-09-28).
+            self.assertIsNone(by["GallPlasCer__5b11a0d9"]["age_days"])
+            self.assertEqual(by["GallPlasCer__5b11a0d9"]["age_source"], "age unknown: no staged_at")
+            self.assertEqual(inc["no_staged_at"], ["GallPlasCer__5b11a0d9"])
+            self.assertEqual(inc["verdict"], "starved")
+            self.assertAlmostEqual(inc["oldest_never_reached_days"], 30, delta=0.1)
+            self.assertIn("1 with no staged_at, so of unknown age (GallPlasCer__5b11a0d9)",
+                          inc["detail"])
+            self.assertTrue(os.path.isdir(legacy))
+
+    def test_an_entry_without_staged_at_is_never_starved_on_a_guess(self):
+        """Its directory says 40 days; nothing says when it was staged. Not starved, and said."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            e.entry("GallPlasCer__5b11a0d9", age_h=40 * 24, staged=False)
+            e.entry("new__00000001", age_h=2)
+            inc = fd.incoming_health([], NOW, e.drop)
+            self.assertEqual(inc["verdict"], "ok", inc)
+            self.assertIsNone([x for x in inc["entries"]
+                               if x["entry"] == "GallPlasCer__5b11a0d9"][0]["age_days"])
+            self.assertAlmostEqual(inc["oldest_never_reached_days"], 2 / 24, delta=0.1)
+            self.assertIn("no staged_at", inc["detail"])
+
+    def test_age_never_reads_any_mtime(self):
+        """staged_at 10 d ago; the directory AND the manifest file touched just now."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            ent = e.entry("x__00000002", age_h=10 * 24)
+            os.utime(os.path.join(ent, fd.MANIFEST), (NOW, NOW))
+            os.utime(ent, (NOW, NOW))
+            x = fd.incoming_health([], NOW, e.drop)["entries"][0]
+            self.assertAlmostEqual(x["age_days"], 10, delta=0.05)
+            self.assertEqual(x["age_source"], "staged_at")
+
+    def test_staged_at_forms_frans_reader_accepts(self):
+        epoch = 1788908552.0                                   # 2026-09-08T23:02:32Z
+        for v in ("2026-09-08T23:02:32Z", "2026-09-08T23:02:32+00:00", epoch, str(epoch)):
+            self.assertAlmostEqual(fd._staged_epoch(v), epoch, delta=1, msg=repr(v))
+        for v in (None, True, "", "yesterday", -5):
+            self.assertIsNone(fd._staged_epoch(v), repr(v))
 
     def test_broken_links_are_listed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1061,6 +1292,131 @@ class QcRuleTests(unittest.TestCase):
             self.assertEqual(fd.read_receipt(qc_out)["status"], "qc_run")
 
 
+    # Release review 2.8.0: the Core's own HeLa-standard QC names were missed, and a customer study
+    # that names its pooled QC was excluded -- then blocked every later stage. Twin vectors: FRAN's
+    # find_uningested pins the same (patch drafted for fran-db).
+    HELA_EXCLUDED = ["07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3",
+                     "12May2026_DIA_60spd_HeLa50_S1-A5", "30apr26_HeL50Flextr-tf9d0_100spd_S4-A1",
+                     "FL050525_HeL50-Dda-newDualIT-HCDIT_60m_1", "Hel-50_100spd"]
+    HELA_KEPT = ["HeLa50ng_titration", "buffer 100mM HeLa50", "HeLa_digest_timecourse"]
+    AGENT = ["PROT_0812 plasma + pooled QC", "PROT_10234 plasma + pooled QC"]
+    # core_submission.PROT_TOKEN's pattern and flags, which FRAN's find_uningested.PROT_ID_RE
+    # copies literally (it cannot import the skill); FRAN's test pins this same string.
+    PROT_PATTERN = r"(?<![A-Za-z0-9])prot[_\-# ]?(\d{3,5})(?![A-Za-z0-9])"
+
+    def test_hela_standard_and_prot_vectors(self):
+        for n in self.HELA_EXCLUDED:
+            self.assertIn("HeLa standard", fd.name_qc_signal(n) or "", n)
+        for n in self.HELA_KEPT + self.KEPT:
+            self.assertIsNone(fd.name_qc_signal(n), n)
+        for n in self.AGENT:
+            self.assertTrue(fd.name_qc_signal(n) and fd.PROT_ID_RE.search(n), n)
+        self.assertEqual(fd.HELA_STD_RE.pattern, r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
+        self.assertEqual(fd.RUN_METHOD_RE.pattern,
+                         r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
+
+    def test_the_prot_id_is_core_submissions_one_definition(self):
+        """Rule 3: the QC rule reads a PROT id with the SAME regex `identify` does -- imported, not
+        copied. It once required exactly 4 digits, while --prot takes up to 5."""
+        import core_submission as cs
+        self.assertIs(fd.PROT_ID_RE, cs.PROT_TOKEN)
+        self.assertIsNone(fd.PROT_ID_UNAVAILABLE)
+        self.assertEqual((cs.PROT_TOKEN.pattern, cs.PROT_TOKEN.flags & re.I),
+                         (self.PROT_PATTERN, re.I))
+        self.assertEqual(cs.ids_in("PROT_10234 plasma"), [("internal_id", "PROT_10234")])
+        self.assertEqual(cs.normalize_submission("PROT_10234"), ("internal_id", "PROT_10234"))
+
+    def test_a_prot_id_anywhere_up_the_path_goes_to_an_agent(self):
+        """The QC signal is read on the last three components (FRAN's reach); a PROT id on all of
+        them -- here it is the fourth from the end."""
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(os.path.join(d, "SERVICE", "Lab", "PROT_0812", "diann", "2.7.0"))
+            q, why = fd.is_qc_run(out, names=["Lumos QC"])
+            self.assertIsNone(q, why)
+            self.assertIn("needs_agent_check", why)
+            self.assertIn("PROT_0812", why)
+            q, why = fd.is_qc_run(search_dir(os.path.join(d, "SERVICE", "Lab", "x", "diann", "2.7.0")),
+                                  names=["Lumos QC"])
+            self.assertIs(q, True, why)                    # no id anywhere: still QC
+
+    def test_no_prot_regex_means_a_person_decides_and_it_is_said(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = search_dir(d)
+            with mock.patch.object(fd, "PROT_ID_RE", None), \
+                    mock.patch.object(fd, "PROT_ID_UNAVAILABLE", "core_submission.py could not be "
+                                      "imported (ModuleNotFoundError: x)"), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                q, why = fd.is_qc_run(out, names=["Exploris QC2"])
+                plain = fd.is_qc_run(out, names=["Plasma_liver2"])
+        self.assertIsNone(q)
+        self.assertIn("needs_agent_check", why)
+        self.assertIn("core_submission.py could not be imported", why)
+        self.assertIn("WARNING: cannot look for a PROT id", err.getvalue())
+        self.assertIs(plain[0], False)                     # no QC signal: nothing to refer
+
+    def test_the_cores_hela_standard_runs_are_qc(self):
+        """HT (Evosep, NN-spd) and Lumos (NNm gradient) HeLa QC, named as the Core names them."""
+        for title in ("07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"):
+            with tempfile.TemporaryDirectory() as d:
+                res = self._stage(d, self._session(d, title))
+                self.assertEqual(res["reason"], "qc_run", title)
+                self.assertIn("HeLa standard", res["qc_rule"])
+
+    def test_a_customer_study_naming_its_pooled_qc_goes_to_an_agent_and_blocks_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "PROT_0812_plasma")
+            res = self._stage(d, out, name="PROT_0812 plasma + pooled QC")
+            self.assertFalse(res["staged"])
+            self.assertEqual(res["reason"], "needs_agent_check")
+            self.assertIsNone(res["qc"])
+            self.assertIn("PROT_0812", res["qc_rule"])
+            self.assertIn("--not-qc", res["detail"])
+            self.assertFalse(os.path.exists(os.path.join(d, "incoming", fd.entry_name(out))))
+            self.assertNotEqual((fd.read_receipt(out) or {}).get("status"), "qc_run")  # nothing recorded
+            ok = self._stage(d, out, name="PROT_0812 plasma + pooled QC", not_qc=True)
+            self.assertTrue(ok["staged"], ok.get("detail"))
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "PROT_0812_plasma")
+            self.assertEqual(self._stage(d, out, name="PROT_0812 plasma + pooled QC",
+                                         qc=True)["reason"], "qc_run")
+
+    def _legacy_name_rule_qc_run(self, out):
+        """A receipt the OLD rule wrote: qc_run, reached by the name rule, on a customer study."""
+        with open(os.path.join(out, fd.RECEIPT), "w") as fh:
+            json.dump({"status": "qc_run", "search_dir": out, "decided_by": "someone",
+                       "at": "2026-09-24T10:00:00", "search_name": "PROT_0812 plasma + pooled QC",
+                       "qc_rule": "QC run: excluded by policy (search_name 'PROT_0812 plasma + "
+                                  "pooled QC' matches QC_NAME_RE)"}, fh)
+
+    def test_an_old_name_rule_qc_run_is_rejudged_not_binding(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "PROT_0812_plasma")
+            self._legacy_name_rule_qc_run(out)
+            res = self._stage(d, out)                              # a plain, flagless stage
+            self.assertEqual(res["reason"], "needs_agent_check", res.get("detail"))
+            self.assertTrue(self._stage(d, out, not_qc=True)["staged"])
+        with tempfile.TemporaryDirectory() as d:                   # still QC under today's rule
+            out = self._session(d, "Plasma_liver2")
+            with open(os.path.join(out, fd.RECEIPT), "w") as fh:
+                json.dump({"status": "qc_run", "search_name": "Exploris QC2",
+                           "qc_rule": "QC run: excluded by policy (search_name 'Exploris QC2' "
+                                      "matches QC_NAME_RE)"}, fh)
+            self.assertEqual(self._stage(d, out)["reason"], "qc_run")
+
+    def test_backfill_does_not_block_on_an_old_name_rule_qc_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = Tree(d)
+            out = search_dir(os.path.join(t.svc_root, "on_campus", "Smith", "PROT_0812_plasma"),
+                             "search_out")
+            self._legacy_name_rule_qc_run(out)
+            with env_vars(FRAN_DROP_DIR=t.drop, FRAN_HEALTH="off"):
+                found, _, _ = fd.discover([t.svc_root])
+                pre = os.path.realpath(t.root) + "/"
+                rows = {r["out"]: r for r in fd.plan_backfill(found, prefixes=(pre,))}
+            self.assertEqual((rows[out]["decision"], rows[out]["reason"]),
+                             ("skip", "needs_agent_check"), rows[out])
+
+
 class VerifyFromLogsTests(unittest.TestCase):
     def _staged(self, d):
         out = search_dir(d)
@@ -1488,11 +1844,13 @@ class ReviewFixTests(unittest.TestCase):
                 c = fd.check(Args(out, fasta_meta=mouse + ".meta.json"))
             self.assertEqual((c["organism"], c["fasta_path"]), ("Mus musculus", mouse))
             self.assertNotIn("fasta_meta_ignored", c)
-            # ...and with no sidecar of the search's own FASTA, blank -- never the wrong one
+            # ...and with no sidecar of the search's own FASTA: that FASTA's path from the search's
+            # own --fasta, its organism from its headers (none here) -- never the wrong meta's
             os.unlink(mouse + ".meta.json")
             with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")):
                 c = fd.check(Args(out, fasta_meta=human + ".meta.json"))
-            self.assertEqual((c["organism"], c["fasta_path"]), (None, None))
+            self.assertEqual((c["organism"], c["fasta_path"]), (None, mouse))
+            self.assertIn("no OX=", c["organism_unresolved"])
 
     # F ----------------------------------------------------------------------------------------
     def test_F_coursework_is_never_staged_by_stage_or_backfill(self):
@@ -1579,6 +1937,140 @@ class ReviewFixTests(unittest.TestCase):
             with open(os.path.join(d, "delimp_report.parquet"), "w") as fh:
                 fh.write("x")
             self.assertIsNone(fd.detect_engine(d)[0])
+
+
+class FastaFromSearchTests(unittest.TestCase):
+    """No sidecar tied to the search's FASTA: the database comes from the search's own --fasta, and
+    the organism from that FILE's UniProt headers -- never from its name (Brett, 2026-09-25, on the
+    Siegel searches: "this should be directly queryable from the search logs")."""
+
+    @staticmethod
+    def _fasta(path, entries):
+        """entries: [(accession, OS, OX)]; OS/OX None -> a header without them."""
+        with open(path, "w") as fh:
+            for acc, os_, ox in entries:
+                tail = f" OS={os_} OX={ox} GN=G PE=1 SV=1" if ox else ""
+                fh.write(f">{acc} Protein{tail}\nPEPTIDEK\n")
+        return path
+
+    def _search(self, d, fasta, via="log"):
+        out = search_dir(os.path.join(d, "lab"), "search_out", prov=False)
+        if via == "log":
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"diann-linux --f a.d --fasta {fasta} --out report.parquet\n")
+        return out
+
+    def _check(self, d, out, **kw):
+        err = io.StringIO()
+        with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming")), contextlib.redirect_stderr(err):
+            return fd.check(Args(out, **kw)), err.getvalue()
+
+    def test_the_organism_comes_from_the_headers_not_the_filename(self):
+        """The name says UP000005640 (human); the headers say mouse. The headers win."""
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "UP000005640_9606_plus_contam.fasta"),
+                             [(f"sp|Q{i}|X_MOUSE", "Mus musculus", 10090) for i in range(40)]
+                             + [("Cont_P02769", "Bos taurus", 9913)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["taxon"]), ("Mus musculus", 10090))
+            self.assertEqual(c["organism_source"],
+                             "FASTA headers (OX=10090 in 40 of 40 target entries) via search log "
+                             "--fasta (report.log.txt)")
+            self.assertEqual(c["fasta_path"], fa)
+            self.assertEqual(c["fasta_md5"], hashlib.md5(_read(fa, "rb")).hexdigest())  # noqa: S324
+            self.assertEqual(c["fasta_n_proteins"], 41)
+            self.assertEqual(c["organism_evidence"]["contaminant_entries"], 1)
+            self.assertIn("supporting evidence only",
+                          c["organism_evidence"]["proteome_id_in_filename"])
+
+    def test_untagged_contaminants_still_resolve_at_the_majority(self):
+        """Universal contaminants appended WITHOUT the Cont_ tag (a hand-built FASTA) count as
+        targets; the majority still holds -- 98.9% even over all 21,044 entries of the Sep-2025
+        MRS human+contaminant file (which does tag its contaminants Cont_)."""
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "legacy.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(99)]
+                             + [("sp|P02769|ALBU_BOVIN", "Bos taurus", 9913)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["taxon"]), ("Homo sapiens", 9606))
+            self.assertIn("OX=9606 in 99 of 100 target entries", c["organism_source"])
+
+    def test_a_mixed_taxon_fasta_claims_no_organism_and_says_why(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "mix.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(10)]
+                             + [(f"sp|Q{i}|X_MOUSE", "Mus musculus", 10090) for i in range(10)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["taxon"]), (None, None))
+            self.assertEqual(c["fasta_path"], fa)                  # the database is still known
+            self.assertIn("no clear majority", c["organism_unresolved"])
+
+    def test_the_user_wins_and_a_disagreement_is_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "human.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(20)])
+            out = self._search(d, fa)
+            c, err = self._check(d, out, organism="Mus musculus", taxon=10090)
+            self.assertEqual((c["organism"], c["taxon"]), ("Mus musculus", 10090))
+            self.assertEqual(c["organism_source"], "--organism (given)")
+            self.assertIn("OX=9606", c["organism_warning"])
+            self.assertIn("disagree with the FASTA's own headers", err)
+            c, err = self._check(d, out, organism="Homo sapiens", taxon=9606)
+            self.assertNotIn("organism_warning", c)
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
+                res = run_quiet(fd.stage, Args(out, organism="Mus musculus", taxon=10090))[1]
+            man = _load_json(os.path.join(res["entry"], fd.MANIFEST))
+            self.assertIn("OX=9606", man["organism_warning"])
+            self.assertEqual(man["fasta_path"], fa)
+
+    def test_no_readable_file_is_blank_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            c, _ = self._check(d, self._search(d, os.path.join(d, "gone.fasta")))
+            self.assertEqual((c["organism"], c["fasta_path"], c["fasta_md5"]), (None, None, None))
+            self.assertIn("no FASTA the search names is readable", c["organism_unresolved"])
+
+    def test_non_uniprot_headers_claim_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "custom.fasta"), [(f"contig{i}", None, None)
+                                                              for i in range(5)])
+            c, _ = self._check(d, self._search(d, fa))
+            self.assertEqual((c["organism"], c["fasta_path"]), (None, fa))
+            self.assertIn("no OX=", c["organism_unresolved"])
+
+    def test_a_laptop_path_in_provenance_and_the_hive_path_in_the_log(self):
+        """hive_remote: provenance names the laptop copy, the log the file read on HIVE."""
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "dog.fasta"),
+                             [(f"sp|P{i}|X_CANLF", "Canis lupus familiaris", 9615) for i in range(10)])
+            out = self._search(d, fa)
+            with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+                json.dump({"engine": "diann", "fasta": "/Users/someone/sessions/x/dog.fasta"}, fh)
+            c, _ = self._check(d, out)
+            self.assertEqual((c["fasta_path"], c["taxon"]), (fa, 9615))
+            self.assertIn("search log --fasta", c["fasta_source"])
+
+    def test_two_readable_fastas_cannot_be_one_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self._fasta(os.path.join(d, "a.fasta"), [("sp|P1|A_HUMAN", "Homo sapiens", 9606)])
+            b = self._fasta(os.path.join(d, "b.fasta"), [("sp|P2|B_HUMAN", "Homo sapiens", 9606)])
+            out = search_dir(os.path.join(d, "lab"), "search_out", prov=False)
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"diann-linux --fasta {a} --fasta {b} --out report.parquet\n")
+            c, _ = self._check(d, out)
+            self.assertEqual((c["fasta_path"], c["organism"]), (None, None))
+            self.assertIn("2 FASTA files", c["organism_unresolved"])
+
+    def test_the_manifest_still_passes_frans_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = self._fasta(os.path.join(d, "human.fasta"),
+                             [(f"sp|P{i}|X_HUMAN", "Homo sapiens", 9606) for i in range(20)])
+            out = self._search(d, fa)
+            with env_vars(FRAN_DROP_DIR=os.path.join(d, "incoming"), FRAN_HEALTH="off"):
+                res = run_quiet(fd.stage, Args(out))[1]
+            m, why = fran_read_manifest(res["entry"], "diann")
+            self.assertIsNone(why, why)
+            self.assertEqual((m["organism"], m["taxon"], m["fasta_path"]),
+                             ("Homo sapiens", "9606", fa))
 
 
 class CorpusQueryGuardTests(unittest.TestCase):
@@ -1923,6 +2415,88 @@ class SbatchTests(unittest.TestCase):
             self.assertNotIn("--apply", body)
             self.assertIn("DRY RUN", body)
             self.assertEqual(res["mode"], "dry_run")
+
+
+
+class CoreTreesFromTheShareTable(unittest.TestCase):
+    """Rule 3: the Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map),
+    the same definitions core_submission uses -- fran_deposit keeps no copy of them."""
+
+    def test_backfill_roots_and_core_prefixes_follow_the_table(self):
+        import share_map
+        root = share_map.hive_root(share_map.FLINDERS_SHARE)
+        self.assertTrue(root.startswith("/"))
+        self.assertEqual(fd.backfill_roots(),
+                         [fd.GROUP_ROOT + "/SERVICE", root + "/Data/lab/service"])
+        self.assertEqual(fd.core_prefixes(), (fd.GROUP_ROOT + "/", root + "/"))
+        rows = [dict(r, hive="/x/flinders") if r["share"] == share_map.FLINDERS_SHARE else r
+                for r in share_map.load_table()]
+        with mock.patch.object(share_map, "load_table", return_value=rows):
+            self.assertEqual(fd.backfill_roots()[1], "/x/flinders/Data/lab/service")
+            self.assertEqual(fd.core_prefixes()[1], "/x/flinders/")
+            self.assertEqual(fd.core_search("/x/flinders/Data/lab/service/a/search", set()),
+                             (True, "in a Core tree"))
+
+    def test_the_same_service_tree_as_core_submission(self):
+        import core_submission as cs
+        with mock.patch.dict(os.environ, {"CORE_FLINDERS_ROOT": ""}):
+            self.assertEqual(cs.service_root(), fd.backfill_roots()[1])
+
+    def test_the_quobyte_service_tree_is_the_tables_on_both_sides(self):
+        """core_submission's work root and the tree the backfill walks: one definition, the
+        proteomics-grp share's HIVE path in hive_shares.tsv plus share_map.QUOBYTE_SERVICE."""
+        import core_submission as cs
+        import share_map
+        with mock.patch.dict(os.environ, {"CORE_WORK_ROOT": ""}):
+            self.assertEqual(cs.work_root(), fd.backfill_roots()[0])
+            self.assertEqual(cs.work_root(), fd.GROUP_ROOT + "/SERVICE")
+            rows = [dict(r, hive="/y/quobyte") if r["share"] == share_map.QUOBYTE_SHARE else r
+                    for r in share_map.load_table()]
+            with mock.patch.object(share_map, "load_table", return_value=rows):
+                self.assertEqual(cs.work_root(), "/y/quobyte/SERVICE")
+                self.assertEqual(fd.backfill_roots()[0], "/y/quobyte/SERVICE")
+            rows = [r for r in share_map.load_table() if r["share"] != share_map.QUOBYTE_SHARE]
+            with mock.patch.object(share_map, "load_table", return_value=rows):
+                with self.assertRaises(cs.Stop):
+                    cs.work_root()
+                with self.assertRaises(SystemExit):
+                    fd.backfill_roots()
+
+    def test_no_flinders_row_stops_the_backfill_instead_of_skipping_the_tree(self):
+        import share_map
+        with mock.patch.object(share_map, "load_table", return_value=[]):
+            with self.assertRaises(SystemExit):
+                fd.backfill_roots()
+
+class ReceiptIsAtomicTests(unittest.TestCase):
+    """The receipt carries decisions (opted_out, not_core_facility, qc_run). Written in place, a
+    write that died half-way left a truncated receipt that read_receipt() calls malformed -- and
+    the decision was lost. _write_json_group: tmp + replace, so the old receipt survives."""
+
+    def test_a_failed_write_leaves_the_previous_receipt_whole(self):
+        with tempfile.TemporaryDirectory() as out:
+            self.assertTrue(fd.write_receipt(out, {"status": "qc_run", "qc_rule": "x"}))
+            real_dump = fd.json.dump
+
+            def dies_half_way(obj, fh, **kw):
+                fh.write('{"status": "stag')
+                raise OSError(28, "No space left on device")
+            with mock.patch.object(fd.json, "dump", side_effect=dies_half_way):
+                data = {"status": "staged"}
+                self.assertIsNone(fd.write_receipt(out, data))
+            self.assertIn("No space", data["receipt_error"])
+            self.assertIs(fd.json.dump, real_dump)
+            self.assertEqual(fd.read_receipt(out), {"status": "qc_run", "qc_rule": "x"})
+            self.assertEqual([f for f in os.listdir(out) if f.endswith(".tmp")], [])
+
+    def test_the_receipt_is_group_writable(self):
+        with tempfile.TemporaryDirectory() as out:
+            old = os.umask(0o022)
+            try:
+                p = fd.write_receipt(out, {"status": "staged"})
+            finally:
+                os.umask(old)
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o664)
 
 
 if __name__ == "__main__":

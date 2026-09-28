@@ -32,7 +32,7 @@ Usage (the orchestrator fills these from earlier steps):
 Outputs under --outdir:
   run_manifest.json          everything, machine-readable
   REPRODUCE.md               human-readable methods + how-to-rerun
-  reproduce.sh               re-creates env, re-fetches pinned workflow, re-runs
+  reproduce.sh               re-creates env, re-derives the shipped defaults, re-runs
   MANIFEST.txt               [OK]/[SKIPPED] log of what was captured
   environment/               conda-explicit.txt, pip-freeze.txt, r-sessionInfo.txt, versions.txt
   inputs/                    copies of params, conditions.csv, the workflow manifest
@@ -40,7 +40,9 @@ Outputs under --outdir:
 """
 import sys, os, json, glob, shutil, hashlib, argparse, subprocess, platform, shlex
 
-from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE   # one definition, where it is written
+# one definition each, where it is written
+from fetch_fasta import KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sidecar_state
+from skill_version import skill_version, plugin_meta, label as skill_label
 
 MANIFEST_LINES = []
 def ok(msg):      MANIFEST_LINES.append(f"[OK]      {msg}")
@@ -216,11 +218,10 @@ def main():
     open(os.path.join(env_dir, "versions.txt"), "w").write(json.dumps(versions, indent=2)); ok("tool versions")
 
     # ---- which skill produced this + how it was installed --------------------
-    skill_meta = load_json(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        "..", ".claude-plugin", "plugin.json")) or {}
+    skill_meta = plugin_meta()
     skill_info = {
         "name": skill_meta.get("name", "ucdavis-proteomics-core-pipeline"),
-        "version": skill_meta.get("version", "unknown"),
+        "version": skill_version(),                 # skill_version.py: the one reader
         "title": "UC Davis Proteomics Core pipeline",
         "repository": skill_meta.get("repository", "https://github.com/bsphinney/DE-LIMP"),
         "marketplace": "ucdavis-proteomics-core",
@@ -229,13 +230,14 @@ def main():
             "claude plugin install ucdavis-proteomics-core-pipeline",
         ],
     }
-    open(os.path.join(env_dir, "skill.txt"), "w").write(
+    open(os.path.join(env_dir, "skill.txt"), "w", encoding="utf-8").write(
         "Produced by the {title} Claude skill.\n\n"
-        "Skill:       {name} v{version}\n"
+        "Skill:       {name} {shown}\n"
         "Repository:  {repository}\n"
         "Marketplace: {marketplace}\n\n"
         "Installed with:\n  {i0}\n  {i1}\n".format(
-            i0=skill_info["install"][0], i1=skill_info["install"][1], **skill_info)); ok("skill identity + install")
+            i0=skill_info["install"][0], i1=skill_info["install"][1],
+            shown=skill_label(skill_info["version"]), **skill_info)); ok("skill identity + install")
 
     # ---- copy inputs ---------------------------------------------------------
     in_dir = os.path.join(out, "inputs")
@@ -394,7 +396,11 @@ def main():
     # a sidecar built with the check disabled (a replay of a replay) likewise.
     _rule = fi.get("contaminant_target_rule")
     fasta_repro_keep = ""
-    if fi and fasta_repro_contam != "none" and (not _rule or _rule == KEEP_TARGET_CONTAMINANTS_RULE):
+    # Which rule built the database: fetch_fasta.sidecar_state(), the one definition (legacy /
+    # identity_only / current). A database this replay rebuilds without contaminants has none.
+    _state = sidecar_state(fi) if fi and fasta_repro_contam != "none" else "current"
+    if _state == "legacy" or (fi and fasta_repro_contam != "none"
+                              and _rule == KEEP_TARGET_CONTAMINANTS_RULE):
         fasta_repro_keep = " --keep-target-contaminants"
         fasta_repro_note += (
             " The original database was built before target-identical contaminants were "
@@ -402,6 +408,21 @@ def main():
             "the corrected database." if not _rule else
             " The original database was built with --keep-target-contaminants; this replays "
             "that faithfully -- drop the flag to get the corrected database.")
+    # Built by the identity rule alone (sidecar_state "identity_only": the rule, no
+    # min_unique_peptides -- before the peptide rule, so near-identical entries such as bovine
+    # EEF1A1 vs mouse stayed). Today's fetch_fasta.py would drop more; --min-unique-peptides 0
+    # rebuilds that database. A recorded threshold other than the default (0 included) is
+    # replayed as recorded.
+    _k = fi.get("min_unique_peptides")
+    if _state == "identity_only" and _k is None:
+        fasta_repro_keep += " --min-unique-peptides 0"
+        fasta_repro_note += (
+            " The original database was built before near-identical contaminants were "
+            "removed; this replays that faithfully -- drop --min-unique-peptides 0 to get "
+            "the corrected database.")
+    elif (_state != "legacy" and _k is not None and _k != MIN_UNIQUE_PEPTIDES and
+          _rule != KEEP_TARGET_CONTAMINANTS_RULE and fasta_repro_contam != "none"):
+        fasta_repro_keep += f" --min-unique-peptides {int(_k)}"
     if fasta_repro_content in ("unknown", "as_staged"):
         # A --path override or a HIVE-staged file: not reconstructible from a proteome ID.
         # fetch_fasta.py's entry-count check (content_inferred) is the best guess at what a
@@ -497,7 +518,7 @@ make input drift visible.
 
 {r_section}
 ## Skill that produced this
-- **{skill_info['title']}** — `{skill_info['name']}` v{skill_info['version']}
+- **{skill_info['title']}** — `{skill_info['name']}` {skill_label(skill_info['version'])}
 - Repository: {skill_info['repository']}
 - This analysis was run by the above Claude skill (in Claude Code / Claude Desktop).
 - Installed with:
@@ -520,7 +541,8 @@ make input drift visible.
 SKILL=/path/to/ucdavis-proteomics-core-pipeline bash reproduce.sh
 ```
 `reproduce.sh` rebuilds the conda env from `environment/conda-explicit.txt`,
-re-fetches the workflow **pinned to commit `{commit}`**, re-resolves the engine,
+re-derives the search defaults from the data type (they ship with the skill version above;
+defaults table `{defaults_version}`), re-resolves the engine,
 rebuilds the FASTA, and re-runs search + DE. Compare outputs to
 `checksums/checksums.json`. This is the heavyweight path — it re-runs a multi-hour
 search. If you only want the statistics, use the R script above.
@@ -537,7 +559,7 @@ search. If you only want the statistics, use the R script above.
 ## Capture log
 See `MANIFEST.txt` for exactly what was and wasn't captured.
 """
-    open(os.path.join(out, "REPRODUCE.md"), "w").write(md); ok("REPRODUCE.md")
+    open(os.path.join(out, "REPRODUCE.md"), "w", encoding="utf-8").write(md); ok("REPRODUCE.md")
 
     open(os.path.join(out, "MANIFEST.txt"), "w").write(
         "Reproducibility bundle — capture log\n" + "=" * 40 + "\n" + "\n".join(MANIFEST_LINES) + "\n")

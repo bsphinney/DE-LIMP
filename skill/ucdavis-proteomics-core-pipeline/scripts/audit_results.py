@@ -24,7 +24,8 @@ Checks:
                     quantified under its own accession): possible contamination, KEPT
                     in quantification -- reported, never excluded (WARN)
   contaminant_overlap
-                    real proteins present only as identical Cont_ entries in a
+                    real proteins present only as identical (or peptide-
+                    indistinguishable) Cont_ entries in a
                     database used as-is -- excluded from quant, missing here (WARN)
   de_signal         0 significant (WARN: underpowered) or >50% significant
                     (WARN: likely batch/normalization/confounding artefact)
@@ -40,7 +41,10 @@ import sys, os, csv, json, glob, argparse
 from collections import Counter, defaultdict
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
-from fetch_fasta import target_contaminants, seen_only_as_cont, lost_to_contaminants_message
+from fetch_fasta import (target_contaminants, seen_only_as_cont, lost_to_contaminants_message,
+                         CONT_TAG)
+# What a subject / animal column is called: one definition, shared with --map.
+from collect_conditions import subject_header, subject_assessment
 
 CONTAMINANT_PATTERNS = ("KRT", "KRTAP",            # keratins (skin/hair)
                         "TRYP", "PRSS1", "TRY1",   # trypsin (digestion)
@@ -58,23 +62,55 @@ def read_csv(path):
         return list(csv.DictReader(fh))
 
 
-def audit_conditions(findings, rows, adjp):
-    groups = Counter(r.get("Group", "").strip() for r in rows if r.get("Group", "").strip())
-    if not groups:
+def replication_unit(rows, block_col=None):
+    """The column whose DISTINCT values are the replicates: the block run_de.R recorded
+    (de_provenance block_column), else a conditions.csv column named for the animal /
+    subject (collect_conditions.subject_header). None = every run is its own replicate.
+    Three injections of one mouse are one mouse: counting runs called them three."""
+    if not rows:
+        return None
+    if block_col and block_col in rows[0]:
+        return block_col
+    groups = {r["File.Name"]: (r.get("Group") or "").strip() for r in rows if r.get("File.Name")}
+    for c in rows[0]:
+        if c in ("File.Name", "Group") or not subject_header(c):
+            continue
+        vals = {r["File.Name"]: (r.get(c) or "").strip() for r in rows if r.get("File.Name")}
+        # the header is not enough (a 'Subject' of M/F): the values must look like subjects
+        if all(vals.values()) and not subject_assessment(vals, groups):
+            return c
+    return None
+
+
+def audit_conditions(findings, rows, adjp, block_col=None):
+    runs = Counter(r.get("Group", "").strip() for r in rows if r.get("Group", "").strip())
+    if not runs:
         add(findings, "replication", "FAIL", "No groups assigned in conditions.csv.")
-        return groups
+        return runs
+    unit = replication_unit(rows, block_col)
+    if unit:
+        members = defaultdict(set)
+        for r in rows:
+            g = r.get("Group", "").strip()
+            if g:
+                members[g].add(r[unit].strip())
+        groups = Counter({g: len(v) for g, v in members.items()})
+        what = f"distinct {unit} (n = {unit}, not runs)"
+    else:
+        groups, what = runs, "replicates"
+    detail = {"group_sizes": dict(groups), "unit": unit or "run", "runs_per_group": dict(runs)}
     singletons = [g for g, n in groups.items() if n < 2]
     small = [g for g, n in groups.items() if n == 2]
     if singletons:
         add(findings, "replication", "FAIL",
-            f"Group(s) with <2 replicates have no within-group variance — differential statistics are not valid: {singletons}.",
-            {"group_sizes": dict(groups)})
+            f"Group(s) with <2 {what} have no within-group variance — differential statistics are not valid: {singletons}.",
+            detail)
     elif small:
         add(findings, "replication", "WARN",
-            f"Group(s) with only 2 replicates: {small}. Usable but low power; 3+ is recommended.",
-            {"group_sizes": dict(groups)})
+            f"Group(s) with only 2 {what}: {small}. Usable but low power; 3+ is recommended.",
+            detail)
     else:
-        add(findings, "replication", "PASS", f"All groups have ≥3 replicates.", {"group_sizes": dict(groups)})
+        add(findings, "replication", "PASS", f"All groups have ≥3 {what}.", detail)
     # balance
     if len(groups) >= 2:
         hi, lo = max(groups.values()), min(groups.values())
@@ -183,6 +219,20 @@ def _tokens(cell):
     return {t.strip().upper() for t in (cell or "").split(";") if t.strip()}
 
 
+def removed_contaminant_groups(de_dir):
+    """-> (record, rows): run_de.R's contaminant record and the protein groups its filter
+    removed. The filter takes Cont_ groups out of Expression_Matrix.csv, so a real protein
+    that sat in the database only as a Cont_ entry is visible only in this table now."""
+    try:
+        with open(os.path.join(de_dir or "", "de_provenance.json")) as fh:
+            rec = json.load(fh).get("contaminants") or {}
+    except (OSError, ValueError):
+        return {}, []
+    table = rec.get("removed_table") if rec.get("removed") else None
+    path = os.path.join(de_dir, table) if table else None
+    return rec, (read_csv(path) if path and os.path.exists(path) else [])
+
+
 def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, keratin_sample=False):
     """Proteins that are both a <organism> protein and a common contaminant.
 
@@ -211,17 +261,29 @@ def audit_target_contaminants(findings, meta_path, em_path, de_dir, adjp, kerati
     em_rows = read_csv(em_path) if em_path and os.path.exists(em_path) else []
 
     # Real proteins that exist only as Cont_ entries: a database used as-is, one built with
-    # --keep-target-contaminants, or one built BEFORE the overlap check (legacy sidecar --
-    # the databases that lost ACTB/EEF1A1/KRT8). The matrix makes it concrete where it can.
+    # --keep-target-contaminants, one built BEFORE the overlap check (legacy sidecar -- the
+    # databases that lost ACTB/EEF1A1/KRT8), or one built by the identity rule alone (near-
+    # identical entries: bovine EEF1A1/YWHAZ vs mouse). The matrix makes it concrete where it can.
     kept = tc["kept_as_contaminant"]
     seen = seen_only_as_cont(kept, [(_tokens(r.get("Protein.Group")), r.get("Genes") or "?")
                                     for r in em_rows])
     msg = lost_to_contaminants_message(tc, seen)
     if msg:
+        rec, removed = removed_contaminant_groups(de_dir)
+        gone = seen_only_as_cont(kept, [(_tokens(r.get("Protein.Group")), r.get("Genes") or "?")
+                                        for r in removed])
+        if rec.get("removed"):
+            msg += (f" run_de.R's contaminant filter then removed every {rec.get('tag') or CONT_TAG}"
+                    f" group from the DE ({rec.get('n_protein_groups')} groups, listed in "
+                    f"{rec.get('removed_table')})"
+                    + (f", among them {', '.join(gone[:12])}" if gone else "")
+                    + "; --keep-contaminants keeps them, at the price of testing the true "
+                      "contaminants too.")
         add(findings, "contaminant_overlap", "WARN", msg,
             {"fasta_meta": meta_path, "legacy_database": bool(tc.get("legacy_note")),
+             "database_state": tc.get("state"),
              "genes": sorted({r.get("gene") or r.get("target_acc") or "?" for r in kept}),
-             "seen_only_as_cont": seen})
+             "seen_only_as_cont": seen, "removed_by_de_filter": gone})
 
     if not tc["dropped"]:
         return
@@ -307,8 +369,10 @@ def main():
     ap.add_argument("--conditions")
     ap.add_argument("--de-dir")
     ap.add_argument("--acquisition-json")
-    ap.add_argument("--adjp", type=float, default=0.05)
-    ap.add_argument("--logfc", type=float, default=1.0)
+    # Default: the cutoffs run_de.R recorded in de_provenance.json -- the one definition the
+    # tables, figures and methods use. 0.05 / 1 only when there is no record, and said so.
+    ap.add_argument("--adjp", type=float, default=None)
+    ap.add_argument("--logfc", type=float, default=None)
     ap.add_argument("--min-proteins", type=int, default=500)
     ap.add_argument("--max-missing", type=float, default=0.5)
     ap.add_argument("--keratin-sample", action="store_true",
@@ -321,9 +385,26 @@ def main():
     fasta_meta = a.fasta_meta or ("search.fasta.meta.json"
                                   if os.path.exists("search.fasta.meta.json") else None)
 
+    prov = {}
+    if a.de_dir:
+        try:
+            with open(os.path.join(a.de_dir, "de_provenance.json")) as fh:
+                prov = json.load(fh)
+        except (OSError, ValueError):
+            prov = {}
+    cutoff_source = {}
+    for key, default in (("adjp", 0.05), ("logfc", 1.0)):
+        if getattr(a, key) is not None:
+            cutoff_source[key] = "command line"
+        elif isinstance(prov.get(key), (int, float)):
+            setattr(a, key, float(prov[key])); cutoff_source[key] = "de_provenance.json"
+        else:
+            setattr(a, key, default)
+            cutoff_source[key] = "DEFAULT -- not recorded in de_provenance.json"
+
     findings = []
     if a.conditions and os.path.exists(a.conditions):
-        audit_conditions(findings, read_csv(a.conditions), a.adjp)
+        audit_conditions(findings, read_csv(a.conditions), a.adjp, block_col=prov.get("block_column"))
     if a.acquisition_json and os.path.exists(a.acquisition_json):
         audit_acquisition(findings, a.acquisition_json)
     em = os.path.join(a.de_dir, "Expression_Matrix.csv") if a.de_dir else None
@@ -350,7 +431,8 @@ def main():
         fh.write("\n".join(lines) + "\n")
     with open(os.path.splitext(a.out)[0] + ".json"
               if a.out.endswith(".md") else a.out + ".json", "w") as fh:
-        json.dump({"overall": overall, "n_fail": n_fail, "n_warn": n_warn, "findings": findings}, fh, indent=2)
+        json.dump({"overall": overall, "n_fail": n_fail, "n_warn": n_warn, "findings": findings,
+                   "cutoffs": {"adjp": a.adjp, "logfc": a.logfc, "source": cutoff_source}}, fh, indent=2)
 
     print(json.dumps({"overall": overall, "n_fail": n_fail, "n_warn": n_warn,
                       "report": os.path.abspath(a.out),

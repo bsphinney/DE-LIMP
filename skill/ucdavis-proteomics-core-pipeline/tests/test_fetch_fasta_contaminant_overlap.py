@@ -7,9 +7,17 @@ human P60709, EEF1A1 = P68104, TUBB5 = P07437 ...; plus Cont_Q3LI67 as an exact 
 31 identical to mouse. In a real DIA-NN 2.7.0 HeLa search ACTB, EEF1A1 and KRT8 came out ONLY
 as Cont_ protein groups, and --cont-quant-exclude Cont_ kept them out of quantification.
 
+PROT_0756 (mouse brain IPs, 2026-09-25): identity is not enough -- bovine EF1A1 and 1433Z
+differ from mouse by ONE residue, and both were Cont_-only groups in all 30 runs. So an entry
+that shares peptides with a target and has fewer than 2 independent peptides of its own in the
+search's digest (I = L) is dropped too.
+
 Guards, all offline on tiny synthetic FASTAs:
-  * identical and contained contaminant entries are dropped and recorded; near-identical,
-    too-short and I/L-only-different ones are kept; a target entry is never dropped;
+  * identical and contained contaminant entries are dropped and recorded; so are entries with
+    fewer than 2 independent peptides of their own (a 1-residue difference, an I/L-only one);
+    entries with 2+ are kept, as are too-short and unrelated ones; a target is never dropped;
+  * the peptide digest is the search's (estimate_params.DIANN_DIGEST); missed-cleavage variants
+    of one difference count once; the threshold is an option, and 0 is the identity rule alone;
   * the sidecar lists them, the counts stay truthful, the warning is present, and the
     methods text says what happened;
   * a database used as-is (contaminants already inside) cannot be fixed -- it warns loudly;
@@ -63,11 +71,11 @@ def headers(text):
 
 
 class Matching(unittest.TestCase):
-    def test_identical_and_substring_dropped_everything_else_kept(self):
+    def test_identical_substring_and_peptide_redundant_dropped_the_rest_kept(self):
         kept, dropped, enzymes = ff.drop_target_contaminants(CONT, TARGET)
         self.assertEqual(enzymes, [])      # the trypsin entry matches no target here
         by = {r["cont_acc"]: r for r in dropped}
-        self.assertEqual(set(by), {"Cont_P60712", "Cont_Q3LI67"})
+        self.assertEqual(set(by), {"Cont_P60712", "Cont_Q3LI67", "Cont_Q00001", "Cont_Q00003"})
         self.assertEqual(by["Cont_P60712"]["reason"], "identical")
         self.assertEqual((by["Cont_P60712"]["target_acc"], by["Cont_P60712"]["gene"]),
                          ("P60709", "ACTB"))
@@ -76,11 +84,24 @@ class Matching(unittest.TestCase):
         self.assertEqual((by["Cont_Q3LI67"]["target_acc"], by["Cont_Q3LI67"]["gene"]),
                          ("P05787", "KRT8"))
         self.assertEqual(by["Cont_Q3LI67"]["cont_gene"], "KRTAP6-3")
-        # Near-identical, below the minimum length, I/L-only, and unrelated: all kept, and
-        # written back byte-for-byte.
-        self.assertEqual(headers(kept), [">sp|Cont_Q00001|ACTB_OTHER", ">sp|Cont_Q00002|SHORT_X",
-                                         ">sp|Cont_Q00003|G3P_ILSWAP", ">sp|Cont_P00761|TRYP_PIG"])
-        self.assertIn(f"{GAPDH_IL}\n", kept)
+        # One residue off: every peptide carrying it overlaps the others, so ONE of its own.
+        one = by["Cont_Q00001"]
+        self.assertEqual((one["reason"], one["target_acc"], one["gene"]),
+                         ("shared_peptides", "P60709", "ACTB"))
+        self.assertEqual(one["n_unique_peptides"], 1)
+        # ... carried by 4 digest peptides (0 and 1 missed cleavage, with and without Met).
+        self.assertEqual(one["n_unique_peptides_all"], 4)
+        self.assertEqual(one["n_shared_with_target"], one["n_shared_peptides"])
+        # I/L-only: the same peptides as far as a spectrum can tell.
+        il = by["Cont_Q00003"]
+        self.assertEqual((il["reason"], il["target_acc"], il["n_unique_peptides"]),
+                         ("shared_peptides", "P04406", 0))
+        # Identity drops carry the peptide counts too.
+        self.assertEqual(by["Cont_P60712"]["n_unique_peptides"], 0)
+        # Below the minimum length (no searchable peptide) and unrelated: kept, and written
+        # back byte-for-byte.
+        self.assertEqual(headers(kept), [">sp|Cont_Q00002|SHORT_X", ">sp|Cont_P00761|TRYP_PIG"])
+        self.assertIn(f"{GAPDH[5:11]}\n", kept)
 
     def test_substring_minimum_is_seven_residues(self):
         self.assertEqual(ff.MIN_CONTAINED_LEN, 7)     # DIA-NN's default --min-pep-len
@@ -96,6 +117,113 @@ class Matching(unittest.TestCase):
         actb = next(r for r in dropped if r["cont_acc"] == "Cont_P60712")
         self.assertEqual(actb["n_targets"], 2)
         self.assertEqual(actb["target_accs"], ["P60709", "P99999"])
+
+
+def swap(seq, *positions, to="W"):
+    """seq with each position replaced by `to` (Y where it already is W)."""
+    s = list(seq)
+    for i in positions:
+        s[i] = to if s[i] != to else "Y"
+    return "".join(s)
+
+
+def cont(name, seq):
+    return f">sp|Cont_{name}|{name}_X synthetic OS=X GN=X PE=1 SV=1\n{seq}\n"
+
+
+class PeptideRule(unittest.TestCase):
+    """An entry the search cannot tell apart from a target protein goes, even when it is not
+    identical: fewer than MIN_UNIQUE_PEPTIDES independent peptides of its own (I = L), counted
+    in the search's own digest. Bovine EF1A1 vs mouse Eef1a1 is the case: 1 residue of 462."""
+
+    def drop(self, contaminants, target=TARGET, **kw):
+        _, dropped, enzymes = ff.drop_target_contaminants(contaminants, target, **kw)
+        return {r["cont_acc"]: r for r in dropped}, enzymes
+
+    def test_a_one_residue_difference_is_dropped_however_many_peptides_carry_it(self):
+        # GAPDH position 7 sits in VGVNGFGR; with 1 missed cleavage VKVGVNGFGR and
+        # VGVNGFGRIGR carry it too -- three peptides, one piece of evidence.
+        by, _ = self.drop(cont("E1", swap(GAPDH, 7)))
+        r = by["Cont_E1"]
+        self.assertEqual((r["reason"], r["target_acc"], r["gene"]),
+                         ("shared_peptides", "P04406", "GAPDH"))
+        self.assertEqual((r["n_unique_peptides_all"], r["n_unique_peptides"]), (3, 1))
+        self.assertEqual(r["n_peptides"], r["n_shared_peptides"] + r["n_unique_peptides_all"])
+        self.assertEqual(r["target_accs"], ["P04406"])
+
+    def test_two_independent_peptides_of_its_own_keep_the_entry(self):
+        two = cont("E2", swap(GAPDH, 30, 200))
+        by, _ = self.drop(two)
+        self.assertEqual(by, {})
+        pep = ff.peptide_overlap(ff._fasta_records(two), ff._fasta_records(TARGET))[0]
+        self.assertEqual(pep["n_unique_peptides"], 2)
+        # ... and the threshold is the option: at 3 the same entry goes.
+        by3, _ = self.drop(two, min_unique=3)
+        self.assertEqual(by3["Cont_E2"]["n_unique_peptides"], 2)
+
+    def test_i_and_l_count_as_the_same_residue(self):
+        # I->L in two separate peptides: nothing a spectrum could tell apart -> 0 own, dropped.
+        il = [i for i, c in enumerate(GAPDH) if c == "I"]
+        far = [il[0], il[-1]]
+        by, _ = self.drop(cont("IL", swap(GAPDH, *far, to="L")))
+        self.assertEqual(by["Cont_IL"]["n_unique_peptides"], 0)
+        # The same two positions changed to V ARE two peptides of its own -> kept.
+        by_v, _ = self.drop(cont("IV", swap(GAPDH, *far, to="V")))
+        self.assertEqual(by_v, {})
+
+    def test_no_shared_peptide_is_no_match(self):
+        # Unrelated, and too short for any searchable peptide: neither can be a target protein.
+        by, _ = self.drop(cont("U1", "WWWWHHHHWWWWHHHHWWWW") + cont("U2", "ACDEF"))
+        self.assertEqual(by, {})
+
+    def test_digestion_enzyme_stays_under_the_peptide_rule_too(self):
+        # Porcine trypsin one residue off the pig proteome's entry: exempt when trypsin is used.
+        near = (f">sp|Cont_P00761|TRYP_PIG Trypsin OS=Sus scrofa OX=9823 PE=1 SV=1\n"
+                f"{swap(PIG_TRYPSIN, 12)}\n")
+        by, enzymes = self.drop(near, PIG_TARGET)
+        self.assertEqual(by, {})
+        self.assertEqual([(e["cont_acc"], e["match"], e["target_acc"]) for e in enzymes],
+                         [("Cont_P00761", "shared_peptides", "P00761")])
+        # Not the digest (--enzyme gluc): dropped like any other protein, and says why.
+        by, enzymes = self.drop(near, PIG_TARGET, enzymes_used=("gluc",))
+        self.assertEqual(enzymes, [])
+        self.assertEqual(by["Cont_P00761"]["enzyme_not_used"], "trypsin")
+
+    def test_threshold_zero_is_the_identity_rule_alone(self):
+        by, _ = self.drop(CONT, min_unique=0)
+        self.assertEqual(set(by), {"Cont_P60712", "Cont_Q3LI67"})
+        self.assertNotIn("non-overlapping peptides", ff.contaminant_target_rule(0))
+        self.assertEqual(ff.MIN_UNIQUE_PEPTIDES, 2)
+
+    def test_the_digest_is_the_searchs(self):
+        import estimate_params as ep
+        self.assertIs(ff.DIANN_DIGEST, ep.DIANN_DIGEST)
+        d = ep.DIANN_DIGEST
+        self.assertEqual(ff.MIN_CONTAINED_LEN, d["min_pep_len"])
+        with tempfile.TemporaryDirectory() as root:
+            out = os.path.join(root, "p.cfg")
+            r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "estimate_params.py"),
+                                "--engine", "diann", "--acquisition", "DIA", "--instrument",
+                                "timsTOF HT", "--precursor-mz-range", "299.5", "1200.5",
+                                "--out", out], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out) as fh:
+                cfg = fh.read().split("\n")
+        for line in (f"--cut {d['cut']}", f"--missed-cleavages {d['missed_cleavages']}",
+                     f"--min-pep-len {d['min_pep_len']}", f"--max-pep-len {d['max_pep_len']}",
+                     "--met-excision"):
+            self.assertIn(line, cfg)
+
+    def test_digest_follows_dianns_cut_syntax(self):
+        seq = "MAAAAAAAKGGGGGGGRPCCCCCCCK"
+        self.assertEqual(ff.digest_spans(seq),        # K*,R*: cuts before P too (trypsin/P)
+                         [(0, 9), (0, 17), (9, 17), (9, 26), (17, 26), (1, 9), (1, 17)])
+        no_p = dict(ff.DIANN_DIGEST, cut="K*,R*,!*P", met_excision=False)
+        self.assertEqual(ff.digest_spans(seq, no_p), [(0, 9), (0, 26), (9, 26)])
+        # An empty --cut disables digestion: the whole entry is the one peptide.
+        self.assertEqual(ff.digest_spans(seq, dict(no_p, cut="")), [(0, 26)])
+        with self.assertRaises(ValueError):
+            ff._cut_pattern("K*,KR*")
 
 
 class FetchSidecar(unittest.TestCase):
@@ -128,19 +256,33 @@ class FetchSidecar(unittest.TestCase):
         m, fasta, err = self.fetch("--path", self.target, "--contaminants", "universal",
                                    "--contaminants-path", self.cont)
         self.assertEqual(m["n_contaminants_in_set"], 6)
-        self.assertEqual(m["n_contaminants_appended"], 4)
-        self.assertEqual(m["n_contaminants_dropped_as_target"], 2)
+        self.assertEqual(m["n_contaminants_appended"], 2)
+        self.assertEqual(m["n_contaminants_dropped_as_target"], 4)
         self.assertEqual({r["cont_acc"] for r in m["contaminants_dropped_as_target"]},
-                         {"Cont_P60712", "Cont_Q3LI67"})
-        self.assertEqual(m["n_sequences"], 3 + 4)
-        self.assertEqual(m["n_entries"], 3 + 4)
+                         {"Cont_P60712", "Cont_Q3LI67", "Cont_Q00001", "Cont_Q00003"})
+        self.assertEqual(m["n_sequences"], 3 + 2)
+        self.assertEqual(m["n_entries"], 3 + 2)
         self.assertEqual(m["diann_cont_quant_exclude"], "Cont_")
         self.assertEqual(m["contaminants_identical_to_target_kept"], [])
         # The warning is there, and it IS the recorded note (make_methods keys on that).
         self.assertIn(m["contaminants_dropped_note"], m["warnings"])
-        self.assertIn("removed 2 of the 6", m["contaminants_dropped_note"])
+        self.assertIn("removed 4 of the 6", m["contaminants_dropped_note"])
+        self.assertIn("(1 identical, 1 contained in one, 2 with fewer than 2 peptides of their "
+                      "own)", m["contaminants_dropped_note"])
         self.assertIn("Cont_P60712 (ACTB_BOVIN) = P60709 ACTB", m["contaminants_dropped_note"])
-        self.assertIn("removed 2 of the 6", err)
+        self.assertIn("Cont_Q00001 (ACTB_OTHER) ~ P60709 ACTB (1 own peptide)",
+                      m["contaminants_dropped_note"])
+        self.assertIn("removed 4 of the 6", err)
+        # The rule that ran, its threshold and the digest it counted in are recorded.
+        self.assertEqual(m["min_unique_peptides"], 2)
+        self.assertEqual(m["contaminant_digest"], ff.DIANN_DIGEST)
+        self.assertEqual(m["contaminant_target_rule"], ff.CONTAMINANT_TARGET_RULE)
+        self.assertIn("fewer than 2 non-overlapping peptides", m["contaminant_target_rule"])
+        # Every drop names its target and how many peptides of its own it had.
+        rec = next(r for r in m["contaminants_dropped_as_target"] if r["cont_acc"] == "Cont_Q00001")
+        self.assertEqual((rec["reason"], rec["target_acc"], rec["n_unique_peptides"]),
+                         ("shared_peptides", "P60709", 1))
+        self.assertTrue(all("n_unique_peptides" in r for r in m["contaminants_dropped_as_target"]))
         # The searched database: the dropped contaminants are gone ...
         self.assertNotIn(">sp|Cont_P60712|", fasta)
         self.assertNotIn(">sp|Cont_Q3LI67|", fasta)
@@ -164,8 +306,9 @@ class FetchSidecar(unittest.TestCase):
                 mock.patch.object(ff, "_get_json", return_value=(data, {})):
             m, _, _ = self.fetch("--proteome", "UP000005640", "--hive", "--contaminants",
                                  "universal", "--contaminants-path", self.cont)
-        self.assertEqual(m["n_contaminants_dropped_as_target"], 2)
-        self.assertIn("is a Homo sapiens protein", m["contaminants_dropped_note"])
+        self.assertEqual(m["n_contaminants_dropped_as_target"], 4)
+        self.assertIn("cannot be told apart from, a Homo sapiens protein",
+                      m["contaminants_dropped_note"])
 
     def test_no_overlap_leaves_everything_as_before(self):
         clean = os.path.join(self.root, "clean.fasta")
@@ -192,7 +335,7 @@ class FetchSidecar(unittest.TestCase):
         self.assertEqual(m["n_contaminants_appended"], 0)       # used as-is ...
         self.assertEqual(m["n_contaminants_dropped_as_target"], 0)  # ... so nothing removable
         kept = {r["cont_acc"] for r in m["contaminants_identical_to_target_kept"]}
-        self.assertEqual(kept, {"Cont_P60712", "Cont_Q3LI67"})
+        self.assertEqual(kept, {"Cont_P60712", "Cont_Q3LI67", "Cont_Q00001", "Cont_Q00003"})
         w = next(x for x in m["warnings"] if "cannot be removed" in x)
         self.assertIn("Cont_P60712 (ACTB_BOVIN) = P60709 ACTB", w)
         self.assertIn("without --path", w)
@@ -213,9 +356,10 @@ class FetchSidecar(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(md) as fh:
             text = fh.read()
-        self.assertIn("2 contaminant entries identical to (or contained in) Homo sapiens "
-                      "proteins were removed from the library first, so those proteins are "
-                      "quantified under their own accessions.", text)
+        self.assertIn("4 contaminant entries that the search could not tell apart from Homo "
+                      "sapiens proteins (identical or contained sequence, or fewer than 2 "
+                      "peptides of their own) were removed from the library first, so those "
+                      "proteins are quantified under their own accessions.", text)
         # Described in the sentence, so NOT repeated as something to resolve before publication.
         self.assertNotIn("Database build warnings", text)
 
@@ -339,7 +483,7 @@ class DigestionEnzymes(unittest.TestCase):
                 fh.write(PIG_TARGET + CONT + filler)
             m, _ = self.fetch(root, "--path", combined, "--contaminants", "universal")
         self.assertEqual({r["cont_acc"] for r in m["contaminants_identical_to_target_kept"]},
-                         {"Cont_P60712", "Cont_Q3LI67"})
+                         {"Cont_P60712", "Cont_Q3LI67", "Cont_Q00001", "Cont_Q00003"})
         self.assertEqual([r["cont_acc"] for r in m["contaminants_kept_despite_target_match"]],
                          ["Cont_P00761"])
 
@@ -517,8 +661,9 @@ class Auditors(unittest.TestCase):
         self.assertEqual(f["status"], "WARN")
         self.assertTrue(f["detail"]["legacy_database"])
         self.assertIn("built before fetch_fasta.py checked", f["message"])
-        self.assertIn("2 of its Cont_ entries are Homo sapiens proteins", f["message"])
-        self.assertIn("Affected: ACTB, KRT8", f["message"])
+        self.assertIn("4 of its Cont_ entries are (or cannot be told apart from) Homo sapiens "
+                      "proteins", f["message"])
+        self.assertIn("Affected: ACTB, GAPDH, KRT8", f["message"])
         self.assertEqual(f["detail"]["seen_only_as_cont"], ["ACTB (Cont_P60712)"])
         self.assertIn("Rebuild the FASTA", f["message"])
 
@@ -561,6 +706,48 @@ class Auditors(unittest.TestCase):
         self.assertFalse([x for x in a["findings"] if "could not read" in x["message"]
                           and meta_path in x["message"]])
 
+    def test_identity_only_sidecar_names_the_near_identical_proteins(self):
+        """Built by the identity rule alone (the rule, no min_unique_peptides -- fetch_fasta.py
+        before 2.8.0): the near-identical entries stayed, so a 1-residue GAPDH twin took GAPDH's
+        peptides. Re-checked in the searched FASTA, the auditor names the protein and the fix."""
+        meta = self.legacy_meta(TARGET + cont("E1", swap(GAPDH, 7)),
+                                contaminant_target_rule=ff.contaminant_target_rule(0))
+        self.assertEqual(ff.sidecar_state(meta), "identity_only")
+        f = self.finding(self.audit("--fasta-meta", self.write_meta(meta)), "contaminant_overlap")
+        self.assertEqual(f["status"], "WARN")
+        self.assertEqual(f["detail"]["database_state"], "identity_only")
+        self.assertIn("identity rule alone", f["message"])
+        self.assertIn("1 of its Cont_ entries share peptides with Homo sapiens proteins",
+                      f["message"])
+        self.assertIn("Affected: GAPDH", f["message"])
+        self.assertIn(ff.REBUILD_ADVICE, f["message"])
+        self.assertEqual(f["detail"]["genes"], ["GAPDH"])
+
+    def test_identity_only_sidecar_without_its_fasta_names_the_measured_set(self):
+        meta = self.legacy_meta(contaminant_target_rule=ff.contaminant_target_rule(0),
+                                organism="Mus musculus", taxid=10090)
+        tc = ff.target_contaminants(meta)
+        self.assertEqual((tc["state"], tc["kept_as_contaminant"]), ("identity_only", []))
+        for part in ("identity rule alone", "no longer readable", "10 such entries",
+                     "bovine EEF1A1, YWHAZ and TUBA1D", "run_de.R's contaminant filter removes",
+                     ff.REBUILD_ADVICE):
+            self.assertIn(part, tc["legacy_note"])
+
+    def test_sidecar_states(self):
+        base = {"contaminant_set": "universal", "n_contaminants_appended": 381}
+        rule = ff.contaminant_target_rule()
+        for meta, want in (({}, "current"), ({"contaminant_set": "none"}, "current"),
+                           (base, "legacy"),
+                           (dict(base, contaminant_target_rule=rule), "identity_only"),
+                           (dict(base, contaminant_target_rule=rule, min_unique_peptides=0),
+                            "identity_only"),
+                           (dict(base, contaminant_target_rule=rule, min_unique_peptides=2),
+                            "current"),
+                           (dict(base, contaminant_target_rule=ff.KEEP_TARGET_CONTAMINANTS_RULE),
+                            "current")):
+            self.assertEqual(ff.sidecar_state(meta), want, meta)
+            self.assertEqual(ff._is_legacy_sidecar(meta), want == "legacy")
+
     def test_old_sidecar_without_contaminants_is_not_flagged(self):
         meta = {"organism": "Homo sapiens", "taxid": 9606, "contaminant_set": "none",
                 "n_contaminants_appended": 0}
@@ -602,8 +789,8 @@ class KeepTargetContaminants(unittest.TestCase):
         self.assertEqual(m["n_contaminants_appended"], 6)
         self.assertIn(">sp|Cont_P60712|ACTB_BOVIN", headers(fasta))
         self.assertEqual({r["cont_acc"] for r in m["contaminants_identical_to_target_kept"]},
-                         {"Cont_P60712", "Cont_Q3LI67"})
-        self.assertTrue(any(w.startswith("--keep-target-contaminants: kept 2") for w in m["warnings"]))
+                         {"Cont_P60712", "Cont_Q3LI67", "Cont_Q00001", "Cont_Q00003"})
+        self.assertTrue(any(w.startswith("--keep-target-contaminants: kept 4") for w in m["warnings"]))
 
     def repro(self, fasta_info):
         with tempfile.TemporaryDirectory() as tmp:
@@ -643,9 +830,25 @@ class KeepTargetContaminants(unittest.TestCase):
 
     def test_new_sidecar_replays_without_the_flag(self):
         sh = self.repro({**self.BASE, "contaminant_target_rule": ff.CONTAMINANT_TARGET_RULE,
+                         "min_unique_peptides": ff.MIN_UNIQUE_PEPTIDES,
                          "n_contaminants_appended": 228})
         self.assertNotIn("--keep-target-contaminants", self.fetch_line(sh))
+        self.assertNotIn("--min-unique-peptides", self.fetch_line(sh))
         self.assertNotIn("replays that faithfully", sh)
+
+    def test_identity_rule_sidecar_replays_with_the_peptide_rule_off(self):
+        # Built with the identity rule alone (rule recorded, no min_unique_peptides): today's
+        # default would also drop near-identical entries, so the replay turns that off.
+        sh = self.repro({**self.BASE, "contaminant_target_rule": ff.contaminant_target_rule(0),
+                         "n_contaminants_appended": 228})
+        self.assertIn("--min-unique-peptides 0", self.fetch_line(sh))
+        self.assertNotIn("--keep-target-contaminants", self.fetch_line(sh))
+        self.assertIn("built before near-identical contaminants were removed", sh)
+
+    def test_a_non_default_threshold_is_replayed(self):
+        sh = self.repro({**self.BASE, "contaminant_target_rule": ff.contaminant_target_rule(3),
+                         "min_unique_peptides": 3, "n_contaminants_appended": 228})
+        self.assertIn("--min-unique-peptides 3", self.fetch_line(sh))
 
     def test_a_replay_of_a_replay_keeps_the_flag(self):
         sh = self.repro({**self.BASE, "contaminant_target_rule": ff.KEEP_TARGET_CONTAMINANTS_RULE})
@@ -654,6 +857,31 @@ class KeepTargetContaminants(unittest.TestCase):
     def test_old_sidecar_without_contaminants_needs_no_flag(self):
         sh = self.repro({**self.BASE, "contaminant_set": "none", "n_contaminants_appended": 0})
         self.assertNotIn("--keep-target-contaminants", self.fetch_line(sh))
+
+    def test_replay_flags_follow_sidecar_state(self):
+        """provenance.py decides the replay from fetch_fasta.sidecar_state() (rule 3). The flags
+        for each state are what the inline check gave before -- compared, old against new, on
+        all of these shapes when the switch was made."""
+        B = self.BASE
+        rule = ff.CONTAMINANT_TARGET_RULE
+        for info, state, flags in (
+                (B, "legacy", ["--keep-target-contaminants"]),
+                ({**B, "contaminant_target_rule": ff.contaminant_target_rule(0)}, "identity_only",
+                 ["--min-unique-peptides 0"]),
+                ({**B, "contaminant_target_rule": rule, "min_unique_peptides": 0}, "identity_only",
+                 ["--min-unique-peptides 0"]),
+                ({**B, "contaminant_target_rule": rule, "min_unique_peptides": 2}, "current", []),
+                ({**B, "contaminant_target_rule": rule, "min_unique_peptides": 3}, "current",
+                 ["--min-unique-peptides 3"]),
+                ({**B, "contaminant_target_rule": ff.KEEP_TARGET_CONTAMINANTS_RULE}, "current",
+                 ["--keep-target-contaminants"])):
+            with self.subTest(state=state, info=info.get("min_unique_peptides")):
+                self.assertEqual(ff.sidecar_state(info), state)
+                line = self.fetch_line(self.repro(info))
+                got = [f for f in ("--keep-target-contaminants", "--min-unique-peptides 0",
+                                   "--min-unique-peptides 2", "--min-unique-peptides 3")
+                       if f in line]
+                self.assertEqual(got, flags)
 
 
 class EnzymeNames(unittest.TestCase):

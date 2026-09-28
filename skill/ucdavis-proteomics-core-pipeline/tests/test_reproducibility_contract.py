@@ -288,7 +288,7 @@ class TestRunRestrictionHappensBeforeRollup(unittest.TestCase):
 
     def test_runs_are_filtered_before_readdiann(self):
         restrict = self.src.find("Run %in%")
-        read = self.src.find("limpa::readDIANN(dpc_input")
+        read = self.src.find("read_diann_annotated(dpc_input")   # limpa_compat.R's readDIANN()
         self.assertNotEqual(restrict, -1,
                             "run_de.R no longer restricts runs in the arrow query; "
                             "excluded runs will decide the protein set again")
