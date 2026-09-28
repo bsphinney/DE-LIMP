@@ -294,7 +294,9 @@ class Restyle(unittest.TestCase):
             fh.write(png_bytes("pca.png"))
         with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
             json.dump({"adjp": 0.05, "n_samples": 6, "groups": {"A": 3, "B": 3},
-                       "contrasts": ["B-A"], "display_label": "DPC-Quant + limma (limpa)"}, fh)
+                       "contrasts": ["B-A"], "display_label": "DPC-Quant + limma (limpa)",
+                       "pipeline_id": "dpc", "missing_policy": "Missing precursors modelled via "
+                       "the detection probability curve; not imputed, not dropped."}, fh)
         with open(os.path.join(tables, "DE_dpc_B.A.csv"), "w") as fh:
             fh.write("Protein.Group,logFC,adj.P.Val\nP1,1,0.01\n")
         with open(os.path.join(tables, "QC_detected_vs_inferred.csv"), "w") as fh:

@@ -12,9 +12,11 @@ and make a podcast about". Guards (stdlib; the real-browser test skips without o
   * make_analysis_html --no-pdf, and finalize's [INFO] line when there is no HTML to print.
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -91,6 +93,48 @@ class Convert(unittest.TestCase):
         self.assertTrue(os.path.basename(fake.profile).startswith("html2pdf-profile-"))
         self.assertFalse(os.path.exists(fake.profile))
         self.assertFalse(os.path.exists(self.pdf + ".part"))
+
+    def test_the_profile_is_removed_even_when_a_helper_is_still_writing_to_it(self):
+        # the first rmtree races a helper process that writes one more file into the profile
+        real, calls = shutil.rmtree, []
+
+        def racing(path, ignore_errors=False):
+            calls.append(path)
+            real(path, ignore_errors=ignore_errors)
+            if len(calls) == 1:
+                os.makedirs(path, exist_ok=True)
+                with open(os.path.join(path, "SingletonLock"), "w") as fh:
+                    fh.write("x")
+        fake = FakeBrowser(writes=True, exits=False)
+        with mock.patch.object(h2p.shutil, "rmtree", side_effect=racing), \
+                mock.patch.object(h2p.time, "sleep"):
+            ok, note = h2p.convert(self.html, self.pdf, timeout=10, browser="/x/chrome",
+                                   popen=fake, poll=0.01)
+        self.assertTrue(ok, note)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertFalse(os.path.exists(fake.profile))
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "process groups are POSIX")
+    def test_helpers_left_in_the_browsers_group_are_stopped(self):
+        # the leader exits at once; its helper (sleep) stays in the group, as a browser's can
+        proc = subprocess.Popen(["sh", "-c", "sleep 30 & exit 0"], start_new_session=True)
+        proc.wait()
+
+        def group_gone():
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:                        # macOS, transiently
+                pass
+            return False
+        self.assertFalse(group_gone())                     # the helper is still there
+        h2p._reap_group(proc.pid, timeout=0.2)
+        deadline = time.monotonic() + 5
+        while not group_gone():
+            if time.monotonic() > deadline:
+                self.fail("the browser's leftover helper was not stopped")
+            time.sleep(0.05)
 
     def test_no_browser_writes_no_pdf_and_says_how(self):
         with mock.patch.object(h2p, "find_browser", return_value=None):

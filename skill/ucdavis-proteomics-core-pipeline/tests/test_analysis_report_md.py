@@ -60,6 +60,7 @@ class MarkdownTwin(unittest.TestCase):
         with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
             json.dump({"adjp": 0.05, "n_samples": 6, "groups": {"A": 3, "B": 3},
                        "contrasts": ["B-A"], "display_label": "DPC-Quant + limma (limpa)",
+                       "pipeline_id": "dpc",
                        "detection_matrix": {"file": "Detection_Matrix.csv",
                                             "zero_means": "inferred"}}, fh)
         with open(os.path.join(tables, "QC_detected_vs_inferred.csv"), "w") as fh:
@@ -79,7 +80,7 @@ class MarkdownTwin(unittest.TestCase):
                      "![PCA of the samples](figures/pca.png)\n\n## Key findings\n\n"
                      "![Volcano — B vs A](figures/volcano_B.A.png)\n"
                      "![p-values — B vs A](figures/pvalue_B.A.png)\n- a list item\n\n"
-                     "![Gone](figures/qc_protein_counts.png)\n\n"
+                     "![Gone](figures/heatmap_top.png)\n\n"
                      "## Audit & caveats\n\n- ⚠️ one warning\n\n## Data Quality Notes\n\n"
                      "1. **Something.**\n   - detail\n")
         # the Submission section and header fact come from the attached record
@@ -126,8 +127,8 @@ class MarkdownTwin(unittest.TestCase):
         for cap in ("Volcano caption from figures.json.", "P-value caption.", "PCA caption."):
             self.assertIn(cap, self.md)
         self.assertIn("![Figure 2. Volcano — B vs A](figures/volcano_B.A.png)", self.md)
-        self.assertIn("> **Note:** figure missing: qc_protein_counts.png", self.md)
-        self.assertIn("figure missing: qc_protein_counts.png", self.html)
+        self.assertIn("> **Note:** figure missing: heatmap_top.png", self.md)
+        self.assertIn("figure missing: heatmap_top.png", self.html)
 
     def test_numbers_match_the_de_table(self):
         sig = [r for r in self.de if r["adj.P.Val"] < 0.05]

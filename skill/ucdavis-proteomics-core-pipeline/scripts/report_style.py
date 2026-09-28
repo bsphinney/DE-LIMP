@@ -132,6 +132,8 @@ thead th{position:sticky;top:0;z-index:1;background:var(--surface-2);font-size:.
 tbody tr:nth-child(even) td{background:var(--zebra)}
 tbody tr:last-child td{border-bottom:0}
 td.num,th.num{text-align:right;white-space:nowrap}
+tr.divider td{background:var(--surface-2) !important;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em;text-align:center;border-top:2px solid var(--line)}
+.scrollhint{font-size:.8rem;color:var(--muted);margin:.8rem 0 -.6rem;text-align:right}
 blockquote{margin:1rem 0;padding:.6rem 1rem;border-left:4px solid var(--info);background:var(--info-bg);border-radius:8px}
 footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--muted);font-size:.82rem}
 /* the CoreOmics submission (submission_report.render_html): the form as a definition list */
@@ -160,7 +162,7 @@ footer.foot{max-width:78rem;margin:0 auto;padding:0 1rem 2.5rem;color:var(--mute
     --critical-bg:#fdecea;--zebra:#f6f7f9;--shadow:none;color-scheme:light}
   @page{margin:14mm 12mm}
   body{background:#fff;color:#000;font-size:11pt}
-  .toc,.toggle,.lb,.skip{display:none !important}
+  .toc,.toggle,.lb,.skip,.scrollhint{display:none !important}
   .layout{display:block;padding:0;max-width:none}
   .band{background:#fff;color:#000;border-bottom:2px solid #000;padding:0 0 .8rem;margin-bottom:.8rem}
   .band h1{padding-right:0}
@@ -200,6 +202,13 @@ JS = r"""
   return window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}
  function set(t){root.setAttribute('data-theme',t);if(b)b.textContent=t==='dark'?'☀ Light':'☾ Dark';}
  if(b){set(cur());b.addEventListener('click',function(){set(cur()==='dark'?'light':'dark');});}
+ // a table wider than the screen scrolls in its own box: say so, or it just looks cut off
+ function hints(){var w=document.querySelectorAll('.tablewrap');for(var i=0;i<w.length;i++){
+  var t=w[i],h=t.previousElementSibling,has=h&&h.className==='scrollhint';
+  if(t.scrollWidth>t.clientWidth+4){if(!has){h=document.createElement('div');h.className='scrollhint';
+   h.textContent='\u21c6 wider than the screen: swipe the table sideways';t.parentNode.insertBefore(h,t);}}
+  else if(has){h.parentNode.removeChild(h);}}}
+ hints();window.addEventListener('resize',hints);
  var toc=document.querySelector('details.toc');
  if(toc&&window.matchMedia&&!matchMedia('(min-width: 1100px)').matches)toc.removeAttribute('open');
  var lb=document.getElementById('lb'),li,lc;
@@ -275,16 +284,21 @@ def note(text):
 
 def table(head_cells, body_rows):
     """head_cells / body_rows hold already-rendered inline HTML. A column whose body cells
-    all read as numbers is right-aligned, header included."""
+    all read as numbers is right-aligned, header included. A body row given as
+    {"divider": text} is a full-width divider line (e.g. "not significant below")."""
     ncol = len(head_cells)
-    numeric = [bool(body_rows) and all(is_number(r[j]) for r in body_rows if j < len(r) and
-                                       re.sub(r"<[^>]+>", "", r[j]).strip() not in ("", "—", "-", "NA"))
-               and any(j < len(r) and is_number(r[j]) for r in body_rows) for j in range(ncol)]
+    cells = [r for r in body_rows if not isinstance(r, dict)]
+    numeric = [bool(cells) and all(is_number(r[j]) for r in cells if j < len(r) and
+                                   re.sub(r"<[^>]+>", "", r[j]).strip() not in ("", "—", "-", "NA"))
+               and any(j < len(r) and is_number(r[j]) for r in cells) for j in range(ncol)]
     cls = lambda j: ' class="num"' if j < ncol and numeric[j] else ""   # noqa: E731
     t = ['<div class="tablewrap"><table><thead><tr>']
     t += [f"<th{cls(j)}>{c}</th>" for j, c in enumerate(head_cells)]
     t.append("</tr></thead><tbody>")
     for r in body_rows:
+        if isinstance(r, dict):
+            t.append(f'<tr class="divider"><td colspan="{ncol}">{esc(r["divider"])}</td></tr>')
+            continue
         t.append("<tr>" + "".join(f"<td{cls(j)}>{c}</td>" for j, c in enumerate(r)) + "</tr>")
     t.append("</tbody></table></div>")
     return "".join(t)
