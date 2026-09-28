@@ -41,6 +41,8 @@ from collections import Counter, defaultdict
 
 # The list's ONE definition is the FASTA sidecar; the wording for lost proteins lives there too.
 from fetch_fasta import target_contaminants, seen_only_as_cont, lost_to_contaminants_message
+# What a subject / animal column is called: one definition, shared with --map.
+from collect_conditions import subject_header, subject_assessment
 
 CONTAMINANT_PATTERNS = ("KRT", "KRTAP",            # keratins (skin/hair)
                         "TRYP", "PRSS1", "TRY1",   # trypsin (digestion)
@@ -58,23 +60,55 @@ def read_csv(path):
         return list(csv.DictReader(fh))
 
 
-def audit_conditions(findings, rows, adjp):
-    groups = Counter(r.get("Group", "").strip() for r in rows if r.get("Group", "").strip())
-    if not groups:
+def replication_unit(rows, block_col=None):
+    """The column whose DISTINCT values are the replicates: the block run_de.R recorded
+    (de_provenance block_column), else a conditions.csv column named for the animal /
+    subject (collect_conditions.subject_header). None = every run is its own replicate.
+    Three injections of one mouse are one mouse: counting runs called them three."""
+    if not rows:
+        return None
+    if block_col and block_col in rows[0]:
+        return block_col
+    groups = {r["File.Name"]: (r.get("Group") or "").strip() for r in rows if r.get("File.Name")}
+    for c in rows[0]:
+        if c in ("File.Name", "Group") or not subject_header(c):
+            continue
+        vals = {r["File.Name"]: (r.get(c) or "").strip() for r in rows if r.get("File.Name")}
+        # the header is not enough (a 'Subject' of M/F): the values must look like subjects
+        if all(vals.values()) and not subject_assessment(vals, groups):
+            return c
+    return None
+
+
+def audit_conditions(findings, rows, adjp, block_col=None):
+    runs = Counter(r.get("Group", "").strip() for r in rows if r.get("Group", "").strip())
+    if not runs:
         add(findings, "replication", "FAIL", "No groups assigned in conditions.csv.")
-        return groups
+        return runs
+    unit = replication_unit(rows, block_col)
+    if unit:
+        members = defaultdict(set)
+        for r in rows:
+            g = r.get("Group", "").strip()
+            if g:
+                members[g].add(r[unit].strip())
+        groups = Counter({g: len(v) for g, v in members.items()})
+        what = f"distinct {unit} (n = {unit}, not runs)"
+    else:
+        groups, what = runs, "replicates"
+    detail = {"group_sizes": dict(groups), "unit": unit or "run", "runs_per_group": dict(runs)}
     singletons = [g for g, n in groups.items() if n < 2]
     small = [g for g, n in groups.items() if n == 2]
     if singletons:
         add(findings, "replication", "FAIL",
-            f"Group(s) with <2 replicates have no within-group variance — differential statistics are not valid: {singletons}.",
-            {"group_sizes": dict(groups)})
+            f"Group(s) with <2 {what} have no within-group variance — differential statistics are not valid: {singletons}.",
+            detail)
     elif small:
         add(findings, "replication", "WARN",
-            f"Group(s) with only 2 replicates: {small}. Usable but low power; 3+ is recommended.",
-            {"group_sizes": dict(groups)})
+            f"Group(s) with only 2 {what}: {small}. Usable but low power; 3+ is recommended.",
+            detail)
     else:
-        add(findings, "replication", "PASS", f"All groups have ≥3 replicates.", {"group_sizes": dict(groups)})
+        add(findings, "replication", "PASS", f"All groups have ≥3 {what}.", detail)
     # balance
     if len(groups) >= 2:
         hi, lo = max(groups.values()), min(groups.values())
@@ -333,8 +367,10 @@ def main():
     ap.add_argument("--conditions")
     ap.add_argument("--de-dir")
     ap.add_argument("--acquisition-json")
-    ap.add_argument("--adjp", type=float, default=0.05)
-    ap.add_argument("--logfc", type=float, default=1.0)
+    # Default: the cutoffs run_de.R recorded in de_provenance.json -- the one definition the
+    # tables, figures and methods use. 0.05 / 1 only when there is no record, and said so.
+    ap.add_argument("--adjp", type=float, default=None)
+    ap.add_argument("--logfc", type=float, default=None)
     ap.add_argument("--min-proteins", type=int, default=500)
     ap.add_argument("--max-missing", type=float, default=0.5)
     ap.add_argument("--keratin-sample", action="store_true",
@@ -347,9 +383,26 @@ def main():
     fasta_meta = a.fasta_meta or ("search.fasta.meta.json"
                                   if os.path.exists("search.fasta.meta.json") else None)
 
+    prov = {}
+    if a.de_dir:
+        try:
+            with open(os.path.join(a.de_dir, "de_provenance.json")) as fh:
+                prov = json.load(fh)
+        except (OSError, ValueError):
+            prov = {}
+    cutoff_source = {}
+    for key, default in (("adjp", 0.05), ("logfc", 1.0)):
+        if getattr(a, key) is not None:
+            cutoff_source[key] = "command line"
+        elif isinstance(prov.get(key), (int, float)):
+            setattr(a, key, float(prov[key])); cutoff_source[key] = "de_provenance.json"
+        else:
+            setattr(a, key, default)
+            cutoff_source[key] = "DEFAULT -- not recorded in de_provenance.json"
+
     findings = []
     if a.conditions and os.path.exists(a.conditions):
-        audit_conditions(findings, read_csv(a.conditions), a.adjp)
+        audit_conditions(findings, read_csv(a.conditions), a.adjp, block_col=prov.get("block_column"))
     if a.acquisition_json and os.path.exists(a.acquisition_json):
         audit_acquisition(findings, a.acquisition_json)
     em = os.path.join(a.de_dir, "Expression_Matrix.csv") if a.de_dir else None
@@ -376,7 +429,8 @@ def main():
         fh.write("\n".join(lines) + "\n")
     with open(os.path.splitext(a.out)[0] + ".json"
               if a.out.endswith(".md") else a.out + ".json", "w") as fh:
-        json.dump({"overall": overall, "n_fail": n_fail, "n_warn": n_warn, "findings": findings}, fh, indent=2)
+        json.dump({"overall": overall, "n_fail": n_fail, "n_warn": n_warn, "findings": findings,
+                   "cutoffs": {"adjp": a.adjp, "logfc": a.logfc, "source": cutoff_source}}, fh, indent=2)
 
     print(json.dumps({"overall": overall, "n_fail": n_fail, "n_warn": n_warn,
                       "report": os.path.abspath(a.out),

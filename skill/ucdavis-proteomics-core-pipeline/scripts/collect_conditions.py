@@ -46,13 +46,17 @@ SAMPLE_HEADERS = {"file.name", "filename", "file", "run", "sample", "sample name
                   "samplename", "name", "raw", "raw file", "rawfile", "id"}
 GROUP_HEADERS = {"group", "condition", "treatment", "class", "type", "category",
                  "cohort", "phenotype"}
-BATCH_HEADERS = {"batch", "block", "plate", "run order", "runorder"}
-# The unit samples come from. Kept under its own name so run_de.R can fit it as a random
-# effect (--block); as Covariate1 it was a fixed effect, and nested in the groups (mice
-# within age) that makes the design rank-deficient. Matched after dropping an id/number
-# suffix, so "Mouse ID", "animal_no" and "Patient #" count too.
+# "block" is NOT a batch header: filed as Batch, a sample sheet's Block column became the
+# fixed covariate Batch, and `--block Batch` is then refused (a column cannot be both). It
+# names a blocking unit, so it goes through the subject detection below instead.
+BATCH_HEADERS = {"batch", "plate", "run order", "runorder"}
+# The unit samples come from. Kept under its own name so run_de.R can fit it as a block
+# (--block); as Covariate1 it was a fixed effect, and nested in the groups (mice within
+# age) that makes the design rank-deficient. Matched after dropping an id/number suffix,
+# so "Mouse ID", "animal_no" and "Patient #" count too. Its VALUES still have to look like
+# subjects (subject_assessment) or it stays a covariate and --map asks.
 SUBJECT_HEADERS = {"mouse", "mice", "animal", "rat", "subject", "patient", "donor",
-                   "individual", "participant", "pair"}
+                   "individual", "participant", "pair", "block"}
 
 
 def subject_header(h):

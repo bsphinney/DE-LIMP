@@ -650,7 +650,18 @@ def agents_md(f):
     if f["de_files"]:
         hdr = _csv_header(f["de_files"][0])
         L.append(f"`DE_*.csv` (header of `{os.path.basename(f['de_files'][0])}`):")
-        L += [f"- `{c}` — {COLUMNS.get(c, 'no description recorded')}" for c in hdr]
+        # Detected_<group> / Evidence: described by run_de.R in de_provenance.json
+        # (detection_matrix.de_columns) -- read, never restated here.
+        dcols = ((de.get("detection_matrix") or {}).get("de_columns") or {}) if isinstance(
+            de.get("detection_matrix"), dict) else {}
+
+        def _desc(c):
+            if c in COLUMNS:
+                return COLUMNS[c]
+            if c.startswith("Detected_") and dcols.get("Detected_<group>"):
+                return f"group `{c[len('Detected_'):]}`: {dcols['Detected_<group>']}"
+            return dcols.get(c, "no description recorded")
+        L += [f"- `{c}` — {_desc(c)}" for c in hdr]
     if files.get("expr"):
         hdr = _csv_header(files["expr"])
         ann = [c for c in hdr if c in COLUMNS]

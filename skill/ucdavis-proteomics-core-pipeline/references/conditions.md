@@ -13,8 +13,8 @@ genuine ambiguities.
 2. **A file** — any CSV/TSV they already have. Column names are auto-detected:
    sample column from {File.Name, filename, run, sample, sample name, name, raw,
    id}; group from {group, condition, treatment, class, type, cohort, phenotype};
-   batch from {batch, block, plate, run order}; a subject column from {mouse, mice,
-   animal, rat, subject, patient, donor, individual, participant, pair} (an `id` / `no` /
+   batch from {batch, plate, run order}; a subject column from {mouse, mice,
+   animal, rat, subject, patient, donor, individual, participant, pair, block} (an `id` / `no` /
    `number` suffix allowed: `Mouse ID`, `animal_no`) is kept **under its own name**
    (`Mouse ID` → `Mouse_ID`) — but only when its VALUES look like subjects: ≥ 3 of them,
    not the groups relabelled, and (where they span groups) recurring across them. A

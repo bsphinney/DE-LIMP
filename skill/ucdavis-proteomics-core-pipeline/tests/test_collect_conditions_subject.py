@@ -80,10 +80,10 @@ class SubjectColumnKeptUnderItsOwnName(unittest.TestCase):
                 self.assertNotIn(header if header != col else "Covariate2", out[0])
 
     def test_not_a_subject_column_stays_a_covariate(self):
-        for header in ("Sex", "Tissue", "block", "Treatment_time"):
+        for header in ("Sex", "Tissue", "Treatment_time", "Plate"):
             with self.subTest(header=header):
                 self.assertFalse(cc.subject_header(header))
-        for header in ("Mouse", "mouse_id", "Animal Number", "Patient #", "Pair"):
+        for header in ("Mouse", "mouse_id", "Animal Number", "Patient #", "Pair", "Block"):
             with self.subTest(header=header):
                 self.assertTrue(cc.subject_header(header))
 
