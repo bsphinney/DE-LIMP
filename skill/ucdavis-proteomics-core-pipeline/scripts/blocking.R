@@ -88,6 +88,32 @@ BLOCK_FIT_FIXED <- list(
   dpc = "limpa::dpcDE(y, design + fixed block columns) -> voomaLmFitWithImputation (no block argument)",
   maxlfq = "limma::lmFit(E, design + fixed block columns)")
 
+# A block was asked for, so the fit that reports it must actually CARRY it -- never an
+# unblocked fit recorded as a blocked one. Random: the within-block correlation lmFit(block =,
+# correlation =) used comes back as fit$correlation; a fit without it treated the samples as
+# independent (a limpa whose dpcDE accepted block= and dropped it would do exactly that --
+# 1.2.5 and 1.4.x pass it through). Fixed: the block columns are in fit$design.
+block_fit_check <- function(fit, effect, block_col, block_cols = NULL) {
+  if (identical(effect, "random")) {
+    rho <- fit$correlation
+    if (is.null(rho) || length(rho) != 1L || !is.finite(rho))
+      stop(sprintf(paste0(
+        "--block %s: the fit came back WITHOUT a within-block correlation -- it treated the ",
+        "samples as independent. Refusing to report it as blocked. limpa %s: its dpcDE() must ",
+        "pass block= to voomaLmFitWithImputation() (limpa 1.2.5 and 1.4.x do)."),
+        block_col, tryCatch(as.character(utils::packageVersion("limpa")), error = function(e) "?")),
+        call. = FALSE)
+  } else if (identical(effect, "fixed")) {
+    have <- colnames(fit$design)
+    if (!length(block_cols) || is.null(have) || !all(block_cols %in% have))
+      stop(sprintf(paste0(
+        "--block %s: the fixed-effect fit came back WITHOUT the %s columns in its design -- it ",
+        "treated the samples as independent. Refusing to report it as blocked."),
+        block_col, block_col), call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 # The block as fixed design columns (treatment coding; the first level is absorbed by the
 # group means). One definition: run_de.R fits them, repro_script.R emits the same code.
 block_fixed_columns <- function(block, block_col) {

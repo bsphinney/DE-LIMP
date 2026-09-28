@@ -688,5 +688,44 @@ class BlockRecordWarnings(unittest.TestCase):
                          {"Old_Bait-Old_IgG": "partial", "Old_Bait-Young_Bait": "between"})
 
 
+@unittest.skipUnless(r_has("limma", "jsonlite"), "needs Rscript + limma/jsonlite")
+class BlockFitGuard(unittest.TestCase):
+    """A requested block that the fit does not carry stops the run (mocked fits): a random
+    fit without a correlation, a fixed fit without the block columns. Never an unblocked fit
+    recorded as blocked."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res = json.loads(rscript(f'''
+          source("{BLOCK_R}")
+          try_ <- function(expr) tryCatch({{ expr; "ok" }}, error = function(e) conditionMessage(e))
+          bc <- colnames(block_fixed_columns(c("M1", "M1", "M2", "M2"), "Mouse"))
+          d_fixed <- cbind(A = c(1, 0, 1, 0), B = c(0, 1, 0, 1), Mouse_M2 = c(0, 0, 1, 1))
+          cat(jsonlite::toJSON(list(
+            random_none   = try_(block_fit_check(list(coefficients = 1), "random", "Mouse")),
+            random_na     = try_(block_fit_check(list(correlation = NA_real_), "random", "Mouse")),
+            random_ok     = try_(block_fit_check(list(correlation = 0.17), "random", "Mouse")),
+            random_zero   = try_(block_fit_check(list(correlation = 0), "random", "Mouse")),
+            fixed_missing = try_(block_fit_check(list(design = d_fixed[, 1:2]), "fixed", "Mouse", bc)),
+            fixed_ok      = try_(block_fit_check(list(design = d_fixed), "fixed", "Mouse", bc)),
+            block_cols    = bc), auto_unbox = TRUE))'''))
+
+    def test_a_random_fit_without_a_correlation_stops(self):
+        for k in ("random_none", "random_na"):
+            with self.subTest(k):
+                self.assertIn("--block Mouse: the fit came back WITHOUT a within-block correlation",
+                              self.res[k])
+                self.assertIn("Refusing to report it as blocked", self.res[k])
+
+    def test_a_fixed_fit_without_the_block_columns_stops(self):
+        self.assertEqual(self.res["block_cols"], "Mouse_M2")
+        self.assertIn("fixed-effect fit came back WITHOUT the Mouse columns", self.res["fixed_missing"])
+
+    def test_fits_that_carry_the_block_pass(self):
+        # a consensus of 0 is a real (if useless) blocked fit -- block_record warns about it
+        for k in ("random_ok", "random_zero", "fixed_ok"):
+            self.assertEqual(self.res[k], "ok", k)
+
+
 if __name__ == "__main__":
     unittest.main()

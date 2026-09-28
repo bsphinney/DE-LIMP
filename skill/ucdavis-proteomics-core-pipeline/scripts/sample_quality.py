@@ -353,36 +353,31 @@ def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=Non
     to reach CONFOUND_P (3 vs 3: 1 in 10); then complete separation of the extreme groups
     by >= thr is reported instead, labelled as such.
 
-    bmap (sample -> block, e.g. the mouse): samples of one animal are not exchangeable, so
-    free relabelling of samples would treat them as independent. Blocks nested in the
-    groups (each animal in one group: technical replicates) -> the test runs on BLOCK MEANS,
-    one value per animal. Blocks spanning groups (each mouse gave an IP to several groups)
-    -> labels are relabelled WITHIN each block, which keeps every animal's own level."""
+    With bmap (sample -> block, e.g. the mouse) the samples of one animal are not
+    exchangeable, and the question splits in two (block_confound_checks): here the two
+    answers are combined -- flagged if either flags, p the smallest -- for callers that want
+    one line; main() reports them separately."""
     if not gmap:
         return False, "no conditions.csv -- group-confounding not assessed", None
+    if bmap:
+        tests = block_confound_checks(z, gmap, bmap, samples, thr, block_name, n_perm, seed)
+        if tests:
+            ps = [t["p"] for t in tests if t["p"] is not None]
+            return (any(t["flag"] for t in tests), "  ||  ".join(t["detail"] for t in tests),
+                    min(ps) if ps else None)
     vals, labs = [], []
     for s in samples:
         if s in gmap and z.get(s) is not None:
             vals.append(z[s])
             labs.append(gmap[s])
-    strata, unit = None, "sample"
-    if bmap:
-        blks = [bmap.get(s) for s in samples if s in gmap and z.get(s) is not None]
-        if None not in blks:
-            groups_of = {}
-            for b, g in zip(blks, labs):
-                groups_of.setdefault(b, set()).add(g)
-            if all(len(v) == 1 for v in groups_of.values()):      # nested: block means
-                per = {}
-                for b, v in zip(blks, vals):
-                    per.setdefault(b, []).append(v)
-                order = sorted(per)
-                vals = [sum(per[b]) / len(per[b]) for b in order]
-                labs = [next(iter(groups_of[b])) for b in order]
-                unit = f"{block_name} mean"
-            else:                                                  # spanning: within-block
-                strata = blks
-                unit = f"sample, relabelled within each {block_name}"
+    return _perm_f(vals, labs, thr, n_perm, seed)
+
+
+def _perm_f(vals, labs, thr, n_perm=N_PERM, seed=20260925, strata=None, unit="sample",
+            block_name="block"):
+    """The permutation F-test on (vals, labs): relabel freely, or within `strata` when given.
+    Returns (flag, detail, p); p None = too few arrangements for a CONFOUND_P test, and then
+    complete separation of the extreme groups by >= thr is reported instead."""
     groups = {}
     for v, g in zip(vals, labs):
         groups.setdefault(g, []).append(v)
@@ -391,14 +386,13 @@ def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=Non
     means = {g: sum(v) / len(v) for g, v in groups.items()}
     per_blk = f" {block_name}" if unit.endswith("mean") else ""
     detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n={len(groups[g])}{per_blk})" for g in sorted(means))
-    sizes = [len(v) for v in groups.values()]
     if strata is not None:
         by = {}
         for b, g in zip(strata, labs):
             by.setdefault(b, []).append(g)
         min_p = 1 / _arrangements(list(by.values()))
     else:
-        min_p = _min_p(sizes)
+        min_p = _min_p([len(v) for v in groups.values()])
     if min_p > CONFOUND_P:
         hi = max(means, key=means.get); lo = min(means, key=means.get)
         gap = means[hi] - means[lo]
@@ -410,31 +404,165 @@ def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=Non
     obs = _between(vals, labs)
     rng = random.Random(seed)
     ge = 0
-    if strata is None:
-        perm = list(labs)
-        for _ in range(n_perm):
+    perm = list(labs)
+    idx = {}
+    for i, b in enumerate(strata or []):
+        idx.setdefault(b, []).append(i)
+    for _ in range(n_perm):
+        if strata is None:
             rng.shuffle(perm)
-            if _between(vals, perm) >= obs - 1e-9:
-                ge += 1
-    else:
-        idx = {}
-        for i, b in enumerate(strata):
-            idx.setdefault(b, []).append(i)
-        perm = list(labs)
-        for _ in range(n_perm):
+        else:
             for ii in idx.values():
                 sub = [labs[i] for i in ii]
                 rng.shuffle(sub)
                 for i, g in zip(ii, sub):
                     perm[i] = g
-            if _between(vals, perm) >= obs - 1e-9:
-                ge += 1
+        if _between(vals, perm) >= obs - 1e-9:
+            ge += 1
     p = (ge + 1) / (n_perm + 1)
     how = ("" if unit == "sample" else
            f" on {block_name} means (one value per {block_name})" if unit.endswith("mean")
            else f", relabelling within each {block_name}")
     return p < CONFOUND_P, (f"{detail}  [permutation F-test across {len(groups)} groups{how}: "
                             f"p = {p:.2g}, {n_perm:,} relabellings; flagged at p < {CONFOUND_P}]"), p
+
+
+def _between_levels(blocks, labels):
+    """Groups joined by a shared block (union-find) -> the BETWEEN-block factor: PROT_0756's
+    mice join all Old_* groups into one level and all Young_* into another; a paired design
+    (every patient in both groups) joins everything into one level (no between factor);
+    technical replicates (each mouse in one group) leave every group its own level."""
+    parent = {g: g for g in set(labels)}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    first = {}
+    for b, g in zip(blocks, labels):
+        if b in first:
+            ra, rb = find(first[b]), find(g)
+            if ra != rb:
+                parent[rb] = ra
+        else:
+            first[b] = g
+    members = {}
+    for g in parent:
+        members.setdefault(find(g), set()).add(g)
+    name = {}
+    for root, gs in members.items():
+        if len(gs) == 1:
+            nm = next(iter(gs))
+        else:
+            nm = os.path.commonprefix(sorted(gs)).rstrip("_-. /")
+            if not nm:
+                srt = sorted(gs)
+                nm = " / ".join(srt[:3]) + (" ..." if len(srt) > 3 else "")
+        for g in gs:
+            name[g] = nm
+    return name
+
+
+EXACT_MAX = 200000     # distinct arrangements enumerated exactly; beyond, random relabellings
+
+
+def _distinct_arrangements(labels):
+    """Every distinct ordering of a multiset of labels (C(6,3) = 20 for 3 Old + 3 Young)."""
+    counts = {}
+    for l in labels:
+        counts[l] = counts.get(l, 0) + 1
+    keys, n, out, cur = sorted(counts), len(labels), [], []
+
+    def rec():
+        if len(cur) == n:
+            out.append(tuple(cur)); return
+        for k in keys:
+            if counts[k]:
+                counts[k] -= 1; cur.append(k); rec(); cur.pop(); counts[k] += 1
+    rec()
+    return out
+
+
+def _exact_block_means(means, levels, thr, block_name):
+    """Between-block test on BLOCK MEANS by EXACT enumeration of every assignment of the level
+    labels to the blocks. When even the most extreme assignment cannot reach CONFOUND_P (3 vs 3
+    mice: 2 of 20 = 0.10), no p-value flag: complete separation is reported as a caution."""
+    vals = [means[b] for b in sorted(means)]
+    labs = [levels[b] for b in sorted(means)]
+    by = {}
+    for v, l in zip(vals, labs):
+        by.setdefault(l, []).append(v)
+    lm = {l: sum(v) / len(v) for l, v in by.items()}
+    detail = "; ".join(f"{l}: mean z {lm[l]:+.2f} (n={len(by[l])} {block_name})" for l in sorted(lm))
+    obs = _between(vals, labs)
+    n_arr = math.factorial(len(labs))
+    for l in set(labs):
+        n_arr //= math.factorial(labs.count(l))
+    arrangements = _distinct_arrangements(labs) if n_arr <= EXACT_MAX else None
+    if arrangements is None:
+        f, detail2, p = _perm_f(vals, labs, thr, unit=f"{block_name} mean", block_name=block_name)
+        return {"flag": f, "caution": False, "p": p, "detail": detail2}
+    stats = [_between(vals, list(a)) for a in arrangements]
+    p = sum(1 for x in stats if x >= obs - 1e-9) / len(stats)
+    top = max(stats)
+    min_p = sum(1 for x in stats if x >= top - 1e-9) / len(stats)
+    hi = max(lm, key=lm.get); lo = min(lm, key=lm.get)
+    separated = min(by[hi]) > max(by[lo])
+    if min_p > CONFOUND_P:
+        caution = separated and lm[hi] - lm[lo] >= thr
+        return {"flag": False, "caution": bool(caution), "p": None, "min_p": min_p,
+                "hi": hi, "lo": lo,
+                "detail": (f"{detail}  [exact permutation of the {len(vals)} {block_name} means: "
+                           f"best possible p {min_p:.2g} > {CONFOUND_P}, so no test; "
+                           + (f"complete separation (all {hi} above all {lo})"
+                              if separated else f"{hi} and {lo} overlap") + "]")}
+    return {"flag": p < CONFOUND_P, "caution": False, "p": p, "min_p": min_p, "hi": hi, "lo": lo,
+            "detail": (f"{detail}  [exact permutation of the {len(vals)} {block_name} means "
+                       f"({len(stats):,} arrangements): p = {p:.2g}; flagged at p < {CONFOUND_P}]")}
+
+
+def block_confound_checks(z, gmap, bmap, samples, thr, block_name="block", n_perm=N_PERM,
+                          seed=20260925):
+    """Two different questions once samples come in blocks (animals), each tested the way its
+    samples are exchangeable (PROT_0756 v2: a hemolysis p of 0.001 from within-mouse
+    relabelling was read as an AGE confound it could never detect):
+      within   -- does the panel differ among the samples of ONE block (bait vs IgG IPs of the
+                  same mouse)? Group labels relabelled within each block. It flags what
+                  within-block contrasts can pick up; it says nothing about the between factor.
+      between  -- does it differ between blocks of different levels of the between-block
+                  factor (Old vs Young mice)? One mean per block, exact permutation; too few
+                  blocks for a test -> complete separation is a caution, not a p-value flag.
+    Returns a list of {question, factor, flag, caution, p, detail}; [] when the blocks do not
+    cover the samples."""
+    data = [(z[s], gmap[s], bmap.get(s)) for s in samples if s in gmap and z.get(s) is not None]
+    if not data or any(b is None for _v, _g, b in data):
+        return []
+    vals, labs, blks = zip(*data)
+    groups_in = {}
+    for b, g in zip(blks, labs):
+        groups_in.setdefault(b, set()).add(g)
+    tests = []
+    if any(len(v) > 1 for v in groups_in.values()):
+        f, d, p = _perm_f(list(vals), list(labs), thr, n_perm, seed, strata=list(blks),
+                          unit=f"sample, relabelled within each {block_name}", block_name=block_name)
+        tests.append({"question": "within", "factor": f"groups within one {block_name}",
+                      "flag": bool(f) and p is not None, "caution": False, "p": p,
+                      "detail": f"[within one {block_name}] {d}"})
+    level_of_group = _between_levels(blks, labs)
+    levels = {b: level_of_group[next(iter(gs))] for b, gs in groups_in.items()}
+    if len(set(levels.values())) >= 2:
+        per = {}
+        for b, v in zip(blks, vals):
+            per.setdefault(b, []).append(v)
+        means = {b: sum(v) / len(v) for b, v in per.items()}
+        r = _exact_block_means(means, levels, thr, block_name)
+        names = sorted(set(levels.values()))
+        tests.append({"question": "between", "factor": " vs ".join(names),
+                      "flag": r["flag"], "caution": r["caution"], "p": r["p"],
+                      "hi": r.get("hi"), "lo": r.get("lo"), "min_p": r.get("min_p"),
+                      "detail": f"[between {block_name} levels: {' vs '.join(names)}] {r['detail']}"})
+    return tests
 
 
 def detected_depth(report):
@@ -528,6 +656,9 @@ def main():
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
         confounded, detail, confound_p = confound_check(z, gmap, samples, a.z, bmap=bmap,
                                                         block_name=block_col or "block")
+        # with a block, the two questions are reported apart (block_confound_checks)
+        btests = (block_confound_checks(z, gmap, bmap, samples, a.z, block_col or "block")
+                  if bmap else [])
         expected = a.keratin_sample and name == "EPIDERMIS"
         kept = name == TARGET_PANEL
         if kept or expected:
@@ -540,11 +671,40 @@ def main():
                          "elevated_samples": elevated, "group_confounded": confounded,
                          "confound_p": confound_p,
                          "group_detail": detail, "expected_analyte": expected,
+                         "block_tests": btests,
                          "kept_in_quantification": kept}
         why = (f" These are {org} proteins that are also common-contaminant sequences: possible "
                f"contamination, KEPT in quantification and normalisation." if kept else "")
         if expected:
             pass   # keratin IS the analyte for a keratin-matrix sample: report for QC, never flag
+        elif btests:
+            # Each message says which question it answers: a within-block flag cannot speak
+            # to the between-block factor, and vice versa (PROT_0756 v2).
+            blk = block_col or "block"
+            for t in btests:
+                if t["question"] == "within" and t["flag"]:
+                    flags.append(
+                        f"**{name} differs among the samples of one {blk}** ({t['detail']}). "
+                        f"This answers the WITHIN-{blk} question only: contrasts between groups "
+                        f"inside a {blk} (e.g. bait vs control IPs of the same {blk}) can pick up "
+                        f"{name} proteins -- check those contrasts' hits against this panel "
+                        f"before reading them as biology. It says nothing about differences "
+                        f"BETWEEN {blk}s." + why)
+                elif t["question"] == "between" and t["flag"]:
+                    flags.append(
+                        f"**{name} is CONFOUNDED WITH {t['factor']}** ({t['detail']}). This "
+                        f"answers the BETWEEN-{blk} question: {name} differs between {blk}s of "
+                        f"{t['factor']}, so DE between them may be contamination, not biology; "
+                        f"protein-level marker removal will NOT fix a confounded contrast." + why)
+                elif t["question"] == "between" and t.get("caution"):
+                    flags.append(
+                        f"{name}: complete separation between {blk} levels -- all {t['hi']} "
+                        f"above all {t['lo']} ({t['detail']}). Too few {blk}s for a test, so "
+                        f"this is a caution, not a finding: treat {name} proteins in "
+                        f"{t['hi']}-vs-{t['lo']} contrasts with care." + why)
+            if elevated and not any(t["flag"] for t in btests):
+                flags.append(f"{name}: elevated in {', '.join(elevated)} (|z|>={a.z}) -- possible "
+                             "per-sample contamination; check before interpreting these samples." + why)
         elif confounded:
             flags.append(f"**{name} is CONFOUNDED WITH GROUP** ({detail}). DE between these "
                          "groups may be contamination, not biology; protein-level marker removal "
@@ -654,7 +814,15 @@ def main():
             for s in samples:
                 zz = r["z"][s]
                 fh.write(f"| {s} | {gmap.get(s,'?')} | {zz if zz is not None else 'NA'} |\n")
-            fh.write(f"\n_group-confounding:_ {r['group_detail']}\n\n")
+            if r.get("block_tests"):
+                for t in r["block_tests"]:
+                    q = ("differs among the samples of one block? (within-block contrasts)"
+                         if t["question"] == "within" else
+                         f"differs between blocks, {t['factor']}? (between-block contrasts)")
+                    fh.write(f"\n_{q}_ {t['detail']}\n")
+                fh.write("\n")
+            else:
+                fh.write(f"\n_group-confounding:_ {r['group_detail']}\n\n")
         if tc_note:
             fh.write(f"## {TARGET_PANEL}\n\n_Proteins that are also common-contaminant "
                      f"sequences: {tc_note}._\n\n")
