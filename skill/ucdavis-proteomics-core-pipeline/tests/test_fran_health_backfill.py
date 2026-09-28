@@ -75,8 +75,10 @@ def ts(e):
 
 
 def run_log(start, ingested=0, dup=0, failed=0, queued=0, items=(), skips=(), cands=(),
-            done=True, abort=None):
-    """One auto_ingest_<jobid>.out, in the exact shape FRAN's auto_ingest.py prints."""
+            done=True, abort=None, fmt="old", quarantined=3, backed_off=0, extra=""):
+    """One auto_ingest_<jobid>.out, in the exact shape FRAN's auto_ingest.py prints. `fmt` is its
+    summary line: "old" (to 2026-09-25), "new" (FRAN main 14be43f: + quarantined, backed-off, and
+    any `extra` it appends), or "truncated" (cut mid-line)."""
     L = ["  preflight: PG Farm:5432 reachable",
          f"===== fran auto-ingest {ts(start)} on hive-as-11-2-70 limit=5 =====",
          f"===== auto_ingest {ts(start)} on hive-as-11-2-70 =====",
@@ -102,8 +104,14 @@ def run_log(start, ingested=0, dup=0, failed=0, queued=0, items=(), skips=(), ca
                   "      | HINT:  Rebuild all objects in this database",
                   "      | No precursor records parsed (check the report / --engine)."]
     if done:
-        L.append(f"===== done: {ingested} ingested, {dup} duplicate-skipped, {failed} failed, "
-                 f"{queued} still queued — {ts(start + 600)} =====")
+        head = f"===== done: {ingested} ingested, {dup} duplicate-skipped, {failed} failed, "
+        if fmt == "old":
+            L.append(head + f"{queued} still queued — {ts(start + 600)} =====")
+        elif fmt == "new":
+            L.append(head + f"{queued} still queued, {quarantined} quarantined, {backed_off} "
+                            f"backed-off{extra} — {ts(start + 600)} =====")
+        else:
+            L.append(head[:30])
         L.append(f"===== auto-ingest exit rc=0 {ts(start + 601)} =====")
     return "\n".join(L) + "\n"
 
@@ -137,12 +145,18 @@ class Env:
             fh.write(f"{ts(self.now - age_h * H - 420)} {line}\n")
         os.utime(p, (self.now - age_h * H, self.now - age_h * H))
 
-    def entry(self, name, age_h=100, output_dir=None):
+    def entry(self, name, age_h=100, output_dir=None, staged=True):
+        """A drop entry staged `age_h` ago -- by its manifest's staged_at, as stage writes it
+        (staged=False: a legacy entry without one). The directory mtime is set to the same time,
+        and the age must never be read from it."""
         d = os.path.join(self.drop, name)
         os.makedirs(d)
+        man = {"output_dir": output_dir or f"/real/{name}", "engine": "diann", "staged_by": "brettsp"}
+        if staged:
+            man["staged_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime(self.now - age_h * H))
         with open(os.path.join(d, fd.MANIFEST), "w") as fh:
-            json.dump({"output_dir": output_dir or f"/real/{name}", "engine": "diann",
-                       "staged_by": "brettsp"}, fh)
+            json.dump(man, fh)
         os.utime(d, (self.now - age_h * H, self.now - age_h * H))
         return d
 
@@ -257,6 +271,139 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(fd.progress_health(runs, NOW, None, info)["verdict"], "unknown")
 
 
+# ------------------------------------------------------------ the done line, read by name --
+# The regex this replaced: positional, so it matched no summary line after FRAN appended fields.
+OLD_RUN_DONE = re.compile(r"^===== done: (\d+) ingested, (\d+) duplicate-skipped, (\d+) failed, "
+                          r"(\d+) still queued\W+" + r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+NOW_B = time.mktime((2026, 9, 28, 12, 30, 0, 0, 0, -1))
+
+
+class DoneLineTests(unittest.TestCase):
+    OLD = "===== done: 0 ingested, 3 duplicate-skipped, 2 failed, 182 still queued — 2026-09-24 18:14:13 ====="
+    NEW = ("===== done: 5 ingested, 0 duplicate-skipped, 0 failed, 89 still queued, 3 quarantined, "
+           "0 backed-off — 2026-09-28 11:54:37 =====")
+
+    def test_old_and_new_formats(self):
+        old, new = fd.parse_done_line(self.OLD), fd.parse_done_line(self.NEW)
+        self.assertEqual(old["fields"], {"ingested": 0, "duplicate-skipped": 3, "failed": 2,
+                                         "still queued": 182})
+        self.assertEqual(new["fields"], {"ingested": 5, "duplicate-skipped": 0, "failed": 0,
+                                         "still queued": 89, "quarantined": 3, "backed-off": 0})
+        self.assertEqual((old["missing"], new["missing"], new["notes"]), ([], [], None))
+        self.assertEqual(new["finished"], time.mktime((2026, 9, 28, 11, 54, 37, 0, 0, -1)))
+        self.assertTrue(OLD_RUN_DONE.match(self.OLD))
+        self.assertIsNone(OLD_RUN_DONE.match(self.NEW))           # the blind spot, pinned
+
+    def test_a_future_format_keeps_every_field_and_the_notes(self):
+        line = ("===== done: 5 ingested, 0 duplicate-skipped, 1 failed, 89 still queued, "
+                "3 quarantined, 0 backed-off, 2 systemic, 7 retried-later, held back: sage (import "
+                "failed: No module named x, 2 tries) — 2026-09-28 11:54:37 =====")
+        d = fd.parse_done_line(line)
+        self.assertEqual(d["fields"]["systemic"], 2)
+        self.assertEqual(d["fields"]["retried-later"], 7)
+        self.assertNotIn("tries)", d["fields"])                  # nothing read out of the note
+        self.assertEqual(d["notes"], "held back: sage (import failed: No module named x, 2 tries)")
+        r = fd.parse_ingest_log(line + "\n")
+        self.assertEqual((r["complete"], r["ingested"], r["failed"], r["queued"]), (True, 5, 1, 89))
+        self.assertEqual(r["done_fields"]["quarantined"], 3)
+
+    def test_a_missing_known_field_is_missing_not_zero(self):
+        r = fd.parse_ingest_log("===== done: 5 ingested, 0 failed — 2026-09-28 11:54:37 =====\n")
+        self.assertTrue(r["complete"])
+        self.assertEqual((r["duplicate"], r["queued"]), (None, None))
+        self.assertEqual(r["done_missing"], ["duplicate-skipped", "still queued"])
+
+    def test_a_truncated_or_countless_done_line_is_unreadable_not_died(self):
+        for line in ("===== done: 5 ingested, 0 dupl",
+                     "===== done: 5 ingested, 0 duplicate-skipped",          # no timestamp
+                     "===== done: nothing to report — 2026-09-28 11:54:37 ====="):
+            self.assertIsNone(fd.parse_done_line(line), line)
+            r = fd.parse_ingest_log(line + "\n")
+            self.assertFalse(r["complete"], line)
+            self.assertEqual(r["done_unreadable"], line)
+            self.assertIsNone(r["aborted"])
+
+    def test_a_crashed_run_says_why(self):
+        r = fd.parse_ingest_log("===== auto_ingest 2026-09-28 08:23:01 on hive-a =====\n"
+                                "\n===== CRASHED: OperationalError: server closed the connection "
+                                "— 2026-09-28 08:24:10 =====\n")
+        self.assertFalse(r["complete"])
+        self.assertEqual(r["aborted"], "CRASHED: OperationalError: server closed the connection")
+
+
+class BlindAfterTheDeployTests(unittest.TestCase):
+    """2026-09-28, the exact case: FRAN's cron had ingested 46 searches since 09-26 (queue 136 ->
+    89), but the skill read every one of the 18 post-deploy logs as a run that died, and replayed
+    the last legible logs: last ingest 09-17, 182 queued, 64 runs with nothing ingested, 18 died."""
+
+    def _hive(self, d):
+        e = Env(d, now=NOW_B)
+        newest_done = time.mktime((2026, 9, 28, 11, 54, 37, 0, 0, -1))
+        new_starts = [newest_done - 600 - k * 4 * H for k in range(17, -1, -1)]     # 18, oldest first
+        old_starts = [new_starts[0] - k * 4 * H for k in range(46, 0, -1)]            # 46 before them
+        e.log(run_log(old_starts[0] - 4 * H, ingested=4, dup=1, queued=198))       # 09-17
+        for st in old_starts:
+            e.log(run_log(st, dup=3, failed=2, queued=182))
+        ingested = [0, 5, 0, 5, 0, 5, 0, 5, 1, 0, 5, 0, 5, 0, 5, 0, 5, 5]          # 46, oldest first
+        for i, st in enumerate(new_starts):
+            e.log(run_log(st, ingested=ingested[i], queued=135 - sum(ingested[:i + 1]), fmt="new"))
+        e.submit()
+        return e
+
+    def test_the_eighteen_post_deploy_logs_are_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            e = self._hive(d)
+            runs, info = runs_of(e)
+            self.assertEqual(len(runs), 65)
+            new = runs[:18]
+            self.assertTrue(all(r["complete"] for r in new))
+            self.assertEqual(sum(r["ingested"] for r in new), 46)
+            self.assertFalse(any(OLD_RUN_DONE.match(ln) for r in new
+                                 for ln in _read(r["log"]).splitlines()))  # the old parse: blind
+            p = fd.progress_health(runs, NOW_B, fd.submit_log_info(e.logs, NOW_B), info)
+            self.assertEqual(p["verdict"], "healthy", p)
+            self.assertEqual(p["queued"], 89)
+            self.assertEqual((p["consecutive_runs_without_ingest"], p["of_which_aborted"],
+                              p["unreadable_done_lines"]), (0, 0, 0))
+            self.assertEqual(p["last_ingest"]["finished"], "2026-09-28 11:54")
+            self.assertNotIn("died", p["detail"])
+
+    def test_unreadable_newest_logs_never_read_as_died_or_stuck(self):
+        """The same HIVE if FRAN's format changed again: the 18 newest logs finish with a done
+        line this reader cannot parse. The 46 old zero-ingest runs must not come back as stuck."""
+        with tempfile.TemporaryDirectory() as d:
+            e = self._hive(d)
+            for name in sorted(os.listdir(e.logs))[-19:]:              # 18 logs + the submit log
+                p = os.path.join(e.logs, name)
+                if name.startswith("auto_ingest_") and name.endswith(".out"):
+                    txt = _read(p).replace(" still queued,", " still queued;")  # a new separator
+                    txt = re.sub(r" — (\d{4})", r" at \1", txt)                  # and no dash
+                    txt = re.sub(r"(===== done:[^\n]*?) at \d{4}-\S+ \S+ =====", r"\1", txt)
+                    with open(p, "w") as fh:
+                        fh.write(txt)
+            runs, info = runs_of(e)
+            p = fd.progress_health(runs, NOW_B, fd.submit_log_info(e.logs, NOW_B), info)
+            self.assertEqual(p["unreadable_done_lines"], 18, p)
+            self.assertEqual(p["verdict"], "unknown", p)
+            self.assertEqual(p["of_which_aborted"], 0)
+            self.assertIn("18 log(s) with an unreadable done line (format changed?)", p["detail"])
+            self.assertIn("the 18 newest are unreadable, so the verdict uses logs up to", p["detail"])
+            self.assertIn("would say stuck", p["detail"])
+            self.assertNotIn("died", p["detail"])
+            self.assertEqual(p["last_run"]["state"], "unreadable")
+
+    def test_every_log_unreadable_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            for k in (3, 2, 1):
+                e.log(run_log(NOW - k * 4 * H, fmt="truncated"))
+            e.submit()
+            runs, info = runs_of(e)
+            p = fd.progress_health(runs, NOW, fd.submit_log_info(e.logs, NOW), info)
+            self.assertEqual(p["verdict"], "unknown", p)
+            self.assertIn("no readable log is left", p["detail"])
+
+
 # ------------------------------------------------------------------------ one entry's fate --
 class EntryStateTests(unittest.TestCase):
     ENTRY = "/quobyte/proteomics-grp/fran/incoming/search_out__e14aac29"
@@ -287,6 +434,29 @@ class EntryStateTests(unittest.TestCase):
         runs = self._runs(run_log(NOW - H, ingested=1, items=[("diann", self.ENTRY, "ok")]),
                           run_log(NOW - 5 * H, failed=1, items=[("diann", self.ENTRY, "fail")]))
         self.assertEqual(fd.entry_log_state(runs, self.ENTRY)["state"], "ingested")
+
+    def test_the_lines_fran_added_at_the_2026_09_26_deploy(self):
+        """FRAN main 14be43f: `SKIP <name>  skipped (<why>)` for QC / needs-a-person, `staged as
+        <entry>` under an item, `ALREADY IN THE CORPUS` (in FRAN: not a failure), and `SKIPPED --
+        <why>` (held back, not attempted)."""
+        name = os.path.basename(self.ENTRY)
+        skip = self._runs(run_log(NOW - H, skips=[(name, "x")]).replace(
+            f"  SKIP {name}  (x)", f"  SKIP {name}  skipped (qc: search_name 'Lumos QC' matches QC_NAME_RE)"))
+        s = fd.entry_log_state(skip, self.ENTRY)
+        self.assertEqual((s["state"], s["outcome"]), ("failed", "skipped"))
+        self.assertIn("QC_NAME_RE", s["detail"])
+
+        def item(line):
+            return ("===== auto_ingest 2026-09-24 11:00:00 on hive-a =====\n"
+                    "\n[1/1] diann search_out\n      /real/search_out\n"
+                    f"      staged as {self.ENTRY}\n      {line}\n")
+        s = fd.entry_log_state(self._runs(item("ALREADY IN THE CORPUS as search_id=42 under this "
+                                               "output_dir — not re-ingesting")), self.ENTRY)
+        self.assertEqual((s["state"], s["outcome"]), ("ingested", "duplicate"))   # via staged as
+        s = fd.entry_log_state(self._runs(item("SKIPPED — diann candidates are held back this "
+                                               "run: import failed (not charged)")), self.ENTRY)
+        self.assertEqual((s["outcome"], s["attempts"]), ("skipped", 0))
+        self.assertIn("held back", s["detail"])
 
     def test_skipped_by_name_is_a_failure_with_the_reason(self):
         runs = self._runs(run_log(NOW - H, skips=[("search_out__e14aac29",
@@ -354,16 +524,44 @@ class IncomingTests(unittest.TestCase):
                            "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                       time.gmtime(month_ago))}, fh)
             os.utime(ent, (NOW, NOW))                                    # rewritten "today"
-            legacy = e.entry("GallPlasCer__5b11a0d9", age_h=5 * 24)       # no staged_at: mtime
+            legacy = e.entry("GallPlasCer__5b11a0d9", age_h=3 * 24, staged=False)  # mtime 3 d
             inc = fd.incoming_health([], NOW, e.drop)
             by = {x["entry"]: x for x in inc["entries"]}
             self.assertAlmostEqual(by["search_mouse_mousecont__9ad24935"]["age_days"], 30, delta=0.1)
             self.assertEqual(by["search_mouse_mousecont__9ad24935"]["age_source"], "staged_at")
-            self.assertAlmostEqual(by["GallPlasCer__5b11a0d9"]["age_days"], 5, delta=0.1)
-            self.assertEqual(by["GallPlasCer__5b11a0d9"]["age_source"], "entry mtime")
+            # No staged_at: age UNKNOWN -- never the 3 d its directory mtime says (2026-09-28).
+            self.assertIsNone(by["GallPlasCer__5b11a0d9"]["age_days"])
+            self.assertEqual(by["GallPlasCer__5b11a0d9"]["age_source"], "age unknown: no staged_at")
+            self.assertEqual(inc["no_staged_at"], ["GallPlasCer__5b11a0d9"])
             self.assertEqual(inc["verdict"], "starved")
             self.assertAlmostEqual(inc["oldest_never_reached_days"], 30, delta=0.1)
+            self.assertIn("1 with no staged_at, so of unknown age (GallPlasCer__5b11a0d9)",
+                          inc["detail"])
             self.assertTrue(os.path.isdir(legacy))
+
+    def test_an_entry_without_staged_at_is_never_starved_on_a_guess(self):
+        """Its directory says 40 days; nothing says when it was staged. Not starved, and said."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            e.entry("GallPlasCer__5b11a0d9", age_h=40 * 24, staged=False)
+            e.entry("new__00000001", age_h=2)
+            inc = fd.incoming_health([], NOW, e.drop)
+            self.assertEqual(inc["verdict"], "ok", inc)
+            self.assertIsNone([x for x in inc["entries"]
+                               if x["entry"] == "GallPlasCer__5b11a0d9"][0]["age_days"])
+            self.assertAlmostEqual(inc["oldest_never_reached_days"], 2 / 24, delta=0.1)
+            self.assertIn("no staged_at", inc["detail"])
+
+    def test_age_never_reads_any_mtime(self):
+        """staged_at 10 d ago; the directory AND the manifest file touched just now."""
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            ent = e.entry("x__00000002", age_h=10 * 24)
+            os.utime(os.path.join(ent, fd.MANIFEST), (NOW, NOW))
+            os.utime(ent, (NOW, NOW))
+            x = fd.incoming_health([], NOW, e.drop)["entries"][0]
+            self.assertAlmostEqual(x["age_days"], 10, delta=0.05)
+            self.assertEqual(x["age_source"], "staged_at")
 
     def test_staged_at_forms_frans_reader_accepts(self):
         epoch = 1788908552.0                                   # 2026-09-08T23:02:32Z

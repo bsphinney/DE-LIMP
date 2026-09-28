@@ -1698,10 +1698,22 @@ UNHEALTHY = ("stuck", "not_running", "stale_code")
 
 _TS = r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)"
 _RUN_START = re.compile(r"^===== (?:fran auto-ingest|auto_ingest) " + _TS + r" on (\S+)")
-_RUN_DONE = re.compile(r"^===== done: (\d+) ingested, (\d+) duplicate-skipped, (\d+) failed, "
-                       r"(\d+) still queued\W+" + _TS)
+# The run's summary line is read BY NAME, never by position. FRAN appends fields: on 2026-09-26
+# "... 182 still queued — <ts> =====" became "... 89 still queued, 3 quarantined, 0 backed-off
+# — <ts> =====", the positional regex this replaced matched none of the new lines, and every run
+# after the deploy read as one that died -- "64 runs with nothing ingested, 18 died" while the cron
+# had ingested 46 searches. parse_done_line() keeps whatever fields it finds.
+_DONE_PREFIX = "===== done:"
+_DONE_TAIL = re.compile(r"(?:\s+[—–-]+)?\s+" + _TS + r"\s*=+\s*$")   # " — <ts> =====", at the end
+_DONE_FIELD = re.compile(r"^(\d+) ([a-z][a-z -]*[a-z])$")    # "89 still queued", "0 backed-off"
+# The fields progress_health reads, by the name FRAN prints -> this run dict's key.
+DONE_FIELDS = {"ingested": "ingested", "duplicate-skipped": "duplicate", "failed": "failed",
+               "still queued": "queued"}
+_CRASHED = re.compile(r"^===== CRASHED: (.*?)\W+" + _TS)
 _ITEM = re.compile(r"^\[(\d+)/(\d+)\] (\S+) (.*)$")
-_SKIP = re.compile(r"^  SKIP (.+?)  \((.*)\)\s*$")
+# FRAN prints a selected-out candidate as "  SKIP <name>  (<why>)", and -- since 2026-09-26 -- a QC
+# exclusion or a manifest that needs a person as "  SKIP <name>  skipped (<why>)".
+_SKIP = re.compile(r"^  SKIP (.+?)  (?:skipped )?\((.*)\)\s*$")
 _QCLAIM = re.compile(r"^  Q(\d+)\s+(\S+)\s+(/.*?)\s*$")
 _CAND = re.compile(r"^  ([a-z]+)\s+(/.*?)\s*$")
 _SLURM_STATE = re.compile(r"^State\s+:\s+(\S+)")
@@ -1710,6 +1722,37 @@ _ENTRY_NAME = re.compile(r"__[0-9a-f]{8}$")          # entry_name()'s suffix
 # Lines in a failed ingest's tail that are noise, not the reason (PG Farm prints the collation
 # warning on every connection).
 _NOISE = ("collation", "HINT:", "DETAIL:  The database", "--- stderr ---", "--- last output ---")
+
+
+def parse_done_line(line):
+    """FRAN's run summary -> {"finished", "fields", "missing", "notes"}, or None if unreadable.
+
+    `===== done: 5 ingested, 0 duplicate-skipped, 0 failed, 89 still queued, 3 quarantined,
+    0 backed-off, 2 systemic, held back: sage (...) — 2026-09-28 11:54:37 =====`
+    The text between "done:" and the trailing timestamp is split on commas; each "<n> <name>"
+    becomes fields[name] = n, in any order, whatever names FRAN adds. The first piece that is not
+    "<n> <name>" (a "held back: ..." note, a count with a reason in brackets) starts `notes`, kept
+    verbatim. A DONE_FIELDS name that is absent is listed in `missing` -- never read as 0.
+    Unreadable: no trailing timestamp (a truncated line), or no "ingested" count, without which the
+    run's progress is unknown."""
+    if not line.startswith(_DONE_PREFIX):
+        return None
+    rest = line[len(_DONE_PREFIX):]
+    tail = _DONE_TAIL.search(rest)
+    if not tail:
+        return None
+    fields, notes = {}, None
+    pieces = rest[:tail.start()].split(",")
+    for i, piece in enumerate(pieces):
+        m = _DONE_FIELD.match(piece.strip())
+        if not m:
+            notes = ",".join(pieces[i:]).strip() or None
+            break
+        fields.setdefault(m.group(2), int(m.group(1)))
+    if "ingested" not in fields:
+        return None
+    return {"finished": _epoch(tail.group(1)), "fields": fields,
+            "missing": [n for n in DONE_FIELDS if n not in fields], "notes": notes}
 
 
 def _log_dir():
@@ -1742,11 +1785,17 @@ def parse_ingest_log(text):
       [i/N] <engine> <search>                                    an attempt, followed by
             <dir>  /  -> <identity>  /  report: ...              ...where it came from
             OK in Ns | SKIPPED-DUPLICATE ... | FAILED ... | TIMEOUT ...
-      ===== done: A ingested, B duplicate-skipped, C failed, D still queued — <ts> =====
-    A log with no `done` line is a run still going, or one that died (PG Farm unreachable, the
-    scan failed, SLURM killed it)."""
+      ===== done: A ingested, B duplicate-skipped, C failed, D still queued[, ...] — <ts> =====
+      ===== CRASHED: <error> — <ts> =====                        the run died, and said why
+    The done line is read by name (parse_done_line): every field lands in `done_fields`, and a
+    known one that is missing stays None, never 0. A `===== done:` line that cannot be read sets
+    `done_unreadable` -- the run FINISHED, in a format this reader does not know -- and is never
+    taken for a run that died. Only a log with no done line at all is a run still going, or one
+    that died (PG Farm unreachable, the scan failed, SLURM killed it). Re-verified against FRAN
+    main (14be43f) 2026-09-28."""
     run = {"started": None, "host": None, "finished": None, "complete": False,
            "ingested": None, "duplicate": None, "failed": None, "queued": None,
+           "done_fields": None, "done_missing": None, "done_notes": None, "done_unreadable": None,
            "aborted": None, "slurm_state": None,
            "items": [], "skips": [], "candidates": [], "queue_claims": []}
     item = None
@@ -1757,11 +1806,20 @@ def parse_ingest_log(text):
                 run["started"], run["host"] = _epoch(m.group(1)), m.group(2)
             item = None
             continue
-        m = _RUN_DONE.match(line)
+        if line.startswith(_DONE_PREFIX):
+            d = parse_done_line(line)
+            if d:
+                run.update(complete=True, done_unreadable=None, finished=d["finished"],
+                           done_fields=d["fields"], done_missing=d["missing"],
+                           done_notes=d["notes"],
+                           **{key: d["fields"].get(name) for name, key in DONE_FIELDS.items()})
+            elif not run["complete"]:
+                run["done_unreadable"] = line.strip()[:300]
+            item = None
+            continue
+        m = _CRASHED.match(line)
         if m:
-            run.update(complete=True, ingested=int(m.group(1)), duplicate=int(m.group(2)),
-                       failed=int(m.group(3)), queued=int(m.group(4)),
-                       finished=_epoch(m.group(5)))
+            run["aborted"] = f"CRASHED: {m.group(1)}"[:200]
             item = None
             continue
         m = _ITEM.match(line)
@@ -1778,8 +1836,13 @@ def parse_ingest_log(text):
                 item["identity"] = s[3:].rstrip("/")
             elif s.startswith("OK in"):
                 item["outcome"], item["detail"] = "ok", s
-            elif s.startswith("SKIPPED-DUPLICATE"):
-                item["outcome"], item["detail"] = "duplicate", s
+            elif s.startswith("staged as "):
+                item["staged_as"] = s[len("staged as "):].rstrip("/")
+            elif s.startswith(("SKIPPED-DUPLICATE", "ALREADY IN THE CORPUS")):
+                item["outcome"], item["detail"] = "duplicate", s   # in the corpus either way
+            elif s.startswith("SKIPPED"):
+                # "SKIPPED — held back / already handled this run / leased": not attempted
+                item["outcome"], item["detail"] = "skipped", s
             elif s.startswith(("FAILED", "TIMEOUT")):
                 item["outcome"], item["detail"] = "failed", s
             elif s.startswith("DRY RUN"):
@@ -1882,18 +1945,28 @@ def progress_health(runs, now=None, submit=None, info=None):
     def t(r):
         return r["started"] or r["mtime"]
 
+    def unreadable(r):
+        return bool(r.get("done_unreadable")) and not r["complete"]
+
     newest = runs[0]
-    running = (not newest["complete"] and not newest["aborted"] and not newest["slurm_state"]
-               and now - t(newest) < JOB_TIME_LIMIT_H * 3600)
+    running = (not newest["complete"] and not newest["aborted"] and not unreadable(newest)
+               and not newest["slurm_state"] and now - t(newest) < JOB_TIME_LIMIT_H * 3600)
     finished = runs[1:] if running else runs
+    # A run whose done line cannot be read FINISHED -- in a format this reader does not know. It is
+    # neither a run that ingested nothing nor one that died: it is left out of the streak, counted,
+    # and the verdict says which logs it rests on.
+    readable = [r for r in finished if not unreadable(r)]
+    n_unreadable = len(finished) - len(readable)
+    newer_unreadable = next((i for i, r in enumerate(finished) if not unreadable(r)),
+                            len(finished))
     streak = aborted = 0
-    for r in finished:
+    for r in readable:
         if r["complete"] and r["ingested"]:
             break
         streak += 1
         aborted += not r["complete"]
-    last_ok = next((r for r in finished if r["complete"] and r["ingested"]), None)
-    last_done = next((r for r in finished if r["complete"]), None)
+    last_ok = next((r for r in readable if r["complete"] and r["ingested"]), None)
+    last_done = next((r for r in readable if r["complete"]), None)
     queued = last_done["queued"] if last_done else None
     age_h = (now - t(newest)) / 3600
 
@@ -1901,16 +1974,27 @@ def progress_health(runs, now=None, submit=None, info=None):
         return None if r is None else {
             "jobid": r["jobid"], "started": _when(t(r)), "finished": _when(r["finished"]),
             "state": ("running" if r is newest and running else
-                      "complete" if r["complete"] else "aborted"),
+                      "complete" if r["complete"] else
+                      "unreadable" if unreadable(r) else "aborted"),
             "ingested": r["ingested"], "duplicate": r["duplicate"], "failed": r["failed"],
-            "queued": r["queued"], "aborted": r["aborted"] or (
-                None if r["complete"] or (r is newest and running) else
+            "queued": r["queued"], "fields": r.get("done_fields"),
+            "missing": r.get("done_missing") or None, "notes": r.get("done_notes"),
+            "aborted": r["aborted"] or (
+                None if r["complete"] or unreadable(r) or (r is newest and running) else
                 f"no summary line (SLURM state {r['slurm_state'] or 'unknown'})"),
+            "unreadable_done_line": r.get("done_unreadable") if unreadable(r) else None,
             "log": r["log"]}
 
     res.update(last_run=brief(newest), last_run_age_h=round(age_h, 1),
                last_ingest=brief(last_ok), queued=queued,
-               consecutive_runs_without_ingest=streak, of_which_aborted=aborted)
+               consecutive_runs_without_ingest=streak, of_which_aborted=aborted,
+               unreadable_done_lines=n_unreadable)
+    basis = None
+    if n_unreadable:
+        basis = (f"{n_unreadable} log(s) with an unreadable done line (format changed?)"
+                 + (f"; the {newer_unreadable} newest are unreadable, so the verdict uses logs up "
+                    f"to {_when(t(readable[0]))}" if newer_unreadable and readable else ""))
+        res["verdict_basis"] = basis
     if last_ok:
         res["last_ingest_age_days"] = round((now - (last_ok["finished"] or t(last_ok))) / 86400, 1)
     sub_age = (submit or {}).get("age_h")
@@ -1925,19 +2009,31 @@ def progress_health(runs, now=None, submit=None, info=None):
                           # `skip: 1 ... already pending/running` = a job stuck in the queue
                           + (f" ({last_word[20:] if last_word[:4].isdigit() else last_word})"
                              if last_word else ""))
+    elif n_unreadable and not readable:
+        res.update(verdict="unknown",
+                   detail=f"{basis}; no readable log is left, so whether FRAN is ingesting "
+                          f"cannot be told")
     elif streak >= STUCK_AFTER_RUNS and (queued is None or queued > 0):
         since = (f"last ingest {_when(last_ok['finished'] or t(last_ok))}" if last_ok
-                 else f"no ingest in the {len(finished)} logs kept")
-        res.update(verdict="stuck",
-                   detail=f"{streak} consecutive cron runs ingested nothing"
-                          + (f" ({aborted} of them died before finishing)" if aborted else "")
-                          + (f"; {queued} searches still queued" if queued is not None else "")
-                          + f"; {since}")
+                 else f"no ingest in the {len(readable)} readable logs kept")
+        stuck = (f"{streak} consecutive cron runs ingested nothing"
+                 + (f" ({aborted} of them died before finishing)" if aborted else "")
+                 + (f"; {queued} searches still queued" if queued is not None else "")
+                 + f"; {since}")
+        if newer_unreadable:
+            # Runs AFTER that streak finished, and cannot be read: "stuck" would rest on stale
+            # logs only -- the 2026-09-28 false alarm. Say what the old logs say, but not stuck.
+            res.update(verdict="unknown",
+                       detail=f"{basis}; those older logs alone would say stuck: {stuck}")
+        else:
+            res.update(verdict="stuck", detail=stuck)
     else:
         res.update(verdict="healthy",
                    detail=("a run is in progress; " if running else "")
                           + (f"last ingest {_when(last_ok['finished'] or t(last_ok))}" if last_ok
                              else "nothing ingested in the logs kept, and nothing waiting"))
+    if basis and not res["detail"].startswith(basis):
+        res["detail"] += f" ({basis})"
     return res
 
 
@@ -1964,7 +2060,7 @@ def entry_log_state(runs, entry, output_dir=None):
     for r in runs:
         when = r["finished"] or r["started"] or r["mtime"]
         for it in r["items"]:
-            if (it["dir"] in keys or it["identity"] in keys
+            if (it["dir"] in keys or it["identity"] in keys or it.get("staged_as") in keys
                     or (name and it["dir"] and os.path.basename(it["dir"]) == name)):
                 hits.append((r, when, it["outcome"] or "attempted",
                              it.get("error") or it["detail"]))
@@ -2005,11 +2101,13 @@ def _staged_epoch(v):
 def incoming_health(runs, now=None, drop=None):
     """Every entry in the drop dir: age, who staged it, broken links, and what the logs say.
 
-    An entry's AGE is its manifest's staged_at -- when it was first handed over -- and the entry
-    directory's mtime only when there is none. Rewriting a manifest (a repair, a QC withdrawal)
-    bumps the directory mtime: on 2026-09-25 the repaired search_mouse_mousecont entry, staged
-    2026-09-08, showed as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough
-    to hide a starved entry under STARVED_AFTER_H."""
+    An entry's AGE is its manifest's staged_at -- when it was first handed over -- and nothing
+    else. Never a modification time: rewriting a manifest (a repair, a QC withdrawal) bumps the
+    directory's. On 2026-09-25 the repaired search_mouse_mousecont entry, staged 2026-09-08, showed
+    as 0 days old, and "oldest never reached" dropped from 16 d to 4 d -- enough to hide a starved
+    entry under STARVED_AFTER_H; on 2026-09-28 the Gallegos pair, which have no staged_at, read as
+    3 d old. An entry without a readable staged_at has age None ("age unknown: no staged_at"),
+    is never called starved on a guess, and is counted and named in the detail instead."""
     now = now or time.time()
     drop = drop or os.environ.get("FRAN_DROP_DIR", DROP_DIR)
     res = {"drop_dir": drop, "verdict": "unknown", "entries": []}
@@ -2027,14 +2125,8 @@ def incoming_health(runs, now=None, drop=None):
         except (OSError, ValueError):
             pass
         staged = _staged_epoch(man.get("staged_at")) if isinstance(man, dict) else None
-        if staged:
-            age_d, age_src = (now - staged) / 86400, "staged_at"
-        else:
-            try:
-                age_d = (now - e.stat(follow_symlinks=False).st_mtime) / 86400
-                age_src = "entry mtime"
-            except OSError:
-                age_d, age_src = None, None
+        age_d = (now - staged) / 86400 if staged else None
+        age_src = "staged_at" if staged else "age unknown: no staged_at"
         try:
             broken = [f for f in os.listdir(e.path)
                       if os.path.islink(os.path.join(e.path, f))
@@ -2061,17 +2153,23 @@ def incoming_health(runs, now=None, drop=None):
     res["n_entries"] = len(res["entries"])
     res["by_state"] = dict(counts)
     waiting = [x for x in res["entries"] if x["state"] == "never_reached"]
-    oldest = max((x["age_days"] or 0 for x in waiting), default=0)
-    res["oldest_never_reached_days"] = round(oldest, 1) if waiting else None
+    dated = [x for x in waiting if x["age_days"] is not None]
+    oldest = max((x["age_days"] for x in dated), default=0)
+    res["oldest_never_reached_days"] = round(oldest, 1) if dated else None
+    undated = [x["entry"] for x in res["entries"] if x["age_days"] is None]
+    res["no_staged_at"] = undated
+    unknown_age = (f"; {len(undated)} with no staged_at, so of unknown age "
+                   f"({', '.join(undated[:3])}{', ...' if len(undated) > 3 else ''})"
+                   if undated else "")
     if runs is None:
         res["detail"] = "the cron's logs could not be read, so no entry's state is known"
-    elif waiting and oldest * 24 > STARVED_AFTER_H:
+    elif dated and oldest * 24 > STARVED_AFTER_H:
         res.update(verdict="starved",
                    detail=f"{len(waiting)} of {len(res['entries'])} staged entries never reached "
-                          f"by the cron (oldest {oldest:.0f} d)")
+                          f"by the cron (oldest {oldest:.0f} d, by staged_at){unknown_age}")
     else:
         res.update(verdict="ok", detail=f"{len(res['entries'])} staged entries; "
-                   + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
+                   + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + unknown_age)
     if counts.get("failed"):
         res["failed"] = [{"entry": x["entry"], "detail": x["detail"]}
                          for x in res["entries"] if x["state"] == "failed"]

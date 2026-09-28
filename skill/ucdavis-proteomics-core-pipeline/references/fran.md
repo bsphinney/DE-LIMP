@@ -150,12 +150,19 @@ their real paths on 2026-09-08.) `health` is how this becomes visible from the s
 It is read-only and needs no credential. It reads what the cron itself writes
 (`/quobyte/proteomics-grp/de-limp/fran_refresh/logs/auto_ingest_<jobid>.out` and
 `auto_ingest_submit.log`), lists the drop dir, and compares FRAN's ingest code on HIVE with
-GitHub `main`:
+GitHub `main`.
+
+Each run's `===== done: ... — <time> =====` line is read **by name**: every `<n> <name>` field
+is kept, whatever FRAN adds, and a field it no longer prints is reported missing, never 0. On
+2026-09-26 FRAN appended `quarantined` and `backed-off`; the old positional reader matched none
+of the new lines and read 18 runs that ingested 46 searches as runs that died. A done line that
+still cannot be read is counted as unreadable (the run finished, in a format the skill does not
+know), never as a death, and the verdict says which logs it rests on:
 
 | part | answers | verdicts |
 |---|---|---|
-| `progress` | last run, last run that ingested anything, consecutive runs without an ingest, queue size, whether the cron is still submitting | `healthy` · `stuck` (≥ 3 runs in a row ingested nothing while work was queued; a run that died counts) · `not_running` (no run, or no submission, for > 12 h) · `unknown` |
-| `incoming` | each drop entry: age, who staged it and when, broken links, what the logs say (`ingested` / `failed` / `never_reached`), and whether it is a QC run not yet marked (`qc_unmarked`) | `starved` when an entry has gone unreached for > 48 h, even if the cron is ingesting *other* searches |
+| `progress` | last run, last run that ingested anything, consecutive runs without an ingest, queue size, whether the cron is still submitting, and how many logs end in a done line it could not read (`unreadable_done_lines`, `verdict_basis`) | `healthy` · `stuck` (≥ 3 runs in a row ingested nothing while work was queued; a run that died counts) · `not_running` (no run, or no submission, for > 12 h) · `unknown` (also when the newest logs are unreadable: never `stuck` from stale logs) |
+| `incoming` | each drop entry: age (from its manifest's `staged_at` only, never a modification time; without one the age is unknown and the entry is listed in `no_staged_at`), who staged it and when, broken links, what the logs say (`ingested` / `failed` / `never_reached`), and whether it is a QC run not yet marked (`qc_unmarked`) | `starved` when an entry has gone unreached for > 48 h by its `staged_at`, even if the cron is ingesting *other* searches; an entry of unknown age is never called starved |
 | `ingest_code` | each ingest file's md5 on HIVE vs `main`: `current`, `stale` (matches an older commit: *which one, from when*), `local_modification` (matches none of that file's recent commits), `missing`, `not_on_main`, `unknown` | `stale` if any file is stale or missing, or a file on FRAN's own refuse list (`corpus_ingest.py`, `spectronaut_to_corpus.py`, `diann_to_corpus.py`, `versions.py`) differs at all · `modified` · `current` |
 
 Overall `verdict`: `healthy` · `stuck` · `not_running` · `stale_code` · `unknown`, plus a one-line
