@@ -138,5 +138,62 @@ class FastaInManifest(unittest.TestCase):
             self.assertEqual(_count_entries(fa), 3)
 
 
+def _fasta(path, entries):
+    with open(path, "w") as fh:
+        for h in entries:
+            fh.write(h + "\nMPEPTIDEK\n")
+    return path
+
+
+YEAST = ">sp|P{i:05d}|Y{i}_YEAST Protein {i} OS=Saccharomyces cerevisiae (strain ATCC 204508 / S288c) OX=559292 GN=Y{i} PE=1 SV=1"
+HUMAN = ">sp|Q{i:05d}|H{i}_HUMAN Protein {i} OS=Homo sapiens OX=9606 GN=H{i} PE=1 SV=1"
+CONT_SP = ">sp|Cont_P00761|TRYP_PIG Trypsin OS=Sus scrofa OX=9823 GN=PRSS1 PE=1 SV=1"
+CONT_BARE = ">Cont_P02769|ALBU_BOVIN Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4"
+
+
+class OrganismFromHeadersTests(unittest.TestCase):
+    """A contaminant is not a target: its header CONTAINS fetch_fasta.CONT_TAG, as fetch_fasta
+    tests it -- the skill's and DE-LIMP's contaminants are `>sp|Cont_...`, not `>Cont_...`."""
+
+    def test_the_sp_cont_form_is_a_contaminant(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "h.fasta"),
+                       [HUMAN.format(i=i) for i in range(3)] + [CONT_SP, CONT_SP.replace("P00761", "P00760")])
+            org, tax, ev, why = fd.organism_from_headers(f)
+            self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (3, 2), ev)
+            self.assertEqual((org, tax, why), ("Homo sapiens", 9606, None))
+
+    def test_a_bare_cont_prefix_is_still_a_contaminant(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "h.fasta"), [HUMAN.format(i=0), CONT_BARE])
+            self.assertEqual(fd.organism_from_headers(f)[2]["contaminant_entries"], 1)
+
+    def test_yeast_plus_universal_resolves(self):
+        """6,066 yeast + 380 Universal contaminants is 94.1% yeast over ALL entries -- below
+        HEADER_MAJORITY, so counting contaminants as targets left the organism unresolved. The same
+        ratio here: 16 yeast + 1 contaminant."""
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "y.fasta"), [YEAST.format(i=i) for i in range(16)] + [CONT_SP])
+            self.assertLess(16 / 17, fd.HEADER_MAJORITY)            # the old count failed here
+            org, tax, ev, why = fd.organism_from_headers(f)
+            self.assertIsNone(why)
+            self.assertEqual(tax, 559292)
+            self.assertTrue(org.startswith("Saccharomyces cerevisiae"), org)
+            self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (16, 1))
+
+    def test_untagged_contaminants_still_count_as_targets(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = _fasta(os.path.join(d, "hand.fasta"),
+                       [YEAST.format(i=i) for i in range(16)] + [CONT_SP.replace("Cont_", "")])
+            org, tax, ev, why = fd.organism_from_headers(f)
+            self.assertEqual((ev["target_entries"], ev["contaminant_entries"]), (17, 0))
+            self.assertIsNone(tax)
+            self.assertIn("no clear majority", why)
+
+    def test_the_tag_is_fetch_fastas(self):
+        import fetch_fasta
+        self.assertEqual(fd._cont_tag(), fetch_fasta.CONT_TAG)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

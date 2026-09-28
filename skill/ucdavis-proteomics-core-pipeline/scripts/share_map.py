@@ -32,6 +32,11 @@ HIVE_ROOTS = ("/quobyte/", "/nfs/lssc0/")
 FLINDERS_SHARE = "proteomics"
 FLINDERS_RAW = ("Data", "raw_data")              # instrument raw files
 FLINDERS_SERVICE = ("Data", "lab", "service")    # the Core's service folders
+# The Core's Quobyte group share, by its name in the table, and the tree inside it where service
+# work lives: core_submission.py's work root (CORE_WORK_ROOT's default) and the tree fran_deposit's
+# backfill walks.
+QUOBYTE_SHARE = "proteomics-grp"
+QUOBYTE_SERVICE = ("SERVICE",)
 
 
 def load_table(path=TABLE):

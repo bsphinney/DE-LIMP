@@ -37,7 +37,7 @@ A QC run (a HeLa series watching an instrument) is not a customer search, and FR
 out of the corpus, as it does STAN. FRAN's scanner can only recognise QC by path, and a drop
 entry has no QC path, so the skill decides. There is **one** definition,
 `fran_deposit.is_qc_run(out, session)`, used by `check`, `stage` and `backfill`. Its twin in
-FRAN is `ingest/find_uningested.py` `policy_exclusion` / `qc_reason` / `QC_NAME_RE`: change one,
+FRAN is `ingest/find_uningested.py` `qc_reason` / `name_qc_signal` and its regexes: change one,
 change the other. The precedence is FRAN's; the first match wins:
 
 1. **Explicit QC:** `stage --qc`, or `"qc": true` in the session's `session.json` (or
@@ -54,6 +54,16 @@ change the other. The precedence is FRAN's; the first match wins:
    `hela_qc_2` and `Exploris QC2`. It keeps `HeLa_digest_timecourse`, `aqc_buffer_study`,
    `QCM_study` and `Plasma_liver2`, the same pinned vectors as FRAN. "HeLa" alone is **not**
    QC.
+
+   The rule also catches the Core's **HeLa standard**: `HE50` / `HeL50` / `Hel-50` /
+   `HeLa50(ng)` beside a run-method token, `NN-spd` (Evosep, e.g. the timsTOF HT's
+   `07162026_HE50_60-spd-dia-_S1-A1`) or an `NNm` gradient (the Lumos's `FL030926_HeL50_90m_3`,
+   which carries no SPD). Neither token alone counts: `HeLa50ng_titration` is an experiment.
+
+   **A PROT_#### id overrides the name rule.** A name that trips it but also carries a Core
+   submission id (`PROT_0812 plasma + pooled QC`) is a customer study that mentions its pooled QC.
+   The reason is then `needs_agent_check`, not `qc_run`: `stage` refuses, records nothing, and
+   blocks nothing. Decide it and re-run `stage` with `--qc` or `--not-qc`.
 
 A QC run gets reason `qc_run`, with a `why` in FRAN's wording, e.g. `QC run: excluded by policy
 (search_name 'chkLUppm_HeLa50_2026 Lumos QC' matches QC_NAME_RE)`. The receipt records it. `--not-qc` corrects a
@@ -78,7 +88,10 @@ skips at ingest time. Nothing in the shared drop dir is deleted, and `verify` th
 
 - **A withdrawal sticks.** A `qc_run` receipt, or a staged manifest that says `qc: true`, means
   QC for every later `stage` until someone passes `--not-qc` explicitly. A plain `stage --out X`
-  used to re-stage a withdrawn run with `qc: false`, which FRAN honours.
+  used to re-stage a withdrawn run with `qc: false`, which FRAN honours. The exception is a verdict
+  the **name rule** reached: it is re-judged by today's rule, with the name it was judged on, so a
+  rule fix reaches a search it misjudged before. An explicit `--qc`, a session marker and an
+  excluded tree stay binding.
 - **A withdrawal that fails says so.** For example, the entry was staged by another account
   without group write. The result then starts `withdraw FAILED: <why>`, names the entry that is
   still staged, and never claims the run was kept out.
