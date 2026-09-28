@@ -213,6 +213,21 @@ class FinalizeKeepsThePdf(unittest.TestCase):
                 with open(p["manifest_txt"]) as fh:
                     self.assertIn("made from the current HTML", fh.read())
 
+    def test_a_stale_pdf_stays_beside_the_report(self):
+        """print_report renames a PDF it could not re-print to Analysis_Report.stale.pdf; the
+        next finalize's tidy step must not move that into figures/ either."""
+        import test_deposit_package as tdp
+        with tempfile.TemporaryDirectory() as d:
+            p = tdp.dia_session(d)
+            stale = os.path.join(p["output_dir"], "Analysis_Report.stale.pdf")
+            with open(stale, "wb") as fh:
+                fh.write(b"%PDF-1.4\nOLD\n%%EOF\n")
+            r = tdp.finalize(p["session_dir"])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.isfile(stale))
+            self.assertFalse(os.path.exists(os.path.join(p["figures_dir"],
+                                                         "Analysis_Report.stale.pdf")))
+
 
 class Integration(unittest.TestCase):
     def test_make_analysis_html_no_pdf(self):
