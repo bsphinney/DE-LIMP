@@ -38,4 +38,4 @@ quantification.
 
 ## Files
 
-Analysis_Report.html, the DE_dpc_*.csv tables (with the PropObs column), methods.md.
+README.html, Analysis_Report.html, the DE_dpc_*.csv tables (with the Detected_<group> columns, detected in k of n runs per group, and the Evidence column), methods.md.

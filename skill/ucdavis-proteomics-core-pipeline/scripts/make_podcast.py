@@ -96,8 +96,17 @@ GAP_SEGMENT, GAP_CHUNK, GAP_TURN = 0.7, 0.3, 0.25   # seconds of silence
 
 START, END = "<!-- podcast:start -->", "<!-- podcast:end -->"
 T_START, T_END = "<!-- TRANSCRIPT START -->", "<!-- TRANSCRIPT END -->"
-DISCLOSURE = ("AI-generated discussion of these results; voices are synthetic; the report is "
-              "the record — check anything important against it.")
+DISCLOSURE = ("AI-generated, in synthetic voices. It discusses this report and methods; items "
+              "beyond them are listed in the transcript. The report is the record — check "
+              "anything important against it.")
+
+
+def extras_note(man):
+    """" It also drew on: <labels> (not in this folder)." when the check had extra sources."""
+    labs = [x.get("label") or x.get("file") for x in (man.get("sources") or [])
+            if isinstance(x, dict) and x.get("delivered") is False]
+    labs = [str(x) for x in labs if x]
+    return f" It also drew on: {'; '.join(labs)} (not in this folder)." if labs else ""
 DISCLOSURE_RE = re.compile(r"\bAI[-\s]generated\b|\bgenerated\s+(?:by|with)\s+(?:an?\s+)?"
                            r"(?:AI|artificial\s+intelligence)\b", re.I)
 
@@ -135,7 +144,14 @@ TEACHING = [
     ("multiple testing", r"multiple[- ]testing|Benjamini|adjusted p|\bFDR\b"),
 ]
 # The close tells them what to do next: which file to open, how to tier hits, what to validate.
-NEXT_STEPS = r"\.(?:html|csv|md|pdf)\b|Analysis[_ ]Report|PropObs|\bvalidat|\btier"
+NEXT_STEPS = (r"README|Analysis[_ ]Report|Detected_|detection (?:count|column)|detected in \d+ "
+              r"of \d+|\bEvidence\b|tier file|\bvalidat")
+# Advice the brief forbids: PropObs is the observed fraction of a protein's precursors over ALL
+# runs, so a hit found only in its bait's pulldowns scores low. Tier with the per-group
+# detection columns (Detected_<group> k/n, Evidence) or the tier file instead.
+PROPOBS_TIER = re.compile(r"\b(?:tier|rank|sort|filter|prioriti[sz]e)\w*\b[^.!?]{0,80}\bPropObs\b"
+                          r"|\bPropObs\b[^.!?]{0,80}\b(?:tier|rank|sort|filter|prioriti[sz]e)\w*",
+                          re.I)
 
 # A quantity said in words cannot be checked against the sources: numbers over ten, their
 # plurals and -fold forms, N-fold, dozen(s), twice, half. A phrase listed under "Claims beyond the
@@ -743,9 +759,21 @@ def load_source(path):
 
 
 # ----------------------------------------------------------------------------- check
+def _as_source(x):
+    """A source as check uses it: a dict with path, sha, text, kind ('delivered' | 'extra'),
+    label and ref (what check.txt records). A (path, sha, text) tuple is a delivered source."""
+    if isinstance(x, dict):
+        return x
+    path, sha, text = x
+    return {"path": path, "sha": sha, "text": text, "kind": "delivered", "label": None,
+            "ref": os.path.basename(path)}
+
+
 def check(s, sources, forbid=()):
-    """-> dict with fails / warns / infos (lists of str) and stats. `sources`: [(path, sha,
-    text)]."""
+    """-> dict with fails / warns / infos (lists of str) and stats. `sources`: dicts from
+    cmd_check (or (path, sha, text) tuples, taken as delivered). A token found only in an
+    extra source (one the lab was not given) passes only when a Claims bullet names it and that
+    source."""
     fails, warns, infos = [], [], []
     for line, msg in s.problems:
         fails.append((f"line {line}: " if line else "") + msg)
@@ -757,16 +785,43 @@ def check(s, sources, forbid=()):
                      "have no rows)")
     if not s.has_claims:
         fails.append("missing section '## Claims beyond the report' (bullets, or 'None')")
-    if not sources:
-        fails.append("no --source given: nothing to check the numbers and symbols against")
+    srcs = [_as_source(x) for x in sources]
+    if not [x for x in srcs if x["kind"] == "delivered"]:
+        fails.append("no delivered --source given: nothing to check the numbers and symbols "
+                     "against")
 
-    book = NumberBook()
-    hay = []
-    for path, sha, text in sources:
-        book.add_text(text)
-        hay.append(normalize_numbers(text).lower())
-    hay = "\n".join(hay)
-    phrases = _words_norm(hay)
+    def pool(kind):
+        book, hay = NumberBook(), []
+        for x in srcs:
+            if x["kind"] == kind:
+                book.add_text(x["text"])
+                hay.append(normalize_numbers(x["text"]).lower())
+        hay = "\n".join(hay)
+        return book, hay, _words_norm(hay)
+    book, hay, phrases = pool("delivered")
+    xs = []                                  # each extra source on its own, to name the right one
+    for x in srcs:
+        if x["kind"] == "extra":
+            b = NumberBook()
+            b.add_text(x["text"])
+            h = normalize_numbers(x["text"]).lower()
+            xs.append({"label": x.get("label") or os.path.basename(x["path"]), "book": b, "hay": h,
+                       "phrases": _words_norm(h), "names": [n.lower() for n in (
+                           x.get("label"), os.path.basename(x["path"])) if n]})
+
+    def extra_hits(test):
+        return [x for x in xs if test(x)]
+
+    def extra_only(where, what, pred, hits):
+        """`what` is only in the extra sources `hits`: pass when a Claims bullet says it (pred)
+        and names one of them."""
+        labels = ", ".join(repr(x["label"]) for x in hits)
+        if any(pred(c) and any(n in c.lower() for x in hits for n in x["names"]) for c in s.claims):
+            infos.append(f"{where}: {what} is only in {labels} (not delivered); it is listed under "
+                         "Claims beyond the report with its source")
+        else:
+            fails.append(f"{where}: {what} is only in {labels}, not in the files the lab has -- "
+                         "list it under Claims beyond the report naming that source, or drop it")
     claims_hay = normalize_numbers(s.claims_text).lower()
     disclosed = NumberBook()
     disclosed.add_text(s.claims_text)
@@ -787,6 +842,11 @@ def check(s, sources, forbid=()):
             elif v == "magnitude":
                 infos.append(f"{where}: {n.text} is spoken as an order of magnitude of a source "
                              "value (same power of ten)")
+            elif xs and extra_hits(lambda x, n=n: x["book"].verdict(n) in (
+                    "exact", "rounded", "magnitude")):
+                extra_only(where, f"number {n.text}", lambda c, v=n.value: any(
+                    b.value == v for b in numbers_in(c)),
+                    extra_hits(lambda x, n=n: x["book"].verdict(n) in ("exact", "rounded", "magnitude")))
             elif disclosed.verdict(n) in ("exact", "trivial"):
                 infos.append(f"{where}: {n.text} is not in the sources; it is listed under "
                              "Claims beyond the report")
@@ -801,6 +861,10 @@ def check(s, sources, forbid=()):
             ph = quantity_phrase(t.text, m)
             if ph and f" {ph} " in phrases:
                 continue
+            hits = extra_hits(lambda x, ph=ph: f" {ph} " in x["phrases"]) if ph else []
+            if hits:
+                extra_only(where, f"'{ph}'", lambda c, ph=ph: f" {ph} " in _words_norm(c), hits)
+                continue
             if re.search(r"\b" + re.escape(m.group(0).lower()) + r"\b", s.claims_text.lower()):
                 infos.append(f"{where}: '{m.group(0)}' is listed under Claims beyond the report")
                 continue
@@ -808,6 +872,11 @@ def check(s, sources, forbid=()):
                          "-- use the report's own phrase or its digits (the pronunciation step "
                          "handles speech), or list it under Claims beyond the report if it is "
                          "your own gloss")
+        for m in PROPOBS_TIER.finditer(t.text):
+            fails.append(f"{where}: '{m.group(0)}' -- do not tier or rank hits by PropObs: it is "
+                         "the observed fraction over ALL runs, so a hit found only in its own "
+                         "group scores low. Point to the per-group detection columns "
+                         "(Detected_<group>, Evidence) or the tier file instead")
         for m in SPECIALTY.finditer(t.text):
             fails.append(f"{where}: '{m.group(0)}' -- a host must not claim a real research "
                          "specialty (it lends a synthetic voice false authority); say \"I'm the "
@@ -825,6 +894,11 @@ def check(s, sources, forbid=()):
     for tok, (i, t) in seen.items():
         where = f"turn {i} (line {t.line}, {t.speaker.upper()})"
         if symbol_found(tok, hay):
+            continue
+        hits = extra_hits(lambda x, tok=tok: symbol_found(tok, x["hay"]))
+        if hits:
+            extra_only(where, tok, lambda c, tok=tok: symbol_found(tok, normalize_numbers(c).lower()),
+                       hits)
             continue
         if symbol_found(tok, claims_hay):
             infos.append(f"{where}: {tok} is not in the sources; it is listed under Claims beyond "
@@ -856,6 +930,11 @@ def check(s, sources, forbid=()):
     for tok, (i, t) in caps.items():
         where = f"turn {i} (line {t.line}, {t.speaker.upper()})"
         if symbol_found(tok, hay):
+            continue
+        hits = extra_hits(lambda x, tok=tok: symbol_found(tok, x["hay"]))
+        if hits:
+            extra_only(where, tok, lambda c, tok=tok: symbol_found(tok, normalize_numbers(c).lower()),
+                       hits)
             continue
         if symbol_found(tok, claims_hay):
             infos.append(f"{where}: {tok} is not in the sources; it is listed under Claims beyond "
@@ -902,8 +981,9 @@ def check(s, sources, forbid=()):
                      "proteomics works, with your data' segment; skip what does not apply here)")
     tail = "\n".join(t.text for seg in s.segments[-2:] for t in seg)
     if turns and not re.search(NEXT_STEPS, tail, re.I):
-        warns.append("the last two segments never say what to do with this: which file to open, "
-                     "how to tier hits by PropObs, what to validate first")
+        warns.append("the last two segments never say what to do with this: README.html, the "
+                     "report, the per-group detection columns (Detected_<group>, Evidence) or the "
+                     "tier file, and what to validate first")
 
     words = sum(t.words for t in turns)
     by = {}
@@ -941,11 +1021,17 @@ def check_report(s, res, sources, forbid):
     L = [f"Podcast script check: {res['status']} ({len(res['fails'])} problem(s), "
          f"{len(res['warns'])} warning(s))",
          f"status: {res['status']}",
-         f"script: {s.path}",
+         f"script: {os.path.basename(s.path)}",
          f"script_sha256: {s.sha256}",
          f"checked: {now_iso()}"]
-    L += [f"source: {p} sha256={sha}" for p, sha, _ in sources]
-    L.append("forbidden names: " + (", ".join(forbid) if forbid else "none given"))
+    for x in (_as_source(y) for y in sources):          # relative paths / basenames only
+        if x["kind"] == "delivered":
+            L.append(f"source: {x['ref']} sha256={x['sha']}")
+        else:
+            L.append(f"extra-source: {x['ref']} sha256={x['sha']} label=\"{x.get('label') or ''}\"")
+    names = [n for n in forbid if n.strip()]
+    L.append(f"forbidden names: {len(names)} given (not listed here)" if names else
+             "forbidden names: none given")
     L += ["", f"words: {st['words']:,} · turns: {st['turns']} · segments: {st['segments']} · "
               f"about {st['minutes']} min at {WPM} wpm",
           "speaking share: " + " · ".join(f"{h} {v}%" for h, v in st["share"].items())]
@@ -967,25 +1053,59 @@ def check_report(s, res, sources, forbid):
     return "\n".join(L) + "\n"
 
 
+def output_dir_of(script_path, given=None):
+    """The session's output folder: --output-dir, else the folder above a podcast/ folder."""
+    if given:
+        return os.path.realpath(given)
+    d = os.path.dirname(os.path.abspath(script_path))
+    return os.path.realpath(os.path.dirname(d)) if os.path.basename(d) == "podcast" else None
+
+
 def cmd_check(a):
     s = parse_script(a.script)
-    sources = []
-    missing = []
+    sdir = os.path.dirname(s.path)
+    out = output_dir_of(s.path, a.output_dir)
+    pod = os.path.realpath(sdir)
+    sources, problems = [], []
+    if not out:
+        problems.append("cannot tell the session's output folder: keep the script in "
+                        "<session>/output/podcast/ or pass --output-dir")
     for p in a.source:
         if not os.path.isfile(p):
-            missing.append(p)
+            problems.append(f"source not found: {p}")
+            continue
+        rp = os.path.realpath(p)
+        if not out or not rp.startswith(out + os.sep) or rp.startswith(pod + os.sep):
+            problems.append(f"source {os.path.basename(p)} is not a delivered file: a --source must "
+                            f"be in the session's output folder the lab receives (the report, "
+                            f"methods.md, SAMPLE_QUALITY.md, AUDIT.md), not the podcast folder. "
+                            f"Give anything else as --extra-source {os.path.basename(p)} "
+                            f"--label \"what it is\"")
             continue
         sha, text = load_source(p)
-        sources.append((os.path.abspath(p), sha, text))
+        sources.append({"path": rp, "sha": sha, "text": text, "kind": "delivered", "label": None,
+                        "ref": os.path.relpath(rp, pod).replace(os.sep, "/")})
+    extras, labels = list(a.extra_source or []), list(a.label or [])
+    if len(extras) != len(labels):
+        problems.append(f"{len(extras)} --extra-source but {len(labels)} --label: give each extra "
+                        "source its own --label \"what it is\"")
+    for p, lab in zip(extras, labels):
+        if not os.path.isfile(p):
+            problems.append(f"extra source not found: {p}")
+            continue
+        sha, text = load_source(p)
+        sources.append({"path": os.path.realpath(p), "sha": sha, "text": text, "kind": "extra",
+                        "label": lab.strip() or os.path.basename(p), "ref": os.path.basename(p)})
     res = check(s, sources, a.forbid_name or [])
-    for p in missing:
-        res["fails"].insert(0, f"source not found: {p}")
+    for pr in reversed(problems):
+        res["fails"].insert(0, pr)
+    if problems:
         res["status"] = "FAIL"
-    out = os.path.join(os.path.dirname(s.path), "check.txt")
-    with open(out, "w", encoding="utf-8") as fh:
+    path = os.path.join(sdir, "check.txt")
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(check_report(s, res, sources, a.forbid_name or []))
     print(json.dumps({"status": res["status"], "fails": len(res["fails"]),
-                      "warnings": len(res["warns"]), "check": out, **res["stats"]}, indent=2))
+                      "warnings": len(res["warns"]), "check": path, **res["stats"]}, indent=2))
     for f in res["fails"][:40]:
         log(f"[FAIL] {f}")
     for w in res["warns"]:
@@ -1006,23 +1126,25 @@ def read_check(s):
         return None, [], f"no check.txt beside {os.path.basename(s.path)}"
     status = re.search(r"(?m)^status: (\w+)", text)
     sha = re.search(r"(?m)^script_sha256: (\w+)", text)
-    srcs = [{"file": m.group(1), "sha256": m.group(2)}
+    srcs = [{"file": m.group(1), "sha256": m.group(2), "delivered": True}
             for m in re.finditer(r"(?m)^source: (.+) sha256=(\w+)$", text)]
+    extra = [{"file": m.group(1), "sha256": m.group(2), "delivered": False, "label": m.group(3)}
+             for m in re.finditer(r'(?m)^extra-source: (.+) sha256=(\w+) label="(.*)"$', text)]
     if not status or status.group(1) != "PASS":
         return (status.group(1) if status else None), srcs, "check.txt does not say PASS"
     if not sha or sha.group(1) != s.sha256:
         return "STALE", srcs, "the script changed after check.txt was written"
     if not srcs:
-        return "STALE", srcs, "check.txt names no source"
-    for src in srcs:
+        return "STALE", srcs + extra, "check.txt names no delivered source"
+    for src in srcs:                     # relative to check.txt; extra sources are not re-read
         try:
-            now = source_sha(source_text(src["file"]))
+            now = source_sha(source_text(os.path.join(os.path.dirname(path), src["file"])))
         except OSError:
-            return "STALE", srcs, f"source {src['file']} is missing"
+            return "STALE", srcs + extra, f"source {src['file']} is missing"
         if now != src["sha256"]:
-            return "STALE", srcs, (f"source {os.path.basename(src['file'])} changed after "
-                                   "check.txt was written")
-    return "PASS", srcs, None
+            return "STALE", srcs + extra, (f"source {os.path.basename(src['file'])} changed after "
+                                           "check.txt was written")
+    return "PASS", srcs + extra, None
 
 
 # ----------------------------------------------------------------------------- audio
@@ -1856,7 +1978,13 @@ def cmd_render(a):
         shutil.copyfile(s.path, script_copy)
         chk = os.path.join(os.path.dirname(s.path), "check.txt")
         if os.path.isfile(chk) and os.path.abspath(chk) != os.path.join(out, "check.txt"):
-            shutil.copyfile(chk, os.path.join(out, "check.txt"))
+            with open(chk, encoding="utf-8") as fh:              # sources stay relative, rebased
+                text = fh.read()
+            text = re.sub(r"(?m)^source: (.+) (sha256=\w+)$", lambda m: "source: " + (
+                m.group(1) if os.path.isabs(m.group(1)) else rel(os.path.normpath(os.path.join(
+                    os.path.dirname(s.path), m.group(1))), out)) + " " + m.group(2), text)
+            with open(os.path.join(out, "check.txt"), "w", encoding="utf-8") as fh:
+                fh.write(text)
     man = {
         "show": s.show, "title": s.title,
         "hosts": [{"name": h, "role": r or None, "voice": backend.voices.get(h)} for h, r in s.hosts],
@@ -2362,11 +2490,9 @@ def transcript_html(s, man, out):
                                     else "") + " — check.txt")],
             ["Made", esc(man["created"])],
             ["Script sha256", f"<code>{esc(s.sha256[:16])}…</code>"]]
-    pron = (rs.table(["Written", "Spoken"], [[esc(w), esc(sp)] for w, sp in s.pronunciation])
-            if s.pronunciation else "<p>Only the built-in substitutions.</p>")
     body = (f"<header><h1>{esc(title)}</h1><p>An AI-generated audio discussion of {what}: "
             f"two synthetic hosts talk through the results.</p></header>\n"
-            + rs.callout("info", f"<p>{esc(DISCLOSURE)} The hosts are fictional, their voices are "
+            + rs.callout("info", f"<p>{esc(DISCLOSURE + extras_note(man))} The hosts are fictional, their voices are "
                                  "synthetic, and the script was written by an AI from the report; "
                                  "anything said beyond the report is listed below.</p>",
                          title="AI-generated")
@@ -2378,7 +2504,7 @@ def transcript_html(s, man, out):
               "speculation). Check these before relying on them.</p>" + claims + "</section>"
             + '<section><h2 id="made">How this was made</h2>' + rs.table(["", ""], rows)
             + "<p>Pronunciation substitutions change only what the voices say; the transcript "
-              "above keeps the written form.</p>" + pron + "</section>")
+              "above keeps the written form. They are listed in check.txt.</p></section>")
     if hasattr(rs, "document"):
         return rs.document(title, body)
     return rs.page(title, body)
@@ -2480,8 +2606,8 @@ def listen_card_html(outdir, base_dir=None):
             f'<span class="pc-d">{esc(minutes_label(man.get("duration_s")))}</span></div>'
             f'<audio controls preload="none" src="{href(audio)}">Open '
             f'<a href="{href(audio)}">{esc(audio)}</a> to listen.</audio>'
-            f"<p>{esc(DISCLOSURE)} <a href=\"{href(tr)}\">Read the transcript</a> (with the claims "
-            f"that go beyond the report). The audio is a separate file in the podcast folder "
+            f"<p>{esc(DISCLOSURE + extras_note(man))} <a href=\"{href(tr)}\">Read the transcript</a> "
+            f"(with the claims that go beyond the report). The audio is a separate file in the podcast folder "
             f"beside this report.</p>"
             f'<p class="pc-print">Audio: {esc(audio)} · transcript: {esc(tr)} (beside this '
             f"report)</p></aside>{END}")
@@ -2495,7 +2621,7 @@ def listen_md(outdir, base_dir=None):
     audio, tr = _paths(outdir, base_dir or outdir, man)
     return "\n".join([START, f"> **Listen:** *{man.get('show') or SHOW}* — "
                              f"{man.get('title') or 'Untitled'} ({minutes_label(man.get('duration_s'))}): "
-                             f"[{audio}]({href(audio)}). {DISCLOSURE} Transcript: [{tr}]({href(tr)}).",
+                             f"[{audio}]({href(audio)}). {DISCLOSURE}{extras_note(man)} Transcript: [{tr}]({href(tr)}).",
                       END])
 
 
@@ -2724,6 +2850,12 @@ def main(argv=None):
     c.add_argument("script")
     c.add_argument("--source", nargs="+", default=[], action="extend",
                    help="the report files the script is from")
+    c.add_argument("--output-dir", help="the session's output folder (default: the folder "
+                                        "above the script's podcast/ folder)")
+    c.add_argument("--extra-source", action="append", metavar="FILE",
+                   help="a source the lab was NOT given (notes, a draft); needs its own --label, "
+                        "and anything only in it must be a Claims bullet naming it")
+    c.add_argument("--label", action="append", help="what the matching --extra-source is")
     c.add_argument("--forbid-name", nargs="+", default=[], action="extend",
                    help="names that must not appear (the PI, staff, collaborators)")
     r = sub.add_parser("render", help="render a checked script to audio")

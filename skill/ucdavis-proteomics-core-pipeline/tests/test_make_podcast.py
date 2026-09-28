@@ -188,6 +188,12 @@ class RealFormat(Workspace):
     10 segments. The study itself is synthetic (the real one is unpublished client data)."""
     FIX = os.path.join(HERE, "fixtures", "podcast")
 
+    def fixture_report(self):
+        """The synthetic report, delivered: copied into the session's output folder."""
+        dst = os.path.join(self.out, "synthetic_report.md")
+        shutil.copy(os.path.join(self.FIX, "synthetic_report.md"), dst)
+        return dst
+
     def test_parses_exactly(self):
         s = mp.parse_script(os.path.join(self.FIX, "format_v1_script.md"))
         self.assertEqual(s.problems, [])
@@ -207,8 +213,7 @@ class RealFormat(Workspace):
     def test_passes_check_teaches_and_closes(self):
         os.makedirs(self.pod, exist_ok=True)
         shutil.copy(os.path.join(self.FIX, "format_v1_script.md"), self.script)
-        rc, out, err = run("check", self.script, "--source",
-                           os.path.join(self.FIX, "synthetic_report.md"))
+        rc, out, err = run("check", self.script, "--source", self.fixture_report())
         txt = read(os.path.join(self.pod, "check.txt"))
         self.assertEqual(rc, 0, txt)
         self.assertNotIn("never taught", txt)
@@ -227,7 +232,7 @@ class RealFormat(Workspace):
         # same phrasings in the synthetic study's wording.
         os.makedirs(self.pod, exist_ok=True)
         shutil.copy(os.path.join(self.FIX, "format_v1_script.md"), self.script)
-        src = os.path.join(self.FIX, "synthetic_report.md")
+        src = self.fixture_report()
         rc, out, err = run("check", self.script, "--source", src)
         txt = read(os.path.join(self.pod, "check.txt"))
         self.assertEqual(rc, 0, txt)
@@ -256,7 +261,8 @@ class Check(Workspace):
         rc, txt = self.check()
         self.assertEqual(rc, 0, txt)
         self.assertIn("status: PASS", txt)
-        self.assertIn(f"source: {os.path.abspath(self.report)} sha256=", txt)
+        self.assertIn("source: ../AI_Analysis_Report.md sha256=", txt)       # relative
+        self.assertNotIn(self.d, txt)                                        # no tmp paths
         # rounding and order of magnitude are allowed, and said so
         self.assertRegex(txt, r"10\.6 matches a source value rounded")
         self.assertRegex(txt, r"5e-15 matches a source value rounded")
@@ -304,7 +310,7 @@ class Check(Workspace):
         rc, txt = self.check(text, "--forbid-name", "Dickson", "Silva")
         self.assertEqual(rc, 1)
         self.assertIn("forbidden name 'Dickson' appears in: turn 2", txt)
-        self.assertIn("forbidden names: Dickson, Silva", txt)
+        self.assertIn("forbidden names: 2 given (not listed here)", txt)
 
     def test_spelled_out_numbers_fail(self):
         rc, txt = self.check(script_text().replace("30 IPs", "Thirty IPs"))
@@ -455,7 +461,7 @@ class Render(Workspace):
         self.assertIs(man["ai_generated"], True)
         self.assertEqual(man["audio"], "podcast.wav")                 # no encoder: WAV kept
         self.assertEqual(man["script_sha256"], mp.parse_script(self.script).sha256)
-        self.assertEqual(man["sources"][0]["file"], os.path.abspath(self.report))
+        self.assertEqual(man["sources"][0]["file"], "../AI_Analysis_Report.md")
         self.assertEqual(man["check"]["status"], "PASS")
         self.assertGreater(man["duration_s"], 3)
         self.assertEqual(len([f for f in os.listdir(os.path.join(self.pod, ".cache")) if f.endswith(".wav")]), 2)
@@ -1194,7 +1200,7 @@ class ReportGenerator(Workspace):
         write(self.report, "# Study\n\nA one-line standfirst.\n\n## Overview\n\nText 6,112.\n")
         page = self.make_report()
         self.assertNotIn(mp.START, page)                              # no podcast, no card
-        src = os.path.join(self.d, "source_report.md")
+        src = os.path.join(self.out, "source_report.md")
         write(src, REPORT)
         checked_podcast(self.out, src)
         self.assertEqual(run("link", self.out)[0], 0)
@@ -1271,7 +1277,7 @@ class ReviewFixes(Workspace):
                ("LEO", "So the report says.")]
         for src_text in ("Recall dropped by half. Of the runs, 3 were thin.",
                          "| Metric | half |\n| of the runs | 3 |"):
-            src = os.path.join(self.d, "b.md")
+            src = os.path.join(self.out, "b.md")
             write(src, REPORT + "\n" + src_text + "\n")
             rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"), source=src)
             self.assertEqual(rc, 1, src_text)
@@ -1291,14 +1297,14 @@ class ReviewFixes(Workspace):
         for want in ("number 3k is not in the sources", "number 2M is not in the sources",
                      "IL-6 looks like a gene/protein symbol", "COVID-19 looks like"):
             self.assertIn(want, txt)
-        src = os.path.join(self.d, "k.md")
+        src = os.path.join(self.out, "k.md")
         write(src, REPORT + "\nAbout 3,000 proteins, 2,000,000 spectra, IL-6 and COVID-19.\n")
         rc, txt = self.check_txt(script_text(segs=(seg,), claims="None"), source=src)
         self.assertEqual(rc, 0, txt)
 
     # 2 -- a letter-ending symbol prefix-matched ordinary words
     def test_invented_acronyms_do_not_match_inside_words(self):
-        src = os.path.join(self.d, "words.md")
+        src = os.path.join(self.out, "words.md")
         write(src, REPORT + "\nsodium applied architecture synaptic junction\n")
         seg = [("MAYA", "An AI-generated test: SOD, APP, ARC, SYN and JUN all moved."),
                ("LEO", "And RyR and IgGs are fine.")]
@@ -1322,7 +1328,7 @@ class ReviewFixes(Workspace):
         self.assertIn("α looks like a gene/protein symbol", txt)
         for ok in ("Signal", "Noise", "Maya", "Leo", "Welcome", "Old"):
             self.assertNotIn(f"{ok} is capitalised", txt)
-        src = os.path.join(self.d, "greek.md")
+        src = os.path.join(self.out, "greek.md")
         write(src, REPORT + "\nTNF-α rose; Gapdh, Actb and Kras were flat.\n")
         rc, txt = self.check_txt(script_text(segs=(seg,), claims="- Myc is named from memory."),
                                  source=src)
@@ -1668,6 +1674,115 @@ class Verify(Workspace):
         self.assertEqual(t("fell minus 1.3 to 6,112"), ["fell", "1.3", "to", "6112"])
         self.assertEqual(t("LRS124 and LRS-124, KCNB1"), ["lrs", "124", "and", "lrs", "124",
                                                          "kcnb", "1"])
+
+
+class Release280(Workspace):
+    """Release review, 2026-09-28 (biologist reviewer): the episode may discuss only what the
+    lab was given, never advise PropObs tiering, and ship no absolute or /tmp paths."""
+
+    def test_sources_must_be_delivered_files(self):
+        notes = os.path.join(self.d, "notes.md")                      # outside output/
+        write(notes, REPORT)
+        write(self.script, script_text())
+        rc, out, err = run("check", self.script, "--source", notes)
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 1)
+        self.assertIn("source notes.md is not a delivered file", txt)
+        self.assertIn("--extra-source notes.md --label", txt)
+        write(os.path.join(self.pod, "draft.md"), REPORT)             # nor the podcast folder
+        rc, out, err = run("check", self.script, "--source", os.path.join(self.pod, "draft.md"))
+        self.assertIn("draft.md is not a delivered file", read(os.path.join(self.pod, "check.txt")))
+        rc, out, err = run("check", self.script, "--source", self.report)
+        self.assertEqual(rc, 0, read(os.path.join(self.pod, "check.txt")))
+
+    def test_an_extra_source_needs_a_label_and_named_claims(self):
+        notes = os.path.join(self.d, "v2_notes.md")
+        write(notes, "v2 notes: the rebuilt FASTA removed 41 entries; ACTB was affected.\n")
+        seg = [("MAYA", "An AI-generated show. The rebuild removed 41 entries, and ACTB was one."),
+               ("LEO", "The report is the record.")]
+        write(self.script, script_text(segs=(seg,), claims="None"))
+        rc, out, err = run("check", self.script, "--source", self.report, "--extra-source", notes)
+        self.assertEqual(rc, 1)
+        self.assertIn("1 --extra-source but 0 --label", read(os.path.join(self.pod, "check.txt")))
+        rc, out, err = run("check", self.script, "--source", self.report, "--extra-source", notes,
+                           "--label", "v2 notes (Core, not delivered)")
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 1)
+        self.assertIn("number 41 is only in 'v2 notes (Core, not delivered)', not in the files "
+                      "the lab has", txt)
+        self.assertIn("ACTB is only in 'v2 notes (Core, not delivered)'", txt)
+        # a bullet naming a DIFFERENT source does not count
+        write(self.script, script_text(segs=(seg,), claims="- 41 entries and ACTB: from the "
+                                                           "pairing comparison."))
+        rc, out, err = run("check", self.script, "--source", self.report, "--extra-source", notes,
+                           "--label", "v2 notes (Core, not delivered)")
+        self.assertEqual(rc, 1)
+        write(self.script, script_text(segs=(seg,), claims="- 41 entries removed and ACTB: from "
+                                                           "the v2 notes (Core, not delivered)."))
+        rc, out, err = run("check", self.script, "--source", self.report, "--extra-source", notes,
+                           "--label", "v2 notes (Core, not delivered)")
+        txt = read(os.path.join(self.pod, "check.txt"))
+        self.assertEqual(rc, 0, txt)
+        self.assertIn('extra-source: v2_notes.md sha256=', txt)
+        self.assertIn('label="v2 notes (Core, not delivered)"', txt)
+        self.assertNotIn(self.d, txt)                                  # basenames only
+        # the episode says so: the card and podcast.json name the extra source
+        mp.BACKENDS["fake"] = FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        with mock.patch.object(mp, "encode_aac", return_value=(None, "test")):
+            self.assertEqual(run("render", self.script, "--tts", "fake")[0], 0)
+        man = json.loads(read(os.path.join(self.pod, "podcast.json")))
+        self.assertIn({"file": "v2_notes.md", "sha256": man["sources"][1]["sha256"],
+                       "delivered": False, "label": "v2 notes (Core, not delivered)"},
+                      man["sources"])
+        card = mp.listen_card_html(self.out)
+        self.assertIn("It discusses this report and methods; items beyond them are listed in the "
+                      "transcript.", card)
+        self.assertIn("It also drew on: v2 notes (Core, not delivered) (not in this folder).", card)
+
+    def test_propobs_tiering_is_forbidden_advice(self):
+        for bad in ("Tier the hits by PropObs, high first.", "Sort them by PropObs.",
+                    "PropObs is how you should tier them."):
+            seg = [("MAYA", "An AI-generated show. " + bad), ("LEO", "The report is the record.")]
+            write(self.script, script_text(segs=(seg,), claims="None"))
+            rc, out, err = run("check", self.script, "--source", self.report)
+            self.assertEqual(rc, 1, bad)
+            self.assertIn("do not tier or rank hits by PropObs", read(os.path.join(self.pod,
+                                                                            "check.txt")))
+        seg = [("MAYA", "An AI-generated show. PropObs is the fraction observed over all runs."),
+               ("LEO", "The report is the record.")]
+        write(self.script, script_text(segs=(seg,), claims="None"))
+        rc, out, err = run("check", self.script, "--source", self.report)
+        self.assertNotIn("do not tier", read(os.path.join(self.pod, "check.txt")))
+        self.assertIn("Detected_<group>, Evidence", read(os.path.join(self.pod, "check.txt")))
+
+    def test_delivered_files_hold_no_absolute_paths_and_no_pronunciation_table(self):
+        mp.BACKENDS["fake"] = FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        self.assertEqual(self.check()[0], 0)
+        with mock.patch.object(mp, "encode_aac", return_value=(None, "test")):
+            self.assertEqual(run("render", self.script, "--tts", "fake")[0], 0)
+        for f in ("podcast.json", "check.txt", "transcript.html"):
+            text = read(os.path.join(self.pod, f))
+            self.assertNotIn(self.d, text, f)
+            self.assertNotIn(os.path.realpath(self.d), text, f)
+            self.assertNotIn("/private/tmp", text, f)
+        page = read(os.path.join(self.pod, "transcript.html"))
+        self.assertNotIn("<th>Written</th>", page)
+        self.assertNotIn("J P H three", page)                          # a spoken form
+        self.assertIn("They are listed in check.txt.", page)
+        self.assertIn("- Jph3 -> J P H three", read(os.path.join(self.pod, "check.txt")))
+
+    def test_a_copied_check_keeps_working_elsewhere(self):
+        mp.BACKENDS["fake"] = FakeTTS
+        self.addCleanup(mp.BACKENDS.pop, "fake", None)
+        self.assertEqual(self.check()[0], 0)
+        dest = os.path.join(self.d, "elsewhere", "podcast")
+        with mock.patch.object(mp, "encode_aac", return_value=(None, "test")):
+            self.assertEqual(run("render", self.script, "--tts", "fake", "--out", dest)[0], 0)
+        self.assertIn("source: ../../output/AI_Analysis_Report.md sha256=",
+                      read(os.path.join(dest, "check.txt")))
+        self.assertIsNone(mp.read_check(mp.parse_script(os.path.join(dest, "podcast_script.md")))[2])
 
 
 class SessionFiles(unittest.TestCase):

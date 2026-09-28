@@ -1754,7 +1754,10 @@ python3 scripts/make_podcast.py link <session>/output
 the word match ratio, dropped spans and numbers the voice misread, and names the segments to
 listen to. It runs by itself after a consented `--tts gemini` render, and it sends the audio,
 so it needs `--cloud-ok` too.
-`check` matches tokens, not meaning. It fails a number, symbol-like word or capitalised name
+Sources are the delivered files in `output/` only: anything else (a Core note, a draft) is an
+`--extra-source <file> --label "<what>"`, and what comes only from it must be a named Claims
+bullet. The episode never advises tiering by PropObs; it points to README.html, the report and
+the per-group detection columns. `check` matches tokens, not meaning. It fails a number, symbol-like word or capitalised name
 that is not in the sources or listed under "Claims beyond the report", a quantity in words, a
 missing AI disclosure, a host claiming a real specialty, and a forbidden name. It cannot catch
 a true number attached to the wrong protein, a relational word ("higher", "the top hit") or a
@@ -1762,7 +1765,8 @@ false sentence built from true tokens, so read the script against the report you
 and link refuse until the check passes for the current script and sources. `--tts gemini` sends
 the transcript (never the report) to Google, and nothing without `--cloud-ok` (`--cloud-ok no`
 is a refusal). On a free-tier key Google may use the text, so use a paid-tier key or `--tts say`
-for unpublished data, and record the user's consent.
+for unpublished data. The Core director's approval is the consent (Brett, 2026-09-28); record
+it with `--cloud-ok`.
 → detail (the brief, the file format, privacy): `references/podcast.md`.
 
 ### 10. Reproducibility bundle (mandatory)
