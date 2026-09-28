@@ -31,6 +31,7 @@ import notify_slack as ns  # noqa: E402
 import record_run as rr  # noqa: E402
 
 FAKE_T = "Fk7" + "Ab3dEf6hIj9kLm2nOp5q"          # a fake STAN share token
+FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiJmYWtlIn0" + "." + "fakesignaturefake"
 EXAMPLES = {
     "private key": "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nAAAAfake\n-----END OPENSSH PRIVATE KEY-----",
     "github": "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2",
@@ -50,6 +51,16 @@ EXAMPLES = {
     "share token argv, =": "--share-token=" + FAKE_T,
     "share token env": "STAN_HT_SHARE_TOKEN=" + FAKE_T + " python3 ht_manifest.py fetch 0793",
     "cookie argv": "--cookie 'AppServiceAuthSession=" + FAKE_T + "'",
+    # release verification, 2.8.0: report_issue.sh recorded all of these
+    "anthropic key": "export KEY=sk-ant-" + "api03-FAKEfakeFAKEfake0123456789abcdef",
+    "openai project key": "sk-proj-" + "FAKEfakeFAKEfake0123456789_-ab",
+    "openai key": "sk-" + "FAKEfakeFAKEfake0123456789abcdefFAKEfake01234567",
+    "aws access key id": "aws_access_key_id = AKIA" + "IOSFODNN7EXAMPLE",
+    "bare bearer": "curl -H 'Bearer " + "FAKEfakeFAKEfake0123456789'",
+    "jwt": "the PG Farm token is " + FAKE_JWT,
+    "share token argv, two spaces": "--share-token  " + FAKE_T,
+    "share token argv, tab": "--share-token\t" + FAKE_T,
+    "cookie argv, tab": "--cookie\tAppServiceAuthSession=" + FAKE_T,
 }
 # Look-alikes that must pass: file NAMES (the documented forms), placeholders, prose.
 BENIGN = [
@@ -67,6 +78,13 @@ BENIGN = [
     "password",
     "AQ.short",
     "detect_acquisition.py returned 'not found' for all 15 .raw",
+    "sk-learn",
+    "risk-2026-09-28_session_name_with_many_parts_xyz",
+    "sk-2026-09-28_session_name_foo_bar_baz_qux",
+    "AKIA is the AWS access-key prefix",
+    "Bearer tokens are sent in a header",
+    'eyJ is base64 for {"',
+    "--share-token\t<tok>",
 ]
 
 
@@ -106,13 +124,13 @@ class ReportIssueMirrorTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def report(self, text):
+    def report(self, text, *more):
         env = {k: v for k, v in os.environ.items() if not k.startswith("HIVE_")}
         env.update(HOME=self.d, HIVE_ENV_FILE=os.path.join(self.d, "none"), TMPDIR=self.d,
                    SKILL_ISSUES_DIR=self.shared,
                    SKILL_ISSUES_LOCAL_DIR=os.path.join(self.d, "local"))
         return subprocess.run(["bash", os.path.join(SCRIPTS, "report_issue.sh"), "--title", "t",
-                               "--what", text], capture_output=True, text=True, env=env,
+                               "--what", text, *more], capture_output=True, text=True, env=env,
                               timeout=60)
 
     def test_every_example_is_refused_and_nothing_is_written(self):
@@ -121,6 +139,12 @@ class ReportIssueMirrorTests(unittest.TestCase):
                 p = self.report(text)
                 self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
                 self.assertNotIn(FAKE_T, p.stdout + p.stderr)
+        self.assertEqual(os.listdir(self.shared), [])
+
+    def test_mode_is_checked_too(self):
+        """--mode is written into the file, and was the one free-text field left unchecked."""
+        p = self.report("t", "--mode", "hive_remote " + EXAMPLES["openai key"])
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertEqual(os.listdir(self.shared), [])
 
     def test_the_look_alikes_are_recorded(self):
@@ -166,7 +190,15 @@ class _Echo(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         type(self).seen.append({"path": self.path, "cookie": self.headers.get("Cookie")})
-        body = f"internal error handling GET {self.path}".encode()
+        if type(self).status == 200:
+            # a reply that echoes what it was sent into every field fetch() prints or keeps
+            tok = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token")
+                   or [""])[0]
+            body = json.dumps({"submission": "0793", "include": "samples", "files": [],
+                               "plates": [f"P1-{tok}"], "counts": {"sample": 1, f"x{tok}": 2},
+                               "missing_paths": [f"/raw/{tok}.d"], "note": self.path}).encode()
+        else:
+            body = f"internal error handling GET {self.path}".encode()
         self.send_response(type(self).status)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
@@ -237,6 +269,41 @@ class HtManifestTests(unittest.TestCase):
         p = self.fetch("--cookie-file", cookie)
         self.assertEqual(_Echo.seen[0]["cookie"], "AppServiceAuthSession=" + FAKE_T)
         self.assertNotIn(FAKE_T, p.stdout + p.stderr)
+
+    def test_a_200_reply_that_echoes_the_token_is_masked_in_print_and_in_the_json(self):
+        """fetch() printed plates, counts and the missing-path examples straight from the reply,
+        and wrote ht_manifest.json verbatim (release verification, 2.8.0)."""
+        p = self.fetch("--share-token-file", self.tokfile, status=200)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)       # the missing path gate
+        self.assertIn("plates", p.stdout)
+        self.assertNotIn(FAKE_T, p.stdout + p.stderr)
+        self.assertIn("[redacted]", p.stdout)
+        with open(os.path.join(self.d, "ht_manifest.json")) as fh:
+            text = fh.read()
+        self.assertNotIn(FAKE_T, text)
+        self.assertIn("[redacted]", text)
+        self.assertIn("gates", json.loads(text))
+
+    def test_the_cli_path_masks_the_pg_credential(self):
+        """The STAN CLI route reads the PG Farm credential; a STAN that echoes it must not get it
+        printed or kept. Not JWT-shaped on purpose: the value itself is masked, not a pattern."""
+        fake_pg = "pgFAKE" + "Zz9yXw8vUt7sRq6pOn5m"
+        pg = os.path.join(self.d, "pg_token")
+        with open(pg, "w") as fh:
+            fh.write(fake_pg + "\n")
+        stan = os.path.join(self.d, "fake_stan")
+        with open(stan, "w") as fh:
+            fh.write("#!/bin/sh\nprintf '{\"files\": [], \"plates\": [\"%s\"], "
+                     "\"missing_paths\": [\"/raw/%s.d\"]}' \"$PGPASSWORD\" \"$PGPASSWORD\"\n")
+        os.chmod(stan, 0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("STAN_", "PG"))}
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ht_manifest.py"), "--stan", stan,
+                            "--token", pg, "fetch", "0793", "--out", self.d],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertNotIn(fake_pg, p.stdout + p.stderr)
+        with open(os.path.join(self.d, "ht_manifest.json")) as fh:
+            self.assertNotIn(fake_pg, fh.read())
 
     def test_nothing_it_writes_holds_the_token(self):
         self.fetch("--share-token-file", self.tokfile)

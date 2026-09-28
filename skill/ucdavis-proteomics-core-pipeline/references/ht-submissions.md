@@ -242,8 +242,9 @@ and in `commands.log`, which the run registry copies into a folder the whole Cor
 read. The first line above passes it through stdin (`printf` is a shell builtin, so it never
 shows in a process list either) into a mode-600 file. Do not write that line into
 `commands.log`. `--share-token <tok>` still works, with a warning, and so does `STAN_HT_SHARE_TOKEN`.
-`--cookie-file` does the same for an Entra session cookie. `ht_manifest.py` masks the token
-and cookie in every line it prints, including a server error that echoes the request URL.
+`--cookie-file` does the same for an Entra session cookie. `ht_manifest.py` masks the token,
+the cookie and the PG credential in every line it prints and in `ht_manifest.json`, whatever
+the server echoes back, in an error or in a normal reply's plates, counts and example paths.
 
 Get `<tok>` from the submission's HT tab in the dashboard — the token is an HMAC of the
 submission number, so a link for 0793 opens 0793 and nothing else, and rotating

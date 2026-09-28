@@ -22,7 +22,9 @@ After that, nothing about the run is HT-specific -- step 2 onward is the ordinar
 The share token and the Entra cookie are read from a FILE (--share-token-file, --cookie-file).
 On the command line they are in the process list and in the session's commands.log, which the
 run registry copies into a folder the whole Core group can read (release review, 2.8.0). Every
-line this script prints has the token value masked, whatever the server echoes back.
+line this script prints goes through _say(), and ht_manifest.json through _scrubbed(): the
+token, cookie and PG credential are masked, whatever the server echoes back -- in an error or
+in a 200 reply's plates, counts or example paths (release verification, 2.8.0).
 
 `fetch` writes `files.txt` (one absolute .d path per line, for --raw/--files) and
 `ht_manifest.json` (the full STAN payload plus the gate results).
@@ -47,6 +49,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 
 # STAN's own venv on HIVE. Overridable because nothing should hardcode one person's path.
 DEFAULT_STAN = "/quobyte/proteomics-grp/brett/stan_venv/bin/stan"
@@ -86,6 +89,7 @@ def _env(token_path: str | None) -> dict:
     env = dict(os.environ)
     env["STAN_DB_BACKEND"] = env.get("STAN_DB_BACKEND", "pg")
     if env.get("PGPASSWORD"):
+        _remember(env["PGPASSWORD"])
         return env
 
     explicit = token_path or env.get("STAN_PG_TOKEN")
@@ -104,6 +108,7 @@ def _env(token_path: str | None) -> dict:
             continue
         if tok:
             env["PGPASSWORD"] = tok
+            _remember(tok)
             return env
         tried.append(f"{p} — empty")
 
@@ -143,7 +148,7 @@ def _read_secret_file(path: str, what: str) -> str:
     if not val:
         sys.exit(f"[ht_manifest] the {what} file {p} is empty")
     if mode & 0o077:
-        print(f"[ht_manifest] WARNING: {p} can be read by other users (mode {mode & 0o777:o}); "
+        _say(f"[ht_manifest] WARNING: {p} can be read by other users (mode {mode & 0o777:o}); "
               f"chmod 600 it.", file=sys.stderr)
     return val
 
@@ -155,7 +160,7 @@ def _credentials(a) -> tuple:
         tok = _read_secret_file(a.share_token_file, "share token")
     elif getattr(a, "share_token", None):
         tok = a.share_token
-        print("[ht_manifest] WARNING: --share-token puts the token in the process list and in "
+        _say("[ht_manifest] WARNING: --share-token puts the token in the process list and in "
               "commands.log; use --share-token-file.", file=sys.stderr)
     else:
         tok = os.environ.get("STAN_HT_SHARE_TOKEN")
@@ -163,8 +168,9 @@ def _credentials(a) -> tuple:
         cookie = _read_secret_file(a.cookie_file, "cookie")
     elif getattr(a, "cookie", None):
         cookie = a.cookie
-        print("[ht_manifest] WARNING: --cookie puts the session cookie in the process list and in "
+        _say("[ht_manifest] WARNING: --cookie puts the session cookie in the process list and in "
               "commands.log; use --cookie-file.", file=sys.stderr)
+    _remember(tok, cookie)
     return tok, cookie
 
 
@@ -180,6 +186,33 @@ def _masked(text, *secrets) -> str:
     except ImportError:          # copied here alone: the exact-value mask above still applied
         return out
     return redact(out)
+
+
+# Every secret value this run has read -- share token, cookie, PG credential, and each one
+# URL-encoded -- so _say() and _scrubbed() can mask them wherever they turn up.
+_SECRETS: list = []
+
+
+def _remember(*values):
+    for v in values:
+        if v and v not in _SECRETS:
+            _SECRETS.extend([v, urllib.parse.quote_plus(v)])
+
+
+def _say(text="", file=None):
+    """print(), masked: the only way this script writes a line."""
+    print(_masked(text, *_SECRETS), file=file or sys.stdout)
+
+
+def _scrubbed(obj):
+    """`obj` with every string in it -- keys too -- masked like a printed line."""
+    if isinstance(obj, str):
+        return _masked(obj, *_SECRETS)
+    if isinstance(obj, dict):
+        return {_scrubbed(k): _scrubbed(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrubbed(v) for v in obj]
+    return obj
 
 
 def _run_stan(argv: list, env: dict) -> subprocess.CompletedProcess:
@@ -201,7 +234,6 @@ def _manifest_over_http(a) -> dict | int:
     browser; a share link does not.
     """
     import urllib.error
-    import urllib.parse
     import urllib.request
 
     base = (a.http or os.environ.get("STAN_HT_URL") or "").rstrip("/")
@@ -216,7 +248,7 @@ def _manifest_over_http(a) -> dict | int:
 
     def err(msg):
         # every line, not only the one that used to print `url`: a server may echo the request
-        print(_masked(msg, tok, cookie, urllib.parse.quote_plus(tok or "")), file=sys.stderr)
+        _say(msg, file=sys.stderr)
 
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
@@ -255,18 +287,18 @@ def _manifest_over_cli(a) -> dict | int:
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "").strip()
         if "No such command" in err:
-            print(f"[ht_manifest] the STAN on this machine has no 'ht-manifest' command.\n"
+            _say(f"[ht_manifest] the STAN on this machine has no 'ht-manifest' command.\n"
                   f"  {stan}\n"
                   f"  HT support landed in STAN v1.0.43; this venv predates it. Update the\n"
                   f"  venv (pip install -U from the STAN repo) and re-run. Nothing was searched.",
                   file=sys.stderr)
             return 3
-        print(f"[ht_manifest] stan ht-manifest failed (rc={p.returncode}):\n{err}", file=sys.stderr)
+        _say(f"[ht_manifest] stan ht-manifest failed (rc={p.returncode}):\n{err}", file=sys.stderr)
         return 3
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
-        print(f"[ht_manifest] STAN returned non-JSON:\n{p.stdout[:500]}", file=sys.stderr)
+        _say(f"[ht_manifest] STAN returned non-JSON:\n{p.stdout[:500]}", file=sys.stderr)
         return 3
 
 
@@ -346,21 +378,21 @@ def fetch(a) -> int:
     with open(fl, "w") as fh:
         fh.write("".join(f + "\n" for f in files))
     with open(mf, "w") as fh:
-        json.dump(m, fh, indent=2)
+        json.dump(_scrubbed(m), fh, indent=2)
 
-    print(f"submission {m.get('submission', a.submission)}  include={m.get('include', a.include)}")
-    print(f"  files      : {len(files)}")
-    print(f"  plates     : {', '.join(map(str, plates)) or '(none reported)'}")
-    print(f"  counts     : {counts}")
-    print(f"  files.txt  : {fl}")
-    print(f"  manifest   : {mf}")
+    _say(f"submission {m.get('submission', a.submission)}  include={m.get('include', a.include)}")
+    _say(f"  files      : {len(files)}")
+    _say(f"  plates     : {', '.join(map(str, plates)) or '(none reported)'}")
+    _say(f"  counts     : {counts}")
+    _say(f"  files.txt  : {fl}")
+    _say(f"  manifest   : {mf}")
     for g in gates:
         if g["status"] != "PASS":
-            print(f"  [{g['status']}] {g['gate']}: {g.get('detail', '')}")
+            _say(f"  [{g['status']}] {g['gate']}: {g.get('detail', '')}")
             for ex in g.get("examples", [])[:5]:
-                print(f"        {ex}")
+                _say(f"        {ex}")
     if hard_fail:
-        print("\nHARD GATE FAILED — do not search. Resolve the above with the operator first.",
+        _say("\nHARD GATE FAILED — do not search. Resolve the above with the operator first.",
               file=sys.stderr)
         return 2
     return 0
@@ -395,27 +427,27 @@ def link(a) -> int:
             payload = json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            print(f"[ht_manifest] FRAN returned 404 for submission {a.submission}.\n"
+            _say(f"[ht_manifest] FRAN returned 404 for submission {a.submission}.\n"
                   f"  That endpoint is INTERNAL — 404 is also what it returns to a caller\n"
                   f"  who is not signed in, or to a lab user asking about another lab's\n"
                   f"  submission. So this is 'not visible to you', not proof of 'not ingested'.\n"
                   f"  Sign in at {base} (Microsoft Entra) or pass --cookie.", file=sys.stderr)
             return 4
-        print(f"[ht_manifest] FRAN returned HTTP {e.code} for {url}", file=sys.stderr)
+        _say(f"[ht_manifest] FRAN returned HTTP {e.code} for {url}", file=sys.stderr)
         return 4
     except urllib.error.URLError as e:
-        print(f"[ht_manifest] cannot reach {base}: {e.reason}", file=sys.stderr)
+        _say(f"[ht_manifest] cannot reach {base}: {e.reason}", file=sys.stderr)
         return 4
 
     body = payload.get("data", payload) if isinstance(payload, dict) else {}
     searches = (body or {}).get("searches") or []
-    print(f"submission {a.submission} — FRAN knows {len(searches)} search(es)")
+    _say(f"submission {a.submission} — FRAN knows {len(searches)} search(es)")
     for s in searches:
-        print(f"  {str(s.get('search_name') or s.get('id'))[:44]:<46}"
+        _say(f"  {str(s.get('search_name') or s.get('id'))[:44]:<46}"
               f"{str(s.get('search_engine') or '-'):<13}"
               f"prec={s.get('n_precursors_total')} pg={s.get('n_protein_groups_total')}")
     if not searches:
-        print("\n  No search under this submission yet. If fran_deposit.py reported\n"
+        _say("\n  No search under this submission yet. If fran_deposit.py reported\n"
               "  staged_pending_cron, that is expected — FRAN ingests on its next scan.\n"
               "  Re-run this later; it is not a failure.", file=sys.stderr)
         return 4
