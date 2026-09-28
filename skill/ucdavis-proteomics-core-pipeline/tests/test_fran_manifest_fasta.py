@@ -197,6 +197,45 @@ class OrganismFromHeadersTests(unittest.TestCase):
         self.assertEqual(fd._cont_tag(), (fetch_fasta.CONT_TAG, None))
 
 
+class LoggedFastaPathTests(unittest.TestCase):
+    """A --fasta path with spaces, as DIA-NN logs it: its arguments joined with spaces and NO
+    quotes, each option's value running to the next "--" (diann.cpp 1.8 arguments()). The Core's
+    own "Universal Protein Contaminants.fasta" was cut to ".../Universal" (not readable here)."""
+
+    # Verbatim from the DIA-NN 1.8.1 log of PXD022216 (Windows): a spaced path, and " - " in it.
+    PXD022216 = (r"C:\DIA-NN\1.8.1\DiaNN.exe --f D:\raw\a.raw  --lib  --threads 12 --fasta "
+                 r"C:\SpectralLib\human - 2021-02-16-reviewed-contam-UP000005640.fasta --met-excision "
+                 r"--cut K*,R* --mass-acc 10.0")
+
+    def test_a_windows_log_with_spaces(self):
+        self.assertEqual(fd.logged_fastas(self.PXD022216),
+                         [r"C:\SpectralLib\human - 2021-02-16-reviewed-contam-UP000005640.fasta"])
+
+    def test_values_end_at_the_next_option_and_fasta_search_is_not_one(self):
+        log = ("DIA-NN 2.7.0 Academia\r\n"
+               "/opt/diann-linux --f a.d --fasta /x/y/Universal Protein Contaminants.fasta "
+               "--fasta-search --fasta /x/human.fasta --fasta-filter f.txt --threads 8\r\n"
+               "diann.exe --f \"Z:\\a.raw \" --fasta \"/q/with space.fasta\" --out r.parquet\n"
+               "/opt/diann-linux --fasta /x/last.fasta\n")
+        self.assertEqual(fd.logged_fastas(log),
+                         ["/x/y/Universal Protein Contaminants.fasta", "/x/human.fasta",
+                          "/q/with space.fasta", "/x/last.fasta"])
+
+    def test_the_search_finds_its_spaced_database(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = _fasta(os.path.join(d, "Universal Protein Contaminants.fasta"),
+                        [HUMAN.format(i=i) for i in range(3)])
+            out = os.path.join(d, "search")
+            os.makedirs(out)
+            with open(os.path.join(out, "report.log.txt"), "w") as fh:
+                fh.write(f"DIA-NN 2.7.0 Academia\n/opt/diann-linux --f a.d --lib  --fasta {fa} "
+                         f"--fasta-search --out {out}/report.parquet\n")
+            self.assertEqual(fd.search_fastas(out), (fa,))
+            res = fd.fasta_from_search(out)
+            self.assertEqual(res["fasta_path"], fa, res)
+            self.assertEqual(res["taxon"], 9606, res)
+
+
 class ContaminantTagUnavailableTests(unittest.TestCase):
     """A partial copy of scripts/ (no estimate_params.py, which fetch_fasta imports) cannot import
     fetch_fasta. The contaminant tag is then unknown and every contaminant counts as a target --

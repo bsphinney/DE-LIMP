@@ -63,7 +63,10 @@ change the other. The precedence is FRAN's; the first match wins:
    **A PROT_#### id overrides the name rule.** A name that trips it but also carries a Core
    submission id (`PROT_0812 plasma + pooled QC`) is a customer study that mentions its pooled QC.
    The reason is then `needs_agent_check`, not `qc_run`: `stage` refuses, records nothing, and
-   blocks nothing. Decide it and re-run `stage` with `--qc` or `--not-qc`.
+   blocks nothing. Decide it and re-run `stage` with `--qc` or `--not-qc`. The id is read with
+   `core_submission.PROT_TOKEN`, the regex `identify` uses (PROT plus 3-5 digits, so PROT_10234
+   counts), in the names and in **every** folder of the out dir's path, not only the last three
+   the QC token is read on: a PROT id can only send the call to a person, never exclude a run.
 
 A QC run gets reason `qc_run`, with a `why` in FRAN's wording, e.g. `QC run: excluded by policy
 (search_name 'chkLUppm_HeLa50_2026 Lumos QC' matches QC_NAME_RE)`. The receipt records it. `--not-qc` corrects a
@@ -374,7 +377,9 @@ That is honest, not a bug.
 **No sidecar at all: read the FASTA the search names** (`fasta_from_search`). A search whose
 FASTA has no sidecar (a hand-run DIA-NN, or `MRS/UP000005640_9606_plus_universal_contam.fasta`
 behind the Siegel searches) still says exactly which database it read: `fasta` in
-`search_provenance.json`, or `--fasta` in its `report.log.txt`. That file then supplies
+`search_provenance.json`, or `--fasta` in its `report.log.txt`. The log is read the way DIA-NN
+reads its own arguments (logged unquoted; a value runs to the next `--`), so a path with spaces,
+such as `Universal Protein Contaminants.fasta`, is kept whole. That file then supplies
 everything:
 
 - `fasta_path`, plus `fasta_md5` and `fasta_n_proteins` from fetch_fasta's own helpers, and

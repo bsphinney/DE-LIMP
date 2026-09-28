@@ -1356,10 +1356,13 @@ def cmd_locate(a) -> int:
 # PROT_#### token in a path or message, a 12-hex CoreOmics id, or "submission 807" typed by the
 # user. A bare number in a FILE name is never read as one -- Exploris runs carry counters
 # (Ex08312026_380_JE21). Everything else goes through the same sample-id matching as `locate`.
-# 3-4 digits after PROT: "Total_prot_10ug" and "WT_prot1" are protein amounts and names, not
-# submissions. A hex id preceded by "xxxx-" is the tail of a UUID/GUID, not a CoreOmics id.
-PROT_TOKEN = re.compile(r"(?<![A-Za-z0-9])prot[_\-# ]?(\d{3,4})(?![A-Za-z0-9])", re.I)
-SUBMISSION_WORD = re.compile(r"\bsubmission\s*(?:number|no\.?)?\s*#?\s*(\d{3,4})(?![0-9])", re.I)
+# 3-5 digits after PROT: "Total_prot_10ug" and "WT_prot1" are protein amounts and names, not
+# submissions; 5 because SUBMISSION_NUMBER (and record_run's --prot) take up to 5, so PROT_10234
+# is one. PROT_TOKEN is THE definition of a submission id written in a name or path: fran_deposit's
+# QC rule imports it, and FRAN's find_uningested.PROT_ID_RE is a pinned literal copy of it.
+# A hex id preceded by "xxxx-" is the tail of a UUID/GUID, not a CoreOmics id.
+PROT_TOKEN = re.compile(r"(?<![A-Za-z0-9])prot[_\-# ]?(\d{3,5})(?![A-Za-z0-9])", re.I)
+SUBMISSION_WORD = re.compile(r"\bsubmission\s*(?:number|no\.?)?\s*#?\s*(\d{3,5})(?![0-9])", re.I)
 HEX_TOKEN = re.compile(r"(?<![0-9a-z])(?<![0-9a-f]{4}-)([0-9a-f]{12})(?![0-9a-z])")
 # identify's exit 0 needs more than one lucky id: a generic id ("HeLa", "Blank") can name one
 # file of thirty. The candidate must own at least half the files and two distinct sheet ids.

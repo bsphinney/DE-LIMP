@@ -120,6 +120,20 @@ import time
 import urllib.error
 import urllib.request
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+# A Core submission id written in a name or a path has ONE definition, core_submission.PROT_TOKEN
+# (`identify` reads submissions with it); the QC rule imports it, never a copy. A partial copy of
+# scripts/ without core_submission.py cannot look for one, and is_qc_run then refers every
+# name-rule hit to a person (needs_agent_check) and says why -- it never guesses either way.
+try:
+    from core_submission import PROT_TOKEN as PROT_ID_RE
+    PROT_ID_UNAVAILABLE = None
+except ImportError as _e:
+    PROT_ID_RE = None
+    PROT_ID_UNAVAILABLE = f"core_submission.py could not be imported ({type(_e).__name__}: {_e})"
+
 GROUP_ROOT = "/quobyte/proteomics-grp"
 FRAN_URL = "https://fran.stan-proteomics.org"
 RECEIPT = "fran_deposit.json"
@@ -300,7 +314,21 @@ def find_report(out, engine):
     return None
 
 
-_FASTA_ARG = re.compile(r"--fasta\s+(\"[^\"]+\"|'[^']+'|\S+)")
+# A --fasta value on the command line DIA-NN echoes into its log, read the way DIA-NN reads its own
+# arguments (diann.cpp 1.8, arguments()): argv is joined with single spaces, UNQUOTED -- the shell or
+# Windows already removed any quotes -- and each option's value runs to the next "--", trimmed. So a
+# path with spaces is logged as is, and only this reading gets it back: the DIA-NN 1.8.1 log of
+# PXD022216 has `--fasta C:\SpectralLib\human - 2021-02-16-reviewed-contam-UP000005640.fasta
+# --met-excision`, which \S+ cut to `C:\SpectralLib\human` and shlex (posix) to `C:SpectralLibhuman`.
+# "fasta " needs its space, as in DIA-NN, so --fasta-search / --fasta-filter are never read as one.
+_FASTA_ARG = re.compile(r"--fasta (.*?)(?=--|$)", re.M)
+
+
+def logged_fastas(text):
+    """Every --fasta value in DIA-NN log text (see _FASTA_ARG), trimmed; surrounding quotes, which
+    only a hand-written command line would carry, are dropped."""
+    vals = (m.strip().strip("\"'").strip() for m in _FASTA_ARG.findall(text.replace("\r", "")))
+    return [v for v in vals if v]
 
 
 def search_fastas(out, with_source=False):
@@ -323,7 +351,7 @@ def search_fastas(out, with_source=False):
                 head = fh.read(2 << 20)
         except OSError:
             continue
-        found += [(m.strip("\"'"), f"search log --fasta ({log})") for m in _FASTA_ARG.findall(head)]
+        found += [(v, f"search log --fasta ({log})") for v in logged_fastas(head)]
     uniq = {}
     for path, src in found:
         uniq.setdefault(path, src)
@@ -741,9 +769,11 @@ def write_receipt(out, data):
 # ONE definition: is_qc_run(). backfill and stage both call it; nothing else decides QC.
 # TWIN RULE in FRAN: ingest/find_uningested.py `qc_reason` / `name_qc_signal` / QC_NAME_RE,
 # HELA_STD_RE, RUN_METHOD_RE, PROT_ID_RE (on FRAN main since PR #12; the HeLa-standard and
-# PROT_#### parts ship with the matching FRAN patch of 2026-09-28). The two must agree byte for
-# byte -- change one, change the other. Pinned by the same vectors on both sides (here
-# tests/test_fran_health_backfill.py QcRuleTests; FRAN tests/test_auto_ingest_starvation.py):
+# PROT_#### parts ship with the matching FRAN patches of 2026-09-28). The two must agree byte for
+# byte -- change one, change the other. FRAN cannot import the skill, so its PROT_ID_RE is a
+# literal copy of core_submission.PROT_TOKEN; both repos' tests pin the same pattern string.
+# Pinned by the same vectors on both sides (here tests/test_fran_health_backfill.py QcRuleTests;
+# FRAN tests/test_auto_ingest_starvation.py):
 #   excluded: "chkLUppm_HeLa50_2026 Lumos QC", "QC_run_01", "hela_qc_2", "Exploris QC2",
 #             "07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"
 #   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2",
@@ -758,10 +788,10 @@ QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
 # token alone is a signal: "HeLa50ng_titration" is an experiment, and "100mM" is not a gradient.
 HELA_STD_RE = re.compile(r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
 RUN_METHOD_RE = re.compile(r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
-# A Core submission id. A name that carries one is a CUSTOMER study, whatever QC word it also
-# carries ("PROT_0812 plasma + pooled QC"), so the name rule refers it to a person
-# (needs_agent_check) instead of deciding qc_run -- and qc_run, once recorded, blocks later stages.
-PROT_ID_RE = re.compile(r"(?i)(?<![a-z0-9])prot[-_]?\d{4}(?!\d)")
+# A Core submission id (PROT_ID_RE, imported above). A name or path that carries one is a
+# CUSTOMER study, whatever QC word it also carries ("PROT_0812 plasma + pooled QC"), so the name
+# rule refers it to a person (needs_agent_check) instead of deciding qc_run -- and qc_run, once
+# recorded, blocks later stages.
 # What a NAME-rule verdict says in its reason text. A qc_run recorded on one of these is re-judged
 # by today's rule (decide_qc); an explicit --qc, session marker or excluded tree stays binding.
 NAME_RULE_MARKS = ("matches QC_NAME_RE", "is a HeLa standard")
@@ -843,8 +873,9 @@ def is_qc_run(out, session=None, *, names=(), override=None):
       3. an explicit NOT-QC marker -- `override=False` (--not-qc) or session metadata "qc": false
       4. name_qc_signal (QC_NAME_RE, or a HeLa standard beside a run-method token) on the search
          name(s) in `names` and the session name, then on the last three components of the out dir
-         path -- UNLESS one of those names carries a Core submission id (PROT_ID_RE): then the
-         answer is None, "needs_agent_check: ..." -- a person decides, with --qc or --not-qc
+         path -- UNLESS a Core submission id (PROT_ID_RE) is in one of those names or ANYWHERE in
+         the out dir's path: then the answer is None, "needs_agent_check: ..." -- a person
+         decides, with --qc or --not-qc. (Also None when PROT_ID_RE could not be imported.)
     `why` mirrors FRAN's reason text: "QC run: excluded by policy (<what matched>)". It goes into
     the receipt, and for a staged search into the manifest's `qc_rule`."""
     out = os.path.abspath(out)
@@ -872,11 +903,23 @@ def is_qc_run(out, session=None, *, names=(), override=None):
         labelled += [("session_name", n) for n in (_session_title(session),
                                                    os.path.basename(session)) if n]
     labelled += [("output_dir", c) for c in [x for x in real.split("/") if x][-3:]]
+    # The QC signal is read on the last three path components, as FRAN reads them; a PROT id on
+    # EVERY component. The Core files a search wherever the submission's tree puts it (in
+    # SERVICE/<lab>/PROT_0812/diann/2.7.0/search_out it is 4th from the end), and a PROT id can
+    # only turn qc_run into needs_agent_check -- reading further can never exclude anything.
+    prot_texts = [t for _, t in labelled] + [c for p in dict.fromkeys((out, real))
+                                             for c in p.split("/") if c]
     for field, text in labelled:
         sig = name_qc_signal(text)
         if not sig:
             continue
-        prot = next((t for _, t in labelled if PROT_ID_RE.search(t)), None)
+        if PROT_ID_RE is None:
+            sys.stderr.write(f"[fran_deposit] WARNING: cannot look for a PROT id -- "
+                             f"{PROT_ID_UNAVAILABLE}; a person decides this QC call\n")
+            return None, (f"needs_agent_check: {field} {text!r} {sig}, but whether a Core "
+                          f"submission id is in its names cannot be checked: "
+                          f"{PROT_ID_UNAVAILABLE}. Decide with stage --qc or --not-qc.")
+        prot = next((t for t in prot_texts if PROT_ID_RE.search(t)), None)
         if prot:
             return None, (f"needs_agent_check: {field} {text!r} {sig}, but {prot!r} carries a Core "
                           f"submission id -- a customer study can mention its pooled QC. Decide "
