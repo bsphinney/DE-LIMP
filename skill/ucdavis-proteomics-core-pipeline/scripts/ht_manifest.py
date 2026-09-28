@@ -19,6 +19,11 @@ After that, nothing about the run is HT-specific -- step 2 onward is the ordinar
     bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 --out ~/ht0793'
     bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py link 0793'
 
+The share token and the Entra cookie are read from a FILE (--share-token-file, --cookie-file).
+On the command line they are in the process list and in the session's commands.log, which the
+run registry copies into a folder the whole Core group can read (release review, 2.8.0). Every
+line this script prints has the token value masked, whatever the server echoes back.
+
 `fetch` writes `files.txt` (one absolute .d path per line, for --raw/--files) and
 `ht_manifest.json` (the full STAN payload plus the gate results).
 
@@ -119,9 +124,62 @@ def _env(token_path: str | None) -> dict:
         f"       must be set BY the refresher, not after it.\n"
         f"    2. export STAN_PG_TOKEN=<a token file you can read>\n"
         f"    3. Skip the database entirely and use the hosted dashboard:\n"
-        f"         --http https://ucd.stan-proteomics.org --share-token <tok>\n"
+        f"         --http https://ucd.stan-proteomics.org --share-token-file <file>\n"
+        f"       (a file holding the share token, mode 600 -- not the token on the command line)\n"
         f"  Do NOT copy the token into your home directory — it expires in 7 days and\n"
         f"  yours will not be refreshed.")
+
+
+def _read_secret_file(path: str, what: str) -> str:
+    """A token or cookie from a file: stripped, never echoed. A file other users can read is
+    used, with a warning -- the point of the file is that nobody else sees the value."""
+    p = os.path.expanduser(path)
+    try:
+        with open(p) as fh:
+            val = fh.read().strip()
+        mode = os.stat(p).st_mode
+    except OSError as e:
+        sys.exit(f"[ht_manifest] cannot read the {what} file {p}: {e.strerror}")
+    if not val:
+        sys.exit(f"[ht_manifest] the {what} file {p} is empty")
+    if mode & 0o077:
+        print(f"[ht_manifest] WARNING: {p} can be read by other users (mode {mode & 0o777:o}); "
+              f"chmod 600 it.", file=sys.stderr)
+    return val
+
+
+def _credentials(a) -> tuple:
+    """(share token, cookie), files first. The argv forms still work, with a warning."""
+    tok = cookie = None
+    if getattr(a, "share_token_file", None):
+        tok = _read_secret_file(a.share_token_file, "share token")
+    elif getattr(a, "share_token", None):
+        tok = a.share_token
+        print("[ht_manifest] WARNING: --share-token puts the token in the process list and in "
+              "commands.log; use --share-token-file.", file=sys.stderr)
+    else:
+        tok = os.environ.get("STAN_HT_SHARE_TOKEN")
+    if getattr(a, "cookie_file", None):
+        cookie = _read_secret_file(a.cookie_file, "cookie")
+    elif getattr(a, "cookie", None):
+        cookie = a.cookie
+        print("[ht_manifest] WARNING: --cookie puts the session cookie in the process list and in "
+              "commands.log; use --cookie-file.", file=sys.stderr)
+    return tok, cookie
+
+
+def _masked(text, *secrets) -> str:
+    """`text` with each secret value replaced, then notify_slack's patterns applied (the skill's
+    one list; it catches `token=...` even when the value is not one this run knows)."""
+    out = str(text)
+    for v in secrets:
+        if v:
+            out = out.replace(v, "[redacted]")
+    try:
+        from notify_slack import redact
+    except ImportError:          # copied here alone: the exact-value mask above still applied
+        return out
+    return redact(out)
 
 
 def _run_stan(argv: list, env: dict) -> subprocess.CompletedProcess:
@@ -147,14 +205,19 @@ def _manifest_over_http(a) -> dict | int:
     import urllib.request
 
     base = (a.http or os.environ.get("STAN_HT_URL") or "").rstrip("/")
-    tok = a.share_token or os.environ.get("STAN_HT_SHARE_TOKEN")
+    tok, cookie = _credentials(a)
     qs = {"q": a.submission, "include": a.include}
     if tok:
         qs["token"] = tok
     url = f"{base}/api/ht/manifest?" + urllib.parse.urlencode(qs)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    if a.cookie:
-        req.add_header("Cookie", a.cookie)
+    if cookie:
+        req.add_header("Cookie", cookie)
+
+    def err(msg):
+        # every line, not only the one that used to print `url`: a server may echo the request
+        print(_masked(msg, tok, cookie, urllib.parse.quote_plus(tok or "")), file=sys.stderr)
+
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read().decode())
@@ -165,22 +228,23 @@ def _manifest_over_http(a) -> dict | int:
         except Exception:
             pass
         if e.code in (401, 403):
-            print(f"[ht_manifest] {base} refused the request ({e.code}).\n"
-                  f"  HT data is not public — it carries customer sample names and paths.\n"
-                  f"  Use ONE of:\n"
-                  f"    --share-token <tok>   a per-submission share link from the HT tab\n"
-                  f"                          (the only option that works headless)\n"
-                  f"    --cookie '<session>'  an Entra session cookie from a signed-in browser\n"
-                  f"  Sign-in is Microsoft Entra ({base}/.auth/login/aad), not CAS.\n"
-                  f"  server said: {body}", file=sys.stderr)
+            err(f"[ht_manifest] {base} refused the request ({e.code}).\n"
+                f"  HT data is not public — it carries customer sample names and paths.\n"
+                f"  Use ONE of:\n"
+                f"    --share-token-file <f>  a file holding the per-submission share token from\n"
+                f"                            the HT tab (the only option that works headless)\n"
+                f"    --cookie-file <f>       a file holding an Entra session cookie from a\n"
+                f"                            signed-in browser\n"
+                f"  Sign-in is Microsoft Entra ({base}/.auth/login/aad), not CAS.\n"
+                f"  server said: {body}")
         else:
-            print(f"[ht_manifest] {url} returned HTTP {e.code}: {body}", file=sys.stderr)
+            err(f"[ht_manifest] {url} returned HTTP {e.code}: {body}")
         return 3
     except urllib.error.URLError as e:
-        print(f"[ht_manifest] cannot reach {base}: {e.reason}", file=sys.stderr)
+        err(f"[ht_manifest] cannot reach {base}: {e.reason}")
         return 3
     except json.JSONDecodeError:
-        print(f"[ht_manifest] {base} returned non-JSON", file=sys.stderr)
+        err(f"[ht_manifest] {base} returned non-JSON")
         return 3
 
 
@@ -323,8 +387,9 @@ def link(a) -> int:
     base = (a.fran or os.environ.get("FRAN_URL") or "https://fran.stan-proteomics.org").rstrip("/")
     url = f"{base}/api/internal/submission/{urllib_quote(a.submission)}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    if a.cookie:
-        req.add_header("Cookie", a.cookie)
+    _, cookie = _credentials(a)
+    if cookie:
+        req.add_header("Cookie", cookie)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             payload = json.loads(r.read().decode())
@@ -381,11 +446,16 @@ def main() -> int:
                         "https://ucd.stan-proteomics.org (or set STAN_HT_URL). Use this when "
                         "you cannot read the Postgres token — which is every Core member "
                         "except its owner.")
-    f.add_argument("--share-token", default=None,
-                   help="per-submission share token from the HT tab (or STAN_HT_SHARE_TOKEN). "
+    f.add_argument("--share-token-file", default=None, metavar="FILE",
+                   help="file holding the per-submission share token from the HT tab (mode 600). "
                         "The only auth path that works headless.")
+    f.add_argument("--share-token", default=None,
+                   help="the token itself (or STAN_HT_SHARE_TOKEN). Avoid: it lands in the process "
+                        "list and commands.log -- use --share-token-file")
+    f.add_argument("--cookie-file", default=None, metavar="FILE",
+                   help="file holding an Entra session cookie from a signed-in browser")
     f.add_argument("--cookie", default=None,
-                   help="Entra session cookie from a signed-in browser, if you have one")
+                   help="the cookie itself. Avoid, as for --share-token: use --cookie-file")
     f.set_defaults(func=fetch)
 
     r = sub.add_parser("link", help="check the finished search is visible under its "
@@ -393,8 +463,11 @@ def main() -> int:
     r.add_argument("submission")
     r.add_argument("--fran", default=None, metavar="BASE_URL",
                    help="FRAN base URL (or FRAN_URL; default https://fran.stan-proteomics.org)")
+    r.add_argument("--cookie-file", default=None, metavar="FILE",
+                   help="file holding an Entra session cookie — the submission endpoint is "
+                        "internal-only")
     r.add_argument("--cookie", default=None,
-                   help="Entra session cookie — the submission endpoint is internal-only")
+                   help="the cookie itself. Avoid: it lands in commands.log -- use --cookie-file")
     r.set_defaults(func=link)
 
     a = ap.parse_args()

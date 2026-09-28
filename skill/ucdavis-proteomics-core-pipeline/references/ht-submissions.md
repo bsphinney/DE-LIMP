@@ -187,7 +187,7 @@ in either app, so "log in with your UC Davis account" means Entra.
 | | how it authenticates | works headless on HIVE? |
 |---|---|---|
 | **CLI** (default) — `stan ht-manifest` | Postgres credential | **only for the token's owner** |
-| **HTTP** — `--http https://ucd.stan-proteomics.org` + `--share-token` | per-submission HMAC share link | **yes** |
+| **HTTP** — `--http https://ucd.stan-proteomics.org` + `--share-token-file` | per-submission HMAC share link | **yes** |
 | **HTTP** + `--cookie` | Entra session cookie from a signed-in browser | awkward — cookie expires |
 | **HTTP** with neither | Entra sign-in (browser redirect) | no |
 
@@ -229,9 +229,18 @@ only the 7-day token — **never `.pgfarm_secret.json`**, which mints tokens ind
 **So for anyone who is not the token's owner, use the HTTP path:**
 
 ```
+printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0793'
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0793 \
-    --http https://ucd.stan-proteomics.org --share-token <tok> --out ~/ht0793'
+    --http https://ucd.stan-proteomics.org --share-token-file ~/.stan/share_0793 --out ~/ht0793'
 ```
+
+**The token goes in a file, never on a command line.** A token in argv is in the process list,
+and in `commands.log`, which the run registry copies into a folder the whole Core group can
+read. The first line above passes it through stdin (`printf` is a shell builtin, so it never
+shows in a process list either) into a mode-600 file. Do not write that line into
+`commands.log`. `--share-token <tok>` still works, with a warning, and so does `STAN_HT_SHARE_TOKEN`.
+`--cookie-file` does the same for an Entra session cookie. `ht_manifest.py` masks the token
+and cookie in every line it prints, including a server error that echoes the request URL.
 
 Get `<tok>` from the submission's HT tab in the dashboard — the token is an HMAC of the
 submission number, so a link for 0793 opens 0793 and nothing else, and rotating

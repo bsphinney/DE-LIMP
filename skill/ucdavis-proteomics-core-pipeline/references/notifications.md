@@ -194,14 +194,20 @@ Significant counts are the ones `run_de.R` wrote; they are never recounted.
    - The webhook is read only inside `notify_slack.py`. It is never passed on a command line,
      written into a job script, printed or logged, and it is scrubbed from every error.
    - **Every string in every payload** (alert bodies and titles, error tails, session names),
-     and every log, status and MANIFEST line, first goes through the patterns `report_issue.sh`
-     refuses, then through `_scrub`. Those patterns are:
+     and every log, status and MANIFEST line, first goes through `notify_slack._SECRET_PATTERNS`
+     (the skill's one list of secret patterns), then through `_scrub`. `record_run.py` imports
+     the same list. `report_issue.sh` carries an ERE mirror of it, because it must run without
+     Python, and `tests/test_secret_patterns.py` keeps the two in step. The patterns are:
      - private-key blocks;
      - `ghp_` / `github_pat_` / `hf_` tokens;
      - `Authorization: Bearer|Token …`;
      - `password=` / `password:`;
      - `postgres(ql)://user:pass@`;
-     - any `hooks.slack.com/services/…` URL.
+     - any `hooks.slack.com/services/…` URL, and Slack `xox[abeprs]-` tokens;
+     - Google API keys (`AIza…`, `AQ.…`), and any key-shaped `key=…` value;
+     - STAN share tokens (`token=…` in a URL, `--share-token …`, `STAN_HT_SHARE_TOKEN=…`)
+       and an Entra cookie on the command line (`--cookie …`). A value that begins like a path
+       (`/`, `~`, `.`, `$`) is a file name and is left alone.
 
      A match becomes `[redacted]`, and the message still goes out.
 3. **The top-level `text`** is escaped like the blocks (`&`, `<`, `>`), so `<!channel>` or

@@ -131,8 +131,8 @@ LIVE_STATES = {"PENDING", "RUNNING", "REQUEUED", "RESIZING", "SUSPENDED", "CONFI
 SACCT_CANDIDATES = ("/cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sacct",
                     "/usr/bin/sacct", "/usr/local/bin/sacct", "/opt/slurm/bin/sacct")
 # The registry is readable by the whole Core group. Refuse by NAME anything that holds a
-# credential, and by CONTENT anything that looks like one -- the patterns report_issue.sh refuses,
-# plus Slack tokens and webhook URLs. A refused file is listed with the reason, never silent.
+# credential, and by CONTENT anything that looks like one -- notify_slack.contains_secret(), the
+# skill's one secret-pattern list. A refused file is listed with the reason, never silent.
 SECRET_NAME_RE = re.compile(
     r"token|webhook|secret|passw|credential|(^|\.)env$|^id_(rsa|dsa|ecdsa|ed25519)|"
     r"\.(pem|key|p12|pfx)$|^\.netrc$|^\.pgpass$", re.I)
@@ -142,10 +142,15 @@ SECRET_NAME_RE = re.compile(
 # that is gone (a re-finalized, clean zip) leaves the record, and one a call did not look at stays.
 FINDING_PARTS = ("search", "detection", "fasta", "analysis", "zip")
 FASTA_RE = re.compile(r"\.(fasta|fa|faa)(\.gz)?$", re.I)
-SECRET_TEXT_RE = re.compile(
-    rb"-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|hf_[A-Za-z0-9]{20,}|"
-    rb"Authorization: *(Token|Bearer) +[A-Za-z0-9]|xox[abprs]-[A-Za-z0-9-]{10,}|"
-    rb"hooks\.slack\.com/services/")
+# The content check is notify_slack's list, not a copy of it. This file kept its own regex, and it
+# disagreed with the other two lists: it had no share-token, password, DSN or Google-key pattern,
+# so a commands.log holding `--share-token <tok>` went into the group-readable registry (release
+# review, 2.8.0). A copy piped alone to a remote python has no siblings to import; the content
+# check then refuses every file (secret_reason) rather than copying unchecked.
+try:
+    from notify_slack import contains_secret  # noqa: E402
+except ImportError:
+    contains_secret = None
 # CoreOmics identifiers (DataAnalysis CLAUDE.md, "Every session links to its CoreOmics
 # submission"): PROT_#### plus a 12-hex id. The same forms core_submission.py accepts.
 HEX_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -421,10 +426,12 @@ def secret_reason(path):
     """Why this file must not be copied into a group-readable folder, or None."""
     if SECRET_NAME_RE.search(os.path.basename(path)):
         return "its name marks it as a credential (token / webhook / .env / key file)"
+    if contains_secret is None:
+        return "its contents cannot be checked for secrets here (notify_slack.py not importable)"
     try:
         with open(path, "rb") as fh:
-            if SECRET_TEXT_RE.search(fh.read()):
-                return "its contents look like a key, token or webhook URL"
+            if contains_secret(fh.read().decode("utf-8", "replace")):
+                return "its contents look like a key, token, password or webhook URL"
     except OSError as e:
         return f"unreadable: {e}"
     return None
@@ -1757,11 +1764,14 @@ def add_manifest(zip_path, name, src):
 
 
 # ------------------------------------------------------------------------- skill issues
-ISSUE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(.+)\.md$")
+# <date>_<user>[_<tag>][+<unique>].md: report_issue.sh writes one file per entry since 2.8.0, named
+# with a `+<HHMMSS>-<host>-<pid>-<random>` suffix that clean() guarantees the user and tag never
+# contain. Older one-file-per-day names (no suffix) still match.
+ISSUE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_([^+]+?)(?:\+[A-Za-z0-9._-]+)?\.md$")
 
 
 def find_issues(user, tags, days):
-    """report_issue.sh files for this run: <date>_<user>_<tag>.md whose tag matches the session
+    """report_issue.sh files for this run: <date>_<user>_<tag>[+...].md whose tag matches the session
     (compared on letters and digits only -- the agent may have spelled the name either way), from
     any day, since setup problems are often recorded the day before the search; plus the same
     user's untagged files from the days the search ran."""

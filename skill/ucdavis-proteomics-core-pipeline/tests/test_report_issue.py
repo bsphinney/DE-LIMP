@@ -8,7 +8,10 @@ What must hold, because a failure here is silent -- nobody is waiting for the re
   * three routes -- write to the Core's shared folder directly (on HIVE), through
     hive_exec.sh over SSH (a laptop in hive_remote mode), or into a local folder with a note
     to send it on -- and a failed shared write falls back to local instead of losing it;
-  * one file per user/day/session, the header written once, entries appended in order;
+  * one file per ENTRY, <date>_<user>[_<session>]+<unique>.md, written under a dot-name and
+    renamed into place. Appending to one file per day lost entries to a check-then-create race
+    (68 of 120 with 3 writers, release review 2.8.0), and a cross-node `>>` on /quobyte is
+    unlocked -- flock does not lock across HIVE nodes there;
   * an entry without optional fields is still written (a `[ -n "$FIX" ] && printf` as the
     last line of the block once made every such entry look like a failed write);
   * text that looks like a key, token or password is refused, and nothing is written;
@@ -18,6 +21,7 @@ Nothing here contacts HIVE: HIVE_EXEC is replaced by a stub that runs the remote
 against a temp directory standing in for /quobyte.
 """
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -70,16 +74,48 @@ class ReportIssue(unittest.TestCase):
             return names[0], fh.read()
 
     # ------------------------------------------------------------------ routes
-    def test_direct_header_once_entries_in_order(self):
+    def test_each_entry_is_its_own_complete_file(self):
         os.makedirs(self.shared)
         for title in ("first", "second"):
             p = self.run_it("--title", title, "--what", "w", "--session", "chkLUppm")
             self.assertEqual(p.returncode, 0, p.stderr)
-        name, text = self.read_only_file(self.shared)
-        self.assertTrue(name.endswith("_chkLUppm.md"), name)
-        self.assertEqual(text.count("# Skill issues"), 1, text)
-        self.assertLess(text.index("## first"), text.index("## second"))
-        self.assertIn("**Skill version:**", text)
+        names = self.files(self.shared)
+        self.assertEqual(len(names), 2, names)
+        titles = set()
+        for n in names:
+            # what the readers match on is the part before `+`
+            self.assertRegex(n, r"^\d{4}-\d{2}-\d{2}_[^+]+_chkLUppm\+[A-Za-z0-9._-]+\.md$")
+            with open(os.path.join(self.shared, n)) as fh:
+                text = fh.read()
+            self.assertEqual(text.count("\n## "), 1, text)
+            self.assertIn("**Skill version:**", text)
+            titles |= set(re.findall(r"^## (\w+)", text, re.M))
+        self.assertEqual(titles, {"first", "second"})
+
+    def test_concurrent_writers_lose_nothing(self):
+        """Many writers at once, as sessions on several nodes are. The old one-file-per-day
+        design raced at file creation -- every writer that found it empty truncated it: the
+        release review lost 68 of 120, and 120 simultaneous writers here lost 14 of 120
+        (2026-09-28). Every entry must land, whole, with nothing temporary left behind."""
+        os.makedirs(self.shared)
+        n = 60
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HIVE_")}
+        env.update(HOME=self.d, HIVE_ENV_FILE=os.path.join(self.d, "no-hive.env"),
+                   SKILL_ISSUES_LOCAL_DIR=self.local, TMPDIR=self.d, SKILL_ISSUES_DIR=self.shared)
+        procs = [subprocess.Popen(["bash", SCRIPT, "--title", f"w{i}", "--what", "race",
+                                   "--session", "race"], env=env, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.PIPE, text=True) for i in range(n)]
+        done = [(p, p.communicate()[1]) for p in procs]      # communicate() closes the pipes
+        errors = [err for p, err in done if p.returncode != 0]
+        self.assertEqual(errors, [])
+        names = self.files(self.shared)
+        self.assertEqual(len(names), n, "entries lost")
+        self.assertFalse([x for x in names if x.startswith(".") or x.endswith(".part")])
+        seen = set()
+        for name in names:
+            with open(os.path.join(self.shared, name)) as fh:
+                seen |= set(re.findall(r"^## (w\d+)", fh.read(), re.M))
+        self.assertEqual(len(seen), n)
 
     def test_entry_without_optional_fields_is_written(self):
         os.makedirs(self.shared)
@@ -127,7 +163,7 @@ class ReportIssue(unittest.TestCase):
                     "Authorization: Token 0123456789abcdef", "password=hunter2"):
             p = self.run_it("--title", "t", "--what", bad)
             self.assertEqual(p.returncode, 2, bad)
-            self.assertIn("key, token or password", p.stderr)
+            self.assertIn("key, token, password or webhook", p.stderr)
         self.assertEqual(self.files(self.shared), [])
 
     def test_session_name_cannot_escape_the_folder(self):

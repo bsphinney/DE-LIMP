@@ -918,7 +918,7 @@ class WhatIsCopied(Base):
             self.assertNotIn("s/input/hive.env", z.namelist())
         log = self.read(folder)
         self.assertIn("credential", log)
-        self.assertIn("look like a key, token or webhook", log)
+        self.assertIn("look like a key, token, password or webhook", log)
 
     def test_copy_zip_without_moves_compressed_bytes_intact(self):
         src = os.path.join(self.d, "a.zip")
