@@ -84,20 +84,55 @@ def _complete(path):
         return False
 
 
+def _remove_profile(profile, tries=20, wait=0.15):
+    """Remove the throw-away profile. The browser's helper processes can still be writing to
+    it for a moment after the browser itself has stopped, so a single rmtree left empty
+    html2pdf-profile-* folders behind in the temp dir (40 found, 2026-09-28). Retry until it
+    is gone, about 3 s at most."""
+    for _ in range(tries):
+        shutil.rmtree(profile, ignore_errors=True)
+        if not os.path.exists(profile):
+            return True
+        time.sleep(wait)
+    return False
+
+
 def _stop(proc):
     """Stop the browser and the helper processes it started (its own process group, which
-    start_new_session gave it -- so nothing else is signalled)."""
-    if proc.poll() is not None:
-        return
+    start_new_session gave it -- so nothing else is signalled), then wait for those helpers:
+    one still running can write into the profile after it has been removed."""
     group = isinstance(proc, subprocess.Popen) and hasattr(os, "killpg")
-    try:
-        os.killpg(proc.pid, 15) if group else proc.terminate()
-        proc.wait(timeout=5)
-    except Exception:
+    if proc.poll() is None:
         try:
-            os.killpg(proc.pid, 9) if group else proc.kill()
+            os.killpg(proc.pid, 15) if group else proc.terminate()
+            proc.wait(timeout=5)
         except Exception:
+            try:
+                os.killpg(proc.pid, 9) if group else proc.kill()
+            except Exception:
+                pass
+    if group:
+        _reap_group(proc.pid)
+
+
+def _reap_group(pgid, timeout=3.0):
+    """Wait for the rest of the browser's process group (GPU, renderer, crash-handler helpers)
+    to exit, and SIGKILL whatever is left after `timeout`. Signal 0 only asks whether the
+    group exists, and a group ID is not reused while any member is alive, so only the
+    browser's own helpers can be signalled."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:       # the group is gone
+            return
+        except OSError:                  # EPERM: macOS reports it transiently (measured)
             pass
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, 9)
+    except OSError:
+        pass
 
 
 def convert(html_path, pdf_path, timeout=120, browser=None, popen=subprocess.Popen, env=None,
@@ -143,20 +178,22 @@ def convert(html_path, pdf_path, timeout=120, browser=None, popen=subprocess.Pop
             last = size
             time.sleep(poll)
     except OSError as e:
+        errlog.close()
         return False, f"{b} could not be started ({e}); {HOW_BY_HAND}"
     finally:
         if proc is not None:
             _stop(proc)
-        shutil.rmtree(profile, ignore_errors=True)
+        _remove_profile(profile)
     ok = os.path.isfile(tmp_pdf) and _complete(tmp_pdf)
+    errlog.seek(0)
+    err = errlog.read().decode("utf-8", "replace")
+    errlog.close()
     if not ok:
         if os.path.exists(tmp_pdf):
             os.remove(tmp_pdf)
         if timed_out:
             return False, (f"{os.path.basename(b)} did not finish within {timeout}s and was "
                            f"stopped; {HOW_BY_HAND}")
-        errlog.seek(0)
-        err = errlog.read().decode("utf-8", "replace")
         tail = " ".join(ln for ln in err.splitlines() if "rror" in ln)[-200:]
         return False, (f"{os.path.basename(b)} exited {proc.returncode if proc else '?'} without "
                        f"a PDF{': ' + tail if tail else ''}; {HOW_BY_HAND}")
