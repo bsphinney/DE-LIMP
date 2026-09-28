@@ -2298,17 +2298,30 @@ def _submission_details(summary: dict) -> str:
     return f" ({'; '.join(extra)})" if extra else ""
 
 
-def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis") -> str:
+def _item(name: str) -> str:
+    """A delivered item as a link that works from README.html (and reads fine in README.md)."""
+    return f"[`{name}`]({urllib.parse.quote(name, safe='/.')})"
+
+
+def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "analysis",
+                 html_twin: bool = False, for_html: bool = False, hive_md=None) -> str:
     """Collaborator-facing. Every claim comes from the submission record or from a file that
-    was actually delivered -- no internal paths, no email addresses, no numbers that are not
-    in the inputs, and no "we compared your groups" without a comparison table beside it."""
+    was actually delivered -- no email addresses, no numbers that are not in the inputs, and no
+    "we compared your groups" without a comparison table beside it. The only paths are the
+    "Where this lives on HIVE" table (`hive_md`, session_docs' own), which every collaborator
+    README carries so the Core can find the session and the raw data again.
+    README.md is this text; README.html (`html_twin`) is the same text rendered, without the
+    line pointing a Markdown reader at the .html (`for_html`)."""
     label = submission_label(summary)
     pi_name = (summary.get("pi") or {}).get("name")
-    fixed = ("MANIFEST.txt", "checksums.sha256")
+    fixed = ("MANIFEST.txt", "checksums.sha256") + (("README.html",) if html_twin else ())
+    opener = (["**Open `README.html`** (double-click it) — the same page, with working links.", ""]
+              if html_twin and not for_html else [])
     if mode == "raw-only":
         L = [f"# {label} — raw data from the UC Davis Proteomics Core", ""]
         if pi_name:
             L += [f"Prepared for {pi_name}.", ""]
+        L += opener
         why = (" The submission asked for raw data only, so no database search or statistical "
                "analysis was run." if summary.get("raw_data_only") else
                " This delivery holds the raw files only; it contains no search or statistical results.")
@@ -2316,14 +2329,16 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
               f"{_submission_details(summary)}.{why}", "", "## What is here", "",
               "| item | what it is |", "|---|---|"]
         if raw_names:
-            L.append(f"| `../raw/` | {len(raw_names)} raw instrument file(s), in the `raw` folder next to this one |")
-        for name, text in (("methods.md", "a Methods section describing the acquisition, with the instrument acknowledgment"),
+            L.append(f"| {_item('../raw/')} | {len(raw_names)} raw instrument file(s), in the `raw` folder next to this one |")
+        for name, text in (("README.html", "this README as a web page, with working links"),
+                           ("AGENTS.md", "a guide to this folder for an AI assistant: give it this file with the folder"),
+                           ("methods.md", "a Methods section describing the acquisition, with the instrument acknowledgment"),
                            ("methods.docx", "the Methods section as a Word document"),
                            ("MANIFEST.txt", "what was included and, for anything not included, why"),
                            ("checksums.sha256", "SHA-256 checksums of the files in this folder "
                                                 "(`shasum -a 256 -c checksums.sha256`)")):
             if name in delivered or name in fixed:
-                L.append(f"| `{name}` | {text} |")
+                L.append(f"| {_item(name)} | {text} |")
         exts = {os.path.splitext(n.lower())[1] for n in raw_names}
         if exts & {".d", ".raw"}:
             L += ["", "## Opening the files", ""]
@@ -2335,6 +2350,7 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
         L = [f"# {label} — results from the UC Davis Proteomics Core", ""]
         if pi_name:
             L += [f"Prepared for {pi_name}.", ""]
+        L += opener
         claims = []
         if any(x.startswith("search/") for x in delivered):
             claims.append("The mass-spectrometry data were searched to identify and quantify proteins; "
@@ -2352,6 +2368,8 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                   "on purpose: they show how much weight the results can carry.", ""]
         L += ["## What is in this folder", "", "| item | what it is |", "|---|---|"]
         desc = (
+            ("README.html", "this README as a web page, with working links"),
+            ("AGENTS.md", "a guide to this folder for an AI assistant: give it this file with the folder"),
             ("Analysis_Report.html", "the full report: quality control, figures and interpretation (open first)"),
             ("Analysis_Report.pdf", "the same report with its figures as a PDF, for printing or NotebookLM"),
             ("Analysis_Report.md", "the same report as plain text, with each figure's caption and numbers "
@@ -2376,9 +2394,9 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             present = (name in delivered or name in fixed or
                        (name.endswith("/") and any(x.startswith(name) for x in delivered)))
             if present:
-                L.append(f"| `{name}` | {text} |")
+                L.append(f"| {_item(name)} | {text} |")
         if raw_names:
-            L.append("| `../raw/` | your raw instrument files, in the `raw` folder next to this one |")
+            L.append(f"| {_item('../raw/')} | your raw instrument files, in the `raw` folder next to this one |")
         methods = []
         if "methods.md" in delivered:
             methods.append("- **Methods text:** `methods.md`" + (" (and `methods.docx`)" if "methods.docx" in delivered
@@ -2392,6 +2410,10 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
         if "reproducibility/REPRODUCE.md" in delivered:
             methods.append("- **Re-running everything, search included:** `reproducibility/REPRODUCE.md`.")
         L += ["", "## Methods and code", ""] + (methods or ["- Ask the Core for the methods text for this analysis."])
+    if hive_md:
+        L += ["", "## Where this lives on HIVE", "",
+              "For the Core, to find the analysis session, the raw data and the search again:", "",
+              hive_md]
     L += ["", "## Acknowledging the Core", "",
           "If these data appear in a publication, poster or talk, please acknowledge the UC Davis "
           "Proteomics Core" + (" and the instrument grant named at the end of `methods.md`."
@@ -2399,6 +2421,77 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
                                ", and ask us for the instrument grant acknowledgment that applies."),
           "", "## Questions", "", "Contact the UC Davis Proteomics Core.", ""]
     return "\n".join(L)
+
+
+# AGENTS.md in a delivery is the session's (session_docs.agents_md, from its records); this says
+# how its session paths map onto the delivery's layout, which drops the `output/` level.
+AGENTS_DELIVERY_NOTE = (
+    "> **This folder is a delivery copy of an analysis session.** The guide below was written "
+    "for the session itself (its location on HIVE is in \"Where this lives on HIVE\"). Here, a "
+    "path `output/<x>` in it is `<x>` in this folder (`output/tables/` is `tables/`, "
+    "`output/search/report.parquet` is `search/report.parquet`); `input/`, `scripts/`, `logs/` "
+    "and `output/DATA_SUBMISSION/` stayed in the session. `MANIFEST.txt` lists exactly what "
+    "this folder holds.\n\n")
+
+
+def delivery_docs(summary: dict, session_dir, delivery: str, delivered: set, raw_names: list,
+                  mode: str, froot: str, warnings: list) -> list:
+    """AGENTS.md, README.html and README.md for a delivery -- what every collaborator
+    deliverable carries (Brett, 2026-09-24): a page to double-click, a guide for an AI assistant
+    handed the folder, and where it all lives on HIVE. The session's facts, AGENTS.md text and
+    HIVE table come from session_docs.py and README.html is rendered by its renderer, so there
+    is one definition of each. Returns [(name, None | reason)], one MANIFEST line per document:
+    AGENTS.md or README.html failing never stops the delivery. README.md failing does (its
+    error propagates), as it always has."""
+    lines, docs, f, why = [], None, None, None
+    try:
+        docs = sibling("session_docs")
+    except Stop as e:
+        why = e.payload.get("error")
+    if docs and session_dir:
+        try:
+            f = docs.gather(session_dir)
+        except Exception as e:                       # recorded on each document's line
+            why = f"the session's records could not be read: {type(e).__name__}: {e}"
+    if f is None:
+        lines.append(("AGENTS.md", why or "no analysis session to describe (a raw-only delivery)"))
+    else:
+        try:
+            head, _, body = docs.agents_md(f).partition("\n")      # the note goes under the title
+            write_text_nofollow(os.path.join(delivery, "AGENTS.md"),
+                                head + "\n\n" + AGENTS_DELIVERY_NOTE + body.lstrip("\n"),
+                                froot, warnings)
+            delivered.add("AGENTS.md")
+            lines.append(("AGENTS.md", None))
+        except Exception as e:
+            lines.append(("AGENTS.md", f"not written: {type(e).__name__}: {e}"))
+    hive = None
+    if f is not None:
+        try:
+            hive = docs.locations_table(f)
+        except Exception as e:
+            warnings.append(f"README: the HIVE locations table could not be built: {type(e).__name__}: {e}")
+    html_ok = False
+    if docs:
+        try:
+            src = build_readme(summary, delivered, raw_names, mode, html_twin=True, for_html=True,
+                               hive_md=hive)
+            write_text_nofollow(os.path.join(delivery, "README.html"),
+                                docs._render_html(src, src.splitlines()[0].lstrip("# ").strip()),
+                                froot, warnings)
+            delivered.add("README.html")
+            html_ok = True
+            lines.append(("README.html", None))
+        except Exception as e:
+            lines.append(("README.html", f"not written: {type(e).__name__}: {e}"))
+    else:
+        lines.append(("README.html", why or "session_docs.py could not be loaded"))
+    write_text_nofollow(os.path.join(delivery, "README.md"),
+                        build_readme(summary, delivered, raw_names, mode, html_twin=html_ok,
+                                     hive_md=hive), froot, warnings)
+    delivered.add("README.md")
+    lines.append(("README.md", None))
+    return lines
 
 
 def sha256_of(path: str) -> str:
@@ -2699,9 +2792,8 @@ def cmd_deliver(a) -> int:
                 results_link = {"state": "SKIPPED", "reason": f"{getattr(e, 'strerror', None) or e}"}
                 warnings.append(f"results_ link in the service project not made: {results_link['reason']}")
         raw_linked = [r["name"] for r in raw_plan if r["status"] == "OK"]
-        write_text_nofollow(os.path.join(delivery, "README.md"),
-                            build_readme(s, expected, raw_linked, mode), froot, warnings)
-        expected.add("README.md")
+        doc_lines = delivery_docs(s, session_dir, delivery, expected, raw_linked, mode, froot,
+                                  warnings)
         readme_ok = True
     except Exception as e:                               # recorded in MANIFEST + delivery.json, exit 2
         fatal = f"{type(e).__name__}: {e}"
@@ -2721,7 +2813,10 @@ def cmd_deliver(a) -> int:
     if results_link and results_link.get("state") == "SKIPPED":
         manifest_lines.append(f"[SKIPPED] results link in the Core service project (staff bookkeeping) -- "
                               f"{results_link['reason']}")
-    manifest_lines.append("[OK] README.md" if readme_ok else "[SKIPPED] README.md -- not written (delivery stopped early)")
+    if readme_ok:
+        manifest_lines += [f"[OK] {n}" if why is None else f"[SKIPPED] {n} -- {why}" for n, why in doc_lines]
+    else:
+        manifest_lines.append("[SKIPPED] README.md, README.html, AGENTS.md -- not written (delivery stopped early)")
     if fatal:
         manifest_lines.append(f"[SKIPPED] remainder of this delivery -- stopped by an error: {fatal}")
     manifest_ok, errors = False, []

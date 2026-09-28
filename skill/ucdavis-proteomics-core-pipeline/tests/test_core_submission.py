@@ -13,6 +13,7 @@ import contextlib
 import csv
 import datetime as dt
 import http.server
+import importlib
 import io
 import json
 import ntpath
@@ -880,7 +881,8 @@ class TestDeliver(DeliverBase):
         self.assertNotIn("methods.docx", readme, "never describe a file that was not delivered")
         self.assertNotIn("expression matrix", readme)
         self.assertNotIn("@", readme, "no email addresses in a collaborator README")
-        self.assertNotIn(self.tmp, readme, "no internal paths in a collaborator README")
+        self.assertNotIn(self.tmp, readme.split("## Where this lives on HIVE")[0],
+                         "no local paths outside the HIVE table in a collaborator README")
         self.assertFalse(os.path.exists(os.path.join(self.share, "raw")))
         dj = load(os.path.join(self.session, "delivery.json"))
         self.assertTrue(dj["verified"])
@@ -898,6 +900,48 @@ class TestDeliver(DeliverBase):
         got = sorted(os.listdir(os.path.join(self.delivery, "podcast")))
         self.assertEqual(got, ["podcast.m4a", "transcript.html"], "no cache, script or consent record")
         self.assertIn("`podcast/`", read(os.path.join(self.delivery, "README.md")))
+
+    def test_readme_html_and_agents_md_go_to_the_collaborator(self):
+        """Brett's standing rule: every collaborator folder has README.html to double-click and
+        AGENTS.md for an AI assistant -- with links that work IN THE DELIVERY'S layout."""
+        rc, out, p = self.deliver("--apply")
+        self.assertEqual(rc, 0, p.stderr + p.stdout)
+        page = read(os.path.join(self.delivery, "README.html"))
+        hrefs = re.findall(r'<a href="([^"#:]+)"', page)
+        self.assertIn("Analysis_Report.html", hrefs)
+        for h in hrefs:
+            self.assertTrue(os.path.exists(os.path.join(self.delivery, urllib.parse.unquote(h))), h)
+        self.assertNotIn("Open `README.html`", page, "the HTML does not point at itself")
+        readme = read(os.path.join(self.delivery, "README.md"))
+        self.assertIn("**Open `README.html`**", readme)
+        self.assertIn("## Where this lives on HIVE", readme)
+        self.assertIn("[`AGENTS.md`](AGENTS.md)", readme)
+        agents = read(os.path.join(self.delivery, "AGENTS.md"))
+        self.assertTrue(agents.startswith("# AGENTS.md"), "the delivery note sits under the title")
+        self.assertIn("delivery copy of an analysis session", agents)
+        self.assertIn("## Where this lives on HIVE", agents)
+        for doc in (page, readme, agents):
+            self.assertIsNone(re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", doc), "an email address leaked")
+        manifest = read(os.path.join(self.delivery, "MANIFEST.txt"))
+        for name in ("AGENTS.md", "README.html", "README.md"):
+            self.assertIn(f"[OK] {name}", manifest)
+        sums = read(os.path.join(self.delivery, "checksums.sha256"))
+        self.assertIn("  README.html", sums)
+        self.assertIn("  AGENTS.md", sums)
+        self.assertTrue(load(os.path.join(self.session, "delivery.json"))["verified"])
+
+    def test_an_unreadable_session_skips_agents_md_and_says_why(self):
+        docs = importlib.import_module("session_docs")
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(docs, "gather", side_effect=ValueError("bad record")):
+            delivered = {"Analysis_Report.html"}
+            lines = cs.delivery_docs(self.s, self.session, out_dir, delivered, [], "analysis",
+                                     out_dir, [])
+            self.assertEqual(dict(lines)["AGENTS.md"],
+                             "the session's records could not be read: ValueError: bad record")
+            self.assertIsNone(dict(lines)["README.html"])
+            self.assertFalse(os.path.exists(os.path.join(out_dir, "AGENTS.md")))
+            self.assertTrue(os.path.isfile(os.path.join(out_dir, "README.md")))
 
     def test_missing_analysis_report_blocks(self):
         os.remove(os.path.join(self.output, "Analysis_Report.html"))
@@ -1099,6 +1143,13 @@ class TestRawOnlyDelivery(DeliverBase):
             self.assertTrue(os.path.islink(os.path.join(self.share, "raw", os.path.basename(f))))
         self.assertIn(cs.RAW_WHITELIST_WARNING, out["warnings"])
         self.assertTrue(load(os.path.join(self.work, "delivery.json"))["verified"])
+        # README.html even here; AGENTS.md needs a session to describe, and says so
+        self.assertTrue(os.path.isfile(os.path.join(delivery, "README.html")))
+        self.assertIn("[`README.html`](README.html)", readme)
+        manifest = read(os.path.join(delivery, "MANIFEST.txt"))
+        self.assertIn("[OK] README.html", manifest)
+        self.assertIn("[SKIPPED] AGENTS.md -- no analysis session to describe (a raw-only delivery)",
+                      manifest)
 
 
 # ---------------------------------------------------------------------- bioshare --
