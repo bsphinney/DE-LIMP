@@ -614,8 +614,12 @@ class Tables:
 
 
 def gene_label(r):
+    """THE name a DE row is shown by (top tables, figure summaries, the brief): its first gene,
+    else its first UniProt entry name (DIA-NN's Protein.Names, e.g. HVM51_MOUSE for a gene-less
+    Ig V region), else its accession -- never the accession where a name exists."""
     g = (r.get("Genes") or "").split(";")[0].strip()
-    return g or (r.get("Protein.Group") or "?").split(";")[0]
+    n = (r.get("Protein.Names") or "").split(";")[0].strip()
+    return g or n or (r.get("Protein.Group") or "?").split(";")[0]
 
 
 def fmt_p(p):
@@ -756,16 +760,47 @@ def figure_summary(name, tables, qc_path, em_path):
 
 
 # Rows a reader must not take for the sample's biology: the antibody's own chains and
-# common-contaminant entries. Human IMGT symbols (IGHG1, IGKC, IGLV1-40, JCHAIN) and their
-# mouse forms (Ighg2c, Igkc, Iglv1) alike; IgLON (Iglon5) and IGF are NOT Ig chains.
-_IG_CHAIN = re.compile(r"^(IGH[GAMDEVJ]|IGK[CVJ]|IGL[CVJ]|JCHAIN\b)", re.I)
+# common-contaminant entries. An Ig chain is recognised three ways, because many have no gene
+# name (PROT_0756: P06330 HVM51_MOUSE, P01647 KV5AE_MOUSE ... -- Genes empty):
+#  1. the gene: IMGT symbols, human and mouse/rat forms alike (IGHG1, Ighg2c, IGKC, IGKV1-5,
+#     IGLC2, IGLV1-40, JCHAIN/IGJ, rat Igg-2a) -- whole symbol, so IGHMBP2 (a helicase),
+#     IGLL1/IGLL5, IgLON (IGLON5) and IGF are not;
+#  2. the UniProt entry name, which is what DIA-NN's Protein.Names holds: Ig V regions
+#     (HV*/KV*/LV*; not HVCN1, the proton channel), D/J segments (HD/HJ/KJ/LJ + digits) and the
+#     IG-named chains (IGHG3, IGHA, IGG2A, IGKC, IGJ, IGW, IGNAR ...), for the organisms that
+#     have reviewed Ig entries -- elsewhere the same prefixes name toxins (KV53_BUNCI) and
+#     venom peptides (LV1A_BUTOC);
+#  3. a protein description, when an engine gives one ("Ig kappa chain V-V region",
+#     "Immunoglobulin heavy constant gamma 1") -- not an Fc receptor, not BiP ("immunoglobulin
+#     heavy chain-binding protein").
+# Checked 2026-09-28 against UniProt: every reviewed entry named HV*/KV*/LV*/IG* and every
+# KW-1280 (Immunoglobulin) entry, 610 in all, with 0 disagreements between the rules and the
+# entries' own names.
+_IG_GENE = re.compile(r"^(?:IGH(?:[GA]\d*[A-Z]?|M|D|E|[VDJ]\d[\w.-]*)|IGK(?:C|[VJ]\d[\w.-]*)|"
+                      r"IGL(?:C\d*|[VJ]\d[\w.-]*)|JCHAIN|IGJ|IGG-?\d[A-C]?)$", re.I)
+_IG_ORGS = ("HUMAN", "MOUSE", "RAT", "RABIT", "CANLF", "CHICK", "XENLA", "EQUAS", "CAICR",
+            "HETFR", "GINCI", "CARAU", "GORGO", "CAVPO", "AQUCT", "SUNMU", "MESAU")
+_IG_ENTRY = re.compile(r"^(?:(?!HVCN)(?:HV|KV|LV)[A-Z0-9]+|(?:HD|HJ|KJ|LJ)\d+|IG(?:H[GAMDE][A-Z0-9]*|"
+                       r"H1M|G\d?[A-C]?|[ADEMK]\d?|L\d|LC\d*|KC|J|W[A-Z0-9]*|NAR))"
+                       r"_(?:" + "|".join(_IG_ORGS) + r")$")
+_IG_DESC = re.compile(r"\b(?:immunoglobulin|Ig)\s+(?:heavy|kappa|lambda|light|gamma|mu|alpha|delta|"
+                      r"epsilon|J)\b(?![^()]{0,40}\bFc\b)[^()]{0,40}?\b(?:chain|variable|constant|"
+                      r"joining|diversity|region)\b(?![-\s]binding)|\bIg(?:W|NAR)\b", re.I)
 
 
-def background_flag(gene, protein):
+def is_ig_chain(gene, names=None):
+    """THE Ig-chain test (one definition: the top tables and the brief's background list).
+    gene: the row's first gene; names: its Protein.Names (DIA-NN: UniProt entry names)."""
+    g = (gene or "").split(";")[0].strip()
+    n = (names or "").split(";")[0].strip()
+    return bool(_IG_GENE.match(g) or _IG_ENTRY.match(n) or _IG_DESC.search(n))
+
+
+def background_flag(gene, protein, names=None):
     """"Ig chain" / "contaminant" / None for one DE row."""
     if any(t.strip().startswith("Cont_") for t in (protein or "").split(";")):
         return "contaminant"
-    if _IG_CHAIN.match((gene or "").split(";")[0].strip()):
+    if is_ig_chain(gene, names):
         return "Ig chain"
     return None
 
@@ -1047,9 +1082,12 @@ def top_data(tables, a, prov):
             det = note(r.get("Protein.Group"), raw, r) if note else None
             if det is None and detected_columns(r, raw):
                 det = f"{word} {detected_columns(r, raw)}"
-            rows.append({"protein": (r.get("Protein.Group") or "?"), "gene": gene_label(r),
+            prot, name = (r.get("Protein.Group") or "?"), gene_label(r)
+            # the name column never repeats the accession: no gene and no entry name -> "—"
+            rows.append({"protein": prot, "gene": "—" if name == prot.split(";")[0] else name,
                          "lfc": r["_lfc"], "p": r["_p"], "sig": r["_p"] < tables.adjp,
-                         "det": det, "flag": background_flag(gene_label(r), r.get("Protein.Group"))})
+                         "det": det, "flag": background_flag(r.get("Genes"), r.get("Protein.Group"),
+                                                             r.get("Protein.Names"))})
         out.append({"contrast": tables.display(c), "rows": rows, "counts": tables.counts(c),
                     "adjp": tables.adjp})
     return out
