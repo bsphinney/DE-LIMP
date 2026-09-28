@@ -1093,6 +1093,90 @@ class QcRuleTests(unittest.TestCase):
             self.assertEqual(fd.read_receipt(qc_out)["status"], "qc_run")
 
 
+    # Release review 2.8.0: the Core's own HeLa-standard QC names were missed, and a customer study
+    # that names its pooled QC was excluded -- then blocked every later stage. Twin vectors: FRAN's
+    # find_uningested pins the same (patch drafted for fran-db).
+    HELA_EXCLUDED = ["07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3",
+                     "12May2026_DIA_60spd_HeLa50_S1-A5", "30apr26_HeL50Flextr-tf9d0_100spd_S4-A1",
+                     "FL050525_HeL50-Dda-newDualIT-HCDIT_60m_1", "Hel-50_100spd"]
+    HELA_KEPT = ["HeLa50ng_titration", "buffer 100mM HeLa50", "HeLa_digest_timecourse"]
+    AGENT = ["PROT_0812 plasma + pooled QC"]
+
+    def test_hela_standard_and_prot_vectors(self):
+        for n in self.HELA_EXCLUDED:
+            self.assertIn("HeLa standard", fd.name_qc_signal(n) or "", n)
+        for n in self.HELA_KEPT + self.KEPT:
+            self.assertIsNone(fd.name_qc_signal(n), n)
+        for n in self.AGENT:
+            self.assertTrue(fd.name_qc_signal(n) and fd.PROT_ID_RE.search(n), n)
+        self.assertEqual(fd.HELA_STD_RE.pattern, r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
+        self.assertEqual(fd.RUN_METHOD_RE.pattern,
+                         r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
+        self.assertEqual(fd.PROT_ID_RE.pattern, r"(?i)(?<![a-z0-9])prot[-_]?\d{4}(?!\d)")
+
+    def test_the_cores_hela_standard_runs_are_qc(self):
+        """HT (Evosep, NN-spd) and Lumos (NNm gradient) HeLa QC, named as the Core names them."""
+        for title in ("07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"):
+            with tempfile.TemporaryDirectory() as d:
+                res = self._stage(d, self._session(d, title))
+                self.assertEqual(res["reason"], "qc_run", title)
+                self.assertIn("HeLa standard", res["qc_rule"])
+
+    def test_a_customer_study_naming_its_pooled_qc_goes_to_an_agent_and_blocks_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "PROT_0812_plasma")
+            res = self._stage(d, out, name="PROT_0812 plasma + pooled QC")
+            self.assertFalse(res["staged"])
+            self.assertEqual(res["reason"], "needs_agent_check")
+            self.assertIsNone(res["qc"])
+            self.assertIn("PROT_0812", res["qc_rule"])
+            self.assertIn("--not-qc", res["detail"])
+            self.assertFalse(os.path.exists(os.path.join(d, "incoming", fd.entry_name(out))))
+            self.assertNotEqual((fd.read_receipt(out) or {}).get("status"), "qc_run")  # nothing recorded
+            ok = self._stage(d, out, name="PROT_0812 plasma + pooled QC", not_qc=True)
+            self.assertTrue(ok["staged"], ok.get("detail"))
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "PROT_0812_plasma")
+            self.assertEqual(self._stage(d, out, name="PROT_0812 plasma + pooled QC",
+                                         qc=True)["reason"], "qc_run")
+
+    def _legacy_name_rule_qc_run(self, out):
+        """A receipt the OLD rule wrote: qc_run, reached by the name rule, on a customer study."""
+        with open(os.path.join(out, fd.RECEIPT), "w") as fh:
+            json.dump({"status": "qc_run", "search_dir": out, "decided_by": "someone",
+                       "at": "2026-09-24T10:00:00", "search_name": "PROT_0812 plasma + pooled QC",
+                       "qc_rule": "QC run: excluded by policy (search_name 'PROT_0812 plasma + "
+                                  "pooled QC' matches QC_NAME_RE)"}, fh)
+
+    def test_an_old_name_rule_qc_run_is_rejudged_not_binding(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._session(d, "PROT_0812_plasma")
+            self._legacy_name_rule_qc_run(out)
+            res = self._stage(d, out)                              # a plain, flagless stage
+            self.assertEqual(res["reason"], "needs_agent_check", res.get("detail"))
+            self.assertTrue(self._stage(d, out, not_qc=True)["staged"])
+        with tempfile.TemporaryDirectory() as d:                   # still QC under today's rule
+            out = self._session(d, "Plasma_liver2")
+            with open(os.path.join(out, fd.RECEIPT), "w") as fh:
+                json.dump({"status": "qc_run", "search_name": "Exploris QC2",
+                           "qc_rule": "QC run: excluded by policy (search_name 'Exploris QC2' "
+                                      "matches QC_NAME_RE)"}, fh)
+            self.assertEqual(self._stage(d, out)["reason"], "qc_run")
+
+    def test_backfill_does_not_block_on_an_old_name_rule_qc_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = Tree(d)
+            out = search_dir(os.path.join(t.svc_root, "on_campus", "Smith", "PROT_0812_plasma"),
+                             "search_out")
+            self._legacy_name_rule_qc_run(out)
+            with env_vars(FRAN_DROP_DIR=t.drop, FRAN_HEALTH="off"):
+                found, _, _ = fd.discover([t.svc_root])
+                pre = os.path.realpath(t.root) + "/"
+                rows = {r["out"]: r for r in fd.plan_backfill(found, prefixes=(pre,))}
+            self.assertEqual((rows[out]["decision"], rows[out]["reason"]),
+                             ("skip", "needs_agent_check"), rows[out])
+
+
 class VerifyFromLogsTests(unittest.TestCase):
     def _staged(self, d):
         out = search_dir(d)
@@ -2118,11 +2202,62 @@ class CoreTreesFromTheShareTable(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CORE_FLINDERS_ROOT": ""}):
             self.assertEqual(cs.service_root(), fd.backfill_roots()[1])
 
+    def test_the_quobyte_service_tree_is_the_tables_on_both_sides(self):
+        """core_submission's work root and the tree the backfill walks: one definition, the
+        proteomics-grp share's HIVE path in hive_shares.tsv plus share_map.QUOBYTE_SERVICE."""
+        import core_submission as cs
+        import share_map
+        with mock.patch.dict(os.environ, {"CORE_WORK_ROOT": ""}):
+            self.assertEqual(cs.work_root(), fd.backfill_roots()[0])
+            self.assertEqual(cs.work_root(), fd.GROUP_ROOT + "/SERVICE")
+            rows = [dict(r, hive="/y/quobyte") if r["share"] == share_map.QUOBYTE_SHARE else r
+                    for r in share_map.load_table()]
+            with mock.patch.object(share_map, "load_table", return_value=rows):
+                self.assertEqual(cs.work_root(), "/y/quobyte/SERVICE")
+                self.assertEqual(fd.backfill_roots()[0], "/y/quobyte/SERVICE")
+            rows = [r for r in share_map.load_table() if r["share"] != share_map.QUOBYTE_SHARE]
+            with mock.patch.object(share_map, "load_table", return_value=rows):
+                with self.assertRaises(cs.Stop):
+                    cs.work_root()
+                with self.assertRaises(SystemExit):
+                    fd.backfill_roots()
+
     def test_no_flinders_row_stops_the_backfill_instead_of_skipping_the_tree(self):
         import share_map
         with mock.patch.object(share_map, "load_table", return_value=[]):
             with self.assertRaises(SystemExit):
                 fd.backfill_roots()
+
+class ReceiptIsAtomicTests(unittest.TestCase):
+    """The receipt carries decisions (opted_out, not_core_facility, qc_run). Written in place, a
+    write that died half-way left a truncated receipt that read_receipt() calls malformed -- and
+    the decision was lost. _write_json_group: tmp + replace, so the old receipt survives."""
+
+    def test_a_failed_write_leaves_the_previous_receipt_whole(self):
+        with tempfile.TemporaryDirectory() as out:
+            self.assertTrue(fd.write_receipt(out, {"status": "qc_run", "qc_rule": "x"}))
+            real_dump = fd.json.dump
+
+            def dies_half_way(obj, fh, **kw):
+                fh.write('{"status": "stag')
+                raise OSError(28, "No space left on device")
+            with mock.patch.object(fd.json, "dump", side_effect=dies_half_way):
+                data = {"status": "staged"}
+                self.assertIsNone(fd.write_receipt(out, data))
+            self.assertIn("No space", data["receipt_error"])
+            self.assertIs(fd.json.dump, real_dump)
+            self.assertEqual(fd.read_receipt(out), {"status": "qc_run", "qc_rule": "x"})
+            self.assertEqual([f for f in os.listdir(out) if f.endswith(".tmp")], [])
+
+    def test_the_receipt_is_group_writable(self):
+        with tempfile.TemporaryDirectory() as out:
+            old = os.umask(0o022)
+            try:
+                p = fd.write_receipt(out, {"status": "staged"})
+            finally:
+                os.umask(old)
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o664)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

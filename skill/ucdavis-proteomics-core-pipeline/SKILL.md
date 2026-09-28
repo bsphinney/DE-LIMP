@@ -1348,7 +1348,11 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   the search produced them.
 - **QC runs are never handed over** (reason `qc_run`). The rule is FRAN's own, applied to the
   analysis name, the session name and the out-dir path: a `QC` token catches
-  "chkLUppm_HeLa50_2026 Lumos QC", while "HeLa" alone is NOT QC. The decision is made at
+  "chkLUppm_HeLa50_2026 Lumos QC", and so does the Core's HeLa standard beside a run method
+  ("07162026_HE50_60-spd-dia", "FL030926_HeL50_90m_3"), while "HeLa" alone is NOT QC. A
+  QC-looking name that also carries a PROT_#### id gets `needs_agent_check` instead: nothing is
+  staged or recorded. Decide from what the user told you and re-run `stage` with `--qc` or
+  `--not-qc`; ask only if you cannot tell. The decision is made at
   GENERATION (step 7, `run_search.py`): `--fran-name` always, plus `--qc` for a QC run, bakes it into the job-end
   hook, so a QC run never reaches FRAN's queue. Pass the same `--name` / `--qc` / `--not-qc`
   here. A search that turns out to be QC after it was staged is withdrawn (manifest

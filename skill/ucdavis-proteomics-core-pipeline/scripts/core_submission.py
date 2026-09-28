@@ -53,7 +53,7 @@ CONFIGURATION (environment -- which is also how the tests point it at temp dirs)
     COREOMICS_TOKEN      else the contents of ~/.coreomics_token
     CORE_FLINDERS_ROOT   default: the Flinders share's HIVE path in hive_shares.tsv
                          (/nfs/lssc0/flinders/proteomics)  (local file work only)
-    CORE_WORK_ROOT       default /quobyte/proteomics-grp/SERVICE
+    CORE_WORK_ROOT       default: the proteomics-grp share's SERVICE tree (hive_shares.tsv)
 
 EXIT CODES -- the orchestrator branches on these:
     0  ok. From `identify`: exactly one candidate -- confirm it with the user in one line
@@ -100,7 +100,6 @@ except ImportError:         # a partial copy of scripts/: server_flinders_root()
     share_map = None
 
 DEFAULT_BASE_URL = "https://ucdavis.coreomics.com/server/api"
-DEFAULT_WORK_ROOT = "/quobyte/proteomics-grp/SERVICE"
 TOKEN_FILE = "~/.coreomics_token"
 LAB = "PROTEOMICS"
 HTTP_TIMEOUT = 60
@@ -228,8 +227,25 @@ def service_root() -> str:
     return os.path.join(flinders_root(), *_share_map().FLINDERS_SERVICE)
 
 
+def server_work_root() -> str:
+    """The Core's SERVICE tree on Quobyte: the proteomics-grp share's HIVE path from
+    hive_shares.tsv plus share_map.QUOBYTE_SERVICE -- the same tree fran_deposit's backfill walks.
+    Never a second copy of the path here."""
+    sm = _share_map()
+    try:
+        hive = sm.hive_root(sm.QUOBYTE_SHARE)
+    except OSError as e:
+        raise Stop(EXIT_UNREACHABLE, {"error": f"hive_shares.tsv could not be read: {e}",
+                                      "hint": SYNC_HINT})
+    if not hive:
+        raise Stop(EXIT_UNREACHABLE, {"error": f"hive_shares.tsv has no HIVE path for the "
+                                               f"'{sm.QUOBYTE_SHARE}' (Quobyte) share",
+                                      "hint": SYNC_HINT})
+    return "/".join((hive.rstrip("/"),) + sm.QUOBYTE_SERVICE)
+
+
 def work_root() -> str:
-    return os.path.abspath(os.environ.get("CORE_WORK_ROOT") or DEFAULT_WORK_ROOT)
+    return os.path.abspath(os.environ.get("CORE_WORK_ROOT") or server_work_root())
 
 
 def is_under(path: str, root: str) -> bool:

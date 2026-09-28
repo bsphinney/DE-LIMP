@@ -72,6 +72,9 @@ permission on the directory is the enforcement, not a flag in this file.
   opted_out            FRAN_DEPOSIT=off, or --skip
   qc_run               a QC run (is_qc_run: --qc/--not-qc, session `qc`, FRAN's QC trees, or
                        FRAN's QC name rule). Never staged; one staged earlier is marked qc: true
+  needs_agent_check    the QC name rule fired on a name that also carries a Core submission id
+                       (PROT_####): a customer study can mention its pooled QC. Not a decision --
+                       nothing is recorded -- until someone runs stage --qc or --not-qc
 `backfill` adds three of its own, for a directory it found but will not hand over:
   not_a_skill_search   a search this skill did not run (e.g. a DE-LIMP app search)
   already_ingested     the cron's logs show FRAN already ingested it (by any route)
@@ -498,13 +501,25 @@ def _fasta_helpers():
 
 
 def _cont_tag():
-    """fetch_fasta.CONT_TAG ("Cont_"): the contaminant tag DIA-NN's --cont-quant-exclude keys on."""
+    """(tag, None): fetch_fasta.CONT_TAG ("Cont_"), the contaminant tag DIA-NN's
+    --cont-quant-exclude keys on -- or (None, why) when fetch_fasta cannot be imported. Never a
+    silent None: without the tag every contaminant counts as a target, so the failure is WARNED
+    and organism_from_headers / fasta_from_search mark a header-derived organism unverified. (A
+    partial copy of scripts/ without estimate_params.py did exactly this on HIVE, 2026-09-28, and
+    recorded contaminant_entries 0 with no word said.)"""
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from fetch_fasta import CONT_TAG
-        return CONT_TAG
-    except Exception:                                               # noqa: BLE001
-        return None                 # unknown: organism_from_headers then treats no entry as one
+        return CONT_TAG, None
+    except Exception as e:                                          # noqa: BLE001
+        missing = getattr(e, "name", None)
+        why = ("fetch_fasta could not be imported"
+               + (f" (missing module {missing!r})" if missing else "")
+               + f": {type(e).__name__}: {e}")
+        sys.stderr.write(f"[fran_deposit] WARNING: contaminant tag unavailable -- {why}. Every "
+                         f"contaminant counts as a target, so an organism read from FASTA headers "
+                         f"is recorded as unverified. Copy the whole scripts/ directory.\n")
+        return None, why
 
 
 # When NO sidecar is tied to the search's FASTA, the FASTA itself still answers "which database,
@@ -520,14 +535,26 @@ _PROTEOME_ID = re.compile(r"UP\d{9}")
 
 def organism_from_headers(path, cont_tag=None):
     """(organism, taxid, evidence, why-not) from the FASTA's own UniProt headers: OX= tallied over
-    the target entries (a Cont_-tagged contaminant is not a target). One taxon must hold at least
-    HEADER_MAJORITY of them; otherwise nothing is claimed and why-not says what was found. A FASTA
-    whose appended contaminants are NOT Cont_-tagged (a hand-built one) counts them as targets and
-    still resolves when the majority holds: over ALL 21,044 entries of the Sep-2025
-    MRS/UP000005640_9606_plus_universal_contam.fasta, OX=9606 is on 20,814 (98.9%). (That file does
-    tag its 381 contaminants Cont_, so they are excluded; its defect is the 153 of them identical
-    to human proteins.)"""
-    cont_tag = cont_tag or _cont_tag()
+    the target entries. A contaminant is not a target: an entry is one when its header CONTAINS
+    fetch_fasta.CONT_TAG -- fetch_fasta's own test (`CONT_TAG in header`), because the tag sits
+    after the database prefix (`>sp|Cont_P00761|TRYP_PIG ...`), not at the start. One taxon must
+    hold at least HEADER_MAJORITY of the targets; otherwise nothing is claimed and why-not says
+    what was found.
+
+    Why containment, measured 2026-09-28: MRS/UP000005640_9606_plus_universal_contam.fasta tags
+    all 381 of its contaminants `sp|Cont_` (none start `>Cont_`), so the old startswith test
+    counted every one as a target -- OX=9606 on 20,814 of 21,044 (98.9%), where the true targets
+    are 20,663 of 20,663 (100%); and the live manifest incoming/DIA-NN_2.6.0_Ceres__88c1abfb
+    recorded contaminant_entries 0. Human only resolved by the margin. A small proteome does not:
+    6,066 yeast entries + 380 appended contaminants is 94.1% < HEADER_MAJORITY, so the organism
+    went unresolved. A hand-built FASTA whose contaminants carry no tag still counts them as
+    targets and resolves only when the majority holds. So does every FASTA when the tag itself is
+    unavailable (_cont_tag: fetch_fasta not importable) -- then evidence carries
+    `contaminant_tag_unavailable`, why-not says so, and fasta_from_search records the organism as
+    "unverified: contaminant tag unavailable ..."."""
+    no_tag = None
+    if not cont_tag:
+        cont_tag, no_tag = _cont_tag()
     ox, names = collections.Counter(), collections.defaultdict(collections.Counter)
     tag = cont_tag.encode() if cont_tag else None
     n_target = n_cont = 0
@@ -536,7 +563,7 @@ def organism_from_headers(path, cont_tag=None):
             for line in fh:
                 if not line.startswith(b">"):
                     continue
-                if tag and line[1:].startswith(tag):
+                if tag and tag in line:             # fetch_fasta's test: CONT_TAG in header
                     n_cont += 1
                     continue
                 h = line[1:].decode("utf-8", "replace").strip()
@@ -551,6 +578,9 @@ def organism_from_headers(path, cont_tag=None):
         return None, None, {}, f"cannot read {path} ({e.strerror or e})"
     ev = {"target_entries": n_target, "contaminant_entries": n_cont,
           "contaminant_tag": cont_tag, "ox_tally": dict(ox.most_common(4))}
+    if no_tag:
+        # The counts above include every contaminant as a target; say so wherever they are shown.
+        ev["contaminant_tag_unavailable"] = no_tag
     if not n_target:
         return None, None, ev, f"{path} has no target entries"
     if not ox:
@@ -559,7 +589,9 @@ def organism_from_headers(path, cont_tag=None):
     ev.update(ox_top=int(top), ox_top_entries=k)
     if k / n_target < HEADER_MAJORITY:
         return None, None, ev, (f"no clear majority taxon: OX={top} on {k:,} of {n_target:,} target "
-                                f"entries ({k / n_target:.1%} < {HEADER_MAJORITY:.0%})")
+                                f"entries ({k / n_target:.1%} < {HEADER_MAJORITY:.0%})"
+                                + (" -- contaminant tag unavailable, so contaminants were counted "
+                                   "as targets" if no_tag else ""))
     org = names[top].most_common(1)[0][0] if names[top] else None
     return org, int(top), ev, None
 
@@ -597,9 +629,13 @@ def fasta_from_search(out):
         ev["proteome_id_in_filename"] = pid.group(0) + " (supporting evidence only, never the source)"
     res["organism_evidence"] = ev
     if tax:
-        res.update(organism=org, taxon=tax,
-                   organism_source=(f"FASTA headers (OX={tax} in {ev['ox_top_entries']:,} of "
-                                    f"{ev['target_entries']:,} target entries) via {src}"))
+        src_text = (f"FASTA headers (OX={tax} in {ev['ox_top_entries']:,} of "
+                    f"{ev['target_entries']:,} target entries) via {src}")
+        if ev.get("contaminant_tag_unavailable"):
+            src_text = (f"unverified: contaminant tag unavailable "
+                        f"({ev['contaminant_tag_unavailable']}; contaminants counted as targets) "
+                        f"-- {src_text}")
+        res.update(organism=org, taxon=tax, organism_source=src_text)
     else:
         res["why"] = why
     return res
@@ -681,14 +717,13 @@ def read_receipt(out):
 
 
 def write_receipt(out, data):
+    """Write the receipt ATOMICALLY (_write_json_group: tmp + replace, 0664). It carries decisions
+    -- opted_out, not_core_facility, qc_run -- that a later backfill must honour; written in place,
+    a job killed mid-write left a truncated receipt, read_receipt() saw it as malformed, and the
+    decision was lost. The next Core member's stage/verify rewrites it, hence group-writable."""
     p = os.path.join(out, RECEIPT)
     try:
-        with open(p, "w") as fh:
-            json.dump(data, fh, indent=2)
-        try:
-            os.chmod(p, 0o664)        # the next Core member's stage/verify rewrites it
-        except OSError:
-            pass
+        _write_json_group(p, data)
         return p
     except OSError as e:
         # A receipt we could not write is a resume hazard, not a failure of the deposit -- report
@@ -704,13 +739,42 @@ def write_receipt(out, data):
 # incoming/ has no QC path, so the decision has to be made here, before anything is staged.
 #
 # ONE definition: is_qc_run(). backfill and stage both call it; nothing else decides QC.
-# TWIN RULE in FRAN: ingest/find_uningested.py `policy_exclusion` / `qc_reason` / `QC_NAME_RE`
-# (branch fix/auto-ingest-starvation). The two must agree byte for byte -- change one, change the
-# other. Pinned by the same vectors on both sides (tests/test_fran_health_backfill.py QcRuleTests):
-#   excluded: "chkLUppm_HeLa50_2026 Lumos QC", "QC_run_01", "hela_qc_2", "Exploris QC2"
-#   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2"
+# TWIN RULE in FRAN: ingest/find_uningested.py `qc_reason` / `name_qc_signal` / QC_NAME_RE,
+# HELA_STD_RE, RUN_METHOD_RE, PROT_ID_RE (on FRAN main since PR #12; the HeLa-standard and
+# PROT_#### parts ship with the matching FRAN patch of 2026-09-28). The two must agree byte for
+# byte -- change one, change the other. Pinned by the same vectors on both sides (here
+# tests/test_fran_health_backfill.py QcRuleTests; FRAN tests/test_auto_ingest_starvation.py):
+#   excluded: "chkLUppm_HeLa50_2026 Lumos QC", "QC_run_01", "hela_qc_2", "Exploris QC2",
+#             "07162026_HE50_60-spd-dia-_S1-A1_1_23036", "FL030926_HeL50_90m_3"
+#   kept:     "HeLa_digest_timecourse", "aqc_buffer_study", "QCM_study", "Plasma_liver2",
+#             "HeLa50ng_titration"
+#   agent:    "PROT_0812 plasma + pooled QC" -> needs_agent_check
 # "HeLa" alone is deliberately NOT a QC signal: HeLa digests are real experiments too.
 QC_NAME_RE = re.compile(r"(?i)(?<![a-z0-9])qc(?![a-z])")
+# The Core's HeLa STANDARD -- 50 ng of HeLa digest, named HE50 / HeL50 / Hel-50 / HeLa50(ng) on its
+# runs -- is QC only beside a run-method token: NN-spd (Evosep samples per day; timsTOF HT
+# "07162026_HE50_60-spd-dia-_S1-A1") or an NNm gradient (the Lumos: "FL030926_HeL50_90m_3"; its
+# runs carry no SPD). Measured against STAN's records of the Core's own QC runs, 2026-09-28. Neither
+# token alone is a signal: "HeLa50ng_titration" is an experiment, and "100mM" is not a gradient.
+HELA_STD_RE = re.compile(r"(?i)(?<![a-z0-9])he(?:la?)?[-_]?50(?:ng)?(?!\d)")
+RUN_METHOD_RE = re.compile(r"(?i)(?<![a-z0-9])\d{2,3}[-_]?(?:spd|m|min)(?![a-z0-9])")
+# A Core submission id. A name that carries one is a CUSTOMER study, whatever QC word it also
+# carries ("PROT_0812 plasma + pooled QC"), so the name rule refers it to a person
+# (needs_agent_check) instead of deciding qc_run -- and qc_run, once recorded, blocks later stages.
+PROT_ID_RE = re.compile(r"(?i)(?<![a-z0-9])prot[-_]?\d{4}(?!\d)")
+# What a NAME-rule verdict says in its reason text. A qc_run recorded on one of these is re-judged
+# by today's rule (decide_qc); an explicit --qc, session marker or excluded tree stays binding.
+NAME_RULE_MARKS = ("matches QC_NAME_RE", "is a HeLa standard")
+
+
+def name_qc_signal(text):
+    """What makes one name look like a QC run, or None: the QC token, or a HeLa standard beside a
+    run-method token. The twin of FRAN's find_uningested.name_qc_signal."""
+    if QC_NAME_RE.search(text or ""):
+        return "matches QC_NAME_RE"
+    if HELA_STD_RE.search(text or "") and RUN_METHOD_RE.search(text or ""):
+        return "is a HeLa standard (HELA_STD_RE beside a RUN_METHOD_RE token)"
+    return None
 # FRAN's find_uningested.DEFAULT_EXCLUDES, verbatim: trees whose engine output is never a corpus
 # search (STAN QC, the QC watcher, smoke tests, FRAN's scratch dir, the ToF QC series). Substring
 # match, as FRAN does it. A search under one is excluded by POLICY -- even with --not-qc, because
@@ -772,13 +836,15 @@ def _session_qc_marker(session):
 
 
 def is_qc_run(out, session=None, *, names=(), override=None):
-    """(is_qc, why) for a search out dir. FRAN's precedence (policy_exclusion), first match wins:
+    """(is_qc, why) for a search out dir. FRAN's precedence (qc_reason), first match wins:
       1. an explicit QC marker -- `override=True` (stage --qc) or session metadata "qc": true
       2. the out dir is under one of FRAN's DEFAULT_EXCLUDES trees -- excluded EVEN with --not-qc:
          FRAN refuses anything there, so staging it would only put a refusal in its queue
       3. an explicit NOT-QC marker -- `override=False` (--not-qc) or session metadata "qc": false
-      4. QC_NAME_RE on the search name(s) in `names` and the session name, then on the last three
-         components of the out dir path
+      4. name_qc_signal (QC_NAME_RE, or a HeLa standard beside a run-method token) on the search
+         name(s) in `names` and the session name, then on the last three components of the out dir
+         path -- UNLESS one of those names carries a Core submission id (PROT_ID_RE): then the
+         answer is None, "needs_agent_check: ..." -- a person decides, with --qc or --not-qc
     `why` mirrors FRAN's reason text: "QC run: excluded by policy (<what matched>)". It goes into
     the receipt, and for a staged search into the manifest's `qc_rule`."""
     out = os.path.abspath(out)
@@ -807,8 +873,15 @@ def is_qc_run(out, session=None, *, names=(), override=None):
                                                    os.path.basename(session)) if n]
     labelled += [("output_dir", c) for c in [x for x in real.split("/") if x][-3:]]
     for field, text in labelled:
-        if QC_NAME_RE.search(text):
-            return True, f"QC run: excluded by policy ({field} {text!r} matches QC_NAME_RE)"
+        sig = name_qc_signal(text)
+        if not sig:
+            continue
+        prot = next((t for _, t in labelled if PROT_ID_RE.search(t)), None)
+        if prot:
+            return None, (f"needs_agent_check: {field} {text!r} {sig}, but {prot!r} carries a Core "
+                          f"submission id -- a customer study can mention its pooled QC. Decide "
+                          f"with stage --qc or --not-qc.")
+        return True, f"QC run: excluded by policy ({field} {text!r} {sig})"
     return False, "not QC: no qc marker, not under a FRAN excluded tree, no QC token in the names or path"
 
 
@@ -818,11 +891,17 @@ def _recorded_qc(receipt, manifest):
     A withdrawal must STAY a withdrawal. A later plain `stage --out X` (no --name, no flag) used to
     re-stage a withdrawn QC run with qc: false -- which FRAN honours -- so the run got ingested
     after all. A qc_run receipt, or a staged manifest saying qc/exclude: true, is therefore QC
-    until someone says --not-qc explicitly. A recorded --not-qc ("user override") is not-QC."""
-    if receipt.get("status") == "qc_run":
+    until someone says --not-qc explicitly. A recorded --not-qc ("user override") is not-QC.
+
+    EXCEPT a verdict the NAME rule reached (NAME_RULE_MARKS in its qc_rule): that is not binding.
+    decide_qc re-judges it by today's rule, with the name it was judged on. Otherwise a rule fix
+    could never reach a search it had already misjudged -- "PROT_0812 plasma + pooled QC", recorded
+    qc_run, stayed blocked for every later stage."""
+    if receipt.get("status") == "qc_run" and not _name_rule_verdict(receipt.get("qc_rule")):
         return True, (f"QC run: excluded by policy (recorded by {receipt.get('decided_by') or '?'} "
                       f"at {receipt.get('at') or '?'}: {receipt.get('qc_rule') or 'qc_run'})")
-    if manifest.get("qc") is True or manifest.get("exclude") is True:
+    if ((manifest.get("qc") is True or manifest.get("exclude") is True)
+            and not _name_rule_verdict(manifest.get("qc_rule"))):
         return True, (f"QC run: excluded by policy (its staged manifest says qc: true: "
                       f"{manifest.get('qc_rule') or 'no reason recorded'})")
     if QC_OVERRIDE in (receipt.get("qc_rule"), manifest.get("qc_rule")):
@@ -830,15 +909,26 @@ def _recorded_qc(receipt, manifest):
     return None, None
 
 
+def _name_rule_verdict(rule):
+    return any(m in (rule or "") for m in NAME_RULE_MARKS)
+
+
 def decide_qc(out, *, names=(), override=None, receipt=None, manifest=None):
     """THE QC decision for one search, for stage and backfill alike: an explicit flag, else what
     an earlier stage recorded, else is_qc_run's rule. (is_qc_run still puts FRAN's excluded trees
-    above any not-QC decision.)"""
+    above any not-QC decision.) Returns (True | False | None, why); None is needs_agent_check."""
+    receipt, manifest = receipt or {}, manifest or {}
     if override is None:
-        rec, why = _recorded_qc(receipt or {}, manifest or {})
+        rec, why = _recorded_qc(receipt, manifest)
         if rec is True:
             return True, why
         override = rec
+        # An earlier NAME-rule verdict is re-judged with the name it was judged on: a flagless
+        # re-stage does not carry that name, and without it a withdrawn QC run would come back.
+        names = list([names] if isinstance(names, str) else names) + [
+            n for n, rule in ((receipt.get("search_name"), receipt.get("qc_rule")),
+                              (manifest.get("search_name"), manifest.get("qc_rule")))
+            if n and _name_rule_verdict(rule)]
     return is_qc_run(out, names=names, override=override)
 
 
@@ -847,10 +937,17 @@ def _write_json_group(path, data):
     skill writes under incoming/ must be rewritable by the NEXT Core member: with a 022 umask a
     manifest came out 0644, and another member's withdrawal then failed."""
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.chmod(tmp, 0o664)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(data, fh, indent=2)
+        os.chmod(tmp, 0o664)
+        os.replace(tmp, path)
+    except BaseException:
+        try:                                      # never leave a half-written tmp beside it
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _withdraw_qc_entry(entry, why, user):
@@ -914,6 +1011,11 @@ def check(a):
     qc, why = decide_qc(out, names=[name] if name else (), override=override,
                         receipt=read_receipt(out) or {}, manifest=prior_man)
     r["qc"], r["qc_rule"] = qc, why
+    if qc is None:
+        r.update(reason="needs_agent_check", name=name,
+                 detail=f"{why} Nothing is recorded, so this blocks nothing: the next stage with "
+                        f"--qc or --not-qc decides it.")
+        return r
     if qc:
         r.update(reason="qc_run", name=name,
                  entry=os.path.join(os.environ.get("FRAN_DROP_DIR", DROP_DIR), entry_name(out)),
@@ -2267,11 +2369,7 @@ def write_health_status(h, drop=None):
            "checked_by": getpass.getuser(), "host": os.uname().nodename,
            "written_by": "fran_deposit.py health"}
     try:
-        tmp = f"{p}.{os.getpid()}.tmp"
-        with open(tmp, "w") as fh:
-            json.dump(rec, fh, indent=2)
-        os.chmod(tmp, 0o664)
-        os.replace(tmp, p)
+        _write_json_group(p, rec)
         return {"written": p}
     except OSError as e:
         return {"written": None, "why": f"{type(e).__name__}: {e.strerror or e}"}
@@ -2411,7 +2509,6 @@ def health(a):
 # only presets/, references/, scripts/ for brettsp -- kept so a member's sessions there are found).
 # The Flinders share's HIVE path and its service tree are hive_shares.tsv's (share_map.py), read
 # when a backfill needs them -- never a second copy here.
-QUOBYTE_SERVICE = GROUP_ROOT + "/SERVICE"
 
 
 def _flinders():
@@ -2430,9 +2527,16 @@ def _flinders():
 
 
 def backfill_roots():
-    """The Core trees a backfill walks: Quobyte's SERVICE tree and Flinders' service tree."""
+    """The Core trees a backfill walks: Quobyte's SERVICE tree and Flinders' service tree -- both
+    from hive_shares.tsv via share_map, the same definitions core_submission's work_root() and
+    service_root() read (no copy of either path here)."""
     root, sm = _flinders()
-    return [QUOBYTE_SERVICE, "/".join((root,) + sm.FLINDERS_SERVICE)]
+    quobyte = sm.hive_root(sm.QUOBYTE_SHARE)
+    if not quobyte:
+        raise SystemExit(f"[fran_deposit] hive_shares.tsv has no HIVE path for the "
+                         f"'{sm.QUOBYTE_SHARE}' (Quobyte) share")
+    return ["/".join((quobyte.rstrip("/"),) + sm.QUOBYTE_SERVICE),
+            "/".join((root,) + sm.FLINDERS_SERVICE)]
 
 
 def core_prefixes():
@@ -2723,9 +2827,10 @@ def plan_backfill(dirs, apply=False, members=None, prefixes=None, runs=None):
         if not core:
             rows.append({**row, "decision": "skip", "reason": "not_core_facility", "detail": why})
             continue
-        if prior.get("status") in DECISION_STATUS:
-            rows.append({**row, "decision": "excluded" if prior["status"] == "qc_run" else "skip",
-                         "reason": prior["status"],
+        # A recorded qc_run was already weighed by decide_qc above: binding ones returned there,
+        # and a NAME-rule verdict was re-judged. It must not block a second time here.
+        if prior.get("status") in DECISION_STATUS and prior["status"] != "qc_run":
+            rows.append({**row, "decision": "skip", "reason": prior["status"],
                          "detail": f"recorded by {prior.get('decided_by') or '?'} at "
                                    f"{prior.get('at') or '?'}: {prior.get('detail') or ''}".strip()})
             continue
@@ -2939,9 +3044,9 @@ def main():
                    help="skip the GitHub comparison of FRAN's ingest code (no network)")
     b = ap.add_argument_group("backfill")
     b.add_argument("--roots", action="append", default=None,
-                   help=f"walk these instead of the Core trees (default: {QUOBYTE_SERVICE}, "
-                        f"Flinders' service tree from hive_shares.tsv, and members' "
-                        f"~/proteomics-pipeline); repeatable")
+                   help="walk these instead of the Core trees (default: Quobyte's SERVICE tree "
+                        "and Flinders' service tree, both from hive_shares.tsv, and members' "
+                        "~/proteomics-pipeline); repeatable")
     b.add_argument("--list", default=None, help="file of search out dirs, one per line")
     b.add_argument("--apply", action="store_true", help="stage what is eligible (default: dry run)")
     b.add_argument("--max-depth", type=int, default=WALK_MAX_DEPTH)
