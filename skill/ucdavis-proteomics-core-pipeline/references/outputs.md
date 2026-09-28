@@ -78,6 +78,24 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   run-log hook creates it, the three documents are rewritten with its path and go into the zip
   after the hook, like `MANIFEST.txt`.
 
+### The DE tables (`output/tables/DE_<method>_<contrast>.csv`, `run_de.R`)
+One row per protein, sorted by `adj.P.Val`. limma's columns (`logFC`, `AveExpr`, `t`,
+`P.Value`, `adj.P.Val` — THE significance column —, `B`), the protein annotation
+(`Protein.Group`, `Genes`, `Protein.Names`, and on dpc limpa's `NPeptides` / `PropObs`), then
+two kinds of detection column, from `Detection_Matrix.csv` (the one definition of
+"measured"; a run measured a protein when that matrix is > 0):
+- **`Detected_<group>`**, one per group the contrast compares (`Detected_Old_JPH3`,
+  `Detected_Old_IgG`): `k/n` = the protein was measured in `k` of that group's `n` runs.
+  On dpc the other runs' values were inferred by the detection-probability model; on maxlfq
+  they are missing.
+- **`Evidence`**: `measured in both` (every run of every group in the contrast measured it) ·
+  `presence call` (never measured in at least one group — the difference there is the
+  model's, not a measurement: read it as present/absent) · `partly inferred` (dpc) /
+  `partly missing` (maxlfq) otherwise. Empty when the protein has no detection record.
+
+The exact wording of both is in `de_provenance.json` → `detection_matrix.de_columns`, which
+AGENTS.md reads.
+
 ### The optional podcast (`output/podcast/`, `make_podcast.py`)
 An AI-generated audio discussion of the finished report, made only when the user asks
 (`references/podcast.md`). It is a **derivative, not a record**: README and AGENTS.md say so,

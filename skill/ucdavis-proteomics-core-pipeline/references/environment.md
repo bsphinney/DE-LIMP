@@ -54,6 +54,36 @@ Container runtime preference: hpc→apptainer, mac→docker, linux→native.
   scan trailer — that needs a `Microsoft.NETCore.App` 8 root even with a self-contained
   parser. Detail: `references/install.md`.
 
+## The R stack: limpa >= 1.4.0 (`setup.sh`)
+
+`run_de.R --method dpc` reads the DIA-NN report with `limpa::readDIANN()`. The pinned stack is
+**limpa >= 1.4.0** (Bioconductor 3.23). bioconda's only build is limpa **1.2.5**
+(Bioconductor 3.22, R 4.5), and a 2.8.0 `run_de.R` died on it (HIVE sbatch 24154221:
+`unused argument (annotation.columns = dpc_ann)` — 1.2.x calls that argument `extra.columns`).
+
+- **What `setup.sh` builds.** A conda env, solved with `--override-channels -c conda-forge -c
+  bioconda` (a `~/.condarc` listing `defaults` with `channel_priority: strict` otherwise left
+  libmamba only defaults' R ≤ 4.3 `r-statmod`, and the solve failed: sbatch 24154212), with
+  R 4.5 + bioconda `bioconductor-limma` 3.66 + `r-statmod` / `r-data.table` /
+  `r-nanoparquet`. Step 2a then installs **limpa from the Bioconductor 3.23 source
+  repository** into that env (`PROTEOMICS_LIMPA_BIOC` overrides the release). limpa is pure R
+  (no `src/`), has no R-version floor, and every limma function it imports is in limma 3.66,
+  so no compiler and no second Bioconductor stack are needed — conda-forge has `r-base` 4.6
+  but no R 4.6 builds of `r-statmod`, `r-arrow` … yet. Measured: limpa 1.4.0 on limma 3.66
+  gives run_de.R results identical to limpa 1.4.0 on limma 3.68.
+- **The check.** The last thing `setup.sh` does is verify `packageVersion("limpa") >=
+  "1.4.0"`. `setup.json` → `limpa` = `{version, required, ok, source}`; when it fails,
+  `notes` and stderr say `ERROR: limpa <v> ...` with the fix (an `install.packages()` line to
+  run where there is internet — a login node), and `setup.sh` exits 1 (`--check` only
+  reports).
+- **An env that is still on limpa 1.2.x** (an old `setup.sh`, no internet) is not a dead
+  end: `run_de.R` passes the annotation columns under whichever name this limpa's
+  `readDIANN()` has (`limpa_compat.R`) and records it — `de_provenance.json` →
+  `limpa_read = {limpa_version, annotation_argument, path}`. Measured: limpa 1.2.5 and 1.4.0
+  give identical DE tables. The upgrade is still the fix: re-run `setup.sh`.
+- **R 4.6 + Bioconductor 3.23 throughout** (HIVE's `proteomics-pipeline-r46`, built with
+  conda-forge `r-base` 4.6 + `BiocManager` 3.23) passes the same check.
+
 ## Version pinning (reproducibility)
 
 `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION` from the workflow bundle and

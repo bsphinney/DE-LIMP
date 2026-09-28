@@ -249,24 +249,47 @@ def zscore(per, samples):
     return {s: ((per[s] - m) / sd if per[s] is not None else None) for s in samples}
 
 
-def load_conditions(path, samples):
-    """Map matrix sample columns -> group via conditions.csv (fuzzy basename-stem)."""
+def load_conditions(path, samples, column=None):
+    """Map matrix sample columns -> group via conditions.csv (basename stems), or -> the
+    value of `column` (e.g. the block, Mouse) when given. An EXACT stem match wins; a
+    substring match is used only when exactly one row matches -- 'S1' is a substring of
+    'S10'..'S19', and the first such row used to be taken (S10 got S1's group)."""
     if not path or not os.path.exists(path):
         return {}
     pairs = []
     with open(path, newline="") as fh:
         rd = csv.DictReader(fh)
         fcol = next((c for c in rd.fieldnames if "file" in c.lower() or "run" in c.lower() or "sample" in c.lower()), rd.fieldnames[0])
-        gcol = next((c for c in rd.fieldnames if "group" in c.lower() or "condition" in c.lower()), rd.fieldnames[-1])
+        gcol = column if column else next((c for c in rd.fieldnames if "group" in c.lower() or "condition" in c.lower()), rd.fieldnames[-1])
+        if gcol not in rd.fieldnames:
+            return {}
         for r in rd:
-            pairs.append((_stem(r.get(fcol, "")), r.get(gcol, "").strip()))
+            pairs.append((_stem(r.get(fcol, "")), (r.get(gcol) or "").strip()))
     gmap = {}
     for s in samples:
         ss = _stem(s)
-        hit = next((g for stem, g in pairs if stem and (stem == ss or stem in ss or ss in stem)), None)
-        if hit:
-            gmap[s] = hit
+        exact = [g for stem, g in pairs if stem and stem == ss]
+        if exact:
+            gmap[s] = exact[0]
+            continue
+        sub = [g for stem, g in pairs if stem and (stem in ss or ss in stem)]
+        if len(sub) == 1:
+            gmap[s] = sub[0]
     return gmap
+
+
+def block_column_for(matrix_path, explicit=None):
+    """The block (animal / subject) column: --block, else the one run_de.R recorded in the
+    de_provenance.json beside the expression matrix (block_column, present only when the
+    DE was blocked). None = samples are treated as independent."""
+    if explicit:
+        return explicit
+    prov = os.path.join(os.path.dirname(os.path.abspath(matrix_path)), "de_provenance.json")
+    try:
+        with open(prov) as fh:
+            return json.load(fh).get("block_column") or None
+    except (OSError, ValueError):
+        return None
 
 
 def _stem(x):
@@ -311,12 +334,30 @@ def _min_p(sizes):
     return sym / labellings
 
 
-def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925):
+def _arrangements(labels_by_stratum):
+    """Distinct label arrangements a within-stratum relabelling can reach."""
+    total = 1
+    for labs in labels_by_stratum:
+        n = math.factorial(len(labs))
+        for c in set(labs):
+            n //= math.factorial(labs.count(c))
+        total *= n
+    return total
+
+
+def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925, bmap=None,
+                   block_name="block"):
     """Return (confounded: bool, detail, p) -- does the panel score differ between groups
     more than relabelling the samples at random would? That is the danger signal: DE may be
     contamination, not biology. p is None when the design is too small for any relabelling
     to reach CONFOUND_P (3 vs 3: 1 in 10); then complete separation of the extreme groups
-    by >= thr is reported instead, labelled as such."""
+    by >= thr is reported instead, labelled as such.
+
+    bmap (sample -> block, e.g. the mouse): samples of one animal are not exchangeable, so
+    free relabelling of samples would treat them as independent. Blocks nested in the
+    groups (each animal in one group: technical replicates) -> the test runs on BLOCK MEANS,
+    one value per animal. Blocks spanning groups (each mouse gave an IP to several groups)
+    -> labels are relabelled WITHIN each block, which keeps every animal's own level."""
     if not gmap:
         return False, "no conditions.csv -- group-confounding not assessed", None
     vals, labs = [], []
@@ -324,31 +365,75 @@ def confound_check(z, gmap, samples, thr, n_perm=N_PERM, seed=20260925):
         if s in gmap and z.get(s) is not None:
             vals.append(z[s])
             labs.append(gmap[s])
+    strata, unit = None, "sample"
+    if bmap:
+        blks = [bmap.get(s) for s in samples if s in gmap and z.get(s) is not None]
+        if None not in blks:
+            groups_of = {}
+            for b, g in zip(blks, labs):
+                groups_of.setdefault(b, set()).add(g)
+            if all(len(v) == 1 for v in groups_of.values()):      # nested: block means
+                per = {}
+                for b, v in zip(blks, vals):
+                    per.setdefault(b, []).append(v)
+                order = sorted(per)
+                vals = [sum(per[b]) / len(per[b]) for b in order]
+                labs = [next(iter(groups_of[b])) for b in order]
+                unit = f"{block_name} mean"
+            else:                                                  # spanning: within-block
+                strata = blks
+                unit = f"sample, relabelled within each {block_name}"
     groups = {}
     for v, g in zip(vals, labs):
         groups.setdefault(g, []).append(v)
     if len(groups) < 2:
         return False, "fewer than 2 groups with panel data", None
     means = {g: sum(v) / len(v) for g, v in groups.items()}
-    detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n={len(groups[g])})" for g in sorted(means))
+    per_blk = f" {block_name}" if unit.endswith("mean") else ""
+    detail = "; ".join(f"{g}: mean z {means[g]:+.2f} (n={len(groups[g])}{per_blk})" for g in sorted(means))
     sizes = [len(v) for v in groups.values()]
-    if _min_p(sizes) > CONFOUND_P:
+    if strata is not None:
+        by = {}
+        for b, g in zip(strata, labs):
+            by.setdefault(b, []).append(g)
+        min_p = 1 / _arrangements(list(by.values()))
+    else:
+        min_p = _min_p(sizes)
+    if min_p > CONFOUND_P:
         hi = max(means, key=means.get); lo = min(means, key=means.get)
         gap = means[hi] - means[lo]
         separated = gap >= thr and min(groups[hi]) > max(groups[lo])
-        return bool(separated), (f"{detail}  [too few samples for a test (best possible p "
-                                 f"{_min_p(sizes):.2g}); extreme groups "
+        return bool(separated), (f"{detail}  [too few {'samples' if unit == 'sample' else unit + 's'} "
+                                 f"for a test (best possible p {min_p:.2g}); extreme groups "
                                  f"{'completely separated' if separated else 'overlap'}, "
                                  f"gap {gap:+.2f}]"), None
     obs = _between(vals, labs)
     rng = random.Random(seed)
-    perm, ge = list(labs), 0
-    for _ in range(n_perm):
-        rng.shuffle(perm)
-        if _between(vals, perm) >= obs - 1e-9:
-            ge += 1
+    ge = 0
+    if strata is None:
+        perm = list(labs)
+        for _ in range(n_perm):
+            rng.shuffle(perm)
+            if _between(vals, perm) >= obs - 1e-9:
+                ge += 1
+    else:
+        idx = {}
+        for i, b in enumerate(strata):
+            idx.setdefault(b, []).append(i)
+        perm = list(labs)
+        for _ in range(n_perm):
+            for ii in idx.values():
+                sub = [labs[i] for i in ii]
+                rng.shuffle(sub)
+                for i, g in zip(ii, sub):
+                    perm[i] = g
+            if _between(vals, perm) >= obs - 1e-9:
+                ge += 1
     p = (ge + 1) / (n_perm + 1)
-    return p < CONFOUND_P, (f"{detail}  [permutation F-test across {len(groups)} groups: "
+    how = ("" if unit == "sample" else
+           f" on {block_name} means (one value per {block_name})" if unit.endswith("mean")
+           else f", relabelling within each {block_name}")
+    return p < CONFOUND_P, (f"{detail}  [permutation F-test across {len(groups)} groups{how}: "
                             f"p = {p:.2g}, {n_perm:,} relabellings; flagged at p < {CONFOUND_P}]"), p
 
 
@@ -380,6 +465,9 @@ def main():
     ap.add_argument("--matrix", required=True, help="expression matrix CSV (proteins x samples; a gene/id column + numeric sample columns)")
     ap.add_argument("--conditions", help="conditions.csv (File.Name,Group) to test group-confounding")
     ap.add_argument("--report", help="DIA-NN report.parquet for TRUE per-sample detected depth")
+    ap.add_argument("--block", help="conditions.csv column naming the animal / subject each sample "
+                    "came from (the confound test then respects it). Default: the block_column "
+                    "run_de.R recorded in the de_provenance.json beside --matrix, if any")
     ap.add_argument("--out", default="SAMPLE_QUALITY.md")
     ap.add_argument("--z", type=float, default=1.5, help="|z| threshold to flag an elevated sample (default 1.5)")
     ap.add_argument("--keratin-sample", action="store_true",
@@ -399,6 +487,8 @@ def main():
     samples, rows = read_matrix(a.matrix)
     _to_log2(rows, samples)
     gmap = load_conditions(a.conditions, samples)
+    block_col = block_column_for(a.matrix, a.block)
+    bmap = load_conditions(a.conditions, samples, column=block_col) if block_col else {}
 
     na = sum(1 for r in rows for s in samples if r["vals"].get(s) is None)
     complete = na / max(1, len(rows) * len(samples)) < 0.005
@@ -436,7 +526,8 @@ def main():
         per, nhit, matched, cont_hits = panel_scores(rows, samples, genes, removed)
         z = zscore(per, samples)
         elevated = sorted(s for s in samples if z.get(s) is not None and z[s] >= a.z)
-        confounded, detail, confound_p = confound_check(z, gmap, samples, a.z)
+        confounded, detail, confound_p = confound_check(z, gmap, samples, a.z, bmap=bmap,
+                                                        block_name=block_col or "block")
         expected = a.keratin_sample and name == "EPIDERMIS"
         kept = name == TARGET_PANEL
         if kept or expected:

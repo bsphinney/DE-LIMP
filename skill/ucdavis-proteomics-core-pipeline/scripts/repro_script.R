@@ -194,15 +194,21 @@ write_repro_script <- function(path,
       "# --- 1. Read the DIA-NN report, applying the identification FDR cutoffs ------",
       "#     PG.Q.Value uses DIA-NN's recommended 0.05; the rest use --q-cutoff.",
       "#     limpa recycles q.cutoffs against q.columns element-wise.",
+      if (cont_on) c(
+      "#     The annotation columns (the contaminant filter reads the accessions): limpa",
+      "#     >= 1.4.0 names that argument annotation.columns, 1.2.x extra.columns.",
+      "ann_arg <- intersect(c('annotation.columns', 'extra.columns'), names(formals(limpa::readDIANN)))[1]",
+      sprintf("ann_cols <- %s",
+              if (!is.null(dpc_annotation_columns)) .rvec(dpc_annotation_columns)
+              else sprintf("c(eval(formals(limpa::readDIANN)[[ann_arg]]), %s)", .rq(cont_col))),
+      sprintf("dat <- do.call(limpa::readDIANN, c(list(%s, format = %s, q.cutoffs = %s,",
+              src, .rq(format), .cuts_src),
+      sprintf("                                        q.columns = %s),", .rvec(q_columns)),
+      "                                   setNames(list(ann_cols), ann_arg)))")
+      else c(
       sprintf("dat <- limpa::readDIANN(%s, format = %s, q.cutoffs = %s,",
               src, .rq(format), .cuts_src),
-      if (cont_on) c(
-      sprintf("                        q.columns = %s,", .rvec(q_columns)),
-      sprintf("                        annotation.columns = %s)",
-              if (!is.null(dpc_annotation_columns)) .rvec(dpc_annotation_columns)
-              else sprintf("c(eval(formals(limpa::readDIANN)$annotation.columns), %s)",
-                           .rq(cont_col))))
-      else sprintf("                        q.columns = %s)", .rvec(q_columns)),
+      sprintf("                        q.columns = %s)", .rvec(q_columns))),
       "",
       "# --- 2. Keep only the runs that appear in the design -------------------------",
       "dat <- dat[, colnames(dat$E) %in% metadata$File.Name]",

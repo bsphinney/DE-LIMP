@@ -11,8 +11,9 @@
 # What gets installed (no sudo, into ~/.proteomics-pipeline/):
 #   - micromamba          (single static binary; only if no conda/mamba present)
 #   - a conda env with:   python + pyarrow + pyyaml
-#                         R (>=4.5) + bioconductor-limpa + bioconductor-limma
-#                                   + r-arrow + r-dplyr + r-tidyr
+#                         R (>=4.5) + bioconductor-limma + limpa >= 1.4.0 (from
+#                                   Bioconductor 3.23: bioconda has only 1.2.5)
+#                                   + r-arrow + r-dplyr + r-tidyr + r-nanoparquet
 #                         sage-proteomics            (the DDA search engine)
 #                         proteowizard/msconvert     (LINUX ONLY on bioconda)
 #   - thermorawfileparser (bioconda, self-contained: reads Thermo .raw for
@@ -95,9 +96,11 @@ fi
 
 # create-env helper that works for micromamba OR conda/mamba
 create_env() {
+  # bioconductor-limpa here is bioconda's 1.2.5 (its only build): a floor that run_de.R can
+  # still read with (limpa_compat.R). Step 2a upgrades it to >= 1.4.0.
   local pkgs=(python=3.11 pyarrow pyyaml
-              "r-base>=4.5" bioconductor-limpa bioconductor-limma
-              r-arrow r-dplyr r-tidyr sage-proteomics
+              "r-base>=4.5" bioconductor-limpa bioconductor-limma r-statmod r-data.table
+              r-nanoparquet r-arrow r-dplyr r-tidyr sage-proteomics
               r-ggplot2 r-ggrepel r-pheatmap r-jsonlite   # publication-quality figures
               pandoc python-docx)   # pandoc + python-docx: Markdown report -> Word .docx
   # proteowizard (msconvert) is bioconda LINUX-only
@@ -108,13 +111,16 @@ create_env() {
   # 2026-09-23) envs_dirs is the relative "quobyte/proteomics-grp/conda_envs/", so `-r ROOT -n
   # NAME` built the env under $PWD/quobyte/... -- env_ready never found it, and setup.json said
   # rscript "" after a successful create.
+  # --override-channels: the skill names its own channels. A user .condarc with `defaults`
+  # and channel_priority strict (HIVE brettsp, sbatch 24154212) made libmamba consider only
+  # defaults' r-statmod, built for R <= 4.3, and bioconductor-limma 3.66 was unsolvable.
   case "$CONDA" in
     *micromamba)
       "$CONDA" create -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
-        -c conda-forge -c bioconda "${pkgs[@]}" ;;
+        --override-channels -c conda-forge -c bioconda "${pkgs[@]}" ;;
     *)
       "$CONDA" create -y -p "$ENV_PREFIX" \
-        -c conda-forge -c bioconda "${pkgs[@]}" ;;
+        --override-channels -c conda-forge -c bioconda "${pkgs[@]}" ;;
   esac
 }
 
@@ -124,17 +130,40 @@ env_ready() { [ -x "$ENV_PREFIX/bin/python" ] && [ -x "$ENV_PREFIX/bin/Rscript" 
 if [ -n "$CONDA" ] && ! env_ready; then
   if $CHECK_ONLY; then NOTES+=("Analysis env not built yet; run setup.sh to create it.")
   else
-    create_env || NOTES+=("Environment solve failed. Try: $CONDA create -r $MAMBA_ROOT -p $ENV_PREFIX -c conda-forge -c bioconda bioconductor-limpa sage-proteomics python pyarrow")
+    create_env || NOTES+=("Environment solve failed. Try: $CONDA create -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda bioconductor-limma sage-proteomics python pyarrow")
   fi
 fi
 
-# limpa is on bioconda, but if the solve dropped it, install via BiocManager.
-if env_ready && ! "$ENV_PREFIX/bin/Rscript" -e 'q(status=!requireNamespace("limpa",quietly=TRUE))' 2>/dev/null; then
-  if ! $CHECK_ONLY; then
-    say "[setup] limpa missing from env; installing via BiocManager..."
-    "$ENV_PREFIX/bin/Rscript" -e 'if(!requireNamespace("BiocManager",quietly=TRUE))install.packages("BiocManager",repos="https://cloud.r-project.org");BiocManager::install("limpa",update=FALSE,ask=FALSE)' \
-      || NOTES+=("limpa could not be installed. DE --method dpc will be unavailable; --method maxlfq still works (limma only).")
-  fi
+# ---- 2a. limpa >= 1.4.0 -------------------------------------------------------
+# run_de.R reads DIA-NN with readDIANN(annotation.columns =): limpa >= 1.4.0, Bioconductor
+# 3.23. bioconda's only build is 1.2.5 (Bioconductor 3.22, R 4.5), and a 2.8.0 run_de.R died
+# on it (HIVE sbatch 24154221). limpa is pure R -- github.com/bioc/limpa RELEASE_3_23 has no
+# src/, Depends limma with no version and no R floor, Imports data.table / statmod -- and
+# every limma function it imports (lmFit, duplicateCorrelation, squeezeVar, arrayWeights,
+# asMatrixWeights, chooseLowessSpan, loessFit, plotMDS) is in bioconda's limma 3.66. So the
+# env's R takes the Bioconductor 3.23 SOURCE package as it is: no compiler, no R 4.6, no
+# second Bioconductor stack (conda-forge has r-base 4.6 but no R 4.6 builds of r-statmod,
+# r-arrow, ... yet). An env that already has R 4.6 + Bioconductor 3.23 (HIVE's
+# proteomics-pipeline-r46) passes the same check. PROTEOMICS_LIMPA_BIOC overrides the release.
+LIMPA_MIN="1.4.0"
+LIMPA_BIOC="${PROTEOMICS_LIMPA_BIOC:-3.23}"
+LIMPA_REPO="https://bioconductor.org/packages/$LIMPA_BIOC/bioc"
+limpa_ok() {
+  "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!(requireNamespace('limpa', quietly = TRUE) && utils::packageVersion('limpa') >= '$LIMPA_MIN')))" >/dev/null 2>&1
+}
+if env_ready && ! $CHECK_ONLY && ! limpa_ok; then
+  say "[setup] installing limpa >= $LIMPA_MIN from Bioconductor $LIMPA_BIOC (bioconda has only 1.2.5)..."
+  "$ENV_PREFIX/bin/Rscript" -e "install.packages('limpa', repos = c(BioCsoft = '$LIMPA_REPO', CRAN = 'https://cloud.r-project.org'), type = 'source', dependencies = NA)" >&2 \
+    || say "[setup] the limpa install failed (above)"
+fi
+LIMPA_VERSION=""; LIMPA_OK=false
+if env_ready; then
+  LIMPA_VERSION="$("$ENV_PREFIX/bin/Rscript" -e "cat(tryCatch(as.character(utils::packageVersion('limpa')), error = function(e) ''))" 2>/dev/null)"
+  limpa_ok && LIMPA_OK=true
+fi
+LIMPA_FIX="$ENV_PREFIX/bin/Rscript -e \"install.packages('limpa', repos = '$LIMPA_REPO', type = 'source')\" where there is internet (a login node), then bash setup.sh --check"
+if env_ready && ! $LIMPA_OK; then
+  NOTES+=("limpa ${LIMPA_VERSION:-is not installed}${LIMPA_VERSION:+ is older than $LIMPA_MIN}: run_de.R --method dpc needs limpa >= $LIMPA_MIN (it can still read the report with limpa 1.2.x and records that it did, but the pinned stack is >= $LIMPA_MIN). Fix: $LIMPA_FIX.")
 fi
 
 # ---- 2b. ThermoRawFileParser + pythonnet + pandas: their own install ---------
@@ -167,9 +196,9 @@ if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   # shellcheck disable=SC2086  # $EXTRA_PKGS is meant to split into package names
   case "$CONDA" in      # -p for the reason create_env gives
     *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
-                   -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
+                   --override-channels -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
     *)           "$CONDA" install -y -p "$ENV_PREFIX" \
-                   -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
+                   --override-channels -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
   esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
 fi
 
@@ -284,6 +313,8 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
          "$($QUOBYTE && echo true || echo false)"
   printf '  "diann": {"ready": %s, "note": "%s"},\n' "$($DIANN_READY && echo true || echo false)" "$(j "$DIANN_NOTE")"
   printf '  "dotnet8": {"root": "%s", "note": "%s"},\n' "$(j "$DOTNET8_ROOT")" "$(j "$DOTNET8_NOTE")"
+  printf '  "limpa": {"version": "%s", "required": ">= %s", "ok": %s, "source": "Bioconductor %s"},\n' \
+         "$(j "$LIMPA_VERSION")" "$LIMPA_MIN" "$($LIMPA_OK && echo true || echo false)" "$LIMPA_BIOC"
   printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
          "$($DE_READY && echo true || echo false)" \
          "$($DIA_READY && echo true || echo false)" \
@@ -303,3 +334,12 @@ j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 say ""
 say "[setup] activate with:  source $ACTIVATE"
 say "[setup] readiness report written to $SETUP_JSON"
+
+# The pinned R stack is part of a working setup: an env whose limpa is < 1.4.0 is a setup
+# failure, said plainly and with the fix -- not a note to be scrolled past.
+if env_ready && ! $LIMPA_OK; then
+  say ""
+  say "[setup] ERROR: limpa ${LIMPA_VERSION:-(not installed)} in $ENV_PREFIX -- the skill needs limpa >= $LIMPA_MIN (Bioconductor $LIMPA_BIOC)."
+  say "[setup]        Fix: $LIMPA_FIX"
+  $CHECK_ONLY || exit 1
+fi

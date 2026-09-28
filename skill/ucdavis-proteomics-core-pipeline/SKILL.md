@@ -175,6 +175,10 @@ in the same shell before running anything below** (or prefix later commands).
 
 Read `setup.json` and **gate on `ready_for`**:
 - `ready_for.de` false → DE can't run; re-run `setup.sh` and report any `notes`.
+- `limpa.ok` false (setup.sh then ends `ERROR: limpa ...` and exits 1) → the env's limpa is
+  older than 1.4.0 (bioconda has only 1.2.5; setup.sh installs 1.4 from Bioconductor 3.23):
+  run the fix it prints where there is internet. run_de.R still reads the report with limpa
+  1.2.x and records that it did (`references/environment.md`).
 - `ready_for.dia` false → on macOS this means Docker is missing. Run
   `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
   Desktop, open it once), then continue. Don't silently fall back to a DDA engine.

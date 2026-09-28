@@ -120,8 +120,12 @@ and fitting them as independent throws the pairing away. Put the unit in its own
   - `all`: every contrast from the blocked fit.
 
   **Why `within` is the default** (PROT_0756: 6 mice × 5 IPs, consensus correlation
-  0.17). A one-sample-per-mouse age contrast has no pairing to model, and in a balanced
-  design the independent fit's variance is unbiased for every protein. The blocked fit
+  0.17). A one-sample-per-mouse age contrast compares independent samples, and in a
+  balanced design the independent fit's variance is unbiased for every protein. It is not
+  exact: the pooled residuals come from the same mice across groups, so they share the mouse
+  effect and their degrees of freedom are overstated — mildly (simulated type I 0.047–0.071
+  across per-protein correlation 0.05–0.85; a fit on the two groups' samples alone is
+  exact, a follow-up). The blocked fit
   applies ONE consensus correlation to all proteins, so it understates the between-mouse
   variance for proteins with strong mouse-to-mouse variation: the blocked/independent SE
   ratio on the age contrasts was 1.04 at per-protein correlation ≤ 0 and 0.86 at > 0.6

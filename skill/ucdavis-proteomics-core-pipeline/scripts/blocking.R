@@ -38,8 +38,12 @@
 #   all     every contrast from the blocked fit.
 # Why "within" is the default (PROT_0756, 6 mice x 5 IPs, consensus correlation 0.17): a
 # between-block contrast that already uses one sample per block (each bait, 3 vs 3 mice)
-# has no pseudo-replication to correct, and in a balanced design the independent fit's
-# variance is unbiased for every protein. The blocked fit applies ONE consensus
+# compares independent samples, and in a balanced design the independent fit's variance is
+# unbiased for every protein. It is not exact: its pooled residuals come from the same mice
+# across groups, so they share the mouse effect and their degrees of freedom are overstated
+# -- a mild anti-conservatism (blocksim/between.R: type I 0.047-0.071 across per-protein
+# correlation 0.05-0.85; a fit on the two groups' samples alone is exact, follow-up P1).
+# The blocked fit is worse there. It applies ONE consensus
 # correlation to all proteins, so for proteins with strong block-to-block variation it
 # understates the between-block variance: blocked/independent SE ratio 0.86 at per-protein
 # correlation > 0.6 (1.04 at <= 0), matching the value the design predicts to 0.015 -- and
@@ -437,6 +441,23 @@ block_candidates <- function(meta, covariates) {
     tab <- table(v)
     if (length(tab) < 2 || length(tab) == length(v) || any(tab < 2)) next
     if (any(tapply(meta$Group, v, function(g) length(unique(g))) > 1)) hits <- c(hits, cc)
+  }
+  hits
+}
+
+# ...and the NESTED case block_candidates() cannot see: a column that splits a group into
+# units holding several runs each -- technical replicates, several injections or fractions
+# of one animal (Mouse = Ctrl_M1 x3, Ctrl_M2 x3 inside Ctrl). Counted as independent they
+# inflate n. A column constant within every group is a coarser label, not a unit, and is
+# not flagged. Used for a hint only.
+block_candidates_within <- function(meta, covariates) {
+  hits <- character(0)
+  for (cc in setdiff(names(meta), c("File.Name", "Group", covariates))) {
+    v <- as.character(meta[[cc]])
+    if (anyNA(v) || !all(nzchar(v))) next
+    splits <- vapply(split(v, meta$Group), function(x)
+      length(unique(x)) >= 2 && anyDuplicated(x) > 0, logical(1))
+    if (any(splits)) hits <- c(hits, cc)
   }
   hits
 }
