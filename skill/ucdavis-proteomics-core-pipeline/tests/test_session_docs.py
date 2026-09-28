@@ -348,6 +348,25 @@ class Agents(unittest.TestCase):
             self.assertIn("whether a fold-change filter was applied is not recorded", text)
             self.assertNotIn("reference line on the volcano only", text)
 
+    def test_the_rule_is_written_for_people_with_the_recorded_value(self):
+        """PROT_0756 v2's README read "Significance: adj.P.Val < adjp (BH); no fold-change
+        filter (adjp = 0.05)" -- the record's variable name, printed as is."""
+        want = ("adjusted p < 0.05 (Benjamini–Hochberg, within each comparison); no fold-change "
+                "filter")
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, DPC)
+            f = session_docs.gather(p["session_dir"])
+            for doc in (session_docs.readme_md(f), session_docs.agents_md(f)):
+                self.assertIn(want, doc)
+                self.assertNotIn("< adjp", doc)
+                self.assertNotIn("(adjp =", doc)
+        self.assertIn("adjusted p < 0.01 (", session_docs.significance_text(dict(DPC, adjp=0.01)))
+        no_value = {k: v for k, v in DPC.items() if k != "adjp"}
+        self.assertIn("adjusted p < [threshold not recorded] (",
+                      session_docs.significance_text(no_value))
+        other = dict(DPC, significance_rule="q < adjp (Storey)", adjp=0.01)
+        self.assertEqual(session_docs.significance_text(other), "q < adjp (Storey) (adjp = 0.01)")
+
     def test_pull_down_controls_by_name(self):
         with tempfile.TemporaryDirectory() as d:
             prov = dict(DPC, groups={"Old_IgG": 3, "Old_RyR": 3},

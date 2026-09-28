@@ -323,8 +323,13 @@ SEARCH_FILES = [
     (r"\.stats\.tsv$", "OTHER", "optional", "DIA-NN run statistics"),
     (r"\.protein_description\.tsv$", "OTHER", "optional", "DIA-NN protein descriptions"),
     (r"\.manifest\.txt$", "OTHER", "optional", "DIA-NN report manifest"),
-    (r"^step3_assembly\.parquet$", "SPECTRUM_LIBRARY", "recommended",
-     "empirical library assembled from these runs (PRIDE: recommended)"),
+    # The 5-step chain's step 3 (diann_parallel.py): --out-lib empirical.parquet is the library
+    # the final pass searched; --out step3_assembly.parquet is only that pass's report.
+    (r"^empirical\.parquet$", "SPECTRUM_LIBRARY", "required",
+     "empirical spectral library assembled from these runs; the final pass searched it (PRIDE: "
+     "mandatory if a library search was performed)"),
+    (r"^step3_assembly\.parquet$", "OTHER", "optional",
+     "DIA-NN report of the library-assembly pass (step 3); the results are report.parquet"),
     (r"(lib|library)[^/]*\.parquet$", "SPECTRUM_LIBRARY", "recommended",
      "spectral library (PRIDE: mandatory if a library search was performed)"),
     (re.escape(PREDICTED_SPECLIB) + "$", "SPECTRUM_LIBRARY", "recommended",
