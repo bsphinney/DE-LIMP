@@ -46,17 +46,24 @@ import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headles
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 
-# Galleries (no report only): QC first, then overview, then per-contrast results.
+# Galleries (no report only): QC first, then overview, then per-contrast results, and the
+# p-value calibration check last, as an appendix.
+APPENDIX = "Appendix: p-value calibration"
 FIGURE_ORDER = [
     ("qc_detected_vs_inferred", "Quality control"),
     ("qc_protein_counts", "Quality control"),
     ("pca", "Overview"),
     ("heatmap_top", "Overview"),
     ("volcano", "Differential expression"),
-    ("violin_top", "Differential expression"),     # make_figures.R's top-protein violins
-    ("pvalue", "Differential expression"),
+    ("violin_top", "Differential expression"),     # make_figures.R's top-protein plots
+    ("qc_pvalue_panel", APPENDIX),                 # every contrast's p-values, one panel (2.8.0)
+    ("pvalue", APPENDIX),                          # one per contrast (sessions before 2.8.0)
 ]
-SECTION_ORDER = ["Quality control", "Overview", "Differential expression", "Other figures"]
+SECTION_ORDER = ["Quality control", "Overview", "Differential expression", "Other figures",
+                 APPENDIX]
+# Figures the page adds as the appendix itself when the report does not embed them: a
+# calibration check, not a finding, so the narrative never has to interleave it.
+APPENDIX_FIGURES = ("qc_pvalue_panel",)
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".svg", ".webp")
 # Markdown images ![alt](path "title") -> groups 1 (alt), 2 (path); inline <img src="path">
@@ -102,6 +109,50 @@ def data_uri(path):
     mime = mimetypes.guess_type(path)[0] or "image/png"
     with open(path, "rb") as fh:
         return f"data:{mime};base64,{base64.b64encode(fh.read()).decode('ascii')}"
+
+
+def read_figures_json(figures_dir):
+    """make_figures.R's figures.json -> {"figures": [{file, type, caption}], "failed": [{file,
+    type, reason}], "found", "error"}. Two shapes: the object {"figures": [...], "failed":
+    [...]} (2.8.0+) and the bare list of figures older sessions wrote. The ONE reader, for this
+    page and for analysis_prompt.py's brief: a schema change cannot leave one of them silently
+    figure-less. `error` says why a figures.json present could not be used."""
+    out = {"figures": [], "failed": [], "found": False, "error": None}
+    path = os.path.join(figures_dir or "", "figures.json")
+    if not (figures_dir and os.path.exists(path)):
+        return out
+    out["found"] = True
+    try:
+        with open(path, encoding="utf-8") as fh:
+            fj = json.load(fh)
+    except (OSError, ValueError) as e:
+        out["error"] = f"unreadable ({e})"
+        return out
+    if isinstance(fj, list):
+        figs, failed = fj, []
+    elif isinstance(fj, dict) and isinstance(fj.get("figures"), list):
+        figs, failed = fj.get("figures", []), fj.get("failed") or []
+    else:
+        out["error"] = ("neither a list of figures nor an object with a \"figures\" list "
+                        f"(got {type(fj).__name__})")
+        return out
+    for e in figs:
+        if not isinstance(e, dict):
+            continue
+        k = e.get("file") or e.get("filename") or e.get("name")
+        if k:
+            out["figures"].append({"file": os.path.basename(k), "type": e.get("type") or "",
+                                   "caption": e.get("caption") or e.get("title") or ""})
+    for e in failed if isinstance(failed, list) else []:
+        if isinstance(e, str):
+            e = {"file": e}
+        if not isinstance(e, dict):
+            continue
+        k = e.get("file") or e.get("name")
+        if k:
+            out["failed"].append({"file": os.path.basename(k), "type": e.get("type") or "",
+                                  "reason": str(e.get("reason") or e.get("error") or "")})
+    return out
 
 
 def classify(name):
@@ -168,8 +219,15 @@ class Figures:
                                                + (f" ({self.failed[name]})" if self.failed[name]
                                                   else "")}
             elif path is None:
+                # A report written for the per-contrast p-value histograms, rendered against a
+                # run that draws them as one panel: say where they went.
+                moved = (name.startswith("pvalue_") and self.current is not None and
+                         any(c.startswith(APPENDIX_FIGURES) for c in self.current))
                 key, e = ("m", name), {"status": "missing", "name": name,
-                                       "text": f"figure missing: {name}"}
+                                       "text": f"figure missing: {name}"
+                                               + (f" (this run draws every contrast's p-values "
+                                                  f"in one panel: see {APPENDIX})" if moved
+                                                  else "")}
             elif self.current is not None and os.path.basename(path) not in self.current:
                 # On disk but not in this run's figures.json: left over from an earlier run,
                 # so it may show data this report no longer describes.
@@ -578,10 +636,29 @@ def drop_suppressed(md, prefixes):
     return "\n".join(out) + ("\n" if md.endswith("\n") else ""), names, n_par
 
 
+def raw_pvalues(tables, c):
+    out = []
+    for r in tables.rows(c):
+        try:
+            out.append(float(r.get("P.Value")))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def figure_summary(name, tables, qc_path, em_path):
     """A short factual summary of the data a figure draws, taken from the tables -- never a
     number that is not in them. None for figures without one (PCA, heatmap)."""
     stem = os.path.splitext(name)[0]
+    if stem.startswith(APPENDIX_FIGURES) and tables and tables.contrasts:
+        parts = []
+        for c in tables.contrasts:
+            raw = raw_pvalues(tables, c)
+            if raw:
+                parts.append(f"{tables.display(c)} {100 * sum(x < 0.05 for x in raw) / len(raw):.0f}%")
+        if parts:
+            return ("Share of raw p-values below 0.05 per contrast (about 5% when nothing "
+                    "changed): " + ", ".join(parts) + ".")
     for prefix in ("volcano_", "pvalue_"):
         c = stem[len(prefix):] if stem.startswith(prefix) else None
         if c and tables and c in tables.files:
@@ -592,12 +669,7 @@ def figure_summary(name, tables, qc_path, em_path):
                 return (f"{tables.display(c)}: {up + dn:,} of {tested:,} proteins significant at "
                         f"adj.P < {tables.adjp:g} ({up:,} up, {dn:,} down; no fold-change "
                         f"filter). Top 5 by adj.P: {top}.")
-            raw = []
-            for r in tables.rows(c):
-                try:
-                    raw.append(float(r.get("P.Value")))
-                except (TypeError, ValueError):
-                    pass
+            raw = raw_pvalues(tables, c)
             if raw:
                 below = sum(x < 0.05 for x in raw)
                 return (f"{tables.display(c)}: {len(raw):,} p-values, {below:,} "
@@ -685,7 +757,8 @@ def detection_note_fn(tables_dir, prov, conditions):
     def note(protein, contrast, row=None):
         own = detected_columns(row or {}, contrast)
         if own:                           # the DE table's own per-group counts win
-            return f"{word} {own}"
+            ev = ((row or {}).get("Evidence") or "").strip()   # run_de.R's own category
+            return f"{word} {own}" + (f" — {ev}" if ev and ev != "NA" else "")
         d = det.get(protein)
         if d is None:
             return "not recorded"
@@ -709,7 +782,11 @@ def build_page(a, prov, tables, figs, md_text, used):
     if md_text is not None:
         h1, pre, report_secs = split_md_sections(md_text)
     report_h2 = {norm_title(t) for t, _ in report_secs}
+    referenced = set(report_figures(md_text)) if md_text is not None else set()
     g = glance_data(prov, tables, a.tables, a.session)
+    nd = not_drawn_note(figs.failed, referenced)
+    if nd:
+        g["notes"].append(nd)
     if g["tiles"] or g["contrasts"] or g["notes"]:
         sections.append({"anchor": anchor("Results at a glance", used),
                          "title": "Results at a glance", "kind": None, "blocks": [("glance", g)]})
@@ -743,6 +820,11 @@ def build_page(a, prov, tables, figs, md_text, used):
         sections.append({"anchor": anchor("Top proteins per contrast", used),
                          "title": "Top proteins per contrast", "kind": None,
                          "blocks": [("top", top)]})
+    if md_text is not None:
+        app = [fn for fn in a._listed if fn.startswith(APPENDIX_FIGURES) and fn not in referenced]
+        if app:
+            sections.append({"anchor": anchor(APPENDIX, used), "title": APPENDIX, "kind": None,
+                             "blocks": [("gallery", APPENDIX, app)]})
     subtitle = None
     if pre.strip() and len(pre.strip()) < 600 and "\n\n" not in pre.strip():
         subtitle, pre = pre.strip(), ""
@@ -792,6 +874,21 @@ def glance_data(prov, tables, tables_dir, session=None):
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
             "recorded": tables.src == "de_provenance.json", "notes": notes,
             "rule": rule_text(tables.adjp, tables.src)}
+
+
+def not_drawn_note(failed, referenced=()):
+    """The fixed "not drawn in this run" callout: every figure make_figures.R's figures.json
+    lists under `failed`, with its reason, so a missing PCA or top-protein plot is never just
+    absent. A figure the report references already carries its own note where it would be."""
+    items = [(n, why) for n, why in (failed or {}).items() if n not in set(referenced)]
+    if not items:
+        return None
+    return {"kind": "warning",
+            "title": f"{len(items)} figure{'' if len(items) == 1 else 's'} could not be drawn "
+                     f"in this run",
+            "text": "; ".join(f"`{n}`" + (f": {why.rstrip('.')}" if why else "")
+                              for n, why in items)
+                    + " (make_figures.R's `failed` list in `figures/figures.json`)."}
 
 
 def inferred_note(prov, tables_dir):
@@ -1151,27 +1248,15 @@ def main():
     if os.path.abspath(md_out) == os.path.abspath(a.report or ""):
         sys.exit("[make_analysis_html] --md-out would overwrite the report it is made from")
 
-    caps, a._listed, failed, have_fj = {}, [], {}, False
-    if a.figures and os.path.exists(os.path.join(a.figures, "figures.json")):
-        try:
-            fj = json.load(open(os.path.join(a.figures, "figures.json")))
-            entries = fj if isinstance(fj, list) else fj.get("figures", [])
-            for e in entries:
-                if isinstance(e, dict):
-                    k = e.get("file") or e.get("filename") or e.get("name")
-                    if k:
-                        a._listed.append(os.path.basename(k))
-                        caps[os.path.basename(k)] = e.get("caption") or e.get("title") or ""
-            # make_figures.R's `failed` list: figures it tried and could not draw this run
-            for e in ([] if isinstance(fj, list) else fj.get("failed") or []):
-                k = e if isinstance(e, str) else (e.get("file") or e.get("name") or "")
-                if k:
-                    failed[os.path.basename(k)] = ("" if isinstance(e, str) else
-                                                   str(e.get("reason") or e.get("error") or ""))
-            have_fj = True
-        except Exception as e:
-            print(f"[make_analysis_html] WARNING: figures.json unreadable ({e}); captions and "
-                  f"its figure list are not used", file=sys.stderr)
+    fjd = read_figures_json(a.figures)
+    if fjd["error"]:
+        print(f"[make_analysis_html] WARNING: figures.json {fjd['error']}; captions and its "
+              f"figure list are not used", file=sys.stderr)
+    have_fj = fjd["found"] and not fjd["error"]
+    a._listed = [f["file"] for f in fjd["figures"]]
+    caps = {f["file"]: f["caption"] for f in fjd["figures"]}
+    # make_figures.R's `failed` list: figures it tried and could not draw this run
+    failed = {f["file"]: f["reason"] for f in fjd["failed"]}
     available = (sorted(fn for fn in os.listdir(a.figures) if fn.lower().endswith(IMAGE_EXT))
                  if a.figures and os.path.isdir(a.figures) else [])
 

@@ -10,10 +10,18 @@ inline instead of shipping the prompt to an external API.
 1. `analysis_prompt.py` writes `ANALYSIS_PROMPT.md` — the brief, parameterized by
    what's present (QC, GSEA) and by the actual engine + DE method.
 2. **The agent reads the brief and the data files and writes `AI_Analysis_Report.md`.**
-   It computes significant proteins, up/down splits, cross-comparison overlaps, and
-   lowest-CV proteins from the CSVs — citing specific proteins, never fabricating.
+   It computes significant proteins, up/down splits and cross-comparison overlaps from the
+   CSVs, and CVs from measured values only — citing specific proteins, never fabricating.
+   Hits are tiered by per-group detection: the DE tables' `Evidence` (measured in both /
+   partly inferred or missing / presence call, as `de_provenance.json` defines it), never
+   by PropObs. The brief lists every figure in `figures/figures.json` (the 2.8.0 object or an
+   older bare list) and names each one make_figures.R could not draw, with its reason.
 3. `make_analysis_html.py` renders it into **`Analysis_Report.html`** — the report of
-   record: one self-contained page (figures inlined). No Word copy of the report is made
+   record: one self-contained page (figures inlined). Only figures in this run's
+   `figures.json` are embedded. What must not depend on the writer is added by the page
+   itself: Results at a glance, fixed callouts (inferred values, a contaminant-database
+   risk, figures that could not be drawn), the top-protein tables and, as the last section,
+   *Appendix: p-value calibration* (`qc_pvalue_panel.png`). No Word copy of the report is made
    any more (Word mangled the figures, 2026-09-24); the Methods stay in Word
    (`methods.docx`). An older session's `AI_Analysis_Report.docx` is left in place.
 4. `make_report.py` writes `OUTPUT_FILES.md` — every output file, its size, and a
@@ -31,10 +39,10 @@ report describes the samples in the submitter's words and adds nothing they did 
 
 ## Report sections (faithful to DE-LIMP's export prompt)
 Overview · QC Assessment (if QC present) · Key Findings Per Comparison ·
-Cross-Comparison Biomarkers · High-Confidence Biomarker Insights · Pathway/GSEA
-(if present) · Biological Interpretation · How This Analysis Works (LC-MS/MS,
-DIA/DDA, the engine, the stats framework, key terms — written for a biologist with
-no MS background) · Methods & Reproducibility.
+Specificity (pull-down designs) or Cross-Comparison Biomarkers + High-Confidence
+Findings · Pathway/GSEA (if present) · Biological Interpretation · How This Analysis
+Works (LC-MS/MS, DIA/DDA, the engine, the stats framework, key terms — written for a
+biologist with no MS background) · Methods & Reproducibility · Next steps.
 
 ## Pipeline self-description (DE-LIMP rule #1)
 The brief takes the pipeline label, quantification, DE engine, missing-value

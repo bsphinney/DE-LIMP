@@ -14,6 +14,10 @@ n.s. divider and Ig/contaminant flags; rule-2 tags when nothing recorded the rul
 not in this run's figures.json (stale / failed) are notes; the stale PDF is retired; the
 inferred note only for dpc, in the record's own words; one contrast form + direction line;
 the p-value definition; a scroll hint for wide tables.
+Then (figures.json 2.8.0, fix/280-figures; DE detection columns, fix/280-stats): the tiers are
+run_de.R's Evidence categories, described in the record's own words; the top-protein plot is
+not always a violin; the p-value panel is the page's appendix, not narrative; every figure
+make_figures.R could not draw is a fixed callout.
 """
 import csv
 import json
@@ -34,6 +38,16 @@ import html_to_pdf as h2p  # noqa: E402
 
 RUNS = {"Bait": ["b1", "b2", "b3"], "IgG": ["c1", "c2", "c3"]}
 POLICY = "Missing precursors modelled via the detection probability curve; not imputed, not dropped."
+PROV = {"adjp": 0.05, "q_cutoff": 0.01, "logfc": 1.0, "pipeline_id": "dpc", "method": "dpc",
+        "missing_policy": POLICY, "n_samples": 6, "groups": {"Bait": 3, "IgG": 3},
+        "contrasts": ["Bait-IgG"], "detection_matrix": {"zero_means": "inferred"}}
+# run_de.R's de_provenance.json detection_matrix.de_columns (fix/280-stats 4d5bb69), verbatim
+DE_COLUMNS_REC = {
+    "Detected_<group>": "k/n: the runs of that group (n) in which the protein was measured (k; "
+                        "Detection_Matrix.csv > 0, 0 = inferred)",
+    "Evidence": "'measured in both' = measured in every run of every group in the contrast; "
+                "'presence call' = never measured in at least one group, so the difference there "
+                "is the model's, not a measurement; 'partly inferred' = otherwise"}
 # (protein, gene, logFC, adj.P, detection per run b1..b3 c1..c3)
 ROWS = [("P1", "Jph3", 9.1, 1e-9, [3, 3, 3, 0, 0, 0]),      # never measured in IgG
         ("P2", "Ryr2", 5.0, 2e-8, [4, 4, 4, 2, 2, 1]),      # measured in both
@@ -44,21 +58,25 @@ ROWS = [("P1", "Jph3", 9.1, 1e-9, [3, 3, 3, 0, 0, 0]),      # never measured in 
         ("P7", "Gapdh", -0.1, 0.8, [9, 9, 9, 9, 9, 9])]
 
 
+def evidence(d):
+    """run_de.R's Evidence for one row's detection (b1..b3, c1..c3)."""
+    k = [sum(x > 0 for x in d[:3]), sum(x > 0 for x in d[3:])]
+    return ("presence call" if 0 in k else "measured in both" if k == [3, 3]
+            else "partly inferred")
+
+
 def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, report=True,
-            removed=None):
+            removed=None, evidence_col=False, extra_figs=(), omit=(), report_extra=""):
     out = os.path.join(root, "output")
     tables, figs = os.path.join(out, "tables"), os.path.join(out, "figures")
     for d in (tables, figs, os.path.join(root, "input")):
         os.makedirs(d, exist_ok=True)
-    prov = prov if prov is not None else {
-        "adjp": 0.05, "q_cutoff": 0.01, "logfc": 1.0, "pipeline_id": "dpc", "method": "dpc",
-        "missing_policy": POLICY, "n_samples": 6, "groups": {"Bait": 3, "IgG": 3},
-        "contrasts": ["Bait-IgG"], "detection_matrix": {"zero_means": "inferred"}}
+    prov = prov if prov is not None else dict(PROV)
     with open(os.path.join(tables, "de_provenance.json"), "w") as fh:
         json.dump(prov, fh)
     head = ["Protein.Group", "Genes", "logFC", "P.Value", "adj.P.Val", "PropObs"]
     if det_cols:
-        head += ["Detected_Bait", "Detected_IgG"]
+        head += ["Detected_Bait", "Detected_IgG"] + (["Evidence"] if evidence_col else [])
     with open(os.path.join(tables, "DE_dpc_Bait.IgG.csv"), "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(head)
@@ -66,6 +84,7 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
             row = [p, g, lfc, adj / 2, adj, 0.5]
             if det_cols:
                 row += [f"{sum(x > 0 for x in d[:3])}/3", f"{sum(x > 0 for x in d[3:])}/3"]
+                row += [evidence(d)] if evidence_col else []
             w.writerow(row)
     if detmat:
         with open(os.path.join(tables, "Detection_Matrix.csv"), "w", newline="") as fh:
@@ -82,7 +101,9 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
                      "Removed.Entirely\n" + "".join(f"{p},{g},TRUE,3,3,TRUE\n" for p, g in removed))
     with open(os.path.join(root, "input", "conditions.csv"), "w") as fh:
         fh.write("File.Name,Group\n" + "".join(f"{r},{g}\n" for g, rs in RUNS.items() for r in rs))
-    for f in ("volcano_Bait.IgG.png", "old_plot.png", "pvalue_Bait.IgG.png"):
+    for f in ("volcano_Bait.IgG.png", "old_plot.png", "pvalue_Bait.IgG.png") + tuple(extra_figs):
+        if f in omit:
+            continue
         with open(os.path.join(figs, f), "wb") as fh:
             fh.write(b"\x89PNG\r\n\x1a\n" + f.encode())
     if figures_json is not None:
@@ -91,7 +112,8 @@ def session(root, prov=None, detmat=True, det_cols=False, figures_json=None, rep
     if report:
         with open(os.path.join(out, "AI_Analysis_Report.md"), "w") as fh:
             fh.write("# Pull-down\n\n## Overview\n\nText.\n\n![Volcano](figures/volcano_Bait.IgG.png)"
-                     "\n\n![Old](figures/old_plot.png)\n\n![P](figures/pvalue_Bait.IgG.png)\n")
+                     "\n\n![Old](figures/old_plot.png)\n\n![P](figures/pvalue_Bait.IgG.png)\n"
+                     + report_extra)
     return out, tables
 
 
@@ -140,7 +162,7 @@ class Brief(unittest.TestCase):
         b = brief(self.root)
         self.assertIn("rowMeans(n.observations) / NPeptides over **all runs of the study**", b)
         self.assertIn("**Never tier hits by PropObs", b)
-        self.assertIn("count, from Detection_Matrix.csv + conditions.csv", b)
+        self.assertIn("from Detection_Matrix.csv + conditions.csv (count each group's runs", b)
         b2 = brief(tempfile.mkdtemp(dir=self.root), det_cols=True)
         self.assertIn("the DE tables' `Detected_<group>` columns (k/n samples measured)", b2)
         self.assertIn("`Detected_Bait`, `Detected_IgG`", b2)
@@ -177,6 +199,52 @@ class Brief(unittest.TestCase):
         self.assertIn("`Bait-IgG` = **Bait vs IgG**", b)
         self.assertIn("Positive log2FC = higher in the first-named group of the contrast.", b)
         self.assertIn("**do not add a second per-contrast table**", b)
+
+    def test_tiers_are_run_de_evidence_quoted_from_the_record(self):
+        prov = dict(PROV, detection_matrix={"zero_means": "inferred",
+                                            "de_columns": DE_COLUMNS_REC})
+        b = brief(self.root, prov=prov, det_cols=True, evidence_col=True)
+        self.assertIn("`Detected_Bait`, `Detected_IgG` (k/n samples measured), `Evidence`.", b)
+        self.assertIn(f"  - `Evidence`: {DE_COLUMNS_REC['Evidence']} (as recorded in "
+                      "`de_provenance.json`).", b)
+        self.assertIn(f"  - `Detected_<group>`: {DE_COLUMNS_REC['Detected_<group>']}", b)
+        self.assertIn("from the DE tables' `Evidence` column:", b)
+        # the record defines the categories: named here, not restated
+        self.assertIn("  - **measured in both**: the fold change is a measured ratio;", b)
+        self.assertIn("  - **presence call**: a detection event", b)
+        self.assertIn("  - **partly inferred**: a measured ratio with gaps", b)
+        self.assertNotIn("(measured in every run of every group in the contrast)", b)
+        self.assertIn("1. **Follow up first** — significant and *measured in both*", b)
+        self.assertIn("significant with a *presence call*", b)
+        self.assertNotIn("≥ half the samples", b)
+        # an older run without the column: the same three categories, defined here
+        b0 = brief(tempfile.mkdtemp(dir=self.root))
+        self.assertIn("sorted into the three categories run_de.R writes as `Evidence`", b0)
+        self.assertIn("**measured in both** (measured in every run of every group in the "
+                      "contrast)", b0)
+
+    def test_top_protein_plots_and_the_pvalue_panel_goes_to_the_appendix(self):
+        fj = {"figures": [{"file": "volcano_Bait.IgG.png", "type": "volcano", "caption": "V."},
+                          {"file": "violin_top_Bait.IgG.png", "type": "violin",
+                           "caption": "Top 12 proteins; points + mean bar."},
+                          {"file": "qc_pvalue_panel.png", "type": "pvalue",
+                           "caption": "Raw p-value distributions for all 1 contrast (appendix; a "
+                                      "calibration check, not a result)."}],
+              "failed": []}
+        b = brief(self.root, figures_json=fj)
+        self.assertIn("Call it the **top-protein plot**", b)
+        self.assertNotIn("hollow points were not", b)
+        self.assertIn("**Appendix figure — do not embed:** `figures/qc_pvalue_panel.png`", b)
+        self.assertNotIn("- `figures/qc_pvalue_panel.png`", b)      # not in the embed list
+        self.assertIn("*Appendix: p-value calibration*", b)
+        self.assertNotIn("volcano + p-value figures", b)
+        self.assertNotIn("Use the p-value distribution", b)
+        # an older session's per-contrast histograms: together, in an appendix of the report
+        b2 = brief(tempfile.mkdtemp(dir=self.root),
+                   figures_json=[{"file": "pvalue_Bait.IgG.png", "type": "pvalue", "caption": "P."}])
+        self.assertIn("- `figures/pvalue_Bait.IgG.png` (pvalue) — P.", b2)
+        self.assertIn("embed them together in a final `## Appendix: p-value calibration` "
+                      "section, never in the per-comparison sections", b2)
 
 
 class Page(unittest.TestCase):
@@ -245,6 +313,40 @@ class Page(unittest.TestCase):
         self.assertIn("figure could not be drawn in this run", md)
         self.assertEqual(html.count("<img"), 1)
         self.assertIn("not in this run's figures.json", err)
+
+    def test_failed_figures_are_a_fixed_callout_and_the_panel_is_the_appendix(self):
+        why = ("a PCA needs at least 3 samples and 5 varying proteins; this matrix has 2 samples "
+               "and 20 proteins")
+        fj = {"figures": [{"file": "volcano_Bait.IgG.png", "type": "volcano", "caption": "v"},
+                          {"file": "qc_pvalue_panel.png", "type": "pvalue", "caption": "Panel."}],
+              "failed": [{"file": "pca.png", "type": "pca", "reason": why}]}
+        res, html, md, _ = page(self.root, figures_json=fj, extra_figs=("qc_pvalue_panel.png",),
+                                omit=("pvalue_Bait.IgG.png",))
+        self.assertEqual(res["figures_embedded"], 2)                 # volcano + the appendix
+        for doc in (html, md):
+            self.assertIn("1 figure could not be drawn in this run", doc)
+        self.assertIn(f"<code>pca.png</code>: {why}", html)
+        self.assertIn(f"`pca.png`: {why}", md)
+        # the appendix: the page's last section, after the top-protein tables, with its summary
+        self.assertLess(html.rindex("Top proteins per contrast"),
+                        html.rindex("Appendix: p-value calibration"))
+        self.assertIn("## Appendix: p-value calibration", md)
+        self.assertIn("Share of raw p-values below 0.05 per contrast (about 5% when nothing "
+                      "changed): Bait vs IgG 71%.", md)
+        # a report written for per-contrast histograms says where they went
+        self.assertIn("figure missing: pvalue_Bait.IgG.png (this run draws every contrast's "
+                      "p-values in one panel: see Appendix: p-value calibration)", md)
+        # a report that embeds the panel itself gets no second copy
+        res2, html2, md2, _ = page(tempfile.mkdtemp(dir=self.root), figures_json=fj,
+                                   extra_figs=("qc_pvalue_panel.png",),
+                                   report_extra="\n## QC\n\n![Panel](figures/qc_pvalue_panel.png)\n")
+        self.assertNotIn("## Appendix: p-value calibration", md2)
+        self.assertEqual(md2.count("qc_pvalue_panel.png"), 1)
+
+    def test_top_table_note_carries_run_de_evidence(self):
+        _, _, md, _ = page(self.root, det_cols=True, evidence_col=True)
+        self.assertIn("detected 3/3 Bait, 0/3 IgG — presence call", md)
+        self.assertIn("detected 3/3 Bait, 3/3 IgG — measured in both", md)
 
     def test_wide_tables_get_a_scroll_hint(self):
         _, html, _, _ = page(self.root)

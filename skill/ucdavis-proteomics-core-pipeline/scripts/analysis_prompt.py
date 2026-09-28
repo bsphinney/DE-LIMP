@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # direction sentence and ONE default tag, shared with the HTML report.
 from make_analysis_html import (matrix_complete, SUPPRESS_WHEN_COMPLETE,  # noqa: E402
                                 contrast_label, LOGFC_DIRECTION, DEFAULT_TAG, background_flag,
-                                _make_names)
+                                _make_names, read_figures_json, APPENDIX, APPENDIX_FIGURES)
 # which groups are pull-down controls, and what the DE columns mean -- session_docs' own.
 from session_docs import IP_CONTROL_NAME, COLUMNS as DE_COLUMNS  # noqa: E402
 import csv  # noqa: E402
@@ -36,6 +36,10 @@ import csv  # noqa: E402
 # Abundant ER proteins that ride along in almost any membrane pull-down: background, not
 # interactors (HGNC symbols; the mouse genes are the same names in title case).
 ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "PDIA6")
+# The names of run_de.R's `Evidence` categories (its EVIDENCE_LABELS: every run of every group
+# measured / never measured in a group / otherwise, "partly" + the record's zero_means word).
+# They name the tiers; what they mean is quoted from de_provenance.json when the run recorded it.
+EVIDENCE = ("measured in both", "presence call", "partly")
 
 
 def load(path):
@@ -192,13 +196,17 @@ def main():
     missing_policy = prov.get("missing_policy", "")
     citation = prov.get("citation", "")
 
-    # figures
-    figs = []
+    # figures: make_figures.R's figures.json, through the reader the HTML report uses (both
+    # the 2.8.0 object {"figures", "failed"} and an older session's bare list)
+    figs, failed, fig_error = [], [], None
     fdir_rel = ""
     if a.figures_dir and os.path.isdir(a.figures_dir):
-        fj = load(os.path.join(a.figures_dir, "figures.json"))
-        if isinstance(fj, list):
-            figs = fj
+        fjd = read_figures_json(a.figures_dir)
+        figs, failed = fjd["figures"], fjd["failed"]
+        fig_error = fjd["error"] or (None if fjd["found"] else "not found")
+        if fig_error:
+            print(f"[analysis_prompt] WARNING: {a.figures_dir}/figures.json {fig_error}: the "
+                  f"brief lists no figures", file=sys.stderr)
         fdir_rel = os.path.basename(a.figures_dir.rstrip("/")) or "figures"
 
     # A complete-by-construction matrix (DPC/limpa) makes "proteins quantified per sample" a
@@ -207,6 +215,11 @@ def main():
     complete, complete_why = matrix_complete(a.de_dir, prov)
     if complete:
         figs = [f for f in figs if not str(f.get("file", "")).startswith(SUPPRESS_WHEN_COMPLETE)]
+    # The p-value panel is a calibration check: the HTML report adds it as its appendix, so the
+    # narrative does not embed it (or interleave per-contrast p-value plots with the findings).
+    appendix = [f for f in figs if f["file"].startswith(APPENDIX_FIGURES)]
+    embed = [f for f in figs if f not in appendix]
+    legacy_pv = [f for f in embed if f["file"].startswith("pvalue_")]
 
     has_qc = bool(a.qc and os.path.exists(a.qc))
     has_gsea = bool(a.gsea and os.path.exists(a.gsea))
@@ -287,20 +300,32 @@ def main():
         submission_brief(w, a.submission)
 
     w("## Attached data files — read these")
-    de_cols = []
-    if de_files:
-        try:
-            with open(os.path.join(a.de_dir, de_files[0]), newline="") as fh:
-                de_cols = next(csv.reader(fh))
-        except (OSError, StopIteration):
-            de_cols = []
-    det_cols = [c for c in de_cols if c.startswith("Detected_")]
+    heads = {}                               # each DE table's own header: its own groups
     for f in de_files:
+        try:
+            with open(os.path.join(a.de_dir, f), newline="") as fh:
+                heads[f] = next(csv.reader(fh))
+        except (OSError, StopIteration):
+            heads[f] = []
+    de_cols = [c for f in de_files for c in heads[f]]
+    det_cols = [c for c in de_cols if c.startswith("Detected_")]
+    has_evidence = "Evidence" in de_cols
+    # run_de.R's own descriptions of Detected_<group> / Evidence (de_provenance.json): read,
+    # never restated -- session_docs' AGENTS.md quotes the same record.
+    dm_rec = prov.get("detection_matrix") if isinstance(prov.get("detection_matrix"), dict) else {}
+    de_col_desc = dm_rec.get("de_columns") if isinstance(dm_rec.get("de_columns"), dict) else {}
+    for f in de_files:
+        own = [c for c in heads[f] if c.startswith("Detected_")]
         w(f"- `tables/{f}` — DE results for one comparison: Protein.Group, logFC, "
           "AveExpr, t, P.Value, adj.P.Val (BH within the contrast), B, gene annotation"
-          + (", PropObs/NPeptides (limpa)" if "PropObs" in de_cols else "")
-          + (f", per-group detection {', '.join(f'`{c}`' for c in det_cols)} (k/n samples measured)"
-             if det_cols else "") + ".")
+          + (", PropObs/NPeptides (limpa)" if "PropObs" in heads[f] else "")
+          + (f", per-group detection {', '.join(f'`{c}`' for c in own)} (k/n samples measured)"
+             if own else "")
+          + (", `Evidence`" if "Evidence" in heads[f] else "") + ".")
+    for col, desc in (("Detected_<group>", de_col_desc.get("Detected_<group>")),
+                      ("Evidence", de_col_desc.get("Evidence"))):
+        if desc and (det_cols if col.startswith("Detected_") else has_evidence):
+            w(f"  - `{col}`: {desc} (as recorded in `de_provenance.json`).")
     w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample"
       + (" (complete: every cell has a value, measured OR inferred)." if complete else "."))
     if has_detmat:
@@ -348,16 +373,28 @@ def main():
           "NPeptides over **all runs of the study** — study-wide, not per comparison. **Never "
           "tier hits by PropObs and never describe it as detection in either group of a "
           "comparison.**")
-    w("- Tier each hit by **per-group detection**: "
-      + ("the DE tables' `Detected_<group>` columns (k/n samples measured)" if det_cols else
-         "count, from Detection_Matrix.csv + conditions.csv, the samples of each group with the "
-         "protein measured (> 0)" if has_detmat else
-         "per-group detection is not available in this run — say so rather than guessing") + ":")
-    w("  - **measured in both groups** (≥ half the samples of each): the fold change is a "
-      "measured ratio;")
-    w(f"  - **measured in one group, 0 in the other**: a detection event — present vs absent. "
-      f"Report presence, not the size of the fold change (the absent side is {zero_word});")
-    w("  - **mostly unmeasured in both**: weakest; a lead only.")
+    ev_all, ev_none, ev_part = EVIDENCE[0], EVIDENCE[1], f"{EVIDENCE[2]} {zero_word}"
+    source = ("the DE tables' `Evidence` column" if has_evidence else
+              "the DE tables' `Detected_<group>` columns (k/n samples measured)" if det_cols else
+              "Detection_Matrix.csv + conditions.csv (count each group's runs with the protein "
+              "measured, > 0)" if has_detmat else None)
+    recorded_ev = has_evidence and bool(de_col_desc.get("Evidence"))
+    if source is None:
+        w("- Per-group detection is not available in this run — say so rather than guessing, "
+          "and do not sort hits into measured and detection-event tiers.")
+    else:
+        w(f"- Tier each hit by **per-group detection**, from {source}"
+          + ("" if has_evidence else
+             ", sorted into the three categories run_de.R writes as `Evidence`") + ":")
+        w(f"  - **{ev_all}**"
+          + ("" if recorded_ev else " (measured in every run of every group in the contrast)")
+          + ": the fold change is a measured ratio;")
+        w(f"  - **{ev_none}**"
+          + ("" if recorded_ev else " (never measured in at least one group)")
+          + ": a detection event — present vs absent. Report presence, not the size of the fold "
+            f"change (the absent side is {zero_word});")
+        w(f"  - **{ev_part}**" + ("" if recorded_ev else " (every other case)")
+          + ": a measured ratio with gaps — give each group's k/n.")
     w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")
@@ -381,33 +418,61 @@ def main():
         w("")
 
     # ---- figures ----
-    if figs:
+    if figs or failed or fig_error:
         w("## Figures — embed and interpret each one")
+    if fig_error:
+        w(f"**No figure list:** `{fdir_rel}/figures.json` {fig_error}, so no figures are listed "
+          "here. Do not embed image files by guessing their names; say in QC Assessment that the "
+          "figures are not available.")
+        w("")
+    if embed:
         w(f"These publication-quality figures were generated for you in `{fdir_rel}/`. "
           "**Embed every figure** in the relevant section using markdown image syntax "
           f"(e.g. `![caption]({fdir_rel}/<file>)`) so it renders in the HTML report, "
           "and **write an expert interpretation of what each shows for THIS dataset** — "
           "not a generic caption. Available figures:")
-        for fig in figs:
-            w(f"- `{fdir_rel}/{fig.get('file')}` ({fig.get('type')}) — {fig.get('caption')}")
+        for fig in embed:
+            w(f"- `{fdir_rel}/{fig['file']}` ({fig['type']}) — {fig['caption']}")
         w("")
-        w("Placement: volcano + p-value figures in **Key Findings Per Comparison**; PCA + "
+        w("Placement: each volcano in **Key Findings Per Comparison**; PCA + "
           + ("detected-vs-inferred" if complete else "per-sample counts")
-          + " in **QC Assessment**; the heatmap in **Cross-Comparison "
-          "Biomarkers** or **Biological Interpretation**.")
-        if any(f.get("type") == "violin" for f in figs):
+          + " in **QC Assessment**; the heatmap in "
+          + ("**Specificity**" if pulldown else "**Cross-Comparison Biomarkers**")
+          + " or **Biological Interpretation**.")
+        if any(f["type"] == "violin" for f in embed):
             w(f"Place each `{fdir_rel}/violin_top_<contrast>.png` in that comparison's section, "
-              "right after its volcano, with one line on how to read it: filled points were "
-              "measured in that run, hollow points were not (inferred, or missing under MaxLFQ). "
-              "Name every protein its subtitle flags as never measured in one group: that fold "
-              "change is a detection event (seen in one group, not the other), not a measured "
-              "magnitude, so do not quote its size as an effect. If the figure says detection "
-              "status was not recorded, say so; never describe those points as measured.")
+              "right after its volcano. Call it the **top-protein plot**: a group with few runs "
+              "is drawn as its points and a mean bar, not a violin. Add one line on how to read "
+              "it, in its caption's words (filled points were measured in that run; the caption "
+              "says how unmeasured values are shown). Name every protein its subtitle flags as "
+              "never measured in one group: that fold change is a detection event (seen in one "
+              "group, not the other), not a measured magnitude, so do not quote its size as an "
+              "effect. If the figure says detection status was not recorded, say so; never "
+              "describe those points as measured.")
+        if legacy_pv:
+            w(f"The per-contrast p-value histograms (`{fdir_rel}/pvalue_<contrast>.png`) are a "
+              "calibration check, not findings: embed them together in a final "
+              f"`## {APPENDIX}` section, never in the per-comparison sections.")
         if complete:
             w(f"Do NOT embed, reference or describe a proteins-quantified-per-sample plot "
               f"(`qc_protein_counts.png`): {complete_why}, so every sample shows the same "
               f"count and the plot says nothing. Per-sample depth is the *detected* part of "
               f"`qc_detected_vs_inferred.png`.")
+        w("")
+    for fig in appendix:
+        w(f"**Appendix figure — do not embed:** `{fdir_rel}/{fig['file']}` — {fig['caption']} "
+          f"The HTML report adds it as its last section (*{APPENDIX}*). In **QC Assessment**, "
+          "name any contrast whose histogram is not flat with a peak near 0 (skewed toward 1, "
+          "a hump mid-range or a U shape) and point the reader to the appendix; if all look "
+          "well calibrated, say so in one sentence.")
+        w("")
+    if failed:
+        w("**Not drawn in this run** (make_figures.R's `failed` list) — do not embed or refer "
+          "to these as images. Where the report would have used one, say in one line that it "
+          "is not available and why (the HTML report also lists them at the top):")
+        for f in failed:
+            w(f"- `{fdir_rel}/{f['file']}`" + (f" ({f['type']})" if f["type"] else "")
+              + (f" — {f['reason']}" if f["reason"] else " — no reason recorded"))
         w("")
 
     w("## OUTPUT — write `" + a.report_out + "` with ALL of these sections (markdown)")
@@ -433,8 +498,9 @@ def main():
     w("For each comparison: embed its volcano plot, then highlight the top up- and "
       "down-regulated proteins **ranked by adj.P** (use gene names; give logFC, adj.P and each "
       "group's detection, k/n measured). Say which are detection events. Note any comparison "
-      "with unusually few or many hits. Use the p-value distribution to comment on whether the "
-      "statistics are well-calibrated.")
+      "with unusually few or many hits"
+      + (f", and name it if its p-value histogram (*{APPENDIX}*) looks miscalibrated — no "
+         "p-value figure in this section." if appendix or legacy_pv else "."))
     w("")
     if pulldown:
         w("### Specificity: bait-specific, shared, background")
@@ -538,16 +604,17 @@ def main():
       "bundle (see `reproducibility/REPRODUCE.md`).")
     w("")
     w("### Next steps")
-    w("Close with what to do next, using this explicit tier rule, and name the proteins in "
-      "each tier (top few by adj.P):")
-    w("1. **Follow up first** — significant and measured in ≥ half the samples of BOTH groups "
-      "(a measured ratio).")
-    w("2. **Confirm presence** — significant, measured in ≥ half the samples of one group and "
-      "in none of the other: a detection event; confirm with an orthogonal method (western, "
-      "targeted MS) before quoting a fold change"
-      + (" — for a pull-down, these are the interactor candidates." if pulldown else "."))
-    w("3. **Leads only** — significant but measured in fewer than half the samples of both "
-      "groups.")
+    w("Close with what to do next, using this explicit tier rule (the detection categories "
+      "above), and name the proteins in each tier (top few by adj.P):")
+    w(f"1. **Follow up first** — significant and *{ev_all}*: a measured ratio.")
+    w(f"2. **Check the counts** — significant and *{ev_part}*: give each group's k/n; those "
+      "measured in most runs of both groups come first.")
+    w(f"3. **Confirm presence** — significant with a *{ev_none}*: a detection event; confirm "
+      "with an orthogonal method (western, targeted MS) before quoting a fold change"
+      + (" — for a pull-down, these are the interactor candidates, those seen in most bait "
+         "runs first." if pulldown else "."))
+    w("Whatever its tier, a hit measured in fewer than half the runs of every group is a lead "
+      "only.")
     w("Then point the reader to `README.html` at the top of the results folder for where every "
       "file is and how to reuse them.")
     if a.instrument:
@@ -572,10 +639,12 @@ def main():
         "report_to_write": a.report_out,
         "engine": engine, "engine_version": eng_ver, "acquisition": acq, "de_method": method,
         "de_files": de_files, "contrasts": contrasts,
-        "figures": [f.get("file") for f in figs], "n_figures": len(figs),
+        "figures": [f["file"] for f in figs], "n_figures": len(embed),
+        "figures_appendix": [f["file"] for f in appendix],
+        "figures_failed": [f["file"] for f in failed], "figures_error": fig_error,
         "has_qc": has_qc, "has_gsea": has_gsea,
         "next": f"Read {a.out} + the data files + figures, then write {a.report_out} "
-                f"(ALL sections, embed all {len(figs)} figures, expert interpretation), "
+                f"(ALL sections, embed all {len(embed)} figures, expert interpretation), "
                 "then render it with make_analysis_html.py into Analysis_Report.html "
                 "(no Word copy of the report).",
     }, indent=2))
