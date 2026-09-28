@@ -32,7 +32,10 @@ CATALOG = [
     (r"^search_provenance\.json$", "Search output", "Exact search engine, version, and command used (reproducibility)."),
 
     (r"^qc_pvalue_panel\.png$", "Figures",
-     "QC panel: the p-value distribution of each contrast."),
+     "QC panel: the raw p-value distribution of every contrast as small multiples "
+     "(make_figures.R) -- a calibration check for the appendix, where a flat background with a "
+     "peak near 0 means real signal on a well-behaved model, and a skew toward 1, a mid-range "
+     "hump or a U shape flags a model/QC problem in that contrast."),
     (r".*\.png$", "Figures", "Publication-quality figure (volcano / PCA / heatmap / QC) embedded in the analysis report."),
     (r"^figures\.json$", "Figures", "Figure manifest: each figure's file, type, and caption."),
 
