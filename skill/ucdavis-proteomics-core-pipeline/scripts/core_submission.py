@@ -2187,10 +2187,9 @@ def session_ownership(session_dir: str, record: dict) -> tuple:
     wd = record.get("work_dir")
     if wd and is_under(session_dir, wd):
         return True, "the session is under the staged work dir"
-    raw_list = sibling("session").paths_for(session_dir)["raw_list"]
+    # session.read_raw_list: the one reader, which also reads a list skill 2.7 wrote in cp1252
     try:
-        with open(raw_list) as fh:
-            raws = {os.path.realpath(ln.strip()) for ln in fh if ln.strip() and not ln.startswith("#")}
+        raws = {os.path.realpath(r) for r in sibling("session").read_raw_list(session_dir)}
     except OSError:
         raws = set()
     staged = {os.path.realpath(f) for f in record.get("files") or []}

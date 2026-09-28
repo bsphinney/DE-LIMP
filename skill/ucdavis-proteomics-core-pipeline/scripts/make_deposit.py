@@ -45,7 +45,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from session import paths_for, read_raw_list      # noqa: E402  the session layout, one place
+from session import paths_for, read_raw_list, params_file, encoding_note  # noqa: E402  one place
 from session import PREDICTED_SPECLIB, is_predicted_speclib   # noqa: E402  out of the zip
 import make_methods as mm                           # noqa: E402  search_record(): one reader
 from skill_version import skill_version, label     # noqa: E402  the one plugin.json reader
@@ -201,23 +201,14 @@ def _first(paths):
     return None
 
 
-def find_params(p):
-    """The search parameters file the session holds (DIA-NN cfg / Sage json / FragPipe
-    .workflow / Radiant config), newest convention first."""
-    wf, inp = p["workflow_dir"], p["input_dir"]
-    cands = [os.path.join(wf, n) for n in ("params.cfg", "params.json")]
-    for pat in ("*.cfg", "params*.json", "sage*.json", "*.workflow", "*.radiantConfig"):
-        cands += sorted(glob.glob(os.path.join(wf, pat)))
-    for pat in ("params.*", "*.cfg", "sage_config*.json"):
-        cands += sorted(glob.glob(os.path.join(inp, pat)))
-    return _first(c for c in cands if not c.endswith((".rationale.json", "manifest.json")))
-
-
 def read_conditions(path):
     """conditions.csv (collect_conditions.py schema: File.Name,Group[,Batch,...]) -> rows."""
     if not path or not os.path.isfile(path):
         return None
-    with open(path, newline="", encoding="utf-8-sig") as fh:     # -sig: an Excel-saved BOM
+    # -sig: an Excel-saved BOM. replace: collect_conditions.py writes it in the computer's own
+    # encoding (cp1252 on Windows) -- a sample name must not cost the SDRF and the Methods;
+    # gather() records encoding_note() for the SDRF line
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
         rows = list(csv.DictReader(fh))
     if not rows or "File.Name" not in rows[0]:
         return None
@@ -234,13 +225,15 @@ def gather(session_dir):
     f["run_manifest"] = _load(os.path.join(p["repro_dir"], "run_manifest.json")) or {}
     f["search_prov_path"] = _first([p["search_prov"]] + sorted(
         glob.glob(os.path.join(p["search_out"], "*", "search_provenance.json"))))
-    f["params"] = find_params(p)
+    f["params"] = params_file(p, resolved=False)     # the file the search was given
     f["fasta_meta_path"] = _first([p["fasta_meta"]] + sorted(
         glob.glob(os.path.join(p["input_dir"], "*.meta.json"))))
     f["fasta_meta"] = _load(f["fasta_meta_path"]) if f["fasta_meta_path"] else None
     f["de_prov_path"] = _first([os.path.join(p["de_dir"], "de_provenance.json")])
     f["de_prov"] = _load(f["de_prov_path"]) if f["de_prov_path"] else None
     f["conditions"] = read_conditions(p["conditions"])
+    f["conditions_note"] = encoding_note(p["conditions"], "row",
+                                         "the sample names there are not as written")
     f["methods_params"] = _load(os.path.join(p["output_dir"], "methods_params.json")) or {}
     f["srec"] = mm.search_record(f["params"], f["search_prov_path"], f["wf_path"])
     q = f["run_manifest"].get("query") or {}
@@ -630,7 +623,7 @@ def build_sdrf(f):
             row.append(ms1_range)
         row += ["1", "1", safe_name(base) if base else TO_FILL, SDRF_VERSION]
         row += [f"{t} {TEMPLATE_VERSION}" for t in templates]
-        row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver)}", group or TO_FILL]
+        row += [f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}", group or TO_FILL]
         rows.append(row)
         if path and not c and conds:
             notes.append(("factor value", TO_FILL, f"{base} has no row in conditions.csv"))
@@ -696,7 +689,8 @@ def build_sdrf(f):
              ("human" if human else "non-human: add the matching sample template (vertebrates, "
               "invertebrates or plants) and its required columns") + "; "
              + ("dia-acquisition implies ms-proteomics" if acq == "DIA" else "ms-proteomics")),
-            ("comment[sdrf annotation tool]", f"ucdavis-proteomics-core-pipeline {label(skill_ver)}",
+            ("comment[sdrf annotation tool]",
+             f"ucdavis-proteomics-core-pipeline {label(skill_ver, ascii=True)}",
              "this skill"),
             (f"factor value[{TO_FILL}]", "conditions.csv Group" if conds else TO_FILL,
              "conditions.csv gives each run's group label (filled in) but not what variable "
@@ -719,7 +713,8 @@ def write_sdrf(f, out, info):
     n_cells = sum(r.count(TO_FILL) for r in rows)
     info.update(path=path, n_rows=len(rows), n_to_fill=n_cells, sources=sources,
                 to_fill=to_fill, columns=cols)
-    return f"{len(rows)} row(s), {n_cells} TO-FILL cell(s) in {len(to_fill)} column(s)"
+    return (f"{len(rows)} row(s), {n_cells} TO-FILL cell(s) in {len(to_fill)} column(s)"
+            + (f"; conditions.csv is {f['conditions_note']}" if f.get("conditions_note") else ""))
 
 
 # ------------------------------------------------------------------------ protocols --
