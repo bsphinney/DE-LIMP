@@ -149,9 +149,24 @@ NEXT_STEPS = (r"README|Analysis[_ ]Report|Detected_|detection (?:count|column)|d
 # Advice the brief forbids: PropObs is the observed fraction of a protein's precursors over ALL
 # runs, so a hit found only in its bait's pulldowns scores low. Tier with the per-group
 # detection columns (Detected_<group> k/n, Evidence) or the tier file instead.
-PROPOBS_TIER = re.compile(r"\b(?:tier|rank|sort|filter|prioriti[sz]e)\w*\b[^.!?]{0,80}\bPropObs\b"
-                          r"|\bPropObs\b[^.!?]{0,80}\b(?:tier|rank|sort|filter|prioriti[sz]e)\w*",
+# PropObs however it is written or spoken: PropObs, prop obs, prop-obs, "proportion observed".
+_PROPOBS = r"(?:\bprop\.?[\s_-]*obs\b|\bproportion(?:\s+of)?\s+observ\w*)"
+_ADVISE = r"\b(?:tier|rank|sort|filter|triage|prioriti[sz]e)\w*"
+# within one clause (no . ! ? ; :), in either order
+PROPOBS_TIER = re.compile(rf"{_ADVISE}[^.!?;:]{{0,80}}{_PROPOBS}|{_PROPOBS}[^.!?;:]{{0,80}}{_ADVISE}",
                           re.I)
+# "Never tier by PropObs", "rank by fold change, not PropObs": advice against it is fine.
+_NEGATION = re.compile(r"\b(?:never|not|no|nor|don[’']?t|do not|doesn[’']?t|won[’']?t|"
+                       r"shouldn[’']?t|avoid\w*|instead of|rather than)\b", re.I)
+
+
+def propobs_advice(text):
+    """Each clause that advises tiering / ranking / sorting hits by PropObs, unless a negation
+    comes before it in its clause or inside it."""
+    for m in PROPOBS_TIER.finditer(text):
+        start = max(text.rfind(c, 0, m.start()) for c in ".!?;:") + 1
+        if not _NEGATION.search(text[start:m.end()]):
+            yield m.group(0)
 
 # A quantity said in words cannot be checked against the sources: numbers over ten, their
 # plurals and -fold forms, N-fold, dozen(s), twice, half. A phrase listed under "Claims beyond the
@@ -872,8 +887,8 @@ def check(s, sources, forbid=()):
                          "-- use the report's own phrase or its digits (the pronunciation step "
                          "handles speech), or list it under Claims beyond the report if it is "
                          "your own gloss")
-        for m in PROPOBS_TIER.finditer(t.text):
-            fails.append(f"{where}: '{m.group(0)}' -- do not tier or rank hits by PropObs: it is "
+        for adv in propobs_advice(t.text):
+            fails.append(f"{where}: '{adv}' -- do not tier or rank hits by PropObs: it is "
                          "the observed fraction over ALL runs, so a hit found only in its own "
                          "group scores low. Point to the per-group detection columns "
                          "(Detected_<group>, Evidence) or the tier file instead")
@@ -1061,6 +1076,19 @@ def output_dir_of(script_path, given=None):
     return os.path.realpath(os.path.dirname(d)) if os.path.basename(d) == "podcast" else None
 
 
+def output_dir_problem(d):
+    """None when `d` is a session's output folder -- it holds the report
+    (Analysis_Report.html) or the DE record (tables/de_provenance.json) -- else why not. A
+    folder above it (the session, its parent) would let a draft count as delivered."""
+    if not os.path.isdir(d):
+        return f"{d} is not a folder"
+    if (os.path.isfile(os.path.join(d, "Analysis_Report.html"))
+            or os.path.isfile(os.path.join(d, "tables", "de_provenance.json"))):
+        return None
+    return (f"{os.path.basename(d) or d} is not a session's output folder: it holds neither "
+            "Analysis_Report.html nor tables/de_provenance.json")
+
+
 def cmd_check(a):
     s = parse_script(a.script)
     sdir = os.path.dirname(s.path)
@@ -1070,7 +1098,14 @@ def cmd_check(a):
     if not out:
         problems.append("cannot tell the session's output folder: keep the script in "
                         "<session>/output/podcast/ or pass --output-dir")
+    elif output_dir_problem(out):
+        problems.append(("--output-dir" if a.output_dir else "the folder above podcast/") + ": "
+                        + output_dir_problem(out) + ". Point it at <session>/output, the folder the "
+                        "lab receives; nothing is counted as delivered until then")
+        out = None
     for p in a.source:
+        if not out:
+            continue                              # the one problem above says why
         if not os.path.isfile(p):
             problems.append(f"source not found: {p}")
             continue
