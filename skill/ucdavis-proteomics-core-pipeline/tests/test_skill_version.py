@@ -67,6 +67,16 @@ class TheOneReader(unittest.TestCase):
         self.assertIn("plugin.json", sv.UNKNOWN)
         self.assertEqual(sv.label(sv.UNKNOWN), sv.UNKNOWN, "never 'v(unknown ...)'")
 
+    def test_the_ascii_tag_is_the_same_tag(self):
+        """sdrf.tsv gets UNKNOWN_ASCII: an SDRF validator may reject the em dash."""
+        self.assertEqual(sv.UNKNOWN_ASCII, "unknown - plugin.json not found")
+        self.assertTrue(sv.UNKNOWN_ASCII.isascii())
+        self.assertEqual(sv.label(sv.UNKNOWN, ascii=True), sv.UNKNOWN_ASCII)
+        self.assertEqual(sv.label("2.8.0", ascii=True), "v2.8.0")
+        with open(os.path.join(SCRIPTS, "skill_version.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertEqual(src.count("plugin.json not found"), 1, "one definition of the tag")
+
     def test_no_reader_spells_its_own_path_to_plugin_json(self):
         """record_run, provenance, make_deposit and core_submission each read plugin.json on
         their own, with their own fallbacks ("unknown", None, "0.0.0", "?")."""

@@ -20,6 +20,8 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UNKNOWN = "(unknown — plugin.json not found)"
+# The same tag in ASCII, for a file whose validators may take nothing else (sdrf.tsv)
+UNKNOWN_ASCII = UNKNOWN.strip("()").replace(" — ", " - ")
 
 
 def skill_version(here=HERE):
@@ -45,9 +47,12 @@ def plugin_meta(here=HERE):
     return m if isinstance(m, dict) else {}
 
 
-def label(version):
-    """How a version reads after the skill's name: "v2.8.0", or the UNKNOWN tag as it is."""
-    return version if version == UNKNOWN else f"v{version}"
+def label(version, ascii=False):
+    """How a version reads after the skill's name: "v2.8.0", or the UNKNOWN tag as it is --
+    UNKNOWN_ASCII with ascii=True."""
+    if version == UNKNOWN:
+        return UNKNOWN_ASCII if ascii else UNKNOWN
+    return f"v{version}"
 
 
 if __name__ == "__main__":

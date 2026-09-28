@@ -298,13 +298,15 @@ class ReleaseReview280(unittest.TestCase):
         import skill_version as sv
         with tempfile.TemporaryDirectory() as tmp:
             p = dia_session(tmp)
+            # unknown: skill_version's ASCII form -- an SDRF validator may take nothing else
             for got, want in ((sv.skill_version(), f"v{sv.skill_version()}"),
-                              (sv.UNKNOWN, sv.UNKNOWN)):
+                              (sv.UNKNOWN, "unknown - plugin.json not found")):
                 with self.subTest(got), mock.patch.object(md, "skill_version",
                                                           return_value=got):
                     header, rows, _, _ = md.build_sdrf(md.gather(p["session_dir"]))
                     tool = col(header, rows, "comment[sdrf annotation tool]")
                     self.assertEqual(set(tool), {f"ucdavis-proteomics-core-pipeline {want}"})
+                    self.assertTrue(all(t.isascii() for t in tool), tool)
                     self.assertNotIn("0.0.0", json.dumps(rows))
 
 

@@ -211,6 +211,58 @@ class RawList(unittest.TestCase):
                              ["/quobyte/x/r1.d", "/quobyte/x/r2.d"])
 
 
+class LegacyEncodedRawList(unittest.TestCase):
+    """Skill 2.7 and older wrote input/raw_files.txt in the computer's own encoding: on Windows
+    cp1252, where even the header's dash (0x97) is not UTF-8. A strict UTF-8 read raised in
+    gather(), and finalize lost README.html, AGENTS.md and the Methods."""
+
+    def legacy(self, d, extra=""):
+        p = tdp.dia_session(d)
+        paths = session.read_raw_list(p["session_dir"])
+        text = ("# Raw MS files used in this analysis (not copied — too large).\n"
+                + "".join(r + "\n" for r in paths) + extra)
+        with open(p["raw_list"], "wb") as fh:
+            fh.write(text.encode("cp1252"))
+        return p, paths
+
+    def test_a_cp1252_path_is_read_and_said_to_be_damaged(self):
+        with tempfile.TemporaryDirectory() as d:
+            p, paths = self.legacy(d, "C:\\Daten\\Müller\\HeLa_extra.d\n")
+            got = session.read_raw_list(p["session_dir"])
+            self.assertEqual(got[:3], paths)
+            self.assertEqual(got[3], "C:\\Daten\\M\ufffdller\\HeLa_extra.d")
+            note = session.raw_list_encoding_note(p["session_dir"])
+            self.assertIn("not UTF-8", note)
+            self.assertIn("1 path(s)", note)
+            self.assertIn("M\ufffdller", note)
+            level, line = session_docs.ensure_raw_list(p)
+            self.assertEqual(level, "OK")
+            self.assertIn("present (4 files); not UTF-8", line)
+
+    def test_a_header_only_problem_leaves_every_path_as_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            p, paths = self.legacy(d)
+            self.assertEqual(session.read_raw_list(p["session_dir"]), paths)
+            self.assertIn("only in its comment lines",
+                          session.raw_list_encoding_note(p["session_dir"]))
+            write(p["raw_list"], "# utf-8 — fine\n" + "".join(x + "\n" for x in paths))
+            self.assertIsNone(session.raw_list_encoding_note(p["session_dir"]))
+
+    def test_finalize_keeps_the_readme_agents_and_methods(self):
+        with tempfile.TemporaryDirectory() as d:
+            p, _ = self.legacy(d, "C:\\Daten\\Müller\\HeLa_extra.d\n")
+            with open(p["conditions"], "ab") as fh:                # a legacy sample name too
+                fh.write("C:\\Daten\\Müller\\HeLa_extra.d,Treated\n".encode("cp1252"))
+            res = Finalize.run_finalize(Finalize(), p)
+            self.assertEqual(res["zip_docs"], "added")
+            for rel in ("README.html", "AGENTS.md", "output/methods.md"):
+                self.assertGreater(os.path.getsize(os.path.join(p["session_dir"], rel)), 0, rel)
+            man = read(p["manifest_txt"])
+            self.assertRegex(man, r"\[OK\]\s+input/raw_files\.txt .* not UTF-8 .*1 path\(s\)")
+            self.assertRegex(man, r"\[OK\]\s+Publication methods \(output/methods\.md\)")
+            self.assertNotIn("UnicodeDecodeError", man)
+
+
 class Agents(unittest.TestCase):
     def build(self, d, prov, qc=False):
         p = tdp.dia_session(d)

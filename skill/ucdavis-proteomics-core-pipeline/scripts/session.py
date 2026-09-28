@@ -95,12 +95,47 @@ def paths_for(session_dir):
 
 
 def read_raw_list(session_dir):
-    """The raw file paths recorded for a session, in the order init wrote them ([] if none)."""
+    """The raw file paths recorded for a session, in the order init wrote them ([] if none).
+
+    Skill 2.7 and older wrote the file in the computer's own encoding (cp1252 on Windows, where
+    even the header's dash is not UTF-8): a byte that is not UTF-8 reads as U+FFFD, never a
+    UnicodeDecodeError that cost finalize the README, AGENTS.md and the Methods.
+    raw_list_encoding_note() says whether any path was affected."""
     rl = paths_for(session_dir)["raw_list"]
     if not os.path.exists(rl):
         return []
-    with open(rl, encoding="utf-8") as fh:
+    with open(rl, encoding="utf-8", errors="replace") as fh:
         return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+
+
+NOT_UTF8 = ("not UTF-8 (written in the computer's own encoding -- skill 2.7 and older did, and "
+            "cp1252 on Windows is not UTF-8): each such byte reads as U+FFFD")
+
+
+def encoding_note(path, noun="line", consequence="it is not as written"):
+    """None when `path` is UTF-8 (or cannot be read); else a MANIFEST note saying so and which
+    entries -- non-comment lines, as `noun` -- read with U+FFFD, and what that means."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    try:
+        data.decode("utf-8")
+        return None
+    except UnicodeDecodeError:
+        pass
+    bad = [ln.strip() for ln in data.decode("utf-8", "replace").splitlines()
+           if ln.strip() and not ln.startswith("#") and "\ufffd" in ln]
+    return (f"{NOT_UTF8}; {len(bad)} {noun}(s) have one, so {consequence} (first: {bad[0]})"
+            if bad else f"{NOT_UTF8}, only in its comment lines -- every {noun} reads as written")
+
+
+def raw_list_encoding_note(session_dir):
+    """encoding_note() for input/raw_files.txt: a path shown with U+FFFD is not the path on
+    disk."""
+    return encoding_note(paths_for(session_dir)["raw_list"], "path",
+                         "they are not the path on disk -- check them against the raw data")
 
 
 def raw_set(session_dir):
@@ -561,7 +596,7 @@ def do_finalize(a):
     parent = a.reanalysis_of
     marker = os.path.join(p["session_dir"], ".reanalysis_of")
     if not parent and os.path.exists(marker):
-        with open(marker, encoding="utf-8") as fh:
+        with open(marker, encoding="utf-8", errors="replace") as fh:   # 2.7 and older: any encoding
             parent = fh.read().strip()
     if parent:
         diff_path = write_differences(parent, p["session_dir"])
@@ -704,19 +739,22 @@ def do_docs(a):
                                 docs["manifest"]]}, indent=2))
 
 
-def params_file(p):
-    """The search parameters a session ran with (paths_for dict -> path or None): the resolved
-    cfg the search wrote, else the one the workflow step staged, else a params.* / *.cfg /
-    sage_config*.json directly in input/ (older sessions)."""
-    for x in (os.path.join(p["search_out"], "params.resolved.cfg"),
-              os.path.join(p["workflow_dir"], "params.cfg"),
-              os.path.join(p["workflow_dir"], "params.json")):
-        if os.path.isfile(x):
-            return x
-    older = sorted(glob.glob(os.path.join(p["input_dir"], "params.*"))) + \
-        sorted(glob.glob(os.path.join(p["input_dir"], "*.cfg"))) + \
-        sorted(glob.glob(os.path.join(p["input_dir"], "sage_config*.json")))
-    return next((x for x in older if not x.endswith(".rationale.json")), None)
+def params_file(p, resolved=True):
+    """The search parameters file a session holds (paths_for dict -> path or None): with
+    `resolved`, the cfg the search wrote as it ran (<search out>/params.resolved.cfg) first;
+    then the one the workflow step staged (DIA-NN cfg / Sage json / FragPipe .workflow / Radiant
+    config), newest convention first; then a params.* / *.cfg / sage_config*.json directly in
+    input/ (older sessions). resolved=False is the file the search was GIVEN (make_deposit's
+    Methods read)."""
+    wf, inp = p["workflow_dir"], p["input_dir"]
+    cands = [os.path.join(p["search_out"], "params.resolved.cfg")] if resolved else []
+    cands += [os.path.join(wf, n) for n in ("params.cfg", "params.json")]
+    for pat in ("*.cfg", "params*.json", "sage*.json", "*.workflow", "*.radiantConfig"):
+        cands += sorted(glob.glob(os.path.join(wf, pat)))
+    for pat in ("params.*", "*.cfg", "sage_config*.json"):
+        cands += sorted(glob.glob(os.path.join(inp, pat)))
+    return next((c for c in cands if os.path.isfile(c)
+                 and not c.endswith((".rationale.json", "manifest.json"))), None)
 
 
 def _block(prov):

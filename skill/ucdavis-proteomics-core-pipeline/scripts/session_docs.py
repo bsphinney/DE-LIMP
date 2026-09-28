@@ -32,7 +32,8 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-from session import paths_for, read_raw_list, params_file, NOT_RECORDED  # noqa: E402  one place
+from session import (paths_for, read_raw_list, raw_list_encoding_note,  # noqa: E402  one place
+                     params_file, NOT_RECORDED)
 import share_map                                    # noqa: E402
 import make_podcast                                 # noqa: E402  the optional audio discussion
 from fetch_fasta import CONT_TAG                    # noqa: E402  the contaminant tag, one place
@@ -137,8 +138,10 @@ def raw_record(p):
 def ensure_raw_list(p):
     """Write input/raw_files.txt from the search's record when the session has none (a
     hive_remote session is initialised without --raw). Returns (level, note) for MANIFEST.txt."""
-    if read_raw_list(p["session_dir"]):
-        return "OK", f"present ({len(read_raw_list(p['session_dir']))} files)"
+    have = read_raw_list(p["session_dir"])
+    if have:
+        note = raw_list_encoding_note(p["session_dir"])
+        return "OK", f"present ({len(have)} files)" + (f"; {note}" if note else "")
     raws, src = raw_record(p)
     if not raws:
         return "SKIPPED", ("no record of the raw files: no search_provenance.json `files`, "
@@ -320,7 +323,9 @@ def gather(session_dir, registry=None, registry_note=None, pending=(), located_a
     f["raws"], f["raw_src"] = raws, raw_src
     conds = []
     try:
-        with open(p["conditions"], newline="", encoding="utf-8") as fh:
+        # collect_conditions.py writes it in the computer's own encoding: a Windows sample name
+        # must not cost the README (the groups shown are de_provenance.json's when it has them)
+        with open(p["conditions"], newline="", encoding="utf-8", errors="replace") as fh:
             conds = list(csv.DictReader(fh))
     except OSError:
         pass
