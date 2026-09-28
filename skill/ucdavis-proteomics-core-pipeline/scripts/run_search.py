@@ -1379,17 +1379,21 @@ def search_digest(engine, params):
             return got
         if engine == "sage":
             with open(params) as fh:
-                enz = (json.load(fh).get("database") or {}).get("enzyme") or {}
-            got = {k2: enz[k1] for k1, k2 in (("missed_cleavages", "missed_cleavages"),
-                                               ("min_len", "min_pep_len"),
-                                               ("max_len", "max_pep_len")) if k1 in enz}
-            if enz.get("cleave_at"):
-                got["cut"] = ",".join(f"{c}*" for c in enz["cleave_at"]) + (
-                    f",!*{enz['restrict']}" if enz.get("restrict") else "")
-            return got
+                return sage_digest((json.load(fh).get("database") or {}).get("enzyme") or {})
     except (OSError, ValueError, TypeError):
         return None
     return None
+
+
+def sage_digest(enz):
+    """A Sage database.enzyme block in DIANN_DIGEST's shape (keys it states only)."""
+    got = {k2: enz[k1] for k1, k2 in (("missed_cleavages", "missed_cleavages"),
+                                       ("min_len", "min_pep_len"),
+                                       ("max_len", "max_pep_len")) if k1 in enz}
+    if enz.get("cleave_at"):
+        got["cut"] = ",".join(f"{c}*" for c in enz["cleave_at"]) + (
+            f",!*{enz['restrict']}" if enz.get("restrict") else "")
+    return got
 
 
 def warn_contaminant_digest(engine, params, fasta):
@@ -1397,9 +1401,10 @@ def warn_contaminant_digest(engine, params, fasta):
     contaminants on (the sidecar's contaminant_digest, estimate_params.DIANN_DIGEST): its peptide
     rule dropped the contaminant entries with fewer than min_unique_peptides peptides of their
     own IN THAT DIGEST, so under another one -- an --overrides change, or Sage's own 2 missed
-    cleavages and proline rule -- an entry near that cut may be judged differently. A warning,
-    not a stop: the database is still correct for the identity rule, and the list is on record.
-    Returns the message (or None)."""
+    cleavages and proline rule -- an entry near that cut may be judged differently. Sage's known
+    default difference is one INFO line; anything else is a WARNING. Never a stop: the database
+    is still correct for the identity rule, and the list is on record. Returns the message (or
+    None)."""
     sidecar = fasta + ".meta.json"
     try:
         with open(sidecar) as fh:
@@ -1412,16 +1417,31 @@ def warn_contaminant_digest(engine, params, fasta):
     got = search_digest(engine, params)
     if not got:
         return None
-    diffs = [f"{k} {got[k]!r} (FASTA: {want[k]!r})" for k in sorted(got)
-             if k in want and got[k] != want[k]]
-    if not diffs:
+    differ = [k for k in sorted(got) if k in want and got[k] != want[k]]
+    if not differ:
         return None
-    msg = (f"[run_search] WARNING: this search's digest differs from the one fetch_fasta.py judged "
-           f"the contaminants on ({sidecar}, contaminant_digest): {'; '.join(diffs)}. Its peptide "
-           f"rule dropped contaminant entries with fewer than {meta['min_unique_peptides']} "
-           f"peptides of their own in THAT digest; under this one an entry near the cut may be "
-           f"judged differently. The dropped list, with each entry's peptide counts, is "
-           f"contaminants_dropped_as_target in the sidecar.")
+    # Sage's own default digest (estimate_params.SAGE_ENZYME) always differs from DIA-NN's: that
+    # is KNOWN, and a WARNING on every Sage search would teach people to ignore the warning. It
+    # gets one INFO line; a difference the default does not explain (an --overrides change of
+    # cut, missed cleavages or length) stays a WARNING.
+    import estimate_params
+    known = sage_digest(estimate_params.SAGE_ENZYME) if engine == "sage" else {}
+    expected = [k for k in differ if k in known and got[k] == known[k]]
+    unexpected = [k for k in differ if k not in expected]
+    fmt = lambda ks: "; ".join(f"{k} {got[k]!r} (FASTA: {want[k]!r})" for k in ks)   # noqa: E731
+    rule = (f"its peptide rule dropped contaminant entries with fewer than "
+            f"{meta['min_unique_peptides']} peptides of their own in THAT digest, so an entry near "
+            f"the cut may be judged differently here (contaminants_dropped_as_target in {sidecar} "
+            f"has each entry's peptide counts)")
+    if not unexpected:
+        msg = (f"[run_search] INFO: Sage's default digest ({fmt(expected)}) differs from the "
+               f"DIA-NN digest fetch_fasta.py judged the contaminants on -- expected for every Sage "
+               f"search; {rule}.")
+    else:
+        msg = (f"[run_search] WARNING: this search's digest differs from the one fetch_fasta.py "
+               f"judged the contaminants on ({sidecar}, contaminant_digest): {fmt(unexpected)}"
+               + (f" (besides Sage's known default: {fmt(expected)})" if expected else "")
+               + f". {rule[0].upper()}{rule[1:]}.")
     print(msg, file=sys.stderr)
     return msg
 

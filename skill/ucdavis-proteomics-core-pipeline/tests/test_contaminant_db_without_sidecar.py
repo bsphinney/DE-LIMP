@@ -29,6 +29,7 @@ sys.path.insert(0, HERE)
 
 import fetch_fasta as ff    # noqa: E402
 import run_search as rs     # noqa: E402
+import estimate_params as ep  # noqa: E402
 
 LEGACY_NAME = "UP000005640_9606_plus_universal_contam.fasta"
 LEGACY_MD5 = "8de1d9bd0a052b175f88f66f82500d92"      # verified on HIVE, 2026-09-25
@@ -268,14 +269,34 @@ class SearchDigestWarning(unittest.TestCase):
         self.assertIn("missed_cleavages 2 (FASTA: 1)", msg)
         self.assertIn("contaminants_dropped_as_target", msg)
 
-    def test_sage_default_enzyme_warns(self):
-        """Sage's estimate_params default: 2 missed cleavages, no cleavage before P."""
+    def sage_cfg(self, **change):
+        enz = dict(ep.SAGE_ENZYME, **change)       # what estimate_params.build_sage writes
+        return write(os.path.join(self.root, "sage.json"), json.dumps({"database": {"enzyme": enz}}))
+
+    def test_sage_default_enzyme_is_one_info_line_not_a_warning(self):
+        """Every Sage search differs from the DIA-NN digest by Sage's own default (2 missed
+        cleavages, no cleavage before P). That is KNOWN: a WARNING on every Sage search would
+        teach people to ignore the warning, so it is one INFO line that says why."""
         self.sidecar(self.meta)
-        cfg = write(os.path.join(self.root, "sage.json"), json.dumps({"database": {"enzyme": {
-            "missed_cleavages": 2, "min_len": 7, "max_len": 30, "cleave_at": "KR", "restrict": "P"}}}))
-        msg = self.warn("sage", cfg)
+        msg = self.warn("sage", self.sage_cfg())
+        self.assertTrue(msg.startswith("[run_search] INFO: Sage's default digest"), msg)
         self.assertIn("cut 'K*,R*,!*P' (FASTA: 'K*,R*')", msg)
         self.assertIn("missed_cleavages 2 (FASTA: 1)", msg)
+        self.assertIn("expected for every Sage search", msg)
+        self.assertNotIn("WARNING", msg)
+
+    def test_sage_override_beyond_its_default_warns(self):
+        """--overrides changing Sage's missed cleavages or length is NOT the known default."""
+        self.sidecar(self.meta)
+        msg = self.warn("sage", self.sage_cfg(missed_cleavages=3, min_len=6))
+        self.assertTrue(msg.startswith("[run_search] WARNING:"), msg)
+        self.assertIn("missed_cleavages 3 (FASTA: 1)", msg)
+        self.assertIn("min_pep_len 6 (FASTA: 7)", msg)
+        self.assertIn("(besides Sage's known default: cut 'K*,R*,!*P' (FASTA: 'K*,R*'))", msg)
+
+    def test_build_sage_writes_the_one_sage_enzyme(self):
+        text, _rationale = ep.build_sage("DDA", "orbitrap_generic", "", {})
+        self.assertEqual(json.loads(text)["database"]["enzyme"], ep.SAGE_ENZYME)
 
     def test_no_peptide_rule_or_no_sidecar_is_silent(self):
         self.assertIsNone(self.warn("diann", self.diann_cfg(missed=2)))      # no sidecar

@@ -736,6 +736,13 @@ SAGE_ITMS_BUCKET_SIZE = 32768
 SRC_SAGE_LOWRES = "Sage docs' low-res MS/MS setting (sage-docs.vercel.app/docs/configuration)"
 
 
+# Sage's in-silico digest (its database.enzyme block): trypsin with the proline rule, 2 missed
+# cleavages. The ONE definition: build_sage writes it, and run_search.py recognises it as Sage's
+# KNOWN difference from DIANN_DIGEST (which fetch_fasta.py judges contaminants on).
+SAGE_ENZYME = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
+               "cleave_at": "KR", "restrict": "P"}
+
+
 def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
     prec_ppm, frag_ppm, ppm_src = sage_ppm(instr_class)
     ion_trap = ms2_in_ion_trap(ms2_analyzer)
@@ -745,8 +752,7 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None):
     cfg = {
         "database": {
             "bucket_size": SAGE_ITMS_BUCKET_SIZE if ion_trap else 8192,
-            "enzyme": {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
-                       "cleave_at": "KR", "restrict": "P"},
+            "enzyme": dict(SAGE_ENZYME),
             "fragment_min_mz": 200.0, "fragment_max_mz": 1800.0,
             "peptide_min_mass": 500.0, "peptide_max_mass": 5000.0,
             "ion_kinds": ["b", "y"], "min_ion_index": 2,
