@@ -616,7 +616,9 @@ class ChangelogTests(unittest.TestCase):
     def test_the_breaking_override_change_is_in_the_changelog(self):
         text = open(self.PATH).read()
         self.assertIn("BREAKING", text)
-        head = text[:text.index("\n## ", 20)]          # the newest entry only
+        # The entry that shipped it (Skill 2.5.0), not whichever entry is newest.
+        start = text.index("Orbitrap mass accuracy")
+        head = text[start:text.index("\n## ", start)]
         self.assertIn("param_overrides", head)
         self.assertIn("--mass-acc", head)
         self.assertIn("20 ppm", head, "the changelog does not say what went wrong before")

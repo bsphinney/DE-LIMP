@@ -6,11 +6,23 @@ in `R/server_data.R` / `R/helpers.R`. Two pipelines, picked by the bundle's
 
 ## Invocation
 ```
-Rscript scripts/run_de.R --input report.parquet --metadata conditions.csv \
-        --method {dpc|maxlfq} --outdir de_results \
-        [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--logfc 1.0] [--adjp 0.05] \
-        [--block Mouse [--block-scope within|all]]
+Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
+        --metadata conditions.csv --method {dpc|maxlfq} --outdir de_results \
+        [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--eq-cutoff 0] [--pgq-cutoff 0] \
+        [--coverage-min 0.5] [--logfc 1.0] [--adjp 0.05] \
+        [--fasta-meta search.fasta.meta.json] [--keep-contaminants] \
+        [--block Mouse [--block-scope within|all] [--block-effect auto|fixed|random]]
 ```
+- `--q-cutoff` is the q-value filter on the report; `--eq-cutoff` / `--pgq-cutoff` the
+  empirical-library and protein-group q-value filters (0 = off; `de_provenance.json` records
+  each as applied).
+- `--coverage-min` (MaxLFQ only): the fraction of samples a protein must be quantified in to
+  be tested.
+- `--fasta-meta` (`fetch_fasta.py`'s sidecar) tells the contaminant step whether real
+  proteins sat in the database only as `Cont_` entries, which the removal would then take out
+  too. `--keep-contaminants` quantifies and tests `Cont_` entries with the sample proteins
+  instead of removing them first; `de_provenance.json` records which.
+- `--block` / `--block-scope` / `--block-effect`: paired and repeated designs, below.
 `metadata` CSV: `File.Name,Group[,Batch,Covariate1,Covariate2][,<block column>]`. `File.Name` must
 match the `Run` / column names in the report. Default contrasts = every group vs
 the first factor level.
@@ -320,3 +332,7 @@ no status legend is drawn. Never describe those points as measured.
   da Cruz Moschem). QuantUMS computes three scores: protein-group MaxLFQ quality,
   empirical quality, and quantity quality, all measuring MS1/MS2 feature agreement.
   The skill filters on the first two (`--pgq-cutoff`, `--eq-cutoff`).
+
+## Less-used flags
+- `make_figures.R --top <n>`: how many proteins the top-protein heatmap shows (default 50).
+- `sample_quality.py --z <x>`: the |z| above which a sample is flagged as elevated (default 1.5).

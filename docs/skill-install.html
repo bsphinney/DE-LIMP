@@ -317,16 +317,17 @@ footer p { max-width: var(--col); }
     </p>
     <p>
       The skill works out whether your data is DIA or DDA and which instrument produced it,
-      then pulls a validated workflow from the DE-LIMP repository rather than inventing
-      parameters. It installs its own search engine, fetches the right protein database for
+      then takes the search parameters for that data type from the defaults shipped with the
+      skill rather than inventing them. It installs its own search engine, fetches the right protein database for
       your organism, runs the search, and carries the results through differential expression
       analysis in <em>limpa</em>/<em>limma</em>.
     </p>
     <p>
-      What you get back is a folder containing volcano plots and PCA, a results table per
-      comparison, a written interpretation of your data in both Markdown and Word, a methods
-      paragraph you can paste into a manuscript, and a reproducibility bundle that lets
-      someone else re-run the exact analysis. It also audits your experimental design and
+      What you get back is a folder with one self-contained HTML report (the written
+      interpretation, QC, volcano plots, PCA and violins, all embedded), a results table per
+      comparison, a publication Methods section in Markdown and Word, a package for depositing
+      the data in PRIDE or MassIVE, and a reproducibility bundle that lets someone else re-run
+      the exact analysis. It also audits your experimental design and
       stops if something is wrong &mdash; a group with no replicates, a batch confounded with
       your biology, or contamination that could masquerade as a real result.
     </p>
@@ -524,7 +525,8 @@ footer p { max-width: var(--col); }
           <h3>It writes everything up</h3>
           <p>
             Results land in a dated session folder next to your raw data (or anywhere else you
-            ask). Start with <code>README.md</code> inside it, then the analysis report.
+            ask). Open <code>README.html</code> inside it, then
+            <code>output/Analysis_Report.html</code>.
           </p>
         </div>
       </li>
@@ -542,14 +544,16 @@ footer p { max-width: var(--col); }
           <tr><th>File</th><th>What it is</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>README.md</code></td><td>Start here &mdash; a plain summary of the run and where everything is.</td></tr>
-          <tr><td><code>AI_Analysis_Report.md</code><br><code>AI_Analysis_Report.docx</code></td><td>The written interpretation: what changed, in which comparison, and what it may mean. Figures embedded, in Markdown and Word.</td></tr>
-          <tr><td><code>tables/</code></td><td>One differential expression table per comparison, plus the full expression matrix, as CSV.</td></tr>
-          <tr><td><code>figures/</code></td><td>Volcano plots, PCA, heatmap of top proteins, p-value distributions, per-sample protein counts.</td></tr>
-          <tr><td><code>tables/methods.txt</code></td><td>A methods paragraph describing what was actually run. Paste it into a manuscript verbatim.</td></tr>
-          <tr><td><code>AUDIT.md</code><br><code>SAMPLE_QUALITY.md</code></td><td>Design and data-quality findings, including anything that should temper your conclusions.</td></tr>
-          <tr><td><code>OUTPUT_FILES.md</code></td><td>Every file produced, with a plain-language description of each.</td></tr>
-          <tr><td><code>reproducibility/</code></td><td>Exact versions, parameters, checksums, and a runnable <code>reproduce.sh</code> so the analysis can be re-derived later.</td></tr>
+          <tr><td><code>README.html</code></td><td>Start here: what the analysis was, links to every part, and (for UC Davis Core runs) where it all lives on HIVE. <code>README.md</code> is the same as text.</td></tr>
+          <tr><td><code>output/Analysis_Report.html</code><br><code>.pdf</code>, <code>.md</code></td><td>The report of record: the written interpretation with the QC, volcano plots, PCA and violins embedded, so this one file is the whole report. A PDF copy is printed when Chrome, Chromium or Edge is installed; the <code>.md</code> is its plain-text twin (for NotebookLM and similar tools).</td></tr>
+          <tr><td><code>output/podcast/</code></td><td>Optional, only if you ask for it: a ~20-minute AI-generated audio discussion of your results (<code>podcast.m4a</code>) with its <code>transcript.html</code>, linked from the top of the report.</td></tr>
+          <tr><td><code>output/methods.md</code><br><code>output/methods.docx</code></td><td>A publication Methods section (LC-MS, database search, sequence database, statistics) with the instrument-grant acknowledgment. Values it could not read from your data are tagged for you to confirm.</td></tr>
+          <tr><td><code>output/tables/</code></td><td>One differential-expression table per comparison (<code>DE_*.csv</code>), the protein matrix (<code>Expression_Matrix.csv</code>), which values were measured and which inferred (<code>Detection_Matrix.csv</code>), and the whole analysis as plain R (<code>reproducibility_log.R</code>).</td></tr>
+          <tr><td><code>output/figures/</code></td><td>Volcano plots, PCA with each group circled, a heatmap of the top proteins, per-comparison violins marking measured and inferred values, and p-value distributions.</td></tr>
+          <tr><td><code>output/AUDIT.md</code><br><code>output/SAMPLE_QUALITY.md</code></td><td>Design and data-quality findings, including anything that should temper your conclusions.</td></tr>
+          <tr><td><code>output/DATA_SUBMISSION/HOW_TO_SUBMIT.html</code></td><td>Everything for depositing the raw data in PRIDE or MassIVE: a pre-filled sample sheet, the protocol texts and the list of files to upload.</td></tr>
+          <tr><td><code>AGENTS.md</code></td><td>A guide to the folder for an AI assistant you point at it: what each file is and which records to trust.</td></tr>
+          <tr><td><code>output/reproducibility/</code></td><td>Exact versions, parameters, checksums, and a runnable <code>reproduce.sh</code> so the analysis can be re-derived later.</td></tr>
         </tbody>
       </table>
     </div>
@@ -624,8 +628,8 @@ footer p { max-width: var(--col); }
             <td>Install Docker Desktop, open it once so the whale icon settles in the menu bar, then tell Claude to continue.</td>
           </tr>
           <tr>
-            <td>It says no validated workflow exists for your organism</td>
-            <td>That's deliberate &mdash; it won't invent search parameters. Get in touch and a workflow can be added for your organism and instrument.</td>
+            <td>It can't find a protein database for your organism</td>
+            <td>Any organism is supported: the organism only picks the database, never a search parameter. If UniProt has no proteome for it, the skill also looks in NCBI genome assemblies, or you can give it your own FASTA file.</td>
           </tr>
           <tr>
             <td>It stops and refuses to interpret your results</td>
@@ -654,7 +658,7 @@ footer p { max-width: var(--col); }
   <div class="wrap">
     <h2>Questions</h2>
     <p>
-      The skill's source, the validated workflows it draws on, and the issue tracker all live in
+      The skill's source, the search defaults it ships with, and the issue tracker all live in
       the DE-LIMP repository:
       <a href="https://github.com/bsphinney/DE-LIMP">github.com/bsphinney/DE-LIMP</a>.
       If something here is wrong or unclear, open an issue &mdash; that's the fastest way to get it

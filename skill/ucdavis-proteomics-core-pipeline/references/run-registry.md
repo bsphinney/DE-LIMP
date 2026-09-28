@@ -504,3 +504,7 @@ python3 scripts/record_run.py list --json
 - `SLURM_*` and `HIVE_*` are removed from the environment.
 
 No test can reach the real registry.
+
+`record_run.py --detect-json <file>` points at `detect_acquisition.py`'s output when it is not
+beside the search. `--remote-hop` and `--skill-version` are internal (the SSH relay from a laptop
+to HIVE) and are hidden from `--help`.

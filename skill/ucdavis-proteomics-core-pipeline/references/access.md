@@ -45,11 +45,16 @@ export HIVE_USER=<hive_user>
 export HIVE_KEY=<private_key_path>        # the path the user gave you
 bash scripts/hive_exec.sh 'hostname; sbatch --version | head -1'   # confirm
 ```
-1. **Put the skill's scripts on HIVE once** (they run there):
+1. **Put the skill on HIVE, and put it again after every skill update** (the scripts run
+   there, and every record they write names the skill version from `.claude-plugin/
+   plugin.json`, which is copied with them):
    ```
-   bash scripts/hive_exec.sh 'mkdir -p ~/proteomics-pipeline'
-   bash scripts/hive_exec.sh --put ./scripts '~/proteomics-pipeline/'
+   bash scripts/hive_exec.sh --put-skill     # scripts/ + .claude-plugin/ -> ~/proteomics-pipeline/
    ```
+   That is the same as `--put ./scripts '~/proteomics-pipeline/'` plus `--put ./.claude-plugin
+   '~/proteomics-pipeline/'`. A `scripts/` folder put up without `.claude-plugin/` records the
+   version as unknown (the run log, provenance, the deposit package), and one not re-put after
+   an update runs the old scripts.
 2. **Toolchain on HIVE:**
    - **Core member:** `acquire_tools.sh` (run on HIVE) finds the group's DIA-NN
      builds (`/quobyte/proteomics-grp/dia-nn/build_*/diann-<version>/`, plus an older
@@ -162,8 +167,8 @@ SKILL.md steps 1c + 12b) splits across two machines, so it needs three things in
   (`chmod 600`). `fetch` and `bioshare` run locally; HIVE has no CoreOmics token.
 - **HIVE membership in `proteomics-grp`** — `locate`, `stage` and `deliver` read the Flinders
   raw data and write the service directory and Bioshare share (`/nfs/lssc0/flinders/proteomics`).
-- **The whole scripts directory at `~/proteomics-pipeline/scripts/`** on HIVE (step 1 above) —
-  `core_submission.py` imports its neighbours, and a partial copy exits 3 asking for a re-sync.
+- **The whole skill at `~/proteomics-pipeline/`** on HIVE (`hive_exec.sh --put-skill`, step 1
+  above) — `core_submission.py` imports its neighbours, and a partial copy exits 3 asking for a re-sync.
 - For an **HT plate** instead: a STAN share token (`references/ht-submissions.md`).
 
 `hive_exec.sh` reuses one SSH connection for 10 minutes, because HIVE throttles rapid new

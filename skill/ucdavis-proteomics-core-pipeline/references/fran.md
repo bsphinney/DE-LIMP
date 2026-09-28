@@ -472,3 +472,8 @@ database lookup therefore asks under both names.
   out. The cost is disk: 27 GB for the 399-run cohort above. How long they are kept is the
   facility's retention decision, not the skill's.
 - **Local (non-HIVE) searches** have no drop directory to write to and are not handed over.
+
+Less-used flags: `health --no-code` skips the GitHub comparison of FRAN's ingest code (no
+network); `backfill --sbatch --sbatch-dir <dir>` (default `~/fran_backfill`) and
+`--sbatch-minutes <n>` (default: the time budget plus 10 min) set where the job script goes and
+its time limit.

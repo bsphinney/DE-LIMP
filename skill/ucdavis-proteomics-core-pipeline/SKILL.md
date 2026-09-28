@@ -70,7 +70,8 @@ the spine.
      is the artifact to point a user at; it's what they mean by "the R code".
    - **The whole run, pinned.** As you go, append every command you run (verbatim,
      with all arguments) to a `commands.log`. At the end you MUST produce the
-     reproducibility bundle (step 10) capturing the skill's `defaults_version`,
+     reproducibility bundle (step 10) capturing the skill version (from
+     `.claude-plugin/plugin.json`, written to `reproducibility/environment/skill.txt`),
      exact tool + package versions, all parameters, input and output checksums, and
      a runnable `reproduce.sh`. Parameters ship with the skill, so recording the
      skill version pins them — there is no external commit to chase.
@@ -142,7 +143,10 @@ Read `recommended_mode` + `core_member`, then:
   "submit with:"** — `hive_exec.sh 'bash <out>/submit.sh'` for a DIA-NN search that
   predicts its library from the FASTA (two jobs: library, then search — the usual case) or
   that routed to the 5-step chain (>5 files; exit 3), `hive_exec.sh 'sbatch job.sh'` only
-  when a single `job.sh` was written. HIVE gives **compute**; the Core software is separate (next).
+  when a single `job.sh` was written. **Put the skill there first, and again after every
+  skill update:** `bash scripts/hive_exec.sh --put-skill` (`scripts/` and `.claude-plugin/`
+  into `~/proteomics-pipeline/`; the latter carries the version every record states). HIVE
+  gives **compute**; the Core software is separate (next).
 - **Core member = yes (with HIVE) → reuse the installed software** in
   `/quobyte/proteomics-grp/`: `acquire_tools.sh` finds the Core's DIA-NN builds,
   `fetch_fasta.py --hive` reuses pre-staged FASTAs. No rebuilding.
@@ -191,6 +195,10 @@ Read `setup.json` and **gate on `ready_for`**:
   `unknown` and a DIA search falls back to 380–980. Irrelevant for `.d`/mzML-only input.
 - `thermo_raw_reader.resolution_reader.ready` false only means step 2 cannot read the
   Orbitrap resolution and the user will be asked for it; its `note` is the fix.
+
+In `hive_remote` the toolchain lives on HIVE, so run it there instead (the laptop needs none
+of it): `bash scripts/hive_exec.sh 'bash ~/proteomics-pipeline/scripts/setup.sh'`, and read
+`~/.proteomics-pipeline/setup.json` on HIVE the same way.
 
 This step is idempotent — on a machine that's already set up it just verifies and
 returns in seconds. → detail: `references/install.md`.
@@ -261,7 +269,7 @@ and record them with `submission_report.py attach --given` (step 3b) — labelle
 user", never as the CoreOmics record. **Never search
 `/quobyte/proteomics-grp/coreomics/.submissions_db`**: a stale snapshot, where a search for
 0756 matched an unrelated 2019 record. No submission (not Core data) → carry on without.
-With the number: `core_submission.py fetch <number> --out ~/core/PROT_####` (step 1c.1).
+With the number, fetch the record on this computer (`core_submission.py fetch <number> --out ~/core/PROT_####`, as in step 1c) and attach it once the session exists (step 3b).
 
 ### 1a. Core HT submission? Ask STAN for the file list — never glob a plate
 If the user gives a **submission number** instead of a folder ("search 0793", "run the HT
@@ -305,6 +313,15 @@ proteome from `/quobyte/proteomics-grp/de-limp/fasta/` (step 6, `--hive`). The p
 route itself to the **5-step DIA-NN parallel chain** at step 7; pin mass accuracy and
 measure the scan window first (`references/diann_parallel.md`).
 → detail: `references/ht-submissions.md`.
+
+### 1b. Check for a prior analysis of this dataset
+```
+python3 scripts/session.py find-prior --raw /path/to/*.d
+```
+If a match is returned, this is a **re-analysis** of an existing dataset — note the
+prior session dir; you'll pass it to `session.py init --reanalysis-of` (step 3b) so
+the run nests under `<prior>/reanalysis/` and gets a `DIFFERENCES.md`, and you'll
+run the Comparator at the end (step 12). If no match, it's a fresh analysis.
 
 ### 1c. CoreOmics submission (PROT_xxxx) — the Core service run
 When Core staff name a **CoreOmics submission** ("search the data from submission 807",
@@ -379,10 +396,23 @@ locally and on HIVE (`~/core/PROT_0807`).
      ~/core/PROT_0807/session --out ~/core/PROT_0807/session/output/Analysis_Report.html` (the
      Submission section comes from the attached record), and `to_docx.py` for `methods.md` only
      (step 9: no Word copy of the report).
-   - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`:
+   - **Push the finished files back BEFORE deliver** — `deliver` copies from `$S`. The PDF
+     exists only where a headless browser printed it; the podcast (step 9e) only if one was made:
      ```
+     L=~/core/PROT_0807/session/output
      for f in AI_Analysis_Report.md Analysis_Report.html Analysis_Report.md Analysis_Report.pdf methods.md methods.docx; do
-       bash scripts/hive_exec.sh --put ~/core/PROT_0807/session/output/$f "$S/output/"; done
+       [ -f "$L/$f" ] && bash scripts/hive_exec.sh --put "$L/$f" "$S/output/"; done
+     [ -d "$L/podcast" ] && bash scripts/hive_exec.sh --put "$L/podcast" "$S/output/"
+     ```
+   - **Then on HIVE, finish the session:** the output-files report (step 11), then `finalize`
+     (step 12: README.html, AGENTS.md, the deposit package, MANIFEST.txt, the zip, the run log):
+     ```
+     bash scripts/hive_exec.sh "cd $S && python3 ~/proteomics-pipeline/scripts/make_report.py \
+         --out output/OUTPUT_FILES.md --search-out output/search --de-dir output/tables \
+         --repro output/reproducibility --extra input/conditions.csv output/figures \
+         output/AUDIT.md output/SAMPLE_QUALITY.md output/Analysis_Report.html \
+         output/Analysis_Report.md output/Analysis_Report.pdf output/methods.md"
+     bash scripts/hive_exec.sh "python3 ~/proteomics-pipeline/scripts/session.py finalize --dir $S --zip"
      ```
 8. **Deliver, share, draft the email** — step 12b.
 
@@ -390,20 +420,11 @@ locally and on HIVE (`~/core/PROT_0807`).
 |---|---|---|
 | **0** | ok | continue |
 | **2** | a human decision / hard gate — proposal files are still written | show the failing gates. `locate`: `unmatched_samples` (→ `--allow-partial` only if staff confirm those were not run), `ambiguous_label` (→ staff decide: `--accept-ambiguous` or `--files-from`), `weak_ids` / `duplicate_assignment` (→ staff pick the files, `--files-from`), `no_files`. `stage`: several folders, or one naming a different person or institution (→ `--service-dir`); a folder owned by another submission; `--apply` on a hard-failed locate. `deliver`: **not verified — do not share** (see 12b) |
-| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | fix the token; run where the data is (`fetch`/`bioshare` local; `locate`/`stage`/`deliver` on HIVE); sync the whole `scripts/` to `~/proteomics-pipeline/scripts/` |
+| **3** | CoreOmics or the filesystem unreachable, auth failed, or the scripts directory is incomplete | fix the token; run where the data is (`fetch`/`bioshare` local; `locate`/`stage`/`deliver` on HIVE); re-put the skill: `hive_exec.sh --put-skill` |
 | **4** | the files look like an **HT plate** | step 1a, `ht_manifest.py` |
 | **5** | delivery too big for the login node | `sbatch` the `deliver_job.sh` it wrote |
 
 → detail: `references/core-submissions.md`.
-
-### 1b. Check for a prior analysis of this dataset
-```
-python3 scripts/session.py find-prior --raw /path/to/*.d
-```
-If a match is returned, this is a **re-analysis** of an existing dataset — note the
-prior session dir; you'll pass it to `session.py init --reanalysis-of` (step 3b) so
-the run nests under `<prior>/reanalysis/` and gets a `DIFFERENCES.md`, and you'll
-run the Comparator at the end (step 12). If no match, it's a fresh analysis.
 
 ### 2. Detect acquisition + instrument
 ```
@@ -555,10 +576,8 @@ like subjects (≥ 3, not the groups relabelled, recurring across groups) is kep
 own name; when the output has `"block_suggested": true`, run DE with
 `--block <block_column>` (step 8). A subject-named column whose values do not (Subject =
 M/F, Patient = Yes/No) stays a covariate and comes back as `subject_ambiguous` — ask, and
-re-run with `--subject-column <header>` only if the user confirms it. Finalize the CSV, then validate it:
-```
-python3 scripts/collect_conditions.py --validate conditions.csv --against report.parquet
-```
+re-run with `--subject-column <header>` only if the user confirms it. Finalize the CSV; it is
+checked against the search's own run names in step 8, once `report.parquet` exists.
 (Fallback: if the user has nothing yet, `--emit-template` writes a blank
 File.Name,Group sheet for them to fill.) → detail: `references/conditions.md`.
 
@@ -662,7 +681,10 @@ and it is this one.
   tagged as an override in the manifest, so a run record always distinguishes an SOP
   value from the shipped default. Don't override without a stated reason.
 - Parameters come from the skill, so **record the skill version**, not a registry
-  commit. `registry.defaults_version` in the manifest carries it.
+  commit: `provenance.py` reads it from `.claude-plugin/plugin.json` into
+  `reproducibility/environment/skill.txt` and `run_manifest.json` (`skill.version`).
+  `registry.defaults_version` in the manifest is only the date of the defaults table
+  (e.g. `2026-09-23`), not a version.
 
 #### 4a. DIA: the three routes
 
@@ -1418,6 +1440,12 @@ python3 scripts/fran_deposit.py health     # is FRAN's cron taking anything at a
   → detail: `references/ht-submissions.md`.
 
 ### 8. Differential expression
+First check the design against the runs the search actually reported — every report run needs
+a row and every row a report run, every row a group, every group two samples — so a renamed or
+dropped file fails here, not halfway through the DE:
+```
+python3 scripts/collect_conditions.py --validate conditions.csv --against ./search_out/report.parquet
+```
 ```
 Rscript scripts/run_de.R --input ./search_out/report.parquet \
     --metadata conditions.csv --method <dpc|maxlfq> --outdir ./de_results \
@@ -1486,7 +1514,9 @@ Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions) +
 `QC_contaminant_share.csv` + `contaminants_removed.csv` + `Detection_Matrix.csv` (per protein ×
 sample: precursors observed, 0 = inferred by DPC / missing for MaxLFQ, per
-`de_provenance.json` `detection_matrix`) + **`reproducibility_log.R`**.
+`de_provenance.json` `detection_matrix`) + **`reproducibility_log.R`** + (DPC runs)
+`DE-LIMP_session.rds`, which loads straight into the DE-LIMP app
+(https://delimp.stan-proteomics.org/) for interactive exploration.
 
 `reproducibility_log.R` is the whole analysis as plain, flat R — every value written
 out literally (report path, FDR cutoff, sample→group map, design, contrasts), runnable
@@ -1525,16 +1555,16 @@ the variance moderation for *every* protein, not just those rows.
 Rscript scripts/make_figures.R --de-dir ./de_results --conditions ./conditions.csv \
     --outdir ./figures
 ```
-Produces publication-quality volcano (per contrast), PCA, heatmap of top proteins,
-per-contrast top-protein violins (`violin_top_<contrast>.png`: each run's point filled if
-measured, hollow if inferred; a group never measured makes that fold change a detection
-event), the detected-vs-inferred QC plot, and ONE panel of raw p-value distributions
-(`qc_pvalue_panel.png`, for the appendix), plus `figures.json` (`figures`: captions;
-`failed`: every figure not drawn, with the reason). The per-sample protein-count plot is
-drawn only for a matrix with missing values (MaxLFQ); a DPC matrix is complete, so it is
-skipped. The significance cutoff comes from the DE run's `de_provenance.json`;
-`--adjp`/`--logfc` are only a fallback for a run with no record, and the captions then say so.
-These get embedded in the report.
+Produces publication-quality volcano (per contrast), PCA (each group circled and named),
+heatmap of top proteins, per-contrast top-protein violins (`violin_top_<contrast>.png`: each
+run's point filled if measured, hollow if inferred; a group never measured makes that fold
+change a detection event), the detected-vs-inferred QC plot, and ONE panel of raw p-value
+distributions (`qc_pvalue_panel.png`, for the appendix), plus `figures.json` (`figures`:
+captions; `failed`: every figure not drawn, with the reason). The per-sample protein-count
+plot is drawn only for a matrix with missing values (MaxLFQ); a DPC matrix is complete, so
+every bar would be identical — it is skipped and the reason logged. The significance cutoff
+comes from the DE run's `de_provenance.json`; `--adjp`/`--logfc` are only a fallback for a
+run with no record, and the captions then say so. These get embedded in the report.
 
 **Significance is `adj.P.Val` alone — there is no fold-change cutoff anywhere in this
 pipeline.** `--logfc` only positions a labelled reference line on the volcano. Never
@@ -1684,6 +1714,9 @@ rather than hidden.
 
 → detail: `references/analysis.md`.
 
+Once the report is final and the results are going to a collaborator, offer the optional
+audio discussion in one line (step 9e) — never make one by default.
+
 ### 9d. Publication-ready Methods section + acknowledgment
 Generate a drop-in LC-MS/MS Methods section from the facility raw data and the session's own
 records, with the correct UC Davis Proteomics Core instrument-grant acknowledgment:
@@ -1804,8 +1837,9 @@ Catalog everything the run produced so the user knows what each file is:
 ```
 python3 scripts/make_report.py --out OUTPUT_FILES.md \
   --search-out ./search_out --de-dir ./de_results --repro ./reproducibility \
-  --extra ./conditions.csv ./search.fasta ./wf ./figures ./AUDIT.md \
-          ./AI_Analysis_Report.md ./Analysis_Report.html
+  --extra ./conditions.csv ./search.fasta ./wf ./figures ./AUDIT.md ./SAMPLE_QUALITY.md \
+          ./AI_Analysis_Report.md ./Analysis_Report.html ./Analysis_Report.md \
+          ./Analysis_Report.pdf ./methods.md
 ```
 `OUTPUT_FILES.md` lists every file (figures, audit, search/DE outputs, the bundle)
 with its size and a plain-language description, grouped by purpose, and flags
@@ -1918,26 +1952,28 @@ Their outcomes are the last two lines of `MANIFEST.txt`. → `references/notific
 the Methods was skipped: pandoc/python-docx not installed"). `[INFO]` lines are notices, not
 missing parts, so do not relay them. Examples are the run log and Slack lines such as "Core
 notification -- not configured for this user". Then summarize: data type (instrument
-+ acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill's
-`defaults_version`, FASTA source, DE method, and per-contrast significant counts. Point them at the
++ acquisition), engine + **pinned version**, mass accuracy **and its source**, the skill
+version (`reproducibility/environment/skill.txt`), FASTA source, DE method, and per-contrast significant counts. Point them at the
 **session folder** and its **`README.html`** — tell collaborators to open that (double-click);
 `AGENTS.md` is for an AI assistant they hand the folder to. Then:
 - **`output/Analysis_Report.html`** (the report of record: QC, figures and the interpretation in
-  one page; README.html links it first)
-- `OUTPUT_FILES.md` (what every file is)
+  one page; README.html links it first), with `Analysis_Report.pdf` (when a browser printed it)
+  and `Analysis_Report.md` (the plain-text twin for NotebookLM)
+- `output/OUTPUT_FILES.md` (what every file is)
 - **`output/methods.md`** (the publication Methods; its `[... — confirm]` tags must be resolved
   before publishing)
-- `tables/methods.txt` verbatim (the DE record — don't paraphrase)
-- **`tables/reproducibility_log.R`** (the analysis as plain R — say this is where the code is; it
-  is what most people mean when they ask)
-- `reproducibility/REPRODUCE.md` (the pinned recipe, for re-running the search too)
+- `output/tables/methods.txt` verbatim (the DE record — don't paraphrase)
+- **`output/tables/reproducibility_log.R`** (the analysis as plain R — say this is where the code
+  is; it is what most people mean when they ask)
+- `output/reproducibility/REPRODUCE.md` (the pinned recipe, for re-running the search too)
 - **`output/DATA_SUBMISSION/HOW_TO_SUBMIT.md`** (how to deposit the data in PRIDE or MassIVE from
   HIVE). Say how many `TO-FILL` cells `sdrf.tsv` has (`deposit.sdrf_to_fill` in finalize's
   output), and that these are facts only the user knows — tissue, disease, sex, age, what the
   groups are — which the skill never guesses.
 - for a re-analysis, `DIFFERENCES.md` + `comparison/COMPARISON.md`.
-- if one was made (9e), `output/podcast/podcast.m4a`: say it is AI-generated, that you could
-  not listen to it, and that someone should before it is shared.
+- if one was made (9e), `output/podcast/podcast.m4a` and its `transcript.html`: say it is
+  AI-generated, that you could not listen to it, and that someone should before it is shared.
+  If none was made and the results go to a collaborator, offer it once (step 9e).
 
 If anything was recorded with `report_issue.sh` this session, say so in one line and where
 it went (`report_issue.sh --where`), so the user knows the Core will see it.
@@ -1984,8 +2020,9 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   already has files (→ a new `--label`), or when the path passes through a symlink or leaves
   the Flinders root.
 - An analysis delivery fills `<share>/PROT_0807_analysis_<date>/` with `Analysis_Report.html`
-  (required), the reports, methods, `tables/`, `figures/`, `reproducibility/` and the search
-  matrices, plus `README.md` (every claim from a file actually delivered), `MANIFEST.txt`
+  (required), the reports (and its `.pdf`/`.md`), methods, `tables/`, `figures/`,
+  `reproducibility/`, the search matrices and, when one was made, `podcast/` (the audio and
+  `transcript.html` only — never its script, checks or consent record), plus `README.md` (every claim from a file actually delivered), `MANIFEST.txt`
   (`[OK]` / `[SKIPPED] <name> -- <reason>`, architectural rule #4) and `checksums.sha256`, all
   group- and world-readable. A raw-only delivery holds the README, MANIFEST, checksums and any
   methods, with the raw files as relative links in `<share>/raw/`.

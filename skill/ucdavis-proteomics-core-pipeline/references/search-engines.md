@@ -673,3 +673,23 @@ DIA-NN's path is fully wired and native. The **Sage and FragPipe → DE-contract
 adapters are the part that needs real-data validation** (flagged in each
 workflow's `VALIDATION.md`). Verify the protein×run matrix shape and that
 intensities are in the expected (linear, pre-log) scale before trusting DE output.
+
+## Less-used flags
+- `fetch_fasta.py resolve --ncbi` also searches NCBI genome assemblies (automatic when UniProt
+  returns nothing); `--size <n>` is how many candidates to list (default 25).
+- `fetch_fasta.py --add-contaminants` is a legacy switch from the old flat CLI (contaminants
+  are now chosen with `--contaminants <set>`).
+- `resolve_organism.py --offline` is accepted for old call sites; the resolver already falls
+  back to its curated table when UniProt is unreachable.
+- `make_presets.py --template <name>` forces a FragPipe template instead of choosing by instrument;
+  `fragpipe_bootstrap.py --fragpipe-version <v>` (default 24.0).
+- `diatracer_parallel.py --jar <path>`: the diaTracer jar, when it is not found by itself.
+- `make_radiant_library.py --out-dir <dir>` (required), with `--from-parquet` / `--from-speclib`
+  to convert an existing library instead of predicting one; `radiant_parallel.py --runtime
+  docker|apptainer --image <ref|.sif> --config <.radiantConfig>`, with SLURM sizing
+  `--libpred-mem` / `--libpred-time` and `--fulcrum-mem` / `--fulcrum-time`, and `--fdr-thresh`
+  (default 0.01);
+  `radiant_to_delimp.py --no-ms1` skips the MS1 join.
+- De novo: `denovo_search_cmd.py --sif <riffle.sif> --taxonlist <ids>` (2759 = Eukaryota; empty for
+  all of nr); `denovo_homology_fdr.py --fdr <q>` (default 0.01), `--no-model` (E-value alone),
+  `--features default` (the others only reproduce the comparison).

@@ -473,3 +473,6 @@ Listen card points at: the audio, the transcript, the script, `check.txt` and `p
   quantities in words -- plus a missing disclosure, a claimed specialty, forbidden names and
   pronunciation rows that add content. It cannot catch the list under "What check cannot
   catch", so your own read against the report is the other half.
+
+`make_podcast.py verify --verify-model <model>[,<model>]` picks the Gemini text model(s) that
+transcribe the audio (the default is in `make_podcast.py`).

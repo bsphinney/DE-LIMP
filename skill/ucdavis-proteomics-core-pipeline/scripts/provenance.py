@@ -32,7 +32,7 @@ Usage (the orchestrator fills these from earlier steps):
 Outputs under --outdir:
   run_manifest.json          everything, machine-readable
   REPRODUCE.md               human-readable methods + how-to-rerun
-  reproduce.sh               re-creates env, re-fetches pinned workflow, re-runs
+  reproduce.sh               re-creates env, re-derives the shipped defaults, re-runs
   MANIFEST.txt               [OK]/[SKIPPED] log of what was captured
   environment/               conda-explicit.txt, pip-freeze.txt, r-sessionInfo.txt, versions.txt
   inputs/                    copies of params, conditions.csv, the workflow manifest
@@ -541,7 +541,8 @@ make input drift visible.
 SKILL=/path/to/ucdavis-proteomics-core-pipeline bash reproduce.sh
 ```
 `reproduce.sh` rebuilds the conda env from `environment/conda-explicit.txt`,
-re-fetches the workflow **pinned to commit `{commit}`**, re-resolves the engine,
+re-derives the search defaults from the data type (they ship with the skill version above;
+defaults table `{defaults_version}`), re-resolves the engine,
 rebuilds the FASTA, and re-runs search + DE. Compare outputs to
 `checksums/checksums.json`. This is the heavyweight path — it re-runs a multi-hour
 search. If you only want the statistics, use the R script above.
