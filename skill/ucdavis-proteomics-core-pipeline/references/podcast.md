@@ -18,7 +18,18 @@ their own system well but not mass spectrometry or statistics. The episode has t
 
 **Define every term the first time it is said**, in a clause, in the host's own words: FDR,
 log2 fold change (log2FC), adjusted p (adj.P), the IgG control (or whatever the control is),
-protein group, precursor, DIA, PropObs. A term used before it is defined loses this listener.
+protein group, precursor, DIA, and the per-group detection counts (`Detected_<group>`: detected in
+k of n runs). A term used before it is defined loses this listener.
+
+**Discuss only what the lab was given.** Every fact comes from the files in the session's
+`output/` folder, which the lab receives: the report, `methods.md`, `SAMPLE_QUALITY.md`,
+`AUDIT.md`. The Listen card says the episode "discusses this report and methods; items beyond
+them are listed in the transcript", so that has to be true. A Core note, a draft or a scratch
+file the lab cannot open is an **extra source**. Pass it as `--extra-source <file> --label
+"<what it is>"`, and list anything taken only from it under Claims beyond the report, naming
+it (e.g. "41 entries removed: from the v2 notes (Core, not delivered)"). `check` fails a
+number, symbol or phrase found only in an extra source until such a bullet names it, and the
+Listen card adds "It also drew on: <label> (not in this folder)".
 
 Why it is built this way: when a model wrote the script from the report, it passed a number
 check and still made things up ("limpa is our Core's custom extension to limma"; "Kcnb2, the
@@ -66,10 +77,13 @@ So:
 - For **unpublished client data**, use a **paid-tier key** (billing enabled on the key's
   Cloud project), or **`--tts say`**, which runs offline on macOS and sends nothing.
 - A free-tier key is for published or synthetic data only.
-- **Ask the user**, and tell them which tier the key is on. Record the answer:
-  `--cloud-ok "Brett, 2026-09-25, paid key"`. It is written to `podcast.json` as
-  `cloud_tts_consent`. Without `--cloud-ok`, the gemini backend sends nothing and exits,
-  explaining why.
+- **Who approves: the Core director.** Brett ruled on 2026-09-28 that the Core director's
+  approval is enough to send a collaborator's transcript and audio to the TTS and ASR service;
+  the collaborator's lab is not asked separately. Ask the director, say which tier the key is
+  on, and record the answer: `--cloud-ok "Brett (Core director), 2026-09-28, free-tier key"`.
+  It is written to `podcast.json` as `cloud_tts_consent`. Without `--cloud-ok`, the gemini
+  backend sends nothing and exits, explaining why. The free-tier terms above still apply:
+  Google may use the text and audio, and people may read or hear it.
 - Key: `GEMINI_API_KEY`, or `~/.config/ucdavis-proteomics/gemini_key` (`chmod 600`; the tool
   warns if others can read it), beside the skill's other per-user settings. Never paste a key
   into the chat. The tool never prints the key and scrubs it from every error with the skill's
@@ -121,7 +135,8 @@ warns outside 2,200–3,600.
    - precursors versus protein groups, and why proteins come as groups;
    - what a 1% FDR means, and the target-decoy idea;
    - library-free search and match-between-runs;
-   - detected versus inferred values (the detection-probability model, PropObs);
+   - detected versus inferred values (the detection-probability model), and the per-group
+     detection counts that say how often a protein was actually seen in each group;
    - empirical Bayes (why n = 3 is workable);
    - multiple testing (adjusted p).
 
@@ -141,12 +156,19 @@ warns outside 2,200–3,600.
    an inferred value behind a big fold change, empirical Bayes with n = 3, or blocking.
 10. **Lightning round**: one follow-up experiment each.
 11. **What to do with this, then the sign-off** (short):
-    - which files to open: `Analysis_Report.html` first, then the `DE_*.csv` tables;
-    - how to tier hits by PropObs (measured in most samples = solid; mostly inferred = follow
-      up);
+    - which files to open: `README.html` (the folder's front page), then the report
+      (`Analysis_Report.html`);
+    - how to tier hits: the per-group detection columns in the `DE_*.csv` tables
+      (`Detected_<group>`: detected in k of n runs; `Evidence`), or the tier file if the
+      analysis wrote one. A hit seen in every run of its group is solid; one carried by
+      inferred values is a follow-up;
     - what to validate first.
 
-    `check` warns when the last two segments never point at a file, PropObs or validation.
+    **Never tier by PropObs.** It is the observed fraction of a protein's precursors over ALL
+    runs, so a protein found only in its own group -- exactly the hit a pulldown is looking for
+    -- scores low. `check` fails "tier/rank/sort by PropObs" advice.
+    `check` warns when the last two segments never point at README.html, the report, the
+    detection columns or the tier file, or validation.
 
 Merge neighbours to stay within 6–10 segments. For example, fold the lightning round into the
 close, or the detective story into the caveat.
@@ -301,12 +323,19 @@ python3 scripts/make_podcast.py verify $P/podcast_script.md --cloud-ok "<who agr
 python3 scripts/make_podcast.py link $S/output
 ```
 
-- **Sources.** Pass the report text you wrote from: `AI_Analysis_Report.md` (or the report's
-  `Analysis_Report.md` twin, or `Analysis_Report.html`, whose embedded images and scripts are
-  ignored), `methods.md` (the teaching segment's instrument, search and FDR numbers come from
-  it), `AUDIT.md`, `SAMPLE_QUALITY.md`, and any other document you drew on. Do **not**
-  pass the DE tables. With thousands of numbers in the sources, almost any number would match
-  something; `check` warns when that happens.
+- **Sources.** Pass the delivered report text you wrote from, all from the session's `output/`
+  folder: `AI_Analysis_Report.md` (or the report's `Analysis_Report.md` twin, or
+  `Analysis_Report.html`, whose embedded images and scripts are ignored), `methods.md` (the
+  teaching segment's instrument, search and FDR numbers come from it), `AUDIT.md` and
+  `SAMPLE_QUALITY.md`. A `--source` outside `output/` (or inside `output/podcast/`) fails;
+  give it as `--extra-source <file> --label "<what it is>"` instead (see "Discuss only what the
+  lab was given"). `check` finds `output/` as the folder above the script's `podcast/` folder,
+  or from `--output-dir`. Do **not** pass the DE tables: with thousands of numbers in the
+  sources, almost any number would match something, and `check` warns when that happens.
+- **No absolute paths are delivered.** `check.txt` records the script by name and each source
+  by its path relative to `check.txt` (an extra source by its file name and label), each with
+  its sha256; forbidden names are counted, not listed. `podcast.json` copies those. A render
+  into another folder rewrites the relative paths so the check still holds there.
 - **Render refuses** unless `check.txt` says PASS for this exact script and every source is
   unchanged since (each is hashed without any podcast block, so link's own Listen line does
   not count). `--unchecked` overrides this and is recorded in `podcast.json`; use it only when
@@ -409,17 +438,21 @@ python3 scripts/make_podcast.py link $S/output
     record: a `podcast.json` that is unreadable or has a wrong field is reported once as a
     `[WARN]` naming the file and the reason, and the report is made without the card; `link`
     says "podcast.json exists but is invalid: …".
-  - If an `Analysis_Report.pdf` is older than the HTML, link reprints it with `html_to_pdf.py`
-    where the skill has it, so the PDF shows the card's print text (the audio's file name).
-    Otherwise it prints an `[INFO]` line saying how to reprint it by hand.
+  - If an `Analysis_Report.pdf` is older than the HTML, link reprints it with
+    `html_to_pdf.print_report`, so the PDF shows the card's print text (the audio's file
+    name). When it cannot reprint (no browser, say), the old PDF is renamed
+    `Analysis_Report.stale.pdf` -- kept, so it never passes for current -- and link reports it
+    as `[SKIPPED]` with the reason. Without `html_to_pdf.py` at all, an `[INFO]` line says how
+    to reprint it by hand.
 
 ## What ends up in `output/podcast/`
 
 `podcast.m4a`, `podcast_script.md` (the script with its claims ledger), `transcript.html`
-(disclosure, player, transcript, claims, how it was made), `podcast.json` (show, title, hosts
-and voices, TTS backend and exact model, consent, script sha256, sources with their sha256,
-words, duration, `ai_generated: true`, and the `verify` block), `check.txt`, and after verify
-`verify.txt` and `verify_transcript.txt`.
+(disclosure, player, transcript, claims, how it was made -- the pronunciation table is in
+`check.txt`, not here), `podcast.json` (show, title, hosts and voices, TTS backend and exact
+model, consent, script sha256, sources as relative paths or labelled file names with their
+sha256, words, duration, `ai_generated: true`, and the `verify` block), `check.txt`, and after
+verify `verify.txt` and `verify_transcript.txt`.
 
 `.cache/` is scratch. So is any `*.part` file, and `podcast.wav` when `podcast.m4a` sits beside it
 (`render --keep-wav`). One rule (`scripts/scratch_files.py`) keeps all three out of the session

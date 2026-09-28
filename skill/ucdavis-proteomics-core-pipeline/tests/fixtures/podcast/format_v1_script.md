@@ -114,7 +114,7 @@ Nothing in the transcript states a fact that is not in the sources. Everything b
 
 **MAYA:** So what should the lab do with this?
 
-**LEO:** Open Analysis_Report.html first, then the DE_dpc tables. Tier the hits by PropObs: measured in most samples goes on the slide, mostly inferred goes on the follow-up list.
+**LEO:** Open README.html, then Analysis_Report.html, then the DE_dpc tables. Tier the hits by the Detected columns: detected in 4 of 4 Hsp104 runs goes on the slide, detected in 1 of 4 goes on the follow-up list.
 
 **MAYA:** And validate Hsp26 and Hsp42 first. That's Signal to Noise. I'm Maya.
 
