@@ -24,8 +24,18 @@ Usage:
 import sys, os, json, glob, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# ONE test for "the matrix is complete by construction", shared with the HTML report.
-from make_analysis_html import matrix_complete, SUPPRESS_WHEN_COMPLETE  # noqa: E402
+# ONE test for "the matrix is complete by construction", ONE contrast display form, ONE
+# direction sentence and ONE default tag, shared with the HTML report.
+from make_analysis_html import (matrix_complete, SUPPRESS_WHEN_COMPLETE,  # noqa: E402
+                                contrast_label, LOGFC_DIRECTION, DEFAULT_TAG, background_flag,
+                                _make_names)
+# which groups are pull-down controls, and what the DE columns mean -- session_docs' own.
+from session_docs import IP_CONTROL_NAME, COLUMNS as DE_COLUMNS  # noqa: E402
+import csv  # noqa: E402
+
+# Abundant ER proteins that ride along in almost any membrane pull-down: background, not
+# interactors (HGNC symbols; the mouse genes are the same names in title case).
+ER_BACKGROUND = ("HSPA5", "HSP90B1", "CANX", "CALR", "P4HB", "PDIA3", "PDIA4", "PDIA6")
 
 
 def load(path):
@@ -69,6 +79,70 @@ def submission_brief(w, source):
     w(sr.render_markdown(rec, (), heading="### The record, as submitted"))
 
 
+def _detection(de_dir, conditions):
+    """-> (per-sample detection {protein: {run: bool}}, groups {group: [runs]}) from
+    Detection_Matrix.csv + conditions.csv, or ({}, {}) when either is missing."""
+    path = os.path.join(de_dir, "Detection_Matrix.csv")
+    det, groups = {}, {}
+    if not (os.path.exists(path) and conditions and os.path.exists(conditions)):
+        return det, groups
+    with open(path, newline="") as fh:
+        rd = csv.reader(fh)
+        head = next(rd)
+        for rec in rd:
+            det[rec[0]] = {head[i]: _on(rec[i]) for i in range(1, len(rec))}
+    with open(conditions, newline="") as fh:
+        for r in csv.DictReader(fh):
+            groups.setdefault((r.get("Group") or "").strip(), []).append(
+                (r.get("File.Name") or "").strip())
+    return det, groups
+
+
+def _on(v):
+    try:
+        return float(v) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _k_of_n(row, group, det, groups):
+    """(k measured, n) for one protein in one group: the DE table's own Detected_<group>
+    column when present, else Detection_Matrix.csv. None when neither can say."""
+    v = row.get(f"Detected_{group}")
+    if v and "/" in v:
+        k, n = v.split("/", 1)
+        try:
+            return int(k), int(n)
+        except ValueError:
+            pass
+    d = det.get(row.get("Protein.Group"))
+    if d is not None and group in groups:
+        return sum(d.get(s, False) for s in groups[group]), len(groups[group])
+    return None
+
+
+def never_in_control(de_dir, de_file, contrast, control, adjp, det, groups, k=15):
+    """Significant, enriched proteins of a bait-vs-control contrast that were never measured
+    in the control -> (count, [gene names by adj.P]), or None when detection is unknown."""
+    rows, known = [], False
+    with open(os.path.join(de_dir, de_file), newline="", encoding="utf-8", errors="replace") as fh:
+        for r in csv.DictReader(fh):
+            try:
+                p, lfc = float(r.get("adj.P.Val")), float(r.get("logFC"))
+            except (TypeError, ValueError):
+                continue
+            kn = _k_of_n(r, control, det, groups)
+            known = known or kn is not None
+            if p < adjp and lfc > 0 and kn is not None and kn[0] == 0:
+                g = (r.get("Genes") or "").split(";")[0] or r.get("Protein.Group")
+                if not background_flag(g, r.get("Protein.Group")):
+                    rows.append((p, g))
+    if not known:
+        return None
+    rows.sort()
+    return len(rows), [g for _, g in rows[:k]]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="ANALYSIS_PROMPT.md")
@@ -95,7 +169,22 @@ def main():
     acq = (a.acquisition or wfman.get("acquisition", "")).upper()
     de_files = sorted(os.path.basename(f) for f in glob.glob(os.path.join(a.de_dir, "DE_*.csv")))
     contrasts = prov.get("contrasts") or []
-    q_cut, lfc, adjp = prov.get("q_cutoff", 0.01), prov.get("logfc", 1.0), prov.get("adjp", 0.05)
+
+    def recorded(key):
+        v = prov.get(key)
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    # As recorded, or said to be unrecorded (rule 2): never a silent 0.01 / 1.0 / 0.05.
+    q_cut, lfc, adjp_rec = recorded("q_cutoff"), recorded("logfc"), recorded("adjp")
+    adjp = adjp_rec if adjp_rec is not None else 0.05
+    adjp_txt = f"{adjp:g}" if adjp_rec is not None else f"{adjp:g} {DEFAULT_TAG}"
+    groups_all = list((prov.get("groups") or {}).keys()) if isinstance(prov.get("groups"), dict) else []
+    controls = [g for g in groups_all if IP_CONTROL_NAME.search(g)]
+    vs_control = [c for c in contrasts if "-" in c and c.split("-", 1)[1] in controls]
+    pulldown = bool(vs_control)
+    det, det_groups = _detection(a.de_dir, a.conditions)
+    has_detmat = os.path.exists(os.path.join(a.de_dir, "Detection_Matrix.csv"))
+    zero_word = ("missing" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing"
+                 else "inferred")
 
     desc_line = prov.get("display_label") or "the configured quantification + limma pipeline"
     rollup = prov.get("rollup_method", "")
@@ -170,14 +259,26 @@ def main():
             w(f"- **Blocking caveat (say this in Data Quality Notes):** {warn}")
     elif blk.get("column") and blk.get("note"):
         w(f"- Blocking: none used — {blk['note']}")
-    w(f"- Significance rule: adj.P.Val < {adjp} (Benjamini-Hochberg) — the adjusted p-value "
-      f"ALONE (ID FDR q ≤ {q_cut}). **No fold-change filter is applied.** |log2FC| = {lfc} "
-      f"({2**float(lfc):.3g}-fold) is drawn on the volcano as a reference line only.")
-    w("- Do not re-impose a fold-change cutoff when you count or describe significant "
-      "proteins, and never call a result significant \"because it is ≥2-fold\". The test "
-      "was of H0: fold change = 0, so that is the claim the error rate covers. You may say "
-      "how many significant proteins also exceed the reference line — as a description of "
-      "effect size, not as a second significance criterion.")
+    if adjp_rec is not None:
+        w(f"- Significance rule: adj.P.Val < {adjp:g} (Benjamini-Hochberg within each contrast) "
+          f"— the adjusted p-value ALONE (identification FDR: "
+          + (f"q ≤ {q_cut:g}" if q_cut is not None else "not recorded") + "). "
+          "**No fold-change filter is applied.**"
+          + (f" |log2FC| = {lfc:g} ({2 ** float(lfc):.3g}-fold) is drawn on the volcano as a "
+             f"reference line only." if lfc is not None else ""))
+        w("- Do not re-impose a fold-change cutoff when you count or describe significant "
+          "proteins, and never call a result significant \"because it is ≥2-fold\". The test "
+          "was of H0: fold change = 0, so that is the claim the error rate covers. You may say "
+          "how many significant proteins also exceed the reference line — as a description of "
+          "effect size, not as a second significance criterion.")
+    else:
+        w(f"- Significance rule: **not recorded** (de_provenance.json has no adjp). Count at "
+          f"adj.P.Val < {adjp_txt} and say in the report that this cutoff is a default, not the "
+          f"rule the DE applied. Do not claim that no fold-change filter was used unless "
+          f"`methods.txt` says so.")
+    w(f"- Contrasts — name each exactly this way everywhere (text, tables, figure notes): "
+      + "; ".join(f"`{c}` = **{contrast_label(c)}**" for c in contrasts)
+      + f". {LOGFC_DIRECTION}" if contrasts else f"- {LOGFC_DIRECTION}")
     w("- The exact, self-describing methods text is in `tables/methods.txt` — do not "
       "contradict it or invent a different pipeline.")
     w("")
@@ -186,10 +287,28 @@ def main():
         submission_brief(w, a.submission)
 
     w("## Attached data files — read these")
+    de_cols = []
+    if de_files:
+        try:
+            with open(os.path.join(a.de_dir, de_files[0]), newline="") as fh:
+                de_cols = next(csv.reader(fh))
+        except (OSError, StopIteration):
+            de_cols = []
+    det_cols = [c for c in de_cols if c.startswith("Detected_")]
     for f in de_files:
         w(f"- `tables/{f}` — DE results for one comparison: Protein.Group, logFC, "
-          "AveExpr, t, P.Value, adj.P.Val (BH), B, gene annotation.")
-    w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample.")
+          "AveExpr, t, P.Value, adj.P.Val (BH within the contrast), B, gene annotation"
+          + (", PropObs/NPeptides (limpa)" if "PropObs" in de_cols else "")
+          + (f", per-group detection {', '.join(f'`{c}`' for c in det_cols)} (k/n samples measured)"
+             if det_cols else "") + ".")
+    w("- `tables/Expression_Matrix.csv` — log2 protein abundance per sample"
+      + (" (complete: every cell has a value, measured OR inferred)." if complete else "."))
+    if has_detmat:
+        w(f"- `tables/Detection_Matrix.csv` — per protein x sample: precursors observed; "
+          f"**0 = {zero_word}** (not measured in that sample). Same rows and columns as the "
+          f"expression matrix. This, not the expression matrix, says what was measured.")
+    if os.path.exists(os.path.join(a.de_dir, "QC_detected_vs_inferred.csv")):
+        w("- `tables/QC_detected_vs_inferred.csv` — per sample: proteins measured vs inferred.")
     w("- `tables/methods.txt`, `tables/de_provenance.json` — methods + exact versions.")
     if cont.get("share_table"):
         w(f"- `tables/{cont['share_table']}` — per-run contaminant share of "
@@ -205,13 +324,61 @@ def main():
     if has_gsea:
         w(f"- `{a.gsea}` — Gene Set Enrichment results.")
     w("")
-    w("Compute everything you cite directly from these files: significant proteins per "
-      f"contrast (apply adj.P.Val < {adjp} only), up/down splits, the "
-      "top up/down proteins by fold change, proteins significant in ≥2 contrasts, and — "
-      "from the expression matrix + conditions — the most stable proteins (lowest CV "
-      "across replicates). Use gene names where available. **Never fabricate a value, "
-      "protein, pathway, or citation you cannot ground in the data or established biology.**")
+    w("Compute everything you cite directly from these files:")
+    w(f"- significant proteins per contrast (adj.P.Val < {adjp_txt} only) and the up/down split;")
+    w("- the top up/down proteins per contrast **ranked by adj.P.Val (ties by P.Value) — never "
+      "by |logFC|**: where a group was never measured, the largest fold changes are detection "
+      "events set by the missing-value model, not the strongest effects;")
+    w("- proteins significant in ≥2 contrasts;")
+    w("- reproducibility (CV) per group — on the **linear** scale (2^value), from **measured "
+      "values only** (Detection_Matrix.csv > 0 for that protein and sample); skip a group with "
+      "fewer than 2 measured values, and call a protein with no measured value in a group "
+      "*all-inferred* there. Never compute a CV from inferred values: a group never measured "
+      "gets near-identical model values, which reads as CV ≈ 0 — \"most stable\" — when nothing "
+      "was measured"
+      + ("." if has_detmat else ". **Detection_Matrix.csv is not attached, so you cannot tell "
+                                "measured from inferred: do not report CVs as reproducibility.**"))
+    w("Use gene names where available. **Never fabricate a value, protein, pathway, or "
+      "citation you cannot ground in the data or established biology.**")
     w("")
+    # measured vs inferred: how to tier, and what PropObs is NOT
+    w("## Measured vs inferred — how to tier hits")
+    if "PropObs" in de_cols:
+        w(f"- `PropObs`: {DE_COLUMNS['PropObs']}. It is limpa's rowMeans(n.observations) / "
+          "NPeptides over **all runs of the study** — study-wide, not per comparison. **Never "
+          "tier hits by PropObs and never describe it as detection in either group of a "
+          "comparison.**")
+    w("- Tier each hit by **per-group detection**: "
+      + ("the DE tables' `Detected_<group>` columns (k/n samples measured)" if det_cols else
+         "count, from Detection_Matrix.csv + conditions.csv, the samples of each group with the "
+         "protein measured (> 0)" if has_detmat else
+         "per-group detection is not available in this run — say so rather than guessing") + ":")
+    w("  - **measured in both groups** (≥ half the samples of each): the fold change is a "
+      "measured ratio;")
+    w(f"  - **measured in one group, 0 in the other**: a detection event — present vs absent. "
+      f"Report presence, not the size of the fold change (the absent side is {zero_word});")
+    w("  - **mostly unmeasured in both**: weakest; a lead only.")
+    w("")
+    if pulldown:
+        w("## Pull-down design — enrichment over a control")
+        w(f"Control group(s), by name: {', '.join(controls)}. Contrasts against them "
+          f"({', '.join(contrast_label(c) for c in vs_control)}) measure **enrichment over the "
+          "control**, not abundance change.")
+        w("- Do NOT write a blanket sentence such as \"the IgG value is a model-inferred floor\". "
+          "Name the proteins that were never measured in the control, per contrast:")
+        for c in vs_control:
+            ctrl = c.split("-", 1)[1]
+            f = next((x for x in de_files if x.endswith(f"_{_make_names(c)}.csv")), None)
+            res = never_in_control(a.de_dir, f, c, ctrl, adjp, det, det_groups) if f else None
+            w(f"  - {contrast_label(c)}: "
+              + ("detection in the control not recorded — say so." if res is None else
+                 f"{res[0]} significant enriched protein{'' if res[0] == 1 else 's'} never "
+                 f"measured in {contrast_label(ctrl)}"
+                 + (f" (top by adj.P: {', '.join(res[1])})" if res[1] else "") + "."))
+        w("- Background, not interactors: the antibody's own Ig heavy/light chains, "
+          "contaminant (`Cont_`) entries, and abundant ER proteins (" + ", ".join(ER_BACKGROUND)
+          + "). The HTML report's top-protein tables flag Ig chains and contaminants.")
+        w("")
 
     # ---- figures ----
     if figs:
@@ -248,9 +415,10 @@ def main():
       "but accessible. Reference specific proteins/genes throughout.")
     w("")
     w("### Overview")
-    w("Number of comparisons analyzed, total significant proteins per comparison "
-      "(up/down split, as a table). Overall assessment of the experiment's quality, "
-      "depth (proteins quantified), and scope.")
+    w("Number of comparisons analyzed and the overall picture. The HTML report's **Results at "
+      "a glance** already shows significant / up / down per contrast (counted from the DE "
+      "tables) — **do not add a second per-contrast table**; refer to it. Overall assessment of "
+      "the experiment's quality, depth (proteins measured, not merely quantified), and scope.")
     w("")
     w("### QC Assessment")
     w("Evaluate technical quality. Use the PCA and "
@@ -263,22 +431,37 @@ def main():
     w("")
     w("### Key Findings Per Comparison")
     w("For each comparison: embed its volcano plot, then highlight the top up- and "
-      "down-regulated proteins by fold change (use gene names, give logFC and adj.P). "
-      "Note any comparison with unusually few or many hits. Use the p-value distribution "
-      "to comment on whether the statistics are well-calibrated.")
+      "down-regulated proteins **ranked by adj.P** (use gene names; give logFC, adj.P and each "
+      "group's detection, k/n measured). Say which are detection events. Note any comparison "
+      "with unusually few or many hits. Use the p-value distribution to comment on whether the "
+      "statistics are well-calibrated.")
     w("")
-    w("### Cross-Comparison Biomarkers")
-    w("Proteins significant in multiple comparisons are the highest-confidence candidates. "
-      "Discuss consistency of direction (always up, always down, or mixed). Embed the "
-      "heatmap and use it to show which proteins drive the separation. (If there is only "
-      "one comparison, say so and focus on the strongest, most reproducible hits.)")
-    w("")
-    w("### High-Confidence Biomarker Insights")
-    w("For the most stable significant proteins (lowest CV): discuss their known "
-      "biological functions, pathway involvement, and disease associations where you "
-      "recognize the gene. Assess each one's potential as a reliable biomarker from the "
-      "combination of low CV, significant adj.P, and meaningful fold change.")
-    w("")
+    if pulldown:
+        w("### Specificity: bait-specific, shared, background")
+        w("Sort the enriched proteins into three groups, naming them: **bait-specific** "
+          "(enriched over the control for one bait only), **shared across baits** (enriched for "
+          "two or more — complex partners, or common background), and **background** (Ig "
+          "chains, contaminants, abundant ER proteins). For each bait-specific or shared "
+          "protein, give its detection in the bait and control groups (k/n measured). Embed the "
+          "heatmap here if there is one.")
+        w("")
+    else:
+        w("### Cross-Comparison Biomarkers")
+        w("Proteins significant in several comparisons are worth listing, with their direction "
+          "in each (always up, always down, or mixed) — but being significant in many "
+          "comparisons is **not** by itself higher confidence: comparisons that share a group "
+          "(e.g. several treatments against one control) are not independent, so one noisy "
+          "shared group can make a protein \"significant everywhere\". Embed the heatmap and use "
+          "it to show which proteins drive the separation. (If there is only one comparison, say "
+          "so.)")
+        w("")
+        w("### High-Confidence Findings")
+        w("Pick the strongest findings by the tier rule above — significant AND measured in "
+          "both groups first — not by fold change. Where you quote reproducibility, use the CV "
+          "from measured values only. Discuss known functions and pathway involvement of the "
+          "genes you recognize, and state for each whether it is a measured change or a "
+          "detection event.")
+        w("")
     if has_gsea:
         w("### Pathway & Gene Set Enrichment Analysis")
         w("Summarize the top enriched pathways by ontology (highest |NES|). Connect "
@@ -326,14 +509,15 @@ def main():
       "THIS dataset:")
     w("  - **log2 fold change (logFC)**: how much a protein goes up/down between groups "
       "(logFC 1 = doubled, −1 = halved).")
-    w("  - **p-value**: the probability of seeing this difference by chance alone.")
+    w("  - **p-value**: if the protein did not truly change, the probability of a difference "
+      "at least this large from measurement noise alone.")
     w("  - **adjusted p-value (FDR, Benjamini–Hochberg)**: p-values corrected for testing "
-      "thousands of proteins at once — explain the multiple-testing problem with an intuitive "
-      "coin-flip example.")
+      "thousands of proteins at once — BH within each contrast; explain the multiple-testing "
+      "problem with an intuitive coin-flip example.")
     w("  - **volcano plot**: why it's volcano-shaped and how to read it (x = effect size, "
       "y = significance).")
-    w("  - **coefficient of variation (CV)**: a measure of measurement reproducibility — "
-      "lower is more reliable.")
+    w("  - **coefficient of variation (CV)**: SD / mean on the linear scale, from measured "
+      "values only — lower is more reproducible; an inferred value is not a measurement.")
     w("  - **normalization**: why raw intensities need correcting (sample loading differences) "
       "and, briefly, how this pipeline normalizes.")
     w("Keep the tone approachable and encouraging; define jargon when unavoidable.")
@@ -352,6 +536,20 @@ def main():
       "checksums, and a runnable `reproduce.sh`. State that the analysis was produced by the "
       "**UC Davis Proteomics Core pipeline** Claude skill and can be reproduced from that "
       "bundle (see `reproducibility/REPRODUCE.md`).")
+    w("")
+    w("### Next steps")
+    w("Close with what to do next, using this explicit tier rule, and name the proteins in "
+      "each tier (top few by adj.P):")
+    w("1. **Follow up first** — significant and measured in ≥ half the samples of BOTH groups "
+      "(a measured ratio).")
+    w("2. **Confirm presence** — significant, measured in ≥ half the samples of one group and "
+      "in none of the other: a detection event; confirm with an orthogonal method (western, "
+      "targeted MS) before quoting a fold change"
+      + (" — for a pull-down, these are the interactor candidates." if pulldown else "."))
+    w("3. **Leads only** — significant but measured in fewer than half the samples of both "
+      "groups.")
+    w("Then point the reader to `README.html` at the top of the results folder for where every "
+      "file is and how to reuse them.")
     if a.instrument:
         w("")
         w("### Instrument & Acquisition")

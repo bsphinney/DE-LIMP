@@ -475,10 +475,12 @@ def do_finalize(a):
         else:
             try:
                 import html_to_pdf
-                ok, note = html_to_pdf.convert(html_rep, pdf_rep)
+                # an older PDF that could not be re-printed is renamed *.stale.pdf -> [SKIPPED]
+                status, note = html_to_pdf.print_report(html_rep, pdf_rep)
             except Exception as e:                  # recorded, never swallowed
-                ok, note = False, f"{type(e).__name__}: {e}"
-            (man.ok if ok else man.info)("Report PDF (output/Analysis_Report.pdf)", note)
+                status, note = "INFO", f"{type(e).__name__}: {e}"
+            {"OK": man.ok, "SKIPPED": man.skip}.get(status, man.info)(
+                "Report PDF (output/Analysis_Report.pdf)", note)
     registry, registry_note = _registry_lookup(p["session_dir"])
     docs = _write_docs(session_docs, p, man, registry, registry_note,
                        pending=("manifest",))        # MANIFEST.txt is written right below

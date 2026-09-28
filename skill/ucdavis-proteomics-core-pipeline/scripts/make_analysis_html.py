@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_style as rs  # noqa: E402  -- the ONE look shared by the skill's HTML pages
 import html_to_pdf  # noqa: E402  -- the PDF: the same page printed by a headless browser
 import make_podcast       # noqa: E402  -- an optional audio discussion keeps its Listen card
+from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
 
 # Galleries (no report only): QC first, then overview, then per-contrast results.
 FIGURE_ORDER = [
@@ -123,13 +124,18 @@ class Figures:
     caption and data summary, and report the same missing / rejected files."""
 
     def __init__(self, base_dir, root, figures_dir=None, captions=None, summarize=None,
-                 suppress=()):
+                 suppress=(), current=None, failed=None):
         self.base, self.root, self.figdir = base_dir, root, figures_dir
         self.caps = captions or {}
         self.summarize = summarize or (lambda name: None)
         self.suppress = tuple(suppress)          # figure-name prefixes that say nothing here
+        # This run's figures.json: only a figure it lists is embedded. None = no figures.json
+        # (nothing to check against). `failed`: name -> why make_figures.R could not draw it.
+        self.current = None if current is None else set(current)
+        self.failed = dict(failed or {})
         self.n, self.entries = 0, {}
         self.embedded, self.missing, self.rejected, self.suppressed = [], [], [], []
+        self.stale = []
 
     def _locate(self, ref):
         rel = _clean(ref)
@@ -156,9 +162,20 @@ class Figures:
             if not allowed:
                 key, e = ("x", ref), {"status": "rejected", "name": name,
                                       "text": f"figure not embedded (outside the session folder): {ref}"}
+            elif name in self.failed:
+                key, e = ("m", name), {"status": "missing", "name": name,
+                                       "text": f"figure could not be drawn in this run: {name}"
+                                               + (f" ({self.failed[name]})" if self.failed[name]
+                                                  else "")}
             elif path is None:
                 key, e = ("m", name), {"status": "missing", "name": name,
                                        "text": f"figure missing: {name}"}
+            elif self.current is not None and os.path.basename(path) not in self.current:
+                # On disk but not in this run's figures.json: left over from an earlier run,
+                # so it may show data this report no longer describes.
+                key, e = ("s", name), {"status": "stale", "name": name,
+                                       "text": f"figure not shown: {name} is not in this run's "
+                                               f"figures.json (a file left from an earlier run)"}
             else:
                 key = ("f", path)
                 if key not in self.entries:
@@ -173,6 +190,8 @@ class Figures:
                 self.missing.append(name)
             elif e["status"] == "rejected":
                 self.rejected.append(ref)
+            elif e["status"] == "stale":
+                self.stale.append(name)
         return self.entries[key]
 
     def html(self, alt, ref, emitted):
@@ -352,7 +371,9 @@ def table_html(head, body, figs=None):
 def significance_rule(tables_dir, default_adjp=0.05):
     """-> (adjp, source). The cutoff the DE actually applied, from de_provenance.json --
     significance is the adjusted p-value alone there (run_de.R: "adj.P.Val < adjp (BH); no
-    fold-change filter"), so it is here too."""
+    fold-change filter"), so it is here too. Source "--adjp" means NOTHING recorded it: the
+    page then says so and tags the value (architectural rule 2), never "the rule the DE
+    applied"."""
     try:
         with open(os.path.join(tables_dir or "", "de_provenance.json")) as fh:
             adjp = json.load(fh).get("adjp")
@@ -361,6 +382,21 @@ def significance_rule(tables_dir, default_adjp=0.05):
     except (OSError, ValueError):
         pass
     return default_adjp, "--adjp"
+
+
+DEFAULT_TAG = "(DEFAULT — not user-confirmed)"
+
+
+def rule_text(adjp, src):
+    """The significance sentence, as recorded -- or tagged when nothing recorded it."""
+    if src == "de_provenance.json":
+        return (f"Significant = adjusted p < {adjp:g} (Benjamini–Hochberg within each contrast; "
+                f"de_provenance.json), the only rule the DE applied — no fold-change filter. "
+                f"Up / down = sign of the fold change. {LOGFC_DIRECTION}")
+    return (f"Significant here = adjusted p < {adjp:g} {DEFAULT_TAG}: no de_provenance.json "
+            f"records the rule the DE applied, so this page cannot say which cutoff — or whether "
+            f"a fold-change filter — it used. Up / down = sign of the fold change. "
+            f"{LOGFC_DIRECTION}")
 
 
 ENGINE_LABEL = {"diann": "DIA-NN", "sage": "Sage", "fragpipe": "FragPipe", "radiant": "Radiant",
@@ -399,6 +435,16 @@ def session_facts(a, prov, submission=None):
             ("Report generated", datetime.date.today().isoformat())]
 
 
+def contrast_label(c):
+    """THE display form of a contrast, used everywhere a contrast is named (tiles, tables,
+    figure data, the analysis brief): "Old_JPH3-Old_IgG" -> "Old JPH3 vs Old IgG"."""
+    return c.replace("-", " vs ").replace("_", " ")
+
+
+# Which way a fold change points, said once and shown wherever log2FC values are.
+LOGFC_DIRECTION = "Positive log2FC = higher in the first-named group of the contrast."
+
+
 def _make_names(c):
     """R's make.names -- how run_de.R turned a contrast into its DE_<method>_<name>.csv."""
     n = re.sub(r"[^A-Za-z0-9._]", ".", c)
@@ -424,7 +470,7 @@ class Tables:
                                                            else len(order), c))
 
     def display(self, c):
-        return self.label.get(c, c.replace(".", "-")).replace("-", " vs ").replace("_", " ")
+        return contrast_label(self.label.get(c, c.replace(".", "-")))
 
     def rows(self, c):
         if c not in self._rows:
@@ -583,6 +629,33 @@ def figure_summary(name, tables, qc_path, em_path):
     return None
 
 
+# Rows a reader must not take for the sample's biology: the antibody's own chains and
+# common-contaminant entries. Human IMGT symbols (IGHG1, IGKC, IGLV1-40, JCHAIN) and their
+# mouse forms (Ighg2c, Igkc, Iglv1) alike; IgLON (Iglon5) and IGF are NOT Ig chains.
+_IG_CHAIN = re.compile(r"^(IGH[GAMDEVJ]|IGK[CVJ]|IGL[CVJ]|JCHAIN\b)", re.I)
+
+
+def background_flag(gene, protein):
+    """"Ig chain" / "contaminant" / None for one DE row."""
+    if any(t.strip().startswith("Cont_") for t in (protein or "").split(";")):
+        return "contaminant"
+    if _IG_CHAIN.match((gene or "").split(";")[0].strip()):
+        return "Ig chain"
+    return None
+
+
+def detected_columns(row, contrast):
+    """ "k/n A, k/n B" from the DE table's own Detected_<group> columns (run_de.R: k of n
+    samples in the group with the protein measured), or None when the table has none."""
+    parts = [g.strip() for g in (contrast or "").split("-")]
+    if len(parts) != 2:
+        return None
+    vals = [row.get(f"Detected_{g}") for g in parts]
+    if not all(v not in (None, "", "NA") for v in vals):
+        return None
+    return ", ".join(f"{v} {contrast_label(g)}" for v, g in zip(vals, parts))
+
+
 def detection_note_fn(tables_dir, prov, conditions):
     """-> f(protein, contrast) giving "detected 3/3 Old_Kv21, 0/3 Old_IgG" from
     Detection_Matrix.csv, or None when there is no matrix. The word follows the record:
@@ -609,14 +682,18 @@ def detection_note_fn(tables_dir, prov, conditions):
         except (TypeError, ValueError):
             return False
 
-    def note(protein, contrast):
+    def note(protein, contrast, row=None):
+        own = detected_columns(row or {}, contrast)
+        if own:                           # the DE table's own per-group counts win
+            return f"{word} {own}"
         d = det.get(protein)
         if d is None:
             return "not recorded"
         parts = [g.strip() for g in contrast.split("-")] if contrast else []
         if len(parts) == 2 and all(g in groups for g in parts):
             return f"{word} " + ", ".join(
-                f"{sum(on(d.get(s)) for s in groups[g])}/{len(groups[g])} {g}" for g in parts)
+                f"{sum(on(d.get(s)) for s in groups[g])}/{len(groups[g])} {contrast_label(g)}"
+                for g in parts)
         return f"{word} in {sum(on(v) for v in d.values())}/{len(d)} samples"
     return note
 
@@ -632,8 +709,8 @@ def build_page(a, prov, tables, figs, md_text, used):
     if md_text is not None:
         h1, pre, report_secs = split_md_sections(md_text)
     report_h2 = {norm_title(t) for t, _ in report_secs}
-    g = glance_data(prov, tables, a.tables)
-    if g["tiles"] or g["contrasts"] or g["inferred"]:
+    g = glance_data(prov, tables, a.tables, a.session)
+    if g["tiles"] or g["contrasts"] or g["notes"]:
         sections.append({"anchor": anchor("Results at a glance", used),
                          "title": "Results at a glance", "kind": None, "blocks": [("glance", g)]})
     if md_text is None:
@@ -697,7 +774,7 @@ def split_md_sections(md):
     return h1, "\n".join(pre), [(t, "\n".join(b)) for t, b in secs]
 
 
-def glance_data(prov, tables, tables_dir):
+def glance_data(prov, tables, tables_dir, session=None):
     tiles = []
     if isinstance(prov.get("n_samples"), int):
         tiles.append((prov["n_samples"], "samples"))
@@ -710,33 +787,92 @@ def glance_data(prov, tables, tables_dir):
     if rows:
         tiles.append((len(rows), "contrasts"))
         tiles.append((max(r["tested"] for r in rows), "proteins tested"))
-    inferred = None
-    qc = os.path.join(tables_dir or "", "QC_detected_vs_inferred.csv")
-    if os.path.exists(qc):
-        try:
-            with open(qc, newline="") as fh:
-                pct = sorted(float(r["PctInferred"]) for r in csv.DictReader(fh))
-        except (OSError, KeyError, ValueError) as e:
-            pct = []
-            print(f"[make_analysis_html] WARNING: {qc} unreadable ({e}); the inferred-values "
-                  f"note is left out", file=sys.stderr)
-        if pct:
-            dm = os.path.exists(os.path.join(tables_dir, "Detection_Matrix.csv"))
-            inferred = {"kind": "warning" if pct[-1] >= 50 else "info",
-                        "title": "Some values are inferred, not measured",
-                        "text": (f"limpa's detection-probability model gives every protein a value "
-                                 f"in every sample. Where no precursor of a protein was observed, "
-                                 f"that value is a model estimate, not a measurement: "
-                                 f"{pct[0]:.0f}–{pct[-1]:.0f}% of each sample's protein values "
-                                 f"(median {pct[len(pct) // 2]:.0f}%) are inferred here "
-                                 f"(`QC_detected_vs_inferred.csv`). Weigh a large fold change "
-                                 f"carried by inferred values accordingly"
-                                 + (" — `Detection_Matrix.csv` marks every value." if dm else "."))}
+    notes = [n for n in (inferred_note(prov, tables_dir), database_note(prov, tables_dir, session))
+             if n]
     return {"tiles": tiles, "contrasts": rows, "adjp": tables.adjp, "adjp_src": tables.src,
-            "inferred": inferred,
-            "rule": (f"Significant = adjusted p < {tables.adjp:g} (Benjamini–Hochberg; "
-                     f"{tables.src}), the only rule the DE applied — no fold-change filter. "
-                     f"Up / down = sign of the fold change.")}
+            "recorded": tables.src == "de_provenance.json", "notes": notes,
+            "rule": rule_text(tables.adjp, tables.src)}
+
+
+def inferred_note(prov, tables_dir):
+    """The fixed "inferred, not measured" callout. Only for a DPC-Quant run (pipeline_id dpc):
+    it is the detection-probability model that supplies inferred values, and its own record
+    (missing_policy) says how -- the page does not restate the policy in its own words."""
+    if (prov.get("pipeline_id") or prov.get("method")) != "dpc":
+        return None
+    qc = os.path.join(tables_dir or "", "QC_detected_vs_inferred.csv")
+    if not os.path.exists(qc):
+        return None
+    try:
+        with open(qc, newline="") as fh:
+            pct = sorted(float(r["PctInferred"]) for r in csv.DictReader(fh))
+    except (OSError, KeyError, ValueError) as e:
+        print(f"[make_analysis_html] WARNING: {qc} unreadable ({e}); the inferred-values "
+              f"note is left out", file=sys.stderr)
+        return None
+    if not pct:
+        return None
+    dm = os.path.exists(os.path.join(tables_dir, "Detection_Matrix.csv"))
+    policy = (prov.get("missing_policy") or "").strip().rstrip(".")
+    return {"kind": "warning" if pct[-1] >= 50 else "info",
+            "title": "Some values are inferred, not measured",
+            "text": ((f"{policy}. " if policy else
+                      f"Missing-value policy: not recorded in de_provenance.json. ")
+                     + f"Where no precursor of a protein was observed in a sample, its value there "
+                       f"is a model estimate, not a measurement: {pct[0]:.0f}–{pct[-1]:.0f}% of "
+                       f"each sample's protein values (median {pct[len(pct) // 2]:.0f}%) are "
+                       f"inferred in this run (`QC_detected_vs_inferred.csv`). A fold change "
+                       f"where one group was never measured is a detection event, not a measured "
+                       f"magnitude"
+                     + (" — `Detection_Matrix.csv` marks every value." if dm else "."))}
+
+
+def database_note(prov, tables_dir, session=None):
+    """The fixed contaminant-database caveat: run_de.R's record says real proteins may have been
+    removed as contaminants (database_risk). Shown by the page itself -- it must never depend
+    on the report writer remembering it -- and naming the proteins: the ones fetch_fasta.py can
+    show are identical to target proteins when the searched FASTA is still readable, else every
+    contaminant group the filter removed (some of which are then real)."""
+    cont = prov.get("contaminants") if isinstance(prov.get("contaminants"), dict) else {}
+    if cont.get("database_risk") is not True:
+        return None
+    removed = []
+    table = cont.get("removed_table")
+    path = os.path.join(tables_dir or "", table) if table else None
+    if path and os.path.exists(path):
+        with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+            removed = [r for r in csv.DictReader(fh)
+                       if (r.get("Contaminant.Group") or "").upper() == "TRUE"]
+    named, how, extra = [], "", ""
+    meta_path = next((m for m in (cont.get("fasta_meta"),
+                                  os.path.join(session, "input", "search.fasta.meta.json")
+                                  if session else None) if m and os.path.exists(m)), None)
+    if meta_path and removed:
+        try:
+            import fetch_fasta
+            with open(meta_path) as fh:
+                tc = fetch_fasta.target_contaminants(json.load(fh))
+            named = fetch_fasta.seen_only_as_cont(
+                tc["kept_as_contaminant"],
+                [({t.strip().upper() for t in (r.get("Protein.Group") or "").split(";")},
+                  r.get("Genes") or "?") for r in removed])
+            if named:
+                how = "identical to target proteins, re-checked in the searched FASTA"
+            elif tc.get("legacy_note"):
+                extra = "the searched FASTA could not be re-checked"
+        except Exception as e:                           # said, not swallowed
+            extra = f"the FASTA check could not run: {type(e).__name__}: {e}"
+    if not named and removed:
+        named = sorted({(r.get("Genes") or r.get("Protein.Group") or "?").split(";")[0]
+                        for r in removed}, key=str.lower)
+        how = ("every contaminant group the filter removed; which of them are real cannot be "
+               "told from here" + (f" ({extra})" if extra else ""))
+    text = str(cont.get("database_note") or "").strip()
+    text = text[:1].upper() + text[1:]
+    if named:
+        text += f" Proteins affected ({how}; {len(named)}): {', '.join(named)}."
+    return {"kind": "warning", "title": "Real proteins may have been removed as contaminants",
+            "text": text}
 
 
 TOP_K = 20
@@ -748,14 +884,21 @@ def top_data(tables, a, prov):
         return []
     cond = os.path.join(a.session, "input", "conditions.csv") if a.session else None
     note = detection_note_fn(a.tables, prov, cond)
+    word = "quantified" if (prov.get("detection_matrix") or {}).get("zero_means") == "missing" \
+        else "detected"
     out = []
     for c in tables.contrasts:
         raw = tables.label.get(c)
-        rows = [{"protein": (r.get("Protein.Group") or "?"), "gene": gene_label(r),
-                 "lfc": r["_lfc"], "p": r["_p"],
-                 "det": note(r.get("Protein.Group"), raw) if note else None}
-                for r in tables.top(c, TOP_K)]
-        out.append({"contrast": tables.display(c), "rows": rows, "counts": tables.counts(c)})
+        rows = []
+        for r in tables.top(c, TOP_K):
+            det = note(r.get("Protein.Group"), raw, r) if note else None
+            if det is None and detected_columns(r, raw):
+                det = f"{word} {detected_columns(r, raw)}"
+            rows.append({"protein": (r.get("Protein.Group") or "?"), "gene": gene_label(r),
+                         "lfc": r["_lfc"], "p": r["_p"], "sig": r["_p"] < tables.adjp,
+                         "det": det, "flag": background_flag(gene_label(r), r.get("Protein.Group"))})
+        out.append({"contrast": tables.display(c), "rows": rows, "counts": tables.counts(c),
+                    "adjp": tables.adjp})
     return out
 
 
@@ -812,22 +955,40 @@ def glance_html(g):
             [(r["up"] + r["down"], r["contrast"],
               f"&#9650;&thinsp;{r['up']:,} up &nbsp;&#9660;&thinsp;{r['down']:,} down", None)
              for r in g["contrasts"]],
-            heading=f"Significant proteins per contrast (adj. p < {g['adjp']:g})"))
+            heading=f"Significant proteins per contrast (adj. p < {g['adjp']:g}"
+                    + ("" if g["recorded"] else ", default — not recorded") + ")"))
         out.append(f"<p class='lead'>Counted directly from the DE tables. {md_inline(g['rule'])}</p>")
-    if g["inferred"]:
-        i = g["inferred"]
+    for i in g["notes"]:
         out.append(rs.callout(i["kind"], f"<p>{md_inline(i['text'])}</p>", title=i["title"]))
     return "".join(out)
 
 
+def _top_lead():
+    return (f"The {TOP_K} proteins with the smallest adjusted p per contrast, from the DE tables "
+            f"(the full lists are the DE_*.csv files). {LOGFC_DIRECTION} A row flagged Ig chain "
+            f"(the antibody's own chains) or contaminant is not the sample's biology.")
+
+
+def _ns_divider(t):
+    return f"not significant below this line (adj.P ≥ {t['adjp']:g})"
+
+
 def top_html(top):
-    out = [f"<p class='lead'>The {TOP_K} proteins with the smallest adjusted p per contrast, from "
-           f"the DE tables (the full lists are the <code>DE_*.csv</code> files).</p>"]
+    out = [f"<p class='lead'>{md_inline(_top_lead())}</p>"]
     for t in top:
         tested, up, dn = t["counts"]
-        head = ["Protein", "Gene", "log2FC", "adj.P"] + (["Measured"] if any(r["det"] for r in t["rows"]) else [])
-        body = [[rs.esc(r["protein"]), rs.esc(r["gene"]), f"{r['lfc']:+.2f}", fmt_p(r["p"])]
-                + ([rs.esc(r["det"] or "")] if len(head) == 5 else []) for r in t["rows"]]
+        det = any(r["det"] for r in t["rows"])
+        flag = any(r["flag"] for r in t["rows"])
+        head = (["Protein", "Gene", "log2FC", "adj.P"] + (["Measured"] if det else [])
+                + (["Note"] if flag else []))
+        body, prev_sig = [], True
+        for r in t["rows"]:
+            if prev_sig and not r["sig"]:
+                body.append({"divider": _ns_divider(t)})
+            prev_sig = r["sig"]
+            body.append([rs.esc(r["protein"]), rs.esc(r["gene"]), f"{r['lfc']:+.2f}", fmt_p(r["p"])]
+                        + ([rs.esc(r["det"] or "")] if det else [])
+                        + ([f"<b>{rs.esc(r['flag'])}</b>" if r["flag"] else ""] if flag else []))
         # open: a closed <details> does not print, and the PDF must carry these tables
         out.append(f"<details open><summary><strong>{rs.esc(t['contrast'])}</strong> &mdash; "
                    f"{up + dn:,} significant ({up:,} up, {dn:,} down)</summary>"
@@ -924,24 +1085,31 @@ def glance_md(g):
                  f"{r['tested']:,} |" for r in g["contrasts"]]
         out.append("\n".join(rows))
         out.append(g["rule"])
-    if g["inferred"]:
-        i = g["inferred"]
+    for i in g["notes"]:
         out.append(quote(f"**{rs.CALLOUT_KINDS[i['kind']][1]}:** {i['title']}. {i['text']}"))
     return "\n\n".join(out)
 
 
 def top_md(top):
-    out = [f"The {TOP_K} proteins with the smallest adjusted p per contrast, from the DE tables "
-           f"(the full lists are the `DE_*.csv` files)."]
+    out = [_top_lead()]
     for t in top:
         tested, up, dn = t["counts"]
         det = any(r["det"] for r in t["rows"])
+        flag = any(r["flag"] for r in t["rows"])
+        ncol = 4 + det + flag
         rows = [f"### {t['contrast']}", "",
                 f"{up + dn:,} significant ({up:,} up, {dn:,} down) of {tested:,} tested.", "",
-                "| Protein | Gene | log2FC | adj.P |" + (" Measured |" if det else ""),
-                "|---|---|---:|---:|" + ("---|" if det else "")]
-        rows += [f"| {r['protein']} | {r['gene']} | {r['lfc']:+.2f} | {fmt_p(r['p'])} |"
-                 + (f" {r['det'] or ''} |" if det else "") for r in t["rows"]]
+                "| Protein | Gene | log2FC | adj.P |" + (" Measured |" if det else "")
+                + (" Note |" if flag else ""),
+                "|---|---|---:|---:|" + ("---|" if det else "") + ("---|" if flag else "")]
+        prev_sig = True
+        for r in t["rows"]:
+            if prev_sig and not r["sig"]:
+                rows.append(f"| *{_ns_divider(t)}* |" + " |" * (ncol - 1))
+            prev_sig = r["sig"]
+            rows.append(f"| {r['protein']} | {r['gene']} | {r['lfc']:+.2f} | {fmt_p(r['p'])} |"
+                        + (f" {r['det'] or ''} |" if det else "")
+                        + (f" **{r['flag']}** |" if r["flag"] else " |" if flag else ""))
         out.append("\n".join(rows))
     return "\n\n".join(out)
 
@@ -983,7 +1151,7 @@ def main():
     if os.path.abspath(md_out) == os.path.abspath(a.report or ""):
         sys.exit("[make_analysis_html] --md-out would overwrite the report it is made from")
 
-    caps, a._listed = {}, []
+    caps, a._listed, failed, have_fj = {}, [], {}, False
     if a.figures and os.path.exists(os.path.join(a.figures, "figures.json")):
         try:
             fj = json.load(open(os.path.join(a.figures, "figures.json")))
@@ -994,6 +1162,13 @@ def main():
                     if k:
                         a._listed.append(os.path.basename(k))
                         caps[os.path.basename(k)] = e.get("caption") or e.get("title") or ""
+            # make_figures.R's `failed` list: figures it tried and could not draw this run
+            for e in ([] if isinstance(fj, list) else fj.get("failed") or []):
+                k = e if isinstance(e, str) else (e.get("file") or e.get("name") or "")
+                if k:
+                    failed[os.path.basename(k)] = ("" if isinstance(e, str) else
+                                                   str(e.get("reason") or e.get("error") or ""))
+            have_fj = True
         except Exception as e:
             print(f"[make_analysis_html] WARNING: figures.json unreadable ({e}); captions and "
                   f"its figure list are not used", file=sys.stderr)
@@ -1010,7 +1185,8 @@ def main():
     complete, complete_why = matrix_complete(a.tables, prov)
     figs = Figures(base, root, a.figures, caps,
                    summarize=lambda nm: figure_summary(nm, tables, qc, em),
-                   suppress=SUPPRESS_WHEN_COMPLETE if complete else ())
+                   suppress=SUPPRESS_WHEN_COMPLETE if complete else (),
+                   current=a._listed if have_fj else None, failed=failed)
 
     md_text = md_orig = None
     n_par = 0
@@ -1064,6 +1240,10 @@ def main():
         print(f"[make_analysis_html] WARNING: {len(figs.rejected)} image reference(s) point "
               f"outside the session and were not embedded: {', '.join(figs.rejected)}",
               file=sys.stderr)
+    if figs.stale:
+        print(f"[make_analysis_html] WARNING: {len(figs.stale)} referenced image(s) are not in "
+              f"this run's figures.json (left from an earlier run) and are shown as a note, not "
+              f"embedded: {', '.join(figs.stale)}", file=sys.stderr)
 
     # The optional podcast's Listen card and line (make_podcast.py): added before the files are
     # written, so the HTML, its .md twin and the PDF printed from the HTML all carry it.
@@ -1079,10 +1259,12 @@ def main():
     # browser (HIVE) it says so, and finalize retries on the laptop.
     pdf_out = os.path.splitext(a.out)[0] + ".pdf"
     if a.no_pdf:
-        pdf_ok, pdf_note = False, "--no-pdf was given"
+        pdf_status, pdf_note = "INFO", "--no-pdf was given"
     else:
-        pdf_ok, pdf_note = html_to_pdf.convert(a.out, pdf_out)
-    print(f"[make_analysis_html] {'PDF: ' + pdf_out + ' (' + pdf_note + ')' if pdf_ok else 'INFO: no PDF -- ' + pdf_note}",
+        # print_report(): a failed print never leaves an older PDF looking current
+        pdf_status, pdf_note = html_to_pdf.print_report(a.out, pdf_out)
+    pdf_ok = pdf_status == "OK"
+    print(f"[make_analysis_html] {'PDF: ' + pdf_out + ' (' + pdf_note + ')' if pdf_ok else pdf_status + ': no PDF -- ' + pdf_note}",
           file=sys.stderr)
     print(json.dumps({"wrote": a.out, "bytes": os.path.getsize(a.out),
                       "markdown_twin": md_out, "markdown_bytes": os.path.getsize(md_out),
@@ -1091,6 +1273,7 @@ def main():
                       "figure_list": os.path.basename(a.report) if has_report else "figures.json",
                       "figures_not_embedded": left_out, "figures_missing": figs.missing,
                       "figures_rejected": figs.rejected, "figures_suppressed": figs.suppressed,
+                      "figures_stale": figs.stale, "pdf_status": pdf_status,
                       "contrasts": len(tables.contrasts), "self_contained": True}, indent=2))
 
 

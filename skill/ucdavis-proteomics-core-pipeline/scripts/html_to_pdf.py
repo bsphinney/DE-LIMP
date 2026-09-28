@@ -167,6 +167,23 @@ def convert(html_path, pdf_path, timeout=120, browser=None, popen=subprocess.Pop
                   f"{os.path.basename(b)}")
 
 
+def print_report(html_path, pdf_path, **kw):
+    """-> (status, note) for a caller's manifest: "OK" printed; "INFO" not printed and there
+    was no PDF (no browser -- not a failure); "SKIPPED" not printed while an OLDER PDF of the
+    same report sat there. That PDF would read as current while showing an earlier report, so
+    it is renamed <name>.stale.pdf -- kept, never deleted -- and the part is a [SKIPPED]."""
+    ok, note = convert(html_path, pdf_path, **kw)
+    if ok:
+        return "OK", note
+    if (os.path.isfile(pdf_path) and os.path.isfile(html_path)
+            and os.path.getmtime(pdf_path) < os.path.getmtime(html_path)):
+        stale = os.path.splitext(pdf_path)[0] + ".stale.pdf"
+        os.replace(pdf_path, stale)
+        return "SKIPPED", (f"{note} -- the older {os.path.basename(pdf_path)} no longer matches the "
+                           f"HTML and was renamed {os.path.basename(stale)}")
+    return "INFO", note
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
