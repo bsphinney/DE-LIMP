@@ -288,7 +288,7 @@ read this tree (the PROT_0793 search did).
 | instrument | pattern | acquisition date |
 |---|---|---|
 | timsTOF | `MMDDYYYY__60SPD_DIA-<unique_id>_S3-<well>_1_<acq#>.d` | leading `MMDDYYYY` |
-| timsTOF HT plate | `YYYYMMDD_<num>_...`, `MMDDYYYY_<num>_rerun_...` | leading 8 digits |
+| timsTOF HT plate | `YYYYMMDD_<num>_...`, `YYYYMMDD_PROT_<num>_...`, `MMDDYYYY_<num>_rerun_...` | leading 8 digits |
 | Exploris | `Ex<MMDDYYYY>_<n>_<unique_id>.raw` (`Ex08312026_380_JE21.raw`) | `Ex` + 8 = MMDDYYYY |
 | Exploris | `Ex<DDMMYY>_...` (`Ex040826_HeL50…` in `aug26`, `Ex100926_…` in `sep26`) | `Ex` + 6 = DDMMYY |
 | Lumos | `FL<DDMMYY>_...` (`FL280826_HeL50…` in `aug26`) | `FL` + 6 = DDMMYY |
@@ -339,9 +339,12 @@ Also hard gates: `no_files`, and `duplicate_assignment` (one file claimed by two
 (`--allow-partial`).
 
 **HT plates.** If a file in the window is named `<8-digit date>_<num>_…` for this submission
-(`_807_` or `_0807_`), `locate` exits **4**: use `ht_manifest.py`. The number is matched only
-right after the leading date, because anywhere else it collides with run counters —
-Exploris `Ex08312026_380_JE21.raw` would otherwise impersonate submission 0380.
+(`_807_`, `_0807_`, `_PROT_0807_` or `_PROT0807_`, any case), `locate` exits **4**: use
+`ht_manifest.py`. The number is matched only right after the leading date and must end there
+(`_PROT_08070_` is not 0807), because anywhere else it collides with run counters —
+Exploris `Ex08312026_380_JE21.raw` would otherwise impersonate submission 0380. Before 2.9.1
+the `PROT_` form was not recognised, so such a plate went to sample matching and found none
+of its samples.
 
 **Outputs:** `files.txt` (chosen absolute paths), `sample_files.tsv` (`unique_id,
 sample_name, condition_name, file, acquired, date_source, status, alternates, note`; status

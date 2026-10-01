@@ -316,6 +316,28 @@ class TestFilenameDates(unittest.TestCase):
             self.assertEqual(cs.acquisition_date(p), (dt.date(2025, 4, 2), "mtime"))
 
 
+class TestHtPattern(unittest.TestCase):
+    """2.9.1: plate files named `<date>_PROT_<n>_...` were not recognised (0 of 96 found)."""
+
+    def test_the_number_after_the_date_with_or_without_prot(self):
+        p = cs.ht_pattern("PROT_0807")
+        for name in ("20260930_PROT_0807_x.d", "20260930_PROT0807_x.d", "20260930_0807_x.d",
+                     "20260930_807_x.d", "20260930_prot_0807_x.d", "20260930_PROT_807_x.d"):
+            with self.subTest(name=name):
+                self.assertTrue(p.match(name))
+
+    def test_a_longer_number_is_not_the_submission(self):
+        p = cs.ht_pattern("PROT_0807")
+        for name in ("20260930_PROT_08070_x.d", "20260930_08070_x.d", "20260930_PROT0807A_x.d",
+                     "20260930_PROT__0807_x.d", "20260930_X_0807_x.d"):
+            with self.subTest(name=name):
+                self.assertFalse(p.match(name))
+
+    def test_a_run_counter_does_not_impersonate_a_submission(self):
+        self.assertFalse(cs.ht_pattern("PROT_0380").match("Ex08312026_380_JE21.raw"))
+        self.assertFalse(cs.ht_pattern("PROT_0380").match("Ex08312026_PROT_0380_JE21.raw"))
+
+
 class TestTokens(unittest.TestCase):
     def test_delimited_so_kg1_is_not_kg13(self):
         pat = cs.token_pattern("KG1")
@@ -514,6 +536,17 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertTrue(out["ht_plate"])
         self.assertIn("ht_manifest.py", out["next_step"])
+
+    def test_an_ht_plate_named_with_prot_exits_4(self):
+        """2.9.1: a plate named `<date>_PROT_<n>_...` went to sample matching and found 0 of 96."""
+        self.clean_tree()
+        for i in range(3):
+            raw(self.tmp, "tTOF_HT", "mar25", f"20250315_PROT_0807_100spd_Hel50_S6-A{i + 1}_1_2402{i}.d")
+        summary, _ = write_summary(self.tmp)
+        rc, out, _ = self.locate(summary)
+        self.assertEqual(rc, 4)
+        self.assertTrue(out["ht_plate"])
+        self.assertEqual(out["n_ht_files"], 3)
 
     def test_a_run_counter_that_equals_the_number_is_not_an_ht_plate(self):
         self.clean_tree()

@@ -1542,16 +1542,19 @@ def prepare_entry(e: dict) -> dict:
 
 
 def ht_pattern(internal_id):
-    """HT plate filenames put the submission number straight after the leading date:
-    `20260827_793_100spd_...`, `20260901_0793_rerun_...`. Anchoring there (rather than
-    anywhere in the name) keeps run counters such as Exploris `Ex08312026_380_JE21` from
-    impersonating submission 0380."""
+    """HT plate filenames put the submission number straight after the leading date, bare or
+    with its `PROT_` prefix: `20260827_793_100spd_...`, `20260901_0793_rerun_...`,
+    `20260930_PROT_0807_...` (`PROT0807` too, any case). Anchoring there (rather than anywhere
+    in the name) keeps run counters such as Exploris `Ex08312026_380_JE21` from impersonating
+    submission 0380, and the number must end there: `PROT_08070` is not 0807. Before 2.9.1 the
+    prefix was not allowed, so a plate named `<date>_PROT_<n>_...` was not recognised and
+    locate found 0 of its 96 samples."""
     m = re.search(r"(\d+)$", _s(internal_id))
     if not m or int(m.group(1)) == 0:
         return None
     n = int(m.group(1))
     nums = sorted({str(n), "%04d" % n}, key=len, reverse=True)
-    return re.compile(r"^\d{8}_(?:" + "|".join(nums) + r")(?![A-Za-z0-9])", re.I)
+    return re.compile(r"^\d{8}_(?:PROT_?)?(?:" + "|".join(nums) + r")(?![A-Za-z0-9])", re.I)
 
 
 def _mtime(path: str) -> float:
