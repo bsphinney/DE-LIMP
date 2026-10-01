@@ -39,7 +39,7 @@ jobs:
           cd hf-repo
           # Same exclusions as the production sync. `tests` matters most: it holds the
           # 10.5 MB fixture that HF refuses.
-          rsync -av --delete \
+          rsync -av --checksum --delete \
             --exclude='.git' --exclude='README.md' --exclude='.github' \
             --exclude='tests' --exclude='docs/specs' --exclude='*_SPEC*.md' \
             ../github-repo/ ./
