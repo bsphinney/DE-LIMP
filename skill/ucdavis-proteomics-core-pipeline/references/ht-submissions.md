@@ -194,42 +194,32 @@ in either app, so "log in with your UC Davis account" means Entra.
 | **HTTP** + `--cookie` | Entra session cookie from a signed-in browser | awkward — cookie expires |
 | **HTTP** with neither | Entra sign-in (browser redirect) | no |
 
-### The credential is a facility identity, not a personal one
+### The CLI credential is the service account's secret: never copy or share it
 
-This matters because it decides whether sharing it is even a question. The file is a
-**7-day token minted from the `genome-proteomics-service-account` secret** — the identity
-STAN and FRAN both authenticate as. It reads as personal only because it lives at
-`/quobyte/proteomics-grp/brett/.pgfarm_token`, mode `0600`. Every other Core member gets
-*permission denied*, which looks exactly like "that submission does not exist".
+`/quobyte/proteomics-grp/brett/.pgfarm_token` is **not** a short-lived token, whatever its
+name says. It holds the **long-lived 512-character secret of the
+`genome-proteomics-service-account`** (STAN's `CLAUDE.md`, "PG Farm auth"), which STAN exchanges
+for a fresh JWT on every use. It is mode `0600` on purpose. Anyone who can read it can act as
+the service account, which holds `SELECT, INSERT, UPDATE, DELETE` on STAN's tables, with no
+per-person audit trail, for as long as the secret is valid.
 
-`ht_manifest.py` therefore searches, in order:
+**Never copy it, and never make it group-readable**: not into `/quobyte/proteomics-grp/etc/`,
+not into a home directory, not into a session folder. Skill 2.9 and earlier called it a
+"7-day token" and suggested publishing a group-readable copy at
+`/quobyte/proteomics-grp/etc/pgfarm_token`. That was wrong, and `ht_manifest.py` no longer
+looks there.
+
+`ht_manifest.py` looks for a credential, in order:
 
 1. `$PGPASSWORD`
-2. `$STAN_PG_TOKEN`
-3. **`/quobyte/proteomics-grp/etc/pgfarm_token`** ← publish here and it works Core-wide
-   with no configuration
-4. `~/.pgfarm_token`
-5. `/quobyte/proteomics-grp/brett/.pgfarm_token`
+2. `$STAN_PG_TOKEN` (a file)
+3. `~/.pgfarm_token`
+4. `/quobyte/proteomics-grp/brett/.pgfarm_token` (readable by its owner only)
 
-Publishing (3) at mode `0640`, group `proteomics-grp`, makes the CLI path work for the
-whole Core, gated by exactly the group membership `fran_deposit.py` already treats as
-"is this a Core search".
+Every other Core member gets *permission denied* at (4). That is expected, and it does not mean
+"that submission does not exist".
 
-> ⚠ **A plain `chmod 0640` will not hold, and will look like it did.**
-> The token refresher, `pgfarm_refresh_token.py`, rewrites the token as
-> `tmp.write_text(...)` → `os.chmod(tmp, 0o600)` → `os.replace(tmp, token_file)`, and a
-> HIVE cron runs it **every 5 minutes**. The mode, any ACL, and any symlink at that path
-> are all replaced along with the inode. The mode has to be set **by** the refresher —
-> a `--token-mode` argument — not applied after it.
-
-Two caveats before publishing it group-readable: the service account holds
-`SELECT, INSERT, UPDATE, DELETE` (with `ALTER DEFAULT PRIVILEGES` on new tables), so this
-grants write access to STAN's tables and every action is attributed to one identity with
-no per-person audit trail. If that is more than you want to hand out, mint a **second,
-read-only service account** for manifest queries and publish that one instead. And share
-only the 7-day token — **never `.pgfarm_secret.json`**, which mints tokens indefinitely.
-
-**So for anyone who is not the token's owner, use the HTTP path:**
+**So everyone who is not the owner uses the HTTP path with a share token:**
 
 ```
 printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0793'

@@ -68,8 +68,8 @@ EXAMPLES = {
 BENIGN = [
     "--share-token-file ~/.stan/share_0793",
     "--share-token-file=/home/u/.stan/share_0793",
-    "STAN_PG_TOKEN=/quobyte/proteomics-grp/etc/pgfarm_token",
-    "--token /quobyte/proteomics-grp/etc/pgfarm_token",
+    "STAN_PG_TOKEN=$HOME/.stan/pg_credential",
+    "--token ~/.stan/pg_credential",
     "--share-token <tok>",
     "--cookie-file ~/.stan/cookie",
     "the query takes token=~/.stan/share_0793",

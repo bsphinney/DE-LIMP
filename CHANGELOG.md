@@ -1,5 +1,18 @@
 # Changelog
 
+## [Skill 2.9.1] — 2026-10-01
+
+- **STAN's database credential must never be shared.** `/quobyte/proteomics-grp/brett/.pgfarm_token`
+  holds the long-lived secret of STAN's service account, not a 7-day token. Earlier versions
+  (`ht_manifest.py`, `references/ht-submissions.md`) called it safe to copy group-readable and
+  looked first for a copy at `/quobyte/proteomics-grp/etc/pgfarm_token` (none was ever made).
+  That path is no longer searched, the docs say never to copy it or make it group-readable, and
+  staff use the hosted dashboard with a share token (`--http … --share-token-file`).
+- **HT plate files named `<date>_PROT_<n>` are now found.** `locate` recognised only
+  `<date>_<n>`, so a plate named `20260930_PROT_0807_…` was matched sample by sample and none of
+  its 96 samples were found; it now exits 4 for `ht_manifest.py`. Run counters such as
+  `Ex08312026_380_JE21` still do not count as a submission number.
+
 ## [Skill 2.9.0] — 2026-09-30
 
 Staff laptops and HIVE are checked against the Core's current release, and the Core can leave

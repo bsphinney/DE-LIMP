@@ -37,6 +37,11 @@ Give it `.raw`, `.d` or `.mzML` files and it takes them all the way to different
 
 You can also ask it for just one piece — *"re-run this search with the settings matched to the Spectronaut run"* — without wanting the full analysis.
 
+### New in skill 2.9.1
+
+- **STAN's database credential must never be shared.** Earlier versions suggested a shared copy of it; it is a long-lived secret, and staff use the STAN dashboard with a share token instead.
+- **HT plate files named `<date>_PROT_<n>` are now found.** Before, such a plate was not recognised and none of its samples were found.
+
 ### New in skill 2.9.0
 
 - **If you ran Sage or FragPipe DDA with an earlier version, re-run the differential expression.** Earlier versions let contaminants (BSA, trypsin, keratins ...) into the statistics as if they were sample proteins, and for Sage they also counted decoy matches and failed measurements. Both are fixed, and the fixes change the results. The search itself does not need to be repeated, but its output has to be read again with this version (the search's `run_search.py` command with `--adapt-only`) before the DE is re-run; a DE on the old adapted report would repeat the old mistakes.

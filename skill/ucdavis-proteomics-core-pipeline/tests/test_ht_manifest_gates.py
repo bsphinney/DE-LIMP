@@ -139,5 +139,49 @@ class TestWarnGates(unittest.TestCase):
             self.assertEqual(g["needs_rerun"]["n"], 6)
 
 
+
+class CredentialIsNeverShared(unittest.TestCase):
+    """The owner's .pgfarm_token is the service account's long-lived SECRET (STAN CLAUDE.md:
+    512 bytes, mode 0600), not a 7-day token. Skill 2.9 called it safe to copy group-readable to
+    /quobyte/proteomics-grp/etc/pgfarm_token and searched there first."""
+
+    def setUp(self):
+        sys.path.insert(0, SCRIPTS)
+        import ht_manifest
+        self.ht = ht_manifest
+
+    def test_no_shared_copy_is_searched(self):
+        self.assertFalse(hasattr(self.ht, "SHARED_TOKEN"))
+        self.assertFalse(any("/etc/" in c for c in self.ht.TOKEN_CANDIDATES))
+        with open(HT, encoding="utf-8") as fh:
+            src = fh.read()
+        # the old wording may be quoted as history, never stated
+        self.assertFalse("7-day token" in src.replace('"7-day token"', ""),
+                         "ht_manifest.py calls the secret a 7-day token")
+        self.assertFalse("group-readable copy at" in src.split("TOKEN_CANDIDATES =")[1],
+                         "ht_manifest.py still suggests a group-readable copy")
+
+    def test_no_credential_says_never_copy_and_points_at_http(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {k: v for k, v in os.environ.items() if k not in ("PGPASSWORD", "STAN_PG_TOKEN")}
+            with mock.patch.object(self.ht, "TOKEN_CANDIDATES", (os.path.join(tmp, "none"),)), \
+                    mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(SystemExit) as cm:
+                    self.ht._env(None)
+        msg = str(cm.exception.code)
+        self.assertIn("NEVER copy it or make it group-readable", msg)
+        self.assertIn("--http https://ucd.stan-proteomics.org --share-token-file", msg)
+        for wrong in ("7-day", "publish a group-readable", "etc/pgfarm_token"):
+            self.assertNotIn(wrong, msg)
+
+    def test_the_reference_no_longer_suggests_sharing_it(self):
+        ref = os.path.join(os.path.dirname(SCRIPTS), "references", "ht-submissions.md")
+        with open(ref, encoding="utf-8") as fh:
+            doc = fh.read()
+        self.assertNotIn("7-day token", doc.replace('"7-day token"', ""))
+        self.assertNotIn("publish here", doc)
+        self.assertIn("Never copy it, and never make it group-readable", doc)
+
 if __name__ == "__main__":
     unittest.main()
