@@ -54,16 +54,18 @@ import urllib.parse
 # STAN's own venv on HIVE. Overridable because nothing should hardcode one person's path.
 DEFAULT_STAN = "/quobyte/proteomics-grp/brett/stan_venv/bin/stan"
 
-# Where to look for the PG Farm credential, in order. The point of the SHARED entry is that
-# this is not a personal secret at all: it is a 7-day token minted from the
-# `genome-proteomics-service-account` secret -- one facility identity that STAN and FRAN
-# both already authenticate as. It only *looks* personal because it lives under one user's
-# directory at mode 0600. A group-readable copy under proteomics-grp makes the CLI path
-# work for the whole Core, gated by exactly the group membership fran_deposit.py already
-# treats as "is this a Core search".
-SHARED_TOKEN = "/quobyte/proteomics-grp/etc/pgfarm_token"
+# Where to look for the PG Farm credential, in order. OWNER_TOKEN is NOT a short-lived token,
+# whatever its name says: it holds the long-lived 512-character secret of the
+# `genome-proteomics-service-account` (STAN CLAUDE.md, "PG Farm auth"; 512 bytes, mode 0600 on
+# HIVE, 2026-10-01), which STAN exchanges for a fresh JWT on every use. Whoever can read it can
+# act as the service account -- write access to STAN's tables, no per-person trail -- for as
+# long as the secret lives. It must NEVER be copied or made group-readable. Skill 2.9 and
+# earlier called it a "7-day token" and suggested a group-readable copy at
+# /quobyte/proteomics-grp/etc/pgfarm_token, searched first; that was wrong, and that path is no
+# longer searched. Everyone but the owner uses the HTTP path with a share token (--http,
+# --share-token-file), which needs no database credential at all.
 OWNER_TOKEN = "/quobyte/proteomics-grp/brett/.pgfarm_token"
-TOKEN_CANDIDATES = (SHARED_TOKEN, "~/.pgfarm_token", OWNER_TOKEN)
+TOKEN_CANDIDATES = ("~/.pgfarm_token", OWNER_TOKEN)
 DEFAULT_TOKEN = OWNER_TOKEN  # kept for the error message's "tried" list
 
 # A tray is 96 wells. A submission reporting a handful of samples has probably been
@@ -116,23 +118,16 @@ def _env(token_path: str | None) -> dict:
     sys.exit(
         f"[ht_manifest] no usable PG Farm credential. Tried:\n{detail}\n"
         f"\n"
-        f"  This is NOT a personal secret — it is a 7-day token minted from the\n"
-        f"  genome-proteomics-service-account, the identity STAN and FRAN both use. It\n"
-        f"  reads as personal only because it lives under one user's directory at 0600.\n"
+        f"  The CLI path reads STAN's database credential, and only its owner can: the file\n"
+        f"  holds the long-lived service-account SECRET (not a short-lived token), mode 0600 on\n"
+        f"  purpose. NEVER copy it or make it group-readable -- whoever can read it can act as\n"
+        f"  the service account, which can write to STAN's tables.\n"
         f"\n"
-        f"  Fixes, best first:\n"
-        f"    1. Have the Core publish a group-readable copy at\n"
-        f"         {SHARED_TOKEN}   (mode 0640, group proteomics-grp)\n"
-        f"       and this script finds it with no configuration at all.\n"
-        f"       NOTE: a plain chmod will NOT hold — pgfarm_refresh_token.py rewrites the\n"
-        f"       file every 5 minutes via os.chmod(tmp, 0o600) + os.replace(), so the mode\n"
-        f"       must be set BY the refresher, not after it.\n"
-        f"    2. export STAN_PG_TOKEN=<a token file you can read>\n"
-        f"    3. Skip the database entirely and use the hosted dashboard:\n"
-        f"         --http https://ucd.stan-proteomics.org --share-token-file <file>\n"
-        f"       (a file holding the share token, mode 600 -- not the token on the command line)\n"
-        f"  Do NOT copy the token into your home directory — it expires in 7 days and\n"
-        f"  yours will not be refreshed.")
+        f"  Use the hosted dashboard instead (works for every Core member, headless):\n"
+        f"    --http https://ucd.stan-proteomics.org --share-token-file <file>\n"
+        f"  (a file holding the submission's share token from its HT tab, mode 600 -- never the\n"
+        f"  token on the command line). Your OWN credential, if you have one, can be given as\n"
+        f"  STAN_PG_TOKEN=<a file you own> or PGPASSWORD.")
 
 
 def _read_secret_file(path: str, what: str) -> str:
