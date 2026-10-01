@@ -171,6 +171,7 @@ class SageSbatchConvertsInTheJob(_Harness):
         self.assertEqual(conv_rec["where"], "in the job, before Sage")
         self.assertEqual([f["input"] for f in conv_rec["files"]], self.raws)
 
+    @unittest.skipUnless(lfqfx.HAVE_ARROW, "pyarrow is needed to write the Sage fixtures")
     def test_running_the_job_converts_searches_and_warns(self):
         job, _ = self.generate()
         r = subprocess.run(["bash", job], capture_output=True, text=True, timeout=180,
@@ -218,6 +219,7 @@ class SageSbatchConvertsInTheJob(_Harness):
 
 
 class SageInlineStillConverts(_Harness):
+    @unittest.skipUnless(lfqfx.HAVE_ARROW, "pyarrow is needed to write the Sage fixtures")
     def test_inline_converts_here_then_checks(self):
         p = self.run_search(env=self.env(FAKE_SAGE_OFFSET="0.6", FAKE_SAGE_PEAKS="350"))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)

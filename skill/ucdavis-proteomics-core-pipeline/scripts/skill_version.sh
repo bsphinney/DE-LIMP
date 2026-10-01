@@ -210,7 +210,7 @@ LIST
     echo "SKILLCHECK jobs_total=$(printf '%s\n' "$J" | grep -c .)"
   else
     echo "SKILLCHECK jobs=error"
-    echo "SKILLCHECK jobs_error=$(grep -v '^[[:space:]]*$' "$EF" | head -n1 | cut -c1-200)"
+    echo "SKILLCHECK jobs_error=$(LC_ALL=C grep -av '^[[:space:]]*$' "$EF" | head -n1 | cut -c1-200)"
   fi
   [ "$EF" = /dev/null ] || rm -f "$EF"
 fi
@@ -233,10 +233,12 @@ SH
 
   # Run sv_remote_read on HIVE into OUT; false when the answer did not come back whole.
   # LC_ALL=C: under a UTF-8 locale macOS `tr` stops at the first byte that is not UTF-8
-  # ("Illegal byte sequence") and an ssh error in another encoding was cut short.
+  # ("Illegal byte sequence") and an ssh error in another encoding was cut short. GNU grep (Linux,
+  # Git Bash) in a UTF-8 locale prints nothing for such a line, only "binary file matches" on
+  # stderr, so every grep over HIVE's answer runs as `LC_ALL=C grep -a`.
   sv_read_hive() {
     OUT="$(bash "$HIVE_EXEC" "$(sv_remote_read)" 2>&1 | LC_ALL=C tr -d '\r')"
-    printf '%s\n' "$OUT" | grep -q '^SKILLCHECK end=1$'
+    printf '%s\n' "$OUT" | LC_ALL=C grep -aq '^SKILLCHECK end=1$'
   }
   sv_field() { printf '%s\n' "$OUT" | sed -n "s/^SKILLCHECK $1=//p" | head -n1; }
   # The release as read from CURRENT_VERSION: a plain version ("v2.9.0" reads 2.9.0), else "".
@@ -282,7 +284,8 @@ SH
       return 5
     fi
     if ! sv_read_hive; then
-      why="$(printf '%s\n' "$OUT" | grep -v '^SKILLCHECK ' | grep -v '^[[:space:]]*$' | tail -n1 | sv_ascii)"
+      why="$(printf '%s\n' "$OUT" | LC_ALL=C grep -av '^SKILLCHECK ' | LC_ALL=C grep -av '^[[:space:]]*$' \
+             | tail -n1 | sv_ascii)"
       sv_emit unreachable "$here" "" "" not_checked null null "" \
         "Could not reach HIVE to compare skill versions${why:+ ($why)}; carrying on with $here."
       return 5
@@ -417,7 +420,7 @@ SH
       sv_die "the published release is $cur and this copy is $here, older. Going back to it (a withdrawn release) needs --allow-older."
     fi
     OUT="$(bash "$HIVE_EXEC" "$(sv_remote_publish "$here")" 2>&1 | LC_ALL=C tr -d '\r')"
-    if ! printf '%s\n' "$OUT" | grep -q '^SKILLPUB ok=1$'; then
+    if ! printf '%s\n' "$OUT" | LC_ALL=C grep -aq '^SKILLPUB ok=1$'; then
       err="$(printf '%s\n' "$OUT" | sed -n 's/^SKILLPUB error=//p' | head -n1)"
       sv_die "not published: ${err:-$(printf '%s\n' "$OUT" | tail -n1)}"
     fi

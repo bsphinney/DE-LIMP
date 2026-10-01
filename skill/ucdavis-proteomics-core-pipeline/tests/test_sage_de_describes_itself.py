@@ -207,6 +207,7 @@ class SageVersion(unittest.TestCase):
         self.assertTrue(self.value().startswith("Sage (version not recorded) label-free"))
 
 
+@unittest.skipUnless(r_has(*NEEDS), "needs R with " + "/".join(NEEDS))
 class DiannReportKeepsItsDescription(unittest.TestCase):
     def test_an_undeclared_report_is_still_diann_maxlfq(self):
         tmp = tempfile.mkdtemp()
